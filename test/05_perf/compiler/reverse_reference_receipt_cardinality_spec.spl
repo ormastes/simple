@@ -1,0 +1,31 @@
+# NOT_RUN. Same production owner and 73,779-row cardinality as retained a92 profile.
+# Synthetic payloads match cardinality only, not the captured 37MB row distribution.
+# The live stack sample is a diagnostic baseline, not a paired benchmark.
+# Run paired immutable producers on one host; record elapsed time AND peak RSS.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1}
+use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceProjectionV1,
+    ReverseReferenceGenerationReceiptV1, reverse_reference_receipt_encode_v1,
+    reverse_reference_receipt_digest_v1}
+
+describe "Reverse-reference receipt representative cardinality":
+    it "retains all 73779 rows in descending runs and duplicate payloads":
+        val key = ReverseReferenceKeyV1("semantic", "owner", "root", "subject", "direct-import-export", sha256_text("fact"), 1)
+        var rows: [ReverseReferenceProjectionV1] = []
+        var remaining: i64 = 73779
+        while remaining > 0:
+            # Repeated payloads exercise duplicate retention, not deduplication.
+            val consumer = "consumer-" + (remaining % 4096).to_text()
+            rows.push(ReverseReferenceProjectionV1(key, consumer))
+            remaining = remaining - 1
+        val receipt = ReverseReferenceGenerationReceiptV1(2, "owner", "root", rows)
+        val encoded = reverse_reference_receipt_encode_v1(receipt)
+        expect(encoded.split("\n").len()).to_equal(73784)
+        expect(encoded.starts_with("simple-reverse-reference-generation-receipt-v2\nschema=2\nowner=owner\nroot=root\ncount=73779\n")).to_equal(true)
+        expect(reverse_reference_receipt_digest_v1(receipt)).to_equal("sha256:" + sha256_text(encoded))
+        val lines = encoded.split("\n")
+        var index = 6
+        while index < lines.len():
+            expect(lines[index] < lines[index - 1]).to_equal(false)
+            index = index + 1

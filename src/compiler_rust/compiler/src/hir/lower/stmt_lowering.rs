@@ -535,6 +535,9 @@ impl Lowerer {
     pub(super) fn lower_node(&mut self, node: &Node, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
         match node {
             Node::Let(let_stmt) => {
+                if let Some(message) = crate::impl_duplicate_check::let_literal_mismatch(let_stmt) {
+                    return Err(LowerError::Unsupported(message));
+                }
                 // Check for tuple pattern destructuring: val (a, b) = expr
                 // Also handle Pattern::Typed wrapping a tuple pattern
                 let inner_pattern = match &let_stmt.pattern {

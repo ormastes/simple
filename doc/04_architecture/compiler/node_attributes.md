@@ -1,5 +1,14 @@
 # Managed node attributes in Simple
 
+Implementation inventory update, 2026-11-07: the canonical owner is already
+`compiler.common.data` (#7220), not a second NodeAttribute schema resolver.
+The [V2 structural extension](../../05_design/compiler/data_schema_v2_contract_extension.md)
+adds explicit views and property contracts while preserving frozen V1. The
+[finite program matrix](../../08_tracking/data_attributes_program_progress_2026-11-07.md)
+distinguishes landed foundations, this authored extension, and remaining
+source/runtime integration. New-path inventories below retain their historical
+design context and do not authorize competing owners.
+
 Date: 2026-11-06. Status: architecture for implementation; no implementation PASS.
 Scope: [selected full requirements](../../02_requirements/feature/node_attributes.md).
 Evidence: [current source audit](../../01_research/local/node_attributes.md).

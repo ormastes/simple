@@ -1,0 +1,114 @@
+"""
+## Purpose and audience
+Purpose: Pin socket port provenance (bound port, accepted-listener port) to
+the open-file description it describes, so a reused descriptor number never
+inherits another socket's listener authority.
+Audience: kernel engineers maintaining socket_compat and the fd table.
+## Operator workflow
+Run with the unit suite. A stale port after a raw fd_close/fd_set/dup2 means
+portable_net_capability_allowed_v1 would check 72/74/75/76 against the wrong
+socket.
+## Compatibility and limitations
+Host-only. Recording is driven through the socket_compat record helpers
+because a successful bind/accept needs a live netstack IPC peer.
+# @manual: primary
+REQ-OS-KERNEL-001
+"""
+# @req: REQ-OS-KERNEL-001
+
+use std.spec.{describe, it, expect}
+use os.kernel.fd_table.{fd_table_init, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2}
+use os.kernel.socket_compat.{
+    posix_bound_port_for_fd, posix_server_port_for_fd, posix_close_socket,
+    _record_bound_port, _record_server_io_port
+}
+use os.kernel.ipc.syscall_net_portable_v1.{portable_net_capability_allowed_v1}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.task_types.{TaskPriority}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet}
+use os.kernel.types.syscall_types.{SyscallArgs}
+
+fn _port(o: u16?) -> i64:
+    match o:
+        Some(p): p as i64
+        nil: -1
+
+fn _socket_fd(handle: u64) -> i32:
+    val fd = fd_alloc()
+    fd_set(fd, 4, 2, handle)
+    fd
+
+fn _args(id: u64, fd: i32) -> SyscallArgs:
+    SyscallArgs(id: id, arg0: fd as u64, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0)
+
+describe "socket port provenance":
+    it "does not leak a bound port to a descriptor reused after raw fd_close":
+        fd_table_init()
+        val fd = _socket_fd(77u64)
+        _record_bound_port(fd, 8080u16)
+        expect(_port(posix_bound_port_for_fd(fd))).to_equal(8080)
+        fd_close(fd)
+        val reused = _socket_fd(78u64)
+        expect(reused).to_equal(fd)
+        expect(_port(posix_bound_port_for_fd(reused))).to_equal(-1)
+
+    it "does not leak ports when fd_set overwrites an occupied slot":
+        fd_table_init()
+        val fd = _socket_fd(77u64)
+        _record_bound_port(fd, 8080u16)
+        _record_server_io_port(fd, 8080u16)
+        fd_set(fd, 4, 2, 79u64)
+        expect(_port(posix_bound_port_for_fd(fd))).to_equal(-1)
+        expect(_port(posix_server_port_for_fd(fd))).to_equal(-1)
+
+    it "gives a dup2 target the source socket's provenance, not the old one":
+        fd_table_init()
+        val bound = _socket_fd(77u64)
+        val unbound = _socket_fd(78u64)
+        _record_bound_port(bound, 8080u16)
+        expect(fd_dup2(unbound, bound)).to_equal(bound)
+        expect(_port(posix_bound_port_for_fd(bound))).to_equal(-1)
+
+    it "shares provenance with a dup of the same socket":
+        fd_table_init()
+        val bound = _socket_fd(77u64)
+        _record_bound_port(bound, 8080u16)
+        val copy = fd_dup(bound)
+        expect(_port(posix_bound_port_for_fd(copy))).to_equal(8080)
+
+    it "clears both registries on posix_close_socket":
+        fd_table_init()
+        val fd = _socket_fd(77u64)
+        _record_bound_port(fd, 8080u16)
+        _record_server_io_port(fd, 8080u16)
+        posix_close_socket(fd)
+        val reused = _socket_fd(80u64)
+        expect(reused).to_equal(fd)
+        expect(_port(posix_bound_port_for_fd(reused))).to_equal(-1)
+        expect(_port(posix_server_port_for_fd(reused))).to_equal(-1)
+
+    it "records an ephemeral port-0 bind as port 0":
+        fd_table_init()
+        val fd = _socket_fd(77u64)
+        _record_bound_port(fd, 0u16)
+        expect(_port(posix_bound_port_for_fd(fd))).to_equal(0)
+
+    it "checks listen, accept and server I/O against the recorded ports":
+        fd_table_init()
+        var scheduler = Scheduler.new()
+        val caller = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        var ipc = IpcManager.new()
+        val granted = ipc.mint_task_capability_set(caller, [CapabilityKind.NetListen(port: 8080u16)])
+        expect(granted != nil).to_equal(true)
+        val listener = _socket_fd(77u64)
+        expect(portable_net_capability_allowed_v1(_args(72u64, listener), scheduler, ipc)).to_equal(false)
+        _record_bound_port(listener, 8080u16)
+        expect(portable_net_capability_allowed_v1(_args(72u64, listener), scheduler, ipc)).to_equal(true)
+        expect(portable_net_capability_allowed_v1(_args(74u64, listener), scheduler, ipc)).to_equal(true)
+        val accepted = _socket_fd(78u64)
+        expect(portable_net_capability_allowed_v1(_args(75u64, accepted), scheduler, ipc)).to_equal(false)
+        _record_server_io_port(accepted, 8080u16)
+        expect(portable_net_capability_allowed_v1(_args(75u64, accepted), scheduler, ipc)).to_equal(true)
+        expect(portable_net_capability_allowed_v1(_args(76u64, accepted), scheduler, ipc)).to_equal(true)

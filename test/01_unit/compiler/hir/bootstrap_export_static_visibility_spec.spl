@@ -1,0 +1,89 @@
+# AUTHORED / NOT_RUN: actual parser and bootstrap recovery owner, no native link claim.
+use std.spec.{describe, it, expect, step}
+use std.env.variables.{env_get, env_has, env_set, env_unset}
+use compiler.common.config.{Logger}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn compiler_fixture_source() -> text:
+    "var EXPORTED_STATE = \"\"\nvar PRIVATE_STATE = 0\nval EXPORTED_CODE = \"T4010\"\npub(package) var PACKAGE_STATE = 0\nexport EXPORTED_STATE, EXPORTED_CODE, PACKAGE_STATE\n"
+
+fn compiler_invoke_real_owner(bootstrap: bool, direct: bool) -> HirModule:
+    step("Prepare the real fixture")
+    val had_bootstrap = env_has("SIMPLE_BOOTSTRAP")
+    val prior_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    val had_stage4 = env_has("SIMPLE_BOOTSTRAP_STAGE4")
+    val prior_stage4 = env_get("SIMPLE_BOOTSTRAP_STAGE4")
+    val set_bootstrap = env_set("SIMPLE_BOOTSTRAP", if bootstrap: "1" else: "0")
+    # Exercise unconditional bootstrap constant recovery without unrelated flat pools.
+    val set_stage4 = env_set("SIMPLE_BOOTSTRAP_STAGE4", "1")
+    val parsed = parse_full_frontend(compiler_fixture_source(),
+        "src/app/owner_probe/state.spl", "app.owner_probe.state", Logger(level: 0))
+    val no_modules: Dict<text, ParserModule> = {}
+    val surfaces = module_surfaces_from_modules(no_modules, []).unwrap()
+    var lowering = hirlowering_for_module("src/app/owner_probe/state.spl", surfaces)
+    val bootstrap_observed = lowering.ambient_bootstrap_enabled()
+    step("Invoke the production owner")
+    val module: HirModule = if direct:
+        lowering.lower_module(parsed)
+    else:
+        lowering.lower_parser_module_unstub(parsed, false)
+    # Restore ambient inputs before assertions so a failed expectation cannot leak them.
+    val restored_stage4 = if had_stage4:
+        env_set("SIMPLE_BOOTSTRAP_STAGE4", prior_stage4)
+    else:
+        env_unset("SIMPLE_BOOTSTRAP_STAGE4")
+    val restored_bootstrap = if had_bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", prior_bootstrap)
+    else:
+        env_unset("SIMPLE_BOOTSTRAP")
+    expect(set_bootstrap).to_equal(true)
+    expect(set_stage4).to_equal(true)
+    expect(bootstrap_observed).to_equal(bootstrap)
+    expect(restored_stage4).to_equal(true)
+    expect(restored_bootstrap).to_equal(true)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(parsed.constants.len()).to_equal(4)
+    module
+
+fn compiler_assert_contract(module: HirModule):
+    step("Check the observed contract")
+    expect(module.constants.len()).to_equal(4)
+    var observed: [text] = []
+    for constant in module.constants.values():
+        observed.push(constant.name)
+        if constant.name == "EXPORTED_STATE":
+            expect(constant.visibility == Visibility.Public).to_equal(true)
+            expect(constant.is_public).to_equal(true)
+            expect(constant.is_mutable).to_equal(true)
+        elif constant.name == "PRIVATE_STATE":
+            expect(constant.visibility == Visibility.Private).to_equal(true)
+            expect(constant.is_public).to_equal(false)
+            expect(constant.is_mutable).to_equal(true)
+        elif constant.name == "EXPORTED_CODE":
+            expect(constant.visibility == Visibility.Private).to_equal(true)
+            expect(constant.is_public).to_equal(false)
+            expect(constant.is_mutable).to_equal(false)
+        elif constant.name == "PACKAGE_STATE":
+            expect(constant.visibility == Visibility.Package).to_equal(true)
+            expect(constant.is_mutable).to_equal(true)
+    for name in ["EXPORTED_STATE", "PRIVATE_STATE", "EXPORTED_CODE", "PACKAGE_STATE"]:
+        expect(observed.contains(name)).to_equal(true)
+
+describe "Bootstrap constant recovery preserves module exports":
+    it "retains exported mutable visibility through actual bootstrap recovery":
+        compiler_assert_contract(compiler_invoke_real_owner(true, false))
+
+    it "keeps the same export and neighboring visibility contract in normal mode":
+        compiler_assert_contract(compiler_invoke_real_owner(false, false))
+
+    it "retains exported mutable visibility through direct bootstrap lowering":
+        compiler_assert_contract(compiler_invoke_real_owner(true, true))
+
+    it "keeps direct normal lowering and neighboring visibility unchanged":
+        compiler_assert_contract(compiler_invoke_real_owner(false, true))

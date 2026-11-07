@@ -1,0 +1,128 @@
+# NOT_RUN: requires an admitted compiler/test runner for this source revision.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{str_len}
+use std.common.text_bytes.{bytes_to_text}
+use compiler.common.cache.canonical_identity.{canonical_identity_text_lt}
+use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1, reverse_reference_key_encode_v1}
+use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceProjectionV1,
+    ReverseReferenceGenerationReceiptV1, reverse_reference_receipt_encode_v1,
+    reverse_reference_receipt_digest_v1, reverse_reference_publish_generation_v1,
+    reverse_reference_pointer_matches_v1}
+use std.io_runtime.{file_read_nullable}
+
+extern fn rt_getpid() -> i64
+extern fn rt_dir_remove_all(path: text) -> bool
+
+fn sort_key() -> ReverseReferenceKeyV1:
+    ReverseReferenceKeyV1("semantic", "owner", "root", "subject", "direct-import-export", sha256_text("fact"), 1)
+
+fn sort_receipt(consumers: [text]) -> ReverseReferenceGenerationReceiptV1:
+    var rows: [ReverseReferenceProjectionV1] = []
+    for consumer in consumers:
+        rows.push(ReverseReferenceProjectionV1(sort_key(), consumer))
+    ReverseReferenceGenerationReceiptV1(2, "owner", "root", rows)
+
+# Historical insertion ordering is a test oracle, never a production fallback
+# implementation used instead of importing the real receipt owner.
+fn legacy_receipt_bytes(consumers: [text]) -> text:
+    val frame = reverse_reference_key_encode_v1(sort_key())
+    var rows: [text] = []
+    for consumer in consumers:
+        rows.push("{str_len(frame)}:{frame}{str_len(consumer)}:{consumer}")
+    var index = 1
+    while index < rows.len():
+        val value = rows[index]
+        var insertion = index
+        while insertion > 0 and value < rows[insertion - 1]:
+            rows[insertion] = rows[insertion - 1]
+            insertion = insertion - 1
+        rows[insertion] = value
+        index = index + 1
+    var header = "simple-reverse-reference-generation-receipt-v2\nschema=2\nowner=owner\nroot=root\ncount={rows.len()}"
+    for row in rows:
+        header = header + "\n" + row
+    header
+
+describe "Reverse-reference canonical sort preserves receipt bytes":
+    it "matches provider text ordering for NUL-free UTF-8 and prefixes":
+        val words = ["", "a", "aa", "z", "é", "Ω", "中", "😀"]
+        for left in words:
+            for right in words:
+                expect(canonical_identity_text_lt(left, right)).to_equal(left < right)
+
+    it "preserves duplicate and unsorted multibyte rows byte for byte":
+        val consumers = ["😀", "z", "é", "aa", "a", "aa", "中", "Ω", "@family-complete", "@unknown-family"]
+        val receipt = sort_receipt(consumers)
+        val expected = legacy_receipt_bytes(consumers)
+        expect(reverse_reference_receipt_encode_v1(receipt)).to_equal(expected)
+        expect(reverse_reference_receipt_digest_v1(receipt)).to_equal("sha256:" + sha256_text(expected))
+        expect(receipt.projections.len()).to_equal(10)
+
+    it "preserves legacy NUL equal-prefix ordering including duplicates":
+        # Explicit-length production byte conversion avoids raw C-string
+        # literal promotion truncating the fixture before the owner sees it.
+        val nul_z = bytes_to_text([97u8, 0u8, 122u8])
+        val nul_a = bytes_to_text([97u8, 0u8, 97u8])
+        val consumers = [nul_z, nul_a, nul_z, "b", "a"]
+        # Verify the carrier itself before comparing legacy ordering.
+        expect(consumers[0].len()).to_equal(3)
+        expect(consumers[0].byte_at(1)).to_equal(0)
+        expect(consumers[0].byte_at(2)).to_equal(122)
+        expect(consumers[1].len()).to_equal(3)
+        expect(consumers[1].byte_at(2)).to_equal(97)
+        expect(reverse_reference_receipt_encode_v1(sort_receipt(consumers))).to_equal(legacy_receipt_bytes(consumers))
+
+    it "finds NUL beyond the code-point count of a UTF-8 row":
+        val latin_z = bytes_to_text([195u8, 169u8, 195u8, 169u8, 195u8, 169u8, 0u8, 122u8])
+        val latin_a = bytes_to_text([195u8, 169u8, 195u8, 169u8, 195u8, 169u8, 0u8, 97u8])
+        val emoji_z = bytes_to_text([240u8, 159u8, 152u8, 128u8, 240u8, 159u8, 152u8, 128u8, 0u8, 122u8])
+        val emoji_a = bytes_to_text([240u8, 159u8, 152u8, 128u8, 240u8, 159u8, 152u8, 128u8, 0u8, 97u8])
+        # These carriers have five/four code points, but NUL is at byte 6/8.
+        # On the core-C comparator, z-before-a must retain legacy stability.
+        expect(str_len(latin_z)).to_equal(8)
+        expect(latin_z.byte_at(6)).to_equal(0)
+        expect(latin_z.byte_at(7)).to_equal(122)
+        expect(str_len(latin_a)).to_equal(8)
+        expect(latin_a.byte_at(7)).to_equal(97)
+        expect(str_len(emoji_z)).to_equal(10)
+        expect(emoji_z.byte_at(8)).to_equal(0)
+        expect(emoji_z.byte_at(9)).to_equal(122)
+        expect(str_len(emoji_a)).to_equal(10)
+        expect(emoji_a.byte_at(9)).to_equal(97)
+        val consumers = [latin_z, latin_a, latin_z, emoji_z, emoji_a, "éééz"]
+        val expected = legacy_receipt_bytes(consumers)
+        val receipt = sort_receipt(consumers)
+        expect(reverse_reference_receipt_encode_v1(receipt)).to_equal(expected)
+        expect(reverse_reference_receipt_digest_v1(receipt)).to_equal("sha256:" + sha256_text(expected))
+
+    it "retains a terminal NUL after multibyte characters":
+        val terminal = bytes_to_text([195u8, 169u8, 195u8, 169u8, 0u8])
+        expect(str_len(terminal)).to_equal(5)
+        expect(terminal.byte_at(4)).to_equal(0)
+        val consumers = [terminal, "éé", terminal, "z"]
+        expect(reverse_reference_receipt_encode_v1(sort_receipt(consumers))).to_equal(legacy_receipt_bytes(consumers))
+
+    it "preserves empty generation and invalid consumer behavior":
+        expect(reverse_reference_receipt_encode_v1(sort_receipt([]))).to_equal(legacy_receipt_bytes([]))
+        for invalid in ["", "bad\nrow", "bad\rrow"]:
+            val receipt = sort_receipt([invalid])
+            expect(reverse_reference_receipt_encode_v1(receipt)).to_equal("")
+            expect(reverse_reference_receipt_digest_v1(receipt)).to_equal("")
+
+    it "publishes the exact encoded bytes under their tagged digest":
+        val base = "/tmp/reverse-sort-equivalence-" + rt_getpid().to_text()
+        val cache_path = base + "/build_cache.sdn"
+        val receipt = sort_receipt(["z", "a", "a", "é"])
+        val expected = legacy_receipt_bytes(["z", "a", "a", "é"])
+        expect(reverse_reference_publish_generation_v1(cache_path, receipt)).to_equal(true)
+        val pointer = file_read_nullable(cache_path + ".reverse-references/CURRENT")
+        expect(pointer != nil).to_equal(true)
+        if pointer != nil:
+            expect(pointer!).to_equal("sha256:" + sha256_text(expected))
+            val body = file_read_nullable(cache_path + ".reverse-references/" + pointer!.replace(":", "/") + ".receipt")
+            expect(body != nil).to_equal(true)
+            if body != nil:
+                expect(body!).to_equal(expected)
+                expect(reverse_reference_pointer_matches_v1(pointer!, body!)).to_equal(true)
+        expect(rt_dir_remove_all(base)).to_equal(true)

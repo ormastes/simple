@@ -5692,6 +5692,58 @@ int64_t spl_ordered_key_cmp(int64_t left, int64_t right) {
     return a < b ? -1 : (a > b ? 1 : 0);
 }
 
+/* `.hash()` on an erased generic value (`key.hash()` with `key: K`, e.g.
+ * Map.hash_key). Erased bodies carry no trait dictionary, so 50.mir lowers
+ * the call here. Keys equal under rt_native_eq hash equally:
+ *   - text: FNV-1a over the bytes (= rt_hash_text = std.hash Hash for text)
+ *   - integer words and wide/unsigned boxes: the value (= Hash for i64)
+ *   - registered boxed floats: IEEE bits, with both zeros hashing to 0
+ * Any other registered handle (array, tuple, dict, enum, struct allocation)
+ * has no address-free hash at this boundary; abort instead of hashing its
+ * address. A non-heap word (raw integer, bool, inline float) is equal under
+ * rt_native_eq only to the identical word, so hashing its value is
+ * consistent. Hash values for floats/bools need not match std.hash's typed
+ * impls: only agreement with erased equality is promised. */
+static void spl_erased_key_hash_refuse(const char* what, unsigned kind) {
+    fprintf(stderr, "spl_erased_key_hash: key type has no supported native hash (%s %u)\n",
+        what, kind);
+    abort();
+}
+
+int64_t spl_erased_key_hash(int64_t value) {
+    uintptr_t raw = (uintptr_t)value;
+    uintptr_t candidate = (raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP
+        ? raw & ~RT_VALUE_TAG_MASK : raw;
+    int registered_leaf = 0;
+    if (candidate >= 4096 &&
+            rt_core_is_registered_immortal_ptr((void*)candidate)) {
+        uint32_t kind = rt_core_registered_object_kind((void*)candidate);
+        if (kind != RT_VALUE_HEAP_STRING && kind != RT_VALUE_HEAP_FLOAT &&
+                kind != RT_VALUE_HEAP_INT && kind != RT_VALUE_HEAP_UINT)
+            spl_erased_key_hash_refuse("heap kind", (unsigned)kind);
+        registered_leaf = 1;
+    }
+    /* Records live in the struct allocation registry, not the immortal one. */
+    if (rt_struct_receiver_valid(value, 0, 1))
+        spl_erased_key_hash_refuse("struct allocation", 0);
+    if (rt_core_as_string(value)) return rt_hash_text(value);
+    RtCoreFloat* boxed_float = rt_core_as_heap_float(value);
+    if (boxed_float) {
+        double d = boxed_float->value;
+        if (d == 0.0) return 0;
+        uint64_t bits;
+        memcpy(&bits, &d, sizeof(bits));
+        return (int64_t)bits;
+    }
+    RtCoreUInt* boxed_uint = rt_core_as_heap_uint(value);
+    if (boxed_uint) return (int64_t)boxed_uint->value;
+    if (rt_core_as_heap_int(value)) return rt_core_numeric_arg(value);
+    /* A registered leaf the decoders above did not accept (an untagged
+     * string pointer, say) would otherwise hash its address. */
+    if (registered_leaf) spl_erased_key_hash_refuse("undecoded registered leaf", 0);
+    return rt_core_numeric_arg(value);
+}
+
 /* Shared telemetry uses this runtime owner for text, builders, and nil. */
 #include "runtime_collection_capture_impl.h"
 
@@ -10826,6 +10878,39 @@ int64_t rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
                 d_u64 ? raw : rt_core_value_u64_compact(raw);
         }
     }
+    return count;
+}
+
+/* Bulk in-place volatile fill: dst[dst_off..dst_off+count] = value.
+ *
+ * Compiler-owned twin of `Array.fill_span(dst_off, count, value) -> i64`.
+ * Every store is volatile and the fill ends with a full fence, so a
+ * secret wipe through it is never elided or reordered past the call: this
+ * is the runtime boundary the secure-memory owner uses instead of handing
+ * raw data pointers to Simple code. Same bounds rule and diagnostic shape
+ * as rt_array_write_span: count <= 0 is a no-op returning 0, an invalid
+ * destination handle answers -1, and an out-of-range span never writes.
+ * Returns the count written. */
+int64_t rt_array_fill_span(SplArray* dst, int64_t dst_off, int64_t count, int64_t value) {
+    if (count <= 0) return 0;
+    RtCoreArray* d = rt_core_array_ptr(dst);
+    if (!d) return -1;
+    if (dst_off < 0 || count > d->len || dst_off > d->len - count) {
+        fprintf(stderr,
+                "error: semantic: fill_span out of range: dst_off=%lld count=%lld dst_len=%lld\n",
+                (long long)dst_off, (long long)count, (long long)d->len);
+        exit(1);
+    }
+    if (d->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        volatile uint8_t* p = (volatile uint8_t*)d->data + dst_off;
+        for (int64_t i = 0; i < count; i++) p[i] = (uint8_t)(value & 0xff);
+    } else {
+        int d_u64 = (d->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+        int64_t slot = d_u64 ? value : rt_core_value_u64_compact(value);
+        volatile int64_t* p = (volatile int64_t*)d->data + dst_off;
+        for (int64_t i = 0; i < count; i++) p[i] = slot;
+    }
+    rt_memory_barrier();
     return count;
 }
 
@@ -19695,6 +19780,16 @@ static int ws_compat_setsockopt(SOCKET s, int level, int name, const void* value
         if (tv->tv_sec < 0 || tv->tv_usec < 0) { WSASetLastError(WSAEINVAL); return -1; }
         DWORD ms = (DWORD)tv->tv_sec * 1000u + (DWORD)((tv->tv_usec + 999) / 1000);
         return setsockopt(s, level, name, (const char*)&ms, (int)sizeof(ms));
+    }
+    /* On a Winsock STREAM socket SO_REUSEADDR also lets a second socket bind a
+     * port another socket is actively listening on. The BSD meaning callers
+     * want (rebind over TIME_WAIT) is already Windows' default, so drop it.
+     * Not SO_EXCLUSIVEADDRUSE: that refuses a quick restart on the same port.
+     * Datagram sockets keep it: multicast receivers share a port through it. */
+    if (level == SOL_SOCKET && name == SO_REUSEADDR) {
+        int type = 0;
+        int type_len = (int)sizeof(type);
+        if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char*)&type, &type_len) == 0 && type == SOCK_STREAM) return 0;
     }
     return setsockopt(s, level, name, (const char*)value, length);
 }

@@ -8,6 +8,7 @@
 //! linkage, using the same thread-local state pattern as the interpreter BDD.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::value::core::RuntimeValue;
 
@@ -157,6 +158,32 @@ pub extern "C" fn rt_bdd_describe_end() {
 
 /// Start an it-block. Resets expectation state.
 /// Called at the beginning of each `it "..." { ... }` block.
+/// Process-wide cumulative example counters read by std.spec through
+/// `rt_bdd_executed_total` / `rt_bdd_failed_total` (the per-describe BDD_COUNTS
+/// is reset when a top-level describe ends). Atomic: examples may be recorded
+/// from any carrier thread.
+static BDD_TOTAL_PASSED: AtomicI64 = AtomicI64::new(0);
+static BDD_TOTAL_FAILED: AtomicI64 = AtomicI64::new(0);
+
+#[no_mangle]
+pub extern "C" fn rt_bdd_record_result(passed: i64) {
+    if passed != 0 {
+        BDD_TOTAL_PASSED.fetch_add(1, Ordering::SeqCst);
+    } else {
+        BDD_TOTAL_FAILED.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_bdd_executed_total() -> i64 {
+    BDD_TOTAL_PASSED.load(Ordering::SeqCst) + BDD_TOTAL_FAILED.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_bdd_failed_total() -> i64 {
+    BDD_TOTAL_FAILED.load(Ordering::SeqCst)
+}
+
 #[no_mangle]
 pub extern "C" fn rt_bdd_it_start(name_ptr: i64, name_len: i64) {
     let name = unsafe { read_str(name_ptr, name_len) };
@@ -179,6 +206,7 @@ pub extern "C" fn rt_bdd_it_end(passed: i64) {
 
     let expect_failed = BDD_EXPECT_FAILED.with(|cell| *cell.borrow());
     let actually_passed = passed != 0 && !expect_failed;
+    rt_bdd_record_result(if actually_passed { 1 } else { 0 });
 
     if actually_passed {
         println!(" \x1b[32m✓\x1b[0m");

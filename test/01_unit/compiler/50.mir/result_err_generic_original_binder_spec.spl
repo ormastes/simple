@@ -1,0 +1,83 @@
+# @req REQ-SSPEC-COMPILER
+# Source/metadata prevention coverage; native fixtures separately qualify values.
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.driver_mir_target_context
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.ParserModule
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.module_surfaces_from_modules
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn original_err_binder_metadata(file: text):
+    val path = "test/fixtures/compiler/result_err_generic_method_original/" + file
+    val source = rt_file_read_text(path) ?? ""
+    expect(source.len()).to_be_greater_than(0)
+    val module_name = "app.result_err_original"
+    val ast = parse_full_frontend(source, path, module_name, Logger(level: 0))
+    var modules: Dict<text, ParserModule> = {}
+    modules[module_name] = ast
+    val surfaces = module_surfaces_from_modules(modules,
+        [SourceFile(path: path, content: source, module_name: module_name)]).unwrap()
+    var hir_lowering = hirlowering_for_module(module_name, surfaces)
+    val hir = hir_lowering.lower_module(ast)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new_for_target(hir.symbols,
+        driver_mir_target_context(driver_core_compile_options_default()))
+    var inventory: Dict<text, HirModule> = {}
+    inventory[module_name] = hir
+    lowering.prescan_module_struct_names(inventory, module_name)
+    val module = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(module.functions.len()).to_be_greater_than(0)
+    var checked_functions = 0
+    var checked_bindings = 0
+    for raw_function in hir.functions.values():
+        val function: HirFunction = raw_function
+        if function.name == "cancel" or function.name.ends_with(".cancel") or function.name.ends_with("::cancel"):
+            checked_functions = checked_functions + 1
+            val relowered = lowering.lower_function(function)
+            expect(lowering.errors.len()).to_equal(0)
+            expect(relowered.blocks.len()).to_be_greater_than(0)
+            for raw_symbol in hir.symbols.symbols.values():
+                val symbol: HirSymbol = raw_symbol
+                if symbol.name == "error":
+                    val bound = lowering.symbol_bound_local(symbol.id.id)
+                    if bound.id >= 0:
+                        checked_bindings = checked_bindings + 1
+                        val remembered = lowering.find_local_hir_type(bound.id)
+                        val remembered_present: bool = remembered.?
+                        expect(remembered_present).to_equal(true)
+                        if val remembered_type = remembered:
+                            val owner_name = match remembered_type.kind:
+                                case HirTypeKind.Named(owner, _): hir.symbols.symbol_name_scalar_raw(owner.id)
+                                case _: ""
+                            expect(owner_name).to_equal("CancelError")
+                        expect(lowering.struct_value_syms.contains(bound.id)).to_equal(false)
+                        expect(lowering.runtime_value_local_ids.contains(bound.id)).to_equal(true)
+                        var declared_count = 0
+                        for local in relowered.locals:
+                            if local.id.id == bound.id: declared_count = declared_count + 1
+                        expect(declared_count).to_equal(1)
+    # Counts prevent an unmatched method name or discarded binder from passing.
+    expect(checked_functions).to_equal(1)
+    expect(checked_bindings).to_equal(1)
+
+describe "original Result Err generic-method binder metadata":
+    it "retains the declared enum on the unaliased generic method Err binder":
+        original_err_binder_metadata("main.spl")
+    it "keeps the historical typed alias only as a diagnostic control":
+        original_err_binder_metadata("typed_alias_control.spl")
+    it "retains the same declared enum on the corresponding free-function binder":
+        original_err_binder_metadata("free_function_control.spl")
+    it "retains the enum inside the nested slot-state and Result matches":
+        original_err_binder_metadata("nested_match.spl")

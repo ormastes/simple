@@ -1,0 +1,51 @@
+# Native-only child-environment capture, using the canonical C capture owner.
+# The provider lends four words per calling thread until its next call. Copy
+# all words before allocation; no raw pointer/child PID reaches the app layer.
+use std.nogc_sync_mut.sffi.process_capture_text.{process_capture_text_data_v1}
+@unsafe(reason: "borrowed four-word native child-env receipt", capabilities: [ffi, raw_ptr])
+extern fn rt_process_run_bounded_environment_tuple_v1(command_ptr: i64, command_len: i64, args: [text], environment: [text], mode: i64, timeout_ms: i64, max_output_bytes: i64) -> i64
+@unsafe(reason: "read provider receipt before the next synchronous call", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_read_i64(address: i64, offset: i64) -> i64
+@unsafe(reason: "borrow native UTF8 text bytes", capabilities: [ffi, raw_ptr])
+extern fn rt_string_data(value: i64) -> i64
+@unsafe(reason: "native UTF8 extent", capabilities: [ffi])
+extern fn rt_string_len(value: i64) -> i64
+@unsafe(reason: "copy retained child output into Simple text", capabilities: [ffi, raw_ptr])
+extern fn rt_string_new(address: i64, length: i64) -> text
+@unsafe(reason: "private child env spawn uses the existing async PID registry", capabilities: [ffi, raw_ptr])
+extern fn rt_process_spawn_async_environment_v1(command_ptr: i64, command_len: i64, args: [text], environment: [text], mode: i64) -> i64
+
+fn child_env_text_v1(handle: i64) -> Result<text, text>:
+    if handle == 3: return Ok("")
+    val length = unsafe(capabilities: [ffi]): rt_string_len(handle)
+    val pointer = unsafe(capabilities: [ffi, raw_ptr]): rt_string_data(handle)
+    if length < 0 or (length > 0 and pointer == 0): return Err("child-env provider returned invalid text")
+    if length == 0: return Ok("")
+    val copied = unsafe(capabilities: [ffi, raw_ptr]): rt_string_new(pointer, length)
+    Ok(copied)
+
+pub fn process_environment_capture_native_v1(command: text, args: [text], environment: [text], mode: i64, timeout_ms: i64, max_output_bytes: i64) -> Result<(text, text, i64, i64), text>:
+    val retained = command + ""
+    val pointer = process_capture_text_data_v1(retained)
+    if pointer == 0 or retained.len() <= 0: return Err("child-env command pointer unavailable")
+    val block = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_process_run_bounded_environment_tuple_v1(pointer, retained.len(), args, environment, mode, timeout_ms, max_output_bytes)
+    if block == 0: return Err("native child-env capture provider unavailable")
+    val out = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(block, 0)
+    val err = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(block, 8)
+    val status = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(block, 16)
+    val flags = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(block, 24)
+    if flags < 0 or flags > 31: return Err("native child-env receipt flags invalid")
+    # Limit outcomes never expose possibly cut UTF8/protocol payloads. Flags,
+    # not child-controlled text markers, carry timeout/output-limit truth.
+    if flags % 8 != 0:
+        if flags >= 8: return Ok(("", child_env_text_v1(err)?, status, flags))
+        return Ok(("", "", status, flags))
+    Ok((child_env_text_v1(out)?, child_env_text_v1(err)?, status, flags))
+
+pub fn process_environment_spawn_native_v1(command: text, args: [text], environment: [text], mode: i64) -> i64:
+    val retained = command + ""
+    val pointer = process_capture_text_data_v1(retained)
+    if pointer == 0 or retained.len() <= 0: return -1
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_process_spawn_async_environment_v1(pointer, retained.len(), args, environment, mode)

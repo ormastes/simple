@@ -1,0 +1,56 @@
+use std.spec.*
+use std.common.contracts.container.command_v1.*
+
+describe "OCI executable and workload argv mapping":
+    it "keeps the executable scalar and preserves literal tail values":
+        match oci_command_parts_v1(["/agent binary", "--interactive", ""],
+                ["literal ; $(task)", "a b", "--entrypoint=untrusted"], true):
+            case Err(reason): fail(reason)
+            case Ok(parts):
+                expect(parts.options).to_equal(["--entrypoint", "/agent binary"])
+                expect(parts.arguments).to_equal(["--interactive", "",
+                    "literal ; $(task)", "a b", "--entrypoint=untrusted"])
+
+    it "preserves legacy positional command vectors":
+        match oci_command_parts_v1(["/agent", "--flag"], ["tail", ""], false):
+            case Err(reason): fail(reason)
+            case Ok(parts):
+                expect(parts.options).to_equal([])
+                expect(parts.arguments).to_equal(["/agent", "--flag", "tail", ""])
+
+    it "keeps image entrypoint selection for empty commands and args-only requests":
+        for arguments in [[], ["--flag", "literal ; $(task)"]]:
+            match oci_command_parts_v1([], arguments, false):
+                case Err(reason): fail(reason)
+                case Ok(parts):
+                    expect(parts.options).to_equal([])
+                    expect(parts.arguments).to_equal(arguments)
+
+    it "rejects a missing override executable":
+        match oci_command_parts_v1([], [], true):
+            case Err(reason): expect(reason).to_equal("entrypoint-command-empty")
+            case Ok(_): fail("override without executable must reject")
+        for executable in ["", "   "]:
+            match oci_command_parts_v1([executable], [], true):
+                case Err(reason): expect(reason).to_equal("entrypoint-command-empty")
+                case Ok(_): fail("empty scalar executable must reject")
+
+    it "rejects engine option or JSON interpretation of a selected executable":
+        for executable in ["--privileged", " -x"]:
+            match oci_command_parts_v1([executable], [], true):
+                case Err(reason): expect(reason).to_equal("entrypoint-command-option-like")
+                case Ok(_): fail("option-looking executable must reject")
+        for executable in ["[\"/bin/sh\",\"-c\"]", "  [broken", "null", " null "]:
+            match oci_command_parts_v1([executable], [], true):
+                case Err(reason): expect(reason).to_equal("entrypoint-command-json-like")
+                case Ok(_): fail("JSON-looking executable must reject")
+
+    it "rejects NUL in every workload argv position in either mode":
+        for replace in [false, true]:
+            for command in [["/agent\0suffix"], ["/agent", "tail\0suffix"]]:
+                match oci_command_parts_v1(command, [], replace):
+                    case Err(reason): expect(reason).to_equal("command-contains-nul")
+                    case Ok(_): fail("NUL command must reject")
+            match oci_command_parts_v1(["/agent"], ["arg\0suffix"], replace):
+                case Err(reason): expect(reason).to_equal("argument-contains-nul")
+                case Ok(_): fail("NUL argument must reject")

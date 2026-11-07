@@ -1,0 +1,187 @@
+# Bounded client for retained local controller metadata, never launch authority.
+use app.io.mod.{process_run_bounded, process_bounded_timed_out}
+use std.nogc_sync_mut.fs.host_path.host_path_is_absolute
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct CaretOrchestratorRequestV1:
+    executable: text
+    action: text
+    state_root: text
+    controller_id: text
+    request_uid: text
+    source_path: text
+    ns: text
+    name: text
+
+pub struct CaretOrchestratorReplyV1:
+    controller_id: text
+    request_uid: text
+    confirmed: bool
+    status: text
+    code: text
+    reconciliation_required: bool
+    execution_authorized: bool
+    output: text
+
+fn orchestrator_path_valid_v1(path: text) -> bool:
+    (host_path_is_absolute(path) and path.len() <= 4096 and
+        not path.contains("\0") and not path.contains("\n") and
+        not path.contains("\r") and not path.contains("\t"))
+
+pub fn caret_orchestrator_argv_v1(request: CaretOrchestratorRequestV1) -> Result<[text], text>:
+    if request.action != "submit" and request.action != "inspect": return Err("action-invalid")
+    if not orchestrator_path_valid_v1(request.executable) or not orchestrator_path_valid_v1(request.state_root):
+        return Err("path-invalid")
+    if not builder_identifier_valid_v1(request.controller_id) or not builder_identifier_valid_v1(request.request_uid):
+        return Err("identity-invalid")
+    var args = [request.action, request.state_root, request.controller_id, request.request_uid]
+    if request.action == "submit":
+        if not orchestrator_path_valid_v1(request.source_path): return Err("source-path-invalid")
+        if not builder_identifier_valid_v1(request.ns) or not builder_identifier_valid_v1(request.name):
+            return Err("selector-invalid")
+        args = args + [request.source_path, request.ns, request.name]
+    elif request.source_path != "" or request.ns != "" or request.name != "":
+        return Err("inspect-arguments-invalid")
+    Ok(args)
+
+fn orchestrator_failure_v1(request: CaretOrchestratorRequestV1, code: text,
+        reconciliation: bool) -> CaretOrchestratorReplyV1:
+    CaretOrchestratorReplyV1(controller_id: request.controller_id, request_uid: request.request_uid,
+        confirmed: false, status: "unconfirmed", code: code,
+        reconciliation_required: reconciliation, execution_authorized: false, output: "")
+
+fn orchestrator_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("reply-field-missing")
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("reply-field-type")
+
+fn orchestrator_false_v1(fields: Dict<text, SdnValue>, key: text) -> bool:
+    if not fields.contains_key(key): return false
+    match fields[key]:
+        case SdnValue.Bool(value): not value
+        case _: false
+
+fn orchestrator_metadata_v1(request: CaretOrchestratorRequestV1,
+        fields: Dict<text, SdnValue>) -> Result<text, text>:
+    if not fields.contains_key("version"): return Err("reply-version-invalid")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 1: return Err("reply-version-invalid")
+        case _: return Err("reply-version-invalid")
+    if orchestrator_text_v1(fields, "kind")? != "orchestrator-local-controller": return Err("reply-kind-invalid")
+    if (orchestrator_text_v1(fields, "controllerId")? != request.controller_id or
+            orchestrator_text_v1(fields, "requestUid")? != request.request_uid):
+        return Err("reply-identity-mismatch")
+    if not orchestrator_false_v1(fields, "executionAuthorized"): return Err("reply-authority-invalid")
+    val status = orchestrator_text_v1(fields, "status")?
+    if status != "intent-retained" and (request.action != "inspect" or status != "intent-cancelled"):
+        return Err("reply-status-invalid")
+    if not builder_digest_valid_v1(orchestrator_text_v1(fields, "sourceDigest")?): return Err("reply-digest-invalid")
+    var allowed = ["version", "kind", "controllerId", "requestUid", "executionAuthorized", "status", "sourceDigest"]
+    if request.action == "inspect":
+        allowed = allowed + ["assignmentState", "schedulingState", "runtimeState", "terminationObserved", "desiredState",
+            "controllerEpoch", "desiredRevision", "workloadRevision", "planDigest", "assignmentGeneration",
+            "assignmentDigest", "hostOperationId", "physicalHostId", "hostAuthorityId", "hostBootId",
+            "providerGeneration", "serviceScopeId", "assignedCpuMillis", "assignedMemoryBytes"]
+        if (orchestrator_text_v1(fields, "runtimeState")? != "unobserved" or
+                not orchestrator_false_v1(fields, "terminationObserved")): return Err("reply-runtime-invalid")
+        val desired = if status == "intent-cancelled": "cancellation-requested" else: "active"
+        if orchestrator_text_v1(fields, "desiredState")? != desired: return Err("reply-desired-state-invalid")
+        val assignment = orchestrator_text_v1(fields, "assignmentState")?
+        val scheduling = orchestrator_text_v1(fields, "schedulingState")?
+        val workload_keys = ["controllerEpoch", "desiredRevision", "workloadRevision", "planDigest", "assignmentGeneration"]
+        val binding_keys = ["assignmentDigest", "hostOperationId", "physicalHostId", "hostAuthorityId", "hostBootId",
+            "providerGeneration", "serviceScopeId", "assignedCpuMillis", "assignedMemoryBytes"]
+        if assignment == "unbound":
+            if scheduling != "intent-retained" and scheduling != "unassigned": return Err("reply-assignment-invalid")
+        elif assignment == "binding-retained":
+            if scheduling != "assignment-bound": return Err("reply-assignment-invalid")
+        else: return Err("reply-assignment-invalid")
+        for key in workload_keys:
+            if fields.contains_key(key) != (scheduling != "intent-retained"):
+                return Err("reply-assignment-invalid")
+        for key in binding_keys:
+            if fields.contains_key(key) != (assignment == "binding-retained"):
+                return Err("reply-assignment-invalid")
+        for key in ["controllerEpoch", "desiredRevision", "workloadRevision", "assignmentGeneration", "providerGeneration", "assignedCpuMillis", "assignedMemoryBytes"]:
+            if fields.contains_key(key):
+                match fields[key]:
+                    case SdnValue.Int(value):
+                        if key == "assignmentGeneration" and scheduling == "unassigned":
+                            if value < 0: return Err("reply-counter-invalid")
+                        elif value <= 0: return Err("reply-counter-invalid")
+                    case _: return Err("reply-counter-invalid")
+        for key in ["planDigest", "assignmentDigest"]:
+            if fields.contains_key(key):
+                if not builder_digest_valid_v1(orchestrator_text_v1(fields, key)?): return Err("reply-digest-invalid")
+        for key in ["hostOperationId", "physicalHostId", "hostAuthorityId", "hostBootId", "serviceScopeId"]:
+            if fields.contains_key(key):
+                if not builder_identifier_valid_v1(orchestrator_text_v1(fields, key)?): return Err("reply-host-identity-invalid")
+    for key in fields.keys():
+        if not allowed.contains(key): return Err("reply-field-unknown")
+    Ok(status)
+
+pub fn caret_orchestrator_decode_reply_v1(request: CaretOrchestratorRequestV1,
+        stdout: text, stderr: text, exit_code: i64) -> CaretOrchestratorReplyV1:
+    val request_args = caret_orchestrator_argv_v1(request)
+    if request_args.is_err(): return orchestrator_failure_v1(request, request_args.unwrap_err(), true)
+    if process_bounded_timed_out(exit_code, stderr): return orchestrator_failure_v1(request, "controller-timeout", true)
+    if exit_code != 0: return orchestrator_failure_v1(request, "controller-error", true)
+    # Reject saturated capture as ambiguous even if a truncated prefix parses.
+    if stdout.bytes().len() == 0 or stdout.bytes().len() >= 65536 or stderr.bytes().len() >= 65536 or stderr != "":
+        return orchestrator_failure_v1(request, "controller-output-invalid", true)
+    val decoded = sdn_parse_strict_v1(stdout, SdnStrictLimitsV1(max_source_bytes: 65536,
+        max_depth: 8, max_nodes: 256, max_rows: 128, max_cells: 256, max_columns: 64))
+    if decoded.is_err(): return orchestrator_failure_v1(request, "controller-reply-malformed", true)
+    var fields: Dict<text, SdnValue> = {}
+    match decoded.unwrap().value:
+        case SdnValue.Dict(value): fields = value
+        case _: return orchestrator_failure_v1(request, "controller-reply-type", true)
+    val checked = orchestrator_metadata_v1(request, fields)
+    if checked.is_err(): return orchestrator_failure_v1(request, checked.unwrap_err(), true)
+    CaretOrchestratorReplyV1(controller_id: request.controller_id, request_uid: request.request_uid,
+        confirmed: true, status: checked.unwrap(), code: "metadata-confirmed",
+        reconciliation_required: false, execution_authorized: false,
+        output: sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn caret_orchestrator_request_v1(request: CaretOrchestratorRequestV1) -> CaretOrchestratorReplyV1:
+    val args = caret_orchestrator_argv_v1(request)
+    if args.is_err(): return orchestrator_failure_v1(request, args.unwrap_err(), false)
+    # Exactly one explicit executable invocation; no PATH fallback or retry.
+    val (stdout, stderr, code) = process_run_bounded(request.executable, args.unwrap(), 10000, 65536)
+    caret_orchestrator_decode_reply_v1(request, stdout, stderr, code)
+
+fn orchestrator_cli_output_v1(reply: CaretOrchestratorReplyV1) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("caret-orchestrator-result"),
+        "controllerId": SdnValue.String(reply.controller_id), "requestUid": SdnValue.String(reply.request_uid),
+        "confirmed": SdnValue.Bool(reply.confirmed), "status": SdnValue.String(reply.status),
+        "code": SdnValue.String(reply.code), "reconciliationRequired": SdnValue.Bool(reply.reconciliation_required),
+        "executionAuthorized": SdnValue.Bool(false), "controllerOutput": SdnValue.String(reply.output)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+pub fn run_orchestrator_cli(raw_args: [text]) -> i64:
+    var request = CaretOrchestratorRequestV1(executable: "", action: "", state_root: "",
+        controller_id: "", request_uid: "", source_path: "", ns: "", name: "")
+    if raw_args.len() >= 6:
+        request = CaretOrchestratorRequestV1(executable: raw_args[1], action: raw_args[2],
+            state_root: raw_args[3], controller_id: raw_args[4], request_uid: raw_args[5],
+            source_path: "", ns: "", name: "")
+    val expected = if request.action == "submit": 9 else: if request.action == "inspect": 6 else: 0
+    if raw_args.len() == 0 or raw_args[0] != "orchestrator" or expected == 0 or raw_args.len() != expected:
+        print orchestrator_cli_output_v1(orchestrator_failure_v1(request, "usage-invalid", false))
+        return 2
+    if request.action == "submit":
+        request = CaretOrchestratorRequestV1(executable: request.executable, action: request.action,
+            state_root: request.state_root, controller_id: request.controller_id, request_uid: request.request_uid,
+            source_path: raw_args[6], ns: raw_args[7], name: raw_args[8])
+    val reply = caret_orchestrator_request_v1(request)
+    print orchestrator_cli_output_v1(reply)
+    if reply.confirmed: return 0
+    if reply.reconciliation_required: return 1
+    2

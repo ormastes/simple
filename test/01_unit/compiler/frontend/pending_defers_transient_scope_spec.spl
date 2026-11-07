@@ -1,0 +1,51 @@
+# @bug: native_method_call_hir_lowering_invalid_array_handle_2026-11-07
+"""
+## Purpose and audience
+Purpose: source-shape invariant for a process-lifetime frontend global that
+was REPLACED inside the stage-4 streaming transient parser scope. A stage-3
+compiler parsing `impl` methods read `g_pending_defers` after the previous
+parse's scope end had reclaimed the array `convert_decl_fn` installed there
+(save/`g_pending_defers = []`/restore swap), printed `rejected invalid array
+handle before dereference`, and lost the method table
+(`unresolved method call: get ... lookup_method_in_type=no`).
+The global must be mutated in place (truncate to the entry length), never
+reassigned, so no transient allocation is ever stored in it.
+Audience: frontend/flat-AST bridge maintainers.
+"""
+# @tag: unit, compiler, frontend, memory
+
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+
+val CONVERT_NODES = "src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl"
+
+fn read_or_empty(path: text) -> text:
+    file_read_nullable(path) ?? ""
+
+fn body_of_fn(src: text, header: text) -> text:
+    val start = src.index_of(header)
+    if start < 0:
+        return ""
+    val rest = src.substring(start + header.len(), src.len())
+    val next = rest.index_of("\nfn ")
+    if next < 0:
+        return rest
+    rest.substring(0, next)
+
+describe "pending defers stay in place across the transient parser scope":
+    it "convert_decl_fn never reassigns g_pending_defers":
+        val body = body_of_fn(read_or_empty(CONVERT_NODES), "\nfn convert_decl_fn(")
+        expect(body.len()).to_be_greater_than(0)
+        expect(body.contains("g_pending_defers = ")).to_equal(false)
+        expect(body.contains("saved_pending_defers")).to_equal(false)
+
+    it "convert_decl_fn truncates the defer stack back to its entry length":
+        val body = body_of_fn(read_or_empty(CONVERT_NODES), "\nfn convert_decl_fn(")
+        expect(body).to_contain("val pending_defer_base = g_pending_defers.len()")
+        expect(body).to_contain("while g_pending_defers.len() > pending_defer_base:")
+
+    it "no frontend helper swaps a g_ global through a saved_ copy":
+        # Sibling prevention: the `val saved_x = g_x` / `g_x = []` / `g_x =
+        # saved_x` idiom stores a scope-stamped array in a process global.
+        val src = read_or_empty(CONVERT_NODES)
+        expect(src.contains("= g_pending_defers\n    g_pending_defers = []")).to_equal(false)

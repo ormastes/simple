@@ -39,6 +39,15 @@ pub enum SectionType {
     /// module chunks). Kept in sync with the spl `SectionType` in
     /// `70.backend/linker/smf_writer.spl`.
     AspectPackDirectory = 16,
+    /// `.interp_snapshot`: the interpreter fallback snapshot of a standalone
+    /// SMF whose hybrid transform routed one or more functions to
+    /// `rt_interp_call`. Payload is a UTF-8 JSON record
+    /// (`{"version":1,"path":...,"source":...}`) holding the entry source the
+    /// SMF was compiled from; the driver re-seeds the interpreter definitions
+    /// from it before running the module, so the routed calls resolve. Kept
+    /// in sync with the spl `SectionType` in `70.backend/linker/smf_writer.spl`.
+    /// Bug: doc/08_tracking/bug/smf_standalone_interp_fallback_functions_unavailable_2026-06-14.md
+    InterpSnapshot = 17,
 }
 
 impl SmfSection {

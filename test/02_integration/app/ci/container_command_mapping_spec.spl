@@ -1,0 +1,60 @@
+# Pure CI request/provider-command integration; authored UNEXECUTED.
+use std.spec.*
+use app.ci.pipeline_runner.ci_container_request_v1
+use std.common.contracts.orchestration.resource_v1.{ContainerV1, ResourcesV1}
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+
+fn _ci_command_container_v1(command: [text], arguments: [text]) -> ContainerV1:
+    ContainerV1(name: "step",
+        image: "example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        artifact_set_ref: "", command: command, args: arguments, ports: [],
+        resources: ResourcesV1(cpu_request_millis: 1000, cpu_limit_millis: 1000,
+            memory_request_bytes: 268435456, memory_limit_bytes: 268435456))
+
+describe "CI container executable mapping":
+    it "maps a nonempty command to executable override with exact literal workload argv":
+        val container = _ci_command_container_v1(["/bin/echo", ""], ["a b", ""])
+        val request = ci_container_request_v1("step", container, "run-1")
+        expect(request.replace_entrypoint).to_equal(true)
+        expect(request.command).to_equal(container.command)
+        expect(request.args).to_equal(container.args)
+        val built = build_create_command(OCI_ENGINE_PODMAN, "/unused/ci",
+            request, "create-ci", 7, "boot-1")
+        expect(built.0).to_equal("")
+        expect(built.1.args).to_equal(["create", "--name", "simpleorch-run-run-1-step-1",
+            "--label", "io.simpleorch.pod_uid=run-run-1-step",
+            "--label", "io.simpleorch.attempt=1",
+            "--label", "io.simpleorch.node_boot_id=boot-1",
+            "--label", "io.simpleorch.provider_generation=7",
+            "--label", "io.simpleorch.operation_id=create-ci",
+            "--cpu-period", "100000", "--cpu-quota", "100000",
+            "--memory", "268435456", "--pids-limit", "256",
+            "--network", "bridge", "--read-only", "--security-opt",
+            "no-new-privileges", "--cap-drop", "ALL",
+            "--entrypoint", "/bin/echo", request.image, "", "a b", ""])
+
+    it "keeps the image entrypoint when command and args are absent":
+        val request = ci_container_request_v1("step", _ci_command_container_v1([], []), "run-1")
+        expect(request.replace_entrypoint).to_equal(false)
+        expect(request.command).to_equal([])
+        expect(request.args).to_equal([])
+        val built = build_create_command(OCI_ENGINE_PODMAN, "/unused/ci",
+            request, "create-ci", 7, "boot-1")
+        expect(built.0).to_equal("")
+        expect(built.1.args.contains("--entrypoint")).to_equal(false)
+        expect(built.1.args.len()).to_equal(29)
+        expect(built.1.args[28]).to_equal(request.image)
+
+    it "keeps args-only values after the image without manufacturing an executable":
+        val request = ci_container_request_v1("step", _ci_command_container_v1([], ["a b", ""]), "run-1")
+        expect(request.replace_entrypoint).to_equal(false)
+        expect(request.command).to_equal([])
+        expect(request.args).to_equal(["a b", ""])
+        val built = build_create_command(OCI_ENGINE_PODMAN, "/unused/ci",
+            request, "create-ci", 7, "boot-1")
+        expect(built.0).to_equal("")
+        expect(built.1.args.contains("--entrypoint")).to_equal(false)
+        expect(built.1.args.len()).to_equal(31)
+        expect(built.1.args[28]).to_equal(request.image)
+        expect(built.1.args[29]).to_equal("a b")
+        expect(built.1.args[30]).to_equal("")

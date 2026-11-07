@@ -546,33 +546,100 @@ fn private_top_level_fn_names(items: &[Node]) -> std::collections::HashSet<Strin
         .collect()
 }
 
-/// Warn-first visibility check (interp_private_names_leak_across_modules_2026-11-05):
-/// a braced `use m.{name}` that names a private `fn` of `m` from a file outside
-/// `m`'s directory. Same-directory siblings stay in compatibility mode.
-fn warn_private_use_name(
-    name: &str,
+/// Visibility check (interp_private_names_leak_across_modules_2026-11-05):
+/// a braced `use m.{name}` that names a private `fn` of `m` (not re-exported by
+/// an `export`) from a file outside `m`'s directory is a hard error unless the pair is frozen in
+/// `scripts/check/private_import_baseline.txt` (legacy: warn only). Same-directory
+/// siblings stay in compatibility mode (bare `fn` is private to its file; sibling
+/// access is the documented compatibility exception).
+fn check_private_use_names(
+    use_stmt: &UseStmt,
     current_file: Option<&Path>,
     module_path: &Path,
     module_label: &str,
-    provided: &ProvidedSet,
-) {
-    if !provided.private_fns.contains(name) {
-        return;
-    }
-    let Some(importer) = current_file else {
-        return;
+    provided: &ProvidedNames,
+) -> Result<(), CompileError> {
+    let (Some(provided), Some(importer)) = (provided.as_ref(), current_file) else {
+        return Ok(());
     };
-    if importer.parent() == module_path.parent() {
-        return;
+    let dir_of = |p: &Path| p.parent().map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf()));
+    if dir_of(importer) == dir_of(module_path) {
+        return Ok(());
     }
-    if use_warning_seen(format!("priv\u{1}{}\u{1}{}\u{1}{}", module_path.display(), name, importer.display())) {
-        return;
+    let Some(requested) = requested_group_import_names(use_stmt) else {
+        return Ok(());
+    };
+    for name in requested {
+        if !provided.private_fns.contains(&name) {
+            continue;
+        }
+        if private_import_is_baselined(module_path, &name) {
+            // Legacy pair frozen in scripts/check/private_import_baseline.txt:
+            // warn only, so the baseline can ratchet down.
+            if !use_warning_seen(format!("priv\u{1}{}\u{1}{}\u{1}{}", module_path.display(), name, importer.display())) {
+                eprintln!(
+                    "[visibility-warning] '{name}' is a private fn of module '{module_label}' ({}); mark it `pub` or `export` it (imported from {})",
+                    module_path.display(),
+                    importer.display()
+                );
+            }
+            continue;
+        }
+        return Err(CompileError::semantic(format!(
+            "private fn `{name}` of module `{module_label}` ({}) is not visible to {}; mark it `pub` or `export` it",
+            module_path.display(),
+            importer.display()
+        )));
     }
-    eprintln!(
-        "[visibility-warning] '{name}' is a private fn of module '{module_label}' ({}); mark it `pub` or `export` it (imported from {})",
-        module_path.display(),
-        importer.display()
-    );
+    Ok(())
+}
+
+const PRIVATE_IMPORT_BASELINE: &str = "scripts/check/private_import_baseline.txt";
+
+/// Repo-root-relative, `/`-separated form of `module_path` plus the baseline
+/// entries of the repo that contains it. Only the baseline at the repository
+/// root counts; a module outside any repo (a scratch fixture) has no baseline,
+/// so every private import of it is "new".
+fn private_import_baseline_for(module_path: &Path) -> Option<(String, Arc<std::collections::HashSet<String>>)> {
+    static CACHE: OnceLock<std::sync::Mutex<HashMap<std::path::PathBuf, Arc<std::collections::HashSet<String>>>>> =
+        OnceLock::new();
+    let abs = std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf());
+    let mut dir = abs.parent();
+    while let Some(d) = dir {
+        // Only the baseline at the REPOSITORY ROOT (the first ancestor holding a
+        // `.git` entry) counts; a nested copy cannot whitelist pairs.
+        if !d.join(".git").exists() {
+            dir = d.parent();
+            continue;
+        }
+        let candidate = d.join(PRIVATE_IMPORT_BASELINE);
+        if !candidate.is_file() {
+            return None;
+        }
+        {
+            let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+            let set = {
+                let mut guard = cache.lock().ok()?;
+                guard
+                    .entry(d.to_path_buf())
+                    .or_insert_with(|| {
+                        let text = fs::read_to_string(&candidate).unwrap_or_default();
+                        Arc::new(text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+                    })
+                    .clone()
+            };
+            let rel = abs.strip_prefix(d).ok()?.to_string_lossy().replace('\\', "/");
+            return Some((rel, set));
+        }
+    }
+    None
+}
+
+fn private_import_is_baselined(module_path: &Path, name: &str) -> bool {
+    match private_import_baseline_for(module_path) {
+        Some((rel, set)) => set.contains(&format!("{rel}|{name}")),
+        None => false,
+    }
 }
 
 /// Report braced `use` names the resolved module does not provide.
@@ -596,7 +663,6 @@ fn warn_unprovided_use_names(
     };
     for name in requested {
         if provided.contains(&name) {
-            warn_private_use_name(&name, current_file, module_path, module_label, provided);
             continue;
         }
         let importer = current_file
@@ -995,6 +1061,7 @@ pub fn load_and_merge_module(
         // Use-list check on the cache path: the AST is gone, so consult the
         // surface recorded when this module was first loaded.
         if let Some(provided) = lookup_provided_names(&module_path) {
+            check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided)?;
             warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
         }
 
@@ -1386,6 +1453,7 @@ pub fn load_and_merge_module(
         &module_enums,
     );
     record_provided_names(&module_path, provided_names.clone());
+    check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names)?;
     warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names);
 
     // Cache the full module exports for future use
@@ -2562,5 +2630,61 @@ mod private_fn_visibility_tests {
     fn exported_bare_fn_is_not_private() {
         let src = "fn helper() -> i64:\n    1\nfn hidden() -> i64:\n    2\nexport helper\n";
         assert_eq!(private_names(src), vec!["hidden".to_string()]);
+    }
+
+    fn use_of(src: &str) -> simple_parser::ast::UseStmt {
+        let parsed = Parser::new(src).parse().expect("fixture");
+        parsed
+            .items
+            .into_iter()
+            .find_map(|n| match n {
+                simple_parser::ast::Node::UseStmt(u) => Some(u),
+                _ => None,
+            })
+            .expect("use stmt")
+    }
+
+    fn provided_with_private(names: &[&str]) -> super::ProvidedNames {
+        Some(std::sync::Arc::new(super::ProvidedSet {
+            exports: std::sync::Arc::new(crate::value::ModuleTable::leaf(Default::default())),
+            extra: Default::default(),
+            private_fns: names.iter().map(|s| s.to_string()).collect(),
+        }))
+    }
+
+    #[test]
+    fn importing_private_fn_from_other_directory_is_an_error() {
+        let u = use_of("use app.sub.lib_mod.{secret_helper}
+");
+        let r = super::check_private_use_names(
+            &u,
+            Some(std::path::Path::new("app/main3.spl")),
+            std::path::Path::new("app/sub/lib_mod.spl"),
+            "app.sub.lib_mod",
+            &provided_with_private(&["secret_helper"]),
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn same_directory_sibling_and_pub_names_are_allowed() {
+        let u = use_of("use app.lib_mod.{secret_helper}
+");
+        let sibling = super::check_private_use_names(
+            &u,
+            Some(std::path::Path::new("app/main3.spl")),
+            std::path::Path::new("app/lib_mod.spl"),
+            "app.lib_mod",
+            &provided_with_private(&["secret_helper"]),
+        );
+        assert!(sibling.is_ok());
+        let public = super::check_private_use_names(
+            &u,
+            Some(std::path::Path::new("other/main3.spl")),
+            std::path::Path::new("app/lib_mod.spl"),
+            "app.lib_mod",
+            &provided_with_private(&[]),
+        );
+        assert!(public.is_ok());
     }
 }

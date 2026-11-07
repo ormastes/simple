@@ -229,6 +229,21 @@ impl MirLowering:
         else:
             nil
 
+    me coalesce_operand_derivable(expr: HirExpr, depth: i64, visit_budget: [i64]) -> bool:
+        """True when `expr` is `opt ?? fallback` with a derivable fallback.
+        Only for comparison operands, whose bool result does not depend on
+        the coalesce's own type. If the left side recovers a type, its kind
+        must equal the fallback's; an unrecoverable left side (a call, a
+        `T?` value) adds no evidence either way."""
+        match expr.kind:
+            case NullCoalesce(left, right):
+                if val fallback_known = self.infer_unfolded_static_expr_type_bounded(right, depth + 1, visit_budget):
+                    if val left_known = self.infer_unfolded_static_expr_type_bounded(left, depth + 1, visit_budget):
+                        return left_known.kind == fallback_known.kind
+                    return true
+                false
+            case _: false
+
     me infer_unfolded_static_expr_type(expr: HirExpr) -> MirType?:
         # Shared across both binary branches so a repeated dependency cannot
         # turn type recovery into an exponential traversal.
@@ -301,12 +316,39 @@ impl MirLowering:
                 if val elem = element_type:
                     return Some(MirType(kind: MirTypeKind.Array(elem, 0)))
                 nil
+            case NullCoalesce(left, right):
+                # `opt ?? default` yields the optional's payload type. A settled
+                # `T?` on the left is direct evidence. Otherwise only a text or
+                # bool default is admissible: those literal kinds never coerce,
+                # whereas `?? 0` beside an unproven `f64?` would relabel it i64.
+                if val left_settled = left.type_:
+                    val left_concrete: HirType = left_settled
+                    match left_concrete.kind:
+                        case HirTypeKind.Optional(payload):
+                            if val payload_type = self.static_scalar_type_from_hir(payload):
+                                return Some(payload_type)
+                        case _: ()
+                if val default_type = self.infer_unfolded_static_expr_type_bounded(right, depth + 1, visit_budget):
+                    match default_type.kind:
+                        case MirTypeKind.Bool: return Some(default_type)
+                        case MirTypeKind.Opaque(name):
+                            if name == "str": return Some(default_type)
+                        case _: ()
+                nil
             case Binary(op, left, right):
                 val left_type = self.infer_unfolded_static_expr_type_bounded(left, depth + 1, visit_budget)
                 val right_type = self.infer_unfolded_static_expr_type_bounded(right, depth + 1, visit_budget)
                 match op:
                     case HirBinOp.Eq | HirBinOp.NotEq | HirBinOp.Lt | HirBinOp.LtEq | HirBinOp.Gt | HirBinOp.GtEq:
                         if left_type.? and right_type.?: return Some(MirType.bool())
+                        # A comparison yields bool whatever its operands are,
+                        # so a `??` operand only has to be well-formed evidence
+                        # (`(env_get("X") ?? "") == "1"`). A standalone `??`
+                        # is NOT typed here: its value lowering takes the left
+                        # inner type, which this pass cannot see.
+                        val left_ok = left_type.? or self.coalesce_operand_derivable(left, depth + 1, visit_budget)
+                        val right_ok = right_type.? or self.coalesce_operand_derivable(right, depth + 1, visit_budget)
+                        if left_ok and right_ok: return Some(MirType.bool())
                     case HirBinOp.And | HirBinOp.Or:
                         if val left_known = left_type:
                             if val right_known = right_type:
@@ -448,6 +490,11 @@ fn runtime_module_initializer_supported(const_: HirConst) -> bool:
         # static, so `S = (a, b, c)` aborted with "assignment target has no
         # local binding". Same generic runtime-initializer path as above.
         case TupleLit(_): true
+        # Fourth kind of the same defect: `var G: E = E.Variant` (an enum
+        # value has no MirConstValue) got no static, so `G = E.Other` aborted
+        # with "assignment target has no local binding" (stage2 run 15,
+        # engine2d.simd_kernels `_cached_simd_level`).
+        case EnumLit(_, _, _): true
         case _: runtime_module_initializer_type_fallback(const_)
 
 fn runtime_module_initializer_type_fallback(const_: HirConst) -> bool:
@@ -2553,9 +2600,12 @@ impl MirLowering:
         # the promote walk (no write barrier, so it walks persistent graphs
         # too) re-traversed every closure HirModule once per module. Detach
         # it for the promotion and restore the borrowed reference after the
-        # scope ends.
-        val borrowed_trait_providers: [HirModule] = self.trait_impl_provider_modules
-        self.trait_impl_provider_modules = []
+        # scope ends. The borrow is taken only AFTER the scope is paused: under
+        # native codegen `val x: [T] = self.field` is an rt_array_copy, and a
+        # copy made while the scope is live lands in the arena that
+        # transient_array_scope_end_v1 frees, so the restore below then read
+        # a dangling handle ("rejected invalid array handle" + AV in the
+        # stage2 native-build worker on a main-only fixture).
         # From here every exit path must close the scope. `end` frees the
         # arena, so any path that ends WITHOUT a successful promotion must
         # also refuse to hand `lowered` back.
@@ -2564,6 +2614,8 @@ impl MirLowering:
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 2))
             return Err("transient MIR scope pause failed for {module.name}")
         scope_decisions = scope_decisions | 2
+        val borrowed_trait_providers: [HirModule] = self.trait_impl_provider_modules
+        self.trait_impl_provider_modules = []
         # The returned module and owner builder share the same MIR graph.
         # Share committed nodes across both promotions, including the owner's
         # overlapping field roots. No retained graph is written in this window;

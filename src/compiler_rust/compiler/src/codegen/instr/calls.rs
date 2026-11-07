@@ -4434,6 +4434,10 @@ pub fn compile_call<M: Module>(
                 // Array-only name (no text/dict method shares it), so a plain
                 // mapping cannot mis-route another receiver.
                 "write_span" => Some("rt_array_write_span"),
+                // Bulk in-place volatile fill — JIT counterpart of the
+                // interpreter's `arr.fill_span(dst_off, count, value)` mutating
+                // method. Array-only name, same raw-count contract as write_span.
+                "fill_span" => Some("rt_array_fill_span"),
                 "clear" => Some("rt_clear"),
                 "join" => Some("rt_string_join"),
                 // `strip`/`trimmed` are interpreter-level aliases of `trim`
@@ -4673,7 +4677,7 @@ pub fn compile_call<M: Module>(
                         let results = builder.inst_results(call);
                         if !results.is_empty() {
                             let mut value = results[0];
-                            if rt_name == "rt_array_write_span" {
+                            if rt_name == "rt_array_write_span" || rt_name == "rt_array_fill_span" {
                                 // The runtimes return the RAW i64 count (C twin,
                                 // pure-Simple lowering and this seed's runtime all
                                 // agree). This erased-receiver path hands results on

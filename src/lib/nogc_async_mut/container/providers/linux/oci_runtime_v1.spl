@@ -7,6 +7,11 @@
 # probe.  This module does not install tools, change uid maps, change kernel
 # policy, or infer capability from an engine name.
 
+use std.common.contracts.container.command_v1.oci_command_parts_v1
+pub use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
+use std.nogc_async_mut.container.providers.linux.request_v1.{linux_oci_request_bounds_v1, linux_oci_request_digest_v1}
+use std.common.contracts.container.bound_intent_v2.{RuntimeBoundIntentV2, runtime_bound_intent_encode_v2, runtime_bound_intent_decode_v2, runtime_bound_intent_match_v2}
+use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1,
     RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1, RuntimeValidationV1,
     RuntimeProbeV1, RuntimeIntentV1, RuntimeProviderContractV1,
@@ -18,7 +23,7 @@ use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1,
     runtime_state_empty, RUNTIME_PRIVILEGE_ROOTLESS, RUNTIME_PRIVILEGE_ROOT,
     RUNTIME_PRIVILEGE_UNKNOWN}
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout, process_run_bounded}
-use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_publish_noreplace, file_remove, directory_fsync, file_is_regular_no_follow,
     file_read_regular_no_follow_bounded, file_lock, file_unlock}
 use std.nogc_sync_mut.sffi.fs.{file_atomic_write_mode}
 
@@ -43,27 +48,6 @@ pub const OCI_REASON_PROVIDER_UNAVAILABLE = "oci-provider-live-execution-unavail
 pub fn linux_oci_provider_contract() -> RuntimeProviderContractV1:
     RuntimeProviderContractV1(provider_id: "linux-oci-v1", version: 1,
         supports_recovery: true, supports_logs: true)
-
-pub struct LinuxOciRequestV1:
-    pod_uid: text
-    attempt: i64
-    # Filled from the durable intent record during restart recovery. Empty on
-    # first create; the provider then mints and labels one before side effects.
-    operation_id: text
-    image: text
-    bundle_path: text
-    command: [text]
-    args: [text]
-    timeout_ms: i64
-    cpu_limit_millis: i64
-    memory_limit_bytes: i64
-    pid_limit: i64
-    network_policy: text
-    filesystem_policy: text
-    # Build mode (both set): command[0] overrides the image entrypoint, the
-    # staged inputs are mounted read-only and the outputs directory writable.
-    build_input_root: text = ""
-    build_output_root: text = ""
 
 pub struct RootlessCapabilityEvidenceV1:
     uid: text
@@ -101,11 +85,16 @@ pub class LinuxOciRuntimeProviderV1:
     timeout_ms: i64
     live_enabled: bool
     scripted: bool
+    # Explicit fixture opt-in: exact scripted effects with real owned journals.
+    # Production constructors leave this false; live execution always journals.
+    persist_scripted_journal: bool
     scripted_results: [ScriptedCommandResultV1]
     var intents: [RuntimeIntentV1]
+    var request_bindings: Dict<text, RuntimeBoundIntentV2>
     var states: [RuntimeStateV1]
     var operation_sequence: i64
     var scripted_cursor: i64
+    var executor_calls: i64
 
 impl LinuxOciRuntimeProviderV1:
     pub static fn new(platform: text, engine: text, state_dir: text,
@@ -117,8 +106,8 @@ impl LinuxOciRuntimeProviderV1:
             state_dir: state_dir, node_boot_id: node_boot_id,
             provider_generation: provider_generation,
             timeout_ms: effective_timeout, live_enabled: live_enabled,
-            scripted: false, scripted_results: [], intents: [], states: [],
-            operation_sequence: 0, scripted_cursor: 0)
+            scripted: false, persist_scripted_journal: false, scripted_results: [], intents: [], request_bindings: {}, states: [],
+            operation_sequence: 0, scripted_cursor: 0, executor_calls: 0)
         provider
 
     # A deterministic executor seam for contract tests.  Each result is
@@ -127,28 +116,49 @@ impl LinuxOciRuntimeProviderV1:
     pub static fn scripted(platform: text, engine: text, state_dir: text,
             node_boot_id: text, provider_generation: i64,
             results: [ScriptedCommandResultV1],
-            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS) -> LinuxOciRuntimeProviderV1:
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS,
+            persist_scripted_journal: bool = false) -> LinuxOciRuntimeProviderV1:
         val effective_timeout = if timeout_ms > 0 then timeout_ms else OCI_DEFAULT_TIMEOUT_MS
         LinuxOciRuntimeProviderV1(platform: platform, engine: engine,
             state_dir: state_dir, node_boot_id: node_boot_id,
             provider_generation: provider_generation,
-            timeout_ms: effective_timeout, live_enabled: true, scripted: true,
-            scripted_results: _bounded_scripted_results(results), intents: [], states: [],
-            operation_sequence: 0, scripted_cursor: 0)
+            timeout_ms: effective_timeout, live_enabled: true, scripted: true, persist_scripted_journal: persist_scripted_journal,
+            scripted_results: _bounded_scripted_results(results), intents: [], request_bindings: {}, states: [],
+            operation_sequence: 0, scripted_cursor: 0, executor_calls: 0)
 
     pub static fn scripted_with_intents(platform: text, engine: text,
             state_dir: text, node_boot_id: text, provider_generation: i64,
             intents: [RuntimeIntentV1],
             results: [ScriptedCommandResultV1],
-            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS) -> LinuxOciRuntimeProviderV1:
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS,
+            persist_scripted_journal: bool = false) -> LinuxOciRuntimeProviderV1:
         val effective_timeout = if timeout_ms > 0 then timeout_ms else OCI_DEFAULT_TIMEOUT_MS
         LinuxOciRuntimeProviderV1(platform: platform, engine: engine,
             state_dir: state_dir, node_boot_id: node_boot_id,
             provider_generation: provider_generation,
-            timeout_ms: effective_timeout, live_enabled: true, scripted: true,
+            timeout_ms: effective_timeout, live_enabled: true, scripted: true, persist_scripted_journal: persist_scripted_journal,
             scripted_results: _bounded_scripted_results(results),
-            intents: _bounded_intents(intents), states: [],
-            operation_sequence: 0, scripted_cursor: 0)
+            intents: _bounded_intents(intents), request_bindings: {}, states: [],
+            operation_sequence: 0, scripted_cursor: 0, executor_calls: 0)
+
+    pub static fn scripted_with_bound_intents(platform: text, engine: text,
+            state_dir: text, node_boot_id: text, provider_generation: i64,
+            bounds: [RuntimeBoundIntentV2], results: [ScriptedCommandResultV1],
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS,
+            persist_scripted_journal: bool = false) -> LinuxOciRuntimeProviderV1:
+        var identities: [RuntimeIntentV1] = []
+        var bindings: Dict<text, RuntimeBoundIntentV2> = {}
+        var index = 0
+        while index < bounds.len() and index < OCI_MAX_RETAINED_RECORDS:
+            val bound = bounds[index]
+            identities.push(bound.identity)
+            val key = bound.identity.pod_uid + "-" + bound.identity.attempt.to_text()
+            bindings[key] = bound
+            index = index + 1
+        val provider = LinuxOciRuntimeProviderV1.scripted_with_intents(platform,
+            engine, state_dir, node_boot_id, provider_generation, identities, results, timeout_ms, persist_scripted_journal)
+        provider.request_bindings = bindings
+        provider
 
     fn _probe() -> RuntimeProbeV1:
         val valid = self.validate_probe_config()
@@ -208,6 +218,13 @@ impl LinuxOciRuntimeProviderV1:
         RuntimeValidationV1(accepted: true, reason: "")
 
     pub fn validate(request: LinuxOciRequestV1) -> RuntimeValidationV1:
+        match linux_oci_request_bounds_v1(request):
+            case Err(reason): return RuntimeValidationV1(accepted: false, reason: reason)
+            case Ok(_): pass
+        if request.environment.len() != 0 or request.working_directory != "":
+            return RuntimeValidationV1(accepted: false, reason: "execution-options-not-admitted")
+        if request.terminal_mode != "none":
+            return RuntimeValidationV1(accepted: false, reason: "terminal-mode-not-admitted")
         if self.platform != "linux":
             return RuntimeValidationV1(accepted: false,
                 reason: "unsupported-platform: linux OCI provider received " + self.platform)
@@ -247,10 +264,18 @@ impl LinuxOciRuntimeProviderV1:
         if request.image.contains("\n") or request.image.contains("\r"):
             return RuntimeValidationV1(accepted: false,
                 reason: "image-contains-control-character")
-        for item in request.command:
-            if item == "":
-                return RuntimeValidationV1(accepted: false,
-                    reason: "command-contains-empty-argument")
+        val build_mode = request.build_input_root != "" or request.build_output_root != ""
+        if build_mode and request.command.len() == 0:
+            return RuntimeValidationV1(accepted: false, reason: "build-command-empty")
+        match oci_command_parts_v1(request.command, request.args,
+                request.replace_entrypoint or build_mode):
+            case Err(reason): return RuntimeValidationV1(accepted: false, reason: reason)
+            case Ok(_): pass
+        if not (request.replace_entrypoint or build_mode):
+            for item in request.command:
+                if item == "":
+                    return RuntimeValidationV1(accepted: false,
+                        reason: "command-contains-empty-argument")
         for item in request.args:
             if item.contains("\n") or item.contains("\r"):
                 return RuntimeValidationV1(accepted: false,
@@ -275,8 +300,13 @@ impl LinuxOciRuntimeProviderV1:
         val valid = self.validate(request)
         if not valid.accepted:
             return self._rejected("prepare_pod", valid.reason, runtime_command_empty())
+        val binding_error = self._request_binding_error(request)
+        if binding_error != "":
+            return self._rejected("prepare_pod", binding_error, runtime_command_empty())
         self._load_persisted_intent(request)
         val durable = self._durable_intent_for(request)
+        if durable.operation_id != "" and not self._has_bound_intent(request):
+            return self._rejected("prepare_pod", "intent-binding-required", runtime_command_empty())
         if durable.phase == RUNTIME_PHASE_DESTROYED:
             return self._rejected("prepare_pod", "attempt-already-destroyed",
                 runtime_command_empty())
@@ -290,12 +320,23 @@ impl LinuxOciRuntimeProviderV1:
             if not self._evict_oldest_destroyed(request.pod_uid, request.attempt):
                 return self._rejected("prepare_pod", "state-capacity-exhausted",
                     runtime_command_empty())
+        while not self.request_bindings.has(self._binding_key(request)) and
+                self.request_bindings.len() >= OCI_MAX_RETAINED_RECORDS:
+            if not self._evict_oldest_destroyed(request.pod_uid, request.attempt):
+                return self._rejected("prepare_pod", "binding-capacity-exhausted", runtime_command_empty())
         val id = RuntimeIdentityV1(pod_uid: request.pod_uid,
             attempt: request.attempt, provider_generation: self.provider_generation,
-            operation_id: self._next_operation("prepare"), engine: self.engine,
+            operation_id: if durable.operation_id != "": durable.operation_id
+                elif request.operation_id != "": request.operation_id
+                else: self._next_operation("create"), engine: self.engine,
             native_id: "", node_boot_id: self.node_boot_id)
         val state = RuntimeStateV1(phase: RUNTIME_PHASE_PREPARED,
             identity: id, exit_code: -1, reason: "prepared")
+        if not self._remember_request_binding(request, RuntimeIntentV1(pod_uid: id.pod_uid,
+                attempt: id.attempt, provider_generation: id.provider_generation,
+                operation_id: id.operation_id, engine: id.engine, native_id: "",
+                node_boot_id: id.node_boot_id, phase: RUNTIME_PHASE_PREPARED)):
+            return self._rejected("prepare_pod", "intent-request-digest-invalid", runtime_command_empty())
         self.states.push(state)
         self._ok("prepare_pod", state,
             RuntimeCommandV1(operation: "prepare_pod", program: "", args: []),
@@ -307,6 +348,24 @@ impl LinuxOciRuntimeProviderV1:
         val valid = self.validate(request)
         if not valid.accepted:
             return self._rejected("create", valid.reason, runtime_command_empty())
+        if (self.scripted and not self.persist_scripted_journal) or not self.live_enabled:
+            return self._create_owned(request)
+        # Serialize competing creates through reconciliation and the native call,
+        # not just the final record write. The lock file is retained permanently.
+        val lease = file_lock(self._journal_path(request) + ".create.lock", 5)
+        if lease < 0:
+            return self._rejected("create", "create-owner-lock-unavailable", runtime_command_empty())
+        val result = self._create_owned(request)
+        file_unlock(lease)
+        result
+
+    me _create_owned(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+        val valid = self.validate(request)
+        if not valid.accepted:
+            return self._rejected("create", valid.reason, runtime_command_empty())
+        val binding_error = self._request_binding_error(request)
+        if binding_error != "":
+            return self._rejected("create", binding_error, runtime_command_empty())
         val index = self._find(request.pod_uid, request.attempt)
         if index < 0:
             val prepared = self.prepare_pod(request)
@@ -314,6 +373,11 @@ impl LinuxOciRuntimeProviderV1:
                 return prepared
         val state_index = self._find(request.pod_uid, request.attempt)
         val current = self.states[state_index]
+        self._load_persisted_intent(request)
+        val saved_intent = self._durable_intent_for(request)
+        if saved_intent.phase == RUNTIME_PHASE_DESTROYED:
+            return self._rejected("create", "attempt-already-destroyed",
+                runtime_command_empty())
         if current.phase == RUNTIME_PHASE_CREATED or
                 current.phase == RUNTIME_PHASE_RUNNING or
                 current.phase == RUNTIME_PHASE_EXITED or
@@ -322,11 +386,6 @@ impl LinuxOciRuntimeProviderV1:
                 RuntimeCommandV1(operation: "create", program: "", args: []),
                 "idempotent existing native workload")
         if current.phase == RUNTIME_PHASE_DESTROYED:
-            return self._rejected("create", "attempt-already-destroyed",
-                runtime_command_empty())
-        self._load_persisted_intent(request)
-        val saved_intent = self._durable_intent_for(request)
-        if saved_intent.phase == RUNTIME_PHASE_DESTROYED:
             return self._rejected("create", "attempt-already-destroyed",
                 runtime_command_empty())
         if saved_intent.operation_id != "":
@@ -346,7 +405,7 @@ impl LinuxOciRuntimeProviderV1:
                     runtime_command_empty())
         val operation_id = if request.operation_id != "": request.operation_id
             elif saved_intent.operation_id != "": saved_intent.operation_id
-            else: self._next_operation("create")
+            else: current.identity.operation_id
         val command = build_create_command(self.engine, self.state_dir, request,
             operation_id, self.provider_generation, self.node_boot_id)
         if command.0 != "":
@@ -546,12 +605,19 @@ impl LinuxOciRuntimeProviderV1:
         val stopped = RuntimeStateV1(phase: RUNTIME_PHASE_STOPPED,
             identity: current.identity, exit_code: current.exit_code, reason: "stopped")
         self.states[index] = stopped
+        if not self._save_intent(request, current.identity.operation_id,
+                current.identity.native_id, RUNTIME_PHASE_STOPPED):
+            return self._rejected_with_output("stop", stopped, command.1,
+                "intent-journal-update-failed", run.stdout, run.stderr, run.exit_code)
         self._ok("stop", stopped, command.1, "stopped")
 
     me destroy(request: LinuxOciRequestV1, force: bool = false) -> RuntimeOperationV1:
         val valid = self.validate(request)
         if not valid.accepted:
             return self._rejected("destroy", valid.reason, runtime_command_empty())
+        val binding_error = self._request_binding_error(request, true)
+        if binding_error != "":
+            return self._rejected("destroy", binding_error, runtime_command_empty())
         self._load_persisted_intent(request)
         val cached_index = self._find(request.pod_uid, request.attempt)
         if cached_index < 0:
@@ -618,12 +684,17 @@ impl LinuxOciRuntimeProviderV1:
         val valid = self.validate(request)
         if not valid.accepted:
             return self._rejected("recover", valid.reason, runtime_command_empty())
+        val binding_error = self._request_binding_error(request, true)
+        if binding_error != "":
+            return self._rejected("recover", binding_error, runtime_command_empty())
         if self.engine == OCI_ENGINE_RUNC:
             return self._rejected("recover", "runc-recovery-requires-identity-labels",
                 runtime_command_empty())
         self._load_persisted_intent(request)
         val index = self._find(request.pod_uid, request.attempt)
         val saved_intent = self._durable_intent_for(request)
+        if saved_intent.operation_id == "":
+            return self._rejected("recover", "intent-binding-required", runtime_command_empty())
         if saved_intent.operation_id != "" and request.operation_id != "" and
                 request.operation_id != saved_intent.operation_id:
             return self._rejected("recover", "intent-operation-id-mismatch",
@@ -726,6 +797,11 @@ impl LinuxOciRuntimeProviderV1:
     pub fn retained_intent_count() -> i64:
         self.intents.len()
 
+    # Counts every command executor entry, including unmatched scripted attempts.
+    # Host capability/version probe subprocesses are outside this counter.
+    pub fn executor_call_count() -> i64:
+        self.executor_calls
+
     pub fn retained_scripted_result_count() -> i64:
         self.scripted_results.len()
 
@@ -746,10 +822,11 @@ impl LinuxOciRuntimeProviderV1:
             exit_code: -1, stdout: "", stderr: "",
             reason: "optional-capability-unavailable: stats")
 
-    # Intent is written before create executes.  A single newline-delimited
-    # record is used so restart recovery does not depend on the provider's
-    # in-memory table.  The temporary file plus rename keeps a torn write from
-    # becoming authority for a later recovery.
+    # New intent binds canonical request payload before create executes.
+    # Legacy V1 identity-only records authorize exact-identity cleanup only;
+    # their cleanup writer preserves V1 instead of inventing payload proof.
+    # The caller owns a trusted state directory; no-clobber publication and
+    # file/directory barriers protect journal admission, not hostile ancestors.
     fn _journal_path(request: LinuxOciRequestV1) -> text:
         self.state_dir + "/runtime-intent-" + request.pod_uid + "-" +
             request.attempt.to_text() + "-" + self.provider_generation.to_text()
@@ -760,44 +837,225 @@ impl LinuxOciRuntimeProviderV1:
             intent.engine, intent.native_id, intent.node_boot_id,
             intent.phase].join("|")
 
-    fn _write_intent_journal(request: LinuxOciRequestV1) -> bool:
-        if self.scripted: return true
-        if self.state_dir == "": return false
-        var lines: [text] = []
+    fn _read_legacy_intent(request: LinuxOciRequestV1) -> Result<RuntimeIntentV1, text>:
+        val path = self._journal_path(request)
+        if not file_exists(path): return Err("intent-absent")
+        if not file_is_regular_no_follow(path): return Err("intent-file-not-regular")
+        val content = match file_read_regular_no_follow_bounded(path, 8192):
+            case Ok(value): value
+            case Err(_): return Err("intent-file-unreadable")
+        if not content.starts_with("runtime-intent-v1|"): return Err("intent-not-legacy")
+        val fields = content.split("|")
+        if fields.len() != 9: return Err("intent-legacy-invalid")
+        if fields[1] != request.pod_uid or fields[2] != request.attempt.to_text() or
+                fields[3] != self.provider_generation.to_text() or fields[5] != self.engine or
+                fields[7] != self.node_boot_id:
+            return Err("intent-scope-mismatch")
+        if not _safe_token(fields[4]) or not _valid_intent_phase(fields[8]):
+            return Err("intent-legacy-invalid")
+        val row = RuntimeIntentV1(pod_uid: fields[1], attempt: request.attempt,
+            provider_generation: self.provider_generation, operation_id: fields[4],
+            engine: fields[5], native_id: fields[6], node_boot_id: fields[7], phase: fields[8])
+        if self._intent_line(row) != content: return Err("intent-record-not-canonical")
+        Ok(row)
+
+    fn _retained_scope_error(request: LinuxOciRequestV1, row: RuntimeIntentV1) -> text:
+        if row.pod_uid != request.pod_uid or row.attempt != request.attempt:
+            return "intent-scope-mismatch"
+        if row.provider_generation != self.provider_generation: return "intent-provider-generation-mismatch"
+        if row.node_boot_id != self.node_boot_id: return "intent-node-boot-id-mismatch"
+        if row.engine != self.engine: return "intent-engine-mismatch"
+        ""
+
+    fn _legacy_reconciliation_error(request: LinuxOciRequestV1,
+            row: RuntimeIntentV1) -> text:
+        if row.pod_uid != request.pod_uid or row.attempt != request.attempt or
+                row.provider_generation != self.provider_generation or
+                row.node_boot_id != self.node_boot_id or row.engine != self.engine:
+            return "intent-scope-mismatch"
+        if not builder_digest_valid_v1(row.native_id): return "legacy-native-id-unqualified"
+        if row.operation_id == "" or not _safe_token(row.operation_id) or not _valid_intent_phase(row.phase):
+            return "intent-legacy-invalid"
+        if request.operation_id != "" and request.operation_id != row.operation_id:
+            return "intent-operation-id-mismatch"
+        ""
+
+    fn _legacy_transition_error(previous: RuntimeIntentV1,
+            current: RuntimeIntentV1) -> text:
+        if previous.pod_uid != current.pod_uid or previous.attempt != current.attempt or
+                previous.provider_generation != current.provider_generation or
+                previous.operation_id != current.operation_id or previous.engine != current.engine or
+                previous.native_id != current.native_id or previous.node_boot_id != current.node_boot_id:
+            return "intent-scope-mismatch"
+        if previous.phase == RUNTIME_PHASE_DESTROYED and current.phase != RUNTIME_PHASE_DESTROYED:
+            return "attempt-already-destroyed"
+        if current.phase != RUNTIME_PHASE_STOPPED and current.phase != RUNTIME_PHASE_DESTROYED:
+            return "intent-legacy-transition-unsupported"
+        if current.phase == RUNTIME_PHASE_STOPPED and previous.phase != RUNTIME_PHASE_RUNNING and
+                previous.phase != RUNTIME_PHASE_CREATED and previous.phase != RUNTIME_PHASE_STOPPED:
+            return "intent-legacy-transition-unsupported"
+        ""
+
+    fn _binding_key(request: LinuxOciRequestV1) -> text:
+        request.pod_uid + "-" + request.attempt.to_text()
+
+    fn _read_bound_intent(request: LinuxOciRequestV1) -> Result<RuntimeBoundIntentV2, text>:
+        val path = self._journal_path(request)
+        if not file_exists(path): return Err("intent-absent")
+        if not file_is_regular_no_follow(path): return Err("intent-file-not-regular")
+        val content = match file_read_regular_no_follow_bounded(path, 8192):
+            case Ok(value): value
+            case Err(_): return Err("intent-file-unreadable")
+        val bound = runtime_bound_intent_decode_v2(content)?
+        val row = bound.identity
+        if row.pod_uid != request.pod_uid or row.attempt != request.attempt or
+                row.provider_generation != self.provider_generation or
+                row.node_boot_id != self.node_boot_id or row.engine != self.engine:
+            return Err("intent-scope-mismatch")
+        Ok(bound)
+
+    fn _request_binding_error(request: LinuxOciRequestV1,
+            allow_legacy: bool = false) -> text:
+        val digest = match linux_oci_request_digest_v1(request):
+            case Ok(value): value
+            case Err(reason): return reason
+        val key = self._binding_key(request)
+        if self.request_bindings.has(key):
+            val scope_error = self._retained_scope_error(request, self.request_bindings[key].identity)
+            if scope_error != "": return scope_error
+            match runtime_bound_intent_match_v2(self.request_bindings[key], digest, request.operation_id):
+                case Err(reason): return reason
+                case Ok(_): pass
+        else:
+            val cached = self._intent_for(request.pod_uid, request.attempt)
+            if cached.operation_id != "":
+                if not allow_legacy: return "intent-legacy-unbound"
+                val legacy_error = self._legacy_reconciliation_error(request, cached)
+                if legacy_error != "": return legacy_error
+        match self._read_bound_intent(request):
+            case Ok(bound):
+                if not self.request_bindings.has(key) and self._intent_for(request.pod_uid, request.attempt).operation_id != "":
+                    return "intent-binding-kind-mismatch"
+                if self.request_bindings.has(key) and
+                        self.request_bindings[key].identity.operation_id != bound.identity.operation_id:
+                    return "intent-operation-id-mismatch"
+                match runtime_bound_intent_match_v2(bound, digest, request.operation_id):
+                    case Err(reason): return reason
+                    case Ok(_): pass
+            case Err(reason):
+                if reason == "intent-legacy-unbound":
+                    if not allow_legacy: return reason
+                    if self.request_bindings.has(key): return "intent-binding-kind-mismatch"
+                    match self._read_legacy_intent(request):
+                        case Err(legacy_error): return legacy_error
+                        case Ok(row): return self._legacy_reconciliation_error(request, row)
+                if reason != "intent-absent": return reason
+        ""
+
+    fn _has_bound_intent(request: LinuxOciRequestV1) -> bool:
+        if self.request_bindings.has(self._binding_key(request)): return true
+        match self._read_bound_intent(request):
+            case Ok(_): true
+            case Err(_): false
+
+    me _remember_request_binding(request: LinuxOciRequestV1, intent: RuntimeIntentV1) -> bool:
+        match linux_oci_request_digest_v1(request):
+            case Ok(digest):
+                self.request_bindings[self._binding_key(request)] = RuntimeBoundIntentV2(
+                    identity: intent, request_digest: digest)
+                true
+            case Err(_): false
+
+    fn _write_intent_journal(request: LinuxOciRequestV1, legacy: bool = false) -> bool:
         val intent = self._intent_for(request.pod_uid, request.attempt)
-        if intent.operation_id == "": return false
-        lines.push(self._intent_line(intent))
+        if legacy:
+            if self._legacy_reconciliation_error(request, intent) != "": return false
+            if self.scripted and not self.persist_scripted_journal: return true
+            val path = self._journal_path(request)
+            val lock = file_lock(path + ".lock", 5)
+            if lock < 0: return false
+            var allowed = false
+            match self._read_legacy_intent(request):
+                case Ok(previous):
+                    allowed = self._legacy_transition_error(previous, intent) == ""
+                case Err(_): allowed = false
+            val written = if allowed: file_atomic_write_mode(path, self._intent_line(intent), 0o600) else: false
+            val durable = written and directory_fsync(self.state_dir)
+            file_unlock(lock)
+            return durable
+        val digest = match linux_oci_request_digest_v1(request):
+            case Ok(value): value
+            case Err(_): return false
+        val bound = RuntimeBoundIntentV2(identity: intent, request_digest: digest)
+        val bytes = match runtime_bound_intent_encode_v2(bound):
+            case Ok(value): value
+            case Err(_): return false
+        if self.scripted and not self.persist_scripted_journal:
+            return self._remember_request_binding(request, intent)
+        if self.state_dir == "": return false
         val path = self._journal_path(request)
         val lock = file_lock(path + ".lock", 5)
         if lock < 0: return false
-        val written = file_atomic_write_mode(path, lines.join("\n"), 0o600)
+        # Re-read while holding the stable writer lock, before publication.
+        var allowed = self._request_binding_error(request) == ""
+        var first_publication = false
+        match self._read_bound_intent(request):
+            case Ok(previous):
+                if previous.identity.operation_id != intent.operation_id: allowed = false
+                if previous.identity.phase == RUNTIME_PHASE_DESTROYED and intent.phase != RUNTIME_PHASE_DESTROYED:
+                    allowed = false
+                if previous.identity.native_id != "" and previous.identity.native_id != intent.native_id:
+                    allowed = false
+            case Err(reason):
+                if reason == "intent-absent": first_publication = true
+                else: allowed = false
+        var written = false
+        if allowed:
+            if first_publication:
+                # Existence probes can miss dangling links. No-clobber publication
+                # is the authoritative absence check before any native side effect.
+                val staged = path + ".pending"
+                if file_atomic_write_mode(staged, bytes, 0o600):
+                    match file_publish_noreplace(staged, path):
+                        case Ok(published): written = published
+                        case Err(_): written = false
+                    file_remove(staged)
+            else:
+                written = file_atomic_write_mode(path, bytes, 0o600)
+        # The file helper flushes bytes; directory publication needs its own
+        # barrier. Keep a written record on barrier failure for reconciliation.
+        if written and not directory_fsync(self.state_dir): written = false
         file_unlock(lock)
-        written
+        if written: return self._remember_request_binding(request, intent)
+        false
+
 
     fn _read_persisted_intent(request: LinuxOciRequestV1) -> RuntimeIntentV1:
-        if self.state_dir == "":
-            return _empty_intent()
-        val path = self._journal_path(request)
-        if not file_is_regular_no_follow(path):
-            return _empty_intent()
-        val content = match file_read_regular_no_follow_bounded(path, OCI_MAX_OUTPUT_BYTES):
-            case Ok(value): value.trim()
-            case Err(_): return _empty_intent()
-        if content == "":
-            return _empty_intent()
-        val fields = content.split("|")
-        if fields.len() != 9 or fields[0] != "runtime-intent-v1" or
-                fields[1] != request.pod_uid or
-                fields[2] != request.attempt.to_text() or
-                fields[3] != self.provider_generation.to_text() or
-                not _safe_token(fields[4]) or fields[5] != self.engine or
-                (fields[6] != "" and not _safe_token(fields[6])) or
-                fields[7] != self.node_boot_id or not _valid_intent_phase(fields[8]):
-            return _empty_intent()
-        RuntimeIntentV1(pod_uid: fields[1],
-            attempt: fields[2].to_i64(), provider_generation: fields[3].to_i64(),
-            operation_id: fields[4], engine: fields[5], native_id: fields[6],
-            node_boot_id: fields[7], phase: fields[8])
+        match self._read_bound_intent(request):
+            case Ok(bound):
+                val digest = match linux_oci_request_digest_v1(request):
+                    case Ok(value): value
+                    case Err(_): return _empty_intent()
+                match runtime_bound_intent_match_v2(bound, digest, request.operation_id):
+                    case Ok(_):
+                        val key = self._binding_key(request)
+                        if self.request_bindings.has(key):
+                            val cached = self.request_bindings[key]
+                            if cached.request_digest != bound.request_digest or
+                                    cached.identity.operation_id != bound.identity.operation_id:
+                                return _empty_intent()
+                        elif self._intent_for(request.pod_uid, request.attempt).operation_id != "":
+                            return _empty_intent()
+                        if self.request_bindings.has(key) or self.request_bindings.len() < OCI_MAX_RETAINED_RECORDS:
+                            self.request_bindings[key] = bound
+                        bound.identity
+                    case Err(_): _empty_intent()
+            case Err(reason):
+                if reason == "intent-legacy-unbound":
+                    match self._read_legacy_intent(request):
+                        case Ok(row): return row
+                        case Err(_): return _empty_intent()
+                _empty_intent()
 
     me _load_persisted_intent(request: LinuxOciRequestV1):
         val loaded = self._read_persisted_intent(request)
@@ -815,9 +1073,10 @@ impl LinuxOciRuntimeProviderV1:
         self.intents.push(loaded)
 
     fn _durable_intent_for(request: LinuxOciRequestV1) -> RuntimeIntentV1:
-        val cached = self._intent_for(request.pod_uid, request.attempt)
-        if cached.operation_id != "": return cached
-        self._read_persisted_intent(request)
+        # Disk is re-read by binding checks; prefer its phase over stale cache.
+        val persisted = self._read_persisted_intent(request)
+        if persisted.operation_id != "": return persisted
+        self._intent_for(request.pod_uid, request.attempt)
 
     fn _destroyed_count() -> i64:
         var count = 0
@@ -862,6 +1121,11 @@ impl LinuxOciRuntimeProviderV1:
                 kept_intents.push(intent)
         self.states = kept_states
         self.intents = kept_intents
+        var kept_bindings: Dict<text, RuntimeBoundIntentV2> = {}
+        val victim_key = victim_uid + "-" + victim_attempt.to_text()
+        for key in self.request_bindings.keys():
+            if key != victim_key: kept_bindings[key] = self.request_bindings[key]
+        self.request_bindings = kept_bindings
         true
 
     fn _find(request_pod_uid: text, request_attempt: i64) -> i64:
@@ -881,6 +1145,25 @@ impl LinuxOciRuntimeProviderV1:
 
     me _save_intent(request: LinuxOciRequestV1, operation_id: text,
             native_id: text, phase: text):
+        while not self.request_bindings.has(self._binding_key(request)) and
+                self.request_bindings.len() >= OCI_MAX_RETAINED_RECORDS:
+            if not self._evict_oldest_destroyed(request.pod_uid, request.attempt): return false
+        val previous_intent = self._intent_for(request.pod_uid, request.attempt)
+        val legacy = previous_intent.operation_id != "" and not self._has_bound_intent(request)
+        if self._request_binding_error(request, legacy) != "": return false
+        val retained = self._durable_intent_for(request)
+        if retained.operation_id != "":
+            if retained.operation_id != operation_id: return false
+            if retained.phase == RUNTIME_PHASE_DESTROYED and phase != RUNTIME_PHASE_DESTROYED: return false
+            if retained.native_id != "" and retained.native_id != native_id: return false
+        if legacy:
+            val next = RuntimeIntentV1(pod_uid: request.pod_uid, attempt: request.attempt,
+                provider_generation: self.provider_generation, operation_id: operation_id,
+                engine: self.engine, native_id: native_id, node_boot_id: self.node_boot_id, phase: phase)
+            if self._legacy_transition_error(previous_intent, next) != "": return false
+        val binding_key = self._binding_key(request)
+        if self.request_bindings.has(binding_key):
+            if self.request_bindings[binding_key].identity.operation_id != operation_id: return false
         var index = 0
         while index < self.intents.len():
             if self.intents[index].pod_uid == request.pod_uid and
@@ -890,22 +1173,36 @@ impl LinuxOciRuntimeProviderV1:
                     attempt: request.attempt, provider_generation: self.provider_generation,
                     operation_id: operation_id, engine: self.engine,
                     native_id: native_id, node_boot_id: self.node_boot_id, phase: phase)
-                if self._write_intent_journal(request): return true
+                if self._write_intent_journal(request, legacy): return true
                 self.intents[index] = previous
                 return false
             index = index + 1
         while self.intents.len() >= OCI_MAX_RETAINED_RECORDS:
             if not self._evict_oldest_destroyed(request.pod_uid, request.attempt):
                 return false
+        val installed_binding = not legacy and not self.request_bindings.has(binding_key)
+        if installed_binding:
+            if not self._remember_request_binding(request, RuntimeIntentV1(pod_uid: request.pod_uid,
+                    attempt: request.attempt, provider_generation: self.provider_generation,
+                    operation_id: operation_id, engine: self.engine, native_id: native_id,
+                    node_boot_id: self.node_boot_id, phase: phase)):
+                return false
         self.intents.push(RuntimeIntentV1(pod_uid: request.pod_uid,
             attempt: request.attempt, provider_generation: self.provider_generation,
             operation_id: operation_id, engine: self.engine,
             native_id: native_id, node_boot_id: self.node_boot_id, phase: phase))
-        if self._write_intent_journal(request): return true
+        if self._write_intent_journal(request, legacy): return true
         self.intents.pop()
+        if installed_binding:
+            var kept: Dict<text, RuntimeBoundIntentV2> = {}
+            for key in self.request_bindings.keys():
+                if key != binding_key: kept[key] = self.request_bindings[key]
+            self.request_bindings = kept
         false
 
+
     fn _execute(command: RuntimeCommandV1) -> RuntimeExecResultV1:
+        self.executor_calls = self.executor_calls + 1
         if self.scripted:
             if self.scripted_cursor >= self.scripted_results.len():
                 return RuntimeExecResultV1(stdout: "", stderr: "scripted-command-not-found",
@@ -949,11 +1246,22 @@ impl LinuxOciRuntimeProviderV1:
         val valid = self.validate(request)
         if not valid.accepted:
             return self._rejected(operation, valid.reason, runtime_command_empty())
+        val allow_legacy = operation == "inspect" or operation == "stop" or operation == "destroy"
+        val binding_error = self._request_binding_error(request, allow_legacy)
+        if binding_error != "":
+            return self._rejected(operation, binding_error, runtime_command_empty())
         self._load_persisted_intent(request)
         val index = self._find(request.pod_uid, request.attempt)
         if index < 0:
             return self._rejected(operation, "attempt-not-prepared", runtime_command_empty())
+        val durable = self._durable_intent_for(request)
+        if durable.phase == RUNTIME_PHASE_DESTROYED:
+            self.states[index] = _state_from_intent(durable, RUNTIME_PHASE_DESTROYED, "destroyed")
         val state = self.states[index]
+        if durable.operation_id != "" and state.identity.operation_id != durable.operation_id:
+            return self._rejected(operation, "state-operation-id-mismatch", runtime_command_empty())
+        if durable.native_id != "" and state.identity.native_id != durable.native_id:
+            return self._rejected(operation, "state-native-id-mismatch", runtime_command_empty())
         if state.identity.provider_generation != self.provider_generation:
             return self._rejected(operation, "provider-generation-mismatch",
                 runtime_command_empty())
@@ -1166,7 +1474,7 @@ pub fn linux_oci_container_name(pod_uid: text, attempt: i64) -> Result<text, tex
     Ok("simpleorch-" + pod_uid + "-" + attempt.to_text())
 
 fn _native_id_valid(native_id: text) -> bool:
-    _safe_token(native_id)
+    not native_id.starts_with("-") and _safe_token(native_id)
 
 fn _base_command(engine: text, operation: text, state_dir: text,
         native_id: text) -> Result<RuntimeCommandV1, text>:
@@ -1187,6 +1495,13 @@ fn _base_command(engine: text, operation: text, state_dir: text,
 pub fn build_create_command(engine: text, state_dir: text,
         request: LinuxOciRequestV1, operation_id: text,
         provider_generation: i64, node_boot_id: text) -> (text, RuntimeCommandV1):
+    match linux_oci_request_bounds_v1(request):
+        case Err(reason): return (reason, runtime_command_empty())
+        case Ok(_): pass
+    if request.environment.len() != 0 or request.working_directory != "":
+        return ("execution-options-not-admitted", runtime_command_empty())
+    if request.terminal_mode != "none":
+        return ("terminal-mode-not-admitted", runtime_command_empty())
     match linux_oci_container_name(request.pod_uid, request.attempt):
         case Err(reason): return (reason, runtime_command_empty())
         case Ok(name):
@@ -1200,6 +1515,8 @@ pub fn build_create_command(engine: text, state_dir: text,
                     engine != OCI_ENGINE_RUNC:
                 return ("unsupported-engine: " + engine, runtime_command_empty())
             if engine == OCI_ENGINE_RUNC:
+                if request.replace_entrypoint:
+                    return ("runc-entrypoint-override-unsupported", runtime_command_empty())
                 if request.bundle_path == "":
                     return ("runc-bundle-path-empty", runtime_command_empty())
                 return ("", RuntimeCommandV1(operation: "create", program: engine,
@@ -1226,29 +1543,27 @@ pub fn build_create_command(engine: text, state_dir: text,
                 "--network", request.network_policy,
                 "--read-only", "--security-opt", "no-new-privileges",
                 "--cap-drop", "ALL"]
-            var rest: [text] = request.command
-            if request.build_input_root != "" or request.build_output_root != "":
+            val build_mode = request.build_input_root != "" or request.build_output_root != ""
+            if build_mode:
                 if request.build_input_root == "" or request.build_output_root == "":
                     return ("build-root-incomplete", runtime_command_empty())
                 if request.command.len() == 0:
                     return ("build-command-empty", runtime_command_empty())
-                args.push("--entrypoint")
-                args.push(request.command[0])
+            val command_parts = match oci_command_parts_v1(request.command, request.args,
+                    request.replace_entrypoint or build_mode):
+                case Ok(parts): parts
+                case Err(reason): return (reason, runtime_command_empty())
+            for option in command_parts.options:
+                args.push(option)
+            if build_mode:
                 args.push("--mount")
                 args.push("type=bind,source=" + request.build_input_root +
                     ",target=/simple-build/inputs,readonly")
                 args.push("--mount")
                 args.push("type=bind,source=" + request.build_output_root +
                     ",target=/simple-build/outputs")
-                rest = []
-                var i = 1
-                while i < request.command.len():
-                    rest.push(request.command[i])
-                    i = i + 1
             args.push(request.image)
-            for value in rest:
-                args.push(value)
-            for value in request.args:
+            for value in command_parts.arguments:
                 args.push(value)
             ("", RuntimeCommandV1(operation: "create", program: engine, args: args))
 

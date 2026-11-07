@@ -1,0 +1,46 @@
+# Explicit non-secret process configuration. Host policy authorizes these values
+# before provider invocation; this codec neither reads nor inherits host env.
+pub struct OciEnvironmentEntryV1:
+    name: text
+    value: text
+
+pub fn oci_execution_options_v1(environment: [OciEnvironmentEntryV1],
+        working_directory: text) -> Result<[text], text>:
+    if environment.len() > 128: return Err("environment-count-exceeded")
+    if working_directory.len() > 4096: return Err("working-directory-too-long")
+    var options: [text] = []
+    if working_directory != "":
+        if not working_directory.starts_with("/") or working_directory.contains("\0") or
+                working_directory.contains("\n") or working_directory.contains("\r"):
+            return Err("working-directory-invalid")
+        if working_directory != "/":
+            if working_directory.ends_with("/") or working_directory.contains("//"):
+                return Err("working-directory-not-canonical")
+            for segment in working_directory.split("/"):
+                if segment == "." or segment == "..":
+                    return Err("working-directory-not-canonical")
+        options.push("--workdir")
+        options.push(working_directory)
+    val initial = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+    val rest = initial + "0123456789"
+    var names: [text] = []
+    var total = 0
+    for entry in environment:
+        if entry.name == "" or entry.name.len() > 128:
+            return Err("environment-name-invalid")
+        if not initial.contains(entry.name.substring(0, 1)):
+            return Err("environment-name-invalid")
+        var index = 1
+        while index < entry.name.len():
+            if not rest.contains(entry.name.substring(index, index + 1)):
+                return Err("environment-name-invalid")
+            index = index + 1
+        if names.contains(entry.name): return Err("environment-name-duplicate")
+        names.push(entry.name)
+        if entry.value.len() > 4096: return Err("environment-value-too-long")
+        if entry.value.contains("\0"): return Err("environment-value-nul")
+        total = total + entry.name.len() + entry.value.len() + 1
+        if total > 65536: return Err("environment-size-exceeded")
+        options.push("--env")
+        options.push(entry.name + "=" + entry.value)
+    Ok(options)

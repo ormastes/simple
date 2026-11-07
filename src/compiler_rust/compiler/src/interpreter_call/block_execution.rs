@@ -466,6 +466,9 @@ pub(super) fn exec_block_closure_into(
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     // Use bind_pattern_value to handle all pattern types including tuples
                     let is_mutable = let_stmt.mutability.is_mutable();
+                    if let Some(message) = crate::impl_duplicate_check::let_literal_mismatch(let_stmt) {
+                        return Err(CompileError::semantic(message));
+                    }
                     let val = crate::interpreter::coerce_let_value(val, declared_let_type(let_stmt), let_stmt.value.as_ref());
                     crate::interpreter::record_let_declared_width(let_stmt, &mut local_env);
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, &mut local_env);
@@ -1580,6 +1583,9 @@ fn exec_block_closure_mut_inner(
                     // Mark the names local first; see the `exec_block_closure_into` twin.
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     let is_mutable = let_stmt.mutability.is_mutable();
+                    if let Some(message) = crate::impl_duplicate_check::let_literal_mismatch(let_stmt) {
+                        return Err(CompileError::semantic(message));
+                    }
                     let val = crate::interpreter::coerce_let_value(val, declared_let_type(let_stmt), let_stmt.value.as_ref());
                     crate::interpreter::record_let_declared_width(let_stmt, local_env);
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, local_env);

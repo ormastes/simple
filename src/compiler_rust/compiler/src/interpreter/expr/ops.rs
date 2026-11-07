@@ -1407,7 +1407,7 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::BitOr => {
-                    if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                    if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                         let lhs = left_val.as_int()? as u64;
                         let rhs = right_val.as_int()? as u64;
                         Ok(wrap_uint(lhs | rhs, width))
@@ -1416,7 +1416,7 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::BitXor => {
-                    if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                    if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                         let lhs = left_val.as_int()? as u64;
                         let rhs = right_val.as_int()? as u64;
                         Ok(wrap_uint(lhs ^ rhs, width))

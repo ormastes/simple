@@ -1,5 +1,12 @@
 # Node attributes: detail design and structural handoff
 
+2026-11-07 implementation follow-up: use the
+[canonical V2 contract extension](data_schema_v2_contract_extension.md) for
+explicit views/property semantics. Its outer digest identifies the complete V2
+schema; the embedded V1 projection must not be treated as V2 lifecycle proof.
+The [program matrix](../../08_tracking/data_attributes_program_progress_2026-11-07.md)
+retains all remaining integration and execution gates.
+
 Date: 2026-11-06. Status: implementation design, not shipped APIs.
 See [architecture](../../04_architecture/compiler/node_attributes.md),
 [requirements](../../02_requirements/feature/node_attributes.md), and

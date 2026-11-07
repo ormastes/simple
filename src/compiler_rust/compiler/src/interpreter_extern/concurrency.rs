@@ -44,6 +44,11 @@ lazy_static::lazy_static! {
     static ref SFFI_MUTEXES: Mutex<HashMap<i64, InterpreterMutex>> =
         Mutex::new(HashMap::new());
     static ref NEXT_SFFI_MUTEX_ID: Mutex<i64> = Mutex::new(1);
+    /// Condition variables for the native spl_condvar_* ABI: a signal
+    /// generation counter plus the std Condvar that waits on it.
+    static ref SFFI_CONDVARS: Mutex<HashMap<i64, Arc<(Mutex<u64>, Condvar)>>> =
+        Mutex::new(HashMap::new());
+    static ref NEXT_SFFI_CONDVAR_ID: Mutex<i64> = Mutex::new(1);
 }
 
 /// Clear all concurrency registries and reset ID counters.
@@ -59,6 +64,8 @@ pub fn clear_concurrency_registries() {
     *NEXT_TLS_HANDLE.lock().unwrap() = 1;
     SFFI_MUTEXES.lock().unwrap().clear();
     *NEXT_SFFI_MUTEX_ID.lock().unwrap() = 1;
+    SFFI_CONDVARS.lock().unwrap().clear();
+    *NEXT_SFFI_CONDVAR_ID.lock().unwrap() = 1;
 }
 
 fn sffi_mutex_arg(args: &[Value], operation: &str) -> Result<i64, CompileError> {
@@ -389,11 +396,11 @@ pub fn rt_thread_spawn_isolated_with_context(
     }
 
     // Extract the closure
-    let (params, body, captured_env) = match &args[0] {
-        Value::Lambda { params, body, env } => (params.clone(), body.clone(), Env::clone(env)),
-        _ => {
+    let (params, body, captured_env) = match isolated_entry_as_lambda(&args[0]) {
+        Some(entry) => entry,
+        None => {
             return Err(CompileError::Runtime(
-                "rt_thread_spawn_isolated expects first argument to be a closure".to_string(),
+                "rt_thread_spawn_isolated expects first argument to be a closure or function".to_string(),
             ))
         }
     };
@@ -429,6 +436,28 @@ pub fn rt_thread_spawn_isolated_with_context(
     Ok(Value::Int(handle_id))
 }
 
+/// A thread entry is a closure or a named function value. A named function is
+/// run as the equivalent call `name(p0, p1, ...)` over its captured environment,
+/// so `spawn(worker_fn, a, b)` behaves like `spawn(, b: worker_fn(a, b), a, b)`.
+fn isolated_entry_as_lambda(entry: &Value) -> Option<(Vec<String>, Box<Expr>, Env)> {
+    match entry {
+        Value::Lambda { params, body, env } => Some((params.clone(), body.clone(), Env::clone(env))),
+        Value::Function { name, def, captured_env } => {
+            let params: Vec<String> = def.params.iter().map(|p| p.name.clone()).collect();
+            let call_args = params
+                .iter()
+                .map(|p| simple_parser::ast::Argument::new(None, Expr::Identifier(p.clone())))
+                .collect();
+            let body = Box::new(Expr::Call {
+                callee: Box::new(Expr::Identifier(name.clone())),
+                args: call_args,
+            });
+            Some((params, body, Env::clone(captured_env)))
+        }
+        _ => None,
+    }
+}
+
 /// Spawn isolated thread with explicit arguments and interpreter context
 ///
 /// Executes the closure synchronously with full interpreter context.
@@ -448,11 +477,11 @@ pub fn rt_thread_spawn_isolated_with_args_context(
     }
 
     // Extract the closure
-    let (params, body, captured_env) = match &args[0] {
-        Value::Lambda { params, body, env } => (params.clone(), body.clone(), Env::clone(env)),
-        _ => {
+    let (params, body, captured_env) = match isolated_entry_as_lambda(&args[0]) {
+        Some(entry) => entry,
+        None => {
             return Err(CompileError::Runtime(
-                "rt_thread_spawn_isolated_with_args expects first argument to be a closure".to_string(),
+                "rt_thread_spawn_isolated_with_args expects first argument to be a closure or function".to_string(),
             ))
         }
     };
@@ -1387,4 +1416,178 @@ pub fn rt_par_atomic_cmpxchg_i64(args: &[Value]) -> Result<Value, CompileError> 
     let expected = int_arg(args, 1, "rt_par_atomic_cmpxchg_i64")?;
     let value = int_arg(args, 2, "rt_par_atomic_cmpxchg_i64")?;
     Ok(Value::Int(unsafe { simple_runtime::rt_par_atomic_cmpxchg_i64(ptr, expected, value) }))
+}
+
+// ---------------------------------------------------------------------------
+// spl_condvar_* : interpreter counterpart of the native condition-variable ABI
+// (runtime_thread.c). Waiting atomically releases the SFFI mutex, blocks until
+// the signal generation moves, then re-acquires the mutex.
+// ---------------------------------------------------------------------------
+
+fn sffi_handle_args(args: &[Value], count: usize, operation: &str) -> Result<Vec<i64>, CompileError> {
+    if args.len() != count {
+        return Err(CompileError::Runtime(format!("{operation} expects {count} argument(s)")));
+    }
+    args.iter()
+        .map(|a| match a {
+            Value::Int(v) => Ok(*v),
+            _ => Err(CompileError::Runtime(format!("{operation} expects integer arguments"))),
+        })
+        .collect()
+}
+
+fn sffi_condvar_lookup(handle: i64) -> Result<Arc<(Mutex<u64>, Condvar)>, CompileError> {
+    SFFI_CONDVARS
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI condvar registry poisoned".to_string()))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| CompileError::Runtime("unknown SFFI condvar handle".to_string()))
+}
+
+pub fn spl_condvar_create(_args: &[Value]) -> Result<Value, CompileError> {
+    let mut next = NEXT_SFFI_CONDVAR_ID
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI condvar id registry poisoned".to_string()))?;
+    let handle = *next;
+    *next = next
+        .checked_add(1)
+        .ok_or_else(|| CompileError::Runtime("SFFI condvar handles exhausted".to_string()))?;
+    SFFI_CONDVARS
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI condvar registry poisoned".to_string()))?
+        .insert(handle, Arc::new((Mutex::new(0), Condvar::new())));
+    Ok(Value::Int(handle))
+}
+
+fn sffi_condvar_wait_impl(cv_handle: i64, mutex_handle: i64, timeout: Option<Duration>) -> Result<bool, CompileError> {
+    let cv = sffi_condvar_lookup(cv_handle)?;
+    let mutex = sffi_mutex_lookup(mutex_handle)?;
+    let (generation, cvar) = &*cv;
+    let (state, wake) = &*mutex;
+    // Hold the generation lock across the unlock so a signal cannot be lost.
+    let mut gen = generation
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI condvar poisoned".to_string()))?;
+    let start = *gen;
+    {
+        let mut locked = state
+            .lock()
+            .map_err(|_| CompileError::Runtime("SFFI mutex poisoned".to_string()))?;
+        if !*locked {
+            return Err(CompileError::Runtime("spl_condvar_wait called without holding the mutex".to_string()));
+        }
+        *locked = false;
+        wake.notify_one();
+    }
+    let signalled = match timeout {
+        None => {
+            while *gen == start {
+                gen = cvar
+                    .wait(gen)
+                    .map_err(|_| CompileError::Runtime("SFFI condvar poisoned".to_string()))?;
+            }
+            true
+        }
+        Some(limit) => {
+            let (guard, result) = cvar
+                .wait_timeout_while(gen, limit, |g| *g == start)
+                .map_err(|_| CompileError::Runtime("SFFI condvar poisoned".to_string()))?;
+            gen = guard;
+            !result.timed_out()
+        }
+    };
+    drop(gen);
+    let mut locked = state
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI mutex poisoned".to_string()))?;
+    while *locked {
+        locked = wake
+            .wait(locked)
+            .map_err(|_| CompileError::Runtime("SFFI mutex poisoned".to_string()))?;
+    }
+    *locked = true;
+    Ok(signalled)
+}
+
+pub fn spl_condvar_wait(args: &[Value]) -> Result<Value, CompileError> {
+    let h = sffi_handle_args(args, 2, "spl_condvar_wait")?;
+    Ok(Value::Bool(sffi_condvar_wait_impl(h[0], h[1], None)?))
+}
+
+pub fn spl_condvar_wait_timeout(args: &[Value]) -> Result<Value, CompileError> {
+    let h = sffi_handle_args(args, 3, "spl_condvar_wait_timeout")?;
+    let millis = h[2].max(0) as u64;
+    Ok(Value::Bool(sffi_condvar_wait_impl(h[0], h[1], Some(Duration::from_millis(millis)))?))
+}
+
+fn sffi_condvar_wake(args: &[Value], operation: &str, all: bool) -> Result<Value, CompileError> {
+    let h = sffi_handle_args(args, 1, operation)?;
+    let cv = sffi_condvar_lookup(h[0])?;
+    let (generation, cvar) = &*cv;
+    let mut gen = generation
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI condvar poisoned".to_string()))?;
+    *gen = gen.wrapping_add(1);
+    if all {
+        cvar.notify_all();
+    } else {
+        cvar.notify_one();
+    }
+    Ok(Value::Bool(true))
+}
+
+pub fn spl_condvar_signal(args: &[Value]) -> Result<Value, CompileError> {
+    sffi_condvar_wake(args, "spl_condvar_signal", false)
+}
+
+pub fn spl_condvar_broadcast(args: &[Value]) -> Result<Value, CompileError> {
+    sffi_condvar_wake(args, "spl_condvar_broadcast", true)
+}
+
+pub fn spl_condvar_destroy(args: &[Value]) -> Result<Value, CompileError> {
+    let h = sffi_handle_args(args, 1, "spl_condvar_destroy")?;
+    SFFI_CONDVARS
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI condvar registry poisoned".to_string()))?
+        .remove(&h[0]);
+    Ok(Value::Nil)
+}
+
+#[cfg(test)]
+mod condvar_tests {
+    use super::*;
+
+    fn int(v: &Value) -> i64 {
+        match v {
+            Value::Int(i) => *i,
+            other => panic!("expected int, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signal_wakes_a_waiter_and_timeout_reports_false() {
+        let m = int(&spl_mutex_create(&[]).unwrap());
+        let cv = int(&spl_condvar_create(&[]).unwrap());
+        // Nobody signals: a short wait times out and still returns holding the mutex.
+        spl_mutex_lock(&[Value::Int(m)]).unwrap();
+        let r = spl_condvar_wait_timeout(&[Value::Int(cv), Value::Int(m), Value::Int(20)]).unwrap();
+        assert!(matches!(r, Value::Bool(false)));
+        spl_mutex_unlock(&[Value::Int(m)]).unwrap();
+        // A signal from another thread wakes an untimed waiter.
+        let waiter = std::thread::spawn(move || {
+            spl_mutex_lock(&[Value::Int(m)]).unwrap();
+            let r = spl_condvar_wait(&[Value::Int(cv), Value::Int(m)]).unwrap();
+            spl_mutex_unlock(&[Value::Int(m)]).unwrap();
+            matches!(r, Value::Bool(true))
+        });
+        loop {
+            std::thread::sleep(Duration::from_millis(10));
+            spl_condvar_signal(&[Value::Int(cv)]).unwrap();
+            if waiter.is_finished() {
+                break;
+            }
+        }
+        assert!(waiter.join().unwrap());
+    }
 }

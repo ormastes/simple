@@ -1,0 +1,67 @@
+use std.common.contracts.orchestration.workload_fence_v1.*
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, parse_resource_document,
+    as_dict, as_text, as_int, only_known, require, reject}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+
+pub fn workload_fence_encode_v1(state: ControllerWorkloadFenceV1) -> Result<text, text>:
+    if not controller_workload_valid_v1(state): return Err("invalid-workload-fence")
+    val cancelled = if state.cancellation_requested: "true" else: "false"
+    Ok("version: 1\ncontrollerId: \"{state.controller_id}\"\ncontrollerEpoch: {state.controller_epoch}\nworkloadUid: \"{state.workload_uid}\"\ndesiredRevision: {state.desired_revision}\nplanDigest: \"{state.plan_digest}\"\nrevision: {state.revision}\nassignmentGeneration: {state.assignment_generation}\nassignmentDigest: \"{state.assignment_digest}\"\ncancellationRequested: {cancelled}\n")
+
+fn fence_text_v1(fields: Dict<text, SdnValue>, key: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val value = require(fields, key, "", spans)?
+    as_text(value, key, spans)
+
+fn fence_int_v1(fields: Dict<text, SdnValue>, key: text, spans: Dict<text, SdnSpan>) -> Result<i64, RejectionV1>:
+    val value = require(fields, key, "", spans)?
+    as_int(value, key, spans)
+
+fn fence_decode_fields_v1(source: text) -> Result<ControllerWorkloadFenceV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    val spans = parsed.1
+    val fields = as_dict(parsed.0, "", spans)?
+    only_known(fields, ["version", "controllerId", "controllerEpoch", "workloadUid", "desiredRevision",
+        "planDigest", "revision", "assignmentGeneration", "assignmentDigest", "cancellationRequested"], "", spans)?
+    val version = fence_int_v1(fields, "version", spans)?
+    if version != 1: return Err(reject("version", "version", "unsupported workload fence version", spans))
+    val controller = fence_text_v1(fields, "controllerId", spans)?
+    val epoch = fence_int_v1(fields, "controllerEpoch", spans)?
+    val uid = fence_text_v1(fields, "workloadUid", spans)?
+    val desired = fence_int_v1(fields, "desiredRevision", spans)?
+    val plan = fence_text_v1(fields, "planDigest", spans)?
+    val revision = fence_int_v1(fields, "revision", spans)?
+    val generation = fence_int_v1(fields, "assignmentGeneration", spans)?
+    val digest = fence_text_v1(fields, "assignmentDigest", spans)?
+    val cancelled_value = require(fields, "cancellationRequested", "", spans)?
+    val cancelled = match cancelled_value:
+        case SdnValue.Bool(value): value
+        case _: return Err(reject("type", "cancellationRequested", "expected boolean", spans))
+    Ok(ControllerWorkloadFenceV1(controller_id: controller, controller_epoch: epoch, workload_uid: uid,
+        desired_revision: desired, plan_digest: plan, revision: revision, assignment_generation: generation,
+        assignment_digest: digest, cancellation_requested: cancelled))
+
+pub fn workload_fence_decode_v1(source: text) -> Result<ControllerWorkloadFenceV1, text>:
+    if source.len() > 8192: return Err("workload-fence-too-large")
+    val state = match fence_decode_fields_v1(source):
+        case Ok(value): value
+        case Err(reason): return Err("workload-fence-invalid:" + reason.path + ":" + reason.kind)
+    val canonical = workload_fence_encode_v1(state)?
+    if canonical != source: return Err("workload-fence-not-canonical")
+    Ok(state)
+
+# Replay must validate the domain transition, not merely a syntactically valid
+# snapshot. Only create, first bind and sticky cancel exist in this version.
+pub fn workload_fence_initial_v1(state: ControllerWorkloadFenceV1) -> bool:
+    controller_workload_valid_v1(state) and state.revision == 1 and
+        state.assignment_generation == 0 and state.assignment_digest == "" and not state.cancellation_requested
+
+pub fn workload_fence_successor_v1(prior: ControllerWorkloadFenceV1, next: ControllerWorkloadFenceV1) -> bool:
+    if not controller_workload_valid_v1(prior) or not controller_workload_valid_v1(next) or
+            prior.revision == 9223372036854775807 or next.revision != prior.revision + 1 or
+            prior.controller_id != next.controller_id or prior.controller_epoch != next.controller_epoch or
+            prior.workload_uid != next.workload_uid or prior.desired_revision != next.desired_revision or
+            prior.plan_digest != next.plan_digest or prior.cancellation_requested:
+        return false
+    if next.cancellation_requested:
+        return next.assignment_generation == prior.assignment_generation and next.assignment_digest == prior.assignment_digest
+    prior.assignment_generation == 0 and next.assignment_generation == 1 and next.assignment_digest != ""

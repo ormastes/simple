@@ -1,0 +1,53 @@
+# Cycle validation over the canonical flat-AST child projections. Expression,
+# statement and match-arm indices are different domains even when equal.
+use compiler.frontend.core.ast_traversal.*
+use compiler.frontend.core._AstExpr.nodes.{expr_owner_len}
+use compiler.core.ast_stmt.{stmt_owner_len}
+use compiler.core.ast.{arm_pattern_len}
+
+struct NodeLifetimeWorkV1:
+    domain: i64
+    index: i64
+
+pub fn node_lifetime_child_edge_error_v1(parent: i64, child: i64,
+    budget: i64 = 1000000) -> text:
+    if budget <= 0: return "AST topology validation resource limit"
+    var pending = [NodeLifetimeWorkV1(domain: 0, index: child)]
+    var seen: Dict<text, bool> = {}
+    var next = 0
+    while next < pending.len():
+        val item: NodeLifetimeWorkV1 = pending[next]
+        next = next + 1
+        val key = "{item.domain}:{item.index}"
+        if seen.contains_key(key): continue
+        seen[key] = true
+        var expressions: [i64] = []
+        var statements: [i64] = []
+        var arms: [i64] = []
+        if item.domain == 0:
+            if item.index == parent: return "AST child update would introduce a cycle"
+            if item.index < 0 or item.index >= expr_owner_len():
+                return "AST topology contains an invalid expression reference"
+            expressions = flat_expr_child_exprs(item.index)
+            statements = flat_expr_child_stmts(item.index)
+            arms = flat_expr_child_arms(item.index)
+        elif item.domain == 1:
+            if item.index < 0 or item.index >= stmt_owner_len():
+                return "AST topology contains an invalid statement reference"
+            expressions = flat_stmt_child_exprs(item.index)
+            statements = flat_stmt_child_stmts(item.index)
+            arms = flat_stmt_child_arms(item.index)
+        else:
+            if item.index < 0 or item.index >= arm_pattern_len():
+                return "AST topology contains an invalid match-arm reference"
+            expressions = flat_arm_child_exprs(item.index)
+            statements = flat_arm_child_stmts(item.index)
+        if pending.len() + expressions.len() + statements.len() + arms.len() > budget:
+            return "AST topology validation resource limit"
+        for index in expressions:
+            pending.push(NodeLifetimeWorkV1(domain: 0, index: index))
+        for index in statements:
+            pending.push(NodeLifetimeWorkV1(domain: 1, index: index))
+        for index in arms:
+            pending.push(NodeLifetimeWorkV1(domain: 2, index: index))
+    ""

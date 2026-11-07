@@ -140,3 +140,69 @@ Findings against base `origin/release/1.0.0` @ 27e65c24371:
 next sanctioned Stage 2 rerun (s2d). Close this bug as fixed if that peak is
 under 40 GiB. If it is not, reopen it with `SIMPLE_PHASE_RSS=1` per-phase
 attribution.
+
+## 2026-11-07 note (lane r14-bootstrap-mem): Windows MSVC Stage 2 seed native-build measured
+
+Different term from the full-CLI MIR rows above; recorded here because the
+owner's "Stage 2 keeps being killed" report (boot2 lane,
+`bootstrap-windows.sh --msvc --full-bootstrap --keep-going --jobs=min
+--stop-after-stage2`) resolves to this stage.
+
+- **What both boot2 logs actually say:** `exit=1 signal=none`, cause
+  `driver_aot_pipeline.spl: timeout (300s)` then 555 `NOT_ATTEMPTED` from the
+  admission latch. No reap/kill/cap line exists in either log.
+- **Reproduced the exact Stage 2 argv** (boot2 runtime-authority seed, copy of
+  its cache, `--threads 1`) under a 2 s PeakWorkingSet sampler: peak
+  **1.62-1.66 GB** WS on a host with ~3.8 GB free. `driver_aot_pipeline.spl`
+  compiled in 30.7 s (run 1) and 105 s (run 2) of CPU — same binary, same
+  inputs, cpu ~= wall both times. The 300 s abort is host-load inflation of
+  CPU cost, not a stall and not memory; `SIMPLE_NATIVE_FILE_TIMEOUT` (opt-in,
+  pinned into the Stage 2 argv) is the lever; the retry path reuses the same
+  timeout so it fails identically.
+- **Dominant memory term found and fixed:** after `build_import_map` the
+  tracked heap is 67 MB while the process holds 1.12 GB WS / 1.33 GB private.
+  The parallel parse allocates every closure AST on the rayon worker and the
+  builder thread frees them cross-thread; mimalloc parks those frees on the
+  idle worker's pages. Fix: `mem_trace::release_thread_heap` broadcast to the
+  pool + caller right after the import map. BEFORE -> AFTER on the same argv:
+  after-import-map WS 1,122 -> 188 MB; before-compile 1,352 -> 340 MB;
+  compile-phase max 1,656 -> 619 MB; whole-run peak 1,659 -> 1,123 MB (the
+  remaining peak is the parse transient while all 1,598 ASTs are live).
+- **Not a term here:** per-file tracked heap stays 290-412 MB across 32 files
+  (no Rust-side ratchet); `--jobs=min` already yields 1 job / `--threads 1` /
+  `workers: 1`, so admission is already serialised on Windows.
+## 2026-11-07 Phase-4 q0019 / q0021 (mem-p4cap, evidence; no code change)
+
+Jobs (s4e queue, `C:/dev/p3new/s4/out/s4e_q/<id>`, binary
+`s3_fable57s_p4.exe`, 24,489,472 bytes, built 2026-11-07 08:30 +0900):
+
+| job | MIR shards planned | first obj | objs | peak tree | verdict |
+|---|---|---|---|---|---|
+| q0021 (L2 08:46) | 2 | 688.8 s | 5 | 16.35 GB | killed at cap 16 |
+| q0019 (L2 10:29) | 1 | none | 0 | 24.37 GB | killed (cap/commit) |
+
+Both `native-build.log.err` files print
+`[mir-shard] disabled: output format re-reads MIR set`. The command
+(`fable_s4e_build.ps1`: `native-build --entry-closure ... -o simple_s4.exe`)
+selects `OutputFormat.Both`. On `origin/release/1.0.0` Both no longer refuses
+(728ddb0170f + 5a45cad0d94, 2026-11-02: per-module SMF parts,
+`smf_staged_output_format_refusal_v1` refuses only SMF / self-contained). The
+binary lacks that fix: it contains no `MIR shard SMF part` string (the error
+text 5a45cad0d94 added), so its baked source predates 2026-11-02. With the
+refusal, the whole MIR closure stays in `ctx.mir_modules` through codegen,
+the term this bug already names as dominant.
+
+Root cause for these jobs: a stale stage3 producer, not a new retention path
+in source. Nothing to change in `src/` for it.
+
+Second gap (harness, not product): `fable_s4e_build.ps1` does not set
+`SIMPLE_NATIVE_STAGED_CODEGEN_BATCH`, and its default is 0 (off) outside the
+bootstrap scripts (`native_staged_codegen_batch_size_v1`). With `shards=1`
+(q0019) nothing evicts MIR even on a fixed binary. Phase-4 runs should set
+`SIMPLE_NATIVE_STAGED_CODEGEN_BATCH=32`, like the bootstrap lane.
+
+Required check to close: on the next stage3 built from source that includes
+728ddb0170f (Fable owns stage3 builds), rerun q0019 and q0021 with
+`SIMPLE_NATIVE_STAGED_CODEGEN_BATCH=32` under cap 16. Pass = no
+`[mir-shard] disabled` line and peak tree RSS under 16 GB. Record the
+before/after peak and wall time here.

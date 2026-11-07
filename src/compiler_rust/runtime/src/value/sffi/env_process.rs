@@ -20,6 +20,10 @@ use std::sync::{OnceLock, RwLock};
 #[path = "process_bytes_windows.rs"]
 mod process_bytes_windows;
 
+#[path = "process_environment_v1.rs"]
+mod process_environment_v1;
+pub use process_environment_v1::{rt_process_run_bounded_environment_tuple_v1, rt_process_spawn_async_environment_v1};
+
 fn lexer_source_cache() -> &'static RwLock<String> {
     static CACHE: OnceLock<RwLock<String>> = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(String::new()))
@@ -84,6 +88,59 @@ fn resolve_command_path(cmd: &str) -> &str {
         }
     }
     cmd
+}
+
+/// Parse a `#!` first line into interpreter argv. `/usr/bin/env [-S] NAME`
+/// collapses to `NAME` so the interpreter is found by PATH search.
+fn shebang_interpreter_argv(first_line: &str) -> Option<Vec<String>> {
+    let rest = first_line.strip_prefix("#!")?;
+    let mut words: Vec<String> = rest.split_whitespace().map(|w| w.to_string()).collect();
+    if words.is_empty() {
+        return None;
+    }
+    if matches!(words[0].as_str(), "/usr/bin/env" | "/bin/env" | "env") {
+        words.remove(0);
+        if words.first().map(|w| w == "-S").unwrap_or(false) {
+            words.remove(0);
+        }
+        if words.is_empty() {
+            return None;
+        }
+    }
+    Some(words)
+}
+
+/// Build the `Command` for a user-supplied command string. On Windows a file
+/// carrying a `#!` line is not a PE image, so `CreateProcess` fails (exit -1,
+/// no output); re-route it as `<interpreter> [opts] <script>`. POSIX `execve`
+/// already honours shebangs, so non-Windows hosts are unchanged.
+fn script_command(cmd: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        if let Some(argv) = windows_script_interpreter(cmd) {
+            let mut command = std::process::Command::new(resolve_command_path(&argv[0]));
+            command.args(&argv[1..]);
+            command.arg(cmd);
+            return command;
+        }
+    }
+    std::process::Command::new(resolve_command_path(cmd))
+}
+
+#[cfg(windows)]
+fn windows_script_interpreter(cmd: &str) -> Option<Vec<String>> {
+    use std::io::Read;
+    let path = std::path::Path::new(cmd);
+    if !path.is_file() {
+        return None;
+    }
+    let mut head = [0u8; 256];
+    let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
+    if n < 2 || &head[..2] != b"#!" {
+        return None;
+    }
+    let line = head[..n].split(|b| *b == b'\n').next()?;
+    shebang_interpreter_argv(std::str::from_utf8(line).ok()?)
 }
 
 #[cfg(unix)]
@@ -747,7 +804,7 @@ pub unsafe extern "C" fn rt_process_run(cmd_ptr: *const u8, cmd_len: u64, args: 
     };
 
     // Build command with arguments
-    let mut command = Command::new(resolve_command_path(cmd_str));
+    let mut command = script_command(cmd_str);
     clear_simple_child_stack_env(&mut command);
     configure_timeout_child_process_group(&mut command);
 
@@ -812,7 +869,7 @@ pub unsafe extern "C" fn rt_process_run_inherit(cmd_ptr: *const u8, cmd_len: u64
         Ok(value) => value,
         Err(_) => return -1,
     };
-    let mut command = Command::new(resolve_command_path(cmd_str));
+    let mut command = script_command(cmd_str);
     clear_simple_child_stack_env(&mut command);
     for i in 0..rt_array_len(args) {
         if let Some(arg) = extract_string(rt_array_get(args, i)) {
@@ -846,7 +903,7 @@ pub unsafe extern "C" fn rt_process_spawn(cmd_ptr: *const u8, cmd_len: u64, args
     };
 
     // Build command with arguments
-    let mut command = Command::new(resolve_command_path(cmd_str));
+    let mut command = script_command(cmd_str);
     clear_simple_child_stack_env(&mut command);
     configure_timeout_child_process_group(&mut command);
 
@@ -940,7 +997,7 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
         Err(_) => return -1,
     };
 
-    let mut command = Command::new(resolve_command_path(cmd_str));
+    let mut command = script_command(cmd_str);
     clear_simple_child_stack_env(&mut command);
 
     // Extract args from List[String]
@@ -990,7 +1047,7 @@ pub unsafe extern "C" fn rt_process_spawn_guarded(cmd_ptr: *const u8, cmd_len: u
         shell
     };
     #[cfg(not(target_os = "linux"))]
-    let mut command = Command::new(resolve_command_path(cmd_str));
+    let mut command = script_command(cmd_str);
     clear_simple_child_stack_env(&mut command);
     let args_len = rt_array_len(args);
     for i in 0..args_len {
@@ -1300,13 +1357,16 @@ fn wait_status_to_code(status: std::process::ExitStatus) -> i64 {
 /// Removes the child from the registry on success.
 #[no_mangle]
 pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
+    // Reap via child_peak_rss::reap so rt_process_last_child_peak_rss_kib
+    // reports this child's own peak RSS (supervised builder R5).
+    crate::child_peak_rss::reset();
     if timeout_ms <= 0 {
         // Wait indefinitely
         if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
             if let Some(mut child) = map.remove(&pid) {
-                match child.wait() {
-                    Ok(status) => wait_status_to_code(status),
-                    Err(_) => -1,
+                match crate::child_peak_rss::reap(&mut child, false) {
+                    Ok(Some(status)) => wait_status_to_code(status),
+                    _ => -1,
                 }
             } else {
                 -1
@@ -1320,7 +1380,7 @@ pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
         loop {
             if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
                 if let Some(child) = map.get_mut(&pid) {
-                    match child.try_wait() {
+                    match crate::child_peak_rss::reap(child, true) {
                         Ok(Some(status)) => {
                             // Process exited, remove from map
                             map.remove(&pid);
@@ -1384,7 +1444,7 @@ pub unsafe extern "C" fn rt_process_execute(cmd_ptr: *const u8, cmd_len: u64, ar
     };
 
     // Build command with arguments
-    let mut command = Command::new(resolve_command_path(cmd_str));
+    let mut command = script_command(cmd_str);
     clear_simple_child_stack_env(&mut command);
 
     // Extract args from List[String]
@@ -1443,7 +1503,7 @@ pub unsafe extern "C" fn rt_process_run_timeout(
         }
     };
 
-    let mut command = Command::new(resolve_command_path(cmd_str));
+    let mut command = script_command(cmd_str);
     clear_simple_child_stack_env(&mut command);
 
     let args_len = rt_array_len(args);
@@ -1541,7 +1601,7 @@ pub unsafe extern "C" fn rt_process_run_bounded(
         return make_tuple(b"", b"", -1);
     };
 
-    let mut command = Command::new(resolve_command_path(&cmd_str));
+    let mut command = script_command(&cmd_str);
     clear_simple_child_stack_env(&mut command);
     for index in 0..rt_array_len(args) {
         if let Some(arg) = extract_string(rt_array_get(args, index)) {
@@ -1690,7 +1750,7 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
         }
     }
 
-    let mut command = Command::new(resolve_command_path(cmd_str));
+    let mut command = script_command(cmd_str);
     clear_simple_child_stack_env(&mut command);
 
     // Extract args from List<String>
@@ -2291,6 +2351,55 @@ fn fill_terminal_size(_cols: &mut i32, _rows: &mut i32) {}
 mod tests {
     use super::*;
     use crate::value::collections::{rt_array_new, rt_array_push, rt_string_data, rt_string_len, rt_tuple_get};
+    // windows_rt_process_run_cannot_exec_shebang_script_fixtures_2026-09-02:
+    // CreateProcess only launches PE images, so a `#!` script must be
+    // re-routed through its interpreter on Windows.
+    #[test]
+    fn shebang_argv_parses_plain_interpreter() {
+        assert_eq!(shebang_interpreter_argv("#!/bin/sh"), Some(vec!["/bin/sh".to_string()]));
+        assert_eq!(shebang_interpreter_argv("#! /bin/bash -e\r"), Some(vec!["/bin/bash".to_string(), "-e".to_string()]));
+    }
+
+    #[test]
+    fn shebang_argv_collapses_env_indirection() {
+        assert_eq!(shebang_interpreter_argv("#!/usr/bin/env sh"), Some(vec!["sh".to_string()]));
+        assert_eq!(shebang_interpreter_argv("#!/usr/bin/env -S bash -eu"), Some(vec!["bash".to_string(), "-eu".to_string()]));
+        assert_eq!(shebang_interpreter_argv("#!/bin/env python3"), Some(vec!["python3".to_string()]));
+    }
+
+    #[test]
+    fn shebang_argv_rejects_non_shebang_lines() {
+        assert_eq!(shebang_interpreter_argv("echo hi"), None);
+        assert_eq!(shebang_interpreter_argv("#!"), None);
+        assert_eq!(shebang_interpreter_argv("#!   "), None);
+        assert_eq!(shebang_interpreter_argv("#!/usr/bin/env"), None);
+        assert_eq!(shebang_interpreter_argv("MZ\u{90}"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shebang_script_runs_through_interpreter() {
+        let dir = std::env::temp_dir().join(format!("spl_shebang_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, line) in [("plain.shs", "#!/bin/sh"), ("env.shs", "#!/usr/bin/env sh")] {
+            let script = dir.join(name);
+            std::fs::write(&script, format!("{}\necho shebang-ok \"$1\"\nexit 7\n", line)).unwrap();
+            let out = script_command(script.to_str().unwrap()).arg("arg1").output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "shebang-ok arg1", "{}", name);
+            assert_eq!(out.status.code(), Some(7), "{}", name);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pe_and_bare_names_are_not_rerouted() {
+        let out = script_command("cmd").args(["/c", "echo pe-ok"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "pe-ok");
+        let out = script_command("/bin/sh").args(["-c", "echo sh-ok"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "sh-ok");
+    }
+
 
     #[cfg(unix)]
     #[test]

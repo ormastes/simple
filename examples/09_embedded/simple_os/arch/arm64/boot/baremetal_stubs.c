@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "../../common/boot/freestanding_bool_abi.h"
 #include <stddef.h>
 #include "arm64_nonce_slot_contract.h"
 #include "arm_fs_path_classifier.h"
@@ -1591,9 +1592,9 @@ RuntimeValue rt_lt(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) < DEC
 RuntimeValue rt_gt(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) > DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
 RuntimeValue rt_le(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) <= DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
 RuntimeValue rt_ge(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) >= DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
-RuntimeValue rt_and(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) && DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
-RuntimeValue rt_or(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) || DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
-RuntimeValue rt_not(RuntimeValue a) { return DECODE_INT(a) ? FALSE_VALUE : TRUE_VALUE; }
+RuntimeValue rt_and(RuntimeValue a, RuntimeValue b) { return (simpleos_bool_or_integer_truthy((uint64_t)a) && simpleos_bool_or_integer_truthy((uint64_t)b)) ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_or(RuntimeValue a, RuntimeValue b) { return (simpleos_bool_or_integer_truthy((uint64_t)a) || simpleos_bool_or_integer_truthy((uint64_t)b)) ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_not(RuntimeValue a) { return simpleos_bool_or_integer_truthy((uint64_t)a) ? FALSE_VALUE : TRUE_VALUE; }
 RuntimeValue rt_shl(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) << DECODE_INT(b)); }
 RuntimeValue rt_shr(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) >> DECODE_INT(b)); }
 RuntimeValue rt_bitand(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) & DECODE_INT(b)); }
@@ -1623,7 +1624,11 @@ RuntimeValue rt_is_nil(RuntimeValue v) { return IS_NIL(v) ? 1 : 0; }
 RuntimeValue rt_is_int(RuntimeValue v) { return IS_INT(v) ? 1 : 0; }
 RuntimeValue rt_is_float(RuntimeValue v) { return IS_FLOAT(v) ? 1 : 0; }
 RuntimeValue rt_is_string(RuntimeValue v) { if (!IS_HEAP(v)) return 0; HeapHeader *h = (HeapHeader *)DECODE_PTR(v); return (h && h->type == HEAP_STRING) ? 1 : 0; }
-RuntimeValue rt_is_bool(RuntimeValue v) { if (!IS_INT(v)) return 0; int64_t n = DECODE_INT(v); return (n == 0 || n == 1) ? 1 : 0; }
+RuntimeValue rt_is_bool(RuntimeValue val)
+{
+    /* Compatibility predicate ABI: raw 0/1, not a tagged RuntimeValue bool. */
+    return (val == TRUE_VALUE || val == FALSE_VALUE) ? 1 : 0;
+}
 RuntimeValue rt_is_array(RuntimeValue v) { if (!IS_HEAP(v)) return 0; HeapHeader *h = (HeapHeader *)DECODE_PTR(v); return (h && h->type == HEAP_ARRAY) ? 1 : 0; }
 RuntimeValue rt_is_map(RuntimeValue v) { if (!IS_HEAP(v)) return 0; HeapHeader *h = (HeapHeader *)DECODE_PTR(v); return (h && h->type == HEAP_MAP) ? 1 : 0; }
 RuntimeValue rt_is_object(RuntimeValue v) { if (!IS_HEAP(v)) return 0; HeapHeader *h = (HeapHeader *)DECODE_PTR(v); return (h && h->type == HEAP_OBJECT) ? 1 : 0; }
@@ -1652,6 +1657,7 @@ RuntimeValue rt_to_int(RuntimeValue val) {
 }
 RuntimeValue rt_to_string(RuntimeValue val) { return rt_value_to_string(val); }
 RuntimeValue rt_to_bool(RuntimeValue val) {
+    if (val == TRUE_VALUE || val == FALSE_VALUE) return val;
     if (IS_NIL(val)) return FALSE_VALUE;
     if (IS_INT(val)) return DECODE_INT(val) ? TRUE_VALUE : FALSE_VALUE;
     if (IS_HEAP(val)) {

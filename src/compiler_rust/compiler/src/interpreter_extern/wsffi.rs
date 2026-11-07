@@ -261,7 +261,9 @@ pub fn spl_backend_plugin_run_v1(args: &[Value]) -> Result<Value, CompileError> 
 /// Open a shared library and return its handle as i64.
 ///
 /// Callable from Simple as: `spl_dlopen(path: text) -> i64`
-/// Boundary failures are typed interpreter errors; they never become a handle.
+/// A load failure returns 0 (the C runtime's `spl_dlopen` contract; 0 is never a live handle),
+/// so callers observe the documented non-positive-handle failure instead of an abort.
+/// Malformed arguments (arity, non-text, interior NUL) remain typed errors.
 pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("spl_dlopen requires 1 argument (path)"));
@@ -287,7 +289,7 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
                 let err_str = unsafe { CStr::from_ptr(err) }.to_string_lossy();
                 tracing::warn!("spl_dlopen failed for '{}': {}", path, err_str);
             }
-            Err(CompileError::runtime(format!("spl_dlopen failed for '{path}'")))
+            Ok(Value::Int(0)) // load failure: C-runtime parity, 0 is the documented non-handle
         } else {
             Ok(Value::Int(handle as usize as i64))
         }
@@ -303,7 +305,7 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
         let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
         if handle.is_null() {
             tracing::warn!("spl_dlopen failed for '{}'", path);
-            Err(CompileError::runtime(format!("spl_dlopen failed for '{path}'")))
+            Ok(Value::Int(0)) // load failure: C-runtime parity, 0 is the documented non-handle
         } else {
             Ok(Value::Int(handle as usize as i64))
         }
@@ -1039,6 +1041,12 @@ mod tests {
             Value::Float(v) => assert_eq!(v, 2.0),
             other => panic!("expected float result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dlopen_load_failure_returns_zero_not_abort() {
+        let r = spl_dlopen(&[Value::text("definitely_missing_provider_xyz.dll")]).expect("load failure must not abort");
+        assert!(matches!(r, Value::Int(0)));
     }
 
     #[test]

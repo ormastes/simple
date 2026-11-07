@@ -1706,6 +1706,26 @@ impl MirLowering:
                 case _: ()
         nil
 
+    me null_coalesce_optional_fallback_type(left: HirExpr, left_local: LocalId, right: HirExpr) -> HirType?:
+        """`left ?? right` whose default is itself statically `T?` with the
+        SAME nominal payload owner as left's Option (`opt ?? other_opt`, a
+        chained fallback) merges to `T?`, not `T`: absence survives when both
+        sides are absent. Returns that `T?`. The merged word is not a
+        canonical Option box: the present edge holds the unwrapped payload,
+        the default edge the default's own word (box, raw handle or nil);
+        `rt_unwrap_or_self`/`rt_is_some` accept every form. A default of another owner, or
+        one whose type is unknown, stays nil (the record-owner check below
+        still rejects a mismatched owner). Nothing is lowered here."""
+        val left_nominal = self.null_coalesce_nominal_join_type(left, left_local)
+        if val present_left = left_nominal:
+            if val right_type = self.enum_match_expr_type(right):
+                match right_type.kind:
+                    case HirTypeKind.Optional(right_inner):
+                        if enum_payload_types_alias_compatible(present_left, right_inner, self.symbols):
+                            return Some(HirType(kind: HirTypeKind.Optional(present_left), span: right.span))
+                    case _: ()
+        nil
+
     me null_coalesce_default_owner_type(right: HirExpr) -> HirType?:
         """Resolved class/struct/enum type of the `??` default operand, used as
         the merged value's owner when the left Option's inner type is unknown.
@@ -1881,6 +1901,75 @@ impl MirLowering:
         val result = b.emit_binop(MirBinOp.Eq, mir_operand_copy(raw), mir_operand_const_int(1), MirType.bool())
         self.builder = b
         result
+
+    fn hir_type_is_bare_type_param(ty: HirType) -> bool:
+        """`ty` is a bare type parameter in either spelling: `TypeParam`, or
+        `Named` of a symbol declared as a type parameter (a method of an
+        argumentless `impl Bag:` sees its owner's `K` that way)."""
+        match ty.kind:
+            case HirTypeKind.TypeParam(_, _): return true
+            case HirTypeKind.Named(sym, _):
+                if val info = self.symbols.get_symbol_raw(sym.id):
+                    return info.kind == SymbolKind.TypeParam
+                return false
+            case _: return false
+
+    me declared_tuple_member_is_type_param(tuple_base: HirExpr, member_idx: i64) -> bool:
+        """Member `member_idx` of a declared tuple binding is a bare type
+        parameter (`t.0` on `t: (T1, T2)`); false when nothing declares it."""
+        if member_idx < 0:
+            return false
+        if val tuple_declared = self.receiver_declared_type(tuple_base):
+            match tuple_declared.kind:
+                case HirTypeKind.Tuple(tuple_members):
+                    if member_idx < tuple_members.len():
+                        val tuple_member: HirType = tuple_members[member_idx]
+                        return self.hir_type_is_bare_type_param(tuple_member)
+                case _: ()
+        false
+
+    fn local_is_type_param_value(local: LocalId) -> bool:
+        """The local's own HIR type is a bare type parameter (an erased word)."""
+        if val local_hir = self.find_local_hir_type(local.id):
+            return self.hir_type_is_bare_type_param(local_hir)
+        false
+
+    fn local_is_noted_type_param_field(local: LocalId) -> bool:
+        """A type-param field read whose instance nothing records: the Field
+        arm notes the parameter's own name as the value's struct owner."""
+        val note = self.struct_value_syms.get(local.id) ?? ""
+        if note == "":
+            return false
+        if val local_hir = self.find_local_hir_type(local.id):
+            match local_hir.kind:
+                case HirTypeKind.TypeParam(param_name, _):
+                    return note == param_name
+                case HirTypeKind.Named(sym, _):
+                    if val info = self.symbols.get_symbol_raw(sym.id):
+                        return info.kind == SymbolKind.TypeParam and note == info.name
+                    return false
+                case _: return false
+        false
+
+    fn binop_is_erased_type_param_equality(op: HirBinOp, left: LocalId, right: LocalId) -> bool:
+        """`==`/`!=` where both operands are erased type-parameter values and
+        at least one carries no struct note at all -- i.e. a
+        value of the current erased generic body (a `key: K` parameter)."""
+        match op:
+            case Eq | NotEq: ()
+            case _: return false
+        if not self.local_is_type_param_value(left) or not self.local_is_type_param_value(right):
+            return false
+        # Each side is either a body value (no struct note at all) or a noted
+        # unknown-instance field; a note naming a real struct keeps that
+        # struct's own `__eq__` dispatch.
+        val left_free = (self.struct_value_syms.get(left.id) ?? "") == ""
+        val right_free = (self.struct_value_syms.get(right.id) ?? "") == ""
+        if not left_free and not self.local_is_noted_type_param_field(left):
+            return false
+        if not right_free and not self.local_is_noted_type_param_field(right):
+            return false
+        left_free or right_free
 
     me emit_text_word_eq(left: LocalId, right: LocalId) -> LocalId:
         """Text content equality (raw or tagged operands), as a Bool local."""
@@ -3086,79 +3175,67 @@ impl MirLowering:
         self.builder = b
         dest
 
-    me lower_string_interpolation(value: text, interps: [HirInterpolation]) -> LocalId:
-        """Bug #136: lower an interpolated string literal to a real concatenated
-        raw char* value instead of discarding the `{expr}` parts and emitting
-        the verbatim literal.
+    me emit_interpolation_segment(value: text) -> LocalId:
+        # Literal bytes need an explicit count: a segment may contain NUL.
+        val bytes_type = MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false))
+        var b = self.builder
+        val bytes = b.new_temp(bytes_type)
+        b.emit_const(bytes, MirConstValue.Str(value), bytes_type)
+        val length = b.emit_const_int(value.len())
+        val constructor = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_string_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [bytes_type, MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val result = b.emit_call(constructor, [mir_operand_copy(bytes), mir_operand_copy(length)], MirType.i64())
+        self.builder = b
+        if val tagged = result:
+            self.mark_tagged_text_local(tagged.id)
+            return tagged
+        self.error_fatal("unable to emit counted interpolation segment", nil)
+        bytes
 
-        Split `value` into literal segments around the top-level `{...}` regions
-        (positionally aligned with `interps`), lower each interpolation expr, and
-        coerce it to a raw C string via rt_interp_cstr (handles both a tagged
-        heap string -> its buffer, and an already-raw char* -> passthrough --
-        the operands are statically undiscriminable). Concatenate the alternating
-        [seg0, cstr(expr0), seg1, cstr(expr1), ..., segN] with rt_strcat, which
-        takes and returns raw char*. The result is a raw char* (Opaque `str`),
-        the same representation a plain string literal produces, so downstream
-        consumers (rt_println, etc.) are unaffected.
+    me emit_interpolation_concat(left: LocalId, right: MirOperand) -> LocalId:
+        # Keep tagged operands intact so their counted bytes survive concat.
+        val concat = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_strcat_tagged"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+        ))
+        var b = self.builder
+        val result = b.emit_call(concat, [mir_operand_copy(left), right], MirType(kind: MirTypeKind.Opaque("str")))
+        self.builder = b
+        if val tagged = result:
+            self.mark_tagged_text_local(tagged.id)
+            return tagged
+        self.error_fatal("unable to emit tagged interpolation concat", nil)
+        left
+
+    me lower_string_interpolation(value: text, interps: [HirInterpolation]) -> LocalId:
+        """Produce owned tagged text, preserving counted segment/operand bytes.
+
+        Raw rt_strcat results violated strict text consumers such as hash_text:
+        computed text hashed as zero while the same decoded text hashed normally.
+        The existing tagged concat also preserves embedded NUL and Unicode.
         """
         val segments = self.split_interpolation_segments(value)
-        # Number of interpolation slots to emit: guard against any mismatch
-        # between {...} regions found and the parsed interps list.
         var slot_count = interps.len()
         if segments.len() - 1 < slot_count:
             slot_count = segments.len() - 1
-
-        # result starts as the first literal segment (raw char*).
-        # Two statements, NOT nested `self.a(self.b(...))`: a nested me-call in
-        # argument position snapshots the receiver BEFORE the argument call's
-        # builder mutations, so the outer method's write-back clobbers the
-        # str-const emission and rewinds next_local_id -> the coerce call's
-        # fresh dest collides with its own operand (`%lN = rt_interp_cstr(%lN)`,
-        # llc "Only PHI nodes may reference their own value").
-        val seg0_local = self.emit_bootstrap_str_const(segments[0])
-        var result_local = self.bootstrap_coerce_to_raw_str(seg0_local)
-
+        var result_local = self.emit_interpolation_segment(segments[0])
         var k = 0
         while k < slot_count:
-            # Lower the interpolation expr, then coerce to raw char* at runtime.
-            # Intermediate var for the index access (seed chained-access quirk).
             val interp_item: HirInterpolation = interps[k]
             val interp_expr = interp_item.expr
             val interp_local = self.lower_expr(interp_expr)
-            # Bug #136: coerce the operand to a raw char*. A string operand
-            # (Opaque "str") passes straight through rt_interp_cstr. A non-string
-            # operand -- e.g. `{a}` / `{a+b}` where `a` is an i64 -- must first be
-            # rendered to a decimal string via rt_raw_i64_to_string (a tagged
-            # string), which rt_interp_cstr then unwraps to its char* buffer.
-            # Without this, rt_interp_cstr treats the raw i64 as a char* pointer
-            # and derefs it -> SIGSEGV. The operand's lowered MIR type drives the
-            # choice; a `val x = <int>` binding propagates the i64 init type to
-            # the local so `{x}` routes to the numeric path.
-            #
-            # native_interp_bool_float: the old inline check here only tested
-            # for Opaque("str") and otherwise ALWAYS rendered via
-            # rt_raw_i64_to_string, so `"{3<5}"` printed "1"/"0" instead of
-            # "true"/"false" (a bool's tag-adjusted i64 bit pattern misread as
-            # a small decimal) and `"{2.5}"` printed garbage (an f64 bit
-            # pattern reinterpreted as an integer via rt_raw_i64_to_string's
-            # %lld format). coerce_concat_operand already implements the
-            # exact type dispatch this needs -- str passthrough, else
-            # bool/f32(widened)/f64/u64/i64 routed to the matching
-            # rt_raw_*_to_string renderer, mirroring
-            # lower_bootstrap_print_call -- so reuse it instead of
-            # duplicating (and under-covering) that dispatch here. Its
-            # output (str passthrough, or a freshly rt_raw_*_to_string
-            # TAGGED handle) is exactly the shape rt_interp_cstr already
-            # expects downstream.
-            val cstr_local = self.bootstrap_coerce_to_raw_str(interp_local)
-            result_local = self.emit_raw_strcat(result_local, cstr_local)
-            # Append the following literal segment (split statements — see the
-            # nested-me-call receiver-snapshot note on seg0 above).
-            val next_seg_const = self.emit_bootstrap_str_const(segments[k + 1])
-            val next_seg = self.bootstrap_coerce_to_raw_str(next_seg_const)
-            result_local = self.emit_raw_strcat(result_local, next_seg)
+            # Separate mutable receiver calls; nested calls can rewind builder state.
+            # Counted NUL literals may have an I64 MIR ABI despite being text.
+            # Do not send those proven tagged handles through numeric rendering.
+            var rendered = mir_operand_copy(interp_local)
+            if not self.is_tagged_text_local(interp_local.id):
+                rendered = self.coerce_concat_operand(interp_local)
+            result_local = self.emit_interpolation_concat(result_local, rendered)
+            val next_segment = self.emit_interpolation_segment(segments[k + 1])
+            result_local = self.emit_interpolation_concat(result_local, mir_operand_copy(next_segment))
             k = k + 1
-
         result_local
 
     me emit_raw_strcat(left: LocalId, right: LocalId) -> LocalId:
@@ -3643,7 +3720,7 @@ impl MirLowering:
                     case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
                         # `return v` with `v: i64?` from a `-> i64` function
                         # returns the payload, not the Option handle.
-                        result = self.option_scalar_payload_of(result)
+                        result = self.option_payload_for_int_sink(result, found_return)
                         if val result_hir = self.find_local_hir_type(result.id):
                             if self.local_needs_erased_decode(result.id, result_hir):
                                 result = self.decode_runtime_value(result, self.lower_type(found_return))
@@ -3817,8 +3894,8 @@ impl MirLowering:
             val dict_key = self.lower_dict_key(index)
             return self.lower_dict_runtime_read(base, base_local, dict_key, false, nil_probe)
         var index_local = self.lower_expr(index)
-        if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
-            return cli_arg_local
+        # Index the evaluated array even for CLI-named calls. Ordinary
+        # get_args/get_cli_args wrappers can return a filtered or local array.
         # Text values are tagged runtime handles, not raw element
         # pointers. Normalize literals and runtime-produced text to
         # the same representation before bounds checking and lookup.
@@ -4245,6 +4322,16 @@ impl MirLowering:
             )
             val loaded = b.emit_load(mir_operand_copy(ptr), result_type)
             self.builder = b
+            # A member read off a tuple carried as an erased handle (`parsed.2`
+            # on a `case Ok(parsed)` binder of `Result<(V, D, [Issue]), E>`)
+            # took its MIR type from the HIR tuple member above, but no
+            # semantic owner: `for issue in parsed.2` then iterated untyped
+            # elements and `issue.line.to_text()` fell to `owner=` runtime
+            # fallback. Transfer the declared member metadata (a no-op unless
+            # the base's HIR type is a Tuple and the index is a literal).
+            self.remember_native_tuple_member_hir_type(base_local, self.tuple_index_literal(index), loaded)
+            if tuple_member_record != "":
+                self.struct_value_syms[loaded.id] = tuple_member_record
             loaded
 
     fn is_any_runtime_index_base(base_local: LocalId, runtime_array: bool, is_tuple_base: bool, raw_pointer_base: bool) -> bool:
@@ -5132,6 +5219,25 @@ impl MirLowering:
                     if binop_right_owner != "": binop_right_owner else: binop_right_struct
                 else:
                     ""
+                # Erased generic equality (bootstrap run 15, adaptive_map
+                # `entries[i].key == key`): a type-parameter field read whose
+                # instance nothing records is noted as a value "of struct K"
+                # so arithmetic on it stays refused. `==`/`!=` against a peer
+                # that is an un-noted erased type-parameter value of this body
+                # is the erased contract the for-in spelling already lowers:
+                # tag-aware rt_native_eq. Without such a peer it stays refused.
+                if binop_struct_name != "" and self.binop_is_erased_type_param_equality(op, left_local, right_local):
+                    val erased_eq_local = self.emit_runtime_word_eq(left_local, right_local)
+                    match op:
+                        case NotEq:
+                            var b_erased_ne = self.builder
+                            val erased_false = b_erased_ne.new_temp(MirType.bool())
+                            b_erased_ne.emit_const(erased_false, MirConstValue.Bool(false), MirType.bool())
+                            val erased_ne_local = b_erased_ne.emit_binop(MirBinOp.Eq, mir_operand_copy(erased_eq_local), mir_operand_copy(erased_false), MirType.bool())
+                            self.builder = b_erased_ne
+                            return erased_ne_local
+                        case _:
+                            return erased_eq_local
                 if binop_struct_name != "":
                     var binop_dunder = ""
                     match op:
@@ -6718,6 +6824,10 @@ impl MirLowering:
                 # decoded; an i64 default shifts the handle and loses the
                 # element type used by subsequent len/index dispatch.
                 var coalesce_array_type: HirType? = nil
+                # `nested[k] ?? {}` / `opt_dict ?? {}`: same recovery for a
+                # Dict payload, so `.keys()`/`.has()` on the merged value keep
+                # their owner instead of falling to `owner=` runtime fallback.
+                var coalesce_dict_type: HirType? = nil
                 var coalesce_left_type = self.enum_match_expr_type(left)
                 if coalesce_left_type == nil:
                     coalesce_left_type = self.find_local_hir_type(left_local.id)
@@ -6734,6 +6844,10 @@ impl MirLowering:
                     match payload_type.kind:
                         case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                             coalesce_array_type = Some(payload_type)
+                            if coalesce_missing_type:
+                                result_type = self.lower_type(payload_type)
+                        case HirTypeKind.Dict(_, _):
+                            coalesce_dict_type = Some(payload_type)
                             if coalesce_missing_type:
                                 result_type = self.lower_type(payload_type)
                         case _: ()
@@ -6753,6 +6867,22 @@ impl MirLowering:
                 var coalesce_record_type: HirType? = nil
                 var coalesce_tuple_type: HirType? = nil
                 var coalesce_record_fallback_valid = true
+                # `opt ?? other_opt`: the merge stays `T?` (see
+                # null_coalesce_optional_fallback_type). It must not be typed
+                # as the bare record, and the record-owner check must not
+                # reject the optional default. bug
+                # mir_null_coalesce_optional_fallback_payload_2026-11-07.
+                # A present, resolved annotation that is NOT optional (`val w:
+                # T = a ?? b`) keeps the bare-record path and its owner check.
+                var coalesce_annotation_admits_optional = coalesce_missing_type
+                if not coalesce_missing_type:
+                    if val coalesce_annotation = expr_value.type_:
+                        match coalesce_annotation.kind:
+                            case HirTypeKind.Optional(_): coalesce_annotation_admits_optional = true
+                            case _: ()
+                var coalesce_optional_fallback: HirType? = nil
+                if coalesce_annotation_admits_optional:
+                    coalesce_optional_fallback = self.null_coalesce_optional_fallback_type(left, left_local, right)
                 if val nc_inner_type = self.option_inner_hir_type_for_local(left, left_local):
                     # Bug (native_typed_array_text_element_destroyed_at_store,
                     # "still open" item `.first()`/`.last()`): `result_type`
@@ -6806,24 +6936,27 @@ impl MirLowering:
                         case _: ()
                     match nc_inner_type.kind:
                         case HirTypeKind.Named(nc_struct_symbol, _):
-                            if val present_nc_type_symbol = self.symbols.get_symbol_raw(nc_struct_symbol.id):
-                                val nc_type_symbol: HirSymbol = present_nc_type_symbol
-                                match nc_type_symbol.kind:
-                                    case SymbolKind.Struct:
-                                        result_struct_name = self.declared_struct_layout_key(self.composite_layout_key(nc_type_symbol))
-                                        # Preserve the declared record owner, not only its
-                                        # spelling, across the new merged local. The flat
-                                        # path often has no coalesce expression annotation.
-                                        if coalesce_missing_type:
-                                            result_type = self.lower_type(nc_inner_type)
-                                            coalesce_record_type = Some(nc_inner_type)
-                                        elif expr_value.has_type_:
-                                            if val annotated = expr_value.type_:
-                                                if hir_types_equal(annotated, nc_inner_type):
-                                                    coalesce_record_type = Some(nc_inner_type)
-                                    case _: ()
+                            # An optional default keeps the merge `T?`: no
+                            # record result type, layout name or owner check.
+                            if coalesce_optional_fallback == nil:
+                                if val present_nc_type_symbol = self.symbols.get_symbol_raw(nc_struct_symbol.id):
+                                    val nc_type_symbol: HirSymbol = present_nc_type_symbol
+                                    match nc_type_symbol.kind:
+                                        case SymbolKind.Struct:
+                                            result_struct_name = self.declared_struct_layout_key(self.composite_layout_key(nc_type_symbol))
+                                            # Preserve the declared record owner, not only its
+                                            # spelling, across the new merged local. The flat
+                                            # path often has no coalesce expression annotation.
+                                            if coalesce_missing_type:
+                                                result_type = self.lower_type(nc_inner_type)
+                                                coalesce_record_type = Some(nc_inner_type)
+                                            elif expr_value.has_type_:
+                                                if val annotated = expr_value.type_:
+                                                    if hir_types_equal(annotated, nc_inner_type):
+                                                        coalesce_record_type = Some(nc_inner_type)
+                                        case _: ()
                         case _: ()
-                if result_struct_name == "":
+                if result_struct_name == "" and coalesce_optional_fallback == nil:
                     # Same "raw migration form" fallback as ExistsCheck: a
                     # struct pointer bound straight to `T?` without ever
                     # calling ensure_option_handle leaves left_local with no
@@ -6889,7 +7022,7 @@ impl MirLowering:
                     b_right.emit_copy(result_local, right_value)
                     b_right.terminate_goto(merge_block)
                     self.builder = b_right
-                if not right_terminated and result_struct_name == "":
+                if not right_terminated and result_struct_name == "" and coalesce_optional_fallback == nil:
                     # The right (default) operand is a fresh, non-Option
                     # expression -- its own construction registers
                     # struct_value_syms on right_local directly, independent
@@ -6908,12 +7041,18 @@ impl MirLowering:
                 if val array_type = coalesce_array_type:
                     self.runtime_array_locals[result_local.id] = true
                     self.remember_local_hir_type(result_local.id, array_type, 0, 0)
+                if val dict_type = coalesce_dict_type:
+                    self.runtime_dict_locals[result_local.id] = true
+                    self.remember_local_hir_type(result_local.id, dict_type, 0, 0)
                 if coalesce_record_fallback_valid:
                     if val tuple_payload = coalesce_tuple_type:
                         self.remember_local_hir_type(result_local.id, tuple_payload, 0, 0)
                     if val record_type = coalesce_record_type:
                         self.remember_local_hir_type(result_local.id, record_type, 0, 0)
-                if coalesce_record_type == nil and coalesce_array_type == nil and not right_terminated:
+                if val optional_merge = coalesce_optional_fallback:
+                    if not right_terminated:
+                        self.remember_local_hir_type(result_local.id, optional_merge, 0, 0)
+                elif coalesce_record_type == nil and coalesce_array_type == nil and coalesce_dict_type == nil and not right_terminated:
                     # `opt ?? E.Zero` / `d[k] ?? MirType.i64()`: the merged value
                     # has the left side's declared nominal payload type. Without
                     # it a `match` on the result saw an untyped subject (bare

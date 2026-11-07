@@ -11,11 +11,11 @@
 # available. When it does not, the job is recorded BLOCKED with the probe's
 # reason — it is never silently downgraded to a host process.
 #
-# Engine preference is podman, then docker, then a bare OCI runtime. Podman is
-# the default because it is the only one of the three whose normal mode is
-# ROOTLESS, so a CI node does not have to hand a daemon root to run a build.
+# Podman is the default backend. Docker requires explicit selection; missing
+# Podman never selects Docker. Bare OCI runtimes are not wired into this runner.
+# Backend availability does not qualify a runtime or prove rootless execution.
 #
-# Two platform facts the engine order must not paper over:
+# Two platform facts backend selection must not paper over:
 #
 #   * Podman on Windows is a Linux VM (`podman machine` -> WSL2/Hyper-V). It has
 #     no Windows-container backend and cannot produce a process-isolated Windows
@@ -28,7 +28,7 @@
 #     receipt never implies an unprivileged container where none exists.
 
 use app.io.mod.{process_run_timeout, file_read, host_os}
-use std.common.contracts.orchestration.resource_v1.{RejectionV1, PodSpecV1}
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, PodSpecV1, ContainerV1}
 use std.common.contracts.orchestration.ci_v1.{JobV1, PipelineV1, OrderedJobV1,
     expand_pipeline, RUN_POLICY_ALWAYS}
 use std.common.contracts.container.runtime_v1.{RuntimeOperationV1,
@@ -47,7 +47,7 @@ pub const VERDICT_BLOCKED = "BLOCKED"
 # Default per-job wall clock bound. A job that outlives it is FAIL, never PASS.
 pub const DEFAULT_JOB_TIMEOUT_MS = 60000
 
-# Engine candidates for the native-container lane, in preference order.
+# Explicit backend names for the native-container lane (runc is unsupported).
 pub const ENGINE_PODMAN = "podman"
 pub const ENGINE_DOCKER = "docker"
 pub const ENGINE_RUNC = "runc"
@@ -113,13 +113,36 @@ fn userns_nesting() -> (bool, text):
 fn subid_mapping() -> bool:
     engine_present("newuidmap")
 
-# Probe the Linux native-container lane, preferring podman.
+# Reject unsupported names before any engine invocation.
+pub fn container_engine_error(engine: text) -> text:
+    if engine != ENGINE_PODMAN and engine != ENGINE_DOCKER:
+        return "unsupported-container-engine: " + engine
+    ""
+
+# Validate backend selection against observed client availability. This is not
+# runtime qualification: namespace/daemon checks and the provider probe follow.
+# Both observations are explicit so absence of Podman cannot select Docker.
+pub fn container_engine_selection_error(engine: text, podman_present: bool,
+        docker_present: bool) -> text:
+    val error = container_engine_error(engine)
+    if error != "": return error
+    if engine == ENGINE_PODMAN and not podman_present:
+        return "selected-container-engine-unavailable: podman"
+    if engine == ENGINE_DOCKER and not docker_present:
+        return "selected-container-engine-unavailable: docker"
+    ""
+
+# Probe only the selected Linux native-container backend, defaulting to Podman.
 #
 # Reports the engine it would use AND whether that lane would be rootless or
 # root, because those are independent: an available engine says nothing about
 # the privilege the launch requires. Other hosts are refused because this
 # runner has no non-Linux native-container provider (see the module header).
-pub fn probe_container_lane() -> ProbeV1:
+pub fn probe_container_lane(engine: text = ENGINE_PODMAN) -> ProbeV1:
+    val selection_error = container_engine_error(engine)
+    if selection_error != "":
+        return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
+            reason: selection_error)
     val os = host_os()
     # The only wired provider is LinuxOciRuntimeProviderV1. An engine client on
     # another host cannot establish that this runner can launch its containers.
@@ -127,7 +150,14 @@ pub fn probe_container_lane() -> ProbeV1:
         return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
             reason: "native-container-provider-unavailable-on-host: " + os)
 
-    if engine_present(ENGINE_PODMAN):
+    val present = engine_present(engine)
+    val availability_error = container_engine_selection_error(engine,
+        engine == ENGINE_PODMAN and present, engine == ENGINE_DOCKER and present)
+    if availability_error != "":
+        return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
+            reason: availability_error)
+
+    if engine == ENGINE_PODMAN:
         val nest = userns_nesting()
         if nest.0 and subid_mapping():
             return ProbeV1(available: true, engine: ENGINE_PODMAN, privilege: PRIVILEGE_ROOTLESS,
@@ -140,7 +170,7 @@ pub fn probe_container_lane() -> ProbeV1:
         return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
             reason: "podman-rootless-unavailable: " + why)
 
-    if engine_present(ENGINE_DOCKER):
+    if engine == ENGINE_DOCKER:
         # Docker's engine runs as root and the client needs socket access; a
         # successful `--version` is the CLIENT only, so reach the daemon.
         val info = process_run_timeout(ENGINE_DOCKER, ["info", "--format", "{{.OSType}}"], 15000)
@@ -154,7 +184,7 @@ pub fn probe_container_lane() -> ProbeV1:
             reason: "Linux docker daemon reachable; this lane is root-privileged")
 
     ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
-        reason: "no-qualified-container-engine: podman or docker did not answer a positive probe")
+        reason: "unsupported-container-engine: " + engine)
 
 # "" when this runner can execute the job shape, else why not.
 fn job_shape_error(spec: PodSpecV1) -> text:
@@ -289,6 +319,19 @@ fn canonical_runtime_token(value: text) -> text:
     if out == "": "run"
     else: out
 
+# Pure request construction shared by the live runner and command-contract specs.
+# The caller has already selected a container after single-container admission.
+pub fn ci_container_request_v1(name: text, container: ContainerV1,
+        run_id: text) -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "run-" + canonical_runtime_token(run_id) +
+        "-" + canonical_runtime_token(name),
+        attempt: 1, operation_id: "", image: container.image, bundle_path: "",
+        command: container.command, args: container.args, timeout_ms: DEFAULT_JOB_TIMEOUT_MS,
+        cpu_limit_millis: container.resources.cpu_limit_millis,
+        memory_limit_bytes: container.resources.memory_limit_bytes, pid_limit: 256,
+        network_policy: "bridge", filesystem_policy: "read-only",
+        replace_entrypoint: container.command.len() > 0)
+
 # Real native-container execution is wired through LinuxOciRuntimeProviderV1. The
 # caller has already completed the positive host probe; any provider failure
 # remains a receipt failure/block and is never downgraded to native-process.
@@ -308,13 +351,7 @@ fn run_container_job(name: text, spec: PodSpecV1, boot: text,
             state: runtime_state_empty(), exit_code: -1, stdout: "", stderr: "",
             reason: provider_probe.reason)
         return finalized_container_operation_receipt(name, spec, unavailable, boot, 0, journal_root)
-    val request = LinuxOciRequestV1(pod_uid: "run-" + canonical_runtime_token(run_id) +
-        "-" + canonical_runtime_token(name),
-        attempt: 1, operation_id: "", image: c.image, bundle_path: "",
-        command: c.command, args: c.args, timeout_ms: DEFAULT_JOB_TIMEOUT_MS,
-        cpu_limit_millis: c.resources.cpu_limit_millis,
-        memory_limit_bytes: c.resources.memory_limit_bytes, pid_limit: 256,
-        network_policy: "bridge", filesystem_policy: "read-only")
+    val request = ci_container_request_v1(name, c, run_id)
     val prepared = provider.prepare_pod(request)
     if prepared.status != RUNTIME_STATUS_OK:
         return finalized_container_operation_receipt(name, spec, prepared, boot, 0, journal_root)
@@ -363,7 +400,12 @@ fn verdict_of(name: text, receipts: [JobReceiptV1]) -> text:
 # Run a pipeline end to end. Returns a rejection when the pipeline itself is
 # invalid (unresolved reference, cycle); an executed run always returns a
 # receipt, including when every job was blocked.
-pub fn run_pipeline(p: PipelineV1, templates: Dict<text, JobV1>, run_id: text) -> Result<RunReceiptV1, RejectionV1>:
+pub fn run_pipeline(p: PipelineV1, templates: Dict<text, JobV1>, run_id: text,
+        engine: text = ENGINE_PODMAN) -> Result<RunReceiptV1, RejectionV1>:
+    val selection_error = container_engine_error(engine)
+    if selection_error != "":
+        return Err(RejectionV1(kind: "backend", path: "engine",
+            message: selection_error, line: 0, col: 0))
     var ordered: [OrderedJobV1] = []
     match expand_pipeline(p, templates):
         case Err(r): return Err(r)
@@ -406,7 +448,7 @@ pub fn run_pipeline(p: PipelineV1, templates: Dict<text, JobV1>, run_id: text) -
 
         if spec.runtime_class == "native-container":
             if not container_probe_ready:
-                container_probe = probe_container_lane()
+                container_probe = probe_container_lane(engine)
                 container_probe_ready = true
             if not container_probe.available:
                 receipts.push(blocked_receipt(name, spec, container_probe.reason, boot))

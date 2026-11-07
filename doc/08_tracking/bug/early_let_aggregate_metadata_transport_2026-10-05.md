@@ -31,3 +31,9 @@ is missing, which remains under investigation rather than bundled speculatively.
 
 ## 2026-11-03 status: fix-implemented-verification-pending
 Fix is in source (early Let uses `copy_local_hir_type_metadata`, `mir_lowering_stmts.spl:1668,1998`). `test/01_unit/compiler/mir/early_let_receiver_metadata_spec.spl` re-run on the seed: 3/3 pass. Closure: stage3 build of the lexer/HashMap modules shows none of the eight diagnostics.
+
+## 2026-11-07 m-misc: reopen premise outdated
+
+`test/helpers/lowering_harness.spl` exists on release/1.0.0 (and main) and exports `expect_lowered_mir_functions`.
+The 2026-11-07 reopen came from a checkout without `test/helpers/`. Measured result:
+`bin/simple test test/01_unit/compiler/mir/early_let_receiver_metadata_spec.spl` gives 3 total, 3 passed, 0 failed.

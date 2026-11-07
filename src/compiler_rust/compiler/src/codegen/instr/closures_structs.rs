@@ -2403,6 +2403,9 @@ fn try_compile_builtin_method_call<M: Module>(
         // returns the count written). Array-only name; no other receiver
         // type defines it.
         "write_span" => "rt_array_write_span",
+        // Bulk in-place volatile fill (`arr.fill_span(dst_off, count, value)`):
+        // same array-only, raw-count contract as write_span.
+        "fill_span" => "rt_array_fill_span",
         // Generic collection methods (work on String, Array, Tuple, Dict)
         "len" | "length" => "rt_len",
         // Result/Option methods.
@@ -2819,6 +2822,25 @@ fn try_compile_builtin_method_call<M: Module>(
             super::methods::wrap_value(ctx, builder, *arg, raw)
         } else if box_dict_key && arg_i == 0 && key_is_int {
             builder.ins().ishl_imm(raw, 3)
+        } else if runtime_func == "rt_unwrap_or_value"
+            && arg_i == 0
+            && (matches!(builder.func.dfg.value_type(raw), types::F32 | types::F64)
+                || matches!(ctx.vreg_types.get(arg).copied(), Some(TypeId::F32 | TypeId::F64)))
+        {
+            // A float default arrives as a raw f64 (or its i64 bit pattern).
+            // Passed unboxed, the absent case handed those raw bits back and the
+            // caller decoded them as a tagged int: `-1.0` (0xBFF0..) printed as
+            // `-577023702256844800` (== bits >> 3). Box it as a float.
+            // See doc/08_tracking/bug/jit_unwrap_or_on_absent_optional_ignores_default_2026-08-17.md.
+            let vt = builder.func.dfg.value_type(raw);
+            let f = if vt == types::F32 {
+                builder.ins().fpromote(types::F64, raw)
+            } else if vt == types::I64 {
+                builder.ins().bitcast(types::F64, MemFlags::new(), raw)
+            } else {
+                raw
+            };
+            call_runtime_1(ctx, builder, "rt_value_float", f)
         } else {
             raw
         };
@@ -2875,7 +2897,7 @@ fn try_compile_builtin_method_call<M: Module>(
         Ok(Some(receiver_val))
     } else if results.is_empty() {
         Ok(Some(builder.ins().iconst(types::I64, 0)))
-    } else if runtime_func == "rt_array_write_span" {
+    } else if runtime_func == "rt_array_write_span" || runtime_func == "rt_array_fill_span" {
         // The runtimes return the RAW i64 count (C twin, pure-Simple lowering and
         // the seed runtime agree); `write_span` is typed `Any` here, so the
         // result is consumed as a tagged value. Tag it: `(v << 3) | INT(0)`,

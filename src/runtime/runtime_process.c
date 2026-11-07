@@ -167,6 +167,7 @@ static SplArray* process_timeout_result(const char* stdout_text, const char* std
 
 /* Windows process timeout/capture owner. */
 #include <windows.h>
+#include "runtime_process_environment_private.h"
 #ifndef PSAPI_VERSION
 #define PSAPI_VERSION 2
 #endif
@@ -412,8 +413,10 @@ static wchar_t* win_capture_environment(void) {
     return filtered;
 }
 
-static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
-                                         int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes) {
+static SplArray* win_process_run_capture_environment_v1(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                         int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes,
+        const wchar_t* child_environment, int explicit_environment, int64_t* flags) {
+    if(flags)*flags=8; /* provider failure until the complete owner finishes */
     const char* failure = NULL;
     const char** child_args = NULL;
     char* cmd_c = NULL;
@@ -480,7 +483,7 @@ static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplA
     cmdline = win_cmd_build_line(cmd_c, child_args, argc);
     if (cmdline) {
         wide_command = win_capture_command_wide(cmdline);
-        wide_environment = win_capture_environment();
+        wide_environment = explicit_environment ? (wchar_t*)child_environment : win_capture_environment();
     }
     if (!cmdline || !wide_command || !wide_environment) {
         failure = "process spawn failed";
@@ -636,6 +639,11 @@ finish:
     win_capture_finish(&stdout_capture);
     win_capture_finish(&stderr_capture);
 
+    if(flags) {
+        *flags=(timed_out?1:0) | (stdout_capture.total>stdout_capture.limit?2:0) |
+            (stderr_capture.total>stderr_capture.limit?4:0) | (failure?8:0) |
+            (process.hProcess&&!process_done?16:0);
+    }
     const char* result_error = failure ? failure : stderr_capture.data;
     SplArray* result = raw_bytes
         ? process_capture_result(stdout_capture.data, stdout_capture.len, stderr_capture.data,
@@ -650,7 +658,7 @@ finish:
     win_close_handle(&job);
     if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
     free(attributes);
-    free(wide_environment);
+    if(!explicit_environment)free(wide_environment);
     free(wide_command);
     free(cmdline);
     free(cmd_c);
@@ -658,6 +666,72 @@ finish:
     free(stdout_capture.data);
     free(stderr_capture.data);
     return result;
+}
+
+/* Preserve the existing capture ABI and inherited-environment policy. */
+static SplArray* win_process_run_capture(const char* cmd,uint64_t cmd_len,SplArray* args,
+        int64_t timeout_ms,int64_t max_output_bytes,int raw_bytes) {
+    return win_process_run_capture_environment_v1(cmd,cmd_len,args,timeout_ms,
+        max_output_bytes,raw_bytes,NULL,0,NULL);
+}
+
+/* Borrow immutable UTF8 assignments only while making a private UTF16 block. */
+static wchar_t* win_child_env_array_v1(SplArray* environment,int64_t mode,DWORD* error) {
+    int64_t count=environment?rt_array_len(environment):0;
+    if(count<0||(uint64_t)count>WIN_CHILD_ENV_MAX_ENTRIES_V1||(mode!=0&&mode!=1)){*error=ERROR_INVALID_PARAMETER;return NULL;}
+    struct WinChildEnvPairV1* pairs=(struct WinChildEnvPairV1*)calloc(count?(size_t)count:1,sizeof(*pairs));
+    if(!pairs){*error=ERROR_NOT_ENOUGH_MEMORY;return NULL;}
+    wchar_t* result=NULL;
+    for(int64_t i=0;i<count;i++) {
+        int64_t text=rt_array_get(environment,i);const char* data=(const char*)rt_string_data(text);
+        uint64_t length=rt_string_len(text);
+        if(!data||length>4u*WIN_CHILD_ENV_MAX_UNITS_V1||memchr(data,0,(size_t)length)){*error=ERROR_INVALID_PARAMETER;goto done;}
+        size_t offset=length&&data[0]=='='?1:0;
+        const char* equals=(const char*)memchr(data+offset,'=',(size_t)length-offset);
+        if(!equals){*error=ERROR_INVALID_PARAMETER;goto done;}
+        pairs[i].key=data;pairs[i].key_len=(size_t)(equals-data);
+        pairs[i].value=equals+1;pairs[i].value_len=(size_t)length-pairs[i].key_len-1;
+    }
+    result=win_child_environment_v1(pairs,(size_t)count,mode==0,error);
+ done:
+    free(pairs);return result;
+}
+
+#if defined(_MSC_VER)
+#define RT_CHILD_ENV_TLS_V1 __declspec(thread)
+#else
+#define RT_CHILD_ENV_TLS_V1 _Thread_local
+#endif
+/* Borrowed per-thread four-word native result, copied by its SFFI consumer
+ * before another call. No PID/lease authority is projected by this API. */
+int64_t* rt_process_run_bounded_environment_tuple_v1(const char* cmd,uint64_t cmd_len,
+        SplArray* args,SplArray* environment,int64_t mode,int64_t timeout_ms,int64_t max_output_bytes) {
+    static RT_CHILD_ENV_TLS_V1 int64_t block[4];
+    block[0]=block[1]=3;block[2]=-1;block[3]=8;
+    DWORD error=0;wchar_t* copied=NULL;SplArray* result=NULL;int64_t flags=8;
+    if(!cmd||!cmd_len||memchr(cmd,0,(size_t)cmd_len)||timeout_ms<=0||max_output_bytes<=0||max_output_bytes>16777216) {
+        error=ERROR_INVALID_PARAMETER;goto rejected;
+    }
+    int64_t argc=args?rt_array_len(args):0;
+    if(argc<0||argc>32768){error=ERROR_INVALID_PARAMETER;goto rejected;}
+    for(int64_t i=0;i<argc;i++) {
+        int64_t text=rt_array_get(args,i);const char* data=(const char*)rt_string_data(text);uint64_t length=rt_string_len(text);
+        if(text==3)continue; /* canonical empty text argument */
+        if(!data||length>16777216||memchr(data,0,(size_t)length)){error=ERROR_INVALID_PARAMETER;goto rejected;}
+    }
+    copied=win_child_env_array_v1(environment,mode,&error);
+    if(!copied)goto rejected;
+    result=win_process_run_capture_environment_v1(cmd,cmd_len,args,timeout_ms,max_output_bytes,0,copied,1,&flags);
+    free(copied);
+    if(!result)return block;
+    block[0]=rt_array_get(result,0);block[1]=rt_array_get(result,1);
+    block[2]=rt_value_as_int(rt_array_get(result,2));block[3]=flags;
+    rt_array_free(result);return block;
+ rejected:
+    {
+        char reason[128];int count=snprintf(reason,sizeof(reason),"private child environment rejected: Win32 %lu",(unsigned long)error);
+        block[1]=rt_string_new((const uint8_t*)reason,(uint64_t)(count>0?count:0));return block;
+    }
 }
 
 /* (cmd_ptr, cmd_len, args, timeout_ms) -> RuntimeValue (array), per
@@ -1303,6 +1377,15 @@ int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args)
 }
 
 #else /* POSIX */
+int64_t* rt_process_run_bounded_environment_tuple_v1(const char* cmd,uint64_t length,
+        SplArray* args,SplArray* environment,int64_t mode,int64_t timeout,int64_t cap) {
+    (void)cmd;(void)length;(void)args;(void)environment;(void)mode;(void)timeout;(void)cap;return NULL;
+}
+int64_t rt_process_spawn_async_environment_v1(const char* cmd,uint64_t length,
+        SplArray* args,SplArray* environment,int64_t mode) {
+    (void)cmd;(void)length;(void)args;(void)environment;(void)mode;return -95;
+}
+
 
 static int64_t rt_process_spawn_piped_argv(
     const char* cmd, char** argv, bool sandboxed_renderer,
@@ -2190,8 +2273,14 @@ int64_t rt_browser_renderer_spawn_sandboxed(
 #endif
 }
 
+/* Peak RSS (KiB) of the child reaped by the latest rt_process_wait (wait4
+ * ru_maxrss), and whether that reap is newer than the latest run_capture. */
+static _Thread_local int64_t posix_wait_peak_rss_kib = -1;
+static _Thread_local int posix_wait_peak_is_latest = 0;
+
 static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
                                            int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes) {
+    posix_wait_peak_is_latest = 0;
     if (raw_bytes && (timeout_ms < 0 || max_output_bytes < 0 || max_output_bytes > 16777216))
         return process_capture_result("", 0, "", 0, -1, 0, timeout_ms, 1, 0);
     if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1) {
@@ -2275,6 +2364,7 @@ int64_t rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args
  * run_bounded call: wait4() ru_maxrss captured in runtime_fork.c. -1 = not
  * measured (0 is never a real peak). Shared fork-parent state, not per thread. */
 int64_t rt_process_last_child_peak_rss_kib(void) {
+    if (posix_wait_peak_is_latest) return posix_wait_peak_rss_kib;
     int64_t bytes = rt_fork_parent_peak_rss_bytes();
     return bytes > 0 ? bytes / 1024 : -1;
 }
@@ -3228,12 +3318,14 @@ static bool rt_mcp_async_std(DWORD which, HANDLE* duplicate) {
     return true;
 }
 
-int64_t rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count) {
+static int64_t win_process_spawn_async_owned_environment_v1(const char* cmd, const char** args, int64_t arg_count, const wchar_t* environment) {
     if (!cmd || !*cmd || arg_count < 0 || (arg_count > 0 && !args)) return -1;
     char* line = win_cmd_build_line(cmd, args, arg_count);
     if (!line) return -1;
+    wchar_t* wide_line=win_capture_command_wide(line);
+    if(!wide_line){free(line);return -1;}
     struct RtMcpChild* owner = (struct RtMcpChild*)calloc(1, sizeof(*owner));
-    if (!owner) { free(line); return -1; }
+    if (!owner) { free(wide_line); free(line); return -1; }
     HANDLE streams[3] = {NULL, NULL, NULL};
     SIZE_T attributes_size = 0;
     LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
@@ -3250,7 +3342,7 @@ int64_t rt_process_spawn_async_owned_windows(const char* cmd, const char** args,
     }
     if (ready) ready = UpdateProcThreadAttribute(attributes, 0,
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST, streams, sizeof(streams), NULL, NULL) != 0;
-    STARTUPINFOEXA startup = {0};
+    STARTUPINFOEXW startup = {0};
     PROCESS_INFORMATION process = {0};
     startup.StartupInfo.cb = sizeof(startup);
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -3258,14 +3350,15 @@ int64_t rt_process_spawn_async_owned_windows(const char* cmd, const char** args,
     startup.StartupInfo.hStdOutput = streams[1];
     startup.StartupInfo.hStdError = streams[2];
     startup.lpAttributeList = attributes;
-    BOOL started = ready && CreateProcessA(NULL, line, NULL, NULL, TRUE,
-        CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
-        NULL, NULL, &startup.StartupInfo, &process);
+    BOOL started = ready && CreateProcessW(NULL, wide_line, NULL, NULL, TRUE,
+        CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+        (LPVOID)environment, NULL, &startup.StartupInfo, &process);
     if (attributes) {
         if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
         free(attributes);
     }
     for (size_t i = 0; i < 3; i++) if (streams[i]) CloseHandle(streams[i]);
+    free(wide_line);
     free(line);
     if (!started) { free(owner); return -1; }
     CloseHandle(process.hThread);
@@ -3277,6 +3370,29 @@ int64_t rt_process_spawn_async_owned_windows(const char* cmd, const char** args,
     rt_mcp_children = owner;
     ReleaseSRWLockExclusive(&rt_mcp_children_lock);
     return (int64_t)published_pid;
+}
+
+int64_t rt_process_spawn_async_owned_windows(const char* cmd,const char** args,int64_t count) {
+    return win_process_spawn_async_owned_environment_v1(cmd,args,count,NULL);
+}
+
+int64_t rt_process_spawn_async_environment_v1(const char* cmd,uint64_t cmd_len,
+        SplArray* args,SplArray* environment,int64_t mode) {
+    if(!cmd||!cmd_len||cmd_len>SIZE_MAX-1||memchr(cmd,0,(size_t)cmd_len))return -22;
+    DWORD error=0;wchar_t* copied=win_child_env_array_v1(environment,mode,&error);
+    if(!copied)return error==ERROR_NOT_ENOUGH_MEMORY?-1:-22;
+    int64_t count=args?rt_array_len(args):0,pid=-1;char* command=NULL;const char** argv=NULL;
+    if(count<0||count>32768)goto done;
+    command=(char*)malloc((size_t)cmd_len+1);argv=(const char**)calloc((size_t)count+1,sizeof(char*));
+    if(!command||!argv)goto done;memcpy(command,cmd,(size_t)cmd_len);command[cmd_len]=0;
+    for(int64_t i=0;i<count;i++) {
+        int64_t text=rt_array_get(args,i);const char* data=(const char*)rt_string_data(text);uint64_t length=rt_string_len(text);
+        if(text==3){argv[i]="";continue;}
+        if(!data||length>16777216||memchr(data,0,(size_t)length)){pid=-22;goto done;}argv[i]=data;
+    }
+    pid=win_process_spawn_async_owned_environment_v1(command,argv,count,copied);
+ done:
+    free(command);free(argv);free(copied);return pid;
 }
 
 static bool rt_mcp_duplicate_std(DWORD which, HANDLE* duplicate) {
@@ -3487,6 +3603,13 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     }
     DWORD exit_code = 0;
     bool completed = result == WAIT_OBJECT_0 && GetExitCodeProcess(process, &exit_code);
+    /* Handle still open: record the child's own peak working set (R5). */
+    win_last_child_peak_rss_kib = -1;
+    PROCESS_MEMORY_COUNTERS child_counters = {0};
+    child_counters.cb = (DWORD)sizeof(child_counters);
+    if (completed && K32GetProcessMemoryInfo(process, &child_counters, child_counters.cb)) {
+        win_last_child_peak_rss_kib = (int64_t)(child_counters.PeakWorkingSetSize / 1024);
+    }
     AcquireSRWLockExclusive(&rt_mcp_children_lock);
     struct RtMcpChild** link = &rt_mcp_children;
     while (*link && *link != child) link = &(*link)->next;
@@ -3497,13 +3620,31 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     return completed ? (int64_t)(int32_t)exit_code : -1;
 }
 #else
+#include <sys/resource.h>
+/* waitpid twin that keeps the reaped child's rusage, so
+ * rt_process_last_child_peak_rss_kib can report it (supervised builder R5). */
+static pid_t posix_wait_record_peak(pid_t pid, int* status, int options) {
+    struct rusage usage;
+    memset(&usage, 0, sizeof(usage));
+    pid_t r = wait4(pid, status, options, &usage);
+    if (r > 0) {
+        int64_t kib = (int64_t)usage.ru_maxrss;
+#if defined(__APPLE__)
+        kib /= 1024; /* bytes on Darwin */
+#endif
+        posix_wait_peak_rss_kib = kib > 0 ? kib : -1;
+        posix_wait_peak_is_latest = 1;
+    }
+    return r;
+}
+
 int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     if (pid <= 0) return -1;
     if (timeout_ms <= 0) {
         int status = 0;
         pid_t waited;
         do {
-            waited = waitpid((pid_t)pid, &status, 0);
+            waited = posix_wait_record_peak((pid_t)pid, &status, 0);
         } while (waited < 0 && errno == EINTR);
         if (waited < 0) return -1;
         if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
@@ -3520,7 +3661,7 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     int64_t waited_ms = 0;
     for (;;) {
         int status = 0;
-        pid_t r = waitpid((pid_t)pid, &status, WNOHANG);
+        pid_t r = posix_wait_record_peak((pid_t)pid, &status, WNOHANG);
         if (r < 0 && errno == EINTR) continue;
         if (r < 0) {
             /* A failed wait is NOT a signal death, and collapsing it to -1 made

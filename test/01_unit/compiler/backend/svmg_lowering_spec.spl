@@ -1194,3 +1194,177 @@ describe "SVM-G checked i32 right shift signedness":
             val actual = if compound: var_(symbol) else: binop(HirBinOp.Shr, var_(symbol), int_lit(1))
             stmts = stmts.push(s(HirStmtKind.Expr(expr: expect_to_equal(actual, int_lit(2147483644)))))
             expect_vm_shift_result(run_print_body(block_no_tail(stmts), []), 2147483644)
+
+fn nested_sum_helper() -> SvmgHelperFn:
+    val a = SymbolId(id: 2001)
+    val b = SymbolId(id: 2002)
+    SvmgHelperFn(name: "nested_sum", params: [param(a, "a"), param(b, "b")],
+        body: block_with_tail([], binop(HirBinOp.Add, var_(a), var_(b))))
+
+fn nested_sum(left: HirExpr, right: HirExpr) -> HirExpr:
+    call(named_var(SymbolId(id: 2000), "nested_sum"), [left, right])
+
+describe "SVM-G nested helper argument isolation":
+    it "preserves earlier arguments across later nested calls to the same helper":
+        step("Nested sums produce 6 and 10 rather than overwriting pending outer arguments")
+        val cases = [
+            nested_sum(int_lit(1), nested_sum(int_lit(2), int_lit(3))),
+            nested_sum(nested_sum(int_lit(1), int_lit(2)), int_lit(3)),
+            nested_sum(int_lit(1), nested_sum(int_lit(2), nested_sum(int_lit(3), int_lit(4)))),
+        ]
+        val expected = [6, 6, 10]
+        for index in 0..3:
+            val result = run_print_body(block_no_tail([
+                s(HirStmtKind.Expr(expect_to_equal(cases[index], int_lit(expected[index])))),
+                s(HirStmtKind.Expr(expect_to_equal(int_lit(42), int_lit(42)))),
+            ]), [nested_sum_helper()])
+            expect_vm_print_log(result, "")
+            val records = read_records(result.arena, result.log_cap, result.record_count)
+            assert_equal(records.len(), 2)
+            assert_equal(records[0].passed, 1)
+            assert_equal(records[0].value, expected[index])
+            assert_equal(records[1].passed, 1)
+            assert_equal(records[1].value, 42)
+
+    it "preserves arguments across transitive calls and evaluates side effects once in source order":
+        step("An indirect nested sum cannot clobber an outer argument; marker output remains 123")
+        val marker_sym = SymbolId(id: 2003)
+        val marker_value = HirExpr(kind: HirExprKind.Var(marker_sym), has_type_: true,
+            type_: ty(), span: Span.empty())
+        val marker = SvmgHelperFn(name: "mark_arg", params: [param(marker_sym, "value")],
+            body: block_with_tail([
+                s(HirStmtKind.Expr(call(named_var(SymbolId(id: 2004), "print"), [marker_value]))),
+            ], marker_value))
+        val a = SymbolId(id: 2005)
+        val b = SymbolId(id: 2006)
+        val via = SvmgHelperFn(name: "via_sum", params: [param(a, "a"), param(b, "b")],
+            body: block_with_tail([], nested_sum(var_(a), var_(b))))
+        val mark_name = named_var(SymbolId(id: 2007), "mark_arg")
+        val actual = nested_sum(call(mark_name, [int_lit(1)]),
+            call(named_var(SymbolId(id: 2008), "via_sum"), [
+                call(mark_name, [int_lit(2)]), call(mark_name, [int_lit(3)])]))
+        val result = run_print_body(block_no_tail([
+            s(HirStmtKind.Expr(expect_to_equal(actual, int_lit(6)))),
+            s(HirStmtKind.Expr(expect_to_equal(int_lit(42), int_lit(42)))),
+        ]), [nested_sum_helper(), marker, via])
+        expect_vm_print_log(result, "123")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 2)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 6)
+        assert_equal(records[1].passed, 1)
+        assert_equal(records[1].value, 42)
+
+describe "SVM-G helper return stack contract":
+    it "rejects helper tails that produce no operand word":
+        step("A present print or loop tail cannot satisfy a helper return slot")
+        val tails = [
+            call(named_var(SymbolId(id: 2010), "print"), [string_lit("x")]),
+            e(HirExprKind.For(SymbolId(id: 2011),
+                e(HirExprKind.Range(int_lit(0), int_lit(1), false, None)), block_no_tail([]), None)),
+            e(HirExprKind.While(binop(HirBinOp.Lt, int_lit(1), int_lit(0)), block_no_tail([]), None)),
+            expect_to_equal(int_lit(1), int_lit(1)),
+        ]
+        for tail in tails:
+            val helper = SvmgHelperFn(name: "zero_word_return", params: [], body: block_with_tail([], tail))
+            val prog = lower_svmg_program(block_no_tail([
+                s(HirStmtKind.Expr(call(named_var(SymbolId(id: 2012), "zero_word_return"), []))),
+            ]), [helper], 1000)
+            assert_false(prog.ok)
+            assert_contains(prog.error, "requires a tail value")
+
+    it "preserves nested conditional helper return values and side effects":
+        step("Each valid helper return path leaves one word for its caller")
+        for choice in [0, 1]:
+            val inner = e(HirExprKind.If(
+                binop(HirBinOp.Eq, int_lit(1), int_lit(0)),
+                block_with_tail([], int_lit(99)), block_with_tail([], int_lit(6))))
+            val tail = e(HirExprKind.IfChain([
+                HirIfArm(binop(HirBinOp.Eq, int_lit(choice), int_lit(0)),
+                    block_with_tail([], inner), Span.empty()),
+            ], block_with_tail([], int_lit(7))))
+            val helper = SvmgHelperFn(name: "conditional_return", params: [], body: block_with_tail([
+                s(HirStmtKind.Expr(call(named_var(SymbolId(id: 2013), "print"), [string_lit("h")]))),
+            ], tail))
+            val actual = nested_sum(
+                call(named_var(SymbolId(id: 2014), "conditional_return"), []), int_lit(1))
+            val result = run_print_body(block_no_tail([
+                s(HirStmtKind.Expr(expect_to_equal(actual, int_lit(7 + choice)))),
+            ]), [nested_sum_helper(), helper])
+            expect_vm_print_log(result, "h")
+            val records = read_records(result.arena, result.log_cap, result.record_count)
+            assert_equal(records.len(), 1)
+            assert_equal(records[0].passed, 1)
+            assert_equal(records[0].value, 7 + choice)
+
+describe "SVM-G positive range step overflow termination":
+    it "evaluates a helper step once when the increment overflows":
+        step("A dynamic positive step preserves its side effect while terminating the range")
+        val helper = SvmgHelperFn(name: "range_step", params: [], body: block_with_tail([
+            s(HirStmtKind.Expr(call(named_var(SymbolId(id: 2024), "print"), [string_lit("s")]))),
+        ], int_lit(2)))
+        val index = SymbolId(id: 2025)
+        val count = SymbolId(id: 2026)
+        val loop = e(HirExprKind.For(index,
+            e(HirExprKind.Range(int_lit(2147483646), int_lit(2147483647), true,
+                call(named_var(SymbolId(id: 2027), "range_step"), []))),
+            block_no_tail([assign(var_(count), HirAssignOp.Add, int_lit(1))]), None))
+        val result = run_print_body(block_no_tail([
+            s(HirStmtKind.Let(count, ty(), int_lit(0))),
+            s(HirStmtKind.Expr(loop)),
+            s(HirStmtKind.Expr(expect_to_equal(var_(count), int_lit(1)))),
+            s(HirStmtKind.Expr(expect_to_equal(int_lit(42), int_lit(42)))),
+        ]), [helper])
+        expect_vm_print_log(result, "s")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 2)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 1)
+        assert_equal(records[1].passed, 1)
+        assert_equal(records[1].value, 42)
+
+    it "finishes an inclusive singleton at the maximum signed integer":
+        step("The post-body increment must not wrap the singleton range into another iteration")
+        val index = SymbolId(id: 2020)
+        val count = SymbolId(id: 2021)
+        val loop = e(HirExprKind.For(index,
+            e(HirExprKind.Range(int_lit(2147483647), int_lit(2147483647), true, None)),
+            block_no_tail([assign(var_(count), HirAssignOp.Add, int_lit(1))]), None))
+        val result = run_print_body(block_no_tail([
+            s(HirStmtKind.Let(count, ty(), int_lit(0))),
+            s(HirStmtKind.Expr(loop)),
+            s(HirStmtKind.Expr(expect_to_equal(var_(count), int_lit(1)))),
+            s(HirStmtKind.Expr(expect_to_equal(int_lit(42), int_lit(42)))),
+        ]), [])
+        expect_vm_print_log(result, "")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 2)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 1)
+        assert_equal(records[1].passed, 1)
+        assert_equal(records[1].value, 42)
+
+    it "finishes positive steps that overflow or ordinarily overshoot the bound":
+        step("Inclusive and exclusive ranges terminate without requiring a counter equal to the bound")
+        for inclusive in [false, true]:
+            for near_max in [false, true]:
+                val start = if near_max: 2147483646 else: 6
+                val end = if near_max: 2147483647 else: 7
+                val index = SymbolId(id: 2022)
+                val count = SymbolId(id: 2023)
+                val loop = e(HirExprKind.For(index,
+                    e(HirExprKind.Range(int_lit(start), int_lit(end), inclusive, int_lit(2))),
+                    block_no_tail([assign(var_(count), HirAssignOp.Add, int_lit(1))]), None))
+                val result = run_print_body(block_no_tail([
+                    s(HirStmtKind.Let(count, ty(), int_lit(0))),
+                    s(HirStmtKind.Expr(loop)),
+                    s(HirStmtKind.Expr(expect_to_equal(var_(count), int_lit(1)))),
+                    s(HirStmtKind.Expr(expect_to_equal(int_lit(42), int_lit(42)))),
+                ]), [])
+                expect_vm_print_log(result, "")
+                val records = read_records(result.arena, result.log_cap, result.record_count)
+                assert_equal(records.len(), 2)
+                assert_equal(records[0].passed, 1)
+                assert_equal(records[0].value, 1)
+                assert_equal(records[1].passed, 1)
+                assert_equal(records[1].value, 42)

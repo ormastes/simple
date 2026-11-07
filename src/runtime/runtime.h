@@ -696,6 +696,10 @@ int8_t   rt_array_clear(SplArray* array);
  * Returns count copied, -1 on out-of-bounds/invalid handle, 0 for count<=0. */
 int64_t  rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
                              int64_t src_off, int64_t count);
+/* Bulk in-place VOLATILE fill: dst[dst_off..dst_off+count] = value, then a
+ * full fence. Twin of Array.fill_span; same contract shape as write_span. */
+int64_t  rt_array_fill_span(SplArray* dst, int64_t dst_off, int64_t count,
+                            int64_t value);
 int8_t   rt_array_push_i64_raw(SplArray* array, int64_t value);
 int64_t  spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value,
                                     int64_t nargs);
@@ -910,6 +914,7 @@ int64_t  rt_native_neq(int64_t left, int64_t right);
 int64_t  rt_native_cmp(int64_t left, int64_t right);
 /* OrderedMap key comparison: 2 means unsupported erased key representation. */
 int64_t  spl_ordered_key_cmp(int64_t left, int64_t right);
+int64_t  spl_erased_key_hash(int64_t value);
 int64_t  spl_collection_capture_begin(int64_t target);
 int64_t  spl_collection_capture_note_size(int64_t site, int64_t target, int64_t size);
 int64_t  spl_collection_capture_note_lookup(int64_t site, int64_t target, int64_t found);
@@ -1318,6 +1323,14 @@ int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_
 #ifdef _WIN32
 /* Core-C PID/handle ownership shared with rt_process_wait. */
 int64_t  rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count);
+/* Native child-env v1: mode 0 overlays a copied parent environment; mode 1 is
+ * exact replacement. The four-word capture result is borrowed per-thread:
+ * text handles, untagged exit status, authoritative flags (timeout/output/error).
+ * Ordinary capture/async lifetime only: no ProcessOwnedV4 proof is implied. */
+int64_t* rt_process_run_bounded_environment_tuple_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,SplArray* environment,int64_t mode,int64_t timeout_ms,int64_t max_output_bytes);
+int64_t rt_process_spawn_async_environment_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,SplArray* environment,int64_t mode);
 #endif
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
 /* Spawn the installed MCP wrapper with inherited stdio; result is waitable. */
@@ -1601,6 +1614,9 @@ void     rt_bdd_describe_start_rv(int64_t name_rv);
 void     rt_bdd_describe_end(void);
 void     rt_bdd_it_start_rv(int64_t name_rv);
 void     rt_bdd_it_end(int64_t passed);
+void     rt_bdd_record_result(int64_t passed);
+int64_t  rt_bdd_executed_total(void);
+int64_t  rt_bdd_failed_total(void);
 int64_t  rt_bdd_has_failure(void);
 void     rt_bdd_note_skip(void);
 void     rt_bdd_expect_fail(int64_t msg_ptr, int64_t msg_len);

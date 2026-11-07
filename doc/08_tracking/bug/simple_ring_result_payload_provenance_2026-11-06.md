@@ -102,3 +102,110 @@ redeployed Stage 2 compiler builds `simple_ring.spl` without them.
 - Next step: in a free probe slot, run the stage2 build of `simple_ring.spl` with the `cancel` workaround
   reverted and `SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1`, and log which branch the `Err` arm takes. Then write the
   failing spec for that branch.
+
+## Defect 2: empty-owner branch fixed (2026-11-07, lane p1-ring)
+- Stage 2 probe NOT run: no current Stage 2 binary exists (`build/bootstrap/stage2/.../simple.exe.rejected`
+  only), and a cold Stage 2 build does not fit the lane budget (41.6 GB free, 24 GB must stay free).
+- Seed repro of the lead, now `result_payload_provenance_spec` case 4: a `Result<(), SlotErr>` subject
+  whose owner came from a join with an unknown arm (`if c: Ok(()) else: self.release(id)`).
+  `join_result_err_record_owners` (and `invalidate_`/conflicting `copy_`) store `""` but keep the key, so
+  `contains` made the bind arm take `exact_err_record`. That branch raised "Result Err record has no
+  unique provider layout snapshot", never remembered a HIR type for the binder, and so also failed
+  with the exact Stage 2 text `payload type mismatch at 0; function=cancel`. Red before, green after.
+- Fix (`switch_operators_calls.spl`): `exact_err_record` now needs a non-empty owner. The only exception is
+  a subject with no declared payload type, which keeps the fail-closed check. An empty owner with a
+  declared `Result` binds from the declaration (and remembers its HIR type).
+- Case 3 (exact provider record, non-empty owner) passes before and after. That shows the
+  non-empty `exact_err_record` path types the binder correctly on the seed.
+- Still open: whether Stage 2's `cancel` reaches the empty-owner branch, or has `effective_payload_type`
+  nil (SimpleRingError is an enum, so a provider owner should never be registered for it). Keep the
+  `cancel` workaround until a redeployed Stage 2 builds `simple_ring.spl` without it.
+
+## Original failure: fresh reproduction lane (2026-11-07)
+
+Status: original cause unresolved; diagnostic instrumentation and regression
+fixtures authored, execution pending. The adjacent enum/shared-record repair
+and empty-owner fallback are not proof of the historical cause.
+
+The original producer was the run-10 self-hosted aarch64 Linux compiler,
+reported hash prefix `43f9a6fc68ac232f`. Its full producer/source/runtime
+receipt and raw defect-2 trace have not been recovered locally. The linked
+trait-receiver report names
+`build/bootstrap-opus-10/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/logs/compiler_cli_build.log:89052-89098`;
+those lines identify the trait failure, **not** an established location of
+this Result Err trace. That artifact directory is absent from the inspected
+local Windows worktrees.
+
+### Correction to the old trace interpretation
+
+The `mir-evidence` trace executes only after
+`if not maybe_actual_mir.?: return false`. Reaching it establishes that the
+presence check succeeded. In the old interpolation,
+`mir_present={maybe_actual_mir.?}` uses value-position unwrap syntax, so it
+formats the `MirType` payload rather than an explicit Boolean predicate.
+The printed `<invalid-heap>` does not independently establish a missing or
+corrupt MIR local. The missing remembered HIR type remains an observed
+boundary; the cause still requires a controlled reproduction.
+
+The isolated diagnostic source changes print scalar MIR-kind information
+and `mir_present=true` after the successful guard. An opt-in
+`[result-err-bind]` record now reports the subject, binding, raw and bound
+LocalIds, selected exact-record/declared/unknown route, explicit Boolean type
+presence, and scalar HIR/MIR kinds. It uses the existing
+`SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1` gate and does not lower values or write
+metadata again. The extra registry reads are diagnostic-only; the route probe
+is restricted to Result Err binders. A producer rebuilt from these changes is
+needed to execute the new diagnostics; an older executable does not acquire
+them by compiling a newer fixture.
+
+### Prepared reproduction and prevention inventory
+
+The private lane starts from release
+`98669e12655ab2be54aec09acc118aeb43ee8ff0` in
+`D:/dev/simple-result-err-rootcause-20261107`. Its fixtures under
+`test/fixtures/compiler/result_err_generic_method_original/` are:
+
+| Fixture | Purpose |
+| --- | --- |
+| `main.spl` | Minimal original generic method shape; no foreign record or typed Err alias |
+| `typed_alias_control.spl` | Same shape with the historical typed-alias workaround, diagnostic control only |
+| `free_function_control.spl` | Corresponding free-function calls without a typed Err alias |
+| `nested_match.spl` | Result match, slot-state match, then annotated method Result Err reconstruction |
+
+Each standalone candidate asserts two distinct negative Err codes and the Ok
+branch before printing its exact success marker. Generic controls also check
+their source field; the nested case checks outer rejection and the alternate
+slot state. The existing ForeignReceipt fixture remains a separate
+coexistence control.
+
+`test/01_unit/compiler/50.mir/result_err_generic_original_binder_spec.spl`
+loads these actual fixtures, lowers their parsed HIR/MIR, then checks the
+cancel function's bound error local retains `CancelError`, its runtime enum
+marker, and exactly one MIR local declaration, without a record-owner entry.
+Function/binding counts prevent a missing traversal from passing. This is
+metadata coverage, not a substitute for native execution.
+
+For the actual `simple_ring` replay, remove only the cancel arm's typed
+`rejected` alias and pass `error` directly to `CancelRejected`. Keep the
+`take_completion` workaround to isolate defect 2. No production workaround
+has been removed by this preparation.
+
+### Required evidence before an original-cause fix claim
+
+Record the complete producer hash, producer source revision, target, backend,
+linked runtime/provider and isolated cache identity for every attempt. Use
+`SIMPLE_NO_STUB_FALLBACK=1` where supported. Retain compile/run exit codes and
+complete logs, validate real Err/Ok values, and collect the binder route and
+scalar metadata trace. Cover both native backends when available.
+
+All-green current fixtures mean "not reproduced on this producer" unless a
+controlled affected-producer/source failure and repaired differential are
+also retained. The actual `simple_ring` cancel-only replay is a separate
+acceptance criterion. Neither source inspection nor the adjacent fixes close
+the original report.
+
+The sole bootstrap owner reports no admitted self-hosted runtime or Hello
+receipt yet for its active immutable source
+`7ffb05cc9abdbf6233d87ae5b3b5449a13febebf`. No Rust seed, rejected producer,
+Simple test, native compile or executable was run in this fresh lane.
+Runtime reproduction/fix cycles used: **0 of 6**. Qualification remains pending.

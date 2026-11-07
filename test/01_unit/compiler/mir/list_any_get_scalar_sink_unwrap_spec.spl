@@ -1,0 +1,74 @@
+"""
+Regression: bug native_list_any_get_i64_sink_returns_option_handle_2026-11-07.
+
+`fn f(w: list, i: i64) -> i64: w.get(i)` -- `list` is `Array(Any)`, so the
+native array `get` lowering (lower_array_first_or_last) builds an
+`Optional(Any)` handle. The scalar sinks (`-> i64` implicit tail, explicit
+`return`, `val y: i64 = ...`) only unwrapped Optionals whose inner type is a
+plain scalar, so the Option HANDLE pointer reached the i64 slot: the Stage 2
+native binary printed 200634408607585 instead of 4. The `[i64]` receiver was
+already correct (Optional(i64) is unwrapped through rt_unwrap_or_self).
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "list_get.spl", "list_get.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("list_get.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn count_of(hay: text, needle: text) -> i64:
+    var n = 0
+    var i = 0
+    while i + needle.len() <= hay.len():
+        if hay.substring(i, i + needle.len()) == needle:
+            n = n + 1
+            i = i + needle.len()
+        else:
+            i = i + 1
+    n
+
+val SRC = (
+    "fn tail_list(w: list, i: i64) -> i64:\n    val x = w.get(i)\n    x\n\n" +
+    "fn ret_list(w: list, i: i64) -> i64:\n    return w.get(i)\n\n" +
+    "fn bind_list(w: list, i: i64) -> i64:\n    val y: i64 = w.get(i)\n    y\n\n" +
+    "fn tail_typed(w: [i64], i: i64) -> i64:\n    val x = w.get(i)\n    x\n\n" +
+    "fn opt_list(w: list, i: i64) -> bool:\n    w.get(i).?\n"
+)
+
+describe "list (Array(Any)) get into an i64 sink unwraps the Option handle":
+    it "unwraps at the implicit tail, explicit return and annotated binding":
+        val fns = lower_module_json(SRC)
+        for name in ["tail_list", "ret_list", "bind_list"]:
+            val j = fns[name] ?? ""
+            expect(j.len() > 0).to_equal(true)
+            expect(j).to_contain("rt_array_get")
+            expect(j).to_contain("rt_unwrap_or_self")
+            # the payload is decoded once (in the producer), never again at the sink
+            expect(count_of(j, "rt_value_as_int_wide")).to_equal(1)
+
+    it "keeps the already-correct [i64] receiver unwrapped":
+        val fns = lower_module_json(SRC)
+        val j = fns["tail_typed"] ?? ""
+        expect(j).to_contain("rt_unwrap_or_self")
+
+    it "does not unwrap a presence test on the same Optional(Any)":
+        val fns = lower_module_json(SRC)
+        val j = fns["opt_list"] ?? ""
+        expect(j.len() > 0).to_equal(true)
+        expect(j.contains("rt_unwrap_or_self")).to_equal(false)

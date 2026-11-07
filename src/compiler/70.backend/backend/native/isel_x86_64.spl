@@ -237,8 +237,8 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
     # Frame size placeholder - will be patched after we know total frame size
     prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(X86_OP_SUB_IMM, [op_phys(X86_RSP), op_imm(0)]))
 
-    # Move arguments from ABI registers to virtual registers. Under the
-    # frame-vector ABI a vector result takes a hidden pointer in the first
+    # Move arguments from ABI registers or the incoming stack to virtual
+    # registers. Under the frame-vector ABI a vector result takes a hidden pointer in the first
     # slot, and each vector argument arrives as a pointer whose value is
     # copied into the callee frame slot here.
     val abi_shift = if avx512_frame.return_shape != "": 1 else: 0
@@ -246,7 +246,6 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
         val saved = x86_avx512_save_result_pointer_insts(local_ctx, avx512_frame, X86_ARG_REGS[0])
         for mi in saved.insts:
             prologue_block = mach_block_add_inst(prologue_block, mi)
-    var arg_idx = 0
     for local in func.locals:
         match local.kind:
             case Arg(index):
@@ -260,7 +259,13 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
                             prologue_block = mach_block_add_inst(prologue_block, mi)
                     else:
                         prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(X86_OP_MOV_REG_REG, [local_vreg_op(local.id.id), op_phys(arg_reg)]))
-                arg_idx = arg_idx + 1
+                else:
+                    # RBP points at the saved frame pointer; the return address
+                    # occupies the next word, then argument seven starts at +16.
+                    val incoming = op_mem(physical_reg(X86_RBP), 16 + (abi_index - X86_ARG_REG_COUNT) * 8)
+                    # Frame-vector overflow remains subject to its planner's
+                    # admission policy; use the ABI index, including its shift.
+                    prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(X86_OP_MOV_REG_MEM, [local_vreg_op(local.id.id), incoming]))
             case _: ()
 
     mach_func = mach_func_add_block(mach_func, prologue_block)
@@ -1133,14 +1138,22 @@ fn isel_call_with_frame(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, a
             insts.push(ai)
         arg_values.push(arg_low.result)
 
-    # Lower arguments into ABI registers
+    # The frame is 16-byte aligned here. Put any padding above the stack
+    # arguments, then push them right to left so argument seven is at RSP.
+    val stack_args = if arg_values.len() > X86_ARG_REG_COUNT: arg_values.len() - X86_ARG_REG_COUNT else: 0
+    val stack_padding = if stack_args % 2 == 1: 8 else: 0
+    if stack_padding > 0:
+        insts.push(new_mach_inst(X86_OP_SUB_IMM, [op_phys(X86_RSP), op_imm(stack_padding)]))
+    var stack_index = arg_values.len() - 1
+    while stack_index >= X86_ARG_REG_COUNT:
+        insts.push(new_mach_inst(X86_OP_PUSH, [arg_values[stack_index]]))
+        stack_index = stack_index - 1
+
+    # Lower the remaining arguments into ABI registers.
     for i in 0..arg_values.len():
         if i < X86_ARG_REG_COUNT:
             val arg_reg = X86_ARG_REGS[i]
             insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(arg_reg), arg_values[i]]))
-        else:
-            # Stack argument
-            insts.push(new_mach_inst(X86_OP_PUSH, [arg_values[i]]))
 
     # Emit call
     match func_op.kind:
@@ -1179,10 +1192,9 @@ fn isel_call_with_frame(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, a
             if not vector_dest: insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [local_vreg_op(d.id), op_phys(X86_RAX)]))
         case None: ()
 
-    # Clean up stack args
-    val stack_args = if arg_values.len() > X86_ARG_REG_COUNT: arg_values.len() - X86_ARG_REG_COUNT else: 0
+    # Restore both the arguments and the padding after the call.
     if stack_args > 0:
-        insts.push(new_mach_inst(X86_OP_ADD_IMM, [op_phys(X86_RSP), op_imm(stack_args * 8)]))
+        insts.push(new_mach_inst(X86_OP_ADD_IMM, [op_phys(X86_RSP), op_imm(stack_args * 8 + stack_padding)]))
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 

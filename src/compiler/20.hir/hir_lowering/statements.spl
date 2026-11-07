@@ -1,6 +1,6 @@
 use compiler.hir.hir_lowering.concat_copy_v1.{hir_stmt_concat_copy_v1}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
-use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_const_type_settled}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_binding_index_element, hir_const_type_settled}
 # HIR Lowering - Statement Lowering
 #
 # This module handles lowering of statements from AST to HIR.
@@ -98,6 +98,19 @@ impl HirLowering:
         match source_kind:
             case HirExprKind.Try(operand):
                 return hir_binding_try_payload(self.binding_kind_type(operand.kind, span)) ?? unknown
+            # `xs[i]` is typed by the base's declared element type. Index
+            # lowering attaches one only when the lowered base is already
+            # typed; a parameter / module-global base is a bare symbol, so
+            # `val b = blks[i]` stayed untyped and `b.count + n` /
+            # `s.idx.has(k)` lost their owner (bootstrap run 15:
+            # similarity_grouping.spl:84, dynsmf_owned_v2.spl:749).
+            # A range index (`xs[a..b]`) is a sub-array, not an element:
+            # leave it unknown rather than settle a wrong element type.
+            case HirExprKind.Index(index_base, index_value):
+                match index_value.kind:
+                    case HirExprKind.Range(_, _, _, _): return unknown
+                    case _: ()
+                return hir_binding_index_element(self.binding_kind_type(index_base.kind, span)) ?? unknown
             # `e as T` is typed `T` (a trait-to-trait downcast yields `T?` only
             # under the `if val x = e as T` consumer, whose payload is `T`).
             # Untyped, `if val c = self.inner as Close` bound a unit slot
@@ -917,7 +930,9 @@ impl HirLowering:
             val vr_lowered_init = if vr_init.?:
                 self.lower_hir_expr(vr_init ?? sk_dummy)
             else:
-                HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)
+                # No initializer: is_uninit_marker tells this synthesized NilLit
+                # apart from a source-written `nil`; see interp_is_uninit_marker_init.
+                HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span, is_uninit_marker: true)
             val vr_hir_init = if self.attributed_factory_call_kind(vr_lowered_init.kind): self.retain_attributed_collection_type(vr_lowered_init, vr_hir_type) else: vr_lowered_init
             if not vr_has_annotation:
                 val inferred = self.binding_source_type(vr_hir_init, s.bind_optional_payload)
@@ -1081,7 +1096,8 @@ impl HirLowering:
                 val lowered_init = if val init_expr = init:
                     self.lower_hir_expr(init_expr)
                 else:
-                    HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)
+                    # No initializer: is_uninit_marker marks the synthesized NilLit (see above).
+                    HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span, is_uninit_marker: true)
                 val hir_init = if self.attributed_factory_call_kind(lowered_init.kind): self.retain_attributed_collection_type(lowered_init, hir_type) else: lowered_init
                 if not has_annotation:
                     val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)

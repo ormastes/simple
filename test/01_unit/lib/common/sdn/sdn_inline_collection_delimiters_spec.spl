@@ -1,0 +1,45 @@
+# Reject incomplete inline collections before removing their outer delimiters.
+use std.spec.*
+use std.common.sdn.parser.{parse, parse_with_spans_and_issues}
+
+fn collection_error(source: text) -> text:
+    match parse(source):
+        case Err(reason): reason
+        case Ok(_): "unexpected success"
+
+describe "SDN inline collection delimiter integrity":
+    it "rejects missing nested closers instead of truncating a number":
+        step("Parse a nested mapping missing its outer closer")
+        expect(collection_error(r"{spec: {maximumJournalEvents: 10000}")).to_equal("unterminated collection")
+        expect(collection_error(r"{spec: {maximumJournalEvents: 10000")).to_equal("unterminated collection")
+        expect(collection_error(r"[[10000]")).to_equal("unterminated collection")
+
+    it "rejects mismatched and extra closing delimiters":
+        step("Check both delimiter types and trailing input")
+        expect(collection_error(r"{spec: [10000}}")).to_equal("mismatched collection closer")
+        expect(collection_error(r"[10000]]")).to_equal("unexpected collection closer")
+        expect(collection_error(r"{value: 10000}suffix")).to_equal("text after collection")
+        expect(collection_error(r"[10000]suffix")).to_equal("text after collection")
+        expect(collection_error(r"[10000][2]")).to_equal("text after collection")
+        expect(collection_error(r"{value: 10000}{other: 2}")).to_equal("text after collection")
+
+    it "retains the complete nested integer through both public parse paths":
+        step("Parse an independently raw nested numeric document")
+        val source = r"{spec: {maximumJournalEvents: 10000}}"
+        val value = parse(source).unwrap().as_dict().unwrap()["spec"].as_dict().unwrap()["maximumJournalEvents"].as_i64().unwrap()
+        expect(value).to_equal(10000)
+        val located = parse_with_spans_and_issues(source).unwrap().0.as_dict().unwrap()["spec"].as_dict().unwrap()["maximumJournalEvents"].as_i64().unwrap()
+        expect(located).to_equal(10000)
+
+    it "ignores delimiters in quoted scalar values":
+        step("Keep quoted braces as data while validating the outer collection")
+        val source = "{text: \"}]\", value: 10000}"
+        val values = parse(source).unwrap().as_dict().unwrap()
+        expect(values["text"].as_str().unwrap()).to_equal("}]")
+        expect(values["value"].as_i64().unwrap()).to_equal(10000)
+
+    it "reports malformed input through the span and issue entrypoint":
+        step("Ensure metadata collection cannot turn a parse error into success")
+        match parse_with_spans_and_issues(r"{spec: {value: 10000}"):
+            case Err(reason): expect(reason).to_equal("unterminated collection")
+            case Ok(_): fail("malformed collection unexpectedly parsed")

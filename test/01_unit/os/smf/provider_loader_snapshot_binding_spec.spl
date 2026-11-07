@@ -8,9 +8,10 @@ use os.smf.provider_loader.{
     PROVIDER_ADMISSION_DIGEST_MISMATCH,
     ProviderAdmissionRequestV1,
     provider_artifact_digest_v1,
+    provider_snapshot_content_id_v1,
     provider_stage_artifact_snapshot_v1
 }
-use std.common.crypto.blake3.{blake3_hex}
+use std.common.crypto.blake3.{blake3_hash, blake3_hex}
 use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
@@ -62,8 +63,24 @@ describe "provider snapshot binding (swap-after-hash TOCTOU)":
             request_for(path, provider_artifact_digest_v1(genuine)), SNAP_DIR)
         expect(staged.status).to_equal(PROVIDER_ADMISSION_OK)
         expect(staged.load_path == path).to_be(false)
-        expect(staged.load_path.contains(blake3_hex(genuine))).to_be(true)
+        expect(staged.load_path.contains(blake3_hex(blake3_hash(genuine)))).to_be(true)
         expect(same_bytes(rt_file_read_bytes(staged.load_path) ?? [], genuine)).to_be(true)
+
+    it "names the snapshot by a 64-char digest regardless of artifact size":
+        step("a provider-sized artifact stages under a short, digest-named leaf")
+        var big: [u8] = []
+        var i = 0
+        while i < 4096:
+            big.push((i % 251) as u8)
+            i = i + 1
+        expect(big.len()).to_equal(4096)
+        val path = write_artifact("big.so", big)
+        val staged = provider_stage_artifact_snapshot_v1(
+            request_for(path, provider_artifact_digest_v1(big)), SNAP_DIR)
+        expect(staged.status).to_equal(PROVIDER_ADMISSION_OK)
+        expect(provider_snapshot_content_id_v1(big).len()).to_equal(64)
+        expect(staged.load_path).to_equal(SNAP_DIR + "/" + provider_snapshot_content_id_v1(big) + ".so")
+        expect(same_bytes(rt_file_read_bytes(staged.load_path) ?? [], big)).to_be(true)
 
     it "keeps loading the hashed bytes when the declared path is swapped after hashing":
         step("attacker swaps declared path after admission hashed it")
@@ -91,7 +108,7 @@ describe "provider snapshot binding (swap-after-hash TOCTOU)":
         step("planted snapshot is replaced by the hashed bytes")
         val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-plant")
         rt_dir_create(SNAP_DIR, true)
-        file_write_bytes_tagged_native(SNAP_DIR + "/" + blake3_hex(genuine) + ".so",
+        file_write_bytes_tagged_native(SNAP_DIR + "/" + blake3_hex(blake3_hash(genuine)) + ".so",
             bytes_of("PLANTED-EVIL-SNAPSHOT"))
         val path = write_artifact("plant.so", genuine)
         val staged = provider_stage_artifact_snapshot_v1(

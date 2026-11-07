@@ -1,31 +1,51 @@
-# native: integer constant cannot define void in host_facade _checked join
-
-- **Filed:** 2026-11-07
-- **Severity:** P1
-- **Status:** OPEN
-- **Class link:** untyped_optional_arm_join_typed_as_i64_2026-11-06 (fix #7329 optional_join_word_slot does not cover this shape)
+# native_const_type_void_checked_join_host_facade_2026-11-07 (P1, open)
 
 ## Symptom
-
-On stage3 s3_fable57s (which carries #7329), native-build of
-`lib.nogc_async_mut.sosix.host_facade` fails with
+Stage3 `s3_fable57s` native-build of batch q0023 (s4e sweep) fails 20x with
 `E-BACKEND-LLVM-CONST-TYPE: integer constant cannot define void` in
-`sosix_spawn_checked` and `sosix_run_bounded_checked` (10 sites each).
+`lib.nogc_async_mut.sosix.host_facade` — `sosix_spawn_checked` (10) and
+`sosix_run_bounded_checked` (10). Log: `C:/dev/p3new/s4/out/s4e_q/q0023/native-build.log.err`.
 
-Log: `C:/dev/p3new/s4/out/s4e_q/q0023/native-build.log.err` (batch q0023 of the s4e sweep).
+## Investigation (2026-11-07)
+- Spec `test/01_unit/compiler/50.mir/native_const_type_void_checked_join_host_facade_spec.spl`
+  lowers 10 reductions of both functions (typed `match` unwrap with `return Err(e)`,
+  unit `?`, `?` on `Result<text?, E>`, `if val p = found: r = p` / `else: return Err|Ok(ctor)`,
+  both full bodies with module-local helpers declared before and after) and counts
+  Const/Copy defs into Unit-typed MIR locals (the #7329 harness metric).
+- Result on origin/release/1.0.0 (seed-interpreted MIR lowering): **10/10 green, 0 void defs.**
+  The shape does not reproduce in the MIR lowering logic at origin.
+- The stage3 base `C:/dev/wt/p3-envpol2` (HEAD 25fede3cb71 + working-tree folds) does not
+  contain `b961e59c064` (dominating if-result default def) or `28cd60b88ea` (#7329) as commits;
+  its `lower_if`/`lower_if_chain` merge paths otherwise match origin for this shape.
 
-## Analysis
+## Root cause
+Not yet located. Remaining hypotheses: (1) a stage3 native miscompile of the lowering itself
+(the same source lowers cleanly when interpreted), or (2) a post-lowering MIR pass / backend
+local-type view that the harness does not cover. Native MIR dump of host_facade from s3 is the
+next step (blocked this session: C: had 2.4 GB free, below the 8 GB probe budget).
 
-Both functions are `_checked` wrappers that join Result/Option arms. The join slot
-is typed void while an integer constant is defined into it, i.e. a join shape that
-`optional_join_word_slot` (#7329) does not cover.
+## Verification
+Prevention spec green on origin (10/10). Native confirmation pending.
 
-## Repro
+## Additional reproduction (2026-11-07, run-15 Stage 2 on aarch64)
+The bootstrap run-15 Stage 2 binary
+(`/home/yoon/dev/simple-bootstrap/build/bootstrap-opus-15/stage2/aarch64-unknown-linux-gnu/simple`,
+`SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 native-build`) fails the same way on a non-generic
+four-line function, so the shape is not specific to `host_facade`:
 
-Compile host_facade's closure natively (batch q0023), or a minimal `_checked` fixture
-(Result/Option join returning an integer constant) to be written by the fixer.
+```simple
+fn plain_flag(xs: [i64]) -> bool:
+    var found = false
+    for i in 0..xs.len():
+        if xs[i] == 2:
+            found = true
+    found
+```
 
-## Acceptance
-
-Reproducing fixture fails before fix; host_facade compiles natively; sibling `_checked`
-join shapes covered by a regression fixture.
+`E-BACKEND-LLVM-CONST-TYPE: integer constant cannot define void ... function=...plain_flag`.
+Every probe with an else-less assigning `if` inside a loop body hit it (3 of 3); a
+loop-free probe in the same file compiled.
+This supports hypothesis (1): the seed-built Stage 2 miscompiles the lowering of an
+else-less `if` statement. It also blocks native runtime verification of any
+Stage-2-built probe that uses that shape (found while verifying the erased generic
+`==`/`.hash()` lowering for adaptive_map/map/hash).

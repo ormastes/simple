@@ -87,3 +87,31 @@ Exact identities, fixture hashes, rows and logs remain under
 probe receipts are preserved with `direct-`, `tuple-baseline-` and
 `typed-match-` prefixes. Luna reviewed the corrected production placement;
 range shell hygiene (17 fixtures), direct-env guards, and spec layout pass.
+
+## 2026-11-07 re-check on the phase-3 driver (lane w-runner)
+
+Producer: `C:/dev/p3new/s3new/s3_fable57s.exe` (stage3 bootstrap CLI) via the
+gated harness `C:/dev/p3new/s3sanity/run_case.ps1` (`--sources src/lib`,
+llvm-mingw UCRT, `x86_64-pc-windows-gnu`, llvm backend). Probe sources:
+`C:/dev/p3new/s3sanity/root/test/s3sanity/wrunner_tm{2,3,4}.spl`.
+
+| form | result |
+|---|---|
+| original `match wrap(c): case Ok((run, path)):` (arms return, `wrunner_tm2`) | COMPILE-FAIL `unsupported LLVM value conversion from i64 to void function=...check_ok value=%l1` |
+| original form, arms assign a `var` (`wrunner_tm3`) | COMPILE-FAIL, same message in `check_ok` |
+| workaround `val pair: (Run, text) = match ...` + typed `.0`/`.1` (`wrunner_tm4`) | native exe rc=0, `PASS typed_tuple` (exit 0 and 7, all fields intact) |
+
+So the defect still reproduces on phase 3, now loudly (the tuple-pattern
+payload local is lowered with a `void` type and the backend refuses the
+conversion) instead of silently corrupting fields. The two production
+consumers in `test_runner_execute.spl` use the workaround form, which compiles
+and runs correctly on phase 3, so the test runner is not affected while the
+workaround stays. Root repair belongs to MIR enum/tuple payload lowering
+(`50.mir/_MirLoweringExpr/switch_operators_calls.spl` tuple-pattern arm /
+`recover_result_tuple_payload`) and needs a stage3 rebuild to verify; it was
+not attempted in this lane (stage3 builds are owned elsewhere).
+
+Interpreter regression spec (original, typed, Err branch, and the similar
+`Option<(T, text)>` pattern): `test/01_unit/lib/test_runner/result_tuple_match_child_fields_spec.spl`
+— 4/4 pass on `bin/simple.exe`. Retirement criterion unchanged: the
+`wrunner_tm2`/`wrunner_tm3` shapes must build and pass natively.
