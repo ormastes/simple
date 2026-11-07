@@ -49,3 +49,11 @@ Bisect the `src/lib/nogc_sync_mut` growth to find which lanes added direct
 `rt_*` call sites, and route them through the provider surfaces the allowlist
 (`scripts/check/no_direct_rt_allowlist.txt`) already recognises. Do not
 regenerate the AC-9 baseline without reading that diff.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Re-measured: nogc_sync_mut 11088 (baseline 7974), nogc_async_mut_noalloc 399 (baseline 358). Owner decision: migrate (multi-thousand-site) or re-baseline. check-no-direct-rt.shs remains the enforced ratchet.
+
+
+Round 15 update: noalloc +41 were baremetal HAL provider files, now allowlisted (doc/08_tracking/rt_boundary/noalloc_baremetal_hal_providers_2026-11-07.md). nogc_sync_mut: 240 non-allowlisted growing files listed in PR #7456 comment as follow-up.

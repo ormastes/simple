@@ -267,3 +267,11 @@ Other findings, NOT fixed here:
 Status: premise (garbage ISA readback) CONFIRMED on the seed `run` path and
 fixed at the Simple wrapper layer; seed `compile_interp_call` boxing gap stays
 open. Native seed-built red/green still not obtained.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Prevention: test/01_unit/lib/nogc_sync_mut/sffi/codegen_text_expansion_prevention_spec.spl (no inline rt_string_data/len inside a call; @tag:phase3). Native confirmation still needs a seed-built native binary: verification-pending.
+
+
+Round 15 verdict update (coordinator cross-check): fixed on release in 2b67a60c222 (2026-11-06). The static prevention spec above stays.

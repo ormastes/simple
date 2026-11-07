@@ -1,0 +1,43 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: aggregate receiver provenance through dict/array iteration
+
+Bug a174_aggregate_receiver_provenance_2026_10_16. Iterating a Dict<text, Table>
+and then a Table's `[Row]` field must keep the record type of the loop variables
+without `val typed: Table = table` rebinding (workaround sites: database/core.spl
+validate, scv/integrity.spl, scv/compile_snapshot.spl). Native verification of the
+real sites: phase3 stage2 native-build of lib.nogc_sync_mut.database.core.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn mir_error_count(src: text) -> i64:
+    val file = "testdata/aggregate_receiver_spec.spl"
+    val parsed = parse_full_frontend(src, file, "aggregate_receiver_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    lowering.errors.len()
+
+val PRELUDE = "class Row:\n    cells: Dict<text, text>\n\nimpl Row:\n    fn get(key: text) -> text?:\n        self.cells.get(key)\n\nclass Table:\n    rows: [Row]\n\nclass Db:\n    tables: Dict<text, Table>\n\n"
+
+val DICT_THEN_ROWS = PRELUDE + "impl Db:\n    fn validate() -> [text]:\n        var errors: [text] = []\n        for (name, table) in self.tables:\n            for row in table.rows:\n                val valid_opt = row.get(\"valid\")\n                if val Some(v) = valid_opt:\n                    if v != \"true\":\n                        errors.push(name + \":\" + v)\n        errors\n"
+
+val OPTION_DB_THEN_TABLE = PRELUDE + "fn load() -> Db?:\n    nil\n\nfn rows_of(path: text) -> i64:\n    val db_opt = load()\n    val Some(db) = db_opt else:\n        return -1\n    val table_opt = db.tables.get(path)\n    val Some(table) = table_opt else:\n        return -2\n    var n = 0\n    for row in table.rows:\n        n = n + row.cells.len()\n    n\n"
+
+describe "aggregate receiver provenance":
+    it "keeps Table/Row types through for (k, v) in dict then v.rows":
+        expect(mir_error_count(DICT_THEN_ROWS)).to_equal(0)
+
+    it "keeps Db/Table types through Option binding then field and get":
+        expect(mir_error_count(OPTION_DB_THEN_TABLE)).to_equal(0)

@@ -144,3 +144,11 @@ untouched discriminator probe stays RED") could not be reproduced here. Use the
 sentinel-resolution oracle described above instead: it observes which *file* is
 loaded and does not depend on any validation the toolchain may or may not
 perform.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Ratchet gate scripts/check/check-tierless-std-js-imports.shs (common/js <= 1, tree total <= 297). Open owner decision: which tier gc_async_mut/js and nogc_async_mut/js should import from (rewriting changes the loaded module, JsValue.Symbol shape differs).
+
+
+Round 15 update: tier decision made (own tier first, common fallback); 156 imports rewritten in gc_async_mut and nogc_async_mut; ratchet check-tierless-std-js-imports.shs at 141 total, buffer_module the one tier-less exception.
