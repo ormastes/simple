@@ -2871,7 +2871,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(symbol_tier_of("rt_tls_wire_from_bytes"), RuntimeSymbolTier::Sys);
+        assert_eq!(symbol_tier_of("rt_tls_wire_from_bytes"), RuntimeSymbolTier::Core);
     }
 
     #[test]
