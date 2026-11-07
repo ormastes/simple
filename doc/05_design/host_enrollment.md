@@ -1,0 +1,11 @@
+# Signed enrollment detail design
+
+`host_enrollment_v1` owns the bounded canonical data boundary and delegates every signature, role, scope and lifetime check to the existing V2 authority verifier. `HostEnrollmentBindingV1` contains config_digest, policy_digest, native_machine_id, native_boot_id, provider_identity_digest and machine_parent. `HostEnrollmentCredentialV1` contains the original V2 operation and distinct signed grant/approval. Encoding is canonical SDN with version 1 and fixed kind tags; inner operation/signature frames retain their existing canonical formats. No remote clock or authorization boolean is decoded.
+
+`host_enrollment_claim_v1` is the finite effect owner. It decodes exact HostConfig bytes, requires a contained `journal` child selector, CPU-only configuration and the expected controller issuer, loads the installed pinned public policy, and performs authorization before the first mutation. The production entry uses positive native Unix milliseconds. Its explicitly local clock seam supports deterministic tests; it is not a serialized command parameter.
+
+The owner takes a bounded one-second native file lock at the installed parent, reloads policy and verifies authorization again. Serialization and entropy precede the final clock/scope/expiry check. It exclusively creates the native-machine claim, records a private child root, writes and reads back the five root objects, verifies the exact pending claim/nonce, and atomically publishes the enrolled record. One unlock follows every acquired-lock path. Existing or unknown records are never adopted, overwritten or removed. Errors after exclusive creation retain the claim and partial artifacts.
+
+The returned `HostEnrollmentClaimV1` provides root, claim_path, claim_digest, operation_id and binding_digest. These describe successful authorized publication under the caller's installed parent. They do not attest native observations, authenticate arbitrary path ownership, open a capacity journal, launch a provider or expose a service endpoint.
+
+Requirements: `doc/02_requirements/feature/host_enrollment.md`. Architecture: `doc/04_architecture/host_enrollment.md`. Executable inventory, untested failure paths and CPU-limited verification procedure: `doc/03_plan/sys_test/host_enrollment.md`. Status remains AWAITING_VERIFICATION.

@@ -1,6 +1,6 @@
 # Signed host enrollment binding
 
-Status: **NOT_RUN**. Authored manual, not generated execution evidence.
+Status: **AWAITING_VERIFICATION — NOT_RUN**. Authored manual, not generated execution evidence.
 
 Implementation: `src/lib/nogc_sync_mut/orchestration/host_enrollment_v1.spl`.
 Executable: `test/03_system/app/orchestrator/feature/host_enrollment_spec.spl`.
