@@ -15,11 +15,14 @@ impl MirLowering:
             self.optional_record_owners[local.id] = self.declared_struct_layout_key(shape)
 
     me remember_some_record_payload_owner(local: i64, payload_type: HirType):
-        # `Some(Record(..))` names its exact declaration. Record it under the
-        # same layout key the callable-return registrar uses, so a join of
-        # this arm with call arms of the same record keeps the owner and a
-        # different record still clears it. Generic or non-record payloads
-        # record nothing (mir_optional_record_some_literal_arm_owner_2026-11-07).
+        # `Some(Record(..))` names its exact declaration. Keep it under the
+        # same layout key the callable-return registrar uses as a join-only
+        # witness: it lets an arm agree with tracked call arms of the same
+        # record and a different record clears the owner, but it never
+        # establishes an owner by itself, so a match over Some literals and
+        # untracked sources keeps its previous route. Payloads with supplied
+        # type arguments or non-record payloads record nothing
+        # (mir_optional_record_some_literal_arm_owner_2026-11-07).
         match payload_type.kind:
             case HirTypeKind.Named(owner, type_args):
                 if type_args.len() != 0 or owner.id < 0 or not self.symbols.symbols.has(owner.id): return
@@ -30,7 +33,7 @@ impl MirLowering:
                     case SymbolKind.Struct: shape = self.composite_layout_key(declaration)
                     case _: ()
                 if shape != "":
-                    self.optional_record_owners[local] = self.declared_struct_layout_key(shape)
+                    self.optional_record_literal_owners[local] = self.declared_struct_layout_key(shape)
             case _: ()
 
     me copy_optional_record_owner(source: i64, destination: i64):
@@ -52,15 +55,20 @@ impl MirLowering:
         var any_known = false
         var all_known = true
         var owner = ""
+        var literal_owners: [text] = []
         for arm in arms:
             if self.optional_record_owners.contains(arm.id):
                 val candidate = self.optional_record_owners[arm.id]
                 if any_known and owner != candidate: all_known = false
                 if not any_known: owner = candidate
                 any_known = true
+            elif self.optional_record_literal_owners.contains(arm.id):
+                literal_owners.push(self.optional_record_literal_owners[arm.id])
             elif not self.nil_locals.contains(arm.id) and not self.option_none_locals.contains(arm.id):
                 all_known = false
         if any_known:
+            for literal_owner in literal_owners:
+                if literal_owner != owner: all_known = false
             self.optional_record_owners[destination] = if all_known: owner else: ""
 
     me checked_optional_record_type(local: i64, span: Span) -> HirType:

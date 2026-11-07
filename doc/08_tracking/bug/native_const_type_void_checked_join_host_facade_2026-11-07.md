@@ -49,3 +49,35 @@ This supports hypothesis (1): the seed-built Stage 2 miscompiles the lowering of
 else-less `if` statement. It also blocks native runtime verification of any
 Stage-2-built probe that uses that shape (found while verifying the erased generic
 `==`/`.hash()` lowering for adaptive_map/map/hash).
+
+## Native reproducer from run-15 Stage 2 (2026-11-07)
+
+A single-file user program reproduces the backend error on the frozen run-15
+Stage 2 binary (`/home/yoon/dev/simple-bootstrap/build/bootstrap-opus-15/stage2/aarch64-unknown-linux-gnu/simple`,
+`SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 <stage2> native-build main.spl`):
+
+```simple
+struct M:
+    matched: bool
+    count: i64
+
+fn m1(n: i64) -> Option<M>:
+    if n > 100: return None
+    Some(M(matched: n > 1, count: n))
+```
+
+`compile error: E-BACKEND-LLVM-CONST-TYPE: integer constant cannot define void;
+use an explicit MIR Cast for numeric conversion [module=main function=main.m1]`.
+Shape: an early `return <Enum value>` followed by a final enum value. Writing
+the body as `if n > 100: None else: Some(M(..))` compiles cleanly (MIR and
+backend), so the trigger is the early-return + tail combination, not the
+Option record itself.
+
+Run-15 compiler closure: `grep -rl -e "cannot define void" -e CONST-TYPE`
+over `bootstrap-opus-15/logs`, `stage2-compiler-tests/` and `stage3/` finds no
+hit. That is NOT evidence the closure is clean: the `compiler_cli_build` row
+stopped at `[mir-shard] outcome=fail ... link and artifact publication
+blocked` (2298 failed modules), so backend codegen never ran for the closure.
+Because the shape is common in compiler sources, expect it to surface once
+MIR admission passes; the Stage 3 host_facade failure above may be the same
+defect.
