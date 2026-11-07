@@ -37,6 +37,9 @@ constructs `HirLowering.with_filename` without frozen imported module surfaces.
 That route cannot faithfully reproduce this exact imported Function signature
 condition: unresolved callee identity is deliberately excluded by the rule.
 An unqualified CLI invocation with a missing warning is therefore not a passing
-regression. The full multi-module driver owns a diagnostic consumer, but a
-bounded supported external entrypoint and admitted full CLI still require
-qualification. External system reproduction remains OPEN / NOT_RUN.
+regression. The supported full-driver native-build route now has an authored
+bounded reproduction in
+`test/02_integration/compiler/hir/inferred_return_diagnostic_cli_spec.spl`.
+Its ordinary provider/facade positives require warning emission; adjacent
+explicit-return negatives require successful compilation without that warning.
+External system reproduction execution remains NOT_RUN pending an admitted CLI.

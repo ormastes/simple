@@ -140,3 +140,17 @@ Runtime and mutation execution remain NOT_RUN. The ordinary `simple check`
 path lacks the frozen import surfaces needed to reproduce this cross-module
 condition; external full-driver reproduction remains OPEN rather than treating
 a missing warning on that different route as success.
+
+
+### Supported external driver reproduction authored
+
+`test/02_integration/compiler/hir/inferred_return_diagnostic_cli_spec.spl`
+uses the actual `native-build` multi-module route with typecheck warnings
+enabled, pinned SIMPLE_BIN, four isolated fixture/cache/output directories,
+120-second/4-MiB child bounds and retained logs/status. Provider/facade omitted
+returns require exactly one missing-signature diagnostic; completed exit 0 or 1
+qualifies only warning emission, never successful compilation. Worker failure
+markers and abnormal child statuses cannot pass. Explicit Node negatives
+require successful compilation and no warning. Source path confirmed through
+`native_build_compile_with_collection_profile` -> `compiler_driver_run_compile`.
+No production changes. All four external examples remain NOT_RUN.
