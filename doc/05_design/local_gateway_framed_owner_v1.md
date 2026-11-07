@@ -1,8 +1,11 @@
 # Owned local gateway frames and byte handoff
 
-Status: implementation in progress; source and all new native/Simple scenarios
-are **NOT_RUN**. The prior finite Unix connection and ordinary-fork evidence
-does not qualify these new listener, framing or descriptor-transfer paths.
+Status: implementation in progress. The later native receiver/byte-owner fixture
+has one scoped PASS recorded in
+`doc/09_report/local_gateway_receiver_native_20261107/README.md`. Listener,
+distinct-UID sender, Simple ABI/SSpec and application integration remain
+**NOT_RUN/BLOCKED**. Prior finite Unix IO and ordinary-fork evidence does not
+qualify these new paths.
 
 The gateway extends `local_ipc_v1`'s existing generation registry. A listener
 owns its socket and retained no-follow parent directory. It never replaces an
