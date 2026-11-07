@@ -96,3 +96,24 @@ raw byte position using a byte-count-safe primitive instead of `len()`/
 - `test/01_unit/lib/nogc_async_mut/io/tls_common_wire_to_bytes_repro_spec.spl`
   (reproduction spec for the original, now-fixed defect; GREEN, 4/4).
 
+## 2026-11-07 implementation
+
+The confirmed boundary defect spans both directions. Native `rt_byte_char(0)`
+is a NUL-terminated C string and therefore represents an empty string, while
+the seed interpreter encoded bytes 128-255 as Unicode scalars. Consequently a
+single-character construction cannot own arbitrary wire bytes consistently.
+
+`bytes_to_wire` now validates and collects a complete `[u8]` buffer and crosses
+the counted `rt_bytes_to_text` ABI once. `wire_to_bytes` uses `text.to_bytes()`,
+which returns integer storage bytes rather than Unicode character codes.
+`encode_u8`/`encode_u16_be`/`encode_u24_be` route through the same owner.
+Coverage now includes all 256 byte values, embedded NUL, and raw sequences that
+also form valid UTF-8 (`C2 80` and `E2 82 AC`).
+
+Focused pure-Simple native verification parsed, lowered, and borrow-checked the
+standalone all-byte fixture, but the admitted Stage-1 compiler stopped in its
+LLVM backend with pre-existing `E-BACKEND-LLVM-CONST-TYPE` diagnostics. The
+SPipe spec could not be loaded from the intentionally sparse worktree because
+its broader `std.spec`/TLS dependency closure was absent. Release verification
+must run the expanded spec with a current admitted full-tree runtime.
+
