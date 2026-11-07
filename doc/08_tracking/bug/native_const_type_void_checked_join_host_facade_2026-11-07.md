@@ -1,4 +1,4 @@
-# native_const_type_void_checked_join_host_facade_2026-11-07 (P1, open)
+# native_const_type_void_checked_join_host_facade_2026-11-07 (P1, open -- root cause fixed; host_facade Stage 3 re-run pending)
 
 ## Symptom
 Stage3 `s3_fable57s` native-build of batch q0023 (s4e sweep) fails 20x with
@@ -81,3 +81,56 @@ blocked` (2298 failed modules), so backend codegen never ran for the closure.
 Because the shape is common in compiler sources, expect it to surface once
 MIR admission passes; the Stage 3 host_facade failure above may be the same
 defect.
+
+## Root cause (2026-11-07, located with a traced Stage 2)
+
+`src/compiler/50.mir/mir_lowering_stmts.spl` `lower_if_chain` bound
+`val chain_has_else = else_.?`. `.?` returns the `HirBlock?` itself, not a
+bool (syntax reference: "Existence Check (`.?`) -- Returns `T?`"). The
+`if chain_has_else:` result-type test treats the absent Option as false (the
+result temp is Unit), but the dominating-default guard
+`if chain_has_else and expected_type == nil:` (added by `b961e59c064`) read the
+absent Option's raw nil-sentinel word as true in the seed-compiled Stage 2. So
+every else-less `if` -- every `if c: return X` and every assigning
+`if` with no `else` -- got `Const 0` into its Unit result, and LLVM codegen
+rejected it ("integer constant cannot define void"). The seed-interpreted
+lowering evaluates the `and` by truthiness and stays clean, which is why the
+interpreted harnesses were green at both run-15's source (`dba24b97b4d`) and
+origin. `0ba2d79b542` (payloadless merge guard) did not help: the bad def is
+emitted at chain entry, not at the merge.
+
+Trace evidence (temporary probes, not committed), Stage 2 from origin
+`60f2b2c9dfe` on `fn ret1(c: bool) -> i64: if c: return 1 / 0`:
+`[zz-emit] UNIT-DEST dest=2 v=0` emitted before
+`[zz-ifjoin] site=chain-entry che=nil result=2 ... exp_nil=true`, then
+`E-BACKEND-LLVM-CONST-TYPE ... zzdest=2`.
+
+## Fix
+`val chain_has_else: bool = else_ != nil` (a real bool). It also fixes the
+same misread at the arm-copy guard `chain_has_else and not local_is_unit(..)`.
+No other untyped `val x = y.?` binding exists in `50.mir` / `70.backend`; the
+typed `val x: bool = y.?` sites in
+`_MirLoweringExpr/switch_operators_calls.spl` (~4947-4955, the
+`SIMPLE_ENUM_PAYLOAD_PATH_TRACE` diagnostic, incl. `effective_present` driving
+its printed `route`) are trace-only and listed under the follow-up below.
+
+## Native red/green (aarch64, `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 native-build`)
+- Red: frozen run-15 Stage 2 and a Stage 2 built from unmodified origin
+  `60f2b2c9dfe` both fail `full.spl` (plain_flag, ret1, ret_text, pick, elif
+  chain without else) and `opt.spl` (`if n > 100: return None` then
+  `Some(M(..))`) with E-BACKEND-LLVM-CONST-TYPE.
+- Green: Stage 2 built from the fix (seed `seed-try-target/release/simple`,
+  run-15 Stage 2 argv, `--threads 6`, 16G scope, 1617 compiled, 0 failed)
+  builds and runs them: `full` prints `true false 1 0 a b 1 0 10 20 0`,
+  `opt` prints `5 -1`; if/else shapes still print `1`.
+- Spec: `test/01_unit/compiler/mir/else_less_if_unit_merge_const_spec.spl`
+  (the reported shapes, with and without Unit attribution). It is green
+  interpreted before and after the fix: the defect needs the native lane, so
+  the native rebuild above is the gate.
+
+## Follow-up observed (not fixed here)
+`fn g(b: B?) -> bool: val h = b.?; h` returns `true` for `nil` both
+interpreted and native: a `T?` flows into a `bool` return with no presence
+conversion. Same `.?`-as-bool class; separate from this fix. The trace-only
+`val x: bool = y.?` bindings in `switch_operators_calls.spl` (~4947-4955) are
+in the same class.
