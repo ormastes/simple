@@ -1,0 +1,115 @@
+# Native observation owner only; no wire decoder, process control or capacity release.
+use std.common.string_core.str_len
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+@unsafe(reason: "capture pinned cgroup and namespace observation owner", capabilities: [ffi])
+extern fn rt_linux_container_containment_capture_v1(pid: i64, cgroup: text, binding: text) -> i64
+@unsafe(reason: "read bounded events from retained native containment identity", capabilities: [ffi])
+extern fn rt_linux_container_containment_observe_v1(token: i64, binding: text) -> text
+@unsafe(reason: "retire observation descriptors without controlling workload", capabilities: [ffi])
+extern fn rt_linux_container_containment_close_v1(token: i64, binding: text) -> i64
+
+# Members are private to this owner module. Copied metadata cannot recreate it.
+pub class LinuxContainerContainmentOwnerV1:
+    native_token: i64
+    binding_digest: text
+
+pub enum LinuxContainerContainmentPopulationV1:
+    Populated
+    EmptySnapshot
+
+pub struct LinuxContainerContainmentSnapshotV1:
+    capture_pid: i64
+    process_start_ticks: i64
+    cgroup_path: text
+    cgroup_mount_id: i64
+    cgroup_mount_device: i64
+    cgroup_mount_inode: i64
+    cgroup_device: i64
+    cgroup_inode: i64
+    target_pidns_device: i64
+    target_pidns_inode: i64
+    target_cgroupns_device: i64
+    target_cgroupns_inode: i64
+    observer_pidns_device: i64
+    observer_pidns_inode: i64
+    observer_cgroupns_device: i64
+    observer_cgroupns_inode: i64
+    observer_mountns_device: i64
+    observer_mountns_inode: i64
+    observed_unix_ms: i64
+    binding_digest: text
+    state: LinuxContainerContainmentPopulationV1
+
+pub struct LinuxContainerContainmentTurnV1:
+    owner: LinuxContainerContainmentOwnerV1?
+    snapshot: LinuxContainerContainmentSnapshotV1?
+    error: text
+
+pub struct LinuxContainerContainmentCloseTurnV1:
+    owner: LinuxContainerContainmentOwnerV1?
+    closed: bool
+    error: text
+
+fn containment_number_v1(value: text) -> Result<i64, text>:
+    if str_len(value) < 1 or str_len(value) > 19 or (str_len(value) > 1 and value.starts_with("0")):
+        return Err("containment-native-number")
+    var result: i64 = 0
+    for i in 0..str_len(value):
+        val digit = (value.byte_at(i) as i64) - 48
+        if digit < 0 or digit > 9 or result > (9223372036854775807 - digit) / 10:
+            return Err("containment-native-number")
+        result = result * 10 + digit
+    Ok(result)
+
+fn containment_decode_v1(owner: LinuxContainerContainmentOwnerV1, bytes: text) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+    if (str_len(bytes) < 1 or str_len(bytes) > 6143 or not bytes.ends_with("\n") or
+            bytes.contains("\r") or bytes.contains("\t") or bytes.contains("\u{0}")):
+        return Err("containment-observation-unavailable-owner-retained")
+    val fields = bytes.split("\n")
+    if fields.len() != 24 or fields[0] != "linux-container-containment-native-v1" or fields[23] != "":
+        return Err("containment-native-schema")
+    if containment_number_v1(fields[1])? != owner.native_token or fields[2] != owner.binding_digest:
+        return Err("containment-native-binding")
+    var numbers: [i64] = []
+    for i in [3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]:
+        numbers.push(containment_number_v1(fields[i])?)
+    for i in [0, 1, 2, 4, 6, 8, 10, 12, 14, 16, 17]:
+        if numbers[i] <= 0: return Err("containment-native-identity")
+    if numbers[0] > 2147483647 or not fields[5].starts_with("/") or str_len(fields[5]) < 2:
+        return Err("containment-native-identity")
+    val state = match fields[22]:
+        case "0": LinuxContainerContainmentPopulationV1.EmptySnapshot
+        case "1": LinuxContainerContainmentPopulationV1.Populated
+        case _: return Err("containment-native-population")
+    Ok(LinuxContainerContainmentSnapshotV1(capture_pid: numbers[0], process_start_ticks: numbers[1],
+        cgroup_path: fields[5], cgroup_mount_id: numbers[2], cgroup_mount_device: numbers[3], cgroup_mount_inode: numbers[4],
+        cgroup_device: numbers[5], cgroup_inode: numbers[6], target_pidns_device: numbers[7], target_pidns_inode: numbers[8],
+        target_cgroupns_device: numbers[9], target_cgroupns_inode: numbers[10], observer_pidns_device: numbers[11],
+        observer_pidns_inode: numbers[12], observer_cgroupns_device: numbers[13], observer_cgroupns_inode: numbers[14],
+        observer_mountns_device: numbers[15], observer_mountns_inode: numbers[16], observed_unix_ms: numbers[17],
+        binding_digest: owner.binding_digest, state: state))
+
+pub fn linux_container_containment_capture_v1(pid: i64, expected_cgroup_path: text,
+        binding_digest: text) -> LinuxContainerContainmentTurnV1:
+    if pid <= 0 or pid > 2147483647 or not builder_digest_valid_v1(binding_digest):
+        return LinuxContainerContainmentTurnV1(nil, nil, "containment-capture-request-invalid")
+    val token = unsafe(capabilities: [ffi]):
+        rt_linux_container_containment_capture_v1(pid, expected_cgroup_path, binding_digest)
+    if token <= 0: return LinuxContainerContainmentTurnV1(nil, nil, "containment-capture-refused:{token}")
+    val owner = LinuxContainerContainmentOwnerV1(native_token: token, binding_digest: binding_digest)
+    linux_container_containment_observe_v1(owner)
+
+pub fn linux_container_containment_observe_v1(owner: LinuxContainerContainmentOwnerV1) -> LinuxContainerContainmentTurnV1:
+    val bytes = unsafe(capabilities: [ffi]):
+        rt_linux_container_containment_observe_v1(owner.native_token, owner.binding_digest)
+    match containment_decode_v1(owner, bytes):
+        case Ok(snapshot): LinuxContainerContainmentTurnV1(Some(owner), Some(snapshot), "")
+        case Err(error): LinuxContainerContainmentTurnV1(Some(owner), nil, error)
+
+pub fn linux_container_containment_close_v1(owner: LinuxContainerContainmentOwnerV1) -> LinuxContainerContainmentCloseTurnV1:
+    val result = unsafe(capabilities: [ffi]):
+        rt_linux_container_containment_close_v1(owner.native_token, owner.binding_digest)
+    if result != 0:
+        return LinuxContainerContainmentCloseTurnV1(Some(owner), false, "containment-close-unconfirmed:{result}")
+    LinuxContainerContainmentCloseTurnV1(nil, true, "")
