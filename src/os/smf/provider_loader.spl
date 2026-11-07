@@ -19,7 +19,7 @@ use std.nogc_sync_mut.composition.vector_kernel_contract.{
     SimpleVectorKernelRequestV1, SimpleVectorKernelResponseV1
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
-use std.common.crypto.blake3.{blake3_hex}
+use std.common.crypto.blake3.{blake3_hash, blake3_hex}
 use std.nogc_sync_mut.sffi.file_bytes.{file_atomic_write_bytes_tagged_native}
 use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, SimpleProviderQueryResultV1,
@@ -310,6 +310,12 @@ fn _provider_artifact_suffix_v1(path: text) -> text:
     if path.ends_with(".smf"): return ".smf"
     ".so"
 
+fn provider_snapshot_content_id_v1(bytes: [u8]) -> text:
+    # 64-char BLAKE3 digest naming the snapshot. blake3_hex is only a hex
+    # encoder; hex-encoding the raw artifact made the snapshot leaf 2x the DSO
+    # size (142,336 chars for a 71 KB provider), so every real write failed.
+    blake3_hex(blake3_hash(bytes))
+
 fn _provider_snapshot_refusal_v1(status: i32, digest: text, reason: text) -> ProviderArtifactSnapshotV1:
     ProviderArtifactSnapshotV1(status: status, artifact_digest: digest, load_path: "", reason: reason)
 
@@ -333,17 +339,17 @@ fn provider_stage_artifact_snapshot_v1(request: ProviderAdmissionRequestV1,
     if first_read == nil or snapshot_dir == "":
         return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "snapshot-unavailable")
     val bytes = first_read ?? []
-    val content_id = blake3_hex(bytes)
+    val content_id = provider_snapshot_content_id_v1(bytes)
     val snapshot_path = snapshot_dir + "/" + content_id + _provider_artifact_suffix_v1(request.artifact_path)
     rt_dir_create(snapshot_dir, true)
     # A pre-existing snapshot is reused only when its bytes match its name; a
     # planted or corrupted one is atomically replaced by the hashed buffer.
     val existing = rt_file_read_bytes(snapshot_path)
-    val reuse = existing != nil and blake3_hex(existing ?? []) == content_id
+    val reuse = existing != nil and provider_snapshot_content_id_v1(existing ?? []) == content_id
     if not reuse and not file_atomic_write_bytes_tagged_native(snapshot_path, bytes):
         return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "snapshot-write-failed")
     val staged = rt_file_read_bytes(snapshot_path)
-    if staged == nil or blake3_hex(staged ?? []) != content_id:
+    if staged == nil or provider_snapshot_content_id_v1(staged ?? []) != content_id:
         return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "snapshot-digest-unstable")
     ProviderArtifactSnapshotV1(status: PROVIDER_ADMISSION_OK, artifact_digest: digest,
         load_path: snapshot_path, reason: "snapshot-staged")
