@@ -7,6 +7,23 @@ use compiler.frontend.parser_types_expr.{parser_type_kind_named_name, parser_typ
 use compiler.common.driver_core_types.{SourceFile}
 use std.common.crypto.sha256.{sha256_text}
 
+pub fn driver_native_parser_classes_are_metadata_only_v1(owner: ModuleSurfaceParserOwner) -> bool:
+    val value: ParserModule = module_surface_owner_value(owner)
+    # Field defaults are relocated and evaluated by constructor lowering in
+    # the consumer. A class without callable members owns only that metadata.
+    # This is a parsed candidate, never permission to discard nonempty MIR.
+    for class_name in value.classes.keys():
+        val definition = value.classes[class_name]
+        if definition.methods.len() != 0:
+            return false
+        for attribute in definition.attributes:
+            if attribute.name != "repr" and attribute.name != "packed" and attribute.name != "align":
+                return false
+        for field in definition.fields:
+            if field.is_volatile or field.has_fixed_address:
+                return false
+    true
+
 pub fn driver_native_parser_impls_are_enum_templates_v1(owner: ModuleSurfaceParserOwner) -> bool:
     val value: ParserModule = module_surface_owner_value(owner)
     # This is only a declaration-side candidate. Full HIR bodies still lower
@@ -70,7 +87,7 @@ pub fn driver_native_parser_is_declaration_only(owner: ModuleSurfaceParserOwner)
     # presence and the body/data guards remain mandatory, so missing lowering
     # output for a real definition is never silently accepted.
     (value.domain_blocks.len() == 0 and
-        only_extern_functions and value.classes.len() == 0 and value.actors.len() == 0 and
+        only_extern_functions and driver_native_parser_classes_are_metadata_only_v1(owner) and value.actors.len() == 0 and
         driver_native_parser_impls_are_enum_templates_v1(owner) and
         value.constants.len() == 0 and value.static_asserts.len() == 0 and
         value.aop_advices.len() == 0 and value.di_bindings.len() == 0 and
@@ -88,8 +105,8 @@ pub fn driver_native_parser_can_persist_objectless(owner: ModuleSurfaceParserOwn
         for method in value.traits[trait_name].methods:
             if not method.body.stmts.is_empty():
                 return false
-    # Struct defaults are HirField metadata, evaluated by constructor lowering
-    # in the consumer. They do not imply standalone provider code (see #3028).
+    # Struct and metadata-only class defaults are HirField metadata, evaluated
+    # by constructor lowering in the consumer; they own no standalone code.
     true
 
 
