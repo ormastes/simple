@@ -122,8 +122,18 @@ must run the expanded spec with a current admitted full-tree runtime.
 An Astra review rejected the first candidate because it used public
 `rt_bytes_to_text`, whose native implementations intentionally replace `FF`
 with `EF BF BD`. The dedicated ABI above is the correction: interpreter, Rust
-runtime, core C, and hosted/native C implementations all construct counted
+runtime and native C implementations construct counted
 text from the exact input bytes, while ordinary text conversion remains
 unchanged. Runtime unit coverage asserts the complete 0-255 sequence in both
 packed and boxed array layouts plus embedded NUL and mixed UTF-8-shaped bytes.
+
+A second Astra review found duplicate C providers and a boxed-array-unsafe
+hosted copy. Final C ownership is singular: `runtime_native.c` implements the
+packed/boxed-aware ABI; `runtime.c` and `runtime_core_io_exports.c` do not
+export it. The canonical runtime symbol manifest lists the ABI exactly once
+and has an exact-count/tier regression test. A standalone C probe passed packed
+and boxed arrays containing every value 0-255, embedded NUL, and
+`C2 80 00 E2 82 AC FF`; adjacent public lossy-conversion checks remained
+green. Object inspection reported one native export, zero core-IO exports, and
+one C source owner.
 
