@@ -216,6 +216,39 @@ fn partially_typed_i64_call_ordering_keeps_raw_compare() {
     );
 }
 
+fn compile_to_riscv64_freestanding_object(source: &str) -> CodegenResult<Vec<u8>> {
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse failed");
+    let hir_module = hir::lower(&ast).expect("hir lower failed");
+    let mir_module = lower_to_mir(&hir_module).expect("mir lower failed");
+    Codegen::for_target(Target::new(TargetArch::Riscv64, TargetOS::None))?.compile_module(&mir_module)
+}
+
+/// doc/08_tracking/bug/seed_riscv64_u64_while_counter_loop_never_runs_2026-10-03.md:
+/// a `u64` while-counter compared against a `-> u64` call result, and a
+/// `self.be32(..) > self.size` method-result compare, must stay inline
+/// integer compares on riscv64 freestanding. Routing them through the
+/// tag-aware `rt_native_cmp` misread raw integers as tagged values (loop body
+/// never ran; load fault inside `rt_native_cmp` in `FdtBlob.valid()`).
+#[test]
+fn riscv64_u64_call_result_ordering_keeps_raw_compare() {
+    let loop_obj = compile_to_riscv64_freestanding_object(
+        "extern fn rv_slot_count() -> u64\nextern fn rv_slot_mark(slot: u64)\nfn rv_count_slots() -> i64:\n    var n: i64 = 0\n    var slot: u64 = 0u64\n    while slot < rv_slot_count():\n        rv_slot_mark(slot)\n        n = n + 1\n        slot = slot + 1u64\n    return n\n",
+    )
+    .expect("compile riscv64 u64 while-counter loop");
+    let method_obj = compile_to_riscv64_freestanding_object(
+        "class RvBlob:\n    size: u64\n    fn be32(off: u64) -> u64:\n        return off + 8u64\n    fn valid() -> bool:\n        if self.be32(4u64) > self.size:\n            return false\n        return true\n",
+    )
+    .expect("compile riscv64 method-result ordering");
+    for (case, obj) in [("u64 while-counter", &loop_obj), ("method result", &method_obj)] {
+        let relocations = object_relocation_names(obj);
+        assert!(
+            !relocations.iter().any(|name| name.contains("rt_native_cmp")),
+            "riscv64 {case} ordering must not use the tagged-value comparator: {relocations:?}"
+        );
+    }
+}
+
 #[test]
 fn any_ordering_keeps_dynamic_runtime_dispatch() {
     let obj = compile_to_object("fn item5_any_guard(left: Any, right: Any) -> bool:\n    return left >= right\n")
