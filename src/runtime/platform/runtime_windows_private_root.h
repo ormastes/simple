@@ -147,6 +147,11 @@ int64_t rt_windows_private_root_ready_v1(int64_t raw) {
         if (!wp_kind_v1(item->directory,1,0) || !wp_security_v1(item->directory,item==lease)) return 0;
     return 1;
 }
+int64_t rt_windows_private_root_identity_v1(int64_t raw,int64_t output) {
+    WpRootV1 *root=(WpRootV1*)(intptr_t)raw;
+    return output && rt_windows_private_root_ready_v1(raw) &&
+        GetFileInformationByHandleEx(root->directory,FileIdInfo,(void*)(intptr_t)output,24);
+}
 /* Failed admission returns a cleanup lease whenever close did not complete.
  * Its ready query is false; the caller must retain it and retry close. */
 static int64_t wp_reject_v1(WpRootV1 *lease) {
@@ -241,5 +246,6 @@ int64_t rt_windows_private_publish_v1(int64_t root,int64_t file,int64_t name) {(
 int64_t rt_windows_private_check_v1(int64_t file,int64_t maximum) {(void)file;(void)maximum;return 0;}
 int64_t rt_windows_private_root_close_v1(int64_t root) {(void)root;return 0;}
 int64_t rt_windows_private_root_ready_v1(int64_t root) {(void)root;return 0;}
+int64_t rt_windows_private_root_identity_v1(int64_t root,int64_t output) {(void)root;(void)output;return 0;}
 #endif
 #endif

@@ -623,6 +623,7 @@ export retained_directory_is_real_no_follow
 pub class WindowsPrivateFileV1:
     var file: RetainedFile
     root_handle: i64
+    root_identity: [u8]
 
     pub fn security_current() -> bool:
         @when(os="windows"):
@@ -675,6 +676,7 @@ pub class WindowsPrivateFileV1:
 pub class WindowsPrivateRootV1:
     var handle: i64
     var closed: bool
+    var identity: [u8]
 
     pub fn child_directory(name: text, create: bool) -> Result<WindowsPrivateRootV1, WindowsPrivateErrorV1>:
         @when(os="windows"):
@@ -708,11 +710,11 @@ pub class WindowsPrivateRootV1:
         var file = RetainedFile(handle: handle, size: 0, identity: [], writable: create, closed: false, position: 0, maximum: maximum)
         match _retained_metadata(handle):
             case Err(error):
-                Err(WindowsPrivateErrorV1(message: error, cleanup_root: None, cleanup_file: Some(WindowsPrivateFileV1(file: file, root_handle: self.handle))))
+                Err(WindowsPrivateErrorV1(message: error, cleanup_root: None, cleanup_file: Some(WindowsPrivateFileV1(file: file, root_handle: self.handle, root_identity: self.identity))))
             case Ok(meta):
                 file.size = meta.size
                 file.identity = meta.identity
-                val owner = WindowsPrivateFileV1(file: file, root_handle: self.handle)
+                val owner = WindowsPrivateFileV1(file: file, root_handle: self.handle, root_identity: self.identity)
                 if not owner.security_current():
                     return Err(WindowsPrivateErrorV1(message: "WINDOWS_PRIVATE_FILE_SECURITY", cleanup_root: None, cleanup_file: Some(owner)))
                 Ok(owner)
@@ -722,7 +724,7 @@ pub class WindowsPrivateRootV1:
 
     pub fn publish_no_replace(stage: WindowsPrivateFileV1, final_name: text) -> Result<bool, text>:
         @when(os="windows"):
-        if self.closed or stage.root_handle != self.handle or stage.file.writable or not stage.security_current():
+        if self.closed or stage.root_handle != self.handle or not _retained_bytes_equal(stage.root_identity, self.identity) or stage.file.writable or not stage.security_current():
             return Err("WINDOWS_PRIVATE_PUBLISH_STATE")
         val path = _retained_path(final_name)
         if path == 0: return Err("WINDOWS_PRIVATE_NAME")
@@ -769,9 +771,15 @@ fn _windows_private_error_v1(message: text) -> WindowsPrivateErrorV1:
     WindowsPrivateErrorV1(message: message, cleanup_root: None, cleanup_file: None)
 
 fn _windows_private_root_admit_v1(handle: i64) -> Result<WindowsPrivateRootV1, WindowsPrivateErrorV1>:
-    val owner = WindowsPrivateRootV1(handle: handle, closed: false)
+    var owner = WindowsPrivateRootV1(handle: handle, closed: false, identity: [])
     @when(os="windows"):
-    if rt_windows_private_root_ready_v1(handle) == 1: return Ok(owner)
+    val buffer = _retained_alloc(24u64)
+    if buffer != 0:
+        val ready = rt_windows_private_root_identity_v1(handle, buffer)
+        if ready != 0:
+            for index in 0..24: owner.identity.push(volatile_read_u8(buffer + index) as u8)
+        _retained_free(buffer)
+        if ready != 0: return Ok(owner)
     Err(WindowsPrivateErrorV1(message: "WINDOWS_PRIVATE_ROOT_CLEANUP_REQUIRED", cleanup_root: Some(owner), cleanup_file: None))
     @else:
     Err(_windows_private_error_v1("WINDOWS_PRIVATE_HOST_UNSUPPORTED"))
