@@ -44,6 +44,22 @@ fn nominal_is_error(kind: HirTypeKind) -> bool:
         case HirTypeKind.Error: true
         case _: false
 
+extern fn rt_file_read_text(path: text) -> text?
+
+fn nominal_lowered_module(source: text, filename: text) -> HirLowering:
+    val module = parse_and_build_module(source, filename)
+    val lowering = HirLowering.with_filename(filename)
+    lowering.use_explicit_semantic_policy()
+    lowering.lower_module(module)
+    lowering
+
+fn nominal_arity_messages(lowering: HirLowering) -> [text]:
+    var found: [text] = []
+    for message in lowering.diagnostic_messages:
+        if message.contains("type arguments, got"):
+            found = found.push(message)
+    found
+
 fn nominal_local(module: ParserModule) -> HirLowering:
     val lowering = HirLowering.with_filename("nominal_owner.spl")
     lowering.use_explicit_semantic_policy()
@@ -321,5 +337,39 @@ describe("nominal generic argument normalization", fn():
         expect(lowering.errors.len()).to_equal(0)
         expect(lowering.type_alias_argument_names.len()).to_equal(0)
         expect(lowering.type_alias_active_ids.len()).to_equal(0)
+    )
+
+    it("accepts generic impl headers whose binders the parser hoists off the owner", fn():
+        # `impl Owner<A, B>:` parses as owner `Owner` with zero written
+        # arguments plus impl type_params [A, B]; the header is a declaration
+        # site, not a use-site annotation, so declared arity does not apply.
+        val enum_impl = nominal_lowered_module("enum Poll<T>:\n    Ready(T)\n    Pending\nimpl Poll<T>:\n    fn is_ready() -> bool:\n        true\n", "nominal_owner.spl")
+        expect(nominal_arity_messages(enum_impl).len()).to_equal(0)
+        val class_impl = nominal_lowered_module("class Bag<K, V>:\n    n: i64\nimpl Bag<K, V>:\n    fn len() -> i64:\n        self.n\n    me bump():\n        self.n = self.n + 1\n    static fn new() -> Bag<K, V>:\n        Bag(n: 0)\nfn main() -> i64:\n    val bag: Bag<i64, text> = Bag.new()\n    0\n", "nominal_owner.spl")
+        expect(nominal_arity_messages(class_impl).len()).to_equal(0)
+        val inline_struct = nominal_lowered_module("struct Mp<K, V>:\n    n: i64\n    fn len() -> i64:\n        self.n\n", "nominal_owner.spl")
+        expect(nominal_arity_messages(inline_struct).len()).to_equal(0)
+        val inline_class = nominal_lowered_module("class Fu<T>:\n    n: i64\n    fn len() -> i64:\n        self.n\n", "nominal_owner.spl")
+        expect(nominal_arity_messages(inline_class).len()).to_equal(0)
+        val enum_paths = nominal_lowered_module("enum Poll<T>:\n    Ready(T)\n    Pending\nfn ready<T>(p: Poll<T>) -> bool:\n    match p:\n        case Poll.Ready(_): true\n        case Poll.Pending: false\nfn main() -> i64:\n    val p: Poll<i64> = Poll.Pending\n    0\n", "nominal_owner.spl")
+        expect(nominal_arity_messages(enum_paths).len()).to_equal(0)
+    )
+
+    it("still rejects a bare generic annotation inside a generic impl", fn():
+        val lowering = nominal_lowered_module("class Bag<K, V>:\n    n: i64\nimpl Bag<K, V>:\n    fn copy_of(other: Bag) -> i64:\n        other.n\n", "nominal_owner.spl")
+        val messages = nominal_arity_messages(lowering)
+        expect(messages.len()).to_equal(1)
+        expect(messages[0]).to_contain("type `Bag` expects 2 type arguments, got 0")
+    )
+
+    it("lowers the stage3 generic-owner library sources without arity errors", fn():
+        val paths = ["src/lib/nogc_async_mut/async/poll.spl", "src/lib/nogc_async_mut/async/future.spl", "src/lib/nogc_async_mut/async_ring/simple_ring.spl", "src/lib/nogc_sync_mut/src/collections/ordered_map.spl", "src/lib/nogc_sync_mut/src/collections/adaptive_map.spl", "src/lib/nogc_sync_mut/src/collections/adaptive_set.spl", "src/lib/nogc_sync_mut/src/map.spl"]
+        var offending: [text] = []
+        for path in paths:
+            val source = rt_file_read_text(path) ?? ""
+            expect(source.len() > 0).to_equal(true)
+            for message in nominal_arity_messages(nominal_lowered_module(source, path)):
+                offending = offending.push(message)
+        expect(offending).to_equal([])
     )
 )

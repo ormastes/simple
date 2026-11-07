@@ -1,0 +1,52 @@
+#!/bin/sh
+# Real filesystem modes; no compiler, Cargo build, or generation publication.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/generation-storage-check.XXXXXXXX")
+negative=
+trap 'rm -rf "$work"; if [ -n "$negative" ]; then rm -rf "$negative"; fi' EXIT HUP INT TERM
+owner="$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+engine="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+awk '/^bootstrap_stage3_preflight_generation_storage\(\)/{copy=1} copy{print} copy && /^\)$/{exit}' "$owner" >"$work/probe.sh"
+awk '/^prepare_rust_authority_workspace\(\)/{copy=1} copy{print} copy && /^}$/{exit}' "$engine" >"$work/workspace.sh"
+. "$work/probe.sh"
+bootstrap_stage3_preflight_generation_storage "$work/generations"
+[ -z "$(ls -A "$work/generations")" ]
+# The production caller must propagate refusal; the probe precedes all cleanup.
+python3 - "$engine" <<'PY'
+import pathlib, sys
+s = pathlib.Path(sys.argv[1]).read_text()
+body = s.split('prepare_rust_authority_workspace() {', 1)[1].split('\n}', 1)[0]
+assert body.index('bootstrap_stage3_preflight_generation_storage') < body.index('rm -rf')
+assert 'prepare_rust_authority_workspace || return 1' in s
+assert '${rust_authority_generation_root}' in body
+print('PASS production generation-root/pre-Cargo ordering and refusal propagation')
+PY
+echo 'PASS real immutable generation file modes and owned-probe cleanup'
+# Explicit opt-in enables an actual known-incompatible filesystem witness.
+# CI never fabricates a chmod failure or assumes all mounted drives are unsafe.
+if [ -n "${BOOTSTRAP_STORAGE_NEGATIVE_ROOT:-}" ]; then
+    negative=$(mktemp -d "$BOOTSTRAP_STORAGE_NEGATIVE_ROOT/generation-storage-negative.XXXXXXXX")
+    . "$work/workspace.sh"
+    rust_authority_workspace_prepared=0
+    rust_authority_generation_root="$negative/generations"
+    rust_authority_home="$negative/preserved-home"
+    mkdir "$rust_authority_home"
+    printf 'keep\n' >"$rust_authority_home/sentinel"
+    try_cargo() {
+        prepare_rust_authority_workspace || return 1
+        printf 'cargo launched\n' >"$negative/cargo-sentinel"
+    }
+    if try_cargo >"$work/negative.log" 2>&1; then
+        echo 'FAIL negative filesystem unexpectedly supports the required modes' >&2
+        exit 1
+    fi
+    grep -q 'generation storage cannot preserve immutable file modes' "$work/negative.log"
+    [ ! -e "$negative/cargo-sentinel" ]
+    [ "$(cat "$rust_authority_home/sentinel")" = keep ]
+    [ -z "$(ls -A "$rust_authority_generation_root")" ]
+    cat "$work/negative.log"
+    echo 'PASS real incompatible-filesystem refusal before Cargo and HOME cleanup'
+else
+    echo 'SKIP real incompatible-filesystem witness: BOOTSTRAP_STORAGE_NEGATIVE_ROOT unset'
+fi

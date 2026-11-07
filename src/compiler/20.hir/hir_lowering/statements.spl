@@ -56,6 +56,21 @@ fn binding_join_arm_conflicts(left: HirType, right: HirType) -> bool:
     not hir_types_equal(left, right)
 
 impl HirLowering:
+    # Check the unprojected source: Some(Result) is optional, while a Result
+    # itself is not a presence carrier. Keep the existing kind-only transport.
+    me validate_presence_binding(kind: HirExprKind, bind_optional_payload: bool, explicit_presence: bool, span: Span):
+        if not bind_optional_payload or explicit_presence:
+            return
+        var source_kind = kind
+        match kind:
+            case HirExprKind.ExistsCheck(base): source_kind = base.kind
+            case _: ()
+        val source_type = self.binding_kind_type(source_kind, span)
+        match source_type.kind:
+            case HirTypeKind.Result(_, _):
+                self.error("cannot bind a Result with bare if val/while val; use match Ok/Err or Result.ok.?", span)
+            case _: ()
+
     # Early pattern validation runs before inference. Retain only an existing
     # semantic type, including a variable's declared type; never invent an
     # owner from the spelling of a later match alternative. Return a raw type
@@ -886,6 +901,7 @@ impl HirLowering:
             # Removing the box removes the extraction, so there is nothing to corrupt.
             val v_lowered_init = self.lower_hir_expr(v_init)
             val v_hir_init = if self.attributed_factory_call_kind(v_lowered_init.kind): self.retain_attributed_collection_type(v_lowered_init, v_hir_type) else: v_lowered_init
+            self.validate_presence_binding(v_hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
             var v_sym_type = v_hir_type
             if not v_has_annotation:
                 val inferred = self.binding_source_type(v_hir_init, s.bind_optional_payload)
@@ -934,6 +950,7 @@ impl HirLowering:
                 # apart from a source-written `nil`; see interp_is_uninit_marker_init.
                 HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span, is_uninit_marker: true)
             val vr_hir_init = if self.attributed_factory_call_kind(vr_lowered_init.kind): self.retain_attributed_collection_type(vr_lowered_init, vr_hir_type) else: vr_lowered_init
+            self.validate_presence_binding(vr_hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
             if not vr_has_annotation:
                 val inferred = self.binding_source_type(vr_hir_init, s.bind_optional_payload)
                 match inferred.kind:
@@ -1059,6 +1076,7 @@ impl HirLowering:
                 # deliberately NOT migrated here, so it keeps receiving the boxed form.
                 val lowered_init = self.lower_hir_expr(init)
                 val hir_init = if self.attributed_factory_call_kind(lowered_init.kind): self.retain_attributed_collection_type(lowered_init, hir_type) else: lowered_init
+                self.validate_presence_binding(hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
                 var sym_type = hir_type
                 if not has_annotation:
                     val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)
@@ -1099,6 +1117,7 @@ impl HirLowering:
                     # No initializer: is_uninit_marker marks the synthesized NilLit (see above).
                     HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span, is_uninit_marker: true)
                 val hir_init = if self.attributed_factory_call_kind(lowered_init.kind): self.retain_attributed_collection_type(lowered_init, hir_type) else: lowered_init
+                self.validate_presence_binding(hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
                 if not has_annotation:
                     val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)
                     match inferred.kind:

@@ -3,16 +3,18 @@
 # keeps this scratch index inside its inventory lease and promotes only the
 # selected compact rows needed by the actual compilation owner.
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1,
-    CompileSourceInventoryEntryV1, compile_source_inventory_digest_v1,
+    CompileSourceInventoryEntryV1, CompileSourceInventoryReadV1,
+    compile_source_inventory_digest_v1,
     compile_source_inventory_path_valid_v1}
 use std.common.crypto.sha256.{sha256_text}
 
 struct ColdHirSourceInventoryAdmissionV1:
     normalized_root: text
+    inventory: CompileSourceInventoryV1
     source_indices: Dict<text, i64>
     snapshot_sources: Dict<text, bool>
 
-struct ColdHirSelectedSourceRowV1:
+pub(package) struct ColdHirSelectedSourceRowV1:
     source_index: i64
     source_identity: text
     source_digest: text
@@ -20,29 +22,25 @@ struct ColdHirSelectedSourceRowV1:
     module_identity: text
     inventory_entry: CompileSourceInventoryEntryV1
 
-fn cold_hir_source_inventory_admit_v1(source_root: text,
-        expected_source_inventory_digest: text, inventory: CompileSourceInventoryV1,
+fn _cold_hir_source_inventory_admit_v1(source_root: text,
+        expected_source_inventory_digest: text,
+        admitted_inventory: CompileSourceInventoryReadV1,
         snapshot_inventory: text, expected_snapshot_inventory_digest: text,
-        path_count: i64, digest_count: i64, byte_count: i64, module_count: i64,
-        authenticated_inventory_digest: text = ""
+        path_count: i64, digest_count: i64, byte_count: i64, module_count: i64
 ) -> Result<ColdHirSourceInventoryAdmissionV1, text>:
     if path_count != digest_count or path_count != byte_count or path_count != module_count:
         return Err("cold-hir-source-owner-alignment")
-    # compile_source_inventory_digest_v1 re-sorts, re-encodes and re-hashes every
-    # row (measured 42.8 s of the 38.5-43 s
-    # admission for 14,443 rows on the seed interpreter, the dominant fixed cost
-    # of a cold 1-module closure). The inventory reader
-    # already proved sha256(generation bytes) == pointer and a canonical re-encode
-    # before minting its digest, so a caller holding that reader-minted digest
-    # passes it as `authenticated_inventory_digest`. It is trusted only when it
-    # equals the expected digest; any other value, including the "" default,
-    # recomputes (fail-closed).
-    val authenticated = authenticated_inventory_digest != "" and
-        authenticated_inventory_digest == expected_source_inventory_digest
-    if not authenticated:
-        val inventory_digest = compile_source_inventory_digest_v1(inventory)
-        if inventory_digest == "" or inventory_digest != expected_source_inventory_digest:
-            return Err("cold-hir-inventory-mismatch")
+    # The reader proved sha256(generation bytes) == pointer plus canonical
+    # decode before minting this typed result. Keep its inventory and digest in
+    # one value: accepting a separately supplied inventory next to a copied
+    # digest let callers substitute rows while taking the fast path.
+    if not admitted_inventory.valid or
+            admitted_inventory.digest == "" or
+            admitted_inventory.digest != expected_source_inventory_digest:
+        return Err("cold-hir-inventory-mismatch")
+    val inventory = match admitted_inventory.inventory:
+        case Some(value): value
+        case _: return Err("cold-hir-inventory-mismatch")
     if sha256_text(snapshot_inventory) != expected_snapshot_inventory_digest:
         return Err("cold-hir-snapshot-inventory-mismatch")
     val normalized_root = source_root.replace("\\", "/")
@@ -67,10 +65,46 @@ fn cold_hir_source_inventory_admit_v1(source_root: text,
             return Err("cold-hir-snapshot-source-content-mismatch")
         snapshot_sources[identity] = true
     Ok(ColdHirSourceInventoryAdmissionV1(normalized_root: normalized_root,
+        inventory: inventory,
         source_indices: source_indices, snapshot_sources: snapshot_sources))
 
-fn cold_hir_source_inventory_row_v1(admission: ColdHirSourceInventoryAdmissionV1,
-        inventory: CompileSourceInventoryV1, source_index: i64, source_path: text,
+# Package-private fast path. Only the production sibling that receives the
+# result directly from compile_source_inventory_read_at_pointer_v1 may use it;
+# callers outside compiler.driver.cache cannot manufacture this authority.
+pub(peer) fn cold_hir_source_inventory_admit_reader_owned_v1(
+        source_root: text, expected_source_inventory_digest: text,
+        admitted_inventory: CompileSourceInventoryReadV1,
+        snapshot_inventory: text, expected_snapshot_inventory_digest: text,
+        path_count: i64, digest_count: i64, byte_count: i64, module_count: i64
+) -> Result<ColdHirSourceInventoryAdmissionV1, text>:
+    _cold_hir_source_inventory_admit_v1(source_root,
+        expected_source_inventory_digest, admitted_inventory,
+        snapshot_inventory, expected_snapshot_inventory_digest,
+        path_count, digest_count, byte_count, module_count)
+
+# Public defensive boundary for tests and non-reader owners. A freely
+# constructed CompileSourceInventoryReadV1 is not authority: bind its payload
+# back to its claimed digest before entering the package-private fast path.
+fn cold_hir_source_inventory_admit_v1(
+        source_root: text, expected_source_inventory_digest: text,
+        admitted_inventory: CompileSourceInventoryReadV1,
+        snapshot_inventory: text, expected_snapshot_inventory_digest: text,
+        path_count: i64, digest_count: i64, byte_count: i64, module_count: i64
+) -> Result<ColdHirSourceInventoryAdmissionV1, text>:
+    val inventory = match admitted_inventory.inventory:
+        case Some(value): value
+        case _: return Err("cold-hir-inventory-mismatch")
+    val actual_digest = compile_source_inventory_digest_v1(inventory)
+    if actual_digest == "" or actual_digest != admitted_inventory.digest or
+            actual_digest != expected_source_inventory_digest:
+        return Err("cold-hir-inventory-mismatch")
+    _cold_hir_source_inventory_admit_v1(source_root,
+        expected_source_inventory_digest, admitted_inventory,
+        snapshot_inventory, expected_snapshot_inventory_digest,
+        path_count, digest_count, byte_count, module_count)
+
+pub(peer) fn cold_hir_source_inventory_row_v1(admission: ColdHirSourceInventoryAdmissionV1,
+        source_index: i64, source_path: text,
         source_digest: text, source_byte_count: i64, module_identity: text
 ) -> Result<ColdHirSelectedSourceRowV1, text>:
     val path = source_path.replace("\\", "/")
@@ -81,12 +115,12 @@ fn cold_hir_source_inventory_row_v1(admission: ColdHirSourceInventoryAdmissionV1
         return Err("cold-hir-source-identity-invalid")
     if not admission.source_indices.has(identity) or not admission.snapshot_sources.has(identity):
         return Err("cold-hir-source-absent")
-    val entry = inventory.entries[admission.source_indices[identity]]
+    val entry = admission.inventory.entries[admission.source_indices[identity]]
     if entry.content_digest != source_digest or entry.byte_count != source_byte_count:
         return Err("cold-hir-source-content-mismatch")
     Ok(ColdHirSelectedSourceRowV1(source_index: source_index, source_identity: identity,
         source_digest: source_digest, source_byte_count: source_byte_count,
         module_identity: module_identity, inventory_entry: entry))
 
-export ColdHirSourceInventoryAdmissionV1, ColdHirSelectedSourceRowV1
-export cold_hir_source_inventory_admit_v1, cold_hir_source_inventory_row_v1
+export ColdHirSourceInventoryAdmissionV1
+export cold_hir_source_inventory_admit_v1

@@ -1,8 +1,9 @@
 use std.spec.*
 use compiler.driver.cache.cold_hir_source_inventory_admission_v1.{cold_hir_source_inventory_admit_v1}
-use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_digest_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1,
+    CompileSourceInventoryV1, CompileSourceInventoryReadV1,
+    compile_source_inventory_digest_v1}
 use std.common.crypto.sha256.{sha256_text}
-use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
 
 # doc/08_tracking/bug/stage2_windows_frontend_hir_cold_receipt_perf_2026-10-16.md
 # Cold HIR receipt admission re-derived the inventory digest (sort + encode +
@@ -24,44 +25,59 @@ fn build_inventory() -> CompileSourceInventoryV1:
         i = i + 1
     CompileSourceInventoryV1(1, 7, entries)
 
-describe "cold HIR inventory admission cost":
-    it "skips the digest recompute when the reader-minted digest matches, within half the recompute cost":
+fn admitted_inventory(
+    inventory: CompileSourceInventoryV1, digest: text
+) -> CompileSourceInventoryReadV1:
+    CompileSourceInventoryReadV1(true, "", digest, Some(inventory))
+
+describe "cold HIR inventory admission binding":
+    it "accepts a reader result whose payload really matches its digest":
         val inv = build_inventory()
         val digest = compile_source_inventory_digest_v1(inv)
         val d = sha256_text("x")
         val snap = "pkg/m1.spl|sha256_{d}|5"
         val snap_digest = sha256_text(snap)
-        val t0 = time_now_unix_micros()
-        val slow = cold_hir_source_inventory_admit_v1("/frozen", digest, inv, snap, snap_digest, 1, 1, 1, 1)
-        val t1 = time_now_unix_micros()
-        val fast = cold_hir_source_inventory_admit_v1("/frozen", digest, inv, snap, snap_digest, 1, 1, 1, 1, digest)
-        val t2 = time_now_unix_micros()
-        expect(slow.is_ok()).to_be(true)
-        expect(fast.is_ok()).to_be(true)
-        val recompute_us = t1 - t0
-        val authenticated_us = t2 - t1
-        print "ADMISSION_COST rows={ROWS} recompute_ms={recompute_us / 1000} authenticated_ms={authenticated_us / 1000}"
-        expect(authenticated_us * 2 <= recompute_us).to_be(true)
+        val admitted = cold_hir_source_inventory_admit_v1(
+            "/frozen", digest, admitted_inventory(inv, digest),
+            snap, snap_digest, 1, 1, 1, 1)
+        expect(admitted.is_ok()).to_be(true)
 
 describe "cold HIR inventory admission stays fail-closed (prevention)":
-    it "a wrong or empty authenticated digest still recomputes and refuses a forged expected digest":
+    it "an invalid reader result or mismatched reader digest refuses admission":
         val inv = build_inventory()
         val d = sha256_text("x")
         val snap = "pkg/m1.spl|sha256_{d}|5"
         val forged = sha256_text("forged")
-        val no_proof = cold_hir_source_inventory_admit_v1("/frozen", forged, inv, snap, sha256_text(snap), 1, 1, 1, 1)
+        val no_proof = cold_hir_source_inventory_admit_v1(
+            "/frozen", forged,
+            CompileSourceInventoryReadV1(false, "inventory-generation-invalid", "", nil),
+            snap, sha256_text(snap), 1, 1, 1, 1)
         expect(no_proof.is_err()).to_be(true)
         expect(no_proof.unwrap_err()).to_equal("cold-hir-inventory-mismatch")
-        # A proof that differs from the expected digest is not trusted.
+        # A reader result whose digest differs from the expected binding is not trusted.
         val real = compile_source_inventory_digest_v1(inv)
-        val wrong_proof = cold_hir_source_inventory_admit_v1("/frozen", forged, inv, snap, sha256_text(snap), 1, 1, 1, 1, real)
+        val wrong_proof = cold_hir_source_inventory_admit_v1(
+            "/frozen", forged, admitted_inventory(inv, real),
+            snap, sha256_text(snap), 1, 1, 1, 1)
         expect(wrong_proof.is_err()).to_be(true)
         expect(wrong_proof.unwrap_err()).to_equal("cold-hir-inventory-mismatch")
 
-    it "the snapshot and row checks still run on the authenticated path":
+    it "a modified inventory cannot be substituted beside a copied expected digest":
         val inv = build_inventory()
         val real = compile_source_inventory_digest_v1(inv)
-        val forged_row = "pkg/m1.spl|sha256_{sha256_text("other")}|5"
-        val refused = cold_hir_source_inventory_admit_v1("/frozen", real, inv, forged_row, sha256_text(forged_row), 1, 1, 1, 1, real)
+        val other = sha256_text("other")
+        val empty = sha256_text("")
+        val substituted = CompileSourceInventoryV1(1, 7, [
+            CompileSourceInventoryEntryV1(
+                "pkg/m1.spl", other, empty, empty, empty, empty, 5)])
+        val substituted_entry = substituted.entries[0]
+        val forged_row =
+            "{substituted_entry.source_identity}|sha256_{substituted_entry.content_digest}|{substituted_entry.byte_count}"
+        # This is the exact old bypass shape: valid=true, copied expected
+        # digest, modified inventory, and a snapshot coherent with that
+        # modified inventory. The public boundary must rebind payload->digest.
+        val refused = cold_hir_source_inventory_admit_v1(
+            "/frozen", real, admitted_inventory(substituted, real),
+            forged_row, sha256_text(forged_row), 1, 1, 1, 1)
         expect(refused.is_err()).to_be(true)
-        expect(refused.unwrap_err()).to_equal("cold-hir-snapshot-source-content-mismatch")
+        expect(refused.unwrap_err()).to_equal("cold-hir-inventory-mismatch")
