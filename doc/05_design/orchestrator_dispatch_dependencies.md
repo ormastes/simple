@@ -92,4 +92,17 @@ Missing live Podman means that full-system acceptance is BLOCKED.
 
 Sol owns this dependency implementation; Astra performs exact-head review and
 owns app/store integration; root coordinates builds and landing. Additional
-sidecars: N/A. No build is performed for this dependency commit.
+sidecars: N/A.
+
+## Focused diagnostic blocker
+
+The root-authorized native envelope build at source `0f21bee4874` failed before
+link: the old unadmitted producer cannot lower the merged crypto library's
+`Array.fill_span` calls in `secure_memory.spl` at lines 57, 78, 94 and 106.
+No executable was produced and no packet assertions ran. This is the shared
+producer/library prerequisite failure, not evidence of a packet defect; the
+global cause/retry budget remains root-owned. Current MIR has a fill-span
+lowering route, but no replacement producer is qualified by this lane. Do not
+retry unchanged or roll back secure wiping to bypass it. Exact source, producer,
+log and containment identities are in
+`.spipe/simple_orchestrator/dispatch_dependency_verification_20261107.sdn`.
