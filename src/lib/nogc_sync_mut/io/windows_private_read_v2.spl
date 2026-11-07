@@ -9,10 +9,9 @@ pub struct WindowsPrivateReadErrorV2:
     cleanup_root: Option<WindowsPrivateReadRootV2>
     cleanup_file: Option<WindowsPrivateReadFileV2>
 
-pub struct WindowsPrivateSharedReadTurnV2:
+pub struct WindowsPrivatePublishedReadTurnV2:
     reader: Option<WindowsPrivateReadFileV2>
     stage: Option<WindowsPrivateFileV1>
-    published_new: bool
     error: text
 
 fn _read_error(message: text) -> WindowsPrivateReadErrorV2:
@@ -126,37 +125,32 @@ pub fn windows_private_roots_same_directory_v2(writer: WindowsPrivateRootV1,
     if result < 0: return Err("WINDOWS_PRIVATE_READ_ROOT_IDENTITY")
     Ok(result == 1)
 
-# Only this turn's exact successful shape grants a readonly result. The boolean
-# is a historical rename fact even on error, never an admission/readiness flag.
+# Adopts only an already-published exact stage. Namespace publication and its
+# historical result remain entirely with the caller's preceding V1 operation.
 @unsafe(reason: "borrows fixed native turn buffer without nullable authority transfer", capabilities: [ffi, raw_ptr])
-pub fn windows_private_publish_shared_read_v2(root: WindowsPrivateRootV1, stage: WindowsPrivateFileV1,
-        final_name: text) -> WindowsPrivateSharedReadTurnV2:
+pub fn windows_private_adopt_published_read_v2(root: WindowsPrivateRootV1, stage: WindowsPrivateFileV1,
+        final_name: text) -> WindowsPrivatePublishedReadTurnV2:
     @when(os="windows"):
     val path = _read_path(final_name)
     if path == 0:
-        return WindowsPrivateSharedReadTurnV2(reader: None, stage: Some(stage), published_new: false, error: "WINDOWS_PRIVATE_READ_NAME")
-    val output = rt_windows_private_alloc_v1(24)
+        return WindowsPrivatePublishedReadTurnV2(reader: None, stage: Some(stage), error: "WINDOWS_PRIVATE_READ_NAME")
+    val output = rt_windows_private_alloc_v1(16)
     if output == 0:
         rt_windows_private_free_v1(path)
-        return WindowsPrivateSharedReadTurnV2(reader: None, stage: Some(stage), published_new: false, error: "WINDOWS_PRIVATE_READ_MEMORY")
-    val status = rt_windows_private_publish_shared_read_v2(root.token, stage.token, path, output)
+        return WindowsPrivatePublishedReadTurnV2(reader: None, stage: Some(stage), error: "WINDOWS_PRIVATE_READ_MEMORY")
+    val status = rt_windows_private_adopt_published_read_v2(root.token, stage.token, path, output)
     val reader_token = volatile_read_u64(output) as i64
     val stage_token = volatile_read_u64(output + 8) as i64
-    val published = volatile_read_u64(output + 16) == 1u64
     rt_windows_private_free_v1(output)
     rt_windows_private_free_v1(path)
     val reader = if reader_token > 0: Some(WindowsPrivateReadFileV2(token: reader_token)) else: None
     val remaining = if stage_token > 0: Some(WindowsPrivateFileV1(token: stage_token)) else: None
-    var failure = ""
-    if ((status != 0 and status != 1) or
-            (status == 0 and (not published or reader_token <= 0 or stage_token > 0)) or
-            (status == 1 and (published or reader_token > 0 or stage_token <= 0))):
-        failure = "WINDOWS_PRIVATE_SHARED_READ_TRANSITION"
-    WindowsPrivateSharedReadTurnV2(reader: reader, stage: remaining, published_new: published, error: failure)
+    val failure = if status != 0 or reader_token <= 0 or stage_token > 0: "WINDOWS_PRIVATE_PUBLISHED_READ_TRANSITION" else: ""
+    WindowsPrivatePublishedReadTurnV2(reader: reader, stage: remaining, error: failure)
     @else:
-    WindowsPrivateSharedReadTurnV2(reader: None, stage: Some(stage), published_new: false, error: "WINDOWS_PRIVATE_READ_HOST_UNSUPPORTED")
+    WindowsPrivatePublishedReadTurnV2(reader: None, stage: Some(stage), error: "WINDOWS_PRIVATE_READ_HOST_UNSUPPORTED")
     @end
 
 export WindowsPrivateReadErrorV2, WindowsPrivateReadRootV2, WindowsPrivateReadFileV2
-export WindowsPrivateSharedReadTurnV2, windows_private_read_root_open_v2, windows_private_publish_shared_read_v2
+export WindowsPrivatePublishedReadTurnV2, windows_private_read_root_open_v2, windows_private_adopt_published_read_v2
 export windows_private_roots_same_directory_v2

@@ -8,8 +8,8 @@ Status: **NOT_RUN**. No Windows/native build or execution was authorized.
 | REQ-WIN-READ-001 | Two readonly handles open and read the same installed file while both remain retained. The native fixture retains nine plus nine readers. |
 | REQ-WIN-READ-002 | Forging a V1 view cannot write, seal, publish or close the readonly kind; kernel WriteFile through the underlying readonly handle is denied. |
 | REQ-WIN-READ-003 | A missing readonly child is refused without creation. |
-| REQ-WIN-READ-004 | Successful shared handoff closes RW, checks exact file ID/size/bytes/security and returns only a readonly owner. |
-| REQ-WIN-READ-005 | Failed RW close retains the exact cleanup owner and historical publication fact; a real final-name replacement returns a rejected readonly cleanup owner. |
+| REQ-WIN-READ-004 | Successful V1 publication precedes adoption; adoption never renames and checks actual final path/root, file ID/size/bytes/security before issuing a reader. |
+| REQ-WIN-READ-005 | Unpublished/collision/wrong-name stages refuse; failed RW close retains exact cleanup ownership and a real final-name replacement returns a rejected readonly cleanup owner. Host retains its separate prior publication fact. |
 | REQ-WIN-READ-006 | Actual V1/V2 roots compare using volume GUID plus native file ID; mismatch and invalid kind refuse, and failed descriptor release remains attributed to its owning root. |
 
 Provision `SIMPLE_WINDOWS_PRIVATE_READ_INSTALLED_ROOT` for the Simple spec with

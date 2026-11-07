@@ -37,34 +37,46 @@ query/validation failures return an error with both caller-owned roots retained.
 Temporary release failures attach to the exact root whose validation queried
 them. No identity metadata or additional role authority is exported.
 
-## Sealed-stage handoff
+## Already-published stage handoff
 
-`windows_private_publish_shared_read_v2(root: WindowsPrivateRootV1,
+`windows_private_adopt_published_read_v2(root: WindowsPrivateRootV1,
 stage: WindowsPrivateFileV1, final_name)` returns
-`WindowsPrivateSharedReadTurnV2(reader, stage, published_new, error)`; root
-always remains caller-owned. The exact successful shape is empty error,
-`published_new=true`, reader present and stage absent. Only then was the RW
-handle actually closed and replaced by a verified readonly capability.
+`WindowsPrivatePublishedReadTurnV2(reader, stage, error)`; root remains
+caller-owned. The successful shape is empty error, reader present and stage
+absent. Only then was the RW handle actually closed and replaced by a verified
+readonly capability. There is no publication boolean and no rename call.
 
-Before allocation/read, native code enforces the sealed stage's authoritative
-maximum and actual size, at most 8 MiB. It captures the exact sealed bytes under
-the owner lock, then performs the existing handle-relative no-replace rename.
-Publication consumes the phase at the actual kernel effect. A proven collision
-restores the original sealed stage and returns no reader, `published_new=false`
-and empty error. The caller separately opens and verifies the protected final
-entry; collision does not adopt bytes or grant new-publication authority.
+Host performs the existing V1 `publish_no_replace` directly after its fresh
+authorization guard and retains that result as the historical publication fact.
+Only afterward may it invoke this adoption helper. This removes the combined
+helper's added content-copy delay before publication; it does not add native
+clock-at-rename enforcement or strengthen V1's existing admission contract.
+A collision remains Host's prior V1 result; its unpublished stage cannot be
+adopted. The caller separately opens and verifies protected existing bytes.
 
-After successful rename, the original RW handle is closed. A failed close
-returns that exact V1 cleanup owner with `published_new=true` and nonempty
-error. Its aliases cannot write or publish. Once close is confirmed, the final
-entry is reopened readonly relative to the still-pinned mutating root. The
-provider compares exact volume/file ID, size, full captured bytes and current
-protected security before issuing a reader. A new readonly metadata snapshot
-is captured only after this comparison, avoiding reliance on deferred Windows
-last-write timestamps as content identity. A replacement with another file ID
-or changed content is rejected. Reopen/admission failures retain any live
-reader or stage cleanup owner. `published_new` remains a historical effect fact
-on errors and never means readiness. Close failures always remain retryable.
+Native adoption requires the exact V1 root generation, created-stage kind and
+successfully published phase 2, current privacy and unchanged identity. Phase
+alone is insufficient: before closing RW, the provider compares the full actual
+GUID-normalized retained file path to the actual retained parent path plus one
+validated basename, together with exact FileIdInfo. Comparison is ordinal and
+case-sensitive: callers supply the exact canonical spelling used for publication,
+and case aliases refuse rather than assume DOS case folding. Wrong/missing
+names refuse without changing the already-published stage phase.
+
+Before allocation/read, native code enforces the authoritative stage maximum
+and actual size, at most 8 MiB. It captures exact published bytes under the owner
+lock and revalidates the retained root. Immediately before the first fallible
+RW close, the native stage becomes cleanup-only. Failed close returns that exact
+V1 cleanup owner; its aliases cannot write or republish. Root-query temporary
+cleanup stays with the caller-owned root; file-query cleanup stays with its file.
+
+After close is confirmed, the final entry is reopened readonly relative to the
+still-pinned root. Actual final path/root binding, volume/file ID, size, full
+captured bytes and current security must all match. A fresh readonly metadata
+snapshot is captured only after comparison, avoiding reliance on deferred Windows
+last-write timestamps as content identity. Namespace replacement or changed
+content is rejected with every live owner retained. Adoption failures never
+manufacture, retry or reinterpret namespace publication.
 
 File flush/process-crash semantics are the existing profile. Power-loss
 directory-entry persistence is unsupported. Generic readers are not writable
@@ -78,7 +90,7 @@ were authorized. This source is not Windows qualification or deployment proof.
 `rt_windows_private_read_v2_selfcheck.c` is a new authored native fixture. On a
 fresh installed private root, it retains nine transitioned readers while nine
 more are actually reopened, checks kernel readonly access and native cast
-refusal, verifies collision preservation, injects a failed RW close, and
+refusal, rejects unpublished/collision/wrong-name adoption, injects a failed RW close, and
 performs a real final-name replacement during close/reopen to require identity
 rejection with cleanup retained. Its test-only wrappers do not alter production
 behavior or fabricate successful kernel operations.

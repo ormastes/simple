@@ -101,9 +101,17 @@ int main(void) {
         wchar_t stage_name[64];char bytes[64];
         swprintf(stage_name,64,L"shared-stage-%d.sdn",index);swprintf(final,64,L"shared-final-%d.sdn",index);
         snprintf(bytes,sizeof(bytes),"artifact-%d\n",index);
-        int64_t stage=create_stage(writer,stage_name,bytes),out[3]={0};
-        assert(rt_windows_private_publish_shared_read_v2(writer,stage,(int64_t)(intptr_t)final,(int64_t)(intptr_t)out)==0);
-        assert(out[0]>0 && out[1]==0 && out[2]==1);retained[index]=out[0];
+        int64_t stage=create_stage(writer,stage_name,bytes),out[2]={0};
+        assert(rt_windows_private_adopt_published_read_v2(writer,stage,(int64_t)(intptr_t)final,(int64_t)(intptr_t)out)==-1);
+        assert(out[0]==0 && out[1]==stage && wp_find_v1(stage,2)->phase==1);
+        /* Publication stays at the caller's V1 boundary. The adoption helper
+         * never renames and cannot invent that operation's historical truth. */
+        int64_t publication=rt_windows_private_publish_v1(writer,stage,(int64_t)(intptr_t)final);
+        assert(publication==0);
+        assert(rt_windows_private_adopt_published_read_v2(writer,stage,(int64_t)(intptr_t)L"wrong-final.sdn",(int64_t)(intptr_t)out)==-1);
+        assert(out[0]==0 && out[1]==stage && wp_find_v1(stage,2)->phase==2);
+        assert(rt_windows_private_adopt_published_read_v2(writer,stage,(int64_t)(intptr_t)final,(int64_t)(intptr_t)out)==0);
+        assert(out[0]>0 && out[1]==0);retained[index]=out[0];
         /* Old copied stage and forged V1 views cannot regain mutation or close
          * the new readonly generation, even though its numeric token is equal. */
         assert(rt_windows_private_file_write_v1(stage,(int64_t)(intptr_t)"x",1)==-1);
@@ -115,28 +123,31 @@ int main(void) {
         reopened[index]=rt_windows_private_read_file_open_v2(second_root,(int64_t)(intptr_t)final,128);
         assert(reopened[index]>0);exact_read(retained[index],bytes);exact_read(reopened[index],bytes);
     }
-    int64_t collision=create_stage(writer,L"collision-stage.sdn","other\n"),out[3]={0};
-    assert(rt_windows_private_publish_shared_read_v2(writer,collision,(int64_t)(intptr_t)L"shared-final-0.sdn",(int64_t)(intptr_t)out)==1);
-    assert(out[0]==0 && out[1]==collision && out[2]==0);
+    int64_t collision=create_stage(writer,L"collision-stage.sdn","other\n"),out[2]={0};
+    assert(rt_windows_private_publish_v1(writer,collision,(int64_t)(intptr_t)L"shared-final-0.sdn")==1);
+    assert(rt_windows_private_adopt_published_read_v2(writer,collision,(int64_t)(intptr_t)L"shared-final-0.sdn",(int64_t)(intptr_t)out)==-1);
+    assert(out[0]==0 && out[1]==collision && wp_find_v1(collision,2)->phase==1);
     assert(rt_windows_private_file_close_v1(collision));exact_read(retained[0],"artifact-0\n");
 
     int64_t failed=create_stage(writer,L"failed-close-stage.sdn","close\n");
+    assert(rt_windows_private_publish_v1(writer,failed,(int64_t)(intptr_t)L"failed-close-final.sdn")==0);
     targeted_stage=(HANDLE)wp_find_v1(failed,2)->owner;close_fault=1;
-    assert(rt_windows_private_publish_shared_read_v2(writer,failed,(int64_t)(intptr_t)L"failed-close-final.sdn",(int64_t)(intptr_t)out)==-1);
-    assert(out[0]==0 && out[1]==failed && out[2]==1);
+    assert(rt_windows_private_adopt_published_read_v2(writer,failed,(int64_t)(intptr_t)L"failed-close-final.sdn",(int64_t)(intptr_t)out)==-1);
+    assert(out[0]==0 && out[1]==failed);
     assert(rt_windows_private_file_write_v1(failed,(int64_t)(intptr_t)"x",1)==-1);
     assert(rt_windows_private_file_close_v1(failed));targeted_stage=NULL;
     int64_t after_close=rt_windows_private_read_file_open_v2(first_root,(int64_t)(intptr_t)L"failed-close-final.sdn",128);
     assert(after_close>0);exact_read(after_close,"close\n");assert(rt_windows_private_read_file_close_v2(after_close));
 
     int64_t swapped=create_stage(writer,L"swap-stage.sdn","original\n");
+    assert(rt_windows_private_publish_v1(writer,swapped,(int64_t)(intptr_t)L"swap-final.sdn")==0);
     targeted_stage=(HANDLE)wp_find_v1(swapped,2)->owner;
     assert(GetSecurityInfo(targeted_stage,SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION,
         NULL,NULL,NULL,NULL,&replacement_security)==ERROR_SUCCESS && replacement_security);
     swprintf(swap_final,32768,L"%ls\\swap-final.sdn",root_path);
     swprintf(swap_backup,32768,L"%ls\\swap-original.sdn",root_path);close_fault=2;
-    assert(rt_windows_private_publish_shared_read_v2(writer,swapped,(int64_t)(intptr_t)L"swap-final.sdn",(int64_t)(intptr_t)out)==-1);
-    assert(out[0]>0 && out[1]==0 && out[2]==1);
+    assert(rt_windows_private_adopt_published_read_v2(writer,swapped,(int64_t)(intptr_t)L"swap-final.sdn",(int64_t)(intptr_t)out)==-1);
+    assert(out[0]>0 && out[1]==0);
     assert(!rt_windows_private_read_file_check_v2(out[0],128));
     assert(rt_windows_private_read_file_close_v2(out[0]));
     assert(LocalFree(replacement_security)==NULL);targeted_stage=NULL;

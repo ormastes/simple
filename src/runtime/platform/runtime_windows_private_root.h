@@ -543,48 +543,63 @@ static int wp_content_v2(HANDLE handle,uint8_t* expected,int64_t length,int comp
     }
     return 1;
 }
-/* Borrowed output: reader token, remaining stage token, historical rename
- * effect. All outputs are initialized BEFORE any side effect. Return 1 means
- * known no-effect collision; 0 means verified readonly handoff; -1 is error. */
-int64_t rt_windows_private_publish_shared_read_v2(int64_t root,int64_t stage,int64_t name,int64_t output) {
+static int wp_final_binding_v2(WpRootV1* root,HANDLE file,const wchar_t* name,const FILE_ID_INFO* expected) {
+    if (!wp_name_v1(name)) return 0;
+    wchar_t parent[32900],actual[33200];FILE_ID_INFO identity;
+    DWORD parent_count=GetFinalPathNameByHandleW(root->directory,parent,32900,FILE_NAME_NORMALIZED|VOLUME_NAME_GUID);
+    DWORD actual_count=GetFinalPathNameByHandleW(file,actual,33200,FILE_NAME_NORMALIZED|VOLUME_NAME_GUID);
+    if (!parent_count || parent_count>=32900 || !actual_count || actual_count>=33200 ||
+        wcsncmp(parent,L"\\\\?\\Volume{",11) || wcsncmp(actual,L"\\\\?\\Volume{",11)) return 0;
+    while (parent_count && parent[parent_count-1]==L'\\') parent_count--;
+    size_t name_count=wcslen(name);
+    if ((size_t)actual_count!=(size_t)parent_count+1+name_count || actual[parent_count]!=L'\\' ||
+        CompareStringOrdinal(parent,(int)parent_count,actual,(int)parent_count,FALSE)!=CSTR_EQUAL ||
+        CompareStringOrdinal(name,(int)name_count,actual+parent_count+1,(int)name_count,FALSE)!=CSTR_EQUAL) return 0;
+    return GetFileInformationByHandleEx(file,FileIdInfo,&identity,sizeof(identity)) &&
+        !memcmp(&identity,expected,sizeof(identity));
+}
+/* Borrowed output: readonly reader token and remaining V1 stage token. This
+ * operation performs NO rename and reports NO publication boolean. The caller
+ * retains the result of its preceding V1 publication at its own fresh gate. */
+int64_t rt_windows_private_adopt_published_read_v2(int64_t root,int64_t stage,int64_t name,int64_t output) {
     if (!output) return -1;
-    int64_t* out=(int64_t*)(intptr_t)output;out[0]=out[1]=out[2]=0;
+    int64_t* out=(int64_t*)(intptr_t)output;out[0]=out[1]=0;
     AcquireSRWLockExclusive(&wp_lock_v1);
-    WpEntryV1 *directory=wp_find_v1(root,1),*entry=wp_find_v1(stage,2);wp_active_v1=entry;
+    WpEntryV1 *directory=wp_find_v1(root,1),*entry=wp_find_v1(stage,2);
     int64_t result=-1;uint8_t* bytes=NULL;
     if (entry) out[1]=stage;
-    if (!entry || !entry->created_stage || entry->root_token!=root || entry->phase!=1 ||
-        entry->maximum<0 || entry->maximum>8388608 || entry->size.QuadPart<0 ||
-        entry->size.QuadPart>entry->maximum || !wp_root_valid_v1(directory) || !wp_unchanged_v1(entry)) goto done;
+    if (!directory || !entry || !entry->created_stage || entry->root_token!=root || entry->phase!=2 ||
+        entry->maximum<0 || entry->maximum>8388608 || entry->size.QuadPart<0 || entry->size.QuadPart>entry->maximum) goto done;
+    wp_active_v1=directory;
+    if (!wp_root_valid_v1(directory)) goto done;
+    wp_active_v1=entry;
+    FILE_ID_INFO expected=entry->identity;
+    if (!wp_unchanged_v1(entry) || !wp_final_binding_v2((WpRootV1*)directory->owner,
+        (HANDLE)entry->owner,(const wchar_t*)(intptr_t)name,&expected)) goto done;
     int64_t length=entry->size.QuadPart;
     bytes=(uint8_t*)malloc((size_t)(length?length:1));if (!bytes) goto done;
     if (!wp_content_v2((HANDLE)entry->owner,bytes,length,0) || !wp_unchanged_v1(entry)) goto done;
-    /* Phase 4 consumes aliases' mutation while the transition is in flight.
-     * A proven no-effect collision restores the original sealed stage only. */
-    entry->phase=4;
-    result=wp_publish_impl_v1((int64_t)(intptr_t)directory->owner,entry,name);
-    if (entry->phase==2) out[2]=1;
-    if (result==1) {entry->phase=1;goto done;}
-    if (result!=0 || !out[2]) {entry->phase=3;result=-1;goto done;}
-    FILE_ID_INFO expected=entry->identity;
-    entry->phase=3; /* Any failure from here is cleanup-only, never publishable. */
-    if (!CloseHandle((HANDLE)entry->owner)) {result=-1;goto done;}
+    wp_active_v1=directory;
+    if (!wp_root_valid_v1(directory)) goto done;
+    wp_active_v1=entry;
+    /* The already-published stage becomes cleanup-only before the first
+     * fallible close. No alias can regain write or namespace publication. */
+    entry->phase=3;
+    if (!CloseHandle((HANDLE)entry->owner)) goto done;
     entry->owner=NULL;
     HANDLE reader=wp_relative_profile_v2(((WpRootV1*)directory->owner)->directory,
         (const wchar_t*)(intptr_t)name,0,0,1);
     if (reader==INVALID_HANDLE_VALUE) {
         if (!wp_pending_v1(entry)) {memset(entry,0,sizeof(*entry));out[1]=0;}
-        result=-1;goto done;
+        goto done;
     }
     entry->owner=reader;entry->kind=4;entry->created_stage=0;out[0]=stage;out[1]=0;
-    FILE_ID_INFO actual;LARGE_INTEGER size;
+    LARGE_INTEGER size;
     if (!wp_check_impl_v1((int64_t)(intptr_t)reader,entry->maximum) ||
-        !GetFileInformationByHandleEx(reader,FileIdInfo,&actual,sizeof(actual)) ||
-        memcmp(&actual,&expected,sizeof(actual)) || !GetFileSizeEx(reader,&size) || size.QuadPart!=length ||
-        !wp_content_v2(reader,bytes,length,1) || !wp_check_impl_v1((int64_t)(intptr_t)reader,entry->maximum) ||
-        !wp_snapshot_v1(entry) || memcmp(&entry->identity,&expected,sizeof(expected)) || entry->size.QuadPart!=length) {
-        result=-1;goto done;
-    }
+        !wp_final_binding_v2((WpRootV1*)directory->owner,reader,(const wchar_t*)(intptr_t)name,&expected) ||
+        !GetFileSizeEx(reader,&size) || size.QuadPart!=length || !wp_content_v2(reader,bytes,length,1) ||
+        !wp_check_impl_v1((int64_t)(intptr_t)reader,entry->maximum) || !wp_snapshot_v1(entry) ||
+        memcmp(&entry->identity,&expected,sizeof(expected)) || entry->size.QuadPart!=length) goto done;
     entry->phase=1;result=0;
 done:
     free(bytes);wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return result;
@@ -613,8 +628,8 @@ int64_t rt_windows_private_read_file_read_v2(int64_t file,int64_t offset,int64_t
 int64_t rt_windows_private_read_root_close_v2(int64_t root) {(void)root;return 0;}
 int64_t rt_windows_private_read_file_close_v2(int64_t file) {(void)file;return 0;}
 int64_t rt_windows_private_roots_same_directory_v2(int64_t writer,int64_t reader) {(void)writer;(void)reader;return -1;}
-int64_t rt_windows_private_publish_shared_read_v2(int64_t root,int64_t stage,int64_t name,int64_t output) {
-    (void)root;(void)stage;(void)name;if (output) {int64_t* out=(int64_t*)(intptr_t)output;out[0]=out[1]=out[2]=0;}return -1;
+int64_t rt_windows_private_adopt_published_read_v2(int64_t root,int64_t stage,int64_t name,int64_t output) {
+    (void)root;(void)stage;(void)name;if (output) {int64_t* out=(int64_t*)(intptr_t)output;out[0]=out[1]=0;}return -1;
 }
 
 #endif
