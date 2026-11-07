@@ -64,7 +64,7 @@ VEC_TYPE = re.compile(r'^Vec\d+[fdiu]\d*$')
 
 
 TEXT_ABI_SPL = 'src/compiler/50.mir/text_extern_abi.spl'
-TEXT_CASE = re.compile(r'case\s+((?:"[^"\n]*"\s*\|?\s*)+):\s*(?:#[^\n]*\n\s*)*return\s+Some\(\[([0-9,\s]*)\]\)')
+TEXT_CASE = re.compile(r'^[ \t]*case\s+((?:"[^"\n]*"\s*\|?\s*)+):\s*(?:#[^\n]*\n\s*)*return\s+Some\(\[([0-9,\s]*)\]\)', re.M)
 NAME = re.compile(r'"([^"\n]*)"')
 
 
@@ -75,10 +75,33 @@ def text_split_table(root):
     if not os.path.isfile(path):
         return {}
     with open(path, encoding='utf-8', errors='replace') as f:
-        body = f.read()
+        source = f.read()
+    # Simple functions use indentation. Only this top-level owner describes
+    # (ptr, len); neighboring tables can use identical case/Some syntax for
+    # incompatible conventions. Comments cannot introduce or end the owner.
+    source = re.sub(r'"(?:\\.|[^"\\\n])*"|#[^\n]*',
+                    lambda m: '' if m[0].startswith('#') else m[0], source)
+    lines = source.splitlines(keepends=True)
+    owners = [i for i, line in enumerate(lines)
+              if re.match(r'^(?:pub[ \t]+)?fn[ \t]+text_arg_indices\b', line)]
+    if len(owners) != 1:
+        raise ValueError('%s: expected one top-level text_arg_indices function, found %d' %
+                         (path, len(owners)))
+    start = owners[0]
+    if not re.match(r'^(?:pub[ \t]+)?fn[ \t]+text_arg_indices[ \t]*\(.*\).*:[ \t]*$', lines[start].rstrip('\r\n')):
+        raise ValueError('%s: malformed text_arg_indices declaration' % path)
+    end = start + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end][0] in ' \t'):
+        end += 1
+    body = ''.join(lines[start + 1:end])
+    matches = list(TEXT_CASE.finditer(body))
+    cases = [m for m in re.finditer(r'^[ \t]*case[ \t]+[^\n]*', body, re.M)
+             if not re.match(r'[ \t]*case[ \t]+_[ \t]*(?:\("[^"\n]*"\)[ \t]*)?:', m[0])]
+    if not matches or {m.start() for m in matches} != {m.start() for m in cases}:
+        raise ValueError('%s: malformed text_arg_indices split cases' % path)
     out = {}
-    for m in TEXT_CASE.finditer(body):
-        idx = tuple(int(x) for x in m[2].replace(' ', '').split(',') if x)
+    for m in matches:
+        idx = tuple(int(x) for x in m[2].split(',') if x.strip())
         for name in NAME.findall(m[1]):
             out[name] = idx
     return out
@@ -373,7 +396,10 @@ def selftest():
            'extern fn rt_textual(s: text) -> i64\n'
            'extern fn rt_dup(a: i64) -> i64\n'
            'extern fn rt_split(s: text, n: i64) -> i64\n'
+           'extern fn rt_empty(s: text) -> i64\n'
            'extern fn rt_split_wrong(s: text, n: i64) -> i64\n'
+           'extern fn rt_positions(a: text, n: i64, b: text) -> i64\n'
+           'extern fn rt_positions_peer(a: text, n: i64, b: text) -> i64\n'
            'extern fn rt_arr(a: [u8]) -> i64\n'
            'extern fn rt_opt(a: i64) -> i64?\n'
            'extern fn rt_vec(v: Vec4f) -> Vec4f\n'
@@ -388,8 +414,18 @@ def selftest():
                  '    match func_name:\n'
                  '        case "rt_split" | "rt_split_wrong":\n'
                  '            return Some([0])\n'
-                 '        case _:\n'
-                 '            return None\n')
+                 '        # case "rt_textual": return Some([0])\n'
+                 '        case "rt_positions" | "rt_positions_peer":\n'
+                 '            # both text positions, with scalar in between\n'
+                 '            return Some([0, 2])\n'
+                 '        case "rt_empty": return Some([])\n'
+                 '        case _("default # keeps tagged ABI"):\n'
+                 '            return None\n'
+                 '# fn fake_boundary(): comments do not close the body\n'
+                 '\nexport text_arg_indices\n'
+                 'pub fn neighboring_registry(name: text) -> [i64]?:\n'
+                 '    match name:\n'
+                 '        case "rt_split" | "rt_textual": return Some([1])\n')
     good_c = (
         '#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n'
         'int64_t rt_good(int64_t a) { return a; }\n'
@@ -397,9 +433,12 @@ def selftest():
         'int64_t rt_wrong(int64_t a) { return a; }\n'
         '#ifdef _WIN32\nint64_t rt_win_only(void) { return 1; }\n#endif\n'
         'int64_t rt_textual(int64_t v) { return v; }\n'
+        'int64_t rt_empty(int64_t v) { return v; }\n'
         'int64_t rt_dup(int64_t a) { return a; }\n'
         'int64_t rt_split(const uint8_t* p, uint64_t len, int64_t n) { return n + (int64_t)len + p[0]; }\n'
         'int64_t rt_split_wrong(int64_t s, int64_t n) { return s + n; }\n'
+        'int64_t rt_positions(const uint8_t* a, uint64_t al, int64_t n, const uint8_t* b, uint64_t bl) { return n + al + bl; }\n'
+        'int64_t rt_positions_peer(const uint8_t* a, uint64_t al, int64_t n, const uint8_t* b, uint64_t bl) { return n + al + bl; }\n'
         'int64_t rt_arr(int64_t a) { return a; }\n'
         'int64_t rt_opt(int64_t a) { return a; }\n'
         'int64_t rt_vec(int64_t v) { return v; }\n'
@@ -436,7 +475,10 @@ def selftest():
         # text is one tagged int64_t by default; a text-ABI row splits into (ptr, len).
         want(rows, 'rt_textual', 'PASS', 'compiles-with-prototype')
         want(rows, 'rt_split', 'PASS', 'compiles-with-prototype')
+        want(rows, 'rt_empty', 'PASS', 'compiles-with-prototype')
         want(rows, 'rt_split_wrong', 'FAIL', 'prototype-rejected')
+        want(rows, 'rt_positions', 'PASS', 'compiles-with-prototype')
+        want(rows, 'rt_positions_peer', 'PASS', 'compiles-with-prototype')
         # Arrays, optionals, SIMD vectors, declared classes and scalar aliases are int64 handles.
         want(rows, 'rt_arr', 'PASS', 'compiles-with-prototype')
         want(rows, 'rt_opt', 'PASS', 'compiles-with-prototype')
@@ -452,12 +494,52 @@ def selftest():
         wrong = [r for r in rows if r['symbol'] == 'rt_wrong']
         if wrong and 'rt_wrong' not in wrong[0]['diag']:
             fails.append('rt_wrong FAIL diagnostic does not name the symbol')
+        # Refuse incomplete or ambiguous owners rather than silently treating
+        # all text as tagged. The table may intentionally contain Some([]).
+        table_path = os.path.join(root, TEXT_ABI_SPL)
+        invalid_tables = {
+            'missing owner': 'fn neighboring_registry():\n    return None\n',
+            'duplicate owner': table_spl + table_spl,
+            'malformed case': table_spl.replace('Some([0, 2])', 'Some([bad])'),
+            'malformed declaration': table_spl.replace('text_arg_indices(func_name: text) -> [i64]?:', 'text_arg_indices broken'),
+        }
+        for label, invalid in invalid_tables.items():
+            with open(table_path, 'w') as f:
+                f.write(invalid)
+            try:
+                text_split_table(root)
+            except ValueError:
+                pass
+            else:
+                fails.append('%s registry accepted' % label)
+        with open(table_path, 'w') as f:
+            f.write(table_spl)
         # The compiler being unavailable must never produce PASS.
         rows_nocc, _ = check(root, ['src/runtime/good.c'], 'false')
         if any(r['compile'] == 'PASS' for r in rows_nocc):
             fails.append('PASS reported with a failing compiler')
         if not rows_nocc or any(not r['reason'].startswith('tu-baseline-failed') for r in rows_nocc):
             fails.append('failing compiler did not mark every row tu-baseline-failed')
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # Use the current production registry and runtime header together: the
+    # tagged sysctl parameter must remain one word while print_str splits.
+    # Real C compilation catches both false splits and lost legitimate rows.
+    with open(os.path.join(ROOT, TEXT_ABI_SPL), encoding='utf-8') as f:
+        production_table = f.read()
+    runtime_header = os.path.join(ROOT, RT_DIR, 'runtime.h').replace('\\', '/')
+    production_c = ('#include "%s"\n' % runtime_header +
+                    'int32_t rt_sysctlbyname_i32(int64_t name) { return 0; }\n'
+                    'void rt_print_str(const uint8_t* p, uint64_t len) {}\n')
+    root = tree({'src/runtime/production.c': production_c,
+                 'src/lib/abi.spl': 'extern fn rt_sysctlbyname_i32(name: text) -> i32\n'
+                                   'extern fn rt_print_str(s: text) -> void\n',
+                 TEXT_ABI_SPL: production_table})
+    try:
+        rows, _ = check(root, ['src/runtime/production.c'], 'cc')
+        want(rows, 'rt_sysctlbyname_i32', 'PASS', 'compiles-with-prototype')
+        want(rows, 'rt_print_str', 'PASS', 'compiles-with-prototype')
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
