@@ -148,3 +148,28 @@ Update 2026-10-27: the two sites at `backend_api.spl` (`compile`) and `backend_h
 ## Progress 2026-11-06 (hir2 P2 lane)
 
 Re-checked against origin/release/1.0.0: no fix commit for this bug id was found (git log --grep). The defect only shows up in code built natively by the Stage 2/Phase 3 producer. The interpreter-lane HIR specs cannot reproduce it, so a parse_full_frontend + HirLowering spec cannot prove the bug red and then green. No compiler change was made, the workaround tags stay, and the bug stays open until a rebuilt stage3 producer can run the repro.
+
+## Re-assessment, 2026-11-07 (lane w-p3match)
+
+Source at `origin/release/1.0.0` `ac574f19fa4` already contains the root
+mechanism named above: `enum_match_subject_type`
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`) retains a
+declared `Result`/`Optional` from the lowered local (`find_local_hir_type`)
+and feeds `scrut_enum_lookup`, so a bare `Ok`/`Err` arm on a typed local is
+owned by the subject's declaration even when another enum declares the same
+variants. Root-fix work is therefore not missing; only the recovery gate is.
+
+New fixture `test/fixtures/compiler/native_result_local_match_owner.spl`
+covers typed Result locals from a concrete method, trait dispatch and a
+generic free call, both arms each, plus a user enum `OtherVerdict` that also
+declares `Ok`/`Err`.
+
+Probe with `C:/dev/p3new/s3new/s3_fable57s.exe native-build` (first run,
+receiver inferred): MIR reported `fatal_count=4`, all four being
+`unresolved method call` on the un-annotated receiver (a separate probe-binary
+inference gap); zero ownership/ambiguity errors for the six typed-local
+matches or the `OtherVerdict` match. Re-runs with an annotated receiver, the
+existing `native_result_method_match_owner.spl`, and a three-line hello world
+all SEGV (rc=139) in that probe binary, so no executable evidence was
+produced. The workarounds stay in place and the bug stays OPEN until the
+recovery gate above runs on a qualified producer.
