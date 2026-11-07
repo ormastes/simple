@@ -1,0 +1,47 @@
+# Regression: SDK string fields encode once and strict JSON decode preserves bytes.
+use std.spec.*
+use std.common.string_core.{char_from_code}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or}
+use std.nogc_sync_mut.mcp_sdk.core.json.{js}
+use std.nogc_sync_mut.mcp_sdk.core.types.{make_tool_result, make_tool_error, tool_def, tool_def_to_json}
+use std.nogc_sync_mut.mcp_sdk.core.jsonrpc.{jsonrpc_error_with_data}
+
+fn sdk_json_decode_once(wire: text) -> JsonValue:
+    val parsed = json_parse_value_strict(wire)
+    expect(parsed.is_ok()).to_equal(true)
+    parsed.unwrap()
+
+fn sdk_text_content_once(wire: text) -> text:
+    val document = sdk_json_decode_once(wire)
+    val result = json_value_field(document, "result")
+    match json_value_field(result, "content"):
+        JsonValue.Array(items):
+            expect(items.len()).to_equal(1)
+            json_value_text_or(json_value_field(items[0], "text"), "missing")
+        _:
+            expect("missing content").to_equal("one text item")
+            "missing"
+
+describe "MCP SDK JSON encoding once":
+    it "roundtrips quotes backslashes whitespace UTF8 and every control byte":
+        var controls = ""
+        for code in range(0, 32):
+            controls = controls + char_from_code(code)
+        val mixed = "한글\"" + char_from_code(0) + "😀끝"
+        val samples: [text] = ["", "quote \" slash \\", "line1\nline2\r\ttail", "한글 café 😀", controls, mixed]
+        for sample in samples:
+            val value = sdk_json_decode_once(js(sample))
+            expect(json_value_text_or(value, "missing")).to_equal(sample)
+            expect(sdk_text_content_once(make_tool_result("1", sample))).to_equal(sample)
+            expect(sdk_text_content_once(make_tool_error("2", sample))).to_equal(sample)
+
+    it "keeps already structured schema and error data as JSON objects":
+        val schema = "{\"type\":\"object\"}"
+        val tool = sdk_json_decode_once(tool_def_to_json(tool_def("probe", "quoted \"description\"", schema)))
+        expect(json_value_text_or(json_value_field(tool, "description"), "missing")).to_equal("quoted \"description\"")
+        val input_schema = json_value_field(tool, "inputSchema")
+        expect(json_value_text_or(json_value_field(input_schema, "type"), "missing")).to_equal("object")
+        val reply = sdk_json_decode_once(jsonrpc_error_with_data("3", -32602, "quoted \"error\"", "{\"device\":\"COM7\"}"))
+        val error = json_value_field(reply, "error")
+        expect(json_value_text_or(json_value_field(error, "message"), "missing")).to_equal("quoted \"error\"")
+        expect(json_value_text_or(json_value_field(json_value_field(error, "data"), "device"), "missing")).to_equal("COM7")

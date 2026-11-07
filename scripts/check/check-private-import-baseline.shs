@@ -11,7 +11,7 @@
 #
 #   sh scripts/check/check-private-import-baseline.shs [--root DIR] [--base REV] [--selftest]
 #
-# --base defaults to the merge-base of HEAD with origin/release/1.0.0; when the
+# --base overrides PRIVATE_IMPORT_BASE (the trusted CI event base), then defaults to the merge-base of HEAD with origin/release/1.0.0; when the
 # base revision has no baseline file (the introducing change) the ratchet check
 # is skipped and says so.
 #
@@ -23,13 +23,35 @@ set -u
 
 BASELINE_REL="scripts/check/private_import_baseline.txt"
 
-stale_scan() {
+stale_scan() (
+    # Read omitted sparse files from the index without changing the checkout.
+    # Missing ordinary tracked files remain real deletions and must fail.
+    snapshot=$(mktemp -d) || return 2
+    trap 'rm -rf "$snapshot"' EXIT INT TERM HUP
     scan_root=$1
-    base="$scan_root/$BASELINE_REL"
-    (cd "$scan_root" && awk -F'|' '
-        function load(f,   line, n, rest) {
+    git -C "$scan_root" ls-files -t > "$snapshot/index" || return 2
+    awk -F'|' 'FILENAME == ARGV[1] { if (substr($0, 1, 2) == "S ") sparse[substr($0, 3)] = 1; next }
+        ($1 in sparse) && !seen[$1]++ { print $1 }' \
+        "$snapshot/index" "$scan_root/$BASELINE_REL" > "$snapshot/names" || return 2
+    while IFS= read -r path; do
+        # Index fallback is only for absent sparse files. A present directory,
+        # unreadable file or dangling symlink must not revive indexed content.
+        if [ ! -e "$scan_root/$path" ] && [ ! -L "$scan_root/$path" ]; then
+            printf '%s\0' "$path"
+        fi
+    done < "$snapshot/names" > "$snapshot/paths"
+    git -C "$scan_root" checkout-index --ignore-skip-worktree-bits \
+        --prefix="$snapshot/source/" -z --stdin < "$snapshot/paths" || return 2
+    (cd "$scan_root" && awk -v snapshot="$snapshot/source/" -F'|' '
+        function load(f,   line, n, rest, got) {
             delete priv; delete expo
-            if ((getline line < f) < 0) { missing = 1; close(f); return }
+            got = (getline line < f)
+            if (got < 0) {
+                close(f)
+                f = snapshot f
+                got = (getline line < f)
+            }
+            if (got < 0) { missing = 1; close(f); return }
             missing = 0
             do {
                 if (match(line, /^fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
@@ -47,21 +69,26 @@ stale_scan() {
             if (f != cur) { cur = f; load(f) }
             if (missing || !(name in priv) || (name in expo)) print $0
         }' "$BASELINE_REL")
-}
+)
 
 # prints added lines (current minus base); returns 3 when base has no baseline.
-added_scan() {
+added_scan() (
     ascan_root=$1; abase=$2
-    tmp_base=$(mktemp) || return 4
-    if ! git -C "$ascan_root" show "$abase:$BASELINE_REL" > "$tmp_base" 2>/dev/null; then
-        rm -f "$tmp_base"; return 3
-    fi
-    LC_ALL=C sort -u "$tmp_base" > "$tmp_base.s"
-    LC_ALL=C sort -u "$ascan_root/$BASELINE_REL" > "$tmp_base.c"
-    LC_ALL=C comm -13 "$tmp_base.s" "$tmp_base.c"
-    rm -f "$tmp_base" "$tmp_base.s" "$tmp_base.c"
+    tmp_base=$(mktemp -d) || return 4
+    trap 'rm -rf "$tmp_base"' EXIT INT TERM HUP
+    commit=$(git -C "$ascan_root" rev-parse --verify "$abase^{commit}" 2>/dev/null) || return 4
+    entry=$(git -C "$ascan_root" ls-tree "$commit" -- "$BASELINE_REL" 2>/dev/null) || return 4
+    # Only a confirmed absent path is an introducing change. An unreadable
+    # object at an existing path must not waive the no-growth comparison.
+    [ -n "$entry" ] || return 3
+    kind=$(printf '%s\n' "$entry" | awk '{ print $2 }')
+    [ "$kind" = blob ] || return 4
+    git -C "$ascan_root" show "$commit:$BASELINE_REL" > "$tmp_base/base" 2>/dev/null || return 4
+    LC_ALL=C sort -u "$tmp_base/base" > "$tmp_base/sorted" || return 4
+    LC_ALL=C sort -u "$ascan_root/$BASELINE_REL" > "$tmp_base/current" || return 4
+    LC_ALL=C comm -13 "$tmp_base/sorted" "$tmp_base/current" || return 4
     return 0
-}
+)
 
 scan() {
     sroot=$1; sbase=$2
@@ -69,7 +96,9 @@ scan() {
     [ -f "$file" ] || { echo "ERROR - nothing was checked (missing $file)"; return 2; }
     total=$(wc -l < "$file" | tr -d ' ')
     [ "$total" -gt 0 ] || { echo "ERROR - nothing was checked (empty baseline)"; return 2; }
-    stale=$(stale_scan "$sroot")
+    stale=$(stale_scan "$sroot") || {
+        echo "ERROR - nothing was checked (source/index scan failed)"; return 2;
+    }
     if [ -n "$stale" ]; then
         k=$(printf '%s\n' "$stale" | wc -l | tr -d ' ')
         first=$(printf '%s\n' "$stale" | head -5 | tr '\n' ' ')
@@ -83,6 +112,9 @@ scan() {
         echo "ERROR - nothing was checked (no --base given and no merge-base with origin/release/1.0.0)"
         return 2
     fi
+    git -C "$sroot" cat-file -e "$sbase^{commit}" 2>/dev/null || {
+        echo "ERROR - nothing was checked (base is not a readable commit: $sbase)"; return 2;
+    }
     added=$(added_scan "$sroot" "$sbase"); arc=$?
     case $arc in
         3) echo "PASS - $total baseline entries checked, 0 stale; ratchet skipped (base $sbase has no baseline: introducing change)"; return 0 ;;
@@ -120,13 +152,77 @@ selftest() {
     out=$(scan "$d" "$b" | tail -1); case $out in FAIL*gained*extra*) ;; *) echo "ERROR - selftest: an added line must FAIL the ratchet ($out)"; return 2 ;; esac
     printf 'lib/gone.spl|live\n' > "$d/$BASELINE_REL"
     out=$(scan "$d" "$b" | tail -1); case $out in FAIL*) ;; *) echo "ERROR - selftest: missing file must be stale ($out)"; return 2 ;; esac
+    printf 'lib/m.spl|live\n' > "$d/$BASELINE_REL"
+    out=$(scan "$d" missing-base); rc=$?
+    [ "$rc" -eq 2 ] || { echo "ERROR - selftest: invalid base passed ($out)"; return 2; }
+    # Full-checkout deletion: no sparse list must not hide a real removal.
+    git -C "$d" checkout -q "$b" -- lib/m.spl
+    printf 'lib/m.spl|live\n' > "$d/$BASELINE_REL"
+    rm "$d/lib/m.spl"
+    out=$(scan "$d" "$b"); rc=$?
+    [ "$rc" -eq 1 ] || { echo "ERROR - selftest: full tracked deletion passed ($out)"; return 2; }
+    git -C "$d" checkout -q "$b" -- lib/m.spl
+    # Sparse private file is omitted, but its indexed declaration is checked.
+    git -C "$d" update-index --skip-worktree lib/m.spl
+    rm "$d/lib/m.spl"
+    out=$(scan "$d" "$b"); rc=$?
+    [ "$rc" -eq 0 ] || { echo "ERROR - selftest: sparse private declaration failed ($out)"; return 2; }
+    [ ! -e "$d/lib/m.spl" ] || { echo "ERROR - selftest: scanner changed checkout"; return 2; }
+    mkdir "$d/lib/m.spl"
+    out=$(scan "$d" "$b"); rc=$?
+    [ "$rc" -ne 0 ] || { echo "ERROR - selftest: sparse directory passed ($out)"; return 2; }
+    rmdir "$d/lib/m.spl"
+    if ln -s missing-target "$d/lib/m.spl" 2>/dev/null && [ -L "$d/lib/m.spl" ]; then
+        out=$(scan "$d" "$b"); rc=$?
+        [ "$rc" -ne 0 ] || { echo "ERROR - selftest: dangling sparse symlink passed ($out)"; return 2; }
+    else
+        # Windows hosts may lack native symlink permission. Directory/read
+        # failure controls still run; do not fail a healthy gate on that host.
+        echo "selftest NOTE: dangling-symlink fixture unavailable on this host"
+    fi
+    rm -f "$d/lib/m.spl"
+    printf 'invalid index\n' > "$d/corrupt-index"
+    out=$(GIT_INDEX_FILE="$d/corrupt-index" scan "$d" "$b" 2>/dev/null); rc=$?
+    [ "$rc" -eq 2 ] || { echo "ERROR - selftest: corrupt index did not ERROR ($out)"; return 2; }
+    git -C "$d" update-index --info-only --cacheinfo "100644,1111111111111111111111111111111111111111,lib/m.spl" || return 2
+    git -C "$d" update-index --skip-worktree lib/m.spl
+    out=$(scan "$d" "$b" 2>/dev/null); rc=$?
+    [ "$rc" -eq 2 ] || { echo "ERROR - selftest: missing indexed blob did not ERROR ($out)"; return 2; }
+    # A staged promotion in a sparse file must be stale, not silently skipped.
+    blob=$(printf 'pub fn live() -> i64:\n    1\n' | git -C "$d" hash-object -w --stdin)
+    git -C "$d" update-index --cacheinfo "100644,$blob,lib/m.spl"
+    git -C "$d" update-index --skip-worktree lib/m.spl
+    out=$(scan "$d" "$b"); rc=$?
+    [ "$rc" -eq 1 ] || { echo "ERROR - selftest: sparse public promotion passed ($out)"; return 2; }
+    # An empty indexed file must not recycle a preceding file's declarations.
+    blob=$(printf '' | git -C "$d" hash-object -w --stdin)
+    git -C "$d" update-index --cacheinfo "100644,$blob,lib/m.spl"
+    git -C "$d" update-index --skip-worktree lib/m.spl
+    out=$(scan "$d" "$b"); rc=$?
+    [ "$rc" -eq 1 ] || { echo "ERROR - selftest: sparse empty file passed ($out)"; return 2; }
+    # A real base commit with an unreadable baseline object is not an
+    # introducing change, even if the current baseline has gained a row.
+    git -C "$d" show "$b:lib/m.spl" > "$d/lib/m.spl" || return 2
+    printf 'fn extra() -> i64:\n    5\n' >> "$d/lib/m.spl"
+    printf 'lib/m.spl|live\nlib/m.spl|other\nlib/m.spl|extra\n' > "$d/$BASELINE_REL"
+    baseline_blob=$(git -C "$d" rev-parse "$b:$BASELINE_REL") || return 2
+    object="$d/.git/objects/$(printf '%.2s' "$baseline_blob")/${baseline_blob#??}"
+    mv "$object" "$d/base-blob-backup" || return 2
+    out=$(scan "$d" "$b" 2>/dev/null); rc=$?
+    mv "$d/base-blob-backup" "$object" || return 2
+    [ "$rc" -eq 2 ] || { echo "ERROR - selftest: missing base blob skipped ratchet ($out)"; return 2; }
+    # A genuinely absent baseline path still permits the introducing change.
+    empty_tree=$(git -C "$d" mktree </dev/null) || return 2
+    intro=$(printf 'intro fixture\n' | git -C "$d" commit-tree "$empty_tree") || return 2
+    out=$(scan "$d" "$intro"); rc=$?
+    [ "$rc" -eq 0 ] || { echo "ERROR - selftest: confirmed introducing change failed ($out)"; return 2; }
     : > "$d/$BASELINE_REL"
     scan "$d" "$b" >/dev/null; [ $? -eq 2 ] || { echo "ERROR - selftest: empty baseline must ERROR"; return 2; }
     return 0
 }
 
 main_root=.
-main_base=
+main_base=${PRIVATE_IMPORT_BASE:-}
 mode=scan
 while [ $# -gt 0 ]; do
     case $1 in

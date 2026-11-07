@@ -678,3 +678,15 @@ Package: `src/compiler/20.hir/target_hir/` (kept in a subdirectory, not the 20.h
 - Trap: teaching only the dispatch predicates (`native_trait_owner_for_kind`, `trait_receiver_identity`) about `TypeParam` vtable-calls a tagged word. The ABI has to change at the call boundary, where the concrete type is still known.
 - The body may use the object only as a method receiver or a positional argument to a native-trait slot. `native_bounded_param_escape` makes any other use a compile error.
 - Record: `doc/08_tracking/bug/mir_generic_trait_bound_receiver_unresolved_2026-11-06.md`; spec `test/01_unit/compiler/mir/generic_trait_bound_receiver_spec.spl`.
+
+## 2026-11-07 — `Optional(Any)` at integer sinks: use `option_payload_for_int_sink`
+
+`list` is `Array(Any)`; its native `get`/`at` (`lower_array_first_or_last`)
+returns an `Optional(Any)` handle whose payload is already int-decoded
+(`lower_type(Any) = i64`). `option_scalar_payload_of` unwraps only plain-scalar
+inners, so `-> i64` tails/returns and `val y: i64 =` handed the HANDLE pointer
+to the caller (4 read as 200634408607585). Integer sinks now call
+`option_payload_for_int_sink` (switch_operators_calls.spl). Trap: the if-val
+binder still decodes that payload a second time (4 -> 0) — producer/consumer
+disagree on whether an `Any` payload is tagged. Bug:
+`doc/08_tracking/bug/native_list_any_get_i64_sink_returns_option_handle_2026-11-07.md`.
