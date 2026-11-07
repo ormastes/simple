@@ -18,15 +18,15 @@ export use std.common.net.http_core.{
     content_length_from_text, body_decision
 }
 
-# The native `read_line` API uses a 4096-byte buffer (4095 payload bytes plus
-# its terminator). It stops at that boundary even
-# when no newline was found, silently returning a truncated line that is
-# indistinguishable from a short one by length alone — so a `> max` length
-# check can never fire for such input (see
+# The native C `rt_io_tcp_read_line` uses a 4096-byte buffer and silently
+# truncates a longer line (see
 # doc/08_tracking/bug/lab_http_parser_oversized_header_line_silently_truncated_not_rejected_2026-08-07.md).
-# The truncation signature IS detectable here: `read_line()` returns the line
-# INCLUDING its terminating newline, so a raw line that is >= the runtime cap
-# and does NOT end in "\n" was cut mid-line and must be rejected, not parsed.
+# This parser no longer reads through it: `_scalar_read_line` below bounds each
+# line at the configured limit + CRLF and reports SCALAR_LINE_TOO_LONG itself.
+# The one remaining way to get a newline-less line is EOF mid-line;
+# `line_truncated_by_runtime` keeps the historical 431 for such a line at or
+# above this cap (shorter ones get 400 Incomplete). The vector parser shares
+# the cap for its own line bound.
 val RUNTIME_READ_LINE_CAP: i32 = 4096
 
 fn line_truncated_by_runtime(raw: text) -> bool:
@@ -133,8 +133,7 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
     if first.status != SCALAR_LINE_OK:
         return Err("Failed to read request line: {first.error}")
     val request_line = first.line
-    # Reject a runtime-truncated (no-newline, at-cap) request line —
-    # the `> max_request_line` check below can never see it.
+    # A newline-less line here means EOF mid-line (see RUNTIME_READ_LINE_CAP).
     if line_truncated_by_runtime(request_line):
         return Err("431 Request line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
     if not request_line.ends_with("\n"):
@@ -183,10 +182,7 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
             # framing, not an implicit end-of-headers marker.
             return Err("400 Incomplete request headers")
         val header_line = next.line
-        # Reject a runtime-truncated (no-newline, at-cap)
-        # header line — the `> max_header_line` check below is
-        # structurally unreachable for it (the runtime already
-        # cut the line to exactly the cap).
+        # A newline-less line here means EOF mid-line (see RUNTIME_READ_LINE_CAP).
         if line_truncated_by_runtime(header_line):
             return Err("431 Header line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
         if not header_line.ends_with("\n"):
