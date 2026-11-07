@@ -6,7 +6,7 @@
 # body. Every PR that touches any row rewrites that line, so ANY two PRs that
 # both touch the file conflict on line 1 even when their rows are disjoint.
 #
-# Wiring (scripts/setup/setup.shs installs it; .gitattributes selects it):
+# Wiring (scripts/setup/setup-hooks.shs installs it; .gitattributes selects it):
 #   git config merge.sdn-rows.name   "SDN row-union merge + reseal"
 #   git config merge.sdn-rows.driver "sh scripts/vcs/sdn-rows-merge.shs %O %A %B %P"
 # A clone without that config ignores `merge=sdn-rows` and git falls back to its
@@ -305,6 +305,38 @@ selftest() {
     if [ $_rc -ne 0 ] || grep -q "$(printf '\r')" "$_t/a7" || ! grep -q '^    c, P2' "$_t/a7" || ! grep -q '^    d, P2' "$_t/a7" \
         ; then
         echo "selftest FAIL: CRLF inputs (rc=$_rc)"; _fails=$((_fails+1))
+    fi
+
+    # 8 real `git merge` through .gitattributes: two branches adding different
+    # rows merge clean, both rows kept; the stale sidecars each side left behind
+    # are tolerated by the seal checker once one matching seal is added.
+    _n=$((_n+1))
+    _m="$_t/m"
+    if mkdir -p "$_m/d" "$_m/config/check" && git -C "$_m" init -q && git -C "$_m" config user.email s@t \
+        && git -C "$_m" config user.name selftest && git -C "$_m" config core.autocrlf false \
+        && git -C "$_m" config merge.sdn-rows.driver "sh '$HERE/sdn-rows-merge.shs' %O %A %B %P" \
+        && printf 'd/db.sdn merge=sdn-rows\n' > "$_m/.gitattributes" \
+        && printf 'seal_policy |glob, algo|\n    *.sdn, crc32\n' > "$_m/config/check/sdn_seal_policy.sdn" \
+        && printf '%b' "$base" > "$_m/d/db.sdn" && sh "$RESEAL" --no-selftest "$_m/d/db.sdn" >/dev/null \
+        && git -C "$_m" add -A && git -C "$_m" commit -q -m base && git -C "$_m" branch -q side; then
+        printf '%b' "$H\n$(r a open 2026-11-01)\n$(r b open 2026-11-01)\n$(r c open 2026-11-02)\n\n$L\n    a, claimed, s1, 2026-11-01, 2026-11-01, open, x\n" > "$_m/d/db.sdn"
+        sh "$RESEAL" --no-selftest "$_m/d/db.sdn" >/dev/null; git -C "$_m" add -A; git -C "$_m" commit -q -m ours
+        git -C "$_m" checkout -q side
+        printf '%b' "$H\n$(r a open 2026-11-01)\n$(r b open 2026-11-01)\n$(r d open 2026-11-02)\n\n$L\n    a, claimed, s1, 2026-11-01, 2026-11-01, open, x\n" > "$_m/d/db.sdn"
+        sh "$RESEAL" --no-selftest "$_m/d/db.sdn" >/dev/null; git -C "$_m" add -A; git -C "$_m" commit -q -m theirs
+        git -C "$_m" checkout -q -
+        git -C "$_m" merge -q --no-edit side >/dev/null 2>&1; _rc=$?
+        if [ $_rc -ne 0 ] || ! grep -q '^    c, P2' "$_m/d/db.sdn" || ! grep -q '^    d, P2' "$_m/d/db.sdn"; then
+            echo "selftest FAIL: real git merge of disjoint row adds (rc=$_rc)"; _fails=$((_fails+1))
+        else
+            # add the matching seal WITHOUT deleting the two stale ones: still PASS
+            _h=$(SDN_SEAL_ALGO=crc32 sh -c ". '$CHECKDIR/sdn-seal-lib.shs'; csm_hash_hex crc32 '$_m/d/db.sdn'")
+            : > "$_m/d/db.crc32_$_h.csm"; git -C "$_m" add -A; git -C "$_m" commit -q -m seal
+            _v=$(sh "$SEALCHK" --no-selftest --rev HEAD --root "$_m" 2>/dev/null | tail -1)
+            case "$_v" in PASS*) ;; *) echo "selftest FAIL: stale sidecars after merge rejected ($_v)"; _fails=$((_fails+1)) ;; esac
+        fi
+    else
+        echo "selftest FAIL: could not build git-merge fixture repo"; _fails=$((_fails+1))
     fi
 
     rm -rf "$_t"

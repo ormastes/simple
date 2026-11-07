@@ -10,11 +10,12 @@
 # CRLF line ends verifies against the same seal as the LF blob.
 #
 # Verify states (csm_verify):
-#   OK              exactly one sidecar and it matches
+#   OK              at least one sidecar matches (stale extras are ignored with
+#                   a note in `detail`; reseal deletes them opportunistically)
 #   CORRUPT         exactly one sidecar and it mismatches / names an unknown
 #                   algorithm / has the wrong hex length (fail closed)
-#   MERGED_UNSEALED more than one sidecar (loader accepts with a warning, writers
-#                   reseal, gates FAIL with a "run reseal" hint)
+#   MERGED_UNSEALED several sidecars, none matching (loader accepts with a
+#                   warning, writers reseal, gates FAIL with a "run reseal" hint)
 #   MISSING         no sidecar and no legacy header (fail closed)
 #   LEGACY          no sidecar, line 1 is a matching `#sdn-crc32:` header
 #                   (deprecated, accepted for one release)
@@ -210,7 +211,14 @@ fn _csm_verify_core(path: text, content: text, raw: [u8], use_raw: bool) -> CsmV
         val (algo, _hex) = csm_parse_tag(sidecars[0])
         if ok: return CsmVerdict(state: CSM_OK, algo: algo, detail: "")
         return CsmVerdict(state: CSM_CORRUPT, algo: algo, detail: why)
-    CsmVerdict(state: CSM_MERGED_UNSEALED, algo: "", detail: "{sidecars.len()} .csm seals beside {path}; run reseal")
+    # Several sidecars (owner decision 2026-11-07): OK when ANY one matches; the
+    # stale extras a merge leaves behind are ignored and reported in `detail`.
+    for sidecar in sidecars:
+        val (ok, _why) = _csm_sidecar_matches(sidecar, content, raw, use_raw)
+        if ok:
+            val (algo, _hex) = csm_parse_tag(sidecar)
+            return CsmVerdict(state: CSM_OK, algo: algo, detail: "ignoring {sidecars.len() - 1} stale .csm sidecar(s) beside {path}; reseal cleans them")
+    CsmVerdict(state: CSM_MERGED_UNSEALED, algo: "", detail: "{sidecars.len()} .csm seals beside {path}, none matches; run reseal")
 
 # Classify `content` (the exact text of data file `path`).
 fn csm_verify(path: text, content: text) -> CsmVerdict:
@@ -225,6 +233,7 @@ fn csm_verify_bytes(path: text, raw: [u8], content: text) -> CsmVerdict:
 fn csm_load_body(path: text, content: text) -> text?:
     val verdict = csm_verify(path, content)
     if verdict.state == CSM_OK:
+        if verdict.detail != "": _csm_warn(verdict.detail)
         return csm_strip_legacy_header(content)
     if verdict.state == CSM_MERGED_UNSEALED:
         # Accept: a union merge legitimately leaves several seals and none of

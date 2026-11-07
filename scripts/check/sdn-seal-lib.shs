@@ -7,6 +7,7 @@
 # (every CR dropped). ONE hashing function: csm_hash_hex <algo> <file>.
 #
 # States (csm_judge / csm_state): OK | CORRUPT | MERGED_UNSEALED | MISSING | LEGACY
+# Several sidecars: OK when any one matches (stale extras ignored, NOTE on stderr).
 # Policy (config/check/sdn_seal_policy.sdn) maps path globs -> algorithm; a .csm
 # whose algorithm differs from the policy is RESEAL_NEEDED (reported by gates).
 
@@ -161,12 +162,32 @@ csm_legacy_state() { # file -> LEGACY | CORRUPT
     if [ "$_want" = "$_got" ]; then echo LEGACY; else echo CORRUPT; fi
 }
 
-# csm_judge <datafile> <got-hex|-> [<tag>...] -> "STATE" or "STATE detail" (one
-# line). <got-hex> is the datafile's digest for the single tag's algorithm,
-# precomputed by csm_hash_batch ("-" when not needed / not available).
+# csm_got_for <algo> <gots> -> the digest for <algo> from a space-separated
+# "algo:hex ..." list, or "-" when absent.
+csm_got_for() {
+    for _gw in $2; do case "$_gw" in "$1:"*) echo "${_gw#*:}"; return 0 ;; esac; done
+    echo "-"
+}
+
+# csm_tag_check <tag> <got-hex|-> -> "" when the tag matches, else the reason.
+csm_tag_check() {
+    _algo=${1%%_*}; _hex=${1#*_}
+    _w=$(csm_hex_len "$_algo") || { echo "unknown algorithm '$_algo'"; return 0; }
+    case "$_hex" in ''|*[!0-9a-f]*) echo "non-hex digest in $1"; return 0 ;; esac
+    [ "${#_hex}" -eq "$_w" ] || { echo "wrong digest width for $_algo (want $_w)"; return 0; }
+    [ "$2" != "-" ] || { echo "cannot hash with $_algo"; return 0; }
+    [ "$2" = "$_hex" ] || echo "$_algo mismatch (want $_hex got $2)"
+}
+
+# csm_judge <datafile> <gots> [<tag>...] -> "STATE" or "STATE detail" (one
+# line). <gots> is "algo:hex ..." — the datafile's digest for each algorithm its
+# tags name, precomputed by csm_hash_batch ("-" or "" when none available).
 # Tags come from the filesystem or from `git ls-tree` — the caller decides.
+# Several sidecars: OK when ANY one matches (owner decision 2026-11-07 — a
+# stale extra sidecar left by a merge is ignored, with a NOTE on stderr);
+# MERGED_UNSEALED only when none of them matches.
 csm_judge() {
-    _df=$1; _got=$2; shift 2
+    _df=$1; _gots=$2; shift 2
     if [ $# -eq 0 ]; then
         case "$(head -1 "$_df")" in
             '#sdn-crc32:'*) csm_legacy_state "$_df" ;;
@@ -174,23 +195,29 @@ csm_judge() {
         esac
         return 0
     fi
-    if [ $# -gt 1 ]; then echo "MERGED_UNSEALED $# seals"; return 0; fi
-    _algo=${1%%_*}; _hex=${1#*_}
-    _w=$(csm_hex_len "$_algo") || { echo "CORRUPT unknown algorithm '$_algo'"; return 0; }
-    case "$_hex" in ''|*[!0-9a-f]*) echo "CORRUPT non-hex digest in $1"; return 0 ;; esac
-    [ "${#_hex}" -eq "$_w" ] || { echo "CORRUPT wrong digest width for $_algo (want $_w)"; return 0; }
-    [ "$_got" != "-" ] || { echo "CORRUPT cannot hash with $_algo"; return 0; }
-    if [ "$_got" = "$_hex" ]; then echo "OK $_algo"; else echo "CORRUPT $_algo mismatch (want $_hex got $_got)"; fi
+    _n_tags=$#; _match=""; _why=""
+    for _jt in "$@"; do
+        _jg=$(csm_got_for "${_jt%%_*}" "$_gots")
+        _r=$(csm_tag_check "$_jt" "$_jg")
+        if [ -z "$_r" ] && [ -z "$_match" ]; then _match=$_jt; elif [ -z "$_why" ]; then _why=$_r; fi
+    done
+    if [ -n "$_match" ]; then
+        [ "$_n_tags" -eq 1 ] || echo "NOTE: ${CSM_JUDGE_NAME:-$_df}: ignoring $((_n_tags - 1)) stale .csm sidecar(s) beside the matching ${_match} (reseal cleans them)" >&2
+        echo "OK ${_match%%_*}"; return 0
+    fi
+    if [ "$_n_tags" -gt 1 ]; then echo "MERGED_UNSEALED $_n_tags seals, none matches"; return 0; fi
+    echo "CORRUPT $_why"
 }
 
-# csm_state <datafile> [<tag>...]: hashes the file itself (one process per call).
+# csm_state <datafile> [<tag>...]: hashes the file itself (one process per algo).
 csm_state() {
     _sf=$1; shift
-    _sg="-"
-    if [ $# -eq 1 ]; then
-        _sa=${1%%_*}
-        if csm_hex_len "$_sa" >/dev/null; then _sg=$(csm_hash_hex "$_sa" "$_sf") || _sg="-"; fi
-    fi
+    _sg=""
+    for _sa in $(for _st in "$@"; do echo "${_st%%_*}"; done | LC_ALL=C sort -u); do
+        if csm_hex_len "$_sa" >/dev/null; then
+            _sh=$(csm_hash_hex "$_sa" "$_sf") && _sg="$_sg $_sa:$_sh"
+        fi
+    done
     csm_judge "$_sf" "$_sg" "$@"
 }
 

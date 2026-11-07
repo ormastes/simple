@@ -20,9 +20,11 @@
 # push gate looks at seals.
 #
 # STATES (per sealed file, from COMMITTED content at --rev, never the checkout)
-#   OK               exactly one matching sidecar, algorithm == policy
+#   OK               at least one matching sidecar, algorithm == policy (stale
+#                    extra sidecars are ignored with a NOTE on stderr — owner
+#                    decision 2026-11-07; reseal deletes them opportunistically)
 #   CORRUPT          one sidecar that mismatches / unknown algo / bad width   FAIL
-#   MERGED_UNSEALED  more than one sidecar                      FAIL ("run reseal")
+#   MERGED_UNSEALED  several sidecars, NONE matching            FAIL ("run reseal")
 #   MISSING          policy-listed file with no sidecar         FAIL
 #   RESEAL_NEEDED    OK but algorithm differs from the policy   FAIL
 #   LEGACY           line-1 `#sdn-crc32:` header, matching       accepted (note)
@@ -108,9 +110,11 @@ scan() {
     # candidate files: those with seals, legacy headers, or policy rows
     { cut -f1 "$_work/seals.tsv"; cat "$_work/legacy.txt"; cat "$_work/listed.txt"; } | grep -v '^$' | LC_ALL=C sort -u > "$_work/files.txt"
 
-    # PASS 1: copy every single-sealed blob out of git and hash them per
-    # algorithm in ONE batch call each (xxh3/blake3 go through the pure-Simple
-    # CLI whose ~5 s startup must be paid once per algorithm, not per file).
+    # PASS 1: copy every sealed blob out of git and hash it once per algorithm
+    # its sidecars name, in ONE batch call per algorithm (xxh3/blake3 go through
+    # the pure-Simple CLI whose ~5 s startup must be paid once per algorithm,
+    # not per file). A file with several sidecars is hashed for each of their
+    # algorithms: it is OK when ANY sidecar matches.
     mkdir -p "$_work/h"
     _i=0
     : > "$_work/algos.txt"
@@ -118,12 +122,13 @@ scan() {
         _i=$((_i + 1))
         [ -n "$_path" ] || continue
         _tags=$(awk -F'\t' -v p="$_path" '$1 == p { print $2 }' "$_work/seals.tsv")
-        [ -n "$_tags" ] && [ "$(printf '%s\n' "$_tags" | wc -l | tr -d ' ')" -eq 1 ] || continue
-        _a=${_tags%%_*}
-        csm_hex_len "$_a" >/dev/null || continue
+        [ -n "$_tags" ] || continue
         git -C "$_root" cat-file -e "$_rev:$_path" 2>/dev/null || continue
         git -C "$_root" show "$_rev:$_path" > "$_work/h/blob.$_i" 2>/dev/null || continue
-        printf '%s\t%s\n' "$_a" "$_i" >> "$_work/algos.txt"
+        for _a in $(printf '%s\n' "$_tags" | sed 's/_.*//' | LC_ALL=C sort -u); do
+            csm_hex_len "$_a" >/dev/null || continue
+            printf '%s\t%s\n' "$_a" "$_i" >> "$_work/algos.txt"
+        done
     done < "$_work/files.txt"
     : > "$_work/h/empty"
     for _a in $(cut -f1 "$_work/algos.txt" | LC_ALL=C sort -u); do
@@ -136,7 +141,7 @@ scan() {
         # shellcheck disable=SC2086
         if csm_hash_batch "$_a" "$_work/h/out.$_a" $_args 2>"$_work/h/err.$_a" && [ "$(sed -n 1p "$_work/h/out.$_a")" = "$_kat" ]; then
             _j=1
-            for _x in $_idx; do _j=$((_j + 1)); sed -n "${_j}p" "$_work/h/out.$_a" > "$_work/h/hash.$_x"; done
+            for _x in $_idx; do _j=$((_j + 1)); printf " %s:%s" "$_a" "$(sed -n "${_j}p" "$_work/h/out.$_a")" >> "$_work/h/hash.$_x"; done
         else
             echo "hasher for $_a unavailable or failed its known-answer check: $(head -1 "$_work/h/err.$_a" 2>/dev/null) (every $_a-sealed file is treated as CORRUPT)"
         fi   # a failed batch leaves no hash files => every file of that algo is CORRUPT (fail closed)
@@ -158,9 +163,9 @@ scan() {
         if [ -z "$_tags" ] && [ "$_has_legacy" -eq 0 ] && [ "$_is_listed" -eq 0 ]; then continue; fi
         _n=$((_n + 1))
         if [ -n "$_base" ] && { [ "$_all_scope" -eq 1 ] || grep -qxF "$_path" "$_work/scope.txt"; }; then _inrange=$((_inrange + 1)); fi
-        _got=$(cat "$_work/h/hash.$_i" 2>/dev/null); [ -n "$_got" ] || _got="-"
+        _got=$(cat "$_work/h/hash.$_i" 2>/dev/null)   # "algo:hex ..." for this file
         # shellcheck disable=SC2086
-        _res=$(csm_judge "$_work/copy.sdn" "$_got" $_tags)
+        _res=$(CSM_JUDGE_NAME=$_path csm_judge "$_work/copy.sdn" "$_got" $_tags)
         _state=${_res%% *}
         case "$_state" in
             OK)
@@ -175,7 +180,7 @@ scan() {
             MISSING)
                 _flag "$_path" "MISSING seal for policy-listed $_path (the loader fails closed; run scripts/check/reseal-sdn-crc32.shs and commit the .csm)" ;;
             MERGED_UNSEALED)
-                _flag "$_path" "MERGED_UNSEALED $_path: ${_res#MERGED_UNSEALED } .csm files (run scripts/check/reseal-sdn-crc32.shs, which keeps exactly one)" ;;
+                _flag "$_path" "MERGED_UNSEALED $_path: ${_res#MERGED_UNSEALED } .csm files (run scripts/check/reseal-sdn-crc32.shs, which keeps one matching seal)" ;;
             *)
                 _flag "$_path" "CORRUPT $_path: ${_res#CORRUPT } (the loader reads this file as nil; run scripts/check/reseal-sdn-crc32.shs on it and commit)" ;;
         esac
@@ -214,9 +219,9 @@ selftest() {
     # CORRUPT: content changed after sealing
     printf 'bugs |id|\n    a\n' > "$_t/a/doc/corrupt.sdn"; csm_seal_file "$_t/a/doc/corrupt.sdn" crc32 >/dev/null
     printf 'bugs |id|\n    a\n    b\n' > "$_t/a/doc/corrupt.sdn"
-    # MERGED_UNSEALED: two sidecars
-    printf 'bugs |id|\n    a\n' > "$_t/a/doc/merged.sdn"; csm_seal_file "$_t/a/doc/merged.sdn" crc32 >/dev/null
-    : > "$_t/a/doc/merged.crc32_00000001.csm"
+    # MERGED_UNSEALED: two sidecars, NEITHER matching (both stale)
+    printf 'bugs |id|\n    a\n' > "$_t/a/doc/merged.sdn"
+    : > "$_t/a/doc/merged.crc32_00000001.csm"; : > "$_t/a/doc/merged.xxh3_0000000000000002.csm"
     # MISSING: policy-listed, no sidecar
     printf 'bugs |id|\n    a\n' > "$_t/a/doc/listed.sdn"
     # unknown algorithm / wrong width fail closed
@@ -251,14 +256,17 @@ selftest() {
 ' > "$_t/b/doc/b3.sdn"
     # blake3 needs b3sum or a deployed CLI; a runner has neither. The fixture is
     # then dropped (loudly) instead of failing the guard on a missing tool.
-    _nb=6
+    _nb=7
     if csm_hasher_kat blake3 2>/dev/null; then csm_seal_file "$_t/b/doc/b3.sdn" blake3 >/dev/null
-    else rm -f "$_t/b/doc/b3.sdn"; _nb=5; echo "selftest NOTE: blake3 fixture skipped (no b3sum / CLI hasher here)" >&2; fi
+    else rm -f "$_t/b/doc/b3.sdn"; _nb=6; echo "selftest NOTE: blake3 fixture skipped (no b3sum / CLI hasher here)" >&2; fi
     printf 'bugs |id, status|\n    a, open\n' > "$_t/b/doc/good.sdn"; csm_seal_file "$_t/b/doc/good.sdn" crc32 >/dev/null
     printf 'bugs |id, status|\n    d, open\n' > "$_t/b/doc/unsealed.sdn"
     # CRLF content verifies against the LF seal
     printf 'bugs |id|\n    a\n' > "$_t/b/doc/crlf.sdn"; csm_seal_file "$_t/b/doc/crlf.sdn" crc32 >/dev/null
     printf 'bugs |id|\r\n    a\r\n' > "$_t/b/doc/crlf.sdn"
+    # two sidecars, ONE matching (a merge left a stale extra): PASS, NOTE on stderr
+    printf 'bugs |id|\n    a\n' > "$_t/b/doc/stale_extra.sdn"; csm_seal_file "$_t/b/doc/stale_extra.sdn" crc32 >/dev/null
+    : > "$_t/b/doc/stale_extra.crc32_00000001.csm"; : > "$_t/b/doc/stale_extra.xxh3_0000000000000002.csm"
     # a merged file after reseal collapses to one seal
     printf 'bugs |id|\n    a\n' > "$_t/b/doc/resealed.sdn"; : > "$_t/b/doc/resealed.crc32_00000001.csm"
     csm_seal_file "$_t/b/doc/resealed.sdn" crc32 >/dev/null
@@ -269,7 +277,8 @@ selftest() {
     # a header that is not on line 1 does not seal the file
     printf 'bugs |id|\n#sdn-crc32:5\n    a\n' > "$_t/b/doc/later.sdn"
     _commit "$_t/b"
-    _out=$(scan "$_t/b" HEAD); _rc=$?
+    _out=$(scan "$_t/b" HEAD 2>"$_t/b.err"); _rc=$?
+    grep -qF "stale_extra.sdn: ignoring 2 stale .csm sidecar(s)" "$_t/b.err" || { echo "selftest FAIL b: stale extra sidecar NOTE missing on stderr"; _fails=$((_fails + 1)); }
     _expect b-pass "$_rc" 0 "$_out" "PASS — $_nb sealed .sdn file(s) checked at HEAD, 0 stale"
     case "$_out" in *"note: doc/legacy.sdn still carries"*) ;; *) echo "selftest FAIL b: valid legacy header not accepted with a note"; _fails=$((_fails + 1)) ;; esac
     case "$_out" in *unsealed.sdn*|*later.sdn*) echo "selftest FAIL b: unsealed/body-header file reported"; _fails=$((_fails + 1)) ;; esac

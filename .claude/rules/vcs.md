@@ -358,18 +358,23 @@ own merge-tree + CRC + rt-delta checks. Details:
   warning for one release). The hash is over the LF-normalized file (CR dropped),
   through ONE function: `hash_hex` in
   `src/lib/nogc_sync_mut/database/csm_seal.spl` and its shell twin
-  `scripts/check/sdn-seal-lib.shs`. States: one matching sidecar = OK; one
-  mismatching / unknown algo / wrong width = CORRUPT (fail closed); several =
-  MERGED_UNSEALED (loader accepts with a warning, writers reseal, the gate
-  FAILs with "run reseal"); none on a policy-listed file = MISSING (fail
-  closed). **Because the seal is a separate file, two PRs that touch rows no
+  `scripts/check/sdn-seal-lib.shs`. States: **at least one matching `.csm` =
+  OK; stale extra sidecars are ignored (NOTE on stderr) and cleaned
+  opportunistically by the next reseal** (owner decision 2026-11-07 — a merge
+  that leaves an extra sidecar no longer breaks the gate or the loader); one
+  mismatching / unknown algo / wrong width = CORRUPT (fail closed); several,
+  NONE matching = MERGED_UNSEALED (loader accepts with a warning, writers
+  reseal, the gate FAILs with "run reseal"); none on a policy-listed file =
+  MISSING (fail closed). `.gitattributes` selects `merge=sdn-rows` for
+  `bug_db.sdn`; `scripts/setup/setup-hooks.shs` installs the repo-relative
+  driver command (`sh scripts/vcs/sdn-rows-merge.shs %O %A %B %P`). **Because the seal is a separate file, two PRs that touch rows no
   longer conflict on line 1** — their differently named `.csm` files merge as
   add/add. After any merge touching a sealed file run
   `sh scripts/check/reseal-sdn-crc32.shs <file.sdn>` (it strips legacy headers
-  and keeps exactly one sidecar) and commit the `.csm` changes with the data.
+  adds the matching sidecar and deletes the stale ones) and commit the `.csm` changes with the data.
   On a `bug_db.sdn` conflict: union the rows, delete every `bug_db.*.csm`, run
   reseal. `sdn-rows-merge.shs` / `gh-pr-sdn-sync.shs` still union rows; the
-  latter now leaves exactly one resealed `.csm` in the merge tree. Writers
+  latter leaves one matching resealed `.csm` in the merge tree. Writers
   (`bug.spl`, `todo.spl`, `core.spl`, `bug-claim.shs`, `sync-tracking-db-status.shs`)
   add the new seal first, publish the data, then prune the old seals.
 - **`bug_db.sdn` row conflicts resolve automatically (2026-11-03).** Its (pre-sidecar) line 1
