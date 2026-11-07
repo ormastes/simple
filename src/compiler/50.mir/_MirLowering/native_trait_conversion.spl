@@ -76,15 +76,14 @@ impl MirLowering:
         # An already trait-typed source (typed local, declared field chain,
         # declared container read) is this trait's object: move the existing
         # (data, table) value. Only a concrete source searches for an impl.
-        if val existing = self.native_trait_declared_source_type(local, value):
+        val source_type = self.native_trait_declared_source_type(local, value)
+        if val existing = source_type:
             if self.native_trait_owner_for_kind(existing.kind) == owner: return local
         val layout_index = self.native_trait_layout_index(owner)
         if layout_index < 0:
             self.error_fatal("native trait conversion lacks canonical declaration: {owner}", Some(value.span))
             return local
         var concrete_owner = ""
-        val local_type = self.find_local_hir_type(local.id)
-        val source_type: HirType? = if local_type != nil: local_type else: if value.has_type_: value.type_ else: nil
         if val source = source_type:
             match source.kind:
                 case HirTypeKind.Isolated(_):
@@ -204,15 +203,37 @@ impl MirLowering:
         declared container read (`self.blocks[kind]` on Dict<text, Trait>).
         A missing answer leaves the concrete-implementation search in charge."""
         if val local_type = self.find_local_hir_type(local.id):
-            return Some(local_type)
+            # Only top-level Error/Infer are unavailable local metadata.
+            # Any, Unit and nested unknown payloads remain authoritative.
+            match local_type.kind:
+                case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                case _: return Some(local_type)
         if value.has_type_ and value.type_ != nil:
             val expression_type = value.type_ ?? HirType(kind: HirTypeKind.Error, span: value.span)
             match expression_type.kind:
                 case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Unit: ()
                 case _: return Some(expression_type)
+        # receiver_declared_type intentionally trusts all bound-local metadata.
+        # This conversion alone treats top-level Error/Infer as unavailable,
+        # including when the binding points back to the same unknown local.
+        match value.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                return self.native_trait_declared_binding_type(symbol)
+            case _: ()
         if val declared = self.receiver_declared_type(value):
             return Some(declared)
         self.declared_container_read_type(value)
+
+    me native_trait_declared_binding_type(symbol: SymbolId) -> HirType?:
+        val bound = self.find_local(symbol.id)
+        if bound.id >= 0:
+            if val bound_type = self.find_local_hir_type(bound.id):
+                match bound_type.kind:
+                    case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                    case _: return Some(bound_type)
+        if val declaration = self.symbols.get_symbol_raw(symbol.id):
+            return declaration.type_
+        nil
 
     me emit_native_trait_object_for(implementation: NativeTraitImplementation,
             layout: NativeTraitLayout, data: LocalId, cast_name: text) -> LocalId:
