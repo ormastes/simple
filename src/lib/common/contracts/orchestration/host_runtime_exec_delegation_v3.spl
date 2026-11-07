@@ -33,6 +33,9 @@ pub fn host_runtime_exec_delegation_encode_v3(value: HostRuntimeExecDelegationV3
             value.begin_journal_sequence <= 0 or value.observed_unix_ms <= 0):
         return Err("host-exec-delegation-origin-binding-invalid")
     val parent = value.request.intent.request.parent
+    if (value.installation.operation.id == value.request.operation.id or
+            value.installation.operation.id == parent.operation_id):
+        return Err("host-exec-delegation-operation-collision")
     val scope = ContainerHostScopeV2(physical_host_id: parent.physical_host_id, service_scope_id: parent.service_scope_id,
         boot_id: parent.boot_id, provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
         continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
@@ -40,6 +43,11 @@ pub fn host_runtime_exec_delegation_encode_v3(value: HostRuntimeExecDelegationV3
             value.installation.intent.provider_identity_digest != value.request.intent.parent_provider_identity_digest):
         return Err("host-exec-delegation-installed-parent-mismatch")
     if value.deadline.actions != ["exec"]: return Err("host-exec-delegation-deadline-actions")
+    val grant_expiry = value.request.signed.grant.expires_at
+    val approval_expiry = value.request.approval.expires_at
+    val expiry = if grant_expiry < approval_expiry: grant_expiry else: approval_expiry
+    if value.deadline.expires_at_unix_ms != expiry:
+        return Err("host-exec-delegation-deadline-expiry-mismatch")
     val request_digest = container_exec_request_digest_v3(value.request.intent.request)?
     # This validates pure recorded times only. No actual clock/fresh authority is
     # sampled or implied by decoding a historical delegation.

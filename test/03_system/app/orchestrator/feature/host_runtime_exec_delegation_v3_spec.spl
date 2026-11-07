@@ -101,7 +101,7 @@ fn delegation_fixture_v3() -> HostRuntimeExecDelegationV3:
         installation_artifact_digest: host_exec_control_installation_intent_digest_v3(installed).unwrap(),
         begin_journal_sequence: 1, begin_journal_commit_digest: "e".repeat(64),
         control_observation_digest: container_exec_control_observation_digest_v3(delegation_observation_v3()).unwrap(), observed_unix_ms: 100,
-        deadline: container_effect_deadline_v1(container_exec_request_digest_v3(packet.intent.request).unwrap(), packet.operation.id, ["exec"], 1000).unwrap())
+        deadline: container_effect_deadline_v1(container_exec_request_digest_v3(packet.intent.request).unwrap(), packet.operation.id, ["exec"], packet.approval.expires_at).unwrap())
 
 describe "data exec delegation and all-field control observation hash":
     it "round trips exact child installation recorded begin facts and deadline without constructing admission":
@@ -192,6 +192,22 @@ describe "data exec delegation and all-field control observation hash":
         invalid = original
         invalid.api_version = "unsupported"
         expect(container_exec_control_observation_digest_v3(invalid).is_err()).to_equal(true)
+
+    it "binds exact child proof expiry and distinct host journal operation identities":
+        step("binds exact child proof expiry and distinct host journal operation identities")
+        val original = delegation_fixture_v3()
+        expect(original.request.approval.expires_at < original.request.signed.grant.expires_at).to_equal(true)
+        for adjustment in [-1, 1]:
+            var changed = original
+            changed.deadline.expires_at_unix_ms = original.deadline.expires_at_unix_ms + adjustment
+            expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+        for operation_id in [original.request.operation.id, original.request.intent.request.parent.operation_id]:
+            var changed = original
+            changed.installation.intent.operation_id = operation_id
+            changed.installation.operation.id = operation_id
+            changed.installation.operation.payload_digest = host_exec_control_installation_intent_digest_v3(changed.installation.intent).unwrap()
+            changed.installation_artifact_digest = changed.installation.operation.payload_digest
+            expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
 
     it "refuses unknown typed duplicate noncanonical missing and overbound delegation wire":
         step("refuses unknown typed duplicate noncanonical missing and overbound delegation wire")
