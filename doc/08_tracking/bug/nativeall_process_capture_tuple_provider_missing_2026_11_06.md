@@ -1,7 +1,8 @@
 # Native-all lacks the unbounded process result-block provider
 
 Canonical ID: `nativeall_process_capture_tuple_provider_missing_2026_11_06`.
-Severity: P1. Status: source repair implemented; caller diagnostic FAIL; six-cycle cap reached.
+Severity: P1. Status: source repair implemented; awaiting-verification;
+caller diagnostic FAIL; six-cycle cap reached. The bug is not marked fixed.
 
 ## Source-only landing follow-up (2026-11-07)
 
