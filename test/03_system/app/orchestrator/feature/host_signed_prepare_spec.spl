@@ -101,3 +101,147 @@ describe "Signed preparation through the actual host owner":
         assert(not file_exists(fixture.owner.journal.root + "/reservation-payloads"))
         assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
         dir_remove(fixture.owner.journal.root, true)
+
+    it "quarantines prior service fences without releasing prepared or executing resources":
+        for mode in ["prepared", "executing"]:
+            val fixture = signed_prepare_fixture_v1()
+            val payload = host_prepare_request_encode_v1(fixture.request).unwrap()
+            val reply = host_authorized_prepare_reply_v1(fixture.owner, payload, fixture.snapshot, 7,
+                signed_prepare_clock_v1(), signed_prepare_clock_v1).unwrap()
+            var retained = reply.owner
+            if mode == "executing":
+                # This tests the trusted capacity primitive, not a signature
+                # bypass: the public signed executor has separate crypto specs.
+                var grant = fixture.request.signed.grant
+                grant.operations = ["host_execute_v1"]
+                val receipt = host_reservation_receipt_v1(fixture.request.intent, fixture.request.operation).unwrap()
+                val fence = HostLedgerFenceV1(authority_id: retained.ledger.capacity.authority_id,
+                    boot_id: retained.ledger.capacity.boot_id, provider_generation: retained.ledger.capacity.provider_generation,
+                    revision: retained.ledger.revision)
+                retained = host_capacity_owner_begin_v1(retained, fixture.request.intent, fixture.request.operation,
+                    receipt, fence, grant, signed_prepare_clock_v1()).unwrap()
+            assert(host_capacity_owner_close_v1(retained).unwrap())
+            var changed = retained.ledger.capacity
+            changed.boot_id = "new-service-fence"
+            expect(host_capacity_owner_open_v1(retained.journal.root, changed, "d".repeat(64), 50, true).unwrap_err()).to_equal("retained-reservation-host-fence-mismatch")
+            val quarantined = host_capacity_owner_open_quarantined_v2(retained.journal.root, changed,
+                "e".repeat(64), 50).unwrap()
+            assert(not quarantined.ledger.continuity_proven)
+            expect(quarantined.ledger.reservations[0].state).to_equal(HostReservationStateV1.Uncertain)
+            expect(host_available_capacity_v1(quarantined.ledger).unwrap().cpu_millis).to_equal(1000)
+            expect(host_available_capacity_v1(quarantined.ledger).unwrap().memory_bytes).to_equal(3584)
+            expect(quarantined.journal.operations[fixture.request.operation.id].state).to_equal(
+                if mode == "executing": "outcome-unknown" else: "admitted")
+            expect(host_capacity_owner_prepared_receipt_v1(quarantined, fixture.request.intent,
+                fixture.request.operation, fixture.request.signed.grant, signed_prepare_clock_v1()).unwrap_err()).to_equal("retained-reservation-host-fence-mismatch")
+            assert(host_capacity_owner_close_v1(quarantined).unwrap())
+            dir_remove(fixture.owner.journal.root, true)
+
+    it "keeps helper action admission distinct and counts its allocation in the same ledger":
+        val fixture = signed_prepare_fixture_v1()
+        var operation = fixture.request.operation
+        operation.operation = "host_helper_reservation_v1"
+        var grant = fixture.request.signed.grant
+        grant.operations = ["host_helper_reservation_v1"]
+        # Capacity APIs are trusted internal primitives. The helper service
+        # separately verifies signatures and retained parent-budget authority.
+        expect(host_capacity_owner_prepare_v1(fixture.owner, fixture.request.intent, operation,
+            grant, signed_prepare_clock_v1()).unwrap_err()).to_equal("reservation-operation-mismatch")
+        assert(not file_exists(fixture.owner.journal.root + "/reservation-payloads"))
+        val prepared = host_capacity_owner_prepare_helper_v1(fixture.owner, fixture.request.intent,
+            operation, grant, signed_prepare_clock_v1()).unwrap()
+        expect(host_available_capacity_v1(prepared.ledger).unwrap().cpu_millis).to_equal(1000)
+        val receipt = host_capacity_owner_prepared_helper_receipt_v1(prepared, fixture.request.intent,
+            operation, grant, signed_prepare_clock_v1()).unwrap()
+        assert(host_reservation_receipt_v1(fixture.request.intent, operation).is_err())
+        assert(host_helper_reservation_match_receipt_v1(receipt, fixture.request.intent, operation).unwrap())
+        val fence = HostLedgerFenceV1(authority_id: prepared.ledger.capacity.authority_id,
+            boot_id: prepared.ledger.capacity.boot_id, provider_generation: prepared.ledger.capacity.provider_generation,
+            revision: prepared.ledger.revision)
+        grant.operations = ["host_execute_v1"]
+        assert(host_capacity_owner_begin_v1(prepared, fixture.request.intent, operation, receipt,
+            fence, grant, signed_prepare_clock_v1()).is_err())
+        grant.operations = ["host_helper_execute_v1"]
+        val executing = host_capacity_owner_begin_helper_v1(prepared, fixture.request.intent, operation,
+            receipt, fence, grant, signed_prepare_clock_v1()).unwrap()
+        assert(host_capacity_owner_expire_prepared_v1(executing, operation.id, 1000).is_err())
+        expect(host_available_capacity_v1(executing.ledger).unwrap().memory_bytes).to_equal(3584)
+        assert(host_capacity_owner_close_v1(executing).unwrap())
+        val recovered = host_capacity_owner_open_v1(executing.journal.root, executing.ledger.capacity,
+            "f".repeat(64), 50, true).unwrap()
+        expect(recovered.journal.operations[operation.id].state).to_equal("outcome-unknown")
+        expect(host_available_capacity_v1(recovered.ledger).unwrap().cpu_millis).to_equal(1000)
+        assert(host_capacity_owner_close_v1(recovered).unwrap())
+        dir_remove(fixture.owner.journal.root, true)
+
+    it "expires an unconsumed helper preparation without accepting a normal reservation on the helper route":
+        val fixture = signed_prepare_fixture_v1()
+        expect(host_capacity_owner_prepare_helper_v1(fixture.owner, fixture.request.intent,
+            fixture.request.operation, fixture.request.signed.grant, signed_prepare_clock_v1()).unwrap_err()).to_equal("reservation-operation-mismatch")
+        var operation = fixture.request.operation
+        operation.operation = "host_helper_reservation_v1"
+        var grant = fixture.request.signed.grant
+        grant.operations = ["host_helper_reservation_v1"]
+        val prepared = host_capacity_owner_prepare_helper_v1(fixture.owner, fixture.request.intent,
+            operation, grant, signed_prepare_clock_v1()).unwrap()
+        val expired = host_capacity_owner_expire_prepared_v1(prepared, operation.id, 1000).unwrap()
+        expect(expired.journal.operations[operation.id].state).to_equal("cancelled")
+        expect(host_available_capacity_v1(expired.ledger).unwrap().cpu_millis).to_equal(2000)
+        expect(host_available_capacity_v1(expired.ledger).unwrap().memory_bytes).to_equal(4096)
+        assert(host_capacity_owner_close_v1(expired).unwrap())
+        val reopened = host_capacity_owner_open_v1(expired.journal.root, expired.ledger.capacity,
+            "f".repeat(64), 50, true).unwrap()
+        expect(host_available_capacity_v1(reopened.ledger).unwrap().cpu_millis).to_equal(2000)
+        assert(host_capacity_owner_close_v1(reopened).unwrap())
+        dir_remove(fixture.owner.journal.root, true)
+
+    it "reopens mixed normal and helper rows in one ledger and refuses zero-budget helper admission":
+        val fixture = signed_prepare_fixture_v1()
+        val parent = host_authorized_prepare_reply_v1(fixture.owner,
+            host_prepare_request_encode_v1(fixture.request).unwrap(), fixture.snapshot, 7,
+            signed_prepare_clock_v1(), signed_prepare_clock_v1()).unwrap()
+        var helper_intent = fixture.request.intent
+        helper_intent.fence.revision = parent.owner.ledger.revision
+        helper_intent.reservation.id = "helper-reservation"
+        helper_intent.reservation.operation_id = "helper-operation"
+        helper_intent.reservation.nonce = "helper-nonce"
+        helper_intent.reservation.cpu_millis = 0
+        helper_intent = host_reservation_bind_intent_v1(helper_intent).unwrap()
+        var operation = fixture.request.operation
+        operation.id = "helper-operation"
+        operation.operation = "host_helper_reservation_v1"
+        operation.payload_digest = helper_intent.reservation.payload_digest
+        var grant = fixture.request.signed.grant
+        grant.operations = ["host_helper_reservation_v1"]
+        expect(host_capacity_owner_prepare_helper_v1(parent.owner, helper_intent, operation,
+            grant, signed_prepare_clock_v1()).unwrap_err()).to_equal("helper-resource-budget-required")
+        helper_intent.reservation.cpu_millis = 500
+        helper_intent.reservation.memory_bytes = 0
+        helper_intent = host_reservation_bind_intent_v1(helper_intent).unwrap()
+        operation.memory_bytes = 0
+        operation.payload_digest = helper_intent.reservation.payload_digest
+        expect(host_capacity_owner_prepare_helper_v1(parent.owner, helper_intent, operation,
+            grant, signed_prepare_clock_v1()).unwrap_err()).to_equal("helper-resource-budget-required")
+        helper_intent.reservation.memory_bytes = 512
+        operation.memory_bytes = 512
+        helper_intent = host_reservation_bind_intent_v1(helper_intent).unwrap()
+        operation.payload_digest = helper_intent.reservation.payload_digest
+        val both = host_capacity_owner_prepare_helper_v1(parent.owner, helper_intent,
+            operation, grant, signed_prepare_clock_v1()).unwrap()
+        expect(both.journal.operations.len()).to_equal(2)
+        expect(host_available_capacity_v1(both.ledger).unwrap().cpu_millis).to_equal(500)
+        expect(host_available_capacity_v1(both.ledger).unwrap().memory_bytes).to_equal(3072)
+        assert(host_capacity_owner_close_v1(both).unwrap())
+        val reopened = host_capacity_owner_open_v1(both.journal.root, both.ledger.capacity,
+            "f".repeat(64), 50, true).unwrap()
+        expect(reopened.ledger.reservations.len()).to_equal(2)
+        expect(host_available_capacity_v1(reopened.ledger).unwrap().cpu_millis).to_equal(500)
+        assert(host_capacity_owner_prepared_receipt_v1(reopened, fixture.request.intent,
+            fixture.request.operation, fixture.request.signed.grant, signed_prepare_clock_v1()).is_ok())
+        assert(host_capacity_owner_prepared_helper_receipt_v1(reopened, helper_intent,
+            operation, grant, signed_prepare_clock_v1()).is_ok())
+        val expired = host_capacity_owner_expire_prepared_v1(reopened, operation.id, 1000).unwrap()
+        expect(expired.journal.operations[fixture.request.operation.id].state).to_equal("admitted")
+        expect(host_available_capacity_v1(expired.ledger).unwrap().cpu_millis).to_equal(1000)
+        assert(host_capacity_owner_close_v1(expired).unwrap())
+        dir_remove(fixture.owner.journal.root, true)
