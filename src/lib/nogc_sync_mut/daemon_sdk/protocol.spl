@@ -23,7 +23,7 @@ use std.io_runtime.{file_rename}
 # ============================================================================
 
 fn write_daemon_request(req: DaemonRequest, request_dir: text) -> text:
-    if not daemon_spool_id_valid(req.id):
+    if not daemon_spool_id_valid(req.id) or not daemon_spool_fields_safe(req.fields):
         return ""
     mkdir_p(request_dir)
 
@@ -116,7 +116,7 @@ fn parse_request_file(path: text) -> DaemonRequest:
 # ============================================================================
 
 fn write_daemon_response(resp: DaemonResponse, response_dir: text) -> bool:
-    if not daemon_spool_id_valid(resp.request_id):
+    if not daemon_spool_id_valid(resp.request_id) or not daemon_spool_fields_safe(resp.fields):
         return false
     mkdir_p(response_dir)
 
@@ -270,3 +270,21 @@ fn daemon_spool_read(path: text) -> text:
     match file_read_regular_no_follow_bounded(path, 1048576):
         case Ok(content): content
         case Err(message): ""
+
+# V1 has no escaping. Preserve ordinary legacy multiline handling, but never
+# allow field data to manufacture envelope headers or additional fields. This
+# is not a lossless multiline codec; that requires a versioned transport.
+fn daemon_spool_fields_safe(fields: {text: text}) -> bool:
+    for key in fields.keys():
+        if key == "" or key.contains("\n") or key.contains("\r") or key.contains("="):
+            return false
+        val lines = fields[key].split("\n")
+        var index = 1
+        while index < lines.len():
+            val line = lines[index].trim()
+            if line.starts_with("id=") or line.starts_with("request_id=") or
+                    line.starts_with("kind=") or line.starts_with("status=") or
+                    line.starts_with("timestamp=") or line.starts_with("field."):
+                return false
+            index = index + 1
+    true

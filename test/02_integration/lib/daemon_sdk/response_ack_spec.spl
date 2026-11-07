@@ -1,106 +1,32 @@
 # @req DAE-01
-# Actual file-spool failure injection; no daemon process or remote endpoint.
-# NOT_RUN pending admitted self-hosted runtime.
-use std.spec.{describe, it, expect, fail}
-use std.nogc_sync_mut.daemon_sdk.daemon.{DaemonRunner, daemon_runner_start}
-use std.nogc_sync_mut.daemon_sdk.types.*
-use std.nogc_sync_mut.daemon_sdk.protocol.{write_daemon_request, daemon_request_path_for}
-use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write, file_read}
-use std.io_runtime.{file_exists, file_delete, mkdir_p}
-use std.nogc_sync_mut.io_runtime.dir_remove
-
-fn valid_handler(request: DaemonRequest) -> DaemonResponse:
-    val effect_path = request.get_field("effect_path")
-    val before = file_read(effect_path)
-    expect(file_atomic_write(effect_path, before + "effect\n")).to_equal(true)
-    daemon_response_new(request.id, 0)
-
-fn forbidden_handler(request: DaemonRequest) -> DaemonResponse:
-    fail("blocked daemon re-executed an unacknowledged request")
-    daemon_response_new(request.id, 1)
-
-fn mismatched_handler(request: DaemonRequest) -> DaemonResponse:
-    daemon_response_new("unrelated_request", 0)
-
-fn lost_request_handler(request: DaemonRequest) -> DaemonResponse:
-    # Deterministic acknowledgement race: an external consumer removed the
-    # claimed path. The runner must report failure rather than keep polling.
-    expect(file_delete(request.get_field("request_path"))).to_equal(true)
-    daemon_response_new(request.id, 0)
-
-fn start_fixture(root: text) -> DaemonRunner:
-    val config = daemon_config_new(root + "/lock", root + "/requests", root + "/responses")
-    daemon_runner_start(config)
+# Admitted SSpec execution status is recorded separately from native diagnostics.
+use std.spec.*
+use test.fixtures.daemon_sdk.publication_regression.*
 
 describe "legacy daemon response acknowledgement safety":
     it "keeps a request and stops dispatch after a real response publication failure":
-        val root = secure_temp_dir("build", "daemon-response-failure").unwrap()
-        var runner = start_fixture(root)
-        expect(runner.is_running()).to_equal(true)
-        var request = daemon_request_new(1)
-        request.set_field("effect_path", root + "/effect")
-        val request_path = write_daemon_request(request, root + "/requests")
-        expect(request_path != "").to_equal(true)
-        # The final response path is a directory, forcing atomic replace to fail.
-        mkdir_p(root + "/responses/" + request.id + ".resp")
-        runner.run_poll_cycle(valid_handler)
-        val state = runner.get_state()
-        expect(state.status).to_equal(DAEMON_PUBLICATION_BLOCKED)
-        expect(state.errors_count).to_equal(1)
-        expect(state.items_processed).to_equal(0)
-        expect(runner.is_running()).to_equal(false)
-        expect(file_exists(request_path)).to_equal(true)
-        expect(file_read(root + "/effect")).to_equal("effect\n")
-        runner.run_poll_cycle(forbidden_handler)
-        expect(file_read(root + "/effect")).to_equal("effect\n")
-        runner.shutdown()
-        expect(dir_remove(root, true)).to_equal(true)
+        expect(daemon_publication_failure_case()).to_equal(0)
 
     it "refuses a response for another request before publishing or deleting":
-        val root = secure_temp_dir("build", "daemon-response-identity").unwrap()
-        var runner = start_fixture(root)
-        expect(runner.is_running()).to_equal(true)
-        val request = daemon_request_new(1)
-        val request_path = write_daemon_request(request, root + "/requests")
-        runner.run_poll_cycle(mismatched_handler)
-        val state = runner.get_state()
-        expect(state.status).to_equal(DAEMON_PUBLICATION_BLOCKED)
-        expect(file_exists(request_path)).to_equal(true)
-        expect(file_exists(root + "/responses/unrelated_request.resp")).to_equal(false)
-        runner.run_poll_cycle(forbidden_handler)
-        runner.shutdown()
-        expect(dir_remove(root, true)).to_equal(true)
+        expect(daemon_response_identity_case()).to_equal(0)
 
     it "publishes before clearing a successfully processed request":
-        val root = secure_temp_dir("build", "daemon-response-success").unwrap()
-        var runner = start_fixture(root)
-        expect(runner.is_running()).to_equal(true)
-        var request = daemon_request_new(1)
-        request.set_field("effect_path", root + "/effect")
-        val request_path = write_daemon_request(request, root + "/requests")
-        runner.run_poll_cycle(valid_handler)
-        val state = runner.get_state()
-        expect(state.status).to_equal(DAEMON_IDLE)
-        expect(state.items_processed).to_equal(1)
-        expect(file_exists(request_path)).to_equal(false)
-        expect(file_exists(root + "/responses/" + request.id + ".resp")).to_equal(true)
-        runner.run_poll_cycle(forbidden_handler)
-        runner.shutdown()
-        expect(dir_remove(root, true)).to_equal(true)
+        expect(daemon_publication_success_case()).to_equal(0)
 
     it "stops when acknowledgement fails after successful publication":
-        val root = secure_temp_dir("build", "daemon-acknowledgement-failure").unwrap()
-        var runner = start_fixture(root)
-        expect(runner.is_running()).to_equal(true)
-        var request = daemon_request_new(1)
-        request.set_field("request_path", daemon_request_path_for(request.id, root + "/requests"))
-        expect(write_daemon_request(request, root + "/requests") != "").to_equal(true)
-        runner.run_poll_cycle(lost_request_handler)
-        val state = runner.get_state()
-        expect(state.status).to_equal(DAEMON_ACKNOWLEDGEMENT_BLOCKED)
-        expect(state.errors_count).to_equal(1)
-        expect(runner.is_running()).to_equal(false)
-        expect(file_exists(root + "/responses/" + request.id + ".resp")).to_equal(true)
-        runner.run_poll_cycle(forbidden_handler)
-        runner.shutdown()
-        expect(dir_remove(root, true)).to_equal(true)
+        expect(daemon_ack_missing_case()).to_equal(0)
+
+    it "acknowledges only the successful prefix and preserves failed and unprocessed requests":
+        expect(daemon_publication_prefix_case()).to_equal(0)
+
+    it "stops after a deletion refusal while retaining the replacement entry":
+        expect(daemon_ack_refusal_case()).to_equal(0)
+
+    it "rejects field data that injects envelope headers before publication":
+        expect(daemon_envelope_injection_case()).to_equal(0)
+
+    it "does not clean old responses or lose blocked state at outer-loop cycle 100":
+        expect(daemon_outer_loop_failure_case()).to_equal(0)
+
+    it "acknowledges a valid nonzero-status response and preserves ordinary multiline compatibility":
+        expect(daemon_error_status_case()).to_equal(0)
