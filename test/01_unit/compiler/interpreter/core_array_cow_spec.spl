@@ -1,0 +1,222 @@
+use std.spec.{describe, it, expect}
+use compiler.core.interpreter.mod.{core_jit_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.eval_decls.eval_decl
+use compiler.core.ast.{module_get_decls, decl_get, DECL_CE}
+use compiler.core.interpreter.env.{env_lookup}
+use compiler.core.interpreter.eval_calls.{val_copy_for_parameter, val_copy_if_value_struct}
+use compiler.core.interpreter._EvalOps.call_method_eval.eval_array_method
+use compiler.core.interpreter.value.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val CASES_PATH = "test/fixtures/compiler/core_array_cow/cases.spl"
+
+# jit_init disables JIT when threshold >= 999999. This selects the actual core
+# evaluator under test, independent of the outer self-hosted runner's mode.
+fn cow_run(source: text) -> i64:
+    core_jit_interpret(source, "core_array_cow_guest.spl", 999999)
+
+fn cow_cases(names: [text]):
+    val source = rt_file_read_text(CASES_PATH) ?? ""
+    expect(source.len() > 0).to_equal(true)
+    for name in names:
+        val result = cow_run(source + "\nfn main() -> i64:\n    " + name + "()\n")
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+describe "core evaluator array value boundaries":
+    it "isolates bindings reassignment and constructor/getter snapshots both ways":
+        cow_cases(["case_binding", "case_reassignment", "case_getter_constructor"])
+
+    it "detaches nested arrays and struct fields while retaining class identity":
+        cow_cases(["case_nested_arrays", "case_struct_nested", "case_struct_method", "case_struct_value_method", "case_class_reference"])
+
+    it "snapshots inserted elements before later source or receiver mutation":
+        cow_cases(["case_insertion", "case_dictionary_insertion", "case_self_push", "case_nested_self_push"])
+
+    it "isolates value arguments and writes back only explicit mutable arguments":
+        cow_cases(["case_function_arguments", "case_method_arguments", "case_argument_order", "case_mut_nested_writeback"])
+
+    it "preserves lengths iteration values and once-only temporary receiver effects":
+        cow_cases(["case_mutator_lengths", "case_temporary_receiver", "case_iteration_values"])
+
+    it "rejects mut/value aliasing before invoking the function body":
+        val source = "var effects = 0\nfn take(mut a: [i64], b: [i64]):\n    effects += 1\nfn main() -> i64:\n    var a = [1]\n    take(a, a)\n    0\n"
+        val _ = cow_run(source)
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error().contains("aliases both mut and value")).to_equal(true)
+        val effects = env_lookup("effects")
+        expect(val_is_int(effects)).to_equal(true)
+        if val_is_int(effects): expect(val_get_int(effects)).to_equal(0)
+
+    it "preserves ordinary read argument semantics for missing dict keys and struct indices":
+        val source = "struct Record:\n    value: i64\nfn consume(value) -> i64:\n    if value == nil: return 7\n    value\nfn main() -> i64:\n    val values = {\"present\": 1}\n    if consume(values[\"missing\"]) != 7: return 1\n    val record = Record(value: 9)\n    if consume(record[\"value\"]) != 9: return 2\n    if consume(record[\"missing\"]) != 7: return 3\n    0\n"
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+    it "detaches after final-index callbacks snapshot an ancestor for assignment and compound":
+        val declarations = "var source = [[1]]\nvar saved = [[0]]\nvar effects = 0\nfn index() -> i64:\n    effects += 1\n    saved = source\n    0\n"
+        for operation in ["= 9", "+= 8"]:
+            val source = declarations + "fn main() -> i64:\n    source[0][index()] " + operation + "\n    if saved[0][0] != 1: return 1\n    if source[0][0] != 9: return 2\n    if effects != 1: return 3\n    0\n"
+            val result = cow_run(source)
+            expect(eval_has_error()).to_equal(false)
+            expect(val_is_int(result)).to_equal(true)
+            if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+    it "rejects a non-place mut argument before invoking the function body":
+        val source = "var effects = 0\nfn take(mut a: [i64]):\n    effects += 1\nfn main() -> i64:\n    take([1])\n    0\n"
+        val _ = cow_run(source)
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error().contains("requires a writable place")).to_equal(true)
+        val effects = env_lookup("effects")
+        expect(val_is_int(effects)).to_equal(true)
+        if val_is_int(effects): expect(val_get_int(effects)).to_equal(0)
+
+    it "rejects identical array descriptors reached through a mut parameter and class field":
+        val source = "class Holder:\n    items: [i64]\nvar effects = 0\nfn inner(mut a: [i64], b: [i64]):\n    effects += 1\nfn outer(mut a: [i64], holder: Holder):\n    inner(a, holder.items)\nfn main() -> i64:\n    val holder = Holder(items: [1])\n    outer(holder.items, holder)\n    0\n"
+        val _ = cow_run(source)
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error().contains("aliases both mut and value")).to_equal(true)
+        val effects = env_lookup("effects")
+        expect(val_is_int(effects)).to_equal(true)
+        if val_is_int(effects): expect(val_get_int(effects)).to_equal(0)
+
+    it "snapshots eager and forced lazy global array bindings":
+        val source = "var source = [1]\nvar copy = source\nlazy val delayed = source\nfn main() -> i64:\n    copy[0] = 9\n    if source[0] != 1: return 1\n    val forced = delayed\n    source[0] = 7\n    if delayed[0] != 1: return 2\n    if forced[0] != 1: return 3\n    0\n"
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+    it "snapshots class default and spread fields before later argument effects":
+        val source = "var original = [1]\nclass Holder:\n    items: [i64] = original\n    stamp: i64 = 0\nvar donor = Holder(items: [1], stamp: 0)\nfn later() -> i64:\n    donor.items[0] = 9\n    0\nfn main() -> i64:\n    val defaulted = Holder()\n    original[0] = 7\n    if defaulted.items[0] != 1: return 1\n    defaulted.items[0] = 8\n    if original[0] != 7: return 2\n    val spread = Holder(..donor, stamp: later())\n    if spread.items[0] != 1: return 3\n    if donor.items[0] != 9: return 4\n    spread.items[0] = 6\n    if donor.items[0] != 9: return 5\n    0\n"
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+    it "snapshots computation and statement bind values":
+        val source = "var source = [1]\nvar effects = 0\nce option_ce:\n    bind saved = source\n    saved[0] = 9\n    effects += 1\nfn main() -> i64:\n    bind local = source\n    local[0] = 7\n    if source[0] != 1: return 1\n    0\n"
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+        # eval_module currently omits top-level DECL_CE dispatch. Exercise its
+        # real parsed owner explicitly and prove the body ran, rather than
+        # treating a skipped CE body as array-value evidence.
+        var ce_count = 0
+        for declaration in module_get_decls():
+            if decl_get(declaration).tag == DECL_CE:
+                ce_count += 1
+                val _ = eval_decl(declaration)
+        expect(ce_count).to_equal(1)
+        expect(eval_has_error()).to_equal(false)
+        val effects = env_lookup("effects")
+        expect(val_is_int(effects)).to_equal(true)
+        if val_is_int(effects): expect(val_get_int(effects)).to_equal(1)
+        val original = env_lookup("source")
+        expect(val_is_array(original)).to_equal(true)
+        if val_is_array(original): expect(val_get_int(val_array_at(original, 0))).to_equal(1)
+
+    it "copies no rows for read-only forks and only one row on first shared write":
+        val_reset()
+        var elements: [i64] = []
+        var index: i64 = 0
+        while index < 4096:
+            elements.push(val_make_int(index))
+            index += 1
+        val original = val_make_array(elements)
+        val backing_count = val_array_storage_count()
+        val value_count = val_count()
+        val parameter = val_copy_for_parameter(original)
+        expect(parameter != original).to_equal(true)
+        expect(val_count()).to_equal(value_count + 1)
+        expect(val_array_storage_id(parameter)).to_equal(val_array_storage_id(original))
+        expect(val_array_storage_count()).to_equal(backing_count)
+        expect(val_array_len(parameter)).to_equal(4096)
+        expect(val_array_cow_copy_count()).to_equal(0)
+        expect(val_array_cow_copied_slots()).to_equal(0)
+        expect(val_array_set(parameter, 0, val_make_int(9000))).to_equal(true)
+        expect(val_get_int(val_array_at(original, 0))).to_equal(0)
+        expect(val_get_int(val_array_at(parameter, 0))).to_equal(9000)
+        expect(val_array_cow_copy_count()).to_equal(1)
+        expect(val_array_cow_copied_slots()).to_equal(4096)
+        expect(val_array_set(parameter, 1, val_make_int(9001))).to_equal(true)
+        expect(val_array_cow_copy_count()).to_equal(1)
+        val snapshot = val_copy_if_value_struct(parameter)
+        expect(val_array_clear(parameter)).to_equal(true)
+        expect(val_array_len(parameter)).to_equal(0)
+        expect(val_array_len(snapshot)).to_equal(4096)
+        expect(val_array_cow_copy_count()).to_equal(1)
+        expect(val_array_cow_copied_slots()).to_equal(4096)
+
+    it "does not repeat struct-field array detachment on subsequent owned writes":
+        cow_cases(["case_struct_nested"])
+        # One outer backing row and one nested field row, independent of the
+        # two writes to that field. Recopying the struct each time costs more.
+        expect(val_array_cow_copy_count()).to_equal(2)
+
+    it "releases temporary at leases so repeated reads do not force repeated row copies":
+        val source = "fn main() -> i64:\n    var values = [1, 2, 3]\n    var index = 0\n    while index < 64:\n        if values.at(0) != index + 1: return 1\n        values[0] = index + 2\n        index += 1\n    if values[0] != 65: return 2\n    0\n"
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+        # The local's initial construction temporary is retained to arena
+        # reset; after its first detachment all 63 later writes stay unique.
+        expect(val_array_cow_copy_count()).to_equal(1)
+        expect(val_array_cow_copied_slots()).to_equal(3)
+
+    it "does not invalidate owned struct children during readonly traversal leases":
+        val source = "struct Data:\n    items: [i64]\nfn main() -> i64:\n    var source = [Data(items: [1])]\n    var values = source\n    values[0].items[0] = 9\n    var index = 0\n    while index < 64:\n        if values.contains(nil): return 1\n        values[0].items[0] = index\n        index += 1\n    if source[0].items[0] != 1: return 2\n    if values[0].items[0] != 63: return 3\n    0\n"
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+        expect(val_array_cow_copy_count()).to_equal(2)
+
+    it "keeps callback traversal stable and escaping children isolated after releasing the lease":
+        val source = "var rows = [[1], [2]]\nfn change_original(value: [i64]) -> [i64]:\n    rows[1][0] = 9\n    value\nfn main() -> i64:\n    var mapped = rows.map(change_original)\n    if mapped[0][0] != 1: return 1\n    if mapped[1][0] != 2: return 2\n    if rows[1][0] != 9: return 3\n    mapped[0][0] = 7\n    mapped[1][0] = 8\n    if rows[0][0] != 1: return 4\n    if rows[1][0] != 9: return 5\n    rows[0][0] = 6\n    if mapped[0][0] != 7: return 6\n    0\n"
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+    it "releases a traversal lease on method errors before the next owner write":
+        val_reset()
+        val values = val_make_array([val_make_int(1)])
+        val _ = eval_array_method(values, "not_an_array_method", [])
+        expect(eval_has_error()).to_equal(true)
+        expect(val_array_set(values, 0, val_make_int(9))).to_equal(true)
+        expect(val_get_int(val_array_at(values, 0))).to_equal(9)
+        expect(val_array_cow_copy_count()).to_equal(0)
+
+    it "recycles array headers without releasing live shared backing or child values":
+        val_reset()
+        val child = val_make_array([val_make_int(7)])
+        val original = val_make_array([child])
+        val snapshot = val_array_copy(original)
+        val replacement_element = val_make_int(8)
+        val_free(original)
+        val replacement = val_make_array([replacement_element])
+        expect(replacement).to_equal(original)
+        expect(val_get_int(val_array_at(val_array_at(snapshot, 0), 0))).to_equal(7)
+        expect(val_get_int(val_array_at(child, 0))).to_equal(7)
+        val_free(snapshot)
+        val_free(snapshot)
+        expect(val_get_int(val_array_at(child, 0))).to_equal(7)
+        val_reset()
+        expect(val_array_storage_count()).to_equal(0)
+        expect(val_array_cow_copy_count()).to_equal(0)
+
+    it "isolates real ExprStoreState constructor getter and installed nested snapshots":
+        val source = rt_file_read_text("test/fixtures/compiler/core_array_cow/expr_store_state.spl") ?? ""
+        expect(source.len() > 0).to_equal(true)
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)

@@ -24,12 +24,13 @@ use compiler.core.interpreter.eval.{eval_option_binding_value, eval_returning, e
 use compiler.core.interpreter.eval_ops.{eval_enum_variant_access}
 use compiler.core.interpreter.eval_tables.{enum_table_lookup_in, func_module_namespace_lookup, func_resolve_module_member_for_caller, func_table_lookup, func_table_register}
 use compiler.core.interpreter.module_loader_core.{try_force_any_deferred_for}
-use compiler.core.interpreter.value.{VAL_NONE, val_arrays, val_get_array, val_get_int, val_get_struct_name}
+use compiler.core.interpreter.value.{VAL_NONE, val_get_array, val_get_int, val_get_struct_name, val_array_at, val_array_len, val_array_set}
 use compiler.core.interpreter.value.{val_get_text, val_is_array, val_is_int, val_is_nil, val_is_struct}
 use compiler.core.interpreter.value.{val_is_text, val_kind_name, val_make_array, val_make_function, val_make_nil}
 use compiler.core.interpreter.value.{val_make_struct, val_make_text, val_struct_check_field_idx, val_struct_find_field_idx, val_struct_get_field}
 use compiler.core.interpreter.value.{val_struct_get_field_idx, val_struct_set_field_idx, val_struct_upsert_field, val_to_text}
-use compiler.core.interpreter.eval_calls.{val_copy_if_value_struct}
+use compiler.core.interpreter.eval_calls.{val_copy_if_value_struct, val_make_array_snapshot}
+use compiler.core.interpreter.value_places.{eval_mutable_value_place, eval_prepare_value_place}
 use compiler.core.interpreter.resolve.{resolve_is_fast_local}
 
 # ===== Field Access =====
@@ -138,13 +139,12 @@ fn eval_index_expr(eid: i64) -> i64:
     if eval_had_error: return -1
 
     if val_is_array(base_val):
-        val elements = val_get_array(base_val)
         if val_is_int(index_val):
             val idx = val_get_int(index_val)
             if idx >= 0:
-                val len = elements.len()
+                val len = val_array_len(base_val)
                 if idx < len:
-                    return elements[idx]
+                    return val_array_at(base_val, idx)
             eval_set_error("array index out of bounds: " + "{idx}")
             return -1
 
@@ -246,7 +246,7 @@ fn eval_slice_expr(eid: i64) -> i64:
             for i in start_idx..end_idx:
                 result.push(elements[i])
 
-        return val_make_array(result)
+        return val_make_array_snapshot(result)
 
     eval_set_error("cannot slice " + val_kind_name(val_get_kind(base_val)))
     -1
@@ -281,7 +281,7 @@ fn eval_dict_lit(eid: i64) -> i64:
 
         val v_val = eval_expr(value_eids[i])
         if eval_had_error: return -1
-        field_values.push(v_val)
+        field_values.push(val_copy_if_value_struct(v_val))
         i = i + 1
 
     val_make_struct("__dict", field_names, field_values)
@@ -293,8 +293,9 @@ fn eval_assign_expr(eid: i64) -> i64:
     val target_eid = e_node.left
     val value_eid = e_node.right
 
-    val new_val = eval_expr(value_eid)
+    val incoming = eval_expr(value_eid)
     if eval_had_error: return -1
+    val new_val = val_copy_if_value_struct(incoming)
 
     val target_node = expr_get(target_eid)
     val target_tag = target_node.tag
@@ -317,14 +318,14 @@ fn eval_assign_expr(eid: i64) -> i64:
     if target_tag == EXPR_FIELD_ACCESS:
         val base_eid2 = target_node.left
         val field_name = target_node.s_val
-        val base_val = eval_expr(base_eid2)
+        val base_val = eval_mutable_value_place(base_eid2)
         if eval_had_error: return -1
         if val_is_struct(base_val):
             # S1 copy-site 4 (struct field store). Kept identical to the copy of
             # this same function in _EvalOps/access_literal_assign_eval.spl,
             # which is the one eval_ops.spl re-exports; both are patched so the
             # two duplicates cannot drift on the identity contract.
-            val store_val = val_copy_if_value_struct(new_val)
+            val store_val = new_val
             # Fast path: cached field index
             val cached_idx = expr_owner_int(target_eid)
             if cached_idx >= 0:
@@ -347,9 +348,13 @@ fn eval_assign_expr(eid: i64) -> i64:
     if target_tag == EXPR_INDEX:
         val idx_base_eid = target_node.left
         val idx_key_eid = target_node.right
-        val base_val = eval_expr(idx_base_eid)
+        val base_place = eval_prepare_value_place(idx_base_eid)
         if eval_had_error: return -1
         val key_val = eval_expr(idx_key_eid)
+        if eval_had_error: return -1
+        # A final-index callback can snapshot an ancestor. Detach only after
+        # all target expressions have run, using the already frozen path.
+        val base_val = base_place.mutable_value()
         if eval_had_error: return -1
 
         if val_is_struct(base_val):
@@ -366,10 +371,8 @@ fn eval_assign_expr(eid: i64) -> i64:
         if val_is_array(base_val):
             if val_is_int(key_val):
                 val idx = val_get_int(key_val)
-                if idx >= 0:
-                    if idx < val_arrays[base_val].len():
-                        val_arrays[base_val][idx] = new_val
-                        return new_val
+                if val_array_set(base_val, idx, new_val):
+                    return new_val
                 eval_set_error("array index out of bounds: " + "{idx}")
                 return -1
 
