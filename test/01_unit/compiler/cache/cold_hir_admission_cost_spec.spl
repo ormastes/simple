@@ -1,0 +1,67 @@
+use std.spec.*
+use compiler.driver.cache.cold_hir_source_inventory_admission_v1.{cold_hir_source_inventory_admit_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+
+# doc/08_tracking/bug/stage2_windows_frontend_hir_cold_receipt_perf_2026-10-16.md
+# Cold HIR receipt admission re-derived the inventory digest (sort + encode +
+# sha256 over every row) even though the reader had already authenticated it:
+# 42.8 s of a 38.5-43 s fixed cost at 14,443 rows (seed interpreter, Windows),
+# paid for a 1-module closure. Cost pin: with the reader-minted digest the
+# admission must cost at most HALF of the recompute path (measured ratio is
+# far below that, so the threshold has wide headroom and is host independent).
+
+val ROWS: i64 = 3000
+
+fn build_inventory() -> CompileSourceInventoryV1:
+    val empty = sha256_text("")
+    val d = sha256_text("x")
+    var entries: [CompileSourceInventoryEntryV1] = []
+    var i = 0
+    while i < ROWS:
+        entries = entries.push(CompileSourceInventoryEntryV1("pkg/m{i}.spl", d, empty, empty, empty, empty, 5))
+        i = i + 1
+    CompileSourceInventoryV1(1, 7, entries)
+
+describe "cold HIR inventory admission cost":
+    it "skips the digest recompute when the reader-minted digest matches, within half the recompute cost":
+        val inv = build_inventory()
+        val digest = compile_source_inventory_digest_v1(inv)
+        val d = sha256_text("x")
+        val snap = "pkg/m1.spl|sha256_{d}|5"
+        val snap_digest = sha256_text(snap)
+        val t0 = time_now_unix_micros()
+        val slow = cold_hir_source_inventory_admit_v1("/frozen", digest, inv, snap, snap_digest, 1, 1, 1, 1)
+        val t1 = time_now_unix_micros()
+        val fast = cold_hir_source_inventory_admit_v1("/frozen", digest, inv, snap, snap_digest, 1, 1, 1, 1, digest)
+        val t2 = time_now_unix_micros()
+        expect(slow.is_ok()).to_be(true)
+        expect(fast.is_ok()).to_be(true)
+        val recompute_us = t1 - t0
+        val authenticated_us = t2 - t1
+        print "ADMISSION_COST rows={ROWS} recompute_ms={recompute_us / 1000} authenticated_ms={authenticated_us / 1000}"
+        expect(authenticated_us * 2 <= recompute_us).to_be(true)
+
+describe "cold HIR inventory admission stays fail-closed (prevention)":
+    it "a wrong or empty authenticated digest still recomputes and refuses a forged expected digest":
+        val inv = build_inventory()
+        val d = sha256_text("x")
+        val snap = "pkg/m1.spl|sha256_{d}|5"
+        val forged = sha256_text("forged")
+        val no_proof = cold_hir_source_inventory_admit_v1("/frozen", forged, inv, snap, sha256_text(snap), 1, 1, 1, 1)
+        expect(no_proof.is_err()).to_be(true)
+        expect(no_proof.unwrap_err()).to_equal("cold-hir-inventory-mismatch")
+        # A proof that differs from the expected digest is not trusted.
+        val real = compile_source_inventory_digest_v1(inv)
+        val wrong_proof = cold_hir_source_inventory_admit_v1("/frozen", forged, inv, snap, sha256_text(snap), 1, 1, 1, 1, real)
+        expect(wrong_proof.is_err()).to_be(true)
+        expect(wrong_proof.unwrap_err()).to_equal("cold-hir-inventory-mismatch")
+
+    it "the snapshot and row checks still run on the authenticated path":
+        val inv = build_inventory()
+        val real = compile_source_inventory_digest_v1(inv)
+        val forged_row = "pkg/m1.spl|sha256_{sha256_text("other")}|5"
+        val refused = cold_hir_source_inventory_admit_v1("/frozen", real, inv, forged_row, sha256_text(forged_row), 1, 1, 1, 1, real)
+        expect(refused.is_err()).to_be(true)
+        expect(refused.unwrap_err()).to_equal("cold-hir-snapshot-source-content-mismatch")
