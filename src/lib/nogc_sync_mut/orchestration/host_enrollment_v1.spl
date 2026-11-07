@@ -1,0 +1,133 @@
+# Data binding and signed authorization only. Trusted consumers acquire native
+# observations and claim the installed machine root separately. No filesystem
+# ownership, enrollment uniqueness or native continuity is inferred by this codec.
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_decode_signed_grant_v2, distributed_encode_signed_approval_v2, distributed_decode_signed_approval_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostEnrollmentBindingV1:
+    config_digest: text
+    policy_digest: text
+    native_machine_id: text
+    native_boot_id: text
+    provider_identity_digest: text
+    machine_parent: text
+
+pub struct HostEnrollmentCredentialV1:
+    operation: OperationEnvelopeV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+fn host_enrollment_digest_valid_v1(value: text) -> bool:
+    str_len(value) == 64 and builder_digest_valid_v1(value)
+
+fn host_enrollment_parent_valid_v1(path: text) -> bool:
+    if str_len(path) == 0 or str_len(path) > 4096 or not path.starts_with("/") or
+            path == "/" or path.ends_with("/") or path.contains("\0") or
+            path.contains("\n") or path.contains("\r") or path.contains("\t"):
+        return false
+    val parts = path.split("/")
+    var index = 1
+    while index < parts.len():
+        if parts[index] == "" or parts[index] == "." or parts[index] == "..": return false
+        index = index + 1
+    true
+
+pub fn host_enrollment_payload_bytes_v1(binding: HostEnrollmentBindingV1) -> Result<text, text>:
+    """Encode observed values as data; the consumer proves their origin separately."""
+    if not host_enrollment_digest_valid_v1(binding.config_digest) or
+            not host_enrollment_digest_valid_v1(binding.policy_digest) or
+            not host_enrollment_digest_valid_v1(binding.provider_identity_digest):
+        return Err("host-enrollment-binding-digest-invalid")
+    if str_len(binding.native_machine_id) > 128 or str_len(binding.native_boot_id) > 128 or
+            not builder_identifier_valid_v1(binding.native_machine_id) or
+            not builder_identifier_valid_v1(binding.native_boot_id):
+        return Err("host-enrollment-native-identity-invalid")
+    if not host_enrollment_parent_valid_v1(binding.machine_parent): return Err("host-enrollment-machine-parent-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-enrollment-binding"),
+        "configDigest": SdnValue.String(binding.config_digest), "policyDigest": SdnValue.String(binding.policy_digest),
+        "nativeMachineId": SdnValue.String(binding.native_machine_id), "nativeBootId": SdnValue.String(binding.native_boot_id),
+        "providerIdentityDigest": SdnValue.String(binding.provider_identity_digest), "machineParent": SdnValue.String(binding.machine_parent)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn host_enrollment_payload_digest_v1(binding: HostEnrollmentBindingV1) -> Result<text, text>:
+    """Digest the complete canonical native/configuration binding."""
+    Ok(sha256_text(host_enrollment_payload_bytes_v1(binding)?))
+
+pub fn host_enrollment_credential_encode_v1(credential: HostEnrollmentCredentialV1) -> Result<text, text>:
+    """Encode existing V2 signed wire strings without assigning trust."""
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-enrollment-credential"),
+        "operation": SdnValue.String(distributed_encode_operation_v2(credential.operation)?),
+        "signedGrant": SdnValue.String(distributed_encode_signed_grant_v2(credential.signed)?),
+        "signedApproval": SdnValue.String(distributed_encode_signed_approval_v2(credential.approval)?)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(bytes) > 1048576: return Err("host-enrollment-credential-size")
+    Ok(bytes)
+
+fn host_enrollment_text_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-enrollment-credential-field-type:" + name)
+
+pub fn host_enrollment_credential_decode_v1(bytes: text) -> Result<HostEnrollmentCredentialV1, text>:
+    """Strict bounded canonical outer SDN with canonical existing V2 inner codecs."""
+    if str_len(bytes) == 0 or str_len(bytes) > 1048576: return Err("host-enrollment-credential-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 2,
+        max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8)
+    val document = match sdn_parse_strict_v1(bytes, limits):
+        case Ok(parsed): parsed
+        case Err(issue): return Err("host-enrollment-credential-syntax:" + issue.code)
+    if sdn_encode_canonical(document.value) + "\n" != bytes: return Err("host-enrollment-credential-noncanonical")
+    val fields = match document.value:
+        case SdnValue.Dict(items): items
+        case _: return Err("host-enrollment-credential-object-required")
+    val names = ["version", "kind", "operation", "signedGrant", "signedApproval"]
+    for name in fields.keys():
+        if not names.contains(name): return Err("host-enrollment-credential-unknown-field:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("host-enrollment-credential-missing-field:" + name)
+    match fields["version"]:
+        case SdnValue.Int(version):
+            if version != 1: return Err("host-enrollment-credential-version")
+        case _: return Err("host-enrollment-credential-version")
+    if host_enrollment_text_v1(fields, "kind")? != "host-enrollment-credential": return Err("host-enrollment-credential-kind")
+    val credential = HostEnrollmentCredentialV1(
+        operation: distributed_decode_operation_v2(host_enrollment_text_v1(fields, "operation")?)?,
+        signed: distributed_decode_signed_grant_v2(host_enrollment_text_v1(fields, "signedGrant")?)?,
+        approval: distributed_decode_signed_approval_v2(host_enrollment_text_v1(fields, "signedApproval")?)?)
+    if host_enrollment_credential_encode_v1(credential)? != bytes: return Err("host-enrollment-credential-noncanonical")
+    Ok(credential)
+
+pub fn host_enrollment_authorize_v1(binding: HostEnrollmentBindingV1,
+        credential: HostEnrollmentCredentialV1, policy: LocalAuthorityPolicyV1,
+        expected_host_id: text, expected_memory_bytes: i64,
+        context: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
+    """Verify binding and existing signatures before the consumer claims any root."""
+    val payload_digest = host_enrollment_payload_digest_v1(binding)?
+    val operation = credential.operation
+    if operation.operation != "host_enroll_v1": return Err("host-enrollment-action-mismatch")
+    if operation.payload_digest != payload_digest: return Err("host-enrollment-payload-mismatch")
+    if operation.environment_digest != binding.provider_identity_digest: return Err("host-enrollment-provider-mismatch")
+    if not builder_identifier_valid_v1(expected_host_id) or operation.host_id != expected_host_id:
+        return Err("host-enrollment-host-mismatch")
+    if expected_memory_bytes <= 0 or operation.memory_bytes != expected_memory_bytes:
+        return Err("host-enrollment-memory-mismatch")
+    if policy.source_digest != binding.policy_digest: return Err("host-enrollment-policy-digest-mismatch")
+    if context.policy_revision != policy.snapshot.policy_revision or
+            context.revocation_epoch != policy.snapshot.revocation_epoch or
+            context.session_generation != policy.session_generation:
+        return Err("host-enrollment-policy-context-mismatch")
+    distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, credential.signed,
+        credential.approval, operation, context.grant_clock, policy.snapshot.generation,
+        context.policy_revision, context.revocation_epoch, context.session_generation)
