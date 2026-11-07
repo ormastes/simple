@@ -1,0 +1,89 @@
+# Trusted host one-use output opening. Persistent records are data only; the
+# sole native spawn outcome remains in the returned typed retained bundle.
+# This entrypoint requires the same-process exclusive host journal owner. It
+# is not an IPC gateway and its live lease/outcome must never be serialized.
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostCapacityOwnerV1
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.HostHelperLeaseV1
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_load_v1, host_helper_request_encode_v1, host_helper_execution_proof_load_v1}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_settlement_receipt_v1.host_helper_stream_native_store_v1
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use std.nogc_async_mut.container.stream_v2.{simple_container_output_plan_v2, simple_container_open_output_v2}
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerStreamPolicyV2, ContainerOutputResourcesV2, ContainerOutputPlanV2, ContainerHelperAdmissionV2, container_output_admission_validate_v2}
+use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_bytes_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_match_receipt_v1
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostHelperStreamRetainedV1:
+    helper: HostHelperLeaseV1
+    output_plan: ContainerOutputPlanV2
+    spawn: PipedProcessOwnedSpawnV2
+
+pub struct HostHelperOutputTurnV1:
+    owner: HostCapacityOwnerV1
+    container_owner: SimpleContainerOwnerV2
+    retained: HostHelperStreamRetainedV1?
+    recovery_required: bool
+    error: text
+
+pub fn host_helper_open_output_v1(owner: HostCapacityOwnerV1, container_owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1, identity: ContainerOutputIdentityV2,
+        helper: HostHelperLeaseV1, policy: ContainerStreamPolicyV2) -> HostHelperOutputTurnV1:
+    match host_helper_open_output_checked_v1(owner, container_owner, request, expected, identity, helper, policy):
+        case Ok(turn): turn
+        case Err(reason): HostHelperOutputTurnV1(owner: owner, container_owner: container_owner,
+            retained: nil, recovery_required: true, error: reason)
+
+fn host_helper_open_output_checked_v1(owner: HostCapacityOwnerV1, container_owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1, identity: ContainerOutputIdentityV2,
+        helper: HostHelperLeaseV1, policy: ContainerStreamPolicyV2) -> Result<HostHelperOutputTurnV1, text>:
+    val state = daemon_operation_exact_v2(owner.journal, helper.operation)?
+    if state.state != "executing": return Err("helper-stream-executing-intent-required")
+    val root = owner.journal.root
+    val retained_request = host_helper_request_load_v1(root, helper.operation.id)?
+    if (host_helper_plan_bytes_v1(retained_request.plan)? != host_helper_plan_bytes_v1(helper.plan)? or
+            distributed_encode_operation_v2(retained_request.operation)? != distributed_encode_operation_v2(helper.operation)?):
+        return Err("helper-stream-lease-retained-request-mismatch")
+    val receipt_match = host_helper_reservation_match_receipt_v1(helper.receipt, retained_request.intent, helper.operation)?
+    val plan = simple_container_output_plan_v2(container_owner, request, expected, identity, policy,
+        ContainerOutputResourcesV2(cpu_millis: helper.cpu_millis, memory_bytes: helper.memory_bytes))?
+    val consumed = HostHelperStreamConsumedV1(operation_id: helper.operation.id,
+        operation_digest: sha256_text(distributed_encode_operation_v2(helper.operation)?),
+        packet_digest: sha256_text(host_helper_request_encode_v1(retained_request)?),
+        execution_proof_digest: sha256_text(host_helper_execution_proof_load_v1(root, helper.operation.id)?),
+        prepared_receipt_digest: helper.receipt.receipt_digest, deadline_unix_ms: helper.deadline.expires_at_unix_ms,
+        output_plan: plan)
+    val context = host_helper_stream_validate_record_v1(root, helper.operation, consumed)?
+    if (helper.grant_id != context.admission.grant_id or helper.issuer_id != context.admission.issuer_id or
+            helper.approver_id != context.admission.approver_id): return Err("helper-stream-lease-execution-proof-mismatch")
+    val admission = ContainerHelperAdmissionV2(plan: helper.plan, operation: helper.operation, receipt: helper.receipt,
+        deadline: helper.deadline, grant_id: helper.grant_id, issuer_id: helper.issuer_id,
+        approver_id: helper.approver_id, cpu_millis: helper.cpu_millis, memory_bytes: helper.memory_bytes)
+    val matching = container_output_admission_validate_v2(plan, admission)?
+    # Revalidate the same existing writer lease/revision immediately before
+    # exclusive durable consumption. Any existing/partial record blocks launch.
+    val current = daemon_operation_exact_v2(owner.journal, helper.operation)?
+    if current.state != "executing": return Err("helper-stream-executing-intent-required")
+    host_helper_stream_publish_v1(root, helper.operation.id, "consumed", host_helper_stream_consumed_encode_v1(consumed)?, true)?
+    # No ? may discard the only returned native outcome after this boundary.
+    val opened = simple_container_open_output_v2(container_owner, request, expected, identity, admission, policy)
+    val retained = HostHelperStreamRetainedV1(helper: helper, output_plan: plan, spawn: opened.spawn)
+    var error = ""
+    match opened.spawn:
+        case PipedProcessOwnedSpawnV2.Ready(native, _reference):
+            match host_helper_stream_native_store_v1(root, helper.operation, native):
+                case Ok(_): ()
+                case Err(reason): error = reason
+        case PipedProcessOwnedSpawnV2.CleanupRequired(native, _reference, reason):
+            error = reason
+            match host_helper_stream_native_store_v1(root, helper.operation, native):
+                case Ok(_): ()
+                case Err(publication): error = publication
+        case PipedProcessOwnedSpawnV2.Rejected(reason): error = reason
+    Ok(HostHelperOutputTurnV1(owner: owner, container_owner: opened.owner, retained: Some(retained),
+        recovery_required: error != "", error: error))

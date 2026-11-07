@@ -1,0 +1,209 @@
+# Actual proof -> exact native retirement -> canonical reap -> host journal
+# settlement -> correlated ACK. No grant freshness check applies to cleanup.
+# Trusted same-process composition only. The typed ACK is not a signed IPC
+# authority; independent service authentication remains a separate boundary.
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_settle_v1}
+use std.nogc_sync_mut.orchestration.host_helper_stream_owner_v1.HostHelperStreamRetainedV1
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_settlement_receipt_v1.*
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.{distributed_decode_operation_v2, distributed_encode_operation_v2}
+use std.common.contracts.container.stream_v2.{ContainerOutputPlanV2, ContainerHelperAdmissionV2, container_output_plan_encode_v2, container_output_admission_validate_v2}
+use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_bytes_v1
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_launch_encode_profiled_v3
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_cleanup_proof_v2, group_process_stream_collect_reap_v2}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessRefV1, process_cleanup_piped_owned_v2}
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostHelperSettlementAckV1:
+    operation_id: text
+    request_digest: text
+    prepared_receipt_digest: text
+    native_identity_digest: text
+    tree_receipt_digest: text
+    outcome_digest: text
+    journal_revision: text
+    journal_sequence: i64
+
+pub struct HostHelperSettlementTurnV1:
+    owner: HostCapacityOwnerV1
+    retained: HostHelperStreamRetainedV1?
+    settled: bool
+    recovery_required: bool
+    error: text
+    ack: HostHelperSettlementAckV1?
+
+pub struct HostHelperRecoveredStreamV1:
+    operation: OperationEnvelopeV2
+    output_plan: ContainerOutputPlanV2
+    stream_owner: GroupProcessStreamOwnerV2
+    consumption_digest: text
+
+pub struct HostHelperRecoveryTurnV1:
+    owner: HostCapacityOwnerV1
+    recovered: HostHelperRecoveredStreamV1?
+    recovery_required: bool
+    error: text
+
+pub struct HostHelperRecoveredSettlementTurnV1:
+    owner: HostCapacityOwnerV1
+    retained: HostHelperRecoveredStreamV1?
+    settled: bool
+    recovery_required: bool
+    error: text
+    ack: HostHelperSettlementAckV1?
+
+struct HostHelperSettlementProofV1:
+    outcome: text
+    tree_receipt_digest: text
+    request_digest: text
+    prepared_receipt_digest: text
+
+struct HostHelperSettlementCoreTurnV1:
+    owner: HostCapacityOwnerV1
+    ack: HostHelperSettlementAckV1?
+    error: text
+
+fn host_helper_stream_ref_metadata_v1(native: GroupProcessStreamOwnerV2,
+        reference: PipedProcessRefV1?) -> Result<(), text>:
+    match reference:
+        case None: ()
+        case Some(value):
+            if (value.pid <= 0 or value.generation != native.launch.transport_generation or
+                    value.group_root != native.launch.root or value.group_identity != native.identity_digest):
+                return Err("helper-stream-reference-metadata-mismatch")
+    Ok(())
+
+fn host_helper_live_native_v1(root: text, retained: HostHelperStreamRetainedV1) -> Result<GroupProcessStreamOwnerV2, text>:
+    val helper = retained.helper
+    val context = host_helper_stream_context_v1(root, helper.operation)?
+    if (container_output_plan_encode_v2(retained.output_plan)? != container_output_plan_encode_v2(context.consumed.output_plan)? or
+            host_helper_plan_bytes_v1(helper.plan)? != host_helper_plan_bytes_v1(context.request.plan)? or
+            helper.deadline.expires_at_unix_ms != context.consumed.deadline_unix_ms or
+            helper.receipt.receipt_digest != context.consumed.prepared_receipt_digest or
+            helper.grant_id != context.admission.grant_id or helper.issuer_id != context.admission.issuer_id or
+            helper.approver_id != context.admission.approver_id): return Err("helper-stream-retained-bundle-mismatch")
+    val admission = ContainerHelperAdmissionV2(plan: helper.plan, operation: helper.operation, receipt: helper.receipt,
+        deadline: helper.deadline, grant_id: helper.grant_id, issuer_id: helper.issuer_id,
+        approver_id: helper.approver_id, cpu_millis: helper.cpu_millis, memory_bytes: helper.memory_bytes)
+    val matching = container_output_admission_validate_v2(retained.output_plan, admission)?
+    val native = match retained.spawn:
+        case PipedProcessOwnedSpawnV2.Ready(value, reference):
+            host_helper_stream_ref_metadata_v1(value, Some(reference))?
+            value
+        case PipedProcessOwnedSpawnV2.CleanupRequired(value, reference, _reason):
+            host_helper_stream_ref_metadata_v1(value, reference)?
+            value
+        case PipedProcessOwnedSpawnV2.Rejected(_reason):
+            return Err("helper-stream-rejected-needs-explicit-absence-reconciliation")
+    host_helper_stream_native_match_v1(context, native)?
+    val persisted = host_helper_stream_native_recover_v1(root, helper.operation)?
+    if (persisted.identity_digest != native.identity_digest or
+            group_process_stream_launch_encode_profiled_v3(persisted.launch) != group_process_stream_launch_encode_profiled_v3(native.launch)):
+        return Err("helper-stream-native-owner-mismatch")
+    Ok(native)
+
+fn host_helper_settlement_prepare_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
+        native: GroupProcessStreamOwnerV2) -> Result<HostHelperSettlementProofV1, text>:
+    val state = daemon_operation_exact_v2(owner.journal, operation)?
+    if not ["executing", "outcome-unknown", "completed"].contains(state.state):
+        return Err("helper-stream-settlement-execution-required")
+    val root = owner.journal.root
+    val context = host_helper_stream_context_v1(root, operation)?
+    host_helper_stream_native_match_v1(context, native)?
+    val persisted = host_helper_stream_native_load_context_v1(root, operation, context)?
+    if persisted.identity_digest != native.identity_digest: return Err("helper-stream-settlement-native-mismatch")
+    # Settlement is not cancellation. No proof means pending; no OS action.
+    val proof = group_process_stream_cleanup_proof_v2(native)?
+    if proof == "": return Err("helper-stream-cleanup-proof-empty")
+    # Explicit exact-owner recovery route AFTER proof, never a stale-ref retry.
+    # This safely handles smux having already retired its original reference.
+    process_cleanup_piped_owned_v2(native, nil)?
+    val lease = host_helper_stream_grouped_lease_v1(context, native)?
+    val reap = group_process_stream_collect_reap_v2(native, lease)?
+    val outcome = host_helper_settlement_expected_context_v1(root, operation, context, native)?
+    host_helper_stream_publish_v1(root, operation.id, "settlement", outcome, false)?
+    # publish verifies exact readback/sync; the host hook independently reloads
+    # and revalidates all metadata/proof before committing its journal event.
+    Ok(HostHelperSettlementProofV1(outcome: outcome, tree_receipt_digest: reap.tree_receipt_digest,
+        request_digest: context.consumed.output_plan.request_digest,
+        prepared_receipt_digest: context.consumed.prepared_receipt_digest))
+
+fn host_helper_settlement_core_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
+        native: GroupProcessStreamOwnerV2) -> HostHelperSettlementCoreTurnV1:
+    val proof = match host_helper_settlement_prepare_v1(owner, operation, native):
+        case Ok(value): value
+        case Err(reason): return HostHelperSettlementCoreTurnV1(owner, nil, reason)
+    val committed = host_capacity_owner_settle_v1(owner, operation)
+    if not committed.settled: return HostHelperSettlementCoreTurnV1(committed.owner, nil, committed.error)
+    val state = match daemon_operation_exact_v2(committed.owner.journal, operation):
+        case Ok(value): value
+        case Err(reason): return HostHelperSettlementCoreTurnV1(committed.owner, nil, reason)
+    val outcome_digest = sha256_text(proof.outcome)
+    if state.state != "completed" or state.outcome_digest != outcome_digest:
+        return HostHelperSettlementCoreTurnV1(committed.owner, nil, "helper-stream-journal-settlement-mismatch")
+    val ack = HostHelperSettlementAckV1(operation_id: operation.id, request_digest: proof.request_digest,
+        prepared_receipt_digest: proof.prepared_receipt_digest, native_identity_digest: native.identity_digest,
+        tree_receipt_digest: proof.tree_receipt_digest, outcome_digest: outcome_digest,
+        journal_revision: committed.owner.journal.revision, journal_sequence: committed.owner.journal.sequence)
+    HostHelperSettlementCoreTurnV1(committed.owner, Some(ack), "")
+
+pub fn host_helper_settle_output_v1(owner: HostCapacityOwnerV1,
+        retained: HostHelperStreamRetainedV1) -> HostHelperSettlementTurnV1:
+    # Verify current journal ownership BEFORE any metadata repair/publication.
+    val state = match daemon_operation_exact_v2(owner.journal, retained.helper.operation):
+        case Ok(value): value
+        case Err(reason): return HostHelperSettlementTurnV1(owner, Some(retained), false, true, reason, nil)
+    if not ["executing", "outcome-unknown", "completed"].contains(state.state):
+        return HostHelperSettlementTurnV1(owner, Some(retained), false, true, "helper-stream-settlement-execution-required", nil)
+    val native = match host_helper_live_native_v1(owner.journal.root, retained):
+        case Ok(value): value
+        case Err(reason): return HostHelperSettlementTurnV1(owner, Some(retained), false, true, reason, nil)
+    val settled = host_helper_settlement_core_v1(owner, retained.helper.operation, native)
+    match settled.ack:
+        case Some(ack): HostHelperSettlementTurnV1(settled.owner, nil, true, false, "", Some(ack))
+        case None: HostHelperSettlementTurnV1(settled.owner, Some(retained), false, true, settled.error, nil)
+
+pub fn host_helper_recover_output_v1(owner: HostCapacityOwnerV1, operation_id: text) -> HostHelperRecoveryTurnV1:
+    match host_helper_recover_checked_v1(owner, operation_id):
+        case Ok(value): HostHelperRecoveryTurnV1(owner, Some(value), false, "")
+        case Err(reason): HostHelperRecoveryTurnV1(owner, nil, true, reason)
+
+fn host_helper_recover_checked_v1(owner: HostCapacityOwnerV1, operation_id: text) -> Result<HostHelperRecoveredStreamV1, text>:
+    if not owner.journal.operations.contains_key(operation_id): return Err("helper-stream-operation-missing")
+    val operation = distributed_decode_operation_v2(owner.journal.operations[operation_id].envelope)?
+    val state = daemon_operation_exact_v2(owner.journal, operation)?
+    if not ["executing", "outcome-unknown", "completed"].contains(state.state):
+        return Err("helper-stream-recovery-execution-required")
+    val context = host_helper_stream_context_v1(owner.journal.root, operation)?
+    val native = host_helper_stream_native_recover_v1(owner.journal.root, operation)?
+    Ok(HostHelperRecoveredStreamV1(operation: operation, output_plan: context.consumed.output_plan,
+        stream_owner: native, consumption_digest: sha256_text(host_helper_stream_consumed_encode_v1(context.consumed)?)))
+
+pub fn host_helper_settle_recovered_output_v1(owner: HostCapacityOwnerV1,
+        recovered: HostHelperRecoveredStreamV1) -> HostHelperRecoveredSettlementTurnV1:
+    val current = host_helper_recover_output_v1(owner, recovered.operation.id)
+    val exact = match current.recovered:
+        case Some(value): value
+        case None: return HostHelperRecoveredSettlementTurnV1(current.owner, Some(recovered), false, true, current.error, nil)
+    val exact_operation = distributed_encode_operation_v2(exact.operation)
+    val retained_operation = distributed_encode_operation_v2(recovered.operation)
+    if exact_operation.is_err() or retained_operation.is_err():
+        return HostHelperRecoveredSettlementTurnV1(owner, Some(recovered), false, true, "helper-stream-recovery-operation-invalid", nil)
+    if exact_operation.unwrap() != retained_operation.unwrap():
+        return HostHelperRecoveredSettlementTurnV1(owner, Some(recovered), false, true, "helper-stream-recovery-operation-mismatch", nil)
+    if (exact.consumption_digest != recovered.consumption_digest or
+            exact.stream_owner.identity_digest != recovered.stream_owner.identity_digest or
+            group_process_stream_launch_encode_profiled_v3(exact.stream_owner.launch) != group_process_stream_launch_encode_profiled_v3(recovered.stream_owner.launch)):
+        return HostHelperRecoveredSettlementTurnV1(owner, Some(recovered), false, true, "helper-stream-recovery-bundle-mismatch", nil)
+    val plan_match = container_output_plan_encode_v2(exact.output_plan)
+    val retained_plan = container_output_plan_encode_v2(recovered.output_plan)
+    if plan_match.is_err() or retained_plan.is_err():
+        return HostHelperRecoveredSettlementTurnV1(owner, Some(recovered), false, true, "helper-stream-recovery-plan-invalid", nil)
+    if plan_match.unwrap() != retained_plan.unwrap():
+        return HostHelperRecoveredSettlementTurnV1(owner, Some(recovered), false, true, "helper-stream-recovery-plan-mismatch", nil)
+    val settled = host_helper_settlement_core_v1(owner, exact.operation, exact.stream_owner)
+    match settled.ack:
+        case Some(ack): HostHelperRecoveredSettlementTurnV1(settled.owner, nil, true, false, "", Some(ack))
+        case None: HostHelperRecoveredSettlementTurnV1(settled.owner, Some(recovered), false, true, settled.error, nil)
