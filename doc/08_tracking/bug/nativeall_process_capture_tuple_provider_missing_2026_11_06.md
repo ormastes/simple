@@ -3,6 +3,32 @@
 Canonical ID: `nativeall_process_capture_tuple_provider_missing_2026_11_06`.
 Severity: P1. Status: source repair implemented; caller diagnostic FAIL; six-cycle cap reached.
 
+## Source-only landing follow-up (2026-11-07)
+
+The user explicitly reassigned this lane to root and requested PR7337 landing.
+The original head `26c80e995b1c49f03262fa7f1a712f8431790603` and all evidence
+below remain historical pins. The two source commits were rebased in an
+isolated Linux worktree onto release
+`a6dca22ee32da27ff9e45a67ba86ae3ef587074e`, preserving newer release changes.
+The one stale `rt_process_run_tuple c-only` parity-baseline row was removed
+alongside its new Rust export. No capture semantics were changed beyond the
+original export and consumer block release.
+
+Astra and Sol reviewed the physical ABI, fresh-block ownership, shallow tuple
+release, and both consumer cleanup paths; no introduced P0/P1 source defect
+was identified. This is source review, not runtime admission. The original
+raw-only fixture's registry expectation is invalid for canonical C MEMORY_OWNER
+composition, which requires array-scope activation. Whether this explains the
+retained exit14 remains conditional on its unknown linked-runtime identity.
+
+The separate canonical-scope diagnostic in PR7547 preserves the old fixture,
+uses the established transient wrappers, reports actual raw-word observations,
+and requires independently verified runtime provenance. It adds no conflicting
+SFFI signatures against its exact parent but does add one disclosed unsigned
+test observer; aggregate SFFI inventory remains FAIL. Its native execution is
+UNRUN. Neither PR may convert original FAIL14 to PASS, close qualification,
+reset the six-cycle ledger, or substitute Linux evidence for Windows native-all.
+
 ## Reproduction and source authority
 
 Windows Phase Ladder run42208248396/job127860185705 at source
