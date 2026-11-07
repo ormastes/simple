@@ -187,3 +187,90 @@ describe "Vulkan mask plane — clearing and rejecting":
         assert_false(b.cpu_fallback_used)  # oracle: :815 returns before mark_cpu_fallback is reachable
         expect(b.cpu_fallback_reason).to_equal("")  # oracle: :648 initial value, never overwritten
         expect(b.host_buf[1]).to_equal(0u32)  # oracle: nothing was drawn
+
+describe "Vulkan mask plane — remaining primitive routing":
+    it "routes rectangle outlines through the same masked host pixels":
+        # @req REQ-LIB-GPU-VKMASK-007
+        step("Draw a 4x2 outline over the asymmetric stencil without creating a device")
+        var b = masked_backend()
+        b.draw_rect(0, 0, 4, 2, OPAQUE_BLUE)
+        expect(b.cpu_fallback_reason).to_equal("image-copy-host-fallback")
+        expect(b.host_buf).to_equal([0u32, OPAQUE_BLUE, OPAQUE_BLUE, 0u32, 0u32, 0u32, OPAQUE_BLUE, OPAQUE_BLUE])
+
+    it "keeps axis-line rectangle acceleration from bypassing the mask":
+        # @req REQ-LIB-GPU-VKMASK-008
+        step("Draw a horizontal line whose two endpoints are masked out")
+        var b = masked_backend()
+        b.draw_line(0, 0, 3, 0, OPAQUE_BLUE, 1)
+        expect(b.cpu_fallback_reason).to_equal("image-copy-host-fallback")
+        expect(b.host_buf).to_equal([0u32, OPAQUE_BLUE, OPAQUE_BLUE, 0u32, 0u32, 0u32, 0u32, 0u32])
+
+    it "masks the ordered diagonal line route as well as the axis shortcut":
+        # @req REQ-LIB-GPU-VKMASK-009
+        step("Draw the Bresenham points (0,0), (1,0), (2,1), (3,1)")
+        var b = masked_backend()
+        b.draw_line(0, 0, 3, 1, OPAQUE_BLUE, 1)
+        expect(b.cpu_fallback_reason).to_equal("image-copy-host-fallback")
+        expect(b.host_buf).to_equal([0u32, OPAQUE_BLUE, 0u32, 0u32, 0u32, 0u32, OPAQUE_BLUE, OPAQUE_BLUE])
+
+    it "masks filled circles using the existing distance-test decomposition":
+        # @req REQ-LIB-GPU-VKMASK-010
+        step("Draw the radius-one disk centred at (1,0) through the stencil")
+        var b = masked_backend()
+        b.draw_circle_filled(1, 0, 1, OPAQUE_BLUE)
+        expect(b.cpu_fallback_reason).to_equal("image-copy-host-fallback")
+        expect(b.host_buf).to_equal([0u32, OPAQUE_BLUE, OPAQUE_BLUE, 0u32, 0u32, 0u32, 0u32, 0u32])
+
+    it "masks barycentric triangle coverage rather than issuing the maskless kernel":
+        # @req REQ-LIB-GPU-VKMASK-011
+        step("Draw a triangle covering the top row and only (3,1) on the bottom row")
+        var b = masked_backend()
+        b.draw_triangle_filled(0, 0, 3, 0, 3, 1, OPAQUE_BLUE)
+        expect(b.cpu_fallback_reason).to_equal("image-copy-host-fallback")
+        expect(b.host_buf).to_equal([0u32, OPAQUE_BLUE, OPAQUE_BLUE, 0u32, 0u32, 0u32, 0u32, OPAQUE_BLUE])
+
+    it "preserves vertical-gradient endpoints while applying each row's mask":
+        # @req REQ-LIB-GPU-VKMASK-012
+        step("Draw a two-row gradient with independently known top and bottom colours")
+        var b = masked_backend()
+        val bottom = 0xFF445566u32
+        b.draw_gradient_rect(0, 0, 4, 2, OPAQUE_BLUE, bottom)
+        expect(b.cpu_fallback_reason).to_equal("image-copy-host-fallback")
+        expect(b.host_buf).to_equal([0u32, OPAQUE_BLUE, OPAQUE_BLUE, 0u32, 0u32, 0u32, bottom, bottom])
+
+    it "keeps a negative circle radius from becoming the emulator's centre stamp":
+        # @req REQ-LIB-GPU-VKMASK-013
+        step("Refuse a negative masked disk without changing any host pixel")
+        var b = masked_backend()
+        b.draw_circle_filled(1, 0, -1, OPAQUE_BLUE)
+        expect(b.host_buf).to_equal([0u32; 8])
+        expect(b.cpu_fallback_reason).to_equal("circle-filled-dispatch-failed")
+
+    it "does not use a mask fallback to overwrite an unknown completion state":
+        # @req REQ-LIB-GPU-VKMASK-014
+        step("Mark completion unknown before attempting all newly routed primitives")
+        var b = masked_backend()
+        b.completion_unknown = true
+        b.draw_rect(0, 0, 4, 2, OPAQUE_BLUE)
+        b.draw_line(0, 0, 3, 1, OPAQUE_BLUE, 1)
+        b.draw_circle_filled(1, 0, 1, OPAQUE_BLUE)
+        b.draw_triangle_filled(0, 0, 3, 0, 3, 1, OPAQUE_BLUE)
+        b.draw_gradient_rect(0, 0, 4, 2, OPAQUE_BLUE, OPAQUE_BLUE)
+        expect(b.host_buf).to_equal([0u32; 8])
+        expect(b.completion_unknown).to_equal(true)
+        expect(b.cpu_fallback_used).to_equal(false)
+
+    it "refuses widened extreme line spans before entering masked i32 emulation":
+        # @req REQ-LIB-GPU-VKMASK-015
+        step("Reject an x span larger than signed i32 without a raster walk")
+        var horizontal = masked_backend()
+        horizontal.draw_line(-2147483648, 0, 2147483647, 1, OPAQUE_BLUE, 1)
+        expect(horizontal.cpu_fallback_reason).to_equal("line-dispatch-size-invalid")
+        expect(horizontal.host_buf).to_equal([0u32; 8])
+        expect(horizontal.completion_unknown).to_equal(false)
+        step("Reject the corresponding widened y span independently")
+        var vertical = masked_backend()
+        vertical.draw_line(0, -2147483648, 1, 2147483647, OPAQUE_BLUE, 1)
+        expect(vertical.cpu_fallback_reason).to_equal("line-dispatch-size-invalid")
+        expect(vertical.host_buf).to_equal([0u32; 8])
+        expect(vertical.completion_unknown).to_equal(false)
