@@ -16,6 +16,7 @@ Audience: frontend/flat-AST bridge maintainers.
 
 use std.spec.*
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.nogc_sync_mut.sffi.io.{list_dir_recursive}
 
 val CONVERT_NODES = "src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl"
 
@@ -49,3 +50,25 @@ describe "pending defers stay in place across the transient parser scope":
         # saved_x` idiom stores a scope-stamped array in a process global.
         val src = read_or_empty(CONVERT_NODES)
         expect(src.contains("= g_pending_defers\n    g_pending_defers = []")).to_equal(false)
+
+    it "PendingDeferState take/install mutate in place and carry the base":
+        val src = read_or_empty(CONVERT_NODES)
+        val start = src.index_of("pub fn pending_defer_state_take(")
+        expect(start).to_be_greater_than(0)
+        val tail = src.substring(start, src.len())
+        expect(tail.contains("g_pending_defers = ")).to_equal(false)
+        expect(tail).to_contain("g_pending_defer_base: g_pending_defer_base")
+        expect(tail).to_contain("g_pending_defer_base = s.g_pending_defer_base")
+
+    it "no 10.frontend file resets a g_ array global to a fresh []":
+        # Widened sibling prevention over all of src/compiler/10.frontend:
+        # a process-global array must be truncated in place, never replaced.
+        val listing = list_dir_recursive("src/compiler/10.frontend", ".spl")
+        var offenders: [text] = []
+        for path in listing:
+            if path.ends_with(".spl"):
+                for line in read_or_empty(path).split("\n"):
+                    val t = line.trim()
+                    if t.starts_with("g_") and t.ends_with(" = []"):
+                        offenders.push(path + ": " + t)
+        expect(offenders).to_equal([])
