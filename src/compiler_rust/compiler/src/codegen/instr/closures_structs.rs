@@ -2740,7 +2740,14 @@ fn try_compile_builtin_method_call<M: Module>(
     };
 
     if runtime_func == "rt_len" {
-        return Ok(Some(inline_runtime_len_value(builder, receiver_val, ctx.baremetal, ctx.fam_arrays)));
+        let char_count = super::helpers::declare_string_char_count_ref(ctx, builder);
+        return Ok(Some(super::helpers::inline_runtime_len_value_with(
+            builder,
+            receiver_val,
+            ctx.baremetal,
+            ctx.fam_arrays,
+            char_count,
+        )));
     }
 
     // Check if runtime function exists; declare on-demand if missing

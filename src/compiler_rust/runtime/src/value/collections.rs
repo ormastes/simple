@@ -4102,7 +4102,10 @@ pub extern "C" fn rt_string_len(string: RuntimeValue) -> i64 {
 pub extern "C" fn rt_len(value: RuntimeValue) -> i64 {
     match value.heap_type() {
         Some(HeapObjectType::Array) => rt_array_len(value),
-        Some(HeapObjectType::String) => rt_string_len(value),
+        // Generic `.len()` on text counts code points (design
+        // text_len_counts_characters_2026-11-07); `rt_string_len` stays the
+        // byte count behind `byte_len()` and the byte externs.
+        Some(HeapObjectType::String) => rt_string_char_count(value),
         Some(HeapObjectType::Tuple) => rt_tuple_len(value),
         Some(HeapObjectType::Dict) => super::dict::rt_dict_len(value),
         _ => -1,
@@ -4443,14 +4446,84 @@ fn new_string(s: &str) -> RuntimeValue {
     rt_string_new(s.as_ptr(), s.len() as u64)
 }
 
-/// `char_count`: number of Unicode scalar values, as opposed to `len`, which is
-/// the BYTE count. Returns -1 for a non-text receiver, matching `rt_string_len`
-/// and `rt_len`.
+/// `char_count`: code-point count (also used by generic text `len`).
+/// `rt_string_len` remains the byte count. Returns -1 for a non-text receiver.
 #[no_mangle]
 pub extern "C" fn rt_string_char_count(string: RuntimeValue) -> i64 {
-    match string_as_str(string) {
-        Some(s) => s.chars().count() as i64,
-        None => -1,
+    // Backs generic `.len()` on text (design text_len_counts_characters_2026-11-07),
+    // so it must never answer -1 for a real string: bytes that are not valid
+    // UTF-8 (a raw byte slice, a lossy fragment) use the C runtime's
+    // rt_utf8_width walk, including its one-byte fallback for truncated leads
+    // and stray continuation bytes. Counting only non-continuation bytes would
+    // incorrectly report a nonempty continuation-only string as empty.
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return len;
+    }
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.chars().count() as i64,
+        Err(_) => {
+            let mut offset = 0;
+            let mut count = 0;
+            while offset < bytes.len() {
+                let remaining = bytes.len() - offset;
+                let width = match bytes[offset] {
+                    0xc2..=0xdf if remaining >= 2 => 2,
+                    0xe0..=0xef if remaining >= 3 => 3,
+                    0xf0..=0xf4 if remaining >= 4 => 4,
+                    _ => 1,
+                };
+                offset += width;
+                count += 1;
+            }
+            count
+        }
+    }
+}
+
+#[cfg(test)]
+mod string_char_count_byte_fragment_tests {
+    use super::{rt_len, rt_string_char_count, rt_string_len, rt_string_new};
+
+    #[test]
+    fn raw_byte_fragments_match_native_width_contract() {
+        // Byte substring APIs can split UTF-8. These expected counts pin the
+        // native runtime contract, not Unicode replacement decoding: a valid
+        // lead with enough remaining bytes consumes its entire declared width.
+        let cases: &[(&[u8], i64)] = &[
+            (&[0xa9], 1),
+            (&[0x80, 0xbf], 2),
+            (&[0xc2], 1),
+            (&[0xe2, 0x82], 2),
+            (&[0xf0, 0x9f, 0x92], 3),
+            (&[0xc2, b'A'], 1),
+            (&[0xe2, b'A', b'B'], 1),
+            (&[0xf0, b'A', b'B', b'C'], 1),
+            (&[0xc0, 0xaf], 2),
+            (&[0xf5, 0x80, 0x80, 0x80], 4),
+            (&[0xa9, b'A', 0xc2, 0xa9], 3),
+        ];
+        for &(bytes, expected) in cases {
+            let value = rt_string_new(bytes.as_ptr(), bytes.len() as u64);
+            assert_eq!(rt_string_char_count(value), expected, "bytes={bytes:x?}");
+            assert_eq!(rt_len(value), expected, "generic len bytes={bytes:x?}");
+            assert_eq!(rt_string_len(value), bytes.len() as i64);
+        }
+    }
+
+    #[test]
+    fn valid_utf8_keeps_unicode_scalar_counts() {
+        for (text, expected) in [("", 0), ("hello", 5), ("héllo€", 6), ("e\u{301}🦀", 3)] {
+            let value = rt_string_new(text.as_ptr(), text.len() as u64);
+            assert_eq!(rt_string_char_count(value), expected);
+            assert_eq!(rt_len(value), expected);
+            assert_eq!(rt_string_len(value), text.len() as i64);
+        }
     }
 }
 

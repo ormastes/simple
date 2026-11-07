@@ -9,9 +9,192 @@
 //! - Relative: Compute relative path
 //! - Separator: Get platform-specific path separator
 
-use crate::value::collections::rt_string_new;
+use crate::value::collections::{rt_string_new, RuntimeString};
+use crate::value::heap::{with_typed_ptr, HeapObjectType};
 use crate::value::RuntimeValue;
 use std::path::Path;
+
+const NORMALIZE_PATH_CAPACITY: usize = 4096;
+
+fn copy_normalize_path_input(
+    value: RuntimeValue,
+    input: &mut [u8; NORMALIZE_PATH_CAPACITY],
+) -> Option<usize> {
+    with_typed_ptr::<RuntimeString, _>(value, HeapObjectType::String, |ptr| unsafe {
+        // Test the complete managed length before applying C's first-NUL rule.
+        let len = (*ptr).len;
+        if len >= NORMALIZE_PATH_CAPACITY as u64 {
+            return None;
+        }
+        let len = len as usize;
+        input[..len].copy_from_slice((*ptr).as_bytes());
+        Some(len)
+    })
+    .flatten()
+}
+
+/// The bounded lexical algorithm in runtime_core_io_exports.c:404-462.
+/// Both separators are recognized on every host; this is not filesystem
+/// canonicalization and deliberately does not preserve UNC/device semantics.
+fn normalize_legacy_path_into(
+    input: &[u8],
+    output: &mut [u8; NORMALIZE_PATH_CAPACITY],
+) -> Option<usize> {
+    let mut pos = 0;
+    let mut i = 0;
+    if input.len() >= 2 && input[0].is_ascii_alphabetic() && input[1] == b':' {
+        output[..2].copy_from_slice(&input[..2]);
+        pos = 2;
+        i = 2;
+    }
+    let separator = |byte| byte == b'/' || byte == b'\\';
+    let rooted = i < input.len() && separator(input[i]);
+    if rooted {
+        output[pos] = b'/';
+        pos += 1;
+        while i < input.len() && separator(input[i]) {
+            i += 1;
+        }
+    }
+    let body_start = pos;
+    while i < input.len() {
+        let start = i;
+        while i < input.len() && !separator(input[i]) {
+            i += 1;
+        }
+        let segment = &input[start..i];
+        while i < input.len() && separator(input[i]) {
+            i += 1;
+        }
+        if segment.is_empty() || segment == b"." {
+            continue;
+        }
+        if segment == b".." {
+            if pos > body_start {
+                let mut previous = pos;
+                if previous > body_start && output[previous - 1] == b'/' {
+                    previous -= 1;
+                }
+                let previous_end = previous;
+                while previous > body_start && output[previous - 1] != b'/' {
+                    previous -= 1;
+                }
+                if &output[previous..previous_end] != b".." {
+                    pos = previous;
+                    continue;
+                }
+            } else if rooted {
+                continue;
+            }
+        }
+        if pos > body_start && output[pos - 1] != b'/' {
+            if pos == output.len() {
+                return None;
+            }
+            output[pos] = b'/';
+            pos += 1;
+        }
+        if segment.len() >= output.len() - pos {
+            return None;
+        }
+        output[pos..pos + segment.len()].copy_from_slice(segment);
+        pos += segment.len();
+    }
+    if pos > body_start && output[pos - 1] == b'/' {
+        pos -= 1;
+    }
+    if pos == 0 {
+        output[0] = b'.';
+        pos = 1;
+    }
+    Some(pos)
+}
+
+/// Normalize a tagged path lexically, preserving the legacy bounded ABI.
+#[no_mangle]
+pub extern "C" fn rt_path_normalize(path: RuntimeValue) -> RuntimeValue {
+    let mut input = [0u8; NORMALIZE_PATH_CAPACITY];
+    let Some(len) = copy_normalize_path_input(path, &mut input) else {
+        return rt_string_new(std::ptr::null(), 0);
+    };
+    // No borrowed heap pointer or allocation-registry guard survives the copy.
+    if std::str::from_utf8(&input[..len]).is_err() {
+        return rt_string_new(std::ptr::null(), 0);
+    }
+    let end = input[..len].iter().position(|byte| *byte == 0).unwrap_or(len);
+    let mut output = [0u8; NORMALIZE_PATH_CAPACITY];
+    match normalize_legacy_path_into(&input[..end], &mut output) {
+        Some(length) => rt_string_new(output.as_ptr(), length as u64),
+        None => rt_string_new(std::ptr::null(), 0),
+    }
+}
+
+#[cfg(test)]
+#[path = "path_normalize_tests.rs"]
+mod path_normalize_tests;
+// Copy the selected counted-byte suffix while the managed string is guarded.
+// No pointer into the input survives this function or crosses result allocation.
+fn copy_path_component(path: RuntimeValue, extension: bool) -> Option<Vec<u8>> {
+    with_typed_ptr::<RuntimeString, _>(path, HeapObjectType::String, |ptr| unsafe {
+        let len = usize::try_from((*ptr).len).ok()?;
+        if len > isize::MAX as usize {
+            return None;
+        }
+        let bytes = (*ptr).as_bytes();
+        std::str::from_utf8(bytes).ok()?;
+        let mut end = len;
+        while end > 0 && bytes[end - 1] == b'/' {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && bytes[start - 1] != b'/' {
+            start -= 1;
+        }
+        if extension {
+            let basename_start = start;
+            let mut dot = end;
+            while dot > basename_start && bytes[dot - 1] != b'.' {
+                dot -= 1;
+            }
+            start = if dot == basename_start
+                || (dot == basename_start + 1 && bytes[basename_start] == b'.')
+            {
+                end
+            } else {
+                dot
+            };
+        }
+        let mut owned = Vec::new();
+        owned.try_reserve_exact(end - start).ok()?;
+        owned.extend_from_slice(&bytes[start..end]);
+        Some(owned)
+    })?
+}
+
+fn managed_path_component(path: RuntimeValue, extension: bool) -> RuntimeValue {
+    match copy_path_component(path, extension) {
+        Some(bytes) => rt_string_new(bytes.as_ptr(), bytes.len() as u64),
+        None => rt_string_new(b"".as_ptr(), 0),
+    }
+}
+
+/// Return the final counted path component, trimming trailing forward slashes.
+/// Backslashes and embedded NUL bytes are ordinary bytes on every platform.
+#[no_mangle]
+pub extern "C" fn rt_path_filename(path: RuntimeValue) -> RuntimeValue {
+    managed_path_component(path, false)
+}
+
+/// Return the final component's extension without its dot, or empty text.
+/// A leading dot alone does not begin an extension; only '/' separates paths.
+#[no_mangle]
+pub extern "C" fn rt_path_extension(path: RuntimeValue) -> RuntimeValue {
+    managed_path_component(path, true)
+}
+
+#[cfg(test)]
+#[path = "path_component_tests.rs"]
+mod path_component_tests;
 
 /// Helper function for path operations that return strings
 /// Handles null checks, UTF-8 conversion, and result wrapping

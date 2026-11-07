@@ -20,8 +20,12 @@ if let Value::Str(ref s) = recv_val {
         // `clone` on a StrBytes receiver arrives here already converted to a
         // lossy Str, the same display-boundary rule as to_string.
         "to_string" | "to_text" | "clone" => return Ok(Value::shared_text(s.clone())),
-        "len" | "length" | "byte_len" => return Ok(Value::Int(s.len() as i64)),
-        "char_count" => return Ok(Value::Int(s.chars().count() as i64)),
+        // Text `len()` counts code points (owner decision 2026-11-07, design
+        // doc/05_design/language/text/text_len_counts_characters_2026-11-07.md);
+        // `byte_len()` is the explicit UTF-8 byte count. Twin of rt_len's
+        // String arm and the JIT's inline_runtime_len_value string branch.
+        "len" | "length" | "char_count" => return Ok(Value::Int(s.chars().count() as i64)),
+        "byte_len" => return Ok(Value::Int(s.len() as i64)),
         "is_empty" => return Ok(Value::Bool(s.is_empty())),
         "chars" => {
             let chars: Vec<Value> = s.chars().map(|c| Value::text(c.to_string())).collect();

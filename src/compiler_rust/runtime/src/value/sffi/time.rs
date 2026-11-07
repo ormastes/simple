@@ -62,6 +62,13 @@ pub fn try_rt_time_now_micros() -> Option<i64> {
 pub fn rt_time_now_unix_micros() -> i64 {
     unsafe { c_sffi::rt_time_now_unix_micros() }
 }
+/// Unix wall-clock milliseconds, preserving the C runtime error sentinel.
+#[no_mangle]
+pub extern "C" fn rt_time_ms() -> i64 {
+    let micros = rt_time_now_unix_micros();
+    if micros < 0 { -1 } else { micros / 1000 }
+}
+
 #[inline(always)]
 pub fn try_rt_time_now_unix_micros() -> Option<i64> {
     lift_clock_value(rt_time_now_unix_micros())
@@ -254,6 +261,15 @@ mod tests {
             (secs as f64 - secs_f64).abs() < 5.0,
             "rt_time_now_seconds() ({secs}) and the f64 clock ({secs_f64}) disagree by more than 5s"
         );
+    }
+
+    #[test]
+    fn milliseconds_export_is_bracketed_by_live_unix_clock() {
+        let before = super::rt_time_now_unix_micros();
+        let millis = super::rt_time_ms();
+        let after = super::rt_time_now_unix_micros();
+        assert!(before >= 0 && after >= before, "Unix wall clock unavailable or moved backwards");
+        assert!(millis >= before / 1000 && millis <= after / 1000);
     }
 
     #[test]
