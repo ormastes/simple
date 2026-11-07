@@ -1,0 +1,83 @@
+# Controller desired-state projection. The owner must compare/commit revision
+# under its writer before using the returned state; pure values grant no authority.
+use std.common.contracts.orchestration.assignment_v1.*
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+
+pub struct ControllerWorkloadFenceV1:
+    controller_id: text
+    controller_epoch: i64
+    workload_uid: text
+    desired_revision: i64
+    plan_digest: text
+    revision: i64
+    assignment_generation: i64
+    assignment_digest: text
+    cancellation_requested: bool
+
+pub fn controller_workload_valid_v1(state: ControllerWorkloadFenceV1) -> bool:
+    if not builder_identifier_valid_v1(state.controller_id) or not builder_identifier_valid_v1(state.workload_uid) or
+            state.controller_epoch <= 0 or state.desired_revision <= 0 or state.revision <= 0 or
+            not builder_digest_valid_v1(state.plan_digest) or state.assignment_generation < 0:
+        return false
+    if state.assignment_generation == 0: return state.assignment_digest == ""
+    builder_digest_valid_v1(state.assignment_digest)
+
+pub fn controller_workload_create_v1(controller_id: text, controller_epoch: i64,
+        workload_uid: text, desired_revision: i64, plan_digest: text) -> Result<ControllerWorkloadFenceV1, text>:
+    val state = ControllerWorkloadFenceV1(controller_id: controller_id, controller_epoch: controller_epoch,
+        workload_uid: workload_uid, desired_revision: desired_revision, plan_digest: plan_digest,
+        revision: 1, assignment_generation: 0, assignment_digest: "", cancellation_requested: false)
+    if not controller_workload_valid_v1(state): return Err("invalid-workload-fence")
+    Ok(state)
+
+fn controller_workload_scope_v1(state: ControllerWorkloadFenceV1,
+        binding: ControllerAssignmentBindingV1) -> Result<text, text>:
+    if not controller_workload_valid_v1(state): return Err("invalid-workload-fence")
+    val bytes = controller_assignment_bytes_v1(binding)?
+    if state.controller_id != binding.controller_id or state.controller_epoch != binding.controller_epoch or
+            state.workload_uid != binding.workload_uid or state.desired_revision != binding.desired_revision or
+            state.plan_digest != binding.host_intent.plan_digest:
+        return Err("workload-assignment-scope-mismatch")
+    Ok(sha256_text(bytes))
+
+# An active assignment is retained through heartbeat loss, receipt loss and
+# controller restart. Replacing it requires a future evidence-checked retirement
+# transition; there is intentionally no timeout/boolean shortcut here.
+pub fn controller_workload_bind_v1(state: ControllerWorkloadFenceV1, expected_revision: i64,
+        binding: ControllerAssignmentBindingV1) -> Result<ControllerWorkloadFenceV1, text>:
+    val digest = controller_workload_scope_v1(state, binding)?
+    if state.cancellation_requested: return Err("workload-cancellation-requested")
+    val generation = binding.host_intent.reservation.assignment_generation
+    if state.assignment_digest != "":
+        if state.assignment_digest == digest and state.assignment_generation == generation: return Ok(state)
+        return Err("assignment-retirement-required")
+    if state.revision != expected_revision: return Err("workload-revision-stale")
+    if state.revision == 9223372036854775807 or state.assignment_generation == 9223372036854775807:
+        return Err("workload-revision-overflow")
+    if generation != state.assignment_generation + 1: return Err("assignment-generation-stale")
+    var bound = state
+    bound.assignment_generation = generation
+    bound.assignment_digest = digest
+    bound.revision = state.revision + 1
+    Ok(bound)
+
+pub fn controller_workload_matches_v1(state: ControllerWorkloadFenceV1,
+        binding: ControllerAssignmentBindingV1) -> Result<bool, text>:
+    val digest = controller_workload_scope_v1(state, binding)?
+    if state.assignment_digest != digest or state.assignment_generation != binding.host_intent.reservation.assignment_generation:
+        return Err("workload-assignment-fence-mismatch")
+    Ok(true)
+
+# Cancellation stays sticky. Receipt reconciliation remains allowed, but this
+# state cannot authorize a new preparation or revive a late ready notification.
+pub fn controller_workload_cancel_v1(state: ControllerWorkloadFenceV1,
+        expected_revision: i64) -> Result<ControllerWorkloadFenceV1, text>:
+    if not controller_workload_valid_v1(state): return Err("invalid-workload-fence")
+    if state.cancellation_requested: return Ok(state)
+    if state.revision != expected_revision: return Err("workload-revision-stale")
+    if state.revision == 9223372036854775807: return Err("workload-revision-overflow")
+    var cancelled = state
+    cancelled.cancellation_requested = true
+    cancelled.revision = state.revision + 1
+    Ok(cancelled)
