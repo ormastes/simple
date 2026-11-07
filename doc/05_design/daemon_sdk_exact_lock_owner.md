@@ -51,8 +51,16 @@ for all four contracts, including partial-record refusal and repeated shutdown.
 lock-only same-PID generation replacement, legacy refusal/compatibility, and
 kernel-guard contention through public APIs without invoking spool hashes or handler publication.
 
-Checks at authorship: runtime execution NOT_RUN pending producer/build slot.
+The lock-only native diagnostic passed once on 2026-11-07; see
+[provider and runtime evidence](../08_tracking/test/daemon_exact_lock_owner_20261107.md).
+The complete six-scenario SSpec, including runner shutdown, remains NOT_RUN.
 No branch coverage, admitted SSpec, full-library or MCP qualification is claimed.
 The existing native spool hash disagreement is independent: writer and ack
 share `daemon_request_path_for`; its compiler/ABI cause is not repaired here.
 Astra lead reviews exact source before push; root coordinates landing.
+
+The provider audit is revision-bound. Ancestor `6c17f814aa0` already changed
+nonpositive timeouts to a single nonblocking attempt across native POSIX and
+Windows providers. Older blocking provider builds cannot qualify this contract.
+The linked diagnostic was checked directly; the interpreter's reentrant lock
+behavior cannot replace native contention evidence.
