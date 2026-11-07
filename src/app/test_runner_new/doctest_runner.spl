@@ -11,6 +11,7 @@ use std.test_runner.test_runner_types.TestFileResult
 use std.test_runner.test_runner_execute.find_simple_binary
 use std.test_runner.sdoctest.types.{SdoctestFileResult, SdoctestRunResult, SdoctestBlock, BlockResult, BlockStatus}
 use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.test_runner.doctest_runner.{extract_doctests as canonical_source_doctests}
 
 fn _dt_get_temp_dir() -> text:
     val tmpdir = env_get("TMPDIR")
@@ -40,55 +41,17 @@ struct Doctest:
     should_fail: bool
 
 fn extract_doctests(file_path: text) -> [Doctest]:
-    if not file_exists(file_path):
-        return []
-
-    val content = file_read(file_path)
-    val lines = content.split("\n")
+    # The canonical owner handles #/##//// fences and preserves code indentation.
+    # Keep this compatibility module's Doctest identity and execution API stable.
     var doctests: [Doctest] = []
-    var i = 0
-    var in_doc_block = false
-    var in_code_block = false
-    var code_lines: [text] = []
-    var start_line = 0
-    var should_fail = false
-
-    while i < lines.len():
-        val line = lines[i]
-        val trimmed = line.trim()
-
-        # Detect doc comments
-        if trimmed.starts_with("///") or trimmed.starts_with("##"):
-            val doc_content = if trimmed.starts_with("///"):
-                trimmed[3:].trim()
-            else:
-                trimmed[2:].trim()
-
-            if doc_content.starts_with("```simple") or doc_content.starts_with("```spl"):
-                in_code_block = true
-                code_lines = []
-                start_line = i + 1
-                should_fail = doc_content.contains("should_fail")
-            elif doc_content == "```" and in_code_block:
-                in_code_block = false
-                if code_lines.len() > 0:
-                    doctests.push(Doctest(
-                        source_file: file_path,
-                        line_number: start_line,
-                        code: code_lines.join("\n"),
-                        expected_output: "",
-                        should_fail: should_fail
-                    ))
-            elif in_code_block:
-                code_lines.push(doc_content)
-
-        else:
-            if in_code_block:
-                in_code_block = false
-                code_lines = []
-
-        i = i + 1
-
+    for source in canonical_source_doctests(file_path):
+        doctests.push(Doctest(
+            source_file: source.source_file,
+            line_number: source.line_number,
+            code: source.code,
+            expected_output: source.expected_output,
+            should_fail: source.should_fail
+        ))
     doctests
 
 # =========================================================================
