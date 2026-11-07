@@ -1,0 +1,108 @@
+# @req: REQ-CRANELIFT-VERIFIER-TYPES-001
+# Regression: an integer literal flowing into a DECLARED float slot
+# (`takef(3)` with `x: f64`, `val y: f64 = 3`, `return 3` / tail `3` from
+# `-> f64`, struct field `f64` init, method arg) lowered to an i64 Int const.
+# Native (cranelift) builds then failed the verifier with
+# "arg 0 has type i64, expected f64". The literal must lower to a float
+# constant (fconst) when the slot type is f32/f64.
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+@inline
+fn lower_int_float_fixture(source: text) -> MirModule:
+    val path = "int_literal_float_slot_coercion.spl"
+    val ast = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(ast)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    mir
+
+@inline
+fn int_const_count(module: MirModule, fn_suffix: text, wanted: i64) -> i64:
+    """i64 Int constants carrying `wanted` in functions named *fn_suffix."""
+    var count = 0
+    for function in module.functions.values():
+        if function.name.ends_with(fn_suffix):
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.Const(_, value, _):
+                            match value:
+                                case MirConstValue.Int(v):
+                                    if v == wanted:
+                                        count = count + 1
+                                case _: ()
+                        case _: ()
+    count
+
+@inline
+fn float_const_count(module: MirModule, fn_suffix: text, wanted: f64) -> i64:
+    """Float-typed Float constants equal to `wanted` in *fn_suffix."""
+    var count = 0
+    for function in module.functions.values():
+        if function.name.ends_with(fn_suffix):
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.Const(_, value, ty):
+                            match value:
+                                case MirConstValue.Float(v):
+                                    if v == wanted:
+                                        match ty.kind:
+                                            case MirTypeKind.F64 | MirTypeKind.F32: count = count + 1
+                                            case _: ()
+                                case _: ()
+                        case _: ()
+    count
+
+describe "Integer literal into a float slot lowers to a float constant":
+    it "call argument: takef(37) with x: f64":
+        step("Lower a call passing an int literal to an f64 parameter")
+        val mir = lower_int_float_fixture("fn takef(x: f64) -> f64:\n    x * 2.0\n\nfn caller() -> f64:\n    takef(37)\n")
+        expect(int_const_count(mir, "caller", 37)).to_equal(0)
+        expect(float_const_count(mir, "caller", 37.0)).to_equal(1)
+
+    it "negative call argument: takef(-37)":
+        step("Lower a call passing a negated int literal to an f64 parameter")
+        val mir = lower_int_float_fixture("fn takef(x: f64) -> f64:\n    x * 2.0\n\nfn caller() -> f64:\n    takef(-37)\n")
+        expect(int_const_count(mir, "caller", 37)).to_equal(0)
+        expect(float_const_count(mir, "caller", -37.0)).to_equal(1)
+
+    it "annotated binding: val y: f64 = 37":
+        step("Lower an f64-annotated binding initialised from an int literal")
+        val mir = lower_int_float_fixture("fn bind() -> f64:\n    val y: f64 = 37\n    y\n")
+        expect(int_const_count(mir, "bind", 37)).to_equal(0)
+        expect(float_const_count(mir, "bind", 37.0)).to_equal(1)
+
+    it "explicit return 37 from -> f64":
+        step("Lower `return 37` in a float-returning function")
+        val mir = lower_int_float_fixture("fn ret(b: bool) -> f64:\n    if b:\n        return 37\n    1.5\n")
+        expect(int_const_count(mir, "ret", 37)).to_equal(0)
+        expect(float_const_count(mir, "ret", 37.0)).to_equal(1)
+
+    it "tail expression 37 from -> f64":
+        step("Lower an implicit-return int literal in a float-returning function")
+        val mir = lower_int_float_fixture("fn tail() -> f64:\n    37\n")
+        expect(int_const_count(mir, "tail", 37)).to_equal(0)
+        expect(float_const_count(mir, "tail", 37.0)).to_equal(1)
+
+    it "struct field init: P(x: 37) with x: f64":
+        step("Lower a struct literal whose f64 field is an int literal")
+        val mir = lower_int_float_fixture("struct P:\n    x: f64\n\nfn mk() -> f64:\n    val p = P(x: 37)\n    p.x\n")
+        expect(int_const_count(mir, "mk", 37)).to_equal(0)
+        expect(float_const_count(mir, "mk", 37.0)).to_equal(1)
+
+    it "keeps integer slots integer":
+        step("An i64 parameter still receives an i64 constant")
+        val mir = lower_int_float_fixture("fn takei(x: i64) -> i64:\n    x * 2\n\nfn caller() -> i64:\n    takei(37)\n")
+        expect(int_const_count(mir, "caller", 37)).to_equal(1)
+        expect(float_const_count(mir, "caller", 37.0)).to_equal(0)

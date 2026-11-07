@@ -2687,6 +2687,46 @@ impl MirLowering:
             case _:
                 self.error_fatal("unsupported MIR assignment target: {target.kind}", nil)
 
+    me lower_int_literal_for_float_slot(value: HirExpr, declared: HirType) -> LocalId?:
+        """An unsuffixed integer literal (or its negation) flowing into a
+        DECLARED f32/f64 slot (call argument, annotated binding, return,
+        function tail, struct field) is a float constant. IntLit otherwise
+        lowers to an i64 Int const, and native codegen fed that i64 to an f64
+        parameter: Cranelift's verifier rejects "arg 0 has type i64, expected
+        f64". Returns nil when the slot or the value does not match."""
+        var float_type = MirType.f64()
+        match declared.kind:
+            case HirTypeKind.Float(bits):
+                if bits == 32:
+                    float_type = MirType(kind: MirTypeKind.F32)
+            case _:
+                return nil
+        var int_value = 0
+        var matched = false
+        match value.kind:
+            case HirExprKind.IntLit(lit_value, lit_suffix):
+                if lit_suffix == nil:
+                    int_value = lit_value
+                    matched = true
+            case HirExprKind.Unary(op, operand):
+                match op:
+                    case HirUnaryOp.Neg:
+                        match operand.kind:
+                            case HirExprKind.IntLit(neg_value, neg_suffix):
+                                if neg_suffix == nil:
+                                    int_value = 0 - neg_value
+                                    matched = true
+                            case _: ()
+                    case _: ()
+            case _: ()
+        if not matched:
+            return nil
+        var b = self.builder
+        val result = b.new_temp(float_type)
+        b.emit_const(result, MirConstValue.Float(int_value.to_f64()), float_type)
+        self.builder = b
+        Some(result)
+
     me lower_expr_for_slot(value: HirExpr, declared: HirType) -> LocalId:
         """Lower `value` for a slot of DECLARED type `declared` (annotated
         binding, parameter, return type).
@@ -2701,6 +2741,9 @@ impl MirLowering:
         a scalar arm becomes Some, a nil arm None, an ambiguous arm is
         classified per arm. Everything else is plain lower_expr.
         doc/08_tracking/bug/optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md"""
+        if value != nil and declared != nil:
+            if val float_literal = self.lower_int_literal_for_float_slot(value, declared):
+                return float_literal
         if value != nil and declared != nil:
             match declared.kind:
                 case HirTypeKind.Function(_, _, _):

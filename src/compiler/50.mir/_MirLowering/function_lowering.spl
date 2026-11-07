@@ -1076,7 +1076,18 @@ impl MirLowering:
                             fn_tail_conditional_into_scalar_optional = true
                         case _: ()
             case _: ()
-        val result = if fn_returns_bool or fn_tail_conditional_into_scalar_optional:
+        # ... and for a `-> f32/f64` function whose tail is an int literal, so
+        # lower_block_expected lowers it as a float constant, not an i64.
+        var fn_tail_int_literal_into_float = false
+        match fn_.return_type.kind:
+            case HirTypeKind.Float(_):
+                if fn_.body.has and fn_.body.value != nil:
+                    match fn_.body.value.kind:
+                        case HirExprKind.IntLit(_, _) | HirExprKind.Unary(_, _):
+                            fn_tail_int_literal_into_float = true
+                        case _: ()
+            case _: ()
+        val result = if fn_returns_bool or fn_tail_conditional_into_scalar_optional or fn_tail_int_literal_into_float:
             self.lower_block_expected(fn_.body, fn_.return_type)
         else:
             self.lower_block(fn_.body)
@@ -1901,6 +1912,7 @@ impl MirLowering:
                     case _:
                         ()
             var tail_coerced_to_bool = false
+            var tail_float_coerced = false
             match value.kind:
                 case HirExprKind.If(cond, then_, else_):
                     local = self.lower_if(cond, then_, else_, expected_type)
@@ -1915,7 +1927,15 @@ impl MirLowering:
                     else:
                         local = self.lower_expr(value)
                 case _:
-                    local = self.lower_expr(value)
+                    var tail_float_literal: LocalId? = nil
+                    if val float_expected = expected_type:
+                        tail_float_literal = self.lower_int_literal_for_float_slot(value, float_expected)
+                    if val float_local = tail_float_literal:
+                        local = float_local
+                        # value.type_ names the literal's i64; do not record it.
+                        tail_float_coerced = true
+                    else:
+                        local = self.lower_expr(value)
             # A tail match may return/abort on every path. Its reserved result
             # has no definition; never box or otherwise consume it afterward.
             if self.builder.current_block_has_explicit_terminator():
@@ -1934,7 +1954,7 @@ impl MirLowering:
             # the rt_is_some predicate, not the `T?` that value.type_ names, and
             # recording the stale Option type would mislead every downstream
             # consumer of local_hir_types (option handling, field resolution).
-            if value.has_type_ and not tail_coerced_to_bool:
+            if value.has_type_ and not tail_coerced_to_bool and not tail_float_coerced:
                 self.remember_local_hir_type(local.id, value.type_, 0, 0)
             if trace_enabled:
                 print "[mir-lower] block:value-lowered"
