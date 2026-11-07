@@ -88,6 +88,7 @@ pub(crate) fn resolved_text_runtime_method(func_name: &str) -> Option<&'static s
         return None;
     }
     match method {
+        "byte_len" => Some("rt_string_len"),
         "bytes" => Some("rt_string_bytes"),
         "replace" => Some("rt_string_replace"),
         "split" => Some("rt_string_split"),
