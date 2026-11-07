@@ -121,7 +121,7 @@ pub(super) fn eval_control_expr(
             // chosen branch runs; restored right after (not frame-permanent).
             let mut scope_saved: Vec<(String, Option<Value>)> = Vec::new();
             if let Some(pattern) = let_pattern {
-                match crate::interpreter::interpreter_control::optional_let_binding(pattern, &cond_val) {
+                match crate::interpreter::interpreter_control::optional_let_binding_condition(pattern, &cond_val, condition)? {
                     crate::interpreter::interpreter_control::LetBind::Bind(name, inner) => {
                         // Block-local (not `mark_local`): without a local mark the
                         // read prefers a same-named MODULE GLOBAL, but a
