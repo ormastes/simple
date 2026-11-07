@@ -918,6 +918,11 @@ impl<'a> Parser<'a> {
 
             if self.check(&TokenKind::Dedent) {
                 self.advance();
+            } else if !equal_column && self.at_enclosing_list_terminator() {
+                // A same-line list closer ends this physically indented arm
+                // block before the lexer emits its Dedent. Do not pop for the
+                // equal-column continuation shape, which consumed no Indent.
+                self.lexer.pop_indent();
             }
 
             let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
