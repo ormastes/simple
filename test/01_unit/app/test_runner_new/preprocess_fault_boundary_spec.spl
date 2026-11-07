@@ -1,0 +1,28 @@
+# @tag:host-linux
+use std.spec.*
+use std.io_runtime.{cwd, file_write, dir_create, dir_remove_all, getpid}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_executor_parsing.{find_simple_binary}
+
+# runner_inprocess_spec_lexing_has_no_fault_boundary_2026-09-13.
+# REPRO THROUGH THE RUNNER: a directory holding a hostile spec (200k blank lines
+# inside an open bracket -> lexer recursion overflows the stack) and a good spec.
+# Before the boundary the runner process itself died and neither was reported.
+# NOTE (measured 2026-11-07, Windows seed): with SIMPLE_TEST_PREPROCESS_BOUNDARY=0 this seed
+# does NOT die here (it reports parse-error and runs the sibling), so the runner-level
+# RED only reproduces on the Linux runner path; the stack overflow itself is proven in
+# the isolated probe (see preprocess_fault_boundary_prevention_spec).
+# Now: the hostile file is one FAIL naming the front-end fault, the good spec
+# still runs and passes, and the runner prints its summary.
+
+describe "test runner preprocessing fault boundary (through the runner)":
+    it "REPRO: hostile spec is ONE FAIL, sibling spec still runs, runner survives":
+        val dir = cwd() + "/build/pb_runner_{getpid()}"
+        val _m = dir_create(dir, true)
+        val _h = file_write(dir + "/a_hostile_spec.spl", "use std.spec.*\nval x = (" + "\n".repeat(200000))
+        val _g = file_write(dir + "/b_good_spec.spl", "use std.spec.*\ndescribe \"good\":\n    it \"ok\":\n        expect(1 + 1).to_equal(2)\n")
+        val (out, _err, _code) = process_run_bounded(find_simple_binary(), ["test", dir], 900000, 4000000)
+        val _r = dir_remove_all(dir)
+        expect(out).to_contain("preprocessing (lexing) crashed or failed in an isolated child")
+        expect(out).to_contain("b_good_spec.spl outcome=OK")
+        expect(out).to_contain("Results:")
