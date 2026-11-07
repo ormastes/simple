@@ -1,0 +1,165 @@
+# Installed public metadata only. Native privacy plus exact administrator pins
+# does not authorize enrollment, a provider, a journal, or service readiness.
+# External source dependencies are immutable Windows owner PR7748 and the
+# shared private cleanup helper at 60df4d058e4; see the design qualification.
+use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1,
+    WindowsPrivateFileV1, WindowsPrivateErrorV1, windows_private_root_open_v1}
+use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.{
+    HostServicePrivateCleanupV2, host_service_private_cleanup_v2}
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.{
+    LocalAuthorityPolicyV1, local_authority_policy_decode_v1}
+use std.common.contracts.orchestration.host_config_v1.{HostConfigV1, decode_host_config}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_u8_fast_hex
+use std.common.base_encoding.utilities.base_encoding_text_to_bytes
+use std.nogc_sync_mut.io.external_text_io.io_legacy_utf8
+
+pub struct HostPrivateMetadataPinsV2:
+    policy_digest: text
+    configuration_digest: text
+    engine_policy_digest: text
+    broker_policy_digest: text
+
+pub struct HostPrivateMetadataV2:
+    policy: LocalAuthorityPolicyV1
+    configuration: HostConfigV1
+    engine_policy_bytes: text
+    broker_policy_bytes: text
+
+pub struct HostPrivateMetadataOwnerV2:
+    root: WindowsPrivateRootV1
+    pins: HostPrivateMetadataPinsV2
+    metadata: HostPrivateMetadataV2
+    # Exact readonly native generations, in the fixed child-name order below.
+    files: [WindowsPrivateFileV1]
+
+pub enum HostPrivateMetadataOpenV2:
+    Ready(HostPrivateMetadataOwnerV2)
+    Rejected(text)
+    CleanupRequired(HostServicePrivateCleanupV2, text)
+
+pub struct HostPrivateMetadataRefreshV2:
+    owner: Option<HostPrivateMetadataOwnerV2>
+    metadata: Option<HostPrivateMetadataV2>
+    cleanup: Option<HostServicePrivateCleanupV2>
+    error: text
+
+pub fn host_private_metadata_pins_check_v2(pins: HostPrivateMetadataPinsV2) -> Result<bool, text>:
+    if (not builder_digest_valid_v1(pins.policy_digest) or
+            not builder_digest_valid_v1(pins.configuration_digest) or
+            not builder_digest_valid_v1(pins.engine_policy_digest) or
+            not builder_digest_valid_v1(pins.broker_policy_digest)):
+        return Err("host-private-metadata-pin-invalid")
+    Ok(true)
+
+fn host_private_metadata_text_v2(bytes: [u8]) -> Result<text, text>:
+    val decoded = io_legacy_utf8(bytes)?
+    # Refuse replacement, BOM stripping or any other codec normalization.
+    if base_encoding_text_to_bytes(decoded) != bytes:
+        return Err("host-private-metadata-utf8-not-exact")
+    Ok(decoded)
+
+# This pure boundary does not authenticate the source. It is also the exact
+# decoder used after native owner reads, with every raw-byte pin checked first.
+pub fn host_private_metadata_decode_v2(pins: HostPrivateMetadataPinsV2,
+        policy_bytes: [u8], configuration_bytes: [u8], engine_policy_bytes: [u8],
+        broker_policy_bytes: [u8]) -> Result<HostPrivateMetadataV2, text>:
+    val valid = host_private_metadata_pins_check_v2(pins)?
+    val chunks = [policy_bytes, configuration_bytes, engine_policy_bytes, broker_policy_bytes]
+    val expected = [pins.policy_digest, pins.configuration_digest,
+        pins.engine_policy_digest, pins.broker_policy_digest]
+    val names = ["authority-policy.sdn", "host-config.sdn", "engine-policy.sdn", "broker-policy.sdn"]
+    var total: i64 = 0
+    for index in 0..4:
+        if chunks[index].len() < 1 or chunks[index].len() > 1048576:
+            return Err("host-private-metadata-byte-limit:" + names[index])
+        total = total + (chunks[index].len() as i64)
+    if total > 4194304: return Err("host-private-metadata-total-byte-limit")
+    for index in 0..4:
+        if sha256_u8_fast_hex(chunks[index]) != expected[index]:
+            return Err("host-private-metadata-digest-mismatch:" + names[index])
+    val policy_text = host_private_metadata_text_v2(policy_bytes)?
+    val configuration_text = host_private_metadata_text_v2(configuration_bytes)?
+    val engine_text = host_private_metadata_text_v2(engine_policy_bytes)?
+    val broker_text = host_private_metadata_text_v2(broker_policy_bytes)?
+    val policy = local_authority_policy_decode_v1(policy_text)?
+    val configuration = match decode_host_config(configuration_text):
+        case Ok(value): value
+        case Err(issue): return Err("host-private-metadata-configuration:" + issue.kind)
+    Ok(HostPrivateMetadataV2(policy: policy, configuration: configuration,
+        engine_policy_bytes: engine_text, broker_policy_bytes: broker_text))
+
+fn host_private_metadata_error_cleanup_v2(cleanup: HostServicePrivateCleanupV2,
+        error: WindowsPrivateErrorV1) -> HostServicePrivateCleanupV2:
+    var retained = cleanup
+    if error.cleanup_file.is_some(): retained.files.push(error.cleanup_file.unwrap())
+    if error.cleanup_root.is_some(): retained.roots.push(error.cleanup_root.unwrap())
+    retained
+
+fn host_private_metadata_reject_v2(cleanup: HostServicePrivateCleanupV2,
+        error: text) -> HostPrivateMetadataOpenV2:
+    val pending = host_service_private_cleanup_v2(cleanup)
+    if val retained = pending: return HostPrivateMetadataOpenV2.CleanupRequired(retained, error)
+    HostPrivateMetadataOpenV2.Rejected(error)
+
+fn host_private_metadata_read_v2(root: WindowsPrivateRootV1,
+        pins: HostPrivateMetadataPinsV2, files: [WindowsPrivateFileV1]) -> Result<HostPrivateMetadataV2, text>:
+    if files.len() != 4: return Err("host-private-metadata-owner-shape")
+    # Root privacy must be rechecked on the actual retained generation, using
+    # the shared facade's current-security query, never a path or POSIX mode.
+    if not root.security_current(): return Err("host-private-metadata-root-changed")
+    var chunks: [[u8]] = []
+    for original in files:
+        var file = original
+        if not file.security_current(): return Err("host-private-metadata-file-changed")
+        val bytes = file.read_all_bounded(1048576)?
+        if not file.security_current(): return Err("host-private-metadata-file-changed")
+        chunks.push(bytes)
+    val decoded = host_private_metadata_decode_v2(pins, chunks[0], chunks[1], chunks[2], chunks[3])?
+    for file in files:
+        if not file.security_current(): return Err("host-private-metadata-file-changed")
+    if not root.security_current(): return Err("host-private-metadata-root-changed")
+    Ok(decoded)
+
+pub fn host_private_metadata_open_v2(rootpath: text,
+        pins: HostPrivateMetadataPinsV2) -> HostPrivateMetadataOpenV2:
+    val valid = host_private_metadata_pins_check_v2(pins)
+    if valid.is_err(): return HostPrivateMetadataOpenV2.Rejected(valid.unwrap_err())
+    var cleanup = HostServicePrivateCleanupV2(files: [], roots: [])
+    val opened = windows_private_root_open_v1(rootpath)
+    if opened.is_err():
+        val issue = opened.unwrap_err()
+        return host_private_metadata_reject_v2(host_private_metadata_error_cleanup_v2(cleanup, issue), issue.message)
+    val root = opened.unwrap()
+    cleanup.roots.push(root)
+    val names = ["authority-policy.sdn", "host-config.sdn", "engine-policy.sdn", "broker-policy.sdn"]
+    for name in names:
+        val child = root.open_private_file(name, 1048576u64)
+        if child.is_err():
+            val issue = child.unwrap_err()
+            return host_private_metadata_reject_v2(host_private_metadata_error_cleanup_v2(cleanup, issue), issue.message)
+        cleanup.files.push(child.unwrap())
+    val decoded = host_private_metadata_read_v2(root, pins, cleanup.files)
+    if decoded.is_err(): return host_private_metadata_reject_v2(cleanup, decoded.unwrap_err())
+    HostPrivateMetadataOpenV2.Ready(HostPrivateMetadataOwnerV2(root: root, pins: pins,
+        metadata: decoded.unwrap(), files: cleanup.files))
+
+pub fn host_private_metadata_refresh_v2(owner: HostPrivateMetadataOwnerV2) -> HostPrivateMetadataRefreshV2:
+    val decoded = host_private_metadata_read_v2(owner.root, owner.pins, owner.files)
+    if decoded.is_err():
+        # Close marks each canonical generation cleanup-only before a fallible
+        # native close; copied values cannot keep reading on a pending failure.
+        val pending = host_private_metadata_close_v2(owner)
+        return HostPrivateMetadataRefreshV2(nil, nil, pending, decoded.unwrap_err())
+    val metadata = decoded.unwrap()
+    val updated = HostPrivateMetadataOwnerV2(root: owner.root, pins: owner.pins,
+        metadata: metadata, files: owner.files)
+    HostPrivateMetadataRefreshV2(Some(updated), Some(metadata), nil, "")
+
+pub fn host_private_metadata_close_v2(owner: HostPrivateMetadataOwnerV2) -> Option<HostServicePrivateCleanupV2>:
+    host_service_private_cleanup_v2(HostServicePrivateCleanupV2(files: owner.files, roots: [owner.root]))
+
+export HostPrivateMetadataPinsV2, HostPrivateMetadataV2, HostPrivateMetadataOwnerV2
+export HostPrivateMetadataOpenV2, HostPrivateMetadataRefreshV2
+export host_private_metadata_pins_check_v2, host_private_metadata_decode_v2
+export host_private_metadata_open_v2, host_private_metadata_refresh_v2, host_private_metadata_close_v2
