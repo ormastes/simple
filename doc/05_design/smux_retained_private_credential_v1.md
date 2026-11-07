@@ -99,3 +99,9 @@ and logs. Manifest SHA-256:
 `d848071969bc3c7d7345d3130d006059ddae6c4ccaeebe985de02a35e7106a29`.
 Native binary SHA-256:
 `b2654e3e13596ee3105e439e8c6e97a85e162a4d25170952cf61a74ddc2c7762`.
+
+Durable small evidence archive: `doc/09_report/verification/caret_private_credential_native_20261107/`.
+Its default `summary.sdn` is SDN. The original harness serialized JSON under a
+local `.sdn` filename; archived `manifest.json` preserves those historical bytes
+and hash, with the original checksum-path mapping explained in `README.md`.
+The native binary remains local. No qualification was rerun or broadened.

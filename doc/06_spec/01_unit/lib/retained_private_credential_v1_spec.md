@@ -79,3 +79,9 @@ limits/results are retained in
 `SHA256SUMS`. The two fixture path-size warnings are preserved in `compile.log`;
 fixed generated paths fit their buffers. Detailed scope and hashes are recorded
 in `doc/05_design/smux_retained_private_credential_v1.md`.
+
+Durable small evidence archive: `doc/09_report/verification/caret_private_credential_native_20261107/`.
+Its default `summary.sdn` is SDN. The original harness serialized JSON under a
+local `.sdn` filename; archived `manifest.json` preserves those historical bytes
+and hash, with the original checksum-path mapping explained in `README.md`.
+The native binary remains local. No qualification was rerun or broadened.
