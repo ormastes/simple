@@ -74,3 +74,34 @@ route around. Leaving OPEN/ARCHITECTURAL; re-attempt requires a session that
 can run a full bootstrap and touch `src/compiler_rust/`.
 
 **Revalidated 2026-11-02: still plausible because OPEN — blocks the last step of the in-guest Simple compiler port; no merged fix commit with a passing regression is cited in this doc.**
+
+## Re-verification 2026-11-07 (work/simpleos-p1-codegen-20261107) — neither root cause reproduces on the current seed's x86_64 freestanding object path
+
+- **Guard fold (root cause 2):** the "seed inlines rt_array_len and folds
+  array_is_valid's guard" mechanism cannot occur: the seed's only MIR
+  optimizer, `codegen/mir_inline.rs::is_inline_candidate`, has refused
+  `rt_*` callees and any callee with a back edge (array_is_valid has a loop)
+  since May 2026, and Cranelift (0.116, `opt_level=speed` for both Standard and
+  Aggressive) cannot fold `x < 4096` on an unknown parameter.
+  `src/compiler_rust/compiler/tests/entry_closure_defects_x86_64_none.rs`
+  (`low_handle_guard_on_i64_param_survives_x86_64_none`,
+  `low_handle_guard_inside_inlined_callee_survives_x86_64_none`) compiles the
+  `i64`-handle guard shape, directly and through an inlined helper, to an
+  `x86_64-unknown-none` Aggressive object and runs it under `qemu-x86_64`
+  with a `peek` that exits 99 if reached: handles 0, 3 and 8 never reach it
+  (PASS); deleting the guard makes it red (99), so the probe discriminates.
+- **Array initializers (root cause 1):** module-global array initializers
+  are emitted for freestanding builds (`__module_init_<module>` from
+  `codegen/common_backend.rs::generate_module_init`, aggregated by
+  `native_project/linker.rs::generate_init_caller`, which the SimpleOS user
+  link path at `linker.rs` `link_objects_freestanding` includes; called from
+  `src/os/libc/simpleos_crt0.S:121`). Pinned by
+  `baremetal_entry_closure_imported_class_x86_64_none.rs` for a `[u64] = []`
+  global.
+
+No product code changed. Unverified: rebuilding
+`bin/release/x86_64-unknown-simpleos/simple` and the OVMF `/hello.spl` run.
+One residual risk to check then: `src/os/libc/simpleos_simple_runtime.c:230`
+defines a STRONG empty `__simple_call_module_inits`; it is only archived into
+`libsimple_runtime_compat.a` (not the `libsimple_runtime.a` the seed links),
+but any link that pulls that member would silently replace the aggregator.

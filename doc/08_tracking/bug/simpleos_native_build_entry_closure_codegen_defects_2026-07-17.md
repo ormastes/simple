@@ -1612,3 +1612,28 @@ Repro steps needing a SimpleOS/stage3 run: build `gui_entry_desktop.spl` with th
 flags above, `objdump -d` check (C1) `_browser_default_font_lock` init stores, (C2) accessor hit
 path not `xor rax,rax; ret`, (C3) test of `registered_only` before the call; boot under QEMU with
 the vfs fat32 skip lifted for C8 and compare `cr2` / load base vs link base.
+
+## x86_64-unknown-none object revalidation 2026-11-07 (work/simpleos-p1-codegen-20261107)
+
+The 2026-11-03 JIT revalidation ran on an aarch64 host, so it never exercised
+x86_64 instruction selection. New seed test
+`src/compiler_rust/compiler/tests/entry_closure_defects_x86_64_none.rs` emits
+the C2..C6 repros as real `x86_64-unknown-none` Cranelift AOT objects at
+`NativeOptimizationLevel::Aggressive` (`TargetCpu::X86_64V1`), links them with
+a `-nostdlib` `_start` harness plus a small C mirror of the runtime encoding
+(int tag/shift, NIL=3, `RuntimeEnum`, tuple, `OPTION_ENUM_ID`=1) and runs them
+under `qemu-x86_64` user mode:
+
+`cargo test --release -p simple-compiler --test entry_closure_defects_x86_64_none`
+-> 7 passed (C2 `if val` hit payload, C3 `not a and call()` tests LHS, C4
+4-tuple positions, C5 enum `==`, C6 `b0 | (b1 << 8)`, plus two low-handle
+guard probes). Harness discrimination checked by mutation: swapping C4's
+tuple positions and dropping the `< 4096` guard each turned the run red
+(160 vs 112, 99 vs 5).
+
+Conclusion: C2..C6 do not reproduce on the current seed for x86_64-none
+objects. C1 is covered by the landed fixes above (and the entry-closure archive
+test in `baremetal_entry_closure_imported_class_x86_64_none.rs`). Not covered:
+whole-kernel effects (C6 was a heisenbug in the inlined FAT scan; C7 alias
+bridge; C8 import-alias binding) and the QEMU/board desktop boot. No product
+code change; status stays OPEN pending a board/QEMU desktop run.
