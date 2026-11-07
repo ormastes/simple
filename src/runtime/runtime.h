@@ -1583,6 +1583,11 @@ const char* rt_process_read_stdout_ref_v1(int64_t pid, int64_t generation);
 int64_t rt_process_stdout_state_ref_v1(int64_t pid, int64_t generation);
 /* Validation observes registry ownership only, never kernel liveness or I/O. */
 int64_t rt_process_validate_piped_ref_v1(int64_t pid, int64_t generation);
+/* Descriptor-only endpoint: no PID, process liveness, or cleanup authority. */
+int64_t rt_process_validate_byte_endpoint_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+int64_t rt_process_byte_endpoint_state_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+SplArray* rt_process_read_byte_endpoint_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+SplArray* rt_process_close_byte_endpoint_v1(int64_t generation, const char* binding, int64_t binding_bytes);
 int64_t rt_process_write_stdin_some_ref_v1(int64_t pid, int64_t generation,
     const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
 int64_t rt_process_is_piped_alive_ref_v1(int64_t pid, int64_t generation);
@@ -1994,6 +1999,22 @@ SplArray* rt_local_unix_read_v1(int64_t,int64_t,int64_t);
 SplArray* rt_local_unix_write_some_v1(int64_t,SplArray*,int64_t,int64_t,int64_t);
 SplArray* rt_local_unix_write_some_admitted_v1(int64_t,SplArray*,int64_t,int64_t,int64_t,int64_t);
 SplArray* rt_local_unix_close_v1(int64_t);
+/* Listener roles and zero-wait byte operations use the same local registry. */
+SplArray* rt_local_unix_listen_v1(const char*,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_accept_v1(int64_t,int64_t);
+SplArray* rt_local_unix_poll_v1(int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_read_now_v1(int64_t,int64_t);
+SplArray* rt_local_unix_write_some_now_v1(int64_t,SplArray*,int64_t,int64_t);
+SplArray* rt_local_unix_listener_close_v1(int64_t);
+SplArray* rt_local_unix_peer_v1(int64_t);
+SplArray* rt_local_unix_shutdown_write_v1(int64_t);
+SplArray* rt_local_unix_claim_request_v1(int64_t,const char*,int64_t);
+SplArray* rt_local_unix_stage_stdout_v1(int64_t,int64_t,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t);
+SplArray* rt_local_unix_read_handoff_now_v1(int64_t,int64_t);
+SplArray* rt_local_unix_adopt_byte_endpoint_v1(int64_t,const char*,int64_t);
+SplArray* rt_local_unix_handoff_state_v1(int64_t);
+
+
 
 
 /* ===== Raw 32-bit framebuffer operations ===== */

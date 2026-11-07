@@ -1,0 +1,217 @@
+# Client transport owns only its Unix connection and pending received FD.
+# Application receipt verification precedes adopt_output; metadata is not a
+# grant, process owner, service incarnation proof, or host settlement receipt.
+use std.common.string_core.str_len
+use std.common.text_bytes.{boxed_text_bytes_checked, utf8_bytes_valid}
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.nogc_sync_mut.io.local_ipc_v1.*
+use std.nogc_sync_mut.io.piped_byte_endpoint_v1.PipedByteEndpointV1
+use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_frame_v1.*
+
+pub struct LocalGatewayClientV1:
+    connection: LocalUnixConnectionV1
+    expected_service_uid: i64
+    request_id: text
+    deadline_monotonic_ms: i64
+    # 0 send; 1 write-half shutdown; 2 response; 3 EOF; 4 complete;
+    # 5 blocked; 6 descriptor transferred. No implicit operation retry.
+    phase: i64
+    request_prefix: [u8]
+    request_header: [u8]
+    request_payload: [u8]
+    write_part: i64
+    write_offset: i64
+    accepted_bytes: i64
+    reader: LocalGatewayFrameReaderV1
+    error: text
+
+pub struct LocalGatewayClientOpenTurnV1:
+    client: LocalGatewayClientV1?
+    # Exactly one owner location: only populated when no client was constructed.
+    retained_connection: LocalUnixConnectionV1?
+    error: text
+
+pub struct LocalGatewayClientAdoptTurnV1:
+    client: LocalGatewayClientV1
+    endpoint: PipedByteEndpointV1?
+    error: text
+
+pub fn local_gateway_client_open_v1(path: text, expected_service_uid: i64,
+        header: LocalGatewayHeaderV1, payload: text, timeout_ms: i64) -> LocalGatewayClientOpenTurnV1:
+    if header.response or timeout_ms <= 0 or timeout_ms > 30000:
+        return LocalGatewayClientOpenTurnV1(nil, nil, "gateway-client-request")
+    if str_len(payload) != header.payload_bytes:
+        return LocalGatewayClientOpenTurnV1(nil, nil, "gateway-payload-count")
+    val encoded = match local_gateway_header_encode_v1(header):
+        case Ok(value): value
+        case Err(reason): return LocalGatewayClientOpenTurnV1(nil, nil, reason)
+    val payload_bytes = match boxed_text_bytes_checked(payload):
+        case Ok(value): value
+        case Err(_): return LocalGatewayClientOpenTurnV1(nil, nil, "gateway-client-allocation")
+    if not utf8_bytes_valid(payload_bytes): return LocalGatewayClientOpenTurnV1(nil, nil, "gateway-payload-utf8")
+    val header_bytes = match boxed_text_bytes_checked(encoded):
+        case Ok(value): value
+        case Err(_): return LocalGatewayClientOpenTurnV1(nil, nil, "gateway-client-allocation")
+    val prefix = match local_gateway_prefix_encode_v1(header):
+        case Ok(value): value
+        case Err(reason): return LocalGatewayClientOpenTurnV1(nil, nil, reason)
+    val reader = match local_gateway_frame_reader_v1(true):
+        case Ok(value): value
+        case Err(reason): return LocalGatewayClientOpenTurnV1(nil, nil, reason)
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now < 0: return LocalGatewayClientOpenTurnV1(nil, nil, "gateway-clock-unavailable")
+    val deadline = now / 1000000 + timeout_ms
+    val connected = local_unix_connect_v1(path, expected_service_uid, deadline)
+    if connected.error != "" or connected.owner == nil:
+        val reason = if connected.error == "": "gateway-connection-unavailable" else: connected.error
+        return LocalGatewayClientOpenTurnV1(nil, connected.owner, reason)
+    val client = LocalGatewayClientV1(connection: connected.owner.unwrap(),
+        expected_service_uid: expected_service_uid, request_id: header.request_id,
+        deadline_monotonic_ms: deadline, phase: 0, request_prefix: prefix, request_header: header_bytes,
+        request_payload: payload_bytes, write_part: 0, write_offset: 0, accepted_bytes: 0,
+        reader: reader, error: "")
+    LocalGatewayClientOpenTurnV1(Some(client), nil, "")
+
+fn gateway_client_waiting_v1(error: text) -> bool:
+    error == "local_unix_would_block" or error == "local_unix_busy"
+
+pub fn local_gateway_client_poll_v1(client: LocalGatewayClientV1) -> LocalGatewayClientV1:
+    var current = client
+    if current.phase >= 4: return current
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now < 0 or now / 1000000 >= current.deadline_monotonic_ms:
+        current.phase = 5
+        current.error = if now < 0: "gateway-clock-unavailable" else: "gateway-timeout"
+        return current
+    if current.phase == 0:
+        val bytes = match current.write_part:
+            case 0: current.request_prefix
+            case 1: current.request_header
+            case _: current.request_payload
+        if current.write_offset == bytes.len():
+            current.write_offset = 0
+            current.write_part = current.write_part + 1
+            if current.write_part > 2: current.phase = 1
+            return current
+        val remaining = bytes.len() - current.write_offset
+        val maximum = if remaining > 65536: 65536 else: remaining
+        val ready = local_unix_poll_v1(current.connection, false, true)
+        current.connection = ready.owner
+        if ready.error != "":
+            if not gateway_client_waiting_v1(ready.error):
+                current.phase = 5
+                current.error = ready.error
+            return current
+        if not ready.writable and not ready.hangup: return current
+        val sent = local_unix_write_some_now_v1(current.connection, bytes, current.write_offset, maximum)
+        current.connection = sent.owner
+        current.write_offset = current.write_offset + sent.accepted_bytes
+        current.accepted_bytes = current.accepted_bytes + sent.accepted_bytes
+        if sent.error != "" and not gateway_client_waiting_v1(sent.error):
+            current.phase = 5
+            current.error = sent.error
+        return current
+    if current.phase == 1:
+        val shutdown = local_unix_shutdown_write_v1(current.connection)
+        current.connection = shutdown.owner
+        if shutdown.error != "" or not shutdown.shutdown:
+            if not gateway_client_waiting_v1(shutdown.error):
+                current.phase = 5
+                current.error = if shutdown.error == "": "gateway-client-shutdown" else: shutdown.error
+            return current
+        current.phase = 2
+        return current
+    val ready = local_unix_poll_v1(current.connection, true, false)
+    current.connection = ready.owner
+    if ready.error != "":
+        if not gateway_client_waiting_v1(ready.error):
+            current.phase = 5
+            current.error = ready.error
+        return current
+    if not ready.readable and not ready.hangup: return current
+    if current.phase == 2:
+        val received = local_unix_read_handoff_now_v1(current.connection, current.reader.read_limit())
+        current.connection = received.owner
+        if received.bytes.len() > 0:
+            match current.reader.feed(received.bytes):
+                case Ok(_): ()
+                case Err(reason):
+                    current.phase = 5
+                    current.error = reason
+        if received.eof and not current.reader.complete():
+            val rejected = current.reader.end_of_stream()
+            current.phase = 5
+            current.error = current.reader.error
+        if received.error != "" and not gateway_client_waiting_v1(received.error):
+            current.phase = 5
+            current.error = received.error
+        if current.phase != 5 and current.reader.complete(): current.phase = 3
+        return current
+    val trailing = local_unix_read_handoff_now_v1(current.connection, 1)
+    current.connection = trailing.owner
+    if trailing.bytes.len() > 0:
+        current.phase = 5
+        current.error = "gateway-frame-trailing-data"
+        return current
+    if trailing.error != "":
+        if not gateway_client_waiting_v1(trailing.error):
+            current.phase = 5
+            current.error = trailing.error
+        return current
+    if not trailing.eof: return current
+    val header = current.reader.header.unwrap()
+    if header.request_id != current.request_id:
+        current.phase = 5
+        current.error = "gateway-response-correlation"
+        return current
+    val peer = local_unix_peer_v1(current.connection)
+    current.connection = peer.owner
+    if peer.error != "" or peer.peer == nil:
+        if not gateway_client_waiting_v1(peer.error):
+            current.phase = 5
+            current.error = if peer.error == "": "gateway-peer-unavailable" else: peer.error
+        return current
+    if peer.peer.unwrap().uid != current.expected_service_uid:
+        current.phase = 5
+        current.error = "gateway-peer-mismatch"
+        return current
+    val handoff = local_unix_handoff_state_v1(current.connection)
+    current.connection = handoff.owner
+    if handoff.error != "":
+        if not gateway_client_waiting_v1(handoff.error):
+            current.phase = 5
+            current.error = handoff.error
+        return current
+    val expected_state = if header.handoff_metadata == "": 0 else: 3
+    if handoff.state != expected_state:
+        current.phase = 5
+        current.error = "gateway-response-descriptor-count"
+        return current
+    current.phase = 4
+    current
+
+# The caller supplies its application verifier, which checks the common receipt
+# against retained operation/target/nonce/incarnation and the authenticated
+# gateway context, returning its exact binding digest. A decoded checksum alone
+# is insufficient. The native pending FD is consumed once only after success.
+pub fn local_gateway_client_adopt_output_v1(client: LocalGatewayClientV1,
+        verify: fn(LocalGatewayHeaderV1, text, i64) -> Result<text, text>) -> LocalGatewayClientAdoptTurnV1:
+    var current = client
+    if current.phase != 4 or current.reader.header == nil:
+        return LocalGatewayClientAdoptTurnV1(current, nil, "gateway-response-not-complete")
+    val header = current.reader.header.unwrap()
+    if header.handoff_metadata == "": return LocalGatewayClientAdoptTurnV1(current, nil, "gateway-response-no-descriptor")
+    val payload = match local_gateway_payload_decode_v1(header, current.reader.payload):
+        case Ok(value): value
+        case Err(reason): return LocalGatewayClientAdoptTurnV1(current, nil, reason)
+    val binding = match verify(header, payload, current.expected_service_uid):
+        case Ok(value): value
+        case Err(reason):
+            current.phase = 5
+            current.error = reason
+            return LocalGatewayClientAdoptTurnV1(current, nil, reason)
+    val adopted = local_unix_adopt_byte_endpoint_v1(current.connection, binding)
+    current.connection = adopted.owner
+    if adopted.endpoint != nil: current.phase = 6
+    LocalGatewayClientAdoptTurnV1(current, adopted.endpoint, adopted.error)

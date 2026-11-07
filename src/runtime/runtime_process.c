@@ -37,6 +37,7 @@
 
 #include "runtime.h"
 #include "runtime_process_observer_private.h"
+#include "runtime_local_unix_bridge_v1.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1734,6 +1735,9 @@ static int64_t rt_process_spawn_piped_argv(
 
 struct RtProcSlot {
     pid_t pid;       /* 0 = empty, -1 = reserved during spawn */
+    bool byte_endpoint; /* Descriptor-only occupied slot: pid remains zero. */
+    bool stdout_started;
+    char byte_binding[65];
     int   stdin_fd;  /* parent writes here  → child's stdin */
     int   stdout_fd; /* parent reads here   ← child's stdout */
     uint64_t generation;
@@ -1771,21 +1775,25 @@ static char s_browser_renderer_stdin_buf[RT_PROC_READ_BUF];
 
 static struct RtProcSlot* proc_find(pid_t pid) {
     for (int i = 0; i < RT_PROC_MAX; i++) {
-        if (s_procs[i].pid == pid) return &s_procs[i];
+        if (!s_procs[i].byte_endpoint && s_procs[i].pid == pid) return &s_procs[i];
     }
     return NULL;
 }
 
-static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
-    if (pthread_mutex_lock(&s_proc_lock) != 0) return NULL;
+/* Same allocator and capacity for process tickets and descriptor-only endpoints.
+ * Caller owns the existing registry lock; no native process identity is minted
+ * for a byte endpoint. Legacy callers keep their previous locking behavior. */
+static struct RtProcSlot* proc_alloc_locked(bool sandboxed_renderer) {
     if (s_proc_generation >= INT64_MAX || (sandboxed_renderer &&
         s_renderer_slots_active >= RT_RENDERER_PROC_MAX)) {
-        (void)pthread_mutex_unlock(&s_proc_lock);
         return NULL;
     }
     for (int i = 0; i < RT_PROC_MAX; i++) {
-        if (s_procs[i].pid == 0) {
+        if (s_procs[i].pid == 0 && !s_procs[i].byte_endpoint) {
             s_procs[i].pid = -1;
+            s_procs[i].byte_endpoint = false;
+            s_procs[i].stdout_started = false;
+            s_procs[i].byte_binding[0] = 0;
             s_procs[i].generation = ++s_proc_generation;
             s_procs[i].closing = false;
             s_procs[i].stream_ticket = false; s_procs[i].stream_phase = 0;
@@ -1802,17 +1810,21 @@ static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
             s_procs[i].stdout_state = 0;
             memset(&s_procs[i].stdout_tail,0,sizeof(s_procs[i].stdout_tail));
             if (sandboxed_renderer) s_renderer_slots_active++;
-            (void)pthread_mutex_unlock(&s_proc_lock);
             return &s_procs[i];
         }
     }
-    (void)pthread_mutex_unlock(&s_proc_lock);
     return NULL;
+}
+static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return NULL;
+    struct RtProcSlot* slot=proc_alloc_locked(sandboxed_renderer);
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return slot;
 }
 
 /* Caller holds s_proc_lock. Close/free cannot race a read or state query. */
 static void proc_free_locked(struct RtProcSlot* slot) {
-    if (!slot || slot->pid == 0) return;
+    if (!slot || (slot->pid == 0 && !slot->byte_endpoint)) return;
     int stdin_fd=slot->stdin_fd, stdout_fd=slot->stdout_fd;
     if (slot->stream_child_in >= 0) close(slot->stream_child_in);
     if (slot->stream_child_out >= 0) close(slot->stream_child_out);
@@ -1824,6 +1836,7 @@ static void proc_free_locked(struct RtProcSlot* slot) {
     slot->stdin_fd=-1;slot->stdout_fd=-1;slot->sandboxed_renderer=false;
     slot->leader_reaped=false;slot->leader_status_valid=false;slot->leader_status=0;
     slot->tree_stopped=false;slot->stdout_state=0;
+    slot->byte_endpoint=false;slot->stdout_started=false;slot->byte_binding[0]=0;
     slot->closing=false;slot->generation=0;slot->pid=0;
     if (stdin_fd>=0) close(stdin_fd);
     if (stdout_fd>=0) close(stdout_fd);
@@ -2997,6 +3010,9 @@ int64_t rt_process_stream_reserve_v2(void) {
 #ifndef __linux__
     return -1;
 #else
+    /* Establish origin before any export-eligible stream owner exists. A fork
+     * child cannot later export its copied parent ticket through gateway IO. */
+    if(!simple_local_unix_origin_v1())return -1;
     int input[2] = {-1,-1}, output[2] = {-1,-1};
     if (!proc_pipe_cloexec(input) || !proc_pipe_cloexec(output)) goto failed;
     int flags = fcntl(input[1], F_GETFL);
@@ -3124,9 +3140,11 @@ int64_t rt_process_stream_retire_v2(int64_t generation,const char* root,int64_t 
  * Returns available data (may be partial), or "" if nothing ready.
  * The returned pointer is valid until the next call.
  */
-static const char* posix_core_rt_process_read_stdout_slot(struct RtProcSlot* slot) {
+static const char* posix_core_rt_process_read_stdout_slot_count(struct RtProcSlot* slot,size_t* byte_count) {
     s_read_buf[0]=0;
+    if(byte_count)*byte_count=0;
     if(slot&&!slot->closing&&slot->stdout_fd>=0&&slot->stdout_state==0) {
+        slot->stdout_started=true;
         uint8_t raw[PIPED_RAW_CAP];ssize_t count=read(slot->stdout_fd,raw,sizeof(raw));int eof=count==0;
         if(count<0) {
             if(errno!=EAGAIN&&errno!=EWOULDBLOCK&&errno!=EINTR)slot->stdout_state=-1;
@@ -3134,9 +3152,12 @@ static const char* posix_core_rt_process_read_stdout_slot(struct RtProcSlot* slo
         }
         size_t written=0;
         if(!piped_utf8_frame(&slot->stdout_tail,raw,(size_t)count,eof,(uint8_t*)s_read_buf,PIPED_TEXT_CAP,&written))slot->stdout_state=-1;
-        else {s_read_buf[written]=0;if(eof&&slot->stdout_tail.len==0)slot->stdout_state=1;}
+        else {s_read_buf[written]=0;if(byte_count)*byte_count=written;if(eof&&slot->stdout_tail.len==0)slot->stdout_state=1;}
     }
     return s_read_buf;
+}
+static const char* posix_core_rt_process_read_stdout_slot(struct RtProcSlot* slot) {
+    return posix_core_rt_process_read_stdout_slot_count(slot,NULL);
 }
 static const char* posix_core_rt_process_read_stdout(int64_t pid) {
     struct RtProcSlot* slot = proc_find((pid_t)pid);
@@ -4592,3 +4613,17 @@ bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {
     return ioctl((int)handle, TIOCSWINSZ, &size) == 0;
 }
 #endif
+
+#include "runtime_piped_byte_endpoint_v1_impl.h"
+int64_t rt_process_validate_byte_endpoint_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
+    return byte_endpoint_validate_impl_v1(generation,binding,binding_bytes);
+}
+int64_t rt_process_byte_endpoint_state_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
+    return byte_endpoint_state_impl_v1(generation,binding,binding_bytes);
+}
+SplArray* rt_process_read_byte_endpoint_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
+    return byte_endpoint_read_impl_v1(generation,binding,binding_bytes);
+}
+SplArray* rt_process_close_byte_endpoint_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
+    return byte_endpoint_close_impl_v1(generation,binding,binding_bytes);
+}
