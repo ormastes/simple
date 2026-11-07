@@ -1,0 +1,81 @@
+# Prevention: the ui_test drivers must never resolve first-match. Ambiguous
+# and unknown ids are errors in the SGTTI strict resolver AND in every driver
+# built on it (GUI click/type_text), and the shared suggestion algorithm
+# (std.common.ui.id_suggest) is capped, sorted and deduplicated.
+use std.spec.{describe, it, expect}
+use std.ui_test.gui_driver.{SgttiGuiDriver}
+use std.common.ui.id_suggest.{ui_id_suggestions, ui_id_suggestion_hint, ui_id_edit_distance}
+use std.common.ui.access_types.{UiAccessSurface}
+use std.common.ui.win_text_access.{
+    WinTextSnapshot,
+    win_text_make_node,
+    win_text_snapshot_from_parts,
+    win_text_source
+}
+
+fn _surface(surface_id: text) -> UiAccessSurface:
+    UiAccessSurface(
+        surface_id: surface_id,
+        title: surface_id,
+        active: true,
+        window_id: surface_id,
+        app_id: "strict_prevention",
+        root_canonical_id: "{surface_id}#root"
+    )
+
+fn _dup_fixture() -> WinTextSnapshot:
+    val a = win_text_make_node(
+        surface_id: "surface:a", widget_id: "dup_btn", kind: "button",
+        text_value: "A", action_names: ["click", "type_text"], props: [])
+    val b = win_text_make_node(
+        surface_id: "surface:b", widget_id: "dup_btn", kind: "button",
+        text_value: "B", action_names: ["click", "type_text"], props: [])
+    val source = win_text_source(
+        source_id: "strict_prevention",
+        source_kind: "in_process_semantic",
+        confidence: "high",
+        capabilities: ["query_text", "act_node"],
+        captured_at_ms: 1000,
+        max_age_ms: 5000,
+        now_ms: 1000
+    )
+    win_text_snapshot_from_parts(
+        mode: "strict_prevention",
+        active_surface: "surface:a",
+        surfaces: [_surface("surface:a"), _surface("surface:b")],
+        nodes: [a, b],
+        sources: [source]
+    )
+
+describe "GUI driver never acts on an ambiguous id":
+    it "click refuses a duplicated widget id":
+        val gui = SgttiGuiDriver.from_snapshot(_dup_fixture())
+        match gui.click("dup_btn"):
+            Ok(r):
+                expect("acted on first match: {r.target_canonical_id}").to_equal("")
+            Err(e):
+                expect(e).to_contain("ambiguous ui id: dup_btn")
+
+    it "type_text refuses a duplicated widget id":
+        val gui = SgttiGuiDriver.from_snapshot(_dup_fixture())
+        match gui.type_text("dup_btn", "x"):
+            Ok(r):
+                expect("acted on first match: {r.target_canonical_id}").to_equal("")
+            Err(e):
+                expect(e).to_contain("ambiguous ui id: dup_btn")
+
+describe "id_suggest contract":
+    it "edit distance is symmetric and zero only for equal ids":
+        expect(ui_id_edit_distance("abc", "abd")).to_equal(1)
+        expect(ui_id_edit_distance("abd", "abc")).to_equal(1)
+        expect(ui_id_edit_distance("abc", "abc")).to_equal(0)
+
+    it "caps suggestions at three, sorted and deduplicated":
+        val got = ui_id_suggestions("btn_a", ["btn_d", "btn_c", "btn_b", "btn_b", "btn_e"])
+        expect(got.len()).to_equal(3)
+        expect(got[0]).to_equal("btn_b")
+        expect(got[1]).to_equal("btn_c")
+        expect(got[2]).to_equal("btn_d")
+
+    it "renders an empty hint for no suggestions":
+        expect(ui_id_suggestion_hint([])).to_equal("")
