@@ -36,7 +36,7 @@ fn entry_src(with_import: bool, extra: text) -> text:
         return "use lib.helper.\{helper_value\}\n\n" + entry_class_body.replace("HELPER", "helper_value()") + extra
     entry_class_body.replace("HELPER", "41") + extra
 
-fn entry_lower_errors(with_import: bool, extra: text) -> text:
+fn entry_lower_errors(with_import: bool, extra: text, driver_feed: bool = false) -> text:
     val log = Logger(level: 0)
     val main_src = entry_src(with_import, extra)
     val helper_ast = parse_full_frontend(entry_helper_src, "lib/helper.spl", "lib.helper", log)
@@ -56,7 +56,12 @@ fn entry_lower_errors(with_import: bool, extra: text) -> text:
     var mir_lowering = MirLowering.new(main_hir.symbols)
     for module_key in hir_modules.keys():
         mir_lowering.prescan_module_struct_names(hir_modules, module_key)
-    mir_lowering.lower_module(main_hir, [helper_hir])
+    if driver_feed:
+        # Driver shape (driver_pipeline_lowering.spl): transient scope, the
+        # whole closure (entry included) as the provider feed.
+        val scoped = mir_lowering.lower_module_transient_scoped(main_hir, [main_hir, helper_hir], true)
+    else:
+        mir_lowering.lower_module(main_hir, [helper_hir])
     var errors = ""
     for e in main_lowering.errors:
         errors = errors + "hir: " + e.message + "\n"
@@ -79,3 +84,7 @@ describe "entry module own class methods in a 2-module closure":
         step("A call to an undeclared method must still be reported")
         val errors = entry_lower_errors(true, "    w.nope_missing(1)\n")
         expect(errors.contains("unresolved method call")).to_equal(true)
+
+    it "resolves them with the driver-shaped feed (entry in providers, transient scope)":
+        step("Mirrors driver_pipeline_lowering's lower_module_transient_scoped call")
+        expect(entry_lower_errors(true, "", true)).to_equal("")
