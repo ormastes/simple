@@ -58,12 +58,21 @@ discriminant through `emit_option_handle_with_disc`
 `ensure_option_handle`, which still calls it). Boxed payloads
 (`option_payload_is_boxed`) and `Optional` elements keep the runtime path:
 the sentinel cannot collide for a boxed handle, and a stored Option handle
-must not be wrapped again.
+must not be wrapped again. Only a concrete scalar element
+(Int/Float/Bool/Char) is fully static. An `Any` or type-parameter element
+may itself be a stored Option handle (`rt_value_as_int_wide` passes heap
+handles through), so it goes through `normalize_present_option_handle`:
+an enum-id-1 handle passes through unchanged (as the interpreter returns a
+stored Option), anything else, including 3, is Some. Only the `== 3` test
+is dropped. (Review finding on the first version, which made every `Any`
+element static and so turned a stored Some(x) into Some(Some(x)).)
 
 **Evidence:** `test/01_unit/compiler/mir/list_any_get_scalar_sink_unwrap_spec.spl`
 case "does not test the element word against the nil sentinel for list and
-[i64]" (no `option_norm_raw`, no `rt_enum_id` in `get_some`): red before the
-fix (5/6), green after (6/6). Neighbours unchanged before/after:
+[i64]" (no `option_norm_raw`): red before the fix (5/6), green after;
+case "passes a stored Option handle through for Any and type-parameter
+elements" (`option_present_handle` present for `list` and `[T]`): red on the
+first version (6/7), green after (7/7). Neighbours unchanged before/after:
 `null_coalesce_lowering_spec` 0/2, `optional_scalar_handle_representation_spec`
 4/5, `optional_scalar_static_some_spec` 17/18 (same failing examples),
 `if_val_payload_interp_type_spec` 4/4, `array_at_native_lowering_spec` 10/10,

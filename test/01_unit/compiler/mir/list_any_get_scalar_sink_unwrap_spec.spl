@@ -82,7 +82,8 @@ val SOME_SRC = (
     "fn coal_list(w: list, i: i64) -> i64:\n    w.get(i) ?? -1\n\n" +
     "fn coal_typed(w: [i64], i: i64) -> i64:\n    w.get(i) ?? -1\n\n" +
     "fn coal_text(t: [text], i: i64) -> text:\n    t.get(i) ?? \"none\"\n\n" +
-    "fn ifval_list(w: list) -> i64:\n    if val v = w.get(0):\n        return v + 1\n    -1\n"
+    "fn ifval_list(w: list) -> i64:\n    if val v = w.get(0):\n        return v + 1\n    -1\n\n" +
+    "fn gen_get<T>(xs: [T], i: i64) -> T?:\n    xs.get(i)\n"
 )
 
 fn block_of(j: text, label: text) -> text:
@@ -103,12 +104,28 @@ describe "array get some-arm builds Some statically (a stored 3 is present)":
             expect(j.len() > 0).to_equal(true)
             expect(j).to_contain("get_some")
             expect(j.contains("option_norm_raw")).to_equal(false)
-            expect(block_of(j, "get_some").contains("rt_enum_id")).to_equal(false)
-            expect(block_of(j, "get_some")).to_contain("rt_enum_new")
             # presence is still read off the handle, and the payload decoded once
             expect(j).to_contain("rt_is_some")
             expect(j).to_contain("rt_unwrap_or_self")
             expect(count_of(j, "rt_value_as_int_wide")).to_equal(1)
+        # a concrete scalar element is Some by construction: no handle probe
+        val typed = fns["coal_typed"] ?? ""
+        expect(block_of(typed, "get_some").contains("rt_enum_id")).to_equal(false)
+        expect(block_of(typed, "get_some")).to_contain("rt_enum_new")
+        expect(typed.contains("option_present_handle")).to_equal(false)
+
+    it "passes a stored Option handle through for Any and type-parameter elements":
+        # rt_value_as_int_wide passes heap handles through, so a `list`
+        # element may itself be an Option handle; wrapping it again made
+        # `xs.get(0) ?? d` return the inner handle (Some(Some(x))). The
+        # interpreter returns the stored Option as-is.
+        val fns = lower_module_json(SOME_SRC)
+        for name in ["coal_list", "gen_get"]:
+            val j = fns[name] ?? ""
+            expect(j.len() > 0).to_equal(true)
+            expect(block_of(j, "get_some")).to_contain("rt_enum_id")
+            expect(j).to_contain("option_present_handle")
+            expect(j.contains("option_norm_raw")).to_equal(false)
 
     it "keeps runtime classification for a boxed [text] element":
         val fns = lower_module_json(SOME_SRC)
