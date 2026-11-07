@@ -63,3 +63,5 @@ spec out of `/system/` (e.g. pure-script/hardware gates), or delete a tautologic
 | `test/system/ui/ui_access_contract_spec.spl` | no single clear src target (shell/script/tautological/live/portable smoke) |
 | `test/system/watcher/watcher_shb_wiring_compiled_spec.spl` | no single clear src target (shell/script/tautological/live/portable smoke) |
 | `test/system/watcher/watcher_shb_wiring_system_spec.spl` | no single clear src target (shell/script/tautological/live/portable smoke) |
+
+**Note:** `bare_bool_types_spec` covers `config_and_model.spl` only nominally; most of its tests exercise helpers defined in the spec itself.
