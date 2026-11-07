@@ -1,0 +1,37 @@
+use app.io.minimal_runtime_ops.{get_args}
+use app.check.main.{checker_begin_file_scope, checker_end_file_scope, checker_scope_owner_poisoned_v1}
+use app.cli.check.{run_check}
+use compiler.frontend.core.lexer_struct.{make_core_lexer}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_pause, transient_promote}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 2: return 10
+    if not checker_begin_file_scope(): return 11
+    var first = make_core_lexer("keptalpha staleomega")
+    # Keep only A. B must not be accidentally retained by the regression root.
+    var retained_a: [text] = [first.char_slice(0, 9)]
+    if first.char_slice(10, 20) != "staleomega": return 12
+    if not transient_scope_pause(): return 13
+    # Explicitly retain this exact caller-owned graph before arena teardown.
+    # Pause is idempotent in both native array/raw scope implementations; the
+    # checker boundary repeats it before promoting its own persistent roots.
+    if not transient_promote(retained_a): return 14
+    if not checker_end_file_scope(false): return 15
+    var churn: [text] = []
+    for index in 0..128:
+        churn.push("unrelated allocation {index} with different token contents")
+    if churn.len() != 128: return 16
+    if retained_a.len() != 1 or retained_a[0] != "keptalpha": return 17
+    # First reuse is outside a file scope, like the CLI after check_one_full.
+    var next = make_core_lexer("staleomega keptalpha freshdelta")
+    if next.char_slice(0, 10) != "staleomega": return 18
+    if next.char_slice(11, 20) != "keptalpha": return 19
+    if next.char_slice(21, 31) != "freshdelta": return 20
+    # The runner pins a clean source using all three spellings and requires
+    # the exact CLI JSON success receipt, not only this local marker.
+    if run_check(["--json", args[1]]) != 0: return 21
+    if retained_a[0] != "keptalpha": return 22
+    if checker_scope_owner_poisoned_v1(): return 23
+    print "native token interner teardown and retained caller PASS"
+    0
