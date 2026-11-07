@@ -415,7 +415,7 @@ FAILURE_TD
 # Diff-scoped committed-content mode (push tier): --range BASE..NEW
 #
 # Reads COMMITTED content only, with a fixed process count independent of
-# baseline size (mktemp, rev-parse, diff, tr, two cat-file --batch streams,
+# baseline size (mktemp, rev-parse, diff, tr, ls-tree, two cat-file --batch streams,
 # two awk): no working tree, no index extraction, no per-file process. Each
 # spawn costs ~0.7 s on a loaded Windows host, so the count is the budget.
 #   * ratchet: NEW's baseline may not gain any line vs BASE's (removals only);
@@ -459,14 +459,26 @@ plan_awk() {
         }' "$1" "$2"
 }
 
-# classify_awk AFF REQ SRCSTREAM: SRCSTREAM answers REQ in order. Prints
+# classify_awk AFF REQ TREE SRCSTREAM: SRCSTREAM answers REQ in order. TREE
+# supplies the pinned commit's modes and object IDs (cat-file has no objectmode
+# format atom). Prints
 # stale `path|name` entries; exit 2 on a malformed/truncated stream or a
 # non-regular source blob (symlink, gitlink).
 classify_awk() {
     LC_ALL=C awk -F'|' '
         FILENAME==ARGV[1] { aff[++na]=$0; next }
-        FILENAME==ARGV[2] { p=$0; sub(/^[^:]*:/,"",p); path[++nr]=p; next }
+        FILENAME==ARGV[2] { request[++nr]=$0; p=$0; sub(/^[^:]*:/,"",p); path[nr]=p; wanted[p]=1; next }
+        FILENAME==ARGV[3] {
+            tab=index($0,"\t"); if (!tab) { bad=1; exit }
+            p=substr($0,tab+1)
+            if (p in wanted) {
+                n=split(substr($0,1,tab-1),h," ")
+                if (p in mode || n!=3 || (h[1]!="100644" && h[1]!="100755") || h[2]!="blob" || h[3] !~ /^[0-9a-f]+$/) { bad=1; exit }
+                mode[p]=h[1]; oid[p]=h[3]
+            }
+            next }
         rem > 0 { rem -= length($0) + 1; line=$0
+            if (rem<0) { bad=1; exit }
             if (match(line,/^fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
                 nm=substr(line,RSTART,RLENGTH); sub(/^fn[ \t]+/,"",nm); priv[cur SUBSEP nm]=1
             } else if (match(line,/^export[ \t]+/) && line !~ /^export[ \t]+use[ \t]/) {
@@ -475,16 +487,16 @@ classify_awk() {
             }
             next }
         { k++; cur=path[k]
-          if ($0 ~ / missing$/) next
+          if ($0 ~ / missing$/) { if ($0!=request[k] " missing" || (cur in mode)) { bad=1; exit }; next }
           n=split($0,h," ")
-          if (n==3) { m=h[1]; t=h[2]; s=h[3] } else if (n==2) { m=""; t=h[1]; s=h[2] } else { bad=1; exit }
-          if (t!="blob" || s !~ /^[0-9]+$/ || (m!="" && m!="100644" && m!="100755")) { bad=1; exit }
+          if (n!=3 || !(cur in mode) || h[1]!=oid[cur] || h[2]!="blob" || h[3] !~ /^[0-9]+$/) { bad=1; exit }
+          s=h[3]
           present[cur]=1; rem=s+1 }
         END {
             if (bad || rem>0 || k!=nr) exit 2
             for (j=1;j<=na;j++) { split(aff[j],e,"|")
                 if (!(e[1] in present) || !((e[1] SUBSEP e[2]) in priv) || ((e[1] SUBSEP e[2]) in expo)) print aff[j] }
-        }' "$1" "$2" "$3"
+        }' "$1" "$2" "$3" "$4"
 }
 
 range_scan() (
@@ -519,15 +531,20 @@ range_scan() (
         "OK "*) ;;
         *) echo "ERROR - nothing was checked (plan status unexpected)"; exit 2 ;;
     esac
-    set -- ${st#OK }; total=$1; naff=$2; nchanged=$3; rb=$5
+    set -- ${st#OK }; total=$1; naff=$2; nchanged=$3; rb=$5; rn=$6
     if [ "$4" = 1 ]; then ratchet="0 added vs $rb"; else ratchet="ratchet skipped (base $rb has no baseline: introducing change)"; fi
     if [ "$naff" -eq 0 ]; then
         echo "PASS - $nchanged changed file(s) checked, 0 of $total baseline entries affected, $ratchet"
         exit 0
     fi
-    git -C "$rroot" cat-file --batch='%(objectmode) %(objecttype) %(objectsize)' < "$rtmp/req" > "$rtmp/src" 2>/dev/null || {
+    # Mode is tree metadata, not an object property. Read it from the same
+    # immutable NEW commit used by REQ, never from the live index/worktree.
+    # Quoted paths cannot match REQ: plan_awk already refuses them in diff.
+    git -C "$rroot" -c core.quotepath=false ls-tree -r --full-tree "$rn" > "$rtmp/tree" 2>/dev/null || {
+        echo "ERROR - nothing was checked (source tree read failed)"; exit 2; }
+    git -C "$rroot" cat-file --batch='%(objectname) %(objecttype) %(objectsize)' < "$rtmp/req" > "$rtmp/src" 2>/dev/null || {
         echo "ERROR - nothing was checked (source read failed)"; exit 2; }
-    classify_awk "$rtmp/aff" "$rtmp/req" "$rtmp/src" > "$rtmp/stale" || {
+    classify_awk "$rtmp/aff" "$rtmp/req" "$rtmp/tree" "$rtmp/src" > "$rtmp/stale" || {
         echo "ERROR - nothing was checked (source stream malformed or non-regular blob)"; exit 2; }
     k=0; first=""
     while IFS= read -r l; do k=$((k+1)); [ $k -le 5 ] && first="$first$l "; done < "$rtmp/stale"
@@ -546,19 +563,31 @@ range_parser_selftest() {
     pt=$1
     printf 'lib/a.spl|live\nlib/a.spl|tail\nlib/e.spl|live\nlib/gone.spl|live\nlib/p.spl|live\nlib/p.spl|ex\n' > "$pt/st.aff"
     printf 'x:lib/a.spl\nx:lib/e.spl\nx:lib/gone.spl\nx:lib/p.spl\n' > "$pt/st.req"
-    printf '100644 blob 31\nfn live() -> i64:\n    1\nfn tail\n100644 blob 0\n\nx:lib/gone.spl missing\n100644 blob 39\npub fn live() -> i64:\nfn ex()\nexport ex\n' > "$pt/st.src"
-    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.src" > "$pt/st.out"; rc=$?
+    printf '100644 blob aaa\tlib/a.spl\n100644 blob eee\tlib/e.spl\n100755 blob fff\tlib/p.spl\n' > "$pt/st.tree"
+    printf 'aaa blob 31\nfn live() -> i64:\n    1\nfn tail\neee blob 0\n\nx:lib/gone.spl missing\nfff blob 39\npub fn live() -> i64:\nfn ex()\nexport ex\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" > "$pt/st.out"; rc=$?
     out=; while IFS= read -r l; do out="$out${out:+$NL}$l"; done < "$pt/st.out"
     exp="lib/e.spl|live${NL}lib/gone.spl|live${NL}lib/p.spl|live${NL}lib/p.spl|ex"
     [ "$rc" -eq 0 ] && [ "$out" = "$exp" ] || { echo "ERROR - parser selftest: stale set wrong (rc=$rc: $out)"; return 2; }
     [ "${2:-}" = full ] || return 0
     printf 'lib/a.spl|live\n' > "$pt/st.aff"; printf 'x:lib/a.spl\n' > "$pt/st.req"
-    printf '120000 blob 3\nabc\n' > "$pt/st.src"
-    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.src" >/dev/null 2>&1; lrc=$?
-    printf '100644 blob 99\nshort\n' > "$pt/st.src"
-    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.src" >/dev/null 2>&1; trc=$?
+    printf '120000 blob aaa\tlib/a.spl\n' > "$pt/st.tree"
+    printf 'aaa blob 3\nabc\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" >/dev/null 2>&1; lrc=$?
+    printf '100644 blob aaa\tlib/a.spl\n' > "$pt/st.tree"
+    printf 'aaa blob 99\nshort\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" >/dev/null 2>&1; trc=$?
     [ "$lrc" -eq 2 ] || { echo "ERROR - parser selftest: symlink source must ERROR"; return 2; }
     [ "$trc" -eq 2 ] || { echo "ERROR - parser selftest: truncated stream must ERROR"; return 2; }
+    printf 'bbb blob 3\nabc\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" >/dev/null 2>&1; rc=$?
+    [ "$rc" -eq 2 ] || { echo "ERROR - parser selftest: mismatched tree/blob ID must ERROR"; return 2; }
+    printf 'x:lib/a.spl missing\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" >/dev/null 2>&1; rc=$?
+    [ "$rc" -eq 2 ] || { echo "ERROR - parser selftest: unreadable tracked blob must ERROR"; return 2; }
+    printf 'aaa blob 2\nabc\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" >/dev/null 2>&1; rc=$?
+    [ "$rc" -eq 2 ] || { echo "ERROR - parser selftest: oversized stream record must ERROR"; return 2; }
     return 0
 }
 
@@ -592,11 +621,36 @@ range_fixture_selftest() (
     expect "$b4..$b5" 1 deletion "lib/m.spl|live"
     g checkout -q "$b2" 2>/dev/null || exit 2
     printf 'fn live() -> i64:\n    9\n' > "$rd/lib/m.spl"; b6=$(commit edit) || exit 2
+    expect "$b2..$b6" 0 regular-blob "1 of 1 baseline entries re-verified"
     # Sparse checkout without lib/: committed content still verifies.
     (g sparse-checkout init --cone && g sparse-checkout set scripts/check) >/dev/null 2>&1 || exit 2
     [ ! -e "$rd/lib/m.spl" ] || { echo "ERROR - range selftest: sparse fixture not sparse"; exit 2; }
-    expect "$b2..$b6" 0 sparse "1 of 1 baseline entries re-verified"
-    echo 'PASS - range fixtures: untouched/empty/bad-endpoint/removal/leak/promotion/deletion/sparse'
+    # A different live index must neither influence the pinned source nor be
+    # changed by its metadata/blob reads. This uses real Git, including on 2.43.
+    dirty=$(printf 'pub fn live() -> i64:\n    0\n' | g hash-object -w --stdin) || exit 2
+    g update-index --cacheinfo "100644,$dirty,lib/m.spl" && g update-index --skip-worktree lib/m.spl || exit 2
+    before=$(g hash-object --no-filters "$rd/.git/index") || exit 2
+    expect "$b2..$b6" 0 sparse-dirty-index "1 of 1 baseline entries re-verified"
+    [ ! -e "$rd/lib/m.spl" ] && [ "$(g hash-object --no-filters "$rd/.git/index")" = "$before" ] || { echo 'ERROR - range selftest: checkout/index changed'; exit 2; }
+    g reset -q --hard "$b6" && g sparse-checkout disable || exit 2
+    blob=$(g rev-parse "$b6:lib/m.spl") || exit 2
+    g update-index --cacheinfo "100755,$blob,lib/m.spl" || exit 2
+    b7=$(g commit -qm executable && g rev-parse HEAD) || exit 2
+    expect "$b6..$b7" 0 executable-blob "1 of 1 baseline entries re-verified"
+    g update-index --cacheinfo "120000,$blob,lib/m.spl" || exit 2
+    b8=$(g commit -qm symlink && g rev-parse HEAD) || exit 2
+    expect "$b7..$b8" 2 symlink "non-regular blob"
+    g update-index --cacheinfo "160000,$b6,lib/m.spl" || exit 2
+    b9=$(g commit -qm gitlink && g rev-parse HEAD) || exit 2
+    expect "$b8..$b9" 2 gitlink "non-regular blob"
+    # Corrupt an otherwise reachable loose blob: this is a read ERROR, never
+    # a stale declaration or a successful scan of an empty stream.
+    g update-index --cacheinfo "100644,$dirty,lib/m.spl" || exit 2
+    b10=$(g commit -qm unreadable && g rev-parse HEAD) || exit 2
+    prefix=$(printf '%.2s' "$dirty"); suffix=${dirty#??}
+    rm "$rd/.git/objects/$prefix/$suffix" || exit 2
+    expect "$b9..$b10" 2 missing-blob "non-regular blob"
+    echo 'PASS - range fixtures: untouched/empty/bad-endpoint/removal/leak/promotion/deletion/regular/sparse/index/executable/symlink/gitlink/missing-blob'
 )
 
 # Hang guard: a full tree scan over 400 baseline files and a --range scan run

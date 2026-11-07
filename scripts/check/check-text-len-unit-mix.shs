@@ -18,7 +18,7 @@
 # Verdict (last stdout line): PASS — <n> function(s) checked, 0 mixed
 #                            FAIL — <n> function(s) checked, <k> mixed: ...
 #                            ERROR — nothing was checked
-# Exit 0 / 1 / 2. --selftest runs 5 fixtures first and is fatal.
+# Exit 0 / 1 / 2. --selftest runs 7 fixtures first and is fatal.
 
 set -u
 
@@ -110,6 +110,17 @@ scan_file() {
         if (bytecall_here && rest !~ /^ *(==|!=|>|<=) *0([^0-9]|$)/) sameline[r] = 1
         tmp = substr(tmp, RSTART + RLENGTH)
       }
+      # Rule 3: a text LITERAL whose len() sits in a byte-unit expression
+      # ("APOLV2-".len() next to value.byte_len()) is the same cross-receiver
+      # unit mix; a literal has no receiver name, so report it directly.
+      if (bytecall_here) {
+        tmp = line
+        while (match(tmp, /"[^"]*"\.len\(\)/)) {
+          rest = substr(tmp, RSTART + RLENGTH)
+          if (rest !~ /^ *(==|!=|>|<=) *0([^0-9]|$)/) print F ":" NR " <literal> (len() as byte width)"
+          tmp = rest
+        }
+      }
       tmp = line
       while (match(tmp, /(^|[^A-Za-z_0-9.])[A-Za-z_][A-Za-z_0-9]*\[/)) {
         seg = substr(tmp, RSTART, RLENGTH)
@@ -159,8 +170,19 @@ selftest() {
   v=$(run_scan "$fx/c"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: other-receiver/comment fixture must PASS, got rc=$rc: $v"; exit 2; }
   v=$(run_scan "$fx/d"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: other-text len() as byte width must FAIL, got rc=$rc: $v"; exit 2; }
   printf '%s\n' "$v" | grep -q 'width.spl:2 prefix (len() as byte width)' || { echo "selftest: width fixture must name width.spl:2 prefix"; exit 2; }
+  # Cross-receiver comparison/arithmetic: byte_len() of one text vs len() of
+  # another (named receiver, dotted receiver, and string literal) must FAIL;
+  # the all-byte_len() twin must PASS.
+  mkdir -p "$fx/e" "$fx/f"
+  printf 'fn cmp(a: text, b: text) -> bool:\n    a.byte_len() != b.len()\n\nfn dotted(a: text, j: Journal) -> bool:\n    a.byte_len() != j.head.len()\n\nfn lit(v: text) -> bool:\n    v.byte_len() == "APOLV2-".len()\n' > "$fx/e/cross.spl"
+  printf 'fn cmp(a: text, b: text) -> bool:\n    a.byte_len() != b.byte_len()\n\nfn lit(v: text) -> bool:\n    v.byte_len() == "APOLV2-".byte_len() or v.len() == 0\n' > "$fx/f/cross_ok.spl"
+  v=$(run_scan "$fx/e"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: cross-receiver unit mix must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'cross.spl:2 b (len() as byte width)' || { echo "selftest: cross fixture must name cross.spl:2 b"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'cross.spl:5 head (len() as byte width)' || { echo "selftest: cross fixture must name cross.spl:5 head"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'cross.spl:8 <literal> (len() as byte width)' || { echo "selftest: cross fixture must name cross.spl:8 <literal>"; exit 2; }
+  v=$(run_scan "$fx/f"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: all-byte_len() cross twin must PASS, got rc=$rc: $v"; exit 2; }
   v=$(run_scan "$fx/none"); rc=$?; [ $rc -eq 2 ] || { echo "selftest: empty scan must ERROR, got rc=$rc"; exit 2; }
-  echo "selftest: 5 fixtures OK"
+  echo "selftest: 7 fixtures OK"
 }
 
 do_selftest=0

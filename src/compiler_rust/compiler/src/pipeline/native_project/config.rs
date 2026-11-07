@@ -100,7 +100,7 @@ fn read_bootstrap_tools_receipt(path: &Path) -> Result<std::collections::BTreeMa
     Ok(fields)
 }
 
-fn bootstrap_tools_file_sha256(path: &Path) -> Result<String, String> {
+pub(super) fn bootstrap_tools_file_sha256(path: &Path) -> Result<String, String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("bootstrap-tools cannot open {}: {error}", path.display()))?;
@@ -549,6 +549,13 @@ impl NativeProjectBuilder {
     }
 
     pub(crate) fn selected_runtime_library(&self, temp_dir: &Path) -> Result<Option<(PathBuf, bool)>, String> {
+        self.validate_piped_observer_lane()?;
+        if self.piped_observer.is_rust() {
+            let core = super::tools::build_core_c_runtime_with_piped_observer(
+                &temp_dir.join("core_c_runtime"), &self.piped_observer)
+                .ok_or("failed to build the selected observer's core-C owner")?;
+            return Ok(Some((core, false)));
+        }
         // Only the bootstrap CLI entry may still ask for the Rust-hosted bundle.
         // A Stage4 compiler entry must build on the core-C lane or fail closed
         // (doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md);

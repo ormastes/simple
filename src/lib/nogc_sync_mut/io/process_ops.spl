@@ -90,6 +90,20 @@ extern fn rt_process_observation_v4_pin_cwd_value(path: text) -> i64
 extern fn rt_process_observation_v4_cwd_digest_value(handle: i64) -> [u8]
 @unsafe(reason: "native sealed cwd identity close", capabilities: [ffi])
 extern fn rt_process_observation_v4_close_cwd_value(handle: i64) -> i32
+@unsafe(reason: "bounded native reservation before any child effect", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserve_value() -> i64
+@unsafe(reason: "validate receipt identity against retained native reservation", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_matches_value(token: i64, rh: i64, rl: i64, th: i64, tl: i64) -> i64
+@unsafe(reason: "query exact retained reservation state", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_state_value(token: i64) -> i64
+@unsafe(reason: "at most one start under preexisting reservation authority", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_start_pinned_value(token: i64, executable: i64, cwd: i64, binding: [u8]) -> i64
+@unsafe(reason: "nullable observation cannot consume reservation authority", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_observe_value(token: i64, wait_ns: i64, retire: i64) -> ([u8], [u8], [u8], [i64])?
+@unsafe(reason: "idempotent frozen acknowledgement retained until confirmation", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_ack_value(token: i64, digest: [u8]) -> ([u8], [u8], [u8], [i64])?
+@unsafe(reason: "scalar explicit terminal reservation release", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_confirm_release_value(token: i64) -> i64
 @unsafe(reason: "native V4 unpinned start is an explicit unavailable receipt", capabilities: [ffi])
 extern fn rt_process_observation_v4_start_value(binding: [u8]) -> ([u8], [u8], [u8], [i64])
 @unsafe(reason: "native exact pinned V4 process start", capabilities: [ffi])
@@ -892,6 +906,23 @@ pub fn process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64:
 # Stdout drain state is independent of child liveness: 0=open/deferred,
 # 1=observed EOF with buffered tail delivered, -1=terminal read error/unknown.
 # Exited children retain their stdout owner until drain completion or close.
+# Additive native C ABI; requires a runtime built with the matching owner.
+@unsafe(reason: "versioned actual piped-child exit receipt before handle close", capabilities: [ffi])
+extern fn rt_process_piped_exit_status_value(pid: i64) -> [i64]
+
+pub fn process_piped_exit_status_v1(pid: i64) -> Result<i64?, text>:
+    val words = unsafe(capabilities: [ffi]): rt_process_piped_exit_status_value(pid)
+    if words.len() != 4 or words[0] != 1:
+        return Err("piped child exit receipt invalid")
+    if words[3] != 0 or words[1] < 0:
+        return Err("piped child exit query failed: " + str(words[3]))
+    if words[1] == 0:
+        if words[2] != 0: return Err("pending piped exit receipt contains a terminal code")
+        return Ok(nil)
+    if words[1] != 1: return Err("piped child exit state invalid")
+    if words[2] < 0: return Err("piped child terminal exit code invalid")
+    Ok(Some(words[2]))
+
 pub fn process_read_stdout_result(pid: i64) -> Result<text?, text>:
     val chunk = process_read_stdout(pid)
     if chunk.len() > 0:
@@ -1290,6 +1321,103 @@ pub class ProcessObservationLeaseV4:
         self.acknowledged = true
         self.active = false
         Ok(receipt)
+
+# The reservation, not a decoded receipt or PID, owns every post-start outcome.
+# Pins remain retained until confirm_release succeeds; close failures remain
+# on the original pin objects and must be retried by their owner.
+pub const PROCESS_OBSERVATION_RESERVED_READY_V4: i64 = 1
+pub const PROCESS_OBSERVATION_RESERVED_ATTEMPTING_V4: i64 = 2
+pub const PROCESS_OBSERVATION_RESERVED_NO_CHILD_V4: i64 = 3
+pub const PROCESS_OBSERVATION_RESERVED_OWNED_V4: i64 = 4
+pub const PROCESS_OBSERVATION_RESERVED_ACKED_V4: i64 = 5
+
+pub class ProcessObservationReservationV4:
+    token: i64
+    executable: OwnedExecutablePin
+    cwd: OwnedCwdPinV4
+    var released: bool
+    var acknowledgement_validated: bool
+
+    fn validate_receipt(self, receipt: ProcessObservationReceiptV4) -> Result<ProcessObservationReceiptV4, text>:
+        val packet = receipt.packet
+        val matches = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_matches_value(self.token,
+                packet.request_id_high, packet.request_id_low,
+                packet.ticket_high, packet.ticket_low)
+        if matches != 1:
+            return Err("process receipt does not match retained reservation")
+        Ok(receipt)
+
+    pub fn state(self) -> Result<i64, text>:
+        if self.released: return Err("process reservation already released")
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_state_value(self.token)
+        if value < 0: return Err("process reservation state unavailable: {value}")
+        Ok(value)
+
+    pub me fn start(self, request: ProcessObservationRequestV4) -> Result<i64, text>:
+        if self.released: return Err("process reservation already released")
+        val bound = _process_observation_bound_request_v4(self.executable, self.cwd, request)?
+        val encoded = canonical_encode_process_observation_request_v4(bound)?
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_start_pinned_value(
+                self.token, self.executable.handle, self.cwd.handle, encoded)
+        if value < 0:
+            return Err("process reservation start refused; retain owner and query state: {value}")
+        Ok(value)
+
+    pub fn observe(self, caller_wait_ns: i64, retire: bool) -> Result<ProcessObservationReceiptV4, text>:
+        if self.released: return Err("process reservation already released")
+        val wire = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_observe_value(
+                self.token, caller_wait_ns, if retire: 1 else: 0)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; reservation retained")
+        self.validate_receipt(_process_observation_wire_v4(stdout, stderr, binding, words)?)
+
+    pub me fn acknowledge(self, digest: [u8]) -> Result<ProcessObservationReceiptV4, text>:
+        if self.released: return Err("process reservation already released")
+        if digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+            return Err("process reservation acknowledgement digest malformed")
+        val wire = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_ack_value(self.token, digest)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process acknowledgement unavailable; retry with retained reservation")
+        val receipt = _process_observation_wire_v4(stdout, stderr, binding, words)?
+        if (receipt.packet.packet_kind != ProcessObservationPacketKindV4.Ack and
+                receipt.packet.packet_kind != ProcessObservationPacketKindV4.CleanupAck) or
+                receipt.binding_digest != digest:
+            return Err("process reservation acknowledgement mismatch; retry retained owner")
+        val checked = self.validate_receipt(receipt)?
+        self.acknowledgement_validated = true
+        Ok(checked)
+
+    pub me fn confirm_release(self) -> Result<bool, text>:
+        if self.released: return Ok(true)
+        val current = self.state()?
+        if current == PROCESS_OBSERVATION_RESERVED_ACKED_V4 and not self.acknowledgement_validated:
+            return Err("process reservation acknowledgement must be decoded before confirmation")
+        if current != PROCESS_OBSERVATION_RESERVED_READY_V4 and
+                current != PROCESS_OBSERVATION_RESERVED_NO_CHILD_V4 and
+                current != PROCESS_OBSERVATION_RESERVED_ACKED_V4:
+            return Err("process reservation still owns possible child; retirement required")
+        val result = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_confirm_release_value(self.token)
+        if result != 1: return Err("process reservation release failed; retain owner: {result}")
+        self.released = true
+        Ok(true)
+
+pub fn process_observation_owner_reserve_v4(
+    executable: OwnedExecutablePin, cwd: OwnedCwdPinV4
+) -> Result<ProcessObservationReservationV4, text>:
+    if executable.closed or cwd.closed:
+        return Err("process reservation requires live pins")
+    val token = unsafe(capabilities: [ffi]): rt_process_observation_v4_reserve_value()
+    if token <= 0: return Err("process reservation unavailable: {token}")
+    Ok(ProcessObservationReservationV4(token: token, executable: executable,
+        cwd: cwd, released: false, acknowledgement_validated: false))
 
 pub struct ProcessObservationStartV4:
     receipt: ProcessObservationReceiptV4

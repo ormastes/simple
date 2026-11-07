@@ -1,0 +1,164 @@
+# Parent admission for the first, HIR-only worker profile. This is not an
+# arbitrary-tool sandbox. Unknown configuration is rejected, never sanitized.
+use app.io._CliCompile.native_build_closure_request_admit.{native_build_closure_request_admit_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1,
+    native_entry_closure_request_open_v1}
+use std.nogc_sync_mut.env.variables.{env_list_checked}
+use std.common.process.observation_v4.{ProcessObservationEnvironmentV4}
+use std.common.crypto.sha256.{sha256_text}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_extract_v1,
+    environment_variant_policy_handoff_owner_error_label_v1}
+
+pub struct WorkerHirProfileV1:
+    argv: [text]
+    environment: [ProcessObservationEnvironmentV4]
+    closure: NativeEntryClosureRequestV1
+    configuration_digest: text
+    deadline_ms: i64
+
+# Deliberately literal: a new compiler switch requires profile review.
+pub fn worker_hir_argument_error_v1(args: [text]) -> text:
+    val switches = ["--entry-closure", "--strip", "--release", "--release-optimized",
+        "--fail-fast", "--go-to-end", "--keep-going", "--verbose", "--low-memory",
+        "--keep-intermediates", "--no-incremental", "--no-mangle"]
+    val values = ["--entry", "--source", "--output", "--cache-dir", "--backend",
+        "--target", "--cpu", "--opt-level", "--jobs", "--threads", "--timeout",
+        "--host-cpu-max", "--collection-policy", "--collection-memory-budget",
+        "--collection-profile", "--collection-target", "--collection-workload",
+        "--runtime-bundle", "--runtime-owner", "--runtime-path", "--log"]
+    var index = 0
+    var has_closure = false
+    while index < args.len():
+        val arg = args[index]
+        if arg == "--entry-closure": has_closure = true
+        if switches.contains(arg):
+            index = index + 1
+            continue
+        var matched = false
+        for name in values:
+            if arg == name:
+                if index + 1 >= args.len() or args[index + 1].starts_with("--"):
+                    return "missing HIR profile option value"
+                index = index + 1
+                matched = true
+            elif arg.starts_with(name + "="):
+                if arg == name + "=": return "empty HIR profile option value"
+                matched = true
+        if not matched: return "unsupported HIR worker option: " + arg
+        index = index + 1
+    if not has_closure: return "HIR worker requires an explicit frozen entry closure"
+    ""
+
+pub fn worker_hir_environment_key_admitted_v1(key: text) -> bool:
+    # Exact environment is retained. Unknown names cannot acquire configuration
+    # authority just because their values were included in a request digest.
+    val admitted = ["HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "TMP", "TEMP",
+        "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "CI", "PWD", "OLDPWD", "SHLVL", "_",
+        "SIMPLE_BIN", "SIMPLE_BINARY", "SIMPLE_LIB", "SIMPLE_EXECUTION_MODE",
+        "SIMPLE_NATIVE_BUILD_WORKER", "SIMPLE_HIR_WORKER_PROFILE_V1", "SIMPLE_BUILD_PROGRESS_EVENTS",
+        "SIMPLE_COMPILE_FAIL_FAST", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_SCOPE",
+        "SIMPLE_HIR_CACHE", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_CACHE_SCOPE",
+        "SIMPLE_USER_STORAGE_ROOT", "SIMPLE_GLOBAL_DATASET_MAX_BYTES",
+        "SIMPLE_HIR_SHARD_QUEUE", "SIMPLE_HIR_SHARD_OWNER", "SIMPLE_HIR_SHARD_CLAIM_LIMIT",
+        "SIMPLE_PARSE_CLOSURE_REQUEST", "SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST",
+        "SIMPLE_PARSE_CLOSURE_CONSUMER", "SIMPLE_PARSE_CLOSURE_SELECTED_COUNT",
+        "SIMPLE_SCV_COMMIT_ID", "SIMPLE_SCV_INVENTORY_DIGEST", "SIMPLE_SCV_INVENTORY_GENERATION",
+        "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_SOURCE_DRIFTED",
+        "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", "SIMPLE_SCV_TREE_ID",
+        "SIMPLE_COMPILER_PHASE_PROFILE_FILE", "SIMPLE_MEM_SNAPSHOT_FILE",
+        "SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR", "SIMPLE_NO_STUB_FALLBACK",
+        "SIMPLE_NATIVE_ARENA_DECLS",
+        "SIMPLE_HIR_SHARDING", "SIMPLE_PARSE_SHARDING", "SIMPLE_SHARD_SMALL_CLOSURE_MAX",
+        "SIMPLE_HIR_SHARD_WORKER_KB", "SIMPLE_MANAGED_NATIVE_TOOLS",
+        "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH", "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256",
+        "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH", "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256",
+        "SIMPLE_MANAGED_PHASE4_SOURCE_ROOT", "SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH",
+        "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH", "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256"]
+    admitted.contains(key)
+
+pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
+        sources: [text], deadline_ms: i64) -> Result<WorkerHirProfileV1, text>:
+    val opened = match environment_variant_policy_handoff_extract_v1(args):
+        case Ok(value): value
+        case Err(reason): return Err(environment_variant_policy_handoff_owner_error_label_v1(reason))
+    val argument_error = worker_hir_argument_error_v1(opened.user_args)
+    if argument_error != "": return Err(argument_error)
+    if args.len() > 256: return Err("HIR worker argv exceeds profile bound")
+    var argv_bytes: i64 = 0
+    for arg in args:
+        argv_bytes = argv_bytes + arg.byte_len()
+        if argv_bytes > 262144: return Err("HIR worker argv exceeds byte bound")
+    if deadline_ms <= 0: return Err("HIR worker requires a parent absolute deadline")
+    val closure = native_build_closure_request_admit_v1(entry, sources)?
+    # Bind source selection to the real canonical policy handoff, rather than
+    # accepting whichever policy digest the closure request claims for itself.
+    val selected = native_entry_closure_request_open_v1(closure, opened.handoff.policy_digest)?
+    if selected.identities.is_empty(): return Err("HIR worker frozen closure is empty")
+    var environment: [ProcessObservationEnvironmentV4] = []
+    var seen: {text: bool} = {}
+    var parts: [text] = ["worker-hir-profile-v1", closure.receipt_digest,
+        closure.binding.policy_digest, closure.binding.producer_digest, "{deadline_ms}"]
+    val captured = env_list_checked()?
+    if captured.len() > 256: return Err("HIR worker environment exceeds profile bound")
+    var bytes: i64 = 0
+    for pair in captured:
+        if not worker_hir_environment_key_admitted_v1(pair.0):
+            return Err("unsupported HIR worker environment key: " + pair.0)
+        if seen.has(pair.0): return Err("duplicate HIR worker environment key")
+        if pair.0 == "SIMPLE_EXECUTION_MODE" and pair.1 != "" and pair.1 != "native":
+            return Err("HIR profile requires compiled internal worker dispatch")
+        seen[pair.0] = true
+        bytes = bytes + pair.0.byte_len() + pair.1.byte_len()
+        if bytes > 65536: return Err("HIR worker environment exceeds byte bound")
+        environment.push(ProcessObservationEnvironmentV4(key: pair.0, value: pair.1))
+        parts.push(sha256_text(pair.0))
+        parts.push(sha256_text(pair.1))
+    for arg in args: parts.push(sha256_text(arg))
+    Ok(WorkerHirProfileV1(argv: args, environment: environment, closure: closure,
+        configuration_digest: sha256_text(parts.join("\n")), deadline_ms: deadline_ms))
+
+pub fn worker_hir_profile_for_owner_v1(profile: WorkerHirProfileV1,
+        ledger_owner: text, dataset_bytes: i64) -> WorkerHirProfileV1:
+    var environment: [ProcessObservationEnvironmentV4] = []
+    for pair in profile.environment:
+        if pair.key != "SIMPLE_HIR_SHARD_OWNER" and pair.key != "SIMPLE_GLOBAL_DATASET_MAX_BYTES":
+            environment.push(pair)
+    environment.push(ProcessObservationEnvironmentV4(key: "SIMPLE_HIR_SHARD_OWNER", value: ledger_owner))
+    environment.push(ProcessObservationEnvironmentV4(key: "SIMPLE_GLOBAL_DATASET_MAX_BYTES", value: "{dataset_bytes}"))
+    WorkerHirProfileV1(argv: profile.argv, environment: environment, closure: profile.closure,
+        configuration_digest: sha256_text(profile.configuration_digest + "\n" +
+            sha256_text(ledger_owner) + "\n{dataset_bytes}"), deadline_ms: profile.deadline_ms)
+
+pub fn worker_hir_child_validate_v1(args: [text]) -> Result<bool, text>:
+    var forwarded: [text] = []
+    var shard_count = 0
+    var entry = ""
+    var sources: [text] = []
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if arg.starts_with("--hir-shard="):
+            shard_count = shard_count + 1
+            val pieces = arg.substring(12).split("/")
+            if pieces.len() != 2: return Err("invalid HIR shard selection")
+            val ordinal = pieces[0].to_i64() ?? -1
+            val count = pieces[1].to_i64() ?? 0
+            if ordinal < 0 or count <= 0 or ordinal >= count or count > 128:
+                return Err("invalid HIR shard bounds")
+        else:
+            forwarded.push(arg)
+            if arg == "--entry" or arg == "--source":
+                if index + 1 >= args.len(): return Err("missing HIR source option")
+                index = index + 1
+                forwarded.push(args[index])
+                if arg == "--entry": entry = args[index]
+                else: sources.push(args[index])
+            elif arg.starts_with("--entry="): entry = arg.substring(8)
+            elif arg.starts_with("--source="): sources.push(arg.substring(9))
+        index = index + 1
+    if shard_count != 1 or entry == "": return Err("HIR profile requires one shard and entry")
+    # This validates canonical source/configuration input, not child claims of
+    # launch containment. Only the parent's retained pin/lease supplies that.
+    val _profile = worker_hir_profile_admit_v1(forwarded, entry, sources, 1)?
+    Ok(true)
