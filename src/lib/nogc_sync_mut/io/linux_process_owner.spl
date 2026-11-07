@@ -251,3 +251,112 @@ fn _file_sha256_matches(path: text, expected: text) -> bool:
     if val digest = file_hash_sha256(path):
         return digest == expected
     false
+
+# Explicit group-stream profile; V1 file-capture requests stay unchanged.
+use std.common.build_manager.group_process_stream_protocol_v2.{
+    GroupProcessStreamLaunchV2, group_process_stream_launch_validate_v2, group_process_stream_identity_v2
+}
+use std.common.string_core.{str_len}
+
+@unsafe(reason: "real delegated cgroup/pidfd/kill capability admission before any helper fork", capabilities: [ffi])
+extern fn rt_linux_group_stream_admit_v2(path: text, path_len: i64) -> i64
+@unsafe(reason: "pinned detached broker gets exact ticket FD4/5 handoff; post-fork uncertainty retains ticket", capabilities: [ffi])
+extern fn rt_linux_group_launch_stream_broker_v2(program: text, program_len: i64,
+    digest: text, digest_len: i64, args: [text], generation: i64, root: text,
+    root_len: i64, identity: text, identity_len: i64, delegated: text, delegated_len: i64,
+    launch_deadline_unix_ms: i64) -> [i64]
+@unsafe(reason: "same cgroup/pidfd owner, fixed inherited streams, retained token on exec failure", capabilities: [ffi])
+extern fn rt_linux_group_start_stream_v2(program: text, program_len: i64, digest: text,
+    digest_len: i64, args: [text], environment: [text], directory: text, directory_len: i64,
+    root: text, root_len: i64, identity: text, identity_len: i64,
+    memory_limit_bytes: i64, timeout_ms: i64, launch_deadline_unix_ms: i64) -> [i64]
+
+enum LinuxProcessStreamStartV2:
+    Unknown(reason: text)
+    Ready(lease: LinuxProcessLeaseV1)
+    CleanupRequired(lease: LinuxProcessLeaseV1, reason: text)
+    Rejected(reason: text)
+
+fn linux_process_stream_admit_v2(delegated_path: text) -> Result<(), text>:
+    if not linux_process_absolute_v1(delegated_path): return Err("Linux stream requires a delegated cgroup path")
+    val status = unsafe(capabilities: [ffi]):
+        rt_linux_group_stream_admit_v2(delegated_path, str_len(delegated_path))
+    if status != 0: return Err("Linux stream capability admission failed: {status}")
+    Ok(())
+
+fn linux_process_launch_stream_broker_v2(program: text, digest: text, args: [text],
+        generation: i64, root: text, identity: text, delegated_path: text,
+        launch_deadline_unix_ms: i64) -> Result<i64, text>:
+    if not linux_process_absolute_v1(program) or not linux_process_absolute_v1(root) or
+            not builder_digest_valid_v1(digest) or not builder_digest_valid_v1(identity) or generation <= 0:
+        return Err("invalid Linux stream broker launch binding")
+    val status = unsafe(capabilities: [ffi]):
+        rt_linux_group_launch_stream_broker_v2(program, str_len(program), digest, str_len(digest),
+            args, generation, root, str_len(root), identity, str_len(identity), delegated_path,
+            str_len(delegated_path), launch_deadline_unix_ms)
+    if status.len() != 2: return Err("Linux stream broker launch receipt unknown; cleanup required")
+    if status[0] <= 0 or status[1] != 0:
+        return Err("Linux stream broker launch not confirmed; cleanup required: {status[1]}")
+    Ok(status[0])
+
+fn linux_process_stream_start_v2(launch: GroupProcessStreamLaunchV2,
+        identity: text, memory_limit_bytes: i64) -> LinuxProcessStreamStartV2:
+    val invalid = group_process_stream_launch_validate_v2(launch)
+    if invalid != "": return LinuxProcessStreamStartV2.Rejected(invalid)
+    if launch.transport_generation <= 0 or group_process_stream_identity_v2(launch) != identity:
+        return LinuxProcessStreamStartV2.Rejected("Linux stream immutable identity mismatch")
+    val request = launch.request
+    for path in [request.program, request.directory, request.broker_program, launch.root, launch.delegated_cgroup_path]:
+        if not linux_process_absolute_v1(path): return LinuxProcessStreamStartV2.Rejected("Linux stream path/delegation invalid")
+    if not file_is_regular_no_follow(request.program) or not _file_sha256_matches(request.program, request.producer_digest):
+        return LinuxProcessStreamStartV2.Rejected("Linux stream executable differs from pinned digest")
+    if not _file_sha256_matches(launch.root + "/broker.request.sdn", identity):
+        return LinuxProcessStreamStartV2.Rejected("Linux stream immutable request differs")
+    for input in request.inputs:
+        if not file_is_regular_no_follow(input.path) or not _file_sha256_matches(input.path, input.digest):
+            return LinuxProcessStreamStartV2.Rejected("Linux stream input differs: " + input.path)
+    val status = unsafe(capabilities: [ffi]):
+        rt_linux_group_start_stream_v2(request.program, str_len(request.program), request.producer_digest,
+            str_len(request.producer_digest), request.args, request.environment, request.directory,
+            str_len(request.directory), launch.root, str_len(launch.root), identity, str_len(identity),
+            memory_limit_bytes, request.timeout_ms, request.launch_deadline_unix_ms)
+    if status.len() != 2:
+        return LinuxProcessStreamStartV2.Unknown("Linux stream native start receipt unknown; broker must retain authority")
+    if status[0] > 0:
+        val lease = LinuxProcessLeaseV1(status[0])
+        if status[1] != 0: return LinuxProcessStreamStartV2.CleanupRequired(lease, "Linux stream exec/admission failed: {status[1]}")
+        return LinuxProcessStreamStartV2.Ready(lease)
+    LinuxProcessStreamStartV2.Rejected("Linux stream pre-start admission rejected: {status[1]}")
+
+export LinuxProcessStreamStartV2, linux_process_stream_admit_v2
+export linux_process_launch_stream_broker_v2, linux_process_stream_start_v2
+
+@unsafe(reason: "immutable projection of the same genuinely collected cgroup receipt; no OS access", capabilities: [ffi])
+extern fn rt_linux_group_collected_stream_v2(token: i64) -> [i64]
+@unsafe(reason: "release inherited stream endpoints only when this broker has no live native group lease", capabilities: [ffi])
+extern fn rt_linux_group_stream_release_inherited_v2() -> i64
+
+fn linux_process_collected_stream_v2(lease: LinuxProcessLeaseV1) -> Result<LinuxProcessPollV1, text>:
+    val fields = unsafe(capabilities: [ffi]): rt_linux_group_collected_stream_v2(lease.token)
+    linux_process_poll_decode_v1(fields)
+
+fn linux_process_stream_release_inherited_v2() -> Result<(), text>:
+    val status = unsafe(capabilities: [ffi]): rt_linux_group_stream_release_inherited_v2()
+    if status != 0: return Err("stream inherited descriptor release failed: {status}")
+    Ok(())
+
+export linux_process_collected_stream_v2, linux_process_stream_release_inherited_v2
+
+@unsafe(reason: "recover only the actual exact-bound native stream lease, without allocating a result or guessing a token", capabilities: [ffi])
+extern fn rt_linux_group_stream_recover_lease_v2(root: text, root_len: i64,
+    identity: text, identity_len: i64) -> i64
+
+fn linux_process_stream_recover_lease_v2(root: text, identity: text) -> LinuxProcessStreamStartV2:
+    val token = unsafe(capabilities: [ffi]):
+        rt_linux_group_stream_recover_lease_v2(root, str_len(root), identity, str_len(identity))
+    if token > 0:
+        return LinuxProcessStreamStartV2.CleanupRequired(LinuxProcessLeaseV1(token), "recovered actual native stream lease after uncertain receipt")
+    if token == 0: return LinuxProcessStreamStartV2.Rejected("native stream start admitted no group")
+    LinuxProcessStreamStartV2.Unknown("native stream ownership recovery remains uncertain")
+
+export linux_process_stream_recover_lease_v2

@@ -32,6 +32,13 @@ fn native_linux_group_finish_v1(root: text, identity: text,
         memory_limit_bytes: i64, memory_policy: text, samples: [NativeGroupChargeSampleV1],
         complete: bool) -> Result<bool, text>:
     val receipt = linux_process_collect_v1(lease)?
+    native_linux_group_publish_receipt_v1(root, identity, receipt, peak, snapshot_digest,
+        memory_limit_bytes, memory_policy, samples, complete)
+
+fn native_linux_group_publish_receipt_v1(root: text, identity: text,
+        receipt: LinuxProcessPollV1, peak: i64, snapshot_digest: text,
+        memory_limit_bytes: i64, memory_policy: text, samples: [NativeGroupChargeSampleV1],
+        complete: bool) -> Result<bool, text>:
     if not receipt.terminal or not receipt.leader_reaped or not receipt.tree_empty or
             receipt.active_processes != 0:
         return Err("Linux group process tree cleanup not proven")
@@ -63,13 +70,15 @@ fn native_linux_group_finish_v1(root: text, identity: text,
 
 fn native_linux_group_drain_v1(root: text, identity: text,
         lease: LinuxProcessLeaseV1, snapshot_digest: text,
-        memory_limit_bytes: i64, memory_policy: text) -> Result<bool, text>:
+        memory_limit_bytes: i64, memory_policy: text, stream: bool = false) -> Result<bool, text>:
     val _cancelled = linux_process_cancel_v1(lease)?
     val deadline = current_time_ms() + 30000
     while current_time_ms() < deadline:
         val observed = linux_process_poll_v1(lease)?
         if observed.terminal:
             val peak = linux_process_peak_memory_v1(lease)?
+            if stream: return native_linux_group_finish_stream_v2(root, identity, lease, peak,
+                snapshot_digest, memory_limit_bytes, memory_policy, [], false)
             return native_linux_group_finish_v1(root, identity, lease, peak,
                 snapshot_digest, memory_limit_bytes, memory_policy, [], false)
         sleep_ms(10)
@@ -110,12 +119,17 @@ fn native_linux_group_run_in_parent_v1(launch: GroupProcessLaunchV1,
     val enforced = builder_memory_enforcement_bytes_v1(launch.memory_policy, launch.memory_limit_bytes)?
     val lease = linux_process_start_with_memory_v1(native, enforced,
         launch.root, identity)?
+    native_linux_group_monitor_lease_v1(launch.root, identity, lease,
+        launch.snapshot_digest, launch.memory_limit_bytes, launch.memory_policy)
+
+fn native_linux_group_monitor_lease_v1(root: text, identity: text, lease: LinuxProcessLeaseV1,
+        snapshot_digest: text, memory_limit_bytes: i64, memory_policy: text, stream: bool = false) -> Result<bool, text>:
     var last_control = ""
     var error = ""
     var charge_samples: [NativeGroupChargeSampleV1] = []
     var charge_complete = true
     while error == "":
-        val control = native_linux_group_control_v1(launch.root, identity)
+        val control = native_linux_group_control_v1(root, identity)
         if control != "" and control != last_control and control.ends_with("\ncancel"):
             match linux_process_cancel_v1(lease):
                 Ok(_): pass
@@ -143,19 +157,21 @@ fn native_linux_group_run_in_parent_v1(launch: GroupProcessLaunchV1,
                     sample_before, sample_after, observed.memory_current_bytes,
                     peak, observed.active_processes, false))
         if observed.terminal:
-            return native_linux_group_finish_v1(launch.root, identity, lease, peak,
-                launch.snapshot_digest, launch.memory_limit_bytes, launch.memory_policy,
+            if stream: return native_linux_group_finish_stream_v2(root, identity, lease, peak,
+                snapshot_digest, memory_limit_bytes, memory_policy, charge_samples, charge_complete)
+            return native_linux_group_finish_v1(root, identity, lease, peak,
+                snapshot_digest, memory_limit_bytes, memory_policy,
                 charge_samples, charge_complete)
         if control != "" and control != last_control:
             val payload = group_process_observation_encode_v1(identity,
                 native_linux_group_observation_v1(observed, peak))
-            if not file_atomic_write(launch.root + "/broker.control.response", control + "\n" + payload):
+            if not file_atomic_write(root + "/broker.control.response", control + "\n" + payload):
                 error = "cannot publish fresh Linux broker observation"
                 break
             last_control = control
         sleep_ms(10)
-    val cleanup = native_linux_group_drain_v1(launch.root, identity, lease,
-        launch.snapshot_digest, launch.memory_limit_bytes, launch.memory_policy)
+    val cleanup = native_linux_group_drain_v1(root, identity, lease,
+        snapshot_digest, memory_limit_bytes, memory_policy, stream)
     match cleanup:
         Ok(_): Err(error)
         Err(message): Err(error + "; " + message)
@@ -170,6 +186,8 @@ fn main() -> i64:
     val payload = match file_read_regular_no_follow_bounded(root + "/broker.request.sdn", 16777216):
         Ok(value): value
         Err(_): return 2
+    if payload.starts_with("SIMPLE-GROUP-STREAM-2\n"):
+        return native_linux_group_stream_main_v2(root, identity, payload)
     val launch = match group_process_launch_decode_v1(payload):
         Ok(value): value
         Err(_): return 2
@@ -196,3 +214,183 @@ fn _native_group_linux_broker_sha_mismatch(path: text, expected: text) -> bool:
     if val actual = file_hash_sha256(path):
         return actual != expected
     true
+
+# Stream profile shares this broker and its actual cgroup/pidfd lifecycle owner.
+use std.common.build_manager.group_process_stream_protocol_v2.{
+    GroupProcessStreamLaunchV2, group_process_stream_launch_decode_v2,
+    group_process_stream_identity_v2, group_process_stream_ready_encode_v2,
+    group_process_stream_unlaunched_encode_v2
+}
+use std.nogc_sync_mut.io.linux_process_owner.{LinuxProcessStreamStartV2,
+    linux_process_stream_start_v2, linux_cgroup_parent_acquire_at_v2}
+
+fn native_linux_group_release_stream_parent_v2(parent: LinuxCgroupParentV1, root: text) -> bool:
+    while true:
+        match linux_cgroup_parent_release_v1(parent):
+            case Ok(value):
+                if value: return true
+            case Err(reason):
+                val _recorded = file_atomic_write(root + "/broker.error", reason)
+        sleep_ms(100)
+    false
+
+fn native_linux_group_unlaunched_stream_v2(launch: GroupProcessStreamLaunchV2, identity: text,
+        parent: LinuxCgroupParentV1, acquired: text, reason: text) -> Result<bool, text>:
+    val _released = native_linux_group_release_stream_parent_v2(parent, launch.root)
+    while not file_atomic_write(launch.root + "/capacity.released", acquired): sleep_ms(100)
+    var endpoints_released = false
+    while not endpoints_released:
+        match linux_process_stream_release_inherited_v2():
+            case Ok(_): endpoints_released = true
+            case Err(error):
+                val _recorded = file_atomic_write(launch.root + "/broker.error", error)
+                sleep_ms(100)
+    val proof = group_process_stream_unlaunched_encode_v2(identity, launch.transport_generation,
+        launch.request.child_argv_digest)
+    if proof == "": return Err("cannot encode known-unlaunched cleanup proof")
+    while not file_atomic_write(launch.root + "/broker.stream.unlaunched.sdn", proof): sleep_ms(100)
+    Err(reason)
+
+fn native_linux_group_stream_run_v2(launch: GroupProcessStreamLaunchV2,
+        identity: text) -> Result<bool, text>:
+    if not file_is_regular_no_follow(launch.request.broker_program) or
+            _native_group_linux_broker_sha_mismatch(launch.request.broker_program, launch.request.broker_digest) or
+            _native_group_linux_broker_sha_mismatch("/proc/self/exe", launch.request.broker_digest):
+        return Err("Linux stream broker image differs from configured digest")
+    var admitted_parent: LinuxCgroupParentV1? = nil
+    match linux_cgroup_parent_admit_at_v2(launch.delegated_cgroup_path, launch.root, identity):
+        case LinuxCgroupParentAdmissionV1.Acquired(value): admitted_parent = Some(value)
+        case LinuxCgroupParentAdmissionV1.CleanupPending(value, reason):
+            val retained = builder_linux_parent_receipt_encode_v1(BuilderLinuxParentReceiptV1(
+                identity, "linux-local", value.path, value.device, value.inode))
+            return native_linux_group_unlaunched_stream_v2(launch, identity, value, retained, reason)
+        case LinuxCgroupParentAdmissionV1.Rejected(reason):
+            # Native typed rejection proves no parent and no child acquired.
+            # Do not manufacture a released-parent receipt for an absent parent.
+            var closed = false
+            while not closed:
+                match linux_process_stream_release_inherited_v2():
+                    case Ok(_): closed = true
+                    case Err(error):
+                        val _recorded = file_atomic_write(launch.root + "/broker.error", error)
+                        sleep_ms(100)
+            val proof = group_process_stream_unlaunched_encode_v2(identity,
+                launch.transport_generation, launch.request.child_argv_digest)
+            if proof == "": return Err("cannot encode no-parent/no-child admission proof")
+            while not file_atomic_write(launch.root + "/broker.stream.unlaunched.sdn", proof): sleep_ms(100)
+            return Err(reason)
+        case LinuxCgroupParentAdmissionV1.Unknown(reason):
+            # No guessed token or replay. Retain the independent broker and its
+            # native parent FDs; no workload has been launched on this branch.
+            val _recorded = file_atomic_write(launch.root + "/broker.error", reason)
+            while true: sleep_ms(1000)
+            return Err(reason)
+    val parent = admitted_parent.unwrap()
+    val acquired = builder_linux_parent_receipt_encode_v1(BuilderLinuxParentReceiptV1(
+        identity, "linux-local", parent.path, parent.device, parent.inode))
+    if acquired == "" or not file_atomic_write(launch.root + "/capacity.receipt", acquired):
+        return native_linux_group_unlaunched_stream_v2(launch, identity, parent, acquired,
+            "cannot persist stream broker parent receipt")
+    val enforced = builder_memory_enforcement_bytes_v1(launch.memory_policy, launch.memory_limit_bytes)?
+    var started = linux_process_stream_start_v2(launch, identity, enforced)
+    var receipt_unknown = true
+    while receipt_unknown:
+        match started:
+            case LinuxProcessStreamStartV2.Unknown(reason):
+                val _recorded = file_atomic_write(launch.root + "/broker.error", reason)
+                sleep_ms(100)
+                started = linux_process_stream_recover_lease_v2(launch.root, identity)
+            case _: receipt_unknown = false
+    var lease = LinuxProcessLeaseV1(0)
+    var admission_error = ""
+    match started:
+        case LinuxProcessStreamStartV2.Unknown(reason):
+            return Err(reason) # Loop above only exits after exact native recovery.
+        case LinuxProcessStreamStartV2.Ready(value):
+            lease = value
+            val ready = group_process_stream_ready_encode_v2(identity, launch.transport_generation,
+                launch.request.child_argv_digest)
+            if ready == "" or not file_atomic_write(launch.root + "/broker.stream.ready.sdn", ready):
+                admission_error = "cannot persist exact stream exec-ready receipt"
+        case LinuxProcessStreamStartV2.CleanupRequired(value, reason):
+            lease = value
+            admission_error = reason
+        case LinuxProcessStreamStartV2.Rejected(reason):
+            return native_linux_group_unlaunched_stream_v2(launch, identity, parent, acquired, reason)
+    if admission_error != "":
+        val _recorded = file_atomic_write(launch.root + "/broker.error", admission_error)
+        val _cancelled = linux_process_cancel_v1(lease)
+    var outcome = if admission_error == "":
+        native_linux_group_monitor_lease_v1(launch.root, identity, lease,
+            launch.snapshot_digest, launch.memory_limit_bytes, launch.memory_policy, true)
+    else:
+        native_linux_group_drain_v1(launch.root, identity, lease,
+            launch.snapshot_digest, launch.memory_limit_bytes, launch.memory_policy, true)
+    # Never exit and discard a live native lease on a transient cleanup error.
+    # This is the same broker: bounded drain turns retain authority, no relaunch.
+    while not file_exists(launch.root + "/broker.tree.pending.sdn"):
+        match outcome:
+            case Err(reason):
+                val _recorded = file_atomic_write(launch.root + "/broker.error", reason)
+            case Ok(_): pass
+        sleep_ms(100)
+        outcome = native_linux_group_drain_v1(launch.root, identity, lease,
+            launch.snapshot_digest, launch.memory_limit_bytes, launch.memory_policy, true)
+    val _released = native_linux_group_release_stream_parent_v2(parent, launch.root)
+    while not file_atomic_write(launch.root + "/capacity.released", acquired): sleep_ms(100)
+    val terminal = file_read_regular_no_follow_bounded(launch.root + "/broker.tree.pending.sdn", 4096)?
+    while not file_atomic_write(launch.root + "/broker.tree.sdn", terminal): sleep_ms(100)
+    if admission_error != "": return Err(admission_error)
+    outcome
+
+fn native_linux_group_stream_main_v2(root: text, identity: text, payload: text) -> i64:
+    val launch = match group_process_stream_launch_decode_v2(payload):
+        case Ok(value): value
+        case Err(_): return 2
+    if launch.root != root or launch.transport_generation <= 0 or group_process_stream_identity_v2(launch) != identity:
+        return 2
+    val lock = file_lock(root + "/broker.lock", 0)
+    if lock < 0: return 3
+    if file_exists(root + "/broker.started"):
+        val _unlocked = file_unlock(lock)
+        return 3
+    if not file_atomic_write(root + "/broker.started", identity):
+        val _unlocked = file_unlock(lock)
+        return 3
+    val result = native_linux_group_stream_run_v2(launch, identity)
+    val _unlocked = file_unlock(lock)
+    match result:
+        case Ok(_): 0
+        case Err(reason):
+            val _recorded = file_atomic_write(root + "/broker.error", reason)
+            1
+
+# The real collected receipt remains a value here across publication failures.
+# Projection recovery covers native cleanup followed by an allocation/ABI error.
+use std.nogc_sync_mut.io.linux_process_owner.{linux_process_collected_stream_v2,
+    linux_process_stream_release_inherited_v2, linux_process_stream_recover_lease_v2,
+    LinuxCgroupParentV1, LinuxCgroupParentAdmissionV1, linux_cgroup_parent_admit_at_v2}
+
+fn native_linux_group_finish_stream_v2(root: text, identity: text,
+        lease: LinuxProcessLeaseV1, peak: i64, snapshot_digest: text,
+        memory_limit_bytes: i64, memory_policy: text, samples: [NativeGroupChargeSampleV1],
+        complete: bool) -> Result<bool, text>:
+    var retained: LinuxProcessPollV1? = nil
+    while retained == nil:
+        match linux_process_collected_stream_v2(lease):
+            case Ok(receipt): retained = Some(receipt)
+            case Err(_):
+                match linux_process_collect_v1(lease):
+                    case Ok(receipt): retained = Some(receipt)
+                    case Err(reason):
+                        val _recorded = file_atomic_write(root + "/broker.error", reason)
+                        sleep_ms(100)
+    val receipt = retained.unwrap()
+    while true:
+        match native_linux_group_publish_receipt_v1(root, identity, receipt, receipt.memory_peak_bytes,
+                snapshot_digest, memory_limit_bytes, memory_policy, samples, complete):
+            case Ok(value): return Ok(value)
+            case Err(reason):
+                val _recorded = file_atomic_write(root + "/broker.error", reason)
+                sleep_ms(100)
+    Err("unreachable stream publication state")
