@@ -134,3 +134,40 @@ smoke, admitted compiler check or TCP execution is claimed for this change.
 TCP byte validation, bounds, partial-write/backpressure and EOF behavior are
 unchanged. Full transport qualification remains BLOCKED; only the historical
 straight-line partial correction and truthful reproductions are preserved.
+
+## Store-side widening correction after PR 7530 (2026-11-07)
+
+PR 7530 landed the partial Copy/Move correction at
+`0d9369779c9064645edb4e52160fdbf92a0fcb9d`. A new source-only investigation,
+independently reviewed by Sol and Astra, found a separate concrete conversion
+defect in `MirToLlvm.translate_store`: it selects a destination spill width
+then calls `value_as_type`, which always supplies false for source unsignedness.
+Therefore a known U8 source stored into an i64 slot emits sign extension,
+regardless of the corrected Copy/Move metadata. Signed I8 needs that extension;
+unsigned U8 needs zero extension. The correction uses `value_as_type_signed`
+with the source operand's unsigned flag for integer slots. Slot width selection,
+load behavior, and all noninteger destination conversions remain unchanged.
+
+The relation to the retained checked-window failure is a falsifiable hypothesis:
+an unresolved inferred local falls back to I64 during MIR Let lowering, while
+typed byte indexing emits a cast to U8. The early Let effective-type selection
+does not recover narrow integer initializer types. If that byte is used after
+the validation branch, the cross-block-live SSA pass creates a slot using the
+original MirLocal type. Widening at the store predicts the observed `sxtb`
+followed by two i64 stores before validation. However, current HIR preserves a
+known initializer type, and the failing producer's original MIR is unavailable;
+the exact historical byte slot type is not newly proven. The store defect is
+valid independently of that attribution. Changing earlier inference could hide
+it for one source shape without fixing numeric preservation at the store owner.
+
+Direct LLVM owner regressions allocate i64 slots and require U8 `zext`, I8
+`sext`, and i64 store/load operations. The unchanged unsigned native reproducer
+covers validation/push cross-block liveness and exact `[127,128,153,255]`.
+A separate signed native control requires exact `[-128,-1,0,127]` after the
+same validation/push shape. All new cases are authored and NOT_RUN.
+
+No old executable was rerun, no new producer was built, and the exhausted
+six-cycle cause budget was not reset. This is a source-level Store correction;
+current-source native verification and full TCP transport qualification remain
+BLOCKED. Daemon hash investigation concerns raw/tagged text at a call boundary,
+with no identified overlap in this Store conversion owner.

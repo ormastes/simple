@@ -16,6 +16,19 @@ fn copied_widening_ir(unsigned_source: bool, is_move: bool) -> text:
     translator.llvm_cast_impl(LocalId(id: 2), mir_operand_copy(LocalId(id: 1)), MirType.i64())
     translator.builder.build()
 
+fn spilled_widening_ir(unsigned_source: bool) -> text:
+    var translator = MirToLlvm.create("test.spill_unsigned", CodegenTarget.X86_64, nil)
+    translator.local_types[0] = "i8"
+    translator.defined_locals[0] = true
+    translator.unsigned_locals[0] = unsigned_source
+    # Model an original inferred i64 local that receives a resolved byte.
+    # SSA retains this original slot width across validation branches.
+    val slot = LocalId(id: 9)
+    translator.translate_alloc(slot, MirType.i64())
+    translator.translate_store(mir_operand_copy(slot), mir_operand_copy(LocalId(id: 0)))
+    translator.translate_load(LocalId(id: 2), mir_operand_copy(slot))
+    translator.builder.build()
+
 fn copied_octet_as_i64(values: [u8], index: i64) -> i64:
     val byte = values[index]
     byte as i64
@@ -35,6 +48,22 @@ fn checked_octet_window(values: [u8]) -> Result<[u8], text>:
     Ok(result)
 
 describe "integer signedness after an inferred local copy":
+    it "zero-extends an unsigned byte into an i64 spill slot":
+        step("Spilling a resolved U8 preserves its numeric value before reload")
+        val ir = spilled_widening_ir(true)
+        expect(ir).to_contain("zext i8 %l0 to i64")
+        expect(ir.contains("sext i8 %l0 to i64")).to_equal(false)
+        expect(ir).to_contain("store i64")
+        expect(ir).to_contain("load i64, ptr %l9")
+
+    it "sign-extends a signed byte into an i64 spill slot":
+        step("The same spill keeps signed I8 negative instead of zero-extending it")
+        val ir = spilled_widening_ir(false)
+        expect(ir).to_contain("sext i8 %l0 to i64")
+        expect(ir.contains("zext i8 %l0 to i64")).to_equal(false)
+        expect(ir).to_contain("store i64")
+        expect(ir).to_contain("load i64, ptr %l9")
+
     it "replaces stale signed destination metadata for Copy and Move":
         step("Unsigned byte copies and moves zero-extend after replacing stale metadata")
         for is_move in [false, true]:
