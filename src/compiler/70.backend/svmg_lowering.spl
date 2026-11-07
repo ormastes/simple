@@ -13,8 +13,8 @@
 #   - Integer arithmetic/comparison/bitwise: + - * / % (Div->DIV, Mod->REM),
 #     == != < <= > >= & | ^ << >>.
 #   - Float arithmetic/comparison: + - * / == != < <= > >= (FADD/FSUB/FMUL/
-#     FDIV, FEQ/FNE/FLT/FLE/FGT/FGE), dispatched whenever either Binary
-#     operand is a FloatLit or otherwise typed Float (`expr_is_float`) --
+#     FDIV, FEQ/FNE/FLT/FLE/FGT/FGE), dispatched when both Binary
+#     operands emit float values (`expr_is_float`) --
 #     float values live on the stack as their raw f32 bit pattern, matching
 #     ref_vm.spl's `pop_f32`/`push_f32`. REM/bitwise ops on a float operand
 #     have no VM opcode and fail fast rather than silently truncating.
@@ -260,16 +260,17 @@ impl _Lowerer:
                 case HirBinOp.Shr: Some(if is_signed: OP_SAR else: OP_SHR)
                 case _: nil
 
-    # `e` is float-typed if it's a float literal, a Binary expr with a
-    # float-typed operand (transitively), or otherwise carries a checked
-    # Float type -- covers both literal-driven and variable-driven float
-    # expressions without requiring every intermediate node to be re-typed.
+    # Classify the emitted result, not merely the presence of float operands.
+    # Comparisons emit Bool words; arithmetic requires compatible operands.
+    # Other forms use their checked HIR result type, including calls/IntLit.
     fn expr_is_float(e: HirExpr) -> bool:
         match e.kind:
-            case HirExprKind.FloatLit(_, _): true
-            case HirExprKind.FloatLexeme(_, _): true
-            case HirExprKind.Binary(_, left, right):
-                self.expr_is_float(left) or self.expr_is_float(right)
+            case HirExprKind.FloatLit(_, _) | HirExprKind.FloatLexeme(_, _): true
+            case HirExprKind.Binary(op, left, right):
+                match op:
+                    case HirBinOp.Add | HirBinOp.Sub | HirBinOp.Mul | HirBinOp.Div:
+                        self.expr_is_float(left) and self.expr_is_float(right)
+                    case _: false
             case _:
                 if e.has_type_:
                     match e.type_.kind:
@@ -324,7 +325,11 @@ impl _Lowerer:
             return
         match e.kind:
             case HirExprKind.IntLit(value, _):
-                self.emit_pushi(value)
+                if self.expr_is_float(e):
+                    self.emit_op(OP_PUSHF)
+                    self.emit_imm32(f32_to_bits(value as f32) as i64)
+                else:
+                    self.emit_pushi(value)
             case HirExprKind.FloatLit(value, _):
                 self.emit_op(OP_PUSHF)
                 self.emit_imm32(f32_to_bits(value as f32) as i64)
@@ -336,7 +341,15 @@ impl _Lowerer:
             case HirExprKind.NamedVar(symbol, _):
                 self.load_local(symbol)
             case HirExprKind.Binary(op, left, right):
-                val is_float = self.expr_is_float(left) or self.expr_is_float(right)
+                val left_is_float = self.expr_is_float(left)
+                val right_is_float = self.expr_is_float(right)
+                # Every nested Binary passes this boundary, including helper
+                # bodies and conditional branches with checked result types.
+                # The VM has no implicit conversion between integer/float bits.
+                if left_is_float != right_is_float:
+                    self.fail("mixed integer/float binary operands are unsupported in the SVM-G v1 lowering subset")
+                    return
+                val is_float = left_is_float and right_is_float
                 val maybe_opcode = self.binop_opcode(op, is_float, self.expr_is_signed_i32(left))
                 if val opcode = maybe_opcode:
                     self.lower_expr(left)
@@ -374,9 +387,9 @@ impl _Lowerer:
             case HirExprKind.MethodCall(_, _, _, _):
                 self.fail("method calls beyond expect(...).to_equal(...) are not supported in the SVM-G v1 lowering subset (design doc §4.4) -- if the receiver is text, this is the design §4.4 exclusion 'text manipulation beyond literals'")
             case HirExprKind.If(cond, then_, else_):
-                self.lower_if(cond, then_, else_)
+                self.lower_if(cond, then_, else_, true)
             case HirExprKind.IfChain(arms, else_):
-                self.lower_if_chain(arms, else_)
+                self.lower_if_chain(arms, else_, true)
             case HirExprKind.While(cond, body, _):
                 self.lower_while(cond, body)
             case _:
@@ -579,38 +592,60 @@ impl _Lowerer:
     # accepted. The flat form lowers iteratively below so long elif chains do
     # not rebuild or recurse through nested expression payloads.
 
-    me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?):
+    me lower_conditional_branch(block: HirBlock, want_value: bool):
+        if not want_value:
+            self.lower_block_stmts(block)
+            return
+        if not block.has:
+            self.fail("conditional value requires a tail value in every branch")
+            return
+        if not self.expr_leaves_value(block.value):
+            self.fail("conditional value requires a tail value; print, loops and assertions produce no value")
+            return
+        for stmt in block.stmts:
+            if self.ok():
+                self.lower_stmt(stmt)
+        if self.ok():
+            self.lower_expr(block.value)
+
+    me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, want_value: bool = false):
+        if want_value and else_ == nil:
+            self.fail("conditional value requires an else branch")
+            return
         self.lower_expr(cond)
         if not self.ok():
             return
         val else_patch = self.emit_jump(OP_JZ)
-        self.lower_block_stmts(then_)
+        self.lower_conditional_branch(then_, want_value)
         if not self.ok():
             return
         if val else_block = else_:
             val end_patch = self.emit_jump(OP_JMP)
             self.patch_rel16(else_patch, self.code.len())
-            self.lower_block_stmts(else_block)
+            self.lower_conditional_branch(else_block, want_value)
             if not self.ok():
                 return
             self.patch_rel16(end_patch, self.code.len())
         else:
             self.patch_rel16(else_patch, self.code.len())
 
-    me lower_if_chain(arms: [HirIfArm], else_: HirBlock?):
+    me lower_if_chain(arms: [HirIfArm], else_: HirBlock?, want_value: bool = false):
+        if want_value and else_ == nil:
+            self.fail("conditional value requires an else branch")
+            return
         var end_patches: [i64] = []
         for arm in arms:
             self.lower_expr(arm.cond)
             if not self.ok():
                 return
             val next_arm_patch = self.emit_jump(OP_JZ)
-            self.lower_block_stmts(arm.then_)
+            self.lower_conditional_branch(arm.then_, want_value)
             if not self.ok():
                 return
             end_patches.push(self.emit_jump(OP_JMP))
             self.patch_rel16(next_arm_patch, self.code.len())
         if val else_block = else_:
-            self.lower_block_stmts(else_block)
+            self.lower_conditional_branch(else_block, want_value)
             if not self.ok():
                 return
         val chain_end = self.code.len()
@@ -658,7 +693,12 @@ impl _Lowerer:
                     case HirExprKind.Call(_, cargs, _):
                         val actual = cargs[0].value
                         val expected = args[0].value
-                        val is_float = self.expr_is_float(actual) or self.expr_is_float(expected)
+                        val actual_is_float = self.expr_is_float(actual)
+                        val expected_is_float = self.expr_is_float(expected)
+                        if actual_is_float != expected_is_float:
+                            self.fail("mixed integer/float expect operands are unsupported in the SVM-G v1 lowering subset")
+                            return
+                        val is_float = actual_is_float and expected_is_float
                         self.lower_expr(actual)
                         if self.ok():
                             self.emit_op(OP_DUP)
@@ -672,15 +712,40 @@ impl _Lowerer:
 
     # -- statements -------------------------------------------------------------
 
+    # This describes the operand-stack contract of supported expression forms,
+    # independently of checked type metadata. Helpers always load a return word;
+    # print, loops and SYS_RESULT leave none.
+    fn expr_leaves_value(expr: HirExpr) -> bool:
+        if self.is_expect_to_equal(expr):
+            return false
+        match expr.kind:
+            case HirExprKind.For(_, _, _, _) | HirExprKind.While(_, _, _): false
+            case HirExprKind.Call(callee, _, _):
+                match callee.kind:
+                    case HirExprKind.NamedVar(_, name): name != "print"
+                    case _: true
+            case _: true
+
+    me lower_discarded_expr(expr: HirExpr):
+        if self.is_expect_to_equal(expr):
+            self.lower_expect_to_equal(expr)
+            return
+        match expr.kind:
+            case HirExprKind.If(cond, then_, else_):
+                self.lower_if(cond, then_, else_)
+            case HirExprKind.IfChain(arms, else_):
+                self.lower_if_chain(arms, else_)
+            case _:
+                self.lower_expr(expr)
+                if self.ok() and self.expr_leaves_value(expr):
+                    self.emit_op(OP_DROP)
+
     me lower_stmt(s: HirStmt):
         if self.failed:
             return
         match s.kind:
             case HirStmtKind.Expr(expr):
-                if self.is_expect_to_equal(expr):
-                    self.lower_expect_to_equal(expr)
-                else:
-                    self.lower_expr(expr)
+                self.lower_discarded_expr(expr)
             case HirStmtKind.Let(symbol, _, init):
                 self.lower_let(symbol, init)
             case HirStmtKind.Assign(target, op, value):
@@ -690,14 +755,21 @@ impl _Lowerer:
                     case _: nil
                 if val sym = target_sym:
                     if val compound_op = op:
-                        val is_float = self.expr_is_float(target) or self.expr_is_float(value)
-                        val maybe_opcode = self.assign_opcode(compound_op, is_float, self.expr_is_signed_i32(target))
-                        if val opcode = maybe_opcode:
-                            self.compound_assign(sym, opcode, value)
-                        elif is_float:
-                            self.fail("unsupported compound-assignment operator on float operands (only + - * / lower to SVM-G v1 float opcodes; no float REM/bitwise/shift opcode exists)")
+                        val target_is_float = self.expr_is_float(target)
+                        val supported_operands = if target_is_float:
+                            self.expr_is_float(value)
                         else:
-                            self.fail("unsupported compound-assignment operator in the SVM-G v1 lowering subset")
+                            not self.expr_is_float(value)
+                        if not supported_operands:
+                            self.fail("mixed integer/float compound assignment or unproven floating RHS is unsupported in the SVM-G v1 lowering subset")
+                        else:
+                            val maybe_opcode = self.assign_opcode(compound_op, target_is_float, self.expr_is_signed_i32(target))
+                            if val opcode = maybe_opcode:
+                                self.compound_assign(sym, opcode, value)
+                            elif target_is_float:
+                                self.fail("unsupported compound-assignment operator on float operands (only + - * / lower to SVM-G v1 float opcodes; no float REM/bitwise/shift opcode exists)")
+                            else:
+                                self.fail("unsupported compound-assignment operator in the SVM-G v1 lowering subset")
                     else:
                         self.store_local_expr(sym, value)
                 else:
@@ -727,25 +799,7 @@ impl _Lowerer:
             if self.ok():
                 self.lower_stmt(stmt)
         if self.ok() and block.has:
-            match block.value.kind:
-                case HirExprKind.If(_, _, _):
-                    # Control-flow-only construct in this subset (no value
-                    # lowering for `if` as an expression): lower it directly,
-                    # never DROP -- it never pushes a stack value, e.g. an
-                    # `elif` chain arriving as a block's tail expression
-                    # (rather than a plain statement).
-                    self.lower_expr(block.value)
-                case HirExprKind.IfChain(_, _):
-                    self.lower_expr(block.value)
-                case HirExprKind.While(_, _, _):
-                    self.lower_expr(block.value)
-                case _:
-                    # Statement-context block with an unused tail value:
-                    # evaluate for side effects (none exist in this subset)
-                    # and discard.
-                    self.lower_expr(block.value)
-                    if self.ok():
-                        self.emit_op(OP_DROP)
+            self.lower_discarded_expr(block.value)
 
     me lower_for(var_: SymbolId, iter: HirExpr, body: HirBlock):
         match iter.kind:
