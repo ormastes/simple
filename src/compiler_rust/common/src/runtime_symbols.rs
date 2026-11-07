@@ -1226,6 +1226,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_hash_sha256",
     "rt_file_lock",
     "rt_file_unlock",
+    "rt_file_lock_owned_acquire_v2",
+    "rt_file_lock_owned_state_v2",
+    "rt_file_lock_owned_release_v2",
     "rt_file_rename",
     "rt_file_read_lines",
     "rt_file_append_text",
@@ -1344,6 +1347,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // File locking
     "rt_file_lock",
     "rt_file_unlock",
+    "rt_file_lock_owned_acquire_v2",
+    "rt_file_lock_owned_state_v2",
+    "rt_file_lock_owned_release_v2",
     // System info
     "rt_getpid",
     "rt_process_exists",

@@ -156,31 +156,59 @@ fn workload_store_complete_metadata_v1(journal: DistributedOperationJournalV2,
     if prior.state == "admitted": current = daemon_operation_begin_v2(current, operation)?
     daemon_operation_record_outcome_v2(current, operation, "completed", operation.payload_digest)
 
+# Shared projection preserves every existing replay domain and recovery rule.
+# On failure the caller still owns the original lease; completed metadata may
+# advance WAL revision, but never transfers the lock or changes lease identity.
+fn workload_store_project_v2(journal_owner: DistributedOperationJournalV2,
+        controller_id: text) -> Result<ControllerWorkloadStoreV1, text>:
+    var journal = journal_owner
+    val replay = workload_store_replay_v1(journal, controller_id)?
+    var rows = replay.rows
+    for pending in replay.pending:
+        journal = workload_store_complete_metadata_v1(journal, pending)?
+        rows[pending.workload_uid] = pending
+    for operation in replay.pending_inputs:
+        journal = controller_desired_complete_v1(journal, operation)?
+    Ok(ControllerWorkloadStoreV1(controller_id: controller_id, journal: journal, rows: rows))
+
+pub enum ControllerWorkloadStoreOpenV2:
+    Ready(ControllerWorkloadStoreV1)
+    Rejected(text)
+    CleanupRequired(DistributedOperationJournalOpenCleanupV2, text)
+
+pub fn controller_workload_store_open_owned_v2(root: text, controller_id: text, nonce: text,
+        maximum_events: i64) -> ControllerWorkloadStoreOpenV2:
+    val authority = match controller_assignment_authority_v1(controller_id):
+        case Ok(value): value
+        case Err(reason): return ControllerWorkloadStoreOpenV2.Rejected(reason)
+    val journal = match distributed_operation_journal_open_owned_v2(root, authority, nonce, maximum_events):
+        case DistributedOperationJournalOpenV2.Ready(value): value
+        case DistributedOperationJournalOpenV2.Rejected(reason): return ControllerWorkloadStoreOpenV2.Rejected(reason)
+        case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, reason):
+            return ControllerWorkloadStoreOpenV2.CleanupRequired(cleanup, reason)
+    match workload_store_project_v2(journal, controller_id):
+        case Ok(value): ControllerWorkloadStoreOpenV2.Ready(value)
+        case Err(reason):
+            val released = distributed_operation_journal_close_owned_v2(journal)
+            if val cleanup = released.cleanup:
+                return ControllerWorkloadStoreOpenV2.CleanupRequired(cleanup, reason + ":" + released.error)
+            # No owner remains, but consumed-error/stale/error is still failure.
+            val error = if released.error == "": reason else: reason + ":" + released.error
+            ControllerWorkloadStoreOpenV2.Rejected(error)
+
+pub fn controller_workload_store_close_owned_v2(owner: ControllerWorkloadStoreV1) -> DistributedOperationJournalCleanupTurnV2:
+    # Preserve closed/state/error exactly: nil+closed+error is NOT success.
+    distributed_operation_journal_close_owned_v2(owner.journal)
+
 pub fn controller_workload_store_open_v1(root: text, controller_id: text, nonce: text,
         maximum_events: i64) -> Result<ControllerWorkloadStoreV1, text>:
     val authority = controller_assignment_authority_v1(controller_id)?
-    var journal = distributed_operation_journal_open_v2(root, authority, nonce, maximum_events)?
-    val replay = workload_store_replay_v1(journal, controller_id)
-    if replay.is_err():
+    val journal = distributed_operation_journal_open_v2(root, authority, nonce, maximum_events)?
+    val projected = workload_store_project_v2(journal, controller_id)
+    if projected.is_err():
         val closed = distributed_operation_journal_close_v2(journal)
-        return Err(replay.unwrap_err())
-    var rows = replay.unwrap().rows
-    # Only these pure metadata publications are safely completed on recovery.
-    # Remote assignment operations are left untouched for host reconciliation.
-    for pending in replay.unwrap().pending:
-        val completion = workload_store_complete_metadata_v1(journal, pending)
-        if completion.is_err():
-            val closed = distributed_operation_journal_close_v2(journal)
-            return Err(completion.unwrap_err())
-        journal = completion.unwrap()
-        rows[pending.workload_uid] = pending
-    for operation in replay.unwrap().pending_inputs:
-        val completion = controller_desired_complete_v1(journal, operation)
-        if completion.is_err():
-            val closed = distributed_operation_journal_close_v2(journal)
-            return Err(completion.unwrap_err())
-        journal = completion.unwrap()
-    Ok(ControllerWorkloadStoreV1(controller_id: controller_id, journal: journal, rows: rows))
+        return Err(projected.unwrap_err())
+    projected
 
 pub fn controller_workload_store_lookup_v1(owner: ControllerWorkloadStoreV1,
         uid: text) -> Result<ControllerWorkloadFenceV1, text>:

@@ -16,7 +16,7 @@ use std.common.contracts.orchestration.host_prepare_request_v1.host_prepare_requ
 use std.common.contracts.orchestration.host_execute_request_v1.host_execute_request_decode_v1
 use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_decode_v2
 use std.common.contracts.container.execution_v2.*
-use std.nogc_async_mut.container.api_v2.{simple_container_project_v2, simple_container_recover_v2, simple_container_read_v2}
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2, simple_container_recover_v2, simple_container_read_v2}
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RUNTIME_STATUS_OK}
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
@@ -28,9 +28,15 @@ use std.common.string_core.str_len
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenCleanupV2,
+    DistributedOperationJournalCleanupTurnV2, distributed_operation_journal_open_cleanup_v2}
+use std.nogc_sync_mut.io.file_lock_owned_v2.{FileLockReleaseStateV2, file_lock_owner_state_v2}
+
 pub struct HostLocalCommandReplyV1:
     exit_code: i64
     output: text
+    journal_cleanup: Option<DistributedOperationJournalOpenCleanupV2> = nil
+    cleanup_state: Option<FileLockReleaseStateV2> = nil
 
 fn host_local_error_v1(action: text, operation_id: text, reason: text,
         recovery_required: bool) -> HostLocalCommandReplyV1:
@@ -42,15 +48,34 @@ fn host_local_error_v1(action: text, operation_id: text, reason: text,
 
 # Even when a reply cannot be encoded/published, release only this exact writer.
 # No reservation or provider resource is freed by command termination.
-fn host_local_finish_v1(owner: HostCapacityOwnerV1, action: text, operation_id: text,
+pub fn host_local_finish_owned_v2(owner: HostCapacityOwnerV1, action: text, operation_id: text,
         reply: HostLocalCommandReplyV1) -> HostLocalCommandReplyV1:
-    match host_capacity_owner_close_v1(owner):
-        case Ok(closed):
-            if not closed: return host_local_error_v1(action, operation_id, "host-local-close-failed", true)
-        case Err(reason): return host_local_error_v1(action, operation_id, "host-local-close-failed:" + reason, true)
-    reply
+    val closed = host_capacity_owner_close_owned_v2(owner)
+    if closed.closed and closed.error == "" and closed.state == FileLockReleaseStateV2.Released:
+        return reply
+    var failed = host_local_error_v1(action, operation_id, "host-local-close-failed:" + closed.error, true)
+    failed.journal_cleanup = closed.cleanup
+    failed.cleanup_state = Some(closed.state)
+    failed
 
-fn host_local_status_v1(local: HostLocalRootV1) -> Result<text, text>:
+# Explicit canonical retry is for a retained cleanup-only owner. Unknown native
+# state is quarantined by the canonical token owner; never retry a raw handle.
+pub fn host_local_command_cleanup_v2(reply: HostLocalCommandReplyV1) -> HostLocalCommandReplyV1:
+    match reply.journal_cleanup:
+        case nil: reply
+        case Some(cleanup):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            var current = reply
+            current.journal_cleanup = closed.cleanup
+            current.cleanup_state = Some(closed.state)
+            # Preserve the original failed operation/close reply even when this
+            # cleanup succeeds. Cleanup success is not workload success.
+            current.exit_code = 2
+            current
+
+# Project facts from the caller's retained single-writer owner. This does not
+# refresh provider state or confer authority to execute a request.
+pub fn host_local_status_v1(local: HostLocalRootV1) -> Result<text, text>:
     val ledger = local.capacity.ledger
     val available = host_available_capacity_v1(ledger)?
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-local-status"),
@@ -180,44 +205,44 @@ fn host_local_run_owned_v1(action: text, local: HostLocalRootV1,
         host_local_refresh_context_v1(service_root, binding)
     if action == "host-parent-budget":
         val decoded = host_parent_budget_record_decode_v1(payload)
-        if decoded.is_err(): return host_local_finish_v1(local.capacity, action, operation_id,
+        if decoded.is_err(): return host_local_finish_owned_v2(local.capacity, action, operation_id,
             host_local_error_v1(action, operation_id, decoded.unwrap_err(), false))
         val stored = host_parent_budget_store_v1(local, decoded.unwrap(), host_local_context_v1(policy), refresh)
-        if stored.is_err(): return host_local_finish_v1(local.capacity, action, operation_id,
+        if stored.is_err(): return host_local_finish_owned_v2(local.capacity, action, operation_id,
             host_local_error_v1(action, operation_id, stored.unwrap_err(), true))
         val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-parent-budget-reference"),
             "parentOperationId": SdnValue.String(operation_id), "budgetDigest": SdnValue.String(stored.unwrap())}
-        return host_local_finish_v1(local.capacity, action, operation_id,
+        return host_local_finish_owned_v2(local.capacity, action, operation_id,
             HostLocalCommandReplyV1(exit_code: 0, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
     if action == "host-prepare":
         val prepared = host_authorized_prepare_reply_v1(local.capacity, payload,
             policy.snapshot, policy.snapshot.generation, host_local_context_v1(policy), refresh)
         match prepared:
-            case Ok(reply): return host_local_finish_v1(reply.owner, action, operation_id,
+            case Ok(reply): return host_local_finish_owned_v2(reply.owner, action, operation_id,
                 HostLocalCommandReplyV1(exit_code: 0, output: reply.response))
-            case Err(reason): return host_local_finish_v1(local.capacity, action, operation_id,
+            case Err(reason): return host_local_finish_owned_v2(local.capacity, action, operation_id,
                 host_local_error_v1(action, operation_id, reason, true))
     if action == "host-execute":
         val turn = host_authorized_execute_v2(local.capacity, local.container, payload, policy,
             local.binding.provider_identity_digest, local.config.service_scope_id,
             host_local_context_v1(policy), refresh)
-        if turn.error != "": return host_local_finish_v1(turn.owner, action, operation_id,
+        if turn.error != "": return host_local_finish_owned_v2(turn.owner, action, operation_id,
             host_local_error_v1(action, operation_id, turn.error, turn.recovery_required))
         val encoded = match turn.observation:
             case Some(value): host_execution_observation_encode_v2(value)
             case nil: Err("host-execute-observation-unavailable")
         match encoded:
-            case Ok(bytes): return host_local_finish_v1(turn.owner, action, operation_id,
+            case Ok(bytes): return host_local_finish_owned_v2(turn.owner, action, operation_id,
                 HostLocalCommandReplyV1(exit_code: 0, output: bytes))
-            case Err(reason): return host_local_finish_v1(turn.owner, action, operation_id,
+            case Err(reason): return host_local_finish_owned_v2(turn.owner, action, operation_id,
                 host_local_error_v1(action, operation_id, reason, true))
     val output = if action == "host-status": host_local_status_v1(local)
         else:
             host_local_inspect_reply_v1(local, operation_id)
     match output:
-        case Ok(bytes): host_local_finish_v1(local.capacity, action, operation_id,
+        case Ok(bytes): host_local_finish_owned_v2(local.capacity, action, operation_id,
             HostLocalCommandReplyV1(exit_code: 0, output: bytes))
-        case Err(reason): host_local_finish_v1(local.capacity, action, operation_id,
+        case Err(reason): host_local_finish_owned_v2(local.capacity, action, operation_id,
             host_local_error_v1(action, operation_id, reason, true))
 
 fn host_local_inspect_reply_v1(local: HostLocalRootV1, operation_id: text) -> Result<text, text>:
@@ -236,7 +261,20 @@ fn host_local_validate_v1(root: text, path: text) -> Result<text, text>:
     # Validation opens only the configured Container owner. It creates no
     # capacity journal and never calls create/start or manufactures a grant.
     val local = host_local_runtime_open_v1(root, 30000)?
-    val projection = simple_container_project_v2(local.container, request)?
+    host_local_validate_request_v2(local.container, request)
+
+# Persistent handlers use the same projection with their retained Container
+# owner; they neither reopen the capacity writer nor interpret a payload path.
+pub fn host_local_validate_payload_v2(container: SimpleContainerOwnerV2,
+        source: text, expected_operation_id: text = "") -> Result<text, text>:
+    val request = container_execution_request_decode_v2(source)?
+    if expected_operation_id != "" and request.plan.operation_id != expected_operation_id:
+        return Err("host-validate-operation-mismatch")
+    host_local_validate_request_v2(container, request)
+
+fn host_local_validate_request_v2(container: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2) -> Result<text, text>:
+    val projection = simple_container_project_v2(container, request)?
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-container-validation"),
         "backend": SdnValue.String(request.plan.backend), "operationId": SdnValue.String(projection.operation_id),
         "workloadUid": SdnValue.String(projection.workload_uid), "attempt": SdnValue.Int(projection.attempt),
@@ -309,6 +347,13 @@ pub fn host_local_command_v1(args: [text]) -> HostLocalCommandReplyV1:
                 val legacy = host_execute_request_decode_v1(payload)
                 if legacy.is_err(): return host_local_error_v1(action, "", request.unwrap_err(), false)
                 operation_id = legacy.unwrap().operation.id
-    val opened = host_local_root_open_v1(args[1], timeout_ms)
-    if opened.is_err(): return host_local_error_v1(action, operation_id, opened.unwrap_err(), true)
-    host_local_run_owned_v1(action, opened.unwrap(), payload, operation_id)
+    match host_local_root_open_owned_v2(args[1], timeout_ms):
+        case HostLocalRootOpenV2.Ready(local): host_local_run_owned_v1(action, local, payload, operation_id)
+        case HostLocalRootOpenV2.Rejected(error): host_local_error_v1(action, operation_id, error, true)
+        case HostLocalRootOpenV2.CleanupRequired(cleanup, error):
+            var reply = host_local_error_v1(action, operation_id, error, true)
+            reply.journal_cleanup = Some(cleanup)
+            val state = file_lock_owner_state_v2(cleanup.lock)
+            reply.cleanup_state = Some(if state == "held" or state == "retained": FileLockReleaseStateV2.Retained
+                elif state == "stale": FileLockReleaseStateV2.Stale else: FileLockReleaseStateV2.Unknown)
+            reply

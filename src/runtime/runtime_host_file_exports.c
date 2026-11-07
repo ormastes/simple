@@ -32,6 +32,8 @@
 #include <unistd.h>
 #endif
 
+#include "runtime_file_lock_owned_v2.h"
+
 #define RT_HOST_FILE_PATH_MAX 4096U
 
 static char* rt_host_file_copy_path(const uint8_t* path_ptr, uint64_t path_len) {

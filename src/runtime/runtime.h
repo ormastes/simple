@@ -294,6 +294,10 @@ void     rt_dir_list_free(const char** entries, int64_t count);
  * correct shape; this declaration was the stale one. */
 int64_t  rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
 bool     rt_file_unlock(int64_t handle);
+/* Opaque generation capability. All return/status words are signed i64. */
+int64_t rt_file_lock_owned_acquire_v2(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
+int64_t rt_file_lock_owned_state_v2(int64_t token);
+int64_t rt_file_lock_owned_release_v2(int64_t token);
 
 /* ===== Offset-based File I/O ===== */
 

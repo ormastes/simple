@@ -1,0 +1,66 @@
+# Generation-bearing lock capability. The token is not an OS descriptor.
+# Native owner state is authoritative even when Simple values have been copied.
+@unsafe(reason: "creates a native generation owner in the existing OS file-lock namespace", capabilities: [ffi])
+extern fn rt_file_lock_owned_acquire_v2(path: text, timeout_secs: i64) -> i64
+@unsafe(reason: "reads the canonical generation owner without exposing its descriptor", capabilities: [ffi])
+extern fn rt_file_lock_owned_state_v2(token: i64) -> i64
+@unsafe(reason: "releases only the exact live generation, preserving retained or unknown ownership", capabilities: [ffi])
+extern fn rt_file_lock_owned_release_v2(token: i64) -> i64
+
+pub struct FileLockOwnerV2:
+    token: i64
+
+pub enum FileLockOpenV2:
+    Ready(FileLockOwnerV2)
+    Rejected(text)
+    CleanupRequired(FileLockOwnerV2, text)
+
+pub enum FileLockReleaseStateV2:
+    Released
+    Retained
+    Unknown
+    ConsumedError
+    Stale
+
+pub struct FileLockReleaseTurnV2:
+    owner: Option<FileLockOwnerV2>
+    closed: bool
+    # released, retained, unknown, consumed-error, stale. UNKNOWN cannot retry
+    # the native descriptor; its quarantined generation remains inspectable.
+    state: FileLockReleaseStateV2
+    error: text
+
+@unsafe(reason: "observes the canonical native lock generation", capabilities: [ffi])
+pub fn file_lock_owner_state_v2(owner: FileLockOwnerV2) -> text:
+    val state = rt_file_lock_owned_state_v2(owner.token)
+    if state == 1: return "held"
+    if state == 2 or state == 5: return "retained"
+    if state == 3: return "unknown"
+    if state == 4: return "acquiring"
+    "stale"
+
+pub fn file_lock_owner_live_v2(owner: FileLockOwnerV2) -> bool:
+    file_lock_owner_state_v2(owner) == "held"
+
+@unsafe(reason: "retains every OS resource opened during file-lock acquisition", capabilities: [ffi])
+pub fn file_lock_open_owned_v2(path: text, timeout_secs: i64) -> FileLockOpenV2:
+    if path == "" or path.byte_len() >= 4096 or path.contains("\0") or timeout_secs < 0 or timeout_secs > 60:
+        return FileLockOpenV2.Rejected("FILE_LOCK_CONFIGURATION_INVALID")
+    val token = rt_file_lock_owned_acquire_v2(path, timeout_secs)
+    if token <= 0: return FileLockOpenV2.Rejected("FILE_LOCK_ACQUISITION_REJECTED")
+    val owner = FileLockOwnerV2(token)
+    if file_lock_owner_live_v2(owner): return FileLockOpenV2.Ready(owner)
+    FileLockOpenV2.CleanupRequired(owner, "FILE_LOCK_ACQUISITION_CLEANUP_REQUIRED")
+
+@unsafe(reason: "generation-checks release and preserves exact retained or quarantined owner", capabilities: [ffi])
+pub fn file_lock_release_owned_v2(owner: FileLockOwnerV2) -> FileLockReleaseTurnV2:
+    val status = rt_file_lock_owned_release_v2(owner.token)
+    if status == 1: return FileLockReleaseTurnV2(nil, true, FileLockReleaseStateV2.Released, "")
+    if status == 4: return FileLockReleaseTurnV2(nil, true, FileLockReleaseStateV2.ConsumedError, "FILE_LOCK_CLOSE_CONSUMED_WITH_ERROR")
+    if status == 2: return FileLockReleaseTurnV2(Some(owner), false, FileLockReleaseStateV2.Retained, "FILE_LOCK_RELEASE_RETAINED")
+    if status == 3: return FileLockReleaseTurnV2(Some(owner), false, FileLockReleaseStateV2.Unknown, "FILE_LOCK_CLOSE_OUTCOME_UNKNOWN")
+    FileLockReleaseTurnV2(nil, false, FileLockReleaseStateV2.Stale, "FILE_LOCK_GENERATION_STALE")
+
+export FileLockOwnerV2, FileLockOpenV2, FileLockReleaseTurnV2, FileLockReleaseStateV2
+export file_lock_open_owned_v2, file_lock_release_owned_v2
+export file_lock_owner_live_v2, file_lock_owner_state_v2
