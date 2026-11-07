@@ -21,3 +21,5 @@ claim signature/parent-budget verification by the pending helper service consume
 
 Execution logs, compiler identity and branch coverage remain unavailable until
 the admitted-runtime verification gate is run.
+
+Additional authored NOT_RUN case: three sequential real journal preparations are expired and their physical capacity reused; after a new service fence, quarantined open succeeds with all three uncertain and availability refuses capacity-exceeded. This prevents recovery from being blocked before actual no-effect reconciliation. It does not itself prove native inventory or ready transition.
