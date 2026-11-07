@@ -522,7 +522,9 @@ run_tier() {
 if [ "$DO_SELFTEST" = 1 ]; then
     ST_FAILURES=0
     ST_T=$(mktemp -d) || exit 2
-    trap 'rm -rf "$ST_T"' EXIT INT TERM
+    # Preserve per-case diagnostics, including startup failures before a PID.
+    trap 'printf "run-gate-tier: selftest evidence retained at %s\n" "$ST_T" >&2' EXIT
+    trap 'exit 2' INT TERM
 
     st_report() {
         if [ "$1" = ok ]; then
@@ -741,17 +743,26 @@ EOF
     sh "$0" --tier local --manifest-file "$ST_T/m11.sdn" --budget 30 --jobs 2 --results "$ST_T/r11.out" \
         >/dev/null 2>"$ST_T/r11.err" &
     runner_pid=$!
-    # Wait for the grandchild pidfile to appear (row actually launched)
-    # rather than a fixed sleep guessing at scheduling.
-    _w=0
-    while [ ! -s "$ST_T/gc11.pid" ] && [ "$_w" -lt 50 ]; do sleep 0.1 2>/dev/null || sleep 1; _w=$((_w + 1)); done
+    # Interrupt only after the grandchild is observed alive. A fixed poll
+    # count can expire during runner startup and test no active row at all.
+    # Use a bounded wall deadline, and stop waiting if the runner exits.
+    _ready_deadline=$(( $(now_ms) + 30000 ))
+    while [ ! -s "$ST_T/gc11.pid" ] && kill -0 "$runner_pid" 2>/dev/null && [ "$(now_ms)" -lt "$_ready_deadline" ]; do
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    gc11_pid=$(cat "$ST_T/gc11.pid" 2>/dev/null || echo)
+    gc11_ready=0
+    if [ -n "$gc11_pid" ] && kill -0 "$gc11_pid" 2>/dev/null; then gc11_ready=1; fi
+    # On a readiness failure this is owned cleanup, not interruption evidence.
     kill -TERM "$runner_pid" 2>/dev/null
     wait "$runner_pid" 2>/dev/null
     rc=$?
     sleep 1
     gc11_pid=$(cat "$ST_T/gc11.pid" 2>/dev/null || echo)
     if [ -n "$gc11_pid" ] && kill -0 "$gc11_pid" 2>/dev/null; then gc11_alive=1; else gc11_alive=0; fi
-    if [ "$rc" -ne 0 ] && [ -n "$gc11_pid" ] && [ "$gc11_alive" -eq 0 ]; then
+    if [ "$gc11_ready" -ne 1 ]; then
+        st_report bad "(S11) setup failed: grandchild readiness was not observed before the deadline or runner exit" "rc=$rc stderr=$(cat "$ST_T/r11.err" 2>/dev/null)"
+    elif [ "$rc" -ne 0 ] && [ "$gc11_alive" -eq 0 ]; then
         st_report ok "(S11) INT/TERM to the runner kills active rows (pid $gc11_pid) and exits non-zero (rc=$rc)"
     else
         st_report bad "(S11) INT/TERM to the runner kills active rows and exits non-zero" "rc=$rc gc_pid=${gc11_pid:-none} alive=$gc11_alive"
