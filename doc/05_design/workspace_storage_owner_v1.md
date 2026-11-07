@@ -62,8 +62,10 @@ read through `IOCTL_DISK_GET_LENGTH_INFO`. Requested capacity must match that
 fixed volume envelope; free space is a separate observation. Host policy must
 bind exclusive use of this volume and forbid workload volume-management rights.
 Native NTFS allocated-cluster usage is reported; inode usage is explicitly `-1`
-(unavailable), never zero. The provider checks a protected root DACL and exact
-workspace file identity. These are snapshots under the installed administrator
+(unavailable), never zero. The provider checks both trusted root owner SID and
+protected DACL, plus exact workspace file identity. A foreign owner is refused
+even when every writable ACE names a trusted principal: that owner otherwise
+retains implicit WRITE_DAC. These are snapshots under the installed administrator
 policy, not proof against an administrator concurrently changing that policy.
 
 Windows release currently returns unsupported and retains all handles and host
@@ -93,6 +95,17 @@ remain charged. TTL expiry, process exit, unlink success alone, and increased
 free space cannot discharge storage. Administrative quota settings remain intact.
 
 ## Required evidence
+
+Independent review found and repaired the Windows owner-SID omission and the
+missing tagged-text MIR registration. The original 73-check native receipt is
+historical Linux negative evidence, not execution of these repairs. The actual
+Windows SDK descriptor test in
+`src/runtime/test/workspace_storage_windows_owner_v1_selfcheck.c` changes only the
+owner SID under the same trusted DACL and requires refusal; it also covers missing
+owner, foreign WRITE_DAC, and null DACL. It is authored NOT_RUN on Linux.
+`test/fixtures/native_workspace_storage_text_abi_v1/main.spl` directly invokes the
+real storage externs with embedded NUL; this actual compiler ABI probe remains
+NOT_RUN. Two registry SSpec cases accompany it and do not substitute for execution.
 
 Focused negative tests must use real native paths and verify no mutations on
 unsupported filesystems, symlink/replacement, identity/limit mismatch, and stale

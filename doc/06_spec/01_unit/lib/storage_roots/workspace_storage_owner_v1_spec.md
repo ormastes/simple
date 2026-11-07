@@ -28,6 +28,11 @@ over-capacity behavior; independent Windows disposal authority and lifecycle;
 same-host-journal reserve/release integration. All remain **NOT_RUN/BLOCKED**.
 
 Initial Windows release is explicitly unsupported and retains handles/charge.
+The Windows native security-descriptor regression additionally changes only the
+owner SID under a trusted DACL and requires refusal; missing owner, foreign
+WRITE_DAC and null DACL are prevention cases. This SDK fixture is authored NOT_RUN.
+The original C73 result predates the owner-SID/MIR fixes and is retained historical
+evidence. It does not establish Windows behavior or native Simple text lowering.
 Linux recovery after a process restart with an already-absent workspace remains
 pending. Neither a decoded receipt nor process exit authorizes deletion or host
 capacity discharge. These limitations are required follow-up implementation,

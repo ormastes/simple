@@ -20,31 +20,43 @@ static int ws_windows_error_v1(void) {
 static int ws_windows_path_v1(const char* source,wchar_t* target,int count) {
     return MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,source,-1,target,count)>0?0:EINVAL;
 }
+static int ws_windows_trusted_sid_v1(PSID sid,PSID service) {
+    return sid&&IsValidSid(sid)&&(EqualSid(sid,service)||
+        IsWellKnownSid(sid,WinLocalSystemSid)||IsWellKnownSid(sid,WinBuiltinAdministratorsSid));
+}
+static int ws_windows_protected_descriptor_v1(PSECURITY_DESCRIPTOR security,PSID service) {
+    PSID owner=NULL;PACL dacl=NULL;BOOL defaulted=FALSE,present=FALSE;
+    if(!security||!service||!IsValidSid(service)||
+            !GetSecurityDescriptorOwner(security,&owner,&defaulted)||
+            !ws_windows_trusted_sid_v1(owner,service)||
+            !GetSecurityDescriptorDacl(security,&present,&dacl,&defaulted)||!present||!dacl)return EACCES;
+    /* A foreign owner has implicit WRITE_DAC even if no allow ACE grants it.
+     * Refuse before considering writable ACEs; no OWNER_RIGHTS exception. */
+    for(DWORD i=0;i<dacl->AceCount;i++) {
+        void* raw=NULL;if(!GetAce(dacl,i,&raw))return EACCES;
+        ACE_HEADER* header=(ACE_HEADER*)raw;
+        if(header->AceType==ACCESS_DENIED_ACE_TYPE)continue;
+        if(header->AceType!=ACCESS_ALLOWED_ACE_TYPE)return EACCES;
+        ACCESS_ALLOWED_ACE* ace=(ACCESS_ALLOWED_ACE*)raw;
+        if(header->AceFlags&INHERIT_ONLY_ACE)continue;
+        DWORD writes=FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY|FILE_DELETE_CHILD|DELETE|
+            WRITE_DAC|WRITE_OWNER|GENERIC_WRITE|GENERIC_ALL;
+        if((ace->Mask&writes)&&!ws_windows_trusted_sid_v1((PSID)&ace->SidStart,service))return EACCES;
+    }
+    return 0;
+}
 static int ws_windows_protected_parent_v1(HANDLE directory) {
-    PSECURITY_DESCRIPTOR security=NULL;PACL dacl=NULL;
-    DWORD error=GetSecurityInfo(directory,SE_FILE_OBJECT,DACL_SECURITY_INFORMATION,
-        NULL,NULL,&dacl,NULL,&security);
-    if(error!=ERROR_SUCCESS||!dacl){if(security)LocalFree(security);return EACCES;}
+    PSECURITY_DESCRIPTOR security=NULL;
+    DWORD error=GetSecurityInfo(directory,SE_FILE_OBJECT,DACL_SECURITY_INFORMATION|OWNER_SECURITY_INFORMATION,
+        NULL,NULL,NULL,NULL,&security);
+    if(error!=ERROR_SUCCESS||!security){if(security)LocalFree(security);return EACCES;}
     HANDLE token=NULL;DWORD needed=0;TOKEN_USER* user=NULL;int accepted=0;
     if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token))goto done;
     (void)GetTokenInformation(token,TokenUser,NULL,0,&needed);
     if(!needed||needed>65536)goto done;
     user=(TOKEN_USER*)malloc(needed);if(!user)goto done;
     if(!GetTokenInformation(token,TokenUser,user,needed,&needed))goto done;
-    for(DWORD i=0;i<dacl->AceCount;i++) {
-        void* raw=NULL;if(!GetAce(dacl,i,&raw))goto done;
-        ACE_HEADER* header=(ACE_HEADER*)raw;
-        if(header->AceType==ACCESS_DENIED_ACE_TYPE)continue;
-        if(header->AceType!=ACCESS_ALLOWED_ACE_TYPE)goto done;
-        ACCESS_ALLOWED_ACE* ace=(ACCESS_ALLOWED_ACE*)raw;
-        if(header->AceFlags&INHERIT_ONLY_ACE)continue;
-        DWORD writes=FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY|FILE_DELETE_CHILD|DELETE|
-            WRITE_DAC|WRITE_OWNER|GENERIC_WRITE|GENERIC_ALL;
-        PSID sid=(PSID)&ace->SidStart;
-        if((ace->Mask&writes)&&!EqualSid(sid,user->User.Sid)&&
-                !IsWellKnownSid(sid,WinLocalSystemSid)&&!IsWellKnownSid(sid,WinBuiltinAdministratorsSid))goto done;
-    }
-    accepted=1;
+    accepted=ws_windows_protected_descriptor_v1(security,user->User.Sid)==0;
 done:
     if(token)CloseHandle(token);free(user);LocalFree(security);
     return accepted?0:EACCES;

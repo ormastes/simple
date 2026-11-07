@@ -20,6 +20,8 @@ run passed 73 checks. The five modern SSpec narratives and authored manual are
 | Exact unlinked Linux inode plus project blocks/inodes zero releases native owner once | Authorized external exact cleanup; retained native lease | Source present, positive NOT_RUN |
 | Restart with already absent workspace reconciles exact retained charge | New authorized recovery proof bound to immutable project/workspace | IMPLEMENTATION_PENDING; current conservative refusal |
 | Windows GUID/FileID/creation time, protected DACL, exact volume length | Approved disposable dedicated NTFS volume and installed authority | Source present, Windows NOT_RUN |
+| Foreign owner with otherwise trusted DACL must refuse | Actual Windows SDK descriptor regression | Authored native fixture, NOT_RUN |
+| Embedded NUL preserved through actual storage extern calls | Admitted native Simple producer with tagged-text registration | Authored actual extern fixture and two registry specs, NOT_RUN |
 | Windows real over-capacity refusal | Explicitly authorized write inside the dedicated bounded volume | BLOCKED platform fixture |
 | Windows exact-volume disposal or independently proved empty release | Explicit host retention/deletion policy and immutable volume ownership | IMPLEMENTATION_PENDING; current release unsupported |
 | Full host reserve, execution, dirty retention, authorized cleanup, release | Host same-ledger V2 integration and both platform qualified owners | INCOMPLETE |
