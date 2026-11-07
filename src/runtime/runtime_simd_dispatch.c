@@ -50,6 +50,9 @@ int64_t rt_parser_lexical_mask_call_u8x32(int64_t function_address,
 
 #if !defined(SIMPLE_RUNTIME_OPENCL_ONLY)
 
+#if SIMD_HAS_SSE2
+#  include <emmintrin.h>
+#endif
 #if SIMD_CAN_AVX2
 #  include <immintrin.h>
 #endif
@@ -1159,12 +1162,15 @@ SplArray* rt_mlkem_ntt_simd_batch(SplArray* coefficients, bool inverse) {
 
 /* MLKEM_SIMD_END */
 
-#if SIMD_CAN_AVX2
+#if SIMD_HAS_SSE2
 static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color);
-SIMPLE_RUNTIME_TARGET_AVX2
-static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color);
 static void engine2d_blend_into_sse2(int64_t* out, const int64_t* dst,
                                      const int64_t* src, int64_t n);
+#endif
+
+#if SIMD_CAN_AVX2
+SIMPLE_RUNTIME_TARGET_AVX2
+static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color);
 SIMPLE_RUNTIME_TARGET_AVX2
 static void engine2d_blend_into_avx2(int64_t* out, const int64_t* dst,
                                      const int64_t* src, int64_t n);
@@ -1199,6 +1205,9 @@ static void engine2d_fill_into(int64_t* out, int64_t n, int64_t color) {
         engine2d_fill_u32_avx2(out, n, color_word);
         return;
     }
+    engine2d_fill_u32_sse2(out, n, color_word);
+    return;
+#elif SIMD_HAS_SSE2
     engine2d_fill_u32_sse2(out, n, color_word);
     return;
 #elif defined(__riscv) && defined(__riscv_vector)
@@ -1248,7 +1257,7 @@ static inline int64_t engine2d_blend_pixel(int64_t s, int64_t d) {
     return (int64_t)(uint64_t)out;
 }
 
-#if SIMD_CAN_AVX2
+#if SIMD_HAS_SSE2
 static uint32_t engine2d_blend_sse2_pixel(uint32_t s, uint32_t d) {
     uint32_t sa = (s >> 24) & 0xFFu;
     uint32_t da = (d >> 24) & 0xFFu;
@@ -1279,7 +1288,9 @@ static void engine2d_blend_into_sse2(int64_t* out, const int64_t* dst,
         out[i] = (int64_t)(uint64_t)engine2d_blend_sse2_pixel(s, d);
     }
 }
+#endif
 
+#if SIMD_CAN_AVX2
 SIMPLE_RUNTIME_TARGET_AVX2
 static void engine2d_blend_into_avx2(int64_t* out, const int64_t* dst,
                                      const int64_t* src, int64_t n) {
@@ -1389,6 +1400,9 @@ static void engine2d_blend_into(int64_t* out, const int64_t* dst,
         engine2d_blend_into_avx2(out, dst, src, n);
         return;
     }
+    engine2d_blend_into_sse2(out, dst, src, n);
+    return;
+#elif SIMD_HAS_SSE2
     engine2d_blend_into_sse2(out, dst, src, n);
     return;
 #elif defined(__riscv) && defined(__riscv_vector)
@@ -1630,7 +1644,7 @@ SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src) {
     return SIMPLE_RT_NONNULL("rt_engine2d_simd_blend_row_u32", a);
 }
 
-#if SIMD_CAN_AVX2
+#if SIMD_HAS_SSE2
 static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color) {
     __m128i v = _mm_set_epi64x(color, color);
     int64_t i = 0;
@@ -1642,7 +1656,9 @@ static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color) 
         data[i] = color;
     }
 }
+#endif
 
+#if SIMD_CAN_AVX2
 SIMPLE_RUNTIME_TARGET_AVX2
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color) {
     __m256i v = _mm256_set1_epi64x(color);
@@ -1696,6 +1712,9 @@ int64_t rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, 
         engine2d_fill_u32_avx2(data + off, n, color_word);
         return n;
     }
+    engine2d_fill_u32_sse2(data + off, n, color_word);
+    return n;
+#elif SIMD_HAS_SSE2
     engine2d_fill_u32_sse2(data + off, n, color_word);
     return n;
 #elif defined(__riscv) && defined(__riscv_vector)
@@ -1836,7 +1855,9 @@ static void engine2d_blend_boxed_avx2(int64_t* dst, const int64_t* src,
             (int64_t)(uint64_t)s, (int64_t)(uint64_t)d));
     }
 }
+#endif
 
+#if SIMD_HAS_SSE2
 static void engine2d_blend_boxed_sse2(int64_t* dst, const int64_t* src,
                                       int64_t n, uint32_t const_src,
                                       int use_const) {
@@ -2150,6 +2171,12 @@ SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
         }
         return dst;
     }
+#elif SIMD_HAS_SSE2
+    if (!backwards) {
+        engine2d_blend_boxed_sse2(dst_data + d_off, src_data + s_off,
+                                  n, 0u, 0);
+        return dst;
+    }
 #elif defined(__aarch64__) || defined(_M_ARM64)
     if (!backwards) {
         engine2d_blend_boxed_neon(dst_data + d_off, src_data + s_off,
@@ -2210,6 +2237,9 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
     } else {
         engine2d_blend_boxed_sse2(dst_data + off, NULL, n, s, 1);
     }
+    return dst;
+#elif SIMD_HAS_SSE2
+    engine2d_blend_boxed_sse2(dst_data + off, NULL, n, s, 1);
     return dst;
 #elif defined(__aarch64__) || defined(_M_ARM64)
     engine2d_blend_boxed_neon(dst_data + off, NULL, n, s, 1);
