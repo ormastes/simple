@@ -259,11 +259,12 @@ fn sosix_spawn_checked(cmd: text, args: [text]) -> Result<i64, TextIoError>:
     val admitted: text = match sosix_admit_c_string(cmd, false):
         case Ok(v): v
         case Err(e): return Err(e)
-    sosix_require_posix_text_provider()?
+    val on_windows = platform_name() == "windows"
+    if not on_windows: sosix_require_posix_text_provider()?
     if admitted == "": return Err(TextIoError.Io("empty executable name"))
     sosix_arguments_checked(args)?
     var resolved = admitted
-    if not admitted.contains("/"):
+    if not admitted.contains("/") and not (on_windows and (admitted.contains("\\") or admitted.contains(":"))):
         val found = sosix_which_checked(admitted)?
         if val path = found: resolved = path
         else: return Err(TextIoError.Io("SOSIX executable not found: {admitted}"))
@@ -292,8 +293,7 @@ fn sosix_proc_usage(pid: i64) -> SosixProcUsage:
     if pid <= 0:
         return SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
     if sosix_platform() == "windows":
-        # Honest stub: the real Windows backend is a separate work package.
-        return SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
+        return _windows_proc_usage(pid)
 
     val sampled = sosix_run("ps", ["-o", "%cpu=,rss=", "-p", "{pid}"])
     if sampled.exit_code != 0:
@@ -309,6 +309,25 @@ fn sosix_proc_usage(pid: i64) -> SosixProcUsage:
     # `ps` reports rss in kilobytes.
     SosixProcUsage(cpu_pct: _parse_pct(fields[0]), rss_mb: fields[1].to_i64() / 1024, valid: true)
 
+
+# Windows has no `ps`. `tasklist /FI "PID eq N" /FO CSV /NH` prints
+# "image","pid","session","session#","12,345 K"; the last field is the working
+# set. tasklist reports no instantaneous CPU percentage, so cpu_pct stays 0.0
+# (rss is real, valid means "the pid exists and its rss was read").
+fn _windows_proc_usage(pid: i64) -> SosixProcUsage:
+    val none = SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
+    val sampled = sosix_run("tasklist", ["/FI", "PID eq {pid}", "/FO", "CSV", "/NH"])
+    if sampled.exit_code != 0: return none
+    val line = sampled.stdout.trim()
+    if not line.starts_with("\""): return none
+    val cells = line.split("\",\"")
+    if cells.len() < 5: return none
+    if cells[1] != "{pid}": return none
+    var digits = ""
+    for ch in cells[4].split(""):
+        if ch >= "0" and ch <= "9": digits = digits + ch
+    if digits == "": return none
+    SosixProcUsage(cpu_pct: 0.0, rss_mb: digits.to_i64() / 1024, valid: true)
 
 fn _parse_pct(raw: text) -> f64:
     # text has no to_f64() in this lane; `ps` %cpu is always `<int>.<frac>`.

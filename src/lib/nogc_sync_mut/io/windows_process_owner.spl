@@ -95,6 +95,34 @@ fn windows_capacity_headroom_v1(physical_bytes: i64, commit_bytes: i64) -> i64:
 fn windows_process_quote_arg_v1(argument: text) -> text:
     windows_process_quote_arg_linear_v1(argument)
 
+# cmd.exe does not decode CRT argv: it takes the raw tail after /c or /k, so
+# CRT-quoting "echo x& exit 7" makes cmd read the quote as part of the command
+# name (child exit 1 instead of 7). Build `cmd /s /c "<raw tail>"` for cmd;
+# every other program keeps CRT quoting.
+fn windows_process_is_cmd_v1(program: text) -> bool:
+    val lowered = program.lower()
+    var start = 0
+    var i = 0
+    while i < lowered.len():
+        val ch = lowered[i:i + 1]
+        if ch == "/" or ch == "\\" or ch == ":": start = i + 1
+        i = i + 1
+    val base = lowered[start:]
+    base == "cmd.exe" or base == "cmd"
+
+fn windows_process_command_line_v1(program: text, args: [text]) -> text:
+    var command = windows_process_quote_arg_v1(program)
+    val shell_flag = if args.len() >= 2: args[0].lower() else: ""
+    if windows_process_is_cmd_v1(program) and (shell_flag == "/c" or shell_flag == "/k"):
+        var tail = ""
+        var i = 1
+        while i < args.len():
+            tail = tail + (if i > 1: " " else: "") + args[i]
+            i = i + 1
+        return command + " /s " + args[0] + " \"" + tail + "\""
+    for arg in args: command = command + " " + windows_process_quote_arg_v1(arg)
+    command
+
 fn windows_process_path_valid_v1(path: text) -> bool:
     if path.len() < 4 or path[1:2] != ":" or (path[2:3] != "/" and path[2:3] != "\\") or path.contains("\0"):
         return false
@@ -322,8 +350,7 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
             error = "input pin/digest mismatch: " + input.path
             break
         pins = pins.push(pin)
-    var command = windows_process_quote_arg_v1(request.program)
-    for arg in request.args: command = command + " " + windows_process_quote_arg_v1(arg)
+    val command = windows_process_command_line_v1(request.program, request.args)
     var environment = ""
     var ordered = request.environment
     var i = 1
@@ -531,7 +558,7 @@ fn windows_process_collect_v1(lease: WindowsProcessLeaseV1) -> Result<WindowsPro
 
 export WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessPollV1, WindowsProcessLeaseV1
 export windows_process_start_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1
-export windows_process_quote_arg_v1, windows_process_path_valid_v1, windows_process_request_valid_v1
+export windows_process_command_line_v1, windows_process_quote_arg_v1, windows_process_path_valid_v1, windows_process_request_valid_v1
 export windows_process_file_digest_v1
 
 fn windows_process_collected_proof_v1(lease: WindowsProcessLeaseV1) -> bool:
