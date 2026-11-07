@@ -41,7 +41,7 @@ pub fn host_execution_expired_clock_v2() -> HostReservationAuthorizationContextV
     HostReservationAuthorizationContextV1(grant_clock: 190, monotonic_ms: 20,
         policy_revision: 4, revocation_epoch: 2, session_generation: 3)
 
-# mode: success | create-failed | start-failed | inspect-mismatch | inspect-failed | expiry-before-start | short-native-id | effect-expired | intent-obstructed | unsupported-device | wrong-backend.
+# mode: success | create-failed | start-failed | inspect-mismatch | inspect-failed | expiry-before-start | short-native-id | effect-expired | intent-obstructed | unsupported-device | wrong-backend | resolver-success | resolver-recover-failed | resolver-inspect-failed.
 pub fn host_execution_fixture_v2(mode: text, operation_id: text = "operation_1") -> HostExecutionFixtureV2:
     val root = secure_temp_dir("/tmp", "host-execution-fixture").unwrap()
     val state_dir = root + "/provider"
@@ -69,7 +69,15 @@ pub fn host_execution_fixture_v2(mode: text, operation_id: text = "operation_1")
         args: linux_oci_engine_route_v1(engine_policy, inspect_command.args).unwrap(),
         stdout: "workload|1|" + fence_id + "|7|" + operation_id + "|" + (if mode == "inspect-mismatch": "2".repeat(64) else: native_id) +
             "|" + (if mode == "start-failed" or mode == "expiry-before-start" or mode == "short-native-id" or mode == "intent-obstructed": "created" else: "running"), stderr: "", exit_code: if mode == "inspect-failed": 1 else: 0)
-    val results = if mode == "create-failed": [create_result] elif mode == "expiry-before-start" or mode == "short-native-id" or mode == "intent-obstructed": [create_result, inspect_result] else: [create_result, start_result, inspect_result]
+    var results = if mode == "create-failed": [create_result] elif mode == "expiry-before-start" or mode == "short-native-id" or mode == "intent-obstructed": [create_result, inspect_result] else: [create_result, start_result, inspect_result]
+    if mode == "resolver-success":
+        results = [create_result, start_result, inspect_result, inspect_result, inspect_result, inspect_result, inspect_result]
+    elif mode == "resolver-recover-failed" or mode == "resolver-inspect-failed":
+        var failed_inspect = inspect_result
+        failed_inspect.exit_code = 125
+        failed_inspect.stderr = "explicit scripted inspection failure"
+        results = (if mode == "resolver-recover-failed": [create_result, start_result, inspect_result, failed_inspect]
+            else: [create_result, start_result, inspect_result, inspect_result, failed_inspect])
     val provider = LinuxOciRuntimeProviderV1.scripted_with_engine_policy("linux", "podman", state_dir, fence_id, 7,
         engine_policy, engine_observation, engine_observation, results, 100).unwrap()
     assert(provider.set_scripted_effect_clock_v1(if mode == "effect-expired": [190] else: [100, 100]).is_ok())

@@ -9,13 +9,15 @@ use std.nogc_sync_mut.orchestration.host_execution_intent_v1.*
 use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
 use std.nogc_sync_mut.orchestration.host_enrollment_v1.host_enrollment_payload_bytes_v1
 use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.HostReservationIntentV1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.orchestration.host_prepare_request_v1.host_prepare_request_decode_v1
 use std.common.contracts.orchestration.host_execute_request_v1.host_execute_request_decode_v1
 use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_decode_v2
 use std.common.contracts.container.execution_v2.*
 use std.nogc_async_mut.container.api_v2.{simple_container_project_v2, simple_container_recover_v2, simple_container_read_v2}
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
-use std.common.contracts.container.runtime_v1.RUNTIME_STATUS_OK
+use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RUNTIME_STATUS_OK}
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
@@ -67,15 +69,30 @@ fn host_local_status_v1(local: HostLocalRootV1) -> Result<text, text>:
 # Read the operation's protected retained packet and exact journal authority,
 # then inspect the provider again. The request supplies only an operation ID.
 # No create/start/release transition is performed by inspection.
-pub fn host_local_inspect_execution_v1(local: HostLocalRootV1,
-        operation_id: text) -> Result<HostExecutionObservationV2, text>:
+pub struct HostExecutionResolveTurnV2:
+    local: HostLocalRootV1
+    execution: Option<ContainerExecutionRequestV2>
+    observation: Option<HostExecutionObservationV2>
+    error: text
+
+pub struct HostRetainedExecutionV2:
+    operation: OperationEnvelopeV2
+    intent: HostReservationIntentV1
+    execution: ContainerExecutionRequestV2
+    projection: ContainerRequestProjectionV2
+    observation: HostExecutionObservationV2
+
+# Historical data validation, not permission to create/start/clean up. Terminal
+# journal rows remain readable for original completion receipts after cleanup.
+pub fn host_local_retained_execution_v2(local: HostLocalRootV1,
+        operation_id: text) -> Result<HostRetainedExecutionV2, text>:
     if not builder_identifier_valid_v1(operation_id): return Err("host-inspect-operation-invalid")
     val root = local.capacity.journal.root
     val packet = file_read_regular_no_follow_bounded(root + "/host-execute-packets/" + sha256_text(operation_id) + ".sdn", 2097152)?
     val request = host_execution_decode_v2(packet, local.scope)?
     if request.operation.id != operation_id: return Err("host-inspect-operation-mismatch")
     val retained = daemon_operation_exact_v2(local.capacity.journal, request.operation)?
-    if retained.state != "executing" and retained.state != "outcome-unknown":
+    if not ["executing", "outcome-unknown", "completed", "failed", "cancelled"].contains(retained.state):
         return Err("host-inspect-execution-intent-required")
     val runtime_request = request.execution
     val projection = simple_container_project_v2(local.container, runtime_request)?
@@ -84,7 +101,7 @@ pub fn host_local_inspect_execution_v1(local: HostLocalRootV1,
             projection.memory_bytes != request.intent.reservation.memory_bytes or
             runtime_request.plan.service_scope_id != local.config.service_scope_id):
         return Err("host-inspect-request-projection-mismatch")
-    var observation = host_execution_observation_load_v2(root, operation_id)?
+    val observation = host_execution_observation_load_v2(root, operation_id)?
     if container_scope_fence_id_v2(observation.scope)? != container_scope_fence_id_v2(local.scope)?:
         return Err("host-inspect-retained-scope-mismatch")
     if (observation.operation_digest != sha256_text(distributed_encode_operation_v2(request.operation)?) or
@@ -93,21 +110,18 @@ pub fn host_local_inspect_execution_v1(local: HostLocalRootV1,
             observation.issuer_id != request.signed.issuer_id or observation.approver_id != request.approval.approver_id or
             observation.provider_identity_digest != local.binding.provider_identity_digest):
         return Err("host-inspect-retained-observation-mismatch")
-    var container = local.container
-    # A freshly reconstructed provider has no in-memory state. Recover only the
-    # exact retained request/owned journal identity; this never creates/starts.
-    val intent = host_execution_intent_load_v1(root, operation_id)?
-    val recovered = simple_container_recover_v2(container, runtime_request, intent)
-    container = recovered.owner
-    if recovered.operation.status != RUNTIME_STATUS_OK: return Err("host-inspect-recovery-unknown:" + recovered.operation.reason)
-    val inspected_turn = simple_container_read_v2(container, "inspect", runtime_request)
-    val inspected = inspected_turn.operation
+    Ok(HostRetainedExecutionV2(request.operation, request.intent, runtime_request, projection, observation))
+
+fn host_local_record_inspection_v2(local: HostLocalRootV1, retained: HostRetainedExecutionV2,
+        inspected: RuntimeOperationV1) -> Result<HostExecutionObservationV2, text>:
+    var observation = retained.observation
+    val projection = retained.projection
     if inspected.status != RUNTIME_STATUS_OK: return Err("host-inspect-runtime-unknown:" + inspected.reason)
     val identity = inspected.state.identity
     val expected = observation.runtime
     if (str_len(identity.native_id) != 64 or not builder_digest_valid_v1(identity.native_id) or
             identity.native_id != expected.native_id or identity.pod_uid != projection.workload_uid or
-            identity.attempt != projection.attempt or identity.operation_id != operation_id or
+            identity.attempt != projection.attempt or identity.operation_id != retained.execution.plan.operation_id or
             identity.engine != expected.engine or identity.node_boot_id != container_scope_fence_id_v2(local.scope)? or
             identity.provider_generation != local.capacity.ledger.capacity.provider_generation):
         return Err("host-inspect-runtime-identity-mismatch")
@@ -122,8 +136,39 @@ pub fn host_local_inspect_execution_v1(local: HostLocalRootV1,
     observation.observed_monotonic_ms = context.monotonic_ms
     # Preserve the original create/start observation. The latest inspection is
     # a separately guarded fact cache, never another execution authority.
-    val stored = host_execution_inspection_store_v2(root, observation)?
+    val stored = host_execution_inspection_store_v2(local.capacity.journal.root, observation)?
     Ok(observation)
+
+# Persistent consumers retain this complete turn even on recovery/read failure.
+# Only the operation ID comes from the caller; all request/identity facts resolve
+# from the configured protected host store and the actual current Container owner.
+pub fn host_local_resolve_execution_v2(local: HostLocalRootV1,
+        operation_id: text) -> HostExecutionResolveTurnV2:
+    val checked = host_local_retained_execution_v2(local, operation_id)
+    if checked.is_err(): return HostExecutionResolveTurnV2(local, nil, nil, checked.unwrap_err())
+    val retained = checked.unwrap()
+    val intent = host_execution_intent_load_v1(local.capacity.journal.root, operation_id)
+    if intent.is_err(): return HostExecutionResolveTurnV2(local, Some(retained.execution), nil, intent.unwrap_err())
+    var current = local
+    val recovered = simple_container_recover_v2(current.container, retained.execution, intent.unwrap())
+    current.container = recovered.owner
+    if recovered.operation.status != RUNTIME_STATUS_OK:
+        return HostExecutionResolveTurnV2(current, Some(retained.execution), nil, "host-inspect-recovery-unknown:" + recovered.operation.reason)
+    val inspected = simple_container_read_v2(current.container, "inspect", retained.execution)
+    current.container = inspected.owner
+    val observation = host_local_record_inspection_v2(current, retained, inspected.operation)
+    if observation.is_err(): return HostExecutionResolveTurnV2(current, Some(retained.execution), nil, observation.unwrap_err())
+    HostExecutionResolveTurnV2(current, Some(retained.execution), Some(observation.unwrap()), "")
+
+# Compatibility projection for a finite command that closes its writer after
+# the read. Persistent services must use host_local_resolve_execution_v2 above.
+pub fn host_local_inspect_execution_v1(local: HostLocalRootV1,
+        operation_id: text) -> Result<HostExecutionObservationV2, text>:
+    val turn = host_local_resolve_execution_v2(local, operation_id)
+    if turn.error != "": return Err(turn.error)
+    match turn.observation:
+        case Some(value): Ok(value)
+        case nil: Err("host-inspect-observation-unavailable")
 
 fn host_local_run_owned_v1(action: text, local: HostLocalRootV1,
         payload: text, operation_id: text) -> HostLocalCommandReplyV1:
