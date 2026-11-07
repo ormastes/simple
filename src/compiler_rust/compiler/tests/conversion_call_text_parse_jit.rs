@@ -68,3 +68,41 @@ fn main() -> i64:
 "#;
     assert_eq!(run(source), 0);
 }
+
+/// `int(text)` on a SINGLE-character text parses it like `text.to_int()`:
+/// `int("6") == 6`, not the code point 54. Multi-char text was already right
+/// (`int("13") == 13`), which hid the defect. Covers the similar shapes the
+/// LSP sweep hit: literal, local, `[text]` element, fn return, slice, index.
+/// doc/08_tracking/bug/lsp_refactor_tooling_audit_2026_11_07.md
+/// (int_builtin_text_single_char_returns_char_code_jit_2026_11_07)
+#[test]
+fn int_call_of_single_char_text_parses_not_code_point() {
+    let source = r#"
+fn get(xs: [text], i: i64) -> text:
+    xs[i]
+fn main() -> i64:
+    val a = "6"
+    val xs = ["7", "13"]
+    val s = "x5y"
+    if int("6") != 6:
+        return 1
+    if int(a) != 6:
+        return 2
+    if int(xs[0]) != 7:
+        return 3
+    if int(get(xs, 0)) != 7:
+        return 4
+    if int(s[1:2]) != 5:
+        return 5
+    if int(s[1]) != 5:
+        return 6
+    if i64("0") != 0:
+        return 7
+    if int("x") != 0:
+        return 8
+    if int(xs[1]) != 13:
+        return 9
+    0
+"#;
+    assert_eq!(run(source), 0);
+}
