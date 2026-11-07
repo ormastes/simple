@@ -26,6 +26,28 @@ struct DistributedOperationJournalV2:
     operations: {text: DistributedOperationStateV2}
     owned_lock: Option<FileLockOwnerV2> = nil
 
+# Canonical in-process history data, not a decoder/authority token. Consumers
+# build once through history_batch for the actual fixed current owner.
+pub struct DistributedOperationHistoryV2:
+    envelope_digest: text
+    admitted_sequence: i64
+    last_from_state: text
+    last_to_state: text
+    last_outcome_digest: text
+    last_sequence: i64
+    last_commit_digest: text
+
+pub struct DistributedOperationJournalHistoryBatchV2:
+    authority_digest: text
+    head_commit_digest: text
+    head_sequence: i64
+    revision_endpoints: Dict<text, i64>
+    operations: Dict<text, DistributedOperationHistoryV2>
+
+struct OperationReplaySnapshotV2:
+    rows: {text: DistributedOperationStateV2}
+    history: DistributedOperationJournalHistoryBatchV2
+
 fn operation_event_encode_v2(row: DistributedOperationStateV2) -> text:
     task_runner_storage_escape_v1(row.state + "\n" + row.outcome_digest + "\n" + row.envelope)
 
@@ -114,11 +136,21 @@ pub fn distributed_operation_journal_open_v2(root: text, authority_digest: text,
 
 fn distributed_operation_journal_replay_v2(root: text, authority_digest: text,
         maximum_events: i64, held: i64, lease_digest: text) -> Result<DistributedOperationJournalV2, text>:
+    val snapshot = operation_replay_snapshot_v2(root, authority_digest, maximum_events)?
+    Ok(DistributedOperationJournalV2(root, authority_digest, snapshot.history.head_commit_digest,
+        snapshot.history.head_sequence, maximum_events, held, lease_digest, snapshot.rows))
+
+# One canonical parser/fold for both ordinary replay and history qualification.
+# No second writer/lock or Host-specific operation semantics are introduced.
+fn operation_replay_snapshot_v2(root: text, authority_digest: text,
+        maximum_events: i64) -> Result<OperationReplaySnapshotV2, text>:
     val latest = database_wal_current_v1(root + "/database-wal", authority_digest)?
     var cursor = latest
     var sequence: i64 = 0
     var expected_last: i64 = -1
     var history: [WalEntry] = []
+    var commits: [text] = []
+    var endpoints: Dict<text, i64> = {}
     while cursor != "":
         val revision = database_wal_revision_open_v1(root + "/database-wal", cursor)?
         if revision.database_identity != authority_digest: return Err("OPERATION_WAL_AUTHORITY_CHANGED")
@@ -127,15 +159,18 @@ fn distributed_operation_journal_replay_v2(root: text, authority_digest: text,
             sequence = revision.last_sequence
             if sequence > maximum_events: return Err("OPERATION_WAL_REPLAY_BOUND_EXCEEDED")
         val entries = database_wal_segment_read_strict_v1(root + "/database-wal", revision)?
+        endpoints[revision.digest] = revision.last_sequence
         var index = entries.len()
         while index > 0:
             index = index - 1
             history = history.push(entries[index])
+            commits = commits.push(revision.digest)
             if history.len() > maximum_events: return Err("OPERATION_WAL_REPLAY_BOUND_EXCEEDED")
         expected_last = revision.first_sequence - 1
         cursor = revision.parent
     if latest != "" and expected_last != 0: return Err("OPERATION_WAL_HISTORY_INCOMPLETE")
     var rows: {text: DistributedOperationStateV2} = {}
+    var origins: Dict<text, DistributedOperationHistoryV2> = {}
     var index = history.len()
     while index > 0:
         index = index - 1
@@ -144,9 +179,34 @@ fn distributed_operation_journal_replay_v2(root: text, authority_digest: text,
             return Err("OPERATION_WAL_EVENT_INVALID")
         val row = operation_event_decode_v2(entry.data)?
         if entry.row_key != row.operation_id: return Err("OPERATION_WAL_IDENTITY_CHANGED")
+        val from_state = if rows.contains_key(row.operation_id): rows[row.operation_id].state else: ""
+        val admitted_sequence = if origins.contains_key(row.operation_id): origins[row.operation_id].admitted_sequence else: entry.sequence
         rows = operation_event_apply_v2(rows, row)?
-    Ok(DistributedOperationJournalV2(root, authority_digest, latest, sequence,
-        maximum_events, held, lease_digest, rows))
+        origins[row.operation_id] = DistributedOperationHistoryV2(row.envelope_digest, admitted_sequence,
+            from_state, row.state, row.outcome_digest, entry.sequence, commits[index])
+    Ok(OperationReplaySnapshotV2(rows: rows, history: DistributedOperationJournalHistoryBatchV2(
+        authority_digest: authority_digest, head_commit_digest: latest, head_sequence: sequence,
+        revision_endpoints: endpoints, operations: origins)))
+
+pub fn distributed_operation_journal_history_batch_v2(owner: DistributedOperationJournalV2) -> Result<DistributedOperationJournalHistoryBatchV2, text>:
+    val held = operation_owner_check_v2(owner)?
+    val before = database_wal_current_v1(owner.root + "/database-wal", owner.authority_digest)?
+    if before != owner.revision: return Err("OPERATION_JOURNAL_REVISION_STALE")
+    val snapshot = operation_replay_snapshot_v2(owner.root, owner.authority_digest, owner.maximum_events)?
+    val still_held = operation_owner_check_v2(owner)?
+    val after = database_wal_current_v1(owner.root + "/database-wal", owner.authority_digest)?
+    if (after != owner.revision or snapshot.history.head_commit_digest != owner.revision or
+            snapshot.history.head_sequence != owner.sequence): return Err("OPERATION_JOURNAL_HISTORY_MOVED")
+    if snapshot.rows.len() != owner.operations.len(): return Err("OPERATION_JOURNAL_INDEX_MISMATCH")
+    for id in snapshot.rows.keys():
+        if not owner.operations.contains_key(id): return Err("OPERATION_JOURNAL_INDEX_MISMATCH")
+        val actual = snapshot.rows[id]
+        val indexed = owner.operations[id]
+        if (actual.operation_id != id or indexed.operation_id != id or actual.operation_id != indexed.operation_id or
+                actual.envelope != indexed.envelope or actual.envelope_digest != indexed.envelope_digest or
+                actual.state != indexed.state or actual.outcome_digest != indexed.outcome_digest):
+            return Err("OPERATION_JOURNAL_INDEX_MISMATCH")
+    Ok(snapshot.history)
 
 fn distributed_operation_journal_commit_v2(owner: DistributedOperationJournalV2,
         row: DistributedOperationStateV2) -> Result<DistributedOperationJournalV2, text>:
