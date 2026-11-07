@@ -133,6 +133,24 @@ jobs:
           # submodule" and a spurious RED on every PR (2026-09-26, PR #1619/#1621).
           git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
               { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
+          # The private-import baseline names source files outside the fixed
+          # sparse roots above (for example examples/12_business). Materialize
+          # exactly the directories needed by the current baseline so the
+          # checker can distinguish real stale entries from sparse omissions.
+          # Paths travel through stdin; baseline data is never interpolated
+          # into shell commands.
+          if [ ! -s scripts/check/private_import_baseline.txt ]; then
+              echo "fast-gates: private-import baseline is missing or empty"
+              exit 1
+          fi
+          source_dirs=$(mktemp)
+          sorted_source_dirs=$(mktemp)
+          trap 'rm -f "$source_dirs" "$sorted_source_dirs"' EXIT
+          awk -F'|' 'NF >= 2 && $1 != "" { path = $1; sub(/\/[^/]+$/, "", path); if (path != $1) print path }' \
+              scripts/check/private_import_baseline.txt > "$source_dirs"
+          LC_ALL=C sort -u "$source_dirs" > "$sorted_source_dirs"
+          git sparse-checkout add --stdin < "$sorted_source_dirs" ||
+              { echo "fast-gates: could not materialize private-import source directories"; exit 1; }
           # One runner, one manifest, for both local and remote (goal item 5,
           # WP3): this used to be 9 hardcoded `run_gate` lines that had
           # drifted from the pre-push `local` tier (rust-dup --rev vs --range,
