@@ -1,0 +1,31 @@
+# Native Unix reservation-entry controls. Invalid pins and an empty binding
+# deliberately prove expiry/invalid-deadline refusal precedes child preparation.
+# Final-fork, child-exec and Darwin resume controls require the live C fixture.
+use std.spec
+
+@unsafe(reason: "reserves exact native process owner before child effects", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserve_value() -> i64
+@unsafe(reason: "starts only through retained deadline-admitted reservation", capabilities: [ffi])
+extern fn rt_process_observation_v5_reserved_start_admitted_value(token: i64, executable: i64, cwd: i64, binding: [u8], expires_at_unix_ms: i64) -> i64
+@unsafe(reason: "queries exact retained reservation state", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_state_value(token: i64) -> i64
+@unsafe(reason: "confirms release only for actual terminal or no-child state", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_confirm_release_value(token: i64) -> i64
+
+describe "Unix submission deadline at the retained process owner":
+    it "REQ-SUBMIT-EXPIRY-001 consumes an expired attempt without permitting a replay":
+        val token = rt_process_observation_v4_reserve_value()
+        expect(token > 0).to_equal(true)
+        val result = rt_process_observation_v5_reserved_start_admitted_value(token, -1, -1, [], 1)
+        expect(result < 0).to_equal(true)
+        expect(rt_process_observation_v4_reserved_state_value(token)).to_equal(3)
+        expect(rt_process_observation_v5_reserved_start_admitted_value(token, -1, -1, [], 9223372036854775807) < 0).to_equal(true)
+        expect(rt_process_observation_v4_reserved_state_value(token)).to_equal(3)
+        expect(rt_process_observation_v4_reserved_confirm_release_value(token)).to_equal(1)
+
+    it "REQ-SUBMIT-EXPIRY-002 refuses a missing deadline with retained no-child ownership":
+        val token = rt_process_observation_v4_reserve_value()
+        expect(token > 0).to_equal(true)
+        expect(rt_process_observation_v5_reserved_start_admitted_value(token, -1, -1, [], 0) < 0).to_equal(true)
+        expect(rt_process_observation_v4_reserved_state_value(token)).to_equal(3)
+        expect(rt_process_observation_v4_reserved_confirm_release_value(token)).to_equal(1)
