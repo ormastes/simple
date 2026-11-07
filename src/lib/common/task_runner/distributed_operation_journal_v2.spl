@@ -10,6 +10,9 @@ use std.nogc_sync_mut.database.wal_segmented.{database_wal_current_v1,
     database_wal_revision_open_v1, database_wal_segment_read_strict_v1, database_wal_commit_v1}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write, file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io_runtime.{dir_create, file_delete}
+use std.nogc_sync_mut.io.file_lock_owned_v2.{FileLockOwnerV2, FileLockOpenV2,
+    FileLockReleaseStateV2, file_lock_open_owned_v2, file_lock_release_owned_v2,
+    file_lock_owner_live_v2, file_lock_owner_state_v2}
 
 struct DistributedOperationJournalV2:
     root: text
@@ -20,6 +23,7 @@ struct DistributedOperationJournalV2:
     parent_lock: i64
     lease_digest: text
     operations: {text: DistributedOperationStateV2}
+    owned_lock: Option<FileLockOwnerV2> = nil
 
 fn operation_event_encode_v2(row: DistributedOperationStateV2) -> text:
     task_runner_storage_escape_v1(row.state + "\n" + row.outcome_digest + "\n" + row.envelope)
@@ -52,7 +56,10 @@ fn operation_event_apply_v2(rows: {text: DistributedOperationStateV2},
     Ok(updated)
 
 fn operation_owner_check_v2(owner: DistributedOperationJournalV2) -> Result<bool, text>:
-    if owner.parent_lock < 0: return Err("OPERATION_JOURNAL_OWNER_INVALID")
+    if val held = owner.owned_lock:
+        if not file_lock_owner_live_v2(held): return Err("OPERATION_JOURNAL_OWNER_INVALID")
+    else:
+        if owner.parent_lock < 0: return Err("OPERATION_JOURNAL_OWNER_INVALID")
     val lease = file_read_regular_no_follow_bounded(owner.root + "/parent.lease", 512)?
     if sha256_text(lease) != owner.lease_digest: return Err("OPERATION_JOURNAL_LEASE_STALE")
     Ok(true)
@@ -129,9 +136,12 @@ fn distributed_operation_journal_commit_v2(owner: DistributedOperationJournalV2,
     val projection = operation_event_apply_v2(owner.operations, row)?
     Ok(DistributedOperationJournalV2(owner.root, owner.authority_digest,
         revision.digest, revision.last_sequence, owner.maximum_events, owner.parent_lock,
-        owner.lease_digest, projection))
+        owner.lease_digest, projection, owner.owned_lock))
 
 fn distributed_operation_journal_close_v2(owner: DistributedOperationJournalV2) -> Result<bool, text>:
+    # The Result adapter cannot carry cleanup after a partial owned close.
+    # Reject before touching the lease; owned callers must retain typed turn.
+    if owner.owned_lock.is_some(): return Err("OPERATION_JOURNAL_OWNED_CLOSE_REQUIRED")
     val checked = operation_owner_check_v2(owner)?
     if not file_delete(owner.root + "/parent.lease"): return Err("OPERATION_JOURNAL_LEASE_RELEASE_FAILED")
     if not file_unlock(owner.parent_lock): return Err("OPERATION_JOURNAL_UNLOCK_FAILED")
@@ -154,3 +164,103 @@ fn distributed_operation_journal_recover_execution_v2(owner: DistributedOperatio
     if prior.state != "executing": return Ok(owner)
     val uncertain = distributed_operation_transition_v2(prior, "outcome-unknown", "")?
     distributed_operation_journal_commit_v2(owner, uncertain)
+
+# Additive owned entrypoint: callers must exhaustively retain CleanupRequired.
+# The legacy Result entrypoint remains a compatibility surface until all old
+# owners migrate; it is not admitted for new host/controller service startup.
+pub struct DistributedOperationJournalOpenCleanupV2:
+    root: text
+    authority_digest: text
+    lease_digest: text
+    lease_published: bool
+    lock: FileLockOwnerV2
+
+pub enum DistributedOperationJournalOpenV2:
+    Ready(DistributedOperationJournalV2)
+    Rejected(text)
+    CleanupRequired(DistributedOperationJournalOpenCleanupV2, text)
+
+pub struct DistributedOperationJournalCleanupTurnV2:
+    cleanup: Option<DistributedOperationJournalOpenCleanupV2>
+    closed: bool
+    error: text
+    state: FileLockReleaseStateV2
+
+pub fn distributed_operation_journal_open_cleanup_v2(cleanup: DistributedOperationJournalOpenCleanupV2) -> DistributedOperationJournalCleanupTurnV2:
+    var pending = cleanup
+    val phase = file_lock_owner_state_v2(pending.lock)
+    # A stale copied cleanup cannot read/delete a subsequent owner's lease.
+    if phase == "stale":
+        return DistributedOperationJournalCleanupTurnV2(nil, false,
+            "OPERATION_JOURNAL_OWNER_STALE", FileLockReleaseStateV2.Stale)
+    if pending.lease_published:
+        if phase != "held":
+            return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
+                "OPERATION_JOURNAL_CLEANUP_PHASE_INVALID", FileLockReleaseStateV2.Unknown)
+        val lease = file_read_regular_no_follow_bounded(pending.root + "/parent.lease", 512)
+        if lease.is_err():
+            return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
+                "OPERATION_JOURNAL_LEASE_READ_FAILED", FileLockReleaseStateV2.Retained)
+        if sha256_text(lease.unwrap()) != pending.lease_digest:
+            return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
+                "OPERATION_JOURNAL_LEASE_STALE", FileLockReleaseStateV2.Retained)
+        if not file_delete(pending.root + "/parent.lease"):
+            return DistributedOperationJournalCleanupTurnV2(Some(pending), false,
+                "OPERATION_JOURNAL_LEASE_RELEASE_FAILED", FileLockReleaseStateV2.Retained)
+        pending.lease_published = false
+    val released = file_lock_release_owned_v2(pending.lock)
+    if val held = released.owner:
+        pending.lock = held
+        return DistributedOperationJournalCleanupTurnV2(Some(pending), false, released.error, released.state)
+    DistributedOperationJournalCleanupTurnV2(nil, released.closed, released.error, released.state)
+
+fn operation_open_reject_owned_v2(cleanup: DistributedOperationJournalOpenCleanupV2,
+        error: text) -> DistributedOperationJournalOpenV2:
+    val released = distributed_operation_journal_open_cleanup_v2(cleanup)
+    if val pending = released.cleanup:
+        return DistributedOperationJournalOpenV2.CleanupRequired(pending, error + ":" + released.error)
+    if released.error != "":
+        return DistributedOperationJournalOpenV2.Rejected(error + ":" + released.error)
+    DistributedOperationJournalOpenV2.Rejected(error)
+
+pub fn distributed_operation_journal_open_owned_v2(root: text, authority_digest: text,
+        nonce: text, maximum_events: i64) -> DistributedOperationJournalOpenV2:
+    if (root == "" or not builder_digest_valid_v1(authority_digest) or
+            not builder_digest_valid_v1(nonce) or maximum_events <= 0 or maximum_events > 100000):
+        return DistributedOperationJournalOpenV2.Rejected("OPERATION_JOURNAL_CONFIGURATION_INVALID")
+    dir_create(root, true)
+    val acquired = file_lock_open_owned_v2(root + "/parent.lock", 1)
+    var held: Option<FileLockOwnerV2> = nil
+    match acquired:
+        case FileLockOpenV2.Ready(lock): held = Some(lock)
+        case FileLockOpenV2.Rejected(error): return DistributedOperationJournalOpenV2.Rejected(error)
+        case FileLockOpenV2.CleanupRequired(lock, error):
+            return DistributedOperationJournalOpenV2.CleanupRequired(
+                DistributedOperationJournalOpenCleanupV2(root, authority_digest, "", false, lock), error)
+    val lock = held.unwrap()
+    val lease = "DISTRIBUTED-OPERATION-LEASE-V2\n{nonce}\n{authority_digest}\n"
+    var cleanup = DistributedOperationJournalOpenCleanupV2(root, authority_digest,
+        sha256_text(lease), false, lock)
+    if not file_atomic_write(root + "/parent.lease", lease):
+        return operation_open_reject_owned_v2(cleanup, "OPERATION_JOURNAL_LEASE_PUBLICATION_FAILED")
+    cleanup.lease_published = true
+    val replay = distributed_operation_journal_replay_v2(root, authority_digest,
+        maximum_events, -1, cleanup.lease_digest)
+    if replay.is_err(): return operation_open_reject_owned_v2(cleanup, replay.unwrap_err())
+    val row = replay.unwrap()
+    DistributedOperationJournalOpenV2.Ready(DistributedOperationJournalV2(row.root,
+        row.authority_digest, row.revision, row.sequence, row.maximum_events, -1,
+        row.lease_digest, row.operations, Some(lock)))
+
+pub fn distributed_operation_journal_close_owned_v2(owner: DistributedOperationJournalV2) -> DistributedOperationJournalCleanupTurnV2:
+    if val lock = owner.owned_lock:
+        return distributed_operation_journal_open_cleanup_v2(
+            DistributedOperationJournalOpenCleanupV2(owner.root, owner.authority_digest,
+                owner.lease_digest, true, lock))
+    DistributedOperationJournalCleanupTurnV2(nil, false,
+        "OPERATION_JOURNAL_LEGACY_OWNER_REQUIRES_LEGACY_CLOSE", FileLockReleaseStateV2.Stale)
+
+export DistributedOperationJournalV2, DistributedOperationJournalOpenV2
+export DistributedOperationJournalOpenCleanupV2, DistributedOperationJournalCleanupTurnV2
+export distributed_operation_journal_open_owned_v2, distributed_operation_journal_open_cleanup_v2
+export distributed_operation_journal_close_owned_v2

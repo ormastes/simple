@@ -4541,3 +4541,27 @@ fn errno_from_io_error(e: &std::io::Error) -> i64 {
         _ => 5, // EIO
     }
 }
+
+// Owned locking never enters the legacy reentrant path cache above. The exact
+// canonical native generation owner is shared with compiled/JIT callers.
+pub fn rt_file_lock_owned_acquire_v2(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let timeout = match args.get(1) { Some(Value::Int(n)) => *n, _ => return Ok(Value::Int(0)) };
+    let bytes = path.as_bytes();
+    Ok(Value::Int(unsafe {
+        simple_runtime::value::sffi::file_lock_owned_v2::rt_file_lock_owned_acquire_v2(
+            bytes.as_ptr(), bytes.len() as u64, timeout)
+    }))
+}
+pub fn rt_file_lock_owned_state_v2(args: &[Value]) -> Result<Value, CompileError> {
+    let token = match args.first() { Some(Value::Int(n)) => *n, _ => return Ok(Value::Int(0)) };
+    Ok(Value::Int(unsafe {
+        simple_runtime::value::sffi::file_lock_owned_v2::rt_file_lock_owned_state_v2(token)
+    }))
+}
+pub fn rt_file_lock_owned_release_v2(args: &[Value]) -> Result<Value, CompileError> {
+    let token = match args.first() { Some(Value::Int(n)) => *n, _ => return Ok(Value::Int(0)) };
+    Ok(Value::Int(unsafe {
+        simple_runtime::value::sffi::file_lock_owned_v2::rt_file_lock_owned_release_v2(token)
+    }))
+}

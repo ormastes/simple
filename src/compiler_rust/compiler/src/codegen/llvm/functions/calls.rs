@@ -217,7 +217,7 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // corrupting the pointer/length pair fed to UTF-8 validation deeper
         // in the call chain. See
         // doc/08_tracking/bug/windows_stage2_parse_shard_file_lock_arg_corruption_2026-08-31.md.
-        | "rt_file_lock" => Some(&[0]),
+        | "rt_file_lock" | "rt_file_lock_owned_acquire_v2" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
         "rt_file_copy"
         | "rt_file_rename"

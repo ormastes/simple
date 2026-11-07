@@ -347,6 +347,7 @@ fn compile_c_runtime_sources() {
         "runtime_file_view.c",
         "runtime_memory_headroom.c",
         "runtime_fd_stat_rust_bridge.c",
+        "runtime_file_lock_owned_v2_rust_bridge.c",
         "runtime_font.c",
         "runtime_memtrack.c",
         // Shared capture state uses this runtime owner's text and builder ABI.

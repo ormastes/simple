@@ -1645,6 +1645,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_munmap", file_io::rt_munmap);
     insert_simple!("rt_msync", file_io::rt_msync);
     insert_simple!("rt_file_unlock", file_io::rt_file_unlock);
+    insert_simple!("rt_file_lock_owned_acquire_v2", file_io::rt_file_lock_owned_acquire_v2);
+    insert_simple!("rt_file_lock_owned_state_v2", file_io::rt_file_lock_owned_state_v2);
+    insert_simple!("rt_file_lock_owned_release_v2", file_io::rt_file_lock_owned_release_v2);
     insert_simple!("rt_file_write_bytes", file_io::rt_file_write_bytes);
     insert_simple!("rt_file_write_bytes_array", file_io::rt_file_write_bytes);
     insert_simple!("rt_file_wrap_smf_dynlib", file_io::rt_file_wrap_smf_dynlib);

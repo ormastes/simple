@@ -3349,7 +3349,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // (ptr, len) before the call, misaligning the (ptr, len, timeout)
         // ABI. Mirrors the LLVM backend fix in
         // codegen/llvm/functions/calls.rs.
-        | "rt_file_lock" => Some(&[0]),
+        | "rt_file_lock" | "rt_file_lock_owned_acquire_v2" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
         // rt_file_write_text / rt_file_append_text take (ptr,len) PAIRS
         // (see runtime file_ops.rs); they were wrongly in text_cstr_arg_indices,

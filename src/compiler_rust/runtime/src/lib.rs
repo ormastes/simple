@@ -654,6 +654,9 @@ fn runtime_symbol_table_file_lock_contracts_resolve_exact_providers() {
     for (name, expected) in [
         ("rt_file_lock", value::sffi::file_io::rt_file_lock as *const u8),
         ("rt_file_unlock", value::sffi::file_io::rt_file_unlock as *const u8),
+        ("rt_file_lock_owned_acquire_v2", value::sffi::file_lock_owned_v2::rt_file_lock_owned_acquire_v2 as *const u8),
+        ("rt_file_lock_owned_state_v2", value::sffi::file_lock_owned_v2::rt_file_lock_owned_state_v2 as *const u8),
+        ("rt_file_lock_owned_release_v2", value::sffi::file_lock_owned_v2::rt_file_lock_owned_release_v2 as *const u8),
     ] {
         let actual = RUNTIME_SYMBOL_ENTRIES
             .iter()
