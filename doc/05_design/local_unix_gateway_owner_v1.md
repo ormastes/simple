@@ -127,8 +127,12 @@ has a separate focused `local_unix_fork_origin_v1_selfcheck.c`: both parent owne
 locks and the real runtime immortal-registry spinlock are held across fork;
 all five child operations must return NULL without allocation or side
 effects while the parent retains its queued bytes and working connection. A
-separate virgin-registry fork tests first-use behavior. This new case is NOT_RUN
-pending independent source review and the allocated serialized check.
+separate virgin-registry fork tests first-use behavior. This new case passed
+once on source commit `5610d1dc5ecd21746673994395434618b96618db` after independent
+Astra review: build 0, run 0, all 15 recorded source inputs unchanged. Evidence:
+`doc/06_spec/01_unit/lib/io/local_ipc_v1_fork_native_evidence.sdn`. This is the
+single focused run at the six-cycle conservative cap; no earlier green fixture
+was repeated and no further repair/retry cycle was used.
 The fixture observes the actual unchanged namespace identity; namespace-changing
 and PID-collision execution scenarios are NOT_RUN and require separate evidence.
 It also injects one namespace-stat EIO in a virgin child's genuinely initialized

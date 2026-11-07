@@ -39,7 +39,8 @@ one 15-second run and a private TMPDIR. Build took 2.206 seconds and run took
 128 MiB cap. Preserve the evidence; do not repeat this passing run unchanged.
 
 The separate `src/runtime/test/local_unix_fork_origin_v1_selfcheck.c` is authored
-for the subsequent fork-safety correction and is **NOT_RUN**. It holds both parent
+for the subsequent fork-safety correction **PASSED** once on source
+`5610d1dc5ecd21746673994395434618b96618db`, after independent Astra review. It holds both parent
 registry and operation locks plus the actual runtime immortal-registry spinlock
 across fork, requires all five inherited-owner calls to return NULL without
 allocation, consuming bytes, connecting, writing or closing, then exercises
@@ -51,3 +52,14 @@ observation failure with a `--wrap=stat` wrapper that delegates every other call
 to the real provider. Restored observation must leave the owner quarantined;
 all five future calls refuse before stat or socket effects. Privileged namespace
 changes and PID-collision execution remain NOT_RUN.
+
+Exact evidence is in `local_ipc_v1_fork_native_evidence.sdn` and captured output
+in `local_ipc_v1_fork_native_stdout.txt`. Build exited 0 in 2.608 seconds; run
+exited 0 in 0.203 seconds. All 15 before/after source hashes matched; peak
+allocated artifacts were 3,584,000 bytes under the 128 MiB limit. The real CoreC
+allocator is included exactly once by the fixture so its actual registry lock
+can be held. No alternate allocator or registry supplies the witness. The
+`--wrap=stat` hook injects only the documented EIO, otherwise delegating to the
+real provider. The Simple facade, spoofed namespace-object rejection, actual
+namespace transition, and full gateway remain unexecuted. The six-cycle cap is
+converged; no unchanged green run or further fix loop followed.
