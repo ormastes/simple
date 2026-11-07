@@ -1,0 +1,35 @@
+# Prevention: a retained-image reference must carry the image REVISION
+# checksum (simpleos_host_gpu_image_revision), the same value a full entry
+# stores. A reference built with the unrelated readback checksum fails closed
+# as stale instead of resolving.
+use std.spec
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    simpleos_host_gpu_image_resource,
+    simpleos_host_gpu_image_resource_full,
+    simpleos_host_gpu_image_resource_ref,
+    simpleos_host_gpu_image_revision,
+    simpleos_host_gpu_resolve_retained_images
+}
+use std.common.gpu.simpleos_host_gpu_protocol.{simpleos_host_gpu_readback_checksum}
+
+describe "retained image reference checksum":
+    it "stored resource checksum equals the image revision":
+        val px: [u32] = [0xff112233u32, 0xff112233u32, 0xff112233u32, 0xff112233u32]
+        val res = simpleos_host_gpu_image_resource("asset://i", 2, 2, px)
+        expect(res.pixel_checksum).to_equal(simpleos_host_gpu_image_revision(2, 2, px, 4))
+
+    it "resolves a reference using the revision checksum":
+        val px: [u32] = [0xff112233u32, 0xff112233u32, 0xff112233u32, 0xff112233u32]
+        val f1 = simpleos_host_gpu_resolve_retained_images([simpleos_host_gpu_image_resource_full("asset://i", 2, 2, px)], [])
+        val rev = simpleos_host_gpu_image_revision(2, 2, px, 4)
+        val f2 = simpleos_host_gpu_resolve_retained_images([simpleos_host_gpu_image_resource_ref("asset://i", 2, 2, rev)], f1.retained)
+        expect(f2.ok).to_be(true)
+        expect(f2.resolved.len()).to_equal(1)
+
+    it "rejects a reference built with the readback checksum":
+        val px: [u32] = [0xff112233u32, 0xff112233u32, 0xff112233u32, 0xff112233u32]
+        val f1 = simpleos_host_gpu_resolve_retained_images([simpleos_host_gpu_image_resource_full("asset://i", 2, 2, px)], [])
+        val wrong = simpleos_host_gpu_readback_checksum(px, 4)
+        val f2 = simpleos_host_gpu_resolve_retained_images([simpleos_host_gpu_image_resource_ref("asset://i", 2, 2, wrong)], f1.retained)
+        expect(f2.ok).to_be(false)
+        expect(f2.reason).to_equal("stale-image-resource")

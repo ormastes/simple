@@ -1,0 +1,41 @@
+# Prevention: pinned-app click policy. A visible window of the app wins over a
+# minimized one regardless of z-order; only when every window of the app is
+# minimized is the most recent (highest z) one restored; no window -> launch.
+use std.spec
+use common.ui.taskbar_model.{AppRef, TaskbarModel, WindowRef}
+use common.ui.window_scene.{
+    shared_wm_dispatch_pointer,
+    shared_wm_focused_window_id,
+    simple_gui_internal_window,
+    simple_gui_internal_window_scene
+}
+
+fn _taskbar(min1: bool, min2: bool) -> TaskbarModel:
+    TaskbarModel(
+        pinned: [AppRef(app_id: "demo.app", display_name: "Demo", icon: "demo")],
+        running: [
+            WindowRef(window_id: "win1", app_id: "demo.app", title: "One", minimized: min1),
+            WindowRef(window_id: "win2", app_id: "demo.app", title: "Two", minimized: min2)
+        ],
+        tray: []
+    )
+
+fn _scene(min1: bool, min2: bool):
+    simple_gui_internal_window_scene(800, 600, "cpu", [
+        simple_gui_internal_window("surf1", "win1", 1u64, "demo.app", "One", 10, 40, 300, 200, "", min1, false, 1),
+        simple_gui_internal_window("surf2", "win2", 2u64, "demo.app", "Two", 80, 120, 300, 200, "", min2, false, 2)
+    ])
+
+describe "pinned app click policy":
+    it "prefers a visible window over a higher-z minimized one":
+        val r = shared_wm_dispatch_pointer(_scene(false, true), _taskbar(false, true), 10, 575, "left", "down", 1000, "", 0)
+        expect(r.action).to_equal("focus_window")
+        expect(r.window_id).to_equal("win1")
+        expect(r.scene.windows[1].minimized).to_equal(true)
+
+    it "restores the most recent minimized window when none is visible":
+        val r = shared_wm_dispatch_pointer(_scene(true, true), _taskbar(true, true), 10, 575, "left", "down", 1000, "", 0)
+        expect(r.action).to_equal("focus_window")
+        expect(r.window_id).to_equal("win2")
+        expect(r.scene.windows[1].minimized).to_equal(false)
+        expect(shared_wm_focused_window_id(r.scene)).to_equal("win2")
