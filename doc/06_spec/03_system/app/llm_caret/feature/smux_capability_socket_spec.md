@@ -1,7 +1,8 @@
 # Actual compiled smux capability socket client
 
 Source: `test/03_system/app/llm_caret/feature/smux_capability_socket_spec.spl`.
-Shared support: `test/helpers/smux_owned_process_fixture.spl`, imported through
+Shared support: `test/helpers/smux_capability_socket_fixture.spl` and
+`test/helpers/smux_owned_process_fixture.spl`, imported through
 the repository's existing `test.helpers.*` convention.
 Status: **AUTHORED_UNRUN**. No build, native run, socket test or docgen executed.
 

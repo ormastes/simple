@@ -1,0 +1,328 @@
+# AUTHORED_UNRUN. Actual compiled public route and supplied enrolled authority.
+# Every post-start failure returns its retained fixture carrier before assertions.
+use std.spec.step
+use app.io.mod.{process_run_bounded, file_hash_sha256, file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_write}
+use test.helpers.smux_owned_process_fixture.{SmuxOwnedFixtureConfig, owned_fixture_config_for,
+    owned_fixture_text, owned_fixture_path, owned_fixture_diagnostic, owned_fixture_private_path}
+use test.helpers.smux_capability_socket_fixture.{SmuxCapabilitySocketFixture, smux_capability_fixture_start,
+    smux_capability_fixture_request, smux_capability_fixture_stop, capability_socket_note}
+use test.helpers.smux_binding_authority_fixture_v3.{SignedBindingConfigV3, signed_binding_authority_config_v3,
+    signed_binding_fields_v3, signed_binding_int_v3, signed_binding_sign_v3}
+use os.apps.smux.runtime_binding_target_v3.{SmuxRuntimeTargetV3, smux_runtime_target_decode_v3}
+use os.apps.smux.runtime_binding_request_v3.{SmuxRuntimeBindRequestV3, smux_runtime_bind_request_token_v3,
+    smux_runtime_bind_request_digest_v3}
+use os.apps.smux.runtime_binding_reply_v3.{SmuxRuntimeBindingReplyV3, smux_runtime_binding_reply_decode_v3}
+use std.common.contracts.container.stream_v2.{ContainerOutputPlanV2, container_output_plan_decode_v2,
+    container_output_plan_digest_v2}
+use std.common.contracts.orchestration.controller_parent_budget_v1.controller_parent_budget_digest_v1
+use std.common.contracts.orchestration.host_helper_plan_v1.{HostHelperPlanV1, host_helper_plan_digest_v1}
+use std.common.contracts.orchestration.host_capacity_v1.HostLedgerFenceV1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_reservation_bind_intent_v1
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.host_helper_request_encode_v1
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_decode_v2
+use std.nogc_sync_mut.orchestration.host_local_root_v1.host_local_context_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_fsync, directory_fsync}
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.sosix.entropy.sosix_random_hex
+use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
+
+pub struct SignedBindingFixtureConfigV3:
+    authority: SignedBindingConfigV3
+    socket: SmuxOwnedFixtureConfig
+
+pub struct SignedBindingFixtureV3:
+    config: SignedBindingFixtureConfigV3
+    socket: SmuxCapabilitySocketFixture? = nil
+    fence: HostLedgerFenceV1? = nil
+    target: SmuxRuntimeTargetV3? = nil
+    request: SmuxRuntimeBindRequestV3? = nil
+    plan: ContainerOutputPlanV2? = nil
+    initial_runtime: text = ""
+    binding_attempted: bool = false
+    marker: text = ""
+    marker_observed: bool = false
+    released: bool = false
+    workload_still_running: bool = false
+    failure: text = ""
+
+fn signed_note_v3(original: SignedBindingFixtureV3, reason: text) -> SignedBindingFixtureV3:
+    var fixture = original
+    var shown = owned_fixture_diagnostic(reason)
+    if fixture.socket != nil:
+        shown = shown.replace(fixture.socket.unwrap().token, "[redacted]")
+        fixture.socket = capability_socket_note(fixture.socket.unwrap(), shown)
+    fixture.failure = if fixture.failure == "": shown else: fixture.failure + "; " + shown
+    fixture
+
+fn signed_orchestrator_v3(config: SignedBindingConfigV3, args: [text]) -> Result<text, text>:
+    val digest = file_hash_sha256(config.orchestrator_program)
+    if (not file_is_regular_no_follow(config.orchestrator_program) or digest == nil or
+            digest.unwrap() != config.orchestrator_digest): return Err("compiled orchestrator identity mismatch")
+    val (out, error, code) = process_run_bounded(config.orchestrator_program, args, 5000, 16384)
+    if code != 0 or error != "" or out.bytes().len() >= 16384 or error.bytes().len() >= 16384:
+        return Err("bounded real orchestrator request failed")
+    Ok(out)
+
+pub fn signed_binding_fixture_config_v3() -> Result<SignedBindingFixtureConfigV3, text>:
+    val authority = signed_binding_authority_config_v3()?
+    val socket = owned_fixture_config_for("SMUX_SOCKET_TEST_CONFIG", "smuxProgram", "smuxDigest")?
+    if not owned_fixture_path(authority.orchestrator_program): return Err("explicit compiled orchestrator required")
+    for path in [authority.host_root, authority.issuer_seed_path, authority.approver_seed_path,
+            authority.marker_trigger_path, authority.orchestrator_program]:
+        if (path == socket.root or path.starts_with(socket.root + "/") or socket.root.starts_with(path + "/")):
+            return Err("signed fixture broker root must be disjoint from authority and workload paths")
+    val marker_parts = authority.marker_trigger_path.split("/")
+    val marker_parent = marker_parts[0:marker_parts.len() - 1].join("/")
+    for path in [authority.host_root, authority.issuer_seed_path, authority.approver_seed_path]:
+        if path == marker_parent or path.starts_with(marker_parent + "/") or marker_parent.starts_with(path + "/"):
+            return Err("approved workload marker directory must not expose host root or authority keys")
+    Ok(SignedBindingFixtureConfigV3(authority: authority, socket: socket))
+
+pub fn signed_binding_fixture_start_v3(config: SignedBindingFixtureConfigV3) -> SignedBindingFixtureV3:
+    var fixture = SignedBindingFixtureV3(config: config)
+    step("Read actual enrolled host fence and validate private fixture authorities")
+    val authority = config.authority
+    val status = signed_orchestrator_v3(authority, ["host-status", authority.host_root])
+    if status.is_err(): return signed_note_v3(fixture, status.unwrap_err())
+    val parsed = signed_binding_fields_v3(status.unwrap())
+    if parsed.is_err(): return signed_note_v3(fixture, parsed.unwrap_err())
+    val fields = parsed.unwrap()
+    for key in ["kind", "physicalHostId", "authorityId", "fenceId", "providerGeneration", "revision"]:
+        if not fields.contains_key(key): return signed_note_v3(fixture, "actual host status missing fence fields")
+    val kind = owned_fixture_text(fields, "kind")
+    val physical = owned_fixture_text(fields, "physicalHostId")
+    val authority_id = owned_fixture_text(fields, "authorityId")
+    val boot = owned_fixture_text(fields, "fenceId")
+    val generation = signed_binding_int_v3(fields, "providerGeneration")
+    val revision = signed_binding_int_v3(fields, "revision")
+    if (kind.is_err() or physical.is_err() or authority_id.is_err() or boot.is_err() or
+            generation.is_err() or revision.is_err()): return signed_note_v3(fixture, "actual host fence types invalid")
+    if (kind.unwrap() != "host-local-status" or physical.unwrap() != authority.request.intent.physical_host_id or
+            revision.unwrap() <= 0): return signed_note_v3(fixture, "actual host fence differs from retained template")
+    fixture.fence = HostLedgerFenceV1(authority_id: authority_id.unwrap(), boot_id: boot.unwrap(),
+        provider_generation: generation.unwrap(), revision: revision.unwrap())
+    val inspected = signed_orchestrator_v3(authority, ["host-inspect", authority.host_root,
+        authority.request.plan.parent_operation_id])
+    if inspected.is_err(): return signed_note_v3(fixture, inspected.unwrap_err())
+    val observation = host_execution_observation_decode_v2(inspected.unwrap())
+    if observation.is_err(): return signed_note_v3(fixture, observation.unwrap_err())
+    if (observation.unwrap().phase != "running" or observation.unwrap().operation_id != authority.request.plan.parent_operation_id):
+        return signed_note_v3(fixture, "actual retained workload must already be running")
+    fixture.initial_runtime = observation.unwrap().runtime.native_id
+    fixture.socket = smux_capability_fixture_start(config.socket, authority.host_root)
+    if fixture.socket.unwrap().process.failure != "": return signed_note_v3(fixture, "configured server startup failed")
+    fixture
+
+fn signed_request_v3(fixture: SignedBindingFixtureV3, args: [text]) -> Result<text, text>:
+    if fixture.socket == nil: return Err("signed fixture server unavailable")
+    val socket = fixture.socket.unwrap()
+    val (out, error, code) = smux_capability_fixture_request(socket, socket.token, args)
+    if code != 0 or error != "": return Err("real signed fixture request failed: " + args[0])
+    Ok(out)
+
+fn signed_reply_v3(fixture: SignedBindingFixtureV3, args: [text], status: text) -> Result<SmuxRuntimeBindingReplyV3, text>:
+    val reply = smux_runtime_binding_reply_decode_v3(signed_request_v3(fixture, args)?)?
+    val request = fixture.request.unwrap()
+    if (reply.status != status or reply.binding_uid != request.binding_uid or
+            reply.binding_digest != smux_runtime_bind_request_digest_v3(request)? or
+            reply.service_incarnation != request.service_incarnation or
+            reply.workload_operation_id != request.workload_operation_id or reply.helper_operation_id != request.helper_operation_id):
+        return Err("signed fixture reply correlation mismatch")
+    if fixture.plan != nil and reply.request_digest != fixture.plan.unwrap().request_digest:
+        return Err("signed fixture outer plan digest changed")
+    Ok(reply)
+
+fn signed_stage_v3(root: text, uid: text, suffix: text, bytes: text) -> Result<(), text>:
+    val directory = root + "/smux-helper-staging"
+    owned_fixture_private_path(directory, "directory", "700")?
+    val path = directory + "/" + sha256_text(uid) + suffix
+    if file_exists(path) or not file_create_exclusive(path, bytes): return Err("fresh signed staging artifact required")
+    if not file_set_mode(path, 0o600): return Err("signed staging mode failed")
+    owned_fixture_private_path(path, "regular file", "600")?
+    if file_read_regular_no_follow_bounded(path, 2097152)? != bytes: return Err("signed staging readback mismatch")
+    if not file_fsync(path) or not directory_fsync(directory): return Err("signed staging sync failed")
+    Ok(())
+
+fn signed_binding_trigger_v3(path: text, marker: text) -> Result<(), text>:
+    if not file_write(path, marker + "\n"): return Err("approved workload trigger write failed")
+    if not file_fsync(path): return Err("approved workload trigger sync failed")
+    if file_read_regular_no_follow_bounded(path, 128)? != marker + "\n": return Err("approved workload trigger readback mismatch")
+    Ok(())
+
+pub fn signed_binding_fixture_exercise_v3(original: SignedBindingFixtureV3) -> SignedBindingFixtureV3:
+    var fixture = original
+    if fixture.failure != "" or fixture.socket == nil: return fixture
+    val authority = fixture.config.authority
+    step("Create vacant target and publish the canonical output plan")
+    val created = signed_request_v3(fixture, ["create-runtime-target-v3", "signed-" + fixture.socket.unwrap().nonce])
+    if created.is_err(): return signed_note_v3(fixture, created.unwrap_err())
+    val target = smux_runtime_target_decode_v3(created.unwrap())
+    if target.is_err(): return signed_note_v3(fixture, target.unwrap_err())
+    fixture.target = target.unwrap()
+    if not target.unwrap().vacant: return signed_note_v3(fixture, "actual target not vacant")
+    if target.unwrap().service_incarnation != fixture.socket.unwrap().service_incarnation:
+        return signed_note_v3(fixture, "ready record and actual target incarnation differ")
+    val budget = controller_parent_budget_digest_v1(authority.request.budget_proof.budget)
+    if budget.is_err(): return signed_note_v3(fixture, budget.unwrap_err())
+    fixture.request = SmuxRuntimeBindRequestV3(binding_uid: "signed-" + fixture.socket.unwrap().nonce,
+        workload_operation_id: authority.request.plan.parent_operation_id,
+        helper_operation_id: authority.request.operation.id, parent_budget_digest: budget.unwrap(),
+        service_incarnation: target.unwrap().service_incarnation, session_id: target.unwrap().session_id,
+        window_id: target.unwrap().window_id, pane_id: target.unwrap().pane_id,
+        expected_epoch: target.unwrap().epoch, expected_revision: target.unwrap().revision,
+        expected_child_incarnation: target.unwrap().child_incarnation)
+    val request = fixture.request.unwrap()
+    val token = smux_runtime_bind_request_token_v3(request)
+    if token.is_err(): return signed_note_v3(fixture, token.unwrap_err())
+    val planned = signed_reply_v3(fixture, ["plan-existing-runtime-v3", token.unwrap()], "planned")
+    if planned.is_err(): return signed_note_v3(fixture, planned.unwrap_err())
+    val artifact = file_read_regular_no_follow_bounded(authority.host_root + "/journal/smux-binding-output-plans/" +
+        sha256_text(request.binding_uid) + ".sdn", 2097152)
+    if artifact.is_err(): return signed_note_v3(fixture, artifact.unwrap_err())
+    val output = container_output_plan_decode_v2(artifact.unwrap())
+    if output.is_err(): return signed_note_v3(fixture, output.unwrap_err())
+    val plan = output.unwrap()
+    val digest = container_output_plan_digest_v2(plan)
+    val binding = smux_runtime_bind_request_digest_v3(request)
+    if (digest.is_err() or binding.is_err() or digest.unwrap() != plan.request_digest or
+            plan.request_digest != planned.unwrap().request_digest or plan.identity.binding_digest != binding.unwrap() or
+            plan.identity.operation_id != request.helper_operation_id or plan.identity.parent_operation_id != request.workload_operation_id or
+            plan.identity.parent_budget_digest != request.parent_budget_digest or plan.runtime.native_id != fixture.initial_runtime):
+        return signed_note_v3(fixture, "published actual output plan correlation mismatch")
+    fixture.plan = plan
+    step("Sign and prepare the exact helper demand through the retained host owner")
+    var helper = authority.request
+    helper.plan = HostHelperPlanV1(operation_id: request.helper_operation_id, helper_kind: "attach-broker",
+        parent_operation_id: plan.identity.parent_operation_id, parent_operation_digest: plan.identity.parent_operation_digest,
+        parent_assignment_digest: plan.identity.parent_assignment_digest, parent_budget_digest: plan.identity.parent_budget_digest,
+        request_digest: plan.request_digest, scope: helper.budget_proof.budget.scope)
+    var intent = helper.intent
+    intent.fence = fixture.fence.unwrap()
+    val helper_digest = host_helper_plan_digest_v1(helper.plan)
+    if helper_digest.is_err(): return signed_note_v3(fixture, helper_digest.unwrap_err())
+    intent.plan_digest = helper_digest.unwrap()
+    intent.reservation.cpu_millis = plan.resources.cpu_millis
+    intent.reservation.memory_bytes = plan.resources.memory_bytes
+    intent.reservation.nonce = fixture.socket.unwrap().nonce
+    val context = host_local_context_v1(authority.policy)
+    if (helper.operation.duration_ms < 1000 or helper.operation.duration_ms > 30000 or
+            context.monotonic_ms <= 0 or context.monotonic_ms > 9223372036854745807):
+        return signed_note_v3(fixture, "actual clock or bounded helper duration invalid")
+    intent.reservation.prepare_deadline_ms = context.monotonic_ms + helper.operation.duration_ms
+    val bound = host_reservation_bind_intent_v1(intent)
+    if bound.is_err(): return signed_note_v3(fixture, bound.unwrap_err())
+    helper.intent = bound.unwrap()
+    helper.operation.payload_digest = helper.intent.reservation.payload_digest
+    helper.operation.memory_bytes = plan.resources.memory_bytes
+    val signed = signed_binding_sign_v3(authority, helper)
+    if signed.is_err(): return signed_note_v3(fixture, signed.unwrap_err())
+    val (signed_helper, execution_bytes) = signed.unwrap()
+    val packet = host_helper_request_encode_v1(signed_helper)
+    if packet.is_err(): return signed_note_v3(fixture, packet.unwrap_err())
+    val staged_request = signed_stage_v3(authority.host_root, request.binding_uid, ".request.sdn", packet.unwrap())
+    if staged_request.is_err(): return signed_note_v3(fixture, staged_request.unwrap_err())
+    val staged_execution = signed_stage_v3(authority.host_root, request.binding_uid, ".execution.sdn", execution_bytes)
+    if staged_execution.is_err(): return signed_note_v3(fixture, staged_execution.unwrap_err())
+    val prepared = signed_reply_v3(fixture, ["prepare-runtime-helper-v3", request.binding_uid], "helper-prepared")
+    if prepared.is_err(): return signed_note_v3(fixture, prepared.unwrap_err())
+    step("Bind once and capture a fresh workload nonce through the sole pane reader")
+    fixture.binding_attempted = true
+    val adopted = signed_reply_v3(fixture, ["bind-existing-runtime-v3", token.unwrap()], "adopted-opening")
+    if adopted.is_err(): return signed_note_v3(fixture, adopted.unwrap_err())
+    val nonce = sosix_random_hex(16)
+    if nonce == nil: return signed_note_v3(fixture, "fresh workload nonce unavailable")
+    fixture.marker = nonce.unwrap()
+    # Provisioning binds this existing private regular file into the signed
+    # workload, which must repeatedly emit its current line with CRLF. This
+    # writes data only; it never selects an engine command or sends helper input.
+    val protected = owned_fixture_private_path(authority.marker_trigger_path, "regular file", "600")
+    if protected.is_err(): return signed_note_v3(fixture, protected.unwrap_err())
+    val written = signed_binding_trigger_v3(authority.marker_trigger_path, fixture.marker)
+    if written.is_err(): return signed_note_v3(fixture, written.unwrap_err())
+    val deadline = sosix_time_now_monotonic_ms() + 8000
+    var turn = 0
+    while turn < 160 and sosix_time_now_monotonic_ms() < deadline:
+        val capture = signed_request_v3(fixture, ["capture", request.session_id])
+        if capture.is_err(): return signed_note_v3(fixture, capture.unwrap_err())
+        if capture.unwrap().contains(fixture.marker):
+            fixture.marker_observed = true
+            return fixture
+        turn = turn + 1
+        sosix_sleep_ms(25)
+    signed_note_v3(fixture, "fresh workload nonce not captured within bounded real stream window")
+
+fn signed_session_present_v3(listing: text, session_id: text) -> bool:
+    for line in listing.split("\n"):
+        val fields = line.split(" ")
+        if fields.len() > 0 and fields[0] == session_id: return true
+    false
+
+pub fn signed_binding_fixture_finish_v3(original: SignedBindingFixtureV3) -> SignedBindingFixtureV3:
+    var fixture = original
+    if fixture.socket == nil: return fixture
+    step("Clean the attachment and verify host settlement without stopping the workload")
+    var safe_to_stop = not fixture.binding_attempted
+    if fixture.binding_attempted and fixture.request != nil:
+        val request = fixture.request.unwrap()
+        val deadline = sosix_time_now_monotonic_ms() + 8000
+        var turn = 0
+        while turn < 40 and sosix_time_now_monotonic_ms() < deadline:
+            # The close request may be pending. It cleans only this adopted
+            # attachment helper, never a Container workload operation.
+            val socket = fixture.socket.unwrap()
+            val (_close, _close_error, _close_code) = smux_capability_fixture_request(socket, socket.token,
+                ["kill-session", request.session_id])
+            val inspected = signed_request_v3(fixture, ["inspect-runtime-binding-v3", request.binding_uid])
+            if inspected.is_err(): break
+            val parsed = smux_runtime_binding_reply_decode_v3(inspected.unwrap())
+            if parsed.is_err(): break
+            val reply = parsed.unwrap()
+            val digest = smux_runtime_bind_request_digest_v3(request)
+            if (digest.is_err() or reply.binding_uid != request.binding_uid or
+                    reply.binding_digest != digest.unwrap() or reply.service_incarnation != request.service_incarnation or
+                    reply.workload_operation_id != request.workload_operation_id or reply.helper_operation_id != request.helper_operation_id or
+                    fixture.plan == nil or reply.request_digest != fixture.plan.unwrap().request_digest): break
+            if reply.status == "released":
+                fixture.released = true
+                safe_to_stop = true
+                break
+            if reply.status == "helper-prepared" and not reply.stream_owned and not reply.cleanup_retained:
+                # A failed prebegin retains only the durable prepared charge.
+                # Closing its writer does not release or erase that charge.
+                safe_to_stop = true
+                break
+            turn = turn + 1
+            sosix_sleep_ms(25)
+        if not safe_to_stop:
+            return signed_note_v3(fixture, "settlement unconfirmed; retain live server carrier and protected host recovery state")
+        if fixture.released:
+            val listed = signed_request_v3(fixture, ["list-sessions"])
+            if listed.is_err():
+                fixture = signed_note_v3(fixture, listed.unwrap_err())
+            elif signed_session_present_v3(listed.unwrap(), request.session_id):
+                val removed = signed_request_v3(fixture, ["kill-session", request.session_id])
+                if removed.is_err(): fixture = signed_note_v3(fixture, removed.unwrap_err())
+            val after = signed_request_v3(fixture, ["list-sessions"])
+            if after.is_err():
+                fixture = signed_note_v3(fixture, after.unwrap_err())
+            elif signed_session_present_v3(after.unwrap(), request.session_id):
+                fixture = signed_note_v3(fixture, "settled attachment session still present")
+    fixture.socket = smux_capability_fixture_stop(fixture.socket.unwrap())
+    val socket = fixture.socket.unwrap()
+    if not socket.stop_accepted or not socket.owner_stdout_eof or not socket.process.helper_cleaned:
+        return signed_note_v3(fixture, "actual server owner shutdown or terminal cleanup not confirmed")
+    if fixture.released:
+        val authority = fixture.config.authority
+        # Separate real compiled host-inspect opens the host writer only AFTER
+        # smux closes it, independently re-observing the actual Container.
+        val inspected = signed_orchestrator_v3(authority, ["host-inspect", authority.host_root,
+            authority.request.plan.parent_operation_id])
+        if inspected.is_err(): return signed_note_v3(fixture, inspected.unwrap_err())
+        val observation = host_execution_observation_decode_v2(inspected.unwrap())
+        if observation.is_err(): return signed_note_v3(fixture, observation.unwrap_err())
+        if (observation.unwrap().operation_id != authority.request.plan.parent_operation_id or
+                observation.unwrap().phase != "running" or observation.unwrap().runtime.native_id != fixture.initial_runtime):
+            return signed_note_v3(fixture, "independent Container inspect did not confirm same running workload")
+        fixture.workload_still_running = true
+    fixture

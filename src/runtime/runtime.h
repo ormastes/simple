@@ -2416,6 +2416,7 @@ void     rt_rank_select_free(int64_t handle);
 
 /* Workspace storage ABI: tagged text, scalar leases, no cleanup side effects. */
 #include "runtime_workspace_storage_v1.h"
+#include "runtime_retained_private_credential_v1.h"
 
 /* Forward decl: RtCoreString is defined in runtime_native.c */
 struct RtCoreString;

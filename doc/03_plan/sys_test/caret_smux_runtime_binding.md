@@ -1,5 +1,30 @@
 # Runtime binding verification handoff
 
+## Current local composition checkpoint
+
+The V3 exclusive in-process implementation and current limitations are in
+`doc/05_design/smux_exclusive_runtime_binding_v3.md`. Added request, reply,
+policy, immutable-store and authenticated adapter specs remain AUTHORED_UNRUN.
+The configured socket system scenario exercises real process authentication,
+vacant metadata target creation/retry and unplanned binding refusal. It is not
+positive Container attachment evidence. The existing runtime reference spec
+retains legacy V2 coverage and adds separate full-V3 settlement metadata
+transitions; no typed ACK constructed in a pure test is native/ledger proof.
+
+The historical dependency notes below describe earlier source checkpoints.
+Current merged base is `47ffbb08154f40e166ffb385d99748c3463a9152`, including
+the previous Caret checkpoint and all following shared dependencies.
+Additional exact source dependencies: host resolver `a3826478ed7`, standalone
+parent budget `3682a914381`, capability query
+`8640674fdd8a1af65ae070f734c10ce0988e3db6` and its native preflight, helper
+consumption/settlement `dd78e274ac5534ed4dd3e0241e513fd2e514c79c`, plus host
+settlement hook `d6aedcb4471f2cae90718c6d76a82586a11348ed`. Root owns the
+combined integration head (PR 7743) and final dependency closure. No source copy or
+placeholder implementation replaces these owners. Runtime verification is
+still NOT_RUN; the campaign-wide five-core/build allocation restriction remains.
+
+## Historical checkpoint evidence
+
 Status: implementation resumed from release commit
 `862d9e361534c1a13f83a2f43da06e07847df5af`; executable verification remains
 unrun. Positive runtime-binding source composition is incomplete. No

@@ -24,7 +24,10 @@ use os.apps.smux.contract.{
 }
 use os.apps.smux.service.{ServiceState, PaneRecord}
 use os.apps.smux.service_queries.{service_list_sessions, service_list_clients,
-    service_list_windows, service_active_window, service_list_panes, service_focused_pane}
+    service_list_windows, service_active_window, service_list_panes, service_focused_pane,
+    service_pane_index as _pane_idx, service_window_index as _window_idx}
+use os.apps.smux.terminal_settlement_service_v3.terminal_transport_settle_owned_v3
+use std.nogc_sync_mut.orchestration.host_helper_settlement_v1.HostHelperSettlementAckV1
 use os.apps.smux.pane_configured_launch_service.{pane_spawn_configured_pty_state}
 use std.sosix.pty.{PtyLaunchV1}
 use os.apps.smux.client_context_service.{client_context_reconcile}
@@ -145,24 +148,6 @@ fn _with_startup(st: ServiceState) -> ServiceState:
         resize_count: m.resize_count,
         capture_count: m.capture_count
     ))
-
-# Index of the pane only when it belongs to exactly this session AND window.
-fn _pane_idx(st: ServiceState, session_id: text, window_id: text, pane_id: text) -> int:
-    val idx = st.find_pane_idx(pane_id)
-    if idx < 0:
-        return -1
-    val p = st.get_pane(idx).pane
-    if p.session_id != session_id or p.window_id != window_id:
-        return -1
-    return idx
-
-fn _window_idx(st: ServiceState, session_id: text, window_id: text) -> int:
-    val idx = st.find_window_idx(window_id)
-    if idx < 0:
-        return -1
-    if st.get_window(idx).session_id != session_id:
-        return -1
-    return idx
 
 pub fn smux_poll_output() -> int:
     val updated = pane_poll_state(_svc, _closing_sessions, pane_close_poll_windows(_closing_panes, _closing_windows))
@@ -576,7 +561,7 @@ pub fn smux_pane_adopt_terminal_transport(session_id: text, window_id: text,
     _svc = _publish(updated)
     return Ok(reference.pid)
 
-# Complete transfer retains cleanup provenance until a future verified host ack.
+# Complete transfer retains cleanup provenance until verified host settlement.
 pub fn smux_pane_adopt_owned_terminal_transport_v2(session_id: text, window_id: text,
         pane_id: text, expected_epoch: u64, expected_revision: u64,
         expected_child_incarnation: u64, transfer: PipedProcessOwnedTransferV2) -> Result<i64, text>:
@@ -585,6 +570,16 @@ pub fn smux_pane_adopt_owned_terminal_transport_v2(session_id: text, window_id: 
         expected_epoch, expected_revision, expected_child_incarnation, transfer)?
     _svc = _publish(updated)
     return Ok(transfer.reference.pid)
+
+# Trusted host ACK only; no peer decoder or native cleanup is invoked here.
+pub fn smux_pane_acknowledge_owned_terminal_settlement_v3(session_id: text, window_id: text,
+        pane_id: text, expected_epoch: u64, expected_revision: u64, expected_child_incarnation: u64,
+        expected: PipedProcessOwnedTransferV2, helper_operation_id: text, request_digest: text,
+        ack: HostHelperSettlementAckV1) -> Result<bool, text>:
+    val updated = terminal_transport_settle_owned_v3(_svc, _revisions, session_id, window_id, pane_id,
+        expected_epoch, expected_revision, expected_child_incarnation, expected, helper_operation_id, request_digest, ack)?
+    _svc = _publish(updated)
+    return Ok(true)
 
 # Attaches a child on a real pseudo-terminal sized to the pane geometry.
 # `command_line` is handed to the platform launcher as one line (a shell path

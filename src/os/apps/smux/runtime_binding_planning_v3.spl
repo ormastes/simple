@@ -1,0 +1,82 @@
+# Resolve protected retained state before producing the exact helper demand.
+# The returned plan is data for signing, never a lease or an attachment.
+use os.apps.smux.runtime_binding_request_v3.{SmuxRuntimeBindRequestV3, smux_runtime_bind_request_digest_v3}
+use os.apps.smux.runtime_binding_policy_v3.{SmuxRuntimeBindingPolicyV3, smux_runtime_binding_policy_load_v3}
+use os.apps.smux.runtime_binding_target_v3.smux_runtime_target_v3
+use os.apps.smux.api.{smux_owner_snapshot, smux_configuration_revision, smux_window_closing}
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.container.stream_v2.{ContainerOutputPlanV2, ContainerOutputIdentityV2,
+    container_stream_policy_digest_v2}
+use std.nogc_async_mut.container.stream_v2.simple_container_output_plan_v2
+use std.nogc_async_mut.container.output_capabilities_v2.simple_container_output_capabilities_v2
+use std.nogc_sync_mut.orchestration.host_local_root_v1.{HostLocalRootV1,
+    host_local_context_v1, host_local_refresh_context_v1}
+use std.nogc_sync_mut.orchestration.host_local_command_v1.host_local_resolve_execution_v2
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.host_parent_budget_load_v1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+
+pub struct SmuxRuntimePlanningTurnV3:
+    local: HostLocalRootV1
+    execution: ContainerExecutionRequestV2?
+    plan: ContainerOutputPlanV2?
+    error: text
+
+pub fn smux_runtime_binding_target_check_v3(request: SmuxRuntimeBindRequestV3,
+        incarnation: text) -> Result<(), text>:
+    if request.service_incarnation != incarnation: return Err("runtime-binding-service-incarnation-changed")
+    val target = smux_runtime_target_v3(smux_owner_snapshot(), smux_configuration_revision(),
+        smux_window_closing(request.session_id, request.window_id), incarnation,
+        request.session_id, request.window_id, request.pane_id)?
+    if (target.epoch != request.expected_epoch or target.revision != request.expected_revision or
+            target.child_incarnation != request.expected_child_incarnation):
+        return Err("runtime-binding-target-changed")
+    if not target.vacant: return Err("runtime-binding-target-occupied")
+    Ok(())
+
+pub fn smux_runtime_binding_resolve_plan_v3(local: HostLocalRootV1,
+        configured: SmuxRuntimeBindingPolicyV3, request: SmuxRuntimeBindRequestV3,
+        incarnation: text) -> SmuxRuntimePlanningTurnV3:
+    val target = smux_runtime_binding_target_check_v3(request, incarnation)
+    if target.is_err(): return SmuxRuntimePlanningTurnV3(local, nil, nil, target.unwrap_err())
+    val reloaded = smux_runtime_binding_policy_load_v3(local)
+    if reloaded.is_err(): return SmuxRuntimePlanningTurnV3(local, nil, nil, reloaded.unwrap_err())
+    val policy = reloaded.unwrap()
+    val original_digest = container_stream_policy_digest_v2(configured.stream)
+    val current_digest = container_stream_policy_digest_v2(policy.stream)
+    if (original_digest.is_err() or current_digest.is_err() or original_digest.unwrap() != current_digest.unwrap() or
+            configured.resources.cpu_millis != policy.resources.cpu_millis or
+            configured.resources.memory_bytes != policy.resources.memory_bytes):
+        return SmuxRuntimePlanningTurnV3(local, nil, nil, "runtime-binding-configured-policy-changed")
+    val root = local.root
+    val enrollment = local.binding
+    val refresh = fn() -> HostReservationAuthorizationContextV1:
+        host_local_refresh_context_v1(root, enrollment)
+    val budget = host_parent_budget_load_v1(local, request.parent_budget_digest,
+        request.workload_operation_id, host_local_context_v1(local.policy), refresh)
+    if budget.is_err(): return SmuxRuntimePlanningTurnV3(local, nil, nil, budget.unwrap_err())
+    # Provider recovery is stateful even when inspection fails. Never discard
+    # the returned local owner in an error branch.
+    val resolved = host_local_resolve_execution_v2(local, request.workload_operation_id)
+    if resolved.error != "" or resolved.execution == nil or resolved.observation == nil:
+        return SmuxRuntimePlanningTurnV3(resolved.local, nil, nil,
+            if resolved.error == "": "runtime-binding-observation-missing" else: resolved.error)
+    val observed = resolved.observation.unwrap()
+    val parent = budget.unwrap().proof.budget
+    if (observed.operation_id != request.workload_operation_id or
+            observed.operation_digest != parent.parent_operation_digest):
+        return SmuxRuntimePlanningTurnV3(resolved.local, nil, nil, "runtime-binding-parent-observation-mismatch")
+    val binding = smux_runtime_bind_request_digest_v3(request)
+    if binding.is_err(): return SmuxRuntimePlanningTurnV3(resolved.local, nil, nil, binding.unwrap_err())
+    val identity = ContainerOutputIdentityV2(operation_id: request.helper_operation_id,
+        parent_operation_id: parent.parent_operation_id, parent_operation_digest: parent.parent_operation_digest,
+        parent_assignment_digest: parent.parent_assignment_digest, parent_budget_digest: request.parent_budget_digest,
+        binding_digest: binding.unwrap())
+    val planned = simple_container_output_plan_v2(resolved.local.container, resolved.execution.unwrap(),
+        observed.runtime, identity, policy.stream, policy.resources)
+    if planned.is_err(): return SmuxRuntimePlanningTurnV3(resolved.local, nil, nil, planned.unwrap_err())
+    # Capability is an observation of this actual template, provider and
+    # resource context. Startup protocol discovery cannot substitute for it.
+    val capability = simple_container_output_capabilities_v2(resolved.local.container, planned.unwrap())
+    if not capability.output_follow_supported:
+        return SmuxRuntimePlanningTurnV3(resolved.local, nil, nil, capability.reason)
+    SmuxRuntimePlanningTurnV3(resolved.local, resolved.execution, Some(planned.unwrap()), "")

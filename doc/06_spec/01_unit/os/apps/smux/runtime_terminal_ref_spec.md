@@ -5,7 +5,7 @@ Status: **AUTHORED_UNRUN**. This companion is authored, not generated evidence.
 Native builds, test execution and docgen remain blocked pending admitted
 daemon/provider dependencies and a root-authorized build slot.
 
-These fourteen scenarios use synthetic reference/owner values exclusively for pure state
+These seventeen scenarios use synthetic reference/owner values exclusively for pure state
 operations. They never invoke native process methods on those references and
 do not prove a live stream, authenticated binding, provider attachment or agent
 readiness.
@@ -73,11 +73,13 @@ The new trusted owned adoption route retains the full cleanup owner together
 with its stream reference. Successful helper cleanup sets
 `helper_cleaned_awaiting_release`, retains the pane and bundle, and stops further
 stream operations. It is not host budget release. Generic close remains pending
-until a future verified host reap/release acknowledgement, whose API is not
-implemented here. Repeated successful cleanup is not assumed idempotent.
+until a verified host reap/release acknowledgement. The trusted settlement API
+now accepts only the typed host ACK, exact retained bundle and target fences;
+its pure state transition clears authority without native effects. Repeated
+successful cleanup is not assumed idempotent.
 Reset pre-scans the entire service and refuses owned or pending-release state
 before any native effect. No fake acknowledgement or successful bind route is
-provided by these changes.
+provided as evidence by these pure tests.
 Authenticated stop refuses before returning its accepted stop response whenever
 the current pane snapshot retains typed cleanup authority. The server loop thus
 keeps serving instead of exiting after a reset refusal. Future configured binding
@@ -90,3 +92,18 @@ provider output, authenticated positive binding and restart reconciliation
 still require real admitted integration tests. No passing claim is made here.
 Daemon owned-transfer helper imports are an external dependency; no local stub
 substitutes for their implementation or qualification.
+
+The three settlement scenarios apply a synthetic typed ACK only to the pure
+explicit-state helper, never to a native owner or trusted API as real host
+proof. They check exact full-bundle, operation, outer plan digest, native owner
+identity, valid prepared/tree/outcome/journal-revision digests, and positive
+journal sequence. A successful metadata transition preserves captured screen,
+history, content counters and child incarnation while clearing only the bundle,
+canonical reference, pending flag and PID. Duplicate transition, missing cleanup,
+stale fences and mismatched ACKs refuse. Exact compensation remains possible
+when configuration mutation authority is exhausted; no clock rollback occurs.
+
+Legacy V2 nil-profile fixtures remain unchanged to retain compatibility
+regressions. New settlement fixtures carry an explicit synthetic V3 resource
+profile and profiled identity. Both are metadata-only; no fabricated reference
+is passed to a native process method.

@@ -1,0 +1,87 @@
+# Canonical private credential owner
+
+The virgin-origin contract now redirects only the initial namespace open to an
+actual private regular file in an isolated exec process. Real fstatfs and ioctl
+oracles reject that file as a PID namespace. The observer must return IO error
+after exactly one checked close and leave initialization at phase 1 even when
+the genuine namespace path is restored; held-mutex refusal verifies no reset or
+re-adoption. The observer body is the approved shared NSFS/NS_GET_NSTYPE routine,
+with provenance recorded in the design. This fault-target test does not create
+a namespace or qualify actual namespace transitions. **AUTHORED_UNRUN**.
+
+An isolated test-only stat wrapper now injects one EIO for the established
+namespace identity probe, then restores actual stat. With the registry mutex
+held, that first entry must fail IO and all later entries must refuse before
+the mutex despite restored availability. The mismatch case likewise restores
+the injected inode value and verifies permanent quarantine. These are fault
+injection contract assertions, not real namespace-transition qualification.
+Public entry checks origin/quarantine before lock and phase again after lock;
+normal matched unlock adds no new fallible origin syscall. The privileged
+output is labeled `privileged credential cases PASS`, never full-boundary PASS.
+
+Origin prevention now binds actual PID and `/proc/self/ns/pid` device/inode
+before registry/mutex access. Native source asserts the phase atomic is always
+lock-free and publishes immutable origin fields through CAS Initializing then
+release/acquire Ready. Unready/stat failure refuses without reset or spinning.
+Ordinary fork rejection remains an actual fork assertion. Separate isolated
+exec processes inject only a namespace-inode snapshot mismatch with the actual
+PID unchanged, and an Initializing snapshot inherited through an actual fork,
+to exercise those refusal branches. The ordinary actual fork case holds the
+registry mutex across fork, child refusal and parent wait. Injected mismatch
+and Initializing cases likewise hold the mutex during refusal. Moving origin
+checks after mutex acquisition therefore deadlocks and fails the watchdog.
+They never reset/re-adopt origin or create a PID namespace. Output labels these
+as injected contract assertions and says `actual PID-namespace transition
+BLOCKED: no authorized namespace fixture`. A successful ordinary/unprivileged
+fixture therefore never qualifies real namespace transitions. The native unprivileged subset has since passed once for exact source b3b739b9ff4;
+Simple scenarios remain **AUTHORED_UNRUN**. See the bounded evidence below.
+
+Status: **native unprivileged subset PASS; Simple AUTHORED_UNRUN**. Foreign-UID and actual namespace-transition qualification remain BLOCKED; full-runtime and configured-binding qualification remain NOT_RUN.
+
+Simple source: `test/01_unit/lib/retained_private_credential_v1_spec.spl`.
+Native prevention source: `test/01_unit/runtime/retained_private_credential_v1_test.c`.
+
+The pure scenario rejects unknown lifecycle codes and distinguishes unsupported, stale generation and consumed-close diagnostics. The ownership scenario requires an actual fresh mode-0600/current-UID regular initial credential selected by `RETAINED_PRIVATE_CREDENTIAL_TEST_PATH`, beneath a mode-0700/current-UID final directory with trusted non-writable ancestry (root-owned sticky ancestor exception). Initial bytes must be exactly a 32-character lowercase-hex nonce, one space, an ASCII token of 1–128 characters, and optionally one LF. No ready sibling may already exist. Missing capability or provisioning fails, never skips.
+
+The scenario opens and reads through the canonical native owner, publishes an immutable five-field sibling with one LF, refuses duplicate publication, closes, then obtains a fresh actual generation. A copied old token must not close the successor. The successor's read must still match the initial bytes, and a second native publisher must refuse the retained ready winner. All acquired tokens are retained globally before failures; failed acquisition with a token is closed once. No raw descriptor is exposed or restored from serialized data.
+
+The test's loopback port 1 is protocol validation data only. No listening socket, readiness, attachment, process identity, grant or server acceptance is claimed. Ready records remain immutable after close; external fixture administration owns eventual fixture directory removal.
+
+The native prevention selfcheck uses real Linux private files and kernel no-replace publication. It checks copied generations, duplicate publication, fork rejection, mode and actual foreign-UID rejection, symlink, unwritten FIFO and writable-ancestor refusal, directory rename anchoring, final content/permissions, and separate exec-process competing publishers. FIFO acquisition must return without a writer; a blocking-open regression hits the failing watchdog. Its default/full privileged mode requires an isolated privileged Linux fixture for the actual foreign-UID case and fails its precondition otherwise. A 20-second watchdog bounds the selfcheck.
+
+Its close fault injection performs the real OS close, then reports EINTR once. This tests consumed-descriptor error handling and proves a later copied close cannot affect an unrelated reused descriptor. It is not a simulated successful native operation or evidence that a particular kernel close failure occurred naturally. The uncertain token remains queryable; descriptor effects are never retried.
+
+The native selfcheck's default mode and explicit `--privileged` require an
+isolated UID-0 Linux fixture and retain the actual foreign-UID ownership test.
+Without that fixture they fail precondition with exit 1; no elevation is
+attempted. Explicit `--unprivileged` runs all other assertions unchanged,
+including real filesystem/mode, copied generation, fork, FIFO, consumed-close,
+anchored rename, private final content and competing exec-process publication.
+Its successful output says `unprivileged subset PASS` and separately
+`foreign-UID BLOCKED: requires isolated privileged fixture`. That subset's
+exit 0 never qualifies the missing UID case or the privileged full fixture.
+Unknown mode arguments fail usage. Both modes retain the watchdog.
+
+The privileged mode remains **BLOCKED**. The unprivileged native subset passed
+once as recorded below; this does not qualify the Simple facade or full runtime.
+
+## Observed native subset
+
+Exact source `b3b739b9ff4a8597d8400d972c16341d2797ba95`: one GCC 13/BFD
+owner-header/selfcheck compile exit 0 and one `--unprivileged` run exit 0,
+UID 1000, compiler target `aarch64-linux-gnu`, CPUs 0–4. The run explicitly
+reported foreign-UID and real PID-namespace transitions BLOCKED. Fault-injected
+origin tests are labeled contract evidence, not namespace creation.
+
+No green check was repeated. Full source/tool/binary/log hashes and actual
+limits/results are retained in
+`build/caret-private-credential-b3b739b9ff4-20261107/manifest.sdn` and
+`SHA256SUMS`. The two fixture path-size warnings are preserved in `compile.log`;
+fixed generated paths fit their buffers. Detailed scope and hashes are recorded
+in `doc/05_design/smux_retained_private_credential_v1.md`.
+
+Durable small evidence archive: `doc/09_report/verification/caret_private_credential_native_20261107/`.
+Its default `summary.sdn` is SDN. The original harness serialized JSON under a
+local `.sdn` filename; archived `manifest.json` preserves those historical bytes
+and hash, with the original checksum-path mapping explained in `README.md`.
+The native binary remains local. No qualification was rerun or broadened.

@@ -1,0 +1,113 @@
+# AUTHORED_UNRUN. Real public compiled negative binding + vacant target path.
+# No signer, signed helper packet, Container attachment or positive bind is faked.
+use std.spec.{describe, it, expect, fail, step}
+use app.io.mod.env_get
+use test.helpers.smux_owned_process_fixture.{owned_fixture_config_for, owned_fixture_path, owned_fixture_private_path}
+use test.helpers.smux_capability_socket_fixture.{SmuxCapabilitySocketFixture, smux_capability_fixture_start,
+    smux_capability_fixture_request, smux_capability_fixture_stop, capability_socket_note}
+use os.apps.smux.runtime_binding_protocol_v1.smux_runtime_binding_capabilities_decode_v1
+use os.apps.smux.runtime_binding_target_v3.smux_runtime_target_decode_v3
+use os.apps.smux.runtime_binding_request_v3.{SmuxRuntimeBindRequestV3, smux_runtime_bind_request_token_v3}
+use os.apps.smux.runtime_binding_reply_v3.smux_runtime_binding_reply_decode_v3
+
+var retained_smux_configured_fixture: SmuxCapabilitySocketFixture? = nil
+
+fn configured_binding_exercise_v3(original: SmuxCapabilitySocketFixture) -> SmuxCapabilitySocketFixture:
+    var fixture = original
+    if fixture.process.failure != "": return fixture
+    step("Observe real configured planning-only discovery and authenticate every runtime route")
+    val (cap_bytes, cap_error, cap_code) = smux_capability_fixture_request(fixture, fixture.token,
+        ["runtime-binding-capabilities-v1"])
+    if cap_code != 0 or cap_error != "": return capability_socket_note(fixture, "configured capability CLI failed: " + cap_error)
+    val capability = smux_runtime_binding_capabilities_decode_v1(cap_bytes)
+    if capability.is_err(): return capability_socket_note(fixture, capability.unwrap_err())
+    val facts = capability.unwrap()
+    if facts.service_incarnation != fixture.service_incarnation:
+        return capability_socket_note(fixture, "ready record and actual service incarnation differ")
+    if (facts.version != 2 or not facts.planning_supported or facts.bind_existing_runtime or
+            facts.input_supported or facts.geometry_supported or facts.interactive or facts.framed_core_mux):
+        return capability_socket_note(fixture, "configured discovery did not preserve planning-only facts")
+    for command in [["runtime-binding-capabilities-v1"], ["create-runtime-target-v3", "unauthenticated"],
+            ["plan-existing-runtime-v3", "invalid"], ["bind-existing-runtime-v3", "invalid"],
+            ["inspect-runtime-binding-v3", "absent"], ["prepare-runtime-helper-v3", "absent"],
+            ["runtime-binding-target-v3", "s", "w", "p"]]:
+        val (body, error, code) = smux_capability_fixture_request(fixture, "wrong-token", command)
+        if code == 0 or error != "" or body.trim() != "smux: unauthorized":
+            return capability_socket_note(fixture, "configured route did not authenticate first: " + error)
+    step("Create a real vacant target without a shell and replay the exact named target")
+    val name = "negative-" + fixture.nonce
+    val (created_bytes, create_error, create_code) = smux_capability_fixture_request(fixture, fixture.token,
+        ["create-runtime-target-v3", name])
+    if create_code != 0 or create_error != "": return capability_socket_note(fixture, "vacant target creation failed: " + create_error)
+    val created = smux_runtime_target_decode_v3(created_bytes)
+    if created.is_err(): return capability_socket_note(fixture, created.unwrap_err())
+    val target = created.unwrap()
+    if not target.vacant or target.service_incarnation != facts.service_incarnation:
+        return capability_socket_note(fixture, "created target is not vacant in the configured service")
+    val (replay, replay_error, replay_code) = smux_capability_fixture_request(fixture, fixture.token,
+        ["create-runtime-target-v3", name])
+    if replay_code != 0 or replay_error != "" or replay != created_bytes:
+        return capability_socket_note(fixture, "same target name created a different target or changed fences")
+    val target_command = ["runtime-binding-target-v3", target.session_id, target.window_id, target.pane_id]
+    val (snapshot, snapshot_error, snapshot_code) = smux_capability_fixture_request(fixture, fixture.token, target_command)
+    if snapshot_code != 0 or snapshot_error != "" or snapshot != created_bytes:
+        return capability_socket_note(fixture, "actual exact target inspection changed")
+    step("Reject unplanned binding and malformed planning without acquiring helper authority")
+    val request = SmuxRuntimeBindRequestV3(binding_uid: "bind-" + fixture.nonce,
+        workload_operation_id: "workload-" + fixture.nonce, helper_operation_id: "helper-" + fixture.nonce,
+        parent_budget_digest: "a".repeat(64), service_incarnation: target.service_incarnation,
+        session_id: target.session_id, window_id: target.window_id, pane_id: target.pane_id,
+        expected_epoch: target.epoch, expected_revision: target.revision, expected_child_incarnation: target.child_incarnation)
+    val token = smux_runtime_bind_request_token_v3(request)
+    if token.is_err(): return capability_socket_note(fixture, token.unwrap_err())
+    val bind_command = ["bind-existing-runtime-v3", token.unwrap()]
+    val (rejected_bytes, rejected_error, rejected_code) = smux_capability_fixture_request(fixture, fixture.token, bind_command)
+    val rejected = smux_runtime_binding_reply_decode_v3(rejected_bytes)
+    if rejected_code == 0 or rejected_error != "" or rejected.is_err():
+        return capability_socket_note(fixture, "unplanned binding did not return a strict failed public reply: " + rejected_error)
+    val reply = rejected.unwrap()
+    if (reply.binding_uid != request.binding_uid or reply.status != "rejected" or reply.committed or
+            reply.stream_owned or reply.cleanup_retained or reply.host_release_pending):
+        return capability_socket_note(fixture, "unplanned bind claimed retained helper or adopted transport")
+    val (repeat, repeat_error, repeat_code) = smux_capability_fixture_request(fixture, fixture.token, bind_command)
+    if repeat_code == 0 or repeat_error != "" or repeat != rejected_bytes:
+        return capability_socket_note(fixture, "same unplanned binding UID did not preserve its refusal")
+    val (malformed, malformed_error, malformed_code) = smux_capability_fixture_request(fixture, fixture.token,
+        ["plan-existing-runtime-v3", "invalid"])
+    if malformed_code == 0 or malformed_error != "" or malformed.trim() != "smux: invalid runtime binding request":
+        return capability_socket_note(fixture, "malformed plan crossed request validation")
+    val (after, after_error, after_code) = smux_capability_fixture_request(fixture, fixture.token, target_command)
+    if after_code != 0 or after_error != "" or after != created_bytes:
+        return capability_socket_note(fixture, "refused requests changed actual target authority")
+    fixture
+
+describe "real configured smux public negative binding":
+    it "authenticates creates a vacant target and refuses unprepared binding through real CLI sockets":
+        val config = owned_fixture_config_for("SMUX_SOCKET_TEST_CONFIG", "smuxProgram", "smuxDigest")
+        val host_root = env_get("SMUX_CONFIGURED_HOST_ROOT")
+        if config.is_err():
+            fail(config.unwrap_err())
+            return
+        if not owned_fixture_path(host_root):
+            fail("precondition: mandatory absolute SMUX_CONFIGURED_HOST_ROOT")
+            return
+        if (host_root == config.unwrap().root or host_root.starts_with(config.unwrap().root + "/") or
+                config.unwrap().root.starts_with(host_root + "/")):
+            fail("precondition: fixture broker root and enrolled host root must be disjoint")
+            return
+        val protected = owned_fixture_private_path(host_root, "directory", "700")
+        if protected.is_err():
+            fail(protected.unwrap_err())
+            return
+        var fixture = smux_capability_fixture_start(config.unwrap(), host_root)
+        retained_smux_configured_fixture = fixture
+        fixture = configured_binding_exercise_v3(fixture)
+        retained_smux_configured_fixture = fixture
+        fixture = smux_capability_fixture_stop(fixture)
+        retained_smux_configured_fixture = fixture
+        if fixture.process.failure != "":
+            fail(fixture.process.failure)
+            return
+        expect(fixture.stop_accepted).to_equal(true)
+        expect(fixture.owner_stdout_eof).to_equal(true)
+        expect(fixture.process.helper_cleaned).to_equal(true)

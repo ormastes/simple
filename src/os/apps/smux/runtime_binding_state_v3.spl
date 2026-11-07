@@ -1,0 +1,73 @@
+# One persistent server owns these records. Once adopted, only PaneRecord may
+# read or clean up the stream; copies here carry settlement provenance.
+use os.apps.smux.runtime_binding_request_v3.SmuxRuntimeBindRequestV3
+use os.apps.smux.runtime_binding_reply_v3.{SmuxRuntimeBindingReplyV3, smux_runtime_binding_reply_encode_v3}
+use os.apps.smux.runtime_binding_policy_v3.SmuxRuntimeBindingPolicyV3
+use std.common.contracts.container.stream_v2.ContainerOutputPlanV2
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_helper_stream_owner_v1.HostHelperStreamRetainedV1
+use std.nogc_sync_mut.orchestration.host_helper_settlement_v1.{HostHelperRecoveredStreamV1, HostHelperSettlementAckV1}
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalOpenCleanupV2
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+
+pub struct SmuxRuntimeBindingEntryV3:
+    request: SmuxRuntimeBindRequestV3
+    plan: ContainerOutputPlanV2
+    reply: SmuxRuntimeBindingReplyV3
+    retained: HostHelperStreamRetainedV1? = nil
+    recovered: HostHelperRecoveredStreamV1? = nil
+    adopted: bool = false
+    native_cleaned: bool = false
+    settlement_ack: HostHelperSettlementAckV1? = nil
+
+pub struct SmuxRuntimeBindingOwnerV3:
+    local: HostLocalRootV1
+    policy: SmuxRuntimeBindingPolicyV3
+    service_incarnation: text
+    entries: [SmuxRuntimeBindingEntryV3]
+    unresolved_uids: [text] = []
+
+pub struct SmuxRuntimeBindingTurnV3:
+    owner: SmuxRuntimeBindingOwnerV3
+    reply: text
+
+# Partial host startup is not a fabricated ready root. Preserve the canonical
+# cleanup carrier and its actual release state independently of error text.
+pub struct SmuxRuntimeBindingOpenTurnV3:
+    owner: SmuxRuntimeBindingOwnerV3?
+    cleanup: DistributedOperationJournalOpenCleanupV2?
+    cleanup_state: FileLockReleaseStateV2?
+    rejected: bool
+    error: text
+
+pub fn smux_runtime_binding_index_v3(owner: SmuxRuntimeBindingOwnerV3, uid: text) -> int:
+    var index = 0
+    while index < owner.entries.len():
+        if owner.entries[index].request.binding_uid == uid: return index
+        index = index + 1
+    -1
+
+pub fn smux_runtime_binding_prune_released_v3(owner: SmuxRuntimeBindingOwnerV3) -> SmuxRuntimeBindingOwnerV3:
+    var current = owner
+    var retained: [SmuxRuntimeBindingEntryV3] = []
+    for entry in current.entries:
+        if (entry.reply.status != "released" or entry.retained != nil or entry.recovered != nil or
+                entry.reply.host_release_pending): retained.push(entry)
+    current.entries = retained
+    current
+
+pub fn smux_runtime_binding_reply_turn_v3(owner: SmuxRuntimeBindingOwnerV3,
+        reply: SmuxRuntimeBindingReplyV3) -> SmuxRuntimeBindingTurnV3:
+    val encoded = smux_runtime_binding_reply_encode_v3(reply)
+    if encoded.is_err():
+        return SmuxRuntimeBindingTurnV3(owner, "smux: runtime binding reply unavailable; inspect same UID")
+    SmuxRuntimeBindingTurnV3(owner, encoded.unwrap())
+
+pub fn smux_runtime_binding_error_v3(owner: SmuxRuntimeBindingOwnerV3,
+        request: SmuxRuntimeBindRequestV3, code: text) -> SmuxRuntimeBindingTurnV3:
+    val reply = SmuxRuntimeBindingReplyV3(binding_uid: request.binding_uid,
+        service_incarnation: owner.service_incarnation, binding_digest: "",
+        workload_operation_id: request.workload_operation_id, helper_operation_id: request.helper_operation_id,
+        request_digest: "", status: "rejected", code: code, committed: false,
+        stream_owned: false, cleanup_retained: false, host_release_pending: false)
+    smux_runtime_binding_reply_turn_v3(owner, reply)

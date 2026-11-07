@@ -3,6 +3,12 @@
 Status: source integration in progress; awaiting verification. This is not a
 complete runtime-bind service or interactive terminal implementation.
 
+The current exclusive local composition is specified in
+[smux_exclusive_runtime_binding_v3.md](smux_exclusive_runtime_binding_v3.md).
+The unsupported POSIX lifecycle statements below describe the original
+unowned reference API; the newer complete group-owner bundle has a distinct
+cleanup/settlement path. Neither source implementation is runtime-qualified.
+
 REQ-SMUX-RUNTIME-BOUNDARY-001: server authentication precedes capability and
 bind dispatch. The negotiated text protocol must not be exposed through the
 unauthenticated local remote-command dispatcher or described as a complete
