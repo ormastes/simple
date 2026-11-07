@@ -45,6 +45,8 @@ struct Lowered:
     callees: [text]
     indirect_calls: i64
     trait_objects: i64
+    # Blocks of the runtime Some/None split for a `Concrete?` -> `Trait?` value.
+    opt_split_blocks: i64
 
 fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
     var errors: [text] = []
@@ -58,9 +60,13 @@ fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
     # Trait-object constructions in user functions: each `(data, table)`
     # vtable aggregate carries the concrete copy thunk as its first slot.
     var trait_objects = 0
+    var opt_split_blocks = 0
     for function in mir.functions.values():
         val is_thunk = function.name.starts_with("__simple_trait")
         for block in function.blocks:
+            val block_label = block.label ?? ""
+            if block_label.starts_with("native_trait_opt_"):
+                opt_split_blocks = opt_split_blocks + 1
             for instruction in block.instructions:
                 match instruction.kind:
                     case MirInstKind.Aggregate(_, _, operands):
@@ -79,7 +85,7 @@ fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
                     case MirInstKind.CallIndirect(_, _, _, _):
                         indirect_calls = indirect_calls + 1
                     case _: pass
-    Lowered(errors: errors, fatal_count: fatal_count, callees: callees, indirect_calls: indirect_calls, trait_objects: trait_objects)
+    Lowered(errors: errors, fatal_count: fatal_count, callees: callees, indirect_calls: indirect_calls, trait_objects: trait_objects, opt_split_blocks: opt_split_blocks)
 
 fn lower_source(src: text, closure_complete: bool) -> Lowered:
     val parsed = parse_full_frontend(src, "trait_recv.spl", "trait_recv", Logger(level: 0))
@@ -311,9 +317,10 @@ fn expect_optional_concrete_converted(lowered: Lowered):
     expect(lowered.errors.len()).to_equal(0)
     # Exactly one trait object, built on the Some arm only.
     expect(lowered.trait_objects).to_equal(1)
-    # Presence is decided at runtime, and only the Some arm reads the payload.
-    expect(count_matching(lowered.callees, "rt_is_some")).to_be_greater_than(0)
-    expect(count_matching(lowered.callees, "rt_enum_payload")).to_be_greater_than(0)
+    # Presence is decided at runtime: one Some/None/merge split, and the
+    # payload is unwrapped (rt_unwrap_or_self) only on the Some arm.
+    expect(lowered.opt_split_blocks).to_equal(3)
+    expect(count_matching(lowered.callees, "rt_unwrap_or_self")).to_be_greater_than(0)
 
 describe "Concrete? value into an Optional trait slot":
     it "converts a Concrete? param on return":
@@ -330,3 +337,8 @@ describe "Concrete? value into an Optional trait slot":
 
     it "passes a nil Concrete? through as None":
         expect_optional_concrete_converted(lower_source(OPT_CONCRETE_SRC + "fn none_up() -> Parser?:\n    val c: CountingParser? = nil\n    return c\n\nfn main() -> i64:\n    0\n", true))
+
+    it "keeps the declared-payload error for a scalar optional":
+        val lowered = lower_source(SOME_TRAIT_SRC + "fn bad(c: i64?) -> Parser?:\n    return c\n\nfn main() -> i64:\n    0\n", true)
+        expect(count_matching(lowered.errors, "requires a matching declared payload")).to_equal(1)
+        expect(lowered.opt_split_blocks).to_equal(0)

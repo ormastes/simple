@@ -56,7 +56,7 @@ impl MirLowering:
                                 # An existing `Concrete?` value (param,
                                 # local, call result): presence is a runtime
                                 # fact, so convert only the Some payload.
-                                if some_argument == nil and self.native_trait_owner_for_type(existing_inner) == "":
+                                if some_argument == nil and self.native_trait_concrete_record_type(existing_inner):
                                     return self.coerce_native_trait_optional_value(local, value, existing_inner, inner, expected)
                                 if some_argument == nil:
                                     self.error_fatal("native optional trait conversion requires a matching declared payload", Some(value.span))
@@ -173,14 +173,20 @@ impl MirLowering:
         b_some.switch_to_block(some_block)
         val enum_signature = MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false, params_known: true)
         val payload_fn = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_enum_payload"), MirType(kind: MirTypeKind.FuncPtr(enum_signature))))
+            MirConstValue.Str("rt_unwrap_or_self"), MirType(kind: MirTypeKind.FuncPtr(enum_signature))))
+        # rt_unwrap_or_self, not rt_enum_payload: a present non-handle word
+        # (a bare object pointer rt_is_some accepts) is the object itself;
+        # rt_enum_payload would read it as nil and build a bogus data word.
         val payload_res = b_some.emit_call(payload_fn, [mir_operand_copy(option)], MirType.i64())
         self.builder = b_some
         if payload_res == nil:
             self.error_fatal("native optional trait conversion lacks payload", Some(value.span))
             return option
         val payload = payload_res ?? LocalId(id: -1)
-        self.remember_local_hir_type(payload.id, concrete, 0, 0)
+        # Carry the source's states so a resource payload still hits the
+        # concrete-drop-slot rejection of the direct conversion.
+        self.remember_local_hir_type(payload.id, concrete,
+            self.local_hir_type_isolation_state(option.id), self.local_hir_type_resource_state(option.id))
         val payload_expr = HirExpr(kind: value.kind, has_type_: true, type_: concrete, span: value.span)
         val object = self.coerce_native_trait_object(payload, payload_expr, trait_type)
         val wrapped = self.ensure_option_handle(object, expected)
@@ -200,6 +206,17 @@ impl MirLowering:
         self.mark_runtime_value_local(result.id)
         self.remember_local_hir_type(result.id, expected, 2, 0)
         result
+
+    me native_trait_concrete_record_type(type_: HirType) -> bool:
+        """True for a class/struct type -- the only payloads the concrete->
+        trait conversion accepts (i64?/text? keep the declared-payload error)."""
+        match type_.kind:
+            case HirTypeKind.Named(symbol_id, _):
+                if val present_symbol = self.symbols.get_symbol_raw(symbol_id.id):
+                    val symbol: HirSymbol = present_symbol
+                    return symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Struct
+                false
+            case _: false
 
     me native_trait_some_argument(value: HirExpr) -> HirExpr?:
         """The single argument of a `Some(arg)` construction, else nil."""
