@@ -5,6 +5,10 @@ use std.common.process.windows_engine_pipe_v1.WindowsEnginePipeWriteContextV1
 use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.*
 use std.nogc_async_mut.container.providers.windows.docker_engine_exchange_v3.*
 
+# Retain unexpected native ownership before a failing negative assertion. This
+# is cleanup retention only, never a second reader or an admission capability.
+var exchange_retained_v3: [WindowsDockerEngineExchangeV3] = []
+
 fn exchange_cid_v3() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 fn exchange_eid_v3() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 fn exchange_bytes_v3(value: text) -> [u8]: boxed_text_bytes_checked(value).unwrap()
@@ -16,11 +20,21 @@ fn exchange_context_v3(action: text) -> WindowsEnginePipeWriteContextV1:
 fn exchange_rejected_v3(outcome: WindowsDockerEngineExchangeOutcomeV3) -> bool:
     match outcome:
         case WindowsDockerEngineExchangeOutcomeV3.Rejected(_): true
-        case _: false
+        case WindowsDockerEngineExchangeOutcomeV3.Ready(owner):
+            exchange_retained_v3.push(owner)
+            false
+        case WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(owner, _reason):
+            exchange_retained_v3.push(owner)
+            false
 fn exchange_rejection_reason_v3(outcome: WindowsDockerEngineExchangeOutcomeV3) -> text:
     match outcome:
         case WindowsDockerEngineExchangeOutcomeV3.Rejected(reason): reason
-        case _: "unexpected-native-owner"
+        case WindowsDockerEngineExchangeOutcomeV3.Ready(owner):
+            exchange_retained_v3.push(owner)
+            "unexpected-native-owner:ready"
+        case WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(owner, _reason):
+            exchange_retained_v3.push(owner)
+            "unexpected-native-owner:cleanup-required"
 
 describe "Windows private Engine exact HTTP request serialization":
     it "serializes a fixed local Host, explicit version and exact Content-Length":

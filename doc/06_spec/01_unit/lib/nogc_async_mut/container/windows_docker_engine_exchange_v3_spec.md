@@ -6,6 +6,10 @@ Docker request was executed. These authored cases are not qualification evidence
 Source: `src/lib/nogc_async_mut/container/providers/windows/docker_engine_exchange_v3.spl`.
 Spec: `test/01_unit/lib/nogc_async_mut/container/windows_docker_engine_exchange_v3_spec.spl`.
 
+Negative-case helpers retain any unexpected Ready/CleanupRequired owner before
+asserting failure. A regression that opens a native connection therefore does
+not discard its cleanup authority; retained values are never extra readers.
+
 The private serializer accepts only exact API1.48 codec output. It rebuilds each
 supported operation, compares the complete method/target/ordered headers/body,
 and emits HTTP/1.1 with fixed Host docker and exact binary Content-Length.
