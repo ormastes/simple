@@ -81,8 +81,8 @@ scan() {
         sp=$(mktemp) || { echo "ERROR - nothing was checked (mktemp)"; return 2; }
         printf '%s\n' "$missing" | cut -d'|' -f1 | sort -u \
             | (cd "$sroot" && xargs git ls-files -t -- 2>/dev/null) | sed -n 's/^S //p' > "$sp"
-        sparse_n=$(printf '%s\n' "$missing" | awk -F'|' 'NR==FNR{s[$0]=1;next} ($1 in s)' "$sp" - | wc -l | tr -d ' ')
-        missing=$(printf '%s\n' "$missing" | awk -F'|' 'NR==FNR{s[$0]=1;next} !($1 in s)' "$sp" -)
+        sparse_n=$(printf '%s\n' "$missing" | awk -F'|' 'FILENAME==ARGV[1]{s[$0]=1;next} ($1 in s)' "$sp" - | wc -l | tr -d ' ')
+        missing=$(printf '%s\n' "$missing" | awk -F'|' 'FILENAME==ARGV[1]{s[$0]=1;next} !($1 in s)' "$sp" -)
         rm -f "$sp"
         stale=$(printf '%s\n%s\n' "$stale" "$missing" | sed '/^$/d')
     fi
@@ -136,14 +136,14 @@ selftest() {
     printf 'lib/m.spl|live\nlib/m.spl|other\nlib/m.spl|extra\n' > "$d/$BASELINE_REL"
     out=$(scan "$d" "$b" | tail -1); case $out in FAIL*gained*extra*) ;; *) echo "ERROR - selftest: an added line must FAIL the ratchet ($out)"; return 2 ;; esac
     printf 'lib/gone.spl|live\n' > "$d/$BASELINE_REL"
-    out=$(scan "$d" "$b" | tail -1); case $out in FAIL*) ;; *) echo "ERROR - selftest: missing file must be stale ($out)"; return 2 ;; esac
+    out=$(scan "$d" "$b" | tail -1); case $out in "FAIL - "*stale*) ;; *) echo "ERROR - selftest: missing file must be stale ($out)"; return 2 ;; esac
     # sparse checkout: a tracked skip-worktree file absent on disk is skipped (NOTE), not stale;
     # a plain deleted file next to it is still stale.
     printf 'lib/m.spl|live\n' > "$d/$BASELINE_REL"
     git -C "$d" update-index --skip-worktree lib/m.spl && rm -f "$d/lib/m.spl"
     out=$(scan "$d" "$b"); case $out in NOTE*1*PASS*) ;; *) echo "ERROR - selftest: sparse-unmaterialized entry must be skipped ($out)"; return 2 ;; esac
     printf 'lib/m.spl|live\nlib/gone.spl|live\n' > "$d/$BASELINE_REL"
-    out=$(scan "$d" "$b" | tail -1); case $out in FAIL*gone*) ;; *) echo "ERROR - selftest: deleted file beside a sparse one must stay stale ($out)"; return 2 ;; esac
+    out=$(scan "$d" "$b" | tail -1); case $out in "FAIL - "*stale*gone*) ;; *) echo "ERROR - selftest: deleted file beside a sparse one must stay stale ($out)"; return 2 ;; esac
     : > "$d/$BASELINE_REL"
     scan "$d" "$b" >/dev/null; [ $? -eq 2 ] || { echo "ERROR - selftest: empty baseline must ERROR"; return 2; }
     return 0
