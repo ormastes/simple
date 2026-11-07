@@ -45,7 +45,8 @@ stale_scan() {
         {
             f = $1; name = $2
             if (f != cur) { cur = f; load(f) }
-            if (missing || !(name in priv) || (name in expo)) print $0
+            if (missing) print "M|" $0
+            else if (!(name in priv) || (name in expo)) print $0
         }' "$BASELINE_REL")
 }
 
@@ -69,7 +70,23 @@ scan() {
     [ -f "$file" ] || { echo "ERROR - nothing was checked (missing $file)"; return 2; }
     total=$(wc -l < "$file" | tr -d ' ')
     [ "$total" -gt 0 ] || { echo "ERROR - nothing was checked (empty baseline)"; return 2; }
-    stale=$(stale_scan "$sroot")
+    raw=$(stale_scan "$sroot")
+    stale=$(printf '%s\n' "$raw" | grep -v '^M|' || true)
+    missing=$(printf '%s\n' "$raw" | sed -n 's/^M|//p')
+    sparse_n=0
+    if [ -n "$missing" ]; then
+        # A file absent from the worktree but marked skip-worktree ('S') in the
+        # index is unmaterialized by a sparse checkout (CI fast-gates job), not
+        # deleted: skip it and say so. A file absent from the index is stale.
+        sp=$(mktemp) || { echo "ERROR - nothing was checked (mktemp)"; return 2; }
+        printf '%s\n' "$missing" | cut -d'|' -f1 | sort -u \
+            | (cd "$sroot" && xargs git ls-files -t -- 2>/dev/null) | sed -n 's/^S //p' > "$sp"
+        sparse_n=$(printf '%s\n' "$missing" | awk -F'|' 'NR==FNR{s[$0]=1;next} ($1 in s)' "$sp" - | wc -l | tr -d ' ')
+        missing=$(printf '%s\n' "$missing" | awk -F'|' 'NR==FNR{s[$0]=1;next} !($1 in s)' "$sp" -)
+        rm -f "$sp"
+        stale=$(printf '%s\n%s\n' "$stale" "$missing" | sed '/^$/d')
+    fi
+    [ "$sparse_n" -gt 0 ] && echo "NOTE - $sparse_n entr(ies) skipped: file not materialized by sparse checkout (staleness checked on full checkouts)"
     if [ -n "$stale" ]; then
         k=$(printf '%s\n' "$stale" | wc -l | tr -d ' ')
         first=$(printf '%s\n' "$stale" | head -5 | tr '\n' ' ')
@@ -120,6 +137,13 @@ selftest() {
     out=$(scan "$d" "$b" | tail -1); case $out in FAIL*gained*extra*) ;; *) echo "ERROR - selftest: an added line must FAIL the ratchet ($out)"; return 2 ;; esac
     printf 'lib/gone.spl|live\n' > "$d/$BASELINE_REL"
     out=$(scan "$d" "$b" | tail -1); case $out in FAIL*) ;; *) echo "ERROR - selftest: missing file must be stale ($out)"; return 2 ;; esac
+    # sparse checkout: a tracked skip-worktree file absent on disk is skipped (NOTE), not stale;
+    # a plain deleted file next to it is still stale.
+    printf 'lib/m.spl|live\n' > "$d/$BASELINE_REL"
+    git -C "$d" update-index --skip-worktree lib/m.spl && rm -f "$d/lib/m.spl"
+    out=$(scan "$d" "$b"); case $out in NOTE*1*PASS*) ;; *) echo "ERROR - selftest: sparse-unmaterialized entry must be skipped ($out)"; return 2 ;; esac
+    printf 'lib/m.spl|live\nlib/gone.spl|live\n' > "$d/$BASELINE_REL"
+    out=$(scan "$d" "$b" | tail -1); case $out in FAIL*gone*) ;; *) echo "ERROR - selftest: deleted file beside a sparse one must stay stale ($out)"; return 2 ;; esac
     : > "$d/$BASELINE_REL"
     scan "$d" "$b" >/dev/null; [ $? -eq 2 ] || { echo "ERROR - selftest: empty baseline must ERROR"; return 2; }
     return 0
