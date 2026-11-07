@@ -1,6 +1,6 @@
 # Seed riscv64 freestanding: `u64` while-counter loop body never runs (2026-10-03)
 
-**Status:** open (worked around). **Target:** `riscv64gc-unknown-none-elf`,
+**Status:** FIXED (by `a9258170c5d`, 2026-10-05; verified 2026-11-07). **Target:** `riscv64gc-unknown-none-elf`,
 seed cranelift backend, built from release/1.0 `d4bfccb7bc9`.
 
 ## Observed
@@ -54,3 +54,36 @@ unreproduced on target; the 2026-10-04 related evidence (ordering compares on
 `be32` call results lowering to dynamic `rt_native_cmp`) is likewise still
 worked around via typed locals. Status: OPEN (worked around); a minimal
 freestanding rv32/rv64 native repro remains the next step.
+
+## Resolution (2026-11-07, work/riscv-bugs-20261107)
+
+Root cause: before `a9258170c5d` ("fix(cranelift): keep untyped raw ordering
+comparisons inline", 2026-10-05 -- two days after the `d4bfccb7bc9` build
+this record was filed against), `compile_binop` in
+`src/compiler_rust/compiler/src/codegen/instr/core.rs` routed an ordering
+compare to the tag-aware `rt_native_cmp` whenever EITHER operand's VReg type
+was not a known scalar. Call results (`rv64_virtio_mmio_blk_slot_count()`,
+`self.be32(..)`) carry no threaded VReg type, so `slot < count()` and
+`self.be32(4u64) > self.size` went dynamic and the raw integers were decoded
+as tagged values (loop condition false / load fault). Since `a9258170c5d`,
+`ordering_needs_dynamic_cmp` (core.rs:62) goes dynamic only when an operand
+is explicitly `Any`, so both shapes now lower to an inline unsigned `icmp`.
+
+Regression test added (riscv64 freestanding target, both shapes):
+`codegen::cranelift::tests::riscv64_u64_call_result_ordering_keeps_raw_compare`
+in `src/compiler_rust/compiler/src/codegen/cranelift_tests.rs`.
+
+- RED (core.rs temporarily reverted to the pre-`a9258170c5d` rule
+  `!(numeric(lhs) && numeric(rhs))`):
+  `cargo test --release -p simple-compiler --lib -- codegen::cranelift::tests::riscv64_u64_call_result_ordering_keeps_raw_compare`
+  -> FAILED: `riscv64 u64 while-counter ordering must not use the
+  tagged-value comparator: ["rv_slot_count", "rt_native_cmp", ...]`.
+- GREEN (core.rs as on the tip): same command -> `ok` (plus the existing
+  `partially_typed_*`, `any_ordering_*`, `text_ordering_*` tests: 4 passed).
+- Execution: the riscv64 loop object from the test, linked with a C `_start`
+  stub (`rv_slot_count()` returns 8) via llvm-18 clang + lld and run under
+  `qemu-riscv64` user mode, ran the body exactly 8 times (slots 0..7).
+
+Not verified: a full SimpleOS riscv64 boot under QEMU/real firmware or on the
+board with the i64-counter workaround in `nvfs_root_entry.spl` and the typed
+locals in `fdt_blob.spl` removed. Those workarounds are left in place.

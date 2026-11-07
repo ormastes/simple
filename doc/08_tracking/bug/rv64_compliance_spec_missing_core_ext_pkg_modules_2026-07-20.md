@@ -58,3 +58,19 @@ live in `src/hardware/rv64gc/{core,ext,pkg}/` (not `src/lib/hardware/...`) and
 bugs: `(misa >> 5) and 1` / `(misa >> 3) and 1` used logical `and` (yields
 `true`) instead of bitwise `&`. Fixed to `& 1`, assertions unchanged
 (expect `== 1`). Result: 22/22 passed.
+
+## Re-verification (2026-11-07, work/riscv-bugs-20261107)
+
+Still FIXED at `origin/release/1.0.0` @ `1965f658d45`; no code change needed.
+The spec file is `test/02_integration/hardware/rv64gc/rv64_compliance_spec.spl`
+(the `.spipe_matchers_` name in the Command section above no longer exists).
+Binary: privately built Rust seed `target-rv/release/simple` (54154944 bytes,
+built 2026-11-07 08:56 from this tip; `cargo build --release --bin simple`).
+
+```
+simple test test/02_integration/hardware/rv64gc/rv64_compliance_spec.spl
+SPEC FILE VERDICT: ... outcome=OK declared>=22 executed=22 passed=22 failed=0 skipped=0 dropped=0
+```
+
+Not verified on the pure-Simple self-hosted binary (none deployed in this
+worktree).
