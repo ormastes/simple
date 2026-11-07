@@ -1,0 +1,227 @@
+# Authored semantic-owner integration; runtime/provider qualification pending.
+use std.spec.*
+use compiler.common.data.data_semantic_type_identity_v1.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1}
+use compiler.frontend.parser_types.{ParserModule, ParserTypeParam}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.type_aliases.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.data_semantic_type_identity_v1.*
+use compiler.hir.data_type_binding_v1.*
+
+fn identity_lowerer_v1(rows: [(text, text, text)], selected: i64) -> HirLowering:
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+    for row in rows:
+        modules[row.0] = parse_and_build_module_checked_reference_v1(row.2, row.1).unwrap()
+        sources = sources.push(SourceFile(path: row.1, content: row.2, module_name: row.0))
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module(rows[selected].1, surfaces)
+    lowering.begin_module(rows[selected].1)
+    expect(lowering.data_prepare_module_type_bindings_v1(modules[rows[selected].0]).unwrap()).to_equal(true)
+    lowering
+
+fn local_identity_lowerer_v1(source: text) -> HirLowering:
+    identity_lowerer_v1([("pkg.owner", "pkg/owner.spl", source)], 0)
+
+fn bound_identity_v1(lowering: HirLowering, spelling: text) -> DataSemanticTypeIdentityV1:
+    lowering.data_bind_type_text_identity_v1(spelling, "schema-types.sdn").unwrap()
+
+fn type_binding_rejected_v1(lowering: HirLowering, spelling: text) -> bool:
+    match lowering.data_bind_type_text_identity_v1(spelling, "schema-types.sdn"):
+        case Err(_): true
+        case Ok(_): false
+
+fn hir_identity_type_v1(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+describe "schema type identity uses existing semantic owners":
+    it "merges forward aliases and direct nested language types before any body lowering":
+        step("Declare aliases using the real frontend and HIR prebody owner passes")
+        val source = "type First = Later\ntype Later = Dict<text, [i64?]>\nfn body_is_not_lowered() -> i64:\n    unknown_body_value\n"
+        var lowering = local_identity_lowerer_v1(source)
+        val alias_key = bound_identity_v1(lowering, "First")
+        val direct_key = bound_identity_v1(lowering, "Dict<text, [i64?]>")
+        expect(data_semantic_type_identity_equal_v1(alias_key, direct_key)).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "binds source and SDN nested generic arguments through the same context":
+        step("Parse a real generic class field and independently parse the SDN type expression")
+        val source = "pub class Box<T>:\n    value: T\npub class View:\n    payload: Box<Dict<text, [i64?]>>\n"
+        val module = parse_and_build_module_checked_reference_v1(source, "pkg/owner.spl").unwrap()
+        var lowering = local_identity_lowerer_v1(source)
+        val field = module.classes["View"].fields[0]
+        val from_source = lowering.data_bind_type_identity_v1(field.type_).unwrap()
+        val from_sdn = bound_identity_v1(lowering, "Box<Dict<text, [i64?]>>")
+        expect(data_semantic_type_identity_equal_v1(from_source, from_sdn)).to_equal(true)
+        expect(data_semantic_type_identity_equal_v1(from_sdn, bound_identity_v1(lowering, "Box<Dict<text, [u64?]>>"))).to_equal(false)
+
+    it "uses semantic generic alias substitution and defaults without inventing an alias resolver":
+        step("Register a bound generic alias template through the existing semantic owner")
+        # The flat-AST generic declaration bridge is a separately assigned repair;
+        # this case tests its existing semantic target, not parser preservation.
+        var lowering = local_identity_lowerer_v1("pub struct RegionId:\n    value: u64\n")
+        val id = lowering.symbols.define("Items", SymbolKind.TypeAlias, nil, Span.empty(), Visibility.Public, false, Some("pkg/owner.spl"))
+        val formal = ParserTypeParam(name: "T", bounds: [], has_default: true,
+            default: Type(kind: TypeKind.Named("RegionId", []), span: Span.empty()), span: Span.empty())
+        val template = data_parser_type_text_v1("Dict<text, [T?]>", "owner.spl").unwrap()
+        lowering.register_type_alias_template(id, template, [formal], "pkg/owner.spl")
+        expect(data_semantic_type_identity_equal_v1(bound_identity_v1(lowering, "Items"), bound_identity_v1(lowering, "Dict<text, [RegionId?]>"))).to_equal(true)
+        expect(data_semantic_type_identity_equal_v1(bound_identity_v1(lowering, "Items<i64>"), bound_identity_v1(lowering, "Dict<text, [i64?]>"))).to_equal(true)
+        expect(type_binding_rejected_v1(lowering, "Items<i64, bool>")).to_equal(true)
+
+    it "uses the canonical nominal owner for omitted defaults and rejects excess arguments":
+        step("The shared nominal normalization repair must make Box and Box<i64> one bound type")
+        # Integration requirement for the separately owned nominal-type repair;
+        # this adapter must not synthesize defaults or invent generic arity.
+        var lowering = local_identity_lowerer_v1("pub class Box<T = i64>:\n    value: T\n")
+        expect(data_semantic_type_identity_equal_v1(bound_identity_v1(lowering, "Box"), bound_identity_v1(lowering, "Box<i64>"))).to_equal(true)
+        expect(type_binding_rejected_v1(lowering, "Box<i64, bool>")).to_equal(true)
+
+    it "binds actual parsed generic alias defaults and nested arguments after the bridge owner repair":
+        step("The frontend must retain generic alias metadata before canonical semantic substitution")
+        val source = "type Items<T = i64> = Dict<text, [T?]>\n"
+        val parsed = parse_and_build_module_checked_reference_v1(source, "pkg/owner.spl").unwrap()
+        expect(parsed.type_aliases["Items"].type_params.len()).to_equal(1)
+        var lowering = local_identity_lowerer_v1(source)
+        expect(data_semantic_type_identity_equal_v1(bound_identity_v1(lowering, "Items"), bound_identity_v1(lowering, "Dict<text, [i64?]>"))).to_equal(true)
+        expect(data_semantic_type_identity_equal_v1(bound_identity_v1(lowering, "Items<bool>"), bound_identity_v1(lowering, "Dict<text, [bool?]>"))).to_equal(true)
+
+    it "rejects alias cycles and unknown nominal names rather than issuing a guessed key":
+        step("Semantic errors produce no reusable schema type identity")
+        var cyclic = local_identity_lowerer_v1("type First = Second\ntype Second = First\n")
+        expect(type_binding_rejected_v1(cyclic, "First")).to_equal(true)
+        var unknown = local_identity_lowerer_v1("")
+        expect(type_binding_rejected_v1(unknown, "MissingType")).to_equal(true)
+
+    it "keeps nominal wrappers distinct and ignores local SymbolId allocation order":
+        step("Equal u64 fields do not collapse declarations; shifted symbol numbering does not change the owner key")
+        val first_source = "pub struct RegionId:\n    value: u64\npub struct ObjId:\n    value: u64\n"
+        var first = local_identity_lowerer_v1(first_source)
+        var second = local_identity_lowerer_v1("pub class ABefore:\n    value: bool\n" + first_source)
+        expect(first.symbols.local_type_binding_raw("RegionId") == second.symbols.local_type_binding_raw("RegionId")).to_equal(false)
+        val region = bound_identity_v1(first, "RegionId")
+        expect(data_semantic_type_identity_equal_v1(region, bound_identity_v1(first, "ObjId"))).to_equal(false)
+        expect(data_semantic_type_identity_equal_v1(region, bound_identity_v1(second, "RegionId"))).to_equal(true)
+
+    it "resolves imported rename and re-export chains to their terminal declaration owner":
+        step("Provider, direct alias, and facade alias use the real retained module-surface resolver")
+        val rows = [
+            ("pkg.provider", "pkg/provider.spl", "pub struct RegionId:\n    value: u64\n"),
+            ("pkg.facade", "pkg/facade.spl", "export use pkg.provider.{RegionId}\n"),
+            ("pkg.consumer", "pkg/consumer.spl", "use pkg.provider.{RegionId as Direct}\nuse pkg.facade.{RegionId as ViaFacade}\n")]
+        var provider = identity_lowerer_v1(rows, 0)
+        var consumer = identity_lowerer_v1(rows, 2)
+        val original = bound_identity_v1(provider, "RegionId")
+        expect(data_semantic_type_identity_equal_v1(original, bound_identity_v1(consumer, "Direct"))).to_equal(true)
+        expect(data_semantic_type_identity_equal_v1(original, bound_identity_v1(consumer, "ViaFacade"))).to_equal(true)
+
+    it "distinguishes imported homonyms owned by different provider modules":
+        step("Consumer-local names cannot collapse two provider declarations")
+        val rows = [
+            ("pkg.a", "pkg/a.spl", "pub struct RegionId:\n    value: u64\n"),
+            ("pkg.b", "pkg/b.spl", "pub struct RegionId:\n    value: u64\n"),
+            ("pkg.consumer", "pkg/consumer.spl", "use pkg.a.{RegionId as A}\nuse pkg.b.{RegionId as B}\n")]
+        var lowering = identity_lowerer_v1(rows, 2)
+        expect(data_semantic_type_identity_equal_v1(bound_identity_v1(lowering, "A"), bound_identity_v1(lowering, "B"))).to_equal(false)
+
+    it "does not confuse an imported rename with a different declaration having that alias spelling":
+        step("Inspect real frontend/importer metadata when the provider exports both Actual and Alias")
+        val rows = [
+            ("pkg.provider", "pkg/provider.spl", "pub enum Actual:\n    One\npub enum Alias:\n    Two\n"),
+            ("pkg.consumer", "pkg/consumer.spl", "use pkg.provider.{Actual as Alias}\n")]
+        var provider = identity_lowerer_v1(rows, 0)
+        var consumer = identity_lowerer_v1(rows, 1)
+        val renamed = bound_identity_v1(consumer, "Alias")
+        expect(data_semantic_type_identity_equal_v1(renamed, bound_identity_v1(provider, "Actual"))).to_equal(true)
+        expect(data_semantic_type_identity_equal_v1(renamed, bound_identity_v1(provider, "Alias"))).to_equal(false)
+
+    it "establishes strict ownership policy from the parsed module and resets it for a legacy module":
+        step("Preparation mirrors normal HIR module policy without caller-injected flags")
+        val strict_source = "@no_gc(strict)\npub struct StrictMarker:\n    value: i64\n"
+        val legacy_source = "pub struct LegacyMarker:\n    value: i64\n"
+        val rows = [("pkg.strict", "pkg/strict.spl", strict_source),
+            ("pkg.legacy", "pkg/legacy.spl", legacy_source)]
+        var lowering = identity_lowerer_v1(rows, 0)
+        expect(lowering.nogc_strict).to_equal(true)
+        val strict = bound_identity_v1(lowering, "&i64")
+        lowering.begin_module("pkg/legacy.spl")
+        val legacy_module = parse_and_build_module_checked_reference_v1(legacy_source, "pkg/legacy.spl").unwrap()
+        expect(lowering.data_prepare_module_type_bindings_v1(legacy_module).unwrap()).to_equal(true)
+        expect(lowering.nogc_strict).to_equal(false)
+        expect(data_semantic_type_identity_equal_v1(strict, bound_identity_v1(lowering, "&i64"))).to_equal(false)
+
+    it "retains reference, pointer and ownership qualifiers at every nested position":
+        step("Project already-bound HIR qualifier constructors without lowering them to machine representation")
+        var lowering = local_identity_lowerer_v1("")
+        val base = hir_identity_type_v1(HirTypeKind.Int(64, false))
+        val forms = [HirTypeKind.Ref(base, false), HirTypeKind.Ref(base, true),
+            HirTypeKind.Ptr(base, false), HirTypeKind.Ptr(base, true), HirTypeKind.Isolated(base),
+            HirTypeKind.Unique(base), HirTypeKind.Shared(base), HirTypeKind.Weak(base)]
+        var identities: [DataSemanticTypeIdentityV1] = []
+        for form in forms: identities = identities.push(lowering.data_type_identity_v1(hir_identity_type_v1(form)).unwrap())
+        for left in 0..identities.len():
+            for right in 0..identities.len():
+                expect(data_semantic_type_identity_equal_v1(identities[left], identities[right])).to_equal(left == right)
+        val outer = hir_identity_type_v1(HirTypeKind.Optional(hir_identity_type_v1(HirTypeKind.Ref(base, false))))
+        val inner = hir_identity_type_v1(HirTypeKind.Ref(hir_identity_type_v1(HirTypeKind.Optional(base)), false))
+        expect(data_semantic_type_identity_equal_v1(lowering.data_type_identity_v1(outer).unwrap(), lowering.data_type_identity_v1(inner).unwrap())).to_equal(false)
+
+    it "includes function effects and recursive Throws type while normalizing effect declaration order":
+        step("Function identity cannot omit orthogonal effect annotations")
+        var lowering = local_identity_lowerer_v1("")
+        val base = hir_identity_type_v1(HirTypeKind.Int(64, true))
+        val io = Effect(kind: EffectKind.IO, span: Span.empty())
+        val throws = Effect(kind: EffectKind.Throws(base), span: Span.empty())
+        val a = hir_identity_type_v1(HirTypeKind.Function([], base, [io, throws]))
+        val b = hir_identity_type_v1(HirTypeKind.Function([], base, [throws, io]))
+        val pure = hir_identity_type_v1(HirTypeKind.Function([], base, []))
+        val key = lowering.data_type_identity_v1(a).unwrap()
+        expect(data_semantic_type_identity_equal_v1(key, lowering.data_type_identity_v1(b).unwrap())).to_equal(true)
+        expect(data_semantic_type_identity_equal_v1(key, lowering.data_type_identity_v1(pure).unwrap())).to_equal(false)
+
+    it "rejects unresolved HIR constructors and a nominal declaration missing its semantic owner":
+        step("Infer, Error, unbound parameters/projections and ownerless names cannot become global proof")
+        var lowering = local_identity_lowerer_v1("")
+        val unbound = lowering.symbols.define("Unowned", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        val forms = [HirTypeKind.Infer(1, 0), HirTypeKind.Error, HirTypeKind.TypeParam("T", []),
+            HirTypeKind.Projection(hir_identity_type_v1(HirTypeKind.Int(64, true)), "Item"), HirTypeKind.Named(unbound, [])]
+        for form in forms:
+            var rejected = false
+            match lowering.data_type_identity_v1(hir_identity_type_v1(form)):
+                case Err(_): rejected = true
+                case Ok(_): rejected = false
+            expect(rejected).to_equal(true)
+
+    it "rejects malformed SDN type syntax and extra declarations through the checked existing parser":
+        step("Do not accept parser recovery or injection as a valid single type expression")
+        var lowering = local_identity_lowerer_v1("")
+        for spelling in ["Dict<text,", "i64\ntype Injected = bool", "", "\0"]:
+            expect(type_binding_rejected_v1(lowering, spelling)).to_equal(true)
+
+    it "bounds semantic traversal before collecting an oversized HIR type tree":
+        step("Reject wide semantic input before serializing all child nodes")
+        var lowering = local_identity_lowerer_v1("")
+        val unit = hir_identity_type_v1(HirTypeKind.Unit)
+        var wide: [HirType] = []
+        for _ in 0..257: wide = wide.push(unit)
+        var rejected = false
+        match lowering.data_type_identity_v1(hir_identity_type_v1(HirTypeKind.Tuple(wide))):
+            case Err(message): rejected = message.contains("child count bound")
+            case Ok(_): rejected = false
+        expect(rejected).to_equal(true)
+        var leaves: [HirType] = []
+        for _ in 0..256: leaves = leaves.push(unit)
+        val group = hir_identity_type_v1(HirTypeKind.Tuple(leaves))
+        rejected = false
+        match lowering.data_type_identity_v1(hir_identity_type_v1(HirTypeKind.Tuple([group, group, group, group]))):
+            case Err(message): rejected = message.contains("aggregate node bound")
+            case Ok(_): rejected = false
+        expect(rejected).to_equal(true)

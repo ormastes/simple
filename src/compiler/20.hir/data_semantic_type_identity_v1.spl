@@ -1,0 +1,202 @@
+# The HIR owner resolves names/aliases; this adapter only transports its facts.
+use compiler.common.data.data_semantic_type_identity_v1.{
+    DataSemanticTypeIdentityV1, data_semantic_type_bounded_node_v1,
+    data_semantic_type_identity_v1, DATA_SEMANTIC_TYPE_MAX_DEPTH_V1,
+    DATA_SEMANTIC_TYPE_MAX_BYTES_V1, DATA_SEMANTIC_TYPE_MAX_NODES_V1}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+fn type_nominal_kind_v1(kind: SymbolKind) -> text:
+    match kind:
+        case SymbolKind.Struct: "struct"
+        case SymbolKind.Class: "class"
+        case SymbolKind.Enum: "enum"
+        case SymbolKind.Trait: "trait"
+        case _: ""
+
+struct DataTypeProjectionV1:
+    canonical: text
+    nodes: i64
+
+struct DataTypeChildrenProjectionV1:
+    children: [text]
+    nodes: i64
+    byte_len: i64
+
+impl HirLowering:
+    me data_nominal_type_fields_v1(id: SymbolId) -> Result<[text], text>:
+        if not self.symbols.symbols.has(id.id): return Err("type identity has no bound nominal declaration")
+        val declaration = self.symbols.symbols[id.id]
+        if declaration.id.id != id.id: return Err("type identity nominal symbol key mismatch")
+        val kind = type_nominal_kind_v1(declaration.kind)
+        if kind == "": return Err("type identity requires a terminal nominal type, not an alias/value")
+        val owner = hir_symbol_owner_module(declaration.defining_module ?? "")
+        if owner == "" or declaration.name == "": return Err("type identity nominal declaration has no owner/name")
+        val local_owner = hir_symbol_owner_module(self.module_filename)
+        if owner == local_owner:
+            return Ok(hir_payload_terminal_identity(owner, declaration.name, kind).split("::"))
+
+        # Reuse retained semantic materialization/origin owners. An imported
+        # lexical rename is not the original terminal declaration's name.
+        if self.module_surfaces.index_by_name.has(owner):
+            val index = self.module_surfaces.index_by_name[owner]
+            if index < 0 or index >= self.module_surfaces.surfaces.len(): return Err("type identity provider surface index is stale")
+            val surface = self.module_surfaces.surfaces[index]
+            val origin = self.resolve_materialized_enum_payload_origin(surface, owner, declaration.name)
+            if origin.found:
+                if origin.item_kind != kind: return Err("type identity terminal declaration kind mismatch")
+                return Ok(hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind).split("::"))
+        if self.materialized_payload_bindings.has(declaration.name):
+            val fields = self.materialized_payload_bindings[declaration.name].split("::")
+            if fields.len() != 3 or fields[0] != owner or fields[2] != kind:
+                return Err("type identity retained terminal owner conflicts with its bound symbol")
+            return Ok(fields)
+        # Explicit-import rename/re-export resolution belongs to HIR's existing
+        # owner, not to a schema-specific spelling/alias resolver.
+        if self.module_surfaces.index_by_name.has(local_owner):
+            val index = self.module_surfaces.index_by_name[local_owner]
+            if index < 0 or index >= self.module_surfaces.surfaces.len(): return Err("type identity consumer surface index is stale")
+            val surface = self.module_surfaces.surfaces[index]
+            val origin = self.resolve_materialized_enum_payload_explicit_import(surface, declaration.name)
+            if origin.found:
+                if origin.item_kind != kind: return Err("type identity explicit import kind mismatch")
+                return Ok(hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind).split("::"))
+        return Err("type identity imported nominal origin is not retained by its semantic owner")
+
+    me data_type_children_v1(values: [HirType], depth: i64, remaining: i64) -> Result<DataTypeChildrenProjectionV1, text>:
+        if values.len() > 256: return Err("semantic type child count bound")
+        var children: [text] = []
+        var nodes: i64 = 0
+        var bytes: i64 = 0
+        for value in values:
+            val child = self.data_type_node_v1(value, depth + 1, remaining - nodes)?
+            val count = child.canonical.bytes().len()
+            if count > DATA_SEMANTIC_TYPE_MAX_BYTES_V1 - bytes: return Err("semantic type aggregate child byte bound")
+            bytes = bytes + count
+            nodes = nodes + child.nodes
+            children = children.push(child.canonical)
+        Ok(DataTypeChildrenProjectionV1(children: children, nodes: nodes, byte_len: bytes))
+
+    me data_type_node_v1(value: HirType, depth: i64, remaining: i64) -> Result<DataTypeProjectionV1, text>:
+        if depth > DATA_SEMANTIC_TYPE_MAX_DEPTH_V1: return Err("semantic type nesting exceeds identity depth bound")
+        if remaining < 1: return Err("semantic type aggregate node bound")
+        var tag = ""
+        var fields: [text] = []
+        var child_types: [HirType] = []
+        var declared_effects: [Effect] = []
+        match value.kind:
+            case HirTypeKind.Int(bits, signed):
+                tag = "int"
+                fields = ["{bits}", if signed: "signed" else: "unsigned"]
+            case HirTypeKind.Float(bits):
+                tag = "float"
+                fields = ["{bits}"]
+            case HirTypeKind.Bool: tag = "bool"
+            case HirTypeKind.Char: tag = "char"
+            case HirTypeKind.Str: tag = "text"
+            case HirTypeKind.Unit: tag = "unit"
+            case HirTypeKind.Never: tag = "never"
+            case HirTypeKind.Any: tag = "any"
+            case HirTypeKind.Named(symbol, arguments):
+                tag = "named"
+                fields = self.data_nominal_type_fields_v1(symbol)?
+                child_types = arguments
+            case HirTypeKind.DynTrait(symbol):
+                tag = "dyn"
+                fields = self.data_nominal_type_fields_v1(symbol)?
+                if fields.len() != 3 or fields[2] != "trait": return Err("dynamic type does not bind a trait declaration")
+            case HirTypeKind.Tuple(elements):
+                tag = "tuple"
+                child_types = elements
+            case HirTypeKind.Union(elements):
+                # Preserve the existing HIR type owner's member ordering.
+                tag = "union"
+                child_types = elements
+            case HirTypeKind.Array(inner, size):
+                tag = "array"
+                fields = [if size == nil: "?" else: "{size!}"]
+                child_types = [inner]
+            case HirTypeKind.Slice(inner):
+                tag = "slice"
+                child_types = [inner]
+            case HirTypeKind.Dict(key, item):
+                tag = "dict"
+                child_types = [key, item]
+            case HirTypeKind.Result(ok, err):
+                tag = "result"
+                child_types = [ok, err]
+            case HirTypeKind.Ref(inner, mutable):
+                tag = "ref"
+                fields = [if mutable: "mutable" else: "immutable"]
+                child_types = [inner]
+            case HirTypeKind.Ptr(inner, mutable):
+                tag = "ptr"
+                fields = [if mutable: "mutable" else: "immutable"]
+                child_types = [inner]
+            case HirTypeKind.Optional(inner):
+                tag = "optional"
+                child_types = [inner]
+            case HirTypeKind.Isolated(inner):
+                tag = "isolated"
+                child_types = [inner]
+            case HirTypeKind.Unique(inner):
+                tag = "unique"
+                child_types = [inner]
+            case HirTypeKind.Shared(inner):
+                tag = "shared"
+                child_types = [inner]
+            case HirTypeKind.Weak(inner):
+                tag = "weak"
+                child_types = [inner]
+            case HirTypeKind.Function(parameters, result, effects):
+                tag = "function"
+                if parameters.len() > 255 or effects.len() > 256: return Err("semantic function child count bound")
+                for parameter in parameters: child_types = child_types.push(parameter)
+                child_types = child_types.push(result)
+                fields = ["{parameters.len()}"]
+                declared_effects = effects
+            case _: return Err("semantic type is unresolved or outside the versioned identity vocabulary")
+        val projected = self.data_type_children_v1(child_types, depth, remaining - 1)?
+        var children = projected.children
+        var nodes = 1 + projected.nodes
+        var emitted_bytes = projected.byte_len
+        var effect_nodes: [text] = []
+        for effect in declared_effects:
+            if nodes >= remaining: return Err("semantic effect aggregate node bound")
+            nodes = nodes + 1
+            var effect_tag = ""
+            var effect_children: [text] = []
+            match effect.kind:
+                case EffectKind.Pure: effect_tag = "effect.pure"
+                case EffectKind.IO: effect_tag = "effect.io"
+                case EffectKind.Async: effect_tag = "effect.async"
+                case EffectKind.Mutates: effect_tag = "effect.mutates"
+                case EffectKind.Allocates: effect_tag = "effect.allocates"
+                case EffectKind.Throws(error_type):
+                    effect_tag = "effect.throws"
+                    val child = self.data_type_node_v1(error_type, depth + 2, remaining - nodes)?
+                    nodes = nodes + child.nodes
+                    effect_children = [child.canonical]
+                case _: return Err("semantic function effect is unresolved or has no bound identity")
+            val effect_node = data_semantic_type_bounded_node_v1(effect_tag, [], effect_children)?
+            val count = effect_node.bytes().len()
+            if count > DATA_SEMANTIC_TYPE_MAX_BYTES_V1 - emitted_bytes: return Err("semantic effect aggregate byte bound")
+            emitted_bytes = emitted_bytes + count
+            effect_nodes = effect_nodes.push(effect_node)
+        if tag == "function":
+            effect_nodes.sort()
+            var retained: [text] = []
+            for effect_node in effect_nodes:
+                if retained.len() == 0 or retained[retained.len() - 1] != effect_node:
+                    retained = retained.push(effect_node)
+            fields = fields.push("{retained.len()}")
+            for effect_node in retained: children = children.push(effect_node)
+        val canonical = data_semantic_type_bounded_node_v1(tag, fields, children)?
+        Ok(DataTypeProjectionV1(canonical: canonical, nodes: nodes))
+
+    me data_type_identity_v1(value: HirType) -> Result<DataSemanticTypeIdentityV1, text>:
+        if self.errors.len() != 0: return Err("semantic type owner has unresolved diagnostics")
+        val projected = self.data_type_node_v1(value, 0, DATA_SEMANTIC_TYPE_MAX_NODES_V1)?
+        data_semantic_type_identity_v1(projected.canonical)
