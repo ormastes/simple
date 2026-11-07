@@ -215,6 +215,11 @@ pub unsafe extern "C" fn rt_process_run_bounded_observed_tuple_v1(
     receipt(b"", b"observed capture requires native core-C owner", -1, 8 | 64)
 }
 
+/// The Rust lane has no shared native PTY owner-thread binding. Refuse; a
+/// thread DWORD or fresh per-call HANDLE cannot authorize the C/Simple owner.
+#[no_mangle]
+pub unsafe extern "C" fn rt_windows_pty_owner_thread_guard_v1() -> i64 { 0 }
+
 /// Uses the same Rust Child registry consumed by wait, kill and liveness.
 #[no_mangle]
 pub unsafe extern "C" fn rt_process_spawn_async_environment_v1(ptr:*const u8,len:u64,args:RuntimeValue,env:RuntimeValue,mode:i64)->i64 {
