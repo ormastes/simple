@@ -5,11 +5,40 @@ use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_operators.{HirBinOp}
 use compiler.hir.hir_codec.{hir_fn_scalars_at_v1, hir_fn_scalars_at_key_v1,
-    hir_module_function_keys_in_v1, hir_fn_scalars_with_keys_in_v1}
+    hir_module_function_keys_in_v1, hir_fn_scalars_with_keys_in_v1,
+    hir_module_encode}
 use compiler.hir.return_type_interface_v1.{rti_rows_from_hir_v1}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
+
+# Hash one provider in a disposable ownership scope. Only its digest escapes;
+# the potentially large codec body and encoder scratch are reclaimed.
+fn mir_provider_module_content_digest_v1(provider: HirModule) -> text:
+    if not transient_array_scope_begin_v1(): return ""
+    val body = hir_module_encode(provider)
+    val digest = if body == "": "" else: sha256_text(body)
+    if not transient_array_scope_pause_v1():
+        val _ended_pause = transient_array_scope_end_v1()
+        return ""
+    if not transient_heap_promote_v1(digest):
+        val _ended_promote = transient_array_scope_end_v1()
+        return ""
+    if not transient_array_scope_end_v1(): return ""
+    digest
+
+# Seal the exact ordered provider graph once at closure-session setup. The
+# returned key is immutable authority for provider-index reuse; callers retain
+# no encoded bodies. A codec refusal returns "", which makes reuse fail closed.
+fn mir_provider_session_content_key_v1(providers: [HirModule]) -> text:
+    var framed = "mir-provider-session-content-v1\n"
+    for raw_provider in providers:
+        val provider: HirModule = raw_provider
+        val digest = mir_provider_module_content_digest_v1(provider)
+        if digest == "": return ""
+        framed = framed + "{provider.name.len()}:{provider.name}" +
+            "{provider.path.len()}:{provider.path}{digest.len()}:{digest}"
+    sha256_text(framed)
 use compiler.mir._MirLowering.declaration_providers_v1.*
 use compiler.mir._MirLowering.exact_extern_provenance.*
 use compiler.mir._MirLowering.provider_globals.*

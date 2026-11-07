@@ -33,7 +33,7 @@ fn impl_src(i: i64) -> text:
 # Every consumer dispatches through the trait (vtable) and calls one
 # implementor directly.
 fn consumer_src() -> text:
-    "use lib.store.\{Store\}\nuse lib.impl0.\{Mem0\}\n\nfn via_param(s: Store) -> i64:\n    s.list(2)\n\nfn direct(n: i64) -> i64:\n    val m = Mem0(base: n)\n    m.list(1)\n"
+    "use lib.store.\{Store\}\nuse lib.impl0.\{Mem0\}\n\nfn invoke(callback: fn(Store) -> i64, s: Store) -> i64:\n    callback(s)\n\nfn via_param(s: Store) -> i64:\n    s.list(2)\n\nfn via_lift(s: Store) -> i64:\n    invoke(\\item: item.list(3), s)\n\nfn direct(n: i64) -> i64:\n    val m = Mem0(base: n)\n    m.list(1)\n"
 
 struct ClosureRun:
     errors: i64
@@ -59,7 +59,7 @@ fn collect_calls(mir: MirModule, callees: [text], indirect: i64) -> ClosureRun:
                     case _: pass
     ClosureRun(errors: 0, index_builds: 0, relocations: 0, callees: names, indirect_calls: indirect_calls)
 
-fn lower_closure(provider_count: i64, consumer_count: i64, eager: bool) -> ClosureRun:
+fn lower_closure(provider_count: i64, consumer_count: i64, eager: bool, reverse_impls: bool = false) -> ClosureRun:
     val log = Logger(level: 0)
     var modules: Dict<text, ParserModule> = {}
     var sources: [SourceFile] = []
@@ -84,8 +84,9 @@ fn lower_closure(provider_count: i64, consumer_count: i64, eager: bool) -> Closu
     providers.push(store_lowering.lower_module(modules["lib.store"]))
     i = 0
     while i < provider_count:
-        var impl_lowering = hirlowering_for_module("lib/impl{i}.spl", surfaces)
-        providers.push(impl_lowering.lower_module(modules["lib.impl{i}"]))
+        val provider_i = if reverse_impls: provider_count - i - 1 else: i
+        var impl_lowering = hirlowering_for_module("lib/impl{provider_i}.spl", surfaces)
+        providers.push(impl_lowering.lower_module(modules["lib.impl{provider_i}"]))
         i = i + 1
     for raw_consumer in consumers:
         val feed_consumer: HirModule = raw_consumer
@@ -95,6 +96,7 @@ fn lower_closure(provider_count: i64, consumer_count: i64, eager: bool) -> Closu
     val target = driver_mir_target_context(driver_core_compile_options_default())
     val first: HirModule = consumers[0]
     var lowering = MirLowering.new_for_target(first.symbols, target)
+    lowering.provider_session_requested_key = mir_provider_session_content_key_v1(providers)
     lowering.trait_impl_closure_complete = true
     var failed = 0
     var calls = ClosureRun(errors: 0, index_builds: 0, relocations: 0, callees: [], indirect_calls: 0)
@@ -142,3 +144,15 @@ describe "MIR provider trait-impl walk stays once per closure":
         expect(count_matching(demand.callees, "Mem0.list")).to_equal(count_matching(eager.callees, "Mem0.list"))
         expect(count_matching(demand.callees, "Mem0.list")).to_be_greater_than(0)
         expect(demand.callees.len()).to_equal(eager.callees.len())
+
+    it "preserves eager equivalence for either ordering of multiple providers":
+        val demand_forward = lower_closure(3, 1, false, false)
+        val eager_forward = lower_closure(3, 1, true, false)
+        val demand_reverse = lower_closure(3, 1, false, true)
+        val eager_reverse = lower_closure(3, 1, true, true)
+        expect(demand_forward.errors).to_equal(0)
+        expect(demand_reverse.errors).to_equal(0)
+        expect(demand_forward.indirect_calls).to_equal(eager_forward.indirect_calls)
+        expect(demand_reverse.indirect_calls).to_equal(eager_reverse.indirect_calls)
+        expect(demand_forward.callees.len()).to_equal(eager_forward.callees.len())
+        expect(demand_reverse.callees.len()).to_equal(eager_reverse.callees.len())

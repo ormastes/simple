@@ -1,7 +1,7 @@
 # In-process MIR: per-consumer provider rebuild is quadratic in time and retained memory
 
 Date: 2026-10-20
-Status: OPEN. Diagnosis measured. Partial repair landed with this record (unmeasured, see below).
+Status: WAITING_VERIFY. Diagnosis measured; provider-once repair awaits an admitted pure-Simple Stage 2 run.
 Related: `phase3_mir_retained_memory_2026_10_17.md`,
 `mir_lower_child_tasks_append_access_violation_2026-10-19.md`.
 
@@ -148,6 +148,13 @@ lookups. `trait_impl_owners_materialize_v1` and `trait_impl_method_materialize_v
 take a key only when the fallback trait-receiver dispatch asks for it. The demand
 lane uses the same conditions as layout demand. The escape hatch for A/B checks is
 `SIMPLE_MIR_EAGER_TRAIT_IMPLS=1`.
+
+Provider-session reuse is authorized by `mir_provider_session_content_key_v1`,
+an immutable SHA-256 key over the exact ordered HIR codec bodies. Module names and
+provider order remain diagnostic shape checks only; an empty key rebuilds, and a
+same-name provider with changed impl content mints a different key. The driver
+computes the key once before the closure loop, preserving the once-per-closure
+goal. Lifted lowerings inherit the sealed key and the read-only trait index.
 
 Measured on seed `D:/dev/wt/seed/simple.exe`, sha256 `4efe643ae90e1a85…`, with
 the interpreted spec, N=3 consumers and P=3 providers:

@@ -68,6 +68,7 @@ fn lower_closure(provider_count: i64, consumer_count: i64) -> ProviderRun:
     val target = driver_mir_target_context(driver_core_compile_options_default())
     val first: HirModule = consumers[0]
     var lowering = MirLowering.new_for_target(first.symbols, target)
+    lowering.provider_session_requested_key = mir_provider_session_content_key_v1(providers)
     lowering.trait_impl_closure_complete = true
     var failed = 0
     c = 0
@@ -81,6 +82,52 @@ fn lower_closure(provider_count: i64, consumer_count: i64) -> ProviderRun:
         index_builds: lowering.trait_impl_provider_index_builds,
         relocations: lowering.trait_impl_provider_relocations)
 
+fn changed_provider_session_rebuilds() -> ProviderRun:
+    val log = Logger(level: 0)
+    val before_impl = impl_src(0)
+    val after_impl = before_impl.replace("self.side * 1", "self.side * 9")
+    val consumer = consumer_src()
+    var before_modules: Dict<text, ParserModule> = {}
+    before_modules["lib.shape"] = parse_full_frontend(shape_src, "lib/shape.spl", "lib.shape", log)
+    before_modules["lib.impl0"] = parse_full_frontend(before_impl, "lib/impl0.spl", "lib.impl0", log)
+    val before_sources = [
+        SourceFile(path: "lib/shape.spl", content: shape_src, module_name: "lib.shape"),
+        SourceFile(path: "lib/impl0.spl", content: before_impl, module_name: "lib.impl0")]
+    val before_surfaces = module_surfaces_from_modules(before_modules, before_sources).unwrap()
+    var before_shape = hirlowering_for_module("lib/shape.spl", before_surfaces)
+    var before_impl_lowering = hirlowering_for_module("lib/impl0.spl", before_surfaces)
+    val before_providers = [before_shape.lower_module(before_modules["lib.shape"]),
+        before_impl_lowering.lower_module(before_modules["lib.impl0"])]
+
+    var after_modules: Dict<text, ParserModule> = {}
+    after_modules["lib.shape"] = parse_full_frontend(shape_src, "lib/shape.spl", "lib.shape", log)
+    after_modules["lib.impl0"] = parse_full_frontend(after_impl, "lib/impl0.spl", "lib.impl0", log)
+    val after_sources = [
+        SourceFile(path: "lib/shape.spl", content: shape_src, module_name: "lib.shape"),
+        SourceFile(path: "lib/impl0.spl", content: after_impl, module_name: "lib.impl0")]
+    val after_surfaces = module_surfaces_from_modules(after_modules, after_sources).unwrap()
+    var after_shape = hirlowering_for_module("lib/shape.spl", after_surfaces)
+    var after_impl_lowering = hirlowering_for_module("lib/impl0.spl", after_surfaces)
+    val after_providers = [after_shape.lower_module(after_modules["lib.shape"]),
+        after_impl_lowering.lower_module(after_modules["lib.impl0"])]
+
+    var consumer_lowering = hirlowering_for_module("app/c.spl", after_surfaces)
+    val consumer_hir = consumer_lowering.lower_module(
+        parse_full_frontend(consumer, "app/c.spl", "app.c", log))
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(consumer_hir.symbols, target)
+    lowering.trait_impl_closure_complete = true
+    val before_key = mir_provider_session_content_key_v1(before_providers)
+    val after_key = mir_provider_session_content_key_v1(after_providers)
+    lowering.provider_session_requested_key = before_key
+    val first = lowering.lower_module_transient_scoped(consumer_hir, before_providers, true)
+    lowering.provider_session_requested_key = after_key
+    val second = lowering.lower_module_transient_scoped(consumer_hir, after_providers, true)
+    ProviderRun(errors: lowering.errors.len() + (if first.is_err(): 1 else: 0) +
+            (if second.is_err(): 1 else: 0) + (if before_key == after_key: 1 else: 0),
+        index_builds: lowering.trait_impl_provider_index_builds,
+        relocations: lowering.trait_impl_provider_relocations)
+
 describe "MIR provider trait-impl registration per closure":
     it "walks the provider impl tables once for a three-consumer closure":
         val run = lower_closure(3, 3)
@@ -90,3 +137,8 @@ describe "MIR provider trait-impl registration per closure":
     it "relocates no provider impl method into consumers that never dispatch through the trait":
         val run = lower_closure(3, 3)
         expect(run.relocations).to_equal(0)
+
+    it "rebuilds when one MirLowering sees changed content under identical provider names":
+        val run = changed_provider_session_rebuilds()
+        expect(run.errors).to_equal(0)
+        expect(run.index_builds).to_equal(2)
