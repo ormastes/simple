@@ -94,6 +94,13 @@ fn calls(lines: [text], symbol: text) -> bool:
             return true
     false
 
+fn negates_bool(lines: [text]) -> bool:
+    for line in lines:
+        val l: text = line
+        if l.contains(" = icmp eq i1 "):
+            return true
+    false
+
 fn first_error(s: Shaped) -> text:
     if s.errors.len() > 0:
         return s.errors[0]
@@ -127,6 +134,8 @@ describe "erased generic `==` on a type-parameter field":
             "        n\n")
         expect(first_error(s)).to_equal("")
         expect(calls(function_body(s.ir, "zzz_count_other"), "rt_native_eq")).to_equal(true)
+        # `!=` compares the runtime equality bool against false.
+        expect(negates_bool(function_body(s.ir, "zzz_count_other"))).to_equal(true)
 
     it "for-in over a method result with early returns (adaptive_map remove shape)":
         val s = shape(
@@ -219,3 +228,18 @@ describe "erased generic `.hash()` on a type parameter":
             "    t.0.hash() xor t.1.hash()\n")
         expect(first_error(s)).to_equal("")
         expect(calls(function_body(s.ir, "zzz_hash_pair"), "spl_erased_key_hash")).to_equal(true)
+
+    it "a struct with its own Hash impl keeps dispatching to the impl":
+        val s = shape(
+            HASH_TRAIT +
+            "struct Pt:\n" +
+            "    x: i64\n" +
+            "\n" +
+            "impl Hash for Pt:\n" +
+            "    fn hash() -> i64:\n" +
+            "        self.x\n" +
+            "\n" +
+            "fn zzz_hash_pt(p: Pt) -> i64:\n" +
+            "    p.hash()\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_hash_pt"), "spl_erased_key_hash")).to_equal(false)

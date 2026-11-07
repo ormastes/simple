@@ -7,6 +7,11 @@ use crate::value::core::RuntimeValue;
 use crate::value::heap::{is_registered_heap_ptr, HeapHeader, HeapObjectType};
 use crate::value::tags;
 
+extern "C" {
+    // runtime_memory.c: true for a live record allocation (rt_struct_alloc).
+    fn rt_struct_receiver_valid(receiver: i64, byte_offset: i64, access_width: i64) -> i8;
+}
+
 fn relation(order: Ordering) -> i64 {
     match order {
         Ordering::Less => -1,
@@ -146,20 +151,31 @@ pub extern "C" fn spl_ordered_key_cmp(left: i64, right: i64) -> i64 {
 /// the core-C `spl_erased_key_hash`. Keys equal under `rt_native_eq` hash
 /// equally: text by FNV-1a content (= `rt_hash_text`), integer words and
 /// wide/unsigned boxes by value, boxed floats by IEEE bits with both zeros
-/// hashing to 0. Any other registered handle has no address-free hash here,
-/// so the process aborts instead of hashing an address.
+/// hashing to 0. Any other registered handle (array, tuple, dict, enum, struct
+/// allocation) has no address-free hash here, so the process aborts instead of
+/// hashing an address. A non-heap word equals only the identical word under
+/// `rt_native_eq`, so hashing its value is consistent; float/bool hash values
+/// need not match std.hash's typed impls.
 #[no_mangle]
 pub extern "C" fn spl_erased_key_hash(value: i64) -> i64 {
-    if let Some(kind) = registered_kind(value) {
-        if !matches!(
-            kind,
-            HeapObjectType::String | HeapObjectType::Float | HeapObjectType::Int | HeapObjectType::UInt
-        ) {
-            eprintln!("spl_erased_key_hash: key type has no supported native hash ({:?})", kind);
-            std::process::abort();
-        }
+    fn refuse(what: &str) -> ! {
+        eprintln!("spl_erased_key_hash: key type has no supported native hash ({})", what);
+        std::process::abort();
+    }
+    let registered_leaf = match registered_kind(value) {
+        Some(HeapObjectType::String | HeapObjectType::Float | HeapObjectType::Int | HeapObjectType::UInt) => true,
+        Some(kind) => refuse(&format!("{:?}", kind)),
+        None => false,
+    };
+    // Records live in runtime_memory.c's struct allocation registry.
+    if unsafe { rt_struct_receiver_valid(value, 0, 1) } != 0 {
+        refuse("struct allocation");
     }
     let v = RuntimeValue::from_raw(value as u64);
+    if registered_leaf && v.heap_type().is_none() {
+        // An untagged leaf pointer would otherwise hash its address.
+        refuse("undecoded registered leaf");
+    }
     match v.heap_type() {
         Some(HeapObjectType::String) => rt_hash_text(v),
         Some(HeapObjectType::Float) => {

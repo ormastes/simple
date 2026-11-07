@@ -48,5 +48,9 @@ int main(void) {
     assert(spl_erased_key_hash(17) == spl_erased_key_hash(17)); /* raw word */
     assert(spl_erased_key_hash(wide_low) == INT64_C(1152921504606846976));
     assert(spl_erased_key_hash(rt_value_u64(INT64_MAX)) == INT64_MAX);
+    assert(spl_erased_key_hash(rt_value_u64(-1)) == -1); /* u64::MAX box */
+    assert(spl_erased_key_hash(rt_value_float(-0.0)) == 0);
+    assert(spl_erased_key_hash(rt_value_float(0.0)) == 0);
+    assert(spl_erased_key_hash(rt_value_float(1.5)) == spl_erased_key_hash(rt_value_float(1.5)));
     return 0;
 }
