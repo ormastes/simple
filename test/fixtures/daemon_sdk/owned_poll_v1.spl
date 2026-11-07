@@ -1,0 +1,177 @@
+# Shared real SDK oracles. Execution/admission evidence is recorded separately.
+use std.nogc_sync_mut.daemon_sdk.daemon.{DaemonOwnedResponseV1, DaemonRunner, daemon_runner_start}
+use std.nogc_sync_mut.daemon_sdk.types.*
+use std.nogc_sync_mut.daemon_sdk.protocol.{write_daemon_request, daemon_request_path_for}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write, file_read}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.io_runtime.{file_delete, file_exists, mkdir_p}
+
+struct OwnedPollDomainV1:
+    root: text
+    handled: i64
+    total: i64
+
+fn owned_poll_root() -> text:
+    secure_temp_dir("build", "daemon-owned-poll").unwrap()
+
+fn owned_poll_owner(root: text) -> OwnedPollDomainV1:
+    OwnedPollDomainV1(root, 0, 0)
+
+fn owned_poll_handler(owner: OwnedPollDomainV1, request: DaemonRequest) -> DaemonOwnedResponseV1<OwnedPollDomainV1>:
+    val updated = OwnedPollDomainV1(owner.root, owner.handled + 1, owner.total + request.kind)
+    val prior = file_read(owner.root + "/effects")
+    assert(file_atomic_write(owner.root + "/effects", prior + "effect\n"))
+    if request.get_field("mode") == "remove-request":
+        assert(file_delete(request.get_field("request_path")))
+    if request.get_field("mode") == "mismatch" or (request.get_field("mode") == "fail-second" and updated.handled == 2):
+        return DaemonOwnedResponseV1(updated, daemon_response_new("unrelated_owner_request", 0))
+    DaemonOwnedResponseV1(updated, daemon_response_new(request.id, 0))
+
+fn owned_poll_rejecting_handler(owner: OwnedPollDomainV1, request: DaemonRequest) -> DaemonOwnedResponseV1<OwnedPollDomainV1>:
+    assert(false)  # Idle or stopped runners must never invoke this callback.
+    DaemonOwnedResponseV1(owner, daemon_response_new(request.id, 1))
+
+fn owned_poll_cleanup(runner: DaemonRunner, root: text):
+    var local_runner = runner
+    local_runner.shutdown()
+    assert(dir_remove(root, true))
+
+fn owned_poll_runner(root: text, limit: i64) -> DaemonRunner:
+    var config = daemon_config_new(root + "/lock", root + "/requests", root + "/responses")
+    config.max_concurrent = limit
+    val runner = daemon_runner_start(config)
+    assert(runner.is_running())
+    runner
+
+fn owned_poll_request(root: text, id: text, kind: i64, mode: text) -> text:
+    var request = DaemonRequest(id: id, kind: kind, timestamp: 1, fields: {})
+    request.set_field("mode", mode)
+    request.set_field("request_path", daemon_request_path_for(id, root + "/requests"))
+    val path = write_daemon_request(request, root + "/requests")
+    assert(path != "")
+    path
+
+pub fn owned_poll_idle_stopped_case() -> i64:
+    val root = owned_poll_root()
+    var runner = owned_poll_runner(root, 2)
+    var owner = OwnedPollDomainV1(root, 7, 19)
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_rejecting_handler)
+    assert(owner.root == root and owner.handled == 7 and owner.total == 19)
+    val idle = runner.get_state()
+    assert(idle.status == DAEMON_IDLE and idle.cycle_count == 1)
+    assert(idle.items_processed == 0 and idle.errors_count == 0)
+    runner.shutdown()
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_rejecting_handler)
+    val stopped = runner.get_state()
+    assert(owner.root == root and owner.handled == 7 and owner.total == 19)
+    assert(stopped.status == DAEMON_SHUTTING_DOWN and stopped.cycle_count == 1)
+    owned_poll_cleanup(runner, root)
+    0
+
+pub fn owned_poll_accumulation_case() -> i64:
+    val root = owned_poll_root()
+    var runner = owned_poll_runner(root, 2)
+    val first_path = owned_poll_request(root, "owned_first", 2, "")
+    val second_path = owned_poll_request(root, "owned_second", 3, "")
+    var owner = owned_poll_owner(root)
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_handler)
+    val state = runner.get_state()
+    assert(owner.handled == 2 and owner.total == 5 and owner.root == root)
+    assert(state.status == DAEMON_IDLE and state.items_processed == 2)
+    assert(state.cycle_count == 1 and state.errors_count == 0 and runner.is_running())
+    assert(not file_exists(first_path) and not file_exists(second_path))
+    assert(file_exists(root + "/responses/owned_first.resp"))
+    assert(file_exists(root + "/responses/owned_second.resp"))
+    assert(file_read(root + "/effects") == "effect\neffect\n")
+    owned_poll_cleanup(runner, root)
+    0
+
+pub fn owned_poll_publication_failure_case() -> i64:
+    val root = owned_poll_root()
+    var runner = owned_poll_runner(root, 2)
+    val request_path = owned_poll_request(root, "owned_blocked", 7, "")
+    mkdir_p(root + "/responses/owned_blocked.resp")
+    var owner = owned_poll_owner(root)
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_handler)
+    val blocked = runner.get_state()
+    assert(owner.handled == 1 and owner.total == 7)
+    assert(blocked.status == DAEMON_PUBLICATION_BLOCKED and blocked.errors_count == 1)
+    assert(blocked.items_processed == 0 and blocked.cycle_count == 1 and not runner.is_running())
+    assert(file_exists(request_path))
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_rejecting_handler)
+    assert(owner.handled == 1 and owner.total == 7)
+    assert(file_read(root + "/effects") == "effect\n")
+    val after = runner.get_state()
+    assert(after.status == DAEMON_PUBLICATION_BLOCKED and after.cycle_count == 1)
+    owned_poll_cleanup(runner, root)
+    0
+
+pub fn owned_poll_identity_failure_case() -> i64:
+    val root = owned_poll_root()
+    var runner = owned_poll_runner(root, 2)
+    val path = owned_poll_request(root, "owned_identity", 11, "mismatch")
+    var owner = owned_poll_owner(root)
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_handler)
+    val state = runner.get_state()
+    assert(owner.handled == 1 and owner.total == 11)
+    assert(state.status == DAEMON_PUBLICATION_BLOCKED and state.items_processed == 0)
+    assert(state.errors_count == 1 and not runner.is_running())
+    assert(file_exists(path) and not file_exists(root + "/responses/unrelated_owner_request.resp"))
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_rejecting_handler)
+    assert(owner.handled == 1 and owner.total == 11)
+    owned_poll_cleanup(runner, root)
+    0
+
+pub fn owned_poll_ack_failure_case() -> i64:
+    val root = owned_poll_root()
+    var runner = owned_poll_runner(root, 2)
+    val path = owned_poll_request(root, "owned_ack", 13, "remove-request")
+    var owner = owned_poll_owner(root)
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_handler)
+    val state = runner.get_state()
+    assert(owner.handled == 1 and owner.total == 13)
+    assert(state.status == DAEMON_ACKNOWLEDGEMENT_BLOCKED and state.errors_count == 1)
+    assert(state.items_processed == 1 and state.cycle_count == 1 and not runner.is_running())
+    assert(not file_exists(path) and file_exists(root + "/responses/owned_ack.resp"))
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_rejecting_handler)
+    assert(owner.handled == 1 and owner.total == 13)
+    assert(file_read(root + "/effects") == "effect\n")
+    owned_poll_cleanup(runner, root)
+    0
+
+pub fn owned_poll_limit_case() -> i64:
+    val root = owned_poll_root()
+    var runner = owned_poll_runner(root, 1)
+    val first = owned_poll_request(root, "owned_limit_first", 2, "")
+    val second = owned_poll_request(root, "owned_limit_second", 3, "")
+    var owner = owned_poll_owner(root)
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_handler)
+    val state = runner.get_state()
+    assert(owner.handled == 1 and (owner.total == 2 or owner.total == 3))
+    assert(state.items_processed == 1 and state.status == DAEMON_IDLE and runner.is_running())
+    assert(file_exists(first) != file_exists(second))
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_handler)
+    val after = runner.get_state()
+    assert(owner.handled == 2 and owner.total == 5)
+    assert(after.items_processed == 2 and after.cycle_count == 2 and after.status == DAEMON_IDLE)
+    assert(not file_exists(first) and not file_exists(second))
+    owned_poll_cleanup(runner, root)
+    0
+
+pub fn owned_poll_prefix_failure_case() -> i64:
+    val root = owned_poll_root()
+    var runner = owned_poll_runner(root, 3)
+    val first = owned_poll_request(root, "owned_prefix_first", 2, "fail-second")
+    val second = owned_poll_request(root, "owned_prefix_second", 3, "fail-second")
+    var owner = owned_poll_owner(root)
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_handler)
+    val state = runner.get_state()
+    assert(owner.handled == 2 and owner.total == 5)
+    assert(state.status == DAEMON_PUBLICATION_BLOCKED and state.items_processed == 1)
+    assert(state.errors_count == 1 and state.cycle_count == 1 and not runner.is_running())
+    assert(file_exists(first) != file_exists(second))
+    owner = runner.run_poll_cycle_owned_v1(owner, owned_poll_rejecting_handler)
+    assert(owner.handled == 2 and owner.total == 5)
+    assert(file_read(root + "/effects") == "effect\neffect\n")
+    owned_poll_cleanup(runner, root)
+    0
