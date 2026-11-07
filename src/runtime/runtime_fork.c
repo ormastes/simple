@@ -21,6 +21,10 @@
 int64_t rt_fork_child_setup(void) {
     return -1; /* Not supported on Windows */
 }
+int simple_process_launch_admission_check_v1(int64_t expiry) { (void)expiry; return -1; }
+int64_t simple_fork_child_setup_admitted_v1(int64_t expiry) { (void)expiry; return -3; }
+int64_t simple_fork_parent_capture_flags_v1(void) { return 8; }
+void simple_fork_parent_capture_release_v1(void) {}
 
 int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
                                     uint64_t max_output_bytes) {
@@ -78,18 +82,7 @@ int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid) {
 #include <fcntl.h>
 #include <time.h>
 
-/* Per-fork pipe state (stored by parent after fork) */
-static int s_stdout_read_fd = -1;
-static int s_stderr_read_fd = -1;
-
-/* Stored results from last rt_fork_parent_wait() */
-static char* s_result_stdout = NULL;
-static char* s_result_stderr = NULL;
-static uint64_t s_result_stdout_length = 0;
-static uint64_t s_result_stderr_length = 0;
-static bool s_result_timed_out = false;
-static bool s_result_signaled = false;
-static struct rusage s_result_rusage;
+#include "runtime_fork_capture_context_private.h"
 
 /* Each stream retains at most 4 MiB of child output, split head/tail. */
 #define FORK_CAPTURE_LIMIT (4U * 1024U * 1024U)
@@ -215,10 +208,7 @@ static void set_nonblocking(int fd) {
 
 /* Free previous results */
 static void free_results(void) {
-    if (s_result_stdout) { SPL_FREE(s_result_stdout); s_result_stdout = NULL; }
-    if (s_result_stderr) { SPL_FREE(s_result_stderr); s_result_stderr = NULL; }
-    s_result_stdout_length = 0;
-    s_result_stderr_length = 0;
+    fork_capture_clear_output_v1(fork_capture_current_v1);
 }
 
 static pid_t wait4_nointr(pid_t pid, int* status, int options) {
@@ -226,10 +216,24 @@ static pid_t wait4_nointr(pid_t pid, int* status, int options) {
     do {
         waited = wait4(pid, status, options, &s_result_rusage);
     } while (waited < 0 && errno == EINTR);
+    if (waited == pid || (waited < 0 && errno == ECHILD)) fork_capture_current_v1->active_child = 0;
     return waited;
 }
 
-int64_t rt_fork_child_setup(void) {
+int simple_process_launch_admission_check_v1(int64_t expires_at_unix_ms) {
+    struct timespec now;
+    if (expires_at_unix_ms <= 0 || clock_gettime(CLOCK_REALTIME, &now) != 0 ||
+            now.tv_sec < 0 || (uint64_t)now.tv_sec > (uint64_t)INT64_MAX / 1000U ||
+            now.tv_nsec < 0 || now.tv_nsec >= 1000000000L) return -1;
+    if ((uint64_t)now.tv_sec > ((uint64_t)INT64_MAX - (uint64_t)(now.tv_nsec / 1000000)) / 1000U) return -1;
+    int64_t milliseconds = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    return milliseconds >= expires_at_unix_ms ? 1 : 0;
+}
+
+static int64_t fork_child_setup_admission_v1(int64_t expires_at_unix_ms) {
+    ForkCaptureContextV1* context = fork_capture_context_v1();
+    if (!context || context->active_child > 0 || context->stdout_read_fd >= 0 ||
+            context->stderr_read_fd >= 0) return -1;
     int stdout_pipe[2]; /* [0]=read, [1]=write */
     int stderr_pipe[2];
 
@@ -246,6 +250,14 @@ int64_t rt_fork_child_setup(void) {
     fflush(stdout);
     fflush(stderr);
 
+    if (expires_at_unix_ms > 0) {
+        int admitted = simple_process_launch_admission_check_v1(expires_at_unix_ms);
+        if (admitted != 0) {
+            close(stdout_pipe[0]); close(stdout_pipe[1]);
+            close(stderr_pipe[0]); close(stderr_pipe[1]);
+            return admitted > 0 ? -2 : -3;
+        }
+    }
     pid_t pid = fork();
     if (pid < 0) {
         /* Fork failed */
@@ -294,15 +306,24 @@ int64_t rt_fork_child_setup(void) {
     /* Store read ends for rt_fork_parent_wait */
     s_stdout_read_fd = stdout_pipe[0];
     s_stderr_read_fd = stderr_pipe[0];
+    context->active_child = pid;
 
     return (int64_t)pid;
+}
+
+int64_t rt_fork_child_setup(void) { return fork_child_setup_admission_v1(0); }
+int64_t simple_fork_child_setup_admitted_v1(int64_t expiry) {
+    if (expiry <= 0) return -3;
+    return fork_child_setup_admission_v1(expiry);
 }
 
 static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
                                      uint64_t max_output_bytes, int raw_prefix) {
     /* Reject invalid pids: kill(-1)/waitpid(-1) would signal/reap every
      * process the user owns (e.g. when a failed fork's -1 is passed in). */
-    if (child_pid <= 0) {
+    ForkCaptureContextV1* context = fork_capture_current_v1;
+    if (child_pid <= 0 || !context || context->active_child != child_pid ||
+            context->stdout_read_fd < 0 || context->stderr_read_fd < 0) {
         return -1;
     }
     if (max_output_bytes > SIZE_MAX - 2U * FORK_CAPTURE_MARKER_MAX - 1U) return -1;
@@ -311,12 +332,11 @@ static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
     free_results();
     s_result_timed_out = false;
     s_result_signaled = false;
+    s_result_capture_flags_v1 = 8;
     memset(&s_result_rusage, 0, sizeof(s_result_rusage));
 
     int stdout_fd = s_stdout_read_fd;
     int stderr_fd = s_stderr_read_fd;
-    s_stdout_read_fd = -1;
-    s_stderr_read_fd = -1;
 
     size_t capture_limit = (size_t)max_output_bytes;
     /* Allocate bounded captures, plus marker and terminator space. */
@@ -332,8 +352,12 @@ static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
         (void)wait4_nointr((pid_t)child_pid, &status, 0);
         close(stdout_fd);
         close(stderr_fd);
+        s_stdout_read_fd = s_stderr_read_fd = -1;
         return -1;
     }
+    /* Preserve ownership for thread-exit/cancellation cleanup during poll. */
+    s_result_stdout = out_buf;
+    s_result_stderr = err_buf;
     size_t head_limit = raw_prefix ? capture_limit : capture_limit / 2U + capture_limit % 2U;
     size_t tail_limit = raw_prefix ? 0 : capture_limit / 2U;
     ForkCapture out_capture = {out_buf, 0, 0, 0, 0, head_limit, tail_limit, raw_prefix};
@@ -503,6 +527,7 @@ static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
 
     close(stdout_fd);
     close(stderr_fd);
+    s_stdout_read_fd = s_stderr_read_fd = -1;
 
     /* Why the capture stopped, if it stopped before real EOF. Reported into
      * the captured text itself so a truncated capture can never be mistaken
@@ -528,6 +553,10 @@ static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
     s_result_stderr = err_buf;
     s_result_stdout_length = out_len;
     s_result_stderr_length = err_len;
+    s_result_capture_flags_v1 = (timed_out ? 1 : 0) |
+        (out_capture.total > capture_limit ? 2 : 0) |
+        (err_capture.total > capture_limit ? 4 : 0) |
+        ((wait_failed || cleanup_descendants || stdout_read_error || stderr_read_error) ? 8 : 0);
 
     /* Timeout/wait failure cleanup completed before the final pipe drain. */
     if (timed_out || wait_failed) {
@@ -540,6 +569,7 @@ static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
     pid_t waited = child_exited ? (pid_t)child_pid : wait4_nointr((pid_t)child_pid, &status, 0);
 
     if (waited < 0) {
+        s_result_capture_flags_v1 |= 8;
         return -1;
     } else if (WIFEXITED(status)) {
         return (int64_t)WEXITSTATUS(status);
@@ -614,45 +644,6 @@ int64_t simple_fork_parent_wait_bounded_bytes(int64_t child_pid, int64_t timeout
 
 int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     return rt_fork_parent_wait_bounded(child_pid, timeout_ms, FORK_CAPTURE_LIMIT);
-}
-
-bool rt_fork_parent_timed_out(void) {
-    return s_result_timed_out;
-}
-
-bool rt_fork_parent_signaled(void) {
-    return s_result_signaled;
-}
-
-int64_t rt_fork_parent_user_cpu_micros(void) {
-    return (int64_t)s_result_rusage.ru_utime.tv_sec * 1000000LL +
-           (int64_t)s_result_rusage.ru_utime.tv_usec;
-}
-
-int64_t rt_fork_parent_system_cpu_micros(void) {
-    return (int64_t)s_result_rusage.ru_stime.tv_sec * 1000000LL +
-           (int64_t)s_result_rusage.ru_stime.tv_usec;
-}
-
-int64_t rt_fork_parent_peak_rss_bytes(void) {
-#if defined(__APPLE__)
-    return (int64_t)s_result_rusage.ru_maxrss;
-#else
-    return (int64_t)s_result_rusage.ru_maxrss * 1024LL;
-#endif
-}
-
-const char* rt_fork_parent_stdout(void) {
-    return s_result_stdout ? s_result_stdout : "";
-}
-
-const char* rt_fork_parent_stderr(void) {
-    return s_result_stderr ? s_result_stderr : "";
-}
-
-void simple_fork_parent_capture_lengths(uint64_t* stdout_bytes, uint64_t* stderr_bytes) {
-    *stdout_bytes = s_result_stdout_length;
-    *stderr_bytes = s_result_stderr_length;
 }
 
 void rt_fork_child_exit(int64_t exit_code) {

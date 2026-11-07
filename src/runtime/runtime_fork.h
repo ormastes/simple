@@ -27,7 +27,9 @@ extern "C" {
  * Fork the current process and set up stdout/stderr pipe capture.
  *
  * In the child: stdout (fd 1) and stderr (fd 2) are redirected to pipes.
- * In the parent: pipe read ends are stored internally for rt_fork_parent_wait().
+ * In the parent: pipe read ends are owned by the calling thread until wait.
+ * Setup/wait/getters must use that same thread; another thread or child PID
+ * cannot consume this receipt. At most one outstanding raw child per thread.
  *
  * Returns:
  *   0    = child process (stdio redirected to pipes)
@@ -35,6 +37,11 @@ extern "C" {
  *   -1   = error (fork or pipe failed)
  */
 int64_t rt_fork_child_setup(void);
+/* Private synchronous capture admission: 0=admitted, 1=expired, -1=clock
+ * unavailable. The admitted setup checks again immediately before fork;
+ * -2 means expired/no child and -3 means unavailable clock/no child. */
+int simple_process_launch_admission_check_v1(int64_t expires_at_unix_ms);
+int64_t simple_fork_child_setup_admitted_v1(int64_t expires_at_unix_ms);
 
 /*
  * Parent: read captured stdout/stderr from child, wait for exit with timeout.
@@ -85,6 +92,12 @@ const char* rt_fork_parent_stderr(void);
  * diagnostic markers, but exclude the extra C terminator. Same lifetime as
  * the data getters above. This is not a Simple runtime FFI entrypoint. */
 void simple_fork_parent_capture_lengths(uint64_t* stdout_bytes, uint64_t* stderr_bytes);
+/* Authoritative capture flags: timeout1, stdout-limit2, stderr-limit4,
+ * provider/incomplete8. Never infer these facts from child-controlled text. */
+int64_t simple_fork_parent_capture_flags_v1(void);
+/* Release output only after copying it. Outcome/rusage scalars are retained.
+ * Raw callers otherwise retain buffers until their next wait or thread exit. */
+void simple_fork_parent_capture_release_v1(void);
 
 /*
  * Child: exit immediately without atexit handlers or stdio flush.
