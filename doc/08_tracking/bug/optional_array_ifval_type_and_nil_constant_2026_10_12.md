@@ -38,3 +38,15 @@ copy, mirroring the Some arm (`expr_dispatch.spl` ~6707). Spec (promoted from th
 `test/01_unit/compiler/mir/optional_array_ifval_payload_spec.spl`.
 Verify: `bin/<stage3> test test/01_unit/compiler/mir/optional_array_ifval_payload_spec.spl`,
 then native-build `${d##*/}_native.spl.repro` and check the LLVM verifies.
+
+**2026-11-07 (m-optarr): spec re-scoped, 8/8 pass.** The 4/7 failures were stale
+spec premises, not compiler defects: (a) `[any]`/`any?` in safe source now hits
+policy error `W-ANY-COMPILE-001` (no Any outside unsafe), so case 1 asserts that
+diagnostic plus zero MIR errors and case 4 accepts either the policy error or
+the iter error; (b) the HIR Let now always carries the resolved binding type, so
+an unmarked binding's Let is `Optional(payload)` (not nil) - the cases now assert
+it stays nullable on both Let and symbol. Added a nested-optional case (marked
+`[any]??` unwraps exactly one layer). Run: `bin/simple.exe run
+test/01_unit/compiler/mir/optional_array_ifval_payload_spec.spl` -> `outcome=OK
+executed=8 passed=8`. Remaining verification: native-build of the
+`_native.spl.repro` fixture on a fresh stage3 (not run; stage3 builds owned elsewhere).
