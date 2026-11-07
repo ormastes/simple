@@ -293,6 +293,21 @@ extern "C" fn dump_on_signal(sig: libc::c_int) {
 }
 
 extern "C" fn dump_at_exit() {
+    flush_at_process_exit();
+}
+
+static DUMPED: AtomicBool = AtomicBool::new(false);
+
+/// Write the report once. No-op unless the counters are on. Called from the
+/// `atexit` arm AND explicitly by the driver before its terminal
+/// `std::process::exit`: on Windows that call is `ExitProcess`, which never
+/// runs CRT `atexit` handlers, so without the explicit call
+/// `SIMPLE_PERF_COUNTERS=1` produced no report at all there (measured
+/// 2026-11-07: `lint` with the counters on, 126 s, zero output).
+pub fn flush_at_process_exit() {
+    if STATE.load(Ordering::Relaxed) != ON || DUMPED.swap(true, Ordering::Relaxed) {
+        return;
+    }
     let text = render();
     match std::env::var("SIMPLE_PERF_COUNTERS_OUT") {
         Ok(path) if !path.is_empty() => {

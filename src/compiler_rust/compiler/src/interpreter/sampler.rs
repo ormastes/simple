@@ -1,17 +1,26 @@
-//! Level-gated SIGPROF sampling profiler for the AST interpreter (default OFF).
+//! Level-gated sampling profiler for the AST interpreter (default OFF).
 //!
 //! `perf` is unavailable on the dev hosts (`perf_event_paranoid=4`,
-//! `ptrace_scope=1`), so this is the in-process substitute: enable with
-//! `SIMPLE_INTERP_SAMPLE=1` and every 10 ms (`SIMPLE_INTERP_SAMPLE_US` to
-//! override) an `ITIMER_PROF` tick records
+//! `ptrace_scope=1`; no elevation for `wpr` on the Windows hosts), so this is
+//! the in-process substitute: enable with `SIMPLE_INTERP_SAMPLE=1` and every
+//! 10 ms (`SIMPLE_INTERP_SAMPLE_US` to override) a tick records
 //!
 //!   * the innermost interpreted Simple function (self time),
 //!   * every distinct function on the interpreted call stack (inclusive time),
 //!   * the innermost `Expr` kind being dispatched by `evaluate_expr`.
 //!
-//! The handler is async-signal-safe: it only touches fixed-size static atomics
+//! Tick source per platform:
+//!   * Unix: an `ITIMER_PROF` SIGPROF handler — CPU-time sampling of the
+//!     interpreter thread.
+//!   * Everything else (Windows): a timer THREAD that sleeps the interval and
+//!     reads the same atomics — wall-time sampling. A blocked interpreter
+//!     thread (I/O, waiting on a child) is then charged to whatever frame it
+//!     is blocked in, where SIGPROF would not have ticked at all. The report
+//!     names which source produced it (`tick: cpu` / `tick: wall`).
+//!
+//! The tick is async-signal-safe: it only touches fixed-size static atomics
 //! (an open-addressed table keyed by interned name pointer). Aggregation and
-//! rendering happen at exit (`libc::atexit`), written to stderr or
+//! rendering happen at exit (`atexit`), written to stderr or
 //! `SIMPLE_INTERP_SAMPLE_OUT` (pid-suffixed so forked test children don't
 //! clobber each other).
 //!
@@ -108,26 +117,52 @@ fn init() -> bool {
             libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
             libc::atexit(dump_at_exit);
         }
-        // This sampler is built on SIGPROF + setitimer, which Windows does not
-        // provide; `libc` is a cfg(unix)-only dependency here, so the block
-        // above cannot even be compiled. Say so LOUDLY instead of reporting
-        // "enabled" and then producing no samples: a profiler that silently
-        // emits nothing is exactly the trap .claude/rules/commands.md records
-        // under "Profiling trap: SIMPLE_INTERP_SAMPLE emits NOTHING", which has
-        // already cost two investigations.
+        // No SIGPROF/setitimer here (and `libc` is a cfg(unix)-only dependency
+        // of this crate). The tick comes from a timer thread instead: the
+        // sampled state is all process-global atomics written by the
+        // interpreter thread, so a second thread reading them with Acquire
+        // ordering sees a consistent (depth, frames) pair exactly as the
+        // signal handler does. `atexit` is standard C and the MSVC CRT
+        // exports it, declared directly as perf_counters.rs does. Until this
+        // port the Windows arm only printed a warning and recorded nothing —
+        // the ".claude/rules/commands.md: SIMPLE_INTERP_SAMPLE emits NOTHING"
+        // trap; now the report says `tick: wall` so a reader knows what was
+        // sampled.
         #[cfg(not(unix))]
         {
-            let _ = us;
-            eprintln!(
-                "warning: SIMPLE_INTERP_SAMPLE is set but the interpreter sampler is                  unavailable on this platform (it requires POSIX SIGPROF/setitimer);                  no samples will be collected"
-            );
+            extern "C" {
+                fn atexit(cb: extern "C" fn()) -> i32;
+            }
+            // SAFETY: `dump_at_exit` is `extern "C" fn()` and never unwinds.
+            unsafe {
+                atexit(dump_at_exit);
+            }
+            TICK_THREAD_RUNNING.store(true, Ordering::Release);
+            let interval = std::time::Duration::from_micros(us as u64);
+            std::thread::Builder::new()
+                .name("simple-interp-sampler".into())
+                .spawn(move || {
+                    while TICK_THREAD_RUNNING.load(Ordering::Acquire) {
+                        std::thread::sleep(interval);
+                        take_sample();
+                    }
+                })
+                .expect("spawn interpreter sampler tick thread");
         }
     }
-    #[cfg(not(unix))]
-    let on = false;
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
     on
 }
+
+/// Set while the non-Unix timer thread should keep ticking; cleared by
+/// `dump_at_exit` so no tick lands while the tables are being rendered.
+#[cfg(not(unix))]
+static TICK_THREAD_RUNNING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+const TICK_SOURCE: &str = "cpu";
+#[cfg(not(unix))]
+const TICK_SOURCE: &str = "wall";
 
 fn intern(name: &str) -> &'static str {
     let mut g = INTERN.lock().unwrap();
@@ -240,6 +275,12 @@ fn bump(table: &'static [Slot], key: *mut u8, len: usize, incl: bool) -> bool {
 
 #[cfg(unix)]
 extern "C" fn on_sigprof(_sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+    take_sample();
+}
+
+/// One tick: attribute the current interpreted stack and expr kind. Atomics
+/// only — callable from a signal handler or from the timer thread.
+fn take_sample() {
     TOTAL_SAMPLES.fetch_add(1, Ordering::Relaxed);
     let d = DEPTH.load(Ordering::Acquire).min(STACK_CAP);
     if d == 0 {
@@ -301,10 +342,11 @@ pub fn render() -> String {
     };
     let mut out = String::from("interp-sample-profile:\n");
     out.push_str(&format!(
-        "  total_samples: {}  idle: {}  dropped: {}\n",
+        "  total_samples: {}  idle: {}  dropped: {}  tick: {}\n",
         total,
         IDLE_SAMPLES.load(Ordering::Relaxed),
-        DROPPED_SAMPLES.load(Ordering::Relaxed)
+        DROPPED_SAMPLES.load(Ordering::Relaxed),
+        TICK_SOURCE
     ));
     let mut rows: Vec<(String, u64, u64)> = FRAMES
         .iter()
@@ -318,8 +360,16 @@ pub fn render() -> String {
         })
         .collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
+    // `SIMPLE_INTERP_SAMPLE_ROWS=<n>` widens the table (default 60, which hid
+    // every parse-entry row of a lint profile behind the lexer leaves);
+    // `all` prints every sampled frame.
+    let row_cap = match std::env::var("SIMPLE_INTERP_SAMPLE_ROWS") {
+        Ok(v) if v == "all" => usize::MAX,
+        Ok(v) => v.parse().unwrap_or(60),
+        Err(_) => 60,
+    };
     out.push_str("  frames (self / inclusive):\n");
-    for (name, s, i) in rows.iter().take(60) {
+    for (name, s, i) in rows.iter().take(row_cap) {
         out.push_str(&format!(
             "    {:>8} {:>6.2}%  {:>8} {:>6.2}%  {}\n",
             s,
@@ -342,8 +392,22 @@ pub fn render() -> String {
     out
 }
 
-#[cfg(unix)]
 extern "C" fn dump_at_exit() {
+    flush_at_process_exit();
+}
+
+static DUMPED: AtomicBool = AtomicBool::new(false);
+
+/// Stop ticking and write the report once. No-op unless the sampler is on.
+/// Called from the `atexit` arm AND explicitly by the driver before its
+/// terminal `std::process::exit`: on Windows that is `ExitProcess`, which
+/// never runs CRT `atexit` handlers, so the report would otherwise be lost
+/// exactly on the dominant CLI path (`lint`, `run`, `native-build`).
+pub fn flush_at_process_exit() {
+    if STATE.load(Ordering::Relaxed) != ON || DUMPED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    #[cfg(unix)]
     unsafe {
         let zero = libc::timeval { tv_sec: 0, tv_usec: 0 };
         let it = libc::itimerval {
@@ -352,6 +416,8 @@ extern "C" fn dump_at_exit() {
         };
         libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
     }
+    #[cfg(not(unix))]
+    TICK_THREAD_RUNNING.store(false, Ordering::Release);
     let text = render();
     match std::env::var("SIMPLE_INTERP_SAMPLE_OUT") {
         Ok(path) if !path.is_empty() => {
@@ -365,8 +431,13 @@ extern "C" fn dump_at_exit() {
 mod tests {
     use super::*;
 
+    /// Both tests push onto the process-global sampler stack; serialise them so
+    /// one test's frames never sit on top of the other's mid-sample.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn frame_push_pop_and_table_bump_are_consistent() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Drive the table directly (no signal): interned keys aggregate by pointer.
         let a = intern("alpha_fn");
         let b = intern("alpha_fn");
@@ -387,5 +458,42 @@ mod tests {
         }
         assert_eq!(DEPTH.load(Ordering::Relaxed), d0);
         STATE.store(OFF, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn take_sample_attributes_self_and_inclusive_on_every_platform() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The tick body is shared by the SIGPROF handler and the non-Unix
+        // timer thread; drive it directly so the attribution it records is
+        // pinned without depending on either tick source.
+        STATE.store(ON, Ordering::Relaxed);
+        let before_total = TOTAL_SAMPLES.load(Ordering::Relaxed);
+        let before_idle = IDLE_SAMPLES.load(Ordering::Relaxed);
+        {
+            let _f = Frame::enter("sample_outer_fn");
+            let _g = Frame::enter("sample_inner_fn");
+            let _k = KindGuard::enter("SampleKind");
+            take_sample();
+            take_sample();
+        }
+        STATE.store(OFF, Ordering::Relaxed);
+        assert_eq!(TOTAL_SAMPLES.load(Ordering::Relaxed), before_total + 2);
+        assert_eq!(IDLE_SAMPLES.load(Ordering::Relaxed), before_idle, "a non-empty stack is never idle");
+        let text = render();
+        assert!(text.contains("tick: "), "{}", text);
+        let row = |name: &str| -> (u64, u64) {
+            let line = text
+                .lines()
+                .find(|l| l.trim_end().ends_with(name))
+                .unwrap_or_else(|| panic!("missing row for {name}:\n{text}"));
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            (cols[0].parse().unwrap(), cols[2].parse().unwrap())
+        };
+        let (inner_self, inner_incl) = row("sample_inner_fn");
+        let (outer_self, outer_incl) = row("sample_outer_fn");
+        assert!(inner_self >= 2 && inner_incl >= 2, "innermost gets self + inclusive: {text}");
+        assert!(outer_incl >= 2, "caller gets inclusive: {text}");
+        assert_eq!(outer_self, 0, "caller never gets self time while a callee is on top: {text}");
+        assert!(text.contains("SampleKind"), "{}", text);
     }
 }
