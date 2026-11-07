@@ -109,3 +109,14 @@ then actual positive sendmsg must deliver exactly one descriptor, including acro
 partial writes. Verify source replay refusal and descriptor disposal on connection
 failure without deriving any helper resource release from byte EOF. Application
 policy/receipt verification and independent broker proof remain required.
+
+The SCM fixture also recycles an actual closed endpoint read-fd integer into a
+new canonical pipe generation. Stale-generation and wrong-binding validate,
+state, read and close calls must refuse without consuming the new queued byte or
+closing that descriptor; the correct new owner reads it. A separate ordinary
+fork retains an allocated endpoint and queued byte while the parent holds the
+actual LU registry and connection locks. All four endpoint ports must reject the
+child (scalar origin refusal / nullable receipt unavailable), and the parent must
+still read its byte and close its endpoint. No namespace or identity changes,
+private phase fabrication, production test hook or old fixture rerun is used.
+These additional endpoint regressions remain SOURCE ONLY / NOT_RUN.

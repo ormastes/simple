@@ -10,6 +10,7 @@
 int main(void){return 77;}
 #else
 #include <dirent.h>
+#include <sys/wait.h>
 static const char* binding="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static int64_t sw(SplArray* a,int i){assert(a&&rt_array_len(a)>i);return rt_value_as_int(rt_array_get(a,i));}
 static int fd_count(void){DIR* d=opendir("/proc/self/fd");assert(d);int n=0;while(readdir(d))n++;assert(closedir(d)==0);return n;}
@@ -75,6 +76,51 @@ int main(void) {
     a=rt_process_read_byte_endpoint_v1(adopted,binding,64);assert(sw(a,0)==0&&sw(a,1)==1&&sw(a,2)==0);rt_array_free(a);
     a=rt_process_close_byte_endpoint_v1(adopted,binding,64);assert(sw(a,0)==0&&sw(a,1)==1);rt_array_free(a);
     assert(rt_process_validate_byte_endpoint_v1(adopted,binding,64)==-2);
+    /* Recycle the actual read-fd integer and pipe registry slot into a NEW
+     * generation. Every stale/wrong-binding operation must leave it untouched. */
+    int recycled[2];assert(pipe2(recycled,O_NONBLOCK|O_CLOEXEC)==0);
+    if(recycled[1]==original_pending) {
+        int moved=fcntl(recycled[1],F_DUPFD_CLOEXEC,original_pending+1);assert(moved>=0);
+        close(recycled[1]);recycled[1]=moved;
+    }
+    if(recycled[0]!=original_pending) {
+        assert(dup3(recycled[0],original_pending,O_CLOEXEC)==original_pending);
+        close(recycled[0]);recycled[0]=original_pending;
+    }
+    int64_t successor=0;assert(simple_process_byte_adopt_v1(recycled[0],binding,64,&successor)==0);
+    assert(successor>adopted);assert(write(recycled[1],"N",1)==1);
+    const char* wrong="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    assert(rt_process_validate_byte_endpoint_v1(adopted,binding,64)==-2);
+    assert(rt_process_byte_endpoint_state_v1(adopted,binding,64)==-2);
+    a=rt_process_read_byte_endpoint_v1(adopted,binding,64);assert(sw(a,0)==-2&&!sw(a,1)&&!sw(a,2));rt_array_free(a);
+    a=rt_process_close_byte_endpoint_v1(adopted,binding,64);assert(sw(a,0)==-2&&!sw(a,1));rt_array_free(a);
+    assert(rt_process_validate_byte_endpoint_v1(successor,wrong,64)==-2);
+    assert(rt_process_byte_endpoint_state_v1(successor,wrong,64)==-2);
+    a=rt_process_read_byte_endpoint_v1(successor,wrong,64);assert(sw(a,0)==-2&&!sw(a,1)&&!sw(a,2));rt_array_free(a);
+    a=rt_process_close_byte_endpoint_v1(successor,wrong,64);assert(sw(a,0)==-2&&!sw(a,1));rt_array_free(a);
+    assert(fcntl(original_pending,F_GETFD)>=0);
+    a=rt_process_read_byte_endpoint_v1(successor,binding,64);assert(sw(a,0)==0&&sw(a,2)==1&&sw(a,3)=='N');rt_array_free(a);
+    /* An allocated endpoint plus queued byte survives ordinary fork. All four
+     * endpoint ports reject the child before entering inherited LU gates. */
+    assert(write(recycled[1],"F",1)==1);
+    slot=lu_lock_v1(token,&status);assert(slot&&status==0);
+    assert(pthread_mutex_lock(&lu_registry_v1)==0);
+    pid_t child=fork();assert(child>=0);
+    if(child==0) {
+        alarm(3);
+        assert(rt_process_validate_byte_endpoint_v1(successor,binding,64)==-10);
+        assert(rt_process_byte_endpoint_state_v1(successor,binding,64)==-10);
+        assert(rt_process_read_byte_endpoint_v1(successor,binding,64)==NULL);
+        assert(rt_process_close_byte_endpoint_v1(successor,binding,64)==NULL);
+        assert(fcntl(original_pending,F_GETFD)>=0);
+        _exit(0);
+    }
+    int child_status;assert(waitpid(child,&child_status,0)==child&&WIFEXITED(child_status)&&WEXITSTATUS(child_status)==0);
+    assert(pthread_mutex_unlock(&lu_registry_v1)==0);pthread_mutex_unlock(&slot->operation);
+    assert(fcntl(original_pending,F_GETFD)>=0);
+    a=rt_process_read_byte_endpoint_v1(successor,binding,64);assert(sw(a,0)==0&&sw(a,2)==1&&sw(a,3)=='F');rt_array_free(a);
+    close(recycled[1]);
+    a=rt_process_close_byte_endpoint_v1(successor,binding,64);assert(sw(a,0)==0&&sw(a,1)==1);rt_array_free(a);
     for(int i=1;i<count;i++){a=rt_process_close_byte_endpoint_v1(generations[i],binding,64);assert(sw(a,1)==1);rt_array_free(a);close(writers[i]);}
     a=rt_local_unix_close_v1(token);assert(sw(a,1)==1);rt_array_free(a);close(peer);
     /* A queued but unadopted received descriptor is disposed on socket close. */
@@ -84,6 +130,6 @@ int main(void) {
     a=rt_local_unix_close_v1(token);assert(sw(a,1)==1);rt_array_free(a);
     assert(fcntl(pending,F_GETFD)<0&&errno==EBADF);close(source[1]);close(peer);
     close(listener);assert(unlink(path)==0&&rmdir(root)==0);
-    puts("PASS SCM receive ownership/extra+truncated disposal/EOF/capacity retention/adopt replay/byte EOF; authenticated stage/send integration NOT_RUN");return 0;
+    puts("PASS SCM receive ownership/extra+truncated disposal/EOF/capacity retention/adopt replay/recycled-fd stale+binding refusal/endpoint fork/byte EOF; authenticated stage/send integration NOT_RUN");return 0;
 }
 #endif
