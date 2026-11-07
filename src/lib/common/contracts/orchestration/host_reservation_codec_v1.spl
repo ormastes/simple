@@ -1,0 +1,176 @@
+# Canonical immutable reservation payload for distributed-operation V2.
+# Encoding is SDN; decoding reuses the shared strict parser and value helpers.
+# A digest binds values, not caller authority or provider enforcement.
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, reject, parse_resource_document,
+    as_dict, as_array, as_text, as_int, only_known, require}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+
+pub struct HostReservationIntentV1:
+    physical_host_id: text
+    fence: HostLedgerFenceV1
+    plan_digest: text
+    reservation: HostReservationV1
+
+# Integrity binding, not authentication or proof of journal admission. Only the
+# host owner may publish this as a prepared receipt after checking its journal.
+pub struct HostPreparedReservationReceiptV1:
+    operation_id: text
+    envelope_digest: text
+    intent_digest: text
+    prepared_revision: i64
+    receipt_digest: text
+
+pub fn host_reservation_receipt_v1(intent: HostReservationIntentV1,
+        operation: OperationEnvelopeV2) -> Result<HostPreparedReservationReceiptV1, text>:
+    val matching = host_reservation_match_operation_v1(intent, operation)?
+    if intent.fence.revision == 9223372036854775807:
+        return Err("reservation-receipt-revision-overflow")
+    val envelope = distributed_encode_operation_v2(operation)?
+    val envelope_digest = sha256_text(envelope)
+    val revision = intent.fence.revision + 1
+    val body = "kind: host-prepared-reservation-v1\noperationId: \"{operation.id}\"\nenvelopeDigest: \"{envelope_digest}\"\nintentDigest: \"{operation.payload_digest}\"\npreparedRevision: {revision}\n"
+    Ok(HostPreparedReservationReceiptV1(operation_id: operation.id,
+        envelope_digest: envelope_digest, intent_digest: operation.payload_digest,
+        prepared_revision: revision, receipt_digest: sha256_text(body)))
+
+pub fn host_reservation_match_receipt_v1(receipt: HostPreparedReservationReceiptV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2) -> Result<bool, text>:
+    val expected = host_reservation_receipt_v1(intent, operation)?
+    if receipt.operation_id != expected.operation_id or receipt.envelope_digest != expected.envelope_digest or
+            receipt.intent_digest != expected.intent_digest or receipt.prepared_revision != expected.prepared_revision or
+            receipt.receipt_digest != expected.receipt_digest:
+        return Err("reservation-receipt-mismatch")
+    Ok(true)
+
+# Reconstructable terminal bytes: the retained intent and envelope are the
+# inputs, so an abort needs no second mutable outcome store. Only the host owner
+# may attest this outcome, after checking that execution has never begun.
+pub fn host_reservation_abort_outcome_v1(intent: HostReservationIntentV1,
+        operation: OperationEnvelopeV2) -> Result<text, text>:
+    val receipt = host_reservation_receipt_v1(intent, operation)?
+    Ok("kind: host-prepared-abort-v1\nreceiptDigest: \"{receipt.receipt_digest}\"\nexecutionStarted: false\n")
+
+# The row's payload_digest is deliberately excluded from its own preimage.
+# Bind it using host_reservation_bind_intent_v1 before matching an operation.
+pub fn host_reservation_encode_intent_v1(intent: HostReservationIntentV1) -> Result<text, text>:
+    val row = intent.reservation
+    val fence = intent.fence
+    if not host_reservation_valid_v1(row) or row.state != HostReservationStateV1.Prepared or
+            not builder_identifier_valid_v1(intent.physical_host_id) or
+            not builder_identifier_valid_v1(fence.authority_id) or
+            not builder_identifier_valid_v1(fence.boot_id) or fence.provider_generation <= 0 or
+            fence.revision <= 0 or not builder_digest_valid_v1(intent.plan_digest):
+        return Err("invalid-reservation-intent")
+    # Quote validated tokens, including numeric-looking IDs and digests, so
+    # SDN cannot reinterpret them as booleans or integer quantities.
+    var lines: [text] = ["version: 1",
+        "physicalHostId: \"{intent.physical_host_id}\"",
+        "authorityId: \"{fence.authority_id}\"", "bootId: \"{fence.boot_id}\"",
+        "providerGeneration: {fence.provider_generation}", "ledgerRevision: {fence.revision}",
+        "planDigest: \"{intent.plan_digest}\"", "reservationId: \"{row.id}\"",
+        "operationId: \"{row.operation_id}\"", "serviceScopeId: \"{row.service_scope_id}\"",
+        "assignmentGeneration: {row.assignment_generation}", "nonce: \"{row.nonce}\"",
+        "cpuMillis: {row.cpu_millis}", "memoryBytes: {row.memory_bytes}",
+        "prepareDeadlineMs: {row.prepare_deadline_ms}"]
+    if row.exclusive_devices.len() == 0:
+        lines.push("exclusiveDevices: []")
+    else:
+        lines.push("exclusiveDevices:")
+        for device in row.exclusive_devices:
+            lines.push("    - \"{device}\"")
+    Ok(lines.join("\n") + "\n")
+
+pub fn host_reservation_bind_intent_v1(intent: HostReservationIntentV1) -> Result<HostReservationIntentV1, text>:
+    val bytes = host_reservation_encode_intent_v1(intent)?
+    val row = intent.reservation
+    val bound = HostReservationV1(id: row.id, operation_id: row.operation_id,
+        payload_digest: sha256_text(bytes), service_scope_id: row.service_scope_id,
+        assignment_generation: row.assignment_generation, nonce: row.nonce,
+        cpu_millis: row.cpu_millis, memory_bytes: row.memory_bytes,
+        exclusive_devices: row.exclusive_devices, prepare_deadline_ms: row.prepare_deadline_ms,
+        state: HostReservationStateV1.Prepared)
+    Ok(HostReservationIntentV1(physical_host_id: intent.physical_host_id, fence: intent.fence,
+        plan_digest: intent.plan_digest, reservation: bound))
+
+fn host_intent_text_v1(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val value = require(fields, key, "", spans)?
+    as_text(value, key, spans)
+
+fn host_intent_integer_v1(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>) -> Result<i64, RejectionV1>:
+    val value = require(fields, key, "", spans)?
+    as_int(value, key, spans)
+
+fn host_intent_decode_fields_v1(source: text) -> Result<HostReservationIntentV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    host_reservation_decode_value_v1(parsed.0, parsed.1, source)
+
+# Value decoder shared with bounded untrusted service envelopes. The caller
+# still checks canonical bytes before accepting the resulting payload digest.
+pub fn host_reservation_decode_value_v1(value: SdnValue, spans: Dict<text, SdnSpan>,
+        source: text) -> Result<HostReservationIntentV1, RejectionV1>:
+    val fields = as_dict(value, "", spans)?
+    only_known(fields, ["version", "physicalHostId", "authorityId", "bootId",
+        "providerGeneration", "ledgerRevision", "planDigest", "reservationId", "operationId",
+        "serviceScopeId", "assignmentGeneration", "nonce", "cpuMillis", "memoryBytes",
+        "prepareDeadlineMs", "exclusiveDevices"], "", spans)?
+    val version = host_intent_integer_v1(fields, "version", spans)?
+    if version != 1:
+        return Err(reject("version", "version", "unsupported reservation intent version", spans))
+    val physical_host_id = host_intent_text_v1(fields, "physicalHostId", spans)?
+    val authority_id = host_intent_text_v1(fields, "authorityId", spans)?
+    val boot_id = host_intent_text_v1(fields, "bootId", spans)?
+    val provider_generation = host_intent_integer_v1(fields, "providerGeneration", spans)?
+    val revision = host_intent_integer_v1(fields, "ledgerRevision", spans)?
+    val plan_digest = host_intent_text_v1(fields, "planDigest", spans)?
+    val id = host_intent_text_v1(fields, "reservationId", spans)?
+    val operation_id = host_intent_text_v1(fields, "operationId", spans)?
+    val scope = host_intent_text_v1(fields, "serviceScopeId", spans)?
+    val assignment = host_intent_integer_v1(fields, "assignmentGeneration", spans)?
+    val nonce = host_intent_text_v1(fields, "nonce", spans)?
+    val cpu = host_intent_integer_v1(fields, "cpuMillis", spans)?
+    val memory = host_intent_integer_v1(fields, "memoryBytes", spans)?
+    val deadline = host_intent_integer_v1(fields, "prepareDeadlineMs", spans)?
+    val devices_value = require(fields, "exclusiveDevices", "", spans)?
+    val raw_devices = as_array(devices_value, "exclusiveDevices", spans)?
+    var devices: [text] = []
+    for value in raw_devices:
+        devices.push(as_text(value, "exclusiveDevices", spans)?)
+    val fence = HostLedgerFenceV1(authority_id: authority_id, boot_id: boot_id,
+        provider_generation: provider_generation, revision: revision)
+    val row = HostReservationV1(id: id, operation_id: operation_id, payload_digest: sha256_text(source),
+        service_scope_id: scope, assignment_generation: assignment, nonce: nonce,
+        cpu_millis: cpu, memory_bytes: memory, exclusive_devices: devices,
+        prepare_deadline_ms: deadline, state: HostReservationStateV1.Prepared)
+    Ok(HostReservationIntentV1(physical_host_id: physical_host_id, fence: fence,
+        plan_digest: plan_digest, reservation: row))
+
+pub fn host_reservation_decode_intent_v1(source: text) -> Result<HostReservationIntentV1, text>:
+    if source.len() > 65536:
+        return Err("reservation-intent-too-large")
+    val intent = match host_intent_decode_fields_v1(source):
+        case Ok(value): value
+        case Err(reason): return Err("reservation-intent-invalid:" + reason.path + ":" + reason.kind)
+    val canonical = host_reservation_encode_intent_v1(intent)?
+    if canonical != source:
+        return Err("reservation-intent-not-canonical")
+    Ok(intent)
+
+# Pure binding check. Grant authorization, payload retention and journal commit
+# are additional host-owner steps; this function never authorizes native effects.
+pub fn host_reservation_match_operation_v1(intent: HostReservationIntentV1,
+        operation: OperationEnvelopeV2) -> Result<bool, text>:
+    val encoded_operation = distributed_encode_operation_v2(operation)?
+    val payload = host_reservation_encode_intent_v1(intent)?
+    val digest = sha256_text(payload)
+    if operation.operation != "host_reservation_v1" or operation.id != intent.reservation.operation_id or
+            operation.host_id != intent.physical_host_id or operation.memory_bytes != intent.reservation.memory_bytes or
+            operation.payload_digest != digest or intent.reservation.payload_digest != digest:
+        return Err("reservation-operation-mismatch")
+    Ok(true)
