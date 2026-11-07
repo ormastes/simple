@@ -22,17 +22,15 @@ Evidence: `reviews/remote-13ca-after-26b7/workflow-release-independent-review.md
 
 **Revalidated 2026-11-02: still plausible because OPEN; candidate HOLD; authorized branch/ancestry policy unresolved; no merged fix commit with a passing regression is cited in this doc.**
 
-## Closed 2026-11-07 (owner-approved)
+## Source correction 2026-11-07 — verification pending
 
-The last open item — `.github/release-convergence-manifest.json:3` still
-naming `release_phase3` — is resolved: `release_ref` is now `release/1.0.0`,
-matching the route `candidate.yml` derives (`release/$release_line`).
-Evidence: `jq -e '.release_ref == "release/1.0.0"'` PASS;
-`scripts/release/validate-convergence-manifest.jq` PASS with
-`--arg release_ref release/1.0.0`. No projection or selftest pinned the old
-value (`grep release_phase3` over `.github/`,
-`scripts/check/check-github-policy-projection.shs`, `scripts/release/tests/`
-finds only historical classification reasons and the test's intentional
-rejection/exemption cases). `check-github-policy-projection.shs` fails with a
-pre-existing `spipe-vcs-v3-main` digest mismatch identical on the unmodified
-tree; unrelated to this change.
+The manifest `release_ref` now names `release/1.0.0`, matching the branch
+spelling derived by `candidate.yml`. This corrects the stale alias only.
+JSON parsing and explicit `release_ref` equality check validate that edit.
+The convergence jq validator checks other manifest fields; it does not prove
+top-level release-ref equality, current ancestry, or provider admission.
+
+Status remains **fix-implemented-verification-pending**, with candidate HOLD.
+Closure still requires the normal exact-ref/head/provider receipts, protected
+admission and qualification stated above. No such receipt is added by this
+metadata change; the previous proposed closure is withdrawn.

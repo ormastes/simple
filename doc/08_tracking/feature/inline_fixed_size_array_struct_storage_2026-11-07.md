@@ -15,7 +15,8 @@ allocation** at construction or at any later point.
 ## Why
 
 `nogc_async_mut_noalloc/collections/*` (`FixedArray`, `FixedStack`,
-`FixedMap`) are now allocation-free *after construction*, but their backing
+`FixedMap`) have a source repair intended to avoid allocation *after construction*
+(native allocation measurement remains pending), but their backing
 storage is still a heap `[T]` filled once in `new()`. True noalloc
 (static/inline storage, required by the WP-12 allocation-class lattice) is not
 expressible today because the language has no inline fixed-size array.
