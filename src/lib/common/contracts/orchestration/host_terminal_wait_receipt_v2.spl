@@ -1,0 +1,118 @@
+# Pure retained terminal-wait integrity/qualification; no host owner or I/O.
+use std.common.contracts.container.execution_v2.{ContainerExecutionPlanV2, ContainerHostScopeV2,
+    container_execution_plan_bytes_v2, container_execution_plan_decode_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1}
+use std.common.contracts.container.runtime_operation_codec_v2.{container_runtime_operation_encode_v2,
+    container_runtime_operation_decode_v2}
+use std.common.contracts.container.execution_evidence_v2.container_runtime_observation_digest_v2
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub val HOST_TERMINAL_WAIT_MAX_BYTES_V2: i64 = 8388608
+
+pub struct HostTerminalWaitReceiptV2:
+    execution: ContainerExecutionPlanV2
+    operation_digest: text
+    provider_identity_digest: text
+    observed_unix_ms: i64
+    observation_digest: text
+    wait: RuntimeOperationV1
+
+fn host_terminal_wait_receipt_encode_v2(value: HostTerminalWaitReceiptV2) -> Result<text, text>:
+    for digest in [value.operation_digest, value.provider_identity_digest, value.observation_digest]:
+        if not builder_digest_valid_v1(digest): return Err("host-terminal-wait-digest-invalid")
+    if value.observed_unix_ms <= 0: return Err("host-terminal-wait-clock-invalid")
+    val plan = container_execution_plan_bytes_v2(value.execution)?
+    val wait = container_runtime_operation_encode_v2(value.wait)?
+    if container_runtime_observation_digest_v2(value.wait)? != value.observation_digest:
+        return Err("host-terminal-wait-observation-digest-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-terminal-wait"),
+        "execution": SdnValue.String(plan), "operationDigest": SdnValue.String(value.operation_digest),
+        "providerIdentityDigest": SdnValue.String(value.provider_identity_digest),
+        "observedUnixMs": SdnValue.Int(value.observed_unix_ms),
+        "observationDigest": SdnValue.String(value.observation_digest), "wait": SdnValue.String(wait)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > HOST_TERMINAL_WAIT_MAX_BYTES_V2: return Err("host-terminal-wait-source-size")
+    Ok(source)
+
+fn host_terminal_wait_text_v2(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-terminal-wait-text-required:" + key)
+
+fn host_terminal_wait_integer_v2(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-terminal-wait-integer-required:" + key)
+
+fn host_terminal_wait_receipt_decode_v2(source: text) -> Result<HostTerminalWaitReceiptV2, text>:
+    if str_len(source) == 0 or str_len(source) > HOST_TERMINAL_WAIT_MAX_BYTES_V2:
+        return Err("host-terminal-wait-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(
+            max_source_bytes: HOST_TERMINAL_WAIT_MAX_BYTES_V2, max_depth: 2,
+            max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 12)):
+        case Ok(value): value
+        case Err(issue): return Err("host-terminal-wait-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-terminal-wait-object-required")
+    val names = ["version", "kind", "execution", "operationDigest", "providerIdentityDigest", "observedUnixMs", "observationDigest", "wait"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("host-terminal-wait-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("host-terminal-wait-missing-field:" + key)
+    if host_terminal_wait_integer_v2(fields, "version")? != 2 or
+            host_terminal_wait_text_v2(fields, "kind")? != "host-terminal-wait":
+        return Err("host-terminal-wait-version")
+    val value = HostTerminalWaitReceiptV2(
+        execution: container_execution_plan_decode_v2(host_terminal_wait_text_v2(fields, "execution")?)?,
+        operation_digest: host_terminal_wait_text_v2(fields, "operationDigest")?,
+        provider_identity_digest: host_terminal_wait_text_v2(fields, "providerIdentityDigest")?,
+        observed_unix_ms: host_terminal_wait_integer_v2(fields, "observedUnixMs")?,
+        observation_digest: host_terminal_wait_text_v2(fields, "observationDigest")?,
+        wait: container_runtime_operation_decode_v2(host_terminal_wait_text_v2(fields, "wait")?)?)
+    if host_terminal_wait_receipt_encode_v2(value)? != source: return Err("host-terminal-wait-noncanonical")
+    Ok(value)
+
+fn host_terminal_wait_receipt_validate_v2(value: HostTerminalWaitReceiptV2,
+        expected_execution: ContainerExecutionPlanV2, expected_runtime: RuntimeIdentityV1,
+        expected_operation_digest: text, expected_provider_identity_digest: text,
+        minimum_observed_unix_ms: i64) -> Result<bool, text>:
+    val _canonical = host_terminal_wait_receipt_encode_v2(value)?
+    if container_execution_plan_bytes_v2(value.execution)? != container_execution_plan_bytes_v2(expected_execution)? or
+            value.operation_digest != expected_operation_digest or
+            value.provider_identity_digest != expected_provider_identity_digest:
+        return Err("host-terminal-wait-retained-binding-mismatch")
+    if minimum_observed_unix_ms <= 0 or value.observed_unix_ms < minimum_observed_unix_ms:
+        return Err("host-terminal-wait-clock-regressed")
+    val wait = value.wait
+    if wait.operation != "wait" or wait.command.operation != "wait" or wait.status != "ok" or
+            wait.exit_code != 0 or (wait.state.phase != "exited" and wait.state.phase != "stopped") or
+            wait.state.exit_code < 0:
+        return Err("host-terminal-wait-terminal-observation-required")
+    val scope = ContainerHostScopeV2(physical_host_id: expected_execution.physical_host_id,
+        service_scope_id: expected_execution.service_scope_id, boot_id: expected_execution.boot_id,
+        provider_generation: expected_execution.provider_generation, native_machine_id: expected_execution.native_machine_id,
+        continuity_mode: expected_execution.continuity_mode, continuity_id: expected_execution.continuity_id)
+    val actual = wait.state.identity
+    if (expected_execution.backend == "linux-podman" and actual.engine != "podman") or
+            (expected_execution.backend == "windows-docker-process" and actual.engine != "docker"):
+        return Err("host-terminal-wait-backend-mismatch")
+    if not builder_digest_valid_v1(actual.native_id) or str_len(actual.native_id) != 64 or
+            actual.native_id != expected_runtime.native_id or actual.pod_uid != expected_runtime.pod_uid or
+            actual.pod_uid != expected_execution.workload_uid or actual.attempt != expected_runtime.attempt or
+            actual.attempt != expected_execution.attempt or actual.operation_id != expected_runtime.operation_id or
+            actual.operation_id != expected_execution.operation_id or actual.engine != expected_runtime.engine or
+            actual.provider_generation != expected_runtime.provider_generation or
+            actual.provider_generation != expected_execution.provider_generation or
+            actual.node_boot_id != expected_runtime.node_boot_id or
+            actual.node_boot_id != container_scope_fence_id_v2(scope)?:
+        return Err("host-terminal-wait-runtime-identity-mismatch")
+    Ok(true)
+
+export HostTerminalWaitReceiptV2, HOST_TERMINAL_WAIT_MAX_BYTES_V2
+export host_terminal_wait_receipt_encode_v2, host_terminal_wait_receipt_decode_v2, host_terminal_wait_receipt_validate_v2

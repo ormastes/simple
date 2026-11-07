@@ -1,0 +1,107 @@
+# One actual common-API wait retained under the SAME protected host journal
+# owner. Original bytes/time win on replay; no cleanup/launch/release grant.
+use std.nogc_sync_mut.orchestration.host_local_root_v1.{HostLocalRootV1, host_local_context_v1}
+use std.nogc_sync_mut.orchestration.host_local_command_v1.{host_local_retained_execution_v2,
+    host_local_resolve_execution_v2}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.HostExecutionObservationV2
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, container_scope_fence_id_v2}
+use std.common.contracts.container.execution_evidence_v2.container_runtime_observation_digest_v2
+export use std.common.contracts.orchestration.host_terminal_wait_receipt_v2.{HostTerminalWaitReceiptV2,
+    HOST_TERMINAL_WAIT_MAX_BYTES_V2, host_terminal_wait_receipt_encode_v2,
+    host_terminal_wait_receipt_decode_v2, host_terminal_wait_receipt_validate_v2}
+use std.nogc_async_mut.container.api_v2.simple_container_read_v2
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded,
+    file_create_exclusive, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+
+pub struct HostTerminalWaitTurnV2:
+    local: HostLocalRootV1
+    receipt: Option<HostTerminalWaitReceiptV2>
+    error: text
+
+fn host_terminal_wait_binding_v2(local: HostLocalRootV1, execution: ContainerExecutionRequestV2,
+        observed: HostExecutionObservationV2, value: HostTerminalWaitReceiptV2) -> Result<bool, text>:
+    if observed.provider_identity_digest != local.binding.provider_identity_digest:
+        return Err("host-terminal-wait-retained-binding-mismatch")
+    if observed.runtime.node_boot_id != container_scope_fence_id_v2(local.scope)?:
+        return Err("host-terminal-wait-runtime-identity-mismatch")
+    host_terminal_wait_receipt_validate_v2(value, execution.plan, observed.runtime,
+        observed.operation_digest, local.binding.provider_identity_digest, observed.observed_unix_ms)
+
+fn host_terminal_wait_path_v2(local: HostLocalRootV1, operation_id: text) -> Result<text, text>:
+    if not builder_identifier_valid_v1(operation_id): return Err("host-terminal-wait-operation-invalid")
+    Ok(local.capacity.journal.root + "/host-terminal-waits-v2/" + sha256_text(operation_id) + ".sdn")
+
+# No native calls, including after destruction. The protected original packet,
+# exact journal envelope and shared retained observation validate historical data.
+fn host_terminal_wait_retained_v2(local: HostLocalRootV1,
+        operation_id: text) -> Result<HostTerminalWaitReceiptV2, text>:
+    val path = host_terminal_wait_path_v2(local, operation_id)?
+    val value = host_terminal_wait_receipt_decode_v2(file_read_regular_no_follow_bounded(path, HOST_TERMINAL_WAIT_MAX_BYTES_V2)?)?
+    val retained = host_local_retained_execution_v2(local, operation_id)?
+    val _bound = host_terminal_wait_binding_v2(local, retained.execution, retained.observation, value)?
+    # Retry an interrupted durability step over the SAME original bytes/time.
+    # A file left by a failed mode/readback/sync publication is never restamped.
+    if not file_set_mode(path, 0o600) or not file_fsync(path) or
+            not directory_fsync(local.capacity.journal.root + "/host-terminal-waits-v2") or
+            not directory_fsync(local.capacity.journal.root):
+        return Err("host-terminal-wait-retained-sync-failed")
+    Ok(value)
+
+fn host_terminal_wait_store_v2(local: HostLocalRootV1, value: HostTerminalWaitReceiptV2) -> Result<bool, text>:
+    val source = host_terminal_wait_receipt_encode_v2(value)?
+    val root = local.capacity.journal.root
+    val directory = root + "/host-terminal-waits-v2"
+    if not dir_is_real_no_follow(root): return Err("host-terminal-wait-root-unsafe")
+    if not file_exists(directory) and not dir_create(directory, true): return Err("host-terminal-wait-directory-unavailable")
+    if not dir_is_real_no_follow(directory): return Err("host-terminal-wait-directory-unsafe")
+    val path = host_terminal_wait_path_v2(local, value.execution.operation_id)?
+    if not file_create_exclusive(path, source): return Err("host-terminal-wait-publication-failed")
+    if not file_set_mode(path, 0o600): return Err("host-terminal-wait-mode-failed")
+    if file_read_regular_no_follow_bounded(path, HOST_TERMINAL_WAIT_MAX_BYTES_V2)? != source:
+        return Err("host-terminal-wait-readback-mismatch")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root):
+        return Err("host-terminal-wait-sync-failed")
+    Ok(true)
+
+fn host_terminal_wait_v2(local: HostLocalRootV1, operation_id: text) -> HostTerminalWaitTurnV2:
+    val path = host_terminal_wait_path_v2(local, operation_id)
+    if path.is_err(): return HostTerminalWaitTurnV2(local, nil, path.unwrap_err())
+    # Always prefer original bytes/time. Existing corrupt/unreadable facts fail
+    # closed; no inspect/recover/wait may restamp them into a fresh observation.
+    if file_exists(path.unwrap()):
+        val retained = host_terminal_wait_retained_v2(local, operation_id)
+        if retained.is_err(): return HostTerminalWaitTurnV2(local, nil, retained.unwrap_err())
+        return HostTerminalWaitTurnV2(local, Some(retained.unwrap()), "")
+    val resolved = host_local_resolve_execution_v2(local, operation_id)
+    var current = resolved.local
+    if resolved.error != "": return HostTerminalWaitTurnV2(current, nil, resolved.error)
+    val execution = match resolved.execution:
+        case Some(value): value
+        case nil: return HostTerminalWaitTurnV2(current, nil, "host-terminal-wait-execution-unavailable")
+    val observed = match resolved.observation:
+        case Some(value): value
+        case nil: return HostTerminalWaitTurnV2(current, nil, "host-terminal-wait-identity-unavailable")
+    val turn = simple_container_read_v2(current.container, "wait", execution)
+    current.container = turn.owner
+    if turn.operation.status != "ok":
+        return HostTerminalWaitTurnV2(current, nil, "host-terminal-wait-runtime-unknown:" + turn.operation.reason)
+    val context = host_local_context_v1(current.policy)
+    if context.grant_clock <= 0 or context.monotonic_ms < observed.observed_monotonic_ms:
+        return HostTerminalWaitTurnV2(current, nil, "host-terminal-wait-clock-invalid")
+    val digest = container_runtime_observation_digest_v2(turn.operation)
+    if digest.is_err(): return HostTerminalWaitTurnV2(current, nil, digest.unwrap_err())
+    val receipt = HostTerminalWaitReceiptV2(execution: execution.plan,
+        operation_digest: observed.operation_digest, provider_identity_digest: current.binding.provider_identity_digest,
+        observed_unix_ms: context.grant_clock, observation_digest: digest.unwrap(), wait: turn.operation)
+    val bound = host_terminal_wait_binding_v2(current, execution, observed, receipt)
+    if bound.is_err(): return HostTerminalWaitTurnV2(current, nil, bound.unwrap_err())
+    val stored = host_terminal_wait_store_v2(current, receipt)
+    if stored.is_err(): return HostTerminalWaitTurnV2(current, nil, stored.unwrap_err())
+    HostTerminalWaitTurnV2(current, Some(receipt), "")
+
+export HostTerminalWaitTurnV2, host_terminal_wait_v2, host_terminal_wait_retained_v2

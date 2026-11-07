@@ -1,0 +1,120 @@
+# Full runtime observation transport. Canonical bytes are integrity, never
+# provider authenticity or a grant. The existing observation digest is unchanged.
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeCommandV1,
+    RuntimeStateV1, RuntimeOperationV1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.string_core.str_len
+
+pub val CONTAINER_RUNTIME_OPERATION_MAX_BYTES_V2: i64 = 2097152
+
+fn runtime_operation_record_v2(names: [text], values: [SdnValue]) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    for index in 0..names.len(): fields[names[index]] = values[index]
+    SdnValue.Dict(fields)
+
+fn runtime_operation_checked_fields_v2(value: SdnValue,
+        names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("runtime-operation-object-required")
+    for key in fields.keys():
+        if not names.contains(key): return Err("runtime-operation-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("runtime-operation-missing-field:" + key)
+    Ok(fields)
+
+fn runtime_operation_text_v2(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("runtime-operation-text-required:" + name)
+
+fn runtime_operation_integer_v2(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("runtime-operation-integer-required:" + name)
+
+fn container_runtime_operation_encode_v2(value: RuntimeOperationV1) -> Result<text, text>:
+    if value.command.args.len() > 4096: return Err("runtime-operation-argument-count")
+    var size: i64 = 0
+    for part in [value.status, value.operation, value.command.operation, value.command.program,
+            value.stdout, value.stderr, value.reason, value.state.phase, value.state.reason,
+            value.state.identity.pod_uid, value.state.identity.operation_id, value.state.identity.engine,
+            value.state.identity.native_id, value.state.identity.node_boot_id]:
+        val count = str_len(part)
+        if count > CONTAINER_RUNTIME_OPERATION_MAX_BYTES_V2: return Err("runtime-operation-source-size")
+        size = size + count
+        if size > CONTAINER_RUNTIME_OPERATION_MAX_BYTES_V2: return Err("runtime-operation-source-size")
+    var arguments: [SdnValue] = []
+    for argument in value.command.args:
+        val count = str_len(argument)
+        if count > 1048576: return Err("runtime-operation-argument-size")
+        size = size + count
+        if size > CONTAINER_RUNTIME_OPERATION_MAX_BYTES_V2: return Err("runtime-operation-source-size")
+        arguments.push(SdnValue.String(argument))
+    val identity = value.state.identity
+    val runtime = runtime_operation_record_v2(
+        ["podUid", "attempt", "providerGeneration", "operationId", "engine", "nativeId", "nodeBootId"],
+        [SdnValue.String(identity.pod_uid), SdnValue.Int(identity.attempt), SdnValue.Int(identity.provider_generation),
+            SdnValue.String(identity.operation_id), SdnValue.String(identity.engine),
+            SdnValue.String(identity.native_id), SdnValue.String(identity.node_boot_id)])
+    val command = runtime_operation_record_v2(["operation", "program", "args"],
+        [SdnValue.String(value.command.operation), SdnValue.String(value.command.program), SdnValue.Array(arguments)])
+    val state = runtime_operation_record_v2(["phase", "identity", "exitCode", "reason"],
+        [SdnValue.String(value.state.phase), runtime, SdnValue.Int(value.state.exit_code), SdnValue.String(value.state.reason)])
+    val document = runtime_operation_record_v2(
+        ["version", "kind", "status", "operation", "command", "state", "exitCode", "stdout", "stderr", "reason"],
+        [SdnValue.Int(2), SdnValue.String("container-runtime-operation"), SdnValue.String(value.status),
+            SdnValue.String(value.operation), command, state, SdnValue.Int(value.exit_code),
+            SdnValue.String(value.stdout), SdnValue.String(value.stderr), SdnValue.String(value.reason)])
+    val bytes = sdn_encode_canonical(document) + "\n"
+    if str_len(bytes) > CONTAINER_RUNTIME_OPERATION_MAX_BYTES_V2: return Err("runtime-operation-source-size")
+    Ok(bytes)
+
+fn container_runtime_operation_decode_v2(source: text) -> Result<RuntimeOperationV1, text>:
+    if str_len(source) == 0 or str_len(source) > CONTAINER_RUNTIME_OPERATION_MAX_BYTES_V2:
+        return Err("runtime-operation-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(
+            max_source_bytes: CONTAINER_RUNTIME_OPERATION_MAX_BYTES_V2,
+            max_depth: 4, max_nodes: 8400, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value
+        case Err(issue): return Err("runtime-operation-syntax:" + issue.code)
+    val fields = runtime_operation_checked_fields_v2(parsed.value,
+        ["version", "kind", "status", "operation", "command", "state", "exitCode", "stdout", "stderr", "reason"])?
+    if runtime_operation_integer_v2(fields, "version")? != 2 or
+            runtime_operation_text_v2(fields, "kind")? != "container-runtime-operation":
+        return Err("runtime-operation-version")
+    val command_fields = runtime_operation_checked_fields_v2(fields["command"], ["operation", "program", "args"])?
+    val argument_values = match command_fields["args"]:
+        case SdnValue.Array(values): values
+        case _: return Err("runtime-operation-arguments-required")
+    if argument_values.len() > 4096: return Err("runtime-operation-argument-count")
+    var arguments: [text] = []
+    for argument in argument_values:
+        match argument:
+            case SdnValue.String(value): arguments.push(value)
+            case _: return Err("runtime-operation-argument-text-required")
+    val state_fields = runtime_operation_checked_fields_v2(fields["state"], ["phase", "identity", "exitCode", "reason"])?
+    val identity_fields = runtime_operation_checked_fields_v2(state_fields["identity"],
+        ["podUid", "attempt", "providerGeneration", "operationId", "engine", "nativeId", "nodeBootId"])?
+    val identity = RuntimeIdentityV1(pod_uid: runtime_operation_text_v2(identity_fields, "podUid")?,
+        attempt: runtime_operation_integer_v2(identity_fields, "attempt")?,
+        provider_generation: runtime_operation_integer_v2(identity_fields, "providerGeneration")?,
+        operation_id: runtime_operation_text_v2(identity_fields, "operationId")?,
+        engine: runtime_operation_text_v2(identity_fields, "engine")?,
+        native_id: runtime_operation_text_v2(identity_fields, "nativeId")?,
+        node_boot_id: runtime_operation_text_v2(identity_fields, "nodeBootId")?)
+    val value = RuntimeOperationV1(status: runtime_operation_text_v2(fields, "status")?,
+        operation: runtime_operation_text_v2(fields, "operation")?,
+        command: RuntimeCommandV1(operation: runtime_operation_text_v2(command_fields, "operation")?,
+            program: runtime_operation_text_v2(command_fields, "program")?, args: arguments),
+        state: RuntimeStateV1(phase: runtime_operation_text_v2(state_fields, "phase")?, identity: identity,
+            exit_code: runtime_operation_integer_v2(state_fields, "exitCode")?, reason: runtime_operation_text_v2(state_fields, "reason")?),
+        exit_code: runtime_operation_integer_v2(fields, "exitCode")?, stdout: runtime_operation_text_v2(fields, "stdout")?,
+        stderr: runtime_operation_text_v2(fields, "stderr")?, reason: runtime_operation_text_v2(fields, "reason")?)
+    if container_runtime_operation_encode_v2(value)? != source: return Err("runtime-operation-noncanonical")
+    Ok(value)
+
+export container_runtime_operation_encode_v2, container_runtime_operation_decode_v2
