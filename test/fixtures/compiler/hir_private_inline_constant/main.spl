@@ -1,0 +1,70 @@
+# Native diagnostic of the actual shared classifier only; not full HIR/MIR admission.
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirConst, HirExpr, HirExprKind, HirBinOp, HirInterpolation}
+use compiler.hir.hir_private_inline_constant_v1.{hir_private_literal_is_inline_v1}
+
+fn typed_expr(kind: HirExprKind, type_: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: Span.empty(), is_uninit_marker: false)
+
+fn constant(value: HirExpr, mutable: bool, visibility: Visibility) -> HirConst:
+    HirConst(symbol: SymbolId(id: 1), name: "probe", type_: value.type_, value: value,
+        is_mutable: mutable, visibility: visibility, is_public: visibility == Visibility.Public,
+        is_volatile: false, has_fixed_address: false, fixed_address: 0, span: Span.empty())
+
+fn check(name: text, actual: bool, expected: bool) -> i64:
+    if actual == expected:
+        print "PASS {name}"
+        return 0
+    print "FAIL {name}"
+    1
+
+fn main() -> i64:
+    val integer = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+    val text_type = HirType(kind: HirTypeKind.Str, span: Span.empty())
+    val boolean = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+    val floating = HirType(kind: HirTypeKind.Float(64), span: Span.empty())
+    val one = typed_expr(HirExprKind.IntLit(1, None), integer)
+    val kilo = typed_expr(HirExprKind.IntLit(1024, None), integer)
+    val variable = typed_expr(HirExprKind.NamedVar(SymbolId(id: 2), "runtime_seed"), integer)
+    val runtime = typed_expr(HirExprKind.Binary(HirBinOp.Mul, variable, kilo), integer)
+    val plain = typed_expr(HirExprKind.StringLit("T4010", None), text_type)
+    val no_parts: [HirInterpolation] = []
+    val empty = typed_expr(HirExprKind.StringLit("T4010", Some(no_parts)), text_type)
+    val part = HirInterpolation(expr: variable, has_format: false, format: "", span: Span.empty())
+    val interpolated = typed_expr(HirExprKind.StringLit("value=", Some([part])), text_type)
+    val array_type = HirType(kind: HirTypeKind.Array(text_type, None), span: Span.empty())
+    val array = typed_expr(HirExprKind.ArrayLit([plain], None), array_type)
+    var failures: i64 = 0
+    var assertions: i64 = 0
+    failures = failures + check("integer literal", hir_private_literal_is_inline_v1(constant(one, false, Visibility.Private)), true)
+    assertions = assertions + 1
+    failures = failures + check("boolean literal", hir_private_literal_is_inline_v1(constant(typed_expr(HirExprKind.BoolLit(true), boolean), false, Visibility.Private)), true)
+    assertions = assertions + 1
+    failures = failures + check("float lexeme", hir_private_literal_is_inline_v1(constant(typed_expr(HirExprKind.FloatLexeme("1.5", None), floating), false, Visibility.Private)), true)
+    assertions = assertions + 1
+    failures = failures + check("plain string", hir_private_literal_is_inline_v1(constant(plain, false, Visibility.Private)), true)
+    assertions = assertions + 1
+    failures = failures + check("empty string interpolation list", hir_private_literal_is_inline_v1(constant(empty, false, Visibility.Private)), true)
+    assertions = assertions + 1
+    failures = failures + check("runtime string interpolation", hir_private_literal_is_inline_v1(constant(interpolated, false, Visibility.Private)), false)
+    assertions = assertions + 1
+    for size in [128, 512, 16]:
+        val first = typed_expr(HirExprKind.Binary(HirBinOp.Mul, typed_expr(HirExprKind.IntLit(size, None), integer), kilo), integer)
+        val budget = typed_expr(HirExprKind.Binary(HirBinOp.Mul, first, kilo), integer)
+        failures = failures + check("folded driver budget {size}", hir_private_literal_is_inline_v1(constant(budget, false, Visibility.Private)), true)
+        assertions = assertions + 1
+    failures = failures + check("array storage", hir_private_literal_is_inline_v1(constant(array, false, Visibility.Private)), false)
+    assertions = assertions + 1
+    failures = failures + check("runtime arithmetic storage", hir_private_literal_is_inline_v1(constant(runtime, false, Visibility.Private)), false)
+    assertions = assertions + 1
+    failures = failures + check("mutable literal storage", hir_private_literal_is_inline_v1(constant(one, true, Visibility.Private)), false)
+    assertions = assertions + 1
+    failures = failures + check("scoped literal storage", hir_private_literal_is_inline_v1(constant(one, false, Visibility.Package)), false)
+    assertions = assertions + 1
+    failures = failures + check("public literal storage", hir_private_literal_is_inline_v1(constant(one, false, Visibility.Public)), false)
+    assertions = assertions + 1
+    print "ASSERTIONS={assertions} FAILURES={failures}"
+    if assertions != 14: return 2
+    failures

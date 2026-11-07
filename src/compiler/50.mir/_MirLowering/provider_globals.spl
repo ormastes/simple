@@ -9,6 +9,7 @@ use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.hir.generated.hir_children.{HirNode, hir_children_of, hir_children_of_block}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.hir.hir_literal_constant_v1.{hir_fold_literal_constant_v1}
+use compiler.hir.hir_private_inline_constant_v1.{hir_private_literal_is_inline_v1}
 
 fn mir_global_storage_name(owner: text, name: text) -> text:
     # Normalize the owner to the repo-relative logical module name BEFORE
@@ -29,19 +30,7 @@ fn mir_global_declaration_key(owner: text, name: text) -> text:
     "{mir_layout_canonical_module_name(owner)}::{name}"
 
 fn imported_private_literal_is_inline(constant: HirConst) -> bool:
-    if constant.is_mutable or not constant.visibility.is_private(): return false
-    match constant.value.kind:
-        case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) |
-             HirExprKind.FloatLexeme(_, _) | HirExprKind.BoolLit(_): true
-        case HirExprKind.StringLit(_, _): not runtime_module_initializer_supported(constant)
-        # Literal-only arithmetic (`val MAX: i64 = 512 * 1024 * 1024`) is an
-        # immutable value the importer can fold with the same literal folder
-        # the provider uses. The provider's runtime slot for it is private, and
-        # Cranelift cannot import a non-public static (stage2 run 15,
-        # RUNTIME_STD_*_MAX_BYTES_V1), so import the folded value instead.
-        case HirExprKind.Binary(_, _, _) | HirExprKind.Unary(_, _):
-            hir_fold_literal_constant_v1(constant.value) != nil
-        case _: false
+    hir_private_literal_is_inline_v1(constant)
 
 fn mir_global_demanded_owners(demanded: Dict<text, [i64]>) -> Dict<text, bool>:
     var owners: Dict<text, bool> = {}
