@@ -131,3 +131,12 @@ stage2_route_expected=$(printf 'app.cli.bootstrap_main\ncompiler.driver.driver\n
 So a Stage-2 candidate cannot be admitted on Windows while every binary its
 in-process pure-Simple driver produces dies at RVA 0. Admission is blocked on
 this bug, not merely on the C-runtime compile failures fixed alongside it.
+
+## 2026-11-07: closed — premise outdated
+
+Filed against the `x86_64-pc-windows-msvc` / clang-cl link lane. Current
+Windows policy is llvm-mingw UCRT only (MSVC is not a supported lane), and
+natively built pure-Simple Windows binaries run `main` correctly: e.g.
+`C:/dev/p3new/s3new/s3_fable57s.exe` (sha256 acf09bd3c650...fea29) prints
+`simple-bootstrap 1.0.0-rc.1`, rc=0. Reopen only if an llvm-mingw-linked
+binary reproduces the image-base call.
