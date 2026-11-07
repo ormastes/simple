@@ -1,0 +1,95 @@
+# Correlation metadata only. Decoding never grants endpoint, process, or ledger
+# authority. The authenticated gateway separately consumes the native FD frame.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct ContainerByteHandoffReceiptV1:
+    operation_id: text
+    request_digest: text
+    target_binding_digest: text
+    native_identity_digest: text
+    handoff_nonce: text
+    # Fresh cryptographic gateway startup nonce, not host continuity_id.
+    gateway_incarnation_nonce: text
+    provider_generation: i64
+    # Source host transport generation, never a destination registry token.
+    source_generation: i64
+    binding_digest: text
+
+fn byte_handoff_fields_v1(value: ContainerByteHandoffReceiptV1) -> Dict<text, SdnValue>:
+    {"kind": SdnValue.String("container-byte-handoff"), "version": SdnValue.Int(1),
+        "operationId": SdnValue.String(value.operation_id),
+        "requestDigest": SdnValue.String(value.request_digest),
+        "targetBindingDigest": SdnValue.String(value.target_binding_digest),
+        "nativeIdentityDigest": SdnValue.String(value.native_identity_digest),
+        "handoffNonce": SdnValue.String(value.handoff_nonce),
+        "gatewayIncarnationNonce": SdnValue.String(value.gateway_incarnation_nonce),
+        "providerGeneration": SdnValue.Int(value.provider_generation),
+        "sourceGeneration": SdnValue.Int(value.source_generation)}
+
+pub fn container_byte_handoff_digest_v1(value: ContainerByteHandoffReceiptV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(value.operation_id): return Err("byte-handoff-operation")
+    for digest in [value.request_digest, value.target_binding_digest, value.native_identity_digest,
+            value.handoff_nonce, value.gateway_incarnation_nonce]:
+        if not builder_digest_valid_v1(digest): return Err("byte-handoff-digest")
+    if value.provider_generation <= 0 or value.source_generation <= 0:
+        return Err("byte-handoff-generation")
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(byte_handoff_fields_v1(value)))))
+
+pub fn container_byte_handoff_validate_v1(value: ContainerByteHandoffReceiptV1) -> Result<(), text>:
+    if value.binding_digest != container_byte_handoff_digest_v1(value)?:
+        return Err("byte-handoff-binding")
+    Ok(())
+
+pub fn container_byte_handoff_encode_v1(value: ContainerByteHandoffReceiptV1) -> Result<text, text>:
+    container_byte_handoff_validate_v1(value)?
+    var fields = byte_handoff_fields_v1(value)
+    fields["bindingDigest"] = SdnValue.String(value.binding_digest)
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.byte_len() > 4096: return Err("byte-handoff-size")
+    Ok(source)
+
+fn byte_handoff_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("byte-handoff-text:" + key)
+
+fn byte_handoff_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("byte-handoff-integer:" + key)
+
+pub fn container_byte_handoff_decode_v1(source: text) -> Result<ContainerByteHandoffReceiptV1, text>:
+    if source.byte_len() == 0 or source.byte_len() > 4096: return Err("byte-handoff-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4096,
+            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 11)):
+        case Ok(value): value
+        case Err(_): return Err("byte-handoff-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("byte-handoff-object")
+    val names = ["kind", "version", "operationId", "requestDigest", "targetBindingDigest",
+        "nativeIdentityDigest", "handoffNonce", "gatewayIncarnationNonce", "providerGeneration",
+        "sourceGeneration", "bindingDigest"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("byte-handoff-unknown:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("byte-handoff-missing:" + key)
+    if (byte_handoff_text_v1(fields, "kind")? != "container-byte-handoff" or
+            byte_handoff_int_v1(fields, "version")? != 1):
+        return Err("byte-handoff-version-kind")
+    val value = ContainerByteHandoffReceiptV1(operation_id: byte_handoff_text_v1(fields, "operationId")?,
+        request_digest: byte_handoff_text_v1(fields, "requestDigest")?,
+        target_binding_digest: byte_handoff_text_v1(fields, "targetBindingDigest")?,
+        native_identity_digest: byte_handoff_text_v1(fields, "nativeIdentityDigest")?,
+        handoff_nonce: byte_handoff_text_v1(fields, "handoffNonce")?,
+        gateway_incarnation_nonce: byte_handoff_text_v1(fields, "gatewayIncarnationNonce")?,
+        provider_generation: byte_handoff_int_v1(fields, "providerGeneration")?,
+        source_generation: byte_handoff_int_v1(fields, "sourceGeneration")?,
+        binding_digest: byte_handoff_text_v1(fields, "bindingDigest")?)
+    if container_byte_handoff_encode_v1(value)? != source: return Err("byte-handoff-noncanonical")
+    Ok(value)
