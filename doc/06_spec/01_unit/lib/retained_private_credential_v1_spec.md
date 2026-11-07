@@ -33,10 +33,10 @@ checks after mutex acquisition therefore deadlocks and fails the watchdog.
 They never reset/re-adopt origin or create a PID namespace. Output labels these
 as injected contract assertions and says `actual PID-namespace transition
 BLOCKED: no authorized namespace fixture`. A successful ordinary/unprivileged
-fixture therefore never qualifies real namespace transitions. All remain
-**AUTHORED_UNRUN** after this incremental source fix.
+fixture therefore never qualifies real namespace transitions. The native unprivileged subset has since passed once for exact source b3b739b9ff4;
+Simple scenarios remain **AUTHORED_UNRUN**. See the bounded evidence below.
 
-Status: **AUTHORED_UNRUN**. No compilation, native prevention selfcheck, Simple test or platform qualification has run.
+Status: **native unprivileged subset PASS; Simple AUTHORED_UNRUN**. Foreign-UID and actual namespace-transition qualification remain BLOCKED; full-runtime and configured-binding qualification remain NOT_RUN.
 
 Simple source: `test/01_unit/lib/retained_private_credential_v1_spec.spl`.
 Native prevention source: `test/01_unit/runtime/retained_private_credential_v1_test.c`.
@@ -47,7 +47,7 @@ The scenario opens and reads through the canonical native owner, publishes an im
 
 The test's loopback port 1 is protocol validation data only. No listening socket, readiness, attachment, process identity, grant or server acceptance is claimed. Ready records remain immutable after close; external fixture administration owns eventual fixture directory removal.
 
-The native prevention selfcheck uses real Linux private files and kernel no-replace publication. It checks copied generations, duplicate publication, fork rejection, mode and actual foreign-UID rejection, symlink, unwritten FIFO and writable-ancestor refusal, directory rename anchoring, final content/permissions, and separate exec-process competing publishers. FIFO acquisition must return without a writer; a blocking-open regression hits the failing watchdog. It requires an isolated privileged Linux fixture for the actual foreign-UID case and fails its precondition otherwise. A 20-second watchdog bounds the selfcheck.
+The native prevention selfcheck uses real Linux private files and kernel no-replace publication. It checks copied generations, duplicate publication, fork rejection, mode and actual foreign-UID rejection, symlink, unwritten FIFO and writable-ancestor refusal, directory rename anchoring, final content/permissions, and separate exec-process competing publishers. FIFO acquisition must return without a writer; a blocking-open regression hits the failing watchdog. Its default/full privileged mode requires an isolated privileged Linux fixture for the actual foreign-UID case and fails its precondition otherwise. A 20-second watchdog bounds the selfcheck.
 
 Its close fault injection performs the real OS close, then reports EINTR once. This tests consumed-descriptor error handling and proves a later copied close cannot affect an unrelated reused descriptor. It is not a simulated successful native operation or evidence that a particular kernel close failure occurred naturally. The uncertain token remains queryable; descriptor effects are never retried.
 
@@ -62,5 +62,20 @@ Its successful output says `unprivileged subset PASS` and separately
 exit 0 never qualifies the missing UID case or the privileged full fixture.
 Unknown mode arguments fail usage. Both modes retain the watchdog.
 
-Both modes remain **AUTHORED_UNRUN** in this source checkpoint; no new runtime
-PASS is recorded here.
+The privileged mode remains **BLOCKED**. The unprivileged native subset passed
+once as recorded below; this does not qualify the Simple facade or full runtime.
+
+## Observed native subset
+
+Exact source `b3b739b9ff4a8597d8400d972c16341d2797ba95`: one GCC 13/BFD
+owner-header/selfcheck compile exit 0 and one `--unprivileged` run exit 0,
+UID 1000, compiler target `aarch64-linux-gnu`, CPUs 0–4. The run explicitly
+reported foreign-UID and real PID-namespace transitions BLOCKED. Fault-injected
+origin tests are labeled contract evidence, not namespace creation.
+
+No green check was repeated. Full source/tool/binary/log hashes and actual
+limits/results are retained in
+`build/caret-private-credential-b3b739b9ff4-20261107/manifest.sdn` and
+`SHA256SUMS`. The two fixture path-size warnings are preserved in `compile.log`;
+fixed generated paths fit their buffers. Detailed scope and hashes are recorded
+in `doc/05_design/smux_retained_private_credential_v1.md`.
