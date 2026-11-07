@@ -1,0 +1,188 @@
+# @req ORCH-02 HOST-02
+# Canonical common wire only; no SDK authority, owner or provider execution PASS.
+# Frozen steps mirror exact case titles. Native/app roundtrip belongs to owners.
+use test.fixtures.orchestrator_acceptance.controller_container_dispatch_v2.*
+use std.common.contracts.orchestration.controller_dispatch_request_v2.*
+use std.common.contracts.orchestration.host_execute_request_v2.*
+use std.common.contracts.orchestration.host_helper_plan_v1.*
+use std.common.contracts.orchestration.controller_execution_reply_v2.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes_v1
+use std.common.contracts.container.execution_v2.*
+use std.common.sdn.value.SdnValue
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+
+describe "versioned controller host helper and reply integrity":
+    it "preserves four distinct real signed pairs and both exact backend envelopes":
+        step("preserves four distinct real signed pairs and both exact backend envelopes")
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val fixture = controller_container_wire_fixture_v2(backend)
+            val wire = controller_dispatch_request_encode_v2(fixture.dispatch).unwrap()
+            val restored = controller_dispatch_request_decode_v2(wire).unwrap()
+            expect(controller_dispatch_request_encode_v2(restored).unwrap()).to_equal(wire)
+            expect(restored.execution.plan.backend).to_equal(backend)
+            expect(restored.assignment_signed.grant.id).to_equal("assignment")
+            expect(restored.execution_signed.grant.id).to_equal("execution")
+            expect(restored.prepare_signed.grant.id).to_equal("prepare")
+            expect(restored.host_execution_signed.grant.id).to_equal("host-execution")
+            expect(restored.assignment_approval.signature).to_equal(fixture.dispatch.assignment_approval.signature)
+            expect(restored.execution_approval.signature).to_equal(fixture.dispatch.execution_approval.signature)
+            expect(restored.prepare_approval.signature).to_equal(fixture.dispatch.prepare_approval.signature)
+            expect(restored.host_execution_approval.signature).to_equal(fixture.dispatch.host_execution_approval.signature)
+            val host_wire = host_execute_request_encode_v2(fixture.host).unwrap()
+            expect(host_execute_request_encode_v2(host_execute_request_decode_v2(host_wire).unwrap()).unwrap()).to_equal(host_wire)
+            expect(host_execute_request_decode_v2(host_wire).unwrap().execution.request_bytes).to_equal(fixture.dispatch.execution.request_bytes)
+
+    it "binds full service scope internal fence workload and original host operation":
+        step("binds full service scope internal fence workload and original host operation")
+        val fixture = controller_container_wire_fixture_v2("windows-docker-process")
+        expect(fixture.dispatch.execution.plan.boot_id).to_equal("")
+        expect(fixture.dispatch.execution.plan.continuity_mode).to_equal("service-incarnation-v1")
+        expect(fixture.dispatch.execution.plan.physical_host_id == fixture.dispatch.execution.plan.native_machine_id).to_equal(false)
+        expect(fixture.dispatch.binding.host_intent.fence.boot_id).to_equal(container_scope_fence_id_v2(fixture.helper.scope).unwrap())
+        var changed = fixture.dispatch
+        changed.execution.plan.operation_id = "other-operation"
+        expect(controller_dispatch_request_encode_v2(changed).is_err()).to_equal(true)
+        changed = fixture.dispatch
+        changed.binding.workload_uid = "other-workload"
+        changed.operation.payload_digest = sha256_text(controller_assignment_bytes_v1(changed.binding).unwrap())
+        expect(controller_dispatch_request_encode_v2(changed).unwrap_err()).to_equal("controller-dispatch-workload-operation-mismatch")
+        changed = fixture.dispatch
+        changed.execution.plan.native_machine_id = "windows-machine-guid-v1:other"
+        expect(controller_dispatch_request_encode_v2(changed).is_err()).to_equal(true)
+        changed = fixture.dispatch
+        changed.execution.plan.continuity_id = "windows-service-incarnation-v1:other"
+        expect(controller_dispatch_request_encode_v2(changed).is_err()).to_equal(true)
+        changed = fixture.dispatch
+        changed.execution.plan.physical_host_id = "other-alias"
+        expect(controller_dispatch_request_encode_v2(changed).is_err()).to_equal(true)
+        var host = fixture.host
+        host.execution.plan.operation_id = "other-operation"
+        expect(host_execute_request_encode_v2(host).is_err()).to_equal(true)
+        host = fixture.host
+        host.execution.plan.provider_generation = 4
+        expect(host_execute_request_encode_v2(host).is_err()).to_equal(true)
+
+    it "renews proof frames while preserving immutable body plan assignment and operation":
+        step("renews proof frames while preserving immutable body plan assignment and operation")
+        val fixture = controller_container_wire_fixture_v2("linux-podman")
+        val renewed = controller_container_renew_fixture_v2(fixture.dispatch)
+        expect(renewed.execution.request_bytes).to_equal(fixture.dispatch.execution.request_bytes)
+        expect(renewed.execution.plan.request_digest).to_equal(fixture.dispatch.execution.plan.request_digest)
+        expect(container_execution_plan_digest_v2(renewed.execution.plan).unwrap()).to_equal(container_execution_plan_digest_v2(fixture.dispatch.execution.plan).unwrap())
+        expect(controller_assignment_bytes_v1(renewed.binding).unwrap()).to_equal(controller_assignment_bytes_v1(fixture.dispatch.binding).unwrap())
+        expect(renewed.operation.payload_digest).to_equal(fixture.dispatch.operation.payload_digest)
+        expect(renewed.assignment_signed.signature == fixture.dispatch.assignment_signed.signature).to_equal(false)
+        expect(renewed.host_execution_approval.signature == fixture.dispatch.host_execution_approval.signature).to_equal(false)
+        val original_wire = controller_dispatch_request_encode_v2(fixture.dispatch).unwrap()
+        val renewed_wire = controller_dispatch_request_encode_v2(renewed).unwrap()
+        expect(original_wire == renewed_wire).to_equal(false)
+        expect(controller_dispatch_request_decode_v2(renewed_wire).unwrap().execution.request_bytes).to_equal(fixture.dispatch.execution.request_bytes)
+
+    it "rejects prepared receipt tampering and immutable host intent disagreement":
+        step("rejects prepared receipt tampering and immutable host intent disagreement")
+        val fixture = controller_container_wire_fixture_v2("linux-podman")
+        var changed = fixture.host
+        changed.receipt.prepared_revision = 99
+        expect(host_execute_request_encode_v2(changed).is_err()).to_equal(true)
+        changed = fixture.host
+        changed.receipt.receipt_digest = "e".repeat(64)
+        expect(host_execute_request_encode_v2(changed).is_err()).to_equal(true)
+        changed = fixture.host
+        changed.receipt.operation_id = "other-operation"
+        expect(host_execute_request_encode_v2(changed).is_err()).to_equal(true)
+        changed = fixture.host
+        changed.intent.plan_digest = "d".repeat(64)
+        expect(host_execute_request_encode_v2(changed).is_err()).to_equal(true)
+        val wire = host_execute_request_encode_v2(fixture.host).unwrap()
+        expect(host_execute_request_decode_v2(controller_container_wire_field_v2(wire, "receipt", SdnValue.String("forged"))).is_err()).to_equal(true)
+
+    it "requires a unique helper operation and mandatory parent aggregate budget digest":
+        step("requires a unique helper operation and mandatory parent aggregate budget digest")
+        val fixture = controller_container_wire_fixture_v2("linux-podman")
+        val bytes = host_helper_plan_bytes_v1(fixture.helper).unwrap()
+        val restored = host_helper_plan_decode_v1(bytes).unwrap()
+        expect(restored.parent_budget_digest).to_equal(fixture.helper.parent_budget_digest)
+        expect(host_helper_plan_digest_v1(restored).unwrap()).to_equal(sha256_text(bytes))
+        expect(restored.parent_operation_id).to_equal(fixture.dispatch.binding.host_operation.id)
+        expect(restored.parent_assignment_digest).to_equal(sha256_text(controller_assignment_bytes_v1(fixture.dispatch.binding).unwrap()))
+        var helper = fixture.helper
+        helper.operation_id = helper.parent_operation_id
+        expect(host_helper_plan_bytes_v1(helper).is_err()).to_equal(true)
+        helper = fixture.helper
+        helper.parent_budget_digest = ""
+        expect(host_helper_plan_bytes_v1(helper).is_err()).to_equal(true)
+        expect(host_helper_plan_decode_v1(controller_container_wire_without_v2(bytes, "parentBudgetDigest")).is_err()).to_equal(true)
+        helper = fixture.helper
+        helper.parent_budget_digest = "e".repeat(64)
+        expect(host_helper_plan_digest_v1(helper).unwrap() == host_helper_plan_digest_v1(fixture.helper).unwrap()).to_equal(false)
+        helper = fixture.helper
+        helper.operation_id = "another-helper-operation"
+        expect(host_helper_plan_digest_v1(helper).unwrap() == host_helper_plan_digest_v1(fixture.helper).unwrap()).to_equal(false)
+        helper = fixture.helper
+        helper.helper_kind = "unknown-worker"
+        expect(host_helper_plan_bytes_v1(helper).is_err()).to_equal(true)
+
+    it "refuses unknown duplicate wrong version and malformed nested packet fields":
+        step("refuses unknown duplicate wrong version and malformed nested packet fields")
+        val fixture = controller_container_wire_fixture_v2("linux-podman")
+        val wire = controller_dispatch_request_encode_v2(fixture.dispatch).unwrap()
+        expect(controller_dispatch_request_decode_v2(controller_container_wire_field_v2(wire, "version", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(controller_dispatch_request_decode_v2(controller_container_wire_field_v2(wire, "kind", SdnValue.String("host-execute-request"))).is_err()).to_equal(true)
+        expect(controller_dispatch_request_decode_v2(controller_container_wire_field_v2(wire, "authenticated", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(controller_dispatch_request_decode_v2(controller_container_wire_field_v2(wire, "execution", SdnValue.Int(1))).is_err()).to_equal(true)
+        val head = wire.slice(0, wire.len() - 2)
+        expect(controller_dispatch_request_decode_v2(head + ", version: 2" + "}\n").is_err()).to_equal(true)
+        for field in ["assignmentSigned", "assignmentApproval", "executionSigned", "executionApproval", "prepareSigned", "prepareApproval", "hostExecutionSigned", "hostExecutionApproval"]:
+            expect(controller_dispatch_request_decode_v2(controller_container_wire_without_v2(wire, field)).is_err()).to_equal(true)
+        expect(controller_dispatch_request_decode_v2(wire + "\n").is_err()).to_equal(true)
+        val host = host_execute_request_encode_v2(fixture.host).unwrap()
+        expect(host_execute_request_decode_v2(controller_container_wire_field_v2(host, "version", SdnValue.String("2"))).is_err()).to_equal(true)
+        expect(host_execute_request_decode_v2(controller_container_wire_field_v2(host, "unknown", SdnValue.Bool(true))).is_err()).to_equal(true)
+        val helper = host_helper_plan_bytes_v1(fixture.helper).unwrap()
+        expect(host_helper_plan_decode_v1(controller_container_wire_field_v2(helper, "version", SdnValue.Int(2))).is_err()).to_equal(true)
+
+    it "correlates replies without allowing false completion or stale nested response hashes":
+        step("correlates replies without allowing false completion or stale nested response hashes")
+        val fixture = controller_container_wire_fixture_v2("linux-podman")
+        val wire = controller_execution_reply_encode_v2(fixture.reply).unwrap()
+        val restored = controller_execution_reply_decode_v2(wire).unwrap()
+        expect(restored.request_uid).to_equal(fixture.dispatch.binding.workload_uid)
+        expect(restored.host_operation_id).to_equal(fixture.dispatch.binding.host_operation.id)
+        expect(restored.assignment_digest).to_equal(sha256_text(controller_assignment_bytes_v1(fixture.dispatch.binding).unwrap()))
+        expect(restored.host_response).to_equal(fixture.reply.host_response)
+        expect(restored.observation_digest).to_equal(sha256_text(restored.host_response))
+        expect(controller_execution_reply_decode_v2(controller_container_wire_field_v2(wire, "completionObserved", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(controller_execution_reply_decode_v2(controller_container_wire_field_v2(wire, "completionObserved", SdnValue.String("false"))).is_err()).to_equal(true)
+        expect(controller_execution_reply_decode_v2(controller_container_wire_field_v2(wire, "kind", SdnValue.String("completed"))).is_err()).to_equal(true)
+        expect(controller_execution_reply_decode_v2(controller_container_wire_field_v2(wire, "version", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(controller_execution_reply_decode_v2(controller_container_wire_field_v2(wire, "target", SdnValue.String("remote-daemon"))).is_err()).to_equal(true)
+        var changed = fixture.reply
+        changed.host_response = changed.host_response + "changed"
+        expect(controller_execution_reply_encode_v2(changed).is_err()).to_equal(true)
+        changed = fixture.reply
+        changed.status = "completed"
+        expect(controller_execution_reply_encode_v2(changed).is_err()).to_equal(true)
+        val head = wire.slice(0, wire.len() - 2)
+        expect(controller_execution_reply_decode_v2(head + ", version: 2" + "}\n").is_err()).to_equal(true)
+        expect(controller_execution_reply_decode_v2(wire + "\n").is_err()).to_equal(true)
+
+    it "enforces nested and outer UTF8 byte ceilings without truncation":
+        step("enforces nested and outer UTF8 byte ceilings without truncation")
+        val fixture = controller_container_wire_fixture_v2("linux-podman")
+        var changed = fixture.dispatch
+        changed.execution.request_bytes = "é".repeat(524289)
+        expect(str_len(changed.execution.request_bytes)).to_equal(1048578)
+        expect(controller_dispatch_request_encode_v2(changed).is_err()).to_equal(true)
+        var host = fixture.host
+        host.execution.request_bytes = changed.execution.request_bytes
+        expect(host_execute_request_encode_v2(host).is_err()).to_equal(true)
+        val oversized_packet = "é".repeat(1048577)
+        expect(controller_dispatch_request_decode_v2(oversized_packet).is_err()).to_equal(true)
+        expect(host_execute_request_decode_v2(oversized_packet).is_err()).to_equal(true)
+        expect(host_helper_plan_decode_v1("é".repeat(8193)).is_err()).to_equal(true)
+        var reply = fixture.reply
+        reply.host_response = "é".repeat(65537)
+        reply.observation_digest = sha256_text(reply.host_response)
+        expect(controller_execution_reply_encode_v2(reply).is_err()).to_equal(true)
+        expect(controller_execution_reply_decode_v2("é".repeat(131073)).is_err()).to_equal(true)
