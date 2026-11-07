@@ -1,0 +1,305 @@
+# Bounded binary transport only. Expected correlation comes from the retained
+# authenticated Job owner (region=actual slot+1, generation=actual lease), never
+# a first frame or PID. SHA256/checksum is integrity, not authentication/grant.
+# Host startup/authentication and the native revision barrier are NOT implemented.
+use std.common.structural.transfer.process_frame_codec.{process_transfer_frame_header_len,
+    process_transfer_frame_v1, encode_process_transfer_frame, decode_process_transfer_frame}
+use std.common.structural.transfer.transfer_contracts.{ParallelExecutionDomain,
+    ParallelTransferMode, ParallelTransferPayload, transfer_envelope_v1,
+    parallel_execution_domain_to_u8, parallel_transfer_mode_to_u8, parallel_transfer_payload_to_u8}
+use std.common.structural.transfer.transfer_codec.{transfer_envelope_wire_len, decode_transfer_envelope}
+use std.common.structural.wire.{wire_get_u64, wire_put_u64}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub const WINDOWS_DOCKER_BROKER_BODY_MAX_V3: i64 = 61432
+pub const WINDOWS_DOCKER_BROKER_PAYLOAD_MAX_V3: i64 = 65536
+pub const WINDOWS_DOCKER_BROKER_METADATA_MAX_V3: i64 = 4096
+
+pub struct WindowsDockerBrokerFrameV3:
+    kind: text
+    target_digest: text
+    control_kind: text
+    nonce_digest: text
+    revision: i64
+    frame_sequence: i64
+    payload_digest: text
+    payload_bytes: i64
+    accepted_prefix: i64
+    rows: i64
+    cols: i64
+    stream: text
+    byte_offset: i64
+    complete: bool
+    unknown: bool
+    body: [u8]
+
+pub struct WindowsDockerBrokerFrameTurnV3:
+    consumed: i64
+    frame: WindowsDockerBrokerFrameV3?
+    error: text
+
+pub fn windows_docker_broker_geometry_digest_v3(rows: i64, cols: i64) -> Result<text, text>:
+    if rows < 1 or rows > 32767 or cols < 1 or cols > 32767:
+        return Err("windows-broker-geometry-bound")
+    val fields: Dict<text, SdnValue> = {"rows": SdnValue.Int(rows), "cols": SdnValue.Int(cols)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+pub fn windows_docker_broker_frame_validate_v3(frame: WindowsDockerBrokerFrameV3) -> Result<bool, text>:
+    if not builder_digest_valid_v1(frame.target_digest) or not builder_digest_valid_v1(frame.payload_digest):
+        return Err("windows-broker-digest-invalid")
+    if frame.frame_sequence <= 0 or frame.body.len() > WINDOWS_DOCKER_BROKER_BODY_MAX_V3:
+        return Err("windows-broker-sequence-or-body-bound")
+    if frame.payload_bytes < 0 or frame.payload_bytes > WINDOWS_DOCKER_BROKER_BODY_MAX_V3 or
+            frame.accepted_prefix < 0 or frame.accepted_prefix > frame.payload_bytes:
+        return Err("windows-broker-prefix-or-payload-bound")
+    if frame.kind == "output":
+        if frame.control_kind != "" or frame.nonce_digest != "" or frame.revision != 0 or
+                frame.rows != 0 or frame.cols != 0 or frame.accepted_prefix != 0 or frame.unknown:
+            return Err("windows-broker-output-control-fields")
+        if frame.stream != "stdout" and frame.stream != "stderr" and frame.stream != "tty":
+            return Err("windows-broker-output-stream")
+        if frame.byte_offset < 0 or frame.byte_offset > 9223372036854775807 - frame.body.len():
+            return Err("windows-broker-output-offset-overflow")
+        if frame.body.len() == 0 and not frame.complete: return Err("windows-broker-empty-output-requires-eof")
+        if frame.payload_bytes != frame.body.len() or frame.payload_digest != sha256_u8_hex(frame.body):
+            return Err("windows-broker-output-body-integrity")
+        return Ok(true) # complete is stream EOF only, never workload completion.
+    if frame.kind != "input" and frame.kind != "geometry" and frame.kind != "progress":
+        return Err("windows-broker-kind-invalid")
+    if frame.revision <= 0 or not builder_digest_valid_v1(frame.nonce_digest) or
+            frame.stream != "" or frame.byte_offset != 0:
+        return Err("windows-broker-control-correlation")
+    if frame.kind != "progress" and (frame.complete or frame.unknown):
+        return Err("windows-broker-request-terminal-flags")
+    if frame.unknown and frame.complete: return Err("windows-broker-unknown-complete-conflict")
+    if frame.kind == "progress" and frame.body.len() != 0: return Err("windows-broker-progress-body-forbidden")
+    if frame.control_kind == "input":
+        if frame.kind == "geometry" or frame.rows != 0 or frame.cols != 0 or frame.payload_bytes == 0:
+            return Err("windows-broker-input-fields")
+        if frame.kind == "input" and (frame.payload_bytes != frame.body.len() or
+                frame.payload_digest != sha256_u8_hex(frame.body)):
+            return Err("windows-broker-input-body-integrity")
+        if frame.complete and frame.accepted_prefix != frame.payload_bytes:
+            return Err("windows-broker-progress-incomplete-prefix")
+    elif frame.control_kind == "geometry":
+        if frame.kind == "input" or frame.payload_bytes != 0 or frame.accepted_prefix != 0 or frame.body.len() != 0:
+            return Err("windows-broker-geometry-fields")
+        if frame.payload_digest != windows_docker_broker_geometry_digest_v3(frame.rows, frame.cols)?:
+            return Err("windows-broker-geometry-digest-mismatch")
+    else: return Err("windows-broker-control-kind-invalid")
+    Ok(true)
+
+fn metadata(frame: WindowsDockerBrokerFrameV3) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-docker-broker-frame-v3"),
+        "version": SdnValue.Int(3), "frameKind": SdnValue.String(frame.kind),
+        "targetDigest": SdnValue.String(frame.target_digest), "controlKind": SdnValue.String(frame.control_kind),
+        "nonceDigest": SdnValue.String(frame.nonce_digest), "revision": SdnValue.Int(frame.revision),
+        "frameSequence": SdnValue.Int(frame.frame_sequence), "payloadDigest": SdnValue.String(frame.payload_digest),
+        "payloadBytes": SdnValue.Int(frame.payload_bytes), "acceptedPrefix": SdnValue.Int(frame.accepted_prefix),
+        "rows": SdnValue.Int(frame.rows), "cols": SdnValue.Int(frame.cols), "stream": SdnValue.String(frame.stream),
+        "byteOffset": SdnValue.Int(frame.byte_offset), "complete": SdnValue.Bool(frame.complete),
+        "unknown": SdnValue.Bool(frame.unknown)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn byte_slice(bytes: [u8], offset: i64, count: i64) -> [u8]:
+    var copied = [0u8; count]
+    for index in 0..count: copied[index] = bytes[offset + index]
+    copied
+
+fn context_reason(region: i64, generation: i64) -> text:
+    if region <= 0 or generation <= 0: return "windows-broker-retained-correlation-required"
+    ""
+
+# Only the fixed header is inspected here; no advertised payload is allocated.
+fn header_payload(bytes: [u8], region: i64, generation: i64, to_process: bool) -> Result<i64, text>:
+    val reason = context_reason(region, generation)
+    if reason != "": return Err(reason)
+    if bytes.len() < process_transfer_frame_header_len(): return Err("windows-broker-header-truncated")
+    val announced = wire_get_u64(bytes, transfer_envelope_wire_len())
+    if announced < 8 or announced > WINDOWS_DOCKER_BROKER_PAYLOAD_MAX_V3:
+        return Err("windows-broker-advertised-payload-bound")
+    val decoded = decode_transfer_envelope(byte_slice(bytes, 0, transfer_envelope_wire_len()))
+    if not decoded.ok: return Err("windows-broker-envelope-invalid")
+    val envelope = decoded.value
+    val source = if to_process: 0 else: 2
+    val target = if to_process: 2 else: 0
+    if envelope.region_id != region or envelope.generation != generation:
+        return Err("windows-broker-envelope-correlation")
+    if parallel_execution_domain_to_u8(envelope.source_domain) != source or
+            parallel_execution_domain_to_u8(envelope.target_domain) != target or
+            parallel_transfer_mode_to_u8(envelope.mode) != 0 or
+            parallel_transfer_payload_to_u8(envelope.payload) != 3 or
+            envelope.ownership_token != 0 or envelope.source_invalidated:
+        return Err("windows-broker-envelope-direction-or-mode")
+    Ok(announced)
+
+fn direction(frame: WindowsDockerBrokerFrameV3, to_process: bool) -> Result<bool, text>:
+    val request = frame.kind == "input" or frame.kind == "geometry"
+    if request != to_process: return Err("windows-broker-kind-direction")
+    Ok(true)
+
+pub fn windows_docker_broker_frame_encode_v3(frame: WindowsDockerBrokerFrameV3,
+        region: i64, generation: i64, to_process: bool) -> Result<[u8], text>:
+    val reason = context_reason(region, generation)
+    if reason != "": return Err(reason)
+    val valid = windows_docker_broker_frame_validate_v3(frame)?
+    val routed = direction(frame, to_process)?
+    val source = metadata(frame)
+    if source.byte_len() > WINDOWS_DOCKER_BROKER_METADATA_MAX_V3: return Err("windows-broker-metadata-bound")
+    val encoded = match boxed_text_bytes_checked(source):
+        case Ok(value): value
+        case Err(_): return Err("windows-broker-metadata-byte-extraction-failed")
+    if encoded.len() != source.byte_len(): return Err("windows-broker-metadata-byte-length")
+    var payload: [u8] = wire_put_u64([], encoded.len())
+    for byte in encoded: payload.push((byte as i64) & 255)
+    for byte in frame.body: payload.push((byte as i64) & 255)
+    if payload.len() > WINDOWS_DOCKER_BROKER_PAYLOAD_MAX_V3: return Err("windows-broker-payload-bound")
+    val source_domain = if to_process: ParallelExecutionDomain.Parent else: ParallelExecutionDomain.Process
+    val target_domain = if to_process: ParallelExecutionDomain.Process else: ParallelExecutionDomain.Parent
+    val envelope = transfer_envelope_v1(region, generation, source_domain, target_domain, ParallelTransferMode.Copy,
+        ParallelTransferPayload.EncodedCopy, 0, false)
+    val bytes = encode_process_transfer_frame(process_transfer_frame_v1(envelope, payload))
+    if bytes.len() != process_transfer_frame_header_len() + payload.len(): return Err("windows-broker-frame-encode-failed")
+    Ok(bytes)
+
+fn text_field(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("windows-broker-metadata-text:" + key)
+
+fn integer(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("windows-broker-metadata-integer:" + key)
+
+fn boolean(fields: Dict<text, SdnValue>, key: text) -> Result<bool, text>:
+    match fields[key]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("windows-broker-metadata-boolean:" + key)
+
+fn decode_metadata(source: text, body: [u8]) -> Result<WindowsDockerBrokerFrameV3, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4096,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value
+        case Err(_): return Err("windows-broker-metadata-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("windows-broker-metadata-object")
+    val keys = ["kind", "version", "frameKind", "targetDigest", "controlKind", "nonceDigest", "revision",
+        "frameSequence", "payloadDigest", "payloadBytes", "acceptedPrefix", "rows", "cols", "stream",
+        "byteOffset", "complete", "unknown"]
+    for key in fields.keys():
+        if not keys.contains(key): return Err("windows-broker-metadata-unknown:" + key)
+    for key in keys:
+        if not fields.contains_key(key): return Err("windows-broker-metadata-missing:" + key)
+    if text_field(fields, "kind")? != "windows-docker-broker-frame-v3" or integer(fields, "version")? != 3:
+        return Err("windows-broker-metadata-schema")
+    val frame = WindowsDockerBrokerFrameV3(kind: text_field(fields, "frameKind")?,
+        target_digest: text_field(fields, "targetDigest")?, control_kind: text_field(fields, "controlKind")?,
+        nonce_digest: text_field(fields, "nonceDigest")?, revision: integer(fields, "revision")?,
+        frame_sequence: integer(fields, "frameSequence")?, payload_digest: text_field(fields, "payloadDigest")?,
+        payload_bytes: integer(fields, "payloadBytes")?, accepted_prefix: integer(fields, "acceptedPrefix")?,
+        rows: integer(fields, "rows")?, cols: integer(fields, "cols")?, stream: text_field(fields, "stream")?,
+        byte_offset: integer(fields, "byteOffset")?, complete: boolean(fields, "complete")?,
+        unknown: boolean(fields, "unknown")?, body: body)
+    if metadata(frame) != source: return Err("windows-broker-metadata-not-canonical")
+    val valid = windows_docker_broker_frame_validate_v3(frame)?
+    Ok(frame)
+
+pub fn windows_docker_broker_frame_decode_v3(bytes: [u8], expected_region: i64,
+        expected_generation: i64, to_process: bool) -> Result<WindowsDockerBrokerFrameV3, text>:
+    val announced = header_payload(bytes, expected_region, expected_generation, to_process)?
+    if bytes.len() != process_transfer_frame_header_len() + announced: return Err("windows-broker-frame-length")
+    val target = if to_process: ParallelExecutionDomain.Process else: ParallelExecutionDomain.Parent
+    val decoded = decode_process_transfer_frame(bytes, target)
+    if not decoded.ok: return Err("windows-broker-process-frame-invalid:" + decoded.reason)
+    val payload = decoded.value.payload
+    val length = wire_get_u64(payload, 0) # announced>=8 was checked before full decode.
+    if length <= 0 or length > WINDOWS_DOCKER_BROKER_METADATA_MAX_V3 or length > payload.len() - 8:
+        return Err("windows-broker-metadata-length")
+    val body_length = payload.len() - 8 - length
+    if body_length > WINDOWS_DOCKER_BROKER_BODY_MAX_V3: return Err("windows-broker-body-bound")
+    val encoded = byte_slice(payload, 8, length)
+    if not utf8_bytes_valid(encoded): return Err("windows-broker-metadata-utf8")
+    val source = bytes_to_text(encoded)
+    if source.byte_len() != encoded.len(): return Err("windows-broker-metadata-byte-roundtrip")
+    val frame = decode_metadata(source, byte_slice(payload, 8 + length, body_length))?
+    val routed = direction(frame, to_process)?
+    Ok(frame)
+
+# Single mutable reader owner. Sequence/revision authorization belongs to its
+# external owner; successfully parsing one frame does not authorize an effect.
+pub class WindowsDockerBrokerFrameReaderV3:
+    expected_region: i64
+    expected_generation: i64
+    to_process: bool
+    buffer: [u8]
+    used: i64 = 0
+    needed: i64
+    failed: text = ""
+    finished: bool = false
+
+    pub static fn create_v3(expected_region: i64, expected_generation: i64,
+            to_process: bool) -> Result<WindowsDockerBrokerFrameReaderV3, text>:
+        val reason = context_reason(expected_region, expected_generation)
+        if reason != "": return Err(reason)
+        val header = process_transfer_frame_header_len()
+        Ok(WindowsDockerBrokerFrameReaderV3(expected_region: expected_region,
+            expected_generation: expected_generation, to_process: to_process,
+            buffer: [0u8; header], needed: header))
+
+    pub fn buffer_capacity_v3() -> i64: self.buffer.len()
+
+    # The IO owner reports stream EOF here. It is never workload-exit proof.
+    pub me fn finish_v3() -> Result<bool, text>:
+        if self.failed != "": return Err(self.failed)
+        if self.used != 0:
+            self.failed = "windows-broker-reader-truncated-at-eof"
+            return Err(self.failed)
+        self.finished = true
+        Ok(true)
+
+    pub me fn feed(bytes: [u8]) -> WindowsDockerBrokerFrameTurnV3:
+        if self.failed != "": return WindowsDockerBrokerFrameTurnV3(consumed: 0, frame: nil, error: self.failed)
+        if self.finished:
+            self.failed = "windows-broker-reader-already-finished"
+            return WindowsDockerBrokerFrameTurnV3(consumed: 0, frame: nil, error: self.failed)
+        if bytes.len() > WINDOWS_DOCKER_BROKER_PAYLOAD_MAX_V3:
+            self.failed = "windows-broker-reader-chunk-bound"
+            return WindowsDockerBrokerFrameTurnV3(consumed: 0, frame: nil, error: self.failed)
+        val header = process_transfer_frame_header_len()
+        var consumed: i64 = 0
+        while consumed < bytes.len():
+            val available = bytes.len() - consumed
+            val remaining = self.needed - self.used
+            val count = if available < remaining: available else: remaining
+            for index in 0..count: self.buffer[self.used + index] = bytes[consumed + index]
+            self.used = self.used + count
+            consumed = consumed + count
+            if self.used == header and self.needed == header:
+                val announced = header_payload(self.buffer, self.expected_region, self.expected_generation, self.to_process)
+                if announced.is_err():
+                    self.failed = announced.unwrap_err()
+                    return WindowsDockerBrokerFrameTurnV3(consumed: consumed, frame: nil, error: self.failed)
+                # Allocate only AFTER fixed-header envelope/cap/correlation checks.
+                self.needed = header + announced.unwrap()
+                var bounded = [0u8; self.needed]
+                for index in 0..header: bounded[index] = self.buffer[index]
+                self.buffer = bounded
+            if self.used == self.needed:
+                val decoded = windows_docker_broker_frame_decode_v3(self.buffer, self.expected_region,
+                    self.expected_generation, self.to_process)
+                if decoded.is_err():
+                    self.failed = decoded.unwrap_err()
+                    return WindowsDockerBrokerFrameTurnV3(consumed: consumed, frame: nil, error: self.failed)
+                self.buffer = [0u8; header]
+                self.used = 0
+                self.needed = header
+                return WindowsDockerBrokerFrameTurnV3(consumed: consumed, frame: Some(decoded.unwrap()), error: "")
+        WindowsDockerBrokerFrameTurnV3(consumed: consumed, frame: nil, error: "")
