@@ -1,0 +1,42 @@
+# UNEXECUTED: native and SSpec qualification are separate requirements.
+# design: doc/05_design/language/text/text_len_counts_characters_2026-11-07.md
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+
+fn text_len_units_mir(source: text) -> text:
+    val parsed = parse_full_frontend(source, "len_units_spec.spl", "len_units_spec.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("len_units_spec.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    expect(mir_lowering.errors.len()).to_equal(0)
+    serialize_mir_module(mir)
+
+describe "text length units lower to explicit runtime symbols":
+    it "lowers byte_len on a text receiver to rt_string_len":
+        val source = "fn bytes_of(value: text) -> i64:\n    return value.byte_len()\n"
+        val mir = text_len_units_mir(source)
+        expect(mir).to_contain("rt_string_len")
+        expect(mir.contains("rt_string_char_count")).to_be(false)
+
+    it "lowers char_count on a text receiver to rt_string_char_count":
+        val source = "fn chars_of(value: text) -> i64:\n    return value.char_count()\n"
+        val mir = text_len_units_mir(source)
+        expect(mir).to_contain("rt_string_char_count")
+
+    it "lowers byte_len through a binding local used as a byte-scan bound":
+        val source = "fn scan(value: text) -> i64:\n    val n = value.byte_len()\n    var i = 0\n    var acc = 0\n    while i < n:\n        acc = acc + value.byte_at(i)\n        i = i + 1\n    return acc\n"
+        val mir = text_len_units_mir(source)
+        expect(mir).to_contain("rt_string_len")
+        expect(mir).to_contain("__simple_rt_string_byte_at")
+        expect(mir.contains("unresolved method call")).to_be(false)
+
+    it "preserves a declared custom byte_len method":
+        val source = "class Framed:\n    size: i64\n    fn byte_len() -> i64:\n        return self.size\n\nfn custom(value: Framed) -> i64:\n    return value.byte_len()\n"
+        val mir = text_len_units_mir(source)
+        expect(mir).to_contain("Framed")
+        expect(mir.contains("rt_string_len")).to_be(false)

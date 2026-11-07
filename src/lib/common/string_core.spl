@@ -12,11 +12,11 @@ fn str_eq(a: text, b: text) -> bool:
 
 # Slicing
 #
-# These use the language's own `s[a:b]` slice expression rather than the
+# These use the language's own `s.substring(a, b)` byte-offset method rather than the
 # `rt_slice` / `rt_string_char_at` externs. Both externs are declared for the
 # LLVM/C backends but NEITHER is registered in the interpreter's extern table,
 # so every interpreted call died with "unknown extern function: rt_slice" /
-# "... rt_string_char_at". `s[a:b]` is lowered natively by all three engines,
+# "... rt_string_char_at". `substring` is lowered natively by all three engines,
 # and this module already indexes natively elsewhere (str_trim_left,
 # str_replace_all), so this removes an inconsistency rather than adding one.
 fn str_slice(s: text, start: i64, end: i64) -> text:
@@ -25,7 +25,7 @@ fn str_slice(s: text, start: i64, end: i64) -> text:
     val slen = rt_string_len(s)
     if start >= slen:
         return ""
-    s[start:end]
+    s.substring(start, end)
 
 fn str_safe_slice(s: text, start: i64, end: i64) -> text:
     val slen = rt_string_len(s)
@@ -37,7 +37,7 @@ fn str_safe_slice(s: text, start: i64, end: i64) -> text:
         e2 = slen
     if s2 >= e2:
         return ""
-    s[s2:e2]
+    s.substring(s2, e2)
 
 fn str_char_at(s: text, idx: i64) -> text:
     # Character access is a Unicode-scalar ordinal, matching text.char_at and
@@ -59,7 +59,7 @@ fn str_char_at(s: text, idx: i64) -> text:
         if next > length:
             return ""
         if ordinal == idx:
-            return s[offset:next]
+            return s.substring(offset, next)
         offset = next
         ordinal = ordinal + 1
     ""
@@ -76,28 +76,28 @@ fn str_char_at(s: text, idx: i64) -> text:
 # every input and `str_contains` / `str_starts_with` / `str_ends_with` answered
 # false for every input, including inputs that plainly match. -1 is the
 # "not found" sentinel, so callers quietly took the absent branch instead of
-# failing. `s[a:b]` is lowered natively by all three engines.
+# failing. `substring` is lowered natively by all three engines.
 fn str_starts_with(s: text, prefix: text) -> bool:
-    val plen = prefix.len()
+    val plen = prefix.byte_len()
     if plen == 0:
         return true
-    if plen > s.len():
+    if plen > s.byte_len():
         return false
-    s[0:plen] == prefix
+    s.substring(0, plen) == prefix
 
 fn str_ends_with(s: text, suffix: text) -> bool:
-    val slen = s.len()
-    val flen = suffix.len()
+    val slen = s.byte_len()
+    val flen = suffix.byte_len()
     if flen == 0:
         return true
     if flen > slen:
         return false
-    s[slen - flen:slen] == suffix
+    s.substring(slen - flen, slen) == suffix
 
 fn str_index_of(s: text, sub: text) -> i64:
-    if sub.len() == 0:
+    if sub.byte_len() == 0:
         return 0
-    if sub.len() > s.len():
+    if sub.byte_len() > s.byte_len():
         return -1
     # One native byte search (rt_text_find), the same idiom str_split uses
     # below. The previous `s[i:i + sublen] == sub` loop allocated one
@@ -109,15 +109,15 @@ fn str_index_of(s: text, sub: text) -> i64:
     s.index_of(sub, 0)
 
 fn str_last_index_of(s: text, sub: text) -> i64:
-    val slen = s.len()
-    val sublen = sub.len()
+    val slen = s.byte_len()
+    val sublen = sub.byte_len()
     if sublen == 0:
         return slen
     if sublen > slen:
         return -1
     var i = slen - sublen
     while i >= 0:
-        if s[i:i + sublen] == sub:
+        if s.substring(i, i + sublen) == sub:
             return i
         i = i - 1
     -1
@@ -130,16 +130,16 @@ fn is_whitespace_char(c: text) -> bool:
     c == " " or c == "\t" or c == "\n" or c == "\u000B" or c == "\u000C" or c == "\r"
 
 fn str_trim_left(s: text) -> text:
-    val slen = s.len()
+    val slen = s.byte_len()
     var i = 0
-    while i < slen and is_whitespace_char(s[i:i + 1]):
+    while i < slen and is_whitespace_char(s.substring(i, i + 1)):
         i = i + 1
     str_slice(s, i, slen)
 
 fn str_trim_right(s: text) -> text:
-    val slen = s.len()
+    val slen = s.byte_len()
     var i = slen - 1
-    while i >= 0 and is_whitespace_char(s[i:i + 1]):
+    while i >= 0 and is_whitespace_char(s.substring(i, i + 1)):
         i = i - 1
     str_slice(s, 0, i + 1)
 
@@ -165,7 +165,7 @@ fn trim_field(field: text, should_trim: bool) -> text:
 fn str_replace_all(s: text, old: text, new_s: text) -> text:
     if old == "":
         return s
-    val olen = old.len()
+    val olen = old.byte_len()
     # Jump between leftmost non-overlapping matches with the native byte
     # search (rt_text_find), the same idiom str_split uses below: one call
     # and one slice per match instead of one 1-byte substring pushed per
@@ -180,7 +180,7 @@ fn str_replace_all(s: text, old: text, new_s: text) -> text:
         result.push(new_s)
         start = hit + olen
         hit = s.index_of(old, start)
-    result.push(str_slice(s, start, s.len()))
+    result.push(str_slice(s, start, s.byte_len()))
     result.join("")
 
 fn str_replace(s: text, old: text, new_s: text) -> text:
@@ -188,8 +188,8 @@ fn str_replace(s: text, old: text, new_s: text) -> text:
 
 # Split and Join
 fn str_split(s: text, sep: text) -> [text]:
-    val slen = s.len()
-    val plen = sep.len()
+    val slen = s.byte_len()
+    val plen = sep.byte_len()
     var result: [text] = []
     if slen == 0:
         result.push("")
@@ -345,11 +345,11 @@ fn is_alnum_char(c: text) -> bool:
 
 # Case conversion
 fn str_to_lower(s: text) -> text:
-    val slen = s.len()
+    val slen = s.byte_len()
     var result: [text] = []
     var i = 0
     while i < slen:
-        val ch = s[i:i + 1]
+        val ch = s.substring(i, i + 1)
         val code = char_code_inline(ch)
         if code >= 65 and code <= 90:
             result.push(char_from_code_inline(code + 32))
@@ -359,11 +359,11 @@ fn str_to_lower(s: text) -> text:
     result.join("")
 
 fn str_to_upper(s: text) -> text:
-    val slen = s.len()
+    val slen = s.byte_len()
     var result: [text] = []
     var i = 0
     while i < slen:
-        val ch = s[i:i + 1]
+        val ch = s.substring(i, i + 1)
         val code = char_code_inline(ch)
         if code >= 97 and code <= 122:
             result.push(char_from_code_inline(code - 32))
@@ -375,15 +375,15 @@ fn str_to_upper(s: text) -> text:
 fn str_capitalize(s: text) -> text:
     if s.len() == 0:
         return ""
-    str_to_upper(str_slice(s, 0, 1)) + str_slice(s, 1, s.len())
+    str_to_upper(str_slice(s, 0, 1)) + str_slice(s, 1, s.byte_len())
 
 # Manipulation
 fn str_reverse(s: text) -> text:
-    val slen = s.len()
+    val slen = s.byte_len()
     var result: [text] = []
     var i = slen - 1
     while i >= 0:
-        result.push(s[i:i + 1])
+        result.push(s.substring(i, i + 1))
         i = i - 1
     result.join("")
 
@@ -400,26 +400,26 @@ fn str_repeat(s: text, count: i64) -> text:
 fn str_truncate(s: text, max_len: i64) -> text:
     if s.len() == 0:
         return ""
-    if s.len() <= max_len:
+    if s.byte_len() <= max_len:
         return s
     str_slice(s, 0, max_len) + "..."
 
 fn str_pad_left(s: text, width: i64, pad: text) -> text:
-    val slen = s.len()
+    val slen = s.byte_len()
     if slen >= width:
         return s
     val need = width - slen
     str_repeat(pad, need) + s
 
 fn str_pad_right(s: text, width: i64, pad: text) -> text:
-    val slen = s.len()
+    val slen = s.byte_len()
     if slen >= width:
         return s
     val need = width - slen
     s + str_repeat(pad, need)
 
 fn str_center(s: text, width: i64) -> text:
-    val slen = s.len()
+    val slen = s.byte_len()
     if slen >= width:
         return s
     val need = width - slen

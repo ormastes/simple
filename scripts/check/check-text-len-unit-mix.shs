@@ -1,0 +1,177 @@
+#!/bin/sh
+# check-text-len-unit-mix.shs — fail when one function uses byte_len() on a
+# receiver AND indexes/slices that same receiver with the `[ ]` operator.
+#
+# Rule (doc/05_design/language/text/text_len_counts_characters_2026-11-07.md):
+# `s[i]` / `s[a..b]` are code-point operators; `byte_len()` / `byte_at` /
+# `substring` are the byte family. Mixing them on one receiver is wrong on
+# non-ASCII text (and silently so). A byte scan is bounded by byte_len() and
+# cut with substring(); a character loop is bounded by len() and indexed s[i].
+#
+# Usage: sh scripts/check/check-text-len-unit-mix.shs [--selftest] [root ...]
+#   default roots: src/lib src/app src/compiler
+# Rule 2: another text X that is passed to a byte-family method of a
+# byte-scanned receiver (s.starts_with(X), s.index_of(X), s.replace(X, ..))
+# is a byte width when it offsets that receiver; `X.len()` in the same
+# function is flagged as "(len() as byte width)" — write `X.byte_len()`.
+#
+# Verdict (last stdout line): PASS — <n> function(s) checked, 0 mixed
+#                            FAIL — <n> function(s) checked, <k> mixed: ...
+#                            ERROR — nothing was checked
+# Exit 0 / 1 / 2. --selftest runs 5 fixtures first and is fatal.
+
+set -u
+
+scan_file() {
+  # prints "file:line receiver" for each byte_len() line whose enclosing fn
+  # also applies `recv[` ; prints "FNCOUNT <n>" on stderr-free channel last
+  awk -v F="$1" '
+    function flush(   r, l, x, scanned) {
+      scanned = 0
+      for (r in bl) {
+        scanned = 1
+        if ((r) in ix) {
+          n = split(bl[r], ls, ",")
+          for (l = 1; l <= n; l++) if (ls[l] != "") print F ":" ls[l] " " r
+        }
+      }
+      for (r in bf) scanned = 1
+      # Rule 2: another text X whose len() reaches a byte-family call on a
+      # byte-scanned receiver -- directly as an argument (s.substring(0,
+      # X.len())), through an alias (val w = X.len(); s.substring(0, w)) or
+      # on the same line as that receiver byte_len()/byte op -- is a byte
+      # width in the wrong unit. Flag every X.len() line in the function.
+      if (scanned) {
+        for (x in lu) {
+          if ((x) in bl) continue
+          hit = 0
+          if ((x) in argref) hit = 1
+          if ((x) in sameline) hit = 1
+          for (a in alias) if (alias[a] == x && ((a) in argref)) hit = 1
+          if (hit) {
+            n = split(lu[x], ls, ",")
+            for (l = 1; l <= n; l++) if (ls[l] != "") print F ":" ls[l] " " x " (len() as byte width)"
+          }
+        }
+      }
+      delete bl; delete ix; delete bf; delete argref; delete lu; delete alias; delete sameline
+    }
+    /^[ \t]*(pub |export )?(fn|me|async fn|async me) / { flush(); fncount++ }
+    /^[ \t]*#/ { next }
+    {
+      # Docstrings (triple-quoted blocks) are prose, not code.
+      q = gsub(/"""/, "\"\"\"")
+      if (q % 2 == 1) { in_doc = !in_doc; next }
+      if (q > 0) next
+      if (in_doc) next
+      line = $0
+      sub(/#.*$/, "", line)
+      tmp = line
+      while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.byte_len\(\)/)) {
+        r = substr(tmp, RSTART, RLENGTH - 11)
+        bl[r] = bl[r] "," NR
+        tmp = substr(tmp, RSTART + RLENGTH)
+      }
+      # Byte-family calls on a receiver, and the identifiers they take as
+      # offsets/widths (argref); `val w = X.len()` aliases; X.len() uses.
+      bytecall_here = 0
+      tmp = line
+      while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.(byte_len\(\)|byte_at\(|substring\(|slice\(|index_of\(|find\(|starts_with\(|ends_with\(|split\(|replace\(|contains\()/)) {
+        mstart = RSTART; mlen = RLENGTH
+        seg = substr(tmp, mstart, mlen)
+        r = seg; sub(/\..*$/, "", r)
+        bf[r] = 1
+        if (seg ~ /byte_len\(\)$/) bytecall_here = 1
+        args = substr(tmp, mstart + mlen)
+        sub(/\).*$/, "", args)
+        # Only offset-taking calls make an argument a byte offset/width;
+        # starts_with/ends_with/split/replace/contains take whole texts.
+        if (seg !~ /\.(substring|slice|byte_at|index_of|find)\($/) args = ""
+        while (match(args, /[A-Za-z_][A-Za-z_0-9]*/)) {
+          a = substr(args, RSTART, RLENGTH)
+          if (a != r && a !~ /^(val|var|if|and|or|not|true|false|nil|as|i64|text)$/) argref[a] = 1
+          args = substr(args, RSTART + RLENGTH)
+        }
+        tmp = substr(tmp, mstart + mlen)
+      }
+      if (match(line, /(val|var) +[A-Za-z_][A-Za-z_0-9]* *(: *i64)? *= *[A-Za-z_][A-Za-z_0-9]*\.len\(\)/)) {
+        decl = substr(line, RSTART, RLENGTH)
+        sub(/^(val|var) +/, "", decl)
+        aname = decl; sub(/[^A-Za-z_0-9].*$/, "", aname)
+        src = decl; sub(/\.len\(\)$/, "", src); sub(/^.*[^A-Za-z_0-9]/, "", src)
+        alias[aname] = src
+      }
+      tmp = line
+      while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.len\(\)/)) {
+        r = substr(tmp, RSTART, RLENGTH - 6)
+        lu[r] = lu[r] "," NR
+        rest = substr(tmp, RSTART + RLENGTH)
+        # An emptiness test (X.len() == 0 / != 0 / > 0) is unit-free.
+        if (bytecall_here && rest !~ /^ *(==|!=|>|<=) *0([^0-9]|$)/) sameline[r] = 1
+        tmp = substr(tmp, RSTART + RLENGTH)
+      }
+      tmp = line
+      while (match(tmp, /(^|[^A-Za-z_0-9.])[A-Za-z_][A-Za-z_0-9]*\[/)) {
+        seg = substr(tmp, RSTART, RLENGTH)
+        sub(/^[^A-Za-z_]/, "", seg)
+        r = substr(seg, 1, length(seg) - 1)
+        ix[r] = 1
+        tmp = substr(tmp, RSTART + RLENGTH)
+      }
+    }
+    END { flush(); printf "FNCOUNT %d\n", fncount }
+  ' "$1"
+}
+
+run_scan() {
+  total_fn=0; offenders=""; k=0
+  for root in "$@"; do
+    [ -e "$root" ] || continue
+    find "$root" -name '*.spl' -type f | while read -r f; do scan_file "$f"; done
+  done > "$tmp_out"
+  total_fn=$(awk '/^FNCOUNT /{s+=$2} END{print s+0}' "$tmp_out")
+  offenders=$(grep -v '^FNCOUNT ' "$tmp_out" | sort -u)
+  k=$(printf '%s\n' "$offenders" | grep -c . || true)
+  [ "$total_fn" -eq 0 ] && { echo "ERROR — nothing was checked"; return 2; }
+  if [ "$k" -gt 0 ]; then
+    printf '%s\n' "$offenders"
+    echo "FAIL — $total_fn function(s) checked, $k mixed byte_len()+[ ] site(s) (see lines above)"
+    return 1
+  fi
+  echo "PASS — $total_fn function(s) checked, 0 mixed"
+  return 0
+}
+
+tmp_out=$(mktemp)
+trap 'rm -f "$tmp_out"; rm -rf "${fx:-}"' EXIT
+
+selftest() {
+  fx=$(mktemp -d)
+  mkdir -p "$fx/a" "$fx/b" "$fx/c"
+  printf 'fn byte_scan(s: text) -> i64:\n    var i = 0\n    while i < s.byte_len():\n        if s.byte_at(i) == 32: return i\n        i = i + 1\n    s.substring(0, 1)\n    -1\n\nfn chars(s: text) -> i64:\n    var i = 0\n    while i < s.len():\n        if s[i] == '"'"' '"'"': return i\n        i = i + 1\n    -1\n' > "$fx/a/clean.spl"
+  printf 'fn mixed(s: text) -> text:\n    var i = 0\n    while i < s.byte_len():\n        if s[i:i + 1] == " ": return s[0:i]\n        i = i + 1\n    s\n' > "$fx/b/mixed.spl"
+  printf 'fn other(s: text, arr: [i64]) -> i64:\n    # s[0] in a comment must not count\n    val n = s.byte_len()\n    arr[0] + n\n\nfn has_prefix(s: text, prefix: text) -> bool:\n    if prefix.byte_len() > s.byte_len(): return false\n    s.substring(0, prefix.byte_len()) == prefix\n' > "$fx/c/other_recv.spl"
+  mkdir -p "$fx/d"
+  printf 'fn has_prefix(s: text, prefix: text) -> bool:\n    val plen = prefix.len()\n    if plen > s.byte_len(): return false\n    s.substring(0, plen) == prefix\n' > "$fx/d/width.spl"
+  v=$(run_scan "$fx/a"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: clean fixture must PASS, got rc=$rc: $v"; exit 2; }
+  v=$(run_scan "$fx/b"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: mixed fixture must FAIL, got rc=$rc"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'mixed.spl:3 s' || { echo "selftest: mixed fixture must name mixed.spl:3 s"; exit 2; }
+  v=$(run_scan "$fx/c"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: other-receiver/comment fixture must PASS, got rc=$rc: $v"; exit 2; }
+  v=$(run_scan "$fx/d"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: other-text len() as byte width must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'width.spl:2 prefix (len() as byte width)' || { echo "selftest: width fixture must name width.spl:2 prefix"; exit 2; }
+  v=$(run_scan "$fx/none"); rc=$?; [ $rc -eq 2 ] || { echo "selftest: empty scan must ERROR, got rc=$rc"; exit 2; }
+  echo "selftest: 5 fixtures OK"
+}
+
+do_selftest=0
+roots=""
+for a in "$@"; do
+  case "$a" in
+    --selftest) do_selftest=1 ;;
+    *) roots="$roots $a" ;;
+  esac
+done
+[ "$do_selftest" -eq 1 ] && selftest
+[ -z "$roots" ] && roots="src/lib src/app src/compiler"
+# shellcheck disable=SC2086
+run_scan $roots
