@@ -35,7 +35,7 @@ fn host_capacity_payload_path_v1(journal: DistributedOperationJournalV2, digest:
     journal.root + "/reservation-payloads/" + digest + ".sdn"
 
 fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity: HostCapacityV1,
-        continuity_proven: bool) -> Result<HostCapacityLedgerV1, text>:
+        continuity_proven: bool, quarantine_previous: bool = false) -> Result<HostCapacityLedgerV1, text>:
     if journal.operations.len() > 4096:
         return Err("reservation-history-full")
     var rows: [HostReservationV1] = []
@@ -46,12 +46,19 @@ fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity:
         val bytes = file_read_regular_no_follow_bounded(host_capacity_payload_path_v1(journal, operation.payload_digest), 65536)?
         val intent = host_reservation_decode_intent_v1(bytes)?
         val matching = host_reservation_match_operation_v1(intent, operation)?
-        if intent.physical_host_id != capacity.physical_host_id or intent.fence.authority_id != capacity.authority_id or
-                intent.fence.boot_id != capacity.boot_id or intent.fence.provider_generation != capacity.provider_generation:
+        if intent.physical_host_id != capacity.physical_host_id or intent.fence.authority_id != capacity.authority_id:
+            return Err("retained-reservation-host-fence-mismatch")
+        if not quarantine_previous and (intent.fence.boot_id != capacity.boot_id or
+                intent.fence.provider_generation != capacity.provider_generation):
             return Err("retained-reservation-host-fence-mismatch")
         var row = intent.reservation
         val abort_outcome = host_reservation_abort_outcome_v1(intent, operation)?
-        if state.state == "cancelled" and state.outcome_digest == sha256_text(abort_outcome) and continuity_proven:
+        if quarantine_previous:
+            # Startup under a fresh service incarnation never makes old
+            # preparation deadlines, cancellation or native absence assumptions.
+            # All retained resources remain charged until explicit reconciliation.
+            row.state = HostReservationStateV1.Uncertain
+        elif state.state == "cancelled" and state.outcome_digest == sha256_text(abort_outcome) and continuity_proven:
             row.state = HostReservationStateV1.Released
         elif state.state != "admitted":
             # Terminal create/cancel is not native absence. Recovery remains
@@ -65,11 +72,23 @@ fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity:
 
 pub fn host_capacity_owner_open_v1(root: text, capacity: HostCapacityV1, nonce: text,
         maximum_events: i64, continuity_proven: bool) -> Result<HostCapacityOwnerV1, text>:
+    host_capacity_owner_open_internal_v1(root, capacity, nonce, maximum_events, continuity_proven, false)
+
+# Persistent-service startup mechanism, not admission authority. The returned
+# owner remains continuity=false and cannot admit or replay prepared receipts.
+# Its actual service owner must finish native inventory/quarantine before it may
+# enable admission. No caller-supplied boolean makes this path ready.
+pub fn host_capacity_owner_open_quarantined_v2(root: text, capacity: HostCapacityV1,
+        nonce: text, maximum_events: i64) -> Result<HostCapacityOwnerV1, text>:
+    host_capacity_owner_open_internal_v1(root, capacity, nonce, maximum_events, false, true)
+
+fn host_capacity_owner_open_internal_v1(root: text, capacity: HostCapacityV1, nonce: text,
+        maximum_events: i64, continuity_proven: bool, quarantine_previous: bool) -> Result<HostCapacityOwnerV1, text>:
     val empty = HostCapacityLedgerV1(capacity: capacity, revision: 1,
         continuity_proven: false, reservations: [])
     val valid = host_available_capacity_v1(empty)?
     var journal = distributed_operation_journal_open_v2(root, host_capacity_authority_digest_v1(capacity), nonce, maximum_events)?
-    val projection = host_capacity_projection_v1(journal, capacity, continuity_proven)
+    val projection = host_capacity_projection_v1(journal, capacity, continuity_proven, quarantine_previous)
     if projection.is_err():
         val released = distributed_operation_journal_close_v2(journal)
         if released.is_err(): return Err("host-open-rejected-and-journal-close-failed:" + projection.unwrap_err())
@@ -180,6 +199,10 @@ fn host_capacity_owner_check_admitted_v1(owner: HostCapacityOwnerV1,
 fn host_capacity_owner_check_retained_v1(owner: HostCapacityOwnerV1,
         intent: HostReservationIntentV1, operation: OperationEnvelopeV2) -> Result<bool, text>:
     val matching = host_reservation_match_operation_v1(intent, operation)?
+    if intent.fence.authority_id != owner.ledger.capacity.authority_id or
+            intent.fence.boot_id != owner.ledger.capacity.boot_id or
+            intent.fence.provider_generation != owner.ledger.capacity.provider_generation:
+        return Err("retained-reservation-host-fence-mismatch")
     if intent.physical_host_id != owner.ledger.capacity.physical_host_id or
             owner.journal.authority_digest != host_capacity_authority_digest_v1(owner.ledger.capacity) or
             owner.ledger.revision != owner.journal.sequence + 1:

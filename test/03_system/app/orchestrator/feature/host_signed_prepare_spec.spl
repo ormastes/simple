@@ -101,3 +101,38 @@ describe "Signed preparation through the actual host owner":
         assert(not file_exists(fixture.owner.journal.root + "/reservation-payloads"))
         assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
         dir_remove(fixture.owner.journal.root, true)
+
+    it "quarantines prior service fences without releasing prepared or executing resources":
+        for mode in ["prepared", "executing"]:
+            val fixture = signed_prepare_fixture_v1()
+            val payload = host_prepare_request_encode_v1(fixture.request).unwrap()
+            val reply = host_authorized_prepare_reply_v1(fixture.owner, payload, fixture.snapshot, 7,
+                signed_prepare_clock_v1(), signed_prepare_clock_v1).unwrap()
+            var retained = reply.owner
+            if mode == "executing":
+                # This tests the trusted capacity primitive, not a signature
+                # bypass: the public signed executor has separate crypto specs.
+                var grant = fixture.request.signed.grant
+                grant.operations = ["host_execute_v1"]
+                val receipt = host_reservation_receipt_v1(fixture.request.intent, fixture.request.operation).unwrap()
+                val fence = HostLedgerFenceV1(authority_id: retained.ledger.capacity.authority_id,
+                    boot_id: retained.ledger.capacity.boot_id, provider_generation: retained.ledger.capacity.provider_generation,
+                    revision: retained.ledger.revision)
+                retained = host_capacity_owner_begin_v1(retained, fixture.request.intent, fixture.request.operation,
+                    receipt, fence, grant, signed_prepare_clock_v1()).unwrap()
+            assert(host_capacity_owner_close_v1(retained).unwrap())
+            var changed = retained.ledger.capacity
+            changed.boot_id = "new-service-fence"
+            expect(host_capacity_owner_open_v1(retained.journal.root, changed, "d".repeat(64), 50, true).unwrap_err()).to_equal("retained-reservation-host-fence-mismatch")
+            val quarantined = host_capacity_owner_open_quarantined_v2(retained.journal.root, changed,
+                "e".repeat(64), 50).unwrap()
+            assert(not quarantined.ledger.continuity_proven)
+            expect(quarantined.ledger.reservations[0].state).to_equal(HostReservationStateV1.Uncertain)
+            expect(host_available_capacity_v1(quarantined.ledger).unwrap().cpu_millis).to_equal(1000)
+            expect(host_available_capacity_v1(quarantined.ledger).unwrap().memory_bytes).to_equal(3584)
+            expect(quarantined.journal.operations[fixture.request.operation.id].state).to_equal(
+                if mode == "executing": "outcome-unknown" else: "admitted")
+            expect(host_capacity_owner_prepared_receipt_v1(quarantined, fixture.request.intent,
+                fixture.request.operation, fixture.request.signed.grant, signed_prepare_clock_v1()).unwrap_err()).to_equal("retained-reservation-host-fence-mismatch")
+            assert(host_capacity_owner_close_v1(quarantined).unwrap())
+            dir_remove(fixture.owner.journal.root, true)
