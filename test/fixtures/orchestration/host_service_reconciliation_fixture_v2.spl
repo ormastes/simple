@@ -1,0 +1,120 @@
+# Real historical capacity journal + actual Windows scripted service adapter.
+# Inventory/native IDs are explicit synthetic fixture facts, not Windows proof.
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.WindowsServiceInventorySampleV2
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+
+pub struct HostReconciliationFixtureV2:
+    root: text
+    owner: HostCapacityOwnerV1
+    scope: ContainerHostScopeV2
+    entry: ContainerServiceInventoryEntryV2
+
+fn reconciliation_context_v2() -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: 100, monotonic_ms: 10,
+        policy_revision: 1, revocation_epoch: 0, session_generation: 1)
+
+fn reconciliation_record_v2(owner: HostCapacityOwnerV1, entry: ContainerServiceInventoryEntryV2,
+        execute: bool, release: bool) -> HostCapacityOwnerV1:
+    val scope = entry.scope
+    val plan = ContainerExecutionPlanV2(backend: "windows-docker-process", workload_uid: entry.runtime.pod_uid,
+        attempt: entry.runtime.attempt, operation_id: entry.runtime.operation_id, request_digest: entry.request_digest,
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    val row = HostReservationV1(id: "reservation-" + entry.runtime.operation_id, operation_id: entry.runtime.operation_id,
+        payload_digest: "0".repeat(64), service_scope_id: scope.service_scope_id, assignment_generation: 1,
+        nonce: "nonce-" + entry.runtime.operation_id, cpu_millis: entry.cpu_millis, memory_bytes: entry.memory_bytes,
+        exclusive_devices: [], prepare_deadline_ms: 1000, state: HostReservationStateV1.Prepared)
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: scope.physical_host_id,
+        fence: HostLedgerFenceV1(authority_id: owner.ledger.capacity.authority_id, boot_id: container_scope_fence_id_v2(scope).unwrap(),
+            provider_generation: scope.provider_generation, revision: owner.ledger.revision),
+        plan_digest: container_execution_plan_digest_v2(plan).unwrap(), reservation: row)).unwrap()
+    val operation = OperationEnvelopeV2(version: 2, id: entry.runtime.operation_id, payload_digest: intent.reservation.payload_digest,
+        principal: "principal", project: "project", host_id: scope.physical_host_id, operation: "host_reservation_v1",
+        environment_digest: "a".repeat(64), policy_revision: 1, revocation_epoch: 0, session_generation: 1,
+        memory_bytes: entry.memory_bytes, duration_ms: 1000)
+    var grant = ExecutionGrantV2(id: "historical-grant", principal: operation.principal, project: operation.project,
+        host_id: operation.host_id, operations: ["host_reservation_v1"], environment_digest: operation.environment_digest,
+        policy_revision: 1, revocation_epoch: 0, expires_at: 10000, maximum_memory_bytes: 1073741824, maximum_duration_ms: 1000)
+    val context = reconciliation_context_v2()
+    val prepared = host_capacity_owner_prepare_v1(owner, intent, operation, grant, context).unwrap()
+    val receipt = host_capacity_owner_prepared_receipt_v1(prepared, intent, operation, grant, context).unwrap()
+    # This is retained metadata for reconciliation, deliberately not a runnable
+    # Windows request/previous native execution claim. Provider rows are the
+    # explicitly scripted facts. No leaf bypass is used for the current owner.
+    val opaque = sdn_encode_canonical(SdnValue.Dict({"historicalFixtureData": SdnValue.Bool(true)})) + "\n"
+    val request = ContainerExecutionRequestV2(plan: plan, request_bytes: opaque)
+    val directory = owner.journal.root + "/host-execution-requests"
+    assert(dir_create(directory, true))
+    assert(file_atomic_write_mode(directory + "/" + sha256_text(operation.id) + ".sdn",
+        container_execution_request_encode_v2(request).unwrap(), 0o600))
+    val fence = HostLedgerFenceV1(authority_id: prepared.ledger.capacity.authority_id, boot_id: prepared.ledger.capacity.boot_id,
+        provider_generation: prepared.ledger.capacity.provider_generation, revision: prepared.ledger.revision)
+    if execute:
+        grant.operations = ["host_execute_v1"]
+        return host_capacity_owner_begin_v1(prepared, intent, operation, receipt, fence, grant, context).unwrap()
+    if release:
+        grant.operations = ["host_abort_prepared_v1"]
+        return host_capacity_owner_abort_prepared_v1(prepared, intent, operation, receipt, fence, grant, context).unwrap()
+    prepared
+
+# history: empty | admitted | executing | released-history | unknown-over-capacity.
+pub fn host_reconciliation_fixture_v2(history: text) -> HostReconciliationFixtureV2:
+    val root = secure_temp_dir("/tmp", "host-service-reconciliation").unwrap()
+    val scope = windows_adapter_scope_fixture_v2()
+    val entry = windows_adapter_inventory_fixture_v2()
+    val old_capacity = HostCapacityV1(physical_host_id: scope.physical_host_id, authority_id: "startup-owner",
+        boot_id: container_scope_fence_id_v2(entry.scope).unwrap(), provider_generation: scope.provider_generation,
+        cpu_millis: 4000, memory_bytes: 1073741824, exclusive_devices: [])
+    var owner = host_capacity_owner_open_v1(root, old_capacity, "c".repeat(64), 100, true).unwrap()
+    if history == "released-history":
+        for index in 0..3:
+            var historical = entry
+            historical.runtime.operation_id = "history-" + index.to_text()
+            historical.runtime.pod_uid = "history-workload-" + index.to_text()
+            owner = reconciliation_record_v2(owner, historical, false, true)
+    elif history != "empty":
+        owner = reconciliation_record_v2(owner, entry, history != "admitted", false)
+    assert(host_capacity_owner_close_v1(owner).unwrap())
+    var capacity = old_capacity
+    capacity.boot_id = container_scope_fence_id_v2(scope).unwrap()
+    if history == "unknown-over-capacity":
+        capacity.cpu_millis = 1000
+        capacity.memory_bytes = 268435456
+    val quarantined = host_capacity_owner_open_quarantined_v2(root, capacity, "d".repeat(64), 100).unwrap()
+    assert(not quarantined.ledger.continuity_proven)
+    HostReconciliationFixtureV2(root: root, owner: quarantined, scope: scope, entry: entry)
+
+pub fn host_reconciliation_container_v2(entries: [ContainerServiceInventoryEntryV2],
+        following_error: text = "") -> SimpleContainerOwnerV2:
+    var samples = [WindowsServiceInventorySampleV2(entries: entries, error: ""),
+        WindowsServiceInventorySampleV2(entries: entries, error: "")]
+    if following_error != "": samples.push(WindowsServiceInventorySampleV2(entries: [], error: following_error))
+    windows_adapter_owner_fixture_v2([], samples)
+
+pub fn host_reconciliation_assert_quarantined_v2(owner: SimpleContainerOwnerV2):
+    match owner:
+        case SimpleContainerOwnerV2.Windows(_, adapter): assert(adapter.startup_quarantined)
+        case SimpleContainerOwnerV2.Linux(_, _): fail("expected actual Windows service fixture owner")
+
+pub fn host_reconciliation_assert_admitted_v2(owner: SimpleContainerOwnerV2):
+    match owner:
+        case SimpleContainerOwnerV2.Windows(_, adapter): assert(not adapter.startup_quarantined)
+        case SimpleContainerOwnerV2.Linux(_, _): fail("expected actual Windows service fixture owner")
+
+pub fn host_reconciliation_changed_inventory_v2(fresh: [ContainerServiceInventoryEntryV2]) -> SimpleContainerOwnerV2:
+    # Factory saw nothing; only the mandatory fresh sample sees the object.
+    windows_adapter_owner_fixture_v2([], [WindowsServiceInventorySampleV2(entries: [], error: ""),
+        WindowsServiceInventorySampleV2(entries: fresh, error: "")])

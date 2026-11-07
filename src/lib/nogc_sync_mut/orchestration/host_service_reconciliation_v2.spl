@@ -1,0 +1,168 @@
+# Persistent startup reconciliation over the SAME host capacity owner.
+# The actual provider refresh runs after acquiring that journal's writer.
+# No inventory supplied by a request, boolean ready setter, or second ledger.
+# Durability profile is process-crash-v1; power-loss recovery is not claimed.
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.service_v2.*
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2, simple_container_backend_v2}
+use std.nogc_async_mut.container.service_v2.{simple_container_inventory_service_v2, simple_container_complete_quarantine_v2}
+use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_exact_v2, daemon_operation_record_outcome_v2}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+
+pub struct HostServiceReconciliationTurnV2:
+    owner: HostCapacityOwnerV1
+    container: SimpleContainerOwnerV2
+    admission: Option<ContainerServiceAdmissionV2>
+    receipt_path: text
+    error: text
+
+fn host_service_writer_v2(owner: HostCapacityOwnerV1) -> Result<bool, text>:
+    match distributed_operation_journal_lookup_v2(owner.journal, ""):
+        case Err(reason):
+            if reason != "OPERATION_NOT_FOUND": return Err(reason)
+        case Ok(_): return Err("host-service-invalid-empty-operation")
+    if owner.ledger.revision != owner.journal.sequence + 1: return Err("host-service-projection-stale")
+    if owner.ledger.continuity_proven: return Err("host-service-already-admitted")
+    Ok(true)
+
+fn host_service_inventory_match_v2(owner: HostCapacityOwnerV1, scope: ContainerHostScopeV2,
+        entries: [ContainerServiceInventoryEntryV2]) -> Result<bool, text>:
+    val digest = container_service_inventory_digest_v2("windows-docker-process", scope, entries)?
+    # Every observed native object needs an existing retained charge. Duplicate
+    # native IDs/operations are rejected by the common complete-inventory digest.
+    for entry in entries:
+        val state = distributed_operation_journal_lookup_v2(owner.journal, entry.runtime.operation_id)?
+        if state.state == "admitted": return Err("host-service-native-effect-without-execution-intent")
+        val operation = distributed_decode_operation_v2(state.envelope)?
+        if operation.operation != "host_reservation_v1": return Err("host-service-inventory-operation-kind")
+        val intent = host_reservation_decode_intent_v1(file_read_regular_no_follow_bounded(
+            owner.journal.root + "/reservation-payloads/" + operation.payload_digest + ".sdn", 65536)?)?
+        val matched = host_reservation_match_operation_v1(intent, operation)?
+        if (intent.fence.boot_id != container_scope_fence_id_v2(entry.scope)? or
+                intent.fence.provider_generation != entry.scope.provider_generation or
+                intent.reservation.service_scope_id != scope.service_scope_id or
+                intent.reservation.cpu_millis < entry.cpu_millis or intent.reservation.memory_bytes < entry.memory_bytes):
+            return Err("host-service-inventory-charge-mismatch")
+        val retained = container_execution_request_decode_v2(file_read_regular_no_follow_bounded(
+            owner.journal.root + "/host-execution-requests/" + sha256_text(operation.id) + ".sdn", 2097152)?)?
+        val plan = retained.plan
+        if (container_execution_plan_digest_v2(plan)? != intent.plan_digest or
+                plan.backend != "windows-docker-process" or plan.operation_id != operation.id or
+                plan.workload_uid != entry.runtime.pod_uid or plan.attempt != entry.runtime.attempt or
+                plan.request_digest != entry.request_digest or plan.provider_generation != entry.scope.provider_generation or
+                plan.native_machine_id != entry.scope.native_machine_id or plan.continuity_id != entry.scope.continuity_id or
+                plan.continuity_mode != entry.scope.continuity_mode or plan.boot_id != entry.scope.boot_id or
+                plan.physical_host_id != entry.scope.physical_host_id or plan.service_scope_id != entry.scope.service_scope_id):
+            return Err("host-service-inventory-retained-request-mismatch")
+        var charged = false
+        for row in owner.ledger.reservations:
+            if row.operation_id == operation.id:
+                if (row.state == HostReservationStateV1.Released or row.cpu_millis < entry.cpu_millis or
+                        row.memory_bytes < entry.memory_bytes): return Err("host-service-inventory-not-charged")
+                charged = true
+        if not charged: return Err("host-service-inventory-unaccounted")
+    Ok(true)
+
+fn host_service_receipt_store_v2(owner: HostCapacityOwnerV1, scope: ContainerHostScopeV2,
+        inventory_digest: text, classifications: [SdnValue]) -> Result<text, text>:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-service-reconciliation"),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(scope)?),
+        "inventoryDigest": SdnValue.String(inventory_digest), "journalAuthorityDigest": SdnValue.String(owner.journal.authority_digest),
+        "journalCommitDigest": SdnValue.String(owner.journal.revision), "journalSequence": SdnValue.Int(owner.journal.sequence),
+        "durabilityProfile": SdnValue.String("process-crash-v1"), "reservations": SdnValue.Array(classifications)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    val directory = owner.journal.root + "/service-reconciliations"
+    if not file_exists(directory) and not dir_create(directory, true): return Err("host-service-receipt-directory-failed")
+    val path = directory + "/" + container_scope_fence_id_v2(scope)? + ".sdn"
+    if file_exists(path):
+        if file_read_regular_no_follow_bounded(path, 4194304)? != bytes: return Err("host-service-receipt-changed")
+    elif not file_atomic_write_mode(path, bytes, 0o600): return Err("host-service-receipt-write-failed")
+    if file_read_regular_no_follow_bounded(path, 4194304)? != bytes: return Err("host-service-receipt-readback-failed")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(owner.journal.root):
+        return Err("host-service-receipt-sync-failed")
+    Ok(path)
+
+pub fn host_service_reconcile_v2(owner: HostCapacityOwnerV1,
+        container: SimpleContainerOwnerV2) -> HostServiceReconciliationTurnV2:
+    val checked = host_service_writer_v2(owner)
+    if checked.is_err(): return HostServiceReconciliationTurnV2(owner, container, nil, "", checked.unwrap_err())
+    val scope = simple_container_scope_v2(container)
+    val fence = container_scope_fence_id_v2(scope)
+    if (fence.is_err() or simple_container_backend_v2(container) != "windows-docker-process" or
+            scope.continuity_mode != "service-incarnation-v1" or scope.boot_id != ""):
+        return HostServiceReconciliationTurnV2(owner, container, nil, "", "host-service-scope-required")
+    if (owner.ledger.capacity.boot_id != fence.unwrap() or owner.ledger.capacity.physical_host_id != scope.physical_host_id or
+            owner.ledger.capacity.provider_generation != scope.provider_generation):
+        return HostServiceReconciliationTurnV2(owner, container, nil, "", "host-service-capacity-scope-mismatch")
+    # This actual query occurs while the existing host journal writer is held.
+    # The earlier factory snapshot is deliberately not accepted as input.
+    val refreshed = simple_container_inventory_service_v2(container)
+    var current_container = refreshed.owner
+    if refreshed.error != "" or refreshed.inventory.is_none():
+        return HostServiceReconciliationTurnV2(owner, current_container, nil, "", "host-service-inventory-unavailable:" + refreshed.error)
+    val entries = refreshed.inventory.unwrap()
+    val matched = host_service_inventory_match_v2(owner, scope, entries)
+    if matched.is_err(): return HostServiceReconciliationTurnV2(owner, current_container, nil, "", matched.unwrap_err())
+    var current = owner
+    var rows: [HostReservationV1] = []
+    var classifications: [SdnValue] = []
+    for original in owner.ledger.reservations:
+        var row = original
+        val state_result = distributed_operation_journal_lookup_v2(current.journal, row.operation_id)
+        if state_result.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", state_result.unwrap_err())
+        val state = state_result.unwrap()
+        val operation_result = distributed_decode_operation_v2(state.envelope)
+        if operation_result.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", operation_result.unwrap_err())
+        val operation = operation_result.unwrap()
+        val intent_bytes = file_read_regular_no_follow_bounded(current.journal.root + "/reservation-payloads/" + operation.payload_digest + ".sdn", 65536)
+        if intent_bytes.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", intent_bytes.unwrap_err())
+        val decoded = host_reservation_decode_intent_v1(intent_bytes.unwrap())
+        if decoded.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", decoded.unwrap_err())
+        val intent = decoded.unwrap()
+        val abort = if operation.operation == "host_helper_reservation_v1": host_helper_reservation_abort_outcome_v1(intent, operation)
+            else: host_reservation_abort_outcome_v1(intent, operation)
+        if abort.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", abort.unwrap_err())
+        var present = false
+        for entry in entries:
+            if entry.runtime.operation_id == operation.id: present = true
+        val no_effect = not present and (state.state == "admitted" or
+            (state.state == "cancelled" and state.outcome_digest == sha256_text(abort.unwrap())))
+        if no_effect:
+            # Admitted means begin never committed in the selected process-crash
+            # profile. A native match above refuses; unknown never takes this path.
+            val cancelled = daemon_operation_record_outcome_v2(current.journal, operation, "cancelled", sha256_text(abort.unwrap()))
+            if cancelled.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", cancelled.unwrap_err())
+            current.journal = cancelled.unwrap()
+            current.ledger.revision = current.journal.sequence + 1
+            row.state = HostReservationStateV1.Released
+        else:
+            row.state = HostReservationStateV1.Uncertain
+        rows.push(row)
+        val record: Dict<text, SdnValue> = {"operationId": SdnValue.String(operation.id),
+            "state": SdnValue.String(if no_effect: "released-no-effect" else: "charged-uncertain"),
+            "cpuMillis": SdnValue.Int(row.cpu_millis), "memoryBytes": SdnValue.Int(row.memory_bytes)}
+        classifications.push(SdnValue.Dict(record))
+    current.ledger.reservations = rows
+    val capacity_checked = host_available_capacity_v1(current.ledger)
+    if capacity_checked.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", capacity_checked.unwrap_err())
+    val stored = host_service_receipt_store_v2(current, scope, refreshed.inventory_digest, classifications)
+    if stored.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", stored.unwrap_err())
+    val admission = ContainerServiceAdmissionV2(scope_fence_id: fence.unwrap(), inventory_digest: refreshed.inventory_digest,
+        host_journal_commit_digest: current.journal.revision, host_journal_revision: current.journal.sequence,
+        durability_profile: "process-crash-v1")
+    val enabled = simple_container_complete_quarantine_v2(current_container, admission)
+    current_container = enabled.owner
+    if enabled.error != "" or not enabled.admitted:
+        return HostServiceReconciliationTurnV2(current, current_container, nil, stored.unwrap(), "host-service-admission-refused:" + enabled.error)
+    current.ledger.continuity_proven = true
+    HostServiceReconciliationTurnV2(current, current_container, Some(admission), stored.unwrap(), "")
