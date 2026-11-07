@@ -1,0 +1,115 @@
+#!/bin/sh
+# Fail-only native staging/argv regression and QEMU command construction.
+# Synthetic C helpers never publish Simple application qualification.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+runner=$root/scripts/check/run-item5-app-vector-receipts.shs
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/item5-provider-path.XXXXXX")
+cleanup() {
+    if [ "${ITEM5_PATH_TEST_KEEP:-0}" = 1 ]; then
+        printf 'PATH_TEST_EVIDENCE=%s\n' "$tmp"
+    else
+        chmod -R u+w "$tmp" 2>/dev/null || true
+        rm -rf "$tmp"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+cc=${CC:-clang}
+command -v "$cc" >/dev/null 2>&1 || { echo 'UNSUPPORTED: C compiler required'; exit 77; }
+cat >"$tmp/probe.c" <<'C'
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    char cwd[4096], bytes[14];
+    const char *expected = getenv("ITEM5_TEST_OUTPUT");
+    if (!expected || !getcwd(cwd, sizeof(cwd)) || strcmp(cwd, expected)) return 2;
+    const char *path = "build/providers/vector-provider.so";
+    struct stat st;
+    if (stat(path, &st) || (st.st_mode & 0777) != 0444) return 3;
+    FILE *input = fopen(path, "rb");
+    if (!input || fread(bytes, 1, sizeof(bytes), input) != sizeof(bytes)) return 4;
+    if (fclose(input) || memcmp(bytes, "provider-bytes", sizeof(bytes))) return 5;
+    if (mkdir(".simple", 0700) && errno != EEXIST) return 6;
+    if (mkdir(".simple/provider_snapshots", 0700) && errno != EEXIST) return 7;
+    FILE *snapshot = fopen(".simple/provider_snapshots/path-probe", "wb");
+    if (!snapshot || fputs("owner-writable", snapshot) < 0 || fclose(snapshot)) return 8;
+    if (argc > 1) {
+        if (argc != 5 || strcmp(argv[1], path)) return 9;
+        puts("ITEM5_NEGATIVE_VECTOR_RELATIVE_ARG_OK");
+    }
+    puts("ITEM5_NEGATIVE_CWD_PROVIDER_SNAPSHOT_OK");
+    return 1; /* Deliberate failure: never a successful application oracle. */
+}
+C
+printf 'void item5_test_observer_stub(void) {}\n' >"$tmp/observer.c"
+timeout 60 "$cc" -std=c11 -O2 -Wall -Wextra -Werror "$tmp/probe.c" -o "$tmp/probe"
+timeout 60 "$cc" -shared -fPIC -std=c11 -O2 -Wall -Wextra -Werror "$tmp/observer.c" -o "$tmp/observer.so"
+printf provider-bytes >"$tmp/provider.so"
+sha() { sha256sum "$1" | awk '{print $1}'; }
+app_sha=$(sha "$tmp/probe") provider_sha=$(sha "$tmp/provider.so") observer_sha=$(sha "$tmp/observer.so")
+perl -MJSON::PP -e '
+my ($dir,$hash)=@ARGV;
+my $h={status=>"pass",gate_exit_status=>0,compiler_sha256=>"a"x64,source_commit=>"b"x40,runtime_archive_sha256=>"5"x64};
+my $m={schema=>"item5-simple-app-build-v2",compiler_sha256=>"a"x64,producer_source_commit=>"b"x40,app_source_commit=>"c"x40,app_source_tree_oid=>"d"x40,runtime_archive_sha256=>"5"x64,apps=>{}};
+for my $role (qw(db-scalar db-vector http-scalar http-vector)) {$m->{apps}{$role}={status=>"pass",sha256=>$hash,compiler_sha256=>"a"x64,app_source_commit=>"c"x40,app_source_tree_oid=>"d"x40,runtime_archive_sha256=>"5"x64};}
+for my $entry (["hello.json",$h],["apps.json",$m]) {open my $f,">:raw","$dir/$entry->[0]" or die $!;print {$f} JSON::PP->new->encode($entry->[1]);close $f or die $!;}
+' "$tmp" "$app_sha"
+export ITEM5_TEST_OUTPUT=$tmp/run
+if sh "$runner" --output "$ITEM5_TEST_OUTPUT" \
+    --producer-receipt "$tmp/hello.json" --producer-receipt-sha256 "$(sha "$tmp/hello.json")" \
+    --app-build-manifest "$tmp/apps.json" --app-build-manifest-sha256 "$(sha "$tmp/apps.json")" \
+    --provider-dso "$tmp/provider.so" --provider-sha256 "$provider_sha" \
+    --observer "$tmp/observer.so" --observer-sha256 "$observer_sha" \
+    --provider-id 1 --implementation-id 1 \
+    --db-scalar "$tmp/probe" --db-scalar-sha256 "$app_sha" \
+    --db-vector "$tmp/probe" --db-vector-sha256 "$app_sha" \
+    --http-scalar "$tmp/probe" --http-scalar-sha256 "$app_sha" \
+    --http-vector "$tmp/probe" --http-vector-sha256 "$app_sha" >"$tmp/whole-run.log" 2>&1; then
+    echo 'FAIL deliberate app failure was accepted'; exit 1
+fi
+grep -qx ITEM5_NEGATIVE_CWD_PROVIDER_SNAPSHOT_OK "$ITEM5_TEST_OUTPUT/logs/db-scalar.stdout"
+[ "$(sha "$ITEM5_TEST_OUTPUT/build/providers/vector-provider.so")" = "$provider_sha" ]
+[ "$(stat -c %a "$ITEM5_TEST_OUTPUT/build/providers")" = 555 ]
+[ "$(stat -c %a "$ITEM5_TEST_OUTPUT/build")" = 555 ]
+[ -f "$ITEM5_TEST_OUTPUT/.simple/provider_snapshots/path-probe" ]
+[ ! -e "$ITEM5_TEST_OUTPUT/evidence.env" ]
+cat >"$tmp/guest-capture.sh" <<'GUEST'
+set -eu
+[ "$#" = 8 ] && [ "$1" = aarch64-neon ] && [ "$2" = /not/executed/qemu ]
+[ "$(pwd)" = "$ITEM5_TEST_OUTPUT" ] && [ "$5" = build/providers/vector-provider.so ]
+[ -r "$5" ]
+echo ITEM5_QEMU_COMMAND_CONSTRUCTION_ONLY
+exit 1
+GUEST
+cat >"$tmp/invoke.sh" <<'PREFIX'
+set -eu
+root=$ITEM5_TEST_ROOT output=$ITEM5_TEST_OUTPUT
+target_profile=$ITEM5_TEST_PROFILE target_qemu=/not/executed/qemu
+qemu_guest_exec=$ITEM5_TEST_GUEST_CAPTURE
+watchdog=$root/scripts/resource/process-tree-rss-watchdog.pl
+staged_observer=$output/staged/vector-observer.so
+max_rss_kib=1048576 timeout_seconds=60
+fail() { echo "$*" >&2; exit 1; }
+PREFIX
+sed -n '/^run_app() {/,/^}/p' "$runner" >>"$tmp/invoke.sh"
+grep '^staged_provider_argument=' "$runner" >>"$tmp/invoke.sh"
+cat >>"$tmp/invoke.sh" <<'INVOKE'
+run_app "$ITEM5_TEST_ROLE" "$output/staged/db-vector/probe" db-vector never-a-pass \
+    "$staged_provider_argument" unused-digest 1 1
+INVOKE
+export ITEM5_TEST_ROOT=$root ITEM5_TEST_GUEST_CAPTURE=$tmp/guest-capture.sh
+for profile in native aarch64-neon; do
+    export ITEM5_TEST_PROFILE=$profile ITEM5_TEST_ROLE=db-vector-path-$profile
+    if sh "$tmp/invoke.sh" >"$tmp/$profile.log" 2>&1; then
+        echo 'FAIL deliberate vector probe failure was accepted'; exit 1
+    fi
+done
+grep -qx ITEM5_NEGATIVE_VECTOR_RELATIVE_ARG_OK "$ITEM5_TEST_OUTPUT/logs/db-vector-path-native.stdout"
+grep -qx ITEM5_NEGATIVE_CWD_PROVIDER_SNAPSHOT_OK "$ITEM5_TEST_OUTPUT/logs/db-vector-path-native.stdout"
+grep -qx ITEM5_QEMU_COMMAND_CONSTRUCTION_ONLY "$ITEM5_TEST_OUTPUT/logs/db-vector-path-aarch64-neon.stdout"
+[ ! -e "$ITEM5_TEST_OUTPUT/evidence.env" ]
+echo 'ITEM5_PROVIDER_PATH_TEST_PASS native_cwd_snapshot=checked native_vector_argument=checked qemu_construction=checked qemu_execution=not_run simple_apps=not_run'

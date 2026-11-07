@@ -1,0 +1,53 @@
+use std.spec
+use app.cli.shard_mem_clamp.{shard_tree_headroom_kib_for_v1, build_memory_reserve_default_kib_v1, shard_effective_tree_budget_kb_v1, shard_pool_workers_v1, SHARD_HIR_WORKER_KB_V1, SHARD_PARSE_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1, BUILD_MEMORY_RESERVE_CAP_KIB_V1}
+
+# doc/08_tracking/bug/stage2_compiler_tests_frontend_shard_rss_2026-10-25.md
+# doc/08_tracking/bug/tree_rss_whole_build_floor_blocks_32g_hosts_2026-11-05.md
+# Repro: with no env/host reserve the shard headroom fell back to a flat 24 GiB,
+# so a 32 GiB host (28 GiB free) admitted 0 HIR workers and silently fell back
+# to a single-process whole-program build. The fallback must be the host-scaled
+# build reserve (min(24 GiB, RAM/2)), and admission must stay fail-closed.
+val GIB: i64 = 1048576
+
+describe "shard headroom fallback is host-scaled":
+    it "32 GiB host with no explicit reserve keeps 16 GiB, admits >= 1 HIR worker":
+        val headroom = shard_tree_headroom_kib_for_v1("", 0, 32 * GIB)
+        expect(headroom).to_equal(16 * GIB)
+        val effective = shard_effective_tree_budget_kb_v1(0, 0, 28 * GIB, headroom)
+        expect(shard_pool_workers_v1(effective, SHARD_HIR_WORKER_KB_V1) >= 1).to_be_true()
+
+    it "explicit env and host reserves still win over the total":
+        expect(shard_tree_headroom_kib_for_v1("1073741824", 8 * GIB, 32 * GIB)).to_equal(GIB)
+        expect(shard_tree_headroom_kib_for_v1("", 8 * GIB, 32 * GIB)).to_equal(8 * GIB)
+
+    it "unknown total keeps the 24 GiB cap (unknown never shrinks the floor)":
+        expect(shard_tree_headroom_kib_for_v1("", 0)).to_equal(24 * GIB)
+        expect(shard_tree_headroom_kib_for_v1("", 0, 0 - 1)).to_equal(24 * GIB)
+
+describe "shard admission stays fail-closed (prevention)":
+    it "headroom is never above the 24 GiB cap and never above half of RAM":
+        for total_gib in [4, 8, 16, 24, 32, 48, 64, 128, 512]:
+            val headroom = shard_tree_headroom_kib_for_v1("", 0, total_gib * GIB)
+            expect(headroom <= BUILD_MEMORY_RESERVE_CAP_KIB_V1).to_be_true()
+            expect(headroom <= (total_gib * GIB) / 2).to_be_true()
+            expect(headroom).to_equal(build_memory_reserve_default_kib_v1(total_gib * GIB))
+
+    it "workers x measured estimate never exceeds free - headroom on any host":
+        for total_gib in [16, 24, 32, 48, 64, 128]:
+            val headroom = shard_tree_headroom_kib_for_v1("", 0, total_gib * GIB)
+            # Worst case for admission: the whole host is free.
+            val effective = shard_effective_tree_budget_kb_v1(0, 0, total_gib * GIB, headroom)
+            for est in [SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1]:
+                val workers = shard_pool_workers_v1(effective, est)
+                expect(workers * est <= total_gib * GIB - headroom).to_be_true()
+
+    it "keeps the measured per-worker estimates at or above the 2937-module peaks":
+        # 3.1-3.6 GiB parse, 5.3-6.3 GiB HIR (stage2_compiler_tests_frontend_shard_rss).
+        expect(SHARD_PARSE_WORKER_KB_V1 >= 3774874).to_be_true()
+        expect(SHARD_HIR_WORKER_KB_V1 >= 6606028).to_be_true()
+
+    it "48 GiB measured case: admitted HIR workers fit the measured 6.3 GiB peak":
+        val headroom = shard_tree_headroom_kib_for_v1("", 0, 48 * GIB)
+        val effective = shard_effective_tree_budget_kb_v1(0, 0, 48 * GIB, headroom)
+        val workers = shard_pool_workers_v1(effective, SHARD_HIR_WORKER_KB_V1)
+        expect(workers * 6606028 <= 48 * GIB - headroom).to_be_true()
