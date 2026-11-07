@@ -3,7 +3,7 @@
 - **Date:** 2026-07-24
 - **Severity:** high (breaks `bin/simple run` for hardware probes when seed
   delegation is not taken)
-- **Status:** closed — not reproducible on release/1.0.0 (re-verified 2026-11-07, see below)
+- **Status:** fix-implemented-verification-pending — fixed in source by `4b88aebf00b` (2026-08-21); native CLI not re-run (re-verified 2026-11-07, see below)
 
 ## Symptom
 
@@ -58,7 +58,7 @@ Root-fix (1) in the pure-Simple HIR import binder (test: the three
 path). For (2), make `run` delegation depend only on sibling presence, not on
 binary location/name.
 
-## Re-verification 2026-11-07 (release/1.0.0 @ 0e56cc6bade) — not reproducible
+## Re-verification 2026-11-07 (release/1.0.0 @ 0e56cc6bade) — no longer reproduces
 
 No self-hosted CLI is deployed on this host, so the native binary itself was
 not run. Instead the regression spec
@@ -85,8 +85,10 @@ Findings, per stage:
   not vacuous.
 
 `SPEC FILE VERDICT: ... outcome=OK declared>=5 executed=5 passed=5 failed=0`.
-There is no red phase: the defect no longer exists in source, so no code was
-changed.
+There is no red phase: the defect was already fixed in source, so no code was
+changed here. The `std.X` -> `lib.X` fold in `resolve_module_key`
+(`module_import_registration.spl:1179-1187`) landed in `4b88aebf00b`
+(2026-08-21), after this bug was filed — i.e. it was fixed, not absent.
 
 Defect (2) (delegation): `_cli_driver_binary` (`src/app/io/cli_ops.spl:351`)
 no longer treats a `simple_seed` sibling as an implicit authority; it delegates

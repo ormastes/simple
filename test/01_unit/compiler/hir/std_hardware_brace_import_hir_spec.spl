@@ -27,6 +27,7 @@ struct ProbeClosure:
     surfaces: ModuleSurfacesByName
     entry_module: text
     seen: Dict<text, bool>
+    missing: [text]
 
 fn probe_closure(entry: text) -> ProbeClosure:
     var queue: [text] = [entry]
@@ -34,6 +35,7 @@ fn probe_closure(entry: text) -> ProbeClosure:
     var modules: Dict<text, Module> = {}
     var sources: [SourceFile] = []
     var entry_module = ""
+    var missing: [text] = []
     var cursor = 0
     while cursor < queue.len():
         val path = queue[cursor]
@@ -42,6 +44,8 @@ fn probe_closure(entry: text) -> ProbeClosure:
             continue
         seen[path] = true
         val content = file_read_nullable(path) ?? ""
+        if content.len() == 0:
+            missing.push(path)
         val module_name = _driver_module_name_from_path(path)
         if path == entry:
             entry_module = module_name
@@ -61,7 +65,7 @@ fn probe_closure(entry: text) -> ProbeClosure:
         case Ok(value): value
         case Err(error):
             ModuleSurfacesByName.empty()
-    ProbeClosure(modules: modules, surfaces: surfaces, entry_module: entry_module, seen: seen)
+    ProbeClosure(modules: modules, surfaces: surfaces, entry_module: entry_module, seen: seen, missing: missing)
 
 fn lower_errors(modules: Dict<text, Module>, surfaces: ModuleSurfacesByName, owner: text) -> [text]:
     if not modules.has(owner):
@@ -73,21 +77,25 @@ fn lower_errors(modules: Dict<text, Module>, surfaces: ModuleSurfacesByName, own
         messages.push(error.message)
     messages
 
-fn probe_hir_errors(entry: text) -> [text]:
+fn probe_hir_errors(entry: text, provider: text) -> [text]:
     val closure = probe_closure(entry)
+    if closure.missing.len() > 0:
+        return ["missing or empty probe source: {closure.missing}"]
+    if not closure.seen.has(provider):
+        return ["std.hardware provider was not loaded: " + provider]
     lower_errors(closure.modules, closure.surfaces, closure.entry_module)
 
 describe "std.hardware brace-import HIR resolution":
     it "resolves the multi-line std.hardware.link_mux brace-imports of jtag_route_probe":
-        val errors = probe_hir_errors("test/01_unit/lib/hardware/link_mux/jtag_route_probe.spl")
+        val errors = probe_hir_errors("test/01_unit/lib/hardware/link_mux/jtag_route_probe.spl", "src/lib/hardware/link_mux/jtag_route.spl")
         expect(errors).to_equal([])
 
     it "resolves the multi-line std.hardware.link_mux brace-imports of mux_probe":
-        val errors = probe_hir_errors("test/01_unit/lib/hardware/link_mux/mux_probe.spl")
+        val errors = probe_hir_errors("test/01_unit/lib/hardware/link_mux/mux_probe.spl", "src/lib/hardware/link_mux/mux.spl")
         expect(errors).to_equal([])
 
     it "resolves the std.hardware.link_mux brace-imports of frame_probe":
-        val errors = probe_hir_errors("test/01_unit/lib/hardware/link_mux/frame_probe.spl")
+        val errors = probe_hir_errors("test/01_unit/lib/hardware/link_mux/frame_probe.spl", "src/lib/hardware/link_mux/frame.spl")
         expect(errors).to_equal([])
 
     it "loads the std.hardware providers into the closure (non-vacuity)":
