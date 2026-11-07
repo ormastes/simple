@@ -1,0 +1,123 @@
+# @req ORCH-02 HOST-02
+# Pure full-template integrity fixtures, never live owner/admission authority.
+# Execution NOT_RUN; daemon V3 codec dependency pending integration.
+use std.common.contracts.container.stream_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.group_process_stream_profile_v3.*
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+
+fn output_codec_fixture_v2() -> ContainerOutputPlanV2:
+    val workload = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "workload", attempt: 2,
+        operation_id: "parent-operation", request_digest: "a".repeat(64), physical_host_id: "authorized-alias",
+        service_scope_id: "service", boot_id: "boot", provider_generation: 7, native_machine_id: "machine",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id, service_scope_id: workload.service_scope_id,
+        boot_id: workload.boot_id, provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: workload.workload_uid, attempt: workload.attempt,
+        operation_id: workload.operation_id, provider_generation: workload.provider_generation, engine: "podman",
+        native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val identity = ContainerOutputIdentityV2(operation_id: "output-operation", parent_operation_id: workload.operation_id,
+        parent_operation_digest: "c".repeat(64), parent_assignment_digest: "d".repeat(64),
+        parent_budget_digest: "e".repeat(64), binding_digest: "f".repeat(64))
+    val args = ["attach", "--no-stdin", "--sig-proxy=false", runtime.native_id]
+    val request = GroupProcessStreamRequestV2(program: "/usr/bin/podman", producer_digest: "1".repeat(64), args: args,
+        environment: ["LANG=C", "TERM=dumb"], directory: "/trusted/work", inputs: [], timeout_ms: 30000,
+        broker_program: "/trusted/broker", broker_digest: "2".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2("/usr/bin/podman", args), launch_deadline_unix_ms: 0)
+    val budget = GroupProcessBrokerBudgetV3(cgroup_path: "/delegated/broker", device: 1, inode: 2, generation: 3,
+        policy_digest: "3".repeat(64), cpu_quota_us: 10000, cpu_period_us: 100000,
+        reserved_cpu_millis: 100, memory_limit_bytes: 16777216, reserved_memory_bytes: 16777216)
+    val profile = GroupProcessStreamProfileV3(helper_cpu: group_process_cpu_quota_v3(50).unwrap(),
+        broker: budget, child_image_mode: "trusted-local-admin-image-fd-v1")
+    val launch = GroupProcessStreamLaunchV2(root: "/trusted/output", worker_id: identity.operation_id, generation: 7,
+        snapshot_digest: "4".repeat(64), cache_identity: "5".repeat(64), memory_limit_bytes: 33554432,
+        request: request, delegated_cgroup_path: "/delegated/helpers", memory_policy: "enforce", transport_generation: 0,
+        profile_v3: Some(profile))
+    var plan = ContainerOutputPlanV2(mode: "output-follow", workload: workload, runtime: runtime, identity: identity,
+        resources: ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), provider_identity_digest: "6".repeat(64),
+        policy_digest: "7".repeat(64), launch_template: launch, request_digest: "")
+    plan.request_digest = container_output_plan_digest_v2(plan).unwrap()
+    plan
+
+fn output_codec_wire_v2(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn output_codec_without_v2(source: text, key: text) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    val fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    var retained: Dict<text, SdnValue> = {}
+    for name in fields.keys():
+        if name != key: retained[name] = fields[name]
+    sdn_encode_canonical(SdnValue.Dict(retained)) + "\n"
+
+describe "canonical retained container output plan integrity":
+    it "round trips the full template runtime identity and parent association without changing digest":
+        step("round trips the full template runtime identity and parent association without changing digest")
+        val plan = output_codec_fixture_v2()
+        val source = container_output_plan_encode_v2(plan).unwrap()
+        val decoded = container_output_plan_decode_v2(source).unwrap()
+        expect(container_output_plan_encode_v2(decoded).unwrap()).to_equal(source)
+        expect(container_output_plan_digest_v2(decoded).unwrap()).to_equal(plan.request_digest)
+        expect(group_process_stream_template_encode_v3(decoded.launch_template).unwrap()).to_equal(group_process_stream_template_encode_v3(plan.launch_template).unwrap())
+        expect(decoded.runtime).to_equal(plan.runtime)
+        expect(decoded.identity).to_equal(plan.identity)
+        expect(decoded.resources).to_equal(plan.resources)
+        expect(container_execution_plan_bytes_v2(decoded.workload).unwrap()).to_equal(container_execution_plan_bytes_v2(plan.workload).unwrap())
+
+    it "refuses changed digest template engine and runtime fence before restoration":
+        step("refuses changed digest template engine and runtime fence before restoration")
+        val plan = output_codec_fixture_v2()
+        var changed = plan
+        changed.request_digest = "a".repeat(64)
+        expect(container_output_plan_encode_v2(changed).is_err()).to_equal(true)
+        changed = plan
+        changed.launch_template.request.environment = ["LANG=changed"]
+        expect(container_output_plan_encode_v2(changed).is_err()).to_equal(true)
+        changed = plan
+        changed.runtime.engine = "docker"
+        expect(container_output_plan_encode_v2(changed).is_err()).to_equal(true)
+        changed = plan
+        changed.runtime.node_boot_id = "a".repeat(64)
+        expect(container_output_plan_encode_v2(changed).is_err()).to_equal(true)
+        val source = container_output_plan_encode_v2(plan).unwrap()
+        expect(container_output_plan_decode_v2(output_codec_wire_v2(source, "requestDigest", SdnValue.String("a".repeat(64)))).is_err()).to_equal(true)
+        expect(container_output_plan_decode_v2(output_codec_wire_v2(source, "runtimeEngine", SdnValue.String("docker"))).is_err()).to_equal(true)
+        expect(container_output_plan_decode_v2(output_codec_wire_v2(source, "launchTemplate", SdnValue.String("not a daemon template"))).is_err()).to_equal(true)
+
+    it "refuses generated transport and deadline fields in a retained template":
+        step("refuses generated transport and deadline fields in a retained template")
+        var plan = output_codec_fixture_v2()
+        plan.launch_template.transport_generation = 1
+        expect(container_output_plan_encode_v2(plan).is_err()).to_equal(true)
+        plan = output_codec_fixture_v2()
+        plan.launch_template.request.launch_deadline_unix_ms = 1000
+        expect(container_output_plan_encode_v2(plan).is_err()).to_equal(true)
+
+    it "refuses unknown missing mistyped duplicate and noncanonical outer fields":
+        step("refuses unknown missing mistyped duplicate and noncanonical outer fields")
+        val source = container_output_plan_encode_v2(output_codec_fixture_v2()).unwrap()
+        expect(container_output_plan_decode_v2(output_codec_wire_v2(source, "authorized", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(container_output_plan_decode_v2(output_codec_without_v2(source, "parentBudgetDigest")).is_err()).to_equal(true)
+        expect(container_output_plan_decode_v2(output_codec_wire_v2(source, "runtimeAttempt", SdnValue.String("2"))).is_err()).to_equal(true)
+        expect(container_output_plan_decode_v2(output_codec_wire_v2(source, "version", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(container_output_plan_decode_v2(source + "\n").is_err()).to_equal(true)
+        val head = source.slice(0, source.len() - 2)
+        expect(container_output_plan_decode_v2(head + ", version: 2" + "}\n").is_err()).to_equal(true)
+
+    it "bounds total and nested encoded bytes without accepting partial templates":
+        step("bounds total and nested encoded bytes without accepting partial templates")
+        val oversized = "é".repeat(1048577)
+        expect(str_len(oversized)).to_equal(2097154)
+        expect(container_output_plan_decode_v2(oversized).is_err()).to_equal(true)
+        val source = container_output_plan_encode_v2(output_codec_fixture_v2()).unwrap()
+        expect(container_output_plan_decode_v2(output_codec_wire_v2(source, "launchTemplate", SdnValue.String(oversized))).is_err()).to_equal(true)
+        expect(container_output_plan_decode_v2("").is_err()).to_equal(true)
