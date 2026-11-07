@@ -1,0 +1,89 @@
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse}
+use std.nogc_sync_mut.http_server.request_parser.{HttpRequestParserV1, http_request_parser_close_owned_v1}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+use std.common.base_encoding.{base_encoding_facade_text_to_bytes}
+
+val ITEM5_PERF_PAD: text = "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+
+fn item5_perf_handler_v1(request: HttpRequest) -> HttpResponse:
+    if request.path != "/bench" or request.body != "Wiki" or request.query != "pad={ITEM5_PERF_PAD}" or request.header("X-Pad") != ITEM5_PERF_PAD:
+        return HttpResponse.ok("INVALID_REQUEST")
+    HttpResponse.ok("ITEM5_MATCHED_HTTP_BODY")
+
+fn item5_perf_wire_hex_v1(wire: text) -> text:
+    val digits = "0123456789abcdef"
+    val bytes = base_encoding_facade_text_to_bytes(wire)
+    var encoded = ""
+    var index = 0
+    while index < bytes.len():
+        val octet = bytes[index] as i64
+        val high = octet / 16
+        val low = octet % 16
+        encoded = encoded + digits.slice(high, high + 1) + digits.slice(low, low + 1)
+        index = index + 1
+    encoded
+
+fn item5_http_workload_v1(parser: HttpRequestParserV1?) -> i32:
+    var router = Router.new()
+    router.post("/bench", item5_perf_handler_v1)
+    var server = SimpleHttpServer.new("127.0.0.1", 0, router)
+    val vector = parser != nil
+    if val owner = parser:
+        server = server.with_http_request_parser_v1(owner)
+    val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+    val address = listener.local_addr().unwrap()
+    val request = "POST /bench?pad={ITEM5_PERF_PAD} HTTP/1.1\r\nHost: loopback\r\nX-Pad: {ITEM5_PERF_PAD}\r\nContent-Length: 4\r\nConnection: close\r\n\r\nWiki"
+    var reference = ""
+    var batch = 0
+    while batch < 4:
+        var responses: [text] = []
+        var successes: [i64] = []
+        var handled: [bool] = []
+        var index = 0
+        val started = time_now_nanos()
+        while index < 128:
+            val client = TcpStream.connect(address).unwrap()
+            if not client.write_text_status(request): return 1
+            val connection = listener.accept().unwrap()
+            if not server.admission.try_acquire(): return 2
+            val outcome = server.handle_connection_on_owner_v1(connection)
+            responses.push(client.read_text().unwrap())
+            successes.push(outcome.provider_successes)
+            handled.push(outcome.handled)
+            if val next_parser = outcome.parser:
+                server = server.with_http_request_parser_v1(next_parser)
+            val _ = client.close()
+            index = index + 1
+        val elapsed = time_now_nanos() - started
+        if elapsed <= 0: return 3
+        var checksum: i64 = 0
+        var provider_calls: i64 = 0
+        index = 0
+        while index < 128:
+            val wire = responses[index]
+            if not handled[index] or not wire.starts_with("HTTP/1.1 200") or not wire.ends_with("ITEM5_MATCHED_HTTP_BODY"): return 4
+            if reference == "": reference = wire
+            if wire != reference: return 5
+            if vector and successes[index] <= 0: return 6
+            if not vector and successes[index] != 0: return 7
+            provider_calls = provider_calls + successes[index]
+            val bytes = base_encoding_facade_text_to_bytes(wire)
+            var byte_index = 0
+            while byte_index < bytes.len():
+                checksum = checksum + (bytes[byte_index] as i64)
+                byte_index = byte_index + 1
+            index = index + 1
+        if batch == 3:
+            println("ITEM5_PERF_V1 kind=http size=128 operations=128 ns={elapsed} checksum={checksum} results=128 provider_calls={provider_calls} warmups=3")
+            println("ITEM5_PERF_WIRE_V1 hex={item5_perf_wire_hex_v1(reference)}")
+        batch = batch + 1
+    val _ = listener.close()
+    if val final_parser = server.request_parser:
+        val closed = http_request_parser_close_owned_v1(final_parser)
+        if closed.status != 0: return 8
+    0
+
+export item5_http_workload_v1
