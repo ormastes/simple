@@ -171,3 +171,10 @@ merge is authorized by this decision. Qualified runtime/manual checks,
 clang-cl qualification, and the helper-oracle discrepancy remain pending;
 backend policy, actual optimizer DSO loading, and automatic aspect packaging
 are not completed by landing this scoped change.
+
+Required-CI follow-up: the inherited bug database had multiple `.csm` seals.
+Merging current release reduced three to two, but did not restore the canonical
+one-seal contract. The canonical reseal script produced
+`bug_db.xxh3_5e10ba41703d8f85.csm` and removed the two stale companions.
+`git hash-object` before and after confirmed that database content was unchanged.
+This is seal metadata repair only, not a bug-status reconciliation.
