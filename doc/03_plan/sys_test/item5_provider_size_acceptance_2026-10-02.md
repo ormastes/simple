@@ -52,6 +52,19 @@ production calls and built-in matchers. Source substring checks are auxiliary
 architecture checks. Missing native artifacts or receipts block acceptance.
 Existing synthetic BS7 receipts verify their checker only.
 
+BS7 authority update (2026-11-07): both canonical cohort entrypoints require
+`--stage4-receipt "$STAGE4_COMPILER.provenance.env"`,
+`--stage4-compiler "$STAGE4_COMPILER"` and
+`--stage4-source-root "$STAGE4_SOURCE_ROOT"` in addition to existing inputs.
+Use the actual adjacent `simple-bootstrap-stage4-provenance-v1` sidecar for a
+`pure-simple-full-cli` candidate; the existing verifier checks the full Stage3
+dependency chain. Do not synthesize a two-field Stage4 label or promote Phase2
+Hello evidence. The updated unit contract uses an unmodified Stage4 verifier
+with a private test-only deep Stage3 stub; its PASS is not native admission.
+Real startup/RSS, build/runtime bindings, NoGC inspection and no-demand
+observation acquisition remain OPEN. Empty supplied traces do not close I5-01,
+and supplied samples do not establish actual interpreter measurements.
+
 | Case | Requirement | Setup, action and observable assertion |
 |---|---|---|
 | I5-01 | REQ-001, NFR-005 | Start no-import hello with loader/init counters; register all optional descriptors; assert zero mappings, initializations, archive reads and provider effects before demand. |
