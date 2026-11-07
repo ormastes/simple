@@ -16,7 +16,7 @@ use compiler.core.ast.{DECL_CE, decl_ce_block}
 use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding, decl_type_alias}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_enum_payload_unnamed_marker, decl_set_lazy}
-use compiler.core.ast.{decl_set_type_params}
+use compiler.core.ast.{decl_set_type_params, decl_set_type_param_constraints}
 use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args, decl_set_vhdl_generic_args, decl_set_flatten_struct_output}
 use compiler.core.ast.{decl_impl_block}
 use compiler.frontend.core._Ast.decl_nodes.{decl_impl_block_typed}
@@ -2148,26 +2148,24 @@ fn parse_module_body():
             parser_advance()
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 35:
-            # Type alias: type X = Y -- capture name + aliased type into the
-            # arena (bug type_alias_declarations_discarded_at_parse_2026-07-29,
-            # lane TAL1). Pure plumbing: no semantic alias registry yet -- a
-            # later lane consumes module.type_aliases.
+            # Type aliases share declaration generic syntax, bounds/default
+            # transport, and the existing semantic alias owner.
             parser_advance()
             var ta_name: text = ""
             if par_kind_get() == 6:
                 ta_name = par_text_get()
                 parser_advance()
+            val ta_parameters = parse_type_params_with_trait_bounds()
             var ta_type_tag: i64 = 0
-            if par_kind_get() == TOK_ASSIGN:
-                parser_advance()
+            if parser_expect(TOK_ASSIGN):
                 ta_type_tag = parser_parse_type()
             if ta_name != "":
                 val ta_d = decl_type_alias(ta_name, ta_type_tag, 0)
+                decl_set_type_params(ta_d, ta_parameters.0)
+                decl_set_type_param_constraints(ta_d, ta_parameters.1)
                 module_add_decl(ta_d)
-            # Defensive skip-to-newline: this minimal capture does not parse
-            # generic type-alias params (`type X<T> = ...`) or where-clauses,
-            # so consume any leftover tokens the same way the old skip loop
-            # did rather than risking a parse desync.
+            # Preserve the existing recovery boundary for unsupported trailing
+            # syntax; generic parameters and the RHS have been consumed.
             while true:
                 val type_is_nl: bool = par_kind_get() == 180
                 val type_is_ded: bool = par_kind_get() == 182
