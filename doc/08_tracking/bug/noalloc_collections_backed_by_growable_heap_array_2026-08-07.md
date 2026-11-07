@@ -1,5 +1,18 @@
 # `nogc_async_mut_noalloc/collections/*` claim "no heap allocation" but are backed by a real heap `[T]` array — partially fixed, root cause stays open
-## Open 2026-09-16 — needs owner triage
+## Re-scoped 2026-11-07 — fix implemented, verification pending
+
+The post-construction allocation repair is present in source: `FixedArray`/
+`FixedStack` prefill storage in `new()`, and `FixedMap` uses parallel arrays.
+The historical backing-length and map regressions below support that source
+repair, but do not measure deployed-native allocation behavior. Closure needs
+an identified native executable and allocation measurements across steady-state
+insert/update/remove/clear operations. No such receipt is attached here.
+
+True inline/static storage is tracked separately by
+`doc/08_tracking/feature/inline_fixed_size_array_struct_storage_2026-11-07.md`
+(FR-LANG-INLINE-FIXED-ARRAY-0001). This split does not qualify either scope.
+
+## Historical investigation (retained; not native qualification)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -7,10 +20,9 @@ evidence found in the body. This is bookkeeping, not verification.
 **Filed:** 2026-08-07
 **Severity:** high — undermines the allocation-class lattice (WP-12) the whole
 Wave-3 aerospace plan depends on
-**Status:** PARTIALLY FIXED — steady-state (post-construction) heap growth
-eliminated for `FixedArray`/`FixedStack`, and per-operation object allocation
-eliminated for `FixedMap`; genuine inline/static storage is **not
-achievable** with the language as it exists today. Stays RED.
+**Status:** fix-implemented-verification-pending. The historical investigation
+below records source behavior and earlier test results; allocation-free native
+steady-state operation remains unverified.
 
 ## Origin
 
