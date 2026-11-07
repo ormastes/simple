@@ -2,6 +2,7 @@
 use std.spec.{describe, it, expect, fail}
 use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessCpuQuotaV3, GroupProcessBrokerBudgetV3, GroupProcessStreamProfileV3, group_process_cpu_quota_v3, group_process_stream_profile_validate_v3, group_process_stream_profile_encode_v3, group_process_stream_profile_decode_v3, group_process_stream_resource_receipt_v3}
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2, GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2, group_process_stream_launch_encode_v2, group_process_stream_launch_decode_v2, group_process_stream_launch_encode_v3, group_process_stream_launch_decode_v3, group_process_stream_launch_validate_profiled_v3, group_process_stream_template_encode_v3, group_process_stream_template_digest_v3, group_process_stream_apply_profile_v3}
+use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_decode_v3}
 
 fn stream_profile_policy_v3() -> GroupProcessStreamProfileV3:
     GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(25, 2500, 100000),
@@ -29,6 +30,30 @@ fn stream_profile_template_digest_v3(launch: GroupProcessStreamLaunchV2) -> text
             ""
 
 describe "canonical CPU resource profile V3":
+    it "restores only canonical zero-field templates and rejects launch or trailing bytes":
+        val actual = stream_profile_launch_v3()
+        val encoded = match group_process_stream_template_encode_v3(actual):
+            case Ok(value): value
+            case Err(reason):
+                fail("template encoding failed: {reason}")
+                ""
+        match group_process_stream_template_decode_v3(encoded):
+            case Ok(restored):
+                expect(restored.transport_generation).to_equal(0)
+                expect(restored.request.launch_deadline_unix_ms).to_equal(0)
+                expect(group_process_stream_launch_encode_v3(restored)).to_equal("")
+                match group_process_stream_template_encode_v3(restored):
+                    case Ok(value): expect(value).to_equal(encoded)
+                    case Err(reason): fail("restored template failed encoding: {reason}")
+            case Err(reason): fail("canonical template restore failed: {reason}")
+        val actual_wire = group_process_stream_launch_encode_v3(actual)
+        for invalid in [encoded + "trailing\n", actual_wire,
+                actual_wire.replace("SIMPLE-GROUP-STREAM-3\n", "SIMPLE-GROUP-STREAM-TEMPLATE-3\n"),
+                "x".repeat(16777217)]:
+            match group_process_stream_template_decode_v3(invalid):
+                case Err(_): ()
+                case Ok(_): fail("invalid template became restored metadata")
+
     it "derives exact quota at low CPU boundary and rejects zero negative overflow":
         for millis in [1, 9, 10, 25, 1000]:
             match group_process_cpu_quota_v3(millis):

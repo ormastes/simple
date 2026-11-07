@@ -169,10 +169,12 @@ fn group_process_stream_launch_encode_core_v3(value: GroupProcessStreamLaunchV2,
 fn group_process_stream_number_v2(field: text, limit: i64) -> Result<i64, text>:
     group_process_profile_number_v3(field, limit)
 
-fn group_process_stream_launch_decode_core_v3(payload: text, profiled: bool) -> Result<GroupProcessStreamLaunchV2, text>:
+fn group_process_stream_launch_decode_core_v3(payload: text, profiled: bool,
+        template: bool = false) -> Result<GroupProcessStreamLaunchV2, text>:
     if str_len(payload) > GROUP_PROCESS_STREAM_MAX_WIRE_BYTES_V2: return Err("stream wire exceeds bound")
     var reader = BuilderWireReaderV1.create(payload)
-    val expected = if profiled: "SIMPLE-GROUP-STREAM-3" else: "SIMPLE-GROUP-STREAM-2"
+    val expected = if template: "SIMPLE-GROUP-STREAM-TEMPLATE-3" else:
+        if profiled: "SIMPLE-GROUP-STREAM-3" else: "SIMPLE-GROUP-STREAM-2"
     if reader.scalar() != expected: return Err("invalid group stream header")
     val policy = reader.scalar()
     val root = reader.scalar()
@@ -215,7 +217,7 @@ fn group_process_stream_launch_decode_core_v3(payload: text, profiled: bool) -> 
         snapshot_digest: snapshot, cache_identity: cache, memory_limit_bytes: memory,
         request: request, delegated_cgroup_path: delegated, memory_policy: policy,
         transport_generation: transport, profile_v3: profile)
-    if group_process_stream_launch_encode_core_v3(launch, profiled) != payload:
+    if group_process_stream_launch_encode_core_v3(launch, profiled, template) != payload:
         return Err("noncanonical/invalid group stream request")
     Ok(launch)
 
@@ -316,4 +318,11 @@ fn group_process_stream_template_digest_v3(value: GroupProcessStreamLaunchV2) ->
     val payload = group_process_stream_template_encode_v3(value)?
     Ok(sha256_text(payload))
 
+# Restores planning metadata only. Shared strict parsing requires both dynamic
+# fields to be zero and rejects trailing/noncanonical bytes. Launch entrypoints
+# continue rejecting this domain and require a verified positive deadline.
+fn group_process_stream_template_decode_v3(payload: text) -> Result<GroupProcessStreamLaunchV2, text>:
+    group_process_stream_launch_decode_core_v3(payload, true, true)
+
 export group_process_stream_template_encode_v3, group_process_stream_template_digest_v3
+export group_process_stream_template_decode_v3

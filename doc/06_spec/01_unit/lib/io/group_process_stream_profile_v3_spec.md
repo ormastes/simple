@@ -1,5 +1,12 @@
 # Group stream CPU profile V3 manual
 
+Canonical persistence follow-up: `group_process_stream_template_decode_v3`
+shares the existing strict launch parser and re-encode validation in the
+`SIMPLE-GROUP-STREAM-TEMPLATE-3` domain. Both dynamic fields must be zero;
+restored metadata is not launch authority. One additional common spec covers
+roundtrip, zero fields, continued launch refusal, trailing bytes, substituted
+launch domain with nonzero fields and the existing 16MiB size bound. NOT_RUN.
+
 Planning capability follow-up: `linux_process_stream_template_admit_v3` in
 `std.nogc_sync_mut.io.linux_process_owner` validates the canonical V3 template
 and invokes the same native target check as launch admission. It creates no
