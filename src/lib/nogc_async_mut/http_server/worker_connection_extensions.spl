@@ -13,7 +13,7 @@ use std.nogc_async_mut.io.tcp_backend.{
 use std.http_server.types.{
     ConnectionAction, default_response_data
 }
-use std.http_server.response.{build_not_found}
+use std.http_server.response.{build_not_found, build_error}
 use std.http_server.h2_connection.{H2Connection}
 use std.http.h2.h2_preface.{h2_validate_preface, H2_CONNECTION_PREFACE_LEN}
 use std.http_server.worker_wire.{
@@ -507,7 +507,17 @@ impl Worker:
             val route_result = self.router.route(request)
             match route_result:
                 Ok((location, params)):
-                    resp = self.inline_static_handler(location, request)
+                    # Keep HTTP/2 handler selection consistent with H1: a
+                    # direct inline_static_handler bypasses custom registrations
+                    # and the server security context.
+                    if is_dynamic_handler(location.handler_type):
+                        if self.handler_registry.has_async(location.handler_type):
+                            # Async parking is per-fd (H1 only); fail closed.
+                            resp = build_error(503, "Async handler service unavailable")
+                        else:
+                            resp = self.execute_handler_with_remote_security_context(location, request)
+                    else:
+                        resp = self.inline_static_handler(location, request)
                 Err(e):
                     resp = build_not_found()
             if resp.body_file.len() > 0:

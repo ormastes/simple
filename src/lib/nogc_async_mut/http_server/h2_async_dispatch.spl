@@ -1,0 +1,69 @@
+"""
+# HTTP/2 asynchronous dispatch targets
+
+Worker-owned identity ledger connecting a bounded asynchronous handler job to
+one HTTP/2 connection and stream. It stores no socket or scheduler object and
+therefore cannot block the event loop. Multiple streams on one connection keep
+independent job identities.
+"""
+
+use std.http_server.types.{HttpRequestData}
+
+class H2AsyncTarget:
+    job_id: i64
+    connection_id: i64
+    stream_id: i64
+    request: HttpRequestData
+
+class H2AsyncDispatch:
+    targets: Dict<i64, H2AsyncTarget>
+
+    static fn create() -> H2AsyncDispatch:
+        H2AsyncDispatch(targets: {})
+
+    fn count() -> i64:
+        self.targets.keys().len()
+
+    fn contains(job_id: i64) -> bool:
+        self.targets.contains_key(job_id)
+
+    me register(job_id: i64, connection_id: i64, stream_id: i64,
+                request: HttpRequestData) -> bool:
+        if job_id <= 0 or stream_id <= 0 or self.targets.contains_key(job_id):
+            return false
+        for existing_id in self.targets.keys():
+            val existing = self.targets[existing_id]
+            if existing.connection_id == connection_id and existing.stream_id == stream_id:
+                return false
+        self.targets[job_id] = H2AsyncTarget(
+            job_id: job_id,
+            connection_id: connection_id,
+            stream_id: stream_id,
+            request: request
+        )
+        true
+
+    fn get(job_id: i64) -> H2AsyncTarget?:
+        if self.targets.contains_key(job_id):
+            return self.targets[job_id]
+        nil
+
+    me remove(job_id: i64) -> bool:
+        if not self.targets.contains_key(job_id):
+            return false
+        self.targets.remove(job_id)
+        true
+
+    fn job_ids() -> [i64]:
+        self.targets.keys()
+
+    me remove_connection(connection_id: i64) -> [i64]:
+        var removed: [i64] = []
+        val ids = self.targets.keys()
+        for job_id in ids:
+            if self.targets[job_id].connection_id == connection_id:
+                self.targets.remove(job_id)
+                removed.push(job_id)
+        removed
+
+export H2AsyncTarget, H2AsyncDispatch
