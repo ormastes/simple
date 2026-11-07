@@ -1,0 +1,239 @@
+# Trusted single-parent admission turn. No native exec/create/start or release.
+# Actual read-only resolver/probe may block: this is not a gateway callback and
+# must not be installed on its priority control loop as a synchronous handler.
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.host_local_command_v1.host_local_resolve_execution_v2
+use std.nogc_sync_mut.orchestration.host_runtime_exec_projection_v3.host_runtime_exec_parent_projection_v3
+use std.nogc_sync_mut.orchestration.host_exec_control_installation_owner_v3.host_exec_control_installation_load_v3
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.host_enrollment_payload_digest_v1
+use std.nogc_sync_mut.orchestration.host_cleanup_store_v1.host_cleanup_private_read_v1
+use std.nogc_sync_mut.orchestration.host_exec_private_publication_v3.host_exec_private_publish_v3
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.contracts.orchestration.host_runtime_exec_delegation_v3.*
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.common.contracts.container.exec_v3.container_exec_request_digest_v3
+use std.common.contracts.container.exec_admission_v3.ContainerExecAdmissionV3
+use std.common.contracts.container.exec_installed_v3.{ContainerExecInstalledV3, container_exec_installed_match_v3}
+use std.common.contracts.container.exec_control_v3.{container_exec_control_observation_match_v3, container_exec_control_observation_digest_v3}
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_deadline_v1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2, container_execution_plan_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.distributed_control_v2.ExecutionGrantV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v2, daemon_operation_begin_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_async_mut.container.exec_control_v3.{ContainerExecControlCleanupV3, simple_container_exec_control_probe_v3}
+use std.nogc_sync_mut.io.file_ops.file_exists
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostRuntimeExecLeaseV3:
+    admission: ContainerExecAdmissionV3
+    installed: ContainerExecInstalledV3
+    delegation: HostRuntimeExecDelegationV3
+    delegation_digest: text
+
+pub struct HostRuntimeExecBeginTurnV3:
+    local: HostLocalRootV1
+    lease: Option<HostRuntimeExecLeaseV3>
+    control_cleanup: Option<ContainerExecControlCleanupV3>
+    recovery_required: bool
+    error: text
+
+fn exec_begin_failed_v3(local: HostLocalRootV1, recovery: bool, reason: text) -> HostRuntimeExecBeginTurnV3:
+    HostRuntimeExecBeginTurnV3(local: local, lease: nil, control_cleanup: nil, recovery_required: recovery, error: reason)
+
+# Exact retained charge/current owner, not another allocation or a caller-supplied
+# assertion of continuity. Current native liveness is checked separately below.
+fn exec_begin_current_v3(local: HostLocalRootV1, packet: HostRuntimeExecRequestV3) -> Result<bool, text>:
+    val live = distributed_operation_journal_lookup_v2(local.capacity.journal, "")
+    if live.is_ok() or live.unwrap_err() != "OPERATION_NOT_FOUND": return Err("host-exec-begin-journal-not-current")
+    if not local.capacity.ledger.continuity_proven: return Err("host-exec-begin-reconciliation-required")
+    val parent = packet.intent.request.parent
+    val scope = ContainerHostScopeV2(physical_host_id: parent.physical_host_id, service_scope_id: parent.service_scope_id,
+        boot_id: parent.boot_id, provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
+        continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
+    if (container_host_scope_bytes_v2(scope)? != container_host_scope_bytes_v2(local.scope)? or
+            local.capacity.ledger.capacity.physical_host_id != scope.physical_host_id or
+            local.capacity.ledger.capacity.authority_id != "host-" + host_enrollment_payload_digest_v1(local.binding)? or
+            local.capacity.ledger.capacity.boot_id != container_scope_fence_id_v2(scope)? or
+            local.capacity.ledger.capacity.provider_generation != scope.provider_generation or
+            packet.intent.parent_provider_identity_digest != local.binding.provider_identity_digest):
+        return Err("host-exec-begin-current-scope-mismatch")
+    val original = packet.parent_binding.host_operation
+    val retained = distributed_operation_journal_lookup_v2(local.capacity.journal, original.id)?
+    if not ["executing", "outcome-unknown"].contains(retained.state): return Err("host-exec-begin-active-parent-required")
+    val expected = packet.parent_binding.host_intent.reservation
+    var count = 0
+    for row in local.capacity.ledger.reservations:
+        if row.operation_id == original.id:
+            count = count + 1
+            if (not [HostReservationStateV1.Executing, HostReservationStateV1.Uncertain].contains(row.state) or
+                    row.id != expected.id or row.payload_digest != original.payload_digest or row.cpu_millis != expected.cpu_millis or
+                    row.memory_bytes != expected.memory_bytes or row.exclusive_devices != expected.exclusive_devices or
+                    row.service_scope_id != expected.service_scope_id or row.assignment_generation != expected.assignment_generation or
+                    row.nonce != expected.nonce or row.prepare_deadline_ms != expected.prepare_deadline_ms):
+                return Err("host-exec-begin-parent-charge-mismatch")
+    if count != 1: return Err("host-exec-begin-parent-charge-required")
+    Ok(true)
+
+# No Host/Container owner is captured in the publication guard. Only immutable
+# policy, signed request and context data cross this synchronous callback port.
+fn exec_begin_verify_v3(policy: LocalAuthorityPolicyV1, packet: HostRuntimeExecRequestV3,
+        before: HostReservationAuthorizationContextV1, after: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
+    if (after.grant_clock <= 0 or after.monotonic_ms < 0 or after.grant_clock < before.grant_clock or
+            after.monotonic_ms < before.monotonic_ms): return Err("host-exec-begin-clock-invalid-or-regressed")
+    if (after.policy_revision != before.policy_revision or after.revocation_epoch != before.revocation_epoch or
+            after.session_generation != before.session_generation or after.policy_revision != policy.snapshot.policy_revision or
+            after.revocation_epoch != policy.snapshot.revocation_epoch or after.session_generation != policy.session_generation):
+        return Err("host-exec-begin-context-changed")
+    distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, packet.signed, packet.approval,
+        packet.operation, after.grant_clock, policy.snapshot.generation, after.policy_revision,
+        after.revocation_epoch, after.session_generation)
+
+fn exec_begin_deadline_v3(packet: HostRuntimeExecRequestV3, grant: ExecutionGrantV2) -> Result<ContainerEffectDeadlineV1, text>:
+    val expires = if grant.expires_at < packet.approval.expires_at: grant.expires_at else: packet.approval.expires_at
+    container_effect_deadline_v1(container_exec_request_digest_v3(packet.intent.request)?, packet.operation.id, ["exec"], expires)
+
+fn exec_begin_publication_error_v3(reason: text, stage_path: text) -> text:
+    # Retained stage metadata is not cleanup permission or known-native absence.
+    if stage_path == "": reason else: reason + ":retained-stage:" + stage_path
+
+pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> HostRuntimeExecBeginTurnV3:
+    var current = local
+    val decoded = host_runtime_exec_request_decode_v3(source)
+    if decoded.is_err(): return exec_begin_failed_v3(current, false, decoded.unwrap_err())
+    val packet = decoded.unwrap()
+    val envelope = distributed_encode_operation_v2(packet.operation)
+    if envelope.is_err(): return exec_begin_failed_v3(current, false, envelope.unwrap_err())
+    val root = current.capacity.journal.root
+    val name = sha256_text(packet.operation.id) + ".sdn"
+    val prior = distributed_operation_journal_lookup_v2(current.capacity.journal, packet.operation.id)
+    var admitted_retry = false
+    if prior.is_ok():
+        if prior.unwrap().envelope != envelope.unwrap(): return exec_begin_failed_v3(current, true, "host-exec-begin-original-operation-mismatch")
+        if prior.unwrap().state != "admitted": return exec_begin_failed_v3(current, true, "host-exec-begin-recovery-required")
+        admitted_retry = true
+        val archived = host_cleanup_private_read_v1(root + "/host-runtime-exec-requests", name, 4194304)
+        if archived.is_err(): return exec_begin_failed_v3(current, true, "host-exec-begin-admitted-archive-required:" + archived.unwrap_err())
+        if archived.unwrap() != source: return exec_begin_failed_v3(current, true, "host-exec-begin-original-packet-mismatch")
+    elif prior.unwrap_err() != "OPERATION_NOT_FOUND":
+        return exec_begin_failed_v3(current, true, prior.unwrap_err())
+    if file_exists(root + "/host-runtime-exec-delegations/" + name):
+        return exec_begin_failed_v3(current, true, "host-exec-begin-delegation-already-recorded")
+    val historical = host_runtime_exec_parent_projection_v3(current.capacity.journal, current.capacity.ledger.capacity, packet)
+    if historical.is_err(): return exec_begin_failed_v3(current, admitted_retry, historical.unwrap_err())
+    if not historical.unwrap(): return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-parent-proof-refused")
+    val charged = exec_begin_current_v3(current, packet)
+    if charged.is_err(): return exec_begin_failed_v3(current, admitted_retry, charged.unwrap_err())
+    # Even read-only native resolver work is preceded by full SDK verification.
+    val authorized = exec_begin_verify_v3(current.policy, packet, context, context)
+    if authorized.is_err(): return exec_begin_failed_v3(current, admitted_retry, authorized.unwrap_err())
+    val resolved = host_local_resolve_execution_v2(current, packet.intent.request.parent.operation_id)
+    current = resolved.local
+    if resolved.error != "": return exec_begin_failed_v3(current, admitted_retry, resolved.error)
+    if resolved.execution.is_none() or resolved.observation.is_none():
+        return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-parent-observation-required")
+    if resolved.observation.unwrap().phase != "running": return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-running-parent-required")
+    val actual_plan = container_execution_plan_bytes_v2(resolved.execution.unwrap().plan)
+    val requested_plan = container_execution_plan_bytes_v2(packet.intent.request.parent)
+    if actual_plan.is_err() or requested_plan.is_err(): return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-parent-plan-invalid")
+    if actual_plan.unwrap() != requested_plan.unwrap(): return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-parent-plan-mismatch")
+    val loaded = host_exec_control_installation_load_v3(current)
+    if loaded.is_err(): return exec_begin_failed_v3(current, admitted_retry, loaded.unwrap_err())
+    val installation = loaded.unwrap()
+    val before_probe = refresh()
+    val probe_authority = exec_begin_verify_v3(current.policy, packet, context, before_probe)
+    if probe_authority.is_err(): return exec_begin_failed_v3(current, admitted_retry, probe_authority.unwrap_err())
+    val probe_timeout = if packet.intent.request.timeout_ms > 30000: 30000 else: packet.intent.request.timeout_ms
+    val probed = simple_container_exec_control_probe_v3(current.container, resolved.execution.unwrap(),
+        packet.intent.request.parent_runtime, installation.canonical_policy_bytes, probe_timeout)
+    current.container = probed.owner
+    if probed.error != "" or probed.cleanup.is_some() or probed.observation.is_none():
+        val reason = if probed.error != "": probed.error else: "host-exec-begin-control-cleanup-or-observation-required"
+        return HostRuntimeExecBeginTurnV3(current, nil, probed.cleanup, admitted_retry or probed.cleanup.is_some(), reason)
+    val control = probed.observation.unwrap()
+    val matched_control = container_exec_control_observation_match_v3(control, resolved.execution.unwrap(),
+        packet.intent.request.parent_runtime, packet.intent.parent_provider_identity_digest, installation.intent.control_policy_digest)
+    if matched_control.is_err(): return exec_begin_failed_v3(current, admitted_retry, matched_control.unwrap_err())
+    if not matched_control.unwrap(): return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-control-observation-refused")
+    if control.exec_control_identity_digest != packet.intent.exec_control_identity_digest:
+        return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-control-identity-mismatch")
+    if control.observed_unix_ms < before_probe.grant_clock:
+        return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-control-clock-regressed")
+    val after_probe = refresh()
+    val fresh_authority = exec_begin_verify_v3(current.policy, packet, before_probe, after_probe)
+    if fresh_authority.is_err(): return exec_begin_failed_v3(current, admitted_retry, fresh_authority.unwrap_err())
+    if after_probe.grant_clock < control.observed_unix_ms:
+        return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-control-clock-regressed")
+    val deadline = exec_begin_deadline_v3(packet, fresh_authority.unwrap())
+    if deadline.is_err(): return exec_begin_failed_v3(current, admitted_retry, deadline.unwrap_err())
+    val control_digest = container_exec_control_observation_digest_v3(control)
+    if control_digest.is_err(): return exec_begin_failed_v3(current, admitted_retry, control_digest.unwrap_err())
+    val policy = current.policy
+    val archive_guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+        val fresh = refresh()
+        val verified = exec_begin_verify_v3(policy, packet, after_probe, fresh)?
+        Ok(fresh)
+    val archived = host_exec_private_publish_v3(root, "host-runtime-exec-requests", name, source, archive_guard)
+    if archived.error != "" or archived.recovery_required:
+        val reason = if archived.error != "": archived.error else: "host-exec-begin-archive-recovery-required"
+        return exec_begin_failed_v3(current, admitted_retry or archived.recovery_required,
+            exec_begin_publication_error_v3(reason, archived.stage_path))
+    if archived.context.is_none(): return exec_begin_failed_v3(current, true, "host-exec-begin-archive-context-required")
+    val before_admit = refresh()
+    val admit_authority = exec_begin_verify_v3(policy, packet, archived.context.unwrap(), before_admit)
+    if admit_authority.is_err(): return exec_begin_failed_v3(current, admitted_retry, admit_authority.unwrap_err())
+    val admitted = daemon_operation_admit_v2(current.capacity.journal, packet.operation)
+    if admitted.is_err(): return exec_begin_failed_v3(current, true, admitted.unwrap_err())
+    current.capacity.journal = admitted.unwrap().journal
+    current.capacity.ledger.revision = current.capacity.journal.sequence + 1
+    if admitted.unwrap().state != "admitted": return exec_begin_failed_v3(current, true, "host-exec-begin-recovery-required")
+    val before_begin = refresh()
+    val begin_authority = exec_begin_verify_v3(policy, packet, before_admit, before_begin)
+    if begin_authority.is_err(): return exec_begin_failed_v3(current, true, begin_authority.unwrap_err())
+    val begun = daemon_operation_begin_v2(current.capacity.journal, packet.operation)
+    if begun.is_err(): return exec_begin_failed_v3(current, true, begun.unwrap_err())
+    current.capacity.journal = begun.unwrap()
+    # These actual durable cuts are captured immediately; no later commit is
+    # permitted to stand in for the original one-use child BEGIN.
+    val begin_sequence = current.capacity.journal.sequence
+    val begin_revision = current.capacity.journal.revision
+    current.capacity.ledger.revision = begin_sequence + 1
+    val after_begin = refresh()
+    val delegation_authority = exec_begin_verify_v3(policy, packet, before_begin, after_begin)
+    if delegation_authority.is_err(): return exec_begin_failed_v3(current, true, delegation_authority.unwrap_err())
+    val delegation = HostRuntimeExecDelegationV3(request: packet, installation: installation.request,
+        installation_artifact_digest: installation.artifact_digest, begin_journal_sequence: begin_sequence,
+        begin_journal_commit_digest: begin_revision, control_observation_digest: control_digest.unwrap(),
+        observed_unix_ms: control.observed_unix_ms, deadline: deadline.unwrap())
+    val delegation_bytes = host_runtime_exec_delegation_encode_v3(delegation)
+    if delegation_bytes.is_err(): return exec_begin_failed_v3(current, true, delegation_bytes.unwrap_err())
+    val proof_digest = sha256_text(delegation_bytes.unwrap())
+    val admission = ContainerExecAdmissionV3(intent: packet.intent, request: packet.intent.request, operation: packet.operation,
+        parent_operation_digest: packet.intent.parent_operation_digest, parent_assignment_digest: packet.intent.parent_assignment_digest,
+        provider_identity_digest: control.exec_control_identity_digest, deadline: deadline.unwrap(), grant_id: packet.signed.grant.id,
+        issuer_id: packet.signed.issuer_id, approver_id: packet.approval.approver_id, execution_proof_digest: proof_digest)
+    val installed = ContainerExecInstalledV3(intent: installation.intent, artifact_digest: installation.artifact_digest)
+    val installed_match = container_exec_installed_match_v3(installed, admission)
+    if installed_match.is_err(): return exec_begin_failed_v3(current, true, installed_match.unwrap_err())
+    if not installed_match.unwrap(): return exec_begin_failed_v3(current, true, "host-exec-begin-installed-refused")
+    val delegation_guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+        val fresh = refresh()
+        val verified = exec_begin_verify_v3(policy, packet, after_begin, fresh)?
+        Ok(fresh)
+    val delegated = host_exec_private_publish_v3(root, "host-runtime-exec-delegations", name,
+        delegation_bytes.unwrap(), delegation_guard)
+    if delegated.error != "" or delegated.recovery_required:
+        val reason = if delegated.error != "": delegated.error else: "host-exec-begin-delegation-recovery-required"
+        return exec_begin_failed_v3(current, true, exec_begin_publication_error_v3(reason, delegated.stage_path))
+    if not delegated.published_new: return exec_begin_failed_v3(current, true, "host-exec-begin-delegation-already-recorded")
+    if delegated.context.is_none(): return exec_begin_failed_v3(current, true, "host-exec-begin-delegation-context-required")
+    val handoff = refresh()
+    val handoff_authority = exec_begin_verify_v3(policy, packet, delegated.context.unwrap(), handoff)
+    if handoff_authority.is_err(): return exec_begin_failed_v3(current, true, handoff_authority.unwrap_err())
+    HostRuntimeExecBeginTurnV3(local: current, lease: Some(HostRuntimeExecLeaseV3(admission: admission, installed: installed,
+        delegation: delegation, delegation_digest: proof_digest)), control_cleanup: nil, recovery_required: false, error: "")
