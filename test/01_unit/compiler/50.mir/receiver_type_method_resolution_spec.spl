@@ -1,0 +1,82 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Receiver types survive lowering for builtin method calls (bootstrap run 15)
+
+Stage 2 row compiler_cli_build (run 15, base dba24b97b4d) sealed whole MIR
+shards failed on `unresolved method call ... route=runtime-fallback owner=`
+for receivers whose type was known in source but lost before method dispatch.
+Each probe drives parse -> HIR -> MIR in-process for one source shape.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn mir_errors_for(source: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "hir")
+    mir_lowering.lower_module(hir)
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + e.message + "\n"
+    out
+
+val nested_dict_coalesce_source = "fn probe(file_hashes: {text: {text: bool}}) -> i64:\n    var n = 0\n    for file in file_hashes.keys():\n        val hashes = file_hashes[file] ?? {}\n        for hash_key in hashes.keys():\n            n = n + 1\n    n\n"
+
+val optional_dict_coalesce_source = "fn probe(h0: {text: bool}?) -> i64:\n    val h = h0 ?? {}\n    h.keys().len()\n"
+
+val sdn_shape_tuple_payload_source = "enum Val:\n    A\n    B(n: i64)\n\nstruct Issue:\n    line: i64\n    col: i64\n\nfn parse_it(s: text) -> Result<(Val, Dict<text, i64>, [Issue]), text>:\n    Ok((Val.A, {}, [Issue(line: 1, col: 2)]))\n\nfn probe(s: text) -> text:\n    var out = \"\"\n    match parse_it(s):\n        case Err(m): out = m\n        case Ok(parsed):\n            for issue in parsed.2:\n                out = out + issue.line.to_text() + \":\" + issue.col.to_text()\n    out\n"
+
+val tuple_payload_array_member_source = "struct Issue:\n    line: i64\n\nfn parse_it(s: text) -> Result<(text, [Issue]), text>:\n    Ok((s, [Issue(line: 1)]))\n\nfn probe(s: text) -> text:\n    match parse_it(s):\n        case Err(m): m\n        case Ok(parsed):\n            val xs = parsed.1\n            xs[0].line.to_text()\n"
+
+val tuple_payload_struct_member_source = "struct Issue:\n    line: i64\n\nfn parse_it(s: text) -> Result<(text, Issue), text>:\n    Ok((s, Issue(line: 1)))\n\nfn probe(s: text) -> text:\n    match parse_it(s):\n        case Err(m): m\n        case Ok(parsed):\n            parsed.1.line.to_text()\n"
+
+val tuple_payload_scalar_member_source = "fn parse_it(s: text) -> Result<(text, i64), text>:\n    Ok((s, 0))\n\nfn probe(s: text) -> text:\n    match parse_it(s):\n        case Err(m): m\n        case Ok(parsed): parsed.1.to_text()\n"
+
+describe "receiver types reach builtin method dispatch":
+    # interner_and_logging.spl:621-622 `val hashes = file_hashes[file] ?? {}` then `hashes.keys()`
+    it "keeps the Dict payload type through `nested[k] ?? {}`":
+        val errs = mir_errors_for(nested_dict_coalesce_source)
+        print "mir errors: [{errs}]"
+        expect(errs).to_equal("")
+    it "keeps the Dict payload type through `opt_dict ?? {}`":
+        val errs = mir_errors_for(optional_dict_coalesce_source)
+        print "mir errors: [{errs}]"
+        expect(errs).to_equal("")
+    # traceability/sdn_codec.spl:151-152 `for issue in parsed.2:` on parse_with_spans_and_issues
+    it "types `for x in ok_binder.N` elements of an erased Result tuple payload":
+        val errs = mir_errors_for(sdn_shape_tuple_payload_source)
+        print "mir errors: [{errs}]"
+        expect(errs).to_equal("")
+    it "types an array member read off an erased Result tuple payload":
+        val errs = mir_errors_for(tuple_payload_array_member_source)
+        print "mir errors: [{errs}]"
+        expect(errs).to_equal("")
+    it "types a struct member read off an erased Result tuple payload":
+        val errs = mir_errors_for(tuple_payload_struct_member_source)
+        print "mir errors: [{errs}]"
+        expect(errs).to_equal("")
+    it "still lowers a scalar member of an erased Result tuple payload":
+        val errs = mir_errors_for(tuple_payload_scalar_member_source)
+        print "mir errors: [{errs}]"
+        expect(errs).to_equal("")
