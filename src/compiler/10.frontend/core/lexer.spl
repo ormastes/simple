@@ -96,6 +96,14 @@ var lex_token_end_direct: [i64] = [0]
 # once during normal scanning; speculative restores can rewind it.
 var lex_span_char_cursor: [i64] = [0]
 var lex_span_byte_cursor: [i64] = [0]
+# Empty until the first span conversion of a source; then one entry: whether
+# every character of the source is one byte (byte length == char count), in
+# which case a byte offset IS the char offset and the cursor walk is skipped.
+# Measured 2026-11-07 (seed interpreter, `lint driver_types.spl`, 82 KB
+# ASCII): the cursor walk was the single hottest interpreted leaf, 12.8% of
+# self time. Reset with the cursors; saved/restored with them for nested
+# lexers.
+var lex_span_all_ascii: [bool] = []
 var lex_cur_no_interp_direct: [bool] = [false]
 
 # Pure, independently testable: returns slot[0], or `default` when slot is
@@ -125,16 +133,21 @@ fn lexer_new(source: text) -> Lexer:
 fn lex_source_byte_offset(char_offset: i64) -> i64:
     if current_core_lexer_slot.len() == 0:
         return 0
-    if lex_span_char_cursor.len() == 0:
-        lex_span_char_cursor = [0]
-    if lex_span_byte_cursor.len() == 0:
-        lex_span_byte_cursor = [0]
     var target = char_offset
     if target < 0:
         target = 0
     val char_count = current_core_lexer_slot[0].source_chars.len()
     if target > char_count:
         target = char_count
+    if lex_span_all_ascii.len() == 0:
+        lex_span_all_ascii = [current_core_lexer_slot[0].source.len() == char_count]
+    if lex_span_all_ascii[0]:
+        # One byte per character: the offsets coincide, no walk needed.
+        return target
+    if lex_span_char_cursor.len() == 0:
+        lex_span_char_cursor = [0]
+    if lex_span_byte_cursor.len() == 0:
+        lex_span_byte_cursor = [0]
     if target < lex_span_char_cursor[0]:
         lex_span_char_cursor[0] = 0
         lex_span_byte_cursor[0] = 0
@@ -218,6 +231,7 @@ fn lex_init_with_path(source: text, source_path: text):
     # backing storage of the old module-global array.
     lex_span_char_cursor = [0]
     lex_span_byte_cursor = [0]
+    lex_span_all_ascii = []
     lex_env_save_enabled[0] = (env_get_nullable("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
     lex_generic_close_pending[0] = false
     core_token_env_save_set(lex_env_save_enabled[0])
@@ -1005,6 +1019,7 @@ pub struct LexerState:
     lex_token_end_direct: [i64]
     lex_span_char_cursor: [i64]
     lex_span_byte_cursor: [i64]
+    lex_span_all_ascii: [bool]
     lex_cur_no_interp_direct: [bool]
     lex_dead_reported: [bool]
     lex_all_kinds: [i64]
@@ -1031,6 +1046,7 @@ pub fn lexer_state_take() -> LexerState:
         lex_token_end_direct: lex_token_end_direct,
         lex_span_char_cursor: lex_span_char_cursor,
         lex_span_byte_cursor: lex_span_byte_cursor,
+        lex_span_all_ascii: lex_span_all_ascii,
         lex_cur_no_interp_direct: lex_cur_no_interp_direct,
         lex_dead_reported: lex_dead_reported,
         lex_all_kinds: lex_all_kinds,
@@ -1055,6 +1071,7 @@ pub fn lexer_state_take() -> LexerState:
     lex_token_end_direct = [0]
     lex_span_char_cursor = [0]
     lex_span_byte_cursor = [0]
+    lex_span_all_ascii = []
     lex_cur_no_interp_direct = [false]
     lex_dead_reported = [false]
     lex_all_kinds = []
@@ -1081,6 +1098,7 @@ pub fn lexer_state_install(s: LexerState):
     lex_token_end_direct = s.lex_token_end_direct
     lex_span_char_cursor = s.lex_span_char_cursor
     lex_span_byte_cursor = s.lex_span_byte_cursor
+    lex_span_all_ascii = s.lex_span_all_ascii
     lex_cur_no_interp_direct = s.lex_cur_no_interp_direct
     lex_dead_reported = s.lex_dead_reported
     lex_all_kinds = s.lex_all_kinds

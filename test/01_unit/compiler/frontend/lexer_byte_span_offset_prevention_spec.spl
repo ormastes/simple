@@ -1,0 +1,86 @@
+# Purpose and audience: prevention spec for the lexer's char-offset -> byte-offset
+# conversion (`lex_source_byte_offset`). The conversion takes an O(1) path when
+# every character of the source is one byte and a cursor walk otherwise; the
+# all-ASCII decision is cached per source. This spec pins, independently of
+# which path ran: every token's byte span slices the UTF-8 source back to the
+# token's own text, for an ASCII source, a multibyte source, and an ASCII
+# source lexed AFTER a multibyte one and vice versa (a cached decision that
+# leaked across `lex_init` calls would put every span of the second source
+# off by the multibyte surplus).
+# Bug: doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md (2026-11-07 note)
+
+use std.spec
+use std.spec.step
+
+use compiler.frontend.core.lexer.*
+
+# Byte offset of each char index, from the source itself: the oracle never
+# goes through the lexer's cursor or its all-ASCII flag.
+fn byte_prefix(source: text) -> [i64]:
+    val chars = source.chars()
+    var out: [i64] = [0]
+    var acc = 0
+    for c in chars:
+        acc = acc + c.len()
+        out.push(acc)
+    out
+
+# The source text covered by byte span [start, end_pos), rebuilt char by char.
+fn slice_by_bytes(source: text, prefix: [i64], start: i64, end_pos: i64) -> text:
+    val chars = source.chars()
+    var out = ""
+    var i = 0
+    while i < chars.len():
+        if prefix[i] >= start and prefix[i + 1] <= end_pos:
+            out = out + chars[i]
+        i = i + 1
+    out
+
+# Lex `source` and check every token whose text is a plain lexeme (identifiers,
+# keywords, numbers, punctuation): its span must slice the source to its text.
+# String literals are skipped because their `.text` is the unquoted value.
+# Returns the number of tokens actually checked so a vacuous run is visible.
+fn checked_tokens(source: text) -> i64:
+    val prefix = byte_prefix(source)
+    val lexer = lexer_new(source)
+    var checked = 0
+    var last_end = 0
+    for i in 0..256:
+        val token = lexer_next_token(lexer)
+        if token.span.end_pos < token.span.start:
+            expect(token.span.end_pos).to_equal(token.span.start)
+        if token.span.start < last_end:
+            expect(token.span.start).to_equal(last_end)
+        last_end = token.span.end_pos
+        val t = token.text
+        if t != "" and not t.contains("\n"):
+            val sliced = slice_by_bytes(source, prefix, token.span.start, token.span.end_pos)
+            # A string literal's `.text` is its unquoted value; its span
+            # covers the quotes, so the slice is the quoted form.
+            val quoted = "\"" + t + "\""
+            if sliced == t or sliced == quoted:
+                checked = checked + 1
+            else:
+                expect(sliced).to_equal(t)
+        if token.span.start >= source.len() and t == "":
+            break
+    checked
+
+val ascii_source = "fn add(a: i64, b: i64) -> i64:\n    val total = a + b\n    total\n"
+val multibyte_source = "val s = \"héllo wörld\"  # çomment ✓\nfn f(x: i64) -> i64:\n    x + 1\n"
+
+describe "Lexer byte spans survive the ASCII fast path":
+    it "slices an all-ASCII source back to every token":
+        step("Verify: byte offsets coincide with char offsets on ASCII input")
+        expect(checked_tokens(ascii_source) >= 18).to_equal(true)
+
+    it "slices a multibyte source back to every token":
+        step("Verify: spans after a multibyte literal and comment are UTF-8 byte offsets")
+        expect(checked_tokens(multibyte_source) >= 12).to_equal(true)
+
+    it "does not leak the all-ASCII decision from one source to the next":
+        step("Verify: ASCII then multibyte then ASCII, each source decided on its own")
+        expect(checked_tokens(ascii_source) >= 18).to_equal(true)
+        expect(checked_tokens(multibyte_source) >= 12).to_equal(true)
+        expect(checked_tokens(ascii_source) >= 18).to_equal(true)
+        expect(checked_tokens(multibyte_source) >= 12).to_equal(true)
