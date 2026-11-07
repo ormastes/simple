@@ -1,6 +1,6 @@
 # Bare variant inside `Some(..)` / `Ok(..)` / `Err(..)` binds on stage2, silently
 
-- **Status:** FIX IN REVIEW (branch `work/rel-bare-variant-generic-slot-20261010`)
+- **Status:** FIX LANDED on release/1.0.0 (lineage incl. f816e5e2bb4; review branch `work/rel-bare-variant-generic-slot-20261010` no longer exists, merged via squash/rebase). Spec `test/01_unit/compiler/50.mir/bare_variant_generic_slot_spec.spl` GREEN 10/10 on 2026-11-07 (seed release100-7a0e6fe516f). Not-covered items below stay open.
 - **Date:** 2026-10-10
 - **Severity:** HIGH (silent wrong-code in the pure-Simple compiler; seed is correct)
 - **Component:** `src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl`
