@@ -25,7 +25,7 @@ Scope: the 22 still-open PRs from the original 28-PR aggregation, assessed again
 | #7346 | Rust facade absent | filename/extension exports/test module absent; nativeall integration pending. |
 | #7265 | Partial umbrella | Ownership subset landed through #7237/#7404; source-session/diagnostic-snapshot work remains absent/unfinished. |
 | #7241 | Pinned lifecycle addition absent | Lifecycle contract owner/spec absent; PR has newer commits beyond original aggregate pin and is not declared fully assessed. |
-| #7344 | Unfinished repair absent | Seed owner-census/scoped-call additions and dedicated regressions absent. |
+| #7344 | Draft-specific changes not present; newer owners need comparison | Expanded census/temporary-assignment APIs from the pinned draft are absent; existing census and call-root refusal implementations are present. No equivalence or qualification claim. |
 
 The main checkout and all 373 registered worktrees had no `bin/release/*/simple` executable in the bounded availability audit. No Rust seed or provisional executable was substituted for required pure-runtime compiler/lib/MCP tests. Windows evidence is not a runnable Linux compiler. Native C/provider existence is not proof of the separate Rust/nativeall composition.
 
