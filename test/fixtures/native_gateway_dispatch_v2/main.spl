@@ -1,27 +1,12 @@
 # NOT_RUN. Two externally launched processes under already provisioned distinct
 # UIDs. This fixture never creates identities, elevates, or fabricates tokens.
 use std.nogc_sync_mut.sffi.cli_args.cli_get_args
-use std.common.string_core.{str_len, string_char_code_at}
-use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.common.string_core.str_len
+use test.fixtures.daemon_sdk.gateway_cli_v2.{gateway_fixture_uid_v2, gateway_fixture_now_v2}
 use std.nogc_sync_mut.io.local_ipc_v1.*
 use std.nogc_sync_mut.daemon_sdk.local_gateway_v1.*
 use std.nogc_sync_mut.daemon_sdk.local_gateway_client_v1.*
 use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.*
-
-fn uid_v2(source: text) -> i64:
-    assert(str_len(source) > 0 and str_len(source) <= 10)
-    var value = 0
-    for index in 0..str_len(source):
-        val digit = string_char_code_at(source, index) - 48
-        assert(digit >= 0 and digit <= 9)
-        value = value * 10 + digit
-        assert(value <= 2147483647)
-    value
-
-fn now_v2() -> i64:
-    val now = time_sample_monotonic_nanos_or_failure()
-    assert(now >= 0)
-    now / 1000000
 
 fn counted_v2(owner: i64, request: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<i64>:
     assert(request.action == "fixture-count" and request.operation_id == "fixture-operation")
@@ -41,10 +26,10 @@ fn server_v2(path: text, service_uid: i64, client_uid: i64, mode: text) -> i64:
     assert(opened.error == "" and opened.owner != nil)
     var listener = opened.owner.unwrap()
     print "gateway-dispatch-v2 LISTENING"
-    val deadline = now_v2() + 15000
+    val deadline = gateway_fixture_now_v2() + 15000
     var accepted: LocalGatewayConnectionV1? = nil
     while accepted == nil:
-        assert(now_v2() < deadline)
+        assert(gateway_fixture_now_v2() < deadline)
         val turn = local_gateway_accept_v1(listener, client_uid, 15000)
         listener = turn.listener
         accepted = turn.connection
@@ -52,7 +37,7 @@ fn server_v2(path: text, service_uid: i64, client_uid: i64, mode: text) -> i64:
     var connection = accepted.unwrap()
     var request: LocalGatewayRequestV1? = nil
     while request == nil:
-        assert(now_v2() < deadline)
+        assert(gateway_fixture_now_v2() < deadline)
         val received = local_gateway_receive_v2(connection)
         connection = received.connection
         assert(received.error == "")
@@ -91,7 +76,7 @@ fn server_v2(path: text, service_uid: i64, client_uid: i64, mode: text) -> i64:
     else:
         if mode == "success":
             while connection.phase == 2:
-                assert(now_v2() < deadline)
+                assert(gateway_fixture_now_v2() < deadline)
                 val sent = local_gateway_publish_v2(connection)
                 connection = sent.connection
                 assert(sent.error == "")
@@ -111,9 +96,9 @@ fn client_v2(path: text, service_uid: i64, mode: text) -> i64:
     val opened = local_gateway_client_open_v1(path, service_uid, header, payload, 15000)
     assert(opened.error == "" and opened.client != nil and opened.retained_connection == nil)
     var client = opened.client.unwrap()
-    val deadline = now_v2() + 15000
+    val deadline = gateway_fixture_now_v2() + 15000
     while client.phase < 4:
-        assert(now_v2() < deadline)
+        assert(gateway_fixture_now_v2() < deadline)
         client = local_gateway_client_poll_v1(client)
     if mode == "success":
         assert(client.phase == 4 and client.error == "")
@@ -131,8 +116,8 @@ fn main() -> i64:
     val role = args[1]
     val mode = args[2]
     assert(mode == "success" or mode == "correlation" or mode == "publication")
-    val service_uid = uid_v2(args[4])
-    val client_uid = uid_v2(args[5])
+    val service_uid = gateway_fixture_uid_v2(args[4])
+    val client_uid = gateway_fixture_uid_v2(args[5])
     assert(service_uid != client_uid and args[6] == "provisioned-distinct-uids")
     if role == "server": return server_v2(args[3], service_uid, client_uid, mode)
     assert(role == "client")
