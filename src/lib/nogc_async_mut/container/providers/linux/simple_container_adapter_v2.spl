@@ -4,7 +4,9 @@ use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, Container
     ContainerExecutionRequestV2, ContainerRequestProjectionV2, ContainerHostObservationV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RuntimeIntentV1, RuntimeIdentityV1,
-    RUNTIME_STATUS_REJECTED, runtime_command_empty, runtime_state_empty}
+    RUNTIME_STATUS_REJECTED, RUNTIME_PHASE_CREATED, RUNTIME_PHASE_RUNNING,
+    RUNTIME_PHASE_EXITED, RUNTIME_PHASE_STOPPED,
+    runtime_command_empty, runtime_state_empty}
 use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceiptV2,
     ContainerExecutionUserReceiptV2, container_execution_user_receipt_encode_v2,
     container_runtime_query_digest_v2, container_runtime_observation_digest_v2,
@@ -55,11 +57,15 @@ fn _linux_container_adapter_refused_v2(action: text, reason: text) -> RuntimeOpe
         command: runtime_command_empty(), state: runtime_state_empty(), exit_code: -1,
         stdout: "", stderr: "", reason: reason)
 
-fn _linux_container_intent_equal_v2(left: RuntimeIntentV1, right: RuntimeIntentV1) -> bool:
+fn _linux_container_intent_identity_equal_v2(left: RuntimeIntentV1, right: RuntimeIntentV1) -> bool:
     left.pod_uid == right.pod_uid and left.attempt == right.attempt and
         left.provider_generation == right.provider_generation and left.operation_id == right.operation_id and
         left.engine == right.engine and left.native_id == right.native_id and
-        left.node_boot_id == right.node_boot_id and left.phase == right.phase
+        left.node_boot_id == right.node_boot_id
+
+fn _linux_container_recovery_phase_allowed_v2(retained: text, expected: text) -> bool:
+    expected == RUNTIME_PHASE_CREATED and (retained == RUNTIME_PHASE_RUNNING or
+        retained == RUNTIME_PHASE_EXITED or retained == RUNTIME_PHASE_STOPPED)
 
 pub class LinuxSimpleContainerAdapterV2:
     scope: ContainerHostScopeV2
@@ -271,8 +277,19 @@ impl LinuxSimpleContainerAdapterV2:
         val retained = match self.provider.retained_intent_v1(decoded, true):
             case Ok(value): value
             case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
-        if not _linux_container_intent_equal_v2(retained, expected):
+        if not _linux_container_intent_identity_equal_v2(retained, expected):
             return _linux_container_adapter_refused_v2("recover", "container-adapter-retained-intent-mismatch")
+        if retained.phase != expected.phase:
+            if not _linux_container_recovery_phase_allowed_v2(retained.phase, expected.phase) or
+                    not builder_digest_valid_v1(retained.native_id) or not builder_digest_valid_v1(expected.native_id):
+                return _linux_container_adapter_refused_v2("recover", "container-adapter-recovery-phase-mismatch")
+            # Relax only a proven V2 binding. Existing exact-phase legacy and
+            # uncertain PREPARED recovery keep their original admission path.
+            val bound = match self.provider.retained_intent_v1(decoded):
+                case Ok(value): value
+                case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
+            if not _linux_container_intent_identity_equal_v2(bound, retained) or bound.phase != retained.phase:
+                return _linux_container_adapter_refused_v2("recover", "container-adapter-retained-intent-mismatch")
         match self._set_duration_v2(decoded):
             case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
             case Ok(_): pass
