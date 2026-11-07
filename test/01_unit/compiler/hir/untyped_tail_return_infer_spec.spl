@@ -17,6 +17,9 @@ use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_types.{HirTypeKind}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.MirLowering
+use compiler.mir.mir_serialization.{serialize_mir_function}
 
 fn lower_src(src: text, name: text, robust: bool) -> HirLowering:
     val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
@@ -76,6 +79,30 @@ describe "untyped tail-value return inference (owner decision 2026-11-06)":
         val src = "fn p():\n    print(\"x\")\n"
         expect(ret_kind_name(src, "call_tail", "p")).to_equal("unit")
         expect(diag_count(lower_src(src, "call_tail_d", false), "RET-")).to_equal(0)
+
+    it "keeps an explicit unit tail `()` as Unit with no diagnostic":
+        # Shape of src/compiler/80.driver/cache/integration/shadow_mode.spl
+        # `shadow_on_compile_done`: bare early returns plus a trailing `()`.
+        # Typing it Any gave an i64 signature, and Cranelift rejected every
+        # bare `return` ("arguments of return must match function signature").
+        val src = "fn u(a: bool):\n    if a:\n        return\n    ()\n"
+        expect(ret_kind_name(src, "unit_tail", "u")).to_equal("unit")
+        expect(diag_count(lower_src(src, "unit_tail_d", false), "RET-")).to_equal(0)
+
+    it "gives an explicit unit tail a Unit MIR signature, matching its bare returns":
+        val src = "fn u(a: bool):\n    if a:\n        return\n    ()\n"
+        val parsed = parse_full_frontend(src, "testdata/unit_tail_mir.spl", "unit_tail_mir", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/unit_tail_mir.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        var lowering = MirLowering.new(hir.symbols)
+        val mir = lowering.lower_module(hir)
+        expect(lowering.errors.len()).to_equal(0)
+        var signature = "missing"
+        for function in mir.functions.values():
+            if function.name == "u" or function.name.ends_with(".u"):
+                val serialized = serialize_mir_function(function)
+                signature = if serialized.contains("\"return_type\":\"Unit\""): "unit" else: "non-unit"
+        expect(signature).to_equal("unit")
 
 describe "robust mode: missing return type on a value-returning function is an error":
     it "rejects an untyped tail-value function":
