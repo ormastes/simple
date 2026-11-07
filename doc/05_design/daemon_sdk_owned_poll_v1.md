@@ -62,8 +62,13 @@ the unadmitted producer could not resolve `fill_span` at four call sites. The
 100 failed-module labels are one aggregate failure, not independent defects.
 The forbidden callback now uses the equivalent built-in `assert(false)` so the
 native oracle has no SSpec dependency; the actual SSpec wrapper remains intact.
-This changes no product behavior and weakens no expected result. A bounded
-second build with the changed closure is authorized; its result is separate.
+This changes no product behavior and weakens no expected result. The bounded
+second build at `13709568c52` reduced the closure from 100 to 71 modules but
+still failed at the same four `fill_span` calls before linking. The production
+entropy facade also reaches `secure_memory` through `crypto_sffi` and SHA-256;
+the removed test import was not its sole dependency path. Neither attempt
+produced an executable or established a generic-owner runtime verdict. See
+[the diagnostic report](../08_tracking/bug/native_owned_poll_secure_memory_fill_span_2026_11_07.md).
 
 Admitted SSpec, native execution, generated
 manual scores, branch coverage, legacy callback execution and full-library/
