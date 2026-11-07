@@ -15,7 +15,9 @@ use std.nogc_async_mut.container.stream_v2.*
 use std.nogc_async_mut.container.output_capabilities_v2.simple_container_output_capabilities_v2
 use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
 use test.fixtures.orchestration.host_helper_fixture_v1.host_helper_fixture_v1
-use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_receipt_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_helper_reservation_receipt_v1,
+    host_reservation_bind_intent_v1}
+use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_digest_v1
 use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
 use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
 
@@ -196,15 +198,22 @@ describe "Linux output-follow owned launch planning":
         helper_plan.parent_budget_digest = identity.parent_budget_digest
         helper_plan.request_digest = plan.request_digest
         helper_plan.scope = scope
-        val receipt = host_helper_reservation_receipt_v1(fixture.request.intent, fixture.request.operation).unwrap()
-        val helper = ContainerHelperAdmissionV2(plan: helper_plan, operation: fixture.request.operation,
+        var intent = fixture.request.intent
+        intent.plan_digest = host_helper_plan_digest_v1(helper_plan).unwrap()
+        intent.reservation.cpu_millis = resources.cpu_millis
+        intent = host_reservation_bind_intent_v1(intent).unwrap()
+        var operation = fixture.request.operation
+        operation.payload_digest = intent.reservation.payload_digest
+        val receipt = host_helper_reservation_receipt_v1(intent, operation).unwrap()
+        val helper = ContainerHelperAdmissionV2(plan: helper_plan, intent: intent, operation: operation,
             receipt: receipt, deadline: container_effect_deadline_v1(plan.request_digest, identity.operation_id, ["attach"], 100).unwrap(),
             grant_id: fixture.execution_signed.grant.id, issuer_id: fixture.execution_signed.issuer_id,
             approver_id: fixture.execution_approval.approver_id, cpu_millis: resources.cpu_millis,
             memory_bytes: resources.memory_bytes)
         # This is structural matching only; no test asserts authenticated lease.
         expect(container_output_admission_validate_v2(plan, helper).unwrap()).to_equal(true)
-        for kind in ["plan", "resources", "operation", "action", "host", "receipt", "deadline"]:
+        for kind in ["plan", "resources", "operation", "action", "host", "receipt", "deadline",
+                "original-plan", "intent-payload", "intent-resource", "intent-scope"]:
             var corrupt = helper
             if kind == "plan": corrupt.plan.parent_operation_digest = "e".repeat(64)
             if kind == "resources": corrupt.memory_bytes = corrupt.memory_bytes + 1
@@ -213,6 +222,15 @@ describe "Linux output-follow owned launch planning":
             if kind == "host": corrupt.operation.host_id = "foreign"
             if kind == "receipt": corrupt.receipt.receipt_digest = "e".repeat(64)
             if kind == "deadline": corrupt.deadline.request_digest = "e".repeat(64)
+            if kind == "original-plan":
+                # An internally consistent original signed operation/receipt
+                # cannot authorize a different helper plan attached to it.
+                corrupt.intent = fixture.request.intent
+                corrupt.operation = fixture.request.operation
+                corrupt.receipt = host_helper_reservation_receipt_v1(fixture.request.intent, fixture.request.operation).unwrap()
+            if kind == "intent-payload": corrupt.intent.reservation.nonce = "changed-nonce"
+            if kind == "intent-resource": corrupt.intent.reservation.cpu_millis = corrupt.intent.reservation.cpu_millis + 1
+            if kind == "intent-scope": corrupt.intent.fence.boot_id = "foreign"
             val refused = simple_container_open_output_v2(created.owner, request,
                 created.operation.state.identity, identity, corrupt, policy)
             match refused.spawn:
@@ -223,6 +241,10 @@ describe "Linux output-follow owned launch planning":
                         expect(reason).to_equal("container-output-admission-operation-mismatch")
                     if kind == "receipt": expect(reason).to_equal("reservation-receipt-mismatch")
                     if kind == "deadline": expect(reason).to_equal("container-output-admission-template-mismatch")
+                    if kind == "original-plan": expect(reason).to_equal("container-output-admission-intent-plan-mismatch")
+                    if kind == "intent-payload": expect(reason).to_equal("reservation-operation-mismatch")
+                    if kind == "intent-resource": expect(reason).to_equal("container-output-admission-intent-resource-mismatch")
+                    if kind == "intent-scope": expect(reason).to_equal("container-output-admission-intent-scope-mismatch")
                 case _: fail("corrupted helper carrier must not acquire a native owner")
             expect(adapter.provider.executor_call_count()).to_equal(1)
             expect(adapter.provider.scripted_cursor).to_equal(1)
