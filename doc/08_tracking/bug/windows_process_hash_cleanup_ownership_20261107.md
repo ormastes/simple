@@ -9,7 +9,8 @@ returns an empty digest without returning the failed resource identities.
 The caller can refuse launch, but cannot prove or retry cleanup of those native
 hash resources. A retained file pin alone does not close this ownership gap.
 
-The RAW stream now uses a separate retained V2 hash/pin bundle. It preserves
+The RAW stream's cohesive `windows_pty_owner.spl` capsule now uses a private
+retained V2 hash/pin bundle. It preserves
 the opened file HANDLE, failed CNG hash/algorithm identities, and failed heap
 releases in the existing managed PTY slot. Hash release precedes algorithm and
 buffer release. This source repair is NOT_RUN and does not qualify the inherited

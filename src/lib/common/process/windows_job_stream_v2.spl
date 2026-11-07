@@ -44,6 +44,39 @@ pub enum WindowsManagedStreamReadV2:
     End
     Failed(reason: text)
 
+# Pure authoritative commit/cleanup rules, used by native registry ports.
+# A copied snapshot never authorizes restoring a closed or newer owner.
+pub struct WindowsManagedOwnerVersionV2:
+    generation: i64
+    revision: i64
+    closed: bool
+    create_attempted: bool
+    terminal_observed: bool
+    leader_handle_present: bool
+
+pub fn windows_managed_owner_commit_v2(current: WindowsManagedOwnerVersionV2,
+        proposed: WindowsManagedOwnerVersionV2) -> Result<i64, text>:
+    if current.closed: return Err("Windows managed closed owner cannot be overwritten")
+    if current.generation != proposed.generation: return Err("Windows managed state generation differs")
+    if current.revision != proposed.revision: return Err("Windows managed state snapshot is stale")
+    if current.terminal_observed and not proposed.terminal_observed: return Err("Windows managed terminal proof cannot regress")
+    if current.create_attempted and not proposed.create_attempted: return Err("Windows managed attempt proof cannot regress")
+    if current.leader_handle_present and not proposed.leader_handle_present and not proposed.terminal_observed:
+        return Err("Windows managed leader release requires terminal proof")
+    if current.revision < 0 or current.revision >= 9223372036854775806:
+        return Err("Windows managed owner revision exhausted")
+    Ok(current.revision + 1)
+
+pub fn windows_managed_owner_cleanup_retry_v2(state: WindowsManagedOwnerVersionV2) -> bool:
+    not state.create_attempted or state.leader_handle_present or state.terminal_observed
+
+pub fn windows_managed_host_profile_matches_v2(expected: WindowsManagedStreamHostV2,
+        observed: WindowsManagedStreamHostV2) -> bool:
+    (expected.processor_groups == observed.processor_groups and
+        expected.logical_processors == observed.logical_processors and
+        expected.process_in_job == observed.process_in_job and
+        expected.cpu_quantum_millis == observed.cpu_quantum_millis)
+
 pub fn windows_managed_cpu_quantum_v2(groups: i64, processors: i64, nested: bool) -> Result<i64, text>:
     if groups != 1 or processors < 1 or processors > 64:
         return Err("windows-managed-stream-single-processor-group-required")

@@ -14,3 +14,9 @@ native launch ownership is acquired.
 This negative fixture does not qualify successful process creation, Job CPU or
 memory enforcement, stream backpressure, native fault injection, Docker, or
 interactive operation. Those Windows qualification gates remain outstanding.
+
+`src/runtime/test/rt_windows_pty_owner_thread_selfcheck.c` is an additional
+**NOT_RUN** Windows fixture. Two actual threads race the production owner guard;
+exactly one may bind. It checks that the main thread is rejected while the owner
+is alive and that owner exit prevents rebinding. This fixture covers the guard,
+not the complete Simple registry or Job/stream behavior.

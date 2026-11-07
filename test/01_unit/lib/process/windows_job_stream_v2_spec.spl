@@ -1,5 +1,7 @@
 use std.spec
 use std.common.process.windows_job_stream_v2.{WindowsManagedStreamHostV2, WindowsManagedStreamRequestV2,
+    WindowsManagedOwnerVersionV2, windows_managed_owner_commit_v2, windows_managed_owner_cleanup_retry_v2,
+    windows_managed_host_profile_matches_v2,
     windows_managed_cpu_quantum_v2, windows_managed_cpu_rate_v2, windows_managed_stream_request_reason_v2}
 use std.nogc_sync_mut.io.file_ops.file_read
 
@@ -65,20 +67,70 @@ describe "Windows Job stream V2 pure CPU and RAW contract":
         expiry.launch_expires_at_unix_ms = 0
         expect(windows_managed_stream_request_reason_v2(expiry, host(4))).to_equal("windows-managed-stream-time-budget-invalid")
 
+    it "REQ-WJS-010 rejects stale snapshots and any attempted closed-owner resurrection":
+        val current = WindowsManagedOwnerVersionV2(generation: 7, revision: 4, closed: false,
+            create_attempted: true, terminal_observed: false, leader_handle_present: true)
+        val snapshot = current
+        expect(windows_managed_owner_commit_v2(current, snapshot).unwrap()).to_equal(5)
+        var newer = current
+        newer.revision = 5
+        expect(windows_managed_owner_commit_v2(newer, snapshot).is_err()).to_equal(true)
+        val closed = WindowsManagedOwnerVersionV2(generation: 7, revision: 6, closed: true,
+            create_attempted: true, terminal_observed: true, leader_handle_present: false)
+        expect(windows_managed_owner_commit_v2(closed, snapshot).is_err()).to_equal(true)
+        var forged_current_revision = snapshot
+        forged_current_revision.revision = 6
+        expect(windows_managed_owner_commit_v2(closed, forged_current_revision).is_err()).to_equal(true)
+
+    it "REQ-WJS-011 retries remaining cleanup after a confirmed leader handle was released":
+        val partial = WindowsManagedOwnerVersionV2(generation: 7, revision: 9, closed: false,
+            create_attempted: true, terminal_observed: true, leader_handle_present: false)
+        expect(windows_managed_owner_cleanup_retry_v2(partial)).to_equal(true)
+        var discharged = partial
+        discharged.closed = true
+        expect(windows_managed_owner_commit_v2(partial, discharged).unwrap()).to_equal(10)
+        var unknown = partial
+        unknown.terminal_observed = false
+        expect(windows_managed_owner_cleanup_retry_v2(unknown)).to_equal(false)
+        var regressed = partial
+        regressed.terminal_observed = false
+        expect(windows_managed_owner_commit_v2(partial, regressed).is_err()).to_equal(true)
+        val running = WindowsManagedOwnerVersionV2(generation: 7, revision: 9, closed: false,
+            create_attempted: true, terminal_observed: false, leader_handle_present: true)
+        var lost_leader = running
+        lost_leader.leader_handle_present = false
+        expect(windows_managed_owner_commit_v2(running, lost_leader).is_err()).to_equal(true)
+
+    it "REQ-WJS-012 rejects changed CPU topology or nesting without rewriting the cap":
+        val original = host(4)
+        expect(windows_managed_host_profile_matches_v2(original, host(4))).to_equal(true)
+        expect(windows_managed_host_profile_matches_v2(original, host(8))).to_equal(false)
+        var regrouped = original
+        regrouped.processor_groups = 2
+        expect(windows_managed_host_profile_matches_v2(original, regrouped)).to_equal(false)
+        var nested = original
+        nested.process_in_job = true
+        expect(windows_managed_host_profile_matches_v2(original, nested)).to_equal(false)
+
 describe "Windows managed RAW native source ownership contract (not execution evidence)":
     it "REQ-WJS-005 keeps managed resources in the existing generation-checked PTY registry":
         val owner = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
-        val native = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_native_v2.spl")
+        val native = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
         expect(owner).to_contain("state.managed_generation != lease.generation")
-        expect(owner).to_contain("state.managed_create_attempted and state.process == 0")
+        expect(owner).to_contain("windows_managed_owner_cleanup_retry_v2")
         expect(owner).to_contain("next.managed_pins = retained_pins")
         expect(native).to_contain("not observed.leader_reaped or not observed.job_empty or observed.pending_io")
         expect(native).to_contain("Windows attempted child identity unknown; ownership retained")
 
     it "REQ-WJS-006 constructs a RAW child with hard Job readbacks and suspended admission checks":
-        val launch = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_launch_v2.spl")
-        val policy = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_policy_v2.spl")
-        expect(launch.contains("CreatePseudoConsole")).to_equal(false)
+        val launch = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
+        val policy = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
+        val raw_sections = launch.split("fn _windows_managed_raw_pipes_v2")
+        expect(raw_sections.len()).to_equal(2)
+        val raw_tail = raw_sections[1]
+        val raw_bodies = raw_tail.split("pub fn windows_managed_stream_admit_v2")
+        val raw_body = raw_bodies[0]
+        expect(raw_body.contains("CreatePseudoConsole")).to_equal(false)
         expect(launch).to_contain("state.managed_create_attempted = true")
         expect(launch).to_contain("before_create = windows_managed_stream_launch_check_v2")
         expect(launch).to_contain("before_resume = windows_managed_stream_launch_check_v2")
@@ -87,7 +139,7 @@ describe "Windows managed RAW native source ownership contract (not execution ev
         expect(policy).to_contain("volatile_read_u32(cpu) != 5u32")
 
     it "REQ-WJS-007 preserves byte channels and bounded input authority":
-        val native = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_native_v2.spl")
+        val native = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
         expect(native).to_contain("max_bytes > 8192")
         expect(native).to_contain("data.len() > 4096")
         expect(native).to_contain("state.pending_size = count")
@@ -102,8 +154,8 @@ describe "Windows managed RAW native source ownership contract (not execution ev
         expect(wrapper).to_contain("Windows managed stream unsupported on this platform")
 
     it "REQ-WJS-009 retains each failed CNG or heap release in the same cleanup lease":
-        val pin = file_read("src/lib/nogc_sync_mut/io/windows_process_owner.spl")
-        val launch = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_launch_v2.spl")
+        val pin = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
+        val launch = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
         val owner = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
         expect(pin).to_contain("retained.algorithm = volatile_read_u64(algorithm_slot)")
         expect(pin).to_contain("retained.hash = volatile_read_u64(hash_slot)")
@@ -120,3 +172,28 @@ describe "Windows managed RAW native source ownership contract (not execution ev
         expect(pin).to_contain("WINDOWS_MANAGED_PRODUCER_MAX_HASH_BYTES_V2: i64 = 268435456")
         expect(pin).to_contain("if not _windows_managed_hash_deadline_v2(expires_at_unix_ms)")
         expect(launch).to_contain("request.launch_expires_at_unix_ms)")
+
+    it "REQ-WJS-013 exposes no raw managed state through the forwarding modules":
+        val owner = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
+        val forwarder = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_native_v2.spl")
+        expect(owner.contains("pub fn _windows_pty_managed_load_v2")).to_equal(false)
+        expect(owner.contains("pub fn _windows_pty_managed_store_v2")).to_equal(false)
+        expect(owner.contains("export WindowsPtyStateV1")).to_equal(false)
+        expect(forwarder.contains("WindowsPtyStateV1")).to_equal(false)
+        expect(forwarder.contains("_windows_pty_managed_load_v2")).to_equal(false)
+        expect(owner).to_contain("state = _windows_pty_managed_store_v2(lease, state)?")
+
+    it "REQ-WJS-014 gates every legacy and managed entry on a pinned real owner thread":
+        val owner = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
+        val native = file_read("src/runtime/platform/runtime_windows_pty_owner_thread_private.h")
+        val public_entries = owner.split("\npub fn ")
+        val entry_guards = owner.split("_windows_pty_owner_entry_result_v2()")
+        # One private helper definition plus exactly one guard per public entry.
+        expect(entry_guards.len() - 2).to_equal(public_entries.len() - 1)
+        expect(native).to_contain("static SRWLOCK simple_pty_owner_binding_lock_v1")
+        expect(native).to_contain("DuplicateHandle(GetCurrentProcess(), GetCurrentThread()")
+        expect(native).to_contain("WaitForSingleObject(simple_pty_owner_thread_v1, 0)")
+        expect(native).to_contain("GetThreadId(simple_pty_owner_thread_v1)")
+        expect(native).to_contain("simple_pty_owner_phase_v1 = -2")
+        expect(native).to_contain("candidate && CloseHandle(candidate)")
+        expect(owner).to_contain("state.managed_started and not state.terminal_observed and not state.managed_cancelled")

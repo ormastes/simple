@@ -18,11 +18,22 @@ container input remains disabled until the caller provides separate authority.
 | REQ-WJS-007 | Review byte transport and backpressure | Raw bytes, 8192-byte reads, 4096-byte pending writes, resize refused |
 | REQ-WJS-008 | Review portable wrapper | Windows-only native import; explicit unsupported fallback |
 | REQ-WJS-009 | Review retained CNG/heap failure ledger | Hash, algorithm, and failed buffers remain in the same cleanup lease; hash release precedes algorithm/buffer release |
+| REQ-WJS-010 | Commit pure owner snapshots against authoritative versions | Stale snapshots and closed-owner resurrection rejected even with a forged current revision |
+| REQ-WJS-011 | Retry cleanup after confirmed leader release | Terminal proof permits remaining cleanup; unknown attempted leader and regressed proof refused |
+| REQ-WJS-012 | Compare the observed CPU deployment profile | Processor/group/nesting drift rejected; no affinity or rate rewrite |
+| REQ-WJS-013 | Review native capsule privacy | Forwarders expose typed operations only; authoritative raw state and commit helpers remain in one file |
+| REQ-WJS-014 | Review all entry guards and native thread binding | One real thread HANDLE, atomic publication, live-handle+ID checks, no rebound after exit |
 
 The managed producer-pin path also retains a failed UTF-16 path release. Its
 hash scan is capped at 256 MiB and samples the actual launch clock before and
 after each bounded file read. A native file read can still incur OS I/O delay;
 no hard bound on kernel scheduling or disk completion is claimed.
+
+The cohesive owner intentionally exceeds the file-size guideline to retain raw
+state privacy; see `doc/05_design/windows_managed_stream_owner_capsule_exception_20261107.md`.
+Stable processor topology is a deployment qualification requirement. Polling
+detects drift and requests cancellation but cannot prove instantaneous CPU caps
+across hotplug. Actual native fault and import-rejection tests remain NOT_RUN.
 
 Native acceptance still requires an admitted Windows binary and real negative
 tests for failed CreateProcess, Job assignment, readback, expiry while suspended,

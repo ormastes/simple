@@ -1282,6 +1282,9 @@ typedef struct RtOwnedProcessObservationV1 {
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1419. NOT a bare SplArray*. */
+/* Existing Windows PTY/Job registry is confined to one pinned native thread.
+ * A successful guard grants no process launch or cross-thread transfer. */
+int64_t   rt_windows_pty_owner_thread_guard_v1(void);
 int64_t   rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
