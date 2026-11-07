@@ -65,6 +65,10 @@ the nonce and probe producer with actual CLI bytes/version, exact image,
 configured-user observation, runtime identity and retained wait evidence.
 Only then may the resolver call the admitted agent CLI/invocation contracts.
 Expected association fields must never be promoted into an observed capability.
+The current admitted CLI adapter accepts Codex, Claude and Kimi profiles only.
+Gemini remains a required pending provider from the original scope; it is
+explicitly refused until its actual observed CLI adapter and probe-result
+validation exist. The expected-provider allowlist does not remove that work.
 
 Executable workspace preparation additionally requires an actual protected
 workspace/storage lease, exact file manifest, native identity/hash checks and

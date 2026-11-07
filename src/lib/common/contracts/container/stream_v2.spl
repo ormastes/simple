@@ -1,5 +1,5 @@
-# Trusted in-process output admission. These values are not wire grants and
-# have no decoder: only the host's verified helper lease may construct one.
+# Output plan wire data carries integrity only. Trusted in-process admission
+# has no decoder: only the host's verified helper lease may construct one.
 use std.common.contracts.container.execution_v2.*
 use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
@@ -7,12 +7,14 @@ use std.common.contracts.orchestration.host_helper_plan_v1.{HostHelperPlanV1, ho
 use std.common.contracts.orchestration.host_reservation_codec_v1.{HostPreparedReservationReceiptV1, host_reservation_receipt_integrity_v1}
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessBrokerBudgetV3, GroupProcessStreamProfileV3, group_process_cpu_quota_v3, group_process_stream_profile_validate_v3}
-use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_template_digest_v3}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_template_digest_v3, group_process_stream_template_encode_v3, group_process_stream_template_decode_v3}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.crypto.sha256.sha256_text
 use std.common.string_core.str_len
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 
 pub struct ContainerOutputIdentityV2:
     operation_id: text
@@ -203,3 +205,82 @@ pub fn container_output_admission_validate_v2(plan: ContainerOutputPlanV2,
     for identity in [helper.grant_id, helper.issuer_id, helper.approver_id]:
         if not builder_identifier_valid_v1(identity): return Err("container-output-admission-principal-invalid")
     Ok(true)
+
+# Retained plan data is not an admission or restored host lease. The common
+# open owner still requires a fresh actual plan and verified helper authority.
+pub fn container_output_plan_encode_v2(plan: ContainerOutputPlanV2) -> Result<text, text>:
+    if plan.request_digest != container_output_plan_digest_v2(plan)?:
+        return Err("container-output-plan-request-digest-mismatch")
+    val workload_bytes = container_execution_plan_bytes_v2(plan.workload)?
+    val template_bytes = group_process_stream_template_encode_v3(plan.launch_template)?
+    if str_len(workload_bytes) > 2097152 or str_len(template_bytes) > 2097152:
+        return Err("container-output-plan-nested-size")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("container-output-plan"),
+        "mode": SdnValue.String(plan.mode),
+        "workload": SdnValue.String(workload_bytes),
+        "runtimePodUid": SdnValue.String(plan.runtime.pod_uid),
+        "runtimeAttempt": SdnValue.Int(plan.runtime.attempt),
+        "runtimeProviderGeneration": SdnValue.Int(plan.runtime.provider_generation),
+        "runtimeOperationId": SdnValue.String(plan.runtime.operation_id),
+        "runtimeEngine": SdnValue.String(plan.runtime.engine),
+        "runtimeNativeId": SdnValue.String(plan.runtime.native_id),
+        "runtimeFence": SdnValue.String(plan.runtime.node_boot_id),
+        "operationId": SdnValue.String(plan.identity.operation_id),
+        "parentOperationId": SdnValue.String(plan.identity.parent_operation_id),
+        "parentOperationDigest": SdnValue.String(plan.identity.parent_operation_digest),
+        "parentAssignmentDigest": SdnValue.String(plan.identity.parent_assignment_digest),
+        "parentBudgetDigest": SdnValue.String(plan.identity.parent_budget_digest),
+        "bindingDigest": SdnValue.String(plan.identity.binding_digest),
+        "cpuMillis": SdnValue.Int(plan.resources.cpu_millis),
+        "memoryBytes": SdnValue.Int(plan.resources.memory_bytes),
+        "providerIdentityDigest": SdnValue.String(plan.provider_identity_digest),
+        "policyDigest": SdnValue.String(plan.policy_digest),
+        "requestDigest": SdnValue.String(plan.request_digest),
+        "launchTemplate": SdnValue.String(template_bytes)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 2097152: return Err("container-output-plan-source-size")
+    Ok(source)
+
+fn output_plan_text_v2(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("container-output-plan-text-required:" + key)
+
+fn output_plan_int_v2(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("container-output-plan-integer-required:" + key)
+
+pub fn container_output_plan_decode_v2(source: text) -> Result<ContainerOutputPlanV2, text>:
+    if str_len(source) == 0 or str_len(source) > 2097152: return Err("container-output-plan-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(value): value
+        case Err(_): return Err("container-output-plan-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("container-output-plan-object-required")
+    val names = ["version", "kind", "mode", "workload", "runtimePodUid", "runtimeAttempt", "runtimeProviderGeneration", "runtimeOperationId", "runtimeEngine", "runtimeNativeId", "runtimeFence", "operationId", "parentOperationId", "parentOperationDigest", "parentAssignmentDigest", "parentBudgetDigest", "bindingDigest", "cpuMillis", "memoryBytes", "providerIdentityDigest", "policyDigest", "requestDigest", "launchTemplate"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("container-output-plan-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("container-output-plan-missing-field:" + key)
+    if output_plan_int_v2(fields, "version")? != 2 or output_plan_text_v2(fields, "kind")? != "container-output-plan":
+        return Err("container-output-plan-version-kind")
+    val runtime = RuntimeIdentityV1(pod_uid: output_plan_text_v2(fields, "runtimePodUid")?,
+        attempt: output_plan_int_v2(fields, "runtimeAttempt")?, provider_generation: output_plan_int_v2(fields, "runtimeProviderGeneration")?,
+        operation_id: output_plan_text_v2(fields, "runtimeOperationId")?, engine: output_plan_text_v2(fields, "runtimeEngine")?,
+        native_id: output_plan_text_v2(fields, "runtimeNativeId")?, node_boot_id: output_plan_text_v2(fields, "runtimeFence")?)
+    val identity = ContainerOutputIdentityV2(operation_id: output_plan_text_v2(fields, "operationId")?,
+        parent_operation_id: output_plan_text_v2(fields, "parentOperationId")?,
+        parent_operation_digest: output_plan_text_v2(fields, "parentOperationDigest")?,
+        parent_assignment_digest: output_plan_text_v2(fields, "parentAssignmentDigest")?,
+        parent_budget_digest: output_plan_text_v2(fields, "parentBudgetDigest")?, binding_digest: output_plan_text_v2(fields, "bindingDigest")?)
+    val plan = ContainerOutputPlanV2(mode: output_plan_text_v2(fields, "mode")?,
+        workload: container_execution_plan_decode_v2(output_plan_text_v2(fields, "workload")?)?, runtime: runtime, identity: identity,
+        resources: ContainerOutputResourcesV2(cpu_millis: output_plan_int_v2(fields, "cpuMillis")?, memory_bytes: output_plan_int_v2(fields, "memoryBytes")?),
+        provider_identity_digest: output_plan_text_v2(fields, "providerIdentityDigest")?, policy_digest: output_plan_text_v2(fields, "policyDigest")?,
+        launch_template: group_process_stream_template_decode_v3(output_plan_text_v2(fields, "launchTemplate")?)?,
+        request_digest: output_plan_text_v2(fields, "requestDigest")?)
+    if container_output_plan_encode_v2(plan)? != source: return Err("container-output-plan-noncanonical")
+    Ok(plan)
