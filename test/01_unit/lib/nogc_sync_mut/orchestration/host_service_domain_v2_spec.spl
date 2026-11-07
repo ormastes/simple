@@ -1,0 +1,179 @@
+# @req HOST-02 ORCH-02
+# Actual metadata owner routes over existing legacy-journal test fixtures;
+# provider fixtures are explicitly scripted. These do NOT qualify owned startup/close.
+# Authored NOT_RUN, no native/SSpec/service or control-latency qualification.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.string_core.str_len
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, container_execution_request_encode_v2}
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.host_parent_budget_record_encode_v1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_v1
+use test.fixtures.orchestration.host_parent_budget_fixture_v1.*
+use test.fixtures.orchestration.host_local_resolver_fixture_v2.host_local_resolver_consumed_fixture_v2
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.host_execution_fixture_v2
+use std.nogc_sync_mut.io_runtime.{dir_remove, read_file_text}
+use std.nogc_sync_mut.io.file_ops.file_exists
+
+fn domain_fields_v2(source: text) -> Dict<text, SdnValue>:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536,
+        max_depth: 3, max_nodes: 128, max_rows: 0, max_cells: 0, max_columns: 32)).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(fields): fields
+        case _:
+            assert(false, "domain response must be an actual SDN object")
+            {}
+
+fn domain_request_fixture_v2() -> ContainerExecutionRequestV2:
+    # Obtain actual canonical provider bytes without invoking execute/start/wait.
+    # The auxiliary legacy journal is only existing fixture setup, then closed.
+    val fixture = host_execution_fixture_v2("success")
+    val request = fixture.envelope.execution
+    assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+    dir_remove(fixture.root, true)
+    request
+
+describe "Persistent host service domain":
+    it "checks byte bounds before any owner or request decoder is used":
+        step("Exercise exact operation and payload byte limits with non-ASCII text")
+        val exact = HostServiceRequestV2(action: "host-validate", operation_id: "a".repeat(128), payload: "e".repeat(2097152))
+        expect(host_service_request_error_v2(exact)).to_equal("")
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-validate", "a".repeat(129), "x"))).to_equal("host-service-operation-size")
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-validate", "op_1", "é".repeat(1048577)))).to_equal("host-service-payload-size")
+        expect(host_service_request_error_v2(HostServiceRequestV2("x".repeat(65), "op_1", "x"))).to_equal("host-service-action-size")
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-validate", "op_1", "x\u{0}y"))).to_equal("host-service-payload-nul")
+
+    it "rejects ignored status fields unknown actions and unbound read payloads":
+        step("Require exact action shape and correlation rather than interpreting wire identity")
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-status", "", ""))).to_equal("")
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-status", "op_1", ""))).to_equal("host-service-status-fields")
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-status", "", "principal: injected"))).to_equal("host-service-status-fields")
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-wait", "op_1", "changed-request"))).to_equal("host-service-read-payload-unexpected")
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-prepare", "", "x"))).to_equal("host-service-operation-invalid")
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-shell", "op_1", "touch SENTINEL"))).to_equal("host-service-action-unsupported")
+
+    it "bounds error output explicitly without serializing oversized details":
+        step("Encode and independently parse an error with oversized request metadata and reason")
+        val request = HostServiceRequestV2("z".repeat(1000), "invalid/id", "")
+        val response = host_service_error_payload_v2(request, "detail".repeat(1000), true)
+        val fields = domain_fields_v2(response)
+        expect(fields["kind"]).to_equal(SdnValue.String("host-service-error"))
+        expect(fields["action"]).to_equal(SdnValue.String(""))
+        expect(fields["operationId"]).to_equal(SdnValue.String(""))
+        expect(fields["detailOmitted"]).to_equal(SdnValue.Bool(true))
+        expect(fields["recoveryRequired"]).to_equal(SdnValue.Bool(true))
+        expect(str_len(response)).to_be_less_than(65536)
+
+    it "rejects invalid startup roots before entering any native factory":
+        step("Use inputs rejected before platform or provider probing")
+        for root in ["", "owned\u{0}root"]:
+            match host_service_domain_open_v2(root):
+                case HostServiceDomainOpenV2.Rejected(reason):
+                    expect(reason).to_equal("host-service-protected-root-invalid")
+                case _: assert(false, "invalid startup must reject before acquiring a capability")
+
+    it "serves actual retained capacity without expiring a prepared charge":
+        step("Read the real journal fixture through the shared unchanged status renderer")
+        val fixture = host_parent_budget_fixture_v1()
+        val owner = HostServiceDomainV2(local: fixture.local)
+        val before = owner.local.capacity.journal.sequence
+        val turn = host_service_domain_turn_v2(owner, HostServiceRequestV2("host-status", "", ""))
+        val fields = domain_fields_v2(turn.response)
+        expect(turn.exit_code).to_equal(0)
+        expect(fields["kind"]).to_equal(SdnValue.String("host-local-status"))
+        expect(fields["availableCpuMillis"]).to_equal(SdnValue.Int(3000))
+        expect(fields["availableMemoryBytes"]).to_equal(SdnValue.Int(7680))
+        expect(fields["retainedReservations"]).to_equal(SdnValue.Int(1))
+        expect(turn.owner.local.capacity.journal.sequence).to_equal(before)
+        expect(host_local_resolver_consumed_fixture_v2(turn.owner.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "projects the actual common request without another provider command":
+        step("Validate an exact retained canonical request using the shared single-decode helper")
+        val fixture = host_parent_budget_fixture_v1()
+        val payload = container_execution_request_encode_v2(domain_request_fixture_v2()).unwrap()
+        val before = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        val owner = HostServiceDomainV2(local: fixture.local)
+        val turn = host_service_domain_turn_v2(owner, HostServiceRequestV2("host-validate", "operation_1", payload))
+        val fields = domain_fields_v2(turn.response)
+        expect(turn.exit_code).to_equal(0)
+        expect(fields["operationId"]).to_equal(SdnValue.String("operation_1"))
+        expect(fields["executionAuthorized"]).to_equal(SdnValue.Bool(false))
+        expect(fields["cpuMillis"]).to_equal(SdnValue.Int(1000))
+        expect(fields["memoryBytes"]).to_equal(SdnValue.Int(512))
+        expect(host_local_resolver_consumed_fixture_v2(turn.owner.local.container)).to_equal(before)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "rejects a validation correlation mismatch before provider dispatch":
+        step("Use valid canonical bytes with the wrong outer operation ID")
+        val fixture = host_parent_budget_fixture_v1()
+        val payload = container_execution_request_encode_v2(domain_request_fixture_v2()).unwrap()
+        val before = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        val turn = host_service_domain_turn_v2(HostServiceDomainV2(fixture.local), HostServiceRequestV2("host-validate", "wrong_operation", payload))
+        expect(turn.exit_code).to_equal(1)
+        expect(domain_fields_v2(turn.response)["error"]).to_equal(SdnValue.String("host-validate-operation-mismatch"))
+        expect(host_local_resolver_consumed_fixture_v2(turn.owner.local.container)).to_equal(before)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "binds parent-budget correlation before any planning record is published":
+        step("Reject a signed canonical budget record under a different parent ID")
+        val fixture = host_parent_budget_fixture_v1()
+        val payload = host_parent_budget_record_encode_v1(fixture.record).unwrap()
+        val turn = host_service_domain_turn_v2(HostServiceDomainV2(fixture.local), HostServiceRequestV2("host-parent-budget", "wrong_parent", payload))
+        expect(turn.exit_code).to_equal(1)
+        expect(domain_fields_v2(turn.response)["error"]).to_equal(SdnValue.String("host-service-operation-mismatch"))
+        expect(file_exists(fixture.local.capacity.journal.root + "/host-parent-budget-records")).to_equal(false)
+        expect(turn.owner.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "does not report queued acceptance or block on monolithic native effect routes":
+        step("Send all four effect actions to an actual live journal owner")
+        val fixture = host_parent_budget_fixture_v1()
+        val owner = HostServiceDomainV2(fixture.local)
+        val before = owner.local.capacity.journal.sequence
+        for action in ["host-execute", "host-inspect", "host-wait", "host-cleanup"]:
+            val payload = if action == "host-inspect" or action == "host-wait": "" else: "not-authority"
+            val turn = host_service_domain_turn_v2(owner, HostServiceRequestV2(action, "operation_1", payload))
+            expect(turn.exit_code).to_equal(1)
+            val fields = domain_fields_v2(turn.response)
+            expect(fields["error"]).to_equal(SdnValue.String("host-service-effect-dispatch-required"))
+            expect(fields.contains_key("jobId")).to_equal(false)
+            expect(turn.owner.local.capacity.journal.sequence).to_equal(before)
+            expect(host_local_resolver_consumed_fixture_v2(turn.owner.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "refuses stale or closed writer projections without reopening the legacy test fixture":
+        step("Change the local snapshot then close the original actual writer")
+        val fixture = host_parent_budget_fixture_v1()
+        val owner = HostServiceDomainV2(fixture.local)
+        var stale = owner
+        stale.local.capacity.ledger.revision = stale.local.capacity.ledger.revision + 1
+        val rejected = host_service_domain_turn_v2(stale, HostServiceRequestV2("host-status", "", ""))
+        expect(rejected.exit_code).to_equal(2)
+        expect(domain_fields_v2(rejected.response)["error"]).to_equal(SdnValue.String("host-service-owner-projection-stale"))
+        expect(host_capacity_owner_close_v1(owner.local.capacity).unwrap()).to_equal(true)
+        val closed = host_service_domain_turn_v2(owner, HostServiceRequestV2("host-status", "", ""))
+        expect(closed.exit_code).to_equal(2)
+        expect(domain_fields_v2(closed.response)["recoveryRequired"]).to_equal(SdnValue.Bool(true))
+        dir_remove(fixture.local.root, true)
+        dir_remove(fixture.provider_root, true)
+
+    it "prevents finite CLI reopen loops hidden queues and synchronous provider calls":
+        step("Inspect the owning handler source for forbidden alternate effect paths")
+        val source = read_file_text("src/lib/nogc_sync_mut/orchestration/host_service_domain_v2.spl")
+        val handler = source.split("pub fn host_service_domain_turn_v2")[1]
+        expect(handler.contains("host_local_root_open_owned_v2(")).to_equal(false)
+        expect(source.contains("host_local_command_v1(")).to_equal(false)
+        expect(source.contains("host_authorized_execute_v2(")).to_equal(false)
+        expect(source.contains("host_terminal_wait_v2(")).to_equal(false)
+        expect(source.contains("host_cleanup_v1(")).to_equal(false)
+        expect(source.contains("thread_spawn(")).to_equal(false)
+        expect(source.contains("process_run(")).to_equal(false)
+        expect(source.contains("shell(")).to_equal(false)
+        expect(source.contains("host_capacity_owner_close_v1(")).to_equal(false)
+        expect(source).to_contain("HostLocalRootOpenV2.CleanupRequired(cleanup, reason)")
+        expect(source).to_contain("host_capacity_owner_close_owned_v2(owner.local.capacity)")
+        expect(source).to_contain("distributed_operation_journal_open_cleanup_v2(cleanup)")
