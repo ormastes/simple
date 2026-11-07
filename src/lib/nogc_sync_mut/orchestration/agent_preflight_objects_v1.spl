@@ -1,0 +1,71 @@
+# Immutable expected probe association under the existing controller writer.
+# Historical replay verifies its committed desired input and pinned policy;
+# it does not authenticate task content or turn expected CLI data into evidence.
+use std.common.contracts.orchestration.agent_preflight_binding_v1.*
+use std.common.contracts.orchestration.agent_preflight_dispatch_v1.{AgentPreflightDispatchV1, agent_preflight_dispatch_encode_v1}
+use std.common.contracts.orchestration.agent_policy_resolution_v1.AgentPolicyResolutionV1
+use std.common.contracts.orchestration.execution_policy_v1.runtime_class_backend_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2}
+use std.nogc_sync_mut.orchestration.desired_input_objects_v1.{controller_desired_operation_id_v1, desired_object_put_v1}
+use std.nogc_sync_mut.orchestration.agent_policy_objects_v1.controller_agent_policy_read_v1
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.crypto.sha256.sha256_text
+
+pub fn agent_preflight_policy_match_v1(binding: AgentPreflightBindingV1,
+        policy: AgentPolicyResolutionV1) -> Result<bool, text>:
+    val canonical = agent_preflight_binding_encode_v1(binding)?
+    if (binding.source_digest != policy.source_digest or binding.catalog_digest != policy.catalog_digest or
+            binding.agent_provider != policy.session.agent.provider or binding.execution_os != policy.runtime.execution_os or
+            binding.architecture != policy.runtime.architecture):
+        return Err("agent-preflight-pinned-policy-mismatch")
+    if binding.preflight.backend != runtime_class_backend_v1(policy.runtime)?:
+        return Err("agent-preflight-pinned-provider-mismatch")
+    Ok(true)
+
+pub fn agent_preflight_objects_retain_v1(root: text, binding: AgentPreflightBindingV1) -> Result<bool, text>:
+    val bytes = agent_preflight_binding_encode_v1(binding)?
+    desired_object_put_v1(root, sha256_text(bytes), bytes, 65536)
+
+pub fn agent_preflight_proof_retain_v1(root: text, packet: AgentPreflightDispatchV1) -> Result<bool, text>:
+    val bytes = agent_preflight_dispatch_encode_v1(packet)?
+    desired_object_put_v1(root, sha256_text(bytes), bytes, 4194304)
+
+pub fn agent_preflight_objects_read_v1(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2, controller_id: text) -> Result<AgentPreflightBindingV1, text>:
+    # Validate before using the payload digest as a filename.
+    val envelope = distributed_encode_operation_v2(operation)?
+    if operation.operation != "controller_agent_preflight_v1" or operation.host_id != controller_id:
+        return Err("agent-preflight-controller-mismatch")
+    val bytes = file_read_regular_no_follow_bounded(journal.root + "/desired-input-objects/" + operation.payload_digest + ".sdn", 65536)?
+    if sha256_text(bytes) != operation.payload_digest: return Err("agent-preflight-object-mismatch")
+    val binding = agent_preflight_binding_decode_v1(bytes)?
+    if binding.controller_id != controller_id or distributed_encode_operation_v2(agent_preflight_operation_v1(binding)?)? != envelope:
+        return Err("agent-preflight-envelope-mismatch")
+    val policy_id = "policy-" + controller_desired_operation_id_v1(controller_id, binding.session_uid)?
+    val policy_record = distributed_operation_journal_lookup_v2(journal, policy_id)?
+    val policy_operation = distributed_decode_operation_v2(policy_record.envelope)?
+    if policy_record.state != "completed" or policy_record.outcome_digest != policy_operation.payload_digest:
+        return Err("agent-preflight-policy-not-committed")
+    val policy = controller_agent_policy_read_v1(journal, policy_operation, controller_id)?
+    val matched = agent_preflight_policy_match_v1(binding, policy)?
+    Ok(binding)
+
+# Bounded historical scan of the SAME controller journal, not a second index
+# or scheduler. Multiple sessions may not claim the same probe UID/operation.
+pub fn agent_preflight_for_workload_v1(journal: DistributedOperationJournalV2,
+        controller_id: text, uid: text) -> Result<Option<AgentPreflightBindingV1>, text>:
+    if journal.operations.len() > 4096: return Err("workload-store-history-bound")
+    var found: Option<AgentPreflightBindingV1> = None
+    for id in journal.operations.keys():
+        val record = distributed_operation_journal_lookup_v2(journal, id)?
+        val operation = distributed_decode_operation_v2(record.envelope)?
+        if operation.operation != "controller_agent_preflight_v1": continue
+        val binding = agent_preflight_objects_read_v1(journal, operation, controller_id)?
+        if binding.preflight.workload_uid != uid: continue
+        if found.is_some(): return Err("agent-preflight-workload-conflict")
+        if record.state != "completed" or record.outcome_digest != operation.payload_digest:
+            return Err("agent-preflight-association-not-committed")
+        found = Some(binding)
+    Ok(found)

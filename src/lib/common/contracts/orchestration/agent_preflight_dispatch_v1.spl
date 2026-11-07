@@ -1,0 +1,76 @@
+# Untrusted expected-association packet, never installed CLI evidence or a grant.
+# The owner verifies this separate action proof and all four unchanged dispatch
+# proofs using protected authority snapshots and actual clocks before effects.
+use std.common.contracts.orchestration.agent_preflight_binding_v1.*
+use std.common.contracts.orchestration.controller_dispatch_request_v2.*
+use std.common.contracts.container.execution_v2.container_execution_plan_bytes_v2
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.common.contracts.orchestration.resource_v1.{as_dict, only_known}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+
+pub struct AgentPreflightDispatchV1:
+    binding: AgentPreflightBindingV1
+    dispatch: ControllerDispatchRequestV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+pub fn agent_preflight_authorization_operation_v1(packet: AgentPreflightDispatchV1) -> Result<OperationEnvelopeV2, text>:
+    if packet.binding.controller_id != packet.dispatch.binding.controller_id or
+            packet.dispatch.operation.host_id != packet.binding.controller_id or
+            container_execution_plan_bytes_v2(packet.binding.preflight)? != container_execution_plan_bytes_v2(packet.dispatch.execution.plan)?:
+        return Err("agent-preflight-dispatch-binding-mismatch")
+    var operation = packet.dispatch.operation
+    operation.id = "authorize-" + agent_preflight_operation_id_v1(packet.binding.controller_id, packet.binding.session_uid)?
+    operation.operation = "agent_preflight_authorize_v1"
+    operation.payload_digest = agent_preflight_binding_digest_v1(packet.binding)?
+    val canonical = distributed_encode_operation_v2(operation)?
+    Ok(operation)
+
+pub fn agent_preflight_dispatch_encode_v1(packet: AgentPreflightDispatchV1) -> Result<text, text>:
+    val operation = agent_preflight_authorization_operation_v1(packet)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("agent-preflight-dispatch"),
+        "binding": SdnValue.String(agent_preflight_binding_encode_v1(packet.binding)?),
+        "dispatch": SdnValue.String(controller_dispatch_request_encode_v2(packet.dispatch)?),
+        "signedGrant": SdnValue.String(distributed_encode_signed_grant_v2(packet.signed)?),
+        "signedApproval": SdnValue.String(distributed_encode_signed_approval_v2(packet.approval)?)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 4194304: return Err("agent-preflight-dispatch-source-size")
+    Ok(source)
+
+fn preflight_dispatch_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("agent-preflight-dispatch-text-required:" + key)
+
+pub fn agent_preflight_dispatch_decode_v1(source: text) -> Result<AgentPreflightDispatchV1, text>:
+    if str_len(source) == 0 or str_len(source) > 4194304: return Err("agent-preflight-dispatch-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4194304,
+            max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(_): return Err("agent-preflight-dispatch-syntax")
+    val spans: Dict<text, SdnSpan> = {}
+    val fields = match as_dict(parsed.value, "", spans):
+        case Ok(value): value
+        case Err(_): return Err("agent-preflight-dispatch-object-required")
+    val names = ["version", "kind", "binding", "dispatch", "signedGrant", "signedApproval"]
+    if only_known(fields, names, "", spans).is_err(): return Err("agent-preflight-dispatch-unknown-field")
+    for key in names:
+        if not fields.contains_key(key): return Err("agent-preflight-dispatch-missing-field:" + key)
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 1: return Err("agent-preflight-dispatch-version")
+        case _: return Err("agent-preflight-dispatch-version")
+    if preflight_dispatch_text_v1(fields, "kind")? != "agent-preflight-dispatch": return Err("agent-preflight-dispatch-kind")
+    val packet = AgentPreflightDispatchV1(binding: agent_preflight_binding_decode_v1(preflight_dispatch_text_v1(fields, "binding")?)?,
+        dispatch: controller_dispatch_request_decode_v2(preflight_dispatch_text_v1(fields, "dispatch")?)?,
+        signed: distributed_decode_signed_grant_v2(preflight_dispatch_text_v1(fields, "signedGrant")?)?,
+        approval: distributed_decode_signed_approval_v2(preflight_dispatch_text_v1(fields, "signedApproval")?)?)
+    if agent_preflight_dispatch_encode_v1(packet)? != source: return Err("agent-preflight-dispatch-noncanonical")
+    Ok(packet)

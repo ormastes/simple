@@ -12,6 +12,9 @@ use std.nogc_sync_mut.orchestration.assignment_commit_v1.*
 use std.nogc_sync_mut.orchestration.assignment_objects_v1.*
 use std.nogc_sync_mut.orchestration.desired_input_objects_v1.*
 use std.nogc_sync_mut.orchestration.agent_policy_objects_v1.*
+use std.nogc_sync_mut.orchestration.agent_preflight_objects_v1.*
+use std.common.contracts.orchestration.agent_preflight_binding_v1.*
+use std.common.contracts.container.execution_v2.{ContainerExecutionPlanV2, container_execution_plan_bytes_v2}
 use std.common.contracts.orchestration.desired_input_v1.*
 use std.common.contracts.orchestration.agent_policy_resolution_v1.{AgentPolicyResolutionV1, resolve_agent_policy_v1}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded, file_exists}
@@ -63,6 +66,15 @@ fn workload_store_replay_v1(journal: DistributedOperationJournalV2, controller_i
     for id in journal.operations.keys():
         val record = distributed_operation_journal_lookup_v2(journal, id)?
         val operation = distributed_decode_operation_v2(record.envelope)?
+        if operation.operation == "controller_agent_preflight_v1":
+            val binding = agent_preflight_objects_read_v1(journal, operation, controller_id)?
+            if record.state == "completed":
+                if record.outcome_digest != operation.payload_digest: return Err("agent-preflight-outcome-mismatch")
+            elif record.state == "admitted" or record.state == "executing" or record.state == "outcome-unknown":
+                pending_inputs.push(operation)
+            else:
+                return Err("agent-preflight-terminal-invalid")
+            continue
         if operation.operation == "controller_agent_policy_v1":
             val policy = controller_agent_policy_read_v1(journal, operation, controller_id)?
             if record.state == "completed":
@@ -299,6 +311,51 @@ pub fn controller_workload_store_pinned_policy_v1(owner: ControllerWorkloadStore
     if record.state != "completed" or record.outcome_digest != operation.payload_digest: return Err("policy-snapshot-not-committed")
     controller_agent_policy_read_v1(owner.journal, operation, owner.controller_id)
 
+# Trusted metadata admission only. The service must authenticate the task/image
+# and the later probe execution separately; this association grants no effects.
+pub fn controller_workload_store_preflight_v1(owner: ControllerWorkloadStoreV1,
+        binding: AgentPreflightBindingV1) -> Result<ControllerWorkloadStoreV1, text>:
+    val current = workload_store_current_v1(owner)?
+    if binding.controller_id != owner.controller_id: return Err("agent-preflight-controller-mismatch")
+    val policy = controller_workload_store_pinned_policy_v1(owner, binding.session_uid)?
+    val matched = agent_preflight_policy_match_v1(binding, policy)?
+    val operation = agent_preflight_operation_v1(binding)?
+    val existing = distributed_operation_journal_lookup_v2(owner.journal, operation.id)
+    if existing.is_ok():
+        val exact = daemon_operation_exact_v2(owner.journal, operation)?
+        val retained = agent_preflight_objects_read_v1(owner.journal, operation, owner.controller_id)?
+        if exact.state != "completed" or exact.outcome_digest != operation.payload_digest:
+            return Err("agent-preflight-recovery-required")
+        return Ok(owner)
+    if existing.unwrap_err() != "OPERATION_NOT_FOUND": return Err(existing.unwrap_err())
+    if owner.rows.contains_key(binding.preflight.workload_uid): return Err("agent-preflight-workload-already-exists")
+    if agent_preflight_for_workload_v1(owner.journal, owner.controller_id, binding.preflight.workload_uid)?.is_some():
+        return Err("agent-preflight-workload-conflict")
+    val desired_probe = distributed_operation_journal_lookup_v2(owner.journal,
+        controller_desired_operation_id_v1(owner.controller_id, binding.preflight.workload_uid)?)
+    if desired_probe.is_ok(): return Err("agent-preflight-workload-is-agent-session")
+    if desired_probe.unwrap_err() != "OPERATION_NOT_FOUND": return Err(desired_probe.unwrap_err())
+    if owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
+    val saved = agent_preflight_objects_retain_v1(owner.journal.root, binding)?
+    val admitted = daemon_operation_admit_v2(owner.journal, operation)?
+    val committed = controller_desired_complete_v1(admitted.journal, operation)?
+    Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: committed, rows: owner.rows))
+
+# Called before every probe preparation/execution. Cancellation of its parent
+# remains authoritative even when the child has not acquired a workload row.
+pub fn controller_workload_store_preflight_guard_v1(owner: ControllerWorkloadStoreV1,
+        plan: ContainerExecutionPlanV2) -> Result<bool, text>:
+    val current = workload_store_current_v1(owner)?
+    val association = agent_preflight_for_workload_v1(owner.journal, owner.controller_id, plan.workload_uid)?
+    match association:
+        case None: Ok(true)
+        case Some(binding):
+            if controller_workload_store_agent_cancelled_v1(owner, binding.session_uid)?:
+                return Err("agent-preflight-parent-cancelled")
+            if container_execution_plan_bytes_v2(binding.preflight)? != container_execution_plan_bytes_v2(plan)?:
+                return Err("agent-preflight-execution-plan-mismatch")
+            Ok(true)
+
 # Read source remains allowed after cancellation for inspection. This separate
 # query is mandatory before future resolution; cancellation never implies reap.
 pub fn controller_workload_store_agent_cancelled_v1(owner: ControllerWorkloadStoreV1,
@@ -331,15 +388,30 @@ pub fn controller_workload_store_cancel_agent_v1(owner: ControllerWorkloadStoreV
     val retained = controller_desired_objects_read_v1(owner.journal.root, original, owner.controller_id)?
     val parent = controller_desired_cancel_parent_v1(owner.journal, retained.input)?
     if retained.input.source_digest != expected_source_digest: return Err("desired-cancel-source-mismatch")
+    # Publish the exact child's sticky cancellation first. A crash before the
+    # parent marker cannot revive that child; retry completes the same marker.
+    # This requests reconciliation only, never native teardown or charge release.
+    var current_owner = owner
+    val preflight_id = agent_preflight_operation_id_v1(owner.controller_id, uid)?
+    val preflight_record = distributed_operation_journal_lookup_v2(current_owner.journal, preflight_id)
+    if preflight_record.is_ok():
+        val preflight_operation = distributed_decode_operation_v2(preflight_record.unwrap().envelope)?
+        val binding = agent_preflight_objects_read_v1(current_owner.journal, preflight_operation, owner.controller_id)?
+        if current_owner.rows.contains_key(binding.preflight.workload_uid):
+            val child = current_owner.rows[binding.preflight.workload_uid]
+            if not child.cancellation_requested:
+                current_owner = controller_workload_store_cancel_v1(current_owner, child.workload_uid, child.revision)?
+    elif preflight_record.unwrap_err() != "OPERATION_NOT_FOUND":
+        return Err(preflight_record.unwrap_err())
     val operation = controller_desired_cancel_operation_v1(retained.input)?
-    if controller_workload_store_agent_cancelled_v1(owner, uid)?:
-        val prior = daemon_operation_exact_v2(owner.journal, operation)?
+    if controller_workload_store_agent_cancelled_v1(current_owner, uid)?:
+        val prior = daemon_operation_exact_v2(current_owner.journal, operation)?
         if prior.state != "completed": return Err("desired-input-recovery-required")
-        return Ok(owner)
-    if owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
-    val admitted = daemon_operation_admit_v2(owner.journal, operation)?
+        return Ok(current_owner)
+    if current_owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
+    val admitted = daemon_operation_admit_v2(current_owner.journal, operation)?
     val committed = controller_desired_complete_v1(admitted.journal, operation)?
-    Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: committed, rows: owner.rows))
+    Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: committed, rows: current_owner.rows))
 
 pub fn controller_workload_store_bind_v1(owner: ControllerWorkloadStoreV1, uid: text,
         expected_revision: i64, binding: ControllerAssignmentBindingV1) -> Result<ControllerWorkloadStoreV1, text>:

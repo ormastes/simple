@@ -1,0 +1,90 @@
+# @req ORCH-02 HOST-02
+# Pure packet integrity, NOT authorization. Existing real signed frames are
+# deliberately reused for envelope shape; they do not authorize the NEW action.
+# Execution NOT_RUN. Actual owner verifies a separate action-specific proof.
+use test.fixtures.orchestrator_acceptance.controller_container_dispatch_v2.*
+use std.common.contracts.orchestration.agent_preflight_dispatch_v1.*
+use std.common.contracts.orchestration.agent_preflight_binding_v1.*
+use std.common.contracts.orchestration.controller_dispatch_request_v2.controller_dispatch_request_encode_v2
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.sdn.value.SdnValue
+use std.common.string_core.str_len
+
+fn preflight_dispatch_fixture_v1(backend: text) -> AgentPreflightDispatchV1:
+    val dispatch = controller_container_wire_fixture_v2(backend).dispatch
+    val windows = backend == "windows-docker-process"
+    val binding = AgentPreflightBindingV1(controller_id: dispatch.binding.controller_id, session_uid: "agent-session",
+        source_digest: "a".repeat(64), catalog_digest: "b".repeat(64), task_digest: "c".repeat(64),
+        image_digest: "d".repeat(64), probe_producer_digest: "e".repeat(64), nonce: "f".repeat(64),
+        preflight: dispatch.execution.plan, agent_provider: "codex", executable_path: if windows: "C:/Agent/codex.exe" else: "/usr/bin/codex",
+        execution_os: if windows: "windows" else: "linux", architecture: "x86_64", selected_user: "1000:1000")
+    AgentPreflightDispatchV1(binding: binding, dispatch: dispatch, signed: dispatch.assignment_signed, approval: dispatch.assignment_approval)
+
+describe "expected preflight dispatch packet integrity only":
+    it "round trips both backend packets while preserving all four original proof pairs":
+        step("round trips both backend packets while preserving all four original proof pairs")
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val packet = preflight_dispatch_fixture_v1(backend)
+            val source = agent_preflight_dispatch_encode_v1(packet).unwrap()
+            val decoded = agent_preflight_dispatch_decode_v1(source).unwrap()
+            expect(agent_preflight_dispatch_encode_v1(decoded).unwrap()).to_equal(source)
+            expect(controller_dispatch_request_encode_v2(decoded.dispatch).unwrap()).to_equal(controller_dispatch_request_encode_v2(packet.dispatch).unwrap())
+            expect(distributed_encode_signed_grant_v2(decoded.signed).unwrap()).to_equal(distributed_encode_signed_grant_v2(packet.signed).unwrap())
+            expect(distributed_encode_signed_approval_v2(decoded.approval).unwrap()).to_equal(distributed_encode_signed_approval_v2(packet.approval).unwrap())
+
+    it "derives separate expected association authorization while preserving scoped envelope fields":
+        step("derives separate expected association authorization while preserving scoped envelope fields")
+        val packet = preflight_dispatch_fixture_v1("linux-podman")
+        val actual = agent_preflight_authorization_operation_v1(packet).unwrap()
+        var expected = packet.dispatch.operation
+        expected.id = "authorize-" + agent_preflight_operation_id_v1(packet.binding.controller_id, packet.binding.session_uid).unwrap()
+        expected.operation = "agent_preflight_authorize_v1"
+        expected.payload_digest = agent_preflight_binding_digest_v1(packet.binding).unwrap()
+        expect(distributed_encode_operation_v2(actual).unwrap()).to_equal(distributed_encode_operation_v2(expected).unwrap())
+        expect(actual.operation == packet.dispatch.operation.operation).to_equal(false)
+        # The reused fixture signature does not verify this new action.
+
+    it "refuses controller host identity and exact nested plan mismatches":
+        step("refuses controller host identity and exact nested plan mismatches")
+        val packet = preflight_dispatch_fixture_v1("linux-podman")
+        var changed = packet
+        changed.binding.controller_id = "other-controller"
+        expect(agent_preflight_dispatch_encode_v1(changed).is_err()).to_equal(true)
+        changed = packet
+        changed.dispatch.operation.host_id = "other-controller"
+        expect(agent_preflight_authorization_operation_v1(changed).is_err()).to_equal(true)
+        changed = packet
+        changed.binding.preflight.request_digest = "1".repeat(64)
+        expect(agent_preflight_dispatch_encode_v1(changed).is_err()).to_equal(true)
+        changed = packet
+        changed.binding.preflight.native_machine_id = "other-machine"
+        expect(agent_preflight_dispatch_encode_v1(changed).is_err()).to_equal(true)
+
+    it "changes authorization payload for expected image and task without changing dispatch proofs":
+        step("changes authorization payload for expected image and task without changing dispatch proofs")
+        val packet = preflight_dispatch_fixture_v1("linux-podman")
+        val operation = agent_preflight_authorization_operation_v1(packet).unwrap()
+        var changed = packet
+        changed.binding.image_digest = "1".repeat(64)
+        val next = agent_preflight_authorization_operation_v1(changed).unwrap()
+        expect(next.id).to_equal(operation.id)
+        expect(next.payload_digest == operation.payload_digest).to_equal(false)
+        changed.binding.task_digest = "2".repeat(64)
+        expect(agent_preflight_authorization_operation_v1(changed).unwrap().payload_digest == next.payload_digest).to_equal(false)
+        expect(controller_dispatch_request_encode_v2(changed.dispatch).unwrap()).to_equal(controller_dispatch_request_encode_v2(packet.dispatch).unwrap())
+
+    it "refuses strict outer shape canonical and byte boundary violations":
+        step("refuses strict outer shape canonical and byte boundary violations")
+        val source = agent_preflight_dispatch_encode_v1(preflight_dispatch_fixture_v1("linux-podman")).unwrap()
+        expect(agent_preflight_dispatch_decode_v1(controller_container_wire_field_v2(source, "version", SdnValue.String("1"))).is_err()).to_equal(true)
+        expect(agent_preflight_dispatch_decode_v1(controller_container_wire_field_v2(source, "kind", SdnValue.String("host-execute-request"))).is_err()).to_equal(true)
+        expect(agent_preflight_dispatch_decode_v1(controller_container_wire_field_v2(source, "observedCapability", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(agent_preflight_dispatch_decode_v1(controller_container_wire_field_v2(source, "binding", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(agent_preflight_dispatch_decode_v1(controller_container_wire_without_v2(source, "signedGrant")).is_err()).to_equal(true)
+        expect(agent_preflight_dispatch_decode_v1(source + "\n").is_err()).to_equal(true)
+        val head = source.slice(0, source.len() - 2)
+        expect(agent_preflight_dispatch_decode_v1(head + ", version: 1" + "}\n").is_err()).to_equal(true)
+        val oversized = "é".repeat(2097153)
+        expect(str_len(oversized)).to_equal(4194306)
+        expect(agent_preflight_dispatch_decode_v1(oversized).is_err()).to_equal(true)
