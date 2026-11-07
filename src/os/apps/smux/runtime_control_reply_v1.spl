@@ -1,0 +1,124 @@
+# Metadata replies are correlated with the exact request. Only the live issuer
+# can authorize controls; decoding a reply never creates a local capability.
+use os.apps.smux.runtime_control_request_v1.{SmuxRuntimeControlRequestV1, smux_runtime_control_request_digest_v1,
+    smux_runtime_control_kind_text_v1, smux_runtime_control_fields_v1, smux_runtime_control_request_validate_v1,
+    smux_runtime_control_field_text_v1, smux_runtime_control_field_int_v1}
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlLeaseV1,
+    session_runtime_control_target_digest_v1, session_runtime_control_incarnation_valid_v1, session_runtime_control_lease_validate_v1}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn smux_runtime_control_reply_v1(request: SmuxRuntimeControlRequestV1, incarnation: text,
+        status: text, reason: text, revision: i64, lease: SessionRuntimeControlLeaseV1?, nonce: text,
+        resolved_target_digest: text = "") -> Result<text, text>:
+    smux_runtime_control_request_validate_v1(request)?
+    if revision < 0 or not session_runtime_control_incarnation_valid_v1(incarnation): return Err("runtime-control-reply-context")
+    if not ["resolved", "issued", "replayed", "active", "retired", "absent", "revoked", "rejected", "unsupported"].contains(status):
+        return Err("runtime-control-reply-status")
+    if status == "resolved":
+        if request.action != "resolve" or lease != nil or not builder_digest_valid_v1(resolved_target_digest):
+            return Err("runtime-control-reply-resolution")
+    elif resolved_target_digest != "": return Err("runtime-control-reply-unexpected-target")
+    if ["issued", "replayed", "active", "unsupported"].contains(status) and lease == nil:
+        return Err("runtime-control-reply-lease-missing")
+    if ["issued", "replayed"].contains(status) and (request.action != "issue" or nonce == ""):
+        return Err("runtime-control-reply-issuance")
+    if nonce != "" and (request.action != "issue" or lease == nil): return Err("runtime-control-reply-secret")
+    var target_digest = resolved_target_digest
+    var principal = ""
+    var nonce_digest = ""
+    var issued: i64 = 0
+    var expires: i64 = 0
+    if lease != nil:
+        val current = lease.unwrap()
+        session_runtime_control_lease_validate_v1(current)?
+        if (current.kind != request.control_kind or current.target.binding_uid != request.binding_uid or
+                current.target.service_incarnation != incarnation or current.revision != revision):
+            return Err("runtime-control-reply-lease-correlation")
+        if nonce != "" and sha256_text(nonce) != current.nonce_digest: return Err("runtime-control-reply-nonce-correlation")
+        target_digest = session_runtime_control_target_digest_v1(current.target)?
+        principal = current.principal_id
+        nonce_digest = current.nonce_digest
+        issued = current.issued_monotonic_ms
+        expires = current.expires_monotonic_ms
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("smux-runtime-control-reply"),
+        "requestDigest": SdnValue.String(smux_runtime_control_request_digest_v1(request)?),
+        "bindingUid": SdnValue.String(request.binding_uid), "controlKind": SdnValue.String(smux_runtime_control_kind_text_v1(request.control_kind)),
+        "serviceIncarnation": SdnValue.String(incarnation), "status": SdnValue.String(status), "reason": SdnValue.String(reason),
+        "revision": SdnValue.Int(revision), "targetDigest": SdnValue.String(target_digest), "principalId": SdnValue.String(principal),
+        "nonceDigest": SdnValue.String(nonce_digest), "nonce": SdnValue.String(nonce),
+        "issuedMonotonicMs": SdnValue.Int(issued), "expiresMonotonicMs": SdnValue.Int(expires),
+        "controlReady": SdnValue.Bool(false), "effectApplied": SdnValue.Bool(false)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields))
+    if bytes.bytes().len() > 2048: return Err("runtime-control-reply-bound")
+    Ok(bytes)
+
+pub fn smux_runtime_control_reply_fields_v1(bytes: text) -> Result<Dict<text, SdnValue>, text>:
+    # The compiled CLI appends one stdout record terminator. Requests remain
+    # exact canonical bytes; reply parsing never trims arbitrary whitespace.
+    val body = if bytes.ends_with("\n"): bytes[0:bytes.len() - 1] else: bytes
+    smux_runtime_control_fields_v1(body, ["version", "kind", "requestDigest", "bindingUid", "controlKind",
+        "serviceIncarnation", "status", "reason", "revision", "targetDigest", "principalId", "nonceDigest", "nonce",
+        "issuedMonotonicMs", "expiresMonotonicMs", "controlReady", "effectApplied"])
+
+pub fn smux_runtime_control_reply_ok_v1(request: SmuxRuntimeControlRequestV1, bytes: text) -> bool:
+    val parsed = smux_runtime_control_reply_fields_v1(bytes)
+    if parsed.is_err(): return false
+    val fields = parsed.unwrap()
+    # Validate each scalar type before any projection, including refusal data.
+    for key in ["kind", "requestDigest", "bindingUid", "controlKind", "serviceIncarnation", "status", "reason",
+            "targetDigest", "principalId", "nonceDigest", "nonce"]:
+        if smux_runtime_control_field_text_v1(fields, key).is_err(): return false
+    for key in ["revision", "issuedMonotonicMs", "expiresMonotonicMs"]:
+        if smux_runtime_control_field_int_v1(fields, key).is_err(): return false
+    for key in ["controlReady", "effectApplied"]:
+        match fields[key]:
+            case SdnValue.Bool(value):
+                if value: return false
+            case _: return false
+    val digest = smux_runtime_control_request_digest_v1(request)
+    if digest.is_err(): return false
+    if (smux_runtime_control_field_text_v1(fields, "kind").unwrap() != "smux-runtime-control-reply" or
+            smux_runtime_control_field_text_v1(fields, "requestDigest").unwrap() != digest.unwrap() or
+            smux_runtime_control_field_text_v1(fields, "bindingUid").unwrap() != request.binding_uid or
+            smux_runtime_control_field_text_v1(fields, "controlKind").unwrap() != smux_runtime_control_kind_text_v1(request.control_kind) or
+            not session_runtime_control_incarnation_valid_v1(smux_runtime_control_field_text_v1(fields, "serviceIncarnation").unwrap())): return false
+    val status = smux_runtime_control_field_text_v1(fields, "status").unwrap()
+    val nonce = smux_runtime_control_field_text_v1(fields, "nonce").unwrap()
+    val revision = smux_runtime_control_field_int_v1(fields, "revision").unwrap()
+    if revision < 0: return false
+    if request.action == "resolve":
+        return (status == "resolved" and revision == 0 and nonce == "" and
+            builder_digest_valid_v1(smux_runtime_control_field_text_v1(fields, "targetDigest").unwrap()) and
+            smux_runtime_control_field_text_v1(fields, "nonceDigest").unwrap() == "" and
+            smux_runtime_control_field_int_v1(fields, "issuedMonotonicMs").unwrap() == 0 and
+            smux_runtime_control_field_int_v1(fields, "expiresMonotonicMs").unwrap() == 0)
+    if request.action == "issue":
+        if status != "issued" and status != "replayed": return false
+        if nonce.len() != 64 or not builder_digest_valid_v1(nonce) or revision != request.expected_revision + 1: return false
+        if sha256_text(nonce) != smux_runtime_control_field_text_v1(fields, "nonceDigest").unwrap(): return false
+        if not builder_digest_valid_v1(smux_runtime_control_field_text_v1(fields, "targetDigest").unwrap()): return false
+        if smux_runtime_control_field_text_v1(fields, "targetDigest").unwrap() != request.expected_target_digest: return false
+        if not builder_identifier_valid_v1(smux_runtime_control_field_text_v1(fields, "principalId").unwrap()): return false
+        val issued = smux_runtime_control_field_int_v1(fields, "issuedMonotonicMs").unwrap()
+        val expires = smux_runtime_control_field_int_v1(fields, "expiresMonotonicMs").unwrap()
+        return issued > 0 and expires > issued and expires - issued <= 15000
+    if nonce != "": return false
+    val target = smux_runtime_control_field_text_v1(fields, "targetDigest").unwrap()
+    val principal = smux_runtime_control_field_text_v1(fields, "principalId").unwrap()
+    val nonce_digest = smux_runtime_control_field_text_v1(fields, "nonceDigest").unwrap()
+    val issued = smux_runtime_control_field_int_v1(fields, "issuedMonotonicMs").unwrap()
+    val expires = smux_runtime_control_field_int_v1(fields, "expiresMonotonicMs").unwrap()
+    if target == "":
+        if principal != "" or nonce_digest != "" or issued != 0 or expires != 0: return false
+    elif (not builder_digest_valid_v1(target) or not builder_identifier_valid_v1(principal) or
+            not builder_digest_valid_v1(nonce_digest) or revision < 1 or issued <= 0 or expires <= issued or expires - issued > 15000): return false
+    if request.action == "revoke": return status == "revoked" and revision == request.expected_revision and target == ""
+    if request.action == "inspect":
+        if status == "active": return revision > 0 and target != ""
+        if status == "retired": return revision > 0
+        return status == "absent" and revision == 0 and target == ""
+    # Current output-only adapters have no admitted control effect port.
+    false

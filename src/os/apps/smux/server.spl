@@ -24,6 +24,10 @@ use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.sosix.entropy.sosix_random_hex
 use std.common.build_manager.contracts.builder_identifier_valid_v1
+use os.apps.smux.smux_runtime_control_owner_v1.{SmuxRuntimeControlOwnerV1, smux_runtime_control_owner_new_v1}
+use os.apps.smux.runtime_control_policy_v1.smux_runtime_control_policy_load_v1
+use os.apps.smux.runtime_control_request_v1.smux_runtime_control_request_from_token_v1
+use os.apps.smux.runtime_control_service_v1.{smux_runtime_control_service_v1, smux_runtime_control_sweep_v1}
 use os.apps.smux.runtime_binding_request_v3.smux_runtime_bind_request_from_token_v3
 use os.apps.smux.runtime_binding_target_v3.{smux_runtime_target_v3, smux_runtime_target_encode_v3}
 use os.apps.smux.runtime_binding_target_create_v3.smux_runtime_target_create_v3
@@ -41,6 +45,9 @@ const CLIENT_DEADLINE_MS: i64 = 2000
 # Exclusive in-process host/smux composition, not an independent host daemon.
 # No wire request selects its root or policy; the host holds one journal writer.
 var _runtime_binding_owner: SmuxRuntimeBindingOwnerV3? = nil
+# Installed once per service incarnation, after protected host startup. A
+# malformed/absent policy denies controls without enabling legacy authority.
+var _runtime_control_owner: SmuxRuntimeControlOwnerV1? = nil
 var _runtime_credential_owner: RetainedPrivateCredentialV1? = nil
 var _runtime_journal_cleanup: DistributedOperationJournalOpenCleanupV2? = nil
 var _runtime_journal_cleanup_state: FileLockReleaseStateV2? = nil
@@ -91,6 +98,7 @@ fn runtime_stop_reply_v3() -> text:
     if smux_server_stop_reply_v1(smux_owner_snapshot()) != "smux: stopping server":
         return "smux: stop refused: terminal cleanup or host release pending"
     _runtime_cleanup_only = true
+    _runtime_control_owner = nil
     # Close the real host writer while the authenticated recovery listener is
     # still available. No success response precedes actual owned release.
     if not runtime_close_host_v3(): return "smux: stop refused: host writer cleanup unconfirmed"
@@ -154,6 +162,17 @@ pub fn smux_server_dispatch(request: text, token: text) -> text:
         return smux_runtime_binding_capabilities_v1()
     val parts = command.split(" ")
     if parts.len() == 0: return "smux: invalid request"
+    if parts[0] == "runtime-control-v1":
+        if (_runtime_binding_owner == nil or _runtime_control_owner == nil or not _runtime_configured):
+            return "smux: runtime control policy unavailable"
+        if parts.len() != 2: return "smux: invalid runtime control request"
+        val parsed = smux_runtime_control_request_from_token_v1(parts[1])
+        if parsed.is_err(): return "smux: invalid runtime control request"
+        # Only this branch, after the retained service credential comparison,
+        # projects the installed trusted-local-owner principal into issuance.
+        val turn = smux_runtime_control_service_v1(_runtime_binding_owner.unwrap(), _runtime_control_owner.unwrap(), parsed.unwrap())
+        _runtime_control_owner = turn.owner
+        return turn.reply
     if parts[0] == "create-runtime-target-v3":
         if _runtime_binding_owner == nil: return smux_runtime_binding_refusal_v3()
         if parts.len() != 2: return "smux: invalid runtime target name"
@@ -274,6 +293,7 @@ pub fn smux_server_serve_owner_file(path: text) -> i64:
 # Legacy path-based owner-file mode above never opens a host runtime owner.
 pub fn smux_server_serve_runtime_owner_file(path: text, host_root: text) -> i64:
     if _runtime_configured or _runtime_binding_owner != nil or _runtime_credential_owner != nil: return 1
+    _runtime_control_owner = nil
     val credential = retained_private_credential_open_v1(path)
     _runtime_credential_owner = credential.owner
     if credential.owner == nil: return 1
@@ -317,6 +337,10 @@ pub fn smux_server_serve_runtime_owner_file(path: text, host_root: text) -> i64:
     _runtime_host_released = opened.rejected
     var startup_failed = opened.owner == nil
     if opened.owner != nil:
+        val control_policy = smux_runtime_control_policy_load_v1(opened.owner.unwrap().local)
+        if control_policy.is_ok():
+            val controls = smux_runtime_control_owner_new_v1(control_policy.unwrap(), incarnation.unwrap())
+            if controls.is_ok(): _runtime_control_owner = Some(controls.unwrap())
         val ready = fields[0] + " " + address.unwrap() + " " + fields[1] + " " +
             getpid().to_text() + " " + incarnation.unwrap() + "\n"
         val published = retained_private_credential_publish_v1(_runtime_credential_owner.unwrap(),
@@ -365,6 +389,8 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
             else:
                 lease_error_reported = false
             client_reap_deadline = reap_now + SMUX_CLIENT_LEASE_SWEEP_MS
+            if _runtime_binding_owner != nil and _runtime_control_owner != nil and not _runtime_cleanup_only:
+                _runtime_control_owner = Some(smux_runtime_control_sweep_v1(_runtime_binding_owner.unwrap(), _runtime_control_owner.unwrap()))
         val _polled = smux_poll_output()
         val accepted = listener.accept_timeout(10)
         if accepted.is_ok():

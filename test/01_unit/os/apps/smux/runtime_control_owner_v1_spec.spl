@@ -1,0 +1,299 @@
+# AUTHORED_UNRUN. Synthetic metadata exercises pure state only. No principal
+# authentication, actual entropy, attachment, exec birth or native effect is proved.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlKindV1,
+    SessionRuntimeControlTargetV1, SessionRuntimeControlLeaseV1, session_runtime_control_target_validate_v1,
+    session_runtime_control_target_match_v1, session_runtime_control_target_binding_match_v1,
+    session_runtime_control_target_bytes_v1, session_runtime_control_target_digest_v1,
+    session_runtime_control_lease_validate_v1, session_runtime_control_lease_check_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use os.apps.smux.runtime_control_policy_v1.{SmuxRuntimeControlPolicyV1, smux_runtime_control_policy_decode_v1}
+use os.apps.smux.smux_runtime_control_owner_v1.{smux_runtime_control_owner_new_v1,
+    smux_runtime_control_find_v1, smux_runtime_control_issue_v1, smux_runtime_control_check_v1,
+    smux_runtime_control_revoke_v1, smux_runtime_control_invalidate_binding_v1}
+use os.apps.smux.runtime_control_request_v1.{SmuxRuntimeControlRequestV1, smux_runtime_control_request_token_v1}
+use os.apps.smux.runtime_control_reply_v1.{smux_runtime_control_reply_v1, smux_runtime_control_reply_fields_v1}
+use app.hosted_apps.smux_client.smux_client_request_reply_ok
+
+fn control_target_fixture_v1() -> SessionRuntimeControlTargetV1:
+    val scope = ContainerHostScopeV2(physical_host_id: "host-a", service_scope_id: "scope-a",
+        boot_id: "boot-a", provider_generation: 1, native_machine_id: "machine-a",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-a")
+    val runtime = RuntimeIdentityV1(pod_uid: "pod-a", attempt: 1, provider_generation: 1,
+        operation_id: "workload-a", engine: "podman", native_id: "a".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    SessionRuntimeControlTargetV1(scope: scope, runtime: runtime, workload_request_digest: "b".repeat(64),
+        binding_uid: "binding-a", binding_digest: "c".repeat(64), service_incarnation: "d".repeat(32),
+        session_id: "s", window_id: "w", pane_id: "p", service_epoch: 1, child_incarnation: 1,
+        client_id: "client-a", attachment_generation: 1, execution_kind: "primary", native_exec_id: "", exec_request_digest: "")
+
+fn control_policy_fixture_v1(ttl: i64 = 100) -> SmuxRuntimeControlPolicyV1:
+    SmuxRuntimeControlPolicyV1(principal_id: "local-owner", allowed: [SessionRuntimeControlKindV1.Input,
+        SessionRuntimeControlKindV1.Geometry], max_lease_ms: ttl)
+
+fn control_policy_fields_v1() -> Dict<text, SdnValue>:
+    {"version": SdnValue.Int(1), "kind": SdnValue.String("smux-runtime-control-policy"),
+        "principalId": SdnValue.String("local-owner"), "allowed": SdnValue.Array([SdnValue.String("input"), SdnValue.String("geometry")]),
+        "maxLeaseMs": SdnValue.Int(100)}
+
+describe "runtime control metadata and bounded issuer":
+    it "correlates complete runtime target facts and permits only explicit holder handover":
+        step("Reject stale capability and binding drift")
+        val target = control_target_fixture_v1()
+        expect(session_runtime_control_target_validate_v1(target).is_ok()).to_equal(true)
+        expect(session_runtime_control_target_digest_v1(target).unwrap()).to_equal(sha256_text(session_runtime_control_target_bytes_v1(target).unwrap()))
+        var holder = target
+        holder.client_id = "client-b"
+        holder.attachment_generation = 2
+        expect(session_runtime_control_target_match_v1(target, holder).is_err()).to_equal(true)
+        expect(session_runtime_control_target_binding_match_v1(target, holder).is_ok()).to_equal(true)
+        var changed = target
+        changed.runtime.native_id = "f".repeat(64)
+        expect(session_runtime_control_target_binding_match_v1(target, changed).is_err()).to_equal(true)
+        changed = target
+        changed.runtime.provider_generation = 2
+        expect(session_runtime_control_target_validate_v1(changed).is_err()).to_equal(true)
+        changed = target
+        changed.native_exec_id = "f".repeat(64)
+        expect(session_runtime_control_target_validate_v1(changed).is_err()).to_equal(true)
+        changed.execution_kind = "exec"
+        expect(session_runtime_control_target_validate_v1(changed).is_err()).to_equal(true)
+        changed.exec_request_digest = "e".repeat(64)
+        expect(session_runtime_control_target_validate_v1(changed).is_ok()).to_equal(true)
+        # Shape acceptance is not actual exec-birth proof or provider admission.
+
+    it "strictly decodes independent local control policy and denies malformed rights":
+        val fields = control_policy_fields_v1()
+        expect(smux_runtime_control_policy_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).unwrap().allowed.len()).to_equal(2)
+        for key in ["streamPolicy", "root", "controlReady"]:
+            var changed = fields
+            changed[key] = SdnValue.Bool(true)
+            expect(smux_runtime_control_policy_decode_v1(sdn_encode_canonical(SdnValue.Dict(changed))).is_err()).to_equal(true)
+        for ttl in [0, 15001]:
+            var changed = fields
+            changed["maxLeaseMs"] = SdnValue.Int(ttl)
+            expect(smux_runtime_control_policy_decode_v1(sdn_encode_canonical(SdnValue.Dict(changed))).is_err()).to_equal(true)
+        for rights in [[SdnValue.String("input"), SdnValue.String("input")], [SdnValue.String("terminate")], [SdnValue.Int(1)]]:
+            var changed = fields
+            changed["allowed"] = SdnValue.Array(rights)
+            expect(smux_runtime_control_policy_decode_v1(sdn_encode_canonical(SdnValue.Dict(changed))).is_err()).to_equal(true)
+        var changed = fields
+        changed["version"] = SdnValue.Int(2)
+        expect(smux_runtime_control_policy_decode_v1(sdn_encode_canonical(SdnValue.Dict(changed))).is_err()).to_equal(true)
+
+    it "issues distinct rights and revokes only one kind":
+        step("Issue distinct control rights from checked owner inputs")
+        val target = control_target_fixture_v1()
+        val owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(), target.service_incarnation).unwrap()
+        val input = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 10)
+        val geometry = smux_runtime_control_issue_v1(input.owner, target, SessionRuntimeControlKindV1.Geometry, "e".repeat(32) + ":1", 1000, 0, "b".repeat(64), 11)
+        expect(input.error).to_equal("")
+        expect(geometry.error).to_equal("")
+        expect(input.lease.unwrap().revision).to_equal(1)
+        expect(geometry.lease.unwrap().revision).to_equal(1)
+        expect(input.nonce != geometry.nonce).to_equal(true)
+        step("Revoke one right without changing the other")
+        val revoked = smux_runtime_control_revoke_v1(geometry.owner, target.binding_uid, SessionRuntimeControlKindV1.Input, 1, 12)
+        expect(revoked.error).to_equal("")
+        expect(smux_runtime_control_find_v1(revoked.owner, target.binding_uid, SessionRuntimeControlKindV1.Input).unwrap().active).to_equal(false)
+        val checked = smux_runtime_control_check_v1(revoked.owner, target.binding_uid, SessionRuntimeControlKindV1.Geometry, geometry.nonce, 1, target, 13)
+        expect(checked.status).to_equal("checked")
+        expect(checked.nonce).to_equal("")
+
+    it "returns exact replay without extending expiry or returning a fresh capability":
+        val target = control_target_fixture_v1()
+        val owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(100), target.service_incarnation).unwrap()
+        val issued = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 50, 0, "a".repeat(64), 10)
+        val replay = smux_runtime_control_issue_v1(issued.owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "b".repeat(64), 20)
+        expect(replay.replay).to_equal(true)
+        expect(replay.nonce).to_equal(issued.nonce)
+        expect(replay.lease.unwrap().expires_monotonic_ms).to_equal(50)
+        var altered = target
+        altered.client_id = "client-b"
+        val conflict = smux_runtime_control_issue_v1(replay.owner, altered, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "c".repeat(64), 21)
+        expect(conflict.error).to_equal("control-issue-replay-conflict")
+        val token_conflict = smux_runtime_control_issue_v1(conflict.owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":2", 1000, 0, "c".repeat(64), 22)
+        expect(token_conflict.error).to_equal("control-issue-replay-conflict")
+
+    it "prevents expired or revoked old CAS from resurrecting a right":
+        val target = control_target_fixture_v1()
+        val owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(40), target.service_incarnation).unwrap()
+        val issued = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 10)
+        val expired = smux_runtime_control_issue_v1(issued.owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "b".repeat(64), 50)
+        expect(expired.error).to_equal("control-lease-retired")
+        expect(expired.revision).to_equal(1)
+        val next = smux_runtime_control_issue_v1(expired.owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 1, "b".repeat(64), 51)
+        expect(next.revision).to_equal(2)
+        val revoked = smux_runtime_control_revoke_v1(next.owner, target.binding_uid, SessionRuntimeControlKindV1.Input, 2, 52)
+        val replay = smux_runtime_control_issue_v1(revoked.owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 1, "c".repeat(64), 53)
+        expect(replay.error).to_equal("control-lease-retired")
+        val fresh = smux_runtime_control_issue_v1(replay.owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 2, "c".repeat(64), 54)
+        expect(fresh.revision).to_equal(3)
+
+    it "rejects a wrong nonce without revoking a legitimate holder":
+        step("Reject stale capability and binding drift")
+        val target = control_target_fixture_v1()
+        val owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(), target.service_incarnation).unwrap()
+        val issued = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 10)
+        var drift = target
+        drift.runtime.native_id = "f".repeat(64)
+        val denied = smux_runtime_control_check_v1(issued.owner, target.binding_uid, SessionRuntimeControlKindV1.Input, "wrong", 1, drift, 11)
+        expect(denied.lease == nil).to_equal(true)
+        expect(smux_runtime_control_find_v1(denied.owner, target.binding_uid, SessionRuntimeControlKindV1.Input).unwrap().active).to_equal(true)
+        val checked = smux_runtime_control_check_v1(denied.owner, target.binding_uid, SessionRuntimeControlKindV1.Input, issued.nonce, 1, target, 12)
+        expect(checked.error).to_equal("")
+        expect(session_runtime_control_lease_check_v1(issued.lease.unwrap(), target, SessionRuntimeControlKindV1.Input,
+            "another-principal", sha256_text(issued.nonce), 1, 12).is_err()).to_equal(true)
+        # Pure metadata corruption injection, not a real authenticated caller.
+        var corrupted = checked.owner
+        var entry = corrupted.entries[0]
+        entry.lease.principal_id = "another-principal"
+        corrupted.entries[0] = entry
+        val principal_denied = smux_runtime_control_check_v1(corrupted, target.binding_uid,
+            SessionRuntimeControlKindV1.Input, issued.nonce, 1, target, 13)
+        expect(principal_denied.error).to_equal("control-principal-denied")
+
+    it "retires both kinds on trusted stable binding drift and refuses rebinding the UID":
+        val target = control_target_fixture_v1()
+        val owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(), target.service_incarnation).unwrap()
+        val input = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 10)
+        val geometry = smux_runtime_control_issue_v1(input.owner, target, SessionRuntimeControlKindV1.Geometry, "e".repeat(32) + ":1", 1000, 0, "b".repeat(64), 11)
+        var drift = target
+        drift.child_incarnation = 2
+        val retired = smux_runtime_control_check_v1(geometry.owner, target.binding_uid, SessionRuntimeControlKindV1.Input, input.nonce, 1, drift, 12)
+        expect(retired.error).to_equal("control-binding-changed")
+        expect(smux_runtime_control_find_v1(retired.owner, target.binding_uid, SessionRuntimeControlKindV1.Input).unwrap().active).to_equal(false)
+        expect(smux_runtime_control_find_v1(retired.owner, target.binding_uid, SessionRuntimeControlKindV1.Geometry).unwrap().active).to_equal(false)
+        val denied = smux_runtime_control_issue_v1(retired.owner, drift, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 1, "c".repeat(64), 13)
+        expect(denied.error).to_equal("control-binding-changed")
+
+    it "permits an intentional current-CAS holder handover while preserving the other kind":
+        val target = control_target_fixture_v1()
+        val owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(), target.service_incarnation).unwrap()
+        val issued = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 10)
+        val geometry = smux_runtime_control_issue_v1(issued.owner, target, SessionRuntimeControlKindV1.Geometry,
+            "e".repeat(32) + ":1", 1000, 0, "b".repeat(64), 11)
+        var holder = target
+        holder.client_id = "client-b"
+        holder.attachment_generation = 2
+        val replaced = smux_runtime_control_issue_v1(geometry.owner, holder, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":2", 1000, 1, "c".repeat(64), 12)
+        expect(replaced.revision).to_equal(2)
+        val old = smux_runtime_control_check_v1(replaced.owner, target.binding_uid, SessionRuntimeControlKindV1.Input, issued.nonce, 1, target, 13)
+        expect(old.error).to_equal("control-capability-stale")
+        expect(smux_runtime_control_check_v1(old.owner, target.binding_uid, SessionRuntimeControlKindV1.Input, replaced.nonce, 2, holder, 14).error).to_equal("")
+        # Models the trusted service observing loss of B's actual attachment.
+        # It revokes only Input; A's independent Geometry right survives.
+        val lost_holder = smux_runtime_control_revoke_v1(old.owner, target.binding_uid, SessionRuntimeControlKindV1.Input, 2, 15)
+        expect(smux_runtime_control_check_v1(lost_holder.owner, target.binding_uid,
+            SessionRuntimeControlKindV1.Geometry, geometry.nonce, 1, target, 16).error).to_equal("")
+
+    it "quarantines on clock regression and refuses counter or deadline overflow":
+        val target = control_target_fixture_v1()
+        val owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(), target.service_incarnation).unwrap()
+        val issued = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 10)
+        val regressed = smux_runtime_control_check_v1(issued.owner, target.binding_uid, SessionRuntimeControlKindV1.Input, issued.nonce, 1, target, 9)
+        expect(regressed.owner.quarantined).to_equal(true)
+        expect(smux_runtime_control_check_v1(regressed.owner, target.binding_uid, SessionRuntimeControlKindV1.Input, issued.nonce, 1, target, 11).error).to_equal("control-owner-quarantined")
+        # Explicit pure-state boundary injection; no native authority is forged.
+        var exhausted = issued.owner
+        var entry = exhausted.entries[0]
+        entry.lease.revision = 9223372036854775807
+        entry.base_revision = 9223372036854775806
+        exhausted.entries[0] = entry
+        expect(smux_runtime_control_issue_v1(exhausted, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1",
+            1000, 9223372036854775807, "b".repeat(64), 11).error).to_equal("control-revision-exhausted")
+        expect(smux_runtime_control_revoke_v1(exhausted, target.binding_uid, SessionRuntimeControlKindV1.Input, 9223372036854775807, 11).status).to_equal("revoked")
+        expect(smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1",
+            9223372036854775807, 0, "a".repeat(64), 9223372036854775797).error).to_equal("control-deadline-overflow")
+
+    it "retains bounded tombstones and permits only existing-pair replacement at capacity":
+        val target = control_target_fixture_v1()
+        var owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(), target.service_incarnation).unwrap()
+        for index in 0..16:
+            var named = target
+            named.binding_uid = "binding-" + index.to_text()
+            val issued = smux_runtime_control_issue_v1(owner, named, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1",
+                1000, 0, sha256_text("model-nonce-" + index.to_text()), 10)
+            expect(issued.error).to_equal("")
+            owner = issued.owner
+        var extra = target
+        extra.binding_uid = "binding-extra"
+        expect(smux_runtime_control_issue_v1(owner, extra, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 11).error).to_equal("control-owner-capacity")
+        owner = smux_runtime_control_invalidate_binding_v1(owner, "binding-0", "detached", 11)
+        expect(owner.entries.len()).to_equal(16)
+        expect(smux_runtime_control_issue_v1(owner, extra, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 12).error).to_equal("control-owner-capacity")
+        extra.binding_uid = "binding-0"
+        expect(smux_runtime_control_issue_v1(owner, extra, SessionRuntimeControlKindV1.Input, "e".repeat(32) + ":1", 1000, 1, "a".repeat(64), 12).revision).to_equal(2)
+
+    it "does not populate issuer membership from well-formed lease metadata":
+        val target = control_target_fixture_v1()
+        val owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(), target.service_incarnation).unwrap()
+        val metadata = SessionRuntimeControlLeaseV1(target: target, kind: SessionRuntimeControlKindV1.Input,
+            principal_id: "local-owner", nonce_digest: sha256_text("a".repeat(64)), revision: 1,
+            issued_monotonic_ms: 10, expires_monotonic_ms: 50)
+        expect(session_runtime_control_lease_validate_v1(metadata).is_ok()).to_equal(true)
+        val denied = smux_runtime_control_check_v1(owner, target.binding_uid, SessionRuntimeControlKindV1.Input, "a".repeat(64), 1, target, 11)
+        expect(denied.error).to_equal("control-lease-not-found")
+        expect(denied.owner.entries.len()).to_equal(0)
+
+    it "requires separate policy rights and refuses nonce reuse without retiring the current right":
+        val target = control_target_fixture_v1()
+        var policy = control_policy_fixture_v1()
+        policy.allowed = [SessionRuntimeControlKindV1.Input]
+        val restricted = smux_runtime_control_owner_new_v1(policy, target.service_incarnation).unwrap()
+        expect(smux_runtime_control_issue_v1(restricted, target, SessionRuntimeControlKindV1.Geometry,
+            "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 10).error).to_equal("control-kind-not-allowed")
+        val owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(), target.service_incarnation).unwrap()
+        val input = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input,
+            "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 10)
+        val reused = smux_runtime_control_issue_v1(input.owner, target, SessionRuntimeControlKindV1.Geometry,
+            "e".repeat(32) + ":1", 1000, 0, input.nonce, 11)
+        expect(reused.error).to_equal("control-nonce-reused")
+        val malformed = smux_runtime_control_issue_v1(reused.owner, target, SessionRuntimeControlKindV1.Input,
+            "e".repeat(32) + ":1", 1000, 1, "not-entropy", 12)
+        expect(malformed.error).to_equal("control-issue-input-invalid")
+        expect(smux_runtime_control_find_v1(malformed.owner, target.binding_uid, SessionRuntimeControlKindV1.Input).unwrap().active).to_equal(true)
+
+    it "consumes the real reply codec through hosted client classification without native control claims":
+        val target = control_target_fixture_v1()
+        val owner = smux_runtime_control_owner_new_v1(control_policy_fixture_v1(), target.service_incarnation).unwrap()
+        val issued = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Input,
+            "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 10)
+        val request = SmuxRuntimeControlRequestV1(action: "issue", binding_uid: target.binding_uid,
+            control_kind: SessionRuntimeControlKindV1.Input, client_id: target.client_id,
+            attachment_token: "e".repeat(32) + ":1", expected_revision: 0, nonce: "", payload: "", columns: 0, rows: 0,
+            expected_target_digest: session_runtime_control_target_digest_v1(target).unwrap())
+        val command = "runtime-control-v1 " + smux_runtime_control_request_token_v1(request).unwrap()
+        val bytes = smux_runtime_control_reply_v1(request, target.service_incarnation, "issued", "", issued.revision,
+            issued.lease, issued.nonce).unwrap()
+        expect(smux_client_request_reply_ok(command, bytes)).to_equal(true)
+        expect(smux_client_request_reply_ok(command, bytes + "\n")).to_equal(true)
+        expect(smux_client_request_reply_ok(command, bytes + "\n\n")).to_equal(false)
+        val replay = smux_runtime_control_reply_v1(request, target.service_incarnation, "replayed", "", issued.revision,
+            issued.lease, issued.nonce).unwrap()
+        expect(smux_client_request_reply_ok(command, replay)).to_equal(true)
+        val fields = smux_runtime_control_reply_fields_v1(bytes).unwrap()
+        for key in ["requestDigest", "nonce"]:
+            var changed = fields
+            changed[key] = SdnValue.String("f".repeat(64))
+            expect(smux_client_request_reply_ok(command, sdn_encode_canonical(SdnValue.Dict(changed)))).to_equal(false)
+        var changed = fields
+        changed["targetDigest"] = SdnValue.String("malformed")
+        expect(smux_client_request_reply_ok(command, sdn_encode_canonical(SdnValue.Dict(changed)))).to_equal(false)
+        changed = fields
+        changed["targetDigest"] = SdnValue.String("f".repeat(64))
+        expect(smux_client_request_reply_ok(command, sdn_encode_canonical(SdnValue.Dict(changed)))).to_equal(false)
+        changed = fields
+        changed["controlReady"] = SdnValue.Bool(true)
+        expect(smux_client_request_reply_ok(command, sdn_encode_canonical(SdnValue.Dict(changed)))).to_equal(false)
+        changed = fields
+        changed["issuedMonotonicMs"] = SdnValue.Int(0)
+        expect(smux_client_request_reply_ok(command, sdn_encode_canonical(SdnValue.Dict(changed)))).to_equal(false)
+        var wrong_kind = issued.lease.unwrap()
+        wrong_kind.kind = SessionRuntimeControlKindV1.Geometry
+        expect(smux_runtime_control_reply_v1(request, target.service_incarnation, "issued", "", issued.revision,
+            Some(wrong_kind), issued.nonce).is_err()).to_equal(true)

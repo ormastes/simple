@@ -1,0 +1,109 @@
+# Real compiled configured socket and actual adopted Container stream only.
+# Every error is returned to the caller's retained SignedBindingFixtureV3.
+use std.spec.step
+use test.helpers.smux_signed_binding_fixture_v3.{SignedBindingFixtureV3, SignedBindingFixtureConfigV3}
+use test.helpers.smux_capability_socket_fixture.smux_capability_fixture_request
+use test.helpers.smux_owned_process_fixture.owned_fixture_private_path
+use app.io.mod.file_read_regular_no_follow_bounded
+use os.apps.smux.runtime_control_policy_v1.smux_runtime_control_policy_decode_v1
+use os.apps.smux.runtime_control_request_v1.{SmuxRuntimeControlRequestV1, smux_runtime_control_request_token_v1,
+    smux_runtime_control_request_digest_v1, smux_runtime_control_field_text_v1, smux_runtime_control_field_int_v1}
+use os.apps.smux.runtime_control_reply_v1.{smux_runtime_control_reply_fields_v1, smux_runtime_control_reply_ok_v1}
+use os.apps.smux.client_leases.client_lease_token_valid
+use std.common.contracts.mux.session_runtime_control_v1.SessionRuntimeControlKindV1
+use std.common.sdn.value.SdnValue
+
+pub fn runtime_control_fixture_preflight_v1(config: SignedBindingFixtureConfigV3) -> Result<(), text>:
+    val path = config.authority.host_root + "/smux-runtime-control-policy.sdn"
+    owned_fixture_private_path(path, "regular file", "600")?
+    val policy = smux_runtime_control_policy_decode_v1(file_read_regular_no_follow_bounded(path, 4096)?)?
+    if (policy.max_lease_ms != 15000 or not policy.allowed.contains(SessionRuntimeControlKindV1.Input) or
+            not policy.allowed.contains(SessionRuntimeControlKindV1.Geometry)):
+        return Err("control fixture requires explicitly installed both-right policy with 15000ms maximum")
+    Ok(())
+
+fn control_fixture_request(action: text, uid: text, kind: SessionRuntimeControlKindV1,
+        revision: i64, nonce: text) -> SmuxRuntimeControlRequestV1:
+    SmuxRuntimeControlRequestV1(action: action, binding_uid: uid, control_kind: kind, client_id: "",
+        attachment_token: "", expected_revision: revision, nonce: nonce, payload: "", columns: 0, rows: 0)
+
+fn control_fixture_exchange(fixture: SignedBindingFixtureV3, request: SmuxRuntimeControlRequestV1,
+        expected_code: i64) -> Result<Dict<text, SdnValue>, text>:
+    if fixture.socket == nil or fixture.request == nil: return Err("actual control fixture target unavailable")
+    val socket = fixture.socket.unwrap()
+    val token = smux_runtime_control_request_token_v1(request)?
+    val (bytes, error, code) = smux_capability_fixture_request(socket, socket.token, ["runtime-control-v1", token])
+    if error != "" or code != expected_code: return Err("compiled control request returned unexpected exit status")
+    val fields = smux_runtime_control_reply_fields_v1(bytes)?
+    if (smux_runtime_control_field_text_v1(fields, "requestDigest")? != smux_runtime_control_request_digest_v1(request)? or
+            smux_runtime_control_field_text_v1(fields, "serviceIncarnation")? != fixture.request.unwrap().service_incarnation):
+        return Err("actual control response correlation mismatch")
+    for key in ["effectApplied", "controlReady"]:
+        match fields[key]:
+            case SdnValue.Bool(value):
+                if value: return Err("output-only fixture unexpectedly claimed a control effect")
+            case _: return Err("control response boolean malformed")
+    if expected_code == 0 and not smux_runtime_control_reply_ok_v1(request, bytes):
+        return Err("actual successful control metadata failed strict client validation")
+    Ok(fields)
+
+pub fn runtime_control_fixture_exercise_v1(fixture: SignedBindingFixtureV3) -> Result<(), text>:
+    if fixture.failure != "" or not fixture.marker_observed or fixture.socket == nil or fixture.request == nil:
+        return Err("actual signed binding and fresh pane output are required before controls")
+    val socket = fixture.socket.unwrap()
+    val bound = fixture.request.unwrap()
+    val client = "control-fixture"
+    val (attached, attach_error, attach_code) = smux_capability_fixture_request(socket, socket.token,
+        ["client-attach", bound.session_id, client, "80", "24"])
+    if attach_error != "" or attach_code != 0: return Err("actual leased attachment failed")
+    val parts = attached.trim().split(" ")
+    if parts.len() != 4 or parts[0] != "smux:" or parts[1] != "leased" or parts[3] != bound.session_id:
+        return Err("actual attachment reply malformed")
+    val attachment = parts[2]
+    if not client_lease_token_valid(attachment): return Err("actual attachment token malformed")
+    step("Issue distinct control rights from the authenticated configured socket")
+    var input_request = control_fixture_request("resolve", bound.binding_uid, SessionRuntimeControlKindV1.Input, 0, "")
+    input_request.client_id = client
+    input_request.attachment_token = attachment
+    val resolved = control_fixture_exchange(fixture, input_request, 0)?
+    input_request.action = "issue"
+    input_request.expected_target_digest = smux_runtime_control_field_text_v1(resolved, "targetDigest")?
+    val issued_input = control_fixture_exchange(fixture, input_request, 0)?
+    val input_nonce = smux_runtime_control_field_text_v1(issued_input, "nonce")?
+    var geometry_request = input_request
+    geometry_request.control_kind = SessionRuntimeControlKindV1.Geometry
+    val issued_geometry = control_fixture_exchange(fixture, geometry_request, 0)?
+    val geometry_nonce = smux_runtime_control_field_text_v1(issued_geometry, "nonce")?
+    if input_nonce == geometry_nonce: return Err("distinct rights reused the same secret")
+    val replay = control_fixture_exchange(fixture, input_request, 0)?
+    if (smux_runtime_control_field_text_v1(replay, "nonce")? != input_nonce or
+            smux_runtime_control_field_int_v1(replay, "expiresMonotonicMs")? != smux_runtime_control_field_int_v1(issued_input, "expiresMonotonicMs")?):
+        return Err("issue replay changed the capability or expiry")
+    step("Reject runtime control effects and the legacy attachment input bypass")
+    var input = control_fixture_request("input", bound.binding_uid, SessionRuntimeControlKindV1.Input, 1, input_nonce)
+    input.payload = "not-sent"
+    val denied_input = control_fixture_exchange(fixture, input, 1)?
+    if smux_runtime_control_field_text_v1(denied_input, "status")? != "unsupported": return Err("valid input capability did not reach actual unsupported provider boundary")
+    var geometry = control_fixture_request("resize", bound.binding_uid, SessionRuntimeControlKindV1.Geometry, 1, geometry_nonce)
+    geometry.columns = 81
+    geometry.rows = 25
+    val denied_geometry = control_fixture_exchange(fixture, geometry, 1)?
+    if smux_runtime_control_field_text_v1(denied_geometry, "status")? != "unsupported": return Err("valid geometry capability did not reach actual unsupported provider boundary")
+    val (legacy, legacy_error, legacy_code) = smux_capability_fixture_request(socket, socket.token,
+        ["client-request", bound.session_id, client, attachment, "input", bound.session_id, bound.window_id, bound.pane_id, "78"])
+    if legacy_error != "" or legacy_code == 0 or not legacy.contains("terminal transport is read-only"):
+        return Err("legacy attachment input did not fail at the bound terminal guard")
+    step("Revoke Input while Geometry remains issued then detach the attachment")
+    val revoke = control_fixture_request("revoke", bound.binding_uid, SessionRuntimeControlKindV1.Input, 1, "")
+    val _revoked = control_fixture_exchange(fixture, revoke, 0)?
+    val stale = control_fixture_exchange(fixture, input, 1)?
+    if smux_runtime_control_field_text_v1(stale, "status")? != "rejected": return Err("revoked input capability survived")
+    val inspect = control_fixture_request("inspect", bound.binding_uid, SessionRuntimeControlKindV1.Geometry, 0, "")
+    val active = control_fixture_exchange(fixture, inspect, 0)?
+    if smux_runtime_control_field_text_v1(active, "status")? != "active": return Err("Input revocation changed Geometry authority")
+    val (_detached, detach_error, detach_code) = smux_capability_fixture_request(socket, socket.token,
+        ["client-detach", bound.session_id, client, attachment])
+    if detach_error != "" or detach_code != 0: return Err("actual attachment detach failed")
+    val retired = control_fixture_exchange(fixture, inspect, 0)?
+    if smux_runtime_control_field_text_v1(retired, "status")? != "retired": return Err("detached attachment kept runtime control authority")
+    Ok(())
