@@ -18,13 +18,10 @@
 # patch.target_revision so a chain of applies can keep using composition_id
 # as the revision.
 #
-# Batch scoping: apply() collapses the result into a single batch reusing
-# the base composition's first batch's metadata (schema/batch_id/
-# backend_target/source/embedding). Multi-batch structural preservation
-# (splitting the result back across multiple original batches) is out of
-# scope for this slice -- the round-trip oracle compares flattened commands,
-# not batch containers. This is a documented, deliberate limitation, not a
-# silent gap.
+# Batch scoping: the patch records the target batch layout (metadata + sizes)
+# and apply() splits the result back across those batches; a patch without a
+# layout collapses into a single batch reusing the base composition first
+# batch metadata. The round-trip oracle still compares flattened commands.
 #
 # Known limitations (documented, not silent):
 # - component_id is assumed unique per composition (matches the existing
@@ -83,6 +80,8 @@ struct DrawIrPatch:
     target_revision: text
     operations: [DrawIrPatchOp]
     damage_rects: [DrawIrRect]
+    target_batch_shells: [DrawIrBatch]
+    target_batch_sizes: [i32]
 
 struct DrawIrPatchApplyResult:
     ok: bool
@@ -357,11 +356,18 @@ fn draw_ir_patch_between(old_composition: DrawIrComposition, old_rev: text, new_
     var damage: [DrawIrRect] = []
     _draw_ir_patch_build_forward_ops(baseline_index, current_index, operations, damage)
     _draw_ir_patch_build_remove_ops(baseline_index, current_index, operations, damage)
+    var shells: [DrawIrBatch] = []
+    var sizes: [i32] = []
+    for batch in new_composition.batches:
+        shells.push(DrawIrBatch(schema: batch.schema, batch_id: batch.batch_id, backend_target: batch.backend_target, source: batch.source, embedding: batch.embedding, commands: []))
+        sizes.push(batch.commands.len())
     DrawIrPatch(
         base_revision: old_rev,
         target_revision: new_rev,
         operations: operations,
-        damage_rects: damage
+        damage_rects: damage,
+        target_batch_shells: shells,
+        target_batch_sizes: sizes
     )
 
 fn _draw_ir_patch_result_length(base_index: DrawIrCommandIndex, patch: DrawIrPatch) -> i32:
@@ -417,6 +423,28 @@ fn _draw_ir_patch_base_batch(composition: DrawIrComposition) -> DrawIrBatch:
         return batches[0]
     draw_ir_batch("patched", composition.backend_target, draw_ir_embedding_config("", "", 0, 0, 0, 0, 0, 1000, false), [])
 
+# Splits the reconstructed flat command list back across the target batches
+# recorded by draw_ir_patch_between. Patches without recorded batch layout
+# fall back to one batch reusing the base composition first batch metadata.
+fn _draw_ir_patch_split_batches(composition: DrawIrComposition, patch: DrawIrPatch, commands: [DrawIrCommand]) -> [DrawIrBatch]:
+    if patch.target_batch_shells.len() == 0 or patch.target_batch_shells.len() != patch.target_batch_sizes.len():
+        val base_batch = _draw_ir_patch_base_batch(composition)
+        return [DrawIrBatch(schema: draw_ir_commands_schema(commands), batch_id: base_batch.batch_id, backend_target: base_batch.backend_target, source: base_batch.source, embedding: base_batch.embedding, commands: commands)]
+    var out: [DrawIrBatch] = []
+    var offset = 0
+    var b = 0
+    while b < patch.target_batch_shells.len():
+        val shell = patch.target_batch_shells[b]
+        var slice: [DrawIrCommand] = []
+        var k = 0
+        while k < patch.target_batch_sizes[b] and offset + k < commands.len():
+            slice.push(commands[offset + k])
+            k = k + 1
+        offset = offset + k
+        out.push(DrawIrBatch(schema: shell.schema, batch_id: shell.batch_id, backend_target: shell.backend_target, source: shell.source, embedding: shell.embedding, commands: slice))
+        b = b + 1
+    out
+
 fn draw_ir_patch_apply(composition: DrawIrComposition, patch: DrawIrPatch) -> DrawIrPatchApplyResult:
     if composition.composition_id != patch.base_revision:
         return DrawIrPatchApplyResult(
@@ -426,21 +454,14 @@ fn draw_ir_patch_apply(composition: DrawIrComposition, patch: DrawIrPatch) -> Dr
         )
     val base_index = draw_ir_build_command_index(composition)
     val commands = _draw_ir_patch_apply_commands(base_index, patch)
-    val base_batch = _draw_ir_patch_base_batch(composition)
-    val patched_batch = DrawIrBatch(
-        schema: draw_ir_commands_schema(commands),
-        batch_id: base_batch.batch_id,
-        backend_target: base_batch.backend_target,
-        source: base_batch.source,
-        embedding: base_batch.embedding,
-        commands: commands
-    )
+    val patched_batches = _draw_ir_patch_split_batches(composition, patch, commands)
+    val patched_schema = draw_ir_commands_schema(commands)
     val patched_composition = DrawIrComposition(
-        schema: patched_batch.schema,
+        schema: patched_schema,
         composition_id: patch.target_revision,
         scene_key: composition.scene_key,
         backend_target: composition.backend_target,
-        batches: [patched_batch],
+        batches: patched_batches,
         generation: draw_ir_next_composition_generation()
     )
     DrawIrPatchApplyResult(ok: true, reason: "", composition: patched_composition)

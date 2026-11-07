@@ -1,0 +1,59 @@
+# @cover src/lib/common/ui/draw_ir_patch.spl 80%
+# @tag: unit, ui, draw_ir, patch, prevention
+"""
+Prevention guard for draw_ir_patch batch-layout restore: apply() must rebuild
+the target batch count, ids and per-batch sizes for ANY batch shape (shrink,
+grow, empty batch), never index past the batch table or collapse to one batch.
+"""
+use std.spec
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use common.ui.draw_ir_patch.{
+    draw_ir_patch_between,
+    draw_ir_patch_apply,
+    draw_ir_patch_commands_equal
+}
+
+fn _emb():
+    draw_ir_embedding_config("surface", "root", 0, 0, 100, 100, 0, 1000, false)
+
+describe "draw_ir_patch batch layout prevention":
+    it "restores a grown batch table (1 -> 3 batches)":
+        val base = draw_ir_composition("r1", "s", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("a", DRAW_IR_BACKEND_CPU, _emb(), [draw_ir_rect("x", 0, 0, 2, 2, 1u32)])
+        ])
+        val target = draw_ir_composition("r2", "s", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("a2", DRAW_IR_BACKEND_CPU, _emb(), [draw_ir_rect("x", 0, 0, 2, 2, 1u32)]),
+            draw_ir_batch("b2", DRAW_IR_BACKEND_CPU, _emb(), [draw_ir_rect("y", 3, 0, 2, 2, 2u32), draw_ir_rect("z", 6, 0, 2, 2, 3u32)]),
+            draw_ir_batch("c2", DRAW_IR_BACKEND_CPU, _emb(), [draw_ir_rect("w", 9, 0, 2, 2, 4u32)])
+        ])
+        val patch = draw_ir_patch_between(base, "r1", target, "r2")
+        val applied = draw_ir_patch_apply(base, patch)
+        expect(applied.ok).to_equal(true)
+        expect(applied.composition.batches.len()).to_equal(3)
+        expect(applied.composition.batches[1].commands.len()).to_equal(2)
+        expect(applied.composition.batches[2].batch_id).to_equal("c2")
+        expect(draw_ir_patch_commands_equal(applied.composition, target)).to_equal(true)
+
+    it "restores a shrunk batch table with an empty middle batch":
+        val base = draw_ir_composition("r1", "s", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("a", DRAW_IR_BACKEND_CPU, _emb(), [draw_ir_rect("x", 0, 0, 2, 2, 1u32)]),
+            draw_ir_batch("b", DRAW_IR_BACKEND_CPU, _emb(), [draw_ir_rect("y", 3, 0, 2, 2, 2u32)]),
+            draw_ir_batch("c", DRAW_IR_BACKEND_CPU, _emb(), [draw_ir_rect("z", 6, 0, 2, 2, 3u32)])
+        ])
+        val target = draw_ir_composition("r2", "s", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("a", DRAW_IR_BACKEND_CPU, _emb(), [draw_ir_rect("x", 0, 0, 2, 2, 1u32)]),
+            draw_ir_batch("empty", DRAW_IR_BACKEND_CPU, _emb(), []),
+            draw_ir_batch("c", DRAW_IR_BACKEND_CPU, _emb(), [draw_ir_rect("z", 6, 0, 2, 2, 3u32)])
+        ])
+        val patch = draw_ir_patch_between(base, "r1", target, "r2")
+        val applied = draw_ir_patch_apply(base, patch)
+        expect(applied.ok).to_equal(true)
+        expect(applied.composition.batches.len()).to_equal(3)
+        expect(applied.composition.batches[1].commands.len()).to_equal(0)
+        expect(applied.composition.batches[2].commands[0].component_id).to_equal("z")
