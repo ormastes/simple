@@ -1,0 +1,240 @@
+# Linux leaf adapter for the common container API. Its callers serialize access
+# to the retained provider; this module is not another scheduler or grant verifier.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2,
+    ContainerExecutionRequestV2, ContainerRequestProjectionV2, ContainerHostObservationV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
+use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RuntimeIntentV1, RuntimeIdentityV1,
+    RUNTIME_STATUS_REJECTED, runtime_command_empty, runtime_state_empty}
+use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceiptV2,
+    container_runtime_query_digest_v2, container_runtime_observation_digest_v2,
+    container_absence_receipt_encode_v2}
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.LinuxOciRuntimeProviderV1
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEngineObservationV1,
+    linux_oci_engine_policy_decode_v1}
+use std.nogc_async_mut.container.providers.linux.engine_observer_v1.linux_oci_engine_observe_v1
+use std.nogc_sync_mut.sffi.linux_uname_v1.linux_native_uname_architecture_v1
+use std.sffi.platform.platform_name_raw
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+
+pub const LINUX_SIMPLE_CONTAINER_BACKEND_V2 = "linux-podman"
+
+fn _linux_container_native_id_v2(path: text) -> Result<text, text>:
+    val raw = file_read_regular_no_follow_bounded(path, 128)?
+    val identity = raw.trim()
+    if raw.len() > 128 or not builder_identifier_valid_v1(identity):
+        return Err("container-native-identity-invalid")
+    Ok(identity)
+
+fn _linux_container_observation_v2(engine: LinuxOciEngineObservationV1) -> Result<ContainerHostObservationV2, text>:
+    if platform_name_raw().lower() != "linux": return Err("container-adapter-native-os-unsupported")
+    val architecture = linux_native_uname_architecture_v1()?
+    val machine = _linux_container_native_id_v2("/etc/machine-id")?
+    val boot = _linux_container_native_id_v2("/proc/sys/kernel/random/boot_id")?
+    Ok(ContainerHostObservationV2(backend: LINUX_SIMPLE_CONTAINER_BACKEND_V2,
+        native_machine_id: machine, native_boot_id: boot, provider_identity_digest: engine.identity_digest,
+        execution_os: "linux", architecture: architecture,
+        continuity_assurance: "native-boot-incarnation-v1", boot_observation: boot))
+
+fn _linux_container_scope_error_v2(scope: ContainerHostScopeV2) -> text:
+    match container_host_scope_bytes_v2(scope):
+        case Err(reason): return reason
+        case Ok(_): pass
+    if scope.continuity_mode != "native-boot-incarnation-v1":
+        return "container-adapter-continuity-mode-unsupported"
+    if scope.boot_id != scope.continuity_id: return "container-adapter-continuity-id-mismatch"
+    ""
+
+fn _linux_container_adapter_refused_v2(action: text, reason: text) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: action,
+        command: runtime_command_empty(), state: runtime_state_empty(), exit_code: -1,
+        stdout: "", stderr: "", reason: reason)
+
+fn _linux_container_intent_equal_v2(left: RuntimeIntentV1, right: RuntimeIntentV1) -> bool:
+    left.pod_uid == right.pod_uid and left.attempt == right.attempt and
+        left.provider_generation == right.provider_generation and left.operation_id == right.operation_id and
+        left.engine == right.engine and left.native_id == right.native_id and
+        left.node_boot_id == right.node_boot_id and left.phase == right.phase
+
+pub class LinuxSimpleContainerAdapterV2:
+    scope: ContainerHostScopeV2
+    provider: LinuxOciRuntimeProviderV1
+    _observed_host: ContainerHostObservationV2
+    _duration_cap_ms: i64
+
+impl LinuxSimpleContainerAdapterV2:
+    pub static fn observe(policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
+        val policy = linux_oci_engine_policy_decode_v1(policy_bytes)?
+        val engine = linux_oci_engine_observe_v1(policy, 5000)?
+        _linux_container_observation_v2(engine)
+
+    pub static fn open(policy_bytes: text, state_root: text, scope: ContainerHostScopeV2,
+            expected_provider_identity_digest: text, timeout_ms: i64) -> Result<LinuxSimpleContainerAdapterV2, text>:
+        val scope_error = _linux_container_scope_error_v2(scope)
+        if scope_error != "": return Err(scope_error)
+        if not builder_digest_valid_v1(expected_provider_identity_digest):
+            return Err("container-adapter-provider-identity-invalid")
+        if timeout_ms <= 0: return Err("container-adapter-timeout-invalid")
+        if not state_root.starts_with("/") or state_root.len() > 4096 or state_root.contains("\0"):
+            return Err("container-adapter-state-root-invalid")
+        # Reuse the canonical no-follow parent owner; no local ownership guess.
+        val directory = retained_directory_open_trusted_v1(state_root)?
+        if not directory.close(): return Err("container-adapter-state-root-close-failed")
+        val policy = linux_oci_engine_policy_decode_v1(policy_bytes)?
+        val provider_fence = container_scope_fence_id_v2(scope)?
+        val provider = LinuxOciRuntimeProviderV1.new_with_engine_policy("linux", "podman", state_root,
+            provider_fence, scope.provider_generation, policy, true, timeout_ms)?
+        val engine = provider.retained_engine_observation_v1()?
+        val observation = _linux_container_observation_v2(engine)?
+        if observation.provider_identity_digest != expected_provider_identity_digest:
+            return Err("container-adapter-provider-identity-mismatch")
+        if observation.native_boot_id != scope.boot_id: return Err("container-adapter-boot-mismatch")
+        if observation.native_machine_id != scope.native_machine_id: return Err("container-adapter-native-machine-mismatch")
+        Ok(LinuxSimpleContainerAdapterV2(scope: scope, provider: provider,
+            _observed_host: observation, _duration_cap_ms: timeout_ms))
+
+    # Explicit fixture-only construction: a real open never accepts a supplied
+    # observation or chooses scripted execution from user configuration.
+    pub static fn scripted_fixture_v2(scope: ContainerHostScopeV2,
+            provider: LinuxOciRuntimeProviderV1, observed: ContainerHostObservationV2,
+            timeout_ms: i64) -> Result<LinuxSimpleContainerAdapterV2, text>:
+        if not provider.scripted: return Err("container-adapter-fixture-requires-scripted-provider")
+        val scope_error = _linux_container_scope_error_v2(scope)
+        if scope_error != "": return Err(scope_error)
+        if provider.platform != "linux" or provider.engine != "podman" or not provider.engine_policy.?:
+            return Err("container-adapter-fixture-provider-unsupported")
+        val provider_fence = container_scope_fence_id_v2(scope)?
+        if provider.node_boot_id != provider_fence or provider.provider_generation != scope.provider_generation:
+            return Err("container-adapter-fixture-provider-scope-mismatch")
+        val engine = provider.retained_engine_observation_v1()?
+        if observed.backend != LINUX_SIMPLE_CONTAINER_BACKEND_V2 or observed.native_boot_id != scope.boot_id or
+                observed.native_machine_id != scope.native_machine_id or
+                observed.continuity_assurance != scope.continuity_mode or observed.boot_observation != scope.continuity_id or
+                observed.provider_identity_digest != engine.identity_digest or
+                not builder_digest_valid_v1(observed.provider_identity_digest) or timeout_ms <= 0:
+            return Err("container-adapter-fixture-observation-invalid")
+        Ok(LinuxSimpleContainerAdapterV2(scope: scope, provider: provider,
+            _observed_host: observed, _duration_cap_ms: timeout_ms))
+
+    pub fn is_scripted_fixture_v2() -> bool:
+        self.provider.scripted
+
+    pub fn observation() -> ContainerHostObservationV2:
+        self._observed_host
+
+    fn _checked_request_v2(request: ContainerExecutionRequestV2) -> Result<(LinuxOciRequestV1, ContainerRequestProjectionV2), text>:
+        val plan = request.plan
+        if plan.backend != LINUX_SIMPLE_CONTAINER_BACKEND_V2: return Err("container-adapter-backend-mismatch")
+        if plan.physical_host_id != self.scope.physical_host_id or plan.service_scope_id != self.scope.service_scope_id or
+                plan.boot_id != self.scope.boot_id or plan.provider_generation != self.scope.provider_generation or
+                plan.native_machine_id != self.scope.native_machine_id or plan.continuity_mode != self.scope.continuity_mode or
+                plan.continuity_id != self.scope.continuity_id:
+            return Err("container-adapter-request-scope-mismatch")
+        if not builder_identifier_valid_v1(plan.workload_uid) or plan.attempt <= 0 or
+                not builder_identifier_valid_v1(plan.operation_id) or not builder_digest_valid_v1(plan.request_digest):
+            return Err("container-adapter-plan-identity-invalid")
+        val decoded = linux_oci_retained_request_decode_v1(request.request_bytes)?
+        val digest = linux_oci_request_digest_v1(decoded)?
+        if digest != plan.request_digest: return Err("container-adapter-request-digest-mismatch")
+        if decoded.pod_uid != plan.workload_uid or decoded.attempt != plan.attempt or decoded.operation_id != plan.operation_id:
+            return Err("container-adapter-request-identity-mismatch")
+        val projection = ContainerRequestProjectionV2(workload_uid: decoded.pod_uid, attempt: decoded.attempt,
+            operation_id: decoded.operation_id, request_digest: digest, cpu_millis: decoded.cpu_limit_millis,
+            memory_bytes: decoded.memory_limit_bytes, timeout_ms: decoded.timeout_ms, has_devices: false,
+            has_workspace: decoded.bundle_path != "" or decoded.build_input_root != "" or decoded.build_output_root != "")
+        Ok((decoded, projection))
+
+    pub fn project(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
+        val checked = self._checked_request_v2(request)?
+        Ok(checked.1)
+
+    pub fn validate(request: ContainerExecutionRequestV2) -> Result<bool, text>:
+        val checked = self._checked_request_v2(request)?
+        val valid = self.provider.validate(checked.0)
+        if not valid.accepted: return Err(valid.reason)
+        Ok(true)
+
+    fn _set_duration_v2(request: LinuxOciRequestV1) -> Result<(), text>:
+        val timeout = if request.timeout_ms < self._duration_cap_ms: request.timeout_ms else: self._duration_cap_ms
+        self.provider.set_operation_timeout_v1(timeout)
+
+    pub me read(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
+        if action != "inspect" and action != "logs" and action != "wait":
+            return _linux_container_adapter_refused_v2(action, "container-adapter-read-action-unsupported")
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+        val decoded = checked.0
+        val valid = self.provider.validate(decoded)
+        if not valid.accepted: return _linux_container_adapter_refused_v2(action, valid.reason)
+        match self._set_duration_v2(decoded):
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+            case Ok(_): pass
+        if action == "inspect": return self.provider.inspect(decoded)
+        if action == "logs": return self.provider.logs(decoded)
+        self.provider.wait(decoded, true)
+
+    pub me apply(action: text, request: ContainerExecutionRequestV2,
+            deadline: ContainerEffectDeadlineV1) -> RuntimeOperationV1:
+        if action == "inspect" or action == "logs" or action == "wait": return self.read(action, request)
+        if action != "prepare" and action != "create" and action != "start" and action != "stop" and action != "destroy":
+            return _linux_container_adapter_refused_v2(action, "container-adapter-action-unsupported")
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+        val decoded = checked.0
+        val valid = self.provider.validate(decoded)
+        if not valid.accepted: return _linux_container_adapter_refused_v2(action, valid.reason)
+        match self._set_duration_v2(decoded):
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+            case Ok(_): pass
+        if action == "create" or action == "start":
+            match self.provider.set_effect_deadline_v1(deadline):
+                case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+                case Ok(_): pass
+        if action == "prepare": return self.provider.prepare_pod(decoded)
+        if action == "create": return self.provider.create(decoded)
+        if action == "start": return self.provider.start(decoded)
+        if action == "stop": return self.provider.stop(decoded)
+        self.provider.destroy(decoded, false)
+
+    pub fn intent(request: ContainerExecutionRequestV2) -> Result<RuntimeIntentV1, text>:
+        val checked = self._checked_request_v2(request)?
+        self.provider.retained_intent_v1(checked.0, true)
+
+    pub me absence(request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1) -> Result<ContainerAbsenceReceiptV2, text>:
+        val checked = self._checked_request_v2(request)?
+        val decoded = checked.0
+        val valid = self.provider.validate(decoded)
+        if not valid.accepted: return Err(valid.reason)
+        self._set_duration_v2(decoded)?
+        val observed = self.provider.observe_absence_v2(decoded, expected)?
+        val receipt = ContainerAbsenceReceiptV2(backend: LINUX_SIMPLE_CONTAINER_BACKEND_V2,
+            scope: self.scope, identity: expected, request_digest: checked.1.request_digest,
+            provider_identity_digest: observed.provider_identity_digest, observed_unix_ms: observed.observed_unix_ms,
+            query_digest: container_runtime_query_digest_v2(observed.operation.command)?,
+            evidence_digest: container_runtime_observation_digest_v2(observed.operation)?,
+            proof_kind: "exact-native-object-absence-v1")
+        # Integrity/shape validation is not producer authentication or host
+        # acceptance. No lifecycle tombstone or budget state is changed here.
+        val canonical = container_absence_receipt_encode_v2(receipt)?
+        Ok(receipt)
+
+    pub me recover(request: ContainerExecutionRequestV2, expected: RuntimeIntentV1) -> RuntimeOperationV1:
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
+        val decoded = checked.0
+        val retained = match self.provider.retained_intent_v1(decoded, true):
+            case Ok(value): value
+            case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
+        if not _linux_container_intent_equal_v2(retained, expected):
+            return _linux_container_adapter_refused_v2("recover", "container-adapter-retained-intent-mismatch")
+        match self._set_duration_v2(decoded):
+            case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
+            case Ok(_): pass
+        self.provider.recover(decoded)

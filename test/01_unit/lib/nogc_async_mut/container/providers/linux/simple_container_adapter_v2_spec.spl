@@ -1,0 +1,349 @@
+# Actual common API dispatch over an explicit Linux scripted provider.
+# Authored/unexecuted; this does not claim native host or container evidence.
+use std.spec.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.LinuxSimpleContainerAdapterV2
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.contracts.container.runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.contracts.container.execution_evidence_v2.*
+
+fn _linux_api_deadline_v2(request: ContainerExecutionRequestV2, expiry: i64) -> ContainerEffectDeadlineV1:
+    container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id,
+        ["create", "start"], expiry).unwrap()
+
+fn _linux_api_absence_query_fixture_v2(native: text, exit_code: i64,
+        stdout: text = "", stderr: text = "") -> ScriptedCommandResultV1:
+    # Independent literal query, not a lifecycle tombstone or destroy builder.
+    val query = RuntimeCommandV1(operation: "absence", program: "podman", args: ["container", "exists", native])
+    var result = linux_container_script_result_fixture_v2(query, stdout)
+    result.exit_code = exit_code
+    result.stderr = stderr
+    result
+
+describe "Linux adapter through the common Simple Container API":
+    it "projects actual canonical resources and retains the full common owner scope":
+        val owner = linux_container_owner_fixture_v2([], [1])
+        val request = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+        val projected = simple_container_project_v2(owner, request).unwrap()
+        expect(projected.workload_uid).to_equal("workload-1")
+        expect(projected.attempt).to_equal(1)
+        expect(projected.operation_id).to_equal("create-api")
+        expect(projected.request_digest).to_equal(request.plan.request_digest)
+        expect(projected.cpu_millis).to_equal(1000)
+        expect(projected.memory_bytes).to_equal(268435456)
+        expect(projected.timeout_ms).to_equal(5000)
+        expect(projected.has_devices).to_equal(false)
+        expect(projected.has_workspace).to_equal(false)
+        expect(simple_container_backend_v2(owner)).to_equal("linux-podman")
+        expect(simple_container_scope_v2(owner).native_machine_id).to_equal("native-machine-1")
+        expect(simple_container_scope_v2(owner).physical_host_id).to_equal("physical-host-alias")
+
+    it "refuses noncanonical bytes digest tampering and mismatched request identities before native effects":
+        val adapter = linux_container_adapter_fixture_v2([], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val original = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+        var changed = original
+        changed.request_bytes = original.request_bytes + "\n"
+        expect(simple_container_project_v2(owner, changed).is_err()).to_equal(true)
+        changed = original
+        changed.plan.request_digest = "f".repeat(64)
+        expect(simple_container_project_v2(owner, changed).is_err()).to_equal(true)
+        changed = original
+        changed.plan.operation_id = "other"
+        expect(simple_container_project_v2(owner, changed).is_err()).to_equal(true)
+        changed = original
+        changed.plan.workload_uid = "other"
+        expect(simple_container_project_v2(owner, changed).is_err()).to_equal(true)
+        expect(adapter.provider.executor_call_count()).to_equal(0)
+
+    it "rejects every cross-scope plan field through the common owner before leaf dispatch":
+        val adapter = linux_container_adapter_fixture_v2([], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val original = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+        for field in ["physical", "service", "boot", "generation", "machine", "mode", "continuity", "backend"]:
+            var changed = original
+            if field == "physical": changed.plan.physical_host_id = "other"
+            if field == "service": changed.plan.service_scope_id = "other"
+            if field == "boot": changed.plan.boot_id = "other"
+            if field == "generation": changed.plan.provider_generation = 8
+            if field == "machine": changed.plan.native_machine_id = "other"
+            if field == "mode": changed.plan.continuity_mode = "service-incarnation-v1"
+            if field == "continuity": changed.plan.continuity_id = "other"
+            if field == "backend": changed.plan.backend = "windows-docker-process"
+            val refused = simple_container_apply_v2(owner, "prepare", changed, _linux_api_deadline_v2(original, 100))
+            expect(refused.operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+            expect(simple_container_scope_v2(refused.owner).native_machine_id).to_equal("native-machine-1")
+        expect(adapter.provider.executor_call_count()).to_equal(0)
+
+    it "routes prepare create start reads stop and destroy with signed duration and opaque scope fence":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val scope = linux_container_scope_fixture_v2()
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val start = build_start_command("podman", "/unused/api", native).1
+        val inspect = build_inspect_command("podman", "/unused/api", native).1
+        val logs = build_logs_command("podman", "/unused/api", native).1
+        val wait = build_wait_command("podman", "/unused/api", native).1
+        val destroy = build_destroy_command("podman", "/unused/api", native, false).1
+        val adapter = linux_container_adapter_fixture_v2([
+            linux_container_script_result_fixture_v2(create, native),
+            linux_container_script_result_fixture_v2(start, ""),
+            linux_container_script_result_fixture_v2(inspect, "workload-1|1|" + fence + "|7|create-api|" + native + "|running"),
+            linux_container_script_result_fixture_v2(logs, "literal-log"),
+            linux_container_script_result_fixture_v2(wait, "0\n"),
+            linux_container_script_result_fixture_v2(destroy, "")], [1, 2])
+        var owner = simple_container_scripted_linux_fixture_v2(scope, adapter)
+        val deadline = _linux_api_deadline_v2(request, 100)
+        val prepared = simple_container_apply_v2(owner, "prepare", request, deadline)
+        expect(prepared.operation.status).to_equal(RUNTIME_STATUS_OK)
+        owner = prepared.owner
+        val created = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(created.operation.command.program).to_equal("/usr/bin/podman")
+        expect(created.operation.command.args.contains("io.simpleorch.node_boot_id=" + fence)).to_equal(true)
+        expect(created.operation.state.identity.node_boot_id).to_equal(fence)
+        owner = created.owner
+        val started = simple_container_apply_v2(owner, "start", request, deadline)
+        expect(started.operation.status).to_equal(RUNTIME_STATUS_OK)
+        owner = started.owner
+        val inspected = simple_container_read_v2(owner, "inspect", request)
+        expect(inspected.operation.state.phase).to_equal(RUNTIME_PHASE_RUNNING)
+        owner = inspected.owner
+        val logged = simple_container_read_v2(owner, "logs", request)
+        expect(logged.operation.stdout).to_equal("literal-log")
+        owner = logged.owner
+        val waited = simple_container_read_v2(owner, "wait", request)
+        expect(waited.operation.state.phase).to_equal(RUNTIME_PHASE_EXITED)
+        owner = waited.owner
+        val expired = _linux_api_deadline_v2(request, 1)
+        val stopped = simple_container_apply_v2(owner, "stop", request, expired)
+        expect(stopped.operation.status).to_equal(RUNTIME_STATUS_OK)
+        owner = stopped.owner
+        val destroyed = simple_container_apply_v2(owner, "destroy", request, expired)
+        expect(destroyed.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(adapter.provider.scripted_cursor).to_equal(6)
+        expect(adapter.provider.timeout_ms).to_equal(3000)
+        expect(simple_container_intent_v2(destroyed.owner, request).unwrap().phase).to_equal(RUNTIME_PHASE_DESTROYED)
+        val replay_wait = simple_container_read_v2(destroyed.owner, "wait", request)
+        expect(replay_wait.operation.reason).to_equal("wait-retained-evidence-unavailable")
+        expect(adapter.provider.scripted_cursor).to_equal(6)
+
+    it "rejects launch expiry at the final leaf boundary without consuming a successful create fixture":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val command = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(command, "b".repeat(64))], [100])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val refused = simple_container_apply_v2(owner, "create", request, _linux_api_deadline_v2(request, 100))
+        expect(refused.operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(refused.operation.reason).to_contain("container-effect-deadline-expired")
+        expect(adapter.provider.scripted_cursor).to_equal(0)
+
+    it "refuses unknown actions and launch actions on the read-only API without effects":
+        val adapter = linux_container_adapter_fixture_v2([], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val request = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+        expect(simple_container_apply_v2(owner, "unknown", request, _linux_api_deadline_v2(request, 100)).operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(simple_container_read_v2(owner, "create", request).operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(adapter.provider.executor_call_count()).to_equal(0)
+
+    it "refuses unsupported leaf effects and projects workspace intent rather than hiding it":
+        val owner = linux_container_owner_fixture_v2([], [1])
+        var leaf = linux_container_leaf_fixture_v2()
+        leaf.working_directory = "/work"
+        expect(simple_container_project_v2(owner, linux_container_request_fixture_v2(leaf)).is_err()).to_equal(true)
+        leaf = linux_container_leaf_fixture_v2()
+        leaf.build_input_root = "/work/inputs"
+        leaf.build_output_root = "/work/outputs"
+        expect(simple_container_project_v2(owner, linux_container_request_fixture_v2(leaf)).unwrap().has_workspace).to_equal(true)
+
+    it "recovers only an exact retained intent through the common API and preserves its scoped owner":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val scope = linux_container_scope_fixture_v2()
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val inspect = build_inspect_command("podman", "/unused/api", native).1
+        val adapter = linux_container_adapter_fixture_v2([
+            linux_container_script_result_fixture_v2(create, native),
+            linux_container_script_result_fixture_v2(inspect, "workload-1|1|" + fence + "|7|create-api|" + native + "|exited")], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(scope, adapter)
+        val created = simple_container_apply_v2(owner, "create", request, _linux_api_deadline_v2(request, 100))
+        expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val retained = simple_container_intent_v2(created.owner, request).unwrap()
+        expect(retained.node_boot_id).to_equal(fence)
+        expect(retained.node_boot_id == scope.boot_id).to_equal(false)
+        var foreign = retained
+        foreign.operation_id = "foreign-operation"
+        expect(simple_container_recover_v2(created.owner, request, foreign).operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(adapter.provider.scripted_cursor).to_equal(1)
+        val recovered = simple_container_recover_v2(created.owner, request, retained)
+        expect(recovered.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(recovered.operation.state.phase).to_equal(RUNTIME_PHASE_EXITED)
+        expect(simple_container_scope_v2(recovered.owner).native_machine_id).to_equal(scope.native_machine_id)
+        expect(adapter.provider.scripted_cursor).to_equal(2)
+
+    it "rejects a fixture provider with a different opaque fence or provider generation":
+        val scope = linux_container_scope_fixture_v2()
+        val engine = linux_container_engine_fixture_v2()
+        for wrong in ["fence", "generation"]:
+            val node = if wrong == "fence": "foreign-fence" else: container_scope_fence_id_v2(scope).unwrap()
+            val generation = if wrong == "generation": 8 else: 7
+            val provider = LinuxOciRuntimeProviderV1.scripted_with_engine_policy("linux", "podman", "/unused/api",
+                node, generation, linux_container_policy_fixture_v2(), engine, engine, []).unwrap()
+            val observed = ContainerHostObservationV2(backend: "linux-podman", native_machine_id: scope.native_machine_id,
+                native_boot_id: scope.boot_id, provider_identity_digest: engine.identity_digest, execution_os: "linux",
+                architecture: "x86_64", continuity_assurance: scope.continuity_mode, boot_observation: scope.continuity_id)
+            match LinuxSimpleContainerAdapterV2.scripted_fixture_v2(scope, provider, observed, 3000):
+                case Err(reason): expect(reason).to_equal("container-adapter-fixture-provider-scope-mismatch")
+                case Ok(_): fail("common owner cannot wrap a foreign leaf scope")
+
+    it "dispatches a native stop for a running workload":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val start = build_start_command("podman", "/unused/api", native).1
+        val stop = build_stop_command("podman", "/unused/api", native, 10).1
+        val adapter = linux_container_adapter_fixture_v2([
+            linux_container_script_result_fixture_v2(create, native),
+            linux_container_script_result_fixture_v2(start, ""),
+            linux_container_script_result_fixture_v2(stop, "")], [1, 2])
+        var owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val created = simple_container_apply_v2(owner, "create", request, _linux_api_deadline_v2(request, 100))
+        expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val started = simple_container_apply_v2(created.owner, "start", request, _linux_api_deadline_v2(request, 100))
+        expect(started.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val stopped = simple_container_apply_v2(started.owner, "stop", request, _linux_api_deadline_v2(request, 1))
+        expect(stopped.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(stopped.operation.state.phase).to_equal(RUNTIME_PHASE_STOPPED)
+        expect(stopped.operation.command.args).to_equal(["--remote=false", "--root", "/home/test/storage",
+            "--runroot", "/run/user/1000/storage", "--storage-driver", "overlay", "--storage-opt=",
+            "stop", "--time", "10", native])
+        expect(adapter.provider.scripted_cursor).to_equal(3)
+
+    it "queries wait afresh after recovered exit and separates CLI status from workload exit":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val inspect = build_inspect_command("podman", "/unused/api", native).1
+        val wait = build_wait_command("podman", "/unused/api", native).1
+        val adapter = linux_container_adapter_fixture_v2([
+            linux_container_script_result_fixture_v2(create, native),
+            linux_container_script_result_fixture_v2(inspect, "workload-1|1|" + fence + "|7|create-api|" + native + "|exited"),
+            linux_container_script_result_fixture_v2(wait, "7\n")], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val created = simple_container_apply_v2(owner, "create", request, _linux_api_deadline_v2(request, 100))
+        val retained = simple_container_intent_v2(created.owner, request).unwrap()
+        val recovered = simple_container_recover_v2(created.owner, request, retained)
+        expect(recovered.operation.state.phase).to_equal(RUNTIME_PHASE_EXITED)
+        val waited = simple_container_read_v2(recovered.owner, "wait", request)
+        expect(waited.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(waited.operation.exit_code).to_equal(0)
+        expect(waited.operation.state.exit_code).to_equal(7)
+        expect(waited.operation.stdout).to_equal("7\n")
+        expect(adapter.provider.scripted_cursor).to_equal(3)
+
+    it "returns an independent exact-query absence receipt without mutating retained lifecycle state":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val query = _linux_api_absence_query_fixture_v2(native, 1)
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, native), query], [1, 2])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val created = simple_container_apply_v2(owner, "create", request, _linux_api_deadline_v2(request, 100))
+        val absent = simple_container_absence_v2(created.owner, request, created.operation.state.identity)
+        expect(absent.error).to_equal("")
+        val receipt = absent.receipt.unwrap()
+        expect(receipt.proof_kind).to_equal("exact-native-object-absence-v1")
+        expect(receipt.request_digest).to_equal(request.plan.request_digest)
+        expect(receipt.provider_identity_digest).to_equal(linux_container_engine_fixture_v2().identity_digest)
+        expect(receipt.observed_unix_ms).to_equal(2)
+        val expected_query = RuntimeCommandV1(operation: "absence", program: "/usr/bin/podman", args: query.args)
+        expect(receipt.query_digest).to_equal(container_runtime_query_digest_v2(expected_query).unwrap())
+        val expected_evidence = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "absence", command: expected_query,
+            state: RuntimeStateV1(phase: RUNTIME_PHASE_DESTROYED, identity: created.operation.state.identity,
+                exit_code: -1, reason: "independently-observed-absent"), exit_code: 1, stdout: "", stderr: "",
+            reason: "exact-native-object-absence-v1")
+        expect(receipt.evidence_digest).to_equal(container_runtime_observation_digest_v2(expected_evidence).unwrap())
+        expect(container_absence_receipt_decode_v2(container_absence_receipt_encode_v2(receipt).unwrap()).is_ok()).to_equal(true)
+        expect(simple_container_intent_v2(absent.owner, request).unwrap().phase).to_equal(RUNTIME_PHASE_CREATED)
+        expect(adapter.provider.scripted_cursor).to_equal(2)
+
+    it "never turns a destroyed tombstone into absence proof without consuming a dedicated query":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val destroy = build_destroy_command("podman", "/unused/api", native, false).1
+        for include_query in [false, true]:
+            var results = [linux_container_script_result_fixture_v2(create, native), linux_container_script_result_fixture_v2(destroy, "")]
+            if include_query: results.push(_linux_api_absence_query_fixture_v2(native, 1))
+            val adapter = linux_container_adapter_fixture_v2(results, [1, 2])
+            val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+            val created = simple_container_apply_v2(owner, "create", request, _linux_api_deadline_v2(request, 100))
+            val destroyed = simple_container_apply_v2(created.owner, "destroy", request, _linux_api_deadline_v2(request, 1))
+            expect(destroyed.operation.status).to_equal(RUNTIME_STATUS_OK)
+            val absent = simple_container_absence_v2(destroyed.owner, request, created.operation.state.identity)
+            if include_query:
+                expect(absent.error).to_equal("")
+                expect(absent.receipt.?).to_equal(true)
+                expect(adapter.provider.scripted_cursor).to_equal(3)
+            else:
+                expect(absent.error.len()).to_be_greater_than(0)
+                expect(absent.receipt).to_equal(nil)
+                expect(adapter.provider.scripted_cursor).to_equal(2)
+            expect(adapter.provider.executor_call_count()).to_equal(3)
+
+    it "refuses present native objects and engine errors as absence evidence":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        for exit_code in [0, 125]:
+            val query = _linux_api_absence_query_fixture_v2(native, exit_code)
+            val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, native), query], [1, 2])
+            val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+            val created = simple_container_apply_v2(owner, "create", request, _linux_api_deadline_v2(request, 100))
+            val absent = simple_container_absence_v2(created.owner, request, created.operation.state.identity)
+            expect(absent.receipt).to_equal(nil)
+            expect(absent.error.len()).to_be_greater_than(0)
+            expect(adapter.provider.scripted_cursor).to_equal(2)
+
+    it "rejects unsafe partial foreign identifiers and digest tampering before an absence query":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, native)], [1, 2])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val created = simple_container_apply_v2(owner, "create", request, _linux_api_deadline_v2(request, 100))
+        for id in ["--all", "arbitrary-name", "partial", "c".repeat(64)]:
+            var wrong = created.operation.state.identity
+            wrong.native_id = id
+            val absent = simple_container_absence_v2(created.owner, request, wrong)
+            expect(absent.receipt).to_equal(nil)
+            expect(absent.error.len()).to_be_greater_than(0)
+        var changed = request
+        changed.plan.request_digest = "f".repeat(64)
+        expect(simple_container_absence_v2(created.owner, changed, created.operation.state.identity).receipt).to_equal(nil)
+        expect(adapter.provider.executor_call_count()).to_equal(1)
+        expect(adapter.provider.scripted_cursor).to_equal(1)
