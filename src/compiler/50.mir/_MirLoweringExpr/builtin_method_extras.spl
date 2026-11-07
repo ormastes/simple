@@ -643,6 +643,25 @@ impl MirLowering:
         self.builder = b_body
         Some(acc)
 
+    me builtin_keeps_array_type_on_assign(value: LocalId, declared: HirType?) -> bool:
+        """`rows = [[]; n]` / `rows = []` on a declared `[[T]]` var: the literal
+        carries no HIR type, and dropping the binding's declared array type
+        left a later `for x in rows[i]` with an erased i64 element and no
+        provenance (#143). Keep the declared Array/Slice type only when the
+        assigned value is itself a proven runtime array (array literals are
+        also runtime-value words, so that marker is not a veto), never Any."""
+        if val kept = declared:
+            var kept_is_array = false
+            match kept.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): kept_is_array = true
+                case _: ()
+            if not kept_is_array:
+                return false
+            if self.local_hir_type_is_any(value):
+                return false
+            return self.local_is_runtime_array(value)
+        false
+
     me builtin_keeps_numeric_type_on_assign(target: LocalId, value: LocalId, declared: HirType?) -> bool:
         """`total = total + x` on a numeric `var`: the binop result carries no
         HIR type, and dropping the binding's tracked `f64`/`i64` left a later

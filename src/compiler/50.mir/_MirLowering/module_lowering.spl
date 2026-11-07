@@ -301,6 +301,25 @@ impl MirLowering:
                 if val elem = element_type:
                     return Some(MirType(kind: MirTypeKind.Array(elem, 0)))
                 nil
+            case NullCoalesce(left, right):
+                # `opt ?? default` yields the optional's payload type. A settled
+                # `T?` on the left is direct evidence. Otherwise only a text or
+                # bool default is admissible: those literal kinds never coerce,
+                # whereas `?? 0` beside an unproven `f64?` would relabel it i64.
+                if val left_settled = left.type_:
+                    val left_concrete: HirType = left_settled
+                    match left_concrete.kind:
+                        case HirTypeKind.Optional(payload):
+                            if val payload_type = self.static_scalar_type_from_hir(payload):
+                                return Some(payload_type)
+                        case _: ()
+                if val default_type = self.infer_unfolded_static_expr_type_bounded(right, depth + 1, visit_budget):
+                    match default_type.kind:
+                        case MirTypeKind.Bool: return Some(default_type)
+                        case MirTypeKind.Opaque(name):
+                            if name == "str": return Some(default_type)
+                        case _: ()
+                nil
             case Binary(op, left, right):
                 val left_type = self.infer_unfolded_static_expr_type_bounded(left, depth + 1, visit_budget)
                 val right_type = self.infer_unfolded_static_expr_type_bounded(right, depth + 1, visit_budget)
