@@ -1,5 +1,6 @@
 # Persistent trusted-local composition; platform effects use Simple Container.
-pub use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingOwnerV3, SmuxRuntimeBindingTurnV3}
+pub use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingOwnerV3, SmuxRuntimeBindingTurnV3,
+    SmuxRuntimeBindingOpenTurnV3}
 use os.apps.smux.runtime_binding_state_v3.{smux_runtime_binding_index_v3,
     smux_runtime_binding_reply_turn_v3, smux_runtime_binding_error_v3}
 use os.apps.smux.runtime_binding_request_v3.SmuxRuntimeBindRequestV3
@@ -8,26 +9,42 @@ use os.apps.smux.runtime_binding_policy_v3.smux_runtime_binding_policy_load_v3
 use os.apps.smux.runtime_binding_planning_v3.smux_runtime_binding_resolve_plan_v3
 use os.apps.smux.runtime_binding_store_v3.{smux_binding_plan_store_v3,
     smux_binding_output_plan_store_v3, smux_binding_receipt_load_v3}
-use std.nogc_sync_mut.orchestration.host_local_root_v1.host_local_root_open_v1
-use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_v1
+use std.nogc_sync_mut.orchestration.host_local_root_v1.{HostLocalRootOpenV2, host_local_root_open_owned_v2}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_owned_v2
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalCleanupTurnV2
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 pub use os.apps.smux.runtime_binding_bind_v3.smux_runtime_binding_bind_v3
 pub use os.apps.smux.runtime_binding_inspection_v3.smux_runtime_binding_inspect_v3
 pub use os.apps.smux.runtime_binding_prepare_v3.smux_runtime_binding_prepare_v3
 
+pub fn smux_runtime_binding_policy_failure_v3(closed: DistributedOperationJournalCleanupTurnV2,
+        reason: text) -> SmuxRuntimeBindingOpenTurnV3:
+    val released = (closed.state == FileLockReleaseStateV2.Released and closed.closed and
+        closed.cleanup == nil and closed.error == "")
+    SmuxRuntimeBindingOpenTurnV3(nil, closed.cleanup, Some(closed.state), released,
+        if released: reason else: "runtime-binding-open-owner-close-unconfirmed")
+
 pub fn smux_runtime_binding_owner_open_v3(host_root: text,
-        service_incarnation: text) -> Result<SmuxRuntimeBindingOwnerV3, text>:
-    if service_incarnation.len() != 32: return Err("runtime-binding-incarnation-invalid")
+        service_incarnation: text) -> SmuxRuntimeBindingOpenTurnV3:
+    if service_incarnation.len() != 32:
+        return SmuxRuntimeBindingOpenTurnV3(nil, nil, nil, true, "runtime-binding-incarnation-invalid")
     for ch in service_incarnation.chars():
-        if not "0123456789abcdef".contains(ch): return Err("runtime-binding-incarnation-invalid")
-    val local = host_local_root_open_v1(host_root, 30000)?
+        if not "0123456789abcdef".contains(ch):
+            return SmuxRuntimeBindingOpenTurnV3(nil, nil, nil, true, "runtime-binding-incarnation-invalid")
+    val local = match host_local_root_open_owned_v2(host_root, 30000):
+        case HostLocalRootOpenV2.Ready(value): value
+        case HostLocalRootOpenV2.Rejected(reason):
+            return SmuxRuntimeBindingOpenTurnV3(nil, nil, nil, true, reason)
+        case HostLocalRootOpenV2.CleanupRequired(cleanup, reason):
+            return SmuxRuntimeBindingOpenTurnV3(nil, Some(cleanup), nil, false, reason)
     val configured = smux_runtime_binding_policy_load_v3(local)
     if configured.is_err():
-        val closed = host_capacity_owner_close_v1(local.capacity)
-        if closed.is_err() or not closed.unwrap(): return Err("runtime-binding-open-owner-close-unconfirmed")
-        return Err(configured.unwrap_err())
-    Ok(SmuxRuntimeBindingOwnerV3(local, configured.unwrap(), service_incarnation, [], []))
+        val closed = host_capacity_owner_close_owned_v2(local.capacity)
+        return smux_runtime_binding_policy_failure_v3(closed, configured.unwrap_err())
+    SmuxRuntimeBindingOpenTurnV3(Some(SmuxRuntimeBindingOwnerV3(local, configured.unwrap(), service_incarnation, [], [])),
+        nil, nil, false, "")
 
 pub fn smux_runtime_binding_stop_allowed_v3(owner: SmuxRuntimeBindingOwnerV3) -> bool:
     if owner.unresolved_uids.len() != 0: return false
@@ -35,9 +52,9 @@ pub fn smux_runtime_binding_stop_allowed_v3(owner: SmuxRuntimeBindingOwnerV3) ->
         if entry.reply.host_release_pending or entry.retained != nil or entry.recovered != nil: return false
     true
 
-pub fn smux_runtime_binding_owner_close_v3(owner: SmuxRuntimeBindingOwnerV3) -> Result<bool, text>:
+pub fn smux_runtime_binding_owner_close_v3(owner: SmuxRuntimeBindingOwnerV3) -> Result<DistributedOperationJournalCleanupTurnV2, text>:
     if not smux_runtime_binding_stop_allowed_v3(owner): return Err("runtime-binding-cleanup-or-release-pending")
-    host_capacity_owner_close_v1(owner.local.capacity)
+    Ok(host_capacity_owner_close_owned_v2(owner.local.capacity))
 
 pub fn smux_runtime_binding_capabilities_v3(owner: SmuxRuntimeBindingOwnerV3) -> text:
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),

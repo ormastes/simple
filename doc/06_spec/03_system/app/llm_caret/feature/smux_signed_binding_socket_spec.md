@@ -49,3 +49,9 @@ Binding is never automatically retried. Cleanup/inspection uses the same binding
 The shared real socket fixture bounds server lifetime to 45 seconds, publication to 8 seconds, each compiled request to 5 seconds, captures to 16 KiB, and fixture stdout drain/proof cleanup separately. Nonce capture and settlement each have an 8-second caller deadline and finite turn limit. A slow or saturated real backend fails honestly. Request timeouts remain uncertainty, never success.
 
 The pre-existing workload and its signed parent allocation are provisioning-owned and deliberately remain running. This scenario owns and settles only its attachment helper and test server. No Windows support, remote gateway, interactive input, geometry, workload completion or termination is inferred.
+
+Configured discovery uses immutable `OWNER` and exclusively published `OWNER.ready`.
+The fixture validates the exact five-field newline-terminated record, unchanged
+input nonce/token, private ready file, and actual service incarnation correlation.
+A PID remains diagnostic. A stale/malformed ready record fails the scenario; it
+is not removed or accepted as readiness. Runtime status remains AUTHORED_UNRUN.

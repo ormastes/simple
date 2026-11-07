@@ -8,8 +8,15 @@ daemons.
 ## Ownership and deployment
 
 `smux --serve-runtime-owner-file OWNER HOSTROOT` opens the installed protected
-host root once and retains its sole capacity-journal writer. The owner file
-must be a regular no-follow 0600 file in a real 0700 directory. Startup fixes
+host root once and retains its sole capacity-journal writer. The canonical
+retained private credential owner requires an effective-user-owned regular
+no-follow 0600 input in an effective-user-owned 0700 directory, reached through
+validated retained directory descriptors. `OWNER` remains immutable; startup
+exclusively publishes `OWNER.ready` using kernel no-replace semantics. Its
+exact newline-terminated record is `nonce address token diagnosticPid serviceIncarnation`.
+A reconnecting client correlates nonce and service incarnation with authenticated
+service responses; the PID is not ownership authority. A stale ready record is
+refused, never overwritten or deleted. New startup uses a fresh input generation. Startup fixes
 the host root, stream policy and fresh service incarnation. Wire requests
 cannot override them. Concurrent host writers are rejected by the host owner;
 separate host commands cannot run while this local composition holds the root.
@@ -122,3 +129,26 @@ resources; missing prerequisites fail rather than skip/pass. Full positive
 acceptance additionally needs a real signed-plan authority fixture, fresh
 workload output, independent Container inspect, EOF/cleanup proof and exact
 host journal release. No production-readiness PASS is asserted.
+
+## Startup and shutdown ownership
+
+Configured startup consumes `HostLocalRootOpenV2`, including its canonical
+partial journal cleanup capability. A policy failure closes through the owned
+host API and retains every returned cleanup state. Only `Released`, `closed`,
+no cleanup capability and an empty error establish host release. Unknown, stale
+or consumed-error states cannot be converted into a new writer or a successful
+stop. Native credential close similarly reports consumed uncertainty without
+retrying an old descriptor.
+
+If startup has an unresolved host cleanup owner after one compensation attempt,
+the same process keeps a cleanup-only authenticated listener and reports
+`owner cleanup pending`; it publishes no successful ready record. Every command
+except authenticated stop is refused. Normal stop releases the real host writer
+and native credential owner before it acknowledges listener shutdown. This is
+still exclusive in-process recovery, not an independent service restart protocol.
+
+The configured socket scenarios now inspect the immutable five-field ready
+record and correlate its incarnation with actual capability/target responses.
+Legacy four-field owner-file scenarios retain their existing behavior and gain
+no configured host authority. These scenarios and startup propagation specs are
+AUTHORED_UNRUN until a qualified runtime is allocated.

@@ -22,3 +22,9 @@ Steps:
 Every post-start operation returns the fixture carrier before assertions. The scenario retains that carrier globally after start, exercise and stop, including cleanup-bearing failure. Startup without a valid endpoint uses the existing bounded broker cancellation/proof path, never a raw PID fallback. Request timeouts remain uncertain and do not trigger fresh operation IDs.
 
 Positive binding still requires real canonical plan publication, cryptographically signed matching helper packets staged through the agreed same-owner preparation route, actual runtime output through the sole pane reader, and verified host settlement. This negative scenario neither substitutes synthetic positive capability evidence nor includes a failing placeholder for that separate acceptance requirement.
+
+Configured discovery uses immutable `OWNER` and exclusively published `OWNER.ready`.
+The fixture validates the exact five-field newline-terminated record, unchanged
+input nonce/token, private ready file, and actual service incarnation correlation.
+A PID remains diagnostic. A stale/malformed ready record fails the scenario; it
+is not removed or accepted as readiness. Runtime status remains AUTHORED_UNRUN.

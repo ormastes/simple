@@ -14,9 +14,13 @@ use os.apps.smux.smux_remote.{smux_remote_dispatch}
 use os.apps.smux.runtime_binding_protocol_v1.{smux_runtime_binding_capabilities_v1, smux_runtime_binding_refusal_v3}
 use os.apps.smux.client_leases.{SMUX_CLIENT_LEASE_SWEEP_MS}
 use std.common.crypto.constant_time.{constant_time_compare}
-use std.nogc_sync_mut.io.file_ops.{file_read, file_write, file_read_regular_no_follow_bounded}
-use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
-use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write}
+use std.nogc_sync_mut.io.retained_file.{RetainedPrivateCredentialV1,
+    retained_private_credential_open_v1, retained_private_credential_read_v1,
+    retained_private_credential_publish_v1, retained_private_credential_close_v1}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenCleanupV2,
+    distributed_operation_journal_open_cleanup_v2}
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.sosix.entropy.sosix_random_hex
 use std.common.build_manager.contracts.builder_identifier_valid_v1
@@ -37,6 +41,61 @@ const CLIENT_DEADLINE_MS: i64 = 2000
 # Exclusive in-process host/smux composition, not an independent host daemon.
 # No wire request selects its root or policy; the host holds one journal writer.
 var _runtime_binding_owner: SmuxRuntimeBindingOwnerV3? = nil
+var _runtime_credential_owner: RetainedPrivateCredentialV1? = nil
+var _runtime_journal_cleanup: DistributedOperationJournalOpenCleanupV2? = nil
+var _runtime_journal_cleanup_state: FileLockReleaseStateV2? = nil
+var _runtime_configured: bool = false
+var _runtime_cleanup_only: bool = false
+var _runtime_host_released: bool = false
+var _runtime_credential_consumed: bool = false
+
+# Only native/host owned turns can advance these local observations. They
+# never authorize descriptor IO or a new writer; native generations do that.
+fn runtime_close_host_v3() -> bool:
+    if _runtime_host_released: return true
+    if _runtime_binding_owner != nil:
+        val outcome = smux_runtime_binding_owner_close_v3(_runtime_binding_owner.unwrap())
+        if outcome.is_err(): return false
+        val closed = outcome.unwrap()
+        _runtime_binding_owner = nil
+        _runtime_journal_cleanup = closed.cleanup
+        _runtime_journal_cleanup_state = Some(closed.state)
+        _runtime_cleanup_only = true
+        _runtime_host_released = (closed.state == FileLockReleaseStateV2.Released and closed.closed and
+            closed.cleanup == nil and closed.error == "")
+        return _runtime_host_released
+    if _runtime_journal_cleanup != nil:
+        val closed = distributed_operation_journal_open_cleanup_v2(_runtime_journal_cleanup.unwrap())
+        _runtime_journal_cleanup = closed.cleanup
+        _runtime_journal_cleanup_state = Some(closed.state)
+        _runtime_host_released = (closed.state == FileLockReleaseStateV2.Released and closed.closed and
+            closed.cleanup == nil and closed.error == "")
+    _runtime_host_released
+
+fn runtime_close_credential_v3() -> bool:
+    if _runtime_credential_consumed: return false
+    if _runtime_credential_owner == nil: return false
+    val closed = retained_private_credential_close_v1(_runtime_credential_owner.unwrap())
+    _runtime_credential_owner = closed.owner
+    _runtime_credential_consumed = closed.consumed
+    # A consumed-error is explicit uncertainty, not success or retry authority.
+    if closed.completed and closed.consumed and closed.error == "":
+        _runtime_credential_owner = nil
+        return true
+    false
+
+fn runtime_stop_reply_v3() -> text:
+    if (_runtime_binding_owner != nil and
+            not smux_runtime_binding_stop_allowed_v3(_runtime_binding_owner.unwrap())):
+        return "smux: stop refused: runtime helper cleanup or host release pending"
+    if smux_server_stop_reply_v1(smux_owner_snapshot()) != "smux: stopping server":
+        return "smux: stop refused: terminal cleanup or host release pending"
+    _runtime_cleanup_only = true
+    # Close the real host writer while the authenticated recovery listener is
+    # still available. No success response precedes actual owned release.
+    if not runtime_close_host_v3(): return "smux: stop refused: host writer cleanup unconfirmed"
+    if not runtime_close_credential_v3(): return "smux: stop refused: credential cleanup unconfirmed"
+    "smux: stopping server"
 
 class PendingClient:
     stream: TcpStream
@@ -84,6 +143,9 @@ pub fn smux_server_dispatch(request: text, token: text) -> text:
     if presented.len() == request.len() or not constant_time_compare(presented, token):
         return "smux: unauthorized"
     val command = request[presented.len() + 1:]
+    if _runtime_configured:
+        if command == "stop-server": return runtime_stop_reply_v3()
+        if _runtime_cleanup_only: return "smux: runtime initialization or writer cleanup unconfirmed"
     # This authenticated text adapter negotiates explicit absence. It does not
     # expose runtime binding through the unauthenticated remote dispatcher.
     if command == "runtime-binding-capabilities-v1":
@@ -129,9 +191,6 @@ pub fn smux_server_dispatch(request: text, token: text) -> text:
         if target.is_err(): return "smux: " + target.unwrap_err()
         return smux_runtime_target_encode_v3(target.unwrap())
     if command == "stop-server":
-        if (_runtime_binding_owner != nil and
-                not smux_runtime_binding_stop_allowed_v3(_runtime_binding_owner.unwrap())):
-            return "smux: stop refused: runtime helper cleanup or host release pending"
         return smux_server_stop_reply_v1(smux_owner_snapshot())
     return smux_remote_dispatch(command)
 
@@ -210,47 +269,88 @@ pub fn smux_server_serve_owner_file(path: text) -> i64:
         return 1
     _serve_on(listener, address, f[1])
 
-# The trusted host root is supplied only at owner startup. A timeout of a
-# synchronous request is uncertainty; inspect the SAME binding UID afterward.
-fn runtime_owner_file_private_v3(path: text) -> bool:
-    if (not path.starts_with("/") or path.ends_with("/") or path.bytes().len() > 4096 or
-            path.contains("\0") or path.contains("\n") or path.contains("\r")): return false
-    val components = path.split("/")
-    var parent = ""
-    var index = 1
-    while index < components.len() - 1:
-        if components[index] == "" or components[index] == "." or components[index] == "..": return false
-        parent = parent + "/" + components[index]
-        if not dir_is_real_no_follow(parent): return false
-        index = index + 1
-    if parent == "" or file_mode_bits(parent) != 0o700: return false
-    val leaf = components[components.len() - 1]
-    if leaf == "" or leaf == "." or leaf == ".." or file_mode_bits(path) != 0o600: return false
-    file_read_regular_no_follow_bounded(path, 512).is_ok()
-
+# Configured mode has an immutable input and an exclusively published .ready
+# generation. Only canonical native owners read/publish/close those files.
+# Legacy path-based owner-file mode above never opens a host runtime owner.
 pub fn smux_server_serve_runtime_owner_file(path: text, host_root: text) -> i64:
-    if _runtime_binding_owner != nil: return 1
-    if not runtime_owner_file_private_v3(path): return 1
-    val raw = sosix_random_hex(16)
-    if raw == nil: return 1
-    val opened = smux_runtime_binding_owner_open_v3(host_root, raw ?? "")
-    if opened.is_err(): return 1
-    _runtime_binding_owner = opened.unwrap()
-    val code = smux_server_serve_owner_file(path)
-    val closed = smux_runtime_binding_owner_close_v3(_runtime_binding_owner.unwrap())
-    if closed.is_err(): return 1
-    if not closed.unwrap(): return 1
-    _runtime_binding_owner = nil
+    if _runtime_configured or _runtime_binding_owner != nil or _runtime_credential_owner != nil: return 1
+    val credential = retained_private_credential_open_v1(path)
+    _runtime_credential_owner = credential.owner
+    if credential.owner == nil: return 1
+    _runtime_configured = true
+    _runtime_credential_consumed = false
+    _runtime_host_released = true
+    _runtime_cleanup_only = true
+    if credential.error != "" or credential.state != "open":
+        val _closed = runtime_close_credential_v3()
+        return 1
+    val initial = retained_private_credential_read_v1(credential.owner.unwrap())
+    _runtime_credential_owner = initial.owner
+    if initial.error != "":
+        val _closed = runtime_close_credential_v3()
+        return 1
+    # Native opening already checked the exact bounded ASCII input layout;
+    # this parse is not a second path read or a filesystem authority claim.
+    val fields = bytes_to_text(initial.bytes).trim().split(" ")
+    if fields.len() != 2 or not valid_token(fields[1]):
+        val _closed = runtime_close_credential_v3()
+        return 1
+    val bound = TcpListener.bind("127.0.0.1:0")
+    if bound.is_err():
+        val _closed = runtime_close_credential_v3()
+        return 1
+    var listener = bound.unwrap()
+    val address = listener.local_addr()
+    if address.is_err() or not local_endpoint(address.unwrap()):
+        val _socket_closed = listener.close()
+        val _closed = runtime_close_credential_v3()
+        return 1
+    val incarnation = sosix_random_hex(16)
+    if incarnation == nil:
+        val _socket_closed = listener.close()
+        val _closed = runtime_close_credential_v3()
+        return 1
+    val opened = smux_runtime_binding_owner_open_v3(host_root, incarnation.unwrap())
+    _runtime_binding_owner = opened.owner
+    _runtime_journal_cleanup = opened.cleanup
+    _runtime_journal_cleanup_state = opened.cleanup_state
+    _runtime_host_released = opened.rejected
+    var startup_failed = opened.owner == nil
+    if opened.owner != nil:
+        val ready = fields[0] + " " + address.unwrap() + " " + fields[1] + " " +
+            getpid().to_text() + " " + incarnation.unwrap() + "\n"
+        val published = retained_private_credential_publish_v1(_runtime_credential_owner.unwrap(),
+            initial.bytes, text_to_bytes(ready))
+        _runtime_credential_owner = published.owner
+        if published.completed and published.error == "" and published.state == "published":
+            _runtime_cleanup_only = false
+        else:
+            startup_failed = true
+    if startup_failed:
+        # One compensation attempt, then retain the exact canonical outcome.
+        # An unresolved host writer must keep its authenticated cleanup channel.
+        if runtime_close_host_v3():
+            if runtime_close_credential_v3():
+                val _socket_closed = listener.close()
+                return 1
+        _runtime_cleanup_only = true
+    val code = _serve_on(listener, address.unwrap(), fields[1], not startup_failed)
+    # Configured stop closes the actual host/credential owners BEFORE the
+    # response permits the listener loop to exit; never retry copied handles.
+    if (not _runtime_host_released or _runtime_binding_owner != nil or _runtime_journal_cleanup != nil or
+            _runtime_credential_owner != nil or not _runtime_credential_consumed): return 1
+    _runtime_configured = false
+    if startup_failed: return 1
     code
 
-fn _serve_on(bound_listener: TcpListener, address: text, token: text) -> i64:
+fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialized: bool = true) -> i64:
     var listener = bound_listener
     var clients: [PendingClient] = []
     var stop = false
     var socket_cleanup_failed = false
     var client_reap_deadline: i64 = 0
     var lease_error_reported = false
-    sosix_println("smux: owner ready " + address)
+    sosix_println(if initialized: "smux: owner ready " + address else: "smux: owner cleanup pending " + address)
     while not stop:
         val reap_now = time_now_monotonic_ms()
         if reap_now < 0 or reap_now >= client_reap_deadline:

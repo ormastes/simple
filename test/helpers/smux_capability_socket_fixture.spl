@@ -22,6 +22,7 @@ pub struct SmuxCapabilitySocketFixture:
     token: text
     owner_path: text
     address: text
+    service_incarnation: text
     stop_accepted: bool
     owner_stdout_eof: bool
 
@@ -40,14 +41,15 @@ fn capability_socket_address(value: text) -> bool:
 
 pub fn smux_capability_fixture_start(config: SmuxOwnedFixtureConfig, host_root: text = "") -> SmuxCapabilitySocketFixture:
     var fixture = SmuxCapabilitySocketFixture(process: owned_fixture_empty(config, ""),
-        nonce: "", token: "", owner_path: "", address: "", stop_accepted: false, owner_stdout_eof: false)
+        nonce: "", token: "", owner_path: "", address: "", service_incarnation: "", stop_accepted: false, owner_stdout_eof: false)
     val nonce = sosix_random_hex(16)
     val token = sosix_random_hex(32)
     if nonce == nil or token == nil: return capability_socket_note(fixture, "precondition: fresh owner credentials unavailable")
     fixture.nonce = nonce.unwrap()
     fixture.token = token.unwrap()
     fixture.owner_path = config.root + "/smux-owner-" + fixture.nonce + ".state"
-    if file_exists(fixture.owner_path): return capability_socket_note(fixture, "precondition: owner file already exists")
+    if file_exists(fixture.owner_path) or file_exists(fixture.owner_path + ".ready"):
+        return capability_socket_note(fixture, "precondition: owner generation already exists")
     if not file_atomic_write_mode(fixture.owner_path, fixture.nonce + " " + fixture.token + "\n", 0o600):
         return capability_socket_note(fixture, "private mode600 owner file creation failed")
     val private = owned_fixture_private_path(fixture.owner_path, "regular file", "600")
@@ -59,14 +61,16 @@ pub fn smux_capability_fixture_start(config: SmuxOwnedFixtureConfig, host_root: 
     if fixture.process.failure != "": return fixture
     # Publication proves endpoint discovery only. The reference PID names the
     # broker; the file's child PID is diagnostic and must not be equated to it.
+    val publication_path = if host_root == "": fixture.owner_path else: fixture.owner_path + ".ready"
+    val expected_fields = if host_root == "": 4 else: 5
     val deadline = sosix_time_now_monotonic_ms() + 8000
     var turn = 0
     var last_reason = "owner endpoint not yet published"
     while turn < 160 and sosix_time_now_monotonic_ms() < deadline:
-        val retained = file_read_regular_no_follow_bounded(fixture.owner_path, 1024)
+        val retained = file_read_regular_no_follow_bounded(publication_path, 512)
         if retained.is_ok():
             val fields = retained.unwrap().trim().split(" ")
-            if fields.len() == 4:
+            if fields.len() == expected_fields:
                 if fields[0] != fixture.nonce or fields[2] != fixture.token:
                     return capability_socket_note(fixture, "owner publication credentials changed")
                 if (not capability_socket_address(fields[1]) or not owned_fixture_digits(fields[3]) or
@@ -74,12 +78,24 @@ pub fn smux_capability_fixture_start(config: SmuxOwnedFixtureConfig, host_root: 
                     return capability_socket_note(fixture, "owner publication address or diagnostic PID invalid")
                 val diagnostic_pid = fields[3].to_int() ?? 0
                 if diagnostic_pid <= 0: return capability_socket_note(fixture, "owner publication diagnostic PID is not positive")
-                val protected = owned_fixture_private_path(fixture.owner_path, "regular file", "600")
+                if host_root != "":
+                    if retained.unwrap() != fields.join(" ") + "\n" or fields[4].len() != 32:
+                        return capability_socket_note(fixture, "configured ready record is not canonical")
+                    for ch in fields[4]:
+                        if not "0123456789abcdef".contains(ch):
+                            return capability_socket_note(fixture, "configured service incarnation invalid")
+                    val original = file_read_regular_no_follow_bounded(fixture.owner_path, 512)
+                    if original.is_err() or original.unwrap() != fixture.nonce + " " + fixture.token + "\n":
+                        return capability_socket_note(fixture, "configured immutable input changed")
+                    fixture.service_incarnation = fields[4]
+                val protected = owned_fixture_private_path(publication_path, "regular file", "600")
                 if protected.is_err(): return capability_socket_note(fixture, protected.unwrap_err())
                 fixture.address = fields[1]
                 return fixture
-            # Truncate/write publication can briefly expose incomplete bytes;
-            # no token is sent until the complete protected record validates.
+            if host_root != "":
+                return capability_socket_note(fixture, "configured ready record has invalid field count")
+            # Only legacy publication rewrites its input. Configured publication
+            # is immutable and exclusive; no partial configured record is valid.
         else:
             last_reason = owned_fixture_diagnostic(retained.unwrap_err())
         turn = turn + 1

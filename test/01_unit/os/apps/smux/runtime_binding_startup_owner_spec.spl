@@ -1,0 +1,41 @@
+# Pure consumer propagation only. Synthetic tokens are never sent to native IO.
+use std.spec.{describe, it, expect}
+use os.apps.smux.runtime_binding_owner_v3.smux_runtime_binding_policy_failure_v3
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenCleanupV2,
+    DistributedOperationJournalCleanupTurnV2}
+use std.nogc_sync_mut.io.file_lock_owned_v2.{FileLockOwnerV2, FileLockReleaseStateV2}
+
+describe "smux partial host startup retains canonical cleanup":
+    it "preserves the exact returned partial journal and generation on uncertain close":
+        val cleanup = DistributedOperationJournalOpenCleanupV2(root: "/protected/host/journal",
+            authority_digest: "a".repeat(64), lease_digest: "b".repeat(64), lease_published: true,
+            lock: FileLockOwnerV2(token: 731))
+        for phase in [FileLockReleaseStateV2.Retained, FileLockReleaseStateV2.Unknown,
+                FileLockReleaseStateV2.ConsumedError]:
+            val native = DistributedOperationJournalCleanupTurnV2(Some(cleanup), false, "close-unconfirmed", phase)
+            val turn = smux_runtime_binding_policy_failure_v3(native, "policy-invalid")
+            expect(turn.owner == nil).to_equal(true)
+            expect(turn.rejected).to_equal(false)
+            expect(turn.cleanup.is_some()).to_equal(true)
+            expect(turn.cleanup.unwrap().root).to_equal(cleanup.root)
+            expect(turn.cleanup.unwrap().lease_digest).to_equal(cleanup.lease_digest)
+            expect(turn.cleanup.unwrap().lease_published).to_equal(true)
+            expect(turn.cleanup.unwrap().lock.token).to_equal(731)
+            expect(turn.cleanup_state.unwrap()).to_equal(phase)
+            expect(turn.error).to_equal("runtime-binding-open-owner-close-unconfirmed")
+
+    it "rejects without a live owner only after exact confirmed release":
+        val native = DistributedOperationJournalCleanupTurnV2(nil, true, "", FileLockReleaseStateV2.Released)
+        val turn = smux_runtime_binding_policy_failure_v3(native, "policy-invalid")
+        expect(turn.rejected).to_equal(true)
+        expect(turn.owner == nil).to_equal(true)
+        expect(turn.cleanup == nil).to_equal(true)
+        expect(turn.error).to_equal("policy-invalid")
+
+    it "does not upgrade stale or consumed-error metadata to successful cleanup":
+        for phase in [FileLockReleaseStateV2.Stale, FileLockReleaseStateV2.ConsumedError]:
+            val turn = smux_runtime_binding_policy_failure_v3(
+                DistributedOperationJournalCleanupTurnV2(nil, true, "uncertain", phase), "policy-invalid")
+            expect(turn.rejected).to_equal(false)
+            expect(turn.cleanup_state.unwrap()).to_equal(phase)
+            expect(turn.error).to_equal("runtime-binding-open-owner-close-unconfirmed")
