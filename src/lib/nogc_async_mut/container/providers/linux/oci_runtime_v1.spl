@@ -16,6 +16,7 @@ use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1
 use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.common.contracts.container.command_v1.oci_command_parts_v1
 use std.common.contracts.container.execution_options_v1.oci_execution_options_v1
+use std.nogc_async_mut.container.providers.linux.execution_user_v2.{build_execution_user_command_v2, linux_oci_execution_user_parse_v2}
 pub use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
 use std.nogc_async_mut.container.providers.linux.request_v1.{linux_oci_request_bounds_v1, linux_oci_request_digest_v1}
 use std.common.contracts.container.bound_intent_v2.{RuntimeBoundIntentV2, runtime_bound_intent_encode_v2, runtime_bound_intent_decode_v2, runtime_bound_intent_match_v2}
@@ -78,8 +79,14 @@ pub struct ScriptedCommandResultV1:
     # Explicit fixture representation of the native bounded-capture flag.
     output_limited: bool = false
 
-# Provider-local observed facts used by the common API's absence receipt. This
-# is not a lifecycle completion or helper-group reap receipt.
+# Fresh configured-user metadata, not an effective process UID measurement.
+pub struct LinuxOciExecutionUserObservationV2:
+    operation: RuntimeOperationV1
+    selected_user: text
+    observed_unix_ms: i64
+    provider_identity_digest: text
+
+# Native object absence is not a lifecycle completion or helper-group reap.
 pub struct LinuxOciAbsenceObservationV2:
     operation: RuntimeOperationV1
     observed_unix_ms: i64
@@ -315,6 +322,35 @@ impl LinuxOciRuntimeProviderV1:
             stdout: run.stdout, stderr: run.stderr, reason: "exact-native-object-absence-v1")
         Ok(LinuxOciAbsenceObservationV2(operation: operation, observed_unix_ms: observed_ms,
             provider_identity_digest: baseline.identity_digest))
+
+    pub me observe_execution_user_v2(request: LinuxOciRequestV1,
+            expected: RuntimeIdentityV1) -> Result<LinuxOciExecutionUserObservationV2, text>:
+        val valid = self.validate(request)
+        if not valid.accepted: return Err(valid.reason)
+        if self.engine != OCI_ENGINE_PODMAN or not self.engine_policy.?:
+            return Err("execution-user-managed-podman-required")
+        if not builder_digest_valid_v1(expected.native_id): return Err("execution-user-full-native-id-required")
+        val retained = self.retained_intent_v1(request)?
+        if retained.pod_uid != expected.pod_uid or retained.attempt != expected.attempt or
+                retained.provider_generation != expected.provider_generation or
+                retained.operation_id != expected.operation_id or retained.engine != expected.engine or
+                retained.native_id != expected.native_id or retained.node_boot_id != expected.node_boot_id:
+            return Err("execution-user-retained-identity-mismatch")
+        if not self.live_enabled: return Err(OCI_REASON_PROVIDER_UNAVAILABLE)
+        val command = build_execution_user_command_v2(self.engine, expected.native_id)?
+        val run = self._execute(command, request)
+        if not run.matched: return Err(self._execution_failure_reason_v1(run, "execution-user-query-failed"))
+        if run.exit_code != 0 or run.stderr != "": return Err("execution-user-query-unproven")
+        val selected = linux_oci_execution_user_parse_v2(run.stdout, expected)?
+        val observed_ms = self._effect_clock_unix_ms_v1()
+        if observed_ms < 0: return Err("execution-user-observation-clock-unavailable")
+        val baseline = self.retained_engine_observation_v1()?
+        val operation = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "execution-user",
+            command: self._receipt_command_v1(command), state: _state_from_intent(retained, RUNTIME_PHASE_UNKNOWN, "configured-user-observed"),
+            exit_code: run.exit_code, stdout: run.stdout, stderr: run.stderr,
+            reason: "exact-native-execution-user-v1")
+        Ok(LinuxOciExecutionUserObservationV2(operation: operation, selected_user: selected,
+            observed_unix_ms: observed_ms, provider_identity_digest: baseline.identity_digest))
 
     # A deterministic executor seam for contract tests.  Each result is
     # matched by operation, program, and exact argv; an unmatched command is

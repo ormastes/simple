@@ -6,6 +6,7 @@ use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RuntimeIntentV1, RuntimeIdentityV1,
     RUNTIME_STATUS_REJECTED, runtime_command_empty, runtime_state_empty}
 use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceiptV2,
+    ContainerExecutionUserReceiptV2, container_execution_user_receipt_encode_v2,
     container_runtime_query_digest_v2, container_runtime_observation_digest_v2,
     container_absence_receipt_encode_v2}
 use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.LinuxOciRuntimeProviderV1
@@ -243,6 +244,23 @@ impl LinuxSimpleContainerAdapterV2:
         # Integrity/shape validation is not producer authentication or host
         # acceptance. No lifecycle tombstone or budget state is changed here.
         val canonical = container_absence_receipt_encode_v2(receipt)?
+        Ok(receipt)
+
+    pub me execution_user(request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1) -> Result<ContainerExecutionUserReceiptV2, text>:
+        val checked = self._checked_request_v2(request)?
+        val valid = self.provider.validate(checked.0)
+        if not valid.accepted: return Err(valid.reason)
+        self._set_duration_v2(checked.0)?
+        val observed = self.provider.observe_execution_user_v2(checked.0, expected)?
+        val receipt = ContainerExecutionUserReceiptV2(backend: LINUX_SIMPLE_CONTAINER_BACKEND_V2,
+            scope: self.scope, identity: expected, request_digest: checked.1.request_digest,
+            provider_identity_digest: observed.provider_identity_digest, selected_user: observed.selected_user,
+            observed_unix_ms: observed.observed_unix_ms,
+            query_digest: container_runtime_query_digest_v2(observed.operation.command)?,
+            evidence_digest: container_runtime_observation_digest_v2(observed.operation)?,
+            proof_kind: "exact-native-execution-user-v1")
+        val canonical = container_execution_user_receipt_encode_v2(receipt)?
         Ok(receipt)
 
     pub me recover(request: ContainerExecutionRequestV2, expected: RuntimeIntentV1) -> RuntimeOperationV1:
