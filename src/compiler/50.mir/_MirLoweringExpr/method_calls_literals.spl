@@ -5232,6 +5232,45 @@ impl MirLowering:
                     if val byte_at_local = byte_at_result:
                         return byte_at_local
 
+                # Text length units (design: text_len_counts_characters_2026-11-07):
+                # `byte_len()` is the explicit UTF-8 byte count (rt_string_len)
+                # and `char_count()` the code-point count (rt_string_char_count).
+                # Both had no lowering arm, so a stage2/stage3 compile of a
+                # caller fell through to generic dispatch. Same text proof as
+                # `byte_at` above.
+                if (method == "byte_len" or method == "char_count") and args.len() == 0:
+                    var len_unit_receiver_is_text = declared_text_receiver
+                    if not len_unit_receiver_is_text:
+                        len_unit_receiver_is_text = self.local_is_str(unresolved_receiver_local)
+                    if not len_unit_receiver_is_text:
+                        len_unit_receiver_is_text = self.local_hir_type_is_str(unresolved_receiver_local)
+                    if not len_unit_receiver_is_text:
+                        if val len_unit_bound_type = self.enum_match_expr_type(receiver):
+                            match len_unit_bound_type.kind:
+                                case HirTypeKind.Str: len_unit_receiver_is_text = true
+                                case _: ()
+                    if not len_unit_receiver_is_text:
+                        self.error_fatal("{method} receiver is not text", Some(receiver.span))
+                        return unresolved_receiver_local
+                    val len_unit_symbol = if method == "byte_len": "rt_string_len" else: "rt_string_char_count"
+                    val len_unit_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str(len_unit_symbol),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()],
+                            return_type: MirType.i64(),
+                            is_variadic: false
+                        )))
+                    ))
+                    var len_unit_builder = self.builder
+                    val len_unit_result = len_unit_builder.emit_call(
+                        len_unit_op,
+                        [mir_operand_copy(unresolved_receiver_local)],
+                        MirType.i64()
+                    )
+                    self.builder = len_unit_builder
+                    if val len_unit_local = len_unit_result:
+                        return len_unit_local
+
                 # Primitive/text `.to_text()` and `.to_string()` share the
                 # existing interpolation renderer, but only after custom
                 # struct methods had first chance to resolve above.

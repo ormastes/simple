@@ -20,7 +20,7 @@ fn tbd_yaml_colon(value: text) -> i64:
             if byte == quote: quote = 0
         elif byte == 34 or byte == 39:
             quote = byte
-        elif byte == 58 and (index + 1 == value.len() or value.byte_at(index + 1) == 32):
+        elif byte == 58 and (index + 1 == value.byte_len() or value.byte_at(index + 1) == 32):
             return index
     -1
 
@@ -28,7 +28,7 @@ fn tbd_yaml_scalar(value: text, limits: MachOTbdLimitsV1) -> Result<JsonValue, t
     val item = value.trim()
     if item == "": return Err("TBD empty YAML scalar")
     if item.starts_with("\""):
-        if item.len() > limits.max_name_bytes * 6 + 2: return Err("TBD YAML name quota exceeded")
+        if item.byte_len() > limits.max_name_bytes * 6 + 2: return Err("TBD YAML name quota exceeded")
         val decoded = json_parse_value_strict(item)
         if decoded.is_err(): return Err("TBD invalid quoted YAML scalar")
         val quoted = decoded.unwrap()
@@ -37,15 +37,15 @@ fn tbd_yaml_scalar(value: text, limits: MachOTbdLimitsV1) -> Result<JsonValue, t
         if name.len() > limits.max_name_bytes: return Err("TBD YAML name quota exceeded")
         return Ok(quoted)
     if item.starts_with("'"):
-        if item.len() < 2 or not item.ends_with("'"): return Err("TBD unterminated YAML quote")
-        if item.len() > limits.max_name_bytes * 2 + 2: return Err("TBD YAML name quota exceeded")
+        if item.byte_len() < 2 or not item.ends_with("'"): return Err("TBD unterminated YAML quote")
+        if item.byte_len() > limits.max_name_bytes * 2 + 2: return Err("TBD YAML name quota exceeded")
         var name = ""
         var index: i64 = 1
-        while index < item.len() - 1:
+        while index < item.byte_len() - 1:
             if item.byte_at(index) == 39:
-                if index + 1 >= item.len() - 1 or item.byte_at(index + 1) != 39: return Err("TBD invalid YAML single quote")
+                if index + 1 >= item.byte_len() - 1 or item.byte_at(index + 1) != 39: return Err("TBD invalid YAML single quote")
                 index = index + 1
-            name = name + item[index:index + 1]
+            name = name + item.substring(index, index + 1)
             if name.len() > limits.max_name_bytes: return Err("TBD YAML name quota exceeded")
             index = index + 1
         return Ok(JsonValue.Str(name))
@@ -56,7 +56,7 @@ fn tbd_yaml_scalar(value: text, limits: MachOTbdLimitsV1) -> Result<JsonValue, t
         var quote: i64 = 0
         var escaped = false
         var index: i64 = 1
-        while index < item.len() - 1:
+        while index < item.byte_len() - 1:
             val byte = item.byte_at(index) as i64
             if escaped:
                 escaped = false
@@ -69,11 +69,11 @@ fn tbd_yaml_scalar(value: text, limits: MachOTbdLimitsV1) -> Result<JsonValue, t
             elif byte == 91 or byte == 123 or byte == 93 or byte == 125:
                 return Err("TBD unsupported nested YAML flow collection")
             elif byte == 44:
-                values = values.push(tbd_yaml_scalar(item[start:index], limits)?)
+                values = values.push(tbd_yaml_scalar(item.substring(start, index), limits)?)
                 start = index + 1
             index = index + 1
         if quote != 0: return Err("TBD unterminated YAML flow quote")
-        val tail = item[start:item.len() - 1].trim()
+        val tail = item.substring(start, item.byte_len() - 1).trim()
         if tail != "": values = values.push(tbd_yaml_scalar(tail, limits)?)
         return Ok(JsonValue.Array(values))
     if item.starts_with("&") or item.starts_with("*") or item.starts_with("!") or item.starts_with("{") or
@@ -81,7 +81,7 @@ fn tbd_yaml_scalar(value: text, limits: MachOTbdLimitsV1) -> Result<JsonValue, t
         return Err("TBD unsupported YAML scalar syntax")
     if item.contains(": ") or item.contains("[") or item.contains("]") or item.contains("{") or item.contains("}"):
         return Err("TBD invalid plain YAML scalar")
-    if item.len() > limits.max_name_bytes: return Err("TBD YAML name quota exceeded")
+    if item.byte_len() > limits.max_name_bytes: return Err("TBD YAML name quota exceeded")
     Ok(JsonValue.Str(item))
 
 class TbdYamlParser:
@@ -148,7 +148,7 @@ fn tbd_yaml_documents(source: text, limits: MachOTbdLimitsV1) -> Result<[JsonVal
         if raw.contains("\t"): return Err("TBD unsupported YAML tab indentation")
         var quote: i64 = 0
         var escaped = false
-        var stop = raw.len()
+        var stop = raw.byte_len()
         for index in 0..raw.len():
             val byte = raw.byte_at(index) as i64
             if escaped:
@@ -168,7 +168,7 @@ fn tbd_yaml_documents(source: text, limits: MachOTbdLimitsV1) -> Result<[JsonVal
                 brackets = brackets - 1
                 if brackets < 0: return Err("TBD unbalanced YAML flow sequence")
         if quote != 0: return Err("TBD unsupported multiline YAML quote")
-        val body = raw[0:stop].trim()
+        val body = raw.substring(0, stop).trim()
         if body == "": continue
         if body.starts_with("---") or body == "...":
             if pending.len() != 0 or brackets != 0: return Err("TBD unfinished YAML sequence")
@@ -191,7 +191,7 @@ fn tbd_yaml_documents(source: text, limits: MachOTbdLimitsV1) -> Result<[JsonVal
         if not active or ended: return Err("TBD missing YAML TAPI document tag")
         if pending.len() == 0:
             pending_indent = 0
-            while pending_indent < raw.len() and raw.byte_at(pending_indent) == 32:
+            while pending_indent < raw.byte_len() and raw.byte_at(pending_indent) == 32:
                 pending_indent = pending_indent + 1
         pending = pending.push(body)
         if brackets == 0:
