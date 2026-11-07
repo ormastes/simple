@@ -38,6 +38,9 @@ class MirToLlvm:
     string_counter: i64
     inline_bytes_zero_global_emitted: bool
     local_types: Dict<i64, text>
+    # Opaque LLVM pointers erase pointee width. Keep declared raw Ptr/Ref
+    # element types separately so GEP scales byte/narrow/float addresses.
+    gep_element_types_by_name: Dict<text, text>
     value_types: Dict<text, text>
     defined_locals: Dict<i64, bool>
     return_locals: Dict<i64, bool>
@@ -193,6 +196,7 @@ class MirToLlvm:
         self.current_function_name = name
         self.defined_func_names[name] = true
         self.local_types = {}
+        self.gep_element_types_by_name = {}
         self.value_types = {}
         self.defined_locals = {}
         self.return_locals = {}
@@ -256,6 +260,36 @@ class MirToLlvm:
                 true
             case _:
                 false
+
+    me llvm_pointer_element_type(ty: MirType) -> text:
+        match ty.kind:
+            case MirTypeKind.Ptr(element, _) | MirTypeKind.Ref(element, _):
+                val element_type = self.llvm_type_text(element)
+                if element_type != "void":
+                    return element_type
+            case _: ()
+        ""
+
+    me remember_gep_pointer_type(local_id: i64, ty: MirType):
+        val name = self.get_local(local_id)
+        val element = self.llvm_pointer_element_type(ty)
+        if element != "" or self.gep_element_types_by_name.contains_key(name):
+            self.gep_element_types_by_name[name] = element
+
+    me gep_element_type_for_value(name: text) -> text:
+        if self.gep_element_types_by_name.contains_key(name):
+            self.gep_element_types_by_name[name]
+        else:
+            ""
+
+    me remember_gep_element_type(name: text, element: text):
+        self.gep_element_types_by_name[name] = element
+
+    me inherit_gep_pointer_type(dest_name: text, source_name: text):
+        if self.gep_element_type_for_value(dest_name) == "":
+            val element = self.gep_element_type_for_value(source_name)
+            if element != "":
+                self.gep_element_types_by_name[dest_name] = element
 
     me llvm_type_text(ty: MirType) -> text:
         val kind: MirTypeKind = ty.kind
@@ -375,6 +409,7 @@ class MirToLlvm:
             string_counter: 0,
             inline_bytes_zero_global_emitted: false,
             local_types: {},
+            gep_element_types_by_name: {},
             value_types: {},
             defined_locals: {},
             return_locals: {},
