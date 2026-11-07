@@ -104,7 +104,9 @@ the seed interpreter encoded bytes 128-255 as Unicode scalars. Consequently a
 single-character construction cannot own arbitrary wire bytes consistently.
 
 `bytes_to_wire` now validates and collects a complete `[u8]` buffer and crosses
-the counted `rt_bytes_to_text` ABI once. `wire_to_bytes` uses `text.to_bytes()`,
+the dedicated counted `rt_tls_wire_from_bytes` ABI once. Unlike public
+`rt_bytes_to_text`, the TLS-only carrier does not repair malformed UTF-8;
+`wire_to_bytes` uses `text.to_bytes()`,
 which returns integer storage bytes rather than Unicode character codes.
 `encode_u8`/`encode_u16_be`/`encode_u24_be` route through the same owner.
 Coverage now includes all 256 byte values, embedded NUL, and raw sequences that
@@ -116,4 +118,12 @@ LLVM backend with pre-existing `E-BACKEND-LLVM-CONST-TYPE` diagnostics. The
 SPipe spec could not be loaded from the intentionally sparse worktree because
 its broader `std.spec`/TLS dependency closure was absent. Release verification
 must run the expanded spec with a current admitted full-tree runtime.
+
+An Astra review rejected the first candidate because it used public
+`rt_bytes_to_text`, whose native implementations intentionally replace `FF`
+with `EF BF BD`. The dedicated ABI above is the correction: interpreter, Rust
+runtime, core C, and hosted/native C implementations all construct counted
+text from the exact input bytes, while ordinary text conversion remains
+unchanged. Runtime unit coverage asserts the complete 0-255 sequence in both
+packed and boxed array layouts plus embedded NUL and mixed UTF-8-shaped bytes.
 

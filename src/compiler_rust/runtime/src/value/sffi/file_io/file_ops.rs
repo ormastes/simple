@@ -2357,6 +2357,29 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
     rt_string_new(text.as_ptr(), text.len() as u64)
 }
 
+/// TLS wire carrier: preserve exact bytes in counted text without changing
+/// the public UTF-8-repairing bytes-to-text contract.
+#[no_mangle]
+pub extern "C" fn rt_tls_wire_from_bytes(bytes: RuntimeValue) -> RuntimeValue {
+    if !bytes.is_heap() || bytes.as_heap_ptr().is_null() {
+        return RuntimeValue::NIL;
+    }
+    if let Some(packed) = crate::value::collections::packed_byte_array_bytes(bytes) {
+        return rt_string_new(packed.as_ptr(), packed.len() as u64);
+    }
+    let len = crate::value::collections::rt_array_len(bytes);
+    if len < 0 { return RuntimeValue::NIL; }
+    let mut out = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let value = crate::value::collections::rt_array_get(bytes, i);
+        if !value.is_int() || !(0..=255).contains(&value.as_int()) {
+            return RuntimeValue::NIL;
+        }
+        out.push(value.as_int() as u8);
+    }
+    rt_string_new(out.as_ptr(), out.len() as u64)
+}
+
 /// Write raw bytes to file
 /// Takes an array of integers (0-255)
 #[no_mangle]
@@ -3694,6 +3717,24 @@ mod byte_text_utf8_invariant_tests {
         let actual = std::str::from_utf8(bytes).expect("decoder constructed invalid RuntimeString");
         assert_eq!(actual.as_bytes(), expected.as_bytes());
         assert_eq!(actual.chars().count(), expected.chars().count());
+    }
+
+    fn assert_raw(value: RuntimeValue, expected: &[u8]) {
+        assert!(!value.is_nil());
+        let length = rt_string_len(value);
+        let data = rt_string_data(value);
+        assert_eq!(length as usize, expected.len());
+        let actual = unsafe { std::slice::from_raw_parts(data, length as usize) };
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn tls_wire_carrier_preserves_all_bytes_and_nul() {
+        let all: Vec<u8> = (0..=255).collect();
+        assert_raw(rt_tls_wire_from_bytes(unsafe { bytes_to_runtime_array(&all) }), &all);
+        assert_raw(rt_tls_wire_from_bytes(boxed(&all)), &all);
+        let mixed = [0xc2, 0x80, 0, 0xe2, 0x82, 0xac, 0xff];
+        assert_raw(rt_tls_wire_from_bytes(unsafe { bytes_to_runtime_array(&mixed) }), &mixed);
     }
 
     #[test]

@@ -625,3 +625,20 @@ int64_t rt_string_from_byte_array(int64_t array_value) {
     free(buf);
     return result;
 }
+
+int64_t rt_tls_wire_from_bytes(int64_t array_value) {
+    int64_t len = rt_array_len_safe(array_value);
+    if (len <= 0) return core_io_empty_text();
+    uint8_t* buf = (uint8_t*)malloc((size_t)len);
+    if (!buf) return core_io_empty_text();
+    for (int64_t i = 0; i < len; i++) {
+        int64_t v = rt_array_get((SplArray*)(uintptr_t)array_value, i);
+        if ((v & 7) != 0) { free(buf); return core_io_empty_text(); }
+        int64_t byte = v >> 3;
+        if (byte < 0 || byte > 255) { free(buf); return core_io_empty_text(); }
+        buf[i] = (uint8_t)byte;
+    }
+    int64_t result = rt_string_new(buf, (uint64_t)len);
+    free(buf);
+    return result;
+}
