@@ -9,10 +9,10 @@
 # strict-decode toolkit is reused from `resource_v1`, not copied.
 
 use std.common.sdn.value.{SdnValue, SdnSpan}
-use std.common.sdn.parser.{parse_with_spans_and_issues}
 use std.common.contracts.orchestration.resource_v1.{RejectionV1, ObjectMetaV1, PodSpecV1,
     reject, as_dict, as_array, as_text, as_int, only_known, require,
-    decode_pod_spec, decode_meta}
+    decode_pod_spec, decode_meta, parse_resource_document,
+    decode_resource_envelope, resource_envelope_path}
 
 pub const CI_API_VERSION_V1 = "ci.simple/v1alpha1"
 
@@ -42,90 +42,67 @@ pub struct OrderedJobV1:
     node: PipelineJobV1
     job: JobV1
 
-fn strict_top(source: text, kind: text) -> Result<(Dict<text, SdnValue>, Dict<text, SdnSpan>), RejectionV1>:
-    var spans: Dict<text, SdnSpan> = {}
-    match parse_with_spans_and_issues(source):
-        case Err(e):
-            return Err(RejectionV1(kind: "parse", path: "", message: e, line: 0, col: 0))
-        case Ok(parsed):
-            spans = parsed.1
-            val issues = parsed.2
-            if issues.len() > 0:
-                val issue = issues[0]
-                return Err(RejectionV1(kind: issue.kind, path: issue.path,
-                                       message: issue.message, line: issue.line, col: issue.col))
-            match as_dict(parsed.0, "", spans):
-                case Err(r): return Err(r)
-                case Ok(top):
-                    match only_known(top, ["apiVersion", "kind", "metadata", "spec"], "document", spans):
-                        case Err(r): return Err(r)
-                        case Ok(_): pass
-                    match require(top, "apiVersion", "document", spans):
-                        case Err(r): return Err(r)
-                        case Ok(av):
-                            match as_text(av, "apiVersion", spans):
-                                case Err(r): return Err(r)
-                                case Ok(s):
-                                    if s != CI_API_VERSION_V1:
-                                        return Err(reject("unsupported_api_version", "apiVersion",
-                                            "unsupported apiVersion '" + s + "'", spans))
-                    match require(top, "kind", "document", spans):
-                        case Err(r): return Err(r)
-                        case Ok(kv):
-                            match as_text(kv, "kind", spans):
-                                case Err(r): return Err(r)
-                                case Ok(k):
-                                    if k != kind:
-                                        return Err(reject("unsupported_kind", "kind",
-                                            "expected kind '" + kind + "', found '" + k + "'", spans))
-                    return Ok((top, spans))
-    Err(RejectionV1(kind: "internal", path: "", message: "strict_top fell through", line: 0, col: 0))
+fn strict_top_value(value: SdnValue, spans: Dict<text, SdnSpan>, prefix: text,
+                    kind: text) -> Result<(Dict<text, SdnValue>, Dict<text, SdnSpan>), RejectionV1>:
+    val top = decode_resource_envelope(value, spans, prefix, CI_API_VERSION_V1)?
+    val kv = require(top, "kind", resource_envelope_path(prefix), spans)?
+    val actual = as_text(kv, prefix + "kind", spans)?
+    if actual != kind:
+        return Err(reject("unsupported_kind", prefix + "kind",
+            "expected kind '" + kind + "', found '" + actual + "'", spans))
+    Ok((top, spans))
 
 pub fn decode_job(source: text) -> Result<JobV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    decode_job_value(parsed.0, parsed.1, "")
+
+# Value decoder for the common ResourceList dispatcher; no parse or I/O.
+pub fn decode_job_value(value: SdnValue, source_spans: Dict<text, SdnSpan>, prefix: text) -> Result<JobV1, RejectionV1>:
+    val envelope = resource_envelope_path(prefix)
     var meta = ObjectMetaV1(name: "", ns: "default", labels: {})
     var backoff = 0
     var template = PodSpecV1(os_name: "", runtime_class: "", network_profile: "", containers: [])
-    match strict_top(source, "Job"):
+    match strict_top_value(value, source_spans, prefix, "Job"):
         case Err(r): return Err(r)
         case Ok(parsed):
             val top = parsed.0
             val spans = parsed.1
-            match require(top, "metadata", "document", spans):
+            match require(top, "metadata", envelope, spans):
                 case Err(r): return Err(r)
                 case Ok(mv):
-                    match decode_meta(mv, "metadata", spans):
+                    match decode_meta(mv, prefix + "metadata", spans):
                         case Err(r): return Err(r)
                         case Ok(m): meta = m
-            match require(top, "spec", "document", spans):
+            match require(top, "spec", envelope, spans):
                 case Err(r): return Err(r)
                 case Ok(sv):
-                    match as_dict(sv, "spec", spans):
+                    match as_dict(sv, prefix + "spec", spans):
                         case Err(r): return Err(r)
                         case Ok(sf):
-                            match only_known(sf, ["backoffLimit", "template"], "spec", spans):
+                            match only_known(sf, ["backoffLimit", "template"], prefix + "spec", spans):
                                 case Err(r): return Err(r)
                                 case Ok(_): pass
                             if sf.contains_key("backoffLimit"):
-                                match as_int(sf["backoffLimit"], "spec.backoffLimit", spans):
+                                match as_int(sf["backoffLimit"], prefix + "spec.backoffLimit", spans):
                                     case Err(r): return Err(r)
                                     case Ok(n):
                                         if n < 0:
-                                            return Err(reject("range", "spec.backoffLimit",
+                                            return Err(reject("range", prefix + "spec.backoffLimit",
                                                 "backoffLimit must be >= 0", spans))
                                         backoff = n
-                            match require(sf, "template", "spec", spans):
+                            match require(sf, "template", prefix + "spec", spans):
                                 case Err(r): return Err(r)
                                 case Ok(tv):
-                                    match as_dict(tv, "spec.template", spans):
+                                    match as_dict(tv, prefix + "spec.template", spans):
                                         case Err(r): return Err(r)
                                         case Ok(tf):
-                                            match only_known(tf, ["spec"], "spec.template", spans):
+                                            match only_known(tf, ["spec"], prefix + "spec.template", spans):
                                                 case Err(r): return Err(r)
                                                 case Ok(_): pass
-                                            match require(tf, "spec", "spec.template", spans):
+                                            match require(tf, "spec", prefix + "spec.template", spans):
                                                 case Err(r): return Err(r)
                                                 case Ok(tsv):
-                                                    match decode_pod_spec(tsv, "spec.template.spec", spans):
+                                                    match decode_pod_spec(tsv, prefix + "spec.template.spec", spans):
                                                         case Err(r): return Err(r)
                                                         case Ok(ps): template = ps
     Ok(JobV1(meta: meta, backoff_limit: backoff, template: template))
@@ -184,30 +161,35 @@ fn decode_pipeline_job(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> R
                      run_after: run_after, run_policy: policy))
 
 pub fn decode_pipeline(source: text) -> Result<PipelineV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    decode_pipeline_value(parsed.0, parsed.1, "")
+
+pub fn decode_pipeline_value(value: SdnValue, source_spans: Dict<text, SdnSpan>, prefix: text) -> Result<PipelineV1, RejectionV1>:
+    val envelope = resource_envelope_path(prefix)
     var meta = ObjectMetaV1(name: "", ns: "default", labels: {})
     var jobs: [PipelineJobV1] = []
-    match strict_top(source, "Pipeline"):
+    match strict_top_value(value, source_spans, prefix, "Pipeline"):
         case Err(r): return Err(r)
         case Ok(parsed):
             val top = parsed.0
             val spans = parsed.1
-            match require(top, "metadata", "document", spans):
+            match require(top, "metadata", envelope, spans):
                 case Err(r): return Err(r)
                 case Ok(mv):
-                    match decode_meta(mv, "metadata", spans):
+                    match decode_meta(mv, prefix + "metadata", spans):
                         case Err(r): return Err(r)
                         case Ok(m): meta = m
-            match require(top, "spec", "document", spans):
+            match require(top, "spec", envelope, spans):
                 case Err(r): return Err(r)
                 case Ok(sv):
-                    match as_dict(sv, "spec", spans):
+                    match as_dict(sv, prefix + "spec", spans):
                         case Err(r): return Err(r)
                         case Ok(sf):
-                            match only_known(sf, ["jobs"], "spec", spans):
+                            match only_known(sf, ["jobs"], prefix + "spec", spans):
                                 case Err(r): return Err(r)
                                 case Ok(_): pass
-                            val jpath = "spec.jobs"
-                            match require(sf, "jobs", "spec", spans):
+                            val jpath = prefix + "spec.jobs"
+                            match require(sf, "jobs", prefix + "spec", spans):
                                 case Err(r): return Err(r)
                                 case Ok(jv):
                                     match as_array(jv, jpath, spans):

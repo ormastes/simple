@@ -1,0 +1,98 @@
+# Administrative intent only. These values neither enroll nor attest a host.
+use std.common.string_core.str_len
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.contracts.orchestration.resource_v1.{ObjectMetaV1, RejectionV1,
+    ORCHESTRATION_API_VERSION_V1, decode_resource_envelope, resource_envelope_path,
+    decode_meta, as_dict, as_array, as_int, require, only_known, reject,
+    parse_cpu_millis, parse_memory_bytes, parse_resource_document}
+
+pub struct HostConfigV1:
+    meta: ObjectMetaV1
+    physical_host_id: text
+    service_scope_id: text
+    controller_ref: text
+    enrollment_credential_ref: text
+    runtime_class_ref: text
+    journal_root: text
+    workspace_roots: [text]
+    cpu_ceiling_millis: i64
+    memory_ceiling_bytes: i64
+    exclusive_device_ids: [text]
+    maintenance_interval_ms: i64
+    maximum_journal_events: i64
+
+fn host_config_text_v1(value: SdnValue, path: text,
+        spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    match value:
+        case SdnValue.String(raw):
+            if raw.len() == 0 or raw.len() > 4096 or raw.trim() != raw or
+                    raw.contains("\n") or raw.contains("\r") or raw.contains("\t") or raw.contains("\0"):
+                return Err(reject("host_config_text", path, "expected bounded nonempty text without control characters", spans))
+            Ok(raw)
+        case _: Err(reject("type", path, "expected text", spans))
+
+fn host_config_field_v1(fields: Dict<text, SdnValue>, key: text, path: text,
+        spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    host_config_text_v1(require(fields, key, path, spans)?, path + "." + key, spans)
+
+fn host_config_list_v1(value: SdnValue, path: text, minimum: i64, maximum: i64,
+        spans: Dict<text, SdnSpan>) -> Result<[text], RejectionV1>:
+    val items = as_array(value, path, spans)?
+    if items.len() < minimum or items.len() > maximum:
+        return Err(reject("host_config_limit", path, "list exceeds permitted bounds", spans))
+    var values: [text] = []
+    var index = 0
+    for item in items:
+        val item_path = path + "." + index.to_text()
+        val name = host_config_text_v1(item, item_path, spans)?
+        if values.contains(name): return Err(reject("duplicate_host_config_value", item_path, "duplicate value", spans))
+        values.push(name)
+        index = index + 1
+    Ok(values)
+
+pub fn decode_host_config_value(value: SdnValue, spans: Dict<text, SdnSpan>,
+        prefix: text) -> Result<HostConfigV1, RejectionV1>:
+    val envelope = resource_envelope_path(prefix)
+    val top = decode_resource_envelope(value, spans, prefix, ORCHESTRATION_API_VERSION_V1)?
+    if host_config_text_v1(require(top, "kind", envelope, spans)?, prefix + "kind", spans)? != "HostConfig":
+        return Err(reject("unsupported_kind", prefix + "kind", "expected HostConfig", spans))
+    val meta = decode_meta(require(top, "metadata", envelope, spans)?, prefix + "metadata", spans)?
+    val path = prefix + "spec"
+    val fields = as_dict(require(top, "spec", envelope, spans)?, path, spans)?
+    only_known(fields, ["physicalHostId", "serviceScopeId", "controllerRef", "enrollmentCredentialRef",
+        "runtimeClassRef", "journalRoot", "workspaceRoots", "budget", "maintenanceIntervalMs", "maximumJournalEvents"], path, spans)?
+    val physical = host_config_field_v1(fields, "physicalHostId", path, spans)?
+    val scope = host_config_field_v1(fields, "serviceScopeId", path, spans)?
+    val controller = host_config_field_v1(fields, "controllerRef", path, spans)?
+    val credential = host_config_field_v1(fields, "enrollmentCredentialRef", path, spans)?
+    val runtime = host_config_field_v1(fields, "runtimeClassRef", path, spans)?
+    val journal = host_config_field_v1(fields, "journalRoot", path, spans)?
+    val roots = host_config_list_v1(require(fields, "workspaceRoots", path, spans)?, path + ".workspaceRoots", 1, 64, spans)?
+    val budget_path = path + ".budget"
+    val budget = as_dict(require(fields, "budget", path, spans)?, budget_path, spans)?
+    only_known(budget, ["cpu", "memory", "exclusiveDeviceIds"], budget_path, spans)?
+    val cpu = parse_cpu_millis(host_config_field_v1(budget, "cpu", budget_path, spans)?)
+    if cpu <= 0: return Err(reject("quantity", budget_path + ".cpu", "expected positive nonoverflowing CPU ceiling", spans))
+    val memory = parse_memory_bytes(host_config_field_v1(budget, "memory", budget_path, spans)?)
+    if memory <= 0: return Err(reject("quantity", budget_path + ".memory", "expected positive nonoverflowing memory ceiling", spans))
+    val devices = host_config_list_v1(require(budget, "exclusiveDeviceIds", budget_path, spans)?, budget_path + ".exclusiveDeviceIds", 0, 256, spans)?
+    val interval = as_int(require(fields, "maintenanceIntervalMs", path, spans)?, path + ".maintenanceIntervalMs", spans)?
+    if interval < 1 or interval > 60000:
+        return Err(reject("host_config_limit", path + ".maintenanceIntervalMs", "expected 1..60000 milliseconds", spans))
+    val events = as_int(require(fields, "maximumJournalEvents", path, spans)?, path + ".maximumJournalEvents", spans)?
+    if events < 1 or events > 100000:
+        return Err(reject("host_config_limit", path + ".maximumJournalEvents", "expected 1..100000 events", spans))
+    Ok(HostConfigV1(meta: meta, physical_host_id: physical, service_scope_id: scope,
+        controller_ref: controller, enrollment_credential_ref: credential, runtime_class_ref: runtime,
+        journal_root: journal, workspace_roots: roots, cpu_ceiling_millis: cpu,
+        memory_ceiling_bytes: memory, exclusive_device_ids: devices,
+        maintenance_interval_ms: interval, maximum_journal_events: events))
+
+# Source boundary for local host configuration. Administrative intent never
+# authenticates enrollment, native host identity or available capacity.
+pub fn decode_host_config(source: text) -> Result<HostConfigV1, RejectionV1>:
+    if str_len(source) > 1048576:
+        return Err(RejectionV1(kind: "host_config_limit", path: "document",
+            message: "HostConfig source exceeds 1 MiB byte limit", line: 0, col: 0))
+    val parsed = parse_resource_document(source)?
+    decode_host_config_value(parsed.0, parsed.1, "")

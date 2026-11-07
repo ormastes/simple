@@ -1,0 +1,49 @@
+# Read-only application composition of the strict shared resource decoder.
+# Schema validity is not reference resolution, admission, or apply authority.
+use std.common.contracts.orchestration.resource_set_v1.{decode_resource_set, resource_set_item_identity}
+use std.common.contracts.orchestration.resource_v1.RejectionV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+pub struct OrchestratorValidationReplyV1:
+    exit_code: i64
+    output: text
+
+fn validation_failure_v1(reason: RejectionV1, exit_code: i64) -> OrchestratorValidationReplyV1:
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "kind": SdnValue.String("orchestrator-validation"),
+        "status": SdnValue.String("rejected"), "code": SdnValue.String(reason.kind),
+        "path": SdnValue.String(reason.path), "message": SdnValue.String(reason.message),
+        "line": SdnValue.Int(reason.line), "column": SdnValue.Int(reason.col),
+        "authorized": SdnValue.Bool(false), "referencesResolved": SdnValue.Bool(false)
+    }
+    OrchestratorValidationReplyV1(exit_code: exit_code, output: sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# All resources must decode before a success is emitted. The digest identifies
+# the input bytes only; it must never be accepted as an executable plan digest.
+pub fn orchestrator_validate_source_v1(source: text) -> OrchestratorValidationReplyV1:
+    val decoded = decode_resource_set(source)
+    if decoded.is_err(): return validation_failure_v1(decoded.unwrap_err(), 1)
+    var keys: [SdnValue] = []
+    for item in decoded.unwrap().items:
+        keys.push(SdnValue.String(resource_set_item_identity(item)))
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "kind": SdnValue.String("orchestrator-validation"),
+        "status": SdnValue.String("schema-valid"), "sourceDigest": SdnValue.String(sha256_text(source)),
+        "resourceCount": SdnValue.Int(keys.len()), "resourceKeys": SdnValue.Array(keys),
+        "authorized": SdnValue.Bool(false), "referencesResolved": SdnValue.Bool(false)
+    }
+    OrchestratorValidationReplyV1(exit_code: 0, output: sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# Takes arguments after the executable name. Reject argument errors before I/O.
+pub fn orchestrator_validate_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() != 2:
+        return validation_failure_v1(RejectionV1(kind: "usage", path: "", message: "usage: simple-orchestrator validate <file>", line: 0, col: 0), 2)
+    if args[0] != "validate" or args[1] == "":
+        return validation_failure_v1(RejectionV1(kind: "usage", path: "", message: "usage: simple-orchestrator validate <file>", line: 0, col: 0), 2)
+    val source = file_read_regular_no_follow_bounded(args[1], 1048576)
+    if source.is_err():
+        return validation_failure_v1(RejectionV1(kind: "input-unavailable", path: "", message: "input must be a readable regular file within the 1 MiB limit", line: 0, col: 0), 1)
+    orchestrator_validate_source_v1(source.unwrap())
