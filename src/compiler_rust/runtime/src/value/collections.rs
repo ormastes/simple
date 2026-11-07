@@ -217,6 +217,10 @@ pub fn transient_heap_scope_paused() -> bool {
     TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().is_some_and(|scope| scope.paused))
 }
 
+fn allocation_uses_session_v1(alloc_depth: i32, module_running: bool) -> bool {
+    alloc_depth > 0 || !module_running
+}
+
 pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
     // A live session owns what a paused/absent module scope would have left
     // permanent, and everything inside rt_session_alloc_begin/end (I3).
@@ -227,7 +231,7 @@ pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
         };
         let module_running =
             TRANSIENT_HEAP_SCOPE.with(|scope| scope.borrow().as_ref().is_some_and(|scope| !scope.paused));
-        if session.alloc_depth > 0 || !module_running {
+        if allocation_uses_session_v1(session.alloc_depth, module_running) {
             session.adopt(value);
             return true;
         }
@@ -3041,6 +3045,23 @@ fn next_transient_scope_identity(counter: &std::sync::atomic::AtomicU32) -> Opti
 #[no_mangle]
 pub extern "C" fn rt_transient_array_scope_identity_v1() -> i64 {
     TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().map_or(0, |scope| i64::from(scope.id)))
+}
+
+/// Actual new-object owner, with disjoint signed domains; observation only.
+#[no_mangle]
+pub extern "C" fn rt_allocation_owner_identity_v1() -> i64 {
+    TRANSIENT_HEAP_SCOPE.with(|scope| {
+        let scope = scope.borrow();
+        let running = scope.as_ref().is_some_and(|scope| !scope.paused);
+        SESSION_HEAP.with(|session| {
+            if let Some(session) = session.borrow().as_ref() {
+                if allocation_uses_session_v1(session.alloc_depth, running) {
+                    return -i64::from(session.id);
+                }
+            }
+            if running { i64::from(scope.as_ref().unwrap().id) } else { 0 }
+        })
+    })
 }
 
 #[cfg(test)]

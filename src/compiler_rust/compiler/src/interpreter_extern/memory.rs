@@ -577,6 +577,15 @@ pub fn rt_transient_array_scope_identity_v1(args: &[Value]) -> Result<Value, Com
     Ok(Value::Int(simple_runtime::value::rt_transient_array_scope_identity_v1()))
 }
 
+pub fn rt_allocation_owner_identity_v1(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_allocation_owner_identity_v1 requires 0 arguments",
+        ));
+    }
+    Ok(Value::Int(simple_runtime::value::rt_allocation_owner_identity_v1()))
+}
+
 pub fn rt_transient_array_scope_end(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
         return Err(CompileError::runtime(

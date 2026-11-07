@@ -493,6 +493,8 @@ int8_t rt_transient_array_scope_begin(void);
 int64_t rt_transient_array_scope_state_v1(void);
 /* Current owner's non-reused positive scope identity, or 0 inactive/foreign. */
 int64_t rt_transient_array_scope_identity_v1(void);
+/* 0 process, +u32 transient scope, -u32 session; observes actual allocation. */
+int64_t rt_allocation_owner_identity_v1(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
 /* Graph-operation success for a supported root in an active paused scope,
