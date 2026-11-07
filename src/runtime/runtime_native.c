@@ -1716,12 +1716,16 @@ static uint32_t rt_core_registered_object_kind(void* ptr) {
     return *(uint8_t*)ptr;
 }
 
+static int rt_core_allocation_uses_session_v1(void) {
+    return rt_core_session_heap_live_id &&
+        (rt_core_session_alloc_depth > 0 || !rt_core_transient_array_scope_active ||
+         rt_core_transient_array_scope_paused);
+}
+
 static uint32_t rt_core_transient_scope_for_new_object(void) {
     /* A live session owns what a paused/absent module scope would have left
      * permanent, and everything inside rt_session_alloc_begin/end (I3). */
-    if (rt_core_session_heap_live_id &&
-        (rt_core_session_alloc_depth > 0 || !rt_core_transient_array_scope_active ||
-         rt_core_transient_array_scope_paused)) {
+    if (rt_core_allocation_uses_session_v1()) {
         return rt_core_session_heap_live_id;
     }
     return rt_core_transient_array_scope_active && !rt_core_transient_array_scope_paused
@@ -1989,6 +1993,13 @@ int64_t rt_transient_array_scope_identity_v1(void) {
             atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
                 (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
     return (int64_t)rt_core_transient_array_scope_id;
+}
+
+/* Signed domain separates process(0), module(+id), and session(-id). This
+ * observes the allocator's selection, including explicit session override. */
+int64_t rt_allocation_owner_identity_v1(void) {
+    const uint32_t owner = rt_core_transient_scope_for_new_object();
+    return rt_core_allocation_uses_session_v1() ? -(int64_t)owner : (int64_t)owner;
 }
 
 int8_t rt_transient_array_scope_begin(void) {
