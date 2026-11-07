@@ -89,3 +89,65 @@ miss count is the load-independent signal.
   exact file (`COMPILER_FIXTURE_DEFAULT=src/compiler/80.driver/driver_types.spl`,
   budget 60 s) and is RED today. No new row was added; the existing row is the
   guard for this defect.
+
+## 2026-11-07 — OPEN item answered (wall does NOT meet target); where the per-call cost sits now, measured
+
+Host: Windows 11. Binaries built from `origin/release/1.0.0` tip
+`4eb1de2ecbd` with the bootstrap profile (`opt-level = "z"`, same for every
+arm): `simple-base.exe` = pure tip (17883136 B, sha256 `c0c47b2cdd6cd6ee…`);
+`simple-timers.exe` = tip + round-15 profiler tooling + phase timers
+(behaviour-identical with the env vars unset).
+
+**Wall on the original repro:** `lint src/compiler/80.driver/driver_types.spl`
+= 162 s on the release seed (`D:/dev/wt/seed/simple.exe`, 2026-11-06), 124 s
+on `simple-base.exe`, against the 60 s budget of
+`check-lint-cost-budget.shs` and the 5 s target above. Not met. (The
+any-rules `check` child exits 1 on this host, so these exclude that lane;
+same in every arm.)
+
+**The scope chain works; the remaining cost is elsewhere.** Micro-benchmarks
+(`SIMPLE_EXECUTION_MODE=interpret`, 20,000 iterations each, `simple-base.exe`):
+
+| call shape | ns / iteration |
+|---|---|
+| loop body `acc = acc + i` | 6-9 |
+| same-file `fn local_fn(x) = x + 1` | 35 (first loop 290) |
+| same-file fn whose body calls builtin `math_min_i64(a, b)` | 13,707 |
+| builtin `math_min_i64(i, 7)` called directly from `main` | 6,609 |
+| imported `std.common.math.min_i64(i, 7)` (module-owned, no globals) | 14,337-15,543 |
+| imported `compiler.core.parser.par_kind_get()` | 12,113-16,241 |
+| imported `compiler.core.lexer_chars.is_ident_char("a")` | 100,990 |
+| inline module-global array read `g_slot[0]` from `main` | 2,369 |
+| same-file fn that reads one module-global slot | 7,413 |
+| local `arr[0] = arr[0] + arr[1]` | 2,602-2,789 |
+
+So a call is cheap (35 ns) until its body contains a *call* or touches a
+*module global*: then it costs 7-16 us, and a builtin call alone is 6.6 us.
+Per-owned-call phase timers (`SIMPLE_PERF_COUNTERS=1`, OWNED_* / BODY_*,
+120,005 owned calls in the `min_i64`/`abs_i64`/`is_digit`/`is_alpha` bench):
+
+| phase (ns per owned call) | |
+|---|---|
+| publish_and_repoint | 186 |
+| captured_env_with_live_globals (scope attach) | 795 |
+| capture_argument_places | 127 |
+| bind_args_with_values_named | 409 |
+| park_written_back_arguments + release_scope | 245 |
+| **execute_function_body** | **15,757** |
+| sync_owned_captured_globals | 375 |
+| write_back_mutable_arguments | 1,001 |
+| restore_parked_arguments / write_back_borrow_arguments | 39 / 42 |
+| body prelude (coverage/mem/sampler frames, CONST_NAMES swap, owner swap) | 925 |
+| mark_block_locals | 108 |
+| body epilogue (return contract, unsigned coerce, async wrap) | 242 |
+
+The call-path WRAPPER (everything this record's earlier fixes targeted) is
+~3.2 us; the body of a one-statement function is 15.7 us, i.e. the cost is
+in evaluating the statement — the `evaluate_call` priority ladder and the
+extern dispatch for `math_min_i64`. Per-rung timers (EVALCALL_* /
+EXTERN_*) are in the tree; their numbers follow in the next note.
+
+Lint's lexer calls across modules several times per character
+(`is_ident_char` -> `is_alpha`/`is_digit` -> `char_code`), so at 10-100 us
+per such call the 82 KB file's 124 s is accounted for by call count times
+this constant, not by any superlinear term.
