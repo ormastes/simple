@@ -43,6 +43,13 @@ pub fn linux_oci_retained_request_encode_v1(request: LinuxOciRequestV1) -> Resul
         fields["userUid"] = SdnValue.Int(request.user_uid)
         fields["userGid"] = SdnValue.Int(request.user_gid)
         fields["userNamespaceMode"] = SdnValue.String(request.user_namespace_mode)
+    if request.containment_profile_digest != "":
+        fields["version"] = SdnValue.Int(4)
+        fields["terminalMode"] = SdnValue.String(request.terminal_mode)
+        fields["userUid"] = SdnValue.Int(request.user_uid)
+        fields["userGid"] = SdnValue.Int(request.user_gid)
+        fields["userNamespaceMode"] = SdnValue.String(request.user_namespace_mode)
+        fields["containmentProfileDigest"] = SdnValue.String(request.containment_profile_digest)
     val body = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
     if body.len() > 1048576: return Err("retained-request-record-too-large")
     Ok(body)
@@ -75,28 +82,35 @@ fn request_fields_decode_v1(source: text) -> Result<LinuxOciRequestV1, Rejection
     only_known(fields, ["version", "kind", "podUid", "attempt", "operationId", "requestDigest", "image",
         "bundlePath", "command", "args", "timeoutMs", "cpuLimitMillis", "memoryLimitBytes", "pidLimit",
         "networkPolicy", "filesystemPolicy", "buildInputRoot", "buildOutputRoot", "replaceEntrypoint",
-        "environment", "workingDirectory", "terminalMode", "userUid", "userGid", "userNamespaceMode"], "", spans)?
+        "environment", "workingDirectory", "terminalMode", "userUid", "userGid", "userNamespaceMode", "containmentProfileDigest"], "", spans)?
     val version = request_field_integer_v1(fields, "version", spans)?
-    if version != 1 and version != 2 and version != 3:
+    if version != 1 and version != 2 and version != 3 and version != 4:
         return Err(reject("version", "version", "unsupported retained request version", spans))
     var terminal_mode = "none"
-    if version == 2 or version == 3:
+    if version == 2 or version == 3 or version == 4:
         terminal_mode = request_field_text_v1(fields, "terminalMode", spans)?
-        if terminal_mode != "stdin" and terminal_mode != "tty" and not (version == 3 and terminal_mode == "none"):
+        if terminal_mode != "stdin" and terminal_mode != "tty" and not ((version == 3 or version == 4) and terminal_mode == "none"):
             return Err(reject("terminal", "terminalMode", "unsupported interactive terminal mode", spans))
     elif fields.contains_key("terminalMode"):
         return Err(reject("version", "terminalMode", "terminal mode requires version 2", spans))
     var user_uid: i64 = -1
     var user_gid: i64 = -1
     var user_namespace_mode = ""
-    if version == 3:
+    if version == 3 or version == 4:
         user_uid = request_field_integer_v1(fields, "userUid", spans)?
         user_gid = request_field_integer_v1(fields, "userGid", spans)?
         user_namespace_mode = request_field_text_v1(fields, "userNamespaceMode", spans)?
-        if user_uid < 0 or user_gid < 0 or user_namespace_mode != "keep-id":
+        if version == 3 and (user_uid < 0 or user_gid < 0 or user_namespace_mode != "keep-id"):
             return Err(reject("user", "userNamespaceMode", "explicit numeric keep-id selection required", spans))
     elif fields.contains_key("userUid") or fields.contains_key("userGid") or fields.contains_key("userNamespaceMode"):
         return Err(reject("version", "userUid", "user selection requires version 3", spans))
+    var containment_profile_digest = ""
+    if version == 4:
+        containment_profile_digest = request_field_text_v1(fields, "containmentProfileDigest", spans)?
+        if containment_profile_digest == "":
+            return Err(reject("containment", "containmentProfileDigest", "explicit containment digest required", spans))
+    elif fields.contains_key("containmentProfileDigest"):
+        return Err(reject("version", "containmentProfileDigest", "containment selection requires version 4", spans))
     if request_field_text_v1(fields, "kind", spans)? != "linux-oci-retained-request":
         return Err(reject("kind", "kind", "unsupported retained request kind", spans))
     val replace_entrypoint = match require(fields, "replaceEntrypoint", "", spans)?:
@@ -130,7 +144,8 @@ fn request_fields_decode_v1(source: text) -> Result<LinuxOciRequestV1, Rejection
         build_output_root: request_field_text_v1(fields, "buildOutputRoot", spans)?,
         replace_entrypoint: replace_entrypoint, environment: environment,
         working_directory: request_field_text_v1(fields, "workingDirectory", spans)?, terminal_mode: terminal_mode,
-        user_uid: user_uid, user_gid: user_gid, user_namespace_mode: user_namespace_mode)
+        user_uid: user_uid, user_gid: user_gid, user_namespace_mode: user_namespace_mode,
+        containment_profile_digest: containment_profile_digest)
     val digest = match linux_oci_request_digest_v1(request):
         case Ok(value): value
         case Err(reason): return Err(reject("request", "", reason, spans))

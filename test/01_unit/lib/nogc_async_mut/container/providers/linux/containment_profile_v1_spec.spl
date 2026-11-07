@@ -1,0 +1,131 @@
+# Candidate data and refusal branches only. AUTHORED/NOT_RUN.
+use std.spec.*
+use std.nogc_async_mut.container.providers.linux.containment_profile_v1.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_policy_digest_v1
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.common.contracts.container.runtime_v1.RUNTIME_STATUS_REJECTED
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.nogc_async_mut.container.api_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+
+fn _containment_candidate_v1() -> LinuxOciContainmentProfileV1:
+    LinuxOciContainmentProfileV1(cli_policy_digest: linux_oci_engine_policy_digest_v1(linux_container_policy_fixture_v2()).unwrap(),
+        runtime_program: "/usr/bin/crun", runtime_digest: "a".repeat(64), runtime_name: "crun", cgroup_manager: "systemd")
+
+describe "containment profile candidate and request V4 boundary":
+    it "roundtrips canonical profile bytes and matches only the exact CLI and selected digests":
+        val profile = _containment_candidate_v1()
+        val bytes = linux_oci_containment_profile_encode_v1(profile).unwrap()
+        val decoded = linux_oci_containment_profile_decode_v1(bytes).unwrap()
+        expect(decoded).to_equal(profile)
+        val selected = linux_oci_containment_profile_digest_v1(profile).unwrap()
+        expect(linux_oci_containment_profile_match_v1(profile, profile.cli_policy_digest, selected).unwrap()).to_equal(true)
+        expect(linux_oci_containment_profile_match_v1(profile, "b".repeat(64), selected).is_err()).to_equal(true)
+        var changed = profile
+        changed.runtime_digest = "b".repeat(64)
+        expect(linux_oci_containment_profile_match_v1(changed, profile.cli_policy_digest, selected).is_err()).to_equal(true)
+
+    it "refuses malformed profile fields unknown fields duplicates and noncanonical bytes":
+        val source = linux_oci_containment_profile_encode_v1(_containment_candidate_v1()).unwrap()
+        for changed in [source + "\n", source.replace("version: 1", "version: 1, version: 1"),
+                source.replace("version: 1", "version: 2"),
+                source.replace("runtimeName:", "unknownName:"), source.replace("cgroupManager: systemd", "cgroupManager: other"),
+                source.replace("runtimeProgram: /usr/bin/crun", "runtimeProgram: relative"),
+                source.replace("runtimeProgram: /usr/bin/crun", "runtimeProgram: /usr/../bin/crun"),
+                source.replace("runtimeDigest: " + "a".repeat(64), "runtimeDigest: " + "A".repeat(64))]:
+            expect(changed == source).to_equal(false)
+            expect(linux_oci_containment_profile_decode_v1(changed).is_err()).to_equal(true)
+        for program in ["/", "/usr//bin/crun", "/usr/bin/crun/", "/usr/bin/crun\0", "/usr/bin/crun\n"]:
+            var profile = _containment_candidate_v1()
+            profile.runtime_program = program
+            expect(linux_oci_containment_profile_encode_v1(profile).is_err()).to_equal(true)
+
+    it "preserves exact historical V1 V2 and V3 bytes and semantic hashes when the selector is empty":
+        var request = linux_container_leaf_fixture_v2()
+        val digest1 = "de002d8540c5c6aead5437c7a33a633554e6540bdd447b34fbde4bb357723d2c"
+        val digest2 = "28394fe48d36fac5849d29d8f350c34ce407c1b5a69876f1b2523093aa2d0624"
+        val digest3 = "57966059a9aee8b23819026287537a616489a969370736c8f0fa26f284940fbb"
+        val legacy1 = "{args: [literal], attempt: 1, buildInputRoot: \"\", buildOutputRoot: \"\", bundlePath: \"\", command: [/agent], cpuLimitMillis: 1000, environment: [], filesystemPolicy: read-only, image: \"" + request.image + "\", kind: linux-oci-retained-request, memoryLimitBytes: 268435456, networkPolicy: none, operationId: create-api, pidLimit: 64, podUid: workload-1, replaceEntrypoint: false, requestDigest: " + digest1 + ", timeoutMs: 5000, version: 1, workingDirectory: \"\"}\n"
+        expect(request.containment_profile_digest).to_equal("")
+        expect(linux_oci_request_digest_v1(request).unwrap()).to_equal(digest1)
+        expect(linux_oci_retained_request_encode_v1(request).unwrap()).to_equal(legacy1)
+        request.terminal_mode = "tty"
+        val legacy2 = legacy1.replace(digest1, digest2).replace(", timeoutMs:", ", terminalMode: tty, timeoutMs:").replace("version: 1", "version: 2")
+        expect(linux_oci_request_digest_v1(request).unwrap()).to_equal(digest2)
+        expect(linux_oci_retained_request_encode_v1(request).unwrap()).to_equal(legacy2)
+        request.terminal_mode = "none"
+        request.user_uid = 1000
+        request.user_gid = 1001
+        request.user_namespace_mode = "keep-id"
+        val legacy3_header = legacy1.replace(digest1, digest3).replace(", timeoutMs:", ", terminalMode: none, timeoutMs:")
+        val legacy3 = legacy3_header.replace("version: 1", "userGid: 1001, userNamespaceMode: keep-id, userUid: 1000, version: 3")
+        expect(linux_oci_request_digest_v1(request).unwrap()).to_equal(digest3)
+        expect(linux_oci_retained_request_encode_v1(request).unwrap()).to_equal(legacy3)
+        expect(linux_oci_retained_request_decode_v1(legacy3).unwrap().containment_profile_digest).to_equal("")
+
+    it "uses V4 with explicit absent or selected user fields and rejects selector tampering or downgrade":
+        for selected_user in [false, true]:
+            var request = linux_container_leaf_fixture_v2()
+            request.containment_profile_digest = linux_oci_containment_profile_digest_v1(_containment_candidate_v1()).unwrap()
+            if selected_user:
+                request.user_uid = 1000
+                request.user_gid = 1001
+                request.user_namespace_mode = "keep-id"
+            val source = linux_oci_retained_request_encode_v1(request).unwrap()
+            expect(source.contains("version: 4")).to_equal(true)
+            expect(source.contains("terminalMode: none")).to_equal(true)
+            expect(source.contains("userUid:")).to_equal(true)
+            val decoded = linux_oci_retained_request_decode_v1(source).unwrap()
+            expect(decoded.containment_profile_digest).to_equal(request.containment_profile_digest)
+            expect(linux_oci_request_digest_v1(decoded)).to_equal(linux_oci_request_digest_v1(request))
+            for changed in [source.replace("version: 4", "version: 3"),
+                    source.replace(request.containment_profile_digest, "f".repeat(64)),
+                    source.replace("containmentProfileDigest: " + request.containment_profile_digest + ", ", ""),
+                    source.replace("containmentProfileDigest:", "unknownProfileDigest:"),
+                    source.replace("containmentProfileDigest: " + request.containment_profile_digest, "containmentProfileDigest: \"\"")]:
+                expect(changed == source).to_equal(false)
+                expect(linux_oci_retained_request_decode_v1(changed).is_err()).to_equal(true)
+        var invalid = linux_container_leaf_fixture_v2()
+        invalid.containment_profile_digest = "not-a-sha"
+        expect(linux_oci_request_bounds_v1(invalid).is_err()).to_equal(true)
+
+    it "refuses selected V4 through actual legacy provider and public create builder before effects":
+        var request = linux_container_leaf_fixture_v2()
+        request.containment_profile_digest = linux_oci_containment_profile_digest_v1(_containment_candidate_v1()).unwrap()
+        val provider = LinuxOciRuntimeProviderV1.scripted("linux", "podman", "/unused/containment", "boot-1", 7, [])
+        expect(provider.prepare_pod(request).status).to_equal(RUNTIME_STATUS_REJECTED)
+        val rejected = provider.create(request)
+        expect(rejected.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(rejected.reason).to_equal("containment-profile-not-installed")
+        expect(rejected.command.program).to_equal("")
+        val built = build_create_command("podman", "/unused/containment", request, request.operation_id, 7, "boot-1")
+        expect(built.0).to_equal("containment-profile-not-installed")
+        expect(built.1.program).to_equal("")
+        expect(built.1.args.len()).to_equal(0)
+        expect(provider.executor_call_count()).to_equal(0)
+        expect(provider.scripted_cursor).to_equal(0)
+        expect(provider.retained_state_count()).to_equal(0)
+
+    it "refuses selected V4 through the actual common API while retaining its owner unchanged":
+        var leaf = linux_container_leaf_fixture_v2()
+        leaf.containment_profile_digest = linux_oci_containment_profile_digest_v1(_containment_candidate_v1()).unwrap()
+        val request = linux_container_request_fixture_v2(leaf)
+        val adapter = linux_container_adapter_fixture_v2([], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create"], 100).unwrap()
+        val turn = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(turn.operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(turn.operation.reason).to_equal("containment-profile-not-installed")
+        expect(turn.operation.command.program).to_equal("")
+        expect(simple_container_project_v2(turn.owner, request).unwrap().request_digest).to_equal(request.plan.request_digest)
+        expect(simple_container_scope_v2(turn.owner)).to_equal(linux_container_scope_fixture_v2())
+        match turn.owner:
+            case SimpleContainerOwnerV2.Linux(_, retained_adapter):
+                expect(retained_adapter.provider.executor_call_count()).to_equal(0)
+                expect(retained_adapter.provider.scripted_cursor).to_equal(0)
+                expect(retained_adapter.provider.retained_state_count()).to_equal(0)
+                expect(retained_adapter.provider.scripted_effect_clock_cursor).to_equal(0)
+            case _: assert(false, "expected retained Linux common owner")
