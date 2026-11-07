@@ -156,3 +156,26 @@ ownership proof is an aliasing bug, which is strictly worse than quadratic.
 No regression gate was added, because no fix landed — a gate here would pin
 nothing.
 
+
+## 2026-11-07 — owner decision: diagnose + builder (part A+B landed, C pending)
+
+- **Builder that already exists (A):** `std.common.string_builder`
+  (`src/lib/common/string_builder.spl`): `StringBuilder` (parts array,
+  `push`/`push_line`/`to_text`/`build`), free constructors `string_builder()` /
+  `string_builder_from(s)`, and `RtStringBuilder` backed by the runtime
+  `rt_string_builder_new/push/len/finish/free` externs
+  (`src/compiler_rust/runtime/src/value/string_builder.rs`, `src/runtime/runtime.h`).
+- **Diagnostic (B):** lint `COLL006` (`src/compiler/35.semantics/lint/collection_patterns.spl`)
+  fires on `s = s + x`, `s = x + s` and `s += x` inside a loop when `s` is plain
+  text. Severity is `WARN`, escalated to `ERROR` under the robust/critical/verified
+  safety profiles (`coll006_severity_for_profile`, same rung as
+  `E-MIR-EMPTY-ARRAY-ELEM`); `simple lint` prints `error[COLL006]` then. It never
+  fires on a builder/buffer target (explicit non-text type or a builder/buffer
+  constructor initializer). Fixed a false negative on the way: statement-level
+  `s = s + x` (STMT_ASSIGN stores target/value separately) never matched.
+  Specs: `test/01_unit/app/lint_spec.spl` "COLL006 scope and robust escalation".
+- **Optimization (C):** still pending. The existing MIR pass
+  `src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl` is a dead stub —
+  `string_builder_opt_run_on_function` returns its input, and the transform never
+  initializes the parts local, never emits the join, and does not check reads of
+  `s` inside the loop. Status stays OPEN until C lands.
