@@ -1,0 +1,253 @@
+# Actual compiled Caret -> controller metadata acceptance helpers.
+# No product decoder, simulated transport, source execution or provider fallback.
+use std.io.env_ops.{env_get, cwd}
+use std.io.process_ops.process_run_bounded
+use std.io.file_ops.{secure_temp_dir, file_atomic_write, file_read_regular_no_follow_bounded}
+use std.io_runtime.{file_exists, file_hash_sha256_or_empty, mkdir_p}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_v2, distributed_operation_journal_close_v2}
+use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_authority_v1
+
+pub struct CaretControllerCliFixture:
+    evidence_root: text
+    state_root: text
+    caret_binary: text
+    controller_binary: text
+    caret_sha256: text
+    controller_sha256: text
+    source_path: text
+    source_text: text
+    source_digest: text
+    controller_id: text
+    request_uid: text
+
+pub struct CaretControllerCliResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+    reply: SdnValue
+
+fn required_linux_path(key: text) -> text:
+    val value = env_get(key)
+    if not value.starts_with("/"):
+        print "BLOCKED: {key} must identify an absolute Linux acceptance path"
+        assert(false)
+    assert(not value.contains("\0") and not value.contains("\n") and not value.contains("\r"))
+    value
+
+fn required_binary_hash(key: text, path: text) -> text:
+    val expected = env_get(key)
+    assert(builder_digest_valid_v1(expected))
+    assert(file_exists(path))
+    val actual = file_hash_sha256_or_empty(path)
+    assert(actual == expected)
+    actual
+
+fn acceptance_reply(source: text) -> SdnValue:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 131072,
+        max_depth: 12, max_nodes: 512, max_rows: 256, max_cells: 512, max_columns: 64))
+    assert(parsed.is_ok())
+    parsed.unwrap().value
+
+pub fn caret_controller_cli_text(reply: SdnValue, key: text) -> text:
+    val fields = reply.as_dict().unwrap()
+    assert(fields.contains_key(key))
+    val field = fields[key]
+    field.as_str().unwrap()
+
+pub fn caret_controller_cli_bool(reply: SdnValue, key: text) -> bool:
+    val fields = reply.as_dict().unwrap()
+    assert(fields.contains_key(key))
+    val field = fields[key]
+    field.as_bool().unwrap()
+
+fn assert_version_one(reply: SdnValue):
+    val fields = reply.as_dict().unwrap()
+    assert(fields.contains_key("version"))
+    match fields["version"]:
+        case SdnValue.Int(value): assert(value == 1)
+        case _: assert(false)
+
+fn capture_cli(executable: text, expected_hash: text, args: [text],
+        evidence_root: text, label: text) -> CaretControllerCliResult:
+    assert(label != "" and not label.contains("/") and not label.contains("\\"))
+    val record_path = evidence_root + "/" + label + ".sdn"
+    assert(not file_exists(record_path))
+    assert(file_hash_sha256_or_empty(executable) == expected_hash)
+    val (stdout, stderr, exit_code) = process_run_bounded(executable, args, 30000, 131072)
+    var arguments: [SdnValue] = []
+    for argument in args:
+        arguments.push(SdnValue.String(argument))
+    val record: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "kind": SdnValue.String("caret-controller-cli-observation"),
+        "executable": SdnValue.String(executable), "executableSha256": SdnValue.String(expected_hash),
+        "argv": SdnValue.Array(arguments), "stdout": SdnValue.String(stdout),
+        "stderr": SdnValue.String(stderr), "exitCode": SdnValue.Int(exit_code)
+    }
+    assert(file_atomic_write(record_path, sdn_encode_canonical(SdnValue.Dict(record))))
+    # Preserve the actual failed invocation before asserting capture or parsing.
+    assert(file_hash_sha256_or_empty(executable) == expected_hash)
+    assert(stderr == "")
+    assert(stdout.bytes().len() > 0 and stdout.bytes().len() < 131072)
+    CaretControllerCliResult(stdout: stdout, stderr: stderr, exit_code: exit_code,
+        reply: acceptance_reply(stdout))
+
+# @inline
+pub fn caret_controller_cli_fixture(label: text) -> CaretControllerCliFixture:
+    val caret_binary = required_linux_path("SIMPLE_CARET_ACCEPTANCE_BINARY")
+    val controller_binary = required_linux_path("SIMPLE_ORCHESTRATOR_ACCEPTANCE_BINARY")
+    val caret_sha256 = required_binary_hash("SIMPLE_CARET_ACCEPTANCE_SHA256", caret_binary)
+    val controller_sha256 = required_binary_hash("SIMPLE_ORCHESTRATOR_ACCEPTANCE_SHA256", controller_binary)
+    val parent = required_linux_path("SIMPLE_ORCHESTRATOR_ACCEPTANCE_ARTIFACT_ROOT")
+    assert(mkdir_p(parent))
+    val evidence_root = secure_temp_dir(parent, "caret-controller-" + label + "-").unwrap()
+    print "Caret controller CLI evidence: {evidence_root}"
+    val input_root = evidence_root + "/input with spaces"
+    val state_parent = evidence_root + "/state with spaces"
+    assert(mkdir_p(input_root))
+    assert(mkdir_p(state_parent))
+    val original_path = cwd() + "/test/fixtures/orchestration/caret_agent_session.sdn"
+    val source_text = file_read_regular_no_follow_bounded(original_path, 1048576).unwrap()
+    assert(source_text.contains("task-immutable-42"))
+    val source_path = input_root + "/agent session.sdn"
+    assert(file_atomic_write(source_path, source_text))
+    val source_digest = sha256_text(source_text)
+    val controller_id = "controller-acceptance"
+    val request_uid = "request-acceptance"
+    val initialized = capture_cli(controller_binary, controller_sha256,
+        ["local-init", state_parent, controller_id], evidence_root, "initialize")
+    assert(initialized.exit_code == 0)
+    assert_version_one(initialized.reply)
+    assert(caret_controller_cli_text(initialized.reply, "kind") == "orchestrator-local-controller")
+    assert(caret_controller_cli_text(initialized.reply, "controllerId") == controller_id)
+    assert(not caret_controller_cli_bool(initialized.reply, "executionAuthorized"))
+    val state_root = caret_controller_cli_text(initialized.reply, "stateRoot")
+    assert(state_root.starts_with(state_parent + "/"))
+    assert(file_exists(state_root))
+    # Prove the public Caret routing contract before scenario actions. This
+    # deliberate usage refusal must not invoke the configured controller.
+    val capability = capture_cli(caret_binary, caret_sha256,
+        ["orchestrator", controller_binary, "inspect", state_root,
+            controller_id, request_uid, "unexpected-preflight-argument"],
+        evidence_root, "client-route-preflight")
+    assert(capability.exit_code == 2)
+    assert_version_one(capability.reply)
+    assert(caret_controller_cli_text(capability.reply, "kind") == "caret-orchestrator-result")
+    assert(caret_controller_cli_text(capability.reply, "code") == "usage-invalid")
+    assert(caret_controller_cli_text(capability.reply, "controllerId") == controller_id)
+    assert(caret_controller_cli_text(capability.reply, "requestUid") == request_uid)
+    assert(not caret_controller_cli_bool(capability.reply, "confirmed"))
+    assert(not caret_controller_cli_bool(capability.reply, "reconciliationRequired"))
+    assert(not caret_controller_cli_bool(capability.reply, "executionAuthorized"))
+    val manifest: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "kind": SdnValue.String("caret-controller-cli-fixture"),
+        "caretBinary": SdnValue.String(caret_binary), "caretSha256": SdnValue.String(caret_sha256),
+        "controllerBinary": SdnValue.String(controller_binary),
+        "controllerSha256": SdnValue.String(controller_sha256),
+        "controllerId": SdnValue.String(controller_id), "requestUid": SdnValue.String(request_uid),
+        "stateRoot": SdnValue.String(state_root), "sourcePath": SdnValue.String(source_path),
+        "sourceDigest": SdnValue.String(source_digest), "scope": SdnValue.String("metadata-only")
+    }
+    assert(file_atomic_write(evidence_root + "/fixture.sdn", sdn_encode_canonical(SdnValue.Dict(manifest))))
+    CaretControllerCliFixture(evidence_root: evidence_root, state_root: state_root,
+        caret_binary: caret_binary, controller_binary: controller_binary,
+        caret_sha256: caret_sha256, controller_sha256: controller_sha256,
+        source_path: source_path, source_text: source_text, source_digest: source_digest,
+        controller_id: controller_id, request_uid: request_uid)
+
+pub fn caret_controller_cli_run(fixture: CaretControllerCliFixture, label: text,
+        args: [text]) -> CaretControllerCliResult:
+    # Caret itself invokes the real configured controller; this helper does not
+    # import or call either product's decoder, command dispatcher or store owner.
+    assert(file_hash_sha256_or_empty(fixture.controller_binary) == fixture.controller_sha256)
+    val result = capture_cli(fixture.caret_binary, fixture.caret_sha256, args, fixture.evidence_root, label)
+    assert(file_hash_sha256_or_empty(fixture.controller_binary) == fixture.controller_sha256)
+    result
+
+pub fn caret_controller_cli_submit(fixture: CaretControllerCliFixture, label: text,
+        source_path: text) -> CaretControllerCliResult:
+    caret_controller_cli_run(fixture, label, ["orchestrator", fixture.controller_binary,
+        "submit", fixture.state_root, fixture.controller_id, fixture.request_uid,
+        source_path, "caret", "review-simple"])
+
+pub fn caret_controller_cli_inspect(fixture: CaretControllerCliFixture, label: text,
+        controller_id: text, request_uid: text) -> CaretControllerCliResult:
+    caret_controller_cli_run(fixture, label, ["orchestrator", fixture.controller_binary,
+        "inspect", fixture.state_root, controller_id, request_uid])
+
+pub fn expect_caret_controller_receipt(fixture: CaretControllerCliFixture,
+        result: CaretControllerCliResult, status: text) -> SdnValue:
+    assert(result.exit_code == 0)
+    assert_version_one(result.reply)
+    assert(caret_controller_cli_text(result.reply, "kind") == "caret-orchestrator-result")
+    assert(caret_controller_cli_text(result.reply, "controllerId") == fixture.controller_id)
+    assert(caret_controller_cli_text(result.reply, "requestUid") == fixture.request_uid)
+    assert(caret_controller_cli_bool(result.reply, "confirmed"))
+    assert(not caret_controller_cli_bool(result.reply, "reconciliationRequired"))
+    assert(not caret_controller_cli_bool(result.reply, "executionAuthorized"))
+    assert(caret_controller_cli_text(result.reply, "code") == "metadata-confirmed")
+    assert(caret_controller_cli_text(result.reply, "status") == status)
+    val inner = acceptance_reply(caret_controller_cli_text(result.reply, "controllerOutput"))
+    assert_version_one(inner)
+    assert(caret_controller_cli_text(inner, "kind") == "orchestrator-local-controller")
+    assert(caret_controller_cli_text(inner, "controllerId") == fixture.controller_id)
+    assert(caret_controller_cli_text(inner, "requestUid") == fixture.request_uid)
+    assert(caret_controller_cli_text(inner, "sourceDigest") == fixture.source_digest)
+    assert(caret_controller_cli_text(inner, "status") == status)
+    assert(not caret_controller_cli_bool(inner, "executionAuthorized"))
+    inner
+
+pub fn caret_controller_cli_retained_source(fixture: CaretControllerCliFixture) -> text:
+    # The effect remains an external public CLI call. This separate observation
+    # replays the canonical WAL owner, not the controller's receipt decoder.
+    # Release the exact observation lease before assertions on its snapshot.
+    val root = fixture.state_root + "/journal"
+    val committed = caret_controller_cli_journal_pointer(fixture)
+    val authority = controller_assignment_authority_v1(fixture.controller_id).unwrap()
+    val nonce = sha256_text("acceptance-" + fixture.evidence_root)
+    val owner = distributed_operation_journal_open_v2(root, authority, nonce, 100000).unwrap()
+    val operations = owner.operations
+    assert(distributed_operation_journal_close_v2(owner).unwrap())
+    assert(caret_controller_cli_journal_pointer(fixture) == committed)
+    assert(operations.len() == 1)
+    for key in operations.keys():
+        val retained = operations[key]
+        assert(retained.state == "completed")
+        val envelope = distributed_decode_operation_v2(retained.envelope).unwrap()
+        assert(envelope.operation == "controller_desired_input_v1")
+        assert(envelope.host_id == fixture.controller_id)
+        assert(envelope.principal == fixture.controller_id)
+        assert(retained.outcome_digest == envelope.payload_digest)
+        val metadata_path = root + "/desired-input-objects/" + envelope.payload_digest + ".sdn"
+        val bytes = file_read_regular_no_follow_bounded(metadata_path, 8192).unwrap()
+        assert(sha256_text(bytes) == envelope.payload_digest)
+        val metadata = acceptance_reply(bytes)
+        assert_version_one(metadata)
+        assert(caret_controller_cli_text(metadata, "controllerId") == fixture.controller_id)
+        assert(caret_controller_cli_text(metadata, "workloadUid") == fixture.request_uid)
+        assert(caret_controller_cli_text(metadata, "sourceDigest") == fixture.source_digest)
+    val path = root + "/desired-input-objects/" + fixture.source_digest + ".sdn"
+    val source = file_read_regular_no_follow_bounded(path, 1048576).unwrap()
+    assert(sha256_text(source) == fixture.source_digest)
+    source
+
+pub fn caret_controller_cli_journal_pointer(fixture: CaretControllerCliFixture) -> text:
+    # Independent durable commit oracle: opening/closing the controller writer
+    # changes its lease, but identical replay must not publish another revision.
+    val path = fixture.state_root + "/journal/database-wal/CURRENT"
+    val pointer = file_read_regular_no_follow_bounded(path, 128).unwrap()
+    assert(pointer.bytes().len() == 65 and pointer.ends_with("\n"))
+    pointer
+
+pub fn caret_controller_cli_changed_source(fixture: CaretControllerCliFixture) -> text:
+    val changed = fixture.source_text.replace("task-immutable-42", "task-immutable-43")
+    assert(changed != fixture.source_text)
+    val path = fixture.evidence_root + "/input with spaces/changed session.sdn"
+    assert(file_atomic_write(path, changed))
+    path
