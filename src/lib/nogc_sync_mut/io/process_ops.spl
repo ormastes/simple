@@ -892,6 +892,23 @@ pub fn process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64:
 # Stdout drain state is independent of child liveness: 0=open/deferred,
 # 1=observed EOF with buffered tail delivered, -1=terminal read error/unknown.
 # Exited children retain their stdout owner until drain completion or close.
+# Additive native C ABI; requires a runtime built with the matching owner.
+@unsafe(reason: "versioned actual piped-child exit receipt before handle close", capabilities: [ffi])
+extern fn rt_process_piped_exit_status_value(pid: i64) -> [i64]
+
+pub fn process_piped_exit_status_v1(pid: i64) -> Result<i64?, text>:
+    val words = unsafe(capabilities: [ffi]): rt_process_piped_exit_status_value(pid)
+    if words.len() != 4 or words[0] != 1:
+        return Err("piped child exit receipt invalid")
+    if words[3] != 0 or words[1] < 0:
+        return Err("piped child exit query failed: " + str(words[3]))
+    if words[1] == 0:
+        if words[2] != 0: return Err("pending piped exit receipt contains a terminal code")
+        return Ok(nil)
+    if words[1] != 1: return Err("piped child exit state invalid")
+    if words[2] < 0: return Err("piped child terminal exit code invalid")
+    Ok(Some(words[2]))
+
 pub fn process_read_stdout_result(pid: i64) -> Result<text?, text>:
     val chunk = process_read_stdout(pid)
     if chunk.len() > 0:

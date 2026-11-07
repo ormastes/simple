@@ -1,0 +1,239 @@
+# Windows tools execute inside the frontend that owns the resident GDB pipes.
+use app.io.mod.{cwd}
+use app.mcpgdb.json_helpers.{js, jp, LB, RB}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field}
+use app.mcpgdb.resident_mi_v1.{ResidentMiReplyV1, resident_mi_quote_v1, resident_gdb_create_v1, resident_gdb_index_v1, resident_gdb_command_v1, resident_gdb_scoped_command_v1, resident_gdb_close_v1, resident_gdb_retained_v1, resident_gdb_id_v1, resident_gdb_backend_v1, resident_gdb_root_v1, resident_gdb_program_v1, resident_gdb_build_v1, resident_gdb_set_program_v1, resident_gdb_set_build_v1, resident_gdb_state_v1, resident_gdb_select_v1, resident_gdb_list_v1, resident_gdb_ids_v1, resident_gdb_current_v1}
+use app.mcpgdb.resident_mi_value_v1.{resident_mi_payload_json_v1}
+use app.mcpgdb.debug_rules.{evaluate_command_rule, classify_command}
+use app.mcpgdb.console_admission_v1.{console_admission_v1_validate}
+use app.mcpgdb.debug_service_bridge_v1.{mcpgdb_debug_bind_session_v1, mcpgdb_debug_binding_v1, mcpgdb_debug_action_for_rule_v1, mcpgdb_debug_authorize_operation_v1, mcpgdb_debug_record_operation_outcome_v1, mcpgdb_debug_unbind_session_v1}
+use std.common.debug.contracts_v1.{debug_policy_development_v1}
+
+var _wg_workspace_v1: text = ""
+var _wg_compile_commands_v1: text = ""
+
+pub fn windows_gdb_handles_v1(name: text) -> bool:
+    ["workspace_open", "workspace_status", "debug_session_create", "debug_session_list", "debug_session_select", "debug_session_close", "debug_launch", "debug_attach", "debug_connect_remote", "debug_disconnect", "debug_restart", "debug_continue", "debug_pause", "debug_step_in", "debug_step_over", "debug_step_out", "breakpoint_set", "breakpoint_remove", "breakpoint_list", "thread_list", "frame_list", "frame_select", "variable_list", "evaluate", "register_read", "register_write", "memory_read", "memory_write", "debug_command_run"].contains(name)
+
+fn wg_root_v1() -> text:
+    if _wg_workspace_v1 != "": _wg_workspace_v1 else: cwd()
+
+fn wg_arguments_v1(raw: text) -> Result<JsonValue, text>:
+    if raw.len() > 1048576: return Err("debug argument byte bound exceeded")
+    val value = json_parse_value_strict(raw)?
+    match value:
+        JsonValue.Object(keys, values):
+            if keys.len() > 32: return Err("debug argument field bound exceeded")
+            for item in values:
+                match item:
+                    JsonValue.Str(_): pass
+                    JsonValue.Int(_): pass
+                    JsonValue.Bool(_): pass
+                    JsonValue.Null: pass
+                    _: return Err("debug arguments require scalar values")
+            return Ok(value)
+        _: return Err("debug arguments must be an object")
+
+fn wg_arg_v1(args: JsonValue, key: text) -> text:
+    match json_value_field(args, key):
+        JsonValue.Str(value): value
+        JsonValue.Int(value): str(value)
+        JsonValue.Bool(value): if value: "true" else: "false"
+        _: ""
+
+fn wg_required_v1(args: JsonValue, key: text) -> Result<text, text>:
+    val value = wg_arg_v1(args, key)
+    if value == "": return Err("missing " + key)
+    val checked = resident_mi_quote_v1(value)?
+    Ok(value)
+
+fn wg_number_v1(raw: text, low: i64, high: i64) -> Result<text, text>:
+    if raw == "" or raw.len() > 10: return Err("numeric debugger argument invalid")
+    var position = 0
+    while position < raw.len():
+        if raw.byte_at(position) < 48 or raw.byte_at(position) > 57: return Err("numeric debugger argument invalid")
+        position = position + 1
+    val value = raw.to_int()
+    if value < low or value > high: return Err("numeric debugger argument out of bounds")
+    Ok(str(value))
+
+fn wg_register_v1(raw: text) -> Result<text, text>:
+    val name = if raw.starts_with("$"): raw.substring(1) else: raw
+    if name == "" or name.len() > 64: return Err("register name invalid")
+    var position = 0
+    while position < name.len():
+        val byte = name.byte_at(position)
+        if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95):
+            return Err("register name invalid")
+        position = position + 1
+    Ok("$" + name)
+
+fn wg_reply_v1(index: i64, command: text, reply: ResidentMiReplyV1) -> Result<text, text>:
+    val data = resident_mi_payload_json_v1(reply.payload)?
+    val stop = resident_mi_payload_json_v1(reply.stop)?
+    val response = LB() + jp("status", js("ok")) + "," + jp("command", js(command)) + "," + jp("output", js(reply.console + reply.record)) + "," + jp("mi_data", data) + "," + jp("state", js(reply.state)) + "," + jp("stop", stop) + "," + jp("stop_revision", str(reply.stop_revision)) + RB()
+    Ok(LB() + jp("session_id", js(resident_gdb_id_v1(index))) + "," + jp("backend", js(resident_gdb_backend_v1(index))) + "," + jp("transport", js("resident-gdb-mi2")) + "," + jp("state", js(reply.state)) + "," + jp("inferior_pid", js(reply.inferior_pid)) + "," + jp("response", response) + RB())
+
+fn wg_run_v1(index: i64, command: text, wait_stop: bool, inspection: bool = false, semantic_expression: bool = false) -> Result<text, text>:
+    if inspection and semantic_expression: return Err("incompatible GDB operation policy")
+    val reply = if inspection or semantic_expression:
+        resident_gdb_scoped_command_v1(index, command, wait_stop, inspection)?
+    else:
+        resident_gdb_command_v1(index, command, wait_stop)?
+    wg_reply_v1(index, command, reply)
+
+fn wg_execute_v1(index: i64, name: text, args: JsonValue, build: text) -> Result<text, text>:
+    if name == "debug_session_close": return resident_gdb_close_v1(index)
+    if name == "debug_launch":
+        if resident_gdb_state_v1(index)? == "running": return Err("pause the target before loading a different program")
+        val program = wg_required_v1(args, "program")?
+        val arguments = wg_arg_v1(args, "args")
+        val checked = resident_mi_quote_v1(arguments)?
+        val argument_command = if arguments == "": "-exec-arguments" else: "-exec-arguments -- " + arguments
+        val loaded = resident_gdb_command_v1(index, "-file-exec-and-symbols " + resident_mi_quote_v1(program)?, false)?
+        resident_gdb_set_program_v1(index, program)
+        resident_gdb_set_build_v1(index, build)
+        val configured = resident_gdb_command_v1(index, argument_command, false)?
+        return wg_run_v1(index, "-exec-run", true)
+    if name == "debug_attach": return wg_run_v1(index, "-target-attach " + wg_number_v1(wg_required_v1(args, "pid")?, 1, 2147483647)?, true)
+    if name == "debug_connect_remote":
+        val host = wg_required_v1(args, "host")?
+        val port = wg_number_v1(wg_required_v1(args, "port")?, 1, 65535)?
+        return wg_run_v1(index, "-target-select remote " + resident_mi_quote_v1(host + ":" + port)?, true)
+    if name == "debug_disconnect": return wg_run_v1(index, "-target-disconnect", false)
+    if name == "debug_restart": return wg_run_v1(index, "-exec-run", true)
+    if name == "debug_continue": return wg_run_v1(index, "-exec-continue", true)
+    if name == "debug_pause":
+        val state = resident_gdb_state_v1(index)?
+        if state == "stopped": return wg_run_v1(index, "-stack-info-frame", false)
+        if state != "running": return Err("target is not running")
+        return wg_run_v1(index, "-exec-interrupt --all", true)
+    if name == "debug_step_in": return wg_run_v1(index, "-exec-step", true)
+    if name == "debug_step_over": return wg_run_v1(index, "-exec-next", true)
+    if name == "debug_step_out": return wg_run_v1(index, "-exec-finish", true)
+    if name == "breakpoint_set":
+        var location = wg_arg_v1(args, "symbol")
+        if location == "":
+            location = wg_required_v1(args, "file")? + ":" + wg_number_v1(wg_required_v1(args, "line")?, 1, 1000000000)?
+        return wg_run_v1(index, "-break-insert -f " + resident_mi_quote_v1(location)?, false)
+    if name == "breakpoint_remove":
+        val number = wg_number_v1(wg_required_v1(args, "breakpoint_id")?, 1, 1000000000)?
+        return wg_run_v1(index, "-break-delete " + number, false)
+    if name == "breakpoint_list": return wg_run_v1(index, "-break-list", false, true)
+    if name == "thread_list": return wg_run_v1(index, "-thread-info", false, true)
+    if ["frame_list", "frame_select", "variable_list", "evaluate", "register_read", "register_write", "memory_read", "memory_write"].contains(name):
+        if resident_gdb_state_v1(index)? != "stopped": return Err("target is not stopped; inspect only after an observed GDB stop")
+    if name == "frame_list": return wg_run_v1(index, "-stack-list-frames 0 63", false, true)
+    if name == "frame_select": return wg_run_v1(index, "-stack-select-frame " + wg_number_v1(wg_required_v1(args, "frame_id")?, 0, 1024)?, false, true)
+    if name == "variable_list": return wg_run_v1(index, "-stack-list-variables --all-values", false, true)
+    if name == "evaluate": return wg_run_v1(index, "-data-evaluate-expression " + resident_mi_quote_v1(wg_required_v1(args, "expression")?)?, false, false, true)
+    if name == "register_read":
+        val raw = wg_arg_v1(args, "name")
+        if raw == "": return wg_run_v1(index, "-data-list-register-values x", false, true)
+        return wg_run_v1(index, "-data-evaluate-expression " + resident_mi_quote_v1(wg_register_v1(raw)?)?, false, true)
+    if name == "register_write":
+        val register = wg_register_v1(wg_required_v1(args, "name")?)?
+        val value = wg_required_v1(args, "value")?
+        return wg_run_v1(index, "-data-evaluate-expression " + resident_mi_quote_v1(register + " = (" + value + ")")?, false, false, true)
+    if name == "memory_read":
+        val address = resident_mi_quote_v1(wg_required_v1(args, "address")?)?
+        val raw_count = wg_arg_v1(args, "count")
+        val count = wg_number_v1(if raw_count == "": "16" else: raw_count, 1, 4096)?
+        val raw_format = wg_arg_v1(args, "format")
+        val format = if raw_format == "": "x" else: raw_format
+        if not ["x", "d", "u", "o", "t", "a", "c", "f"].contains(format): return Err("memory format unsupported")
+        return wg_run_v1(index, "-data-read-memory " + address + " " + format + " 4 1 " + count, false, true)
+    if name == "memory_write":
+        val address = resident_mi_quote_v1(wg_required_v1(args, "address")?)?
+        val value = resident_mi_quote_v1(wg_required_v1(args, "value")?)?
+        return wg_run_v1(index, "-data-write-memory " + address + " x 1 " + value, false, false, true)
+    if name == "debug_command_run":
+        val command = wg_required_v1(args, "command")?
+        console_admission_v1_validate(command)?
+        val dangerous = ["true", "1", "yes"].contains(wg_arg_v1(args, "dangerous").lower())
+        val decision = evaluate_command_rule(resident_gdb_backend_v1(index), command, dangerous, false)
+        if not decision.allowed: return Err(decision.reason)
+        return wg_run_v1(index, "-interpreter-exec console " + resident_mi_quote_v1(command)?, decision.rule_class == "execution_control", decision.rule_class == "read_only")
+    Err("resident Windows GDB tool unsupported: " + name)
+
+pub fn windows_gdb_dispatch_v1(name: text, raw_args: text) -> Result<text, text>:
+    # Parse once at the SDK boundary; preserve JSON escapes and immutable values.
+    val args = wg_arguments_v1(raw_args)?
+    if name == "workspace_open":
+        val root = wg_arg_v1(args, "root")
+        if root != "":
+            val checked = resident_mi_quote_v1(root)?
+            _wg_workspace_v1 = root
+        _wg_compile_commands_v1 = wg_arg_v1(args, "compile_commands_dir")
+        return Ok(LB() + jp("workspace_root", js(wg_root_v1())) + "," + jp("compile_commands_dir", js(_wg_compile_commands_v1)) + "," + jp("session_count", str(resident_gdb_ids_v1().len())) + RB())
+    if name == "workspace_status":
+        return Ok(LB() + jp("workspace_root", js(wg_root_v1())) + "," + jp("compile_commands_dir", js(_wg_compile_commands_v1)) + "," + jp("current_session", js(resident_gdb_current_v1())) + "," + jp("session_count", str(resident_gdb_ids_v1().len())) + "," + jp("sessions", resident_gdb_list_v1()) + RB())
+    if name == "debug_session_create":
+        val raw_backend = wg_arg_v1(args, "backend")
+        val backend = if raw_backend == "": "gdb" else: raw_backend
+        val raw_root = wg_arg_v1(args, "workspace_root")
+        val root = if raw_root == "": wg_root_v1() else: raw_root
+        val id = resident_gdb_create_v1(backend, root)?
+        val index = resident_gdb_index_v1(id)?
+        val build = "unresolved:mcpgdb-session:" + id
+        match mcpgdb_debug_bind_session_v1(id, backend, build, debug_policy_development_v1()):
+            Ok(_): pass
+            Err(reason):
+                val cleanup = resident_gdb_close_v1(index)
+                return Err(reason)
+        resident_gdb_set_build_v1(index, build)
+        return Ok(LB() + jp("session_id", js(id)) + "," + jp("backend", js(backend)) + "," + jp("state", js("idle")) + "," + jp("workspace_root", js(root)) + "," + jp("transport", js("resident-gdb-mi2")) + RB())
+    if name == "debug_session_list": return Ok(resident_gdb_list_v1())
+    if name == "debug_session_select":
+        val selected = resident_gdb_select_v1(wg_required_v1(args, "session_id")?)?
+        return Ok(LB() + jp("current_session", js(selected)) + RB())
+    val index = resident_gdb_index_v1(wg_arg_v1(args, "session_id"))?
+    val id = resident_gdb_id_v1(index)
+    var build = wg_arg_v1(args, "build_id")
+    if build == "":
+        if name == "debug_launch": build = "unresolved:mcpgdb-program:" + wg_arg_v1(args, "program")
+        elif name == "debug_attach": build = "unresolved:mcpgdb-attach-pid:" + wg_arg_v1(args, "pid")
+        else: build = resident_gdb_build_v1(index)
+    val dangerous = ["true", "1", "yes"].contains(wg_arg_v1(args, "dangerous").lower())
+    if name == "debug_command_run": console_admission_v1_validate(wg_required_v1(args, "command")?)?
+    val raw_class = if name == "debug_command_run": classify_command(resident_gdb_backend_v1(index), wg_arg_v1(args, "command")) else: "read_only"
+    val action = mcpgdb_debug_action_for_rule_v1(name, dangerous, raw_class)
+    mcpgdb_debug_bind_session_v1(id, resident_gdb_backend_v1(index), build, debug_policy_development_v1())?
+    mcpgdb_debug_authorize_operation_v1(id, action.operation, name, action.perturbation)?
+    val outcome = wg_execute_v1(index, name, args, build)
+    val succeeded = match outcome:
+        Ok(_): true
+        Err(_): false
+    val reason = match outcome:
+        Ok(_): ""
+        Err(value): value
+    if succeeded and (name == "debug_launch" or name == "debug_attach"): resident_gdb_set_build_v1(index, build)
+    var receipt_failure = ""
+    match mcpgdb_debug_record_operation_outcome_v1(id, action.operation, name, action.perturbation, succeeded, succeeded and action.execution_changes_on_success, reason):
+        Ok(_): pass
+        Err(value): receipt_failure = value
+    if name == "debug_session_close" and not resident_gdb_retained_v1(index):
+        match mcpgdb_debug_unbind_session_v1(id):
+            Ok(_): pass
+            Err(value): receipt_failure = receipt_failure + "; " + value
+    if receipt_failure != "": return Err("debug operation receipt/cleanup failed: " + receipt_failure)
+    outcome
+
+pub fn windows_gdb_shutdown_v1() -> Result<bool, text>:
+    var failures: [text] = []
+    for id in resident_gdb_ids_v1():
+        match resident_gdb_index_v1(id):
+            Ok(index):
+                match resident_gdb_close_v1(index):
+                    Ok(_): pass
+                    Err(reason): failures.push(id + ": " + reason)
+            Err(reason): failures.push(reason)
+        val retained = match resident_gdb_index_v1(id):
+            Ok(index): resident_gdb_retained_v1(index)
+            Err(_): false
+        if not retained and mcpgdb_debug_binding_v1(id) != nil:
+            match mcpgdb_debug_unbind_session_v1(id):
+                Ok(_): pass
+                Err(reason): failures.push(reason)
+    if failures.len() != 0: return Err(failures.join("; "))
+    Ok(true)

@@ -1,0 +1,66 @@
+#!/bin/sh
+# Build only the dedicated native observer archive; never the runtime cdylib.
+# This does not qualify it or select it for a production native build.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+OUTPUT=""
+TARGET=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output) [ "$#" -ge 2 ] || exit 64; OUTPUT=$2; shift 2 ;;
+        --target) [ "$#" -ge 2 ] || exit 64; TARGET=$2; shift 2 ;;
+        *) echo "usage: $0 --output NEW_DIR --target RUST_TARGET" >&2; exit 64 ;;
+    esac
+done
+[ -n "$OUTPUT" ] && [ -n "$TARGET" ] || exit 64
+case "$TARGET" in *[!a-zA-Z0-9_-]*) echo "invalid target" >&2; exit 64 ;; esac
+[ ! -e "$OUTPUT" ] || { echo "output exists" >&2; exit 65; }
+mkdir -p "$OUTPUT"
+OUTPUT=$(CDPATH= cd -- "$OUTPUT" && pwd)
+RUSTC=${RUSTC:-rustc}
+AR=${AR:-ar}
+SOURCE="$ROOT/src/compiler_rust/runtime/src/piped_process_observer.rs"
+BRIDGE="$ROOT/src/runtime/runtime_process_observer_private.h"
+OWNER="$ROOT/src/runtime/runtime_process.c"
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
+    else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+sdn_text() { printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g'; }
+for input in "$SOURCE" "$BRIDGE" "$OWNER"; do [ -f "$input" ] || exit 66; done
+SOURCE_SHA=$(hash_file "$SOURCE")
+BRIDGE_SHA=$(hash_file "$BRIDGE")
+OWNER_SHA=$(hash_file "$OWNER")
+cp "$SOURCE" "$OUTPUT/piped_process_observer.rs"
+[ "$(hash_file "$OUTPUT/piped_process_observer.rs")" = "$SOURCE_SHA" ] || exit 68
+"$RUSTC" -vV >"$OUTPUT/rustc-version.txt" 2>&1
+"$RUSTC" --edition=2021 --crate-name simple_piped_observer_v1 --crate-type=lib \
+    --target "$TARGET" --emit=obj -C panic=abort -C opt-level=2 -C relocation-model=pic \
+    "$OUTPUT/piped_process_observer.rs" -o "$OUTPUT/piped_process_observer.o" >"$OUTPUT/compile.log" 2>&1
+"$AR" rcs "$OUTPUT/libsimple_piped_observer.a" "$OUTPUT/piped_process_observer.o" \
+    >"$OUTPUT/archive.log" 2>&1
+[ -s "$OUTPUT/libsimple_piped_observer.a" ] || exit 67
+[ "$(hash_file "$SOURCE")" = "$SOURCE_SHA" ] &&
+    [ "$(hash_file "$BRIDGE")" = "$BRIDGE_SHA" ] &&
+    [ "$(hash_file "$OWNER")" = "$OWNER_SHA" ] || exit 68
+# This record binds inputs and construction; production selection rechecks it.
+# No PASS/runtime/qualification assertion is emitted by this constructor.
+{
+    echo 'schema: "piped-native-observer-v1"'
+    printf 'target_triple: "%s"\n' "$(sdn_text "$TARGET")"
+    echo 'abi: "core-c-tagged64-observer-v1"'
+    echo 'bridge_version: 1'
+    printf 'bridge_sha256: "%s"\n' "$BRIDGE_SHA"
+    printf 'c_owner_sha256: "%s"\n' "$OWNER_SHA"
+    printf 'rust_source_sha256: "%s"\n' "$SOURCE_SHA"
+    printf 'archive_path: "%s"\n' "$(sdn_text "$OUTPUT/libsimple_piped_observer.a")"
+    printf 'archive_sha256: "%s"\n' "$(hash_file "$OUTPUT/libsimple_piped_observer.a")"
+} >"$OUTPUT/provider.sdn"
+{
+    echo 'schema: "piped-native-observer-construction-v1"'
+    printf 'rustc_version_sha256: "%s"\n' "$(hash_file "$OUTPUT/rustc-version.txt")"
+    printf 'constructor_sha256: "%s"\n' "$(hash_file "$0")"
+    printf 'object_sha256: "%s"\n' "$(hash_file "$OUTPUT/piped_process_observer.o")"
+    echo 'qualification: unrun'
+} >"$OUTPUT/construction.sdn"
+printf 'provider_record=%s\n' "$OUTPUT/provider.sdn"

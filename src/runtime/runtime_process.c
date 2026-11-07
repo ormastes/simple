@@ -36,6 +36,7 @@
 #endif
 
 #include "runtime.h"
+#include "runtime_process_observer_private.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,24 @@
 #include <wchar.h>
 #include <time.h>
 #include "runtime_process_utf8_private.h"
+
+/* Versioned value receipt: [1, state, exit_code, native_error].
+ * state 0=pending (including output not drained), 1=exited with actual status,
+ * -1=invalid owner/provider failure. Never infer exit0 from close/liveness. */
+SplArray* simple_piped_receipt_new_v1(int64_t state, int64_t code, int64_t error) {
+    SplArray* receipt = rt_array_new(4);
+    if (!receipt) return NULL;
+    if (!rt_array_push(receipt, rt_value_int(1)) ||
+        !rt_array_push(receipt, rt_value_int(state)) ||
+        !rt_array_push(receipt, rt_value_int(code)) ||
+        !rt_array_push(receipt, rt_value_int(error))) {
+        rt_array_free(receipt);
+        return NULL;
+    }
+    return receipt;
+}
+#define piped_exit_status_receipt simple_piped_receipt_new_v1
+
 
 /* Ref V1 narrows inputs before reserving a process slot. Legacy PID callers
  * retain their existing argument policy. cmd_len is explicit: never strlen an
@@ -844,17 +863,32 @@ static bool win_random_pipe_name(char* name, size_t name_size) {
     return written > 0 && (size_t)written < name_size;
 }
 
-static void win_piped_cancel_pending(struct WinPipedSlot* slot) {
-    if (!slot || slot->stdin_pending_len == 0) return;
-    (void)CancelIoEx(slot->stdin_write, &slot->stdin_overlapped);
+/* A cancellation request is not completion. Keep the slot, buffer, event and
+ * OVERLAPPED alive on every unconfirmed path so a later close can retry. */
+static bool win_piped_cancel_pending(struct WinPipedSlot* slot) {
+    if (!slot || slot->stdin_pending_len == 0) return true;
+    if (!slot->stdin_write || !slot->stdin_event) return false;
+    DWORD wait = WaitForSingleObject(slot->stdin_event, 0);
+    if (wait != WAIT_OBJECT_0) {
+        if (!CancelIoEx(slot->stdin_write, &slot->stdin_overlapped) &&
+            GetLastError() != ERROR_NOT_FOUND) return false;
+        wait = WaitForSingleObject(slot->stdin_event, 100);
+    }
+    if (wait != WAIT_OBJECT_0) return false;
     DWORD ignored = 0;
-    (void)GetOverlappedResult(
-        slot->stdin_write, &slot->stdin_overlapped, &ignored, TRUE);
+    if (!GetOverlappedResult(
+            slot->stdin_write, &slot->stdin_overlapped, &ignored, FALSE)) {
+        DWORD error = GetLastError();
+        if (error != ERROR_OPERATION_ABORTED && error != ERROR_BROKEN_PIPE &&
+            error != ERROR_NO_DATA && error != ERROR_PIPE_NOT_CONNECTED)
+            return false;
+    }
     slot->stdin_pending_len = 0;
     slot->stdin_pending_data_len = 0;
     slot->stdin_pending_offset = 0;
     memset(&slot->stdin_overlapped, 0, sizeof(slot->stdin_overlapped));
     slot->stdin_overlapped.hEvent = slot->stdin_event;
+    return true;
 }
 
 static struct WinPipedSlot* win_piped_find(DWORD pid) {
@@ -872,14 +906,15 @@ static struct WinPipedSlot* win_piped_alloc(void) {
     return NULL;
 }
 
-static void win_piped_free(struct WinPipedSlot* slot) {
-    if (!slot) return;
-    win_piped_cancel_pending(slot);
+static bool win_piped_free(struct WinPipedSlot* slot) {
+    if (!slot) return true;
+    if (!win_piped_cancel_pending(slot)) return false;
     win_close_handle(&slot->stdin_write);
     win_close_handle(&slot->stdin_event);
     win_close_handle(&slot->stdout_read);
     win_close_handle(&slot->process);
     win_close_handle(&slot->job);
+    return true;
 }
 
 static struct WinPipedSlot* win_piped_reserve_spawn(void) {
@@ -1170,8 +1205,8 @@ static const char* win_core_rt_process_read_stdout(int64_t pid) {
 
 /* Exclusive closing owner: stable slot/OVERLAPPED storage, no registry lock. */
 static bool win_core_rt_process_close_piped(struct WinPipedSlot* slot) {
-    win_piped_cancel_pending(slot);
-    win_close_handle(&slot->stdin_write);
+    bool writes_retired = win_piped_cancel_pending(slot);
+    if (writes_retired) win_close_handle(&slot->stdin_write);
     DWORD wait_result = WaitForSingleObject(slot->process, 100);
     if (wait_result == WAIT_TIMEOUT) {
         if (!TerminateJobObject(slot->job, 1) &&
@@ -1181,6 +1216,8 @@ static bool win_core_rt_process_close_piped(struct WinPipedSlot* slot) {
         wait_result = WaitForSingleObject(slot->process, 5000);
     }
     if (wait_result != WAIT_OBJECT_0) return false;
+    if (!writes_retired && !win_piped_cancel_pending(slot)) return false;
+    win_close_handle(&slot->stdin_write);
     bool stopped = wait_result == WAIT_OBJECT_0;
     return stopped;
 }
@@ -1332,10 +1369,11 @@ static int64_t win_piped_alive_checked_v1(int64_t pid, int64_t generation) {
     uint64_t claimed_generation = slot->generation;
     slot->retiring = true;
     ReleaseSRWLockExclusive(&win_piped_lock);
-    win_piped_cancel_pending(slot);
-    win_close_handle(&slot->stdin_write);
-    win_close_handle(&slot->stdin_event);
-    win_close_handle(&slot->job);
+    if (win_piped_cancel_pending(slot)) {
+        win_close_handle(&slot->stdin_write);
+        win_close_handle(&slot->stdin_event);
+        win_close_handle(&slot->job);
+    }
     AcquireSRWLockExclusive(&win_piped_lock);
     bool same = slot->generation == claimed_generation && slot->pid == (DWORD)pid;
     if (same) slot->retiring = false;
@@ -1359,7 +1397,7 @@ static int64_t win_piped_close_checked_v1(int64_t pid, int64_t generation) {
     slot->closing = true;
     ReleaseSRWLockExclusive(&win_piped_lock);
     bool result = win_core_rt_process_close_piped(slot);
-    if (result) win_piped_free(slot);
+    if (result) result = win_piped_free(slot);
     AcquireSRWLockExclusive(&win_piped_lock);
     bool same = slot->generation == claimed_generation && slot->pid == (DWORD)pid;
     if (same) {
@@ -1374,12 +1412,70 @@ int64_t rt_process_close_piped_ref_v1(int64_t pid, int64_t generation) {
     if (generation <= 0) return -2;
     return win_piped_close_checked_v1(pid, generation);
 }
+void simple_piped_owner_observe_v1(int64_t pid, int64_t collect_exit,
+        struct SimplePipedObservationV1* out, int64_t out_size) {
+    if (!out || out_size != (int64_t)sizeof(*out)) return;
+    *out = (struct SimplePipedObservationV1){1, ERROR_INVALID_PARAMETER, -1, -1, 0, 0};
+    if (pid <= 0 || pid > UINT32_MAX || (collect_exit != 0 && collect_exit != 1)) return;
+    out->owner_error = ERROR_INVALID_HANDLE;
+    AcquireSRWLockExclusive(&win_piped_lock);
+    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
+    if (slot && !slot->closing && !slot->retiring && slot->process) {
+        out->owner_error = 0;
+        out->stdout_state = slot->stdout_state;
+        out->exit_kind = 0;
+        if (slot->stdout_state < 0) out->exit_error = ERROR_READ_FAULT;
+        else if (collect_exit && slot->stdout_state == 1) {
+            DWORD wait = WaitForSingleObject(slot->process, 0);
+            if (wait == WAIT_OBJECT_0) {
+                DWORD actual = 0;
+                if (GetExitCodeProcess(slot->process, &actual)) {
+                    out->exit_kind = 1;
+                    out->exit_value = (int64_t)(uint32_t)actual;
+                } else { out->exit_kind = -1; out->exit_error = GetLastError(); }
+            } else if (wait != WAIT_TIMEOUT) {
+                out->exit_kind = -1;
+                out->exit_error = wait == WAIT_FAILED ? GetLastError() : ERROR_INVALID_DATA;
+            }
+        }
+    }
+    ReleaseSRWLockExclusive(&win_piped_lock);
+}
+
+#if !defined(SIMPLE_RUNTIME_RUST_PIPED_OBSERVER_V1)
+SplArray* rt_process_piped_exit_status_value(int64_t pid) {
+    if (pid <= 0 || pid > UINT32_MAX)
+        return piped_exit_status_receipt(-1, 0, ERROR_INVALID_PARAMETER);
+    int64_t state = -1, code = 0, error = ERROR_INVALID_HANDLE;
+    AcquireSRWLockExclusive(&win_piped_lock);
+    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
+    if (slot && !slot->closing && !slot->retiring && slot->process) {
+        if (slot->stdout_state < 0) error = ERROR_READ_FAULT;
+        else if (slot->stdout_state != 1) { state = 0; error = 0; }
+        else {
+            DWORD wait = WaitForSingleObject(slot->process, 0);
+            if (wait == WAIT_TIMEOUT) { state = 0; error = 0; }
+            else if (wait == WAIT_OBJECT_0) {
+                DWORD actual = 0;
+                if (GetExitCodeProcess(slot->process, &actual)) {
+                    /* A signaled process may legitimately exit with 259;
+                     * WAIT_TIMEOUT, not STILL_ACTIVE's numeric value, is pending. */
+                    state = 1; code = (int64_t)(uint32_t)actual; error = 0;
+                } else error = GetLastError();
+            } else error = wait == WAIT_FAILED ? GetLastError() : ERROR_INVALID_DATA;
+        }
+    }
+    ReleaseSRWLockExclusive(&win_piped_lock);
+    return piped_exit_status_receipt(state, code, error);
+}
+
 int64_t rt_process_stdout_state(int64_t pid) {
     AcquireSRWLockExclusive(&win_piped_lock);
     struct WinPipedSlot* slot = pid>0&&pid<=UINT32_MAX ? win_piped_find((DWORD)pid) : NULL;
     int64_t state = slot && !slot->closing ? slot->stdout_state : -1;
     ReleaseSRWLockExclusive(&win_piped_lock); return state;
 }
+#endif /* C exports selected unless a bound Rust observer object is linked. */
 
 int64_t rt_browser_renderer_spawn_sandboxed(
         const char* cmd, SplArray* args) {
@@ -1546,6 +1642,8 @@ struct RtProcSlot {
     bool  closing; /* exclusive cleanup owner; slot remains reserved */
     bool  sandboxed_renderer;
     bool  leader_reaped;
+    bool  leader_status_valid;
+    int   leader_status;
     bool  tree_stopped;
     int   stdout_state;
     struct PipedUtf8Tail stdout_tail;
@@ -1592,6 +1690,8 @@ static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
             s_procs[i].stdout_fd = -1;
             s_procs[i].sandboxed_renderer = sandboxed_renderer;
             s_procs[i].leader_reaped = false;
+            s_procs[i].leader_status_valid = false;
+            s_procs[i].leader_status = 0;
             s_procs[i].tree_stopped = false;
             s_procs[i].stdout_state = 0;
             memset(&s_procs[i].stdout_tail,0,sizeof(s_procs[i].stdout_tail));
@@ -1610,7 +1710,8 @@ static void proc_free_locked(struct RtProcSlot* slot) {
     int stdin_fd=slot->stdin_fd, stdout_fd=slot->stdout_fd;
     if (slot->sandboxed_renderer && s_renderer_slots_active>0) s_renderer_slots_active--;
     slot->stdin_fd=-1;slot->stdout_fd=-1;slot->sandboxed_renderer=false;
-    slot->leader_reaped=false;slot->tree_stopped=false;slot->stdout_state=0;
+    slot->leader_reaped=false;slot->leader_status_valid=false;slot->leader_status=0;
+    slot->tree_stopped=false;slot->stdout_state=0;
     slot->closing=false;slot->generation=0;slot->pid=0;
     if (stdin_fd>=0) close(stdin_fd);
     if (stdout_fd>=0) close(stdout_fd);
@@ -2714,6 +2815,8 @@ bool rt_process_is_alive(int64_t pid) {
         bool alive = result == 0;
         if (result == slot->pid || (result < 0 && wait_error == ECHILD)) {
             slot->leader_reaped = true;
+            slot->leader_status_valid = result == slot->pid;
+            slot->leader_status = status;
             slot->tree_stopped = proc_signal_tree(slot->pid, SIGKILL, true);
         }
         (void)pthread_mutex_unlock(&s_proc_lock);
@@ -2738,12 +2841,88 @@ int64_t rt_process_is_piped_alive_ref_v1(int64_t pid, int64_t generation) {
     return result;
 }
 
+void simple_piped_owner_observe_v1(int64_t pid, int64_t collect_exit,
+        struct SimplePipedObservationV1* out, int64_t out_size) {
+    if (!out || out_size != (int64_t)sizeof(*out)) return;
+    *out = (struct SimplePipedObservationV1){1, EINVAL, -1, -1, 0, 0};
+    if (pid <= 0 || (int64_t)(pid_t)pid != pid || (collect_exit != 0 && collect_exit != 1)) return;
+    int lock_error = pthread_mutex_lock(&s_proc_lock);
+    if (lock_error != 0) { out->owner_error = lock_error; return; }
+    struct RtProcSlot* slot = proc_find((pid_t)pid);
+    if (slot && !slot->closing) {
+        out->owner_error = 0;
+        out->stdout_state = slot->stdout_state;
+        out->exit_kind = 0;
+        if (slot->stdout_state < 0) out->exit_error = EIO;
+        else if (collect_exit && slot->stdout_state == 1) {
+            if (!slot->leader_reaped) {
+                int status = 0;
+                pid_t waited = waitpid(slot->pid, &status, WNOHANG);
+                if (waited == slot->pid) {
+                    slot->leader_reaped = true;
+                    slot->leader_status_valid = true;
+                    slot->leader_status = status;
+                } else if (waited < 0 && errno != EINTR) {
+                    out->exit_kind = -1; out->exit_error = errno;
+                }
+            }
+            if (slot->leader_reaped && slot->leader_status_valid) {
+                int status = slot->leader_status;
+                if (WIFEXITED(status)) { out->exit_kind = 1; out->exit_value = WEXITSTATUS(status); }
+                else if (WIFSIGNALED(status)) { out->exit_kind = 2; out->exit_value = WTERMSIG(status); }
+                else { out->exit_kind = -1; out->exit_error = EIO; }
+            } else if (slot->leader_reaped) {
+                out->exit_kind = -1; out->exit_error = ECHILD;
+            }
+        }
+    }
+    (void)pthread_mutex_unlock(&s_proc_lock);
+}
+
+#if !defined(SIMPLE_RUNTIME_RUST_PIPED_OBSERVER_V1)
+SplArray* rt_process_piped_exit_status_value(int64_t pid) {
+    if (pid <= 0) return piped_exit_status_receipt(-1, 0, EINVAL);
+    int lock_error = pthread_mutex_lock(&s_proc_lock);
+    if (lock_error != 0) return piped_exit_status_receipt(-1, 0, lock_error);
+    struct RtProcSlot* slot = proc_find((pid_t)pid);
+    int64_t state = -1, code = 0, error = EINVAL;
+    if (slot && !slot->closing) {
+        if (slot->stdout_state < 0) error = EIO;
+        else if (slot->stdout_state != 1) { state = 0; error = 0; }
+        else {
+            if (!slot->leader_reaped) {
+                int status = 0;
+                pid_t waited = waitpid(slot->pid, &status, WNOHANG);
+                if (waited == slot->pid) {
+                    slot->leader_reaped = true;
+                    slot->leader_status_valid = true;
+                    slot->leader_status = status;
+                } else if (waited == 0 || (waited < 0 && errno == EINTR)) {
+                    state = 0; error = 0;
+                } else {
+                    /* ECHILD without a cached status is failure, never exit0. */
+                    error = errno;
+                }
+            }
+            if (slot->leader_reaped && slot->leader_status_valid) {
+                int status = slot->leader_status;
+                if (WIFEXITED(status)) { state = 1; code = WEXITSTATUS(status); error = 0; }
+                else if (WIFSIGNALED(status)) { state = 1; code = 128 + WTERMSIG(status); error = 0; }
+                else error = EIO;
+            } else if (slot->leader_reaped) error = ECHILD;
+        }
+    }
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return piped_exit_status_receipt(state, code, error);
+}
+
 int64_t rt_process_stdout_state(int64_t pid) {
     if (pid <= 0 || pthread_mutex_lock(&s_proc_lock) != 0) return -1;
     struct RtProcSlot* slot = proc_find((pid_t)pid);
     int64_t state = slot && !slot->closing ? slot->stdout_state : -1;
     (void)pthread_mutex_unlock(&s_proc_lock); return state;
 }
+#endif /* C exports selected unless a bound Rust observer object is linked. */
 
 /* Exclusive closing owner; no global mutex is held during waits/signals.
  * Other operations reject closing slots, and allocation cannot reuse them. */
@@ -2766,6 +2945,8 @@ static bool posix_core_rt_process_close_piped(struct RtProcSlot* slot) {
         pid_t result = waitpid(slot->pid, &status, WNOHANG);
         if (result == slot->pid || (result < 0 && errno == ECHILD)) {
             slot->leader_reaped = leader_reaped = true;
+            slot->leader_status_valid = result == slot->pid;
+            slot->leader_status = status;
             break;
         }
         if (result < 0 && errno != EINTR) return false;
@@ -2779,6 +2960,8 @@ static bool posix_core_rt_process_close_piped(struct RtProcSlot* slot) {
             pid_t result = waitpid(slot->pid, &status, WNOHANG);
             if (result == slot->pid || (result < 0 && errno == ECHILD)) {
                 slot->leader_reaped = leader_reaped = true;
+                slot->leader_status_valid = result == slot->pid;
+                slot->leader_status = status;
                 break;
             }
             if (result < 0 && errno != EINTR) return false;
