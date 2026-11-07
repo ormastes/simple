@@ -484,6 +484,7 @@ void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);
 void     rt_exit(int64_t code);
 void     rt_cli_exit(int64_t code);
+int64_t  rt_heap_alloc_count(void);       /* total successful heap registrations */
 int64_t  rt_heap_registry_count(void);
 int64_t  rt_heap_aux_live_bytes(void);      /* array+dict backing-buffer bytes */
 int64_t  rt_heap_array_capacity_bytes(void); /* array element-buffer capacity bytes */
