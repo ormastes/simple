@@ -1,0 +1,54 @@
+#!/bin/sh
+# Ratchet for tierless_std_js_imports_resolve_to_root_lib_js_not_common_2026-08-01.
+# A tier-less `use std.js.*` import resolves to src/lib/js/, never to the
+# importer's own tier. src/lib/common/js/** was made tier-explicit; this gate
+# keeps it that way (<= 1 allowed: conformance/report.spl, which has no common
+# runner) and freezes the tree-wide count of code import lines so it cannot grow.
+#
+# usage: check-tierless-std-js-imports.shs [--selftest] [root]
+# Verdict is the last stdout line: PASS (0) / FAIL (1) / ERROR (2).
+
+BASELINE_TOTAL=141
+ALLOWED_COMMON=1
+# gc_async_mut / nogc_async_mut import their own tier first (owner decision
+# 2026-11-07); the one exception is std.js.node.buffer_module, which exists only
+# in the root src/lib/js tree.
+ALLOWED_TIER=1
+
+count_in() { # dir pattern-root
+    grep -rE '^[[:space:]]*use std\.js\.' --include='*.spl' "$1" 2>/dev/null | wc -l | tr -d ' '
+}
+
+check() {
+    root=$1
+    [ -d "$root/common" ] || { echo "ERROR -- nothing was checked (no $root/common)"; return 2; }
+    total=$(count_in "$root")
+    common=$(count_in "$root/common/js")
+    [ "$total" -gt 0 ] || { echo "ERROR -- nothing was checked (0 imports scanned)"; return 2; }
+    if [ "$common" -gt "$ALLOWED_COMMON" ]; then
+        echo "FAIL -- $common tier-less std.js imports under common/js (allowed $ALLOWED_COMMON)"; return 1
+    fi
+    for tier in gc_async_mut nogc_async_mut; do
+        n=$(count_in "$root/$tier")
+        if [ "$n" -gt "$ALLOWED_TIER" ]; then
+            echo "FAIL -- $n tier-less std.js imports under $tier (allowed $ALLOWED_TIER: the node.buffer_module root-only module)"; return 1
+        fi
+    done
+    if [ "$total" -gt "$BASELINE_TOTAL" ]; then
+        echo "FAIL -- $total tier-less std.js imports tree-wide (baseline $BASELINE_TOTAL)"; return 1
+    fi
+    echo "PASS -- $total tier-less std.js import(s) checked, common/js=$common, baseline $BASELINE_TOTAL"
+    return 0
+}
+
+if [ "$1" = "--selftest" ]; then
+    d=$(mktemp -d); mkdir -p "$d/common/js" "$d/js" "$d/gc_async_mut/js"
+    printf 'use std.js.types.a\nuse std.js.types.b\n' > "$d/common/js/x.spl"
+    check "$d" >/dev/null; rc=$?
+    rm -rf "$d"
+    [ "$rc" -eq 1 ] || { echo "ERROR -- selftest: common/js violation must FAIL"; exit 2; }
+    shift
+fi
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+check "${1:-$repo_root/src/lib}"
+exit $?

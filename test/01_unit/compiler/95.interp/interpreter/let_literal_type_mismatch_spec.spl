@@ -1,0 +1,39 @@
+# Bug: compiler_interpreter_integration_real_gaps_found_2026-09-06 (gap 2)
+#
+# `val x: i64 = "not a number"` used to run: the interpreter printed the text,
+# the JIT printed a pointer-sized integer. A text literal initializing a
+# numeric or bool binding is a type error in BOTH engines.
+# Needs the fixed seed: SIMPLE_BINARY=<seed built from this tree>.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, env_set_process}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn run_src(tag: text, src: text, mode: text) -> (text, i64):
+    val file = get_temp_dir().replace("\\", "/") + "/let_lit_" + tag + ".spl"
+    val _w = write_file(file, src)
+    val _e = env_set_process("SIMPLE_EXECUTION_MODE", mode)
+    val (out, err, rc) = process_run_timeout(binary(), [file], 300000)
+    val _r = env_set_process("SIMPLE_EXECUTION_MODE", "")
+    (out + err, rc)
+
+val BAD = "fn main():\n    val x: i64 = \"not a number\"\n    print x\nmain()\n"
+val BAD_FLOAT = "fn main():\n    val x: f64 = \"1.5\"\n    print x\nmain()\n"
+
+describe "text literal for a numeric binding":
+    it "is a type error in the interpreter":
+        val (o, rc) = run_src("i", BAD, "interpreter")
+        expect(rc != 0).to_equal(true)
+        expect(o.contains("type mismatch")).to_equal(true)
+    it "is a type error in the default engine":
+        val (o, rc) = run_src("j", BAD, "jit")
+        expect(rc != 0).to_equal(true)
+        expect(o.contains("type mismatch")).to_equal(true)
+    it "is a type error for float annotations too":
+        val (o, rc) = run_src("f", BAD_FLOAT, "interpreter")
+        expect(rc != 0).to_equal(true)

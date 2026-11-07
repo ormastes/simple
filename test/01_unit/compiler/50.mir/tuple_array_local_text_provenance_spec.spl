@@ -1,0 +1,65 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: text locals extracted from tuple-array elements keep text type
+
+Bug native_tuple_array_local_text_provenance_2026-10-30: `val param = params[i]`
+with `params: [(text, text)]` followed by `val name = param.0` lost the text
+representation natively (concatenation yielded pointer-like decimal names).
+The MIR local type of `name`/`value` must be the same as the explicitly
+annotated form.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn local_kinds(src: text, target: text) -> [text]:
+    val file = "testdata/tuple_array_local_text_spec.spl"
+    val parsed = parse_full_frontend(src, file, "tuple_array_local_text_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var kinds: [text] = []
+    for function in mir.functions.values():
+        if not (function.name == target or function.name.ends_with("." + target)):
+            continue
+        for local in function.locals:
+            if true:
+                kinds.push("{local.type_.kind}")
+    kinds
+
+fn body(annotated: bool, name: text) -> text:
+    val p = if annotated: "param: (text, text)" else: "param"
+    val n = if annotated: "name: text" else: "name"
+    val v = if annotated: "value: text" else: "value"
+    "fn {name}(params: [(text, text)]) -> text:\n    var out = \"\"\n    var i = 0\n    while i < params.len():\n        val {p} = params[i]\n        val {n} = param.0\n        val {v} = param.1\n        out = out + name + \"=\" + value\n        i = i + 1\n    out\n"
+
+describe "tuple-array element locals":
+    it "types implicit name/value locals exactly like the annotated form":
+        val implicit = local_kinds(body(false, "f"), "f")
+        val explicit = local_kinds(body(true, "g"), "g")
+        expect(implicit.len() > 10).to_equal(true)
+        expect(implicit.len()).to_equal(explicit.len())
+        var diffs = 0
+        var k = 0
+        while k < implicit.len() and k < explicit.len():
+            if implicit[k] != explicit[k]:
+                diffs = diffs + 1
+            k = k + 1
+        expect(diffs).to_equal(0)
+
+    it "lowers the extracted text locals as str, not as integers":
+        val kinds = local_kinds(body(false, "h"), "h")
+        var strs = 0
+        for k in kinds:
+            if k == "MirTypeKind::Opaque(str)":
+                strs = strs + 1
+        expect(strs >= 4).to_equal(true)

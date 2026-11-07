@@ -1,0 +1,102 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# Regression: entry hooks must not shift lifted parameter/environment locals.
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_kinds.*
+use compiler.mir.mir_instruction_support.*
+use compiler.mir.mir_instruction_graph.*
+use compiler.mir.mir_types.*
+
+fn slot_local(operand: MirOperand) -> i64:
+    match operand.kind:
+        case MirOperandKind.Copy(local): local.id
+        case MirOperandKind.Move(local): local.id
+        case _: -1
+
+fn slot_argument(function: MirFunction, operand: MirOperand) -> i64:
+    val id = slot_local(operand)
+    if id < 0 or id >= function.locals.len(): return -1
+    match function.locals[id].kind:
+        case LocalKind.Arg(index): index
+        case _: -1
+
+fn slot_callee(operand: MirOperand) -> text:
+    match operand.kind:
+        case MirOperandKind.Const(value, _):
+            match value:
+                case MirConstValue.Str(name): name
+                case _: ""
+        case _: ""
+
+fn lambda_slots(mode: i64, capture: bool) -> text:
+    val source = if capture:
+        "fn make(k: i64) -> fn(i64) -> i64:\n    \\x: x + k\n"
+    else:
+        "fn make() -> fn(i64) -> i64:\n    \\x: x\n"
+    val file = "lambda_prologue_slots.spl"
+    val ast = parse_full_frontend(source, file, "lambda_prologue_slots", Logger(level: 0))
+    if parser_has_errors(): return "parse-error"
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(ast)
+    if hl.errors.len() != 0: return "hir-error"
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.configure_mcdc_mode(mode)
+    val mir = lowering.lower_module(hir)
+    if lowering.errors.len() != 0: return "mir-error"
+    var lifted = 0
+    var argument = -1
+    var environment = -1
+    var reads = 0
+    var hooks = 0
+    var ordered = true
+    for function in mir.functions.values():
+        if function.name.contains("__lambda_lift_"):
+            lifted = lifted + 1
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, args):
+                            val name = slot_callee(callee)
+                            if name.ends_with("mcdc_static_probe_worker_spawn_hook") or name.ends_with("mcdc_dynamic_probe_worker_spawn_hook"):
+                                hooks = hooks + 1
+                            if name == "rt_closure_get_capture":
+                                reads = reads + 1
+                                if args.len() != 2: return "capture-arity-error"
+                                environment = slot_argument(function, args[0])
+                                if mode != 0 and hooks != 1: ordered = false
+                        case MirInstKind.BinOp(_, _, left, _):
+                            argument = slot_argument(function, left)
+                        case _: ()
+                if not capture:
+                    match block.terminator:
+                        case MirTerminator.Ret(value):
+                            if val returned = value:
+                                argument = slot_argument(function, returned)
+                        case _: ()
+    "lifted={lifted} arg={argument} env={environment} reads={reads} hooks={hooks} ordered={ordered}"
+
+describe "lifted lambda argument slots before entry-hook temporaries":
+    it "keeps an uncaptured parameter in Arg0 with instrumentation off":
+        expect(lambda_slots(0, false)).to_equal("lifted=1 arg=0 env=-1 reads=0 hooks=0 ordered=true")
+
+    it "keeps an uncaptured parameter in Arg0 with the static hook":
+        expect(lambda_slots(1, false)).to_equal("lifted=1 arg=0 env=-1 reads=0 hooks=1 ordered=true")
+
+    it "keeps an uncaptured parameter in Arg0 with the dynamic hook":
+        expect(lambda_slots(2, false)).to_equal("lifted=1 arg=0 env=-1 reads=0 hooks=1 ordered=true")
+
+    it "keeps the environment in Arg0 and the parameter in Arg1 with instrumentation off":
+        expect(lambda_slots(0, true)).to_equal("lifted=1 arg=1 env=0 reads=1 hooks=0 ordered=true")
+
+    it "keeps the environment in Arg0 and the parameter in Arg1 after the static hook":
+        expect(lambda_slots(1, true)).to_equal("lifted=1 arg=1 env=0 reads=1 hooks=1 ordered=true")
+
+    it "keeps the environment in Arg0 and the parameter in Arg1 after the dynamic hook":
+        expect(lambda_slots(2, true)).to_equal("lifted=1 arg=1 env=0 reads=1 hooks=1 ordered=true")

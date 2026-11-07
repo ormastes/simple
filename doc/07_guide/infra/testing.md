@@ -1233,6 +1233,32 @@ mock.was_called_with(["123", "Alice"])   # Match strings
 2. Run on idle machine
 3. Use median instead of mean for skewed distributions
 
+### Preprocess fault boundary (`SIMPLE_TEST_PREPROCESS_BOUNDARY`)
+
+The runner lexes a spec's source in its own process before spawning the spec
+child. A hard fault there (stack overflow, segfault) would kill the whole
+sweep, so a spec that could defeat the lexer is lexed first in an isolated
+child (`src/app/test_runner_new/preprocess_probe.spl`) and a crash is reported
+as one FAIL for that file while the sweep continues.
+
+The child is only started when a cheap string scan says it is needed: file
+larger than 1,000,000 bytes, or more than 2,000 consecutive blank lines (the
+lexer recurses once per newline inside an open bracket). Ordinary specs pay
+nothing. It applies to every lane (interpreter, SMF, native, mcdc fallback,
+safe mode). `source_has_bdd_structure` on the `--spl-doctest` path is a
+read-only text scan and is not covered.
+
+| value | behaviour |
+|---|---|
+| unset | heuristic (default) |
+| `0` | boundary off (escape hatch; a hostile spec can kill the sweep) |
+| `always` | probe every spec (measurement / paranoia) |
+
+The probe script is located from the spec path (`.../test/...` prefix), then
+`SIMPLE_REPO_ROOT`, then the cwd. If a spec needs isolation and the probe
+cannot be found, the file FAILs closed with a message naming
+`SIMPLE_REPO_ROOT`; it is never silently skipped.
+
 ## Troubleshooting: runner-level failures (the specs are fine)
 
 ### Every spec fails `unresolved name: describe` / parser error on `describe "...":`

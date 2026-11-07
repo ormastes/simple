@@ -1,9 +1,9 @@
 # @req: REQ-CRANELIFT-VERIFIER-TYPES-001
 # Regression: a float-typed MIR constant (Zero on the nil arm of `x.unwrap()`
 # / `x!` over an `f64?`, or an Int const typed F32/F64) was emitted as
-# Cranelift `iconst.f64`. iconst is integer-only, so the verifier's
-# iconst_bounds hit `unreachable!()` and aborted the whole native build
-# (pure_database codegen, Windows cranelift lane, 2026-11-07).
+# Cranelift `iconst.f64` (verifier iconst_bounds `unreachable!()`). Zero must
+# become fconst 0.0; a float-typed Int is a BIT PATTERN (e.g. nil sentinel 3)
+# and must become iconst of the same bits + bitcast, never fconst(v as f64).
 use std.spec
 use std.spec.step
 use compiler.common.config.{Logger}
@@ -12,7 +12,7 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
-use compiler.backend.cranelift_codegen_adapter.{const_int_cl_type, cl_const_is_float}
+use compiler.backend.cranelift_codegen_adapter.{const_int_cl_type, cl_const_is_float, cl_scalar_const_plan}
 
 @inline
 fn lower_float_const_fixture(source: text) -> MirModule:
@@ -53,17 +53,38 @@ describe "Cranelift float-typed constants never use iconst":
         val mir = lower_float_const_fixture(src)
         expect(float_typed_const_count(mir, "pick") > 0).to_equal(true)
 
-    it "classifies F32/F64 constants as fconst, integers as iconst":
-        step("cl_const_is_float routes float consts to cranelift_fconst")
-        expect(cl_const_is_float(MirType.f64())).to_equal(true)
-        expect(cl_const_is_float(MirType(kind: MirTypeKind.F32))).to_equal(true)
-        expect(cl_const_is_float(MirType.i64())).to_equal(false)
-        expect(cl_const_is_float(MirType(kind: MirTypeKind.Bool))).to_equal(false)
-        expect(cl_const_is_float(MirType(kind: MirTypeKind.U8))).to_equal(false)
+    it "selects fconst 0.0 for a float-typed Zero":
+        step("cl_scalar_const_plan: Zero typed F64/F32 is fconst, integer Zero is iconst")
+        val (op64, ty64, bits64) = cl_scalar_const_plan(MirConstValue.Zero, MirType.f64())
+        expect(op64).to_equal("fconst_zero")
+        expect(ty64).to_equal(6)
+        expect(bits64).to_equal(0)
+        val (op32, ty32, _) = cl_scalar_const_plan(MirConstValue.Zero, MirType(kind: MirTypeKind.F32))
+        expect(op32).to_equal("fconst_zero")
+        expect(ty32).to_equal(5)
+        val (opi, tyi, _) = cl_scalar_const_plan(MirConstValue.Zero, MirType.i64())
+        expect(opi).to_equal("iconst")
+        expect(tyi).to_equal(4)
+
+    it "keeps the bits of a float-typed Int (nil sentinel 3 is not 3.0)":
+        step("cl_scalar_const_plan: Int typed F64 is iconst.i64 of the same bits + bitcast")
+        val (op64, ty64, bits64) = cl_scalar_const_plan(MirConstValue.Int(3), MirType.f64())
+        expect(op64).to_equal("iconst_bitcast")
+        expect(ty64).to_equal(4)
+        expect(bits64).to_equal(3)
+        step("Int typed F32 is iconst.i32 of the low 32 bits + bitcast")
+        val (op32, ty32, bits32) = cl_scalar_const_plan(MirConstValue.Int(-1), MirType(kind: MirTypeKind.F32))
+        expect(op32).to_equal("iconst_bitcast")
+        expect(ty32).to_equal(3)
+        expect(bits32).to_equal(4294967295)
 
     it "never hands iconst a float controlling type":
-        step("const_int_cl_type is integer-only (CL_TYPE_I64 = 4)")
+        step("Integer-typed Int consts stay iconst.i64 (CL_TYPE_I64 = 4)")
+        val (opi, tyi, bitsi) = cl_scalar_const_plan(MirConstValue.Int(7), MirType.i64())
+        expect(opi).to_equal("iconst")
+        expect(tyi).to_equal(4)
+        expect(bitsi).to_equal(7)
+        val (op16, ty16, _) = cl_scalar_const_plan(MirConstValue.Int(7), MirType(kind: MirTypeKind.I16))
+        expect(op16).to_equal("iconst")
+        expect(ty16).to_equal(4)
         expect(const_int_cl_type(MirType.f64())).to_equal(4)
-        expect(const_int_cl_type(MirType(kind: MirTypeKind.F32))).to_equal(4)
-        expect(const_int_cl_type(MirType.i64())).to_equal(4)
-        expect(const_int_cl_type(MirType(kind: MirTypeKind.I16))).to_equal(4)

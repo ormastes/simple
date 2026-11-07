@@ -29,3 +29,13 @@ The semantic snapshot map persists with provider metadata and is promoted with t
 No compiler, native fixture or compiled spec has run for this source change. Runtime source/producer/runtime/backend/cache pins, positive exact values and negative diagnostic/no-object proof are required before closure. Do not transfer a prior producer or a source-review PASS into native admission.
 
 **Revalidated 2026-11-02: still plausible because OPEN. Severity: P1. Source repair and regressions are authored; native and compiled-spec qualification are UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-07 spec harness repair (lane m-result)
+
+14/15 failures were not the Err-owner repair: `module_surfaces_from_modules` now
+returns `Result`, and the spec's `if val surfaces = ...` bound the whole Result
+(`unknown property or method 'ordered_names' on Result`). Switched to
+`match Ok/Err`; the spec is 15/15 on `bin/simple.exe`. The language gap is filed
+as `if_val_result_binds_whole_result_2026_11_07`. Native fixture still pending:
+blocked by the struct-constructor garbage store (bug_db row 1012), and
+`s3_fable57s.exe native-build` SEGVs on small probes.

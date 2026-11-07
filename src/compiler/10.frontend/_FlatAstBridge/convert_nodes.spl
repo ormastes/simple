@@ -969,9 +969,11 @@ fn convert_flat_expr(idx: i64) -> Expr:
             # No real `{expr}` placeholder (str_interps is empty). Decode any
             # `{{`/`}}` escapes directly since nothing downstream will (see
             # flat_bridge_decode_brace_escapes).
-            if not str_val.contains("{{") and not str_val.contains("}}"):
-                return Expr(kind: ExprKind.StringLit(str_val, None), span: span)
-            return Expr(kind: ExprKind.StringLit(flat_bridge_decode_brace_escapes(str_val), None), span: span)
+            # Rejected regions have already been literalized in str_regions_val.
+            # Decode that representation so nested literal closers survive.
+            if not str_regions_val.contains("{{") and not str_regions_val.contains("}}"):
+                return Expr(kind: ExprKind.StringLit(str_regions_val, None), span: span)
+            return Expr(kind: ExprKind.StringLit(flat_bridge_decode_brace_escapes(str_regions_val), None), span: span)
     if tag == EXPR_BOOL_LIT:
         return Expr(kind: ExprKind.BoolLit(expr_get_int(idx) != 0), span: span)
     if tag == EXPR_NIL_LIT:
@@ -1812,6 +1814,14 @@ fn defer_unsupported_marker(span: Span) -> Stmt:
 # replays first); a group's OWN statements always replay in their original
 # top-to-bottom order, since only one defer body is unwinding at a time.
 var g_pending_defers: [[Stmt]] = []
+# Index of the first group owned by the function currently being converted.
+# convert_decl_fn mutates g_pending_defers IN PLACE (raise base, truncate back)
+# instead of swapping in a fresh array: under the stage-4 streaming parser scope
+# every array allocated during the parse is reclaimed at scope end, so a fresh
+# `[]` or saved copy stored here dangled into the next parse and the next
+# convert_decl_fn read it as `rejected invalid array handle`
+# (native_method_call_hir_lowering_invalid_array_handle_2026-11-07).
+var g_pending_defer_base: i64 = 0
 
 # '$' cannot occur in a source identifier, so these bridge-owned locals
 # cannot capture a user binding. The raw statement ID is unique per body.
@@ -1821,7 +1831,7 @@ fn defer_return_replay(value: Expr?, statement_id: i64, span: Span) -> [Stmt]:
     if val expression = value:
         result.push(Stmt(kind: StmtKind.Val(name, None, expression), span: span))
     var group_index = g_pending_defers.len() - 1
-    while group_index >= 0:
+    while group_index >= g_pending_defer_base:
         val group = g_pending_defers[group_index]
         var statement_index = 0
         while statement_index < group.len():
@@ -1872,7 +1882,7 @@ fn convert_flat_stmt_in_list(idx: i64, is_top_level: bool) -> [Stmt]:
         # native path at all yet — refuse loudly everywhere, top-level or not.
         return [defer_unsupported_marker(make_span())]
     elif tag == STMT_RETURN:
-        if g_pending_defers.len() == 0:
+        if g_pending_defers.len() == g_pending_defer_base:
             return [convert_flat_stmt(idx)]
         val expression_id = stmt_get_expr(idx)
         if expression_id >= 0:
@@ -2302,11 +2312,12 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
     if trace_reset and body.len() > 0 and body[body.len() - 1] >= stmt_count():
         print "[convert_decl_fn] STALE-BODY-SUSPECT name={name} body_len={body.len()} body_first={body[0]} body_last={body[body.len() - 1]} live_stmt_count={stmt_count()} reset_seq={ast_reset_seq_get()}"
     var stmts: [Stmt] = []
-    # Save/restore the pending-defer stack around this function's own body so
-    # a re-entrant conversion (if any future caller nests one) can't leak
-    # defers across function boundaries. See convert_flat_stmt_in_list above.
-    val saved_pending_defers: [[Stmt]] = g_pending_defers
-    g_pending_defers = []
+    # Scope the pending-defer stack to this function's own body so a
+    # re-entrant conversion can't leak defers across function boundaries.
+    # In place only -- never reassign g_pending_defers (see its declaration).
+    val outer_pending_defer_base = g_pending_defer_base
+    val pending_defer_base = g_pending_defers.len()
+    g_pending_defer_base = pending_defer_base
     var contract_preconditions: [ContractClause] = []
     var contract_invariants: [ContractClause] = []
     var contract_postconditions: [ContractClause] = []
@@ -2360,7 +2371,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
                 k = k + 1
         si = si + 1
 
-    if g_pending_defers.len() > 0:
+    if g_pending_defers.len() > pending_defer_base:
         # Fall-off-the-end replay. Already safe to append when the function's
         # last raw top-level statement was `defer` itself (nothing trails it,
         # so the append is truly the new last statement with nothing to
@@ -2390,7 +2401,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         val last_raw_tag = if body_len > 0: stmt_get_tag(body[body_len - 1]) else: -1
         if last_raw_tag == STMT_DEFER:
             var dj = g_pending_defers.len() - 1
-            while dj >= 0:
+            while dj >= pending_defer_base:
                 val dj_group = g_pending_defers[dj]
                 var dji = 0
                 while dji < dj_group.len():
@@ -2419,14 +2430,16 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
                     stmts.push(defer_unsupported_marker(make_span()))
             else:
                 var ej = g_pending_defers.len() - 1
-                while ej >= 0:
+                while ej >= pending_defer_base:
                     val ej_group = g_pending_defers[ej]
                     var eji = 0
                     while eji < ej_group.len():
                         stmts.push(ej_group[eji])
                         eji = eji + 1
                     ej = ej - 1
-    g_pending_defers = saved_pending_defers
+    while g_pending_defers.len() > pending_defer_base:
+        val _dropped_defer_group = g_pending_defers.pop()
+    g_pending_defer_base = outer_pending_defer_base
 
     val visibility = convert_decl_visibility(idx)
     val fn_params: [Param] = params

@@ -15,6 +15,7 @@ use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, lo
 use os.kernel.errno.{EACCES, ENOSYS, ECONNREFUSED, ENOTCONN, EAGAIN, EMFILE, EADDRINUSE}
 use os.kernel.net.socket_ipc_transport.{socket_ipc_send_bytes, socket_ipc_recv_bytes}
 use os.kernel.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_get_status_flags, fd_get_type, fd_get_backend_handle, fd_update_ready}
+use os.kernel.fd_table.{FD_NET_PORT_NONE, fd_set_net_bound_port, fd_get_net_bound_port, fd_set_net_server_port, fd_get_net_server_port}
 use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_socket_network_decision}
 # Well-known netstack service IPC port
 val _NET_PORT: u64 = 2
@@ -141,6 +142,7 @@ fn posix_bind(fd: i32, addr: SockaddrIn) -> i64:
     val reply = _net_ipc_request(NET_BIND, payload)
     if reply.status == 0:
         _record_bound_endpoint(fd, endpoint)
+        _record_bound_port(fd, addr.port)
     reply.status as i64
 
 fn posix_listen(fd: i32, backlog: i32) -> i64:
@@ -210,6 +212,9 @@ fn posix_accept(fd: i32) -> i64:
     if set_result < 0:
         _net_close_remote(reply.value_i32)
         return set_result as i64
+    match posix_bound_port_for_fd(fd):
+        Some(port): _record_server_io_port(accepted_fd, port)
+        nil: pass
     accepted_fd as i64
 
 fn posix_send(fd: i32, data_addr: u64, data_len: u64, flags: i32) -> i64:
@@ -265,6 +270,33 @@ fn posix_close_socket(fd: i32) -> i64:
     if net_fd >= 0:
         _net_close_remote(net_fd)
     fd_close(fd) as i64
+
+# Port provenance for the portable syscall owner's exact authority checks
+# lives on the fd table's open-file description, not in a side table keyed by
+# descriptor number: dup/dup2 share it with the same socket, and every release
+# path (fd_close, fd_set over a slot, dup2, close-on-exec, process exit)
+# resets it, so a reused descriptor number never inherits another socket's
+# port. A port-0 (ephemeral) bind records port 0, so listen on it requires
+# exactly NetListen(port: 0).
+
+fn posix_bound_port_for_fd(fd: i32) -> u16?:
+    """Local port a descriptor was successfully bound to, if any."""
+    _port_or_none(fd_get_net_bound_port(fd))
+
+fn posix_server_port_for_fd(fd: i32) -> u16?:
+    """Listener port an accepted descriptor was produced by, if any."""
+    _port_or_none(fd_get_net_server_port(fd))
+
+fn _port_or_none(raw: u32) -> u16?:
+    if raw == FD_NET_PORT_NONE:
+        return nil
+    Some(raw as u16)
+
+fn _record_bound_port(fd: i32, port: u16):
+    fd_set_net_bound_port(fd, port)
+
+fn _record_server_io_port(fd: i32, port: u16):
+    fd_set_net_server_port(fd, port)
 
 fn _copy_user_bytes(data_addr: u64, data_len: u64) -> [u8]:
     var data: [u8] = []

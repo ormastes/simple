@@ -53,6 +53,11 @@ impl MirLowering:
                                     self.option_value_locals[local.id] = true
                                     self.mark_runtime_value_local(local.id)
                                     return local
+                                # An existing `Concrete?` value (param,
+                                # local, call result): presence is a runtime
+                                # fact, so convert only the Some payload.
+                                if some_argument == nil and self.native_trait_concrete_record_type(existing_inner):
+                                    return self.coerce_native_trait_optional_value(local, value, existing_inner, inner, expected)
                                 if some_argument == nil:
                                     self.error_fatal("native optional trait conversion requires a matching declared payload", Some(value.span))
                                     return local
@@ -139,6 +144,80 @@ impl MirLowering:
         self.remember_local_hir_type(object.id, expected, isolation_state, resource_state)
         object
 
+    me coerce_native_trait_optional_value(option: LocalId, value: HirExpr,
+            concrete: HirType, trait_type: HirType, expected: HirType) -> LocalId:
+        """`Concrete?` value into a `Trait?` slot: Some(v) becomes
+        Some(trait_object(v)) over the same object, None stays None."""
+        var b_test = self.builder
+        val is_some_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_is_some"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false)))))
+        val is_some_res = b_test.emit_call(is_some_fn, [mir_operand_copy(option)], MirType.bool())
+        self.builder = b_test
+        if is_some_res == nil:
+            self.error_fatal("native optional trait conversion lacks presence test", Some(value.span))
+            return option
+        val is_some = is_some_res ?? LocalId(id: -1)
+        var b_split = self.builder
+        val some_block = b_split.new_block(Some("native_trait_opt_some"))
+        val none_block = b_split.new_block(Some("native_trait_opt_none"))
+        val merge_block = b_split.new_block(Some("native_trait_opt_merge"))
+        # Option values are the i64 enum handle (rt_enum_new / normalize_
+        # option_handle), not lower_type(Optional)'s (bool, T) tuple.
+        val result = b_split.new_temp(MirType.i64())
+        b_split.terminate_if(mir_operand_copy(is_some), some_block, none_block)
+        self.builder = b_split
+
+        var b_some = self.builder
+        b_some.switch_to_block(some_block)
+        val enum_signature = MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false, params_known: true)
+        val payload_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_unwrap_or_self"), MirType(kind: MirTypeKind.FuncPtr(enum_signature))))
+        # rt_unwrap_or_self, not rt_enum_payload: a present non-handle word
+        # (a bare object pointer rt_is_some accepts) is the object itself;
+        # rt_enum_payload would read it as nil and build a bogus data word.
+        val payload_res = b_some.emit_call(payload_fn, [mir_operand_copy(option)], MirType.i64())
+        self.builder = b_some
+        if payload_res == nil:
+            self.error_fatal("native optional trait conversion lacks payload", Some(value.span))
+            return option
+        val payload = payload_res ?? LocalId(id: -1)
+        # Carry the source's states so a resource payload still hits the
+        # concrete-drop-slot rejection of the direct conversion.
+        self.remember_local_hir_type(payload.id, concrete,
+            self.local_hir_type_isolation_state(option.id), self.local_hir_type_resource_state(option.id))
+        val payload_expr = HirExpr(kind: value.kind, has_type_: true, type_: concrete, span: value.span)
+        val object = self.coerce_native_trait_object(payload, payload_expr, trait_type)
+        val wrapped = self.ensure_option_handle(object, expected)
+        var b_some_end = self.builder
+        b_some_end.emit_copy(result, wrapped)
+        b_some_end.terminate_goto(merge_block)
+        self.builder = b_some_end
+
+        # None: the source handle/sentinel already reads as None.
+        var b_none = self.builder
+        b_none.switch_to_block(none_block)
+        b_none.emit_copy(result, option)
+        b_none.terminate_goto(merge_block)
+        b_none.switch_to_block(merge_block)
+        self.builder = b_none
+        self.option_value_locals[result.id] = true
+        self.mark_runtime_value_local(result.id)
+        self.remember_local_hir_type(result.id, expected, 2, 0)
+        result
+
+    me native_trait_concrete_record_type(type_: HirType) -> bool:
+        """True for a class/struct type -- the only payloads the concrete->
+        trait conversion accepts (i64?/text? keep the declared-payload error)."""
+        match type_.kind:
+            case HirTypeKind.Named(symbol_id, _):
+                if val present_symbol = self.symbols.get_symbol_raw(symbol_id.id):
+                    val symbol: HirSymbol = present_symbol
+                    return symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Struct
+                false
+            case _: false
+
     me native_trait_some_argument(value: HirExpr) -> HirExpr?:
         """The single argument of a `Some(arg)` construction, else nil."""
         match value.kind:
@@ -191,6 +270,23 @@ impl MirLowering:
                             if symbol_entry.kind == SymbolKind.Class or symbol_entry.kind == SymbolKind.Struct:
                                 payload_type = Some(HirType(kind: HirTypeKind.Named(constructor, []), span: value.span))
                 case _: ()
+        # `Some(c)` with `c` an unannotated local (`val c = Concrete(..)`):
+        # type the payload the way the direct `slot = c` form types `c` -- the
+        # binding's remembered HIR type, else its construction provenance.
+        if payload_type == nil:
+            payload_type = self.receiver_declared_type(argument)
+        if payload_type == nil:
+            var argument_symbol = -1
+            match argument.kind:
+                case HirExprKind.Var(var_symbol): argument_symbol = var_symbol.id
+                case HirExprKind.NamedVar(named_symbol, _): argument_symbol = named_symbol.id
+                case _: ()
+            if argument_symbol >= 0:
+                val argument_local = self.find_local(argument_symbol)
+                if argument_local.id >= 0:
+                    val provenance = self.struct_value_syms.get(argument_local.id) ?? ""
+                    if provenance != "":
+                        self.struct_value_syms[payload.id] = provenance
         if val known = payload_type:
             self.remember_local_hir_type(payload.id, known, 0, 0)
         payload

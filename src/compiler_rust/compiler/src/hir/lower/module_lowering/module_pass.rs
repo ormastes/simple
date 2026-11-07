@@ -1744,6 +1744,7 @@ impl Lowerer {
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
         super::validation::validate_trait_impl_arity(ast_module)?;
+        super::validation::validate_no_duplicate_impl_methods(ast_module)?;
         // Same-named globals of different flattened modules get owner-exact
         // symbols before any registration (see `flatten_global_owner.rs`).
         let qualified = self.qualify_flattened_globals(ast_module);
@@ -2389,6 +2390,7 @@ impl Lowerer {
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
         super::validation::validate_trait_impl_arity(ast_module)?;
+        super::validation::validate_no_duplicate_impl_methods(ast_module)?;
         // Same-named globals of different flattened modules get owner-exact
         // symbols before any registration (see `flatten_global_owner.rs`).
         let qualified = self.qualify_flattened_globals(ast_module);

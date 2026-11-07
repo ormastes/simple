@@ -2822,6 +2822,25 @@ fn try_compile_builtin_method_call<M: Module>(
             super::methods::wrap_value(ctx, builder, *arg, raw)
         } else if box_dict_key && arg_i == 0 && key_is_int {
             builder.ins().ishl_imm(raw, 3)
+        } else if runtime_func == "rt_unwrap_or_value"
+            && arg_i == 0
+            && (matches!(builder.func.dfg.value_type(raw), types::F32 | types::F64)
+                || matches!(ctx.vreg_types.get(arg).copied(), Some(TypeId::F32 | TypeId::F64)))
+        {
+            // A float default arrives as a raw f64 (or its i64 bit pattern).
+            // Passed unboxed, the absent case handed those raw bits back and the
+            // caller decoded them as a tagged int: `-1.0` (0xBFF0..) printed as
+            // `-577023702256844800` (== bits >> 3). Box it as a float.
+            // See doc/08_tracking/bug/jit_unwrap_or_on_absent_optional_ignores_default_2026-08-17.md.
+            let vt = builder.func.dfg.value_type(raw);
+            let f = if vt == types::F32 {
+                builder.ins().fpromote(types::F64, raw)
+            } else if vt == types::I64 {
+                builder.ins().bitcast(types::F64, MemFlags::new(), raw)
+            } else {
+                raw
+            };
+            call_runtime_1(ctx, builder, "rt_value_float", f)
         } else {
             raw
         };

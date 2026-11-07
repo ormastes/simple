@@ -53,3 +53,8 @@ compiler phase that loses the text type, and does not close a compiler bug.
 Do not weaken `[(text, text)]`, erase the public type, or add unsafe casts.
 Add a compiler-level regression and remove this workaround only after a
 producer-bound fix passes the native fixture.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+test/01_unit/compiler/50.mir/tuple_array_local_text_provenance_spec.spl: MIR local types of implicit and annotated forms are identical and str, so the loss is after MIR (codegen). Native repro: remove the explicit annotations in lib/nogc_sync_mut/http/url.spl build_query_string and run the url query contract fixture.

@@ -1,0 +1,130 @@
+# Default-server live TCP fixture for the scalar parser's read-ahead buffer.
+# Sibling of http_scalar_live_socket.spl (which sends ~700 bytes, one read):
+# these requests span several 8 KB refills, split a body between read-ahead
+# and read_exact, overflow the line bound, and truncate a body. Each case
+# prints PASS/FAIL; exit is non-zero if any case fails.
+
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.io.types.{Shutdown}
+
+val BIG_HEADER_COUNT_V1: i64 = 3
+val BIG_HEADER_BYTES_V1: i64 = 6000
+val BODY_TARGET_BYTES_V1: i64 = 20000
+
+fn _pattern(tag: text, bytes: i64) -> text:
+    # Position-dependent content, so a dropped, duplicated or reordered
+    # chunk boundary cannot reproduce the expected text.
+    var out = ""
+    var i = 0
+    while out.len() < bytes:
+        out = out + "{tag}{i};"
+        i = i + 1
+    out.slice(0, bytes)
+
+fn _big_header(k: i64) -> text:
+    _pattern("h{k}-", BIG_HEADER_BYTES_V1)
+
+fn _body() -> text:
+    _pattern("b", BODY_TARGET_BYTES_V1)
+
+fn _handler(request: HttpRequest) -> HttpResponse:
+    var headers_valid = true
+    var k = 0
+    while k < BIG_HEADER_COUNT_V1:
+        if request.header("X-Big-{k}") != _big_header(k):
+            headers_valid = false
+        k = k + 1
+    HttpResponse.ok("headers_valid={headers_valid};body_bytes={request.body.len()};body=" + request.body)
+
+fn _server() -> SimpleHttpServer:
+    var router = Router.new()
+    router.post("/large", _handler)
+    SimpleHttpServer.new("127.0.0.1", 0, router)
+
+# Writes `request` (optionally half-closing), serves one connection, returns the wire.
+fn _drive(server: SimpleHttpServer, request: text, half_close: bool) -> text:
+    match TcpListener.bind("127.0.0.1:0"):
+        Err(_): return ""
+        Ok(listener):
+            match listener.local_addr():
+                Err(_):
+                    val _ = listener.close()
+                    return ""
+                Ok(address):
+                    match TcpStream.connect(address):
+                        Err(_):
+                            val _ = listener.close()
+                            return ""
+                        Ok(client):
+                            var wire = ""
+                            if client.write_text_status(request):
+                                if half_close:
+                                    val _ = client.shutdown(Shutdown.Write)
+                                match listener.accept():
+                                    Err(_): pass
+                                    Ok(connection):
+                                        if server.admission.try_acquire():
+                                            val _ = SimpleHttpServer.handle_connection_admitted_owned_v1(
+                                                server, connection)
+                                        else:
+                                            val _ = connection.close()
+                                match client.read_text():
+                                    Err(_): pass
+                                    Ok(response): wire = response
+                            val _ = client.close()
+                            val _ = listener.close()
+                            wire
+
+fn _report(name: text, ok: bool, wire: text) -> i32:
+    if ok:
+        print("PASS {name}")
+        return 0
+    val head = if wire.len() > 160: wire.slice(0, 160) else: wire
+    print("FAIL {name}: wire_bytes={wire.len()} head={head}")
+    1
+
+fn case_multi_refill_split_body(server: SimpleHttpServer) -> i32:
+    var headers = ""
+    var k = 0
+    while k < BIG_HEADER_COUNT_V1:
+        headers = headers + "X-Big-{k}: " + _big_header(k) + "\r\n"
+        k = k + 1
+    val body = _body()
+    val request = "POST /large HTTP/1.1\r\nHost: loopback\r\n" + headers +
+        "Content-Length: {body.len()}\r\nConnection: close\r\n\r\n" + body
+    val wire = _drive(server, request, false)
+    val ok = wire.starts_with("HTTP/1.1 200") and
+        wire.contains("headers_valid=true;body_bytes={body.len()};body=" + body)
+    _report("multi-refill header block ({request.len() - body.len()} header bytes) + split {body.len()}-byte body", ok, wire)
+
+fn case_unterminated_long_line(server: SimpleHttpServer) -> i32:
+    val request = "POST /large HTTP/1.1\r\nHost: loopback\r\nX-Flood: " + _pattern("f", 9000)
+    val wire = _drive(server, request, true)
+    _report("9 KB unterminated header line -> 431", wire.starts_with("HTTP/1.1 431"), wire)
+
+fn case_unterminated_long_request_line(server: SimpleHttpServer) -> i32:
+    val request = "GET /" + _pattern("r", 9000)
+    val wire = _drive(server, request, true)
+    _report("9 KB unterminated request line -> 431", wire.starts_with("HTTP/1.1 431"), wire)
+
+fn case_short_body(server: SimpleHttpServer) -> i32:
+    val request = "POST /large HTTP/1.1\r\nHost: loopback\r\nContent-Length: 20000\r\nConnection: close\r\n\r\n" + _pattern("s", 100)
+    val wire = _drive(server, request, true)
+    _report("body shorter than Content-Length then half-close -> 400",
+        wire.starts_with("HTTP/1.1 400") and not wire.contains("headers_valid="), wire)
+
+fn main() -> i32:
+    val server = _server()
+    var failed = 0
+    failed = failed + case_multi_refill_split_body(server)
+    failed = failed + case_unterminated_long_line(server)
+    failed = failed + case_unterminated_long_request_line(server)
+    failed = failed + case_short_body(server)
+    if failed > 0:
+        print("FAIL HTTP scalar large live socket probe: {failed} case(s) failed")
+        return 1
+    print("HTTP_SCALAR_LARGE_LIVE_SOCKET_PROBE_COMPLETE cases=4")
+    0

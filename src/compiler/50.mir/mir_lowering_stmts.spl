@@ -1298,7 +1298,7 @@ impl MirLowering:
                                     # `val x: i64 = v` with `v: i64?` binds the
                                     # payload, not the Option handle.
                                     if hir_type_is_plain_scalar(declared_type):
-                                        init_local = self.option_scalar_payload_of(init_local)
+                                        init_local = self.option_payload_for_int_sink(init_local, declared_type)
                                         # `val n: i64 = ident(5)` with an erased
                                         # `T`/Any initializer: decode the tagged
                                         # word into the declared scalar slot
@@ -2322,7 +2322,7 @@ impl MirLowering:
                         else:
                             self.forget_local_hir_type(local.id)
                     case None:
-                        if not self.builtin_keeps_numeric_type_on_assign(local, assigned_value, found_declared_type):
+                        if not self.builtin_keeps_numeric_type_on_assign(local, assigned_value, found_declared_type) and not self.builtin_keeps_array_type_on_assign(assigned_value, found_declared_type):
                             self.forget_local_hir_type(local.id)
                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                 # (mir_lowering_stmts.spl is fenced): a `var`-reassignment
@@ -2687,6 +2687,14 @@ impl MirLowering:
             case _:
                 self.error_fatal("unsupported MIR assignment target: {target.kind}", nil)
 
+    fn numeric_int_const_for(value: i64, ty: MirType) -> MirConstValue:
+        """The NUMBER `value` as a constant of type `ty`. A float type takes
+        the Float form: a float-typed MirConstValue.Int is a bit pattern (the
+        backends iconst+bitcast it, see cl_scalar_const_plan), never 1.0."""
+        match ty.kind:
+            case MirTypeKind.F32 | MirTypeKind.F64: MirConstValue.Float(value.to_f64())
+            case _: MirConstValue.Int(value)
+
     me lower_int_literal_for_float_slot(value: HirExpr, declared: HirType) -> LocalId?:
         """An unsuffixed integer literal (or its negation) flowing into a
         DECLARED f32/f64 slot (call argument, annotated binding, return,
@@ -2699,6 +2707,16 @@ impl MirLowering:
             case HirTypeKind.Float(bits):
                 if bits == 32:
                     float_type = MirType(kind: MirTypeKind.F32)
+            case HirTypeKind.Optional(optional_inner):
+                # `val d: f64? = 3` / `takeo(3)` with `x: f64?`: the payload is
+                # the float 3.0. Lowered as Int(3) it was Some-boxed as the
+                # integer word, which a float decode reads as 1.5e-323.
+                match optional_inner.kind:
+                    case HirTypeKind.Float(optional_bits):
+                        if optional_bits == 32:
+                            float_type = MirType(kind: MirTypeKind.F32)
+                    case _:
+                        return nil
             case _:
                 return nil
         var int_value = 0
@@ -3066,7 +3084,11 @@ impl MirLowering:
             case Mul: MirBinOp.Mul
             case Div: MirBinOp.Div
             case Mod: MirBinOp.Rem
-            case _: MirBinOp.Add
+            case BitAnd: MirBinOp.BitAnd
+            case BitOr: MirBinOp.BitOr
+            case BitXor: MirBinOp.BitXor
+            case Shl: MirBinOp.Shl
+            case Shr: MirBinOp.Shr
 
     me try_lower_bitfield_set(base: HirExpr, base_local: LocalId, field_name: text, value_local: LocalId) -> LocalId?:
         """Lower bitfield field writes before generic struct field assignment."""
@@ -4551,7 +4573,7 @@ impl MirLowering:
         else:
             var b = self.builder
             val temp = b.new_temp(loop_ty)
-            b.emit_const(temp, MirConstValue.Int(0), loop_ty)
+            b.emit_const(temp, self.numeric_int_const_for(0, loop_ty), loop_ty)
             self.builder = b
             start_local = temp
 
@@ -4568,7 +4590,7 @@ impl MirLowering:
         else:
             var b = self.builder
             val temp = b.new_temp(loop_ty)
-            b.emit_const(temp, MirConstValue.Int(1), loop_ty)
+            b.emit_const(temp, self.numeric_int_const_for(1, loop_ty), loop_ty)
             self.builder = b
             step_local = temp
 

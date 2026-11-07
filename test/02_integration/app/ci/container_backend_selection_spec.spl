@@ -1,0 +1,42 @@
+# Backend selection policy only; these observations do not qualify a runtime.
+use std.spec.*
+use app.ci.pipeline_runner.*
+use std.common.contracts.orchestration.ci_v1.{PipelineV1, PipelineJobV1, JobV1}
+use std.common.contracts.orchestration.resource_v1.{ObjectMetaV1}
+
+describe "CI container backend selection":
+    it "blocks missing Podman even when Docker is present":
+        expect(container_engine_selection_error(ENGINE_PODMAN, false, true)).to_equal(
+            "selected-container-engine-unavailable: podman")
+
+    it "admits explicitly selected Docker client without requiring Podman":
+        expect(container_engine_selection_error(ENGINE_DOCKER, false, true)).to_equal("")
+
+    it "blocks missing Docker even when Podman is present":
+        expect(container_engine_selection_error(ENGINE_DOCKER, true, false)).to_equal(
+            "selected-container-engine-unavailable: docker")
+
+    it "admits selected Podman independently of Docker availability":
+        expect(container_engine_selection_error(ENGINE_PODMAN, true, false)).to_equal("")
+
+    it "rejects unsupported names instead of executing them":
+        for engine in [ENGINE_RUNC, "", "auto", "PODMAN", "untrusted-executable"]:
+            expect(container_engine_selection_error(engine, true, true)).to_equal(
+                "unsupported-container-engine: " + engine)
+            val probe = probe_container_lane(engine)
+            expect(probe.available).to_equal(false)
+            expect(probe.engine).to_equal("")
+            expect(probe.privilege).to_equal(PRIVILEGE_UNKNOWN)
+            expect(probe.reason).to_equal("unsupported-container-engine: " + engine)
+
+    it "rejects unknown backend before expanding an invalid pipeline":
+        val pipeline = PipelineV1(meta: ObjectMetaV1(name: "selection", ns: "default", labels: {}),
+            jobs: [PipelineJobV1(name: "missing", job_template_ref: "missing",
+                run_after: [], run_policy: "on-success")])
+        val templates: Dict<text, JobV1> = {}
+        match run_pipeline(pipeline, templates, "selection", "auto"):
+            case Err(rejection):
+                expect(rejection.kind).to_equal("backend")
+                expect(rejection.path).to_equal("engine")
+                expect(rejection.message).to_equal("unsupported-container-engine: auto")
+            case Ok(_): fail("unknown backend must reject before pipeline expansion")

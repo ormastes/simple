@@ -163,7 +163,7 @@ pub(crate) use interpreter_helpers::{
 
 // Include the rest of the interpreter functions
 #[path = "../interpreter_call/mod.rs"]
-mod interpreter_call;
+pub(crate) mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
 pub(crate) use interpreter_call::exec_function_with_values as exec_function_with_value_args;
