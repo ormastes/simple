@@ -4,6 +4,7 @@ use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessCpuQuo
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2, GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2, group_process_stream_identity_profiled_v3, group_process_stream_template_digest_v3}
 use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2}
 use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, PipedProcessOwnedTransferV2, process_piped_owned_transfer_equal_v2}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_process_stream_template_admit_v3}
 
 fn profile_owner_fixture_v3() -> GroupProcessStreamOwnerV2:
     val program = "/opt/approved-helper"
@@ -74,3 +75,27 @@ describe "retained V3 pipe resource provenance":
         match group_process_stream_template_digest_v3(owner.launch):
             case Ok(digest): expect(digest).to_equal(before)
             case Err(reason): fail("final owner template correlation failed: {reason}")
+
+    it "rejects legacy policy at the planning capability boundary":
+        var launch = profile_owner_fixture_v3().launch
+        launch.profile_v3 = nil
+        match linux_process_stream_template_admit_v3(launch):
+            case Err(reason): expect(reason).to_equal("stream template requires V3 resource profile")
+            case Ok(_): fail("legacy launch became profiled planning capability")
+
+    it "checks the real target with zero expiry and refuses a non-cgroup scope":
+        var launch = profile_owner_fixture_v3().launch
+        launch.transport_generation = 0
+        var request = launch.request
+        request.launch_deadline_unix_ms = 0
+        launch.request = request
+        var profile = launch.profile_v3.unwrap()
+        var broker = profile.broker
+        broker.cgroup_path = "/"
+        profile.broker = broker
+        launch.profile_v3 = Some(profile)
+        match linux_process_stream_template_admit_v3(launch):
+            case Err(reason): expect(reason).to_start_with("profiled Linux stream admission failed:")
+            case Ok(_): fail("non-cgroup root became a broker capability")
+        expect(launch.request.launch_deadline_unix_ms).to_equal(0)
+        expect(launch.transport_generation).to_equal(0)
