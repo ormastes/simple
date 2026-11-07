@@ -1,0 +1,61 @@
+# @req REQ-SSPEC-INTEGRATION
+# Regression authored; native reproduction NOT_RUN. Root cause undetermined.
+use std.spec.*
+use std.spec.step
+use std.common.string_core.{str_len}
+use std.io_runtime.{file_read, file_write, process_run_bounded, env_get, cwd_process}
+
+fn hir_assert_contract(case_name: text):
+    step("Prepare the real fixture")
+    val runtime = env_get("SIMPLE_BIN")
+    val workspace = cwd_process()
+    expect(runtime.starts_with("/")).to_equal(true)
+    expect(workspace.starts_with("/")).to_equal(true)
+    if not runtime.starts_with("/") or not workspace.starts_with("/"): return
+    val root = workspace + "/build/test-artifacts/hir-if-result/" + case_name
+    val clean = process_run_bounded("/bin/rm", ["-rf", root], 5000, 65536)
+    expect(clean.2).to_equal(0)
+    if clean.2 != 0: return
+    val setup = process_run_bounded("/bin/mkdir", ["-p", root + "/src"], 5000, 65536)
+    expect(setup.2).to_equal(0)
+    if setup.2 != 0: return
+    val fixture = file_read(workspace + "/test/fixtures/compiler/hir_untyped_if_result_subject/" + case_name + ".spl")
+    expect(fixture.len()).to_be_greater_than(0)
+    if fixture == "": return
+    val copied = file_write(root + "/src/main.spl", fixture)
+    expect(copied).to_equal(true)
+    if not copied: return
+    step("Invoke the production owner")
+    val built = process_run_bounded("/usr/bin/env", ["SIMPLE_BOOTSTRAP=1",
+        "SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1", runtime, "native-build",
+        "--source", root + "/src", "--entry", root + "/src/main.spl",
+        "--entry-closure", "--threads", "1", "--cache-dir", root + "/cache",
+        "-o", root + "/program"], 120000, 4194304)
+    val build_out = file_write(root + "/build.stdout.log", built.0)
+    val build_err = file_write(root + "/build.stderr.log", built.1)
+    val build_status = file_write(root + "/build.status.sdn", "exit_status: {built.2}\n")
+    expect(build_out and build_err and build_status).to_equal(true)
+    expect(str_len(built.0)).to_be_less_than(4194304)
+    expect(str_len(built.1)).to_be_less_than(4194304)
+    expect(built.2).to_equal(0)
+    if built.2 != 0 or str_len(built.0) >= 4194304 or str_len(built.1) >= 4194304: return
+    step("Check the observed contract")
+    val ran = process_run_bounded(root + "/program", [], 10000, 65536)
+    val run_out = file_write(root + "/run.stdout.log", ran.0)
+    val run_err = file_write(root + "/run.stderr.log", ran.1)
+    val run_status = file_write(root + "/run.status.sdn", "exit_status: {ran.2}\n")
+    expect(run_out and run_err and run_status).to_equal(true)
+    expect(str_len(ran.0)).to_be_less_than(65536)
+    expect(str_len(ran.1)).to_be_less_than(65536)
+    expect(ran.2).to_equal(0)
+    expect(ran.0.trim()).to_equal("PASS:hir-if-result-" + case_name)
+
+describe "native untyped if Result subject with colliding variants":
+    it "compiles the original unannotated join and executes both Result payloads":
+        hir_assert_contract("original")
+    it "preserves the explicit Result annotation control":
+        step("Check the neighboring failure case")
+        hir_assert_contract("annotated")
+    it "preserves Result ownership across an elif chain and nested fallback":
+        step("Check the neighboring failure case")
+        hir_assert_contract("ifchain")

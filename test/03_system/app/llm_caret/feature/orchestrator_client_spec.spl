@@ -1,0 +1,160 @@
+# Focused production-client regressions, not distributed execution acceptance.
+# @req REQ-CARET-CONTROLLER-001 REQ-CARET-CONTROLLER-002 REQ-CARET-CONTROLLER-003
+use std.spec.*
+use std.spec.step
+use app.llm_caret.orchestrator_client.{CaretOrchestratorRequestV1,
+    caret_orchestrator_argv_v1, caret_orchestrator_decode_reply_v1,
+    caret_orchestrator_request_v1}
+
+fn controller_request(action: text) -> CaretOrchestratorRequestV1:
+    val source = if action == "inspect": "" else: "/tmp/agent source.sdn"
+    val ns = if action == "inspect": "" else: "agents"
+    val name = if action == "inspect": "" else: "reviewer"
+    CaretOrchestratorRequestV1(executable: "/opt/simple/bin/simple_orchestrator",
+        action: action, state_root: "/tmp/controller state", controller_id: "controller-a",
+        request_uid: "request-a", source_path: source,
+        ns: ns, name: name)
+
+fn controller_submit_reply() -> text:
+    "version: 1\nkind: \"orchestrator-local-controller\"\ncontrollerId: \"controller-a\"\nrequestUid: \"request-a\"\nexecutionAuthorized: false\nstatus: \"intent-retained\"\nsourceDigest: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n"
+
+fn controller_inspect_reply() -> text:
+    controller_submit_reply() + "assignmentState: \"unbound\"\nschedulingState: \"intent-retained\"\nruntimeState: \"unobserved\"\nterminationObserved: false\ndesiredState: \"active\"\n"
+
+fn controller_workload_reply() -> text:
+    val projected = controller_inspect_reply().replace("schedulingState: \"intent-retained\"", "schedulingState: \"unassigned\"")
+    projected + "controllerEpoch: 1\ndesiredRevision: 1\nworkloadRevision: 1\nplanDigest: \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\nassignmentGeneration: 0\n"
+
+fn controller_bound_reply() -> text:
+    val assignment = controller_workload_reply().replace("assignmentState: \"unbound\"", "assignmentState: \"binding-retained\"")
+    val scheduling = assignment.replace("schedulingState: \"unassigned\"", "schedulingState: \"assignment-bound\"")
+    val generation = scheduling.replace("assignmentGeneration: 0", "assignmentGeneration: 1")
+    generation + "assignmentDigest: \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"\nhostOperationId: \"host-op-a\"\nphysicalHostId: \"host-a\"\nhostAuthorityId: \"authority-a\"\nhostBootId: \"boot-a\"\nproviderGeneration: 1\nserviceScopeId: \"scope-a\"\nassignedCpuMillis: 1000\nassignedMemoryBytes: 4096\n"
+
+describe "Caret immutable controller client":
+    it "keeps explicit compiled command arguments as separate values":
+        step("Build submit and inspect arguments for one unchanged request UID")
+        val submit = caret_orchestrator_argv_v1(controller_request("submit"))
+        expect(submit.is_ok()).to_equal(true)
+        expect(submit.unwrap()).to_equal(["submit", "/tmp/controller state",
+            "controller-a", "request-a", "/tmp/agent source.sdn", "agents", "reviewer"])
+        val inspect = caret_orchestrator_argv_v1(controller_request("inspect"))
+        expect(inspect.is_ok()).to_equal(true)
+        expect(inspect.unwrap()).to_equal(["inspect", "/tmp/controller state", "controller-a", "request-a"])
+
+    it "rejects invalid requests before any controller process effect":
+        step("Refuse implicit PATH commands, invalid actions and invalid request identities")
+        var implicit_path = controller_request("submit")
+        implicit_path.executable = "simple_orchestrator"
+        var invalid_uid = controller_request("submit")
+        invalid_uid.request_uid = "request\nforged"
+        var relative_source = controller_request("submit")
+        relative_source.source_path = "agent.sdn"
+        for request in [implicit_path, invalid_uid, relative_source, controller_request("execute")]:
+            expect(caret_orchestrator_argv_v1(request).is_err()).to_equal(true)
+            val reply = caret_orchestrator_request_v1(request)
+            expect(reply.confirmed).to_equal(false)
+            expect(reply.reconciliation_required).to_equal(false)
+            expect(reply.execution_authorized).to_equal(false)
+            expect(reply.request_uid).to_equal(request.request_uid)
+
+    it "accepts a matching retained-intent receipt without granting execution":
+        step("Validate the controller identity, request UID and retained source digest")
+        val reply = caret_orchestrator_decode_reply_v1(controller_request("submit"), controller_submit_reply(), "", 0)
+        expect(reply.confirmed).to_equal(true)
+        expect(reply.controller_id).to_equal("controller-a")
+        expect(reply.request_uid).to_equal("request-a")
+        expect(reply.status).to_equal("intent-retained")
+        expect(reply.execution_authorized).to_equal(false)
+        expect(reply.reconciliation_required).to_equal(false)
+
+    it "distinguishes inspected metadata from observed runtime or termination":
+        step("Read active and cancelled intent while preserving unobserved runtime state")
+        val active = caret_orchestrator_decode_reply_v1(controller_request("inspect"), controller_inspect_reply(), "", 0)
+        expect(active.confirmed).to_equal(true)
+        expect(active.execution_authorized).to_equal(false)
+        val cancelled_status = controller_inspect_reply().replace("intent-retained", "intent-cancelled")
+        val cancelled_text = cancelled_status.replace("desiredState: \"active\"", "desiredState: \"cancellation-requested\"")
+        # Cancellation does not change the scheduling evidence recorded by the owner.
+        val cancelled = caret_orchestrator_decode_reply_v1(controller_request("inspect"),
+            cancelled_text.replace("schedulingState: \"intent-cancelled\"", "schedulingState: \"intent-retained\""), "", 0)
+        expect(cancelled.confirmed).to_equal(true)
+        expect(cancelled.status).to_equal("intent-cancelled")
+        expect(cancelled.execution_authorized).to_equal(false)
+
+    it "refuses replies with wrong identity types version or claimed authorization":
+        step("Keep the original UID when the controller reply cannot be trusted")
+        val good = controller_submit_reply()
+        for output in [good.replace("version: 1", "version: 2"),
+                good.replace("version: 1", "version: \"1\""),
+                good.replace("orchestrator-local-controller", "other-controller"),
+                good.replace("controller-a", "controller-b"),
+                good.replace("request-a", "request-b"),
+                good.replace("executionAuthorized: false", "executionAuthorized: true")]:
+            val reply = caret_orchestrator_decode_reply_v1(controller_request("submit"), output, "", 0)
+            expect(reply.confirmed).to_equal(false)
+            expect(reply.reconciliation_required).to_equal(true)
+            expect(reply.execution_authorized).to_equal(false)
+            expect(reply.controller_id).to_equal("controller-a")
+            expect(reply.request_uid).to_equal("request-a")
+
+    it "requires complete workload and assignment evidence for advanced metadata states":
+        step("Accept complete retained metadata while rejecting missing fields and zero provider generation")
+        for output in [controller_workload_reply(), controller_bound_reply()]:
+            val reply = caret_orchestrator_decode_reply_v1(controller_request("inspect"), output, "", 0)
+            expect(reply.confirmed).to_equal(true)
+            expect(reply.execution_authorized).to_equal(false)
+        val bound = controller_bound_reply()
+        for output in [bound.replace("hostOperationId: \"host-op-a\"\n", ""),
+                bound.replace("providerGeneration: 1", "providerGeneration: 0"),
+                bound.replace("assignmentGeneration: 1", "assignmentGeneration: 0"),
+                controller_inspect_reply() + "hostOperationId: \"host-op-a\"\n"]:
+            val reply = caret_orchestrator_decode_reply_v1(controller_request("inspect"), output, "", 0)
+            expect(reply.confirmed).to_equal(false)
+            expect(reply.reconciliation_required).to_equal(true)
+
+    it "refuses duplicate keys malformed source evidence and unknown status":
+        step("Require strict SDN and the selected operation's exact success schema")
+        val good = controller_submit_reply()
+        for output in [good + "requestUid: \"request-a\"\n", "not a controller receipt",
+                good.replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "invalid-digest"),
+                good.replace("intent-retained", "running")]:
+            val reply = caret_orchestrator_decode_reply_v1(controller_request("submit"), output, "", 0)
+            expect(reply.confirmed).to_equal(false)
+            expect(reply.reconciliation_required).to_equal(true)
+            expect(reply.request_uid).to_equal("request-a")
+
+    it "retains reconciliation after process failure even with a valid stdout receipt":
+        step("Treat timeout, nonzero exit and missing output as unconfirmed completion")
+        for exit_code in [-1, 1, 124]:
+            val reply = caret_orchestrator_decode_reply_v1(controller_request("submit"), controller_submit_reply(), "process failed", exit_code)
+            expect(reply.confirmed).to_equal(false)
+            expect(reply.reconciliation_required).to_equal(true)
+            expect(reply.request_uid).to_equal("request-a")
+        val missing = caret_orchestrator_decode_reply_v1(controller_request("submit"), "", "", 0)
+        expect(missing.confirmed).to_equal(false)
+        expect(missing.reconciliation_required).to_equal(true)
+        expect(missing.request_uid).to_equal("request-a")
+
+    it "rejects saturated byte captures and unsolicited stderr":
+        step("Require complete bounded capture before confirming metadata")
+        val too_large = controller_submit_reply() + " ".repeat(65536)
+        val saturated = caret_orchestrator_decode_reply_v1(controller_request("submit"), too_large, "", 0)
+        expect(saturated.confirmed).to_equal(false)
+        expect(saturated.reconciliation_required).to_equal(true)
+        val warning = caret_orchestrator_decode_reply_v1(controller_request("submit"), controller_submit_reply(), "warning", 0)
+        expect(warning.confirmed).to_equal(false)
+        expect(warning.reconciliation_required).to_equal(true)
+        expect(warning.request_uid).to_equal("request-a")
+
+    it "rejects inconsistent inspection and inferred runtime success":
+        step("Do not convert assignment metadata or cancellation intent into process evidence")
+        val good = controller_inspect_reply()
+        for output in [good.replace("runtimeState: \"unobserved\"", "runtimeState: \"running\""),
+                good.replace("terminationObserved: false", "terminationObserved: true"),
+                good.replace("desiredState: \"active\"", "desiredState: \"cancellation-requested\""),
+                good.replace("assignmentState: \"unbound\"", "assignmentState: \"binding-retained\"")]:
+            val reply = caret_orchestrator_decode_reply_v1(controller_request("inspect"), output, "", 0)
+            expect(reply.confirmed).to_equal(false)
+            expect(reply.reconciliation_required).to_equal(true)
+            expect(reply.execution_authorized).to_equal(false)
