@@ -63,7 +63,12 @@ int64_t   rt_mlkem_modq_avx2_selfcheck(void);
 #endif
 
 /* x86_64 AVX2 — runtime-detected via cpuid */
-#if (defined(__x86_64__) || defined(_M_X64)) && !(defined(__clang__) && defined(_MSC_VER))
+/* SIMPLE_RUNTIME_DISABLE_AVX2 is a build-only test override that excludes
+ * AVX2 code. SIMPLE_RUNTIME_FORCE_NO_AVX2 keeps AVX2 code compiled but disables
+ * its runtime selection. */
+#if (defined(__x86_64__) || defined(_M_X64)) && \
+    !(defined(__clang__) && defined(_MSC_VER)) && \
+    !defined(SIMPLE_RUNTIME_DISABLE_AVX2)
 #  define SIMD_CAN_AVX2 1
 #else
 /* clang-cl (__clang__ AND _MSC_VER) is excluded deliberately.
