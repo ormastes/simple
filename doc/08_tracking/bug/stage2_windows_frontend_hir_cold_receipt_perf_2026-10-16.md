@@ -218,3 +218,15 @@ complexity fact but was not the measured cost at <=1300 modules.
 Memory follow-up (open): the heap registry keeps one entry per live object
 for the process lifetime (~16+ B/entry plus rehash doubling) and is part
 of the 12.8 GB job commit observed at the end of full-CLI parse.
+
+## Note (2026-11-07, Phase 2 Lane 4)
+
+fix-implemented-verification-pending: cold receipt admission (`cold_hir_source_inventory_admit_v1`) no longer
+re-derives the inventory digest (sort + encode + sha256 over every row) when the caller passes the reader-minted
+`admitted.digest` that already equals the expected digest; any other value recomputes (fail-closed).
+Seed-interpreter measurement, admission of a 1-module closure over a synthetic inventory:
+14,443 rows 38.5 s (digest alone 42.8 s) BEFORE; 3,000 rows 5957 ms -> 12 ms AFTER (cost spec, ratio-pinned at <= 1/2).
+Spec: test/01_unit/compiler/cache/cold_hir_admission_cost_spec.spl (3/3). Not yet addressed: the per-row typed ABI
+re-encode (~310 ms/module, `hir_abi_interface_encoded_v1`) -- needs the HIR-encode lane's receipt reuse.
+Verification needs a Stage 2 binary: `SIMPLE_PACKAGE_INDEX_COLD_INIT=1` build of src/app/classrepro/main.spl, read
+`phase3:hir:cold_receipts` from `SIMPLE_COMPILER_PHASE_PROFILE=1` (expect << 6.4 s fixed).
