@@ -5,6 +5,41 @@ use os.apps.smux.service.{ServiceState}
 use std.sosix.pty.{sosix_pty_close}
 use std.sosix.process.{sosix_process_close_piped}
 use std.sosix.process.sosix_process_close_piped_ref_v1
+use std.sosix.process.sosix_process_cleanup_piped_owned_v2
+
+pub struct PaneResetPreparationV2:
+    state: ServiceState
+    may_reset: bool
+
+# Explicit-state preparation for the existing test reset. Owned host-release
+# authority blocks reset entirely, before any cleanup or metadata mutation.
+pub fn prepare_pane_reset_v2(before: ServiceState) -> PaneResetPreparationV2:
+    var index = 0
+    while index < before.pane_count:
+        val pane = before.get_pane(index)
+        if pane.owned_terminal_transfer != nil or pane.helper_cleaned_awaiting_release:
+            return PaneResetPreparationV2(state: before, may_reset: false)
+        index = index + 1
+    var released = before
+    index = 0
+    while index < released.pane_count:
+        val pane = released.get_pane(index)
+        if val reference = pane.terminal_ref:
+            if sosix_process_close_piped_ref_v1(reference).is_err():
+                return PaneResetPreparationV2(state: released, may_reset: false)
+            released = released.replace_pane(index, pane.with_pty(-1, -1))
+        index = index + 1
+    # Preserve legacy reset's best-effort behavior without weakening canonical
+    # or owned cleanup rules. No host reap/budget-release proof is claimed.
+    index = 0
+    while index < released.pane_count:
+        val pane = released.get_pane(index)
+        if pane.pty_fd >= 0:
+            val _closed = sosix_pty_close(pane.pty_fd as i32)
+        elif pane.child_pid > 0:
+            val _closed = sosix_process_close_piped(pane.child_pid)
+        index = index + 1
+    PaneResetPreparationV2(state: released, may_reset: true)
 
 pub fn close_owned_children(st0: ServiceState, session_id: text, window_id: text = "", pane_id: text = "") -> ServiceState:
     var st = st0
@@ -13,8 +48,19 @@ pub fn close_owned_children(st0: ServiceState, session_id: text, window_id: text
         val pane = st.get_pane(i)
         if pane.pane.session_id == session_id and (window_id == "" or pane.pane.window_id == window_id) and (pane_id == "" or pane.pane.id == pane_id):
             var closed = true
-            if val reference = pane.terminal_ref:
-                closed = sosix_process_close_piped_ref_v1(reference).is_ok()
+            if val transfer = pane.owned_terminal_transfer:
+                # Even successful helper cleanup is not host budget release.
+                # Publish the one-shot flag while retaining the complete bundle.
+                closed = false
+                if not pane.helper_cleaned_awaiting_release:
+                    if sosix_process_cleanup_piped_owned_v2(transfer.owner, transfer.reference).is_ok():
+                        var retained = pane
+                        retained.helper_cleaned_awaiting_release = true
+                        st = st.replace_pane(i, retained)
+            elif pane.helper_cleaned_awaiting_release:
+                closed = false
+            elif pane.terminal_ref != nil:
+                closed = sosix_process_close_piped_ref_v1(pane.terminal_ref.unwrap()).is_ok()
             elif pane.pty_fd >= 0:
                 closed = sosix_pty_close(pane.pty_fd as i32)
             elif pane.child_pid > 0:

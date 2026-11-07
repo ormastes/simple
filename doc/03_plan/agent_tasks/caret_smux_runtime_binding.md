@@ -7,11 +7,22 @@ Final source reviewer: Astra lead. Landing/integrated qualification: root.
 
 Caret owns the authenticated smux server adapter, pane adoption into the
 existing stream owner, real Caret consumer, and focused route/lifecycle specs.
-Daemon owns shared generation-bearing pipe references over the existing
-process registry. Podman owns exact-ID attach/session capability and explicit
-trusted runtime policy. Host owns protected execution resolution and fresh
-observation. Orchestrator owns immutable dispatch and versioned execution
-inspection. The system acceptance lead owns cross-process positive scenarios.
+Daemon owns shared generation-bearing pipe references and the group-owned
+stream profile over the existing process registry. Provider leads own exact-ID
+attach/session capabilities and explicit trusted runtime policy. Windows Docker
+and Linux Podman are consumed through the common Simple Container API, whose
+shared contracts remain orchestrator-owned. Host owns protected execution
+resolution, fresh observation, helper admission and reap acknowledgement.
+Orchestrator owns immutable dispatch, aggregate parent budget authorization and
+versioned execution inspection. The system acceptance lead owns cross-process
+positive scenarios.
+
+In the resumed implementation, Sol owns pane full-bundle retention/adoption,
+authenticated stop and input guards, capability client interoperability and the
+real owned-helper consumer scenario. Astra owns the exact CLI/invocation
+contracts, separate Caret controller execution client, integration design and
+final source review. CLI contracts require a consumed retained AgentSession
+resolver and actual image CLI evidence before an executable session claim.
 
 Shared interface names are frozen by their owning leads before consumers are
 implemented. No placeholder successful transport or fabricated observation is

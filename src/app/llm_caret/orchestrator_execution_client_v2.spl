@@ -1,0 +1,141 @@
+# One bounded compiled-controller call. Validated observations are facts, never
+# permission to open a terminal or proof that an AgentSession completed.
+use app.io.mod.{process_run_bounded, process_bounded_timed_out}
+use std.nogc_sync_mut.fs.host_path.host_path_is_absolute
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.contracts.orchestration.controller_execution_reply_v2.{ControllerExecutionReplyV2,
+    controller_execution_reply_decode_v2, controller_execution_reply_encode_v2}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_decode_v2
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct CaretExecutionRequestV2:
+    executable: text
+    action: text
+    state_root: text
+    controller_id: text
+    request_uid: text
+    packet_path: text
+
+pub struct CaretExecutionResultV2:
+    controller_id: text
+    request_uid: text
+    confirmed: bool
+    status: text
+    runtime_phase: text
+    code: text
+    reconciliation_required: bool
+    output: text
+
+fn execution_path_valid_v2(path: text) -> bool:
+    (host_path_is_absolute(path) and path.bytes().len() <= 4096 and
+        not path.contains("\0") and not path.contains("\n") and
+        not path.contains("\r") and not path.contains("\t"))
+
+pub fn caret_execution_argv_v2(request: CaretExecutionRequestV2) -> Result<[text], text>:
+    if not ["dispatch", "resume-execution", "inspect-execution"].contains(request.action):
+        return Err("execution-action-invalid")
+    if not execution_path_valid_v2(request.executable) or not execution_path_valid_v2(request.state_root):
+        return Err("execution-path-invalid")
+    if not builder_identifier_valid_v1(request.controller_id) or not builder_identifier_valid_v1(request.request_uid):
+        return Err("execution-identity-invalid")
+    var args = [request.action, request.state_root, request.controller_id, request.request_uid]
+    if request.action == "inspect-execution":
+        if request.packet_path != "": return Err("execution-inspect-arguments-invalid")
+    else:
+        if not execution_path_valid_v2(request.packet_path): return Err("execution-packet-path-invalid")
+        args.push(request.packet_path)
+    Ok(args)
+
+pub fn caret_execution_timeout_ms_v2(action: text) -> i64:
+    if action == "inspect-execution": 30000 else: 120000
+
+fn execution_failure_v2(request: CaretExecutionRequestV2, code: text,
+        reconciliation: bool) -> CaretExecutionResultV2:
+    CaretExecutionResultV2(controller_id: request.controller_id, request_uid: request.request_uid,
+        confirmed: false, status: "unconfirmed", runtime_phase: "unobserved", code: code,
+        reconciliation_required: reconciliation, output: "")
+
+fn execution_host_phase_v2(reply: ControllerExecutionReplyV2) -> Result<text, text>:
+    if reply.status == "runtime-observed":
+        val observed = host_execution_observation_decode_v2(reply.host_response)?
+        if (observed.operation_id != reply.host_operation_id or observed.plan_digest != reply.plan_digest or
+                observed.request_digest != reply.request_digest):
+            return Err("execution-host-correlation-mismatch")
+        # The host decoder validates the full continuity scope and internal
+        # fence. Preserve it in the canonical output; never call the fence a
+        # native boot attestation or infer completion from an exited phase.
+        return Ok(observed.phase)
+    val parsed = sdn_parse_strict_v1(reply.host_response, SdnStrictLimitsV1(max_source_bytes: 131072,
+        max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8))
+    if parsed.is_err(): return Err("execution-prepared-malformed")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("execution-prepared-object")
+    val expected: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("host-local-operation-state"),
+        "operationId": SdnValue.String(reply.host_operation_id),
+        "state": SdnValue.String("admitted"), "executionObserved": SdnValue.Bool(false)}
+    if sdn_encode_canonical(SdnValue.Dict(fields)) != sdn_encode_canonical(SdnValue.Dict(expected)):
+        return Err("execution-prepared-correlation-mismatch")
+    Ok("unobserved")
+
+pub fn caret_execution_decode_v2(request: CaretExecutionRequestV2,
+        stdout: text, stderr: text, exit_code: i64) -> CaretExecutionResultV2:
+    val args = caret_execution_argv_v2(request)
+    if args.is_err(): return execution_failure_v2(request, args.unwrap_err(), true)
+    if process_bounded_timed_out(exit_code, stderr): return execution_failure_v2(request, "controller-timeout", true)
+    if exit_code == 2: return execution_failure_v2(request, "controller-reconciliation-required", true)
+    if exit_code != 0: return execution_failure_v2(request, "controller-error", true)
+    # Saturated capture is uncertain even when a truncated prefix parses.
+    if stdout.bytes().len() == 0 or stdout.bytes().len() >= 262144 or stderr != "":
+        return execution_failure_v2(request, "controller-output-invalid", true)
+    val decoded = controller_execution_reply_decode_v2(stdout)
+    if decoded.is_err(): return execution_failure_v2(request, decoded.unwrap_err(), true)
+    val reply = decoded.unwrap()
+    if reply.controller_id != request.controller_id or reply.request_uid != request.request_uid:
+        return execution_failure_v2(request, "controller-execution-identity-mismatch", true)
+    val phase = execution_host_phase_v2(reply)
+    if phase.is_err(): return execution_failure_v2(request, phase.unwrap_err(), true)
+    val encoded = controller_execution_reply_encode_v2(reply)
+    if encoded.is_err(): return execution_failure_v2(request, encoded.unwrap_err(), true)
+    CaretExecutionResultV2(controller_id: request.controller_id, request_uid: request.request_uid,
+        confirmed: true, status: reply.status, runtime_phase: phase.unwrap(), code: "execution-facts-confirmed",
+        reconciliation_required: false, output: encoded.unwrap())
+
+pub fn caret_execution_request_v2(request: CaretExecutionRequestV2) -> CaretExecutionResultV2:
+    val args = caret_execution_argv_v2(request)
+    if args.is_err(): return execution_failure_v2(request, args.unwrap_err(), false)
+    val (stdout, stderr, code) = process_run_bounded(request.executable, args.unwrap(),
+        caret_execution_timeout_ms_v2(request.action), 262144)
+    caret_execution_decode_v2(request, stdout, stderr, code)
+
+pub fn caret_execution_output_v2(reply: CaretExecutionResultV2) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "kind": SdnValue.String("caret-orchestrator-execution-result"),
+        "controllerId": SdnValue.String(reply.controller_id), "requestUid": SdnValue.String(reply.request_uid),
+        "confirmed": SdnValue.Bool(reply.confirmed), "status": SdnValue.String(reply.status),
+        "runtimePhase": SdnValue.String(reply.runtime_phase), "code": SdnValue.String(reply.code),
+        "reconciliationRequired": SdnValue.Bool(reply.reconciliation_required),
+        "completionObserved": SdnValue.Bool(false), "controllerOutput": SdnValue.String(reply.output)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+pub fn run_orchestrator_execution_cli_v2(raw_args: [text]) -> i64:
+    var request = CaretExecutionRequestV2(executable: "", action: "", state_root: "",
+        controller_id: "", request_uid: "", packet_path: "")
+    if raw_args.len() >= 6:
+        request = CaretExecutionRequestV2(executable: raw_args[1], action: raw_args[2],
+            state_root: raw_args[3], controller_id: raw_args[4], request_uid: raw_args[5], packet_path: "")
+    val expected = if request.action == "inspect-execution": 6 else:
+        if ["dispatch", "resume-execution"].contains(request.action): 7 else: 0
+    if raw_args.len() == 0 or raw_args[0] != "orchestrator" or expected == 0 or raw_args.len() != expected:
+        print caret_execution_output_v2(execution_failure_v2(request, "usage-invalid", false))
+        return 2
+    if request.action != "inspect-execution": request.packet_path = raw_args[6]
+    val reply = caret_execution_request_v2(request)
+    print caret_execution_output_v2(reply)
+    if reply.confirmed: return 0
+    if reply.reconciliation_required: return 1
+    2
