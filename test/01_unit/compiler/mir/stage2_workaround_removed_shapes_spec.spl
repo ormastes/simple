@@ -1,0 +1,134 @@
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+# Restored natural shapes after the stage2-era workarounds were removed
+# (bugs stage2_rejects_nil_in_optional_enum_payload_2026-11-05 and
+# stage2_if_val_struct_option_binding_as_int_wide_2026-11-03).
+# Repro: `nil` in an optional enum-payload slot and `if val` over struct/enum/
+# class/text Options. Prevention: sibling payload kinds. Coverage: source pins.
+
+struct S2Pt:
+    x: i64
+    y: i64
+
+class S2Cls:
+    n: i64
+
+enum S2Kind:
+    A
+    B(i64)
+
+enum S2Shape:
+    Arr(elem: i64, size: i64?)
+    Named(label: text?, pt: S2Pt?)
+    Wrap(k: S2Kind?, c: S2Cls?)
+
+fn s2_size(s: S2Shape) -> i64:
+    match s:
+        case S2Shape.Arr(_, size):
+            if val n = size:
+                return n
+            -1
+        case _: -2
+
+fn s2_opt_pt(present: bool) -> S2Pt?:
+    if present:
+        return S2Pt(x: 3, y: 4)
+    nil
+
+fn s2_opt_kind(present: bool) -> S2Kind?:
+    if present:
+        return S2Kind.B(7)
+    nil
+
+fn s2_opt_cls(present: bool) -> S2Cls?:
+    if present:
+        return S2Cls(n: 11)
+    nil
+
+fn s2_opt_text(present: bool) -> text?:
+    if present:
+        return "hi"
+    nil
+
+describe "nil in an optional enum payload slot (repro)":
+    it "i64? payload accepts nil":
+        expect(s2_size(S2Shape.Arr(elem: 1, size: nil))).to_equal(-1)
+    it "i64? payload still carries a value":
+        expect(s2_size(S2Shape.Arr(elem: 1, size: 5))).to_equal(5)
+
+describe "nil in sibling optional payload kinds (prevention)":
+    it "text? and struct? payloads accept nil":
+        val s = S2Shape.Named(label: nil, pt: nil)
+        match s:
+            case S2Shape.Named(label, pt):
+                expect(label == nil).to_equal(true)
+                expect(pt == nil).to_equal(true)
+            case _: expect(false).to_equal(true)
+    it "enum? and class? payloads accept nil":
+        val s = S2Shape.Wrap(k: nil, c: nil)
+        match s:
+            case S2Shape.Wrap(k, c):
+                expect(k == nil).to_equal(true)
+                expect(c == nil).to_equal(true)
+            case _: expect(false).to_equal(true)
+    it "non-nil struct? payload round-trips":
+        val s = S2Shape.Named(label: "p", pt: S2Pt(x: 1, y: 2))
+        match s:
+            case S2Shape.Named(label, pt):
+                expect(label ?? "").to_equal("p")
+                if val p = pt:
+                    expect(p.y).to_equal(2)
+                else:
+                    expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+describe "if val over struct/enum/class/text Options (repro + prevention)":
+    it "struct Option binds the payload, not an int":
+        var got = -1
+        if val p = s2_opt_pt(true):
+            got = p.x + p.y
+        expect(got).to_equal(7)
+    it "struct Option nil takes else":
+        var got = 0
+        if val p = s2_opt_pt(false):
+            got = p.x
+        else:
+            got = -9
+        expect(got).to_equal(-9)
+    it "enum Option binds the payload":
+        var got = -1
+        if val k = s2_opt_kind(true):
+            match k:
+                case S2Kind.B(v): got = v
+                case _: got = -3
+        expect(got).to_equal(7)
+    it "class Option binds the payload":
+        var got = -1
+        if val c = s2_opt_cls(true):
+            got = c.n
+        expect(got).to_equal(11)
+    it "text Option binds the payload":
+        var got = ""
+        if val t = s2_opt_text(true):
+            got = t
+        expect(got).to_equal("hi")
+    it "text Option nil takes else":
+        var got = "unset"
+        if val t = s2_opt_text(false):
+            got = t
+        else:
+            got = "none"
+        expect(got).to_equal("none")
+
+describe "source coverage of the restored sites":
+    it "builtin_method_extras spells the array size slot nil":
+        val src = file_read("src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl")
+        expect(src).to_contain("HirTypeKind.Array(int_elem, nil)")
+        expect(src).to_contain("HirTypeKind.Array(float_elem, nil)")
+        expect(src).not_to_contain("HirTypeKind.Array(int_elem, None)")
+        expect(src).not_to_contain("HirTypeKind.Array(float_elem, None)")
+        expect(src).not_to_contain("stage2_rejects_nil_in_optional_enum_payload")
+    it "any_escape checker carries no stage2 tag":
+        val src = file_read("src/compiler/35.semantics/any_escape/checker.spl")
+        expect(src).not_to_contain("@workaround bug=stage2_")

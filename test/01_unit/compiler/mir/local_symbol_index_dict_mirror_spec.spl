@@ -5,8 +5,8 @@ use std.nogc_sync_mut.io.file_ops.{file_read}
 # phase-3 stage2 the hashed local-symbol index buckets a binding by a value that
 # disagrees with the lookup's (symbol 8 landed in bucket 1 of 16, the probe used
 # bucket 8), so every `val`-then-use was "undefined variable". The binding is
-# mirrored into the runtime-canonicalized `local_map` Dict and find_local falls
-# back to it after an index miss. This pins both halves of that mirror.
+# (workaround REMOVED: bind_local no longer mirrors into `local_map`; find_local still falls
+# back to `local_map` for bindings written directly by catch/match patterns.)
 fn fn_body(src: text, header: text, stop: text) -> text:
     val start = src.index_of(header)
     if start < 0:
@@ -17,14 +17,15 @@ fn fn_body(src: text, header: text, stop: text) -> text:
         return rest
     rest.substring(0, end)
 
-describe "MIR local-symbol index is mirrored into local_map":
-    it "bind_local writes every binding into local_map":
+describe "MIR local-symbol index (stage2 mirror workaround removed)":
+    it "bind_local no longer mirrors every binding into local_map":
         val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
         val body = fn_body(src, "me bind_local(symbol_id: i64, local: LocalId):", "fn find_local(")
         expect(body.len() > 0).to_equal(true)
-        expect(body).to_contain("self.local_map[symbol_id] = local")
+        expect(body).not_to_contain("self.local_map[symbol_id] = local")
+        expect(body).to_contain("self.local_symbol_index_slots[bucket] = new_slot")
 
-    it "find_local falls back to local_map after an index miss":
+    it "find_local still resolves direct local_map writers after an index miss":
         val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
         val body = fn_body(src, "fn find_local(symbol_id: i64) -> LocalId:", "fn hir_type_mentions_type_param(")
         expect(body.len() > 0).to_equal(true)
@@ -35,3 +36,7 @@ describe "MIR local-symbol index is mirrored into local_map":
         val src = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
         expect(src).to_contain("self.local_map = {}")
         expect(src).to_contain("self.local_symbol_ids = []")
+
+    it "carries no stage2 workaround tag in mir_lowering_types":
+        val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
+        expect(src).not_to_contain("stage2_local_symbol_index_bucket_tagged_id")
