@@ -1,20 +1,36 @@
+use app.io.mod.{is_windows_platform}
+use app.mcpgdb.native_runners_v1.{mcpgdb_bundle_prepare_v1, mcpgdb_bundle_validate_v1}
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use app.mcpgdb.platform_v1.{mcpgdb_runner_request_path_v1}
 # mcpgdb clangd runner — repo-local wrapper to avoid examples timeout path
 
 use std.io_runtime.{file_read, env_get}
 
-use app.mcpgdb.json_helpers.{extract_id, jsonrpc_error}
+use app.mcpgdb.json_helpers.{extract_id, jsonrpc_error, make_tool_error}
 use app.mcpgdb.state.{save_persisted_state}
 use app.mcpgdb.state_loader.{load_persisted_state_safe}
 use app.mcpgdb.clangd_tools
 
 fn main():
-    val path = env_get("MCPGDB_REQUEST_PATH") ?? ""
+    val path = mcpgdb_runner_request_path_v1()
     if path == "":
         print jsonrpc_error("null", -32602, "missing request path")
         return
-    val body = file_read(path)
+    match mcpgdb_bundle_prepare_v1():
+        Ok(_): pass
+        Err(reason):
+            print make_tool_error("null", reason)
+            return
+    val body = match file_read_regular_no_follow_bounded(path, 1048576):
+        Ok(value): value
+        Err(reason):
+            print make_tool_error("null", reason)
+            return
     if body == "":
         print jsonrpc_error("null", -32602, "empty request body")
+        return
+    if is_windows_platform():
+        print make_tool_error("null", "persistent debugger/clangd session transport is not implemented for Windows; use debug_backend_probe")
         return
     val id = extract_id(body)
     load_persisted_state_safe()

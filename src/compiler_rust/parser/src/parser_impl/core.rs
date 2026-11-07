@@ -89,6 +89,11 @@ pub struct Parser<'a> {
     /// TsArrowFunction hints. Matches nest (a match inside an arm body), so
     /// this is a counter rather than a flag.
     pub(crate) match_arm_depth: usize,
+    /// Column of the innermost arm being parsed. A next-line `|` at this
+    /// boundary starts another arm rather than continuing bitwise OR.
+    pub(crate) match_arm_column: Option<usize>,
+    // Only the top-level expression of a pipe-arm guard owns its separator.
+    pub(crate) match_guard_arrow_depth: Option<u32>,
     /// When true, postfix parsing won't consume `{ ... }` after field access.
     /// Used to prevent ambiguity in `if cond { body }` syntax.
     pub(crate) no_brace_postfix: bool,
@@ -193,6 +198,8 @@ impl<'a> Parser<'a> {
             cond_structural_error: None,
             pattern_indent_count: 0,
             match_arm_depth: 0,
+            match_arm_column: None,
+            match_guard_arrow_depth: None,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
             class_trait_aliases: Vec::new(),
@@ -292,6 +299,8 @@ impl<'a> Parser<'a> {
             cond_structural_error: None,
             pattern_indent_count: 0,
             match_arm_depth: 0,
+            match_arm_column: None,
+            match_guard_arrow_depth: None,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
             class_trait_aliases: Vec::new(),

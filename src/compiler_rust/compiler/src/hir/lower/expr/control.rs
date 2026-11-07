@@ -197,6 +197,7 @@ impl Lowerer {
         };
         let subject_hir = self.lower_subject_for_patterns(condition_expr, [pattern], true, ctx)?;
         let subject_ty = subject_hir.ty;
+        self.validate_result_presence_binding(subject_ty, pattern, condition)?;
 
         // Temp local holding the subject value, so the pattern condition and the
         // payload extraction both read it without re-evaluating the expression.

@@ -9,8 +9,13 @@ percentile() { LC_ALL=C sort -n "$1" | sed -n "$2"p; }
 MODE= OUTPUT= SAMPLES= SIMPLE= INTERPRETER= C_BINARY= PYTHON= C_REFERENCE= STAGE4= NOGC= PROVIDERS= ALLOWANCE=0
 MATCH_SIMPLE= MATCH_C= MATCH_SOURCE= MATCH_STDOUT= MATCH_ARCHIVE= MATCH_RECEIPT=
 MATCH_CLANG= MATCH_LLD= MATCH_STRIP=
+# The measurements remain caller-supplied; this validates Stage4 authority only.
+STAGE4_COMPILER= STAGE4_SOURCE=
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --help) printf '%s\n' 'BS7 supplied-evidence cohort: --stage4-receipt COMPILER.provenance.env --stage4-compiler COMPILER --stage4-source-root SOURCE_ROOT are mandatory canonical Stage4 inputs.' 'Other required inputs: samples, NoGC/provider observations, separate interpreter/Python and matched Simple/C link artifacts. This tool does not acquire those measurements.'; exit 0;;
+        --stage4-compiler) STAGE4_COMPILER=$2; shift 2;;
+        --stage4-source-root) STAGE4_SOURCE=$2; shift 2;;
         --mode) MODE=$2; shift 2;; --output-dir) OUTPUT=$2; shift 2;; --samples) SAMPLES=$2; shift 2;;
         --simple-binary) SIMPLE=$2; shift 2;; --c-binary) C_BINARY=$2; shift 2;;
         --interpreter-binary) INTERPRETER=$2; shift 2;;
@@ -49,8 +54,19 @@ if [ "$(uname -s)" = Linux ]; then
         [ -f "$tool" ] && [ -x "$tool" ] || fail matched-link-tool-missing
     done
 fi
-[ "$(grep -c '^stage=4$' "$STAGE4" || true)" -eq 1 ] || fail admitted-stage4-required
-case "$(sed -n 's/^compiler_kind=//p' "$STAGE4")" in *seed*|*rust*) fail old-seed-is-diagnostic-only;; esac
+# Use canonical Stage4 provenance, never a caller-invented stage=4 label.
+[ -n "$STAGE4_COMPILER" ] && [ -n "$STAGE4_SOURCE" ] || fail actual-stage4-compiler-and-source-required
+[ -f "$STAGE4_COMPILER" ] && [ ! -L "$STAGE4_COMPILER" ] && [ -x "$STAGE4_COMPILER" ] || fail invalid-stage4-compiler
+[ -d "$STAGE4_SOURCE" ] || fail invalid-stage4-source-root
+bs7_check_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$bs7_check_root/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$bs7_check_root/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+[ "$(bootstrap_stage3_manifest_value schema "$STAGE4")" = simple-bootstrap-stage4-provenance-v1 ] || fail canonical-stage4-schema-required
+[ "$(bootstrap_stage3_manifest_value artifact_kind "$STAGE4")" = pure-simple-full-cli ] || fail canonical-stage4-full-cli-required
+stage4_verify_candidate_provenance "$STAGE4" "$STAGE4_COMPILER" "$STAGE4_SOURCE" || fail canonical-stage4-provenance-refused
 sample_count=$(awk -F'|' '$1=="sample"&&$2=="simple"{n++} END{print n+0}' "$SAMPLES")
 [ "$sample_count" -ge "$minimum" ] || fail insufficient-samples
 [ "$(awk -F'|' '$1=="sample"&&$2=="python"{n++} END{print n+0}' "$SAMPLES")" -eq "$sample_count" ] || fail asymmetric-cohort
@@ -109,7 +125,8 @@ fi
 set -- --receipt "$OUTPUT/receipt.env" --samples "$OUTPUT/samples.tsv" \
     --simple-binary "$SIMPLE" --interpreter-binary "$INTERPRETER" \
     --c-binary "$C_BINARY" --python-binary "$PYTHON" \
-    --stage4-receipt "$STAGE4" --nogc-inventory "$OUTPUT/nogc-inventory.tsv" \
+    --stage4-receipt "$STAGE4" --stage4-compiler "$STAGE4_COMPILER" \
+    --stage4-source-root "$STAGE4_SOURCE" --nogc-inventory "$OUTPUT/nogc-inventory.tsv" \
     --provider-trace "$OUTPUT/provider-trace.tsv"
 if [ "$(uname -s)" = Linux ]; then
     set -- "$@" --matched-simple-unstripped "$MATCH_SIMPLE" \

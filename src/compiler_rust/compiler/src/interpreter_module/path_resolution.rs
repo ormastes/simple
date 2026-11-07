@@ -1116,7 +1116,10 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_cache_key, find_numbered_dir, find_workspace_boundary, normalize_base_dir, resolve_module_path};
+    use super::{
+        compute_cache_key, find_numbered_dir, find_workspace_boundary, normalize_base_dir, preferred_stdlib_variant,
+        resolve_module_path,
+    };
     use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
     use std::fs;
     use std::path::{Path, PathBuf};

@@ -1,0 +1,119 @@
+# Restricted resident console grammar. GDB abbreviations, user commands,
+# function calls and command lists are deliberately not a general console API.
+# Use the structured MCP operations for all other debugger operations.
+
+fn console_admission_v1_digits(value: text) -> bool:
+    if value == "" or value.len() > 10: return false
+    var i = 0
+    while i < value.len():
+        val byte = value.byte_at(i)
+        if byte < 48 or byte > 57: return false
+        i = i + 1
+    true
+
+fn console_admission_v1_letter(byte: i64) -> bool:
+    (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95
+
+fn console_admission_v1_atom(value: text) -> bool:
+    if value == "" or value.len() > 128: return false
+    var i = 0
+    while i < value.len():
+        val byte = value.byte_at(i)
+        val letter = console_admission_v1_letter(byte)
+        val digit = byte >= 48 and byte <= 57
+        if not (letter or digit or (byte == 36 and i == 0)): return false
+        i = i + 1
+    # Bare '$' repeats the previous value; require an explicit operand.
+    value != "$"
+
+fn console_admission_v1_expression(value: text) -> bool:
+    # Unary scalar/pointer inspection followed by field/index selectors.
+    # No parentheses, casts, calls, binary operators, assignment or quotes.
+    if value == "" or value.len() > 256: return false
+    var i = 0
+    var unary = 0
+    while i < value.len() and [32, 42, 38, 45, 43].contains(value.byte_at(i)):
+        if value.byte_at(i) != 32:
+            unary = unary + 1
+            if unary > 8: return false
+            # ++ and -- are mutation, not nested unary inspection.
+            if i + 1 < value.len() and (value.byte_at(i) == 43 or value.byte_at(i) == 45) and value.byte_at(i + 1) == value.byte_at(i): return false
+        i = i + 1
+    if i >= value.len(): return false
+    val start = i
+    while i < value.len() and (console_admission_v1_letter(value.byte_at(i)) or (value.byte_at(i) >= 48 and value.byte_at(i) <= 57) or (value.byte_at(i) == 36 and i == start)):
+        i = i + 1
+    if not console_admission_v1_atom(value.substring(start, i)): return false
+    while i < value.len():
+        if value.byte_at(i) == 32:
+            i = i + 1
+        elif value.byte_at(i) == 91:
+            i = i + 1
+            val index_start = i
+            while i < value.len() and value.byte_at(i) >= 48 and value.byte_at(i) <= 57:
+                i = i + 1
+            if not console_admission_v1_digits(value.substring(index_start, i)): return false
+            if i >= value.len() or value.byte_at(i) != 93: return false
+            i = i + 1
+        else:
+            if value.byte_at(i) == 46:
+                i = i + 1
+            elif i + 1 < value.len() and value.byte_at(i) == 45 and value.byte_at(i + 1) == 62:
+                i = i + 2
+            else: return false
+            val field_start = i
+            if i >= value.len() or not console_admission_v1_letter(value.byte_at(i)): return false
+            while i < value.len() and (console_admission_v1_letter(value.byte_at(i)) or (value.byte_at(i) >= 48 and value.byte_at(i) <= 57)):
+                i = i + 1
+            if i == field_start: return false
+    true
+
+fn console_admission_v1_pattern(value: text) -> bool:
+    if value.len() > 128: return false
+    var i = 0
+    while i < value.len():
+        val byte = value.byte_at(i)
+        if not (console_admission_v1_letter(byte) or (byte >= 48 and byte <= 57) or [32, 46, 42, 94, 36, 91, 93, 45, 58].contains(byte)): return false
+        i = i + 1
+    true
+
+pub fn console_admission_v1_validate(command: text) -> Result<bool, text>:
+    if command.len() > 512: return Err("restricted console command bound exceeded")
+    # Only literal ASCII spaces delimit tokens. Reject tabs/newlines/control
+    # bytes even inside quotes; GDB quoting/continuation is outside this grammar.
+    var i = 0
+    while i < command.len():
+        val byte = command.byte_at(i)
+        if byte < 32 or byte > 126: return Err("restricted console requires printable ASCII and spaces")
+        i = i + 1
+    val normalized = command.trim()
+    if ["continue", "c", "step", "s", "next", "n", "finish", "interrupt", "bt", "backtrace", "where", "info registers", "info threads", "info breakpoints", "info frame", "info locals", "info args", "info program", "info sharedlibrary", "info files"].contains(normalized):
+        return Ok(true)
+    # Exact command spelling matters. Never lower-case arbitrary input and then
+    # send the original spelling to GDB, whose aliases are case sensitive.
+    var parts: [text] = []
+    for part in normalized.split(" "):
+        if part != "": parts.push(part)
+    if parts.len() == 0: return Err("empty console command")
+    if ["info threads", "info breakpoints", "info frame", "info locals", "info args", "info program", "info sharedlibrary", "info files"].contains(parts.join(" ")): return Ok(true)
+    if parts[0] == "help":
+        for part in parts:
+            if not console_admission_v1_pattern(part): return Err("invalid help topic")
+        return Ok(true)
+    if parts[0] == "info" and parts.len() >= 2:
+        if parts[1] == "functions":
+            if console_admission_v1_pattern(parts.join(" ")): return Ok(true)
+        if parts[1] == "registers":
+            for part in parts:
+                if not console_admission_v1_atom(part): return Err("invalid register list")
+            return Ok(true)
+    var print_command = ["print", "p", "output"].contains(parts[0])
+    for base in ["print/", "p/", "output/"]:
+        if parts[0].starts_with(base) and parts[0].len() == base.len() + 1:
+            if ["x", "d", "u", "o", "t", "a", "f", "c", "z"].contains(parts[0].substring(base.len())): print_command = true
+    if print_command and parts.len() >= 2:
+        val operand = normalized.substring(parts[0].len()).trim()
+        if console_admission_v1_expression(operand): return Ok(true)
+    if parts.len() == 2:
+        if ["bt", "backtrace", "frame", "up", "down"].contains(parts[0]) and console_admission_v1_digits(parts[1]): return Ok(true)
+    Err("command is outside the restricted console grammar; use structured MCP tools")

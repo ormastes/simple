@@ -1,0 +1,32 @@
+# Native MCPGDB platform boundary: no shell, compiler or source retry.
+use app.io.minimal_runtime_ops.{env_get}
+use app.io.mod.{secure_temp_dir, dir_remove_all, file_create_exclusive, process_run_bounded, is_windows_platform}
+use std.cli.cli_util.{get_cli_args}
+
+pub fn mcpgdb_private_root_v1() -> text:
+    env_get("MCPGDB_PRIVATE_ROOT")
+
+pub fn mcpgdb_request_file_v1(content: text) -> Result<text, text>:
+    val root = mcpgdb_private_root_v1()
+    if root == "": return Err("MCPGDB_PRIVATE_ROOT is required")
+    val directory = secure_temp_dir(root, "mcpgdb-request-")?
+    val path = directory + "/request.json"
+    if not file_create_exclusive(path, content):
+        dir_remove_all(directory)
+        return Err("failed to exclusively create native runner request")
+    Ok(path)
+
+pub fn mcpgdb_request_cleanup_v1(path: text):
+    if path.ends_with("/request.json"):
+        dir_remove_all(path.substring(0, path.len() - 13))
+
+pub fn mcpgdb_runner_request_path_v1() -> text:
+    val args = get_cli_args()
+    if args.len() == 2 and args[0] == "--request-path": return args[1]
+    ""
+
+pub fn mcpgdb_run_native_v1(path: text, request: text) -> (text, text, i64):
+    process_run_bounded(path, ["--request-path", request], 15000, 1048576)
+
+pub fn mcpgdb_windows_persistent_v1(name: text) -> bool:
+    is_windows_platform() and name.starts_with("clangd_")
