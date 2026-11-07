@@ -25,7 +25,7 @@ use std.spipe.*
 use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind, MethodResolution}
 use compiler.hir.hir_definitions.{
     HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock,
-    HirBinOp, HirAssignOp, HirCallArg, HirParam, HirInterpolation,
+    HirBinOp, HirAssignOp, HirCallArg, HirParam, HirInterpolation, HirIfArm,
 }
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.svmg_lowering.{SvmgHelperFn, LoweredProgram, lower_svmg_program}
@@ -147,6 +147,437 @@ fn expect_vm_shift_result(result: VmRunResult, expected: i64):
 # ============================================================================
 # Positive cases
 # ============================================================================
+
+fn guarded_float_compound_body(rhs: HirExpr) -> HirBlock:
+    val symbol = SymbolId(id: 100)
+    val target = HirExpr(kind: HirExprKind.Var(symbol), has_type_: true,
+        type_: float_ty(), span: Span.empty())
+    block_no_tail([
+        s(HirStmtKind.Let(symbol, float_ty(), float_lit(1.0))),
+        assign(target, HirAssignOp.Add, rhs),
+        s(HirStmtKind.Expr(expect_to_equal(target, float_lit(3.5)))),
+    ])
+
+describe "SVM-G expect operand representation":
+    it "rejects integer bits aliased to a float in either operand position":
+        step("Integer 1065353216 must not compare as the f32 bit pattern for 1.0")
+        for reverse in [false, true]:
+            val actual = if reverse: float_lit(1.0) else: int_lit(1065353216)
+            val expected = if reverse: int_lit(1065353216) else: float_lit(1.0)
+            val prog = lower_svmg_program(block_no_tail([
+                s(HirStmtKind.Expr(expect_to_equal(actual, expected)))]), [], 1000)
+            assert_false(prog.ok)
+            assert_contains(prog.error, "mixed integer/float expect operands")
+
+    it "rejects a float comparison result compared with a float":
+        step("Float comparisons emit Bool words and cannot enter FEQ as floats")
+        val actual = binop(HirBinOp.Lt, float_lit(1.0), float_lit(2.0))
+        val prog = lower_svmg_program(block_no_tail([
+            s(HirStmtKind.Expr(expect_to_equal(actual, float_lit(1.0))))]), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float expect operands")
+
+    it "preserves float equality semantics and integer comparison results":
+        step("FEQ equates signed zero while comparison results use integer equality")
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expect_to_equal(float_lit(-0.0), float_lit(0.0)))),
+            s(HirStmtKind.Expr(expect_to_equal(
+                binop(HirBinOp.Lt, float_lit(1.0), float_lit(2.0)), int_lit(1)))),
+        ])
+        val result = run_print_body(body, [])
+        expect_vm_print_log(result, "")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 2)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, expected_signed_i32_bits(-0.0))
+        assert_equal(records[1].passed, 1)
+        assert_equal(records[1].value, 1)
+
+describe "SVM-G discarded expression stack balance":
+    it "discards intermediate scalar results in both consumed conditional branches":
+        step("Let stores the selected tail rather than using an ignored value as its address")
+        for choice in [0, 1]:
+            val value_sym = SymbolId(id: 120)
+            val sentinel_sym = SymbolId(id: 121)
+            val rhs = e(HirExprKind.If(
+                binop(HirBinOp.Eq, int_lit(choice), int_lit(1)),
+                block_with_tail([s(HirStmtKind.Expr(int_lit(99)))], int_lit(7)),
+                block_with_tail([s(HirStmtKind.Expr(int_lit(98)))], int_lit(8))))
+            val expected = if choice == 1: 7 else: 8
+            val result = run_print_body(block_no_tail([
+                s(HirStmtKind.Let(value_sym, ty(), rhs)),
+                s(HirStmtKind.Let(sentinel_sym, ty(), int_lit(42))),
+                s(HirStmtKind.Expr(expect_to_equal(var_(value_sym), int_lit(expected)))),
+                s(HirStmtKind.Expr(expect_to_equal(var_(sentinel_sym), int_lit(42)))),
+            ]), [])
+            expect_vm_print_log(result, "")
+            val records = read_records(result.arena, result.log_cap, result.record_count)
+            assert_equal(records.len(), 2)
+            assert_equal(records[0].passed, 1)
+            assert_equal(records[0].value, expected)
+            assert_equal(records[1].passed, 1)
+            assert_equal(records[1].value, 42)
+
+    it "discards helper results in every consumed chain arm without losing side effects":
+        step("Ignored helper calls execute once and leave only the selected chain tail")
+        val helper = SvmgHelperFn(name: "ignored_value", params: [], body: block_with_tail([
+            s(HirStmtKind.Expr(int_lit(97))),
+            s(HirStmtKind.Expr(call(named_var(SymbolId(id: 122), "print"), [string_lit("h")]))),
+        ], int_lit(99)))
+        val ignored = s(HirStmtKind.Expr(call(named_var(SymbolId(id: 123), "ignored_value"), [])))
+        for choice in [0, 1, 2]:
+            val value_sym = SymbolId(id: 124)
+            val sentinel_sym = SymbolId(id: 125)
+            val rhs = e(HirExprKind.IfChain([
+                HirIfArm(binop(HirBinOp.Eq, int_lit(choice), int_lit(0)),
+                    block_with_tail([ignored], int_lit(10)), Span.empty()),
+                HirIfArm(binop(HirBinOp.Eq, int_lit(choice), int_lit(1)),
+                    block_with_tail([ignored], int_lit(11)), Span.empty()),
+            ], block_with_tail([ignored], int_lit(12))))
+            val result = run_print_body(block_no_tail([
+                s(HirStmtKind.Let(value_sym, ty(), rhs)),
+                s(HirStmtKind.Let(sentinel_sym, ty(), int_lit(42))),
+                s(HirStmtKind.Expr(expect_to_equal(var_(value_sym), int_lit(10 + choice)))),
+                s(HirStmtKind.Expr(expect_to_equal(var_(sentinel_sym), int_lit(42)))),
+            ]), [helper])
+            expect_vm_print_log(result, "h")
+            val records = read_records(result.arena, result.log_cap, result.record_count)
+            assert_equal(records.len(), 2)
+            assert_equal(records[0].passed, 1)
+            assert_equal(records[0].value, 10 + choice)
+            assert_equal(records[1].passed, 1)
+            assert_equal(records[1].value, 42)
+
+    it "discards scalar expression statements on repeated for and while iterations":
+        step("More than 256 ignored values cannot overflow the VM operand stack")
+        for use_while in [false, true]:
+            val counter = SymbolId(id: 126)
+            val sentinel = SymbolId(id: 127)
+            val body = block_no_tail([
+                s(HirStmtKind.Expr(int_lit(99))),
+                assign(var_(counter), HirAssignOp.Add, int_lit(1)),
+            ])
+            val loop = if use_while:
+                e(HirExprKind.While(binop(HirBinOp.Lt, var_(counter), int_lit(300)), body, None))
+            else:
+                e(HirExprKind.For(SymbolId(id: 128),
+                    e(HirExprKind.Range(int_lit(0), int_lit(300), false, None)), body, None))
+            val result = run_print_body(block_no_tail([
+                s(HirStmtKind.Let(counter, ty(), int_lit(0))),
+                s(HirStmtKind.Expr(loop)),
+                s(HirStmtKind.Let(sentinel, ty(), int_lit(42))),
+                s(HirStmtKind.Expr(expect_to_equal(var_(counter), int_lit(300)))),
+                s(HirStmtKind.Expr(expect_to_equal(var_(sentinel), int_lit(42)))),
+            ]), [])
+            expect_vm_print_log(result, "")
+            val records = read_records(result.arena, result.log_cap, result.record_count)
+            assert_equal(records.len(), 2)
+            assert_equal(records[0].passed, 1)
+            assert_equal(records[0].value, 300)
+            assert_equal(records[1].passed, 1)
+            assert_equal(records[1].value, 42)
+
+    it "accepts print tails in either statement conditional branch":
+        step("A print tail has no operand word to discard")
+        for choice in [0, 1]:
+            val statement = e(HirExprKind.If(
+                binop(HirBinOp.Eq, int_lit(choice), int_lit(1)),
+                block_with_tail([], call(named_var(SymbolId(id: 129), "print"), [string_lit("a")])),
+                block_with_tail([], call(named_var(SymbolId(id: 129), "print"), [string_lit("b")]))))
+            val result = run_print_body(block_no_tail([
+                s(HirStmtKind.Expr(statement)),
+                s(HirStmtKind.Expr(expect_to_equal(int_lit(42), int_lit(42)))),
+            ]), [])
+            expect_vm_print_log(result, if choice == 1: "a" else: "b")
+            val records = read_records(result.arena, result.log_cap, result.record_count)
+            assert_equal(records.len(), 1)
+            assert_equal(records[0].passed, 1)
+            assert_equal(records[0].value, 42)
+
+    it "accepts print loop and assertion tails in every statement chain arm":
+        step("Discarded branch tails share the statement expression stack contract")
+        val print_x = call(named_var(SymbolId(id: 130), "print"), [string_lit("x")])
+        val for_tail = e(HirExprKind.For(SymbolId(id: 131),
+            e(HirExprKind.Range(int_lit(0), int_lit(1), false, None)),
+            block_with_tail([], print_x), None))
+        val while_tail = e(HirExprKind.While(
+            binop(HirBinOp.Lt, int_lit(1), int_lit(0)), block_no_tail([]), None))
+        for choice in [0, 1, 2, 3]:
+            val statement = e(HirExprKind.IfChain([
+                HirIfArm(binop(HirBinOp.Eq, int_lit(choice), int_lit(0)),
+                    block_with_tail([], print_x), Span.empty()),
+                HirIfArm(binop(HirBinOp.Eq, int_lit(choice), int_lit(1)),
+                    block_with_tail([], for_tail), Span.empty()),
+                HirIfArm(binop(HirBinOp.Eq, int_lit(choice), int_lit(2)),
+                    block_with_tail([], while_tail), Span.empty()),
+            ], block_with_tail([], expect_to_equal(int_lit(7), int_lit(7)))))
+            val result = run_print_body(block_no_tail([
+                s(HirStmtKind.Expr(statement)),
+                s(HirStmtKind.Expr(expect_to_equal(int_lit(42), int_lit(42)))),
+            ]), [])
+            expect_vm_print_log(result, if choice < 2: "x" else: "")
+            val records = read_records(result.arena, result.log_cap, result.record_count)
+            assert_equal(records.len(), if choice == 3: 2 else: 1)
+            for record in records:
+                assert_equal(record.passed, 1)
+            assert_equal(records[records.len() - 1].value, 42)
+
+    it "rejects zero-word tails on either side of consumed conditionals and chains":
+        step("A present tail must actually produce a value before a consumer can use it")
+        val zero_word_tails = [
+            call(named_var(SymbolId(id: 132), "print"), [string_lit("x")]),
+            e(HirExprKind.For(SymbolId(id: 133),
+                e(HirExprKind.Range(int_lit(0), int_lit(1), false, None)), block_no_tail([]), None)),
+            e(HirExprKind.While(binop(HirBinOp.Lt, int_lit(1), int_lit(0)), block_no_tail([]), None)),
+            expect_to_equal(int_lit(1), int_lit(1)),
+        ]
+        for tail in zero_word_tails:
+            for bad_else in [false, true]:
+                for flat in [false, true]:
+                    val bad = block_with_tail([], tail)
+                    val good = block_with_tail([], int_lit(7))
+                    val then_ = if bad_else: good else: bad
+                    val else_ = if bad_else: bad else: good
+                    val cond = binop(HirBinOp.Eq, int_lit(1), int_lit(1))
+                    val rhs = if flat:
+                        e(HirExprKind.IfChain([HirIfArm(cond, then_, Span.empty())], else_))
+                    else:
+                        e(HirExprKind.If(cond, then_, else_))
+                    val prog = lower_svmg_program(block_no_tail([
+                        s(HirStmtKind.Let(SymbolId(id: 134), ty(), rhs))]), [], 1000)
+                    assert_false(prog.ok)
+                    assert_contains(prog.error, "conditional value requires a tail value")
+
+    it "rejects missing tails and missing else branches in consumed chains":
+        step("Flat conditional chains enforce the same complete value paths as legacy If")
+        val cond = binop(HirBinOp.Eq, int_lit(1), int_lit(1))
+        for bad_else in [false, true]:
+            val good = block_with_tail([], int_lit(7))
+            val then_ = if bad_else: good else: block_no_tail([])
+            val else_ = if bad_else: block_no_tail([]) else: good
+            val rhs = e(HirExprKind.IfChain([HirIfArm(cond, then_, Span.empty())], else_))
+            val prog = lower_svmg_program(block_no_tail([
+                s(HirStmtKind.Let(SymbolId(id: 135), ty(), rhs))]), [], 1000)
+            assert_false(prog.ok)
+            assert_contains(prog.error, "conditional value requires a tail value")
+        val rhs = e(HirExprKind.IfChain([
+            HirIfArm(cond, block_with_tail([], int_lit(7)), Span.empty())], nil))
+        val prog = lower_svmg_program(block_no_tail([
+            s(HirStmtKind.Let(SymbolId(id: 135), ty(), rhs))]), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "conditional value requires an else branch")
+
+describe "SVM-G float compound result representation":
+    it "preserves both float conditional tails consumed by compound assignment":
+        step("Each selected branch leaves one float value for the compound operation")
+        for condition in [0, 1]:
+            var rhs = e(HirExprKind.If(
+                cond: binop(HirBinOp.Eq, int_lit(condition), int_lit(1)),
+                then_: block_with_tail([], float_lit(2.5)),
+                else_: block_with_tail([], float_lit(4.5))))
+            rhs.has_type_ = true
+            rhs.type_ = float_ty()
+            val symbol = SymbolId(id: 106)
+            val target = HirExpr(kind: HirExprKind.Var(symbol), has_type_: true,
+                type_: float_ty(), span: Span.empty())
+            val expected = if condition == 1: 3.5 else: 5.5
+            val body = block_no_tail([
+                s(HirStmtKind.Let(symbol, float_ty(), float_lit(1.0))),
+                assign(target, HirAssignOp.Add, rhs),
+                s(HirStmtKind.Expr(expect_to_equal(target, float_lit(expected)))),
+            ])
+            val result = run_print_body(body, [])
+            expect_vm_print_log(result, "")
+            val records = read_records(result.arena, result.log_cap, result.record_count)
+            assert_equal(records.len(), 1)
+            assert_equal(records[0].passed, 1)
+            assert_equal(records[0].value, expected_signed_i32_bits(expected))
+
+    it "preserves nested integer conditional values":
+        step("Integer conditional results survive nesting and participate in arithmetic")
+        val inner = e(HirExprKind.If(
+            cond: binop(HirBinOp.Eq, int_lit(1), int_lit(2)),
+            then_: block_with_tail([], int_lit(40)),
+            else_: block_with_tail([], int_lit(7))))
+        val outer = e(HirExprKind.If(
+            cond: binop(HirBinOp.Eq, int_lit(1), int_lit(1)),
+            then_: block_with_tail([], inner),
+            else_: block_with_tail([], int_lit(90))))
+        val body = block_no_tail([s(HirStmtKind.Expr(expect_to_equal(
+            binop(HirBinOp.Add, outer, int_lit(3)), int_lit(10))))])
+        val result = run_print_body(body, [])
+        expect_vm_print_log(result, "")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 10)
+
+    it "rejects a value conditional whose branch has no tail":
+        step("A consumed conditional cannot produce an empty stack result")
+        val rhs = e(HirExprKind.If(
+            cond: binop(HirBinOp.Eq, int_lit(1), int_lit(1)),
+            then_: block_no_tail([]), else_: block_with_tail([], int_lit(2))))
+        val prog = lower_svmg_program(block_no_tail([
+            s(HirStmtKind.Let(SymbolId(id: 107), ty(), rhs))]), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "conditional value requires a tail value")
+
+    it "preserves each flat conditional chain value":
+        step("Flat if/elif and else branches each leave one consumed integer value")
+        for choice in [0, 1, 2]:
+            val rhs = e(HirExprKind.IfChain([
+                HirIfArm(cond: binop(HirBinOp.Eq, int_lit(choice), int_lit(0)),
+                    then_: block_with_tail([], int_lit(10)), span: Span.empty()),
+                HirIfArm(cond: binop(HirBinOp.Eq, int_lit(choice), int_lit(1)),
+                    then_: block_with_tail([], int_lit(11)), span: Span.empty()),
+            ], block_with_tail([], int_lit(12))))
+            val body = block_no_tail([s(HirStmtKind.Expr(expect_to_equal(rhs, int_lit(10 + choice))))])
+            val result = run_print_body(body, [])
+            expect_vm_print_log(result, "")
+            val records = read_records(result.arena, result.log_cap, result.record_count)
+            assert_equal(records.len(), 1)
+            assert_equal(records[0].passed, 1)
+            assert_equal(records[0].value, 10 + choice)
+
+    it "rejects a consumed conditional without an else branch":
+        step("Every reachable value path must produce a stack word")
+        val rhs = e(HirExprKind.If(
+            cond: binop(HirBinOp.Eq, int_lit(1), int_lit(2)),
+            then_: block_with_tail([], int_lit(1)), else_: nil))
+        val prog = lower_svmg_program(block_no_tail([
+            s(HirStmtKind.Let(SymbolId(id: 108), ty(), rhs))]), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "conditional value requires an else branch")
+
+    it "executes a Float-typed integer literal through a helper and compound assignment":
+        step("Convert a checked Float integer literal to float bits before VM arithmetic")
+        var literal = int_lit(2)
+        literal.has_type_ = true
+        literal.type_ = float_ty()
+        val helper = SvmgHelperFn(name: "typed_integer_value", params: [],
+            body: block_with_tail([], literal))
+        var rhs = call(named_var(SymbolId(id: 104), "typed_integer_value"), [])
+        rhs.has_type_ = true
+        rhs.type_ = float_ty()
+        val symbol = SymbolId(id: 105)
+        val target = HirExpr(kind: HirExprKind.Var(symbol), has_type_: true,
+            type_: float_ty(), span: Span.empty())
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expect_to_equal(literal, float_lit(2.0)))),
+            s(HirStmtKind.Let(symbol, float_ty(), float_lit(1.0))),
+            assign(target, HirAssignOp.Add, rhs),
+            s(HirStmtKind.Expr(expect_to_equal(target, float_lit(3.0)))),
+        ])
+        val result = run_print_body(body, [helper])
+        expect_vm_print_log(result, "")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 2)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, expected_signed_i32_bits(2.0))
+        assert_equal(records[1].passed, 1)
+        assert_equal(records[1].value, expected_signed_i32_bits(3.0))
+
+    it "rejects direct mixed binary operands before emitting arithmetic":
+        step("Ordinary binary lowering must not reinterpret integer bits as float")
+        val body = block_no_tail([s(HirStmtKind.Expr(
+            binop(HirBinOp.Add, int_lit(1), float_lit(2.0))))])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float binary operands")
+
+    it "rejects mixed binary operands hidden by a checked helper result":
+        step("A Float call result cannot bypass validation of its helper body")
+        val helper = SvmgHelperFn(name: "mixed_value", params: [],
+            body: block_with_tail([], binop(HirBinOp.Add, int_lit(1), float_lit(1.5))))
+        var rhs = call(named_var(SymbolId(id: 103), "mixed_value"), [])
+        rhs.has_type_ = true
+        rhs.type_ = float_ty()
+        val prog = lower_svmg_program(guarded_float_compound_body(rhs), [helper], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float binary operands")
+
+    it "rejects mixed binary operands hidden by a checked conditional result":
+        step("Typed conditional branches still validate their arithmetic operands")
+        var rhs = e(HirExprKind.If(
+            cond: binop(HirBinOp.Eq, int_lit(1), int_lit(1)),
+            then_: block_with_tail([], binop(HirBinOp.Add, int_lit(1), float_lit(1.5))),
+            else_: block_with_tail([], float_lit(2.5))))
+        rhs.has_type_ = true
+        rhs.type_ = float_ty()
+        val prog = lower_svmg_program(guarded_float_compound_body(rhs), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float binary operands")
+
+    it "rejects a float comparison used as a floating binary operand":
+        step("A comparison emits Bool bits rather than its operands' float representation")
+        val body = block_no_tail([s(HirStmtKind.Expr(binop(HirBinOp.Add,
+            binop(HirBinOp.Lt, float_lit(1.0), float_lit(2.0)), float_lit(1.0))))])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float binary operands")
+
+    it "executes a recursively floating arithmetic RHS":
+        step("Preserve floating arithmetic expression admission")
+        val body = guarded_float_compound_body(binop(HirBinOp.Add, float_lit(2.0), float_lit(0.5)))
+        val result = run_print_body(body, [])
+        expect_vm_print_log(result, "")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, expected_signed_i32_bits(3.5))
+
+    it "preserves a known helper call with a checked float result":
+        step("A supported helper returning a float remains a valid compound RHS")
+        val helper = SvmgHelperFn(name: "float_value", params: [],
+            body: block_with_tail([], float_lit(2.5)))
+        var rhs = call(named_var(SymbolId(id: 101), "float_value"), [])
+        rhs.has_type_ = true
+        rhs.type_ = float_ty()
+        val result = run_print_body(guarded_float_compound_body(rhs), [helper])
+        expect_vm_print_log(result, "")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, expected_signed_i32_bits(3.5))
+
+    it "rejects an integer RHS for a float compound target":
+        step("Do not reinterpret an integer RHS as floating bits")
+        val prog = lower_svmg_program(guarded_float_compound_body(int_lit(1)), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float compound assignment")
+
+    it "rejects a float RHS for an integer compound target":
+        step("Do not reinterpret integer target storage as floating bits")
+        val symbol = SymbolId(id: 100)
+        val body = block_no_tail([
+            s(HirStmtKind.Let(symbol, ty(), int_lit(1))),
+            assign(var_(symbol), HirAssignOp.Add, float_lit(1.0)),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float compound assignment")
+
+    it "rejects mixed numeric operands nested inside a float RHS":
+        step("A floating outer operation cannot hide a mixed inner operation")
+        val rhs = binop(HirBinOp.Mul, float_lit(3.0),
+            binop(HirBinOp.Add, int_lit(1), float_lit(2.0)))
+        val prog = lower_svmg_program(guarded_float_compound_body(rhs), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float compound assignment")
+
+    it "rejects a floating comparison result as a float compound RHS":
+        step("Comparisons produce Bool words even when their operands are floats")
+        val rhs = binop(HirBinOp.Lt, float_lit(1.0), float_lit(2.0))
+        val prog = lower_svmg_program(guarded_float_compound_body(rhs), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "unproven floating RHS")
+
+    it "rejects an unknown call result without checked result metadata":
+        step("Do not guess an untyped call result from its name")
+        val rhs = call(named_var(SymbolId(id: 102), "unknown_float"), [])
+        val prog = lower_svmg_program(guarded_float_compound_body(rhs), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "unproven floating RHS")
 
 describe "SVM-G Task D4 lowering — expect(add(1,2)).to_equal(3)":
     # @manual scenario evidence
