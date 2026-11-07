@@ -68,7 +68,13 @@ fn uninit_let_stmt() -> HirStmt:
     # Mirrors what hir_lowering/statements.spl synthesizes for `var x: i64`
     # (no initializer): a bare NilLit init expression.
     val sp = Span.default()
-    val init = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: sp)
+    val init = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: sp), span: sp)
+    HirStmt(kind: HirStmtKind.Let(SymbolId.new(1), nil, init), span: sp)
+
+fn explicit_nil_let_stmt() -> HirStmt:
+    # Mirrors a source-written `var x: i64? = nil`: lowers with has_type_ false.
+    val sp = Span.default()
+    val init = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: sp), span: sp)
     HirStmt(kind: HirStmtKind.Let(SymbolId.new(1), nil, init), span: sp)
 
 fn read_x_expr() -> HirExpr:
@@ -81,8 +87,15 @@ describe "interp_is_uninit_marker_init classifies a Let init expression":
         # @req REQ-SSPEC-UNIT
         step("true for a bare NilLit (what an initializer-less var lowers to)")
         val sp = Span.default()
-        val nil_init = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: sp)
+        val nil_init = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: sp), span: sp)
         expect(interp_is_uninit_marker_init(nil_init)).to_equal(true)
+
+    it "false for a source-written nil (explicit initializer)":
+        # @req REQ-SSPEC-UNIT
+        step("false for a source-written nil (explicit initializer)")
+        val sp = Span.default()
+        val nil_init = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: sp), span: sp)
+        expect(interp_is_uninit_marker_init(nil_init)).to_equal(false)
 
     it "false for a real value":
         # @req REQ-SSPEC-UNIT
@@ -174,3 +187,21 @@ describe "Pure-Simple interpreter strict-mem (SIMPLE_STRICT_MEM parity)":
             case _:
                 got_42 = false
         expect(got_42).to_equal(true)
+
+
+describe "strict-mem: explicit nil is not uninitialized (phase3 repro)":
+    # @tag:phase3
+    it "ON: reading `var x: T? = nil` returns nil, no trap":
+        # @req REQ-SSPEC-UNIT
+        step("ON: reading `var x: T? = nil` returns nil, no trap")
+        val backend = InterpreterBackendImpl.new()
+        val ctx = make_ctx(backend, true)
+        val _ = backend.exec_stmt(explicit_nil_let_stmt(), ctx)
+        val result = backend.eval_expr(read_x_expr(), ctx)
+        var got_nil = false
+        match result:
+            case Ok(Value.Nil):
+                got_nil = true
+            case _:
+                got_nil = false
+        expect(got_nil).to_equal(true)
