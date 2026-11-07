@@ -502,6 +502,7 @@ fn build_c_runtime_library(
     include_stage4_hosted: bool,
     include_cranelift_stubs: bool,
     no_rust_array_packing: bool,
+    piped_observer: &super::piped_observer::PipedObserverSelection,
 ) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root().or_else(|| {
@@ -509,6 +510,9 @@ fn build_c_runtime_library(
         None
     })?;
     let target = effective_target();
+    piped_observer.validate(target, &runtime_root).map_err(|error| {
+        eprintln!("native-build: invalid observer source authority: {error}");
+    }).ok()?;
     let mut runtime_inputs = vec![
         "runtime_native.c",
         "runtime_file_view.c",
@@ -712,9 +716,13 @@ fn build_c_runtime_library(
             return None;
         }
     };
-    let fingerprint = format!("{};no_rust_array_packing={no_rust_array_packing};{}",
+    let mut fingerprint = format!("{};no_rust_array_packing={no_rust_array_packing};{}",
         runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?,
         core_c_vector_provider_pin_fingerprint(vector_pin.as_deref()));
+    if piped_observer.is_rust() {
+        fingerprint.push(';');
+        fingerprint.push_str(&piped_observer.fingerprint());
+    }
     let fingerprint_path = build_dir.join(format!("{}.inputs.fingerprint", host_archive_name()));
 
     if has_nonempty_archive_payload(&archive)
@@ -810,6 +818,9 @@ fn build_c_runtime_library(
                         .arg("-fPIC")
                         .arg("-std=gnu11");
                 }
+                if let Some(define) = piped_observer.c_define() {
+                    command.arg(define);
+                }
                 if no_rust_array_packing {
                     command.arg("-DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1");
                 }
@@ -899,23 +910,29 @@ fn build_c_runtime_library(
     Some(archive)
 }
 
+pub(super) fn build_core_c_runtime_with_piped_observer(
+    build_dir: &Path, selection: &super::piped_observer::PipedObserverSelection,
+) -> Option<PathBuf> {
+    build_c_runtime_library(build_dir, false, true, true, selection)
+}
+
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, false, true, true)
+    build_c_runtime_library(build_dir, false, true, true, &super::piped_observer::PipedObserverSelection::CoreC)
 }
 
 /// C exports supplement a Rust runtime whose lazy arrays must observe C threads.
 pub(crate) fn build_core_c_runtime_supplement_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, false, true, false)
+    build_c_runtime_library(build_dir, false, true, false, &super::piped_observer::PipedObserverSelection::CoreC)
 }
 
 pub(crate) fn build_stage4_compiler_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
     // The compiler backfill owns the real Cranelift hooks. Keep ordinary
     // bootstrap's named-trap stubs out of this archive to prevent overlap.
-    build_c_runtime_library(build_dir, false, false, false)
+    build_c_runtime_library(build_dir, false, false, false, &super::piped_observer::PipedObserverSelection::CoreC)
 }
 
 pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, true, false, false)
+    build_c_runtime_library(build_dir, true, false, false, &super::piped_observer::PipedObserverSelection::CoreC)
 }
 
 /// Compile ONLY `src/runtime/runtime_sqlite.c` into a standalone object.

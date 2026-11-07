@@ -1,0 +1,69 @@
+# Immutable MI value adaptation; shared byte-safe scanners, no Dict authority.
+use std.nogc_async_mut.debug.remote.protocol.gdb_mi_parser.{GdbMiParser}
+use std.common.json.value.{JsonValue, json_value_serialize}
+
+fn resident_mi_value_v1(raw: text, depth: i64) -> Result<JsonValue, text>:
+    if depth > 16: return Err("MI value nesting bound exceeded")
+    val value = raw.trim()
+    if value == "": return Err("MI value missing")
+    if value.starts_with("\""):
+        val end = GdbMiParser.find_closing_quote(value, 1)
+        if end != value.len() - 1: return Err("MI quoted value malformed")
+        return Ok(JsonValue.Str(GdbMiParser.unescape_string(value)))
+    if value.starts_with("{"):
+        if not value.ends_with("}"): return Err("MI tuple incomplete")
+        return resident_mi_pairs_v1(value.substring(1, value.len() - 1), depth + 1)
+    if value.starts_with("["):
+        if not value.ends_with("]"): return Err("MI list incomplete")
+        val body = value.substring(1, value.len() - 1)
+        var items: [JsonValue] = []
+        var start = 0
+        while start < body.len():
+            if items.len() >= 512: return Err("MI list item bound exceeded")
+            val comma = GdbMiParser.find_char(body, ",", start as i32)
+            val end = if comma < 0: body.len() else: comma as i64
+            val item = body.substring(start, end)
+            val equals = GdbMiParser.find_char(item, "=", 0)
+            if equals >= 0:
+                items.push(resident_mi_pairs_v1(item, depth + 1)?)
+            else:
+                items.push(resident_mi_value_v1(item, depth + 1)?)
+            start = end + 1
+        return Ok(JsonValue.Array(items))
+    Ok(JsonValue.Str(value))
+
+fn resident_mi_pairs_v1(raw: text, depth: i64) -> Result<JsonValue, text>:
+    if depth > 16: return Err("MI tuple nesting bound exceeded")
+    var keys: [text] = []
+    var values: [JsonValue] = []
+    var start = 0
+    while start < raw.len():
+        if keys.len() >= 512: return Err("MI field bound exceeded")
+        val comma = GdbMiParser.find_char(raw, ",", start as i32)
+        val end = if comma < 0: raw.len() else: comma as i64
+        val pair = raw.substring(start, end)
+        val equals = GdbMiParser.find_char(pair, "=", 0)
+        if equals <= 0: return Err("MI field assignment malformed")
+        val key = pair.substring(0, equals as i64).trim()
+        if keys.contains(key): return Err("MI duplicate field")
+        keys.push(key)
+        values.push(resident_mi_value_v1(pair.substring(equals as i64 + 1), depth + 1)?)
+        start = end + 1
+    Ok(JsonValue.Object(keys, values))
+
+pub fn resident_mi_payload_json_v1(raw: text) -> Result<text, text>:
+    Ok(json_value_serialize(resident_mi_pairs_v1(raw, 0)?))
+
+pub fn resident_mi_field_v1(raw: text, wanted: text) -> text:
+    var start = 0
+    while start < raw.len():
+        val comma = GdbMiParser.find_char(raw, ",", start as i32)
+        val end = if comma < 0: raw.len() else: comma as i64
+        val pair = raw.substring(start, end)
+        val equals = GdbMiParser.find_char(pair, "=", 0)
+        if equals > 0 and pair.substring(0, equals as i64).trim() == wanted:
+            val value = pair.substring(equals as i64 + 1).trim()
+            if value.starts_with("\""): return GdbMiParser.unescape_string(value)
+            return value
+        start = end + 1
+    ""

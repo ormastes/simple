@@ -2101,6 +2101,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // registered here (found by the same extern census as the entry above).
     insert_simple!("rt_process_write_stdin_some", system::rt_process_write_stdin_some);
     insert_simple!("rt_process_read_stdout", system::rt_process_read_stdout);
+    insert_simple!("rt_process_piped_exit_status_value", system::rt_process_piped_exit_status_value);
+    insert_simple!("rt_process_stdout_state", system::rt_process_stdout_state);
     insert_simple!("rt_process_is_alive", system::rt_process_is_alive);
     insert_simple!("rt_process_close_piped", system::rt_process_close_piped);
     insert_simple!("rt_process_spawn_guarded", system::rt_process_spawn_guarded);

@@ -1491,6 +1491,10 @@ SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_l
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
+/* Additive v1 receipt [version=1, state=-1/0/1, actual_exit_code, native_error].
+ * Query only before close; success requires drained stdout and observed/reaped
+ * leader status. No status is fabricated from ECHILD or close success. */
+SplArray*   rt_process_piped_exit_status_value(int64_t pid);
 /* Ref V1: generation comes from the actual reserved spawn slot, never PID adoption.
  * Scalar actions return -2 stale/invalid, -1 runtime failure; close 0 success,
  * alive 0 stopped/1 running, write >=0 accepted. stdout state 0 deferred/1 EOF.
