@@ -22,6 +22,7 @@ use std.nogc_sync_mut.io.process_ops.{process_run_bounded_environment_v1, proces
 use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
 use std.nogc_async_mut.container.providers.windows.docker_scope_v2.{windows_docker_scope_values_v2, windows_docker_scoped_create_v2, WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2}
+use std.common.contracts.container.control_deadline_v1.{ContainerControlDeadlineV1, container_control_remaining_ms_v1}
 use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1,
     container_effect_deadline_v1, container_effect_remaining_ms_v1}
 
@@ -113,6 +114,22 @@ impl WindowsDockerRuntimeProviderV1:
         val digest = windows_docker_request_digest_v1(self.policy, request)?
         val remaining = container_effect_remaining_ms_v1(deadline, digest, request.operation_id, action, now_ms)?
         Ok(deadline.expires_at_unix_ms)
+
+    # Fresh cleanup authority is request-local, never the retained launch grant.
+    # The actual clock is sampled only after exact-object guard observations.
+    fn _control_admit(request: WindowsDockerRequestV1, action: text,
+            context: ContainerControlDeadlineV1) -> Result<i64, text>:
+        val digest = windows_docker_request_digest_v1(self.policy, request)?
+        val now_ms = if self.scripted_mode:
+            match self.scripted_admission_clock_ms:
+                case Some(value): value
+                case nil: return Err("docker-script-control-clock-required")
+        else:
+            val sampled = time_sample_unix_micros_or_failure()
+            if sampled < 0: return Err("docker-control-clock-unavailable")
+            sampled / 1000
+        val remaining = container_control_remaining_ms_v1(context, digest, request.operation_id, action, now_ms)?
+        Ok(context.expires_at_unix_ms)
 
     pub fn is_scripted_fixture_v1() -> bool: self.scripted_mode and self.script_error == ""
 
@@ -505,6 +522,11 @@ impl WindowsDockerRuntimeProviderV1:
             case Err(error): return self._failure(request, "logs", error)
         self._success(request, "logs", command, state, run.0, run.1)
 
+    pub me fn control(request: WindowsDockerRequestV1, action: text,
+            deadline: ContainerControlDeadlineV1) -> RuntimeOperationV1:
+        if action != "stop" and action != "destroy": return self._failure(request, action, "docker-control-action-unsupported")
+        self._lifecycle(request, action, false, Some(deadline))
+
     pub me fn start(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
         self._lifecycle(request, "start", false)
     pub me fn stop(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
@@ -514,13 +536,14 @@ impl WindowsDockerRuntimeProviderV1:
     pub me fn wait(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
         self._lifecycle(request, "wait", false)
 
-    me fn _lifecycle(request: WindowsDockerRequestV1, operation: text, force: bool) -> RuntimeOperationV1:
+    me fn _lifecycle(request: WindowsDockerRequestV1, operation: text, force: bool,
+            control_context: ContainerControlDeadlineV1? = nil) -> RuntimeOperationV1:
         val before = match self._guard(request):
             case Ok(value): value
             case Err(error): return self._failure(request, operation, error)
         if operation == "start" and before.phase == "running":
             return self._success(request, operation, runtime_command_empty(), before)
-        if operation == "stop" and before.phase == "exited":
+        if operation == "stop" and before.phase == "exited" and control_context == nil:
             return self._success(request, operation, runtime_command_empty(), before)
         if operation == "start" and before.phase != "created": return self._failure(request, operation, "docker-start-phase-invalid")
         if operation == "destroy" and before.phase == "running" and not force:
@@ -535,6 +558,17 @@ impl WindowsDockerRuntimeProviderV1:
             admission = match self._launch_admit(request, "start"):
                 case Ok(value): value
                 case Err(error): return self._failure(request, operation, error)
+        match control_context:
+            case Some(context):
+                admission = match self._control_admit(request, operation, context):
+                    case Ok(value): value
+                    case Err(error): return self._failure(request, operation, error)
+            case nil: ()
+        # A no-effect stop still validates an explicitly supplied context.
+        if operation == "stop" and before.phase == "exited":
+            return self._success(request, operation, runtime_command_empty(), before)
+        # The same absolute expiry reaches the clean-environment native owner,
+        # which samples again after governor admission and before ResumeThread.
         val run = match self._execute(command, admission):
             case Ok(value): value
             case Err(error): return self._failure(request, operation, error)
