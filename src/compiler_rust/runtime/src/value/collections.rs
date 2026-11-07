@@ -37,6 +37,7 @@ thread_local! {
 }
 
 static SESSION_HEAP_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static TRANSIENT_HEAP_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 /// Objects owned by a build session (doc/05_design/compiler/memory/
 /// build_session_memory_model_v1.md §2-§4). Rust objects carry no scope tag,
@@ -94,6 +95,7 @@ pub fn session_heap_owns(value: RuntimeValue) -> bool {
 }
 
 struct TransientHeapScope {
+    id: u32,
     paused: bool,
     objects: Vec<RuntimeValue>,
     /// Lazily built header-address -> `objects` position index, so promotion
@@ -2988,10 +2990,14 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
         if slot.is_some() {
             return false;
         }
+        let Some(id) = next_transient_scope_identity(&TRANSIENT_HEAP_NEXT_ID) else {
+            return false;
+        };
         if unsafe { rt_transient_raw_scope_begin() } == 0 {
             return false;
         }
         *slot = Some(TransientHeapScope {
+            id,
             paused: false,
             objects: Vec::new(),
             by_ptr: Default::default(),
@@ -3022,6 +3028,19 @@ pub extern "C" fn rt_transient_array_scope_state_v1() -> i64 {
         Some(scope) if scope.paused => 2,
         Some(_) => 1,
     })
+}
+
+fn next_transient_scope_identity(counter: &std::sync::atomic::AtomicU32) -> Option<u32> {
+    use std::sync::atomic::Ordering as AtomicOrdering;
+    counter.fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |next| {
+        if next == 0 { None } else { Some(next.checked_add(1).unwrap_or(0)) }
+    }).ok()
+}
+
+/// Current-thread allocator identity; observing it never opens or claims a scope.
+#[no_mangle]
+pub extern "C" fn rt_transient_array_scope_identity_v1() -> i64 {
+    TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().map_or(0, |scope| i64::from(scope.id)))
 }
 
 #[cfg(test)]
