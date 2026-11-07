@@ -1,6 +1,6 @@
 # Engine lib specs: spec-runner interpreter diverges from `run` (JIT) path
 
-**Status:** OPEN 2026-09-16.
+**Status:** fix-implemented-verification-pending (2026-11-07, #7498): shape 3 (same-name type picked last-wins) fixed; engine3d 0/5 -> 2/5. Residuals: spec-side factory mismatch and missing `Transform3D.up()` (see dated note below).
 **Severity:** Blocking for 8 engine spec files (~33 failing examples).
 **Spec files:** `test/01_unit/lib/engine/{scene_node,serializer,scene_manager,prefab,engine3d,physics3d,renderer3d,renderer3d_bugfix}_spec.spl`
 **Lib files:** `src/lib/nogc_sync_mut/engine/scene/node.spl`, `src/lib/nogc_sync_mut/engine/scene/node3d.spl`, `src/lib/nogc_sync_mut/engine/physics/backend.spl`, `src/lib/nogc_sync_mut/engine/physics/config.spl`, `src/lib/nogc_sync_mut/engine/render/renderer3d.spl`

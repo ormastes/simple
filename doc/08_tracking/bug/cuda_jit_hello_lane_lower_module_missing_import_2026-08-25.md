@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** partially fixed (import), remainder blocked on seed interpreter.
+**Status:** fix-implemented-verification-pending (2026-11-07, #7498): symptom 2 (same-name type collision) fixed in the seed interpreter by the module-qualified type registry; verify on the CUDA host with `bin/simple test test/03_system/gpu_lane/cuda_jit_hello_spec.spl` (expect no `ParserModule has no field named friends`). Import half fixed earlier.
 **Spec:** `test/03_system/gpu_lane/cuda_jit_hello_spec.spl` — `Results: 14 total, 13 passed, 1 failed`
 on `bin/simple` = Rust seed, host with 2 live CUDA devices (`SIMPLE_GPU_TEST=1 SIMPLE_CUDA_TEST=1`).
 Sibling `vulkan_jit_hello_spec.spl` passes live on the same host (`2 total, 2 passed`).
