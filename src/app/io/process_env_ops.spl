@@ -1,11 +1,10 @@
 # Hosted process helpers that apply an explicit environment map.
 #
-# No runtime spawn ABI accepts an environment map (every `rt_process_spawn_async`
-# backend takes only cmd + argv). The environment is therefore delivered through
-# POSIX `env`: `/usr/bin/env -- K=V ... cmd args...`. `env` execs the utility,
-# so the returned pid is the child's own pid and wait/kill/liveness stay exact.
-# Requests that cannot be delivered faithfully are refused before any child is
-# created; no variable is ever silently dropped.
+# POSIX keeps its existing env utility route. Windows uses the canonical native
+# owner with a private copied UTF16 overlay and the existing async registry.
+# Empty values remain present; this map API has no deletion operation.
+export use std.nogc_sync_mut.io.process_ops.{process_run_bounded_environment_v1}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_environment_overlay_native_v1, process_environment_key_valid_v1}
 use std.nogc_async_mut.io.process_ops.{process_spawn_async, process_is_running}
 use std.io_runtime.{platform_name, host_os}
 
@@ -29,7 +28,13 @@ fn process_spawn_async_env(cmd: text, args: [text], env: {text: text}) -> i64:
     if env.len() == 0:
         return process_spawn_async(cmd, args)
     if not _process_env_host_uses_unix_route():
-        return PROCESS_SPAWN_ENV_UNSUPPORTED
+        if platform_name() != "windows": return PROCESS_SPAWN_ENV_UNSUPPORTED
+        var assignments: [text] = []
+        for key in env.keys():
+            val value = env[key] ?? ""
+            if not process_environment_key_valid_v1(key) or value.contains("\u{0}"): return PROCESS_SPAWN_ENV_INVALID
+            assignments = assignments.push(key + "=" + value)
+        return process_spawn_environment_overlay_native_v1(cmd, args, assignments)
     # `env` would parse a utility name containing '=' as another assignment.
     if cmd.contains("="):
         return PROCESS_SPAWN_ENV_INVALID

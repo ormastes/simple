@@ -197,7 +197,10 @@ struct TransientPromoteShare {
 /// Erase a freed heap object from the open share window so a recycled address
 /// is never mistaken for a committed node. Called by `unregister_heap_ptr`.
 pub(crate) fn transient_promote_share_forget(addr: usize) {
-    TRANSIENT_PROMOTE_SHARE.with(|slot| {
+    // A runtime-owned TLS destructor can free a string after this optional
+    // per-thread cache has been destroyed. The cache is already gone then;
+    // registry removal, accounting and the real deallocation still proceed.
+    let _ = TRANSIENT_PROMOTE_SHARE.try_with(|slot| {
         if let Ok(mut slot) = slot.try_borrow_mut() {
             if let Some(share) = slot.as_mut() {
                 share.heap.remove(&addr);
