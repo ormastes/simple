@@ -151,3 +151,38 @@ Lint's lexer calls across modules several times per character
 (`is_ident_char` -> `is_alpha`/`is_digit` -> `char_code`), so at 10-100 us
 per such call the 82 KB file's 124 s is accounted for by call count times
 this constant, not by any superlinear term.
+
+### 2026-11-07 (later) — the ladder numbers, and the two rungs that stopped paying
+
+`SIMPLE_PERF_COUNTERS=1` on the same bench (`simple-timers2.exe`, 100,009
+identifier calls; `math_min_i64` is a Simple fn in `std.common.math`, so
+EXTERN_CALLS=5 — the "builtin" above was never an extern):
+
+| evaluate_call rung (ns per identifier call) | before | after |
+|---|---|---|
+| P1 extern check (EXTERN_FUNCTIONS + has_local_def + shadows) | 423 | **149** |
+| P2 `eval_builtin` string match (miss) | 644 | 572 |
+| P3 `eval_bdd_builtin` string match (miss) | 378 | — |
+| P3.9 local callable | 101 | — |
+| P4 overloads | 252 | — |
+| P4.5 decorated sentinel (`format!` + env cascade) | 502 | **52** |
+| P4.9 env shadow check | 242 | 267 |
+| P5 flat exec (inclusive of the callee) | 16,564 | — |
+
+Landed: P4.5 gated on `decorator_apply::any_decorated_fn_bound()` (set by
+all three sentinel writers), and `local_callable_shadows` evaluated only on
+the extern/builtin branches. ~0.7 us per call off a ~7 us fixed cost; the
+end-to-end bench swung 6.6-13.3 us for the UNCHANGED binary between runs as
+other lanes loaded the host, so the claim rests on the per-rung counters,
+not on wall. Prevention:
+`test/01_unit/interpreter/call_ladder_miss_path_prevention_spec.spl`.
+
+What is left per call, in cost order, each a separate change: P2/P3 are
+sequential string matches over every builtin arm (a miss walks them all —
+a name-keyed pre-check must be derived from the arms, not hand-copied);
+the body prelude (925 ns: two TLS `take`s, owner swap, per-param
+`mark_local` String clones); `captured_env_with_live_globals` (795 ns: three
+SipHash lookups keyed by the ~70-byte owner path); `write_back_mutable_arguments`
+(1.0 us on calls with no mutable args). None of these is O(globals); the
+per-call cost is now a sum of constant rungs, which is why the 60 s lint
+budget on `driver_types.spl` is still missed (124 s).
