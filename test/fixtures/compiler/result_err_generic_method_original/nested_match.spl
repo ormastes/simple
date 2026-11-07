@@ -1,0 +1,58 @@
+# Closer to simple_ring.cancel: Result match -> slot-state match -> Result Err.
+enum CancelError:
+    Rejected(code: i64)
+
+enum SlotState:
+    Reserved
+    Committed
+
+enum CancelOutcome:
+    Done
+    Unknown
+    Failed(CancelError)
+
+class CancelSource<T>:
+    value: T
+    state: SlotState
+
+    me token_slot(id: i64) -> Result<i64, CancelError>:
+        if id == 0: return Err(CancelError.Rejected(code: 0))
+        Ok(id)
+
+    me release(id: i64) -> Result<(), CancelError>:
+        if id < 0:
+            return Err(CancelError.Rejected(code: id))
+        Ok(())
+
+    me cancel(id: i64) -> CancelOutcome:
+        val token_result = self.token_slot(id)
+        match token_result:
+            case Result.Err(_): CancelOutcome.Unknown
+            case Result.Ok(slot):
+                match self.state:
+                    case SlotState.Reserved:
+                        val released: Result<(), CancelError> = self.release(slot)
+                        match released:
+                            case Result.Ok(_): CancelOutcome.Done
+                            case Result.Err(error): CancelOutcome.Failed(error)
+                    case SlotState.Committed: CancelOutcome.Done
+
+fn outcome_code(outcome: CancelOutcome) -> i64:
+    match outcome:
+        case CancelOutcome.Done: 0
+        case CancelOutcome.Unknown: 99
+        case CancelOutcome.Failed(error):
+            match error:
+                case CancelError.Rejected(code): code
+
+fn main() -> i64:
+    var source = CancelSource<i64>(value: 17, state: SlotState.Reserved)
+    if outcome_code(source.cancel(-29)) != -29: return 1
+    if outcome_code(source.cancel(3)) != 0: return 2
+    if outcome_code(source.cancel(-41)) != -41: return 3
+    if outcome_code(source.cancel(0)) != 99: return 4
+    source.state = SlotState.Committed
+    if outcome_code(source.cancel(-53)) != 0: return 5
+    if source.value != 17: return 6
+    print "result-err-generic-nested-match: PASS"
+    0
