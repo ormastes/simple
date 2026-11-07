@@ -35,6 +35,7 @@ use compiler.hir.hir_codec_support.{HirCodecWriter,
 use compiler.hir.generated.hir_codec.{hc_enc_hir_module, hc_dec_hir_module}
 use std.common.encoding.utf8.{text_byte_len}
 use std.common.crypto.sha256.{sha256_text}
+use std.env.{env_get}
 
 # v8 uses typed dictionary key order and rejects v7 bucket-order records.
 # v7 rejected v6 records whose integer 3 was serialized as nil (N).
@@ -76,9 +77,22 @@ fn hir_canonical_codec_generated_available_v1() -> bool:
     # an independent lane freezes/reviews its real-HIR golden bytes.
     false
 
+# Test-only count of complete-body encodes. Production compiler workers must
+# not mutate a process-global hot-path diagnostic. Specs explicitly enable
+# this counter around one single-owner registration.
+var _hir_module_encode_calls: i64 = 0
+
+fn hir_module_encode_calls() -> i64:
+    if (env_get("SIMPLE_HIR_ENCODE_COUNT_DIAGNOSTIC") ?? "") == "1":
+        _hir_module_encode_calls
+    else:
+        0
+
 # "" when the module carries a payload the codec refuses (see
 # hir_codec_support.spl); `hir_module_encode_reason` names it.
 fn hir_module_encode(module: HirModule) -> text:
+    if (env_get("SIMPLE_HIR_ENCODE_COUNT_DIAGNOSTIC") ?? "") == "1":
+        _hir_module_encode_calls = _hir_module_encode_calls + 1
     if module.representation_declarations.len() > 0:
         return ""
     var w = HirCodecWriter.create()
@@ -724,6 +738,7 @@ export hir_canonical_codec_header, hir_canonical_codec_rules_identity_v1
 export hir_canonical_codec_identity_v1
 export hir_canonical_codec_generated_available_v1
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
+export hir_module_encode_calls
 export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason, hir_module_decode_reason
 export hir_module_has_rt_hal
 export hir_fn_scalars_at_v1
