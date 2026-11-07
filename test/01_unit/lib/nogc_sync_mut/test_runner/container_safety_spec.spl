@@ -1,0 +1,112 @@
+# Purpose: prevent shell interpolation and unowned deletion in the legacy runner.
+# @req CTR-02 RUN-01
+# Runtime execution of this spec is NOT_RUN; see its mirrored manual.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.test_runner.test_runner_container.{
+    container_runtime_supported_v1, container_test_argv_v1, container_build_argv_v1,
+    container_run_test, container_build_test_image, container_check_image,
+    container_get_version, container_cleanup_volumes
+}
+use std.io_runtime.read_file_text
+
+describe "Legacy container argument and ownership safety":
+    it "keeps metacharacters and spaces inside literal run arguments":
+        step("Build the production argv with shell metacharacters in all free text operands")
+        val test_path = "test/a b;$(touch SENTINEL)`id`.spl"
+        val image = "runner;$(touch SENTINEL):tag"
+        val workspace = "/tmp/work space;$(touch SENTINEL)`id`"
+        val built = container_test_argv_v1(test_path, image, 256, 2.5, "none", true, workspace)
+        expect(built.is_ok()).to_equal(true)
+        val args = built.unwrap()
+        expect(args).to_equal(["run", "--rm", "--memory=256m", "--cpus=2.5",
+            "--network=none", "-v", "/tmp/work space;$(touch SENTINEL)`id`:/workspace:ro",
+            "-w", "/workspace", "runner;$(touch SENTINEL):tag", "test",
+            "test/a b;$(touch SENTINEL)`id`.spl"])
+
+    it "keeps Dockerfile and image values in build option arguments":
+        step("Build the production image argv without token joining or expansion")
+        val file_path = "/tmp/Docker file;$(touch SENTINEL)`id`"
+        val image = "runner;$(touch SENTINEL):tag"
+        val built = container_build_argv_v1(file_path, image)
+        expect(built.is_ok()).to_equal(true)
+        val args = built.unwrap()
+        expect(args).to_equal(["build", "--file=/tmp/Docker file;$(touch SENTINEL)`id`",
+            "--tag=runner;$(touch SENTINEL):tag", "."])
+
+    it "rejects executable selection outside the exact runtime whitelist":
+        step("Check supported names and reject command strings, paths and option injection")
+        expect(container_runtime_supported_v1("docker")).to_equal(true)
+        expect(container_runtime_supported_v1("podman")).to_equal(true)
+        expect(container_runtime_supported_v1("sh")).to_equal(false)
+        expect(container_runtime_supported_v1("docker; touch SENTINEL")).to_equal(false)
+        expect(container_runtime_supported_v1("/usr/bin/docker")).to_equal(false)
+        expect(container_runtime_supported_v1("")).to_equal(false)
+
+    it "rejects unsupported engines in every legacy caller before process execution":
+        step("Pass a shell command as the engine to run, build, image and version entrypoints")
+        val engine = "sh -c touch SENTINEL"
+        val result = container_run_test("spec.spl", engine, "runner:tag", 256, 1.0, "none", true, "/tmp/work")
+        expect(result.0).to_equal("")
+        expect(result.1).to_contain("Unsupported container runtime")
+        expect(result.2).to_equal(1)
+        expect(container_build_test_image(engine, "Dockerfile", "runner:tag")).to_equal(false)
+        expect(container_check_image("runner:tag", engine)).to_equal(false)
+        expect(container_get_version(engine)).to_equal("")
+
+    it "rejects option-like operands and NULs instead of shifting CLI meaning":
+        step("Reject empty, option-prefixed and NUL-containing free text operands")
+        expect(container_test_argv_v1("spec.spl", "--privileged", 256, 1.0, "none", true, "/tmp/work").is_err()).to_equal(true)
+        expect(container_test_argv_v1("--help", "runner:tag", 256, 1.0, "none", true, "/tmp/work").is_err()).to_equal(true)
+        expect(container_test_argv_v1("", "runner:tag", 256, 1.0, "none", true, "/tmp/work").is_err()).to_equal(true)
+        expect(container_build_argv_v1("Dockerfile", "").is_err()).to_equal(true)
+        expect(container_build_argv_v1("Dockerfile", "--tag=other").is_err()).to_equal(true)
+        expect(container_build_argv_v1("Docker\u{0}file", "runner:tag").is_err()).to_equal(true)
+        expect(container_test_argv_v1("spec\u{0}.spl", "runner:tag", 256, 1.0, "none", true, "/tmp/work").is_err()).to_equal(true)
+
+    it "rejects ambiguous mount sources and injected network modes":
+        step("Reject volume-field separators and non-enumerated network policies")
+        expect(container_test_argv_v1("spec.spl", "runner:tag", 256, 1.0, "none", true, "/tmp/work:other").is_err()).to_equal(true)
+        expect(container_test_argv_v1("spec.spl", "runner:tag", 256, 1.0, "none", true, "").is_err()).to_equal(true)
+        expect(container_test_argv_v1("spec.spl", "runner:tag", 256, 1.0, "none; touch SENTINEL", true, "/tmp/work").is_err()).to_equal(true)
+
+    it "preserves writable mount and supported network options while rejecting invalid limits":
+        step("Build a writable bridge request and reject zero or negative limits")
+        val built = container_test_argv_v1("spec.spl", "runner:tag", 512, 1.0, "bridge", false, "/tmp/work")
+        expect(built.is_ok()).to_equal(true)
+        val args = built.unwrap()
+        expect(args[2]).to_equal("--memory=512m")
+        expect(args[4]).to_equal("--network=bridge")
+        expect(args[6]).to_equal("/tmp/work:/workspace:rw")
+        expect(container_test_argv_v1("spec.spl", "runner:tag", 0, 1.0, "none", true, "/tmp/work").is_err()).to_equal(true)
+        expect(container_test_argv_v1("spec.spl", "runner:tag", 256, 0.0, "none", true, "/tmp/work").is_err()).to_equal(true)
+        expect(container_test_argv_v1("spec.spl", "runner:tag", 256, -1.0, "none", true, "/tmp/work").is_err()).to_equal(true)
+
+    # @req CTR-02
+    it "refuses legacy volume cleanup for all engines without ownership evidence":
+        step("Invoke the compatibility API and require explicit refusal")
+        expect(container_cleanup_volumes("docker")).to_equal(false)
+        expect(container_cleanup_volumes("podman")).to_equal(false)
+        expect(container_cleanup_volumes("sh -c touch SENTINEL")).to_equal(false)
+
+    it "prevents reintroducing shell helpers and runtime-wide destructive commands":
+        step("Read the actual owner source and reject broad cleanup or shell execution")
+        val source = read_file_text("src/lib/nogc_sync_mut/test_runner/test_runner_container.spl")
+        expect(source.contains("shell(")).to_equal(false)
+        expect(source.contains("shell_bool(")).to_equal(false)
+        expect(source.contains("shell_output_trimmed(")).to_equal(false)
+        expect(source.contains("volume prune")).to_equal(false)
+        expect(source.contains("system prune")).to_equal(false)
+        val cleanup_body = source.split("fn container_cleanup_volumes(runtime: text) -> bool:")[1]
+        expect(cleanup_body.contains("process_run(")).to_equal(false)
+        expect(cleanup_body.contains("true")).to_equal(false)
+
+    it "prevents replacing real elapsed time with a fabricated zero sample":
+        step("Read the clock helper and require the monotonic owner delegation")
+        val source = read_file_text("src/lib/nogc_sync_mut/test_runner/test_runner_container.spl")
+        val clock_tail = source.split("fn time_now_ms() -> i64:")[1]
+        val clock_body = clock_tail.split("fn container_get_version")[0]
+        expect(clock_body).to_contain("time_now_monotonic_ms()")
+        expect(clock_body.contains("    0")).to_equal(false)
+        expect(clock_body.contains("return 0")).to_equal(false)
+        expect(source).to_contain("end_time - start_time")
