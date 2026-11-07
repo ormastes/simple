@@ -4819,9 +4819,14 @@ impl MirLowering:
                                 if result_payload_type != nil and declared_tuple:
                                     if val native_tuple = self.wrapper_owned_native_tuple_payload_type(found_payload_type):
                                         self.recover_result_tuple_payload(pl, native_tuple)
+                                    elif val try_tuple = self.result_try_tuple_payload_type(found_payload_type):
+                                        # Same slot admission as unwrap and `?`
+                                        # (text, proven records, collections).
+                                        self.recover_result_tuple_payload(pl, try_tuple)
                                     else:
-                                        # No new admission for text/record/erased
-                                        # extras: preserve the existing decoder.
+                                        # Unadmitted slots (e.g. f32) have no native
+                                        # slot proof; the old decoder bound no field.
+                                        self.error_fatal("unsupported Result tuple payload element type: {self.result_tuple_rejected_element(found_payload_type)}", Some(scrutinee.span))
                                         self.decode_declared_enum_payload_slot(pl, found_payload_type)
                                 else:
                                     self.decode_declared_enum_payload_slot(pl, found_payload_type)
@@ -4955,10 +4960,13 @@ impl MirLowering:
                             if val admitted_tuple = wrapper_native_tuple_payload_type(wrapper_payload):
                                 native_tuple_type = Some(admitted_tuple)
                                 native_tuple_fields = fields
+                            elif val try_tuple = self.result_try_tuple_payload_type(wrapper_payload):
+                                # Same slot admission as unwrap and `?`.
+                                native_tuple_type = Some(try_tuple)
+                                native_tuple_fields = fields
                             else:
-                                # Unadmitted extras retain the previous match
-                                # representation route, without a new error.
-                                ()
+                                # Unadmitted slots (e.g. f32) have no native slot proof.
+                                self.error_fatal("unsupported Result tuple payload element type: {self.result_tuple_rejected_element(wrapper_payload)}", Some(scrutinee.span))
                         case _: ()
                 self.builder.enum_semantic_node = semantic_pattern_root
                 var bp = self.builder

@@ -99,3 +99,22 @@ the reviewed b58 blobs; the enum runtime payload-storage section is unchanged.
 No release producer qualification or PostgreSQL completion is inferred.
 
 **Revalidated 2026-11-02: still plausible because OPEN — source repair and regressions authored; native and compiled unit execution pending; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-07 re-scope and match-path fix (lane m-result)
+
+The spec's "text/record/collection slots must be fatal" expectation predates
+the deliberate admission of those slots in `result_try_tuple_field_type`
+(07321b0fdb3 and earlier): unwrap and `?` now project them natively, and the
+"unsupported Result ... payload" diagnostic still fires for unadmitted slots
+(verified for `f32`; `Any` is already rejected by HIR). That part of the
+premise is outdated.
+
+Real defect found: `match` with `Ok((a, b))` / `Some((a, b))` / `Ok(pair)` on a
+tuple the narrower wrapper classifier rejects (e.g. a text slot) emitted neither
+`GetField` nor `rt_tuple_get` -- the binders were never read from the payload.
+Fix (`switch_operators_calls.spl`, both wrapper match paths): fall back to
+`result_try_tuple_payload_type`, the same admission unwrap and `?` use, and
+fail closed with `unsupported Result tuple payload element type` otherwise.
+`result_tuple_unwrap_spec.spl` 21/21 (4 new cases red before the fix);
+`result_try_provider_tuple_spec.spl` 10/10; `result_payload_shape_gaps_spec.spl` 8/8.
+Native match-path run not done: `s3_fable57s.exe native-build` SEGVs on the probe.
