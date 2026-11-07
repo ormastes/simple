@@ -97,27 +97,26 @@ pub fn decorated_fn_key(name: &str) -> String {
     format!("{}{}", DECORATED_FN_PREFIX, name)
 }
 
-thread_local! {
-    /// Set the first time a runtime decorator rebinds a function (every
-    /// writer of a `decorated_fn_key` sentinel sets it). `evaluate_call`'s
-    /// Priority 4.5 used to build the sentinel key (a `format!` String) and
-    /// run the full env lookup cascade on EVERY identifier call to find
-    /// out that no decorator exists: measured 502 ns per call on a program
-    /// with none (2026-11-07, `SIMPLE_PERF_COUNTERS=1`
-    /// EVALCALL_NS_P45_DECORATED). Once set it stays set: the sentinel is
-    /// scoped to an Env, so this flag only says "worth looking", never
-    /// "bound here".
-    static DECORATED_FN_BOUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
+/// Set the first time a runtime decorator rebinds a function (every writer
+/// of a `decorated_fn_key` sentinel sets it). `evaluate_call`'s Priority 4.5
+/// used to build the sentinel key (a `format!` String) and run the full env
+/// lookup cascade on EVERY identifier call to find out that no decorator
+/// exists: measured 502 ns per call on a program with none (2026-11-07,
+/// `SIMPLE_PERF_COUNTERS=1` EVALCALL_NS_P45_DECORATED). Process-global, not
+/// thread-local: an Env carrying a sentinel can be called into from a
+/// spawned thread, and a per-thread flag would make that call skip the
+/// wrapper. Once set it stays set; it only says "worth looking", never
+/// "bound here", so a false positive costs exactly the old lookup.
+static DECORATED_FN_BOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Record that a decorated function has been bound somewhere on this thread.
+/// Record that a decorated function has been bound somewhere in this process.
 pub fn mark_decorated_fn_bound() {
-    DECORATED_FN_BOUND.with(|cell| cell.set(true));
+    DECORATED_FN_BOUND.store(true, std::sync::atomic::Ordering::Release);
 }
 
-/// Has any runtime decorator ever bound a function on this thread?
+/// Has any runtime decorator ever bound a function in this process?
 pub fn any_decorated_fn_bound() -> bool {
-    DECORATED_FN_BOUND.with(|cell| cell.get())
+    DECORATED_FN_BOUND.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Apply the runtime (wrapper) decorators of `f` to `base`.
