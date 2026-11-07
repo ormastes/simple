@@ -83,3 +83,52 @@ emulated primitive can issue one full-frame upload per decomposed span or
 pixel; the correctness route therefore has a concrete O(frame pixels *
 decomposed pieces) transfer cost. No 8K throughput, latency or GPU-only claim
 follows from this repair. The fallback remains explicitly recorded as CPU work.
+
+
+### Arithmetic-domain repair after exact-PR review (2026-11-07)
+
+The earlier helper-body-unchanged checkpoint was insufficient: masked routing
+exposed i32 doubled-line-error overflow and inclusive triangle counters that
+could increment past i32MAX. That source head is held, not admitted.
+
+The revised shared line helper widens differences/error/doubled error to i64.
+Axis lines stamp one run without a per-coordinate walk. The run owner widens
+stroke growth and clips to framebuffer bounds before narrowing or allocating
+the backend rectangle. Triangle edge functions use i64 with explicit x/y spans
+<= i32MAX (2*i32MAX^2 < i64MAX), and compute the third edge directly instead
+of subtracting two edge values from the determinant. Larger masked spans are
+explicitly refused as `triangle-dispatch-size-invalid`, preserving pixels and
+known completion. Triangle scan bounds are intersected with the framebuffer;
+their counters are i64 and cannot wrap at an i32 endpoint. The shared helper
+has the same domain check, without inventing a generic backend error channel.
+
+Four additional device-free scenarios cover both large axis lines with literal
+masked pixels, tiny x/yMAX triangles, a wide-product triangle with only eight
+viewport samples, and out-of-domain refusal. All authored scenarios remain
+UNRUN. No native/device/performance qualification or BugDB closure follows.
+
+
+The same review also traced rectangle edge addition, circle squared radius,
+and gradient channel-times-row overflow in the newly reachable helpers. The
+coherent revision clips widened rectangle bounds before backend expansion,
+scans only visible circle rows with an exact bounded i64 floor-square-root,
+and interpolates gradient channels in i64 using each visible row's original
+source offset. Three further authored literal-pixel cases cover maximum-width
+outlines, i32MAX-radius circles, and the final two rows of a huge gradient.
+These checks remain UNRUN and prior held source packets remain historical.
+
+
+The follow-up review also rejected a billion-point near-axis CPU walk.
+The revised line owner skips directly to the stroke-expanded viewport using
+the original Bresenham phase: the dominant coordinate step k determines the
+minor step as floor((k*minor_span+(major_span-1)/2)/major_span). This retains
+strict half-tie rounding toward the starting minor coordinate, including
+reversed endpoints, rather than restarting the recurrence at a clipped point.
+Axis lines remain one clipped run. Non-axis masked host work is explicitly
+limited to max(4096, framebuffer_width*framebuffer_height) centre steps per
+call. An excessively thick stroke can expand the visible interval beyond that
+budget; admission then records `line-host-work-budget-exceeded` before any
+write, with completion state preserved. This is an explicit unsupported-work
+domain, not partial drawing or invented successful rendering. The same shared
+pure admission helper guards direct emulation calls. Near-axis and pre-write
+refusal scenarios remain authored/UNRUN alongside the previous cases.
