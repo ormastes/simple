@@ -1,6 +1,6 @@
 # AVX server system perf: native build blockers with the admitted Windows Stage 2
 
-Status: OPEN (items 1-6 fixed, see Progress). Found 2026-11-07 on DESKTOP-5A4V03J (Xeon W-2135, AVX-512, MinGW
+Status: OPEN (several fixes landed; remaining failures and verification are listed in Progress). Found 2026-11-07 on DESKTOP-5A4V03J (Xeon W-2135, AVX-512, MinGW
 clang lane, `--backend=cranelift`).
 
 Compiler: admitted Stage 2 from release `060ecf462c5`
@@ -103,7 +103,7 @@ New items found on the way:
    undefined `pmm_*`, `rt_port_*`. Fixed in #7379.
 6. **DB server: Cranelift verifier panic** `verifier/mod.rs:1634` (`iconst` of
    f64; trigger `f64?` unwrap nil path). The 0xC0000409 hint wrongly said
-   "host commit limit exhausted". Fixed in #7384.
+   "host commit limit exhausted". Source fix landed in #7384; rebuilt Stage 2 verification is pending.
 7. **Loadgen ↔ web server exchange fails on Windows**: warmup `ok=0 errors=8
    first_error=no-response:0 elapsed_ms=8`, then the 4-client pass segfaults;
    the server logs nothing after READY. OPEN (under investigation).
