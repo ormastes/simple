@@ -1,7 +1,8 @@
 # Canonical local Unix listener and zero-wait owner
 
-Status: SOURCE ONLY / NOT_RUN. The earlier finite-I/O/fork repair checkpoint is
-separate; no old native check is rerun or claimed for this new listener slice.
+Listener/Simple-spec status: SOURCE ONLY / NOT_RUN. A later receiver/byte-owner
+native result is recorded below. The earlier finite-I/O/fork repair checkpoint
+is separate; no old native check is rerun for this slice.
 
 The new Simple spec has four invalid-input/retention cases at
 `test/01_unit/lib/io/local_ipc_listener_v1_spec.spl`. Actual native mechanisms are
@@ -67,10 +68,10 @@ checks actual kernel peer credentials, requires observed EOF, claims one request
 and rejects both identical and different-ID second claims. Test-only raw poll
 waits for readiness without adding a second reader. No namespace setup, mocked
 accepted flag or synthetic UID assertion substitutes for this evidence.
-SCM frame transport, complete gateway, production daemon signing and all new
-execution evidence remain NOT_RUN.
+Authenticated SCM frame transport, complete gateway and production daemon signing
+remain NOT_RUN. Receiver-only native evidence does not qualify those claims.
 
-## Explicit descriptor handoff (SOURCE ONLY / NOT_RUN)
+## Explicit descriptor handoff (scoped receiver evidence only)
 
 The same connection slot now retains one pending FD and phase 0 none, 1 staged,
 2 sent, 3 received, 4 adopted. Stage requires an accepted, one-use-claimed request
@@ -97,7 +98,9 @@ EAGAIN pending retention, extra and 32-right truncation disposal, EOF, actual sh
 16-slot capacity failure, changed-binding retry refusal, original-binding success,
 copied adoption denial, byte EOF and queued-FD disposal. It links actual
 runtime_process.c and normal CoreC owners. No accepted flag, helper PID or terminal
-proof is fabricated. All cases are currently NOT_RUN.
+proof is fabricated. This receiver fixture later compiled and ran once with exit
+0; exact evidence is archived in
+`doc/09_report/local_gateway_receiver_native_20261107/README.md`.
 
 Stage/send integration remains NOT_RUN until an actual separately provisioned
 client UID and real admitted group helper are available in the server process.
@@ -119,4 +122,5 @@ actual LU registry and connection locks. All four endpoint ports must reject the
 child (scalar origin refusal / nullable receipt unavailable), and the parent must
 still read its byte and close its endpoint. No namespace or identity changes,
 private phase fabrication, production test hook or old fixture rerun is used.
-These additional endpoint regressions remain SOURCE ONLY / NOT_RUN.
+These endpoint regressions are included in the one scoped native receiver PASS.
+The Simple facade and all distinct-UID/group-sender assertions remain NOT_RUN.
