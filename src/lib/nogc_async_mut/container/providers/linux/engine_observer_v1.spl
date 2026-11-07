@@ -5,7 +5,7 @@ use std.nogc_sync_mut.sffi.fs.file_canonicalize
 use std.nogc_sync_mut.io.retained_file.{RetainedFile, retained_file_open,
     retained_file_read_at, retained_file_identity_unchanged, retained_directory_open_trusted_v1}
 use std.common.crypto.sha256.sha256_stream_v1_new
-use std.nogc_sync_mut.io.process_ops.process_run_bounded
+use std.nogc_sync_mut.io.process_ops.{ProcessResult, process_run_bounded_observed_v1}
 
 pub const LINUX_OCI_ENGINE_EXECUTABLE_MAX_BYTES_V1: u64 = 67108864u64
 
@@ -64,15 +64,21 @@ pub fn linux_oci_engine_executable_digest_v1(policy: LinuxOciEnginePolicyV1) -> 
     if not file_closed or not directory_closed: return Err("engine-observation-owner-close-failed")
     result
 
+pub fn linux_oci_engine_capture_observation_v1(policy: LinuxOciEnginePolicyV1,
+        result: ProcessResult, executable_digest: text) -> Result<LinuxOciEngineObservationV1, text>:
+    if result.limit_exceeded or result.limit_type != "": return Err("engine-info-output-or-time-limit")
+    if result.exit_code != 0: return Err("engine-info-observation-failed")
+    if (result.stdout.len() > LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1 or
+            result.stderr.len() > LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1):
+        return Err("engine-info-output-limit")
+    linux_oci_engine_info_observation_v1(policy, result.stdout, executable_digest, policy.expected_uid)
+
 pub fn linux_oci_engine_observe_v1(policy: LinuxOciEnginePolicyV1,
         timeout_ms: i64) -> Result<LinuxOciEngineObservationV1, text>:
     if timeout_ms <= 0 or timeout_ms > 30000: return Err("engine-observation-timeout-invalid")
     val digest = linux_oci_engine_executable_digest_v1(policy)?
     val arguments = linux_oci_engine_route_v1(policy, ["info", "--format", "json"])?
-    val result = process_run_bounded(policy.executable_path, arguments,
-        timeout_ms, LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1)
-    if result.2 != 0: return Err("engine-info-observation-failed")
-    if result.0.len() > LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1 or result.1.len() > LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1:
-        return Err("engine-info-output-limit")
+    val result = process_run_bounded_observed_v1(policy.executable_path, arguments,
+        timeout_ms, LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1)?
     # The retained metadata above positively checked this process's native euid.
-    linux_oci_engine_info_observation_v1(policy, result.0, digest, policy.expected_uid)
+    linux_oci_engine_capture_observation_v1(policy, result, digest)
