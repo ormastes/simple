@@ -4245,6 +4245,16 @@ impl MirLowering:
             )
             val loaded = b.emit_load(mir_operand_copy(ptr), result_type)
             self.builder = b
+            # A member read off a tuple carried as an erased handle (`parsed.2`
+            # on a `case Ok(parsed)` binder of `Result<(V, D, [Issue]), E>`)
+            # took its MIR type from the HIR tuple member above, but no
+            # semantic owner: `for issue in parsed.2` then iterated untyped
+            # elements and `issue.line.to_text()` fell to `owner=` runtime
+            # fallback. Transfer the declared member metadata (a no-op unless
+            # the base's HIR type is a Tuple and the index is a literal).
+            self.remember_native_tuple_member_hir_type(base_local, self.tuple_index_literal(index), loaded)
+            if tuple_member_record != "":
+                self.struct_value_syms[loaded.id] = tuple_member_record
             loaded
 
     fn is_any_runtime_index_base(base_local: LocalId, runtime_array: bool, is_tuple_base: bool, raw_pointer_base: bool) -> bool:
@@ -6718,6 +6728,10 @@ impl MirLowering:
                 # decoded; an i64 default shifts the handle and loses the
                 # element type used by subsequent len/index dispatch.
                 var coalesce_array_type: HirType? = nil
+                # `nested[k] ?? {}` / `opt_dict ?? {}`: same recovery for a
+                # Dict payload, so `.keys()`/`.has()` on the merged value keep
+                # their owner instead of falling to `owner=` runtime fallback.
+                var coalesce_dict_type: HirType? = nil
                 var coalesce_left_type = self.enum_match_expr_type(left)
                 if coalesce_left_type == nil:
                     coalesce_left_type = self.find_local_hir_type(left_local.id)
@@ -6734,6 +6748,10 @@ impl MirLowering:
                     match payload_type.kind:
                         case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                             coalesce_array_type = Some(payload_type)
+                            if coalesce_missing_type:
+                                result_type = self.lower_type(payload_type)
+                        case HirTypeKind.Dict(_, _):
+                            coalesce_dict_type = Some(payload_type)
                             if coalesce_missing_type:
                                 result_type = self.lower_type(payload_type)
                         case _: ()
@@ -6908,12 +6926,15 @@ impl MirLowering:
                 if val array_type = coalesce_array_type:
                     self.runtime_array_locals[result_local.id] = true
                     self.remember_local_hir_type(result_local.id, array_type, 0, 0)
+                if val dict_type = coalesce_dict_type:
+                    self.runtime_dict_locals[result_local.id] = true
+                    self.remember_local_hir_type(result_local.id, dict_type, 0, 0)
                 if coalesce_record_fallback_valid:
                     if val tuple_payload = coalesce_tuple_type:
                         self.remember_local_hir_type(result_local.id, tuple_payload, 0, 0)
                     if val record_type = coalesce_record_type:
                         self.remember_local_hir_type(result_local.id, record_type, 0, 0)
-                if coalesce_record_type == nil and coalesce_array_type == nil and not right_terminated:
+                if coalesce_record_type == nil and coalesce_array_type == nil and coalesce_dict_type == nil and not right_terminated:
                     # `opt ?? E.Zero` / `d[k] ?? MirType.i64()`: the merged value
                     # has the left side's declared nominal payload type. Without
                     # it a `match` on the result saw an untyped subject (bare

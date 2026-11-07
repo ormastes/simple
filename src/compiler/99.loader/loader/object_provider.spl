@@ -7,11 +7,12 @@
 # as a fallback for loaders and the linker wrapper.
 
 use compiler.backend.linker.smf_getter.{SmfGetter, SmfLocation}
-use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakerConfig, ObjTakeResult, objtaker_with_compiler_context, objtaker_take_object}
+use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakerConfig, ObjTakeResult, objtaker_with_compiler_context, objtaker_take_object, objtaker_take_with_types}
 use compiler.backend.linker.obj_taker.{Template, SmfReader}
 use compiler.loader.compiler_sffi.TypeInfo
 use compiler.backend.linker.object_code_unit.{ObjectCodeUnit, make_object_code_unit}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.backend.linker.smf_reader.{SmfReaderImpl}
 use compiler.loader.compiler_ffi.{CompilerContext, compiler_create_context}
 use compiler.backend.linker.object_emitter.{assemble_code_units}
 use std.nogc_sync_mut.io.process_ops.{shell}
@@ -170,16 +171,21 @@ impl ObjectProvider:
         if exports.len() == 0:
             return Err("No exported symbols in {module_or_path}")
 
+        # ObjTaker consumes the `SmfReader` trait; SmfReaderMemory does not
+        # implement it, so adopt the already-loaded bytes as SmfReaderImpl.
+        val trait_reader = match SmfReaderImpl.from_memory(module_or_path, reader):
+            case Ok(adopted): adopted
+            case Err(reason): return Err(reason)
         var units: [ObjectCodeUnit] = []
         for sym in exports:
             # Prefer ObjTaker so deferred/templates are materialized
-            val take_res = objtaker_take_object(self.obj_taker, reader, sym.name)
+            val take_res = objtaker_take_object(self.obj_taker, trait_reader, sym.name)
             var code: [u8] = []
             match take_res:
                 case Code(bytes, _, _):
                     code = bytes
                 case _:
-                    val code_res = reader.read_code(sym)
+                    val code_res = trait_reader.read_code(sym)
                     match code_res:
                         case Ok(bytes):
                             code = bytes
@@ -194,7 +200,7 @@ impl ObjectProvider:
         Ok(units)
 
     fn instantiate_symbol(self: ObjectProvider, reader: SmfReader, symbol: text, type_args: [TypeInfo]) -> Result<[u8], text>:
-        val take_result = self.obj_taker.take_with_types(reader, symbol, type_args)
+        val take_result = objtaker_take_with_types(self.obj_taker, reader, symbol, type_args)
         match take_result:
             case Code(bytes, _, _):
                 Ok(bytes)
