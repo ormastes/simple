@@ -1,0 +1,62 @@
+# Authority context is constructed by the protected controller/host composition,
+# never decoded together with a completion received from a worker.
+use std.common.contracts.distributed_control_v2.*
+use std.common.contracts.distributed_authority_v2.*
+use std.common.contracts.distributed_control_codec_v2.{distributed_environment_digest_v2,
+    distributed_encode_operation_v2, distributed_grant_digest_v2}
+use app.llm_caret.workbench.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_verify_grant_approval_v2, distributed_authority_key_check_v2}
+use std.common.build_manager.contracts.{BuildTaskV1}
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.crypto.sha256.sha256_text
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, remote_policy_bind_v1}
+
+struct RemoteAuthorityContextV1:
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+    issuer: DistributedAuthorityKeyV2
+    approver: DistributedAuthorityKeyV2
+    host_key: DistributedAuthorityKeyV2
+    request: OperationEnvelopeV2
+    requested: ExecutionEnvironmentV2
+    observed: ExecutionEnvironmentV2
+    now: i64
+    policy_revision: i64
+    revocation_epoch: i64
+    session_generation: i64
+    assignment_digest: text
+    controller_epoch: i64
+
+fn remote_context_admit_v1(context: RemoteAuthorityContextV1, task: BuildTaskV1,
+        policy: RemoteEvidencePolicyV1) -> Result<bool, text>:
+    val _bound = remote_policy_bind_v1(task, policy)?
+    if policy.assignment_digest != context.assignment_digest or
+            policy.controller_epoch != context.controller_epoch:
+        return Err("REMOTE_ACTIVE_FENCE_DIFFERS")
+    val grant = distributed_verify_grant_approval_v2(context.signed, context.approval,
+        context.issuer, context.approver, context.request, context.now,
+        context.policy_revision, context.revocation_epoch, context.session_generation)?
+    val host_error = distributed_authority_key_check_v2(context.host_key, "execution-host",
+        context.host_key.identity, context.host_key.revision, grant, context.now,
+        context.policy_revision, context.revocation_epoch)
+    if host_error != "": return Err(host_error)
+    if context.host_key.public_key == context.issuer.public_key or
+            context.host_key.public_key == context.approver.public_key:
+        return Err("REMOTE_AUTHORITY_ROLES_NOT_SEPARATE")
+    if context.request.id != policy.operation_id or context.request.host_id != policy.host_id or
+            context.request.operation != policy.action_kind:
+        return Err("REMOTE_REQUEST_POLICY_DIFFERS")
+    if context.request.payload_digest != sha256_text(builder_encode_task_v1(task)):
+        return Err("REMOTE_REQUEST_TASK_DIFFERS")
+    val environment_error = distributed_environment_match_v2(context.requested, context.observed)
+    if environment_error != "": return Err(environment_error)
+    if distributed_environment_digest_v2(context.requested)? != context.request.environment_digest or
+            context.observed.host_id != policy.host_id or
+            context.observed.toolchain_digest != task.toolchain_digest:
+        return Err("REMOTE_ENVIRONMENT_DIFFERS")
+    if task.timeout_ms != context.request.duration_ms or task.timeout_ms <= 0 or
+            task.memory_limit_bytes != context.request.memory_bytes or task.memory_policy != "enforce":
+        return Err("REMOTE_RESOURCE_BINDING_DIFFERS")
+    Ok(true)
+
+export RemoteAuthorityContextV1, remote_context_admit_v1

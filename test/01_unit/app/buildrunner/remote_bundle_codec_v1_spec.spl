@@ -1,0 +1,156 @@
+# RUN01/02 wire projection only. AWAITING_VERIFICATION; no runtime claim.
+use std.spec.{describe, it, expect, fail}
+use app.buildrunner.remote_bundle_codec_v1.*
+use app.buildrunner.remote_host_v1.RemoteCompletionBundleV1
+use app.buildrunner.remote_evidence_v1.{RemoteEvidenceBytesV1, RemoteOutputBytesV1}
+use std.common.build_manager.contracts.{BuildResultV1, BuildInputV1}
+use std.common.crypto.sha256.sha256_u8_hex
+use test.fixtures.buildrunner.remote_authority_v1.remote_authority_fixture_v1
+
+fn bundle_codec_fixture_v1() -> RemoteCompletionBundleV1:
+    val authority = remote_authority_fixture_v1()
+    val output: [u8] = [0u8, 255u8, 128u8, 10u8]
+    # Structurally valid data, deliberately without execution/publication claims.
+    val result = BuildResultV1(task_id: authority.task.id, attempt: authority.task.attempt,
+        identity_digest: authority.completion.task_identity, host_id: "worker_1", status: "OK",
+        exit_code: 0, outputs: [BuildInputV1(path: "out/café%25.bin", digest: sha256_u8_hex(output))],
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+    val evidence = RemoteEvidenceBytesV1(process_payload: "observed café\n",
+        stdout: [0u8, 255u8, 13u8], stderr: [128u8, 10u8],
+        outputs: [RemoteOutputBytesV1(path: "out/café%25.bin", content: output)])
+    RemoteCompletionBundleV1(result: result, evidence: evidence, completion: authority.completion)
+
+fn bundle_codec_encode_v1(bundle: RemoteCompletionBundleV1) -> text:
+    match remote_bundle_encode_v1(bundle):
+        case Ok(wire): wire
+        case Err(reason):
+            expect(reason).to_equal("")
+            ""
+
+fn bundle_codec_decode_error_v1(wire: text) -> text:
+    match remote_bundle_decode_v1(wire):
+        case Ok(bundle): ""
+        case Err(reason): reason
+
+describe "bounded remote completion bundle transport":
+    it "preserves binary bytes, UTF-8 text, escaped paths, result and completion":
+        val bundle = bundle_codec_fixture_v1()
+        val wire = bundle_codec_encode_v1(bundle)
+        match remote_bundle_decode_v1(wire):
+            case Ok(decoded):
+                expect(decoded.evidence.stdout).to_equal(bundle.evidence.stdout)
+                expect(decoded.evidence.stderr).to_equal(bundle.evidence.stderr)
+                expect(decoded.evidence.process_payload).to_equal(bundle.evidence.process_payload)
+                expect(decoded.evidence.outputs[0].content).to_equal(bundle.evidence.outputs[0].content)
+                expect(decoded.evidence.outputs[0].path).to_equal("out/café%25.bin")
+                expect(decoded.result.outputs[0].digest).to_equal(bundle.result.outputs[0].digest)
+                expect(decoded.completion.signature).to_equal(bundle.completion.signature)
+                expect(bundle_codec_encode_v1(decoded)).to_equal(wire)
+            case Err(reason): expect(reason).to_equal("")
+
+    it "splits a binary blob across an exact 16384-byte boundary":
+        var bundle = bundle_codec_fixture_v1()
+        var evidence = bundle.evidence
+        evidence.stdout = [for i in 0..16385: (i % 256) as u8]
+        bundle.evidence = evidence
+        val wire = bundle_codec_encode_v1(bundle)
+        expect(wire.contains("\n16385\n2\n")).to_equal(true)
+        match remote_bundle_decode_v1(wire):
+            case Ok(decoded): expect(decoded.evidence.stdout).to_equal(evidence.stdout)
+            case Err(reason): expect(reason).to_equal("")
+
+    it "accepts zero-length blobs with zero chunks":
+        var bundle = bundle_codec_fixture_v1()
+        var evidence = bundle.evidence
+        evidence.process_payload = ""
+        evidence.stdout = []
+        evidence.stderr = []
+        evidence.outputs = []
+        bundle.evidence = evidence
+        val wire = bundle_codec_encode_v1(bundle)
+        match remote_bundle_decode_v1(wire):
+            case Ok(decoded):
+                expect(decoded.evidence.process_payload).to_equal("")
+                expect(decoded.evidence.stdout.len()).to_equal(0)
+                expect(decoded.evidence.stderr.len()).to_equal(0)
+                expect(decoded.evidence.outputs.len()).to_equal(0)
+            case Err(reason): expect(reason).to_equal("")
+
+    it "preserves a well-framed byte mutation for independent parent verification":
+        val wire = bundle_codec_encode_v1(bundle_codec_fixture_v1())
+        # stdout 00 ff 0d -> 00 ff 0e; framing is valid but signed log evidence
+        # remains unchanged. Decoding must never mistake framing for authority.
+        val changed = wire.replace("\n00ff0d\n", "\n00ff0e\n")
+        expect(changed == wire).to_equal(false)
+        match remote_bundle_decode_v1(changed):
+            case Ok(decoded): expect(decoded.evidence.stdout).to_equal([0u8, 255u8, 14u8])
+            case Err(reason): expect(reason).to_equal("")
+
+    it "rejects unknown versions, missing termination, truncation and trailing rows":
+        val header = "SIMPLE_REMOTE_COMPLETION_BUNDLE_V1\n"
+        expect(bundle_codec_decode_error_v1("SIMPLE_REMOTE_COMPLETION_BUNDLE_V2\n")).to_equal("REMOTE_BUNDLE_FRAME_INVALID")
+        expect(bundle_codec_decode_error_v1("SIMPLE_REMOTE_COMPLETION_BUNDLE_V1")).to_equal("REMOTE_BUNDLE_WIRE_INVALID")
+        expect(bundle_codec_decode_error_v1(header + "1\n1\n")).to_equal("REMOTE_BUNDLE_BLOB_INVALID")
+        val wire = bundle_codec_encode_v1(bundle_codec_fixture_v1())
+        expect(bundle_codec_decode_error_v1(wire + "extra\n")).to_equal("REMOTE_BUNDLE_WIRE_INVALID")
+
+    it "rejects noncanonical counts, extra chunks, short hex and non-lowercase hex":
+        val header = "SIMPLE_REMOTE_COMPLETION_BUNDLE_V1\n"
+        expect(bundle_codec_decode_error_v1(header + "00\n0\n")).to_equal("REMOTE_BUNDLE_BLOB_INVALID")
+        expect(bundle_codec_decode_error_v1(header + "0\n1\n00\n")).to_equal("REMOTE_BUNDLE_CHUNK_COUNT_INVALID")
+        expect(bundle_codec_decode_error_v1(header + "2\n1\n00\n")).to_equal("REMOTE_BUNDLE_CHUNK_SIZE_INVALID")
+        expect(bundle_codec_decode_error_v1(header + "1\n1\nFF\n")).to_equal("REMOTE_BUNDLE_HEX_INVALID")
+        expect(bundle_codec_decode_error_v1(header + "1\n1\n%30%30\n")).to_equal("REMOTE_BUNDLE_CHUNK_SIZE_INVALID")
+
+    it "rejects unsafe or duplicate output paths on both encoding and decoding":
+        var bundle = bundle_codec_fixture_v1()
+        var evidence = bundle.evidence
+        evidence.outputs = [RemoteOutputBytesV1(path: "../outside", content: [])]
+        bundle.evidence = evidence
+        match remote_bundle_encode_v1(bundle):
+            case Ok(wire): fail("unsafe output path encoded")
+            case Err(reason): expect(reason).to_equal("REMOTE_BUNDLE_OUTPUT_PATH_INVALID")
+        bundle = bundle_codec_fixture_v1()
+        val wire = bundle_codec_encode_v1(bundle)
+        expect(bundle_codec_decode_error_v1(wire.replace("out/café%2525.bin\n", "../outside\n"))).to_equal("REMOTE_BUNDLE_OUTPUT_PATH_INVALID")
+        evidence = bundle.evidence
+        evidence.outputs = [evidence.outputs[0], evidence.outputs[0]]
+        bundle.evidence = evidence
+        match remote_bundle_encode_v1(bundle):
+            case Ok(encoded): fail("duplicate output path encoded")
+            case Err(reason): expect(reason).to_equal("REMOTE_BUNDLE_OUTPUT_PATH_INVALID")
+        val tail = "\n1\nout/café%2525.bin\n4\n1\n00ff800a\n"
+        val duplicated = "\n2\nout/café%2525.bin\n4\n1\n00ff800a\nout/café%2525.bin\n4\n1\n00ff800a\n"
+        expect(wire.contains(tail)).to_equal(true)
+        expect(bundle_codec_decode_error_v1(wire.replace(tail, duplicated))).to_equal("REMOTE_BUNDLE_OUTPUT_PATH_INVALID")
+        expect(bundle_codec_decode_error_v1(wire.replace(tail,
+            "\n4097\nout/café%2525.bin\n4\n1\n00ff800a\n"))).to_equal("REMOTE_BUNDLE_OUTPUT_COUNT_INVALID")
+
+    it "rejects wire and declared raw lengths beyond transport limits":
+        expect(bundle_codec_decode_error_v1("x".repeat(16777217))).to_equal("REMOTE_BUNDLE_WIRE_TOO_LARGE")
+        expect(bundle_codec_decode_error_v1("SIMPLE_REMOTE_COMPLETION_BUNDLE_V1\n4194305\n257\n")).to_equal("REMOTE_BUNDLE_BLOB_INVALID")
+        var bundle = bundle_codec_fixture_v1()
+        var evidence = bundle.evidence
+        evidence.stdout = [for i in 0..4194305: 0u8]
+        bundle.evidence = evidence
+        match remote_bundle_encode_v1(bundle):
+            case Ok(wire): fail("oversized evidence encoded")
+            case Err(reason): expect(reason).to_equal("REMOTE_BUNDLE_BYTES_EXCEEDED")
+
+    it "applies one cumulative budget across individually bounded blobs":
+        var bundle = bundle_codec_fixture_v1()
+        var evidence = bundle.evidence
+        val half_budget: [u8] = [for i in 0..2097152: 0u8]
+        evidence.stdout = half_budget
+        evidence.stderr = half_budget
+        bundle.evidence = evidence
+        match remote_bundle_encode_v1(bundle):
+            case Ok(wire): fail("combined logs plus metadata exceeded budget")
+            case Err(reason): expect(reason).to_equal("REMOTE_BUNDLE_BYTES_EXCEEDED")
+
+    it "rejects malformed UTF-8 in a text blob after binary reassembly":
+        val wire = bundle_codec_encode_v1(bundle_codec_fixture_v1())
+        val process_hex = "6f6273657276656420636166c3a90a"
+        expect(wire.contains(process_hex)).to_equal(true)
+        val changed = wire.replace(process_hex, "ff6273657276656420636166c3a90a")
+        expect(bundle_codec_decode_error_v1(changed) == "").to_equal(false)
