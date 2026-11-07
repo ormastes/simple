@@ -1490,6 +1490,22 @@ SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_l
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
+/* Ref V1: generation comes from the actual reserved spawn slot, never PID adoption.
+ * Scalar actions return -2 stale/invalid, -1 runtime failure; close 0 success,
+ * alive 0 stopped/1 running, write >=0 accepted. stdout state 0 deferred/1 EOF.
+ * Valid POSIX Ref liveness/close return -3 unsupported: no reap/signal/free.
+ * Reads use the same thread-local buffer and UTF-8 framing as legacy PID reads. */
+int64_t rt_process_spawn_piped_generation_v1(const char* cmd, int64_t cmd_len, SplArray* args);
+int64_t rt_process_piped_pid_for_generation_v1(int64_t generation);
+const char* rt_process_read_stdout_ref_v1(int64_t pid, int64_t generation);
+int64_t rt_process_stdout_state_ref_v1(int64_t pid, int64_t generation);
+/* Validation observes registry ownership only, never kernel liveness or I/O. */
+int64_t rt_process_validate_piped_ref_v1(int64_t pid, int64_t generation);
+int64_t rt_process_write_stdin_some_ref_v1(int64_t pid, int64_t generation,
+    const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
+int64_t rt_process_is_piped_alive_ref_v1(int64_t pid, int64_t generation);
+int64_t rt_process_close_piped_ref_v1(int64_t pid, int64_t generation);
+
 int64_t     rt_process_pin_executable(const char* canonical_path);
 /* Separately named opaque owner for consumers that cannot safely retain a raw
  * descriptor.  It is acquired only through rt_process_acquire_pinned_executable. */

@@ -1,3 +1,4 @@
+use compiler.core.ast.{decl_set_param_defaults}
 # Declaration parsing: enum, top-level visibility, module body.
 use compiler.frontend.core.parser_decls.*
 # Parser — Declaration Module
@@ -460,6 +461,7 @@ fn parse_enum_decl() -> i64:
     # S1 (hardening plan 15 Phase 4): parallel element-for-element to
     # variant_payload_types_flat -- see decl_enum_def's docstring.
     var variant_payload_field_names_flat: [text] = []
+    var variant_payload_defaults_flat: [i64] = []
     var parse_enum_method_ids: [i64] = []
     # §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
     # trailing `complete:` / `dyn:` sections declare the OPEN regions of the
@@ -545,6 +547,7 @@ fn parse_enum_decl() -> i64:
         # one entry per payload field -- the declared identifier for a NAMED
         # field, decl_enum_payload_unnamed_marker() for a positional one.
         var variant_field_names: [text] = []
+        var variant_field_defaults: [i64] = []
         if par_kind_get() == 140:
             parser_advance()
             while true:
@@ -585,6 +588,14 @@ fn parse_enum_decl() -> i64:
                     variant_field_names.push(decl_enum_payload_unnamed_marker())
                 else:
                     parser_advance()
+                if variant_field_types.len() > variant_field_defaults.len():
+                    var field_default: i64 = -1
+                    if par_kind_get() == TOK_ASSIGN:
+                        if variant_field_names[variant_field_names.len() - 1] == decl_enum_payload_unnamed_marker():
+                            parser_error("enum payload defaults require a named field")
+                        parser_advance()
+                        field_default = parse_expr()
+                    variant_field_defaults.push(field_default)
                 if par_kind_get() == 160:
                     parser_advance()
             parser_expect(141)
@@ -599,6 +610,7 @@ fn parse_enum_decl() -> i64:
         while vft_i < variant_field_types.len():
             variant_payload_types_flat.push(variant_field_types[vft_i])
             variant_payload_field_names_flat.push(variant_field_names[vft_i])
+            variant_payload_defaults_flat.push(variant_field_defaults[vft_i])
             vft_i = vft_i + 1
         # G42: pipe-separated variants on the same line (e.g. `Escape | F1 | F2`).
         # Pure separator, no semantic change -- loop back to the top and parse
@@ -617,6 +629,7 @@ fn parse_enum_decl() -> i64:
     if saw_complete_section or saw_dyn_section:
         parser_record_enum_open_regions(enum_name, saw_complete_section, saw_dyn_section)
     val enum_d = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, variant_payload_field_names_flat, 0)
+    decl_set_param_defaults(enum_d, variant_payload_defaults_flat)
     representation_declaration_end_v1(representation_owner, enum_d, enum_name)
     # `enum Opt<T>:` -- thread the `<T, ...>` names parsed above onto the flat
     # decl's shared TYPE_PARAMS slot, exactly as parse_struct_decl does for

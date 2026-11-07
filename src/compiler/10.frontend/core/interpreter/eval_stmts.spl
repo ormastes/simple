@@ -17,7 +17,7 @@
 # the pure-Simple HIR resolves per module and reported them as unresolved.
 use compiler.core.ast.{arm_get_body, arm_get_guard, arm_get_pattern, elif_get_body, elif_get_cond}
 use compiler.core.ast.{elif_get_else, expr_get, stmt_get}
-use compiler.core.ast_expr.{EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, EXPR_RANGE}
+use compiler.core.ast_expr.{EXPR_CALL, EXPR_EXISTS_CHECK, EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, EXPR_RANGE}
 use compiler.core.ast_expr.{expr_owner_int, expr_owner_int_set}
 use compiler.core.ast_stmt.{STMT_ASSIGN, STMT_BIND, STMT_BLOCK, STMT_BREAK, STMT_COMPOUND_ASSIGN}
 use compiler.core.ast_stmt.{STMT_CONTINUE, STMT_DEFER, STMT_ERRDEFER, STMT_EXPR, STMT_FOR}
@@ -40,6 +40,7 @@ use compiler.core.interpreter.env.*
 use compiler.core.interpreter.value.*
 use compiler.core.interpreter.resolve.*
 use compiler.core.interpreter.eval_calls.{val_copy_if_value_struct}
+use compiler.core.interpreter.value_places.{eval_mutable_value_place, eval_prepare_value_place}
 
 # Import from split declarations module
 use compiler.core.interpreter.eval_decls.{eval_decl, eval_module, eval_init}
@@ -143,8 +144,9 @@ fn eval_stmt(sid: i64) -> i64:
         val bind_is_nil = val_get_kind(bind_rhs_val) == 0
         if bind_is_nil:
             return bind_rhs_val
-        env_define(bind_name, bind_rhs_val)
-        return bind_rhs_val
+        val snapshot = val_copy_if_value_struct(bind_rhs_val)
+        env_define(bind_name, snapshot)
+        return snapshot
 
     eval_set_error("unsupported statement kind: " + "{tag}")
     -1
@@ -195,7 +197,7 @@ fn eval_tuple_destructure(name: text, init_val: i64) -> i64:
         val part_name = parts[i]
         var elem_val = val_make_nil()
         if i < elements.len():
-            elem_val = elements[i]
+            elem_val = val_copy_if_value_struct(elements[i])
         env_define(part_name, elem_val)
         if eval_current_decl_id >= 0:
             val slot = resolve_is_fast_local(eval_current_decl_id, part_name)
@@ -213,6 +215,17 @@ fn eval_stmt_val_decl(sid: i64) -> i64:
         init_val = eval_expr(init_eid)
         if eval_had_error: return -1
     if stmt_is_if_val_decl(sid):
+        # Keep original expression provenance: an authored .? has already
+        # chosen presence; a bare Result is not an optional binding carrier.
+        var explicit_presence = false
+        if init_eid >= 0:
+            val original_init = expr_get(init_eid)
+            explicit_presence = original_init.tag == EXPR_EXISTS_CHECK
+        if not explicit_presence and val_is_struct(init_val):
+            val carrier_name = val_get_struct_name(init_val)
+            if carrier_name == "Result::Ok" or carrier_name == "Result::Err":
+                eval_set_error("cannot bind a Result with bare if val/while val; use match Ok/Err or Result.ok.?")
+                return -1
         init_val = eval_option_binding_value(init_val)
     # S1 copy-site 3 (struct local binding): `val b = a` on a value-type struct
     # binds a SNAPSHOT, so later writes through `a` cannot be observed via `b`.
@@ -273,8 +286,9 @@ fn eval_stmt_assign(sid: i64) -> i64:
         return -1
     val value_eid = value_stmts[0]
 
-    val new_val = eval_expr(value_eid)
+    val incoming = eval_expr(value_eid)
     if eval_had_error: return -1
+    val new_val = val_copy_if_value_struct(incoming)
 
     val target_node = expr_get(target_eid)
     val target_tag = target_node.tag
@@ -294,14 +308,14 @@ fn eval_stmt_assign(sid: i64) -> i64:
     if target_tag == EXPR_FIELD_ACCESS:
         val base_eid = target_node.left
         val field_name = target_node.s_val
-        val base_val = eval_expr(base_eid)
+        val base_val = eval_mutable_value_place(base_eid)
         if eval_had_error: return -1
         if val_is_struct(base_val):
             # S1 copy-site 4 (struct field store): storing a value-type struct
             # into an already-constructed field stores a SNAPSHOT, so later
             # writes through the source binding cannot reach the field. Class
             # values fall through the gate unchanged and stay aliased.
-            val store_val = val_copy_if_value_struct(new_val)
+            val store_val = new_val
             # Fast path: cached field index
             val cached_idx2 = expr_owner_int(target_eid)
             if cached_idx2 >= 0:
@@ -321,9 +335,11 @@ fn eval_stmt_assign(sid: i64) -> i64:
     if target_tag == EXPR_INDEX:
         val base_eid2 = target_node.left
         val idx_eid = target_node.right
-        val base_val2 = eval_expr(base_eid2)
+        val base_place = eval_prepare_value_place(base_eid2)
         if eval_had_error: return -1
         val idx_val = eval_expr(idx_eid)
+        if eval_had_error: return -1
+        val base_val2 = base_place.mutable_value()
         if eval_had_error: return -1
         if val_is_array(base_val2):
             if val_is_int(idx_val):
@@ -500,7 +516,7 @@ fn eval_stmt_for(sid: i64) -> i64:
 
     val iterable_array = val_iterable_array(iterable)
     if iterable_array >= 0:
-        val elements = val_get_array(iterable_array)
+        val elements = val_get_array(val_copy_if_value_struct(iterable_array))
         var last_val2 = val_make_nil()
         for elem_vid in elements:
             if eval_had_error: break
@@ -509,7 +525,7 @@ fn eval_stmt_for(sid: i64) -> i64:
             eval_continuing = false
             eval_continue_label = ""
             env_push_scope()
-            env_define(iter_name, elem_vid)
+            env_define(iter_name, val_copy_if_value_struct(elem_vid))
             for sid2 in body_stmts:
                 if eval_had_error: break
                 if eval_returning: break
@@ -583,7 +599,7 @@ fn eval_stmt_static_for(sid: i64) -> i64:
 
     val sf_iterable_array = val_iterable_array(sf_iterable)
     if sf_iterable_array >= 0:
-        val sf_elements = val_get_array(sf_iterable_array)
+        val sf_elements = val_get_array(val_copy_if_value_struct(sf_iterable_array))
         var sf_last_val = val_make_nil()
         for sf_elem_vid in sf_elements:
             if eval_had_error: break
@@ -592,7 +608,7 @@ fn eval_stmt_static_for(sid: i64) -> i64:
             eval_continuing = false
             eval_continue_label = ""
             env_push_scope()
-            env_define(sf_iter_name, sf_elem_vid)
+            env_define(sf_iter_name, val_copy_if_value_struct(sf_elem_vid))
             for sf_sid in sf_body_stmts:
                 if eval_had_error: break
                 if eval_returning: break

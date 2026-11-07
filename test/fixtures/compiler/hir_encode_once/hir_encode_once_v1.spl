@@ -1,0 +1,33 @@
+# Shared fixture for the HIR encode-once registration specs
+# (stage2_hir_registration_reencode_timeout_2026-10-16). Builds a lowered
+# module whose path is a real file under the spec's private build root, plus a
+# body-archive input whose identity admits (the archive key binds the source
+# path and the runtime-provider receipt bytes).
+
+use test.fixtures.compiler.completeness95.hir_cases_v1.{fixture_hir_module_v1}
+use compiler.hir.hir_types.{HirModule}
+use compiler.driver.driver_hir_cache.{hir_cache_header}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveInputV1}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn hir_encode_once_module_v1(root: text, with_cfg: bool) -> HirModule:
+    var module = fixture_hir_module_v1(with_cfg)
+    val path = root + "/encode_once_source_{with_cfg}.spl"
+    if not rt_file_write_text(path, "fn encode_once_fixture() -> i64:\n    1\n"):
+        panic("encode-once fixture could not write its source file")
+    module.path = path
+    module
+
+fn hir_encode_once_archive_input_v1(root: text, module: HirModule) -> HirBodyArchiveInputV1:
+    val receipt_path = root + "/runtime_provider_receipt.txt"
+    val receipt = "runtime-provider-receipt-v1\n"
+    if not rt_file_write_text(receipt_path, receipt):
+        panic("encode-once fixture could not write the provider receipt")
+    HirBodyArchiveInputV1(source_path: module.path, closure_digest: sha256_text("closure"),
+        is_entry: false, module_name: module.name, runtime_provider_receipt_path: receipt_path,
+        runtime_provider_digest: sha256_text(receipt), producer_header: hir_cache_header(),
+        stage: "lowered-unresolved-v1")
+
+export hir_encode_once_module_v1, hir_encode_once_archive_input_v1

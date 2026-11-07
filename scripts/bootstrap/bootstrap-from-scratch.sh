@@ -3552,6 +3552,8 @@ prepare_rust_authority_workspace() {
     return 0
   fi
 
+  bootstrap_stage3_preflight_generation_storage "${rust_authority_generation_root}" || return 1
+
   # Both the authority root and Cargo target bind every Rust seed input.
   # Preserve its Cargo target so an interrupted/retried build with the same
   # fingerprint can reuse dependency artifacts. Ephemeral HOME/config/tmp state
@@ -3707,7 +3709,7 @@ run_rust_authority_command() {
     bootstrap_progress_mark "${rust_authority_milestone}" \
       "$(absolute_path "${log_dir}/${rust_authority_log}.log")"
   fi
-  prepare_rust_authority_workspace
+  prepare_rust_authority_workspace || return 1
   if [ "${rust_llvm_status:-disabled}" = enabled ]; then
     if [ "${rust_authority_lto}" = off ]; then
       run_rust_authority_env "${rust_authority_log}" \

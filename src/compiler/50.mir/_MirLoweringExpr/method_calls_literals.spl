@@ -294,9 +294,9 @@ impl MirLowering:
         fix, in the same file, had to back out of) -- this does a RUNTIME
         tagged-or-raw check first via rt_interp_cstr (bug #136's
         autodetection: unwraps an already-tagged handle to its real data
-        buffer, or passes an already-raw char* through unchanged), THEN
-        (re)tags that buffer via rt_string_new using rt_string_len on the
-        ORIGINAL value. Tagged text can contain NUL bytes, so strlen of
+        buffer, or passes an already-raw char* through unchanged). Preserve
+        an existing tagged handle; only raw values need rt_string_new using
+        rt_string_len on the ORIGINAL value. Tagged text can contain NUL bytes, so strlen of
         the unwrapped buffer would discard its length and truncate it.
         Safe for both representations. Used to fix `.starts_with()`/
         `.ends_with()`'s RECEIVER (their existing code below only tagged the
@@ -317,6 +317,32 @@ impl MirLowering:
         var ets_raw = value_local
         if val ets_cstr_local = ets_cstr_res:
             ets_raw = ets_cstr_local
+        # The existing runtime decoder returns the input word unchanged for
+        # raw text and a distinct borrowed data pointer for registered tagged
+        # text. Preserve that original handle instead of copying the entire
+        # receiver on every method call. Compare integer words, never contents
+        # or guessed tag bits. Keep the old raw/null fallback below unchanged.
+        val ets_type = MirType(kind: MirTypeKind.Opaque("str"))
+        var b_ets_branch = self.builder
+        val ets_original_word = b_ets_branch.emit_bitcast(mir_operand_copy(value_local), MirType.i64())
+        val ets_data_word = b_ets_branch.emit_bitcast(mir_operand_copy(ets_raw), MirType.i64())
+        val ets_changed = b_ets_branch.emit_binop(MirBinOp.Ne, mir_operand_copy(ets_original_word), mir_operand_copy(ets_data_word), MirType.bool())
+        val ets_nonnull_block = b_ets_branch.new_block(Some("text_decode_nonnull"))
+        val ets_keep_block = b_ets_branch.new_block(Some("text_keep_tagged"))
+        val ets_raw_block = b_ets_branch.new_block(Some("text_box_raw"))
+        val ets_merge_block = b_ets_branch.new_block(Some("text_normalize_merge"))
+        val ets_result = b_ets_branch.new_local(nil, ets_type, LocalKind.Var)
+        b_ets_branch.terminate_if(mir_operand_copy(ets_changed), ets_nonnull_block, ets_raw_block)
+        b_ets_branch.switch_to_block(ets_nonnull_block)
+        val ets_zero = b_ets_branch.emit_const_int(0)
+        val ets_nonnull = b_ets_branch.emit_binop(MirBinOp.Ne, mir_operand_copy(ets_data_word), mir_operand_copy(ets_zero), MirType.bool())
+        b_ets_branch.terminate_if(mir_operand_copy(ets_nonnull), ets_keep_block, ets_raw_block)
+        b_ets_branch.switch_to_block(ets_keep_block)
+        b_ets_branch.emit_copy(ets_result, value_local)
+        b_ets_branch.terminate_goto(ets_merge_block)
+        b_ets_branch.switch_to_block(ets_raw_block)
+        self.builder = b_ets_branch
+
         val ets_len_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_string_len"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
@@ -324,6 +350,7 @@ impl MirLowering:
         var b_ets_len = self.builder
         val ets_len_res = b_ets_len.emit_call(ets_len_op, [mir_operand_copy(value_local)], MirType.i64())
         self.builder = b_ets_len
+        var ets_boxed = ets_raw
         if val ets_len_local = ets_len_res:
             val ets_new_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_string_new"),
@@ -333,8 +360,13 @@ impl MirLowering:
             val ets_new_res = b_ets_new.emit_call(ets_new_op, [mir_operand_copy(ets_raw), mir_operand_copy(ets_len_local)], MirType.i64())
             self.builder = b_ets_new
             if val ets_new_local = ets_new_res:
-                return ets_new_local
-        ets_raw
+                ets_boxed = ets_new_local
+        var b_ets_merge = self.builder
+        b_ets_merge.emit_copy(ets_result, ets_boxed)
+        b_ets_merge.terminate_goto(ets_merge_block)
+        b_ets_merge.switch_to_block(ets_merge_block)
+        self.builder = b_ets_merge
+        ets_result
 
     me lower_text_split_lines(sl_recv_raw: LocalId, receiver_span: Span) -> LocalId:
         """Lower `text.split_lines()` (bug: pure_simple_text_split_lines_missing).
@@ -6066,32 +6098,20 @@ impl MirLowering:
 
     me lower_gpu_intrinsic_call(name: text, args: [HirCallArg]) -> LocalId:
         """Lower GPU intrinsic function call to MIR GPU instruction."""
-        # Resolve dimension argument (default 0)
-        val dim = if args.len() > 0:
-            # Try to extract constant integer from the dimension argument
+        # Only these five operations consume a dimension. Atomic/data operands
+        # belong to their later lowering path and must not be evaluated here.
+        val takes_dimension = match name:
+            case "gpu_global_id" | "gpu_local_id" | "gpu_block_id" | "gpu_block_dim" | "gpu_grid_dim": true
+            case _: false
+        val dim = if takes_dimension and args.len() > 0:
             val dim_expr = args[0].value
             match dim_expr.kind:
-                case IntLit(value, _):
-                    value
+                case IntLit(value, _): value
                 case _:
-                    # SAME FAIL-OPEN CLASS as the unresolved-method const-0
-                    # placeholder further down this file: a value the lowering
-                    # could not determine was replaced by a plausible default
-                    # instead of a diagnostic. Here a NON-CONSTANT dimension
-                    # argument silently became dimension 0, so
-                    # `thread_idx(d)` for a computed `d` read the X index
-                    # whatever `d` was -- wrong data under exit 0.
-                    #
-                    # The intrinsic genuinely requires a compile-time constant
-                    # dimension (it selects which intrinsic to emit), so the
-                    # honest answer is a diagnostic. The `0` is retained only
-                    # as the placeholder the rest of this function needs to
-                    # keep building a well-formed MIR body; the error above
-                    # makes the build fail on every lane that reads it, and
-                    # the print makes it visible on the lanes that do not.
+                    # Preserve one evaluation for diagnostic recovery, then
+                    # prevent the placeholder index from being published.
                     val dim_local = self.lower_expr(dim_expr)
-                    self.error("GPU thread-index dimension must be a compile-time constant", nil)
-                    print "[mir-lower] WARNING: non-constant GPU thread-index dimension lowered to dimension 0 (silent-default risk)"
+                    self.error_fatal("GPU thread-index dimension must be a compile-time constant", Some(dim_expr.span))
                     0
         else:
             0

@@ -9,7 +9,7 @@ use compiler.types.type_layout.{LayoutAttr, FieldLayout, compute_struct_layout, 
 use compiler.mir.hir_expression_artifact_v1.*
 use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
-use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
 use compiler.hir.hir_codec_key_order.{hc_order_symbol_id_keys_v1}
 use compiler.hir.hir_function_record_identity_v1.{hir_complete_function_digest_v1}
 use compiler.hir.hir_symbol_table_methods.*
@@ -101,16 +101,37 @@ fn mir_hir_project_fields_in_owned_scope_v1(context: HirOwnedArtifactContextV1, 
         index = index + 1
     Ok(projected)
 
-fn mir_hir_project_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1, module: HirModule, authority: text,
-        key: text, digest: text, source_binding: MirHirDeclarationSourceV1? = nil) -> Result<MirHirModuleDeclarationsV1, text>:
-    # Only the final-reader caller supplies authority. Recheck the complete
-    # decoded bytes before publishing any expression/declaration artifact.
-    if transient_array_scope_state_v1() != 1 or not sha256_lower_hex_valid(authority) or
-            not sha256_lower_hex_valid(key) or not sha256_lower_hex_valid(digest):
-        return Err("MIR declaration projection lacks final-stage scope/authority")
+fn mir_hir_project_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1,
+        module: HirModule, authority: text, key: text, digest: text,
+        source_binding: MirHirDeclarationSourceV1? = nil) -> Result<MirHirModuleDeclarationsV1, text>:
     val complete = hir_module_encode(module)
     if complete == "" or sha256_text(complete) != digest:
         return Err("MIR declaration projection final body mismatch")
+    _mir_hir_project_verified_module_in_owned_scope_v1(context, module, authority,
+        key, digest, source_binding)
+
+# Encode-once projection consumes bytes as the sole module snapshot. It never
+# accepts a mutable HirModule alongside caller bytes, so same-name/path
+# mutation cannot reuse stale content under a copied digest.
+fn mir_hir_project_encoded_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1,
+        complete: text, authority: text, key: text, digest: text,
+        source_binding: MirHirDeclarationSourceV1? = nil) -> Result<MirHirModuleDeclarationsV1, text>:
+    if complete == "" or sha256_text(complete) != digest:
+        return Err("MIR declaration projection final body mismatch")
+    val decoded = hir_module_decode(complete)
+    if decoded == nil:
+        return Err("MIR declaration projection final body decode refused")
+    _mir_hir_project_verified_module_in_owned_scope_v1(context, decoded.?, authority,
+        key, digest, source_binding)
+
+fn _mir_hir_project_verified_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1,
+        module: HirModule, authority: text, key: text, digest: text,
+        source_binding: MirHirDeclarationSourceV1?) -> Result<MirHirModuleDeclarationsV1, text>:
+    # Only the final-reader caller supplies authority. The public entry points
+    # above bind this exact graph to the complete body digest first.
+    if transient_array_scope_state_v1() != 1 or not sha256_lower_hex_valid(authority) or
+            not sha256_lower_hex_valid(key) or not sha256_lower_hex_valid(digest):
+        return Err("MIR declaration projection lacks final-stage scope/authority")
     # Complete HIR encoding sorts identity-keyed dictionaries. Project in the
     # same canonical order so independent decodes produce identical seals.
     # Keep original key objects: copying a SymbolId loses dictionary identity.

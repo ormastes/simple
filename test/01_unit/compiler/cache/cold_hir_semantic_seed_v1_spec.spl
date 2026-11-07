@@ -8,8 +8,7 @@ use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     ColdHirSemanticInputV1, cold_hir_semantic_seed_v1,
     cold_hir_semantic_seeds_v1,
     cold_hir_typed_receipt_from_admitted_entry_v1,
-    cold_hir_typed_receipts_from_lowered_sources_v1, ColdHirTypedReceiptV1,
-    cold_hir_receipt_capture_scope_v1
+    cold_hir_typed_receipts_from_lowered_sources_v1, ColdHirTypedReceiptV1
 }
 use compiler.hir.abi_interface.{
     hir_abi_interface_digest_v1, hir_abi_interface_encoded_v1
@@ -23,6 +22,7 @@ use compiler.driver.cache.package_tldr_metadata.{
 }
 use std.scv.compile_source_inventory_core.{
     CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    CompileSourceInventoryReadV1,
     compile_source_inventory_digest_v1
 }
 use std.common.crypto.sha256.{sha256_text}
@@ -103,8 +103,11 @@ fn test_receipt_batch(invalid: bool, wrong_path: bool = false,
     val inventory = CompileSourceInventoryV1(1, 1, entries)
     val snapshot = rows.join("\n")
     # Repeated admitted identity must not duplicate either receipts or errors.
+    val inventory_digest = compile_source_inventory_digest_v1(inventory)
+    val admitted = CompileSourceInventoryReadV1(
+        true, "", inventory_digest, Some(inventory))
     cold_hir_typed_receipts_from_lowered_sources_v1(
-        "/repo", compile_source_inventory_digest_v1(inventory), inventory,
+        "/repo", inventory_digest, admitted,
         snapshot, sha256_text(snapshot),
         ["/repo/pkg/a.spl", "/repo/pkg/b.spl", "/repo/pkg/b.spl", "/repo/pkg/c.spl"],
         [digest, digest, digest, digest],
@@ -311,14 +314,3 @@ describe "cold HIR semantic seed":
         val missing = cold_hir_semantic_seeds_v1(
             [inputs[0]], "/repo", inventory, digest)
         expect(missing.unwrap_err()).to_equal("cold-hir-source-missing:pkg/first.spl")
-
-    # Stage 3 per-file pool (2026-11-07): a SIMPLE_FILE_WORKER_UNIT child
-    # lowers only its picked batch plus uncached imports, yet the capture walked
-    # the whole closure and failed on the first unlowered row
-    # (cold-hir-lowered-module-missing:app.cli.bootstrap_main).
-    it "scopes cold HIR receipt capture to the whole-closure process":
-        expect(cold_hir_receipt_capture_scope_v1(false, false)).to_equal("capture")
-        expect(cold_hir_receipt_capture_scope_v1(true, false)).to_equal("capture")
-        expect(cold_hir_receipt_capture_scope_v1(false, true)).to_equal("skip")
-        expect(cold_hir_receipt_capture_scope_v1(true, true)).to_equal(
-            "cold-hir-full-inventory-file-worker-unit")

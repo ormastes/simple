@@ -1,11 +1,15 @@
-# Bounded source-view route
+# Source-view route
 
-The authored `source_open` handler supports explicit `mode: raw`, a workspace-relative `path`, optional `start_byte`, `max_bytes` (default 4096, maximum 8192) and `snapshot_id`. It reads a regular UTF-8 disk file of at most 1 MiB. Successful output carries original source text, selected/omitted byte ranges, full-content snapshot identity and the next whole-line byte offset. Send the returned identity with every continuation; changed content yields `stale`.
+The authored `source_open` route defaults to a folded native Simple outline. Use `mode: focused` with an unambiguous `target` such as `Counter.second`, or `mode: raw` for exact undecorated source pages. Structural support is currently Simple-only; unsupported languages return an explicit refusal and can still be read in raw mode. L1 syntax is not semantic resolution or typechecking.
 
-Default outline mode currently returns `unsupported`. A large single line produces `source_line_exceeds_budget`; increase the budget within the ceiling. If escaped output exceeds the 16 KiB complete-response ceiling, reduce the source budget. Raw content is encoded as JSON data; do not recover source by stripping decorations from displayed output.
+Inputs: workspace-relative `path`, `mode`, optional `target`, outline `depth` (1 or 2), `max_nodes` (1–64), `max_bytes` (1–8192, default 4096), `snapshot_id`, and structural `cursor` or raw `start_byte`. Continuations must keep returned snapshot and query settings. Changed content/query yields stale. Native outlines admit at most 64 KiB/512 nodes; raw files at most 1 MiB. Oversized indivisible syntax/lines require a larger budget within the limit or explicit raw inspection.
 
-This route does not run diagnostics or compiler processes. It does not read unsaved editor overlays, provide authenticated agent sessions, retain historical snapshots, guarantee race-proof path confinement, or supply language semantics. These limits are included in successful responses. Existing `simple_read` remains a separate legacy diagnostic route.
+Structural results separate exact source segments from display labels, with byte ranges, absolute first lines, folds, noncontiguous import ranges, omissions, diagnostics and explicit partial context. Relevant import semantics and function-body analysis are not evaluated. Raw strings are JSON data; never strip display decorations to manufacture editable source.
 
-Deployment status: source authored on the release lane, but no admitted pure-Simple full CLI was available for runtime verification on 2026-11-06. Do not claim the installed MCP binary exposes this capability until rebuilt admission and real protocol smoke pass. The unit session-transition library is not an authenticated production session host.
+The MCP route uses the shared application result contract and remains explicitly unbound. No authenticated session, first-help commit, preference persistence or HTTP adapter is supplied by this slice. Inline information and virtual hints remain unavailable.
 
-Full requirements remain in the selected plan. See `doc/08_tracking/bug/source_view_foundation_admission_2026-11-06.md` for the outstanding gates.
+No compiler or external process is launched by this route. Disk snapshots are not editor overlays, and the current bounded reread/reparse is not the planned shared cache. Ancestor checks are not an atomic hostile-race sandbox.
+
+Deployment status: authored source on the release lane; no admitted pure-Simple runtime or real MCP lifecycle receipt yet. Do not advertise the installed binary as supporting these changes until rebuilt admission and protocol smoke pass. The full selected plan remains open; consult the admission record and provider-gap record before making completion claims.
+
+The unbound local MCP path captures cwd once. Descriptor-relative protection against malicious directory replacement remains an open IO requirement. Provider result identity binds pagination facts; provider-build provenance is not available.

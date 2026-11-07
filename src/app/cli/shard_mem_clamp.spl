@@ -431,16 +431,23 @@ pub const SHARD_TREE_HEADROOM_KB_V1: i64 = 25165824
 
 # The floor the worker pool leaves free, in KiB. Precedence: explicit
 # SIMPLE_BUILD_MEMORY_RESERVE_BYTES, then host config mem_reserve_free_mib
-# (SIMPLE_HOST_MEM_RESERVE_FREE_MIB > host.sdn > config/host/*.sdn), then 24 GiB.
-pub fn shard_tree_headroom_kib_for_v1(reserve_bytes_field: text, host_reserve_kib: i64) -> i64:
+# (SIMPLE_HOST_MEM_RESERVE_FREE_MIB > host.sdn > config/host/*.sdn), then the
+# host-scaled build_memory_reserve_default_kib_v1(total_kib) -- the SAME reserve
+# the build start guard keeps, so a 32 GiB host gets 16 GiB instead of a flat
+# 24 GiB that left 0 HIR workers (tree_rss_whole_build_floor_blocks_32g_hosts).
+# Unknown total (<= 0) keeps the 24 GiB cap: unknown never shrinks the floor.
+pub fn shard_tree_headroom_kib_for_v1(reserve_bytes_field: text, host_reserve_kib: i64, total_kib: i64 = 0) -> i64:
     val parsed = shard_mem_available_kb_from_field(reserve_bytes_field)
     if parsed > 0: return parsed / 1024
     if host_reserve_kib > 0: return host_reserve_kib
-    SHARD_TREE_HEADROOM_KB_V1
+    build_memory_reserve_default_kib_v1(total_kib)
 
 pub fn shard_tree_headroom_kib_v1() -> i64:
-    shard_tree_headroom_kib_for_v1(env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? "",
-        host_limit_mem_reserve_free_kib(0))
+    val field = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
+    val host_kib = host_limit_mem_reserve_free_kib(0)
+    # An explicit reserve (env or host key) never probes the host total.
+    val explicit = shard_mem_available_kb_from_field(field) > 0 or host_kib > 0
+    shard_tree_headroom_kib_for_v1(field, host_kib, if explicit: 0 else: build_host_memory_total_kib())
 
 # Host RAM/commit reserve and enforced tree RSS cap are separate bounds:
 # min(declared, cap, free - headroom) when host free memory is known. A
