@@ -1300,13 +1300,16 @@ fn wait_status_to_code(status: std::process::ExitStatus) -> i64 {
 /// Removes the child from the registry on success.
 #[no_mangle]
 pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
+    // Reap via child_peak_rss::reap so rt_process_last_child_peak_rss_kib
+    // reports this child's own peak RSS (supervised builder R5).
+    crate::child_peak_rss::reset();
     if timeout_ms <= 0 {
         // Wait indefinitely
         if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
             if let Some(mut child) = map.remove(&pid) {
-                match child.wait() {
-                    Ok(status) => wait_status_to_code(status),
-                    Err(_) => -1,
+                match crate::child_peak_rss::reap(&mut child, false) {
+                    Ok(Some(status)) => wait_status_to_code(status),
+                    _ => -1,
                 }
             } else {
                 -1
@@ -1320,7 +1323,7 @@ pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
         loop {
             if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
                 if let Some(child) = map.get_mut(&pid) {
-                    match child.try_wait() {
+                    match crate::child_peak_rss::reap(child, true) {
                         Ok(Some(status)) => {
                             // Process exited, remove from map
                             map.remove(&pid);
