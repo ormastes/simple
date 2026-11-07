@@ -34,7 +34,7 @@ pub struct LinuxOciEngineObservationV1:
     storage_options_observation_digest: text = ""
 
 fn _engine_path_valid_v1(path: text) -> bool:
-    if path == "" or path.len() > 4096 or not path.starts_with("/") or
+    if path == "" or path.byte_len() > 4096 or not path.starts_with("/") or
             path.contains("\0") or path.contains("\n") or path.contains("\r"):
         return false
     if path == "/": return true
@@ -61,15 +61,15 @@ pub fn linux_oci_engine_policy_error_v1(policy: LinuxOciEnginePolicyV1) -> text:
             not _engine_path_valid_v1(policy.expected_graph_root) or not _engine_path_valid_v1(policy.expected_run_root):
         return "engine-policy-storage-path-invalid"
     val allowed = "abcdefghijklmnopqrstuvwxyz0123456789_-"
-    if policy.expected_storage_driver == "" or policy.expected_storage_driver.len() > 64:
+    if policy.expected_storage_driver == "" or policy.expected_storage_driver.byte_len() > 64:
         return "engine-policy-storage-driver-invalid"
-    for index in 0..policy.expected_storage_driver.len():
+    for index in 0..policy.expected_storage_driver.byte_len():
         if not allowed.contains(policy.expected_storage_driver.substring(index, index + 1)):
             return "engine-policy-storage-driver-invalid"
     if policy.storage_options.len() > 32: return "engine-policy-storage-options-limit"
     var keys: [text] = []
     for option in policy.storage_options:
-        if option.len() > 4096 or option.contains("\0") or option.contains("\n") or option.contains("\r"):
+        if option.byte_len() > 4096 or option.contains("\0") or option.contains("\n") or option.contains("\r"):
             return "engine-policy-storage-option-invalid"
         val key = _engine_option_key_v1(option)
         if key == "" or key.starts_with("-") or keys.contains(key):
@@ -98,7 +98,7 @@ pub fn linux_oci_engine_policy_encode_v1(policy: LinuxOciEnginePolicyV1) -> Resu
         "expectedStorageDriver": SdnValue.String(policy.expected_storage_driver),
         "storageOptionCount": SdnValue.Int(policy.storage_options.len()),
         "storageOptions": SdnValue.Array(options)})) + "\n"
-    if encoded.len() > 163840: return Err("engine-policy-record-too-large")
+    if encoded.byte_len() > 163840: return Err("engine-policy-record-too-large")
     Ok(encoded)
 
 pub fn linux_oci_engine_policy_digest_v1(policy: LinuxOciEnginePolicyV1) -> Result<text, text>:
@@ -138,12 +138,12 @@ fn _engine_policy_decode_fields_v1(source: text) -> Result<LinuxOciEnginePolicyV
         storage_options: options))
 
 pub fn linux_oci_engine_policy_decode_v1(source: text) -> Result<LinuxOciEnginePolicyV1, text>:
-    if source.len() > 163840: return Err("engine-policy-record-too-large")
+    if source.byte_len() > 163840: return Err("engine-policy-record-too-large")
     # Canonical policies are one inline map plus a final newline. Reject
     # indentation documents and deep inline values before the SDN parser.
-    if source.len() < 3 or not source.starts_with("{") or not source.ends_with("}\n"):
+    if source.byte_len() < 3 or not source.starts_with("{") or not source.ends_with("}\n"):
         return Err("engine-policy-record-not-canonical")
-    if source.substring(0, source.len() - 1).contains("\n") or not _engine_json_depth_v1(source):
+    if source.substring(0, source.byte_len() - 1).contains("\n") or not _engine_json_depth_v1(source):
         return Err("engine-policy-record-depth-invalid")
     val policy = match _engine_policy_decode_fields_v1(source):
         case Ok(value): value
@@ -167,7 +167,7 @@ fn _engine_json_depth_v1(source: text) -> bool:
     var depth = 0
     var quoted = false
     var escaped = false
-    for index in 0..source.len():
+    for index in 0..source.byte_len():
         val byte = source.byte_at(index)
         if quoted:
             if escaped: escaped = false
@@ -215,13 +215,13 @@ pub fn linux_oci_engine_observation_match_v1(policy: LinuxOciEnginePolicyV1,
             observed.storage_driver != policy.expected_storage_driver: return Err("engine-storage-scope-mismatch")
     if observed.storage_options != policy.storage_options: return Err("engine-storage-options-mismatch")
     if not builder_digest_valid_v1(observed.storage_options_observation_digest): return Err("engine-storage-options-observation-invalid")
-    if observed.engine_version == "" or observed.engine_version.len() > 256: return Err("engine-version-invalid")
+    if observed.engine_version == "" or observed.engine_version.byte_len() > 256: return Err("engine-version-invalid")
     if observed.identity_digest != linux_oci_engine_identity_digest_v1(observed): return Err("engine-identity-digest-mismatch")
     Ok(true)
 
 pub fn linux_oci_engine_info_observation_v1(policy: LinuxOciEnginePolicyV1, source: text,
         executable_digest: text, effective_uid: i64) -> Result<LinuxOciEngineObservationV1, text>:
-    if source.len() > LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1 or not _engine_json_depth_v1(source):
+    if source.byte_len() > LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1 or not _engine_json_depth_v1(source):
         return Err("engine-info-json-limit")
     val info = json_parse_value_strict(source)?
     val host = _engine_json_field_v1(info, "host")?
@@ -239,7 +239,7 @@ pub fn linux_oci_engine_info_observation_v1(policy: LinuxOciEnginePolicyV1, sour
             if keys.len() != policy.storage_options.len(): return Err("engine-storage-options-mismatch")
             for option in policy.storage_options:
                 val key = _engine_option_key_v1(option)
-                val expected = option.substring(key.len() + 1, option.len())
+                val expected = option.substring(key.byte_len() + 1, option.byte_len())
                 val actual = _engine_json_field_v1(graph, key)?
                 match actual:
                     case JsonValue.Str(value):

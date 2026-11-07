@@ -6,6 +6,9 @@ not generated execution evidence. All focused cases remain UNEXECUTED.
 
 | Scenario | Assertion scope |
 |---|---|
+| Roundtrips Unicode paths and observes full Unicode storage option values | Canonical SDN decode and real JSON observation preserve UTF-8 graph roots and mount-program paths |
+| Limits Unicode paths and option values by encoded bytes | Multibyte values exceeding 4096 bytes reject despite fewer code points |
+| Rejects Unicode output above the byte budget before parsing JSON | A multibyte JSON value exceeding 65536 bytes returns the exact limit error |
 | Roundtrips canonical policy bytes and binds ordered storage options | Canonical SDN roundtrip and semantic/order digest changes |
 | Refuses unknown, noncanonical, oversized, and deeply nested policy data | Strict schema and bounded parsing before interpretation |
 | Rejects unsupported modes, paths, and option aliases before native observation | Explicit mode selection, absolute scoped paths, root-directory executable refusal through validation and production construction, duplicate option keys |
