@@ -22,6 +22,36 @@ rc=$?
 [ "$rc" -eq 75 ] || fail "live-owner lock not respected (rc=$rc)"
 portable_lock_release "$PORTABLE_LOCK_HANDLE"
 
+# Native Windows birth tokens do not authenticate the foreign POSIX group.
+# Even an exited private owner must stay unknown: another MSYS/Cygwin runtime
+# could still own descendants invisible to this observer. No orphan is created
+# by this control, and no real group is signalled.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    mkdir "$tmp/native-exited"
+    sh -c '. "$1"; portable_lock_acquire "$2" own 5' sh \
+      "$lib" "$tmp/native-exited" || fail "private native owner acquire"
+    portable_lock_load_claim "$tmp/native-exited/.own.lock" ||
+      fail "private native claim load"
+    case "$PORTABLE_LOCK_LOADED_START" in
+      77696e646f77733a*) : ;;
+      *) fail "expected native Windows claim identity" ;;
+    esac
+    state=$(portable_lock_claim_state "$PORTABLE_LOCK_LOADED_PID" \
+      "$PORTABLE_LOCK_LOADED_START" "$PORTABLE_LOCK_LOADED_PGID")
+    [ "$state" = unknown ] || fail "exited native owner was $state, not unknown"
+    portable_lock_acquire "$tmp/native-exited" own 0 2>"$tmp/native-exited.err"
+    rc=$?
+    [ "$rc" -eq 75 ] || fail "unknown native claim was not held (rc=$rc)"
+    if grep -q 'reaping orphaned process group\|stale lock reclaimed' \
+        "$tmp/native-exited.err"; then
+      fail "unknown native claim triggered recovery"
+    fi
+    echo "PASS: portable lock Windows selftest (live owner respected, exited native owner unknown and held; 2 cases)"
+    exit 0
+    ;;
+esac
+
 # Dead owner reclaimed. The owner runs as its own session leader (pid == pgid),
 # leaves an orphaned child behind and is SIGKILLed, so no trap could run.
 mkdir "$tmp/dead"
