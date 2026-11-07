@@ -21,3 +21,18 @@ The independent source review covered 14 workflow/sanity/bootstrap/document path
 Evidence: `reviews/remote-13ca-after-26b7/workflow-release-independent-review.md` and `independent-18-path-review.md` in the retained phase3-whole-20261011-c06 evidence root. Existing issue search found #1603 about whole-trunk gate ranges and hook skew; that is distinct from this alias/ancestry contract. No main source/index/ref or allocated probe was changed.
 
 **Revalidated 2026-11-02: still plausible because OPEN; candidate HOLD; authorized branch/ancestry policy unresolved; no merged fix commit with a passing regression is cited in this doc.**
+
+## Closed 2026-11-07 (owner-approved)
+
+The last open item — `.github/release-convergence-manifest.json:3` still
+naming `release_phase3` — is resolved: `release_ref` is now `release/1.0.0`,
+matching the route `candidate.yml` derives (`release/$release_line`).
+Evidence: `jq -e '.release_ref == "release/1.0.0"'` PASS;
+`scripts/release/validate-convergence-manifest.jq` PASS with
+`--arg release_ref release/1.0.0`. No projection or selftest pinned the old
+value (`grep release_phase3` over `.github/`,
+`scripts/check/check-github-policy-projection.shs`, `scripts/release/tests/`
+finds only historical classification reasons and the test's intentional
+rejection/exemption cases). `check-github-policy-projection.shs` fails with a
+pre-existing `spipe-vcs-v3-main` digest mismatch identical on the unmodified
+tree; unrelated to this change.
