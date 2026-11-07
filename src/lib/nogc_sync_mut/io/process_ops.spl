@@ -2167,7 +2167,7 @@ pub fn process_spawn_piped_owned_v2(launch: GroupProcessStreamLaunchV2) -> Piped
                         return PipedProcessOwnedSpawnV2.CleanupRequired(owner, reference, "process_stream_already_terminal")
                     return PipedProcessOwnedSpawnV2.Ready(owner, exact)
 
-pub fn process_cleanup_piped_owned_v2(owner: GroupProcessStreamOwnerV2,
+fn _process_piped_owned_validate_retirement_v2(owner: GroupProcessStreamOwnerV2,
         reference: PipedProcessRefV1?) -> Result<(), text>:
     val invalid = group_process_stream_owner_validate_v2(owner)
     if invalid != "": return Err(invalid)
@@ -2175,15 +2175,10 @@ pub fn process_cleanup_piped_owned_v2(owner: GroupProcessStreamOwnerV2,
         case Some(exact):
             val _valid = process_validate_piped_owned_transfer_v2(PipedProcessOwnedTransferV2(owner: owner, reference: exact))?
         case None: pass
-    # A bounded cancel turn is not proof. Only the canonical durable terminal
-    # receipt permits descriptor retirement; all failures retain the owner.
-    # A no-child admission receipt needs no control response from an exited
-    # broker. Otherwise request cancellation and require its collected proof.
-    val proof = match group_process_stream_cleanup_proof_v2(owner):
-        case Ok(value): value
-        case Err(_pending):
-            val _cancelled = group_process_stream_cancel_v2(owner)?
-            group_process_stream_cleanup_proof_v2(owner)?
+    Ok(())
+
+fn _process_piped_owned_retire_proven_v2(owner: GroupProcessStreamOwnerV2,
+        reference: PipedProcessRefV1?, proof: text) -> Result<(), text>:
     val launch = owner.launch
     val retired = unsafe(capabilities: [ffi]):
         rt_process_stream_retire_v2(launch.transport_generation, launch.root, str_len(launch.root),
@@ -2198,6 +2193,28 @@ pub fn process_cleanup_piped_owned_v2(owner: GroupProcessStreamOwnerV2,
     if retired != 0: return Err("process_stream_retirement_failed")
     # Durable owner/receipt files remain for the host ledger's separate reap ack.
     Ok(())
+
+# Proof-only retirement never publishes a cancel action or retries proof IO.
+# Missing/malformed proof retains the caller's full owner/reference unchanged.
+pub fn process_retire_piped_owned_v2(owner: GroupProcessStreamOwnerV2,
+        reference: PipedProcessRefV1?) -> Result<(), text>:
+    _process_piped_owned_validate_retirement_v2(owner, reference)?
+    val proof = group_process_stream_cleanup_proof_v2(owner)?
+    _process_piped_owned_retire_proven_v2(owner, reference, proof)
+
+pub fn process_cleanup_piped_owned_v2(owner: GroupProcessStreamOwnerV2,
+        reference: PipedProcessRefV1?) -> Result<(), text>:
+    _process_piped_owned_validate_retirement_v2(owner, reference)?
+    # A bounded cancel turn is not proof. Only the canonical durable terminal
+    # receipt permits descriptor retirement; all failures retain the owner.
+    # A no-child admission receipt needs no control response from an exited
+    # broker. Otherwise request cancellation and require its collected proof.
+    val proof = match group_process_stream_cleanup_proof_v2(owner):
+        case Ok(value): value
+        case Err(_pending):
+            val _cancelled = group_process_stream_cancel_v2(owner)?
+            group_process_stream_cleanup_proof_v2(owner)?
+    _process_piped_owned_retire_proven_v2(owner, reference, proof)
 
 pub fn process_spawn_piped_ref_v1(cmd: text, args: [text]) -> Result<PipedProcessRefV1, text>:
     if cmd == "": return Err("empty_process_command")
