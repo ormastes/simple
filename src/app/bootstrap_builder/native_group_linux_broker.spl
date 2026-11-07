@@ -312,6 +312,15 @@ fn native_linux_group_stream_run_v2(launch: GroupProcessStreamLaunchV2,
                 launch.request.child_argv_digest)
             if ready == "" or not file_atomic_write(launch.root + "/broker.stream.ready.sdn", ready):
                 admission_error = "cannot persist exact stream exec-ready receipt"
+        case LinuxProcessStreamStartV2.NoChildCleanupRequired(_value, reason):
+            var scope_cleaned = false
+            while not scope_cleaned:
+                match linux_process_stream_collect_no_child_v2(launch.root, identity):
+                    case Ok(_): scope_cleaned = true
+                    case Err(error):
+                        val _recorded = file_atomic_write(launch.root + "/broker.error", error)
+                        sleep_ms(100)
+            return native_linux_group_unlaunched_stream_v2(launch, identity, parent, acquired, reason)
         case LinuxProcessStreamStartV2.CleanupRequired(value, reason):
             lease = value
             admission_error = reason
@@ -369,7 +378,8 @@ fn native_linux_group_stream_main_v2(root: text, identity: text, payload: text) 
 # Projection recovery covers native cleanup followed by an allocation/ABI error.
 use std.nogc_sync_mut.io.linux_process_owner.{linux_process_collected_stream_v2,
     linux_process_stream_release_inherited_v2, linux_process_stream_recover_lease_v2,
-    LinuxCgroupParentV1, LinuxCgroupParentAdmissionV1, linux_cgroup_parent_admit_at_v2}
+    LinuxCgroupParentV1, LinuxCgroupParentAdmissionV1, linux_cgroup_parent_admit_at_v2,
+    linux_process_stream_collect_no_child_v2}
 
 fn native_linux_group_finish_stream_v2(root: text, identity: text,
         lease: LinuxProcessLeaseV1, peak: i64, snapshot_digest: text,

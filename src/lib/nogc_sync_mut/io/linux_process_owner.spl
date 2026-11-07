@@ -275,6 +275,7 @@ enum LinuxProcessStreamStartV2:
     Unknown(reason: text)
     Ready(lease: LinuxProcessLeaseV1)
     CleanupRequired(lease: LinuxProcessLeaseV1, reason: text)
+    NoChildCleanupRequired(lease: LinuxProcessLeaseV1, reason: text)
     Rejected(reason: text)
 
 fn linux_process_stream_admit_v2(delegated_path: text) -> Result<(), text>:
@@ -324,6 +325,10 @@ fn linux_process_stream_start_v2(launch: GroupProcessStreamLaunchV2,
         return LinuxProcessStreamStartV2.Unknown("Linux stream native start receipt unknown; broker must retain authority")
     if status[0] > 0:
         val lease = LinuxProcessLeaseV1(status[0])
+        val kind = linux_process_stream_no_child_scope_v2(launch.root, identity)
+        if kind == 1 or kind == 2:
+            return LinuxProcessStreamStartV2.NoChildCleanupRequired(lease, "Linux scope cleanup retained without child launch: {status[1]}")
+        if kind < 0: return LinuxProcessStreamStartV2.Unknown("native stream scope classification unknown")
         if status[1] != 0: return LinuxProcessStreamStartV2.CleanupRequired(lease, "Linux stream exec/admission failed: {status[1]}")
         return LinuxProcessStreamStartV2.Ready(lease)
     LinuxProcessStreamStartV2.Rejected("Linux stream pre-start admission rejected: {status[1]}")
@@ -355,8 +360,29 @@ fn linux_process_stream_recover_lease_v2(root: text, identity: text) -> LinuxPro
     val token = unsafe(capabilities: [ffi]):
         rt_linux_group_stream_recover_lease_v2(root, str_len(root), identity, str_len(identity))
     if token > 0:
+        val kind = linux_process_stream_no_child_scope_v2(root, identity)
+        if kind == 1 or kind == 2:
+            return LinuxProcessStreamStartV2.NoChildCleanupRequired(LinuxProcessLeaseV1(token), "recovered actual no-child scope cleanup")
+        if kind < 0: return LinuxProcessStreamStartV2.Unknown("native stream scope classification unknown")
         return LinuxProcessStreamStartV2.CleanupRequired(LinuxProcessLeaseV1(token), "recovered actual native stream lease after uncertain receipt")
     if token == 0: return LinuxProcessStreamStartV2.Rejected("native stream start admitted no group")
     LinuxProcessStreamStartV2.Unknown("native stream ownership recovery remains uncertain")
 
 export linux_process_stream_recover_lease_v2
+
+@unsafe(reason: "classify exact native retained no-child scope, never reaped-leader evidence", capabilities: [ffi])
+extern fn rt_linux_group_stream_no_child_scope_v2(root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "cleanup only an actual no-child cgroup after kernel-empty proof; no leader wait/reap", capabilities: [ffi])
+extern fn rt_linux_group_stream_collect_no_child_v2(root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+
+fn linux_process_stream_no_child_scope_v2(root: text, identity: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_linux_group_stream_no_child_scope_v2(root, str_len(root), identity, str_len(identity))
+
+fn linux_process_stream_collect_no_child_v2(root: text, identity: text) -> Result<(), text>:
+    val status = unsafe(capabilities: [ffi]):
+        rt_linux_group_stream_collect_no_child_v2(root, str_len(root), identity, str_len(identity))
+    if status != 0: return Err("native no-child scope cleanup remains unproven: {status}")
+    Ok(())
+
+export linux_process_stream_no_child_scope_v2, linux_process_stream_collect_no_child_v2

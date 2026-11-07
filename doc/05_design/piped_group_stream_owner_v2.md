@@ -71,6 +71,12 @@ this does not admit Windows owned streams or change legacy Windows Ref support.
 
 ## Admission deadline (launch only)
 
+Resource enforcement is scoped: the existing Linux group owner enforces the
+configured memory policy, but this launch profile has no CPU quota field and
+does not write `cpu.max`. Helper CPU remains nonzero host admission/accounting;
+it is not a hard kernel CPU bound. A hard CPU policy needs an explicit versioned
+extension and runtime evidence before any such claim.
+
 A required positive launch_deadline_unix_ms is canonical request-bound. The
 trusted host supplies the minimum verified grant expiry; accepting a remote
 request's value alone is not authorization. Broker checks a real Unix-ms clock
@@ -215,8 +221,8 @@ raw-adapter denial, one-shot claim versus known no-fork reset, stale generation
 reuse, and pinned-directory refusal of a forged proof in a replacement path.
 It does not prove actual cgroup admission, broker workload startup, descendant
 retirement, Windows owned streams, or admitted Simple/SPipe execution. Existing
-old green harnesses were not rerun. Header-only declarations added after that
-snapshot are explicitly not represented as compiled evidence for those lines.
+old green harnesses were not rerun. Header declarations and the later no-child scope repair postdate that snapshot;
+this run is not represented as final-current source qualification.
 
 Ready means an owned transfer is available, not successful workload exec, protocol
 readiness or attachment. EOF on the CLOEXEC error pipe reports no recorded error;
@@ -236,3 +242,22 @@ Actual collected observations are retained in Simple through failed publication;
 final memory evidence uses the collected observation's own peak. Required full
 broker/delegation/fault/expiry/descendant tests remain pending rather than passing
 by absence of a configured provider.
+
+## No-child scope rollback repair
+
+A failed pre-clone rollback retains an authoritative no_child_scope state with
+pid0 and leader_reaped=false, plus its actual scope/parent FDs. It can never enter
+ordinary poll/collect or a collected reaped-tree projection. The typed
+NoChildCleanupRequired outcome uses dedicated kernel-empty scope cleanup, then
+retained parent release, and only the distinct unlaunched proof. No leader was
+created or reaped. Cleanup failure retains those FDs and does not manufacture
+ordinary terminal observations. Exact root/identity classification is native;
+no caller-provided success boolean chooses this state.
+
+A new focused normal-CoreC fixture invoked the production rollback-retention
+constructor with invalid test FDs and verified ordinary proof denial plus failed
+cleanup retention. Build0/run0 and captured source/binary hashes are tracked in
+`doc/06_spec/01_unit/lib/io/group_stream_no_child_scope_v2_evidence.sdn`.
+This is negative classification evidence only, not successful kernel cgroup
+cleanup, workload exec, full broker lifecycle or admitted SPipe. The previously
+passing transport fixture was not rerun; its historical snapshot remains separate.

@@ -6553,6 +6553,8 @@ SplArray* rt_linux_group_start_stream_v2(const char*p,int64_t pn,const char*d,in
     (void)i;(void)in;(void)memory;(void)timeout;(void)deadline;return group_stream_unavailable_v2(2);
 }
 int64_t rt_linux_group_stream_recover_lease_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_linux_group_stream_no_child_scope_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_linux_group_stream_collect_no_child_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return ENOTSUP;}
 SplArray* rt_linux_group_collected_stream_v2(int64_t token){(void)token;return group_stream_unavailable_v2(10);}
 int64_t rt_linux_group_stream_release_inherited_v2(void){return ENOTSUP;}
 #endif

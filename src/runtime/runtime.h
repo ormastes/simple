@@ -1494,6 +1494,8 @@ SplArray* rt_linux_group_launch_stream_broker_v2(const char*,int64_t,const char*
 SplArray* rt_linux_group_start_stream_v2(const char*,int64_t,const char*,int64_t,
     SplArray*,SplArray*,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t,int64_t);
 SplArray* rt_linux_group_collected_stream_v2(int64_t);
+int64_t rt_linux_group_stream_no_child_scope_v2(const char*,int64_t,const char*,int64_t);
+int64_t rt_linux_group_stream_collect_no_child_v2(const char*,int64_t,const char*,int64_t);
 int64_t rt_linux_group_stream_recover_lease_v2(const char*,int64_t,const char*,int64_t);
 int64_t rt_linux_group_stream_release_inherited_v2(void);
 SplArray* rt_linux_group_launch_broker_v1(const char* program,

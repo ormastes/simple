@@ -39,7 +39,7 @@ extern char **environ;
 
 typedef struct {
     int active, collected, parent_fd, group_fd, pidfd;
-    int stream_mode, stream_start_error;
+    int stream_mode, stream_start_error, no_child_scope;
     char stream_root[4096],stream_identity[65];
     pid_t pid;
     char name[80];
@@ -719,6 +719,8 @@ static int rt_lg_capacity_capability(int parent) {
 }
 
 static int rt_lg_poll(RtLinuxGroup *owner) {
+    /* A scope acquired without cloning a child is not a reaped child tree. */
+    if(owner->no_child_scope)return EPROTO;
     if(owner->active&&owner->group_fd<0&&owner->parent_fd>=0) {
         owner->group_fd=openat(owner->parent_fd,owner->name,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
         if(owner->group_fd<0)return errno?errno:EIO;
@@ -931,6 +933,15 @@ static void rt_lg_stream_exec_failed_v2(int fd,int error) {
     do count=write(fd,&value,sizeof(value));while(count<0&&errno==EINTR);
     (void)count;_exit(126);
 }
+static void rt_lg_retain_unlaunched_scope_v2(int parent_fd,int group_fd,const char* name,
+        const char* root,const char* identity,int64_t started_ms) {
+    rt_linux_group=(RtLinuxGroup){.active=1,.parent_fd=parent_fd,.group_fd=group_fd,
+        .pidfd=-1,.pid=0,.leader_reaped=0,.no_child_scope=1,.stream_mode=1,
+        .started_ms=started_ms<0?0:started_ms,.timeout_ms=0};
+    memcpy(rt_linux_group.name,name,strlen(name)+1);
+    memcpy(rt_linux_group.stream_root,root,strlen(root)+1);
+    memcpy(rt_linux_group.stream_identity,identity,65);
+}
 static SplArray *rt_lg_start_mode_v2(const char *program_data,uint64_t program_len,
         const char *digest_data,uint64_t digest_len,SplArray *args,SplArray *environment,
         const char *directory_data,uint64_t directory_len,const char *root_data,uint64_t root_len,
@@ -1088,12 +1099,7 @@ done:
          * return its token even though no child cloned. Never label this a
          * no-effect rejection or lose cleanup authority on permission failure. */
         if(unlinkat(parent_fd,name,AT_REMOVEDIR)!=0) {
-            rt_linux_group=(RtLinuxGroup){.active=1,.parent_fd=parent_fd,.group_fd=group_fd,
-                .pidfd=-1,.pid=0,.leader_reaped=1,.started_ms=started_ms<0?0:started_ms,.timeout_ms=0};
-            memcpy(rt_linux_group.name,name,strlen(name)+1);
-            rt_linux_group.stream_mode=1;
-            memcpy(rt_linux_group.stream_root,root,strlen(root)+1);
-            memcpy(rt_linux_group.stream_identity,identity,65);
+            rt_lg_retain_unlaunched_scope_v2(parent_fd,group_fd,name,root,identity,started_ms);
             answer[0]=1;if(!answer[1])answer[1]=errno?errno:EIO;
             parent_fd=group_fd=-1;
         }
@@ -1174,8 +1180,40 @@ int64_t rt_linux_group_stream_recover_lease_v2(const char* root_data,int64_t roo
        strcmp(rt_linux_group.stream_identity,identity))return -2;
     return 1;
 }
+/* Classification is a projection of actual retained native scope state.
+ * A no-child scope can never be used as a reaped-leader observation. */
+int64_t rt_linux_group_stream_no_child_scope_v2(const char* root,int64_t root_len,
+        const char* identity,int64_t identity_len) {
+    int64_t matched=rt_linux_group_stream_recover_lease_v2(root,root_len,identity,identity_len);
+    if(matched<=0)return -2;
+    if(!rt_linux_group.no_child_scope)return 0;
+    return rt_linux_group.collected?2:1;
+}
+int64_t rt_linux_group_stream_collect_no_child_v2(const char* root,int64_t root_len,
+        const char* identity,int64_t identity_len) {
+    int64_t kind=rt_linux_group_stream_no_child_scope_v2(root,root_len,identity,identity_len);
+    if(kind==2)return 0; /* retained actual no-child cleanup, not a second collect */
+    if(kind!=1)return ESTALE;
+    RtLinuxGroup* owner=&rt_linux_group;
+    if(owner->group_fd<0) {
+        owner->group_fd=openat(owner->parent_fd,owner->name,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+        if(owner->group_fd<0)return errno?errno:EIO;
+    }
+    int populated=1;
+    if(!rt_lg_populated(owner->group_fd,&populated))return errno?errno:EIO;
+    if(populated) {
+        if(!rt_lg_kill(owner))return errno?errno:EIO;
+        return EBUSY; /* wait for actual cgroup.events empty on a later turn */
+    }
+    if(unlinkat(owner->parent_fd,owner->name,AT_REMOVEDIR)!=0)return errno?errno:EIO;
+    close(owner->group_fd);close(owner->parent_fd);
+    owner->group_fd=owner->parent_fd=-1;owner->collected=1;owner->tree_empty=1;
+    /* leader_reaped remains false: no child ever existed in this owner. */
+    return 0;
+}
 SplArray *rt_linux_group_collected_stream_v2(int64_t token) {
-    return rt_lg_observation(token==1&&rt_linux_group.active&&rt_linux_group.collected?0:EINVAL);
+    return rt_lg_observation(token==1&&rt_linux_group.active&&rt_linux_group.collected&&
+        !rt_linux_group.no_child_scope?0:EINVAL);
 }
 int64_t rt_linux_group_stream_release_inherited_v2(void) {
     if(rt_linux_group.active&&!rt_linux_group.collected)return EBUSY;
