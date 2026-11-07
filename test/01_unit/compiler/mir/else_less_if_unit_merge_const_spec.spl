@@ -10,13 +10,17 @@ run-15 Stage 2 compiler failed native codegen with E-BACKEND-LLVM-CONST-TYPE
 - `if c: return 1` followed by `0`,
 - an else-less `if` that assigns inside a loop.
 
-On the native path the statement-position `if` carries an attributed Unit
-type, so `lower_if` types its merge temp Unit. With no arm defining the temp
-the merge used to emit an unconditional `Const 0` into it. This spec models
-that attribution (every statement-position If/IfChain is marked Unit) and
-counts integer constants defined into Unit/Never MIR locals; it must be 0.
-Without the attribution (seed-interpreted inference) the shapes never reached
-the bad def, which is why earlier interpreted harnesses stayed green.
+Root cause: `lower_if_chain` bound `val chain_has_else = else_.?`. `.?`
+yields the `HirBlock?` itself, so at chain ENTRY the dominating-default guard
+`chain_has_else and expected_type == nil` read the absent Option's raw
+nil-sentinel word as true on the seed-compiled native lane and emitted
+`Const 0` into the no-else chain's Unit result.
+
+That misread is native-only: the interpreted lowering below is green before
+and after the fix. The lowering cases are a shape/invariant guard (with and
+without Unit attribution); the source guard at the end is the part that goes
+red if `chain_has_else` is bound from `.?` again. The native rebuild recorded
+in the bug doc is the real red/green gate.
 """
 
 # @tag: unit, compiler, mir
@@ -30,6 +34,8 @@ use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.*
 use compiler.mir.mir.*
 use compiler.mir._MirLowering.module_lowering.*
+
+extern fn rt_file_read_text(path: text) -> text?
 
 fn unit_typed_if(expr: HirExpr) -> HirExpr:
     var out = expr
@@ -178,3 +184,10 @@ describe "else-less / early-return if merge with inferred types":
         expect(audit(EARLY_RETURN_NONE, false).illegal_constants).to_equal(0)
         expect(audit(LOOP_ASSIGN, false).illegal_constants).to_equal(0)
         expect(audit(ASSIGN_NO_ELSE, false).illegal_constants).to_equal(0)
+
+describe "lower_if_chain else-presence is a real bool":
+    it "binds chain_has_else from a nil comparison, never from `.?`":
+        val src = rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
+        expect(src.len() > 0).to_equal(true)
+        expect(src.contains("val chain_has_else: bool = else_ != nil")).to_equal(true)
+        expect(src.contains("chain_has_else = else_.?")).to_equal(false)

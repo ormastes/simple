@@ -106,8 +106,13 @@ Trace evidence (temporary probes, not committed), Stage 2 from origin
 `E-BACKEND-LLVM-CONST-TYPE ... zzdest=2`.
 
 ## Fix
-`val chain_has_else: bool = else_ != nil` (a real bool). No other
-`val x = y.?` binding exists in `50.mir` / `70.backend`.
+`val chain_has_else: bool = else_ != nil` (a real bool). It also fixes the
+same misread at the arm-copy guard `chain_has_else and not local_is_unit(..)`.
+No other untyped `val x = y.?` binding exists in `50.mir` / `70.backend`; the
+typed `val x: bool = y.?` sites in
+`_MirLoweringExpr/switch_operators_calls.spl` (~4947-4955, the
+`SIMPLE_ENUM_PAYLOAD_PATH_TRACE` diagnostic, incl. `effective_present` driving
+its printed `route`) are trace-only and listed under the follow-up below.
 
 ## Native red/green (aarch64, `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 native-build`)
 - Red: frozen run-15 Stage 2 and a Stage 2 built from unmodified origin
@@ -126,4 +131,6 @@ Trace evidence (temporary probes, not committed), Stage 2 from origin
 ## Follow-up observed (not fixed here)
 `fn g(b: B?) -> bool: val h = b.?; h` returns `true` for `nil` both
 interpreted and native: a `T?` flows into a `bool` return with no presence
-conversion. Same `.?`-as-bool class; separate from this fix.
+conversion. Same `.?`-as-bool class; separate from this fix. The trace-only
+`val x: bool = y.?` bindings in `switch_operators_calls.spl` (~4947-4955) are
+in the same class.
