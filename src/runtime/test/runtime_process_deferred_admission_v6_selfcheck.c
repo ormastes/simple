@@ -79,6 +79,31 @@ static void* wrong_thread(void* p){
     assert(rt_process_observation_v4_reserved_confirm_release_value(t)==-EPERM);
     return NULL;
 }
+/* Must be the first owner action in main: no preceding V6 start/poll or UDS
+ * setup may accidentally establish the origin this regression is testing. */
+static void virgin_reserve_before_first_v6(void){
+    assert(!atomic_load_explicit(&pov6_active,memory_order_acquire));
+    int64_t token=rt_process_observation_v4_reserve_value();assert(token>0);
+    for(int held=0;held<2;held++){
+        if(held)pthread_mutex_lock(&pov4_reservations_lock);
+        pid_t spawned=fork();assert(spawned>=0);
+        if(spawned==0){
+            alarm(2);fail_array_once=1;
+            /* FIRST V6 call in this child, inherited from a legacy reserve. */
+            assert(rt_process_observation_v6_reserved_start_deferred_admitted_value(token,0,0,NULL,1)==-EPERM);
+            assert(rt_process_observation_v4_reserved_state_value(token)==-EPERM);
+            assert(rt_process_observation_v4_reserved_state_value(-1)==-EPERM);
+            assert(rt_process_observation_v4_reserve_value()==-EPERM);
+            assert(fail_array_once==1);_exit(0);
+        }
+        if(held)pthread_mutex_unlock(&pov4_reservations_lock);
+        int status;assert(waitpid(spawned,&status,0)==spawned);
+        assert(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    }
+    assert(!atomic_load_explicit(&pov6_active,memory_order_acquire));
+    assert(rt_process_observation_v4_reserved_state_value(token)==1);
+    assert(rt_process_observation_v4_reserved_confirm_release_value(token)==1);
+}
 static void inherited_gate_refusal(int64_t token,RtOwnedSlot* core){
     pthread_mutex_lock(&pov4_reservations_lock);
     pthread_mutex_lock(&pov4_slots_lock);
@@ -141,7 +166,7 @@ static int64_t start(const char* program,int64_t image,int64_t cwd,const char* m
     rt_array_free(a);return t;
 }
 int main(int argc,char** argv){
-    alarm(15);harness_pid=getpid();assert(argc==2); /* argv[1] must be the separately built real static helper. */
+    alarm(15);harness_pid=getpid();assert(argc==2);virgin_reserve_before_first_v6(); /* argv[1] must be the separately built real static helper. */
     int64_t image=rt_process_pin_executable_owned_value((const uint8_t*)argv[1],strlen(argv[1]));assert(image>0);
     int64_t cwd=rt_process_observation_v4_pin_cwd_value("/",1);assert(cwd>0);
     int64_t expiry=unix_ms()+10000;

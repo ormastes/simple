@@ -9,7 +9,7 @@ static int pov6_current_tid(void) {
 #endif
 }
 static Pov4Reservation* pov4_reservation_acquire(int64_t token) {
-    if(!pov6_origin_if_active())return NULL;
+    if(!pov6_reservation_origin())return NULL;
     if (token <= 0) { errno = ESTALE; return NULL; }
     pthread_mutex_lock(&pov4_reservations_lock);
     Pov4Reservation* found = NULL;
@@ -46,7 +46,7 @@ static Pov4Slot* pov4_reservation_owner(Pov4Reservation* r) {
 }
 
 int64_t rt_process_observation_v4_reserve_value(void) {
-    if(!pov6_origin_if_active())return -errno;
+    if(!pov6_reservation_origin())return -errno;
     pthread_mutex_lock(&pov4_reservations_lock);
     int64_t result = -EAGAIN;
     for (int i = 0; i < POV4_SLOTS; ++i) {

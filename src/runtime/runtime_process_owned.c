@@ -3464,8 +3464,9 @@ typedef struct Pov4Slot {
 static Pov4Slot pov4_slots[POV4_SLOTS];
 static pthread_mutex_t pov4_slots_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* V6 activates the canonical process-origin guard before any V6 mutation.
- * Legacy-only processes retain their prior V4 behavior. No origin is recreated. */
+/* All Linux reservation gates establish canonical origin before mint/lookup.
+ * V6 activation additionally fences ticket follow-ups; unrelated raw adapters
+ * retain their prior behavior. No origin is recreated. */
 #if defined(__linux__)
 #include <stdatomic.h>
 #include "runtime_local_unix_bridge_v1.h"
@@ -3476,6 +3477,11 @@ static _Thread_local unsigned pov6_thread_stamp;
 static int pov6_origin_activate(void) {
     if(!simple_local_unix_origin_v1()){errno=EPERM;return 0;}
     atomic_store_explicit(&pov6_active,1,memory_order_release);return 1;
+}
+/* Every Linux reservation is V6-eligible: establish origin before even a
+ * legacy reservation lookup/mint can first hold the shared gate. */
+static int pov6_reservation_origin(void) {
+    if(!simple_local_unix_origin_v1()){errno=EPERM;return 0;}return 1;
 }
 static int pov6_origin_if_active(void) {
     if(!atomic_load_explicit(&pov6_active,memory_order_acquire))return 1;
@@ -3497,6 +3503,7 @@ static unsigned pov6_current_thread_stamp(void) {
 }
 #else
 static int pov6_origin_if_active(void){return 1;}
+static int pov6_reservation_origin(void){return 1;}
 #endif
 
 /* Reservation authority is delivered before any child side effect. Tokens are
