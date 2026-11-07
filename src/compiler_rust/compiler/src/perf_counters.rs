@@ -22,6 +22,45 @@ macro_rules! counters {
 }
 
 counters!(
+    // Module-owned call path (exec_function_with_values_and_writeback_inner,
+    // the overload every imported function dispatches through) and the
+    // shared execute_function_body: call count plus nanoseconds per phase.
+    // Added 2026-11-07 to locate a measured 12-16 us per owned call
+    // (`min_i64(i, 7)` from std.common.math: 15.5 us vs 35 ns for a
+    // same-file fn) — doc/08_tracking/bug/seed_per_call_env_rebuild_o_globals_regression_2026-08-21.md
+    OWNED_CALLS,
+    OWNED_NS_PUBLISH_REPOINT,
+    OWNED_NS_SCOPE,
+    OWNED_NS_ARG_PLACES,
+    OWNED_NS_BIND,
+    OWNED_NS_PARK,
+    OWNED_NS_BODY,
+    OWNED_NS_SYNC,
+    OWNED_NS_WRITEBACK,
+    OWNED_NS_RESTORE,
+    OWNED_NS_BORROW_WB,
+    // evaluate_call (interpreter_call/mod.rs) priority ladder for an
+    // identifier callee, nanoseconds per rung, plus call_extern_function's
+    // argument evaluation vs. dispatch. Added 2026-11-07: `math_min_i64(i, 7)`
+    // called from `main` measured 6.6 us, and a one-line fn wrapping it 13.7 us.
+    EVALCALL_IDENT_CALLS,
+    EVALCALL_NS_P1_EXTERN_CHECK,
+    EVALCALL_NS_P1_EXTERN_CALL,
+    EVALCALL_NS_P2_BUILTIN,
+    EVALCALL_NS_P3_BDD,
+    EVALCALL_NS_P39_LOCAL,
+    EVALCALL_NS_P4_OVERLOADS,
+    EVALCALL_NS_P45_DECORATED,
+    EVALCALL_NS_P49_ENV_SHADOW,
+    EVALCALL_NS_P5_FLAT_EXEC,
+    EXTERN_CALLS,
+    EXTERN_NS_ARGS,
+    EXTERN_NS_DISPATCH,
+    BODY_CALLS,
+    BODY_NS_PRELUDE,
+    BODY_NS_MARK_LOCALS,
+    BODY_NS_EXEC_BLOCK,
+    BODY_NS_EPILOGUE,
     // copy_value_type_in_place (argument binding, value-type struct copy)
     VT_CALLS,
     VT_ARRAY_ELEMS_SCANNED,
@@ -260,6 +299,25 @@ pub fn trace_array(site: &str, name: &str, len: usize) {
 pub fn bump(counter: &AtomicU64, by: u64) {
     if enabled() {
         counter.fetch_add(by, Ordering::Relaxed);
+    }
+}
+
+/// Start of a timed phase: `None` (no clock read) unless the counters are on.
+#[inline(always)]
+pub fn phase_start() -> Option<std::time::Instant> {
+    if enabled() {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    }
+}
+
+/// Add the nanoseconds since `start` to `counter`; nothing when `start` is
+/// `None`. Pairs with `phase_start` so an OFF run never reads the clock.
+#[inline(always)]
+pub fn phase_end(counter: &AtomicU64, start: Option<std::time::Instant>) {
+    if let Some(start) = start {
+        counter.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 }
 

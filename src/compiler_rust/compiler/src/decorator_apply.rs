@@ -97,6 +97,29 @@ pub fn decorated_fn_key(name: &str) -> String {
     format!("{}{}", DECORATED_FN_PREFIX, name)
 }
 
+thread_local! {
+    /// Set the first time a runtime decorator rebinds a function (every
+    /// writer of a `decorated_fn_key` sentinel sets it). `evaluate_call`'s
+    /// Priority 4.5 used to build the sentinel key (a `format!` String) and
+    /// run the full env lookup cascade on EVERY identifier call to find
+    /// out that no decorator exists: measured 502 ns per call on a program
+    /// with none (2026-11-07, `SIMPLE_PERF_COUNTERS=1`
+    /// EVALCALL_NS_P45_DECORATED). Once set it stays set: the sentinel is
+    /// scoped to an Env, so this flag only says "worth looking", never
+    /// "bound here".
+    static DECORATED_FN_BOUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Record that a decorated function has been bound somewhere on this thread.
+pub fn mark_decorated_fn_bound() {
+    DECORATED_FN_BOUND.with(|cell| cell.set(true));
+}
+
+/// Has any runtime decorator ever bound a function on this thread?
+pub fn any_decorated_fn_bound() -> bool {
+    DECORATED_FN_BOUND.with(|cell| cell.get())
+}
+
 /// Apply the runtime (wrapper) decorators of `f` to `base`.
 ///
 /// Returns `Ok(None)` when `f` carries no runtime decorator, in which case the

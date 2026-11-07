@@ -778,6 +778,7 @@ pub(crate) fn exec_node(
                 // Keep the plain definition in `functions` so the original body
                 // can still recurse; the sentinel makes `evaluate_call` prefer
                 // the wrapper for calls from outside it.
+                crate::decorator_apply::mark_decorated_fn_bound();
                 env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
                 env.insert(f.name.clone(), decorated);
             }

@@ -683,6 +683,11 @@ pub(crate) fn execute_function_body(
     // one `execute_function_body` call, so moving the hook down (and deleting
     // the four upstream copies) preserves the previous counts exactly instead
     // of double-counting the paths that already recorded.
+    // Per-call phase timers (SIMPLE_PERF_COUNTERS=1): everything before the
+    // body's locals are marked, the marking walk, the body, and the restore
+    // epilogue. Off: one atomic load each, no clock read.
+    let body_prelude_start = crate::perf_counters::phase_start();
+    crate::perf_counters::bump(&crate::perf_counters::BODY_CALLS, 1);
     if let Some(cov) = crate::coverage::get_global_coverage() {
         cov.lock().unwrap().record_function_call(&func.name);
     }
@@ -778,10 +783,16 @@ pub(crate) fn execute_function_body(
 
     let synthetic_body = effective_function_body(func);
     let body = synthetic_body.as_ref().unwrap_or(&func.body);
+    crate::perf_counters::phase_end(&crate::perf_counters::BODY_NS_PRELUDE, body_prelude_start);
+    let mark_start = crate::perf_counters::phase_start();
     mark_block_locals(body, local_env);
+    crate::perf_counters::phase_end(&crate::perf_counters::BODY_NS_MARK_LOCALS, mark_start);
 
     // Execute function body - handle result manually to ensure flag restoration
+    let exec_start = crate::perf_counters::phase_start();
     let exec_result = exec_block_fn(body, local_env, functions, classes, enums, impl_methods);
+    crate::perf_counters::phase_end(&crate::perf_counters::BODY_NS_EXEC_BLOCK, exec_start);
+    let epilogue_start = crate::perf_counters::phase_start();
 
     // ALWAYS restore flags before handling the result to avoid flag leaking on error
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
@@ -932,6 +943,7 @@ pub(crate) fn execute_function_body(
         result
     };
 
+    crate::perf_counters::phase_end(&crate::perf_counters::BODY_NS_EPILOGUE, epilogue_start);
     Ok(result)
 }
 
@@ -2460,10 +2472,19 @@ fn exec_function_with_values_and_writeback_inner(
         crate::runtime_profile::record_full_call(&func.name, None, vec![], crate::runtime_profile::CallType::Direct);
     }
 
+    use crate::perf_counters::{self as pc, phase_end, phase_start};
+    pc::bump(&pc::OWNED_CALLS, 1);
+    let t = phase_start();
     publish_and_repoint(outer_env);
+    phase_end(&pc::OWNED_NS_PUBLISH_REPOINT, t);
+    let t = phase_start();
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
+    phase_end(&pc::OWNED_NS_SCOPE, t);
     let self_mode = SelfMode::IncludeSelf;
+    let t = phase_start();
     let arg_places = capture_argument_places(original_args, outer_env, functions, classes, enums, impl_methods);
+    phase_end(&pc::OWNED_NS_ARG_PLACES, t);
+    let t = phase_start();
     let bound = bind_args_with_values_named(
         &func.params,
         &args,
@@ -2476,6 +2497,7 @@ fn exec_function_with_values_and_writeback_inner(
         impl_methods,
         self_mode,
     ).map_err(|e| name_callee(e, func))?;
+    phase_end(&pc::OWNED_NS_BIND, t);
     // The pre-evaluated argument vector holds its own handle on every
     // argument. Kept alive across the body, it pins a parked receiver's field
     // Arc (strong_count > 1), so each `me` push deep-copies the backing Vec —
@@ -2486,8 +2508,11 @@ fn exec_function_with_values_and_writeback_inner(
 
     crate::layout_recorder::record_function_return();
 
+    let t = phase_start();
     let parked = park_written_back_arguments(func, original_args, outer_env, classes, self_mode);
     outer_env.release_scope();
+    phase_end(&pc::OWNED_NS_PARK, t);
+    let t = phase_start();
     let result = execute_function_body(
         func,
         bound,
@@ -2498,18 +2523,27 @@ fn exec_function_with_values_and_writeback_inner(
         impl_methods,
         true,
     );
+    phase_end(&pc::OWNED_NS_BODY, t);
     // The callee is done executing: drop its snapshot so the sync below
     // writes the store in place instead of copying the owner map.
+    let t = phase_start();
     local_env.release_scope();
     sync_owned_captured_globals(func, &local_env, outer_env);
+    phase_end(&pc::OWNED_NS_SYNC, t);
 
+    let t = phase_start();
     if result.is_ok() {
         write_back_mutable_arguments(func, original_args, &arg_places, outer_env, &local_env, classes, self_mode);
     }
+    phase_end(&pc::OWNED_NS_WRITEBACK, t);
+    let t = phase_start();
     restore_parked_arguments(&parked, outer_env, &local_env);
+    phase_end(&pc::OWNED_NS_RESTORE, t);
+    let t = phase_start();
     if result.is_ok() {
         write_back_borrow_arguments(func, original_args, outer_env, &local_env, functions, classes, enums, impl_methods, self_mode)?;
     }
+    phase_end(&pc::OWNED_NS_BORROW_WB, t);
 
     if crate::runtime_profile::is_profiling_active() {
         crate::runtime_profile::record_full_return(None);

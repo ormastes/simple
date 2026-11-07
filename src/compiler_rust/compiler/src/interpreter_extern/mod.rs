@@ -3400,12 +3400,17 @@ pub(crate) fn call_extern_function(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     // Evaluate all arguments upfront
+    crate::perf_counters::bump(&crate::perf_counters::EXTERN_CALLS, 1);
+    let t = crate::perf_counters::phase_start();
     let evaluated: Vec<Value> = args
         .iter()
         .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
         .collect::<Result<Vec<_>, _>>()?;
+    crate::perf_counters::phase_end(&crate::perf_counters::EXTERN_NS_ARGS, t);
 
+    let t = crate::perf_counters::phase_start();
     let result = call_extern_function_with_values(name, &evaluated, env, functions, classes, enums, impl_methods);
+    crate::perf_counters::phase_end(&crate::perf_counters::EXTERN_NS_DISPATCH, t);
     // `&mut x` on an extern argument must actually write back to `x`.
     //
     // `UnaryOp::RefMut` evaluates its operand to a COPY and wraps that copy
