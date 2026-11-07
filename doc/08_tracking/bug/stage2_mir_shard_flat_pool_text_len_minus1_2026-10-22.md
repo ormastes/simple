@@ -1414,3 +1414,14 @@ rerun the Update 1 exact-environment delegated repro (p2_add, cache
 enabled). Expected: no `flat pool encoder ... input_length=-1` panic and no
 0xC00000FD worker; a `[flat-pool] capture refused` line is acceptable. Then
 remove the `@workaround` markers one at a time with the same repro.
+
+## Update 2026-11-07: guard spec repaired
+`flat_pool_invalid_text_guard_spec.spl` was RED under `simple test` on every
+host: the runner exports `SIMPLE_EXECUTION_MODE=interpret`
+(`test_runner_single.spl:1375`), the fixture child inherited it, and the
+interpreter rejects the fixture's NIL text word ("cannot convert array to
+int"), so stdout was empty. The spec now runs the child with
+`SIMPLE_EXECUTION_MODE=jit` and restores it. Verified on seed
+release100-7a0e6fe516f (macOS aarch64): 1/1 PASS; fixture prints the four
+`[flat-pool] capture refused` lines and `sanitize-invalid-text-ok`.
+Stage3 exact-environment repro still pending (status unchanged).
