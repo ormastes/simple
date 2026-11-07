@@ -42,9 +42,30 @@ struct NativeInterfaceDeclV1:
     # Included in every slice (glob use, enum, unrecognised form).
     always: bool
 
+# Character codes, not `line[i:i + 1]`: every one-character slice is a fresh
+# heap text, and phase 1 runs these helpers over every admitted source before
+# any transient scope exists, so each slice stayed live for the whole build
+# (bug stage3_current_source_hir_rss_termination).
+#
+# `char_code_at` positions agree with `len()` and `t[a:b]` only on ASCII text:
+# measured on the Stage-2 candidate, a line holding an em dash tokenized into
+# garbage. Every whole-line scan therefore checks for non-ASCII first and keeps
+# the original slice-based scan for such text (comments and string literals;
+# rare). A scan that stops before the first non-ASCII character (indent,
+# blank) needs no guard: positions up to that point agree.
+fn native_slice_has_non_ascii_v1(t: text) -> bool:
+    var i: i64 = 0
+    val limit = t.len()
+    while i < limit:
+        if t.char_code_at(i) > 127:
+            return true
+        i = i + 1
+    false
+
 fn native_slice_indent_v1(line: text) -> i64:
     var n: i64 = 0
-    while n < line.len() and (line[n:n + 1] == " " or line[n:n + 1] == "\t"):
+    val limit = line.len()
+    while n < limit and (line.char_code_at(n) == 32 or line.char_code_at(n) == 9):
         n = n + 1
     n
 
@@ -52,6 +73,29 @@ fn native_slice_indent_v1(line: text) -> i64:
 # comment, so `fn f(sep: text = "(")` or `struct S:  # (legacy` cannot glue
 # later declarations onto this header.
 fn native_slice_bracket_delta_v1(line: text) -> i64:
+    if native_slice_has_non_ascii_v1(line):
+        return native_slice_bracket_delta_chars_v1(line)
+    var delta: i64 = 0
+    var quote: i64 = 0
+    var i: i64 = 0
+    val limit = line.len()
+    while i < limit:
+        val c: i64 = line.char_code_at(i)
+        if quote != 0:
+            if c == 92:
+                i = i + 1
+            elif c == quote:
+                quote = 0
+        elif c == 34 or c == 39:
+            quote = c
+        elif c == 35:
+            return delta
+        elif c == 40 or c == 91 or c == 123: delta = delta + 1
+        elif c == 41 or c == 93 or c == 125: delta = delta - 1
+        i = i + 1
+    delta
+
+fn native_slice_bracket_delta_chars_v1(line: text) -> i64:
     var delta: i64 = 0
     var quote = ""
     var i: i64 = 0
@@ -71,6 +115,38 @@ fn native_slice_bracket_delta_v1(line: text) -> i64:
         i = i + 1
     delta
 
+# Non-overlapping `"""` occurrences, left to right: the count
+# `line.split("\"\"\"").len() - 1` gave, without copying the line into pieces.
+fn native_slice_triple_quote_count_v1(line: text) -> i64:
+    if native_slice_has_non_ascii_v1(line):
+        return line.split("\"\"\"").len() - 1
+    var count: i64 = 0
+    var run: i64 = 0
+    var i: i64 = 0
+    val limit = line.len()
+    while i < limit:
+        if line.char_code_at(i) == 34:
+            run = run + 1
+            if run == 3:
+                count = count + 1
+                run = 0
+        else:
+            run = 0
+        i = i + 1
+    count
+
+# `line.trim() == ""` without allocating the trimmed copy; same whitespace set
+# as rt_string_trim (space, tab, LF, CR).
+fn native_slice_blank_v1(line: text) -> bool:
+    var i: i64 = 0
+    val limit = line.len()
+    while i < limit:
+        val c: i64 = line.char_code_at(i)
+        if c != 32 and c != 9 and c != 10 and c != 13:
+            return false
+        i = i + 1
+    true
+
 # For each line, whether it STARTS inside a triple-quoted string. Counted on
 # every line (headers, values and bodies alike), so `val USAGE = """` opens a
 # string instead of flipping docstring tracking.
@@ -79,29 +155,37 @@ fn native_slice_string_continuations_v1(lines: [text]) -> [bool]:
     var out: [bool] = []
     for line in lines:
         out.push(inside)
-        val quotes = line.split("\"\"\"").len() - 1
+        val quotes = native_slice_triple_quote_count_v1(line)
         if quotes % 2 == 1:
             inside = not inside
     out
 
-fn native_slice_ident_char_v1(c: text) -> bool:
-    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
-        (c >= "0" and c <= "9") or c == "_"
+fn native_slice_ident_code_v1(c: i64) -> bool:
+    (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57) or c == 95
 
+# Distinct identifiers in first-seen order. Each identifier is sliced once;
+# the old per-character `cur = cur + c` path allocated a one-character slice
+# plus a growing copy for every character. (A per-call Dict dedupe was measured
+# heavier than `out.contains` on these short headers.)
 fn native_slice_identifiers_v1(t: text) -> [text]:
+    if native_slice_has_non_ascii_v1(t):
+        return native_slice_identifiers_chars_v1(t)
+    val limit = t.len()
     var out: [text] = []
-    var cur = ""
+    var start: i64 = -1
     var i: i64 = 0
-    while i <= t.len():
-        val c = if i < t.len(): t[i:i + 1] else: " "
-        if native_slice_ident_char_v1(c):
-            cur = cur + c
-        else:
-            if cur != "" and not out.contains(cur):
-                out.push(cur)
-            cur = ""
+    while i <= limit:
+        val is_ident = i < limit and native_slice_ident_code_v1(t.char_code_at(i))
+        if is_ident:
+            if start < 0: start = i
+        elif start >= 0:
+            val ident = t[start:i]
+            if not out.contains(ident):
+                out.push(ident)
+            start = -1
         i = i + 1
     out
+
 
 fn native_slice_strip_modifiers_v1(trimmed: text) -> text:
     var t = trimmed
@@ -122,9 +206,39 @@ fn native_slice_strip_modifiers_v1(trimmed: text) -> text:
 fn native_slice_is_fn_header_v1(stripped: text) -> bool:
     stripped.starts_with("fn ") or stripped.starts_with("me ")
 
+fn native_slice_ident_char_v1(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+        (c >= "0" and c <= "9") or c == "_"
+
+fn native_slice_identifiers_chars_v1(t: text) -> [text]:
+    var out: [text] = []
+    var cur = ""
+    var i: i64 = 0
+    while i <= t.len():
+        val c = if i < t.len(): t[i:i + 1] else: " "
+        if native_slice_ident_char_v1(c):
+            cur = cur + c
+        else:
+            if cur != "" and not out.contains(cur):
+                out.push(cur)
+            cur = ""
+        i = i + 1
+    out
+
+# First identifier after `keyword`: slices only that identifier instead of
+# copying the header tail and tokenizing all of it.
 fn native_slice_first_ident_after_v1(t: text, keyword: text) -> text:
-    val ids = native_slice_identifiers_v1(t[keyword.len():])
-    if ids.len() == 0: "" else: ids[0]
+    if native_slice_has_non_ascii_v1(t):
+        val ids = native_slice_identifiers_chars_v1(t[keyword.len():])
+        return if ids.len() == 0: "" else: ids[0]
+    val limit = t.len()
+    var i: i64 = keyword.len()
+    while i < limit and not native_slice_ident_code_v1(t.char_code_at(i)):
+        i = i + 1
+    val start = i
+    while i < limit and native_slice_ident_code_v1(t.char_code_at(i)):
+        i = i + 1
+    if i == start: "" else: t[start:i]
 
 # Bound names of a `use` header (modifier-stripped, continuation-joined).
 # Returns ["*"] for a glob or an unparseable form.
@@ -218,7 +332,7 @@ fn native_interface_decls_v1(source: text) -> [NativeInterfaceDeclV1]:
         var depth = native_slice_bracket_delta_v1(t)
         var j = i + 1
         while depth > 0 and j < lines.len() and
-                (in_string[j] or native_slice_indent_v1(lines[j]) > 0 or lines[j].trim() == ""):
+                (in_string[j] or native_slice_indent_v1(lines[j]) > 0 or native_slice_blank_v1(lines[j])):
             val cont = lines[j].trim()
             logical = logical + " " + cont
             depth = depth + native_slice_bracket_delta_v1(cont)
@@ -237,8 +351,10 @@ fn native_interface_decls_v1(source: text) -> [NativeInterfaceDeclV1]:
         i = j
         if native_slice_is_fn_header_v1(native_slice_strip_modifiers_v1(logical)) and logical.ends_with(":"):
             while i < lines.len():
-                val body = lines[i].trim_end()
-                if not in_string[i] and body.trim() != "" and native_slice_indent_v1(body) <= indent:
+                # Body lines are only measured, never kept: test the raw line
+                # (a non-blank line's indent is unchanged by trim_end).
+                val body = lines[i]
+                if not in_string[i] and not native_slice_blank_v1(body) and native_slice_indent_v1(body) <= indent:
                     break
                 i = i + 1
     if cur_header != "":

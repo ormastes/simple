@@ -1367,3 +1367,51 @@ No canonical Stage 3 was run, and both authoritative DB rows remain OPEN.
 - The 7 other examples still fail on other renamed text anchors, for example the streaming `surface_content_hash`, telemetry evidence fields and the `promote_phase_memo_transient_owners` body.
 - TODO(owner): re-anchor the remaining 7 contract examples to current source.
 - TODO(owner): run the single cache-preserving canonical Stage3 transaction under the RSS budget. This host cannot run it now: Phase 3 has priority and full bootstrap builds are not allowed.
+
+## Addendum 2026-11-07: phase-1 interface-index scratch (one contributing cause, fixed)
+
+Measured on macOS arm64 with the Stage-2-admitted candidate
+(`/private/tmp/boot4-out/s2y/.../stage2-admitted/simple`, copied), running
+`native-build src/app/cli/main.spl --backend llvm --threads 1` with
+`SIMPLE_HIR_CACHE=0 SIMPLE_FRONTEND_CACHE=0 SIMPLE_PHASE_RSS=1` under
+`/usr/bin/time -l` and a 2400 s timeout:
+
+- Max RSS 7,445,561,344 B (peak_kib 7,271,056). HIR reached 1073 modules
+  before the timeout.
+- RSS was already 3.86 GB at `phase1:load_sources:fingerprint:start`, before
+  any parse or HIR work. Parse then held level around 4 GB. The single
+  largest step was between `owner_copy:done` (1,143,504 KiB) and
+  `fingerprint:start` (3,862,144 KiB): **+2.72 GB in 64 s**.
+- That window runs `native_source_interface_index_from_sources_with_digests_v1`,
+  which calls `native_interface_decls_v1` once per admitted source. Those
+  helpers in `src/compiler/80.driver/cache/native_interface_slice.spl` scanned
+  text one `t[i:i + 1]` slice at a time, built identifiers with `cur = cur + c`,
+  and called `split`/`trim` on every body line. No transient scope is open in
+  phase 1, so every intermediate text lived until process exit. That is about
+  2.7 GB carried into HIR.
+
+Fix: scan with `char_code_at`, slice each identifier once, count `"""`
+without `split`, and test blank and body lines without `trim`. On this
+candidate, `char_code_at` positions agree with `len()` and slicing only on
+ASCII text, so any text holding a non-ASCII character keeps the original
+slice-based scan.
+
+Reproducer: a native probe that runs `native_interface_decls_v1` over the
+3097 unique sources (47.9 MB) of the same CLI closure. It was built twice by
+the same candidate, once from the old copy and once from the new copy of the
+module. The read+split floor is 0.22 GB.
+
+| | max RSS | wall |
+|---|---|---|
+| old | 3,370,582,016 B | 18.8 s |
+| new | 1,603,371,008 B | 11.2 s |
+
+Scratch above the floor dropped from 3.15 GB to 1.38 GB (-56%). Output is
+byte-identical: for every one of the 45,319 `.spl` files under `src/` and
+`test/`, the old and new probes produced the same dump of every decl's
+digest, names, tokens and `always` flag.
+
+Not closed. This removes part of the RSS carried into HIR. In the same run,
+HIR itself still grew from 6.18 GB to 7.1 GB over 1073 modules. A canonical
+Stage 3 under the RSS budget has not been run with this fix, because it
+needs a Stage 2 rebuilt from this tree.
