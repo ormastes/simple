@@ -1,0 +1,154 @@
+# Canonical C / SIMPLE_RUNTIME_MEMORY_OWNER=1 lifecycle diagnostic only.
+# PR7337's process_capture_result release change is a required dependency.
+# This base lacks that change: both after=-1 assertions deliberately fail
+# until the owner integrates it. Never substitute a local consumer or free.
+# A runner must independently validate the link attestation and runtime hash
+# before execution. These environment inputs are declarations, not link proof.
+# Preserve the original raw-only fixture and its exhausted six-cycle evidence.
+use std.io_runtime.{host_os, env_get}
+use std.nogc_sync_mut.sffi.process_capture.{process_capture_result, rt_process_run_tuple}
+use std.nogc_sync_mut.sffi.process_capture_text.{process_capture_text_data_v1}
+
+@unsafe(reason: "reject an inherited module scope without taking its ownership", capabilities: [ffi])
+extern fn rt_transient_array_scope_state_v1() -> i64
+@unsafe(reason: "reject an inherited session so paused copies have independent lifetime", capabilities: [ffi])
+extern fn rt_session_heap_id() -> u32
+@unsafe(reason: "open the canonical C graph owner and its delegated raw scope", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_array_scope_begin() -> i8
+@unsafe(reason: "keep consumer copies outside the ending canonical scope", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_array_scope_pause() -> i8
+@unsafe(reason: "close only the canonical scope successfully opened by this fixture", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_array_scope_end() -> i8
+@unsafe(reason: "observe actual canonical raw registration before and after consumption", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_raw_words(value: i64, words_out: i64, canonical_out: i64) -> i64
+@unsafe(reason: "allocate the real provider layout for invalid-text rejection", capabilities: [ffi, raw_ptr])
+extern fn rt_alloc(bytes: i64) -> i64
+@unsafe(reason: "initialize the owned three-word invalid-text result", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i64(address: i64, offset: i64, value: i64)
+
+fn declared_sha256_is_valid(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..64:
+        val digit = value.byte_at(index) as i64
+        if (digit < 48 or digit > 57) and (digit < 97 or digit > 102): return false
+    true
+
+# Call only after begin returned one. Take only scalar input: an error string
+# allocated inside the owned scope would not survive the cleanup below.
+fn fail_owned_scope(stage_code: i64) -> i64:
+    val ended = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_end()
+    print "early_cleanup:"
+    print "    failure_code: {stage_code}"
+    print "    scope_end: {ended}"
+    if ended != 1: return 29
+    stage_code
+
+fn main() -> i64:
+    val inherited_module = unsafe(capabilities: [ffi]): rt_transient_array_scope_state_v1()
+    val inherited_session = unsafe(capabilities: [ffi]): rt_session_heap_id()
+    if inherited_module != 0 or inherited_session != 0:
+        print "preflight:"
+        print "    inherited_module: {inherited_module}"
+        print "    inherited_session: {inherited_session}"
+        return 10
+    if env_get("SIMPLE_MEM_HARDEN") != "1":
+        print "preflight:"
+        print "    error: SIMPLE_MEM_HARDEN must be set before startup"
+        return 11
+    val composition = env_get("SIMPLE_PROCESS_CAPTURE_RUNTIME_COMPOSITION")
+    val attestation_sha256 = env_get("SIMPLE_PROCESS_CAPTURE_ATTESTATION_SHA256")
+    val runtime_sha256 = env_get("SIMPLE_PROCESS_CAPTURE_RUNTIME_SHA256")
+    if composition != "canonical-c-memory-owner-v1":
+        print "preflight:"
+        print "    error: missing declared canonical C composition"
+        return 12
+    if not declared_sha256_is_valid(attestation_sha256) or not declared_sha256_is_valid(runtime_sha256):
+        print "preflight:"
+        print "    error: declared attestation and runtime SHA256 must be 64 lowercase hex bytes"
+        return 13
+    print "declared_provenance:"
+    print "    composition: {composition}"
+    print "    attestation_sha256: \"{attestation_sha256}\""
+    print "    target_runtime_sha256: \"{runtime_sha256}\""
+
+    var command = "/bin/sh"
+    var args = ["-c", "printf retained-out; printf retained-err >&2; exit 7"]
+    if host_os() == "windows":
+        command = "cmd.exe"
+        args = ["/d", "/c", "(echo retained-out)&(echo retained-err 1>&2)&exit /b 7"]
+    val pointer = process_capture_text_data_v1(command)
+    val command_len = command.len()
+    if pointer == 0 or command_len <= 0:
+        print "preflight:"
+        print "    error: command pointer or extent unavailable"
+        return 14
+
+    val began = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_begin()
+    if began != 1:
+        print "begin:"
+        print "    scope_begin: {began}"
+        print "    error: no owned scope to close"
+        return 15
+    val active_state = unsafe(capabilities: [ffi]): rt_transient_array_scope_state_v1()
+    if active_state != 1: return fail_owned_scope(16)
+    val block = unsafe(capabilities: [ffi, raw_ptr]): rt_process_run_tuple(pointer, command_len, args)
+    if block == 0: return fail_owned_scope(17)
+    val before = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_words(block, 0, 0)
+    val invalid = unsafe(capabilities: [ffi, raw_ptr]): rt_alloc(24)
+    if invalid == 0: return fail_owned_scope(18)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_write_i64(invalid, 0, -1)
+        rt_ptr_write_i64(invalid, 8, 3)
+        rt_ptr_write_i64(invalid, 16, 0)
+    val invalid_before = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_words(invalid, 0, 0)
+
+    val paused = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_pause()
+    if paused != 1: return fail_owned_scope(19)
+    val paused_state = unsafe(capabilities: [ffi]): rt_transient_array_scope_state_v1()
+    if paused_state != 2: return fail_owned_scope(20)
+    # Diagnostic strings and consumer tuple temporaries are created only after
+    # pause. With no inherited session, their managed allocations have scope0.
+    print "paused:"
+    print "    scope_begin: {began}"
+    print "    scope_pause: {paused}"
+    print "    scope_state: {paused_state}"
+    print "before_consume:"
+    print "    provider_words: {before}"
+    print "    invalid_words: {invalid_before}"
+    # Unexpected registration/layout is a failure, never permission to read
+    # the block through the consumer. Cleanup still owns both allocations.
+    if before != 3 or invalid_before != 3: return fail_owned_scope(22)
+    val (stdout, stderr, status) = process_capture_result(block)
+    val after = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_words(block, 0, 0)
+    val (invalid_out, invalid_err, invalid_status) = process_capture_result(invalid)
+    val invalid_after = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_words(invalid, 0, 0)
+    print "after_consume:"
+    print "    provider_words: {after}"
+    print "    invalid_words: {invalid_after}"
+    val ended = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_end()
+    val ended_state = unsafe(capabilities: [ffi]): rt_transient_array_scope_state_v1()
+    print "ended:"
+    print "    scope_end: {ended}"
+    print "    scope_state: {ended_state}"
+
+    if ended != 1 or ended_state != 0: return 21
+    # Unconditional dependency check: current base does not release either
+    # block. Canonical scope teardown cannot substitute for consumer release.
+    if after != -1 or invalid_after != -1:
+        print "release_required:"
+        print "    error: process_capture_result must release both owned blocks"
+        return 23
+    if status != 7 or not stdout.contains("retained-out") or not stderr.contains("retained-err"):
+        print "child_result:"
+        print "    status: {status}"
+        print "    error: child status or retained stream marker mismatch"
+        return 24
+    if invalid_out != "" or invalid_err != "native process capture returned invalid text" or invalid_status != -1:
+        print "invalid_result:"
+        print "    status: {invalid_status}"
+        print "    error: invalid-text rejection payload mismatch"
+        return 25
+    if not (stdout + "-alive").contains("retained-out"): return 26
+    if not (stderr + "-alive").contains("retained-err"): return 27
+    print "result: process capture canonical owned block OK"
+    0
