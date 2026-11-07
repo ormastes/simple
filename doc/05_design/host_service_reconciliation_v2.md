@@ -47,6 +47,9 @@ protected DACL privacy and no-reparse ancestry. Complete bounded stage bytes are
 sealed/flushed and read back before native no-replace publication. The stage
 handle closes before opening the final entry, including collisions, through the
 same private directory owner. Final bytes and current security must match.
+The retained journal root and receipt directory revalidate native root/ancestor
+privacy again after final-file verification, before cleanup and acknowledgment.
+This uses the existing native query exposed by facade commit `eb6ab9bd17c`.
 No Windows chmod/stat permission check is used. Corrupt or unsafe final entries
 remain blocked without overwrite or repair. Interrupted stages remain evidence.
 
