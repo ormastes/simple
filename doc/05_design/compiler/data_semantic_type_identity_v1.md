@@ -12,6 +12,18 @@ type checks, or replace the canonical data-schema resolver. The separate HIR
 adapter and V3 resolver consume it; this independent dependency is not full W1.
 Frozen V1/V2 nominal paths/arguments/digests are not repurposed.
 
+Concrete managed-schema binding has an explicit stricter admission policy:
+`data_bind_type_identity_v1` first calls the canonical HIR lowerer, then uses
+`data_concrete_type_identity_v1`. The shared bounded semantic projector rejects
+every `HirTypeKind.Any` in this mode, including aliases/defaults, nominal
+arguments, containers, function parameters/results and Throws payloads. This
+catches the ordinary lowerer's intentional unbound-uppercase/container erasure
+without creating another name resolver or changing language semantics. The
+transport entry `data_type_identity_v1` continues to represent Any; a valid
+transport descriptor alone is not concrete schema admission. Explicit written
+Any is also excluded from this schema slice, even when ordinary unsafe language
+policy permits it. A genuinely bound nominal declaration named Q remains valid.
+
 ## Contract and complete framing
 
 `DataSemanticTypeIdentityV1{version,canonical,byte_len}` carries a complete
