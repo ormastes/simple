@@ -125,9 +125,14 @@ ownership sequence, fail-closed provenance declarations and dependency limits.
 The source-only SFFI backlog audit exposed three needless scope-signature
 variants in the first fixture version. Reusing the existing transient wrappers
 removed those variants: the aggregate inventory changed from403/399 to400/399
-source variants, but its prerequisite still FAILs (migration3769/3546 after the
-change). This is not a passing aggregate SFFI audit; neither this source-only
-audit nor its queued migration count establishes runtime/link identity.
+source variants. An exact parent-source inventory, using the tracked src/test
+Simple file list from `05c57b4368292f3df439c76cd94d4307d9311d77`, also reports
+400/399 source variants and migration3768/3546. The corrected fixture reports
+400/399 and migration3769/3546: zero added conflicting signatures and one added
+unsigned migration-queue symbol, its test-only `rt_transient_raw_words`
+observer. That observer has no existing Simple declaration in the parent;
+the other direct declarations reuse existing signatures. Both aggregate audits
+remain FAIL. These source-only counts do not establish runtime/link identity.
 No compiler, native build or fixture execution was performed for this source
 follow-up. Dynamic assertions, Windows native-all closure, source-matched
 P2/SSpec and broader compiler/core/MCP qualification remain UNRUN. A source-only
