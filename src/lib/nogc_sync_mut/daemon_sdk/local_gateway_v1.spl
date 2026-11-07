@@ -39,7 +39,7 @@ pub struct LocalGatewayConnectionV1:
     expected_peer_uid: i64
     deadline_monotonic_ms: i64
     reader: LocalGatewayFrameReaderV1?
-    # 0 receive; 1 require input EOF; 2 send; 3 complete; 4 blocked.
+    # 0 receive; 1 require input EOF; 2 send; 3 complete; 4 blocked; 5 ready.
     phase: i64
     response: LocalGatewayResponseV1?
     reply_prefix: [u8]
@@ -47,6 +47,16 @@ pub struct LocalGatewayConnectionV1:
     reply_payload: [u8]
     reply_part: i64
     reply_offset: i64
+    error: text
+    ready_request: LocalGatewayRequestV1? = nil
+
+pub struct LocalGatewayReceiveTurnV2:
+    connection: LocalGatewayConnectionV1
+    request: LocalGatewayRequestV1?
+    error: text
+
+pub struct LocalGatewayConnectionTurnV2:
+    connection: LocalGatewayConnectionV1
     error: text
 
 pub struct LocalGatewayAcceptTurnV1:
@@ -89,22 +99,26 @@ pub fn local_gateway_accept_v1(listener: LocalUnixListenerV1, expected_client_ui
 fn gateway_waiting_v1(error: text) -> bool:
     error == "local_unix_would_block" or error == "local_unix_busy"
 
-# Exactly one receive chunk OR one response chunk per turn. Handler work must
-# itself be bounded: long effects belong to the existing native effect owner.
-# Every return contains the latest domain owner and connection, including all
-# post-handler encoding, publication, timeout and transport failures.
-pub fn local_gateway_turn_owned_v1<T>(owner: T, connection: LocalGatewayConnectionV1,
-        handler: fn(T, LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<T>) -> LocalGatewayOwnedTurnV1<T>:
+# Deadline checks do not consume dispatch or discard a retained response.
+fn gateway_check_deadline_v2(connection: LocalGatewayConnectionV1) -> LocalGatewayConnectionV1:
     var current = connection
-    var current_owner = owner
-    var handled = false
-    if current.phase >= 3:
-        return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+    if current.phase == 3 or current.phase == 4: return current
     val now = time_sample_monotonic_nanos_or_failure()
     if now < 0 or now / 1000000 >= current.deadline_monotonic_ms:
         current.phase = 4
         current.error = if now < 0: "gateway-clock-unavailable" else: "gateway-timeout"
-        return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+    current
+
+fn gateway_ready_request_v2(connection: LocalGatewayConnectionV1) -> LocalGatewayRequestV1?:
+    if connection.phase == 5: connection.ready_request else: nil
+
+# Advances at most one receive chunk and verifies actual EOF/peer identity.
+# A ready request is scheduling metadata, not application authorization. No
+# handler, one-use dispatch claim, descriptor staging or reply write occurs.
+pub fn local_gateway_receive_v2(connection: LocalGatewayConnectionV1) -> LocalGatewayReceiveTurnV2:
+    var current = gateway_check_deadline_v2(connection)
+    if current.phase != 0 and current.phase != 1:
+        return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
     if current.phase <= 1:
         # Avoid allocating a maximum-sized read receipt for idle connections.
         # Read still handles readiness races as would-block, never by waiting.
@@ -114,14 +128,14 @@ pub fn local_gateway_turn_owned_v1<T>(owner: T, connection: LocalGatewayConnecti
             if not gateway_waiting_v1(ready.error):
                 current.phase = 4
                 current.error = ready.error
-            return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+            return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
         if not ready.readable and not ready.hangup:
-            return LocalGatewayOwnedTurnV1(current_owner, current, false, "")
+            return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), "")
     if current.phase == 0:
         if current.reader == nil:
             current.phase = 4
             current.error = "gateway-frame-owner-missing"
-            return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+            return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
         var reader = current.reader.unwrap()
         val received = local_unix_read_now_v1(current.native, reader.read_limit())
         current.native = received.owner
@@ -140,7 +154,7 @@ pub fn local_gateway_turn_owned_v1<T>(owner: T, connection: LocalGatewayConnecti
             current.phase = 4
             current.error = received.error
         if current.phase != 4 and reader.complete(): current.phase = 1
-        return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+        return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
     if current.phase == 1:
         # Actual EOF is the frame boundary. A timeout or empty would-block is
         # never an EOF proof; any trailing byte blocks dispatch permanently.
@@ -149,24 +163,28 @@ pub fn local_gateway_turn_owned_v1<T>(owner: T, connection: LocalGatewayConnecti
         if trailing.bytes.len() > 0:
             current.phase = 4
             current.error = "gateway-frame-trailing-data"
-            return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+            return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
         if trailing.error != "":
             if not gateway_waiting_v1(trailing.error):
                 current.phase = 4
                 current.error = trailing.error
-            return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
-        if not trailing.eof: return LocalGatewayOwnedTurnV1(current_owner, current, false, "")
+            return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
+        if not trailing.eof: return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), "")
         val peer = local_unix_peer_v1(current.native)
         current.native = peer.owner
         if peer.error != "" or peer.peer == nil:
             if not gateway_waiting_v1(peer.error):
                 current.phase = 4
                 current.error = if peer.error == "": "gateway-peer-unavailable" else: peer.error
-            return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+            return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
         if peer.peer.unwrap().uid != current.expected_peer_uid:
             current.phase = 4
             current.error = "gateway-peer-mismatch"
-            return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+            return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
+        if current.reader == nil or current.reader.unwrap().header == nil:
+            current.phase = 4
+            current.error = "gateway-frame-owner-missing"
+            return LocalGatewayReceiveTurnV2(current, nil, current.error)
         val reader = current.reader.unwrap()
         val header = reader.header.unwrap()
         val payload = match local_gateway_payload_decode_v1(header, reader.payload):
@@ -174,64 +192,103 @@ pub fn local_gateway_turn_owned_v1<T>(owner: T, connection: LocalGatewayConnecti
             case Err(reason):
                 current.phase = 4
                 current.error = reason
-                return LocalGatewayOwnedTurnV1(current_owner, current, false, reason)
-        # Native connection phase consumes dispatch once even if a local caller
-        # copied this completed reader. The domain still verifies its operation
-        # journal and grants; connection consumption is not application authority.
-        val claim = local_unix_claim_request_v1(current.native, header.request_id)
-        current.native = claim.owner
-        if claim.error != "" or not claim.claimed:
-            if not gateway_waiting_v1(claim.error):
-                current.phase = 4
-                current.error = if claim.error == "": "gateway-request-not-claimed" else: claim.error
-            return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
-        val result = handler(current_owner, LocalGatewayRequestV1(action: header.action,
+                return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), reason)
+        current.ready_request = Some(LocalGatewayRequestV1(action: header.action,
             operation_id: header.operation_id, payload: payload, peer_uid: peer.peer.unwrap().uid,
             request_id: header.request_id))
-        # Writeback happens before any fallible response encoding or IO.
-        current_owner = result.owner
-        current.response = Some(result.response)
+        current.phase = 5
+        return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), "")
+    LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
+
+# Dispatches only an EOF-validated ready connection. The native claim still
+# consumes exactly once across copied local connection values. The domain
+# verifies its installed peer policy and grants; scheduling is not authority.
+pub fn local_gateway_dispatch_owned_v2<T>(owner: T, connection: LocalGatewayConnectionV1,
+        handler: fn(T, LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<T>) -> LocalGatewayOwnedTurnV1<T>:
+    var current = gateway_check_deadline_v2(connection)
+    var current_owner = owner
+    var handled = false
+    if current.phase == 3 or current.phase == 4:
+        return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+    if current.phase != 5 or current.ready_request == nil:
+        return LocalGatewayOwnedTurnV1(current_owner, current, false, "gateway-request-not-ready")
+    val request = current.ready_request.unwrap()
+    val peer = local_unix_peer_v1(current.native)
+    current.native = peer.owner
+    if peer.error != "" or peer.peer == nil:
+        if not gateway_waiting_v1(peer.error):
+            current.phase = 4
+            current.error = if peer.error == "": "gateway-peer-unavailable" else: peer.error
+        return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+    if peer.peer.unwrap().uid != current.expected_peer_uid or request.peer_uid != current.expected_peer_uid:
         current.phase = 4
-        handled = true
-        if result.response.request_id != header.request_id:
-            current.error = "gateway-response-correlation"
+        current.error = "gateway-peer-mismatch"
+        return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+    # Native connection phase consumes dispatch once even if a local caller
+    # copied this completed reader. The domain still verifies its operation
+    # journal and grants; connection consumption is not application authority.
+    val claim = local_unix_claim_request_v1(current.native, request.request_id)
+    current.native = claim.owner
+    if claim.error != "" or not claim.claimed:
+        if not gateway_waiting_v1(claim.error):
+            current.phase = 4
+            current.error = if claim.error == "": "gateway-request-not-claimed" else: claim.error
+        return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+    val result = handler(current_owner, request)
+    # Writeback happens before any fallible response encoding or IO.
+    current_owner = result.owner
+    current.ready_request = nil
+    current.response = Some(result.response)
+    current.phase = 4
+    handled = true
+    if result.response.request_id != request.request_id:
+        current.error = "gateway-response-correlation"
+        return LocalGatewayOwnedTurnV1(current_owner, current, handled, current.error)
+    val response_header = LocalGatewayHeaderV1(response: true, request_id: request.request_id,
+        action: "", operation_id: "", exit_code: result.response.exit_code,
+        payload_bytes: str_len(result.response.payload),
+        handoff_metadata: if result.response.output_handoff == nil: "" else: result.response.output_handoff.unwrap().metadata)
+    val encoded = match local_gateway_header_encode_v1(response_header):
+        case Ok(value): value
+        case Err(reason):
+            current.error = reason
+            return LocalGatewayOwnedTurnV1(current_owner, current, handled, reason)
+    current.reply_payload = match boxed_text_bytes_checked(result.response.payload):
+        case Ok(value): value
+        case Err(_):
+            current.error = "gateway-response-allocation"
             return LocalGatewayOwnedTurnV1(current_owner, current, handled, current.error)
-        val response_header = LocalGatewayHeaderV1(response: true, request_id: header.request_id,
-            action: "", operation_id: "", exit_code: result.response.exit_code,
-            payload_bytes: str_len(result.response.payload),
-            handoff_metadata: if result.response.output_handoff == nil: "" else: result.response.output_handoff.unwrap().metadata)
-        val encoded = match local_gateway_header_encode_v1(response_header):
-            case Ok(value): value
-            case Err(reason):
-                current.error = reason
-                return LocalGatewayOwnedTurnV1(current_owner, current, handled, reason)
-        current.reply_payload = match boxed_text_bytes_checked(result.response.payload):
-            case Ok(value): value
-            case Err(_):
-                current.error = "gateway-response-allocation"
-                return LocalGatewayOwnedTurnV1(current_owner, current, handled, current.error)
-        if not utf8_bytes_valid(current.reply_payload):
-            current.error = "gateway-response-utf8"
+    if not utf8_bytes_valid(current.reply_payload):
+        current.error = "gateway-response-utf8"
+        return LocalGatewayOwnedTurnV1(current_owner, current, handled, current.error)
+    current.reply_header = match boxed_text_bytes_checked(encoded):
+        case Ok(value): value
+        case Err(_):
+            current.error = "gateway-response-allocation"
             return LocalGatewayOwnedTurnV1(current_owner, current, handled, current.error)
-        current.reply_header = match boxed_text_bytes_checked(encoded):
-            case Ok(value): value
-            case Err(_):
-                current.error = "gateway-response-allocation"
-                return LocalGatewayOwnedTurnV1(current_owner, current, handled, current.error)
-        current.reply_prefix = match local_gateway_prefix_encode_v1(response_header):
-            case Ok(value): value
-            case Err(reason):
-                current.error = reason
-                return LocalGatewayOwnedTurnV1(current_owner, current, handled, reason)
-        if result.response.output_handoff != nil:
-            val handoff = result.response.output_handoff.unwrap()
-            val staged = local_unix_stage_stdout_v1(current.native, handoff.source, handoff.binding_digest)
-            current.native = staged.owner
-            if staged.error != "" or not staged.staged:
-                current.error = if staged.error == "": "gateway-handoff-not-staged" else: staged.error
-                return LocalGatewayOwnedTurnV1(current_owner, current, handled, current.error)
-        current.phase = 2
-        return LocalGatewayOwnedTurnV1(current_owner, current, handled, "")
+    current.reply_prefix = match local_gateway_prefix_encode_v1(response_header):
+        case Ok(value): value
+        case Err(reason):
+            current.error = reason
+            return LocalGatewayOwnedTurnV1(current_owner, current, handled, reason)
+    if result.response.output_handoff != nil:
+        val handoff = result.response.output_handoff.unwrap()
+        val staged = local_unix_stage_stdout_v1(current.native, handoff.source, handoff.binding_digest)
+        current.native = staged.owner
+        if staged.error != "" or not staged.staged:
+            current.error = if staged.error == "": "gateway-handoff-not-staged" else: staged.error
+            return LocalGatewayOwnedTurnV1(current_owner, current, handled, current.error)
+    current.phase = 2
+    return LocalGatewayOwnedTurnV1(current_owner, current, handled, "")
+
+# Advances at most one reply chunk/half-close. This cannot invoke a handler or
+# repeat descriptor staging, including after a prior publication failure.
+pub fn local_gateway_publish_v2(connection: LocalGatewayConnectionV1) -> LocalGatewayConnectionTurnV2:
+    var current = gateway_check_deadline_v2(connection)
+    if current.phase == 3 or current.phase == 4:
+        return LocalGatewayConnectionTurnV2(current, current.error)
+    if current.phase != 2:
+        return LocalGatewayConnectionTurnV2(current, "gateway-response-not-ready")
     val bytes = match current.reply_part:
         case 0: current.reply_prefix
         case 1: current.reply_header
@@ -244,11 +301,11 @@ pub fn local_gateway_turn_owned_v1<T>(owner: T, connection: LocalGatewayConnecti
                 if not gateway_waiting_v1(shutdown.error):
                     current.phase = 4
                     current.error = if shutdown.error == "": "gateway-response-shutdown" else: shutdown.error
-                return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+                return LocalGatewayConnectionTurnV2(current, current.error)
         current.reply_offset = 0
         current.reply_part = current.reply_part + 1
         if current.reply_part > 2: current.phase = 3
-        return LocalGatewayOwnedTurnV1(current_owner, current, false, "")
+        return LocalGatewayConnectionTurnV2(current, "")
     val remaining = bytes.len() - current.reply_offset
     val maximum = if remaining > 65536: 65536 else: remaining
     val ready = local_unix_poll_v1(current.native, false, true)
@@ -257,13 +314,30 @@ pub fn local_gateway_turn_owned_v1<T>(owner: T, connection: LocalGatewayConnecti
         if not gateway_waiting_v1(ready.error):
             current.phase = 4
             current.error = ready.error
-        return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+        return LocalGatewayConnectionTurnV2(current, current.error)
     if not ready.writable and not ready.hangup:
-        return LocalGatewayOwnedTurnV1(current_owner, current, false, "")
+        return LocalGatewayConnectionTurnV2(current, "")
     val sent = local_unix_write_some_now_v1(current.native, bytes, current.reply_offset, maximum)
     current.native = sent.owner
     current.reply_offset = current.reply_offset + sent.accepted_bytes
     if sent.error != "" and not gateway_waiting_v1(sent.error):
         current.phase = 4
         current.error = sent.error
-    LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
+    LocalGatewayConnectionTurnV2(current, current.error)
+
+# Compatibility turn delegates to the same receive/claim/publication core.
+# Owner writeback remains before every fallible response operation.
+pub fn local_gateway_turn_owned_v1<T>(owner: T, connection: LocalGatewayConnectionV1,
+        handler: fn(T, LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<T>) -> LocalGatewayOwnedTurnV1<T>:
+    var current = connection
+    if current.phase == 0 or current.phase == 1:
+        val received = local_gateway_receive_v2(current)
+        current = received.connection
+        if current.phase != 5:
+            return LocalGatewayOwnedTurnV1(owner, current, false, received.error)
+    if current.phase == 5:
+        return local_gateway_dispatch_owned_v2(owner, current, handler)
+    if current.phase == 2:
+        val published = local_gateway_publish_v2(current)
+        return LocalGatewayOwnedTurnV1(owner, published.connection, false, published.error)
+    LocalGatewayOwnedTurnV1(owner, current, false, current.error)
