@@ -1,0 +1,125 @@
+# Native mechanism for the authenticated keeper preparation stage. A deadline
+# carrier is data, not authority. The common consumer must recompute the exact
+# signed stage digest, verify the retained keeper phase and exact manifest, and
+# preserve these owners through every refusal or uncertain post-effect result.
+use std.common.string_core.str_len
+use std.common.contracts.container.workspace_preparation_deadline_v1.{WorkspacePreparationDeadlineV1,
+    workspace_preparation_remaining_ms_v1}
+use std.common.contracts.storage.workspace_storage_v1.workspace_storage_binding_v1
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.{WorkspaceStorageLeaseV1, workspace_storage_observe_v1}
+use std.nogc_sync_mut.io.linux_container_user_observation_v1.{LinuxContainerUserObservationV1,
+    linux_container_user_observation_refresh_v1}
+use std.nogc_sync_mut.sosix.time.sosix_time_now_unix_micros
+
+@unsafe(reason: "native pinned-file owner-execute preparation under verified keeper stage", capabilities: [ffi])
+extern fn rt_workspace_storage_prepare_executable_v1(storage: i64, user: i64,
+    mapping_binding: text, stage_digest: text, expires_unix_ms: i64,
+    input_relative: text, output_relative: text, executable_relative: text, expected_digest: text) -> text
+
+pub struct WorkspaceStorageExecutableReceiptV1:
+    workspace_binding_digest: text
+    mapping_binding_digest: text
+    stage_digest: text
+    operation_id: text
+    input_relative_root: text
+    output_relative_root: text
+    executable_relative_path: text
+    file_identity: text
+    digest: text
+    size_bytes: i64
+    old_mode: i64
+    new_mode: i64
+    state: text
+    native_error: i64
+
+pub struct WorkspaceStorageExecutableTurnV1:
+    lease: WorkspaceStorageLeaseV1
+    observation: LinuxContainerUserObservationV1
+    receipt: WorkspaceStorageExecutableReceiptV1?
+    recovery_required: bool
+    error: text
+
+fn preparation_refused_v1(lease: WorkspaceStorageLeaseV1, observation: LinuxContainerUserObservationV1,
+        reason: text, uncertain: bool = false) -> WorkspaceStorageExecutableTurnV1:
+    WorkspaceStorageExecutableTurnV1(lease: lease, observation: observation, receipt: nil,
+        recovery_required: uncertain, error: reason)
+
+fn preparation_number_v1(value: text, maximum: i64) -> Result<i64, text>:
+    if str_len(value) == 0 or str_len(value) > 16 or (str_len(value) > 1 and value.starts_with("0")):
+        return Err("workspace-preparation-native-integer")
+    var result: i64 = 0
+    for i in 0..str_len(value):
+        val digit = (value.byte_at(i) as i64) - 48
+        if digit < 0 or digit > 9 or result > (maximum - digit) / 10:
+            return Err("workspace-preparation-native-integer")
+        result = result * 10 + digit
+        if result > maximum: return Err("workspace-preparation-native-integer")
+    Ok(result)
+
+fn preparation_decode_v1(lease: WorkspaceStorageLeaseV1, observation: LinuxContainerUserObservationV1,
+        deadline: WorkspacePreparationDeadlineV1, input_root: text, output_root: text,
+        executable: text, expected_digest: text, payload: text) -> Result<WorkspaceStorageExecutableReceiptV1, text>:
+    if str_len(payload) > 12287 or not payload.ends_with("\n") or payload.contains("\r") or
+            payload.contains("\t") or payload.contains("\u{0}"):
+        return Err("workspace-preparation-native-result-unavailable")
+    val fields = payload.split("\n")
+    if fields.len() != 19 or fields[18] != "" or fields[0] != "workspace-executable-prep-native-v1":
+        return Err("workspace-preparation-native-result-schema")
+    val state = preparation_number_v1(fields[1], 2)?
+    val error = preparation_number_v1(fields[2], 65535)?
+    val size = preparation_number_v1(fields[7], 1073741824)?
+    val old_mode = preparation_number_v1(fields[8], 4095)?
+    val new_mode = preparation_number_v1(fields[9], 4095)?
+    val quota = preparation_number_v1(fields[15], 4294967295)?
+    val hard = preparation_number_v1(fields[16], 1125899906842624)?
+    if fields[3] != input_root or fields[4] != output_root or fields[5] != executable or
+            fields[11] != observation.binding_digest or fields[12] != deadline.request_digest or
+            fields[13] != lease.request.expected_pool_id or fields[14] != lease.request.expected_workspace_id or
+            quota != lease.request.quota_id or hard != lease.request.hard_bytes or fields[17] != lease.request.policy_digest:
+        return Err("workspace-preparation-native-result-binding")
+    if state == 1 and (error != 0 or fields[6] != expected_digest or fields[10] == "" or
+            old_mode >= 512 or (old_mode & 18) != 0 or new_mode != (old_mode | 64)):
+        return Err("workspace-preparation-native-result-effect")
+    if state != 1 and error == 0: return Err("workspace-preparation-native-result-error")
+    var label = "refused"
+    if state == 1: label = "prepared"
+    elif state == 2: label = "uncertain"
+    Ok(WorkspaceStorageExecutableReceiptV1(workspace_binding_digest: workspace_storage_binding_v1(lease.request)?,
+        mapping_binding_digest: observation.binding_digest, stage_digest: deadline.request_digest,
+        operation_id: deadline.operation_id, input_relative_root: input_root, output_relative_root: output_root,
+        executable_relative_path: executable, file_identity: fields[10], digest: fields[6], size_bytes: size,
+        old_mode: old_mode, new_mode: new_mode, state: label, native_error: error))
+
+pub fn workspace_storage_prepare_executable_v1(lease: WorkspaceStorageLeaseV1,
+        observation: LinuxContainerUserObservationV1, deadline: WorkspacePreparationDeadlineV1,
+        expected_stage_digest: text, expected_operation_id: text,
+        input_relative_root: text, output_relative_root: text,
+        executable_relative_path: text, expected_sha256: text) -> WorkspaceStorageExecutableTurnV1:
+    if lease.request.kind != "linux-xfs-project-v1":
+        return preparation_refused_v1(lease, observation, "workspace-preparation-platform-unqualified")
+    val now_micros = sosix_time_now_unix_micros()
+    if now_micros <= 0: return preparation_refused_v1(lease, observation, "workspace-preparation-clock-unavailable")
+    val remaining = workspace_preparation_remaining_ms_v1(deadline, expected_stage_digest,
+        expected_operation_id, now_micros / 1000)
+    match remaining:
+        case Err(reason): return preparation_refused_v1(lease, observation, reason)
+        case Ok(_): ()
+    match workspace_storage_observe_v1(lease):
+        case Err(reason): return preparation_refused_v1(lease, observation, reason)
+        case Ok(receipt):
+            if receipt.state != "retained": return preparation_refused_v1(lease, observation, "workspace-owner-already-released")
+    val refreshed = linux_container_user_observation_refresh_v1(observation)
+    val current = match refreshed:
+        case Err(reason): return preparation_refused_v1(lease, observation, reason)
+        case Ok(value): value
+    val payload = unsafe(capabilities: [ffi]):
+        rt_workspace_storage_prepare_executable_v1(lease.token, current.native_token,
+            current.binding_digest, deadline.request_digest, deadline.expires_at_unix_ms,
+            input_relative_root, output_relative_root, executable_relative_path, expected_sha256)
+    match preparation_decode_v1(lease, current, deadline, input_relative_root, output_relative_root,
+            executable_relative_path, expected_sha256, payload):
+        case Err(reason): preparation_refused_v1(lease, current, reason, true)
+        case Ok(receipt):
+            WorkspaceStorageExecutableTurnV1(lease: lease, observation: current, receipt: Some(receipt),
+                recovery_required: receipt.state == "uncertain",
+                error: if receipt.state == "prepared": "" else: "workspace-preparation-native-refused:{receipt.native_error}")

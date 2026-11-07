@@ -1,7 +1,7 @@
 # Workspace storage tagged text ABI
 
 Source: `test/01_unit/compiler/mir/workspace_storage_text_extern_spec.spl`.
-Status: three authored scenarios, **NOT_RUN**, manually reviewed mirror; no docgen.
+Status: four authored scenarios, **NOT_RUN**, manually reviewed mirror; no docgen.
 
 1. **Use the real MIR registry to retain complete native storage text values.**
    Both admission and recovery register text operands 0, 1, 2, 3, 4 and 7 as
@@ -12,6 +12,9 @@ Status: three authored scenarios, **NOT_RUN**, manually reviewed mirror; no docg
 3. **Keep native user-observation scope and close-binding bytes intact.** Native
    open preserves cgroup/binding arguments 1 and 2; refresh and close preserve
    binding argument 1. These registry assertions do not replace compiled calls.
+4. **Preserve distinct native stage, mapping and manifest operands.** Preparation
+   keeps text operands 2, 3, 5, 6, 7 and 8 tagged; expiry argument 4 stays scalar.
+   No actual native Simple preparation call has been qualified by this registry test.
 
 The independent execution fixture is
 `test/fixtures/native_workspace_storage_text_abi_v1/main.spl`. It directly calls

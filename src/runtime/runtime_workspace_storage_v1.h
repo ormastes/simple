@@ -16,4 +16,7 @@ int64_t rt_workspace_storage_forget_released_v1(int64_t token);
 int64_t rt_linux_container_user_open_v1(int64_t pid,int64_t cgroup,int64_t binding);
 int64_t rt_linux_container_user_observe_v1(int64_t token,int64_t binding);
 int64_t rt_linux_container_user_close_v1(int64_t token,int64_t binding);
+int64_t rt_workspace_storage_prepare_executable_v1(int64_t storage_token,int64_t user_token,
+    int64_t mapping_binding,int64_t stage_digest,int64_t expires_unix_ms,
+    int64_t input_relative,int64_t output_relative,int64_t executable_relative,int64_t expected_digest);
 #endif

@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include "runtime_workspace_storage_linux_private.h"
 #include "runtime_workspace_user_observation_linux_private.h"
+#include "runtime_workspace_executable_prep_linux_private.h"
 static pthread_mutex_t ws_lock_v1 = PTHREAD_MUTEX_INITIALIZER;
 static int ws_lock_acquire_v1(void) { return pthread_mutex_lock(&ws_lock_v1); }
 static void ws_lock_release_v1(void) { (void)pthread_mutex_unlock(&ws_lock_v1); }
@@ -48,7 +49,7 @@ typedef struct { int unavailable; } WsUserNativeV1;
 typedef struct {
     int64_t token, hard_bytes, used_bytes, used_inodes;
     uint32_t quota;
-    int released, role; /* 1 storage owner, 2 read-only external user observation */
+    int released, role, busy; /* role1 storage, role2 read-only user observation */
     char kind[64], parent[4096], leaf[128], pool[256], workspace[256], policy[65];
     WsNativeV1 native;
     WsUserNativeV1 user;
@@ -108,7 +109,7 @@ static int64_t ws_open_or_recover_v1(int64_t kind,int64_t parent,int64_t leaf,
                     !strcmp(existing->policy,candidate.policy)&&existing->quota==candidate.quota&&existing->hard_bytes==hard) {
                 /* Recover retained cleanup authority even when observation is
                  * currently failing. This is a lease, not a readiness receipt. */
-                if(!existing->released)(void)ws_native_observe_v1(&existing->native,existing->leaf,existing->pool,
+                if(!existing->released&&!existing->busy)(void)ws_native_observe_v1(&existing->native,existing->leaf,existing->pool,
                     existing->workspace,hard,&existing->used_bytes,&existing->used_inodes);
                 int64_t token=existing->token;ws_lock_release_v1();return token;
             }
@@ -135,7 +136,7 @@ int64_t rt_workspace_storage_observe_v1(int64_t token) {
     char result[1024]; result[0]=0;
     if(ws_lock_acquire_v1())return rt_string_new((const uint8_t*)"",0);
     WsSlotV1* slot=ws_find_v1(token);
-    if(slot&&slot->role==1) {
+    if(slot&&slot->role==1&&!slot->busy) {
         int error=slot->released?0:ws_native_observe_v1(&slot->native,slot->leaf,slot->pool,
             slot->workspace,slot->hard_bytes,&slot->used_bytes,&slot->used_inodes);
         if(!error) {
@@ -152,6 +153,7 @@ int64_t rt_workspace_storage_release_if_absent_v1(int64_t token) {
     int error=ws_lock_acquire_v1();if(error)return -error;
     WsSlotV1* slot=ws_find_v1(token);
     if(!slot||slot->role!=1) {ws_lock_release_v1();return -ESTALE;}
+    if(slot->busy){ws_lock_release_v1();return -EBUSY;}
     if(!slot->released) {
         error=ws_native_release_if_absent_v1(&slot->native,slot->leaf,slot->hard_bytes,
             &slot->used_bytes,&slot->used_inodes);
@@ -163,7 +165,7 @@ int64_t rt_workspace_storage_forget_released_v1(int64_t token) {
     int error=ws_lock_acquire_v1();if(error)return -error;
     WsSlotV1* slot=ws_find_v1(token);
     if(!slot||slot->role!=1)error=ESTALE;
-    else if(!slot->released)error=EBUSY;
+    else if(slot->busy||!slot->released)error=EBUSY;
     else {ws_native_close_v1(&slot->native);memset(slot,0,sizeof(*slot));}
     ws_lock_release_v1();return -error;
 }
@@ -192,7 +194,7 @@ int64_t rt_linux_container_user_observe_v1(int64_t token,int64_t binding) {
     if(!ws_copy_text_v1(binding,expected,sizeof(expected))||!ws_digest_v1(expected))return rt_string_new((const uint8_t*)"",0);
     if(ws_lock_acquire_v1())return rt_string_new((const uint8_t*)"",0);
     WsSlotV1* slot=ws_find_v1(token);
-    if(slot&&slot->role==2&&!strcmp(slot->policy,expected)&&!ws_user_refresh_v1(&slot->user,slot->parent)) {
+    if(slot&&slot->role==2&&!slot->busy&&!strcmp(slot->policy,expected)&&!ws_user_refresh_v1(&slot->user,slot->parent)) {
         struct timespec now;
         if(clock_gettime(CLOCK_REALTIME,&now)==0&&now.tv_sec>0&&now.tv_sec<INT64_MAX/1000) {
             WsUserFactsV1* f=&slot->user.facts;
@@ -218,9 +220,72 @@ int64_t rt_linux_container_user_close_v1(int64_t token,int64_t binding) {
     int error=ws_lock_acquire_v1();if(error)return -error;
     WsSlotV1* slot=ws_find_v1(token);
     if(!slot||slot->role!=2||strcmp(slot->policy,expected))error=ESTALE;
+    else if(slot->busy)error=EBUSY;
     else {ws_user_close_v1(&slot->user);memset(slot,0,sizeof(*slot));}
     ws_lock_release_v1();return -error;
 #else
     (void)token;(void)binding;return -ENOTSUP;
 #endif
+}
+
+int64_t rt_workspace_storage_prepare_executable_v1(int64_t storage_token,int64_t user_token,
+        int64_t mapping_binding,int64_t stage_digest,int64_t expires_unix_ms,
+        int64_t input_relative,int64_t output_relative,int64_t executable_relative,int64_t expected_digest) {
+    char record[12288];record[0]=0;
+#if defined(__linux__)
+    char mapping[65],stage[65],input[4096],output[4096],executable[64],digest[65];
+    if(!ws_copy_text_v1(mapping_binding,mapping,sizeof(mapping))||!ws_digest_v1(mapping)||
+       !ws_copy_text_v1(stage_digest,stage,sizeof(stage))||!ws_digest_v1(stage)||
+       !ws_copy_text_v1(input_relative,input,sizeof(input))||!ws_copy_text_v1(output_relative,output,sizeof(output))||
+       !ws_copy_text_v1(executable_relative,executable,sizeof(executable))||
+       !ws_copy_text_v1(expected_digest,digest,sizeof(digest))||!ws_digest_v1(digest))return rt_string_new((const uint8_t*)"",0);
+    if(ws_lock_acquire_v1())return rt_string_new((const uint8_t*)"",0);
+    WsSlotV1* storage=ws_find_v1(storage_token);WsSlotV1* user=ws_find_v1(user_token);
+    if(!storage||!user||storage->role!=1||user->role!=2||storage->released||
+            storage->busy||user->busy||strcmp(mapping,user->policy)) {
+        ws_lock_release_v1();return rt_string_new((const uint8_t*)"",0);
+    }
+    /* Scoped loans retain both existing slots while hashing without holding
+     * the registry mutex. Release/close refuse busy slots; generations cannot
+     * be reused. No second registry, journal, or process-control authority. */
+    storage->busy=user->busy=1;ws_lock_release_v1();
+    WsExecutablePrepFactsV1 facts;memset(&facts,0,sizeof(facts));
+    struct timespec mono,wall;int error=0;int64_t deadline=0;
+    /* Sample monotonic first: scheduler delay between samples shortens, never
+     * extends, the window. Native processing has an additional 60s bound. */
+    if(clock_gettime(CLOCK_MONOTONIC,&mono)||clock_gettime(CLOCK_REALTIME,&wall))error=errno;
+    else if(mono.tv_sec<0||wall.tv_sec<0||(uint64_t)mono.tv_sec>((uint64_t)INT64_MAX-999)/1000||
+            (uint64_t)wall.tv_sec>((uint64_t)INT64_MAX-999)/1000)error=EOVERFLOW;
+    else {
+        int64_t now_mono=(int64_t)mono.tv_sec*1000+mono.tv_nsec/1000000;
+        int64_t now_wall=(int64_t)wall.tv_sec*1000+wall.tv_nsec/1000000;
+        if(expires_unix_ms<=now_wall)error=ETIMEDOUT;
+        else {
+            int64_t remaining=expires_unix_ms-now_wall;if(remaining>60000)remaining=60000;
+            if(now_mono>INT64_MAX-remaining)error=EOVERFLOW;else deadline=now_mono+remaining;
+        }
+    }
+    if(!error)error=ws_native_observe_v1(&storage->native,storage->leaf,storage->pool,
+        storage->workspace,storage->hard_bytes,&storage->used_bytes,&storage->used_inodes);
+    if(!error)error=ws_user_refresh_v1(&user->user,user->parent);
+    if(!error)error=ws_prepare_executable_v1(&storage->native,&user->user,input,output,executable,digest,
+        deadline,expires_unix_ms,&facts);
+    if(!error) {
+        error=ws_native_observe_v1(&storage->native,storage->leaf,storage->pool,
+            storage->workspace,storage->hard_bytes,&storage->used_bytes,&storage->used_inodes);
+        if(error)facts.state=2;
+    }
+    facts.error=error;
+    int count=snprintf(record,sizeof(record),"workspace-executable-prep-native-v1\n%d\n%d\n%s\n%s\n%s\n%s\n%llu\n%u\n%u\n%s\n%s\n%s\n%s\n%s\n%u\n%lld\n%s\n",
+        facts.state,facts.error,input,output,executable,facts.digest,(unsigned long long)facts.size_bytes,
+        facts.old_mode,facts.new_mode,facts.file_identity,mapping,stage,storage->pool,storage->workspace,
+        storage->quota,(long long)storage->hard_bytes,storage->policy);
+    if(count<0||(size_t)count>=sizeof(record))record[0]=0;
+    if(ws_lock_acquire_v1()){record[0]=0;} /* Retain busy owners on unknown unlock outcome. */
+    else {storage->busy=user->busy=0;ws_lock_release_v1();}
+#else
+    (void)storage_token;(void)user_token;(void)mapping_binding;(void)stage_digest;(void)expires_unix_ms;
+    (void)input_relative;(void)output_relative;(void)executable_relative;(void)expected_digest;
+#endif
+    return rt_string_new((const uint8_t*)record,strlen(record));
 }
