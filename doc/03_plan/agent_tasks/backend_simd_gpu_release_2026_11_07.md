@@ -152,3 +152,22 @@ no confirmed introduced P0/P1/P2 source defects. Verification and landing are
 qualified Simple/manual checks remain open. CUDA stdout is not a substitute
 for the missing provenance receipts. The review does not approve merging
 unqualified source into the release branch.
+
+## Subsequent user-directed scoped landing
+
+After the draft and its verification limits were reported, the user explicitly
+requested landing these fixes and improvements after review. The earlier
+draft-only disposition above is retained as the historical review outcome;
+this subsequent decision supersedes its publication restriction for the three
+scoped source fixes, without claiming verification PASS or complete features.
+
+The independent highest-capability reviewer checked integration head
+`897460ab097` after merging release `8e63eca53d5`: all eight code/test blobs
+match the previously reviewed source, the release-relative diff contains only
+the intended nine paths, and the bug database and seals match current release.
+No introduced P0/P1/P2 source defect was found. Recommendation: normal PR
+landing conditional on required CI passing. No failing-check bypass or admin
+merge is authorized by this decision. Qualified runtime/manual checks,
+clang-cl qualification, and the helper-oracle discrepancy remain pending;
+backend policy, actual optimizer DSO loading, and automatic aspect packaging
+are not completed by landing this scoped change.
