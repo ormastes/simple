@@ -2569,6 +2569,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_push", &[I64, I64], &[I64]),
     // dst, src, dst_off, src_off, count -> count written (bulk in-place span copy)
     RuntimeFuncSpec::new("rt_array_write_span", &[I64, I64, I64, I64, I64], &[I64]),
+    // dst, dst_off, count, value -> count written (bulk in-place volatile fill)
+    RuntimeFuncSpec::new("rt_array_fill_span", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse_mut", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_sha384_digest", &[I64], &[I64]), // [u8] -> 48-byte [u8]

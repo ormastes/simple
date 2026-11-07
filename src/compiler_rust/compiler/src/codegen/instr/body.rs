@@ -342,6 +342,24 @@ pub(super) fn build_vreg_types(
                         types_map.insert(*d, ty);
                     }
                     MirInst::MethodCallStatic { .. } => {}
+                    // A hybrid-routed call keeps the callee's declared return
+                    // type on its dest exactly like the plain `Call` below.
+                    // Without this stamp `compile_interp_call` had no scalar
+                    // evidence for a plain user function's dest and left the
+                    // bridge's tagged RuntimeValue in the vreg (an `-> i64`
+                    // callee answering 7 reached the caller as 56). Heap
+                    // (`boxed_result`) returns stay unstamped on purpose: their
+                    // RuntimeValue must remain boxed across the bridge.
+                    MirInst::InterpCall {
+                        dest: Some(d),
+                        func_name,
+                        boxed_result: false,
+                        ..
+                    } => {
+                        if let Some(&ty) = function_return_types.get(func_name.as_str()) {
+                            types_map.insert(*d, ty);
+                        }
+                    }
                     MirInst::Call {
                         dest: Some(d),
                         target,

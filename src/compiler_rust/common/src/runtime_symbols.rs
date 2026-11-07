@@ -1617,6 +1617,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_fill",
     "rt_array_flatten",
     "rt_array_write_span",
+    "rt_array_fill_span",
     "rt_array_free",
     "rt_array_header_ptr",
     "rt_string_free",

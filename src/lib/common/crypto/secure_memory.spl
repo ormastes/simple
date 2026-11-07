@@ -1,23 +1,22 @@
 # Compiler-resistant mutable-secret memory owner.
-# Raw runtime array/volatile calls are confined here; applications consume the
-# typed facade and cannot fabricate successful readback.
+#
+# Every wipe goes through `Array.fill_span(dst_off, count, value)`, the
+# compiler-owned in-place VOLATILE fill: the interpreter resolves the caller's
+# place and writes its exclusive storage through its normal mutating-method
+# channel, and native code calls `rt_array_fill_span`, which stores volatile
+# and fences. No raw data pointer ever reaches Simple code -- the previous
+# `rt_array_data_ptr` + `rt_volatile_write_*` loop wrote through a shared
+# `Arc<Vec<u8>>` allocation (or a dangling temporary) under the interpreter.
+# Bug: doc/08_tracking/bug/secure_memory_interpreter_raw_pointer_aliasing_2026-08-24.md
+#
+# Each owner takes its buffer as a `mut` parameter so the wipe is published
+# back to the caller's place (local, field or nested field) on both engines.
+# Applications consume the typed facade and cannot fabricate successful
+# readback: `overwritten_slots` is the count the fill reported and
+# `residual_nonzero_slots` is an independent read-back through the same place.
 
 @unsafe(reason: "raw array length mutation; wrapper validates length and exact success status", capabilities: [ffi])
 extern fn rt_array_set_len_known(collection: [u8], len: i64) -> i8
-@unsafe(reason: "raw i64-array storage pointer; zero is rejected before access", capabilities: [ffi, raw_ptr])
-extern fn rt_array_data_ptr<T>(collection: [T]) -> i64
-@unsafe(reason: "raw u8-array storage pointer; zero is rejected before access", capabilities: [ffi, raw_ptr])
-extern fn rt_array_data_ptr_text(collection: [u8]) -> i64
-@unsafe(reason: "volatile secret-memory byte read after bounds and pointer validation", capabilities: [ffi, raw_ptr])
-extern fn rt_volatile_read_u8(addr: i64) -> i64
-@unsafe(reason: "volatile secret-memory byte write after bounds and pointer validation", capabilities: [ffi, raw_ptr])
-extern fn rt_volatile_write_u8(addr: i64, value: i64)
-@unsafe(reason: "volatile secret-memory word read after bounds and pointer validation", capabilities: [ffi, raw_ptr])
-extern fn rt_volatile_read_u64(addr: i64) -> i64
-@unsafe(reason: "volatile secret-memory word write after bounds and pointer validation", capabilities: [ffi, raw_ptr])
-extern fn rt_volatile_write_u64(addr: i64, value: i64)
-@unsafe(reason: "compiler-resistant memory ordering boundary for secret zeroization", capabilities: [ffi])
-extern fn rt_memory_barrier()
 
 struct SecureZeroReport:
     slot_count: u64
@@ -29,115 +28,87 @@ struct SecureZeroReport:
             self.overwritten_slots == self.slot_count and
             self.residual_nonzero_slots == 0u64
 
-fn _secure_zero_slots(data_ptr: i64, slot_count: u64) -> SecureZeroReport:
-    if slot_count == 0u64 or data_ptr == 0:
-        return SecureZeroReport(
-            slot_count: slot_count, overwritten_slots: 0u64,
-            residual_nonzero_slots: slot_count)
-    var index: u64 = 0u64
-    while index < slot_count:
-        unsafe(capabilities: [ffi, raw_ptr]):
-            rt_volatile_write_u64(data_ptr + (index * 8u64) as i64, 0)
-        index = index + 1u64
-    unsafe(capabilities: [ffi]):
-        rt_memory_barrier()
-    var residual: u64 = 0u64
-    index = 0u64
-    while index < slot_count:
-        val value = unsafe(capabilities: [ffi, raw_ptr]):
-            rt_volatile_read_u64(data_ptr + (index * 8u64) as i64)
-        if value != 0:
-            residual = residual + 1u64
-        index = index + 1u64
-    unsafe(capabilities: [ffi]):
-        rt_memory_barrier()
+fn _failed_report(slot_count: u64) -> SecureZeroReport:
     SecureZeroReport(
-        slot_count: slot_count, overwritten_slots: slot_count,
-        residual_nonzero_slots: residual)
+        slot_count: slot_count, overwritten_slots: 0u64,
+        residual_nonzero_slots: slot_count)
 
-fn secure_zero_u8_slots(bytes: [u8]) -> SecureZeroReport:
-    secure_zero_u8_range(bytes, 0u64, bytes.len())
-
-fn secure_zero_u8_range(bytes: [u8], start: u64, byte_count: u64) -> SecureZeroReport:
-    # A [u8] has one byte per element. Never route its element count through
-    # the u64-slot helper: that would write eight times beyond the allocation.
-    if byte_count == 0u64 or start > bytes.len() or byte_count > bytes.len() - start:
-        return SecureZeroReport(
-            slot_count: byte_count, overwritten_slots: 0u64,
-            residual_nonzero_slots: byte_count)
-    # Native codegen has no `.data_ptr()` lowering at all (only the
-    # interpreter does); the Stage 2 link resolved this call to the
-    # nonexistent dynamic symbol `Array.data_ptr`. Use the canonical runtime
-    # ABI owner explicitly, same as the i64-slot path below;
-    # rt_array_data_ptr_text is the element-agnostic alias of
-    # rt_array_data_ptr (src/runtime/runtime_native.c).
-    val data_ptr = unsafe(capabilities: [ffi, raw_ptr]):
-        rt_array_data_ptr_text(bytes)
-    if data_ptr == 0:
-        return SecureZeroReport(
-            slot_count: byte_count, overwritten_slots: 0u64,
-            residual_nonzero_slots: byte_count)
+fn _residual_nonzero_u8(bytes: [u8], start: u64, byte_count: u64) -> u64:
+    var residual = 0u64
     var index = 0u64
     while index < byte_count:
-        unsafe(capabilities: [ffi, raw_ptr]):
-            rt_volatile_write_u8(data_ptr + (start + index) as i64, 0)
-        index = index + 1u64
-    unsafe(capabilities: [ffi]):
-        rt_memory_barrier()
-    var residual = 0u64
-    index = 0u64
-    while index < byte_count:
-        val value = unsafe(capabilities: [ffi, raw_ptr]):
-            rt_volatile_read_u8(data_ptr + (start + index) as i64)
-        if value != 0:
+        if (bytes[start + index] as i64) != 0:
             residual = residual + 1u64
         index = index + 1u64
-    unsafe(capabilities: [ffi]):
-        rt_memory_barrier()
+    residual
+
+fn secure_zero_u8_slots(mut bytes: [u8]) -> SecureZeroReport:
+    secure_zero_u8_range(bytes, 0u64, bytes.len())
+
+fn secure_zero_u8_range(mut bytes: [u8], start: u64, byte_count: u64) -> SecureZeroReport:
+    """Volatile-overwrite `byte_count` bytes from `start` and read them back.
+
+    Fails closed (nothing written, `verified()` false) for an empty or
+    out-of-range window: a `[u8]` has one byte per element and the window is
+    validated against the element count before any store.
+    """
+    if byte_count == 0u64 or start > bytes.len() or byte_count > bytes.len() - start:
+        return _failed_report(byte_count)
+    val written = bytes.fill_span(start as i64, byte_count as i64, 0u8)
+    if written != byte_count as i64:
+        return _failed_report(byte_count)
     SecureZeroReport(
         slot_count: byte_count, overwritten_slots: byte_count,
-        residual_nonzero_slots: residual)
+        residual_nonzero_slots: _residual_nonzero_u8(bytes, start, byte_count))
 
-fn secure_zero_i64_slots(words: [i64]) -> SecureZeroReport:
-    # `.data_ptr()` lowers to the nonexistent dynamic symbol `Array.data_ptr`
-    # under native codegen for every element type (the byte-array form too —
-    # proven by the 2026-08-31 Stage 2 link). Use the canonical runtime ABI
-    # owner explicitly.
-    val data_ptr = unsafe(capabilities: [ffi, raw_ptr]):
-        rt_array_data_ptr(words)
-    _secure_zero_slots(data_ptr, words.len())
+fn _residual_nonzero_words<T>(words: [T], slot_count: u64) -> u64:
+    var residual = 0u64
+    var index = 0u64
+    while index < slot_count:
+        if (words[index] as i64) != 0:
+            residual = residual + 1u64
+        index = index + 1u64
+    residual
 
-fn secure_zero_u32_slots(words: [u32]) -> SecureZeroReport:
+fn secure_zero_i64_slots(mut words: [i64]) -> SecureZeroReport:
+    """Volatile-overwrite and read back every reachable i64 array slot."""
+    val slot_count = words.len()
+    if slot_count == 0u64:
+        return _failed_report(0u64)
+    val written = words.fill_span(0, slot_count as i64, 0)
+    if written != slot_count as i64:
+        return _failed_report(slot_count)
+    SecureZeroReport(
+        slot_count: slot_count, overwritten_slots: slot_count,
+        residual_nonzero_slots: _residual_nonzero_words(words, slot_count))
+
+fn secure_zero_u32_slots(mut words: [u32]) -> SecureZeroReport:
     """Volatile-overwrite and read back every reachable u32 array slot.
 
     The report covers only this exact owner-reachable allocation. It makes no
     claim about compiler temporaries, stack/register copies, or prior arrays.
     """
-    if words.len() == 0u64:
-        return SecureZeroReport(
-            slot_count: 0u64, overwritten_slots: 0u64,
-            residual_nonzero_slots: 0u64)
-    val data_ptr = unsafe(capabilities: [ffi, raw_ptr]):
-        rt_array_data_ptr(words)
-    if data_ptr == 0:
-        return SecureZeroReport(
-            slot_count: words.len(), overwritten_slots: 0u64,
-            residual_nonzero_slots: words.len())
-    # Generic Simple arrays use one runtime i64 storage slot per non-byte
-    # scalar, including u32. Clear the entire physical slot: four-byte pointer
-    # arithmetic would leave every later logical element and each upper half
-    # untouched while still allowing a misleading low-half readback.
-    _secure_zero_slots(data_ptr, words.len())
+    val slot_count = words.len()
+    if slot_count == 0u64:
+        return _failed_report(0u64)
+    val written = words.fill_span(0, slot_count as i64, 0u32)
+    if written != slot_count as i64:
+        return _failed_report(slot_count)
+    SecureZeroReport(
+        slot_count: slot_count, overwritten_slots: slot_count,
+        residual_nonzero_slots: _residual_nonzero_words(words, slot_count))
 
-fn secure_zero_u64_slots(words: [u64]) -> SecureZeroReport:
+fn secure_zero_u64_slots(mut words: [u64]) -> SecureZeroReport:
     """Volatile-overwrite and read back every reachable u64 array slot."""
-    if words.len() == 0u64:
-        return SecureZeroReport(
-            slot_count: 0u64, overwritten_slots: 0u64,
-            residual_nonzero_slots: 0u64)
-    val data_ptr = unsafe(capabilities: [ffi, raw_ptr]):
-        rt_array_data_ptr(words)
-    _secure_zero_slots(data_ptr, words.len())
+    val slot_count = words.len()
+    if slot_count == 0u64:
+        return _failed_report(0u64)
+    val written = words.fill_span(0, slot_count as i64, 0u64)
+    if written != slot_count as i64:
+        return _failed_report(slot_count)
+    SecureZeroReport(
+        slot_count: slot_count, overwritten_slots: slot_count,
+        residual_nonzero_slots: _residual_nonzero_words(words, slot_count))
 
 fn secure_set_u8_length(bytes: [u8], length: i64) -> bool:
     if length < 0:

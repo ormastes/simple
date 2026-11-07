@@ -10829,6 +10829,39 @@ int64_t rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
     return count;
 }
 
+/* Bulk in-place volatile fill: dst[dst_off..dst_off+count] = value.
+ *
+ * Compiler-owned twin of `Array.fill_span(dst_off, count, value) -> i64`.
+ * Every store is volatile and the fill ends with a full fence, so a
+ * secret wipe through it is never elided or reordered past the call: this
+ * is the runtime boundary the secure-memory owner uses instead of handing
+ * raw data pointers to Simple code. Same bounds rule and diagnostic shape
+ * as rt_array_write_span: count <= 0 is a no-op returning 0, an invalid
+ * destination handle answers -1, and an out-of-range span never writes.
+ * Returns the count written. */
+int64_t rt_array_fill_span(SplArray* dst, int64_t dst_off, int64_t count, int64_t value) {
+    if (count <= 0) return 0;
+    RtCoreArray* d = rt_core_array_ptr(dst);
+    if (!d) return -1;
+    if (dst_off < 0 || count > d->len || dst_off > d->len - count) {
+        fprintf(stderr,
+                "error: semantic: fill_span out of range: dst_off=%lld count=%lld dst_len=%lld\n",
+                (long long)dst_off, (long long)count, (long long)d->len);
+        exit(1);
+    }
+    if (d->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        volatile uint8_t* p = (volatile uint8_t*)d->data + dst_off;
+        for (int64_t i = 0; i < count; i++) p[i] = (uint8_t)(value & 0xff);
+    } else {
+        int d_u64 = (d->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+        int64_t slot = d_u64 ? value : rt_core_value_u64_compact(value);
+        volatile int64_t* p = (volatile int64_t*)d->data + dst_off;
+        for (int64_t i = 0; i < count; i++) p[i] = slot;
+    }
+    rt_memory_barrier();
+    return count;
+}
+
 int64_t rt_array_get_i64_raw(SplArray* a, int64_t index) {
     return rt_array_get(a, index);
 }
