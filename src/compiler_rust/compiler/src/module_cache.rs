@@ -549,6 +549,7 @@ thread_local! {
 
 /// Clear the module exports cache (useful between test runs)
 pub fn clear_module_cache() {
+    bump_registry_generation();
     MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULE_EXPORT_OWNERS.with(|cache| cache.borrow_mut().clear());
     MODULE_CLASSES_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -594,6 +595,7 @@ pub fn clear_module_cache() {
 /// Only clears test-file-specific state while keeping parsed stdlib in cache.
 /// This avoids re-parsing std.spec, std.io, etc. for every test file.
 pub fn clear_module_cache_selective() {
+    bump_registry_generation();
     // Helper: retain only entries whose path contains "src/lib/" (stdlib)
     fn is_stdlib(p: &Path) -> bool {
         let s = p.to_string_lossy();
@@ -1052,6 +1054,7 @@ pub fn cache_module_definitions(
     trace!(path = ?key, classes = classes.len(), functions = functions.len(), enums = enums.len(), "Caching module definitions");
     MODULE_CLASSES_CACHE.with(|cache| {
         cache.borrow_mut().insert(key.clone(), classes.clone());
+    bump_registry_generation();
     });
     let owner = key.to_string_lossy();
     for name in classes.keys() {
@@ -1812,6 +1815,7 @@ pub fn record_flattened_owner_class(class_def: &Arc<ClassDef>) {
 }
 
 fn record_owner_class(owner: Arc<str>, class_def: &Arc<ClassDef>) {
+    bump_registry_generation();
     note_class_owner(&class_def.name, &owner);
     FLATTEN_OWNER_CLASSES.with(|t| {
         t.borrow_mut()
@@ -1856,6 +1860,7 @@ pub fn record_entry_owner_class(class_def: &Arc<ClassDef>) {
 /// Forget the entry script's recorded classes (a new entry is about to be
 /// evaluated in this process, e.g. the next spec file).
 pub fn clear_entry_owner_classes() {
+    bump_registry_generation();
     FLATTEN_OWNER_CLASSES.with(|t| {
         t.borrow_mut().remove(ENTRY_OWNER);
     });
@@ -1870,6 +1875,7 @@ pub fn clear_entry_owner_classes() {
 /// bare NAME matched, which is how module A's cached `Config` became module
 /// B's `Config` the moment B's `impl Config:` was evaluated.)
 pub fn refresh_cached_class(prior: &Arc<ClassDef>, enriched: &Arc<ClassDef>) {
+    bump_registry_generation();
     if Arc::ptr_eq(prior, enriched) {
         return;
     }
@@ -1893,16 +1899,63 @@ pub fn refresh_cached_class(prior: &Arc<ClassDef>, enriched: &Arc<ClassDef>) {
     });
 }
 
+thread_local! {
+    /// Bumped whenever an owner-keyed class registry or an import-binding
+    /// table changes (module load, flattened/entry registration, impl
+    /// enrichment, cache clears, `use` bindings). Every cached resolution is
+    /// stamped with the generation it was computed under and ignored after a
+    /// bump, so no invalidation walks the caches.
+    static REGISTRY_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Bare name -> every distinct owned definition, stamped with the
+    /// generation (see [`owned_class_candidates`]).
+    static CANDIDATES_CACHE: RefCell<HashMap<String, (u64, Arc<[(Arc<str>, Arc<ClassDef>)]>)>> =
+        RefCell::new(HashMap::new());
+    /// Importer owner -> bare name -> the owner walk's answer, stamped with
+    /// the generation. Keyed by `&str` at both levels, so a hit allocates
+    /// nothing; only a miss stores an owned key.
+    static SCOPE_CACHE: RefCell<HashMap<Arc<str>, HashMap<String, (u64, Option<Arc<ClassDef>>)>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Invalidate every cached class resolution (called by the registry and
+/// binding writers; cheap: one counter increment).
+pub(crate) fn bump_registry_generation() {
+    REGISTRY_GEN.with(|g| g.set(g.get().wrapping_add(1)));
+}
+
+fn registry_generation() -> u64 {
+    REGISTRY_GEN.with(|g| g.get())
+}
+
+static ENTRY_OWNER_ARC: std::sync::LazyLock<Arc<str>> = std::sync::LazyLock::new(|| Arc::from(ENTRY_OWNER));
+
+/// Owner key of the executing module (`<entry>` at top level); an `Arc`
+/// clone, never a fresh allocation.
+fn current_owner() -> Arc<str> {
+    crate::interpreter::CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| Arc::clone(&ENTRY_OWNER_ARC))
+}
+
 /// Every distinct definition of `name` in the owner-keyed registries, as
 /// `(owner, def)`, sorted by owner so the answer never depends on hash
-/// order. Two slots that hold the same allocation, structurally equal
-/// definitions, or the same owner count once.
-fn owned_class_candidates(name: &str) -> Vec<(Arc<str>, Arc<ClassDef>)> {
+/// order. Two slots that hold the same allocation or the same owner count
+/// once (identity, never a structural `ClassDef` compare). Memoised per
+/// generation: a hit is one hash probe plus an `Arc` clone.
+fn owned_class_candidates(name: &str) -> Arc<[(Arc<str>, Arc<ClassDef>)]> {
+    let generation = registry_generation();
+    let hit = CANDIDATES_CACHE.with(|c| {
+        c.borrow()
+            .get(name)
+            .filter(|(stamp, _)| *stamp == generation)
+            .map(|(_, candidates)| Arc::clone(candidates))
+    });
+    if let Some(candidates) = hit {
+        return candidates;
+    }
     let mut out: Vec<(Arc<str>, Arc<ClassDef>)> = Vec::new();
     let mut push = |owner: Arc<str>, def: Arc<ClassDef>| {
-        let dup = out
-            .iter()
-            .any(|(o, d)| **o == *owner || Arc::ptr_eq(d, &def) || **d == *def);
+        let dup = out.iter().any(|(o, d)| **o == *owner || Arc::ptr_eq(d, &def));
         if !dup {
             out.push((owner, def));
         }
@@ -1922,15 +1975,46 @@ fn owned_class_candidates(name: &str) -> Vec<(Arc<str>, Arc<ClassDef>)> {
         }
     });
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
+    let candidates: Arc<[(Arc<str>, Arc<ClassDef>)]> = Arc::from(out);
+    CANDIDATES_CACHE.with(|c| {
+        c.borrow_mut().insert(name.to_owned(), (generation, Arc::clone(&candidates)));
+    });
+    candidates
+}
+
+/// The owner walk ([`owner_module_class`]) for `name` as seen from `owner`,
+/// memoised per (owner, name, generation). Misses are cached too: a bare
+/// name no module in the chain declares costs one probe after the first
+/// walk.
+fn scoped_walk(owner: &Arc<str>, name: &str) -> Option<Arc<ClassDef>> {
+    let generation = registry_generation();
+    let cached = SCOPE_CACHE.with(|c| {
+        c.borrow()
+            .get(&**owner)
+            .and_then(|names| names.get(name))
+            .filter(|(stamp, _)| *stamp == generation)
+            .map(|(_, def)| def.clone())
+    });
+    if let Some(answer) = cached {
+        return answer;
+    }
+    let answer = owner_module_class(name);
+    SCOPE_CACHE.with(|c| {
+        c.borrow_mut()
+            .entry(Arc::clone(owner))
+            .or_default()
+            .insert(name.to_owned(), (generation, answer.clone()));
+    });
+    answer
 }
 
 /// Resolve a bare class name the way the SOURCE module sees it:
 ///
 /// 1. the executing module's own definition, or the one its `use m.{Name}`
-///    / `use m.*` bindings lead to (the owner walk);
-/// 2. otherwise, when the bare name has a single owner, that definition --
-///    or the caller's flat scope table when no module owns the name;
+///    / `use m.{Name as Alias}` / `use m.*` / `export use` bindings lead to
+///    (the owner walk);
+/// 2. otherwise, when the bare name has a single owner, the caller's flat
+///    scope table, else that owner's definition;
 /// 3. otherwise the unique definition across every loaded module.
 ///
 /// Two or more DIFFERENT owned definitions with no binding in scope is an
@@ -1941,7 +2025,8 @@ pub fn resolve_class_in_scope(
     classes: &HashMap<String, Arc<ClassDef>>,
     name: &str,
 ) -> Result<Option<Arc<ClassDef>>, crate::error::CompileError> {
-    if let Some(def) = owner_module_class(name) {
+    let owner = current_owner();
+    if let Some(def) = scoped_walk(&owner, name) {
         return Ok(Some(def));
     }
     if !class_name_is_shared(name) {
@@ -1951,26 +2036,23 @@ pub fn resolve_class_in_scope(
         return Ok(classes
             .get(name)
             .cloned()
-            .or_else(|| owned_class_candidates(name).into_iter().next().map(|(_, d)| d)));
+            .or_else(|| owned_class_candidates(name).first().map(|(_, d)| Arc::clone(d))));
     }
     let candidates = owned_class_candidates(name);
     if *DBG_COLLISION {
         eprintln!(
-            "[DBG SCOPE] name={name} walk=miss candidates=[{}] flat={}",
+            "[DBG SCOPE] name={name} owner={owner} walk=miss candidates=[{}] flat={}",
             candidates.iter().map(|(o, _)| o.to_string()).collect::<Vec<_>>().join(", "),
             classes.contains_key(name)
         );
     }
-    match candidates.as_slice() {
+    match &*candidates {
         [] => Ok(classes.get(name).cloned()),
         [(_, def)] => Ok(Some(Arc::clone(def))),
         many => {
-            let current = crate::interpreter::CURRENT_EXEC_MODULE
-                .with(|cell| cell.borrow().clone())
-                .unwrap_or_else(|| Arc::from(ENTRY_OWNER));
             let owners: Vec<&str> = many.iter().map(|(o, _)| o.as_ref()).collect();
             Err(crate::error::CompileError::semantic(format!(
-                "ambiguous type `{name}`: defined in {} and none of them is imported by {current}; \
+                "ambiguous type `{name}`: defined in {} and none of them is imported by {owner}; \
                  import one explicitly (`use <module>.{{{name}}}`)",
                 owners.join(", ")
             )))
@@ -1990,7 +2072,8 @@ pub fn resolve_class_for_instance<V>(
     name: &str,
     fields: &HashMap<String, V>,
 ) -> Option<Arc<ClassDef>> {
-    let walked = owner_module_class(name);
+    let owner = current_owner();
+    let walked = scoped_walk(&owner, name);
     if !class_name_is_shared(name) {
         return walked.or_else(|| classes.get(name).cloned());
     }
@@ -2008,7 +2091,7 @@ pub fn resolve_class_for_instance<V>(
     if let Some((_, def)) = candidates.iter().find(|(_, d)| fields_match(d)) {
         return Some(Arc::clone(def));
     }
-    walked.or(flat).or_else(|| candidates.into_iter().next().map(|(_, d)| d))
+    walked.or(flat).or_else(|| candidates.first().map(|(_, d)| Arc::clone(d)))
 }
 
 /// [`resolve_class_for_instance`] for a method receiver's `self` table. A
@@ -2136,6 +2219,7 @@ mod class_collision_tests {
                 .insert(def.name.clone(), Arc::clone(def));
         });
         note_class_owner(&def.name, owner);
+        bump_registry_generation();
     }
 
     fn uncache(owners: &[&str]) {
@@ -2145,6 +2229,7 @@ mod class_collision_tests {
             }
         });
         retain_class_owners(|owner| !owners.contains(&owner));
+        bump_registry_generation();
         crate::interpreter::MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|c| {
             for owner in owners {
                 c.borrow_mut().remove(*owner);
@@ -2220,11 +2305,129 @@ mod class_collision_tests {
         let msg = err.to_string();
         assert!(msg.contains("ambiguous type `Vec3`"), "got: {msg}");
         assert!(msg.contains("geo_a.spl") && msg.contains("geo_b.spl"), "names both owners: {msg}");
-        // Structurally identical definitions under two owners are NOT ambiguous.
-        let a_again = class_def("class Vec3:\n    x: f64\n    y: f64\n    z: f64\n");
-        cache_class(geo_b, &a_again);
+        uncache(&[geo_a, geo_b, user]);
+    }
+
+    #[test]
+    fn the_same_allocation_under_two_owner_keys_is_not_ambiguous() {
+        // Identity, not a structural compare: one `Arc<ClassDef>` reachable
+        // through two owner keys is one definition.
+        let a = class_def("class Vec3:\n    x: f64\n    y: f64\n    z: f64\n");
+        let (x, y, user) = ("/probe/same/x.spl", "/probe/same/y.spl", "/probe/same/user.spl");
+        cache_class(x, &a);
+        cache_class(y, &a);
+        let scope: HashMap<String, Arc<ClassDef>> = HashMap::new();
         let got = with_exec_module(Some(user), || resolve_class_in_scope(&scope, "Vec3"));
-        assert!(got.unwrap().is_some());
+        assert!(Arc::ptr_eq(&got.unwrap().unwrap(), &a));
+        uncache(&[x, y, user]);
+    }
+
+    fn bind(importer: &str, local: &str, owner: &str, name: &str) {
+        crate::interpreter::record_owner_binding(Arc::from(importer), local.to_string(), (Arc::from(owner), name.to_string()));
+    }
+
+    fn two_vec3s(geo_a: &str, geo_b: &str) -> (Arc<ClassDef>, Arc<ClassDef>) {
+        let a = class_def("class Vec3:\n    x: f64\n    y: f64\n    z: f64\n");
+        let b = class_def("class Vec3:\n    x: f64\n    y: f64\n");
+        cache_class(geo_a, &a);
+        cache_class(geo_b, &b);
+        (a, b)
+    }
+
+    #[test]
+    fn resolve_class_in_scope_follows_a_glob_import_edge() {
+        // `use geo_a.*` records the whole-surface edge under "*".
+        let (geo_a, geo_b, user) = ("/probe/glob/geo_a.spl", "/probe/glob/geo_b.spl", "/probe/glob/user.spl");
+        let (a, _b) = two_vec3s(geo_a, geo_b);
+        bind(user, "*", geo_a, "*");
+        let scope: HashMap<String, Arc<ClassDef>> = HashMap::new();
+        let got = with_exec_module(Some(user), || resolve_class_in_scope(&scope, "Vec3"));
+        assert!(Arc::ptr_eq(&got.unwrap().unwrap(), &a));
+        uncache(&[geo_a, geo_b, user]);
+    }
+
+    #[test]
+    fn resolve_class_in_scope_follows_an_alias_binding() {
+        // `use geo_b.{Vec3 as V}`: the local name differs from the declared one.
+        let (geo_a, geo_b, user) = ("/probe/alias/geo_a.spl", "/probe/alias/geo_b.spl", "/probe/alias/user.spl");
+        let (_a, b) = two_vec3s(geo_a, geo_b);
+        bind(user, "V", geo_b, "Vec3");
+        let scope: HashMap<String, Arc<ClassDef>> = HashMap::new();
+        let got = with_exec_module(Some(user), || resolve_class_in_scope(&scope, "V"));
+        assert!(Arc::ptr_eq(&got.unwrap().unwrap(), &b));
+        uncache(&[geo_a, geo_b, user]);
+    }
+
+    #[test]
+    fn resolve_class_in_scope_follows_a_reexport_chain() {
+        // facade: `export use geo_a.{Vec3}`; user: `use facade.{Vec3}` (two hops).
+        let (geo_a, geo_b, facade, user) = (
+            "/probe/reexport/geo_a.spl",
+            "/probe/reexport/geo_b.spl",
+            "/probe/reexport/facade.spl",
+            "/probe/reexport/user.spl",
+        );
+        let (a, _b) = two_vec3s(geo_a, geo_b);
+        bind(facade, "Vec3", geo_a, "Vec3");
+        bind(user, "Vec3", facade, "Vec3");
+        let scope: HashMap<String, Arc<ClassDef>> = HashMap::new();
+        let got = with_exec_module(Some(user), || resolve_class_in_scope(&scope, "Vec3"));
+        assert!(Arc::ptr_eq(&got.unwrap().unwrap(), &a));
+        uncache(&[geo_a, geo_b, facade, user]);
+    }
+
+    #[test]
+    fn resolve_class_in_scope_follows_nested_imports_mixing_name_and_glob_edges() {
+        // user -> mid (per-name) -> geo_a (glob): three modules, two edge kinds.
+        let (geo_a, geo_b, mid, user) =
+            ("/probe/nested/geo_a.spl", "/probe/nested/geo_b.spl", "/probe/nested/mid.spl", "/probe/nested/user.spl");
+        let (a, _b) = two_vec3s(geo_a, geo_b);
+        bind(user, "Vec3", mid, "Vec3");
+        bind(mid, "*", geo_a, "*");
+        let scope: HashMap<String, Arc<ClassDef>> = HashMap::new();
+        let got = with_exec_module(Some(user), || resolve_class_in_scope(&scope, "Vec3"));
+        assert!(Arc::ptr_eq(&got.unwrap().unwrap(), &a));
+        uncache(&[geo_a, geo_b, mid, user]);
+    }
+
+    #[test]
+    fn generic_classes_with_a_colliding_name_resolve_per_owner() {
+        let a = class_def("class Pair<T>:\n    first: T\n    second: T\n");
+        let b = class_def("class Pair<T>:\n    only: T\n");
+        let (geo_a, geo_b, user_a, user_b) =
+            ("/probe/generic/geo_a.spl", "/probe/generic/geo_b.spl", "/probe/generic/user_a.spl", "/probe/generic/user_b.spl");
+        cache_class(geo_a, &a);
+        cache_class(geo_b, &b);
+        bind(user_a, "Pair", geo_a, "Pair");
+        bind(user_b, "Pair", geo_b, "Pair");
+        let scope: HashMap<_, _> = [("Pair".to_string(), Arc::clone(&b))].into_iter().collect();
+        let got = with_exec_module(Some(user_a), || resolve_class_in_scope(&scope, "Pair"));
+        assert!(Arc::ptr_eq(&got.unwrap().unwrap(), &a));
+        let got = with_exec_module(Some(user_b), || resolve_class_in_scope(&scope, "Pair"));
+        assert!(Arc::ptr_eq(&got.unwrap().unwrap(), &b));
+        // An instance built from A's generic def dispatches to A even from a
+        // module that imports neither.
+        let two: HashMap<String, ()> = [("first".to_string(), ()), ("second".to_string(), ())].into_iter().collect();
+        let got = with_exec_module(Some("/probe/generic/elsewhere.spl"), || resolve_class_for_instance(&scope, "Pair", &two));
+        assert!(Arc::ptr_eq(&got.unwrap(), &a));
+        uncache(&[geo_a, geo_b, user_a, user_b]);
+    }
+
+    #[test]
+    fn cached_resolution_is_invalidated_when_bindings_or_registries_change() {
+        let (geo_a, geo_b, user) = ("/probe/gen/geo_a.spl", "/probe/gen/geo_b.spl", "/probe/gen/user.spl");
+        let a = class_def("class Vec3:\n    x: f64\n    y: f64\n    z: f64\n");
+        cache_class(geo_a, &a);
+        bind(user, "Vec3", geo_a, "Vec3");
+        let scope: HashMap<String, Arc<ClassDef>> = HashMap::new();
+        let got = with_exec_module(Some(user), || resolve_class_in_scope(&scope, "Vec3"));
+        assert!(Arc::ptr_eq(&got.unwrap().unwrap(), &a), "first answer is cached");
+        // A later module load plus a rebinding must not be answered from the cache.
+        let b = class_def("class Vec3:\n    x: f64\n    y: f64\n");
+        cache_class(geo_b, &b);
+        bind(user, "Vec3", geo_b, "Vec3");
+        let got = with_exec_module(Some(user), || resolve_class_in_scope(&scope, "Vec3"));
+        assert!(Arc::ptr_eq(&got.unwrap().unwrap(), &b), "rebinding is visible");
         uncache(&[geo_a, geo_b, user]);
     }
 

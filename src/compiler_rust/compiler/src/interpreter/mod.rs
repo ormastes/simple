@@ -180,6 +180,7 @@ use interpreter_call::{
 // Module caching and loading state
 #[path = "../module_cache.rs"]
 mod module_cache;
+pub(crate) use module_cache::bump_registry_generation;
 pub use module_cache::{
     clear_entry_owner_classes, owner_module_class, owner_module_enum, record_entry_owner_class, record_flattened_owner_class,
     record_flattened_owner_enum, refresh_cached_class, resolve_class_for_instance, resolve_class_for_receiver,
