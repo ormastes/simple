@@ -1,0 +1,228 @@
+# @req ORCH-02 HOST-02
+# Constructed intent/birth data is pure integrity, not native proof/authority.
+# Execution NOT_RUN. No fake provider, exec creation or PID control.
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+
+fn exec_contract_fixture_v3(windows: bool) -> ContainerExecRequestV3:
+    val plan = ContainerExecutionPlanV2(backend: if windows: "windows-docker-process" else: "linux-podman",
+        workload_uid: "parent-workload", attempt: 2, operation_id: "parent-operation", request_digest: "a".repeat(64),
+        physical_host_id: "alias", service_scope_id: "service", boot_id: if windows: "" else: "boot",
+        provider_generation: 3, native_machine_id: "actual-machine", continuity_mode: if windows: "service-incarnation-v1" else: "native-boot-incarnation-v1",
+        continuity_id: if windows: "service-incarnation:nonce" else: "boot")
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: plan.workload_uid, attempt: plan.attempt, operation_id: plan.operation_id,
+        provider_generation: plan.provider_generation, engine: if windows: "docker" else: "podman", native_id: "d".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    ContainerExecRequestV3(parent: plan, parent_runtime: runtime, operation_id: "exec-operation", nonce: "b".repeat(64),
+        argv: if windows: ["C:/Tools/agent.exe", "--version"] else: ["/usr/bin/agent", "--version"],
+        environment: [ContainerExecEnvironmentEntryV3.Literal("LANG", "C"),
+            ContainerExecEnvironmentEntryV3.SecretReference("TOKEN", "secrets/agent-token", "c".repeat(64))],
+        working_directory: if windows: "C:/workspace" else: "/workspace", selected_user: if windows: "ContainerUser" else: "1000:1000",
+        terminal_mode: "none", stdin_requested: false, timeout_ms: 20000)
+
+fn exec_birth_fixture_v3(request: ContainerExecRequestV3) -> ContainerExecBirthReceiptV3:
+    val parent = request.parent
+    val scope = ContainerHostScopeV2(physical_host_id: parent.physical_host_id, service_scope_id: parent.service_scope_id,
+        boot_id: parent.boot_id, provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
+        continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: parent.workload_uid, attempt: parent.attempt,
+        provider_generation: parent.provider_generation, operation_id: parent.operation_id,
+        engine: if parent.backend == "linux-podman": "podman" else: "docker", native_id: "d".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    ContainerExecBirthReceiptV3(request_digest: container_exec_request_digest_v3(request).unwrap(), parent_runtime: runtime,
+        native_exec_id: "e".repeat(64), provider_identity_digest: "f".repeat(64), created_unix_ms: 100,
+        query_digest: "1".repeat(64), evidence_digest: "2".repeat(64), proof_kind: "exact-native-exec-birth-v3")
+
+fn exec_wire_change_v3(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn exec_digest_changed_v3(original: ContainerExecRequestV3, changed: ContainerExecRequestV3):
+    var bound = changed
+    val plan = bound.parent
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    bound.parent_runtime.provider_generation = plan.provider_generation
+    bound.parent_runtime.node_boot_id = container_scope_fence_id_v2(scope).unwrap()
+    expect(container_exec_request_digest_v3(original).unwrap() == container_exec_request_digest_v3(bound).unwrap()).to_equal(false)
+
+describe "neutral container exec intent and birth integrity":
+    it "round trips Linux and Windows requests with literal and unresolved secret entries":
+        step("round trips Linux and Windows requests with literal and unresolved secret entries")
+        for windows in [false, true]:
+            val request = exec_contract_fixture_v3(windows)
+            val source = container_exec_request_encode_v3(request).unwrap()
+            val decoded = container_exec_request_decode_v3(source).unwrap()
+            expect(container_exec_request_encode_v3(decoded).unwrap()).to_equal(source)
+            expect(decoded.environment).to_equal(request.environment)
+            expect(decoded.argv).to_equal(request.argv)
+            expect(decoded.timeout_ms).to_equal(20000)
+
+    it "binds scope operation nonce argv and every environment value or secret version":
+        step("binds scope operation nonce argv and every environment value or secret version")
+        val original = exec_contract_fixture_v3(false)
+        var changed = original
+        changed.parent.physical_host_id = "other-alias"
+        exec_digest_changed_v3(original, changed)
+        changed = original
+        changed.parent.native_machine_id = "other-machine"
+        exec_digest_changed_v3(original, changed)
+        changed = original
+        changed.parent.service_scope_id = "other-service"
+        exec_digest_changed_v3(original, changed)
+        changed = original
+        changed.parent.provider_generation = 4
+        exec_digest_changed_v3(original, changed)
+        changed = original
+        changed.parent.boot_id = "other-boot"
+        changed.parent.continuity_id = "other-boot"
+        exec_digest_changed_v3(original, changed)
+        changed = original
+        changed.parent_runtime.native_id = "3".repeat(64)
+        exec_digest_changed_v3(original, changed)
+        changed = original
+        changed.operation_id = "other-exec"
+        exec_digest_changed_v3(original, changed)
+        changed = original
+        changed.nonce = "3".repeat(64)
+        exec_digest_changed_v3(original, changed)
+        changed = original
+        changed.argv = ["/usr/bin/agent", "--help"]
+        exec_digest_changed_v3(original, changed)
+        changed = original
+        changed.environment = [ContainerExecEnvironmentEntryV3.Literal("LANG", "changed"),
+            ContainerExecEnvironmentEntryV3.SecretReference("TOKEN", "secrets/agent-token", "c".repeat(64))]
+        exec_digest_changed_v3(original, changed)
+        changed.environment = [ContainerExecEnvironmentEntryV3.Literal("LANG", "C"),
+            ContainerExecEnvironmentEntryV3.SecretReference("TOKEN", "secrets/agent-token", "4".repeat(64))]
+        exec_digest_changed_v3(original, changed)
+
+    it "round trips correlated birth without retaining request arguments or secret references":
+        step("round trips correlated birth without retaining request arguments or secret references")
+        for windows in [false, true]:
+            val request = exec_contract_fixture_v3(windows)
+            val receipt = exec_birth_fixture_v3(request)
+            val source = container_exec_birth_encode_v3(receipt).unwrap()
+            val decoded = container_exec_birth_decode_v3(source).unwrap()
+            expect(container_exec_birth_encode_v3(decoded).unwrap()).to_equal(source)
+            expect(container_exec_birth_match_v3(decoded, request).unwrap()).to_equal(true)
+            expect(source.contains("secrets/agent-token")).to_equal(false)
+            expect(source.contains("--version")).to_equal(false)
+            expect(decoded.native_exec_id == decoded.parent_runtime.native_id).to_equal(false)
+
+    it "refuses parent container id as exec id and every mismatched parent identity":
+        step("refuses parent container id as exec id and every mismatched parent identity")
+        val request = exec_contract_fixture_v3(false)
+        val receipt = exec_birth_fixture_v3(request)
+        var changed = receipt
+        changed.native_exec_id = receipt.parent_runtime.native_id
+        expect(container_exec_birth_encode_v3(changed).is_err()).to_equal(true)
+        changed = receipt
+        changed.native_exec_id = "e".repeat(63)
+        expect(container_exec_birth_encode_v3(changed).is_err()).to_equal(true)
+        changed = receipt
+        changed.parent_runtime.native_id = "3".repeat(64)
+        expect(container_exec_birth_match_v3(changed, request).is_err()).to_equal(true)
+        changed = receipt
+        changed.parent_runtime.pod_uid = "other-workload"
+        expect(container_exec_birth_match_v3(changed, request).is_err()).to_equal(true)
+        changed = receipt
+        changed.parent_runtime.attempt = 3
+        expect(container_exec_birth_match_v3(changed, request).is_err()).to_equal(true)
+        changed = receipt
+        changed.parent_runtime.operation_id = "other-parent"
+        expect(container_exec_birth_match_v3(changed, request).is_err()).to_equal(true)
+        changed = receipt
+        changed.parent_runtime.provider_generation = 4
+        expect(container_exec_birth_match_v3(changed, request).is_err()).to_equal(true)
+        changed = receipt
+        changed.parent_runtime.engine = "docker"
+        expect(container_exec_birth_match_v3(changed, request).is_err()).to_equal(true)
+        changed = receipt
+        changed.parent_runtime.node_boot_id = "3".repeat(64)
+        expect(container_exec_birth_match_v3(changed, request).is_err()).to_equal(true)
+        changed = receipt
+        changed.request_digest = "4".repeat(64)
+        expect(container_exec_birth_match_v3(changed, request).is_err()).to_equal(true)
+
+    it "refuses wrong platform users paths and malformed execution options":
+        step("refuses wrong platform users paths and malformed execution options")
+        var request = exec_contract_fixture_v3(false)
+        for user in ["root", "01:2", "-1:2", "1:+2", "1:2:3", "4294967295:1", "1:4294967295", "9223372036854775807:1", "1:9223372036854775807"]:
+            request.selected_user = user
+            expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request = exec_contract_fixture_v3(true)
+        request.selected_user = "ContainerAdministrator"
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request = exec_contract_fixture_v3(true)
+        request.argv = ["C:relative.exe"]
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request = exec_contract_fixture_v3(false)
+        request.working_directory = "relative"
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request = exec_contract_fixture_v3(false)
+        request.operation_id = request.parent.operation_id
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request = exec_contract_fixture_v3(false)
+        request.terminal_mode = "unknown"
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request = exec_contract_fixture_v3(false)
+        request.timeout_ms = 0
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+
+    it "rejects duplicate environment names literal overflow and malformed secret references":
+        step("rejects duplicate environment names literal overflow and malformed secret references")
+        var request = exec_contract_fixture_v3(false)
+        request.environment = [ContainerExecEnvironmentEntryV3.Literal("A", "one"), ContainerExecEnvironmentEntryV3.SecretReference("A", "secret/path", "c".repeat(64))]
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request = exec_contract_fixture_v3(true)
+        request.environment = [ContainerExecEnvironmentEntryV3.Literal("A", "one"), ContainerExecEnvironmentEntryV3.Literal("a", "two")]
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request = exec_contract_fixture_v3(false)
+        request.environment = [ContainerExecEnvironmentEntryV3.Literal("BAD=NAME", "value")]
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request.environment = [ContainerExecEnvironmentEntryV3.Literal("A", "é".repeat(8193))]
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request.environment = [ContainerExecEnvironmentEntryV3.SecretReference("A", "secret\npath", "c".repeat(64))]
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        request.environment = [ContainerExecEnvironmentEntryV3.SecretReference("A", "secret/path", "not-a-digest")]
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+
+    it "rejects unknown duplicate mistyped and noncanonical request and birth wire":
+        step("rejects unknown duplicate mistyped and noncanonical request and birth wire")
+        val request = exec_contract_fixture_v3(false)
+        val source = container_exec_request_encode_v3(request).unwrap()
+        expect(container_exec_request_decode_v3(exec_wire_change_v3(source, "authorized", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(container_exec_request_decode_v3(exec_wire_change_v3(source, "stdinRequested", SdnValue.String("false"))).is_err()).to_equal(true)
+        expect(container_exec_request_decode_v3(source + "\n").is_err()).to_equal(true)
+        val head = source.slice(0, source.len() - 2)
+        expect(container_exec_request_decode_v3(head + ", version: 3" + "}\n").is_err()).to_equal(true)
+        val birth = container_exec_birth_encode_v3(exec_birth_fixture_v3(request)).unwrap()
+        expect(container_exec_birth_decode_v3(exec_wire_change_v3(birth, "environment", SdnValue.Array([]))).is_err()).to_equal(true)
+        expect(container_exec_birth_decode_v3(exec_wire_change_v3(birth, "createdUnixMs", SdnValue.String("100"))).is_err()).to_equal(true)
+        expect(container_exec_birth_decode_v3(birth + "\n").is_err()).to_equal(true)
+
+    it "bounds request and birth bytes without granting workload lifetime control":
+        step("bounds request and birth bytes without granting workload lifetime control")
+        val oversized_request = "é".repeat(524289)
+        expect(str_len(oversized_request)).to_equal(1048578)
+        expect(container_exec_request_decode_v3(oversized_request).is_err()).to_equal(true)
+        val oversized_birth = "é".repeat(8193)
+        expect(str_len(oversized_birth)).to_equal(16386)
+        expect(container_exec_birth_decode_v3(oversized_birth).is_err()).to_equal(true)
+        var request = exec_contract_fixture_v3(false)
+        request.argv = []
+        expect(container_exec_request_encode_v3(request).is_err()).to_equal(true)
+        # timeout_ms only bounds provider calls. Birth carries no PID stop power;
+        # timeout/disconnect never proves exec ended or permits auto-new native ID.

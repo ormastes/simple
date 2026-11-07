@@ -1,0 +1,282 @@
+# Neutral exec intent and native-birth integrity only. No authority, secret
+# resolution, live handle, create retry or parent resource retirement is granted.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub enum ContainerExecEnvironmentEntryV3:
+    Literal(name: text, value: text)
+    SecretReference(name: text, reference: text, version_digest: text)
+
+pub struct ContainerExecRequestV3:
+    parent: ContainerExecutionPlanV2
+    parent_runtime: RuntimeIdentityV1
+    operation_id: text
+    nonce: text
+    argv: [text]
+    environment: [ContainerExecEnvironmentEntryV3]
+    working_directory: text
+    selected_user: text
+    terminal_mode: text
+    stdin_requested: bool
+    # Provider control/observation window only, never workload lifetime/kill.
+    timeout_ms: i64
+
+pub struct ContainerExecBirthReceiptV3:
+    request_digest: text
+    parent_runtime: RuntimeIdentityV1
+    native_exec_id: text
+    provider_identity_digest: text
+    created_unix_ms: i64
+    query_digest: text
+    evidence_digest: text
+    proof_kind: text
+
+fn exec_fields_v3(source: text, maximum: i64) -> Result<Dict<text, SdnValue>, text>:
+    if str_len(source) == 0 or str_len(source) > maximum: return Err("container-exec-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: maximum,
+            max_depth: 4, max_nodes: 20000, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value
+        case Err(_): return Err("container-exec-syntax")
+    match parsed.value:
+        case SdnValue.Dict(value): Ok(value)
+        case _: Err("container-exec-object-required")
+
+fn exec_known_v3(fields: Dict<text, SdnValue>, names: [text]) -> Result<bool, text>:
+    for key in fields.keys():
+        if not names.contains(key): return Err("container-exec-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("container-exec-missing-field:" + key)
+    Ok(true)
+
+fn exec_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("container-exec-text-required:" + key)
+
+fn exec_int_v3(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("container-exec-integer-required:" + key)
+
+fn exec_path_v3(value: text, windows: bool) -> bool:
+    if str_len(value) == 0 or str_len(value) > 4096 or value.contains("\0") or value.contains("\n") or value.contains("\r"):
+        return false
+    if not windows: return value.starts_with("/")
+    if value.len() < 3: return false
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(value.substring(0, 1)) and
+        value.substring(1, 2) == ":" and (value.substring(2, 3) == "/" or value.substring(2, 3) == "\\")
+
+fn exec_name_v3(name: text) -> bool:
+    if str_len(name) == 0 or str_len(name) > 256: return false
+    val first = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+    if not first.contains(name.substring(0, 1)): return false
+    val allowed = first + "0123456789"
+    var index = 0
+    while index < name.len():
+        if not allowed.contains(name.substring(index, index + 1)): return false
+        index = index + 1
+    true
+
+fn exec_user_v3(user: text, windows: bool) -> bool:
+    if str_len(user) == 0 or str_len(user) > 256: return false
+    if windows: return user == "ContainerUser"
+    val parts = user.split(":")
+    if parts.len() != 2: return false
+    for part in parts:
+        val value = part.to_int() ?? -1
+        if value < 0 or value > 4294967294 or value.to_text() != part: return false
+    true
+
+fn exec_environment_bytes_v3(entries: [ContainerExecEnvironmentEntryV3], windows: bool) -> Result<[SdnValue], text>:
+    if entries.len() > 64: return Err("container-exec-environment-count")
+    var names: [text] = []
+    var result: [SdnValue] = []
+    for entry in entries:
+        val name = match entry:
+            case ContainerExecEnvironmentEntryV3.Literal(name, _): name
+            case ContainerExecEnvironmentEntryV3.SecretReference(name, _, _): name
+        val comparison = if windows: name.to_upper() else: name
+        if not exec_name_v3(name) or names.contains(comparison): return Err("container-exec-environment-name")
+        names.push(comparison)
+        val fields: Dict<text, SdnValue> = match entry:
+            case ContainerExecEnvironmentEntryV3.Literal(_, value):
+                if str_len(value) > 16384 or value.contains("\0"): return Err("container-exec-literal-value")
+                {"kind": SdnValue.String("literal"), "name": SdnValue.String(name), "value": SdnValue.String(value)}
+            case ContainerExecEnvironmentEntryV3.SecretReference(_, reference, digest):
+                if str_len(reference) == 0 or str_len(reference) > 1024 or reference.contains("\0") or
+                        reference.contains("\n") or reference.contains("\r") or not builder_digest_valid_v1(digest):
+                    return Err("container-exec-secret-reference")
+                {"kind": SdnValue.String("secret-reference"), "name": SdnValue.String(name),
+                    "reference": SdnValue.String(reference), "versionDigest": SdnValue.String(digest)}
+        result.push(SdnValue.Dict(fields))
+    Ok(result)
+
+fn exec_runtime_bytes_v3(identity: RuntimeIdentityV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(identity.pod_uid) or not builder_identifier_valid_v1(identity.operation_id) or
+            identity.attempt <= 0 or identity.provider_generation <= 0 or not ["podman", "docker"].contains(identity.engine) or
+            not builder_digest_valid_v1(identity.native_id) or not builder_digest_valid_v1(identity.node_boot_id):
+        return Err("container-exec-parent-runtime-invalid")
+    val fields: Dict<text, SdnValue> = {"podUid": SdnValue.String(identity.pod_uid), "attempt": SdnValue.Int(identity.attempt),
+        "providerGeneration": SdnValue.Int(identity.provider_generation), "operationId": SdnValue.String(identity.operation_id),
+        "engine": SdnValue.String(identity.engine), "nativeId": SdnValue.String(identity.native_id), "scopeFence": SdnValue.String(identity.node_boot_id)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn exec_runtime_decode_v3(source: text) -> Result<RuntimeIdentityV1, text>:
+    val fields = exec_fields_v3(source, 16384)?
+    val known = exec_known_v3(fields, ["podUid", "attempt", "providerGeneration", "operationId", "engine", "nativeId", "scopeFence"])?
+    val identity = RuntimeIdentityV1(pod_uid: exec_text_v3(fields, "podUid")?, attempt: exec_int_v3(fields, "attempt")?,
+        provider_generation: exec_int_v3(fields, "providerGeneration")?, operation_id: exec_text_v3(fields, "operationId")?,
+        engine: exec_text_v3(fields, "engine")?, native_id: exec_text_v3(fields, "nativeId")?, node_boot_id: exec_text_v3(fields, "scopeFence")?)
+    if exec_runtime_bytes_v3(identity)? != source: return Err("container-exec-parent-runtime-noncanonical")
+    Ok(identity)
+
+fn exec_runtime_plan_v3(identity: RuntimeIdentityV1, plan: ContainerExecutionPlanV2) -> Result<bool, text>:
+    val validated = exec_runtime_bytes_v3(identity)?
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val engine = if plan.backend == "linux-podman": "podman" else: "docker"
+    if identity.pod_uid != plan.workload_uid or identity.attempt != plan.attempt or identity.operation_id != plan.operation_id or
+            identity.provider_generation != plan.provider_generation or identity.engine != engine or identity.node_boot_id != container_scope_fence_id_v2(scope)?:
+        return Err("container-exec-parent-runtime-plan-mismatch")
+    Ok(true)
+
+pub fn container_exec_request_encode_v3(request: ContainerExecRequestV3) -> Result<text, text>:
+    val parent = container_execution_plan_bytes_v2(request.parent)?
+    val runtime_matched = exec_runtime_plan_v3(request.parent_runtime, request.parent)?
+    val parent_runtime = exec_runtime_bytes_v3(request.parent_runtime)?
+    val windows = request.parent.backend == "windows-docker-process"
+    if not builder_identifier_valid_v1(request.operation_id) or request.operation_id == request.parent.operation_id or
+            not builder_digest_valid_v1(request.nonce) or request.argv.len() == 0 or request.argv.len() > 4096 or request.timeout_ms <= 0:
+        return Err("container-exec-request-identity-bound")
+    if not exec_path_v3(request.argv[0], windows) or not exec_path_v3(request.working_directory, windows) or
+            not exec_user_v3(request.selected_user, windows) or not ["none", "tty"].contains(request.terminal_mode):
+        return Err("container-exec-platform-options")
+    var args: [SdnValue] = []
+    var size: i64 = 0
+    for arg in request.argv:
+        val bytes = str_len(arg)
+        if bytes > 1048576 or arg.contains("\0"): return Err("container-exec-argument")
+        size = size + bytes
+        if size > 1048576: return Err("container-exec-argument-bytes")
+        args.push(SdnValue.String(arg))
+    val env = exec_environment_bytes_v3(request.environment, windows)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("container-exec-request"),
+        "parent": SdnValue.String(parent), "parentRuntime": SdnValue.String(parent_runtime), "operationId": SdnValue.String(request.operation_id), "nonce": SdnValue.String(request.nonce),
+        "argv": SdnValue.Array(args), "environment": SdnValue.Array(env), "workingDirectory": SdnValue.String(request.working_directory),
+        "selectedUser": SdnValue.String(request.selected_user), "terminalMode": SdnValue.String(request.terminal_mode),
+        "stdinRequested": SdnValue.Bool(request.stdin_requested), "timeoutMs": SdnValue.Int(request.timeout_ms)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 1048576: return Err("container-exec-source-size")
+    Ok(source)
+
+pub fn container_exec_request_digest_v3(request: ContainerExecRequestV3) -> Result<text, text>:
+    val source = container_exec_request_encode_v3(request)?
+    Ok(sha256_text(source))
+
+pub fn container_exec_request_decode_v3(source: text) -> Result<ContainerExecRequestV3, text>:
+    val fields = exec_fields_v3(source, 1048576)?
+    val known = exec_known_v3(fields, ["version", "kind", "parent", "parentRuntime", "operationId", "nonce", "argv", "environment",
+        "workingDirectory", "selectedUser", "terminalMode", "stdinRequested", "timeoutMs"])?
+    if exec_int_v3(fields, "version")? != 3 or exec_text_v3(fields, "kind")? != "container-exec-request": return Err("container-exec-version-kind")
+    var argv: [text] = []
+    match fields["argv"]:
+        case SdnValue.Array(values):
+            if values.len() == 0 or values.len() > 4096: return Err("container-exec-argument-count")
+            for item in values:
+                match item:
+                    case SdnValue.String(value): argv.push(value)
+                    case _: return Err("container-exec-argument-type")
+        case _: return Err("container-exec-argv-type")
+    var environment: [ContainerExecEnvironmentEntryV3] = []
+    match fields["environment"]:
+        case SdnValue.Array(values):
+            if values.len() > 64: return Err("container-exec-environment-count")
+            for item in values:
+                val entry = match item:
+                    case SdnValue.Dict(value): value
+                    case _: return Err("container-exec-environment-type")
+                if not entry.contains_key("kind"): return Err("container-exec-environment-kind")
+                val kind = exec_text_v3(entry, "kind")?
+                if kind == "literal":
+                    val valid = exec_known_v3(entry, ["kind", "name", "value"])?
+                    environment.push(ContainerExecEnvironmentEntryV3.Literal(exec_text_v3(entry, "name")?, exec_text_v3(entry, "value")?))
+                elif kind == "secret-reference":
+                    val valid = exec_known_v3(entry, ["kind", "name", "reference", "versionDigest"])?
+                    environment.push(ContainerExecEnvironmentEntryV3.SecretReference(exec_text_v3(entry, "name")?,
+                        exec_text_v3(entry, "reference")?, exec_text_v3(entry, "versionDigest")?))
+                else: return Err("container-exec-environment-kind")
+        case _: return Err("container-exec-environment-type")
+    val stdin_requested = match fields["stdinRequested"]:
+        case SdnValue.Bool(value): value
+        case _: return Err("container-exec-stdin-type")
+    val request = ContainerExecRequestV3(parent: container_execution_plan_decode_v2(exec_text_v3(fields, "parent")?)?,
+        parent_runtime: exec_runtime_decode_v3(exec_text_v3(fields, "parentRuntime")?)?,
+        operation_id: exec_text_v3(fields, "operationId")?, nonce: exec_text_v3(fields, "nonce")?, argv: argv, environment: environment,
+        working_directory: exec_text_v3(fields, "workingDirectory")?, selected_user: exec_text_v3(fields, "selectedUser")?,
+        terminal_mode: exec_text_v3(fields, "terminalMode")?, stdin_requested: stdin_requested, timeout_ms: exec_int_v3(fields, "timeoutMs")?)
+    if container_exec_request_encode_v3(request)? != source: return Err("container-exec-noncanonical")
+    Ok(request)
+
+pub fn container_exec_birth_encode_v3(receipt: ContainerExecBirthReceiptV3) -> Result<text, text>:
+    val identity = receipt.parent_runtime
+    if receipt.proof_kind != "exact-native-exec-birth-v3" or receipt.created_unix_ms <= 0 or identity.attempt <= 0 or
+            identity.provider_generation <= 0 or not builder_identifier_valid_v1(identity.pod_uid) or
+            not builder_identifier_valid_v1(identity.operation_id) or not ["podman", "docker"].contains(identity.engine):
+        return Err("container-exec-birth-identity")
+    for digest in [receipt.request_digest, identity.native_id, identity.node_boot_id, receipt.native_exec_id,
+            receipt.provider_identity_digest, receipt.query_digest, receipt.evidence_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-exec-birth-digest")
+    if receipt.native_exec_id == identity.native_id: return Err("container-exec-birth-parent-id")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("container-exec-birth"),
+        "requestDigest": SdnValue.String(receipt.request_digest), "podUid": SdnValue.String(identity.pod_uid),
+        "attempt": SdnValue.Int(identity.attempt), "providerGeneration": SdnValue.Int(identity.provider_generation),
+        "operationId": SdnValue.String(identity.operation_id), "engine": SdnValue.String(identity.engine),
+        "nativeId": SdnValue.String(identity.native_id), "scopeFence": SdnValue.String(identity.node_boot_id),
+        "nativeExecId": SdnValue.String(receipt.native_exec_id), "providerIdentityDigest": SdnValue.String(receipt.provider_identity_digest),
+        "createdUnixMs": SdnValue.Int(receipt.created_unix_ms), "queryDigest": SdnValue.String(receipt.query_digest),
+        "evidenceDigest": SdnValue.String(receipt.evidence_digest), "proofKind": SdnValue.String(receipt.proof_kind)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 16384: return Err("container-exec-source-size")
+    Ok(source)
+
+pub fn container_exec_birth_decode_v3(source: text) -> Result<ContainerExecBirthReceiptV3, text>:
+    val fields = exec_fields_v3(source, 16384)?
+    val known = exec_known_v3(fields, ["version", "kind", "requestDigest", "podUid", "attempt", "providerGeneration", "operationId",
+        "engine", "nativeId", "scopeFence", "nativeExecId", "providerIdentityDigest", "createdUnixMs", "queryDigest", "evidenceDigest", "proofKind"])?
+    if exec_int_v3(fields, "version")? != 3 or exec_text_v3(fields, "kind")? != "container-exec-birth": return Err("container-exec-version-kind")
+    val receipt = ContainerExecBirthReceiptV3(request_digest: exec_text_v3(fields, "requestDigest")?,
+        parent_runtime: RuntimeIdentityV1(pod_uid: exec_text_v3(fields, "podUid")?, attempt: exec_int_v3(fields, "attempt")?,
+            provider_generation: exec_int_v3(fields, "providerGeneration")?, operation_id: exec_text_v3(fields, "operationId")?,
+            engine: exec_text_v3(fields, "engine")?, native_id: exec_text_v3(fields, "nativeId")?, node_boot_id: exec_text_v3(fields, "scopeFence")?),
+        native_exec_id: exec_text_v3(fields, "nativeExecId")?, provider_identity_digest: exec_text_v3(fields, "providerIdentityDigest")?,
+        created_unix_ms: exec_int_v3(fields, "createdUnixMs")?, query_digest: exec_text_v3(fields, "queryDigest")?,
+        evidence_digest: exec_text_v3(fields, "evidenceDigest")?, proof_kind: exec_text_v3(fields, "proofKind")?)
+    if container_exec_birth_encode_v3(receipt)? != source: return Err("container-exec-noncanonical")
+    Ok(receipt)
+
+# Integrity matching only. Caller must also compare provider_identity_digest
+# with its actual owned engine baseline and verify producer provenance.
+pub fn container_exec_birth_match_v3(receipt: ContainerExecBirthReceiptV3, request: ContainerExecRequestV3) -> Result<bool, text>:
+    val validated = container_exec_birth_encode_v3(receipt)?
+    if exec_runtime_bytes_v3(receipt.parent_runtime)? != exec_runtime_bytes_v3(request.parent_runtime)?:
+        return Err("container-exec-birth-native-parent-mismatch")
+    val plan = request.parent
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val identity = receipt.parent_runtime
+    val engine = if plan.backend == "linux-podman": "podman" else: "docker"
+    if receipt.request_digest != container_exec_request_digest_v3(request)? or identity.pod_uid != plan.workload_uid or
+            identity.attempt != plan.attempt or identity.operation_id != plan.operation_id or
+            identity.provider_generation != plan.provider_generation or identity.engine != engine or
+            identity.node_boot_id != container_scope_fence_id_v2(scope)?:
+        return Err("container-exec-birth-parent-mismatch")
+    Ok(true)
