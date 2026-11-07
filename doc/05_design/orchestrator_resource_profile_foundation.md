@@ -54,10 +54,10 @@ profile assertions. Its profile fixture is `agent_cpu_profile.sdn`; the existing
 source coordinates through the shared value decoder. A standalone
 `resource_profile_foundation_native_probe.spl` includes a real indented nested
 numeric 10000 assertion, quantity boundaries and direct profile allocations.
-That probe remains diagnostic-only and NOT_RUN until a build slot is granted.
+That probe remains diagnostic-only; its first bounded build failed before link.
 
-Runtime verdict: **NOT_RUN**. No admitted self-hosted runner is available and no
-build slot was granted for this preservation change. No coverage percentage,
+Runtime verdict: **NOT_RUN**. No admitted self-hosted runner is available. Root
+granted one bounded native diagnostic slot. No coverage percentage,
 SPipe generation, runtime PASS, compiler/MCP/LSP smoke, production readiness or
 release qualification is claimed. The matching manual is authored, not generated.
 Static diff/provenance checks do not substitute for executing the spec.
@@ -65,3 +65,18 @@ Static diff/provenance checks do not substitute for executing the spec.
 Ownership: Sol worker implements this exact foundation; Astra orchestrator lead
 reviews its exact commit before host/controller consumers adopt it. Root owns
 scarce builds, integration and landing. Additional sidecars: N/A.
+
+## Native optional-text unwrap blocker
+
+The first bounded diagnostic at source commit `020131bf7d6` failed before link:
+`resource_profile_foundation_native_probe.spl:21:27`, `file_read(...).unwrap()`,
+reported `unresolved method call: unwrap route=runtime-fallback key=::unwrap`.
+Producer: unadmitted `simple-copy-unsigned.unadmitted`, SHA-256
+`afae09d224390a57d675a128a052626c3aa665c032481928332ebdc2859d7350`.
+Log: `build/orchestrator-resource-foundation/build.log` in the isolated worktree.
+Native optional-text method resolution needs a compiler fix; this change does
+not claim one. The diagnostic fixture now uses the existing nil-coalescing file
+read form followed by an explicit nonempty assertion, preserving fail-fast
+missing-fixture behavior. The failed log also retains runtime array-handle and
+HIR-cache decode refusals; successful later assertions would not erase those
+producer limitations. No product source changed for this fixture repair.

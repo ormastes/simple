@@ -3,7 +3,8 @@
 Source: `test/03_system/app/orchestrator/feature/resource_profile_foundation_spec.spl`
 Requirements: CFG-01, CFG-02, ORCH-01 from the existing orchestrator lane.
 Status: **NOT_RUN**. This manual is authored from executable scenarios; it is not
-SPipe-generated evidence. No admitted runner or build slot was available.
+SPipe-generated evidence. No admitted runner is available; the separate native
+diagnostic build and its limitations are recorded in the foundation design.
 
 Read `test/fixtures/orchestration/agent_cpu_profile.sdn` directly with
 `decode_resource_profile`. Its CPU minimum/recommendation/preference are
