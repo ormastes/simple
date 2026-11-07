@@ -54,6 +54,8 @@ fn spl_start() -> u64:
 struct Members {
     defined: HashSet<String>,
     undefined: BTreeSet<String>,
+    /// Undefined references of the object that defines the entry `spl_start`.
+    entry_undefined: BTreeSet<String>,
 }
 
 fn normalized(name: &str) -> String {
@@ -91,22 +93,39 @@ fn build_members() -> Members {
     let archive = ArchiveFile::parse(&*data).expect("parse archive");
     let mut defined = HashSet::new();
     let mut undefined = BTreeSet::new();
+    let mut entry_undefined = None;
     for member in archive.members().flatten() {
         let bytes = member.data(&*data).unwrap();
         let Ok(file) = object::File::parse(bytes) else { continue };
+        let mut member_defined = HashSet::new();
+        let mut member_undefined = BTreeSet::new();
         for symbol in file.symbols() {
             let Ok(name) = symbol.name() else { continue };
             if name.is_empty() {
                 continue;
             }
             if symbol.is_undefined() {
-                undefined.insert(normalized(name));
+                member_undefined.insert(normalized(name));
             } else if symbol.is_definition() {
-                defined.insert(normalized(name));
+                member_defined.insert(normalized(name));
             }
         }
+        if member_defined.contains("probe_entry__spl_start") {
+            assert!(
+                entry_undefined.is_none(),
+                "spl_start must be defined by exactly one member"
+            );
+            entry_undefined = Some(member_undefined.clone());
+        }
+        defined.extend(member_defined);
+        undefined.extend(member_undefined);
     }
-    Members { defined, undefined }
+    let entry_undefined = entry_undefined.expect("an archive member must define probe_entry__spl_start");
+    Members {
+        defined,
+        undefined,
+        entry_undefined,
+    }
 }
 
 #[test]
@@ -124,19 +143,28 @@ fn imported_class_references_bind_to_real_definitions_and_module_init_is_emitted
         unbound.is_empty(),
         "cross-module references with no definition in the closure: {unbound:?}"
     );
-    for (what, needle) in [
-        ("constructor", "ProbeCounter_dot_new"),
-        ("method", "ProbeCounter_dot_bump"),
+    // The entry object must really call the imported constructor and method
+    // (a dropped call site would make the binding check above vacuous).
+    for name in [
+        "class_probe__ProbeCounter_dot_new",
+        "class_probe__ProbeCounter_dot_bump",
     ] {
         assert!(
-            members.defined.iter().any(|name| name.ends_with(needle)),
-            "{what} {needle} must be defined: {:?}",
+            members.entry_undefined.contains(name),
+            "entry object must reference {name}: {:?}",
+            members.entry_undefined
+        );
+        assert!(
+            members.defined.contains(name),
+            "{name} must be defined: {:?}",
             members.defined
         );
     }
-    assert!(
-        members.defined.iter().any(|name| name.starts_with("module_init")),
-        "the heap-typed module global needs an emitted __module_init_* initializer: {:?}",
-        members.defined
-    );
+    for name in ["module_init_class_probe", "simple_call_module_inits"] {
+        assert!(
+            members.defined.contains(name),
+            "module-global initializer symbol {name} must be defined: {:?}",
+            members.defined
+        );
+    }
 }

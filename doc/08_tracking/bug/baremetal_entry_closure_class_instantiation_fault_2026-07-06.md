@@ -173,3 +173,6 @@ Unverified: finding 4 (field-layout ordering) is not exercised at runtime by
 this static check, and the real `class_fault_probe_entry.spl` QEMU/board run
 (S1..S5/CLASSOK) was not performed (no QEMU-system/board in this session).
 Status stays INVESTIGATING until that run is done.
+
+These tests are local-only: CI `rust-tests.yml:112` excludes `simple-compiler`
+from `cargo test`, and they need clang/ld.lld (X86 target) and `qemu-x86_64`.

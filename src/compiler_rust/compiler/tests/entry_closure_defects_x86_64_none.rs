@@ -18,7 +18,7 @@
 //! `OPTION_ENUM_ID` = 1).  Any other runtime reference fails the link and is
 //! reported as a test failure rather than silently skipped.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
@@ -27,32 +27,37 @@ use simple_compiler::optimizations::NativeOptimizationLevel;
 use simple_compiler::{hir, mir};
 use simple_parser::Parser;
 
-fn tool(name: &str) -> PathBuf {
-    for dir in [
-        "/home/yoon/dev/llvm/install/bin",
-        "/usr/lib/llvm-23/bin",
-        "/usr/lib/llvm-20/bin",
-        "/usr/bin",
-    ] {
-        let candidate = Path::new(dir).join(name);
-        if candidate.is_file() {
-            return candidate;
-        }
+/// Resolve a host tool from an explicit env override, else from `PATH`;
+/// fail loudly when it is missing instead of reporting a misleading result.
+fn tool(env_override: &str, name: &str) -> PathBuf {
+    if let Some(path) = std::env::var_os(env_override) {
+        let path = PathBuf::from(path);
+        assert!(path.is_file(), "{env_override}={} is not a file", path.display());
+        return path;
     }
-    PathBuf::from(name)
+    std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "{name} not found on PATH (set {env_override}); these x86_64-unknown-none probes \
+                 need clang/ld.lld with the X86 target and qemu-x86_64 user mode"
+            )
+        })
+}
+
+fn clang() -> PathBuf {
+    tool("SIMPLE_X86_64_CLANG", "clang")
+}
+
+fn ld_lld() -> PathBuf {
+    tool("SIMPLE_X86_64_LLD", "ld.lld")
 }
 
 fn qemu_x86_64() -> PathBuf {
-    if let Ok(path) = std::env::var("SIMPLE_QEMU_X86_64") {
-        return PathBuf::from(path);
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let local = Path::new(&home).join(".local/bin/qemu-x86_64");
-    if local.is_file() {
-        local
-    } else {
-        PathBuf::from("qemu-x86_64")
-    }
+    tool("SIMPLE_QEMU_X86_64", "qemu-x86_64")
 }
 
 fn compile_x86_64_none_object(source: &str) -> Vec<u8> {
@@ -121,9 +126,10 @@ fn run_x86_64_none(source: &str, entry: &str) -> i32 {
     run_x86_64_none_with(source, entry, "")
 }
 
-/// `peek` exits with status 99 whenever it is reached, so a dropped guard in
-/// front of it is observable as a wrong status instead of a host fault.
-const FAULTING_PEEK: &str = "long long peek(long long addr) {\n    (void)addr;\n    __asm__ volatile(\"mov $60, %%eax\\n syscall\" :: \"D\"(99L) : \"rax\", \"rcx\", \"r11\", \"memory\");\n    __builtin_unreachable();\n}\n";
+/// `peek` exits with status 99 when reached with a low address (a dropped
+/// guard), and otherwise returns 7, so a guard folded to "always reject" is
+/// observable too.
+const FAULTING_PEEK: &str = "long long peek(long long addr) {\n    if (addr < 8192) {\n        __asm__ volatile(\"mov $60, %%eax\\n syscall\" :: \"D\"(99L) : \"rax\", \"rcx\", \"r11\", \"memory\");\n        __builtin_unreachable();\n    }\n    return 7;\n}\n";
 
 fn run_x86_64_none_with(source: &str, entry: &str, extra_c: &str) -> i32 {
     let object = compile_x86_64_none_object(source);
@@ -137,7 +143,7 @@ fn run_x86_64_none_with(source: &str, entry: &str, extra_c: &str) -> i32 {
     )
     .expect("write harness");
     let exe = dir.path().join("probe");
-    let link = Command::new(tool("clang"))
+    let link = Command::new(clang())
         .args([
             "--target=x86_64-unknown-linux-gnu",
             "-ffreestanding",
@@ -148,7 +154,7 @@ fn run_x86_64_none_with(source: &str, entry: &str, extra_c: &str) -> i32 {
             "-fuse-ld=lld",
             "-O1",
         ])
-        .arg(format!("--ld-path={}", tool("ld.lld").display()))
+        .arg(format!("--ld-path={}", ld_lld().display()))
         .arg(&harness_path)
         .arg(&obj_path)
         .arg("-o")
@@ -206,8 +212,8 @@ fn low_handle_guard_on_i64_param_survives_x86_64_none() {
     // rt_string_join / array_is_valid shape: an `i64` handle parameter guarded
     // by `< 4096` before a dependent memory read.  If the guard were folded
     // away the raw-0 / nil handles would reach `peek` and fault.
-    let src = "extern fn peek(addr: i64) -> i64\n\nfn handle_len(array: i64) -> i64:\n    if array < 4096:\n        return 0\n    peek((array & -8) + 8)\n\nfn probe_main() -> i64:\n    handle_len(0) + handle_len(3) + handle_len(8) + 5\n";
-    assert_eq!(run_x86_64_none_with(src, "probe_main", FAULTING_PEEK), 5);
+    let src = "extern fn peek(addr: i64) -> i64\n\nfn handle_len(array: i64) -> i64:\n    if array < 4096:\n        return 0\n    peek((array & -8) + 8)\n\nfn probe_main() -> i64:\n    handle_len(0) + handle_len(3) + handle_len(8) + handle_len(65536) + 5\n";
+    assert_eq!(run_x86_64_none_with(src, "probe_main", FAULTING_PEEK), 12);
 }
 
 #[test]
@@ -215,6 +221,6 @@ fn low_handle_guard_inside_inlined_callee_survives_x86_64_none() {
     // array_is_valid -> rt_array_len shape: the guard lives in a small,
     // loop-free helper that the MIR inliner (codegen/mir_inline.rs) does
     // inline into its caller.
-    let src = "extern fn peek(addr: i64) -> i64\n\nfn handle_valid(array: i64) -> i64:\n    if array < 4096:\n        return 0\n    if (array & 7) > 1:\n        return 0\n    1\n\nfn handle_len(array: i64) -> i64:\n    if handle_valid(array) < 1:\n        return 0\n    peek((array & -8) + 8)\n\nfn probe_main() -> i64:\n    handle_len(0) + handle_len(3) + handle_len(8) + 6\n";
-    assert_eq!(run_x86_64_none_with(src, "probe_main", FAULTING_PEEK), 6);
+    let src = "extern fn peek(addr: i64) -> i64\n\nfn handle_valid(array: i64) -> i64:\n    if array < 4096:\n        return 0\n    if (array & 7) > 1:\n        return 0\n    1\n\nfn handle_len(array: i64) -> i64:\n    if handle_valid(array) < 1:\n        return 0\n    peek((array & -8) + 8)\n\nfn probe_main() -> i64:\n    handle_len(0) + handle_len(3) + handle_len(8) + handle_len(65536) + 6\n";
+    assert_eq!(run_x86_64_none_with(src, "probe_main", FAULTING_PEEK), 13);
 }

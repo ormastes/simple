@@ -1637,3 +1637,6 @@ test in `baremetal_entry_closure_imported_class_x86_64_none.rs`). Not covered:
 whole-kernel effects (C6 was a heisenbug in the inlined FAT scan; C7 alias
 bridge; C8 import-alias binding) and the QEMU/board desktop boot. No product
 code change; status stays OPEN pending a board/QEMU desktop run.
+
+These tests are local-only: CI `rust-tests.yml:112` excludes `simple-compiler`
+from `cargo test`, and they need clang/ld.lld (X86 target) and `qemu-x86_64`.
