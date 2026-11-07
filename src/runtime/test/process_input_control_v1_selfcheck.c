@@ -6,6 +6,19 @@
 #ifndef __linux__
 int main(void){return 77;}
 #else
+/* Future native recipe links --wrap=write. Switch disposition only in the
+ * precise production pre-write window, then call the REAL syscall. */
+extern ssize_t __real_write(int,const void*,size_t);
+static int switch_sigpipe_before_write,switch_sigpipe_fd=-1;
+ssize_t __wrap_write(int fd,const void* bytes,size_t count){
+    if(switch_sigpipe_before_write&&fd==switch_sigpipe_fd){
+        switch_sigpipe_before_write=0;
+        struct sigaction action;memset(&action,0,sizeof(action));
+        action.sa_handler=SIG_DFL;sigemptyset(&action.sa_mask);
+        assert(sigaction(SIGPIPE,&action,NULL)==0);
+    }
+    return __real_write(fd,bytes,count);
+}
 static const char* id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static const char* target="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 static const char* nonce="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -87,7 +100,17 @@ int main(void){
     a=rt_process_input_write_some_v1(REF,target,64,id,64,2,2,"BAD",3,0,3);assert(word(a,0)==-13&&word(a,1)==0);rt_array_free(a);
     /* Actual EPIPE has a known zero prefix, not Unknown; SIGPIPE is drained. */
     close(input);input=-1;
+    struct sigaction ignored,original;memset(&ignored,0,sizeof(ignored));
+    ignored.sa_handler=SIG_IGN;sigemptyset(&ignored.sa_mask);
+    assert(sigaction(SIGPIPE,&ignored,&original)==0);
+    pthread_mutex_lock(&s_proc_lock);
+    struct RtProcSlot* pipe_owner=stream_action_locked_v2(REF);assert(pipe_owner);
+    switch_sigpipe_fd=pipe_owner->stdin_fd;pthread_mutex_unlock(&s_proc_lock);
+    switch_sigpipe_before_write=1;
     a=rt_process_input_write_some_v1(REF,META,2,2,"BAD",3,0,3);assert(word(a,0)==-3&&word(a,1)==1&&word(a,3)==0);rt_array_free(a);
+    assert(!switch_sigpipe_before_write);
+    sigset_t observed_pending;assert(sigpending(&observed_pending)==0&&sigismember(&observed_pending,SIGPIPE)==0);
+    assert(sigaction(SIGPIPE,&original,NULL)==0);
     assert(input_now_v1(&now));mutation(rt_process_input_install_v1(REF,META,3,now+1000000),0);
     struct timespec expired={0,2000000};nanosleep(&expired,NULL);
     a=rt_process_input_write_some_v1(REF,META,3,1,"BAD",3,0,3);assert(word(a,0)==-14&&word(a,1)==0);rt_array_free(a);

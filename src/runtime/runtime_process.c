@@ -4770,13 +4770,13 @@ SplArray* rt_process_input_write_some_v1(INPUT_REF_ARGS,const char* target,int64
         else if(s->input_sequence>=INPUT_IMMEDIATE_MAX_V1||attempt!=s->input_sequence+1)status=-15;
         else if(s->stdin_fd<0)status=-3;
         else{
-            sigset_t block,old,pending;struct sigaction action;int64_t now;
+            sigset_t block,old,pending;int64_t now;
             sigemptyset(&block);sigaddset(&block,SIGPIPE);
             int mask_error=pthread_sigmask(SIG_BLOCK,&block,&old);
             if(mask_error)status=-17;
             else{
                 bool restore_mask=true;
-                if(sigpending(&pending)!=0||sigaction(SIGPIPE,NULL,&action)!=0)status=-17;
+                if(sigpending(&pending)!=0)status=-17;
                 else if(!input_now_v1(&now))status=-16;
                 else if(now>=s->input_expires)status=-14;
                 else{
@@ -4788,10 +4788,10 @@ SplArray* rt_process_input_write_some_v1(INPUT_REF_ARGS,const char* target,int64
                     int error=written<0?errno:0;
                     int64_t accepted=written>=0?written:0;
                     status=error==0||error==EAGAIN||error==EWOULDBLOCK||error==EINTR?0:-3;
-                    if(error==EPIPE&&sigismember(&pending,SIGPIPE)!=1&&action.sa_handler!=SIG_IGN){
+                    if(error==EPIPE&&sigismember(&pending,SIGPIPE)!=1){
                         struct timespec zero={0,0};
                         int drained=sigtimedwait(&block,NULL,&zero);
-                        if(drained<0&&errno!=EAGAIN){status=-17;restore_mask=false;}
+                        if(drained!=SIGPIPE&&!(drained<0&&errno==EAGAIN)){status=-17;restore_mask=false;}
                         /* On uncertain drain, keep SIGPIPE blocked rather than
                          * unmasking a possibly pending fatal signal. Report it. */
                     }

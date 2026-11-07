@@ -97,3 +97,13 @@ fault injection, live cgroup/broker lifecycle and application input grant/revisi
 integration remain unqualified. The new gate does not make unrelated legacy
 SIGPIPE helpers bounded, guarantee application execution, retract written bytes,
 or serialize a live capability for recovery.
+
+Cycle2 SIGPIPE repair: EPIPE drains whenever SIGPIPE was not pending before the
+write, regardless of any prior ignored disposition. A concurrently changed
+ignored-to-default disposition cannot justify skipping the drain. One zero-time
+sigtimedwait returning SIGPIPE or EAGAIN permits mask restoration; EINTR/other
+uncertainty retains the blocked mask and Recorded known prefix with error. The
+native fixture links `--wrap=write` to change SIG_IGN to SIG_DFL immediately
+before the REAL write to an actually readerless pipe, and asserts Recorded0,
+error and no pending SIGPIPE. This regression is authored NOT_RUN; it is not
+a general signal-configuration or native runtime campaign.

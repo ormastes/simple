@@ -25,3 +25,13 @@ Pending evidence must record exact source/producer/binary hashes, commands,
 logs/exits and bounded timing under CPU0-4. No build/run is currently authorized.
 See [design](../../../../05_design/process_input_control_v1.md) for remaining
 facade, concurrency, signal-fault and application-integration qualification gaps.
+
+Cycle2 SIGPIPE repair: EPIPE drains whenever SIGPIPE was not pending before the
+write, regardless of any prior ignored disposition. A concurrently changed
+ignored-to-default disposition cannot justify skipping the drain. One zero-time
+sigtimedwait returning SIGPIPE or EAGAIN permits mask restoration; EINTR/other
+uncertainty retains the blocked mask and Recorded known prefix with error. The
+native fixture links `--wrap=write` to change SIG_IGN to SIG_DFL immediately
+before the REAL write to an actually readerless pipe, and asserts Recorded0,
+error and no pending SIGPIPE. This regression is authored NOT_RUN; it is not
+a general signal-configuration or native runtime campaign.
