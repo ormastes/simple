@@ -91,6 +91,12 @@ var of_read_notifs: [u64; 256] = [0; 256]
 var of_write_notifs: [u64; 256] = [0; 256]
 var of_error_notifs: [u64; 256] = [0; 256]
 var of_ready_generations: [u64; 256] = [0; 256]
+# Socket port provenance on the open-file description: the bound local port
+# and, for accepted descriptors, the listener port. FD_NET_PORT_NONE = unset.
+# Living on the object makes dup share it and every release path reset it.
+val FD_NET_PORT_NONE: u32 = 0x10000u32
+var of_net_bound_ports: [u32; 256] = [0x10000u32; 256]
+var of_net_server_ports: [u32; 256] = [0x10000u32; 256]
 
 fn fd_table_init():
     """Initialize FD table with stdin/stdout/stderr on serial."""
@@ -114,6 +120,8 @@ fn fd_table_init():
         of_write_notifs[i] = 0
         of_error_notifs[i] = 0
         of_ready_generations[i] = 0
+        of_net_bound_ports[i] = FD_NET_PORT_NONE
+        of_net_server_ports[i] = FD_NET_PORT_NONE
         i = i + 1
     i = 0
     while i < MAX_FD_CONTEXTS:
@@ -289,6 +297,8 @@ fn _fd_release_object_ref(obj: u64):
         of_write_notifs[obj] = 0
         of_error_notifs[obj] = 0
         of_ready_generations[obj] = 0
+        of_net_bound_ports[obj] = FD_NET_PORT_NONE
+        of_net_server_ports[obj] = FD_NET_PORT_NONE
     else:
         _fd_refresh_object_mirrors(obj)
 
@@ -332,6 +342,8 @@ fn fd_set(fd: i32, fd_type: u8, flags: u32, ipc_port: u64) -> i32:
     of_write_notifs[obj] = 0
     of_error_notifs[obj] = 0
     of_ready_generations[obj] = 0
+    of_net_bound_ports[obj] = FD_NET_PORT_NONE
+    of_net_server_ports[obj] = FD_NET_PORT_NONE
     fd_objects[idx] = obj
     fd_fd_flags[idx] = if (flags & O_CLOEXEC) != 0: FD_CLOEXEC else: 0
     _fd_mirror_from_object(fd)
@@ -602,6 +614,32 @@ fn fd_get_backend_handle(fd: i32) -> u64:
         return 0
     val idx: u64 = fd as u64
     of_ports[fd_objects[idx]]
+
+fn fd_set_net_bound_port(fd: i32, port: u16) -> i32:
+    """Record the local port this descriptor's socket is bound to."""
+    if not fd_is_valid(fd):
+        return -9
+    of_net_bound_ports[fd_objects[fd as u64]] = port as u32
+    0
+
+fn fd_get_net_bound_port(fd: i32) -> u32:
+    """Bound local port, or FD_NET_PORT_NONE when unset or fd is invalid."""
+    if not fd_is_valid(fd):
+        return FD_NET_PORT_NONE
+    of_net_bound_ports[fd_objects[fd as u64]]
+
+fn fd_set_net_server_port(fd: i32, port: u16) -> i32:
+    """Record the listener port an accepted descriptor was produced by."""
+    if not fd_is_valid(fd):
+        return -9
+    of_net_server_ports[fd_objects[fd as u64]] = port as u32
+    0
+
+fn fd_get_net_server_port(fd: i32) -> u32:
+    """Accepted-listener port, or FD_NET_PORT_NONE when unset or fd is invalid."""
+    if not fd_is_valid(fd):
+        return FD_NET_PORT_NONE
+    of_net_server_ports[fd_objects[fd as u64]]
 
 fn fd_get_object_id(fd: i32) -> u64:
     """Return the shared open-file-description token for this descriptor."""

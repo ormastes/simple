@@ -179,6 +179,20 @@ host spec; no QEMU or board run was available.
 - On non-x86_64 targets `socket_ipc_send_bytes` fails closed (ENOSYS -> EIO), so
   ARM64 sockets still work only through the direct VirtIO-net exports.
 
+- **Review follow-up (same day).** The first version kept port provenance in
+  side tables keyed by descriptor number and cleared them only in
+  `posix_close_socket`. Raw `fd_close`, `fd_set` over an occupied slot,
+  `fd_dup2`, close-on-exec and process exit then left a stale port on a
+  reused number, so 72/74/75/76 could be checked against the wrong socket.
+  Provenance now lives on the fd table's open-file description
+  (`of_net_bound_ports` / `of_net_server_ports` in `src/os/kernel/fd_table.spl`):
+  dup shares it, and every release path resets it. A port-0 (ephemeral) bind
+  records 0, so listen on it needs exactly `NetListen(port: 0)`.
+  `test/01_unit/os/kernel/socket_port_provenance_spec.spl`: 3/7 with the side
+  tables, 7/7 now. The RV64 dispatcher (`src/os/kernel/arch/riscv64/syscall.spl`)
+  has no 70--76 route and still returns ENOSYS; it does not share this owner
+  yet. `syscall_fd_spec` is 8/12 both before and after this change.
+
 **Still unverified:** no ARM64 QEMU real-firmware boot and no physical-board
 run (board-runnable.md). Acceptance criteria 3--5 (live EL0 SVC route, real
 VirtIO-net host-visible TCP, block-write persistence) stay open, and so does

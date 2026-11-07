@@ -15,6 +15,7 @@ use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, lo
 use os.kernel.errno.{EACCES, ENOSYS, ECONNREFUSED, ENOTCONN, EAGAIN, EMFILE, EADDRINUSE}
 use os.kernel.net.socket_ipc_transport.{socket_ipc_send_bytes, socket_ipc_recv_bytes}
 use os.kernel.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_get_status_flags, fd_get_type, fd_get_backend_handle, fd_update_ready}
+use os.kernel.fd_table.{FD_NET_PORT_NONE, fd_set_net_bound_port, fd_get_net_bound_port, fd_set_net_server_port, fd_get_net_server_port}
 use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_socket_network_decision}
 # Well-known netstack service IPC port
 val _NET_PORT: u64 = 2
@@ -39,13 +40,6 @@ val _POLLERR: i16 = 8
 var g_ai_cli_socket_manifest: AiCliManifest? = nil
 var g_ai_cli_socket_bound_fds: [i32] = []
 var g_ai_cli_socket_bound_endpoints: [text] = []
-# Port provenance consumed by the portable syscall owner's exact authority
-# checks: the local port each bound descriptor holds, and the listener port
-# each accepted (server I/O) descriptor came from. Single kernel owner, no lock.
-var g_socket_bound_port_fds: [i32] = []
-var g_socket_bound_ports: [u16] = []
-var g_socket_server_io_fds: [i32] = []
-var g_socket_server_io_ports: [u16] = []
 
 extern fn unsafe_addr_of(ref: any) -> u64
 use os.kernel.boot.mmio.{mmio_write8, mmio_read8}
@@ -220,7 +214,7 @@ fn posix_accept(fd: i32) -> i64:
         return set_result as i64
     match posix_bound_port_for_fd(fd):
         Some(port): _record_server_io_port(accepted_fd, port)
-        nil: _clear_server_io_port(accepted_fd)
+        nil: pass
     accepted_fd as i64
 
 fn posix_send(fd: i32, data_addr: u64, data_len: u64, flags: i32) -> i64:
@@ -275,63 +269,34 @@ fn posix_close_socket(fd: i32) -> i64:
     val net_fd = _get_net_fd(fd)
     if net_fd >= 0:
         _net_close_remote(net_fd)
-    _clear_bound_port(fd)
-    _clear_server_io_port(fd)
     fd_close(fd) as i64
+
+# Port provenance for the portable syscall owner's exact authority checks
+# lives on the fd table's open-file description, not in a side table keyed by
+# descriptor number: dup/dup2 share it with the same socket, and every release
+# path (fd_close, fd_set over a slot, dup2, close-on-exec, process exit)
+# resets it, so a reused descriptor number never inherits another socket's
+# port. A port-0 (ephemeral) bind records port 0, so listen on it requires
+# exactly NetListen(port: 0).
 
 fn posix_bound_port_for_fd(fd: i32) -> u16?:
     """Local port a descriptor was successfully bound to, if any."""
-    _port_lookup(g_socket_bound_port_fds, g_socket_bound_ports, fd)
+    _port_or_none(fd_get_net_bound_port(fd))
 
 fn posix_server_port_for_fd(fd: i32) -> u16?:
     """Listener port an accepted descriptor was produced by, if any."""
-    _port_lookup(g_socket_server_io_fds, g_socket_server_io_ports, fd)
+    _port_or_none(fd_get_net_server_port(fd))
 
-fn _port_lookup(fds: [i32], ports: [u16], fd: i32) -> u16?:
-    var i = 0
-    while i < fds.len():
-        if fds[i] == fd:
-            return Some(ports[i])
-        i = i + 1
-    nil
+fn _port_or_none(raw: u32) -> u16?:
+    if raw == FD_NET_PORT_NONE:
+        return nil
+    Some(raw as u16)
 
 fn _record_bound_port(fd: i32, port: u16):
-    var i = 0
-    while i < g_socket_bound_port_fds.len():
-        if g_socket_bound_port_fds[i] == fd:
-            g_socket_bound_ports[i] = port
-            return
-        i = i + 1
-    g_socket_bound_port_fds.push(fd)
-    g_socket_bound_ports.push(port)
-
-fn _clear_bound_port(fd: i32):
-    var i = 0
-    while i < g_socket_bound_port_fds.len():
-        if g_socket_bound_port_fds[i] == fd:
-            g_socket_bound_port_fds.remove(i)
-            g_socket_bound_ports.remove(i)
-            return
-        i = i + 1
+    fd_set_net_bound_port(fd, port)
 
 fn _record_server_io_port(fd: i32, port: u16):
-    var i = 0
-    while i < g_socket_server_io_fds.len():
-        if g_socket_server_io_fds[i] == fd:
-            g_socket_server_io_ports[i] = port
-            return
-        i = i + 1
-    g_socket_server_io_fds.push(fd)
-    g_socket_server_io_ports.push(port)
-
-fn _clear_server_io_port(fd: i32):
-    var i = 0
-    while i < g_socket_server_io_fds.len():
-        if g_socket_server_io_fds[i] == fd:
-            g_socket_server_io_fds.remove(i)
-            g_socket_server_io_ports.remove(i)
-            return
-        i = i + 1
+    fd_set_net_server_port(fd, port)
 
 fn _copy_user_bytes(data_addr: u64, data_len: u64) -> [u8]:
     var data: [u8] = []
