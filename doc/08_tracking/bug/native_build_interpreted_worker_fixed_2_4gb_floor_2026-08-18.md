@@ -149,3 +149,42 @@ Any fix here requires rebuilding the Rust seed. Roughly 15 lanes depend on the
 current `bin/simple`, so **no rebuild was performed and no fix is verified.**
 Everything above the "Where the 2.4 GB is held" section is measured; that
 section is code reading only.
+
+## 2026-11-07 — re-measured on Windows (round 15); floor is 1.99 GB, and ~1.3 GB of it is already live after 100 module loads
+
+Binary: `simple-base.exe` built from `origin/release/1.0.0` tip `4eb1de2ecbd`
+(bootstrap profile, 17883136 B, sha256 `c0c47b2cdd6cd6ee…`), Windows 11,
+`SIMPLE_MEM_TRACE=1 SIMPLE_EXECUTION_MODE=interpret
+sh scripts/perf/measure-peak-rss.shs -- simple-base.exe run src/app/cli/native_build_worker.spl`
+(no args — compiles nothing, exactly the 2.37 GB case above).
+
+| quantity | 2026-08-18 (Linux) | 2026-11-07 (Windows) |
+|---|---|---|
+| peak RSS, no-arg worker | 2.37 GB | **1.99 GB** (`peak_kib=1993300`, wall 62.6 s, exit 1) |
+| live after 100 module loads | — | **1344.5 MB** (peak 1351.3 MB) |
+| live after 500 module loads | — | 1475.7 MB |
+| live after 1000 module loads | — | (see mem log) parse_retained=473.4MB eval_retained=299.5MB |
+| import_bindings / module_envs at 500 loads | — | 39,624 / 500 |
+
+Two things the earlier record could not see:
+
+1. **The floor is front-loaded, not accumulated.** 1.34 GB is live after the
+   first 100 of ~1000 module loads and the next 400 loads add only 130 MB.
+   `parse_retained + eval_retained` at 500 loads is 431 MB, so roughly 1 GB
+   of the live set is neither parse nor eval retention as the census
+   classifies it. That unattributed early gigabyte is the next thing to
+   attribute (the census prints its first line only at 100 loads; a
+   per-10-load or per-phase first report would say whether it is the runtime
+   symbol seeding, the prelude, or the first few large generated modules
+   such as `20.hir/generated/hir_codec.spl`, 10.2 MB self + 17.2 MB parse).
+2. `import_bindings=39,624` for 500 envs (79 per module) versus the 927,167
+   / 667 envs (1,390 per module) the 2026-08-21 shard census reported: the
+   per-importer copies named in memory_retention_compiler_and_interpreter
+   § "Open" are gone (`record_owner_binding_layer` shares the source table
+   by reference). That part of the mechanism is fixed; the floor that is
+   left is the early term above.
+
+No fix landed in this pass; the measurement harness is
+`scripts/perf/measure-peak-rss.shs` (ps-sample on Windows, exact
+PeakWorkingSet) and the numbers above are the baseline a budget gate on this
+host would be set against.

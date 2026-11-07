@@ -1,0 +1,60 @@
+# Purpose and audience: prevention spec for the seed interpreter's
+# `evaluate_call` priority ladder (interpreter_call/mod.rs). Two rungs stopped
+# paying their lookup on every call in round 15 (2026-11-07): Priority 4.5
+# (decorator-rebound functions) now runs only once a runtime decorator has
+# bound something on the thread, and the "fn-typed local shadows a prelude
+# builtin" check now runs only on the extern/builtin branches that read it.
+# Each `it` below is a call shape that one of those gates could silently
+# break if it were wrong: it must still resolve exactly as before.
+# Bug: doc/08_tracking/bug/seed_per_call_env_rebuild_o_globals_regression_2026-08-21.md
+
+use std.spec
+use std.spec.step
+use std.common.math.{min_i64}
+
+fn plain_add_one(x: i64) -> i64:
+    x + 1
+
+fn twice(f):
+    fn wrapper(x):
+        return f(x) * 2
+    return wrapper
+
+@twice
+fn module_level_decorated(x: i64) -> i64:
+    x + 1
+
+# A fn-typed parameter named like a prelude builtin (`str`) is a value call
+# and must win over the builtin of the same name.
+fn apply_named_like_builtin(str: fn(i64) -> text, n: i64) -> text:
+    str(n)
+
+describe "evaluate_call miss-path gates":
+    it "resolves an ordinary imported module function (Priority 5 after every miss)":
+        step("Verify: the common call shape reaches the flat function map")
+        expect(min_i64(3, 9)).to_equal(3)
+        expect(plain_add_one(41)).to_equal(42)
+
+    it "still prefers a module-level decorator wrapper over the original body":
+        step("Verify: Priority 4.5 is reached once a decorator has bound a function")
+        expect(module_level_decorated(5)).to_equal(12)
+
+    it "still prefers a decorator wrapper bound inside a block closure":
+        step("Verify: the block-level sentinel writer also arms the gate")
+        fn add_ten(f):
+            fn wrapper(x):
+                return f(x) + 10
+            return wrapper
+        @add_ten
+        fn nested(x):
+            return x + 1
+        expect(nested(1)).to_equal(12)
+
+    it "still lets a fn-typed parameter named like a prelude builtin win":
+        step("Verify: local_callable_shadows is evaluated on the builtin branch")
+        val out = apply_named_like_builtin(\n: "n={n}", 7)
+        expect(out).to_equal("n=7")
+
+    it "still calls the undecorated function by its plain name when no decorator exists":
+        step("Verify: a never-decorated name is unaffected by the gate")
+        expect(plain_add_one(1)).to_equal(2)

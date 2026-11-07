@@ -1003,6 +1003,7 @@ pub(super) fn exec_block_closure_into(
                     // Keep the plain definition in `functions` so the original
                     // body can still recurse; the sentinel makes `evaluate_call`
                     // prefer the wrapper for calls from outside it.
+                    crate::decorator_apply::mark_decorated_fn_bound();
                     local_env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
                     local_env.insert(f.name.clone(), decorated);
                 }
@@ -2194,6 +2195,7 @@ fn exec_block_closure_mut_inner(
                     // Keep the plain definition in `functions` so the original
                     // body can still recurse; the sentinel makes `evaluate_call`
                     // prefer the wrapper for calls from outside it.
+                    crate::decorator_apply::mark_decorated_fn_bound();
                     local_env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
                     local_env.insert(f.name.clone(), decorated);
                 }

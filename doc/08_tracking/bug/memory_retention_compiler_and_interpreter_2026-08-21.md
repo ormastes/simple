@@ -299,3 +299,28 @@ imports now share one `Arc<ModuleTable>` per owner
 2026-10-20) instead of re-materialising bindings per importer. Parse retention
 (28 B/source byte) is the remaining term and is the AST/FunctionDef density
 cost the interpreter must keep.
+
+## 2026-11-07 — "Open: per-module env/export materialisation" re-measured: import bindings are now shared
+
+Windows 11, `simple-base.exe` (tip `4eb1de2ecbd`, bootstrap profile,
+sha256 `c0c47b2cdd6cd6ee…`), no-arg interpreted `native_build_worker.spl`
+under `SIMPLE_MEM_TRACE=1`:
+
+```
+[mem] phases: module_loads=500 source=11.0MB ast_items=14837 parse_retained=270.3MB
+      eval_retained=161.1MB parse_bytes_per_source_byte=24.6 env_entries=14860 export_entries=14208
+[mem] globals census: flat=3682 owners=401 owned_entries=3800 module_envs=500 import_bindings=39624
+```
+
+Against the 2026-08-21 shard census (`env_entries=949861 import_bindings=927167`
+for 667 envs): **79 import bindings and 30 env entries per module, down from
+1,390 and 1,424.** The O(modules x visible globals) materialisation this
+section filed is no longer the retainer; `LayeredEnv` (module env holds its
+imports as shared layers) and `record_owner_binding_layer` (whole-surface
+import by reference) landed in between. `parse_bytes_per_source_byte` is
+24.6 (was 40.6).
+
+What remains open moved: peak RSS of that worker is still 1.99 GB and
+1.34 GB of it is live after only 100 module loads, before parse/eval
+retention can account for it — see the same-date note in
+native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18.md.
