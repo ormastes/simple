@@ -30,3 +30,5 @@ Not tested: native image/rootless/cgroup prerequisites, real executable/engine d
 No build/test allocation was granted. Local tools were restricted with `taskset -c 0-4`; no compiler, SSpec, bootstrap, Podman or other live runtime command was executed.
 
 Shared execution now exclusively invokes Simple Container API V2. The actual provider typed final-native deadline path is represented by the explicit provider-clock refusal regression; its implementation and dependency import still require review/verification. No Linux or Windows native authorization/platform qualification is claimed.
+
+Read-only staging preflight is covered in the first lifecycle case: real signed validation leaves the journal admitted, provider cursor0 and no execute archive. A later expired refresh refuses before begin; preflight success is not a reusable launch capability. NOT_RUN.
