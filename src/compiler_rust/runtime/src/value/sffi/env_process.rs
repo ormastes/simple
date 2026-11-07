@@ -2014,6 +2014,21 @@ pub unsafe extern "C" fn rt_process_run_bounded_bytes_tuple(
     process_result_block(rt_process_run_bounded_bytes(cmd_ptr, cmd_len, args, timeout_ms, max_output_bytes))
 }
 
+/// Raw 3-word block (stdout, stderr, untagged status) for unbounded capture.
+/// The command has an explicit byte extent; arguments and payloads stay in
+/// the Rust runtime. The native consumer owns only the returned raw block.
+///
+/// # Safety
+/// Same contract as [`rt_process_run`].
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_tuple(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+) -> *mut i64 {
+    process_result_block(rt_process_run(cmd_ptr, cmd_len, args))
+}
+
 /// Raw 3-word block (stdout, stderr, untagged status) for
 /// `rt_process_run_bounded` (C twin: `rt_process_run_bounded_tuple`).
 ///
@@ -2593,6 +2608,80 @@ mod tests {
             ("cmd", vec!["/c", "echo hi"])
         } else {
             ("/bin/sh", vec!["-c", "echo hi"])
+        }
+    }
+
+    #[test]
+    fn unbounded_tuple_facade_preserves_both_streams_and_raw_status() {
+        let (cmd, args) = if cfg!(windows) {
+            ("cmd.exe", vec!["/d", "/c", "(echo capture-out)&(echo capture-err 1>&2)&exit /b 7"])
+        } else {
+            ("/bin/sh", vec!["-c", "printf capture-out; printf capture-err >&2; exit 7"])
+        };
+        unsafe {
+            let block = rt_process_run_tuple(cmd.as_ptr(), cmd.len() as u64, runtime_args(&args));
+            assert!(!block.is_null());
+            let stdout = extract_string_test(RuntimeValue::from_raw(*block as u64));
+            let stderr = extract_string_test(RuntimeValue::from_raw(*block.add(1) as u64));
+            let status = *block.add(2);
+            crate::value::sffi::memory::rt_free(block as *mut u8);
+            assert!(stdout.contains("capture-out"), "stdout={stdout:?}");
+            assert!(stderr.contains("capture-err"), "stderr={stderr:?}");
+            assert_eq!(status, 7, "status must be an untagged signed word");
+        }
+    }
+
+    #[test]
+    fn unbounded_tuple_facade_preserves_empty_output_and_spawn_failure() {
+        let (cmd, args) = if cfg!(windows) {
+            ("cmd.exe", vec!["/d", "/c", "exit /b 0"])
+        } else {
+            ("/bin/sh", vec!["-c", ":"])
+        };
+        unsafe {
+            let block = rt_process_run_tuple(cmd.as_ptr(), cmd.len() as u64, runtime_args(&args));
+            assert!(!block.is_null());
+            let stdout = extract_string_test(RuntimeValue::from_raw(*block as u64));
+            let stderr = extract_string_test(RuntimeValue::from_raw(*block.add(1) as u64));
+            let status = *block.add(2);
+            crate::value::sffi::memory::rt_free(block as *mut u8);
+            assert_eq!((stdout.as_str(), stderr.as_str(), status), ("", "", 0));
+
+            let missing = "__simple_missing_process_capture_command_20261106__";
+            let block = rt_process_run_tuple(missing.as_ptr(), missing.len() as u64, runtime_args(&[]));
+            assert!(!block.is_null());
+            let status = *block.add(2);
+            crate::value::sffi::memory::rt_free(block as *mut u8);
+            assert_eq!(status, -1);
+        }
+    }
+
+    #[test]
+    fn unbounded_tuple_block_release_removes_transient_scope_entry() {
+        extern "C" {
+            fn rt_transient_raw_scope_begin() -> i32;
+            fn rt_transient_raw_scope_end() -> i32;
+            fn rt_transient_raw_words(value: i64, words: *mut *const usize, canonical_ptr: *mut usize) -> i64;
+        }
+        // Run this owner-scope test with --test-threads=1. It owns its scope
+        // and must never end a scope belonging to a caller.
+        assert_eq!(unsafe { rt_transient_raw_scope_begin() }, 1);
+        let (cmd, args) = echo_hi_command();
+        unsafe {
+            let block = rt_process_run_tuple(cmd.as_ptr(), cmd.len() as u64, runtime_args(&args));
+            if block.is_null() {
+                assert_eq!(rt_transient_raw_scope_end(), 1);
+                panic!("capture allocation returned no block");
+            }
+            let scoped_words_before = rt_transient_raw_words(block as i64, std::ptr::null_mut(), std::ptr::null_mut());
+            let stdout = RuntimeValue::from_raw(*block as u64);
+            crate::value::sffi::memory::rt_free(block as *mut u8);
+            let scoped_words_after = rt_transient_raw_words(block as i64, std::ptr::null_mut(), std::ptr::null_mut());
+            let ended = rt_transient_raw_scope_end();
+            assert_eq!(scoped_words_before, 3, "live raw result block has exactly three words");
+            assert_eq!(scoped_words_after, -1, "scope teardown must have no stale block entry to free");
+            assert_eq!(ended, 1, "scope exit must not free the released block again");
+            assert!(extract_string_test(stdout).starts_with("hi"), "raw block release must not free payload strings");
         }
     }
 
