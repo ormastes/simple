@@ -1,6 +1,7 @@
 # AUTHORED / NOT_RUN. Identity/solver controls only; no primitive matrix or
 # compiler entrypoint execution is claimed by these in-process fixtures.
 use std.spec.*
+use compiler.hir.builtin_trait_identity_v1.{BuiltinTraitDeclarationOwnerV1 as HirBuiltinOwner, BuiltinTraitKindV1 as HirBuiltinKind, builtin_trait_declarations_create_v1 as hir_builtin_create, builtin_trait_declaration_v1 as hir_builtin_row, builtin_trait_declaration_rebind_v1 as hir_builtin_rebind}
 use compiler.hir.hir_types.{SymbolTable, SymbolId, SymbolKind, Visibility, HirSymbol, HirType, HirTypeKind}
 use compiler.hir.hir_symbol_table_methods.*
 use compiler.common.diagnostics.span.{Span}
@@ -182,3 +183,21 @@ describe "Canonical builtin trait declaration ownership":
         expect(solver.solve_obligation(obligation).is_err()).to_equal(true)
         solver.add_impl(ImplBlock.create(eq, ty, Span.empty()))
         expect(solver.solve_obligation(obligation).is_ok()).to_equal(true)
+
+    it "shares exact HIR identity types through the compatibility API in both directions":
+        val direct: HirBuiltinOwner = hir_builtin_create(SymbolTable.new()).unwrap()
+        val legacy: BuiltinTraitDeclarationOwnerV1 = direct
+        var solver = TraitSolver.create_with_symbols(legacy.symbols)
+        expect(builtin_trait_declarations_install_v1(legacy, solver).is_ok()).to_equal(true)
+        val copy = hir_builtin_row(direct.declarations, direct.symbols, HirBuiltinKind.Copy).unwrap()
+        val clone = builtin_trait_declaration_v1(legacy.declarations, legacy.symbols, BuiltinTraitKindV1.Clone).unwrap()
+        expect(solver.traits[copy].supertraits[0]).to_equal(clone)
+        val old_created = builtin_fixture_owner(3)
+        val new_view: HirBuiltinOwner = old_created
+        val rebound = hir_builtin_rebind(direct, new_view, HirBuiltinKind.Ord).unwrap()
+        val old_row = builtin_trait_declaration_v1(old_created.declarations, old_created.symbols, BuiltinTraitKindV1.Ord).unwrap()
+        expect(rebound).to_equal(old_row)
+        var other_solver = TraitSolver.create_with_symbols(new_view.symbols)
+        expect(builtin_trait_declarations_install_v1(new_view, other_solver).is_ok()).to_equal(true)
+        val eq = hir_builtin_row(new_view.declarations, new_view.symbols, HirBuiltinKind.Eq).unwrap()
+        expect(other_solver.traits[rebound].supertraits[0]).to_equal(eq)

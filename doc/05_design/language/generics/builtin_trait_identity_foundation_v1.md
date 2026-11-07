@@ -63,3 +63,13 @@ allocation before copying. It refuses signed-counter exhaustion and validates
 the resulting counter values and nonnegative in-range owner/trait/scope IDs.
 The final complete i64 allocation window is covered separately from refusal
 controls; all failure controls assert the original table remains unchanged.
+
+## HIR dependency boundary
+
+Identity records, allocation, validation and rebinding now live in
+`compiler.hir.builtin_trait_identity_v1`, depending only on canonical HIR symbol
+owners and common Span. The traits module reexports the existing public API
+and retains solver installation unchanged. This permits future HIR consumers
+without a HIR-to-solver dependency; no module metadata, cache version, primitive
+policy or bound enforcement is activated. Privacy/allocator invariants and
+function bodies are preserved; import parity coverage remains NOT_RUN.

@@ -22,3 +22,7 @@ production registry and TraitSolver APIs. It checks:
 
 These controls do not execute generic source programs, select primitive/float
 policy, qualify serialized cache transport, or prove compiler entrypoint wiring.
+
+- HIR direct imports and legacy reexports share exact owner/kind types in both
+  directions; both real solvers retain exact Copy→Clone and Ord→Eq rows.
+  This additional scenario is AUTHORED / NOT_RUN.
