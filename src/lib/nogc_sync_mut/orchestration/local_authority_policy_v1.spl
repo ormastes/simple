@@ -1,0 +1,132 @@
+# Local administrator provisioned PUBLIC verification policy, never client data.
+# A pinned digest provides integrity only. The caller must own a root created
+# with secure_temp_dir and retain a trusted ancestor tree: no uid getter exists.
+# Path checks are not race-proof handle-relative IO. No boot/provider continuity,
+# enrollment, authorization decision, private key, or clock is inferred here.
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2, distributed_authority_snapshot_create_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.binary_inspect.{hex_to_bytes, bytes_to_hex_canonical}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+
+pub struct LocalAuthorityPolicyV1:
+    snapshot: DistributedAuthoritySnapshotV2
+    session_generation: i64
+    source_digest: text
+
+fn local_policy_fields_v1(value: SdnValue, allowed: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("local-policy-object-required")
+    for name in fields.keys():
+        if not allowed.contains(name): return Err("local-policy-unknown-field:" + name)
+    for name in allowed:
+        if not fields.contains_key(name): return Err("local-policy-missing-field:" + name)
+    Ok(fields)
+
+fn local_policy_text_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("local-policy-text-required:" + name)
+
+fn local_policy_integer_v1(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("local-policy-integer-required:" + name)
+
+fn local_policy_key_v1(value: SdnValue) -> Result<DistributedAuthorityKeyV2, text>:
+    val fields = local_policy_fields_v1(value, ["identity", "role", "revision", "publicKeyHex",
+        "principal", "project", "hostId", "operations", "maximumMemoryBytes", "maximumDurationMs",
+        "policyRevision", "revocationEpoch", "expiresAt", "revoked"])?
+    val encoded = local_policy_text_v1(fields, "publicKeyHex")?
+    if str_len(encoded) != 64: return Err("local-policy-public-key-hex-invalid")
+    val decoded = hex_to_bytes(encoded)
+    if decoded.len() != 32 or bytes_to_hex_canonical(decoded) != encoded:
+        return Err("local-policy-public-key-hex-invalid")
+    var public_key: [u8] = []
+    for byte in decoded:
+        public_key.push(byte as u8)
+    val raw_operations = match fields["operations"]:
+        case SdnValue.Array(items): items
+        case _: return Err("local-policy-operations-array-required")
+    if raw_operations.len() == 0 or raw_operations.len() > 64:
+        return Err("AUTHORITY_OPERATIONS_INVALID")
+    var operations: [text] = []
+    for item in raw_operations:
+        match item:
+            case SdnValue.String(operation): operations.push(operation)
+            case _: return Err("local-policy-operation-text-required")
+    val revoked = match fields["revoked"]:
+        case SdnValue.Bool(flag): flag
+        case _: return Err("local-policy-revoked-boolean-required")
+    Ok(DistributedAuthorityKeyV2(identity: local_policy_text_v1(fields, "identity")?,
+        role: local_policy_text_v1(fields, "role")?, revision: local_policy_integer_v1(fields, "revision")?,
+        public_key: public_key, principal: local_policy_text_v1(fields, "principal")?,
+        project: local_policy_text_v1(fields, "project")?, host_id: local_policy_text_v1(fields, "hostId")?,
+        operations: operations, maximum_memory_bytes: local_policy_integer_v1(fields, "maximumMemoryBytes")?,
+        maximum_duration_ms: local_policy_integer_v1(fields, "maximumDurationMs")?,
+        policy_revision: local_policy_integer_v1(fields, "policyRevision")?,
+        revocation_epoch: local_policy_integer_v1(fields, "revocationEpoch")?,
+        expires_at: local_policy_integer_v1(fields, "expiresAt")?, revoked: revoked))
+
+pub fn local_authority_policy_decode_v1(bytes: text) -> Result<LocalAuthorityPolicyV1, text>:
+    """Decode bounded canonical public policy; this function does not authorize its source."""
+    if str_len(bytes) == 0 or str_len(bytes) > 1048576: return Err("local-policy-source-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 5,
+        max_nodes: 16384, max_rows: 0, max_cells: 0, max_columns: 32)
+    val parsed = match sdn_parse_strict_v1(bytes, limits):
+        case Ok(document): document
+        case Err(issue): return Err("local-policy-syntax:" + issue.code)
+    if sdn_encode_canonical(parsed.value) + "\n" != bytes:
+        return Err("local-policy-noncanonical")
+    val fields = local_policy_fields_v1(parsed.value, ["version", "generation", "policyRevision",
+        "revocationEpoch", "sessionGeneration", "keys"])?
+    if local_policy_integer_v1(fields, "version")? != 1: return Err("local-policy-version")
+    val session = local_policy_integer_v1(fields, "sessionGeneration")?
+    if session <= 0: return Err("local-policy-session-generation-invalid")
+    val values = match fields["keys"]:
+        case SdnValue.Array(items): items
+        case _: return Err("local-policy-keys-array-required")
+    if values.len() == 0 or values.len() > 128: return Err("AUTHORITY_SNAPSHOT_CAPACITY_INVALID")
+    var keys: [DistributedAuthorityKeyV2] = []
+    for value in values:
+        keys.push(local_policy_key_v1(value)?)
+    val snapshot = distributed_authority_snapshot_create_v2(keys,
+        local_policy_integer_v1(fields, "generation")?, local_policy_integer_v1(fields, "policyRevision")?,
+        local_policy_integer_v1(fields, "revocationEpoch")?)?
+    Ok(LocalAuthorityPolicyV1(snapshot: snapshot, session_generation: session, source_digest: sha256_text(bytes)))
+
+pub fn local_authority_policy_load_v1(root: text, expected_digest: text) -> Result<LocalAuthorityPolicyV1, text>:
+    """Load a pinned public policy from the caller's private secure_temp_dir root."""
+    if str_len(expected_digest) != 64: return Err("local-policy-pin-invalid")
+    val digest_bytes = hex_to_bytes(expected_digest)
+    if digest_bytes.len() != 32 or bytes_to_hex_canonical(digest_bytes) != expected_digest:
+        return Err("local-policy-pin-invalid")
+    if str_len(root) == 0 or str_len(root) > 4096 or root.contains("\n") or root.contains("\r") or
+            not root.starts_with("/") or root == "/" or root.ends_with("/") or root.contains("\0"):
+        return Err("local-policy-root-invalid")
+    var prefix = ""
+    val components = root.split("/")
+    var index = 1
+    while index < components.len():
+        val component = components[index]
+        if component == "" or component == "." or component == "..": return Err("local-policy-root-invalid")
+        prefix = prefix + "/" + component
+        if not dir_is_real_no_follow(prefix): return Err("local-policy-root-not-real")
+        index = index + 1
+    if file_mode_bits(root) != 0o700: return Err("local-policy-root-not-private")
+    val path = root + "/authority-policy.sdn"
+    if not file_is_regular_no_follow(path): return Err("local-policy-file-not-regular")
+    val mode = file_mode_bits(path)
+    if mode < 0 or (mode & 0o400) == 0 or (mode & 0o7077) != 0:
+        return Err("local-policy-file-not-private")
+    val bytes = file_read_regular_no_follow_bounded(path, 1048576)?
+    if sha256_text(bytes) != expected_digest: return Err("local-policy-digest-mismatch")
+    local_authority_policy_decode_v1(bytes)
