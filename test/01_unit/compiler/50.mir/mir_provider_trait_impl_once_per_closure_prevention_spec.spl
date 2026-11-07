@@ -41,11 +41,19 @@ struct ClosureRun:
     relocations: i64
     callees: [text]
     indirect_calls: i64
+    lifted_functions: [text]
+    lifted_indirect_calls: i64
 
-fn collect_calls(mir: MirModule, callees: [text], indirect: i64) -> ClosureRun:
+fn collect_calls(mir: MirModule, callees: [text], indirect: i64,
+        lifted_functions: [text], lifted_indirect: i64) -> ClosureRun:
     var names = callees
     var indirect_calls = indirect
+    var lifted_names = lifted_functions
+    var lifted_indirect_calls = lifted_indirect
     for function in mir.functions.values():
+        val lifted = function.name.contains("__lambda_lift_")
+        if lifted:
+            lifted_names = lifted_names.push(function.name)
         for block in function.blocks:
             for instruction in block.instructions:
                 match instruction.kind:
@@ -56,8 +64,12 @@ fn collect_calls(mir: MirModule, callees: [text], indirect: i64) -> ClosureRun:
                             case _: pass
                     case MirInstKind.CallIndirect(_, _, _, _):
                         indirect_calls = indirect_calls + 1
+                        if lifted:
+                            lifted_indirect_calls = lifted_indirect_calls + 1
                     case _: pass
-    ClosureRun(errors: 0, index_builds: 0, relocations: 0, callees: names, indirect_calls: indirect_calls)
+    ClosureRun(errors: 0, index_builds: 0, relocations: 0, callees: names,
+        indirect_calls: indirect_calls, lifted_functions: lifted_names,
+        lifted_indirect_calls: lifted_indirect_calls)
 
 fn lower_closure(provider_count: i64, consumer_count: i64, eager: bool, reverse_impls: bool = false) -> ClosureRun:
     val log = Logger(level: 0)
@@ -99,7 +111,8 @@ fn lower_closure(provider_count: i64, consumer_count: i64, eager: bool, reverse_
     lowering.provider_session_requested_key = mir_provider_session_content_key_v1(providers)
     lowering.trait_impl_closure_complete = true
     var failed = 0
-    var calls = ClosureRun(errors: 0, index_builds: 0, relocations: 0, callees: [], indirect_calls: 0)
+    var calls = ClosureRun(errors: 0, index_builds: 0, relocations: 0, callees: [],
+        indirect_calls: 0, lifted_functions: [], lifted_indirect_calls: 0)
     c = 0
     while c < consumer_count:
         val consumer: HirModule = consumers[c]
@@ -107,13 +120,16 @@ fn lower_closure(provider_count: i64, consumer_count: i64, eager: bool, reverse_
         if mir.is_err():
             failed = failed + 1
         else:
-            calls = collect_calls(mir.unwrap(), calls.callees, calls.indirect_calls)
+            calls = collect_calls(mir.unwrap(), calls.callees, calls.indirect_calls,
+                calls.lifted_functions, calls.lifted_indirect_calls)
         c = c + 1
     env_set("SIMPLE_MIR_EAGER_TRAIT_IMPLS", old_eager)
     ClosureRun(errors: lowering.errors.len() + failed,
         index_builds: lowering.trait_impl_provider_index_builds,
         relocations: lowering.trait_impl_provider_relocations,
-        callees: calls.callees, indirect_calls: calls.indirect_calls)
+        callees: calls.callees, indirect_calls: calls.indirect_calls,
+        lifted_functions: calls.lifted_functions,
+        lifted_indirect_calls: calls.lifted_indirect_calls)
 
 fn count_matching(names: [text], needle: text) -> i64:
     var n = 0
@@ -144,6 +160,9 @@ describe "MIR provider trait-impl walk stays once per closure":
         expect(count_matching(demand.callees, "Mem0.list")).to_equal(count_matching(eager.callees, "Mem0.list"))
         expect(count_matching(demand.callees, "Mem0.list")).to_be_greater_than(0)
         expect(demand.callees.len()).to_equal(eager.callees.len())
+        expect(demand.lifted_functions.len()).to_equal(2)
+        expect(demand.lifted_indirect_calls).to_equal(4)
+        expect(eager.lifted_indirect_calls).to_equal(4)
 
     it "preserves eager equivalence for either ordering of multiple providers":
         val demand_forward = lower_closure(3, 1, false, false)
@@ -151,8 +170,22 @@ describe "MIR provider trait-impl walk stays once per closure":
         val demand_reverse = lower_closure(3, 1, false, true)
         val eager_reverse = lower_closure(3, 1, true, true)
         expect(demand_forward.errors).to_equal(0)
+        expect(eager_forward.errors).to_equal(0)
         expect(demand_reverse.errors).to_equal(0)
+        expect(eager_reverse.errors).to_equal(0)
         expect(demand_forward.indirect_calls).to_equal(eager_forward.indirect_calls)
         expect(demand_reverse.indirect_calls).to_equal(eager_reverse.indirect_calls)
         expect(demand_forward.callees.len()).to_equal(eager_forward.callees.len())
         expect(demand_reverse.callees.len()).to_equal(eager_reverse.callees.len())
+        expect(count_matching(demand_forward.callees, "Mem0.list")).to_equal(1)
+        expect(count_matching(eager_forward.callees, "Mem0.list")).to_equal(1)
+        expect(count_matching(demand_reverse.callees, "Mem0.list")).to_equal(1)
+        expect(count_matching(eager_reverse.callees, "Mem0.list")).to_equal(1)
+        expect(count_matching(demand_forward.callees, "Mem1.list")).to_equal(0)
+        expect(count_matching(demand_forward.callees, "Mem2.list")).to_equal(0)
+        expect(count_matching(demand_reverse.callees, "Mem1.list")).to_equal(0)
+        expect(count_matching(demand_reverse.callees, "Mem2.list")).to_equal(0)
+        expect(demand_forward.indirect_calls).to_equal(4)
+        expect(eager_forward.indirect_calls).to_equal(4)
+        expect(demand_reverse.indirect_calls).to_equal(4)
+        expect(eager_reverse.indirect_calls).to_equal(4)

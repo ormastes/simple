@@ -82,11 +82,21 @@ fn lower_closure(provider_count: i64, consumer_count: i64) -> ProviderRun:
         index_builds: lowering.trait_impl_provider_index_builds,
         relocations: lowering.trait_impl_provider_relocations)
 
-fn changed_provider_session_rebuilds() -> ProviderRun:
+struct ChangedSessionRun:
+    errors: i64
+    index_builds: i64
+    before_owner: text
+    after_owner: text
+    cached_key: text
+    requested_key: text
+
+fn changed_provider_session_rebuilds() -> ChangedSessionRun:
     val log = Logger(level: 0)
     val before_impl = impl_src(0)
-    val after_impl = before_impl.replace("self.side * 1", "self.side * 9")
-    val consumer = consumer_src()
+    # Keep provider module names and ordering identical while changing the
+    # indexed impl owner itself, not merely a method body ignored by the rows.
+    val after_impl = before_impl.replace("Sq0", "Cube0")
+    val consumer = "fn run(n: i64) -> i64:\n    n\n"
     var before_modules: Dict<text, ParserModule> = {}
     before_modules["lib.shape"] = parse_full_frontend(shape_src, "lib/shape.spl", "lib.shape", log)
     before_modules["lib.impl0"] = parse_full_frontend(before_impl, "lib/impl0.spl", "lib.impl0", log)
@@ -121,12 +131,22 @@ fn changed_provider_session_rebuilds() -> ProviderRun:
     val after_key = mir_provider_session_content_key_v1(after_providers)
     lowering.provider_session_requested_key = before_key
     val first = lowering.lower_module_transient_scoped(consumer_hir, before_providers, true)
+    val before_owner = if lowering.provider_trait_owner_row_owner.len() == 1:
+        lowering.provider_trait_owner_row_owner[0]
+    else:
+        ""
     lowering.provider_session_requested_key = after_key
     val second = lowering.lower_module_transient_scoped(consumer_hir, after_providers, true)
-    ProviderRun(errors: lowering.errors.len() + (if first.is_err(): 1 else: 0) +
+    val after_owner = if lowering.provider_trait_owner_row_owner.len() == 1:
+        lowering.provider_trait_owner_row_owner[0]
+    else:
+        ""
+    ChangedSessionRun(errors: lowering.errors.len() + (if first.is_err(): 1 else: 0) +
             (if second.is_err(): 1 else: 0) + (if before_key == after_key: 1 else: 0),
         index_builds: lowering.trait_impl_provider_index_builds,
-        relocations: lowering.trait_impl_provider_relocations)
+        before_owner: before_owner, after_owner: after_owner,
+        cached_key: lowering.provider_session_content_key,
+        requested_key: after_key)
 
 describe "MIR provider trait-impl registration per closure":
     it "walks the provider impl tables once for a three-consumer closure":
@@ -142,3 +162,7 @@ describe "MIR provider trait-impl registration per closure":
         val run = changed_provider_session_rebuilds()
         expect(run.errors).to_equal(0)
         expect(run.index_builds).to_equal(2)
+        expect(run.before_owner).to_contain("Sq0")
+        expect(run.after_owner).to_contain("Cube0")
+        expect(run.before_owner == run.after_owner).to_equal(false)
+        expect(run.cached_key).to_equal(run.requested_key)
