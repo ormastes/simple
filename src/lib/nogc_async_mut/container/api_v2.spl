@@ -22,6 +22,11 @@ pub struct ContainerAbsenceTurnV2:
     receipt: ContainerAbsenceReceiptV2?
     error: text
 
+pub struct ContainerExecutionUserTurnV2:
+    owner: SimpleContainerOwnerV2
+    receipt: ContainerExecutionUserReceiptV2?
+    error: text
+
 pub fn simple_container_observation_v2(owner: SimpleContainerOwnerV2) -> ContainerHostObservationV2:
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.observation()
@@ -242,7 +247,7 @@ pub fn simple_container_recover_v2(owner: SimpleContainerOwnerV2,
             val operation = active.recover(request, intent)
             ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Windows(scope, active), operation: operation)
 
-fn container_api_absence_identity_v2(owner: SimpleContainerOwnerV2,
+fn container_api_runtime_identity_v2(owner: SimpleContainerOwnerV2,
         request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> Result<bool, text>:
     val plan = request.plan
     val scope = simple_container_scope_v2(owner)
@@ -260,7 +265,7 @@ fn container_api_absence_turn_v2(owner: SimpleContainerOwnerV2, request: Contain
         case Err(reason): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: reason)
     val encoded = container_absence_receipt_encode_v2(receipt)
     if encoded.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: encoded.unwrap_err())
-    val matching = container_api_absence_identity_v2(owner, request, receipt.identity)
+    val matching = container_api_runtime_identity_v2(owner, request, receipt.identity)
     if matching.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
     val scope_bytes = container_host_scope_bytes_v2(simple_container_scope_v2(owner))
     val receipt_scope = container_host_scope_bytes_v2(receipt.scope)
@@ -279,7 +284,7 @@ pub fn simple_container_absence_v2(owner: SimpleContainerOwnerV2, request: Conta
         expected: RuntimeIdentityV1) -> ContainerAbsenceTurnV2:
     val projected = simple_container_project_v2(owner, request)
     if projected.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: projected.unwrap_err())
-    val matching = container_api_absence_identity_v2(owner, request, expected)
+    val matching = container_api_runtime_identity_v2(owner, request, expected)
     if matching.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
     match owner:
         case SimpleContainerOwnerV2.Linux(scope, adapter):
@@ -290,3 +295,40 @@ pub fn simple_container_absence_v2(owner: SimpleContainerOwnerV2, request: Conta
             var active = adapter
             val result = active.absence(request, expected)
             container_api_absence_turn_v2(SimpleContainerOwnerV2.Windows(scope, active), request, expected, result)
+
+fn container_api_execution_user_turn_v2(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
+        expected: RuntimeIdentityV1, result: Result<ContainerExecutionUserReceiptV2, text>) -> ContainerExecutionUserTurnV2:
+    val receipt = match result:
+        case Ok(value): value
+        case Err(reason): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: reason)
+    val encoded = container_execution_user_receipt_encode_v2(receipt)
+    if encoded.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: encoded.unwrap_err())
+    val matching = container_api_runtime_identity_v2(owner, request, receipt.identity)
+    if matching.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
+    val scope_bytes = container_host_scope_bytes_v2(simple_container_scope_v2(owner))
+    val receipt_scope = container_host_scope_bytes_v2(receipt.scope)
+    if scope_bytes.is_err() or receipt_scope.is_err():
+        return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: "container-api-execution-user-scope-invalid")
+    if scope_bytes.unwrap() != receipt_scope.unwrap() or receipt.backend != request.plan.backend or
+            receipt.identity.native_id != expected.native_id or receipt.request_digest != request.plan.request_digest or
+            receipt.provider_identity_digest != simple_container_observation_v2(owner).provider_identity_digest:
+        return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: "container-api-execution-user-receipt-mismatch")
+    ContainerExecutionUserTurnV2(owner: owner, receipt: Some(receipt), error: "")
+
+# Fresh exact native selected-user query. Actual effective process identity
+# requires its separate same-process probe, not this engine configuration fact.
+pub fn simple_container_execution_user_v2(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
+        expected: RuntimeIdentityV1) -> ContainerExecutionUserTurnV2:
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: projected.unwrap_err())
+    val matching = container_api_runtime_identity_v2(owner, request, expected)
+    if matching.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            var active = adapter
+            val result = active.execution_user(request, expected)
+            container_api_execution_user_turn_v2(SimpleContainerOwnerV2.Linux(scope, active), request, expected, result)
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            var active = adapter
+            val result = active.execution_user(request, expected)
+            container_api_execution_user_turn_v2(SimpleContainerOwnerV2.Windows(scope, active), request, expected, result)

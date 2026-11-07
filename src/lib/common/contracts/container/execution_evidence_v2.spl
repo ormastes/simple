@@ -22,6 +22,18 @@ pub struct ContainerAbsenceReceiptV2:
     evidence_digest: text
     proof_kind: text
 
+pub struct ContainerExecutionUserReceiptV2:
+    backend: text
+    scope: ContainerHostScopeV2
+    identity: RuntimeIdentityV1
+    request_digest: text
+    provider_identity_digest: text
+    selected_user: text
+    observed_unix_ms: i64
+    query_digest: text
+    evidence_digest: text
+    proof_kind: text
+
 pub struct ContainerExecutionEvidenceV2:
     execution: ContainerExecutionPlanV2
     runtime: RuntimeIdentityV1
@@ -195,3 +207,46 @@ pub fn container_execution_evidence_v2(plan: ContainerExecutionPlanV2, wait: Run
         wait_observation_digest: container_runtime_observation_digest_v2(wait)?, absence: absence)
     val validated = container_execution_evidence_encode_v2(value)?
     Ok(value)
+
+# Selected engine user is an observation, not proof of the workload effective UID.
+pub fn container_execution_user_receipt_encode_v2(receipt: ContainerExecutionUserReceiptV2) -> Result<text, text>:
+    if receipt.proof_kind != "exact-native-execution-user-v1" or receipt.observed_unix_ms <= 0:
+        return Err("container-evidence-user-proof-invalid")
+    if str_len(receipt.selected_user) == 0 or str_len(receipt.selected_user) > 256 or
+            receipt.selected_user.contains("\0") or receipt.selected_user.contains("\n") or
+            receipt.selected_user.contains("\r") or receipt.selected_user.contains("\t"):
+        return Err("container-evidence-selected-user-invalid")
+    for digest in [receipt.request_digest, receipt.provider_identity_digest, receipt.query_digest, receipt.evidence_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-evidence-digest-invalid")
+    if (receipt.backend != "linux-podman" and receipt.backend != "windows-docker-process") or
+            (receipt.backend == "linux-podman" and receipt.identity.engine != "podman") or
+            (receipt.backend == "windows-docker-process" and receipt.identity.engine != "docker"):
+        return Err("container-evidence-user-backend-mismatch")
+    if receipt.identity.node_boot_id != container_scope_fence_id_v2(receipt.scope)? or
+            receipt.identity.provider_generation != receipt.scope.provider_generation:
+        return Err("container-evidence-user-scope-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("container-execution-user-receipt"),
+        "backend": SdnValue.String(receipt.backend), "scope": SdnValue.String(container_host_scope_bytes_v2(receipt.scope)?),
+        "runtime": SdnValue.String(evidence_identity_bytes_v2(receipt.identity)?),
+        "requestDigest": SdnValue.String(receipt.request_digest), "providerIdentityDigest": SdnValue.String(receipt.provider_identity_digest),
+        "selectedUser": SdnValue.String(receipt.selected_user), "observedUnixMs": SdnValue.Int(receipt.observed_unix_ms), "queryDigest": SdnValue.String(receipt.query_digest),
+        "evidenceDigest": SdnValue.String(receipt.evidence_digest), "proofKind": SdnValue.String(receipt.proof_kind)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn container_execution_user_receipt_decode_v2(source: text) -> Result<ContainerExecutionUserReceiptV2, text>:
+    val fields = evidence_fields_v2(source, ["version", "kind", "backend", "scope", "runtime", "requestDigest",
+        "providerIdentityDigest", "selectedUser", "observedUnixMs", "queryDigest", "evidenceDigest", "proofKind"])?
+    if evidence_int_v2(fields, "version")? != 2 or evidence_text_v2(fields, "kind")? != "container-execution-user-receipt":
+        return Err("container-evidence-user-version")
+    val receipt = ContainerExecutionUserReceiptV2(backend: evidence_text_v2(fields, "backend")?,
+        scope: container_host_scope_decode_v2(evidence_text_v2(fields, "scope")?)?,
+        identity: evidence_identity_decode_v2(evidence_text_v2(fields, "runtime")?)?,
+        request_digest: evidence_text_v2(fields, "requestDigest")?, provider_identity_digest: evidence_text_v2(fields, "providerIdentityDigest")?,
+        selected_user: evidence_text_v2(fields, "selectedUser")?, observed_unix_ms: evidence_int_v2(fields, "observedUnixMs")?, query_digest: evidence_text_v2(fields, "queryDigest")?,
+        evidence_digest: evidence_text_v2(fields, "evidenceDigest")?, proof_kind: evidence_text_v2(fields, "proofKind")?)
+    if container_execution_user_receipt_encode_v2(receipt)? != source: return Err("container-evidence-user-noncanonical")
+    Ok(receipt)
+
+pub fn container_execution_user_receipt_digest_v2(receipt: ContainerExecutionUserReceiptV2) -> Result<text, text>:
+    val source = container_execution_user_receipt_encode_v2(receipt)?
+    Ok(sha256_text(source))
