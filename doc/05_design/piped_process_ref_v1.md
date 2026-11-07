@@ -160,8 +160,8 @@ that test-only ownership is not a production Ref cleanup fallback.
 
 ## Approved canonical native leaf ownership
 
-On 2026-11-07 the user and root approved the existing exact designed-C-only
-allowlist for these eight canonical OS registry leaf symbols:
+On 2026-11-07 the user authorized source landing and fixes; root reviewed these
+eight technical entries in the existing exact designed-C-only allowlist:
 `rt_process_spawn_piped_generation_v1`, `rt_process_piped_pid_for_generation_v1`,
 `rt_process_read_stdout_ref_v1`, `rt_process_stdout_state_ref_v1`,
 `rt_process_validate_piped_ref_v1`, `rt_process_write_stdin_some_ref_v1`,
