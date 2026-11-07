@@ -598,6 +598,24 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
  * shares `data`. Both lanes decode the closure word by its declared kind and
  * honour the resulting raw-argument ABI for one- and two-argument workers. */
 static int spl_worker_callable(int64_t kind, int64_t word, int64_t* entry, int64_t* closure_ptr, int* raw) {
+    /* Natively compiled Simple passes a non-capturing fn value (a lifted
+     * lambda or a direct function) through the generic VALUE slot as its BARE
+     * entry address -- no `<< 3`, no `| 1` (measured on the Windows Stage 2
+     * cranelift build of avx_server_loadgen: the word was
+     * &__lambda_lift_0 = 0x...37251). Tag-decoding that word is wrong for
+     * every alignment: an odd entry has TAG_HEAP's bit set and lost it
+     * (jumped to entry-1, SIGSEGV), an 8-aligned entry reads as TAG_INT and
+     * becomes entry>>3. Such a worker boxes/unboxes its own operands
+     * (rt_value_as_int_wide on entry), so its arguments are RuntimeValues and
+     * pass through unchanged (raw = 0). Not a value guess between the two
+     * VALUE encodings: an executable-image address is neither a heap record
+     * (TAG_HEAP) nor `addr << 3` of one, which lies far outside the image. */
+    if (kind == RT_WORKER_CLOSURE_VALUE && rt_native_address_is_code(word)) {
+        *entry = word;
+        *closure_ptr = 0;
+        *raw = 0;
+        return 1;
+    }
     int64_t payload = 0;
     if (!spl_worker_closure_word(kind, word, &payload, raw)) return 0;
     *closure_ptr = 0;
