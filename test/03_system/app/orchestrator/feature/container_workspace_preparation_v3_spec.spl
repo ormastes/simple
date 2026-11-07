@@ -1,0 +1,151 @@
+# @req ORCH-02 HOST-02
+# Pure retained-stage integrity, never native mapping/storage/start authority.
+# Execution NOT_RUN. No owner, quota, immutable-root or exec birth is simulated.
+use std.common.contracts.container.workspace_preparation_v3.*
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+
+fn workspace_exec_fixture_v3(windows: bool) -> ContainerExecRequestV3:
+    val plan = ContainerExecutionPlanV2(backend: if windows: "windows-docker-process" else: "linux-podman",
+        workload_uid: "parent-workload", attempt: 2, operation_id: "parent-operation", request_digest: "a".repeat(64),
+        physical_host_id: "alias", service_scope_id: "service", boot_id: if windows: "" else: "boot",
+        provider_generation: 3, native_machine_id: "actual-machine", continuity_mode: if windows: "service-incarnation-v1" else: "native-boot-incarnation-v1",
+        continuity_id: if windows: "service-incarnation:nonce" else: "boot")
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: plan.workload_uid, attempt: plan.attempt, operation_id: plan.operation_id,
+        provider_generation: plan.provider_generation, engine: if windows: "docker" else: "podman", native_id: "d".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    ContainerExecRequestV3(parent: plan, parent_runtime: runtime, operation_id: "exec-operation", nonce: "b".repeat(64),
+        argv: if windows: ["C:/Tools/agent.exe", "--version"] else: ["/usr/bin/agent", "--version"],
+        environment: [ContainerExecEnvironmentEntryV3.Literal("LANG", "C"),
+            ContainerExecEnvironmentEntryV3.SecretReference("TOKEN", "secrets/agent-token", "c".repeat(64))],
+        working_directory: if windows: "C:/workspace" else: "/workspace", selected_user: if windows: "ContainerUser" else: "1000:1000",
+        terminal_mode: "none", stdin_requested: false, timeout_ms: 20000)
+
+fn workspace_birth_fixture_v3(request: ContainerExecRequestV3) -> ContainerExecBirthReceiptV3:
+    val parent = request.parent
+    val scope = ContainerHostScopeV2(physical_host_id: parent.physical_host_id, service_scope_id: parent.service_scope_id,
+        boot_id: parent.boot_id, provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
+        continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: parent.workload_uid, attempt: parent.attempt,
+        provider_generation: parent.provider_generation, operation_id: parent.operation_id,
+        engine: if parent.backend == "linux-podman": "podman" else: "docker", native_id: "d".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    ContainerExecBirthReceiptV3(request_digest: container_exec_request_digest_v3(request).unwrap(), parent_runtime: runtime,
+        native_exec_id: "e".repeat(64), provider_identity_digest: "f".repeat(64), created_unix_ms: 100,
+        query_digest: "1".repeat(64), evidence_digest: "2".repeat(64), proof_kind: "exact-native-exec-birth-v3")
+
+fn workspace_stage_fixture_v3() -> ContainerWorkspacePreparationRequestV3:
+    val request = workspace_exec_fixture_v3(false)
+    ContainerWorkspacePreparationRequestV3(operation_id: "workspace-stage", exec_request: request,
+        exec_birth: workspace_birth_fixture_v3(request), exec_intent_digest: "2".repeat(64), parent_operation_digest: "3".repeat(64), parent_assignment_digest: "4".repeat(64),
+        storage_reservation_digest: "5".repeat(64), workspace_binding_digest: "6".repeat(64), mapping_binding_digest: "7".repeat(64),
+        mapping_receipt_digest: "8".repeat(64), mount_profile: "linux-build-input-output-v1", input_relative_root: "input",
+        output_relative_root: "output", executables: [ContainerWorkspaceExecutableV3(relative_path: "producer.exe", digest: "9".repeat(64)),
+            ContainerWorkspaceExecutableV3(relative_path: "tools/simple", digest: "a".repeat(64))])
+
+fn workspace_stage_wire_v3(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "workspace preparation retained stage integrity":
+    it "round trips every binding and exact exec request birth and manifest":
+        step("round trips every binding and exact exec request birth and manifest")
+        val request = workspace_stage_fixture_v3()
+        val source = container_workspace_preparation_encode_v3(request).unwrap()
+        val decoded = container_workspace_preparation_decode_v3(source).unwrap()
+        expect(container_workspace_preparation_encode_v3(decoded).unwrap()).to_equal(source)
+        expect(container_workspace_preparation_digest_v3(decoded).unwrap()).to_equal(container_workspace_preparation_digest_v3(request).unwrap())
+        expect(container_exec_request_encode_v3(decoded.exec_request).unwrap()).to_equal(container_exec_request_encode_v3(request.exec_request).unwrap())
+        expect(container_exec_birth_encode_v3(decoded.exec_birth).unwrap()).to_equal(container_exec_birth_encode_v3(request.exec_birth).unwrap())
+        expect(decoded.executables).to_equal(request.executables)
+        expect(container_workspace_preparation_digest_v3(request).unwrap() == request.exec_birth.request_digest).to_equal(false)
+
+    it "binds mapping storage and executable bytes without conflating their digests":
+        step("binds mapping storage and executable bytes without conflating their digests")
+        val request = workspace_stage_fixture_v3()
+        val digest = container_workspace_preparation_digest_v3(request).unwrap()
+        var changed = request
+        changed.exec_intent_digest = "b".repeat(64)
+        expect(container_workspace_preparation_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = request
+        changed.mapping_receipt_digest = "b".repeat(64)
+        expect(container_workspace_preparation_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = request
+        changed.storage_reservation_digest = "b".repeat(64)
+        expect(container_workspace_preparation_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = request
+        changed.executables = [ContainerWorkspaceExecutableV3(relative_path: "producer.exe", digest: "b".repeat(64))]
+        expect(container_workspace_preparation_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = request
+        changed.mapping_binding_digest = "invalid"
+        expect(container_workspace_preparation_encode_v3(changed).is_err()).to_equal(true)
+
+    it "refuses reused stage operations mismatched births and unsupported backend profiles":
+        step("refuses reused stage operations mismatched births and unsupported backend profiles")
+        val request = workspace_stage_fixture_v3()
+        var changed = request
+        changed.operation_id = request.exec_request.operation_id
+        expect(container_workspace_preparation_encode_v3(changed).is_err()).to_equal(true)
+        changed.operation_id = request.exec_request.parent.operation_id
+        expect(container_workspace_preparation_encode_v3(changed).is_err()).to_equal(true)
+        changed = request
+        changed.exec_birth.parent_runtime.native_id = "a".repeat(64)
+        expect(container_workspace_preparation_encode_v3(changed).is_err()).to_equal(true)
+        changed = request
+        changed.mount_profile = "windows-build-input-output-v1"
+        expect(container_workspace_preparation_encode_v3(changed).is_err()).to_equal(true)
+        changed = request
+        changed.exec_request = workspace_exec_fixture_v3(true)
+        changed.exec_birth = workspace_birth_fixture_v3(changed.exec_request)
+        expect(container_workspace_preparation_encode_v3(changed).is_err()).to_equal(true)
+
+    it "refuses lexical root escapes overlap and platform absolute paths":
+        step("refuses lexical root escapes overlap and platform absolute paths")
+        var request = workspace_stage_fixture_v3()
+        for invalid in ["", "/absolute", "C:/absolute", ".", "..", "a/../b", "a/./b", "a//b", "a/", "a\\b", "a\nroot", "a\0root", "x".repeat(4096)]:
+            request.input_relative_root = invalid
+            expect(container_workspace_preparation_encode_v3(request).is_err()).to_equal(true)
+        request = workspace_stage_fixture_v3()
+        request.output_relative_root = request.input_relative_root
+        expect(container_workspace_preparation_encode_v3(request).is_err()).to_equal(true)
+        request.output_relative_root = "input/child"
+        expect(container_workspace_preparation_encode_v3(request).is_err()).to_equal(true)
+        request.input_relative_root = "input/child/deeper"
+        expect(container_workspace_preparation_encode_v3(request).is_err()).to_equal(true)
+
+    it "permits only bounded exact executable manifests without chmod modes":
+        step("permits only bounded exact executable manifests without chmod modes")
+        var request = workspace_stage_fixture_v3()
+        request.executables = []
+        expect(container_workspace_preparation_encode_v3(request).is_err()).to_equal(true)
+        request.executables = [ContainerWorkspaceExecutableV3(relative_path: "arbitrary", digest: "a".repeat(64))]
+        expect(container_workspace_preparation_encode_v3(request).is_err()).to_equal(true)
+        request.executables = [ContainerWorkspaceExecutableV3(relative_path: "producer.exe", digest: "a".repeat(64)),
+            ContainerWorkspaceExecutableV3(relative_path: "producer.exe", digest: "b".repeat(64))]
+        expect(container_workspace_preparation_encode_v3(request).is_err()).to_equal(true)
+        request.executables = [ContainerWorkspaceExecutableV3(relative_path: "tools/simple", digest: "not-a-digest")]
+        expect(container_workspace_preparation_encode_v3(request).is_err()).to_equal(true)
+
+    it "rejects unknown missing typed duplicate noncanonical and oversized stage wire":
+        step("rejects unknown missing typed duplicate noncanonical and oversized stage wire")
+        val source = container_workspace_preparation_encode_v3(workspace_stage_fixture_v3()).unwrap()
+        expect(container_workspace_preparation_decode_v3(workspace_stage_wire_v3(source, "mode", SdnValue.Int(511))).is_err()).to_equal(true)
+        expect(container_workspace_preparation_decode_v3(workspace_stage_wire_v3(source, "execBirth", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(container_workspace_preparation_decode_v3(workspace_stage_wire_v3(source, "version", SdnValue.Int(2))).is_err()).to_equal(true)
+        expect(container_workspace_preparation_decode_v3(source + "\n").is_err()).to_equal(true)
+        val head = source.slice(0, source.len() - 2)
+        expect(container_workspace_preparation_decode_v3(head + ", version: 3" + "}\n").is_err()).to_equal(true)
+        expect(container_workspace_preparation_decode_v3("version: 3\nkind: container-workspace-preparation\n").is_err()).to_equal(true)
+        val oversized = "é".repeat(1048577)
+        expect(str_len(oversized)).to_equal(2097154)
+        expect(container_workspace_preparation_decode_v3(oversized).is_err()).to_equal(true)
