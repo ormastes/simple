@@ -1320,13 +1320,17 @@ int64_t spl_file_size(const char* path) {
  * Output
  * ================================================================ */
 
+/* Flush like rt_print_str: a native server redirected to a file must not
+ * hold its ready/stats lines in the stdio buffer while it blocks in accept. */
 void spl_print(const char* s) {
     if (s) fputs(s, stdout);
+    fflush(stdout);
 }
 
 void spl_println(const char* s) {
     if (s) fputs(s, stdout);
     putchar('\n');
+    fflush(stdout);
 }
 
 void spl_eprintln(const char* s) {
