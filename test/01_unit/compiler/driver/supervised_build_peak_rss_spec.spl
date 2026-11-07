@@ -1,0 +1,62 @@
+# @tag:in-development
+# In development until the Rust seed carrying the rt_process_wait wait4 /
+# PeakWorkingSetSize reap (this change, interpreter_extern/system.rs) is
+# redeployed: the currently deployed seed reaps with try_wait and records
+# nothing, so the 200 MB example reads 0. Promote after the redeploy.
+"""
+## Purpose and audience
+Purpose: Prove the supervised builder records each unit's REAL peak RSS (R5),
+not the old constant 0 placeholder, and that the value is per unit.
+Audience: compiler and tooling engineers who maintain the supervised builder.
+"""
+# @req: REQ-COMPILER-DRIVER-001 — stable requirement identity for this spec.
+#
+# Bug: doc/08_tracking/bug/supervised_builder_unwired_and_no_peak_rss_2026-08-17.md (Gap 2)
+# The reap path reads `process_last_child_peak_rss_kib()` right after the
+# `rt_process_wait` that reaped the unit; the runtime records wait4 ru_maxrss
+# (POSIX) / PeakWorkingSetSize (Windows) at that reap.
+
+use std.spec.*
+use compiler.driver.driver_build.parallel.{
+    ParallelBuilder, ParallelBuildConfig, parallel_supervised_argv,
+    parallel_supervised_cmd}
+use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind}
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+
+# awk keeps one 1 MB string per slot, so N slots is ~N MB resident.
+fn alloc_body(megabytes: i64) -> text:
+    val ob = text.from_char_code(123)
+    val cb = text.from_char_code(125)
+    "awk 'BEGIN " + ob + " s = sprintf(\"%1000000s\", \"x\"); for (i = 0; i < " + megabytes.to_string() + "; i++) a[i] = s " + cb + "'"
+
+fn unit_body(path: text) -> text:
+    if path == "fat.spl":
+        return alloc_body(200)
+    alloc_body(1)
+
+describe "supervised builder peak RSS (R5)":
+    it "records a 200 MB unit in [180 MB, 400 MB) and a light unit below 150 MB":
+        step("Build one fat and one light unit under supervision")
+        val builder = ParallelBuilder.create(ParallelBuildConfig.unstable_mode(0))
+        builder.add_unit("fat.spl", [])
+        builder.add_unit("light.spl", [])
+        val outcomes = builder.build_supervised(
+            \path: rt_process_spawn_async(parallel_supervised_cmd(),
+                                          parallel_supervised_argv(unit_body(path))),
+            \path: "")
+        expect(outcomes.count_of(BuildOutcomeKind.OK)).to_equal(2)  # oracle: 2 — both units exit 0
+        val fat_kb = outcomes.peak_rss_kb_of("fat.spl")
+        val light_kb = outcomes.peak_rss_kb_of("light.spl")
+        step("fat={fat_kb} KiB light={light_kb} KiB")
+        expect(fat_kb >= 180 * 1024).to_equal(true)
+        expect(fat_kb < 400 * 1024).to_equal(true)
+        # Per unit: the light unit must not inherit the fat unit's peak.
+        expect(light_kb > 0).to_equal(true)
+        expect(light_kb < 150 * 1024).to_equal(true)
+
+    it "reports -1 for a path that was never recorded":
+        step("Unknown path has no measurement")
+        val outcomes = ParallelBuilder.create(ParallelBuildConfig.unstable_mode(0)).build_supervised(
+            \path: 0, \path: "")
+        expect(outcomes.peak_rss_kb_of("absent.spl")).to_equal(-1)  # oracle: -1 — not measured sentinel

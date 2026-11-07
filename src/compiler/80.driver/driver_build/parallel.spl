@@ -20,6 +20,7 @@ extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_thread_sleep(millis: i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_time_now_monotonic_ms() -> i64
+extern fn rt_process_last_child_peak_rss_kib() -> i64
 
 # ============================================================================
 # Unstable ("separate process") mode
@@ -958,6 +959,12 @@ impl ParallelBuilder:
 
                 reaped = reaped + 1
                 val wall_ms = rt_time_now_monotonic_ms() - started
+                # R5: the runtime records the reaped child's own peak RSS (wait4
+                # ru_maxrss / PeakWorkingSetSize) inside the rt_process_wait that
+                # returned `status`; read it before any other wait. A budget kill
+                # reaps inside rt_process_kill, which measures nothing: 0.
+                val measured_kib = if timed_out: -1 else: rt_process_last_child_peak_rss_kib()
+                val peak_kb = if measured_kib > 0: measured_kib else: 0
 
                 if status == 0 and not timed_out:
                     # OK requires exit 0 AND the declared artifact on disk. A
@@ -966,15 +973,15 @@ impl ParallelBuilder:
                     val declared = artifact_fn(unit_path)
                     if declared != "" and not rt_file_exists(declared):
                         outcomes.record(BuildUnitOutcome.from_status(
-                            unit_id, unit_path, 1, false, wall_ms, 0,
+                            unit_id, unit_path, 1, false, wall_ms, peak_kb,
                             "exit 0 but declared artifact is missing: {declared}"))
                         self.graph.mark_failed(unit_id, "declared artifact missing")
                     else:
-                        outcomes.record(BuildUnitOutcome.ok(unit_id, unit_path, wall_ms, 0))
+                        outcomes.record(BuildUnitOutcome.ok(unit_id, unit_path, wall_ms, peak_kb))
                         self.graph.mark_completed(unit_id, Some(declared))
                 else:
                     val record = BuildUnitOutcome.from_status(
-                        unit_id, unit_path, status, timed_out, wall_ms, 0, "")
+                        unit_id, unit_path, status, timed_out, wall_ms, peak_kb, "")
                     outcomes.record(record)
                     # The graph tracks "did not produce an artifact"; the OUTCOME
                     # set is what preserves the failed / unverified distinction.
