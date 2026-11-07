@@ -128,3 +128,18 @@ Measured after the change: `process_run_script` on the same fixture returns
 This does not close the record. `rt_process_run` itself is still unable to exec
 a shebang script, so every other caller on Windows remains affected; this is a
 call-site mitigation for the dominant caret-suite bucket, not the root fix.
+
+## 2026-11-07: root fix in the Rust runtime (seed / interpreter lane)
+
+`env_process.rs` gains `script_command(cmd)`, used by every user-command
+spawn site in place of `Command::new(resolve_command_path(cmd))`. On Windows,
+when `cmd` is an existing file whose first bytes are `#!`, it spawns
+`<interpreter> [opts] <cmd> <args...>` (`/usr/bin/env [-S] NAME` collapses to
+`NAME`; `/bin/sh` maps to `sh` via `resolve_command_path`). POSIX is unchanged.
+Tests (`cargo test -p simple-runtime --lib`, CC=clang-cl, Windows host):
+`shebang_argv_*` (3 parser cases), `windows_shebang_script_runs_through_interpreter`
+(plain + env shebang, argv + exit code 7 propagate), and
+`windows_pe_and_bare_names_are_not_rerouted`; env_process suite 33/33 PASS.
+Remaining: the C runtime `rt_process_run_array` (native/self-hosted binaries)
+does not yet re-route shebang scripts (native lane follow-up; the caret call
+sites already use the pure-Simple `process_run_script` shim there).
