@@ -23,6 +23,8 @@ use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 use std.common.sdn.encode.sdn_encode_canonical
 
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalOpenCleanupV2
+
 pub struct HostLocalRootV1:
     root: text
     binding: HostEnrollmentBindingV1
@@ -150,6 +152,15 @@ fn host_local_publish_runtime_v1(claim: HostEnrollmentClaimV1,
     Ok(claim)
 
 pub fn host_local_runtime_open_v1(root: text, timeout_ms: i64) -> Result<HostLocalRuntimeV1, text>:
+    # This finite native-boot root uses POSIX private-policy prerequisites.
+    # Windows persistent service roots require their native ACL capability;
+    # later backend support must never silently admit this filesystem path.
+    @when(os="linux"):
+    val supported = true
+    @else:
+    val supported = false
+    @end
+    if not supported: return Err("host-local-native-runtime-host-unsupported")
     if timeout_ms <= 0: return Err("host-local-timeout-invalid")
     val binding_bytes = file_read_regular_no_follow_bounded(root + "/enrollment-binding.sdn", 1048576)?
     val binding = host_local_binding_decode_v1(binding_bytes)?
@@ -240,3 +251,34 @@ pub fn host_local_root_open_v1(root: text, timeout_ms: i64) -> Result<HostLocalR
     val owner = host_capacity_owner_open_v1(root + "/journal", capacity, nonce, config.maximum_journal_events, true)?
     Ok(HostLocalRootV1(root: root, binding: binding, config: config, policy: local.policy,
         scope: local.scope, container: local.container, capacity: owner))
+
+# Managed finite/persistent callers retain canonical cleanup ownership. No root
+# or ledger is fabricated for a failed replay/projection or failed close.
+
+pub enum HostLocalRootOpenV2:
+    Ready(HostLocalRootV1)
+    Rejected(text)
+    CleanupRequired(DistributedOperationJournalOpenCleanupV2, text)
+
+pub fn host_local_root_open_owned_v2(root: text, timeout_ms: i64) -> HostLocalRootOpenV2:
+    val checked = host_local_runtime_open_v1(root, timeout_ms)
+    if checked.is_err(): return HostLocalRootOpenV2.Rejected(checked.unwrap_err())
+    val local = checked.unwrap()
+    val config = local.config
+    val binding = local.binding
+    val binding_digest = host_enrollment_payload_digest_v1(binding)
+    if binding_digest.is_err(): return HostLocalRootOpenV2.Rejected(binding_digest.unwrap_err())
+    val fence = container_scope_fence_id_v2(local.scope)
+    if fence.is_err(): return HostLocalRootOpenV2.Rejected(fence.unwrap_err())
+    val nonce = sosix_random_hex(32) ?? ""
+    if str_len(nonce) != 64: return HostLocalRootOpenV2.Rejected("host-local-entropy-unavailable")
+    val capacity = HostCapacityV1(physical_host_id: config.physical_host_id,
+        authority_id: "host-" + binding_digest.unwrap(), boot_id: fence.unwrap(), provider_generation: 1,
+        cpu_millis: config.cpu_ceiling_millis, memory_bytes: config.memory_ceiling_bytes,
+        exclusive_devices: config.exclusive_device_ids)
+    match host_capacity_owner_open_owned_v2(root + "/journal", capacity, nonce, config.maximum_journal_events, true):
+        case HostCapacityOpenV2.Ready(owner):
+            HostLocalRootOpenV2.Ready(HostLocalRootV1(root: root, binding: binding, config: config, policy: local.policy,
+                scope: local.scope, container: local.container, capacity: owner))
+        case HostCapacityOpenV2.Rejected(error): HostLocalRootOpenV2.Rejected(error)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, error): HostLocalRootOpenV2.CleanupRequired(cleanup, error)

@@ -18,6 +18,11 @@ use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.orchestration.host_cleanup_evidence_v1.host_cleanup_evidence_v1
 use std.nogc_sync_mut.orchestration.host_helper_settlement_receipt_v1.host_helper_settlement_evidence_v1
 
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenV2,
+    DistributedOperationJournalOpenCleanupV2, DistributedOperationJournalCleanupTurnV2,
+    distributed_operation_journal_open_owned_v2, distributed_operation_journal_close_owned_v2}
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+
 pub struct HostCapacityOwnerV1:
     journal: DistributedOperationJournalV2
     ledger: HostCapacityLedgerV1
@@ -416,3 +421,62 @@ pub fn host_capacity_owner_parent_helpers_settled_v1(owner: HostCapacityOwnerV1,
             if host_helper_plan_digest_v1(plan)? != intent.plan_digest or plan.operation_id != operation.id: return Err("host-cleanup-helper-provenance")
             if plan.parent_operation_id == parent_operation_id: return Err("host-cleanup-helper-unsettled")
     Ok(true)
+
+# Additive managed-owner entrypoint. Legacy Result opens above are compatibility
+# only; they MUST NOT flatten a cleanup-bearing result from this path.
+
+pub enum HostCapacityOpenV2:
+    Ready(HostCapacityOwnerV1)
+    Rejected(text)
+    CleanupRequired(DistributedOperationJournalOpenCleanupV2, text)
+
+fn host_capacity_reject_owned_v2(journal: DistributedOperationJournalV2,
+        stage_error: text) -> HostCapacityOpenV2:
+    val closed = distributed_operation_journal_close_owned_v2(journal)
+    match closed.cleanup:
+        case Some(cleanup): return HostCapacityOpenV2.CleanupRequired(cleanup, stage_error + ":" + closed.error)
+        case nil:
+            if closed.closed and closed.error == "" and closed.state == FileLockReleaseStateV2.Released:
+                return HostCapacityOpenV2.Rejected(stage_error)
+            # ConsumedError has no retryable capability and still is an error;
+            # never report success merely because the native descriptor is gone.
+            val state = if closed.state == FileLockReleaseStateV2.ConsumedError: "consumed-error"
+                elif closed.state == FileLockReleaseStateV2.Unknown: "unknown"
+                elif closed.state == FileLockReleaseStateV2.Stale: "stale"
+                else: "retained"
+            HostCapacityOpenV2.Rejected(stage_error + ":host-journal-close-" + state + ":" + closed.error)
+
+fn host_capacity_open_owned_internal_v2(root: text, capacity: HostCapacityV1, nonce: text,
+        maximum_events: i64, continuity_proven: bool, quarantine_previous: bool) -> HostCapacityOpenV2:
+    val empty = HostCapacityLedgerV1(capacity: capacity, revision: 1, continuity_proven: false, reservations: [])
+    val valid = host_available_capacity_v1(empty)
+    if valid.is_err(): return HostCapacityOpenV2.Rejected(valid.unwrap_err())
+    val opened = distributed_operation_journal_open_owned_v2(root,
+        host_capacity_authority_digest_v1(capacity), nonce, maximum_events)
+    var retained: Option<DistributedOperationJournalV2> = nil
+    match opened:
+        case DistributedOperationJournalOpenV2.Ready(journal): retained = Some(journal)
+        case DistributedOperationJournalOpenV2.Rejected(error): return HostCapacityOpenV2.Rejected(error)
+        case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, error):
+            return HostCapacityOpenV2.CleanupRequired(cleanup, error)
+    var journal = retained.unwrap()
+    val projection = host_capacity_projection_v1(journal, capacity, continuity_proven, quarantine_previous)
+    if projection.is_err(): return host_capacity_reject_owned_v2(journal, projection.unwrap_err())
+    for operation_id in journal.operations.keys():
+        val recovered = distributed_operation_journal_recover_execution_v2(journal, operation_id)
+        if recovered.is_err(): return host_capacity_reject_owned_v2(journal, "host-execution-recovery-failed:" + recovered.unwrap_err())
+        journal = recovered.unwrap()
+    var ledger = projection.unwrap()
+    ledger.revision = journal.sequence + 1
+    HostCapacityOpenV2.Ready(HostCapacityOwnerV1(journal, ledger))
+
+pub fn host_capacity_owner_open_owned_v2(root: text, capacity: HostCapacityV1, nonce: text,
+        maximum_events: i64, continuity_proven: bool) -> HostCapacityOpenV2:
+    host_capacity_open_owned_internal_v2(root, capacity, nonce, maximum_events, continuity_proven, false)
+
+pub fn host_capacity_owner_open_quarantined_owned_v2(root: text, capacity: HostCapacityV1,
+        nonce: text, maximum_events: i64) -> HostCapacityOpenV2:
+    host_capacity_open_owned_internal_v2(root, capacity, nonce, maximum_events, false, true)
+
+pub fn host_capacity_owner_close_owned_v2(owner: HostCapacityOwnerV1) -> DistributedOperationJournalCleanupTurnV2:
+    distributed_operation_journal_close_owned_v2(owner.journal)

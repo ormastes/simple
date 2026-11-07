@@ -1,0 +1,38 @@
+use std.spec.{expect, fail}
+# Actual host reservation journal and actual owned native lock; no provider
+# command is executed. Existing signed-execution fixture supplies admitted data.
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.io.file_lock_owned_v2.*
+
+pub struct HostOwnedJournalFixtureV2:
+    original: HostExecutionFixtureV2
+    owner: HostCapacityOwnerV1
+
+pub fn host_owned_journal_ready_v2(opened: HostCapacityOpenV2) -> HostCapacityOwnerV1:
+    match opened:
+        case HostCapacityOpenV2.Ready(owner): owner
+        case HostCapacityOpenV2.Rejected(error): fail("owned capacity open rejected:" + error)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, error):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.error).to_equal("")
+            expect(closed.closed).to_equal(true)
+            expect(closed.state).to_equal(FileLockReleaseStateV2.Released)
+            fail("unexpected cleanup-required open:" + error)
+
+pub fn host_owned_journal_fixture_v2() -> HostOwnedJournalFixtureV2:
+    val fixture = host_execution_fixture_v2("success")
+    # Close the existing compatibility fixture writer, then acquire through
+    # the actual new managed path. Never construct an owned token/ledger.
+    assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+    val owner = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(fixture.owner.journal.root,
+        fixture.owner.ledger.capacity, "d".repeat(64), 50, true))
+    HostOwnedJournalFixtureV2(fixture, owner)
+
+pub fn host_owned_journal_closed_v2(owner: HostCapacityOwnerV1):
+    val closed = host_capacity_owner_close_owned_v2(owner)
+    expect(closed.closed).to_equal(true)
+    expect(closed.error).to_equal("")
+    expect(closed.cleanup.is_none()).to_equal(true)
+    expect(closed.state).to_equal(FileLockReleaseStateV2.Released)
