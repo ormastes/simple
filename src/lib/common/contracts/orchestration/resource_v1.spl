@@ -116,9 +116,11 @@ fn digits_to_int(s: text) -> i64:
             k = k + 1
         if d < 0:
             return -1
-        acc = acc * 10 + d
-        if acc < 0:
+        # Check before arithmetic: a positive wrap is just as invalid as a
+        # negative wrap, and checked native builds must not trap on input.
+        if acc > 922337203685477580 or (acc == 922337203685477580 and d > 7):
             return -1
+        acc = acc * 10 + d
         i = i + 1
     acc
 
@@ -126,22 +128,22 @@ fn split_suffix(s: text, suffix: text) -> text:
     s.slice(0, s.len() - suffix.len())
 
 # CPU: bare integer = whole cores, `Nm` = millicores. Result is millicores.
-fn parse_cpu_millis(s: text) -> i64:
+pub fn parse_cpu_millis(s: text) -> i64:
     if s.ends_with("m"):
         return digits_to_int(split_suffix(s, "m"))
     val whole = digits_to_int(s)
-    if whole < 0:
+    if whole < 0 or whole > 9223372036854775:
         return -1
     whole * 1000
 
 # Memory: bare integer = bytes, binary Ki/Mi/Gi, decimal K/M/G. Result is bytes.
 fn scaled_memory(s: text, suffix: text, scale: i64) -> i64:
     val n = digits_to_int(split_suffix(s, suffix))
-    if n < 0:
+    if n < 0 or n > 9223372036854775807 / scale:
         return -1
     n * scale
 
-fn parse_memory_bytes(s: text) -> i64:
+pub fn parse_memory_bytes(s: text) -> i64:
     if s.ends_with("Ki"):
         return scaled_memory(s, "Ki", 1024)
     if s.ends_with("Mi"):
@@ -494,8 +496,7 @@ pub fn decode_meta(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Resul
                     case Ok(m): labels = m
     Ok(ObjectMetaV1(name: name, ns: ns, labels: labels))
 
-fn decode_deployment(meta: ObjectMetaV1, v: SdnValue, spans: Dict<text, SdnSpan>) -> Result<ResourceV1, RejectionV1>:
-    val path = "spec"
+fn decode_deployment(meta: ObjectMetaV1, v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<ResourceV1, RejectionV1>:
     var replicas = 1
     var selector: Dict<text, text> = {}
     var tmpl_labels: Dict<text, text> = {}
@@ -567,10 +568,10 @@ fn decode_deployment(meta: ObjectMetaV1, v: SdnValue, spans: Dict<text, SdnSpan>
     # A selector that does not select its own template is unschedulable intent.
     for key in selector.keys():
         if not tmpl_labels.contains_key(key):
-            return Err(reject("selector_template_mismatch", "spec.template.metadata.labels",
+            return Err(reject("selector_template_mismatch", path + ".template.metadata.labels",
                 "template labels are missing selector label '" + key + "'", spans))
         if tmpl_labels[key] != selector[key]:
-            return Err(reject("selector_template_mismatch", "spec.template.metadata.labels",
+            return Err(reject("selector_template_mismatch", path + ".template.metadata.labels",
                 "template label '" + key + "' does not match the selector value", spans))
     Ok(ResourceV1.Deployment(DeploymentV1(meta: meta, replicas: replicas,
         selector_labels: selector,
@@ -581,6 +582,13 @@ fn decode_deployment(meta: ObjectMetaV1, v: SdnValue, spans: Dict<text, SdnSpan>
 # selector/template disagreement is returned as a single RejectionV1 naming the
 # schema path and, where the parser recorded one, the source line and column.
 pub fn decode_resource(source: text) -> Result<ResourceV1, RejectionV1>:
+    match parse_resource_document(source):
+        case Err(r): Err(r)
+        case Ok(parsed): decode_resource_value(parsed.0, parsed.1, "")
+
+# Parse once at the document boundary. Value decoders receive these same spans;
+# callers must not use permissive `parse` and discard duplicate-key issues.
+pub fn parse_resource_document(source: text) -> Result<(SdnValue, Dict<text, SdnSpan>), RejectionV1>:
     var spans: Dict<text, SdnSpan> = {}
     match parse_with_spans_and_issues(source):
         case Err(e):
@@ -593,45 +601,45 @@ pub fn decode_resource(source: text) -> Result<ResourceV1, RejectionV1>:
                 val issue = issues[0]
                 return Err(RejectionV1(kind: issue.kind, path: issue.path,
                                        message: issue.message, line: issue.line, col: issue.col))
-            match as_dict(parsed.0, "", spans):
-                case Err(r): return Err(r)
-                case Ok(top):
-                    match only_known(top, ["apiVersion", "kind", "metadata", "spec"], "document", spans):
-                        case Err(r): return Err(r)
-                        case Ok(_): pass
-                    match require(top, "apiVersion", "document", spans):
-                        case Err(r): return Err(r)
-                        case Ok(av):
-                            match as_text(av, "apiVersion", spans):
-                                case Err(r): return Err(r)
-                                case Ok(s):
-                                    if s != ORCHESTRATION_API_VERSION_V1:
-                                        return Err(reject("unsupported_api_version", "apiVersion",
-                                            "unsupported apiVersion '" + s + "'", spans))
-                    var meta = ObjectMetaV1(name: "", ns: "default", labels: {})
-                    match require(top, "metadata", "document", spans):
-                        case Err(r): return Err(r)
-                        case Ok(mv):
-                            match decode_meta(mv, "metadata", spans):
-                                case Err(r): return Err(r)
-                                case Ok(m): meta = m
-                    var kind = ""
-                    match require(top, "kind", "document", spans):
-                        case Err(r): return Err(r)
-                        case Ok(kv):
-                            match as_text(kv, "kind", spans):
-                                case Err(r): return Err(r)
-                                case Ok(k): kind = k
-                    match require(top, "spec", "document", spans):
-                        case Err(r): return Err(r)
-                        case Ok(sv):
-                            if kind == "Pod":
-                                match decode_pod_spec(sv, "spec", spans):
-                                    case Err(r): return Err(r)
-                                    case Ok(ps):
-                                        return Ok(ResourceV1.Pod(PodResourceV1(meta: meta, spec: ps)))
-                            if kind == "Deployment":
-                                return decode_deployment(meta, sv, spans)
-                            return Err(reject("unsupported_kind", "kind",
-                                "kind '" + kind + "' is not decoded by this contract version", spans))
-    Err(RejectionV1(kind: "internal", path: "", message: "decode fell through", line: 0, col: 0))
+            return Ok((parsed.0, spans))
+    Err(RejectionV1(kind: "internal", path: "", message: "parse fell through", line: 0, col: 0))
+
+# `prefix` is empty for a document or a dotted child prefix ending in '.'.
+# This entrypoint is for a value from parse_resource_document, not raw input.
+pub fn decode_resource_value(value: SdnValue, spans: Dict<text, SdnSpan>, prefix: text) -> Result<ResourceV1, RejectionV1>:
+    val envelope = resource_envelope_path(prefix)
+    val top = decode_resource_envelope(value, spans, prefix, ORCHESTRATION_API_VERSION_V1)?
+    val mv = require(top, "metadata", envelope, spans)?
+    val meta = decode_meta(mv, prefix + "metadata", spans)?
+    val kv = require(top, "kind", envelope, spans)?
+    val kind = as_text(kv, prefix + "kind", spans)?
+    val sv = require(top, "spec", envelope, spans)?
+    if kind == "Pod":
+        val ps = decode_pod_spec(sv, prefix + "spec", spans)?
+        return Ok(ResourceV1.Pod(PodResourceV1(meta: meta, spec: ps)))
+    if kind == "Deployment":
+        return decode_deployment(meta, sv, prefix + "spec", spans)
+    Err(reject("unsupported_kind", prefix + "kind",
+        "kind '" + kind + "' is not decoded by this contract version", spans))
+
+# Retain the legacy top-level diagnostic path; child paths point into the
+# original document, including array indices, with no span-map reconstruction.
+pub fn resource_envelope_path(prefix: text) -> text:
+    if prefix == "":
+        return "document"
+    prefix.substring(0, prefix.len() - 1)
+
+pub fn decode_resource_envelope(value: SdnValue, spans: Dict<text, SdnSpan>, prefix: text,
+                               api_version: text) -> Result<Dict<text, SdnValue>, RejectionV1>:
+    val envelope = resource_envelope_path(prefix)
+    var value_path = ""
+    if prefix != "":
+        value_path = envelope
+    val top = as_dict(value, value_path, spans)?
+    only_known(top, ["apiVersion", "kind", "metadata", "spec"], envelope, spans)?
+    val av = require(top, "apiVersion", envelope, spans)?
+    val version = as_text(av, prefix + "apiVersion", spans)?
+    if version != api_version:
+        return Err(reject("unsupported_api_version", prefix + "apiVersion",
+            "unsupported apiVersion '" + version + "'", spans))
+    Ok(top)
