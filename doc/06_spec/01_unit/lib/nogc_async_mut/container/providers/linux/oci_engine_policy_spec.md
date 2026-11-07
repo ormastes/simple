@@ -8,7 +8,7 @@ not generated execution evidence. All focused cases remain UNEXECUTED.
 |---|---|
 | Roundtrips canonical policy bytes and binds ordered storage options | Canonical SDN roundtrip and semantic/order digest changes |
 | Refuses unknown, noncanonical, oversized, and deeply nested policy data | Strict schema and bounded parsing before interpretation |
-| Rejects unsupported modes, paths, and option aliases before native observation | Explicit mode selection, absolute scoped paths, duplicate option keys |
+| Rejects unsupported modes, paths, and option aliases before native observation | Explicit mode selection, absolute scoped paths, rejection of `/podman` through policy and production constructor before observation, valid `/usr/bin/podman` control, duplicate option keys |
 | Rejects setuid, setgid, writable, and nonexecutable metadata | Live-used metadata predicate checks each permission bit and UID ownership |
 | Routes exact scoped argv and explicit empty storage options | Independent complete argv, local mode, roots/driver/options, literal values |
 | Observes exact local rootless UID, roots, driver, version, and binary digest | Typed observed fields and refusal of mismatched scope |

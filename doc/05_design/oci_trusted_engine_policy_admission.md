@@ -22,6 +22,10 @@ An installed administrative policy names an absolute canonical executable,
 expected effective UID, graph root, run root, storage driver, and ordered storage
 options. The provider observes executable bytes through an existing retained
 file owner, records the hash, and checks identity stability across that read.
+The executable must have a non-root parent directory: `/podman` is rejected by
+policy validation before observation because the existing retained directory
+owner does not support opening `/` as its target. `/usr/bin/podman` remains a
+valid policy path, subject to the actual native ownership checks.
 This is an observation of an administratively trusted mutable path. It is not
 sealed execution, a race-free hash-to-exec guarantee, or proof that shared
 libraries and runtime helpers are immutable. Dynamic ELF executables are within
