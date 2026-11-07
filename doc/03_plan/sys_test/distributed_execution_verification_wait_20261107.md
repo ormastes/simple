@@ -484,3 +484,118 @@ Producer bridge/pristine/full-CLI, actual SSpec/docgen, canonical provider ABI,
 host execution composition, Podman availability, CoreMux output adoption and
 parent RUN evidence remain open. Only real future execution can change those
 rows to diagnostic or admitted PASS, with the evidence class retained explicitly.
+
+## Subsequent Linux native pipe-registry verification — 2026-11-07
+
+The continued goal run executed the C registry selfcheck from draft #7603 at
+`c65e96f575708dfb2c6948779c72c7d4a2a289de`. Its syntax check, compilation and one
+native run passed. This supersedes only the earlier NOT_RUN status of that
+Linux C selfcheck. The original handoff did not execute runtime tests; the
+subsequent evidence is recorded separately below. The three Simple facade
+scenarios, Windows behavior, smux consumer and full system remain unverified.
+The draft remains AWAITING_VERIFICATION and is not admitted or merged by this
+result. No previously passing diagnostic was repeated.
+
+The harness includes the actual `runtime_process.c` owner and links normal
+CoreC owners. It exercised real child processes/pipes, exact generation lookup
+with deterministic same-PID registry coexistence/replacement, stale operations,
+UTF-8 partial writes/tail/EOF, pipe saturation and invalid bounds, input limits,
+generation exhaustion and independent legacy-PID compatibility. Forwarding
+syscall observers confirmed no wait or signal from unsupported POSIX lifecycle
+queries. The harness's test-only retirement/reaping is not a production cleanup
+capability, and the deterministic registry case is not an observed kernel PID
+reuse race. No branch-coverage measurement was taken.
+
+Both compilation and execution inherited CPU affinity `0-4`. Compilation used
+a 120-second timeout and execution a 30-second timeout, each with a five-second
+termination grace. Assertions remained enabled (`-O0`, no `NDEBUG`). There were
+no runtime/provider stubs or duplicate `runtime_process.o`: the owner is compiled
+through the harness include exactly once. Source hashes were checked before and
+after compilation; the executable hash was checked before and after execution.
+
+- Build: exit 0, empty compiler log, source unchanged.
+- Run: exit 0; `piped process Ref V1 registry/reader boundary: PASS`.
+- Executable SHA-256: `c188c0d8dd467462c71f47fedd74324270e0bf6674e5e256458b92f344c441c4`.
+- This is a native C boundary result, not an admitted Simple/compiler result.
+- POSIX liveness and close remain unsupported; the passing test verifies their
+  refusal and retained ownership, not operational process supervision.
+
+The retained local evidence directory is:
+
+`/home/yoon/dev/simple-piped-generation-owner-20261107/build/root-piped-ref-verification-20261107`
+
+It contains `inputs.sdn` (compiler and source/header hashes), `command.txt`,
+`build-result.sdn`, `build.log`, `run-result.sdn`, `run.log` and `selfcheck`. The
+manifest digests are retained in the central SDN status. These local artifacts
+are not claimed to be uploaded CI artifacts; another host must reproduce them
+from the pinned draft source. System-header/SDK inputs are not an admitted
+toolchain receipt.
+
+The compiler invocation, adapted from the existing native CoreC process checks,
+is retained verbatim in `command.txt`. It uses `clang`, the test translation
+unit, and these production owners: `runtime_native`, `runtime_legacy_core`,
+`runtime_memory`, `runtime_simd_dispatch`, `runtime_simd_utf8`,
+`runtime_process_owned`, `runtime_process_tree`, `runtime_memtrack`,
+`runtime_fork`, `runtime_timestamp`, and `runtime_thread`; all from the same
+draft checkout. Flags preserve the standalone CoreC memory/timestamp ownership
+and native array packing contract. No Rust seed or compiler bootstrap was run.
+
+Astra independently checked the source/binary hashes, actual CoreC composition,
+active assertions and executable reachability without rerunning the test. The
+original child invocation was:
+
+```text
+timeout --kill-after=5s 30s /home/yoon/dev/simple-piped-generation-owner-20261107/build/root-piped-ref-verification-20261107/selfcheck
+```
+
+It inherited affinity `0-4` from the `taskset -c 0-4 python3 -` parent that
+recorded the run. `run-command.sdn` preserves this original invocation after
+the review requested it; no rerun was used to produce that record. The exact
+wall-clock start timestamp was not captured. Elapsed time is recorded, and this
+limitation remains explicit rather than inferring a start time from file dates.
+
+## Bridge compatibility preflight — 2026-11-07
+
+The next bootstrap transition was checked against release source
+`68a6f89671421a65a1b99faba1b76cba592850eb` before execution. **The previously
+reviewed four-call secure-memory overlay is insufficient**, including for the
+previous planned source: `text.byte_len()` is a separate required capability.
+This is a source-bound preflight finding, not a newly observed runtime failure.
+No bridge, provider preparation or additional probe ran. The passing fill-span
+probe and native pipe-registry result were not repeated or invalidated.
+
+Astra and Sol matched the producer admission manifest to the exact historical
+`method_calls_literals.spl` at Git revision
+`55a6d938c2a9ffb050d0f368a54f05e0d00760c1`, SHA-256
+`862ad8392087143da163478797776eee4a2ca8b78674669f0709fd746abcd86e`. That source
+recognizes `len`, `length` and `is_empty`, but not `byte_len`; its unresolved
+method path is fatal. General declaration-based resolution cannot supply a
+missing library method. The binary's two unrelated helper-symbol occurrences
+of the substring are not evidence of a callable builtin.
+
+The required closure is concrete: `bootstrap_main.spl:31` imports
+`native_build_main.spl`, whose pinned lines 539, 583 and 585 call `.byte_len()`.
+The common string owner adds further callers and has no library method
+definition. The refreshed compiler contains the new lowering to
+`rt_string_len`, but the historical producer that must compile it does not.
+The secure-memory overlay and Linux driver sources are otherwise unchanged.
+
+The committed preflight receipt is
+[bridge_compatibility_preflight_20261107.sdn](../../../.spipe/simple_orchestrator/bridge_compatibility_preflight_20261107.sdn).
+It pins the producer, source manifest, exact source hashes and required call
+sites. Referenced local source copies/manifests are retained evidence, not
+uploaded CI artifacts. The historical compiler remains historically admitted;
+this does not establish compatibility with current source.
+
+The next viable prerequisite is a receipt-bound producer supporting the needed
+method, or a separately reviewed source-compatible intermediate generation.
+Do not run the four-call-only plan, replace `.byte_len()` with `.len()` despite
+their different semantics, weaken secure wiping, use the Rust seed for product
+qualification, or reset exhausted retry budgets. Any future intermediate must
+compile and run its own Hello, then build pristine current source and its full
+CLI/test runner before system SSpec admission. No such new plan or build is
+authorized by this report. CPU affinity remains shared `0-4`, five cores total.
+
+Overall status remains **AWAITING_VERIFICATION**. This update prevents an
+unsupported bootstrap attempt; it does not complete the orchestrator, admit
+the drafts, or certify source, compiler, platform or runtime gates.

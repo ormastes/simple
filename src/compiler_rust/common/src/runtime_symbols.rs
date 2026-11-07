@@ -1244,6 +1244,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simple_sandbox_section_start",
     "rt_simple_sandbox_section_end",
     "rt_bytes_to_text",
+    "rt_tls_wire_from_bytes",
     "rt_char_from_code",
     "rt_text_to_bytes",
     "rt_file_write_bytes",
@@ -2859,6 +2860,18 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_value_println"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"SCOPE_LEVELS_dot_has"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"stdin_read_char"));
+    }
+
+    #[test]
+    fn tls_wire_provider_is_registered_exactly_once() {
+        assert_eq!(
+            RUNTIME_SYMBOL_NAMES
+                .iter()
+                .filter(|&&name| name == "rt_tls_wire_from_bytes")
+                .count(),
+            1
+        );
+        assert_eq!(symbol_tier_of("rt_tls_wire_from_bytes"), RuntimeSymbolTier::Core);
     }
 
     #[test]

@@ -225,3 +225,66 @@ describe "schema type identity uses existing semantic owners":
             case Err(message): rejected = message.contains("aggregate node bound")
             case Ok(_): rejected = false
         expect(rejected).to_equal(true)
+
+    it "rejects real parsed fields whose canonical owner erases an unbound name to Any":
+        step("Accepting transport of a lowered type must not admit implicit Any to a concrete schema")
+        for spelling in ["Q", "[Q]", "Dict<i64, Q>", "(i64, Q)", "fn(i64) -> Q", "fn(Q) -> i64", "Q?", "Box<Q>", "Dict"]:
+            val source = "pub class Box<T>:\n    value: T\npub class Node:\n    value: {spelling}\n"
+            val parsed = parse_and_build_module_checked_reference_v1(source, "pkg/owner.spl").unwrap()
+            var lowering = local_identity_lowerer_v1(source)
+            val field_type = parsed.classes["Node"].fields[0].type_
+            val lowered = lowering.lower_type(field_type)
+            expect(lowering.errors.len()).to_equal(0)
+            expect(data_semantic_type_identity_valid_v1(lowering.data_type_identity_v1(lowered).unwrap())).to_equal(true)
+            var rejected = false
+            match lowering.data_bind_type_identity_v1(field_type):
+                case Err(message): rejected = message.contains("cannot admit Any")
+                case Ok(_): rejected = false
+            expect(rejected).to_equal(true)
+
+    it "rejects explicitly erased schema types without changing ordinary written-Any policy":
+        step("Schema admission cannot be enabled by an ordinary unsafe type-erasure capability")
+        var lowering = local_identity_lowerer_v1("")
+        lowering.written_any_unsafe_depth = 1
+        expect(type_binding_rejected_v1(lowering, "Any")).to_equal(true)
+        expect(type_binding_rejected_v1(lowering, "Dict<text, Any>")).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "rejects erased alias targets and defaults while admitting explicit concrete arguments":
+        step("Use parsed alias expansion and defaults from the canonical owner without spelling checks")
+        var lowering = local_identity_lowerer_v1("type Lost = [Q]\ntype Items<T = Q> = Dict<text, [T]>\n")
+        expect(type_binding_rejected_v1(lowering, "Lost")).to_equal(true)
+        expect(type_binding_rejected_v1(lowering, "Items")).to_equal(true)
+        expect(data_semantic_type_identity_equal_v1(bound_identity_v1(lowering, "Items<i64>"), bound_identity_v1(lowering, "Dict<text, [i64]>"))).to_equal(true)
+
+    it "admits declared nominal Q directly and through nested aliases":
+        step("A bound declaration wins over the ordinary single-letter erasure fallback")
+        var lowering = local_identity_lowerer_v1("pub class Q:\n    value: i64\ntype Items = Dict<text, [Q]>\n")
+        val direct = bound_identity_v1(lowering, "Q")
+        expect(data_semantic_type_identity_valid_v1(direct)).to_equal(true)
+        expect(data_semantic_type_identity_equal_v1(bound_identity_v1(lowering, "Items"), bound_identity_v1(lowering, "Dict<text, [Q]>"))).to_equal(true)
+
+    it "rejects Any in all projected semantic children while preserving transport and concrete controls":
+        step("The policy follows bounded HIR children and Throws effects, not serialized descriptor strings")
+        var lowering = local_identity_lowerer_v1("")
+        val erased = hir_identity_type_v1(HirTypeKind.Any)
+        val base = hir_identity_type_v1(HirTypeKind.Int(64, true))
+        val throws = Effect(kind: EffectKind.Throws(erased), span: Span.empty())
+        val forms = [HirTypeKind.Any, HirTypeKind.Array(erased, nil), HirTypeKind.Slice(erased),
+            HirTypeKind.Tuple([base, erased]), HirTypeKind.Union([base, erased]),
+            HirTypeKind.Dict(base, erased), HirTypeKind.Result(base, erased),
+            HirTypeKind.Ref(erased, false), HirTypeKind.Ptr(erased, true), HirTypeKind.Optional(erased),
+            HirTypeKind.Isolated(erased), HirTypeKind.Unique(erased), HirTypeKind.Shared(erased), HirTypeKind.Weak(erased),
+            HirTypeKind.Function([erased], base, []), HirTypeKind.Function([], erased, []),
+            HirTypeKind.Function([], base, [throws])]
+        for form in forms:
+            val value = hir_identity_type_v1(form)
+            expect(data_semantic_type_identity_valid_v1(lowering.data_type_identity_v1(value).unwrap())).to_equal(true)
+            var rejected = false
+            match lowering.data_concrete_type_identity_v1(value):
+                case Err(message): rejected = message.contains("cannot admit Any")
+                case Ok(_): rejected = false
+            expect(rejected).to_equal(true)
+        val concrete_throws = Effect(kind: EffectKind.Throws(base), span: Span.empty())
+        val concrete = hir_identity_type_v1(HirTypeKind.Function([base], base, [concrete_throws]))
+        expect(data_semantic_type_identity_equal_v1(lowering.data_type_identity_v1(concrete).unwrap(), lowering.data_concrete_type_identity_v1(concrete).unwrap())).to_equal(true)

@@ -197,6 +197,13 @@ pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+pub fn rt_tls_wire_from_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match args.first().and_then(Value::try_array_bytes) {
+        Some(bytes) => Ok(Value::text_from_bytes(bytes)),
+        None => Ok(Value::text(String::new())),
+    }
+}
+
 /// Assemble two bytes into a u16 (little-endian).
 ///
 /// Callable from Simple as: `bytes_to_u16_le(b0, b1)`
@@ -579,6 +586,13 @@ mod tests {
             Value::text("ok"),
             "valid UTF-8 stays plain text"
         );
+    }
+
+    #[test]
+    fn tls_wire_carrier_preserves_all_bytes() {
+        let all: Vec<u8> = (0..=255).collect();
+        let text = rt_tls_wire_from_bytes_fn(&[Value::byte_array(all.clone())]).unwrap();
+        assert_eq!(text.text_bytes_view(), Some(all.as_slice()));
     }
 
     #[test]

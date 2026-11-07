@@ -145,8 +145,8 @@ fn has_unresolved_simple_operand(instruction: &str) -> bool {
         });
 
     // `$N` is the LLVM operand reference the MIR lowering rewrites `{name}`
-    // into (mir/asm_operands.rs); the C sidecar cannot bind operands, so such
-    // a line is skipped here exactly like the `{name}` form was.
+    // into (mir/asm_operands.rs); the C sidecar cannot bind operands, so it
+    // must reject this line instead of silently turning it into a no-op.
     let has_llvm_operand_ref = instruction
         .char_indices()
         .any(|(i, c)| c == '$' && instruction[i + 1..].starts_with(|d: char| d.is_ascii_digit()));
@@ -158,9 +158,8 @@ fn has_unresolved_simple_operand(instruction: &str) -> bool {
         // Unresolved Simple asm operands leak as the Rust `{:?}` of the AST
         // operand node, e.g. `li t0, Identifier("mstatus_mie")` or
         // `csrr Integer(0), mhartid` (seen in the riscv/riscv32 baremetal startup
-        // blocks). These are never valid assembler tokens, and the host bootstrap
-        // binary never executes those baremetal blocks, so skip them instead of
-        // emitting invalid asm that fails the clang assemble step.
+        // blocks). These are never valid assembler tokens. Reject them instead
+        // of emitting invalid asm or silently omitting the instruction.
         || instruction.contains("Identifier(")
         || instruction.contains("Integer(")
 }
@@ -198,10 +197,11 @@ pub(crate) fn write_inline_asm_c_for_target(
         }
         for instruction in &block.instructions {
             if has_unresolved_simple_operand(instruction) {
-                code.push_str("        \"# skipped Simple asm with unresolved operands\\n\"\n");
-            } else {
-                code.push_str(&format!("        \"{}\\n\"\n", escape_c_asm_string(instruction)));
+                return Err(format!(
+                    "E-ASM-UNRESOLVED: native C sidecar cannot bind inline asm operand or directive `{instruction}`; use a supported constraint or LLVM backend"
+                ));
             }
+            code.push_str(&format!("        \"{}\\n\"\n", escape_c_asm_string(instruction)));
         }
         if use_intel_syntax {
             code.push_str("        \".att_syntax prefix\\n\"\n");

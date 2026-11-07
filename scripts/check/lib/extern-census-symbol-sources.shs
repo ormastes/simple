@@ -1,0 +1,88 @@
+#!/bin/sh
+# Symbol evidence acquisition for extern-backing-census.shs. Source this file.
+# A DLL export is provider evidence, never a substitute for the executable's
+# complete COFF symbol table. These functions do not execute the input binary.
+census_host_windows() {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) return 0;; *) return 1;; esac
+}
+
+census_select_binary() {
+  if [ -n "${SIMPLE_BIN:-}" ]; then printf '%s\n' "$SIMPLE_BIN"; return; fi
+  if census_host_windows; then
+    for census_candidate in \
+      "$1/bin/release/x86_64-pc-windows-msvc/simple.exe" \
+      "$1/bin/release/x86_64-pc-windows-gnu/simple.exe" \
+      "$1/bin/simple.exe"; do
+      if [ -x "$census_candidate" ]; then printf '%s\n' "$census_candidate"; return; fi
+    done
+    printf '%s\n' "$1/bin/simple.exe"
+  elif [ -x "$1/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
+    printf '%s\n' "$1/bin/release/x86_64-unknown-linux-gnu/simple"
+  else
+    printf '%s\n' "$1/bin/simple"
+  fi
+}
+
+census_collect_primary() {
+  census_binary=$1 census_output=$2 census_work=$3
+  census_nm=${EXTERN_CENSUS_NM:-nm}
+  census_floor=${EXTERN_CENSUS_BIN_SYM_FLOOR:-100}
+  case "$census_floor" in ''|*[!0-9]*)
+    echo 'ERROR — symbol floor must be an integer >= 100.' >&2; return 2;; esac
+  # Bound the decimal representation before shell arithmetic. An overflowing
+  # comparison returns an error, which must never become an admission.
+  if [ "${#census_floor}" -gt 9 ] || [ "$census_floor" -lt 100 ]; then
+    echo 'ERROR — symbol floor must be >= 100; non-vacuity cannot be disabled.' >&2; return 2
+  fi
+  [ -x "$census_binary" ] || { echo "ERROR — no binary at $census_binary" >&2; return 2; }
+  if census_host_windows; then
+    census_readobj=${EXTERN_CENSUS_READOBJ:-llvm-readobj}
+    if ! "$census_readobj" --file-headers "$census_binary" > "$census_work/primary-headers.txt" 2> "$census_work/primary-headers.err"; then
+      echo 'ERROR — Windows COFF symbol table metadata could not be read.' >&2; return 2
+    fi
+    if ! grep -q '^Format: COFF-' "$census_work/primary-headers.txt" ||
+       ! grep -Eq 'SymbolCount: [1-9][0-9]*$' "$census_work/primary-headers.txt" ||
+       ! grep -Eq 'PointerToSymbolTable: 0x0*[1-9A-Fa-f][0-9A-Fa-f]*$' "$census_work/primary-headers.txt" ||
+       ! grep -q 'IMAGE_FILE_EXECUTABLE_IMAGE' "$census_work/primary-headers.txt"; then
+      echo 'ERROR — Windows executable lacks a readable full COFF symbol table; exports are insufficient.' >&2; return 2
+    fi
+  fi
+  # Check the producer itself, not the final status of a pipeline. Partial
+  # stdout from a failing tool cannot admit a classification.
+  if ! "$census_nm" -a --defined-only "$census_binary" > "$census_work/primary-nm.txt" 2> "$census_work/primary-nm.err"; then
+    echo 'ERROR — full defined symbol-table acquisition failed.' >&2; return 2
+  fi
+  awk 'NF >= 2 {print $NF}' "$census_work/primary-nm.txt" | LC_ALL=C sort -u > "$census_output"
+  census_count=$(wc -l < "$census_output" | tr -d ' ')
+  if [ "$census_count" -lt "$census_floor" ]; then
+    echo "ERROR — $census_binary yielded $census_count defined symbol(s) (floor $census_floor); backing classification would be vacuous." >&2; return 2
+  fi
+}
+
+census_collect_system() {
+  census_output=$1 census_work=$2
+  if census_host_windows; then
+    CENSUS_SYSTEM_CLASS=windows_crt_export
+    census_readobj=${EXTERN_CENSUS_READOBJ:-llvm-readobj}
+    census_crt=${EXTERN_CENSUS_WINDOWS_CRT:-${SystemRoot:-${SYSTEMROOT:-C:/Windows}}/System32/ucrtbase.dll}
+    if [ ! -f "$census_crt" ] ||
+       ! "$census_readobj" --file-headers --coff-exports "$census_crt" > "$census_work/system-exports.txt" 2> "$census_work/system-exports.err"; then
+      echo "ERROR — Windows CRT export evidence unavailable: $census_crt" >&2; return 2
+    fi
+    if ! grep -q '^Format: COFF-' "$census_work/system-exports.txt" ||
+       ! grep -q 'IMAGE_FILE_DLL' "$census_work/system-exports.txt"; then
+      echo 'ERROR — Windows CRT provider is not a readable PE DLL.' >&2; return 2
+    fi
+    # Named exports only: ordinal-only exports cannot back a named extern.
+    sed -n 's/^  Name: \([A-Za-z_][A-Za-z0-9_]*\)\r\{0,1\}$/\1/p' "$census_work/system-exports.txt" | LC_ALL=C sort -u > "$census_output"
+    [ -s "$census_output" ] || { echo 'ERROR — no named Windows CRT exports were collected.' >&2; return 2; }
+  else
+    CENSUS_SYSTEM_CLASS=libc_libm
+    # Retain the existing Linux provider scope; other Unix provider discovery
+    # is a separate task. This branch is never used as a Windows fallback.
+    for census_library in libc.so.6 libm.so.6 libgcc_s.so.1 libpthread.so.0 libdl.so.2; do
+      [ ! -e "/lib/x86_64-linux-gnu/$census_library" ] ||
+        nm -D --defined-only "/lib/x86_64-linux-gnu/$census_library" 2>/dev/null | awk 'NF>=3{print $3}' | sed 's/@.*//'
+    done | LC_ALL=C sort -u > "$census_output"
+  fi
+}

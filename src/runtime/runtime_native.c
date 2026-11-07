@@ -10524,6 +10524,23 @@ int64_t rt_bytes_to_text(int64_t bytes_value) {
     return result;
 }
 
+/* TLS wire carrier: counted bytes, deliberately without UTF-8 repair. */
+int64_t rt_tls_wire_from_bytes(int64_t bytes_value) {
+    RtCoreArray* array = rt_core_as_array(bytes_value);
+    if (!array || !array->data || array->len <= 0) return rt_string_new(NULL, 0);
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
+    }
+    int64_t length = rt_array_bytes_validate(bytes_value);
+    if (length <= 0) return rt_string_new(NULL, 0);
+    uint8_t* narrowed = (uint8_t*)rt_observed_malloc_v1((size_t)length);
+    if (!narrowed) return rt_string_new(NULL, 0);
+    int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
+    int64_t result = copied > 0 ? rt_string_new(narrowed, (uint64_t)copied) : rt_string_new(NULL, 0);
+    free(narrowed);
+    return result;
+}
+
 int64_t rt_array_len(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? array->len : 0;
@@ -20894,6 +20911,13 @@ void rt_trap_unimplemented(const char *symbol) {
  * plus the legacy untagged id 0 used by pure-Simple MIR); older hashed
  * Result values are still matched by Ok/Err name hash. */
 int64_t rt_unwrap_or_trap(int64_t value) {
+    /* Flat nil is absent, just like boxed Option.None. Check before the
+     * non-enum passthrough so false, zero and present Char stay unchanged. */
+    if (value == rt_core_nil()) {
+        fprintf(stderr, "simple runtime: .unwrap() called on None\n");
+        fflush(stderr);
+        abort();
+    }
     int64_t enum_id = rt_enum_id(value);
     int64_t discriminant;
     if (enum_id < 0) return value;
