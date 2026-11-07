@@ -129,7 +129,6 @@ static int core_io_text_arg(int64_t value, char* buf, size_t buf_size) {
     buf[(size_t)len] = '\0';
     return 1;
 }
-
 /* Heap copy of a tagged text argument (for values too long for a stack
  * buffer, e.g. shell command lines). NULL on failure; caller frees. */
 static char* core_io_text_arg_dup(int64_t value) {
