@@ -1705,6 +1705,116 @@ fn find_stage4_nm_tool(target: simple_common::target::Target) -> Option<String> 
     None
 }
 
+/// Repair GNU PE/COFF `ld -r` output for source-level weak definitions.
+///
+/// GNU ld can reorder the fallback symbol while leaving a WeakExternal aux
+/// record's index unchanged.  LLD then follows the stale index (or crashes on
+/// an out-of-range one).  Resolve the compiler-generated `.weak.*.default.*`
+/// fallback by name and rewrite the aux index before objcopy sees the object.
+fn repair_coff_weak_fallback_indices(path: &Path) -> Result<(), String> {
+    use object::read::coff::{CoffFile, CoffHeader, ImageSymbol};
+
+    let mut bytes = std::fs::read(path)
+        .map_err(|err| format!("failed to read COFF closure {}: {err}", path.display()))?;
+    let coff: CoffFile<'_> = CoffFile::parse(&*bytes)
+        .map_err(|err| format!("failed to parse COFF closure {}: {err}", path.display()))?;
+    let table = coff.coff_symbol_table();
+    let strings = table.strings();
+    let mut named = Vec::new();
+    for (index, symbol) in table.iter() {
+        if let Ok(name) = symbol.name(strings) {
+            if let Ok(name) = std::str::from_utf8(name) {
+                named.push((index.0, name.to_string(), symbol.section_number()));
+            }
+        }
+    }
+    let mut repairs = Vec::new();
+    for (index, symbol) in table.iter() {
+        if symbol.storage_class() != object::pe::IMAGE_SYM_CLASS_WEAK_EXTERNAL
+            || symbol.number_of_aux_symbols() == 0
+            || symbol.section_number() > 0
+        {
+            continue;
+        }
+        let Ok(name) = symbol.name(strings) else { continue };
+        let Ok(name) = std::str::from_utf8(name) else { continue };
+        let prefix = format!(".weak.{name}.default.");
+        let matches: Vec<usize> = named
+            .iter()
+            .filter(|(_, candidate, section)| *section > 0 && candidate.starts_with(&prefix))
+            .map(|(candidate_index, _, _)| *candidate_index)
+            .collect();
+        match matches.as_slice() {
+            [fallback] => repairs.push((index.0 + 1, *fallback)),
+            [] => {}
+            _ => {
+                return Err(format!(
+                    "ambiguous COFF WeakExternal fallback for `{name}` in {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    let symbol_offset = coff.coff_header().pointer_to_symbol_table() as usize;
+    drop(coff);
+    for (aux_index, fallback_index) in repairs {
+        let offset = symbol_offset + aux_index * object::pe::IMAGE_SIZEOF_SYMBOL;
+        let end = offset + 4;
+        if end > bytes.len() {
+            return Err(format!("invalid COFF WeakExternal aux index in {}", path.display()));
+        }
+        bytes[offset..end].copy_from_slice(&(fallback_index as u32).to_le_bytes());
+    }
+    std::fs::write(path, bytes)
+        .map_err(|err| format!("failed to repair COFF closure {}: {err}", path.display()))
+}
+
+fn coff_defined_weak_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
+    use object::read::coff::{CoffFile, CoffHeader, ImageSymbol};
+
+    let bytes = std::fs::read(path)
+        .map_err(|err| format!("failed to read COFF object {}: {err}", path.display()))?;
+    let coff: CoffFile<'_> = CoffFile::parse(&*bytes)
+        .map_err(|err| format!("failed to parse COFF object {}: {err}", path.display()))?;
+    let table = coff.coff_symbol_table();
+    let strings = table.strings();
+    let primary_indices: BTreeSet<usize> = table.iter().map(|(index, _)| index.0).collect();
+    let section_count = coff.coff_header().number_of_sections() as i32;
+    let mut weak = BTreeSet::new();
+    for (index, symbol) in table.iter() {
+        if symbol.storage_class() != object::pe::IMAGE_SYM_CLASS_WEAK_EXTERNAL {
+            continue;
+        }
+        let defined = if (1..=section_count).contains(&symbol.section_number()) {
+            true
+        } else if symbol.number_of_aux_symbols() > 0 {
+            let aux = table
+                .get::<object::pe::ImageAuxSymbolWeak>(index, 1)
+                .map_err(|err| format!("invalid COFF WeakExternal aux record: {err}"))?;
+            let fallback_index = aux.weak_default_sym_index.get(object::LittleEndian) as usize;
+            if !primary_indices.contains(&fallback_index) {
+                return Err(format!(
+                    "COFF WeakExternal fallback index {fallback_index} is not a primary symbol"
+                ));
+            }
+            let fallback = table
+                .symbol(object::SymbolIndex(fallback_index))
+                .map_err(|err| format!("invalid COFF WeakExternal fallback: {err}"))?;
+            (1..=section_count).contains(&fallback.section_number())
+        } else {
+            false
+        };
+        if defined {
+            if let Ok(name) = symbol.name(strings) {
+                if let Ok(name) = std::str::from_utf8(name) {
+                    weak.insert(name.to_string());
+                }
+            }
+        }
+    }
+    Ok(weak)
+}
+
 fn canonical_archive_symbol(symbol: &str) -> &str {
     #[cfg(target_os = "macos")]
     {
@@ -3308,6 +3418,12 @@ fn project_stage4_archive_closure(
             ));
         }
 
+        if target.os == simple_common::target::TargetOS::Windows
+            && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+        {
+            repair_coff_weak_fallback_indices(&closure_object)?;
+        }
+
         reject_partial_link_tombstones(&closure_object, "Stage4 runtime capsule")?;
         let (closure_defined, closure_undefined) = archive_global_symbols(&closure_object)?;
         for symbol in &requested {
@@ -3432,7 +3548,12 @@ fn project_stage4_archive_closure(
         {
             return Err("no GNU nm was found for the Stage4 Windows GNU runtime capsule".to_string());
         }
-        let localized_weak = archive_weak_global_symbols_with_nm(&localized_object, stage4_nm.as_deref())?;
+        let mut localized_weak = archive_weak_global_symbols_with_nm(&localized_object, stage4_nm.as_deref())?;
+        if target.os == simple_common::target::TargetOS::Windows
+            && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+        {
+            localized_weak.extend(coff_defined_weak_symbols(&localized_object)?);
+        }
         let strong_external: Vec<&str> = localized_defined
             .keys()
             .filter(|raw| allowed_external.contains(canonical_archive_symbol(raw)))
@@ -5099,6 +5220,70 @@ mod llvm_tool_policy_tests {
         // The command is rendered with Debug formatting, which escapes Windows
         // path separators; compare against the same rendering.
         assert!(error.contains(&format!("{missing:?}")), "{error}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn coff_weak_fallback_repair_distinguishes_defined_and_unresolved_aliases() {
+        use object::read::coff::{CoffFile, CoffHeader, ImageSymbol};
+
+        let directory = tempfile::tempdir().unwrap();
+        let defined = directory.path().join("defined.c");
+        let defined_object = directory.path().join("defined.o");
+        std::fs::write(
+            &defined,
+            "__attribute__((weak)) int owner(void) { return 1; }\nint root(void) { return owner(); }\n",
+        )
+        .unwrap();
+        let compile = std::process::Command::new("clang")
+            .args(["--target=x86_64-w64-windows-gnu", "-c"])
+            .arg(&defined)
+            .arg("-o")
+            .arg(&defined_object)
+            .output()
+            .unwrap();
+        assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+        assert!(super::coff_defined_weak_symbols(&defined_object).unwrap().contains("owner"));
+
+        let mut bytes = std::fs::read(&defined_object).unwrap();
+        let coff: CoffFile<'_> = CoffFile::parse(&*bytes).unwrap();
+        let table = coff.coff_symbol_table();
+        let strings = table.strings();
+        let weak_index = table
+            .iter()
+            .find_map(|(index, symbol)| {
+                (symbol.storage_class() == object::pe::IMAGE_SYM_CLASS_WEAK_EXTERNAL
+                    && symbol.name(strings).ok() == Some(b"owner"))
+                .then_some(index.0)
+            })
+            .unwrap();
+        let symbol_offset = coff.coff_header().pointer_to_symbol_table() as usize;
+        drop(coff);
+        let aux_offset = symbol_offset + (weak_index + 1) * object::pe::IMAGE_SIZEOF_SYMBOL;
+        bytes[aux_offset..aux_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&defined_object, bytes).unwrap();
+        assert!(super::coff_defined_weak_symbols(&defined_object).is_err());
+        super::repair_coff_weak_fallback_indices(&defined_object).unwrap();
+        assert!(super::coff_defined_weak_symbols(&defined_object).unwrap().contains("owner"));
+
+        let unresolved = directory.path().join("unresolved.c");
+        let unresolved_object = directory.path().join("unresolved.o");
+        std::fs::write(
+            &unresolved,
+            "extern int missing(void) __attribute__((weak));\nint root(void) { return missing ? missing() : 0; }\n",
+        )
+        .unwrap();
+        let compile = std::process::Command::new("clang")
+            .args(["--target=x86_64-w64-windows-gnu", "-c"])
+            .arg(&unresolved)
+            .arg("-o")
+            .arg(&unresolved_object)
+            .output()
+            .unwrap();
+        assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+        assert!(!super::coff_defined_weak_symbols(&unresolved_object)
+            .unwrap()
+            .contains("missing"));
     }
 
     #[cfg(unix)]
