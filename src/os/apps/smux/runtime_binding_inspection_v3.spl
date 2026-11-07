@@ -1,0 +1,212 @@
+# Reconciliation never opens another transport. Adopted panes remain the sole
+# reader and cleanup owner; host settlement requires durable native evidence.
+use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingOwnerV3, SmuxRuntimeBindingTurnV3,
+    SmuxRuntimeBindingEntryV3, smux_runtime_binding_index_v3, smux_runtime_binding_reply_turn_v3,
+    smux_runtime_binding_prune_released_v3}
+use os.apps.smux.runtime_binding_reply_v3.SmuxRuntimeBindingReplyV3
+use os.apps.smux.runtime_binding_store_v3.{smux_binding_request_load_v3,
+    smux_binding_plan_load_v3, smux_binding_receipt_load_v3}
+use os.apps.smux.api.{smux_owner_snapshot, smux_configuration_revision,
+    smux_pane_acknowledge_owned_terminal_settlement_v3}
+use std.nogc_sync_mut.orchestration.host_helper_settlement_v1.{host_helper_recover_output_v1,
+    host_helper_settle_output_v1, host_helper_settle_recovered_output_v1}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_execution_proof_load_typed_v1, host_helper_request_load_v1}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.sosix.process.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2,
+    sosix_process_cleanup_piped_owned_v2}
+
+fn inspect_absent_v3(owner: SmuxRuntimeBindingOwnerV3, uid: text,
+        status: text, reason: text) -> SmuxRuntimeBindingTurnV3:
+    val reply = SmuxRuntimeBindingReplyV3(binding_uid: uid, service_incarnation: owner.service_incarnation,
+        binding_digest: "", workload_operation_id: "", helper_operation_id: "", request_digest: "",
+        status: status, code: reason, committed: false, stream_owned: false,
+        cleanup_retained: false, host_release_pending: false)
+    smux_runtime_binding_reply_turn_v3(owner, reply)
+
+fn inspect_remember_v3(owner: SmuxRuntimeBindingOwnerV3,
+        index: int, entry: SmuxRuntimeBindingEntryV3) -> SmuxRuntimeBindingTurnV3:
+    var current = owner
+    current.entries[index] = entry
+    smux_runtime_binding_reply_turn_v3(current, entry.reply)
+
+fn binding_native_v3(entry: SmuxRuntimeBindingEntryV3) -> GroupProcessStreamOwnerV2?:
+    if entry.recovered != nil: return Some(entry.recovered.unwrap().stream_owner)
+    if entry.retained == nil: return nil
+    match entry.retained.unwrap().spawn:
+        case PipedProcessOwnedSpawnV2.Ready(native, _): Some(native)
+        case PipedProcessOwnedSpawnV2.CleanupRequired(native, _, _): Some(native)
+        case PipedProcessOwnedSpawnV2.Rejected(_): nil
+
+fn binding_transfer_v3(entry: SmuxRuntimeBindingEntryV3) -> PipedProcessOwnedTransferV2?:
+    if entry.retained == nil: return nil
+    match entry.retained.unwrap().spawn:
+        case PipedProcessOwnedSpawnV2.Ready(native, reference):
+            Some(PipedProcessOwnedTransferV2(native, reference))
+        case _: nil
+
+fn binding_cleanup_unadopted_v3(entry: SmuxRuntimeBindingEntryV3) -> Result<(), text>:
+    if entry.native_cleaned: return Ok(())
+    if entry.adopted: return Err("runtime-binding-pane-owns-cleanup")
+    if entry.recovered != nil:
+        return sosix_process_cleanup_piped_owned_v2(entry.recovered.unwrap().stream_owner, nil)
+    if entry.retained == nil: return Err("runtime-binding-cleanup-owner-unavailable")
+    match entry.retained.unwrap().spawn:
+        case PipedProcessOwnedSpawnV2.Ready(native, reference):
+            sosix_process_cleanup_piped_owned_v2(native, Some(reference))
+        case PipedProcessOwnedSpawnV2.CleanupRequired(native, reference, _):
+            sosix_process_cleanup_piped_owned_v2(native, reference)
+        case PipedProcessOwnedSpawnV2.Rejected(_): Err("runtime-binding-absence-reconciliation-required")
+
+fn binding_inspect_entry_v3(owner: SmuxRuntimeBindingOwnerV3, index: int) -> SmuxRuntimeBindingTurnV3:
+    var current = owner
+    var entry = current.entries[index]
+    if entry.reply.status == "released": return smux_runtime_binding_reply_turn_v3(current, entry.reply)
+    val native = binding_native_v3(entry)
+    if native == nil:
+        entry.reply.status = "unconfirmed"
+        entry.reply.code = "runtime-binding-cleanup-owner-unavailable"
+        return inspect_remember_v3(current, index, entry)
+    if entry.adopted:
+        val transfer = binding_transfer_v3(entry)
+        val snapshot = smux_owner_snapshot()
+        val pi = snapshot.find_pane_idx(entry.request.pane_id)
+        if transfer == nil or pi < 0:
+            entry.reply.status = "unconfirmed"
+            entry.reply.code = "runtime-binding-pane-owner-missing"
+            return inspect_remember_v3(current, index, entry)
+        val pane = snapshot.get_pane(pi)
+        if (pane.pane.session_id != entry.request.session_id or pane.pane.window_id != entry.request.window_id or
+                not pane.same_owned_terminal_transfer(transfer)):
+            entry.reply.status = "unconfirmed"
+            entry.reply.code = "runtime-binding-pane-owner-mismatch"
+            return inspect_remember_v3(current, index, entry)
+        if not pane.helper_cleaned_awaiting_release:
+            # Inspection neither consumes output nor cancels an adopted helper.
+            return smux_runtime_binding_reply_turn_v3(current, entry.reply)
+        entry.native_cleaned = true
+    else:
+        val cleaned = binding_cleanup_unadopted_v3(entry)
+        if cleaned.is_err():
+            entry.reply.code = "runtime-binding-cleanup-unconfirmed"
+            return inspect_remember_v3(current, index, entry)
+        entry.native_cleaned = true
+    entry.reply.status = "helper-cleaned-awaiting-release"
+    entry.reply.code = "helper-cleaned-host-release-pending"
+    entry.reply.stream_owned = false
+    entry.reply.cleanup_retained = true
+    entry.reply.host_release_pending = true
+    if entry.settlement_ack == nil:
+        if entry.recovered != nil:
+            val settled = host_helper_settle_recovered_output_v1(current.local.capacity, entry.recovered.unwrap())
+            current.local.capacity = settled.owner
+            if settled.settled and settled.ack != nil: entry.settlement_ack = settled.ack
+        elif entry.retained != nil:
+            val settled = host_helper_settle_output_v1(current.local.capacity, entry.retained.unwrap())
+            current.local.capacity = settled.owner
+            if settled.settled and settled.ack != nil: entry.settlement_ack = settled.ack
+    if entry.settlement_ack == nil: return inspect_remember_v3(current, index, entry)
+    val ack = entry.settlement_ack.unwrap()
+    if (ack.operation_id != entry.request.helper_operation_id or ack.request_digest != entry.plan.request_digest or
+            ack.native_identity_digest != native.unwrap().identity_digest):
+        entry.reply.code = "runtime-binding-settlement-correlation-failed"
+        return inspect_remember_v3(current, index, entry)
+    if entry.adopted:
+        val snapshot = smux_owner_snapshot()
+        val clock = smux_configuration_revision()
+        val pi = snapshot.find_pane_idx(entry.request.pane_id)
+        if pi < 0: return inspect_remember_v3(current, index, entry)
+        val published = smux_pane_acknowledge_owned_terminal_settlement_v3(entry.request.session_id,
+            entry.request.window_id, entry.request.pane_id, clock.epoch, clock.value,
+            snapshot.get_pane(pi).child_incarnation, binding_transfer_v3(entry).unwrap(),
+            entry.request.helper_operation_id, entry.plan.request_digest, ack)
+        if published.is_err() or not published.unwrap(): return inspect_remember_v3(current, index, entry)
+    entry.retained = nil
+    entry.recovered = nil
+    entry.adopted = false
+    entry.reply.status = "released"
+    entry.reply.code = "helper-host-settlement-acknowledged"
+    entry.reply.cleanup_retained = false
+    entry.reply.host_release_pending = false
+    inspect_remember_v3(current, index, entry)
+
+pub fn smux_runtime_binding_inspect_v3(owner: SmuxRuntimeBindingOwnerV3,
+        binding_uid: text) -> SmuxRuntimeBindingTurnV3:
+    var current = owner
+    val index = smux_runtime_binding_index_v3(current, binding_uid)
+    if index >= 0: return binding_inspect_entry_v3(current, index)
+    val root = current.local.capacity.journal.root
+    val request = smux_binding_request_load_v3(root, binding_uid)
+    if request.is_err(): return inspect_absent_v3(current, binding_uid, "not-found", "runtime-binding-record-unavailable")
+    val planned = smux_binding_plan_load_v3(root, request.unwrap())
+    if planned.is_err(): return inspect_absent_v3(current, binding_uid, "unconfirmed", "runtime-binding-plan-unavailable")
+    var reply = planned.unwrap()
+    val recorded = smux_binding_receipt_load_v3(root, request.unwrap())
+    if recorded.is_err(): return inspect_absent_v3(current, binding_uid, "unconfirmed", "runtime-binding-receipt-unavailable")
+    if recorded.unwrap() != nil: reply = recorded.unwrap().unwrap()
+    # A plan without a result may hide a crash after journal begin. Recovery
+    # inspects the protected consumption archive; it never issues another lease.
+    val recovered = host_helper_recover_output_v1(current.local.capacity, request.unwrap().helper_operation_id)
+    current.local.capacity = recovered.owner
+    if recovered.recovered == nil:
+        val helper_id = request.unwrap().helper_operation_id
+        var begun = false
+        if current.local.capacity.journal.operations.contains_key(helper_id):
+            begun = true
+            val helper = host_helper_request_load_v1(root, helper_id)
+            if helper.is_ok():
+                val exact = daemon_operation_exact_v2(current.local.capacity.journal, helper.unwrap().operation)
+                if (exact.is_ok() and exact.unwrap().state == "admitted" and
+                        helper.unwrap().plan.request_digest == planned.unwrap().request_digest and
+                        helper.unwrap().plan.parent_operation_id == request.unwrap().workload_operation_id and
+                        helper.unwrap().plan.parent_budget_digest == request.unwrap().parent_budget_digest):
+                    begun = false
+                    reply.status = "helper-prepared"
+                    reply.code = "helper-reservation-retained-no-transport"
+                    reply.host_release_pending = true
+        if recorded.unwrap() != nil or begun:
+            reply.status = "unconfirmed"
+            reply.code = "runtime-binding-recovery-unconfirmed"
+            reply.stream_owned = false
+            reply.host_release_pending = true
+            if not current.unresolved_uids.contains(binding_uid): current.unresolved_uids.push(binding_uid)
+        return smux_runtime_binding_reply_turn_v3(current, reply)
+    current = smux_runtime_binding_prune_released_v3(current)
+    if current.entries.len() >= 8:
+        if not current.unresolved_uids.contains(binding_uid): current.unresolved_uids.push(binding_uid)
+        reply.status = "unconfirmed"
+        reply.code = "runtime-binding-recovery-capacity"
+        reply.stream_owned = false
+        return smux_runtime_binding_reply_turn_v3(current, reply)
+    val restored = recovered.recovered.unwrap()
+    if (restored.output_plan.request_digest != planned.unwrap().request_digest or
+            restored.output_plan.identity.binding_digest != planned.unwrap().binding_digest or
+            restored.operation.id != request.unwrap().helper_operation_id):
+        reply.status = "unconfirmed"
+        reply.code = "runtime-binding-recovery-correlation-failed"
+        reply.stream_owned = false
+        if not current.unresolved_uids.contains(binding_uid): current.unresolved_uids.push(binding_uid)
+        return smux_runtime_binding_reply_turn_v3(current, reply)
+    val proof = host_helper_execution_proof_load_typed_v1(root, restored.operation.id)
+    if proof.is_err():
+        reply.status = "unconfirmed"
+        reply.code = "runtime-binding-retained-proof-unavailable"
+        reply.stream_owned = false
+        if not current.unresolved_uids.contains(binding_uid): current.unresolved_uids.push(binding_uid)
+        return smux_runtime_binding_reply_turn_v3(current, reply)
+    reply.committed = true
+    reply.helper_grant_id = proof.unwrap().signed.grant.id
+    reply.helper_issuer_id = proof.unwrap().signed.issuer_id
+    reply.helper_approver_id = proof.unwrap().approval.approver_id
+    reply.status = "cleanup-required"
+    reply.code = "runtime-binding-cleanup-only-recovery"
+    reply.stream_owned = false
+    reply.cleanup_retained = true
+    reply.host_release_pending = true
+    current.entries.push(SmuxRuntimeBindingEntryV3(request: request.unwrap(), plan: restored.output_plan,
+        reply: reply, recovered: Some(restored)))
+    var pending: [text] = []
+    for uid in current.unresolved_uids:
+        if uid != binding_uid: pending.push(uid)
+    current.unresolved_uids = pending
+    binding_inspect_entry_v3(current, current.entries.len() - 1)

@@ -1,0 +1,45 @@
+# Trusted metadata transition only. The typed ACK comes from actual host
+# settlement; no decoder, native cleanup, grant verification or receipt minting
+# occurs here. API owns the sole publication of the returned state.
+use os.apps.smux.service.ServiceState
+use os.apps.smux.service_revision.ServiceRevisionState
+use std.sosix.process.PipedProcessOwnedTransferV2
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.nogc_sync_mut.orchestration.host_helper_settlement_v1.HostHelperSettlementAckV1
+
+pub fn terminal_transport_settle_owned_v3(before: ServiceState, clock: ServiceRevisionState,
+        session_id: text, window_id: text, pane_id: text,
+        expected_epoch: u64, expected_revision: u64, expected_child_incarnation: u64,
+        expected: PipedProcessOwnedTransferV2, helper_operation_id: text, request_digest: text,
+        ack: HostHelperSettlementAckV1) -> Result<ServiceState, text>:
+    if (clock.epoch == 0 or clock.value == 0 or clock.epoch != expected_epoch or
+            clock.value != expected_revision): return Err("terminal settlement configuration changed")
+    val si = before.find_session_idx(session_id)
+    val wi = before.find_window_idx(window_id)
+    val pi = before.find_pane_idx(pane_id)
+    if si < 0 or wi < 0 or pi < 0: return Err("unknown terminal settlement target")
+    var pane = before.get_pane(pi)
+    if (before.get_window(wi).session_id != session_id or pane.pane.session_id != session_id or
+            pane.pane.window_id != window_id): return Err("foreign terminal settlement target")
+    if pane.child_incarnation != expected_child_incarnation: return Err("terminal settlement incarnation changed")
+    if (not pane.helper_cleaned_awaiting_release or not pane.same_owned_terminal_transfer(expected) or
+            not pane.same_terminal_ref(expected.reference) or pane.pty_fd >= 0 or
+            pane.child_pid != expected.reference.pid):
+        return Err("terminal settlement retained owner mismatch")
+    if (not builder_identifier_valid_v1(helper_operation_id) or not builder_digest_valid_v1(request_digest) or
+            expected.owner.launch.worker_id != helper_operation_id or ack.operation_id != helper_operation_id or
+            ack.request_digest != request_digest or ack.native_identity_digest != expected.owner.identity_digest):
+        return Err("terminal settlement acknowledgement mismatch")
+    for digest in [ack.request_digest, ack.prepared_receipt_digest, ack.native_identity_digest,
+            ack.tree_receipt_digest, ack.outcome_digest, ack.journal_revision]:
+        if not builder_digest_valid_v1(digest): return Err("terminal settlement acknowledgement digest invalid")
+    if ack.journal_sequence <= 0:
+        return Err("terminal settlement acknowledgement journal invalid")
+    # Deliberately bypass generic replacement helpers: those refuse owned
+    # authority, while this verified transition must preserve bytes and child
+    # incarnation. A later adoption advances incarnation in its existing path.
+    pane.owned_terminal_transfer = nil
+    pane.terminal_ref = nil
+    pane.helper_cleaned_awaiting_release = false
+    pane.child_pid = -1
+    Ok(before.replace_pane(pi, pane))

@@ -1,0 +1,94 @@
+# Pure production-code imports. AUTHORED_UNRUN; no socket or process evidence.
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.sha256_text
+use std.common.base_encoding.base64.base64url_encode
+use os.apps.smux.runtime_binding_request_v3.{SmuxRuntimeBindRequestV3,
+    smux_runtime_bind_request_encode_v3, smux_runtime_bind_request_decode_v3,
+    smux_runtime_bind_request_token_v3, smux_runtime_bind_request_from_token_v3,
+    smux_runtime_bind_request_digest_v3}
+use os.apps.smux.runtime_binding_target_v3.{smux_runtime_target_v3, smux_runtime_target_encode_v3,
+    smux_runtime_target_decode_v3}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
+use os.apps.smux.service_revision.service_revision_new
+
+fn bind_request_fixture_v3() -> SmuxRuntimeBindRequestV3:
+    SmuxRuntimeBindRequestV3(binding_uid: "bind-a", workload_operation_id: "workload-a",
+        helper_operation_id: "helper-a", parent_budget_digest: "a".repeat(64),
+        service_incarnation: "b".repeat(32), session_id: "s", window_id: "w", pane_id: "p",
+        expected_epoch: 1u64, expected_revision: 9223372036854775808u64,
+        expected_child_incarnation: 18446744073709551615u64)
+
+fn bind_target_fixture_v3() -> ServiceState:
+    var state = ServiceState.empty()
+    state = state.add_session(MuxSession.create("s", "target"))
+    state = state.add_window(MuxWindow.create("w", "s", "target"))
+    state.add_pane(PaneRecord.create(MuxPane.create("p", "w", "s")))
+
+describe "immutable smux runtime binding request":
+    it "round trips full-width unsigned fences and uses one canonical digest":
+        step("Encode the exact request and retain unsigned revision and child fences")
+        val request = bind_request_fixture_v3()
+        val bytes = smux_runtime_bind_request_encode_v3(request).unwrap()
+        val decoded = smux_runtime_bind_request_decode_v3(bytes).unwrap()
+        expect(decoded.expected_revision).to_equal(9223372036854775808u64)
+        expect(decoded.expected_child_incarnation).to_equal(18446744073709551615u64)
+        expect(smux_runtime_bind_request_digest_v3(request).unwrap()).to_equal(sha256_text(bytes))
+        val token = smux_runtime_bind_request_token_v3(request).unwrap()
+        expect(smux_runtime_bind_request_from_token_v3(token).unwrap().binding_uid).to_equal("bind-a")
+
+    it "rejects noncanonical and unbounded textual envelopes":
+        step("Reject padding whitespace extra source and oversized decoded requests")
+        val request = bind_request_fixture_v3()
+        val bytes = smux_runtime_bind_request_encode_v3(request).unwrap()
+        val token = smux_runtime_bind_request_token_v3(request).unwrap()
+        for bad in [token + "=", " " + token, token + "\n", "a".repeat(2732)]:
+            expect(smux_runtime_bind_request_from_token_v3(bad).is_err()).to_equal(true)
+        expect(smux_runtime_bind_request_decode_v3(bytes + "\n").is_err()).to_equal(true)
+        expect(smux_runtime_bind_request_from_token_v3(base64url_encode("x".repeat(2049))).is_err()).to_equal(true)
+
+    it "rejects caller selected roots grants and malformed identities":
+        step("Reject extra authority fields and invalid immutable request identities")
+        val bytes = smux_runtime_bind_request_encode_v3(bind_request_fixture_v3()).unwrap()
+        for extra in ["root: /caller/root\n", "argv: []\n", "grant: forged\n"]:
+            expect(smux_runtime_bind_request_decode_v3(bytes + extra).is_err()).to_equal(true)
+        var request = bind_request_fixture_v3()
+        request.service_incarnation = "B".repeat(32)
+        expect(smux_runtime_bind_request_encode_v3(request).is_err()).to_equal(true)
+        request = bind_request_fixture_v3()
+        request.parent_budget_digest = "f".repeat(63)
+        expect(smux_runtime_bind_request_encode_v3(request).is_err()).to_equal(true)
+        request = bind_request_fixture_v3()
+        request.helper_operation_id = request.workload_operation_id
+        expect(smux_runtime_bind_request_encode_v3(request).is_err()).to_equal(true)
+        request = bind_request_fixture_v3()
+        request.expected_epoch = 0u64
+        expect(smux_runtime_bind_request_encode_v3(request).is_err()).to_equal(true)
+        request = bind_request_fixture_v3()
+        request.expected_revision = 0u64
+        expect(smux_runtime_bind_request_encode_v3(request).is_err()).to_equal(true)
+
+    it "inspects exact target ancestry and refuses closing or exhausted targets":
+        step("Expose only the exact current target with attachable incarnation capacity")
+        val state = bind_target_fixture_v3()
+        val clock = service_revision_new()
+        val incarnation = "b".repeat(32)
+        val target = smux_runtime_target_v3(state, clock, false, incarnation, "s", "w", "p").unwrap()
+        expect(target.vacant).to_equal(true)
+        expect(target.epoch).to_equal(clock.epoch)
+        expect(target.child_incarnation).to_equal(state.get_pane(0).child_incarnation)
+        val bytes = smux_runtime_target_encode_v3(target)
+        expect(smux_runtime_target_decode_v3(bytes).is_ok()).to_equal(true)
+        expect(smux_runtime_target_decode_v3(bytes + "\n").is_ok()).to_equal(true)
+        expect(smux_runtime_target_decode_v3(bytes + "\n\n").is_err()).to_equal(true)
+        expect(smux_runtime_target_decode_v3(bytes + "trailing").is_err()).to_equal(true)
+        expect(smux_runtime_target_v3(state, clock, true, incarnation, "s", "w", "p").is_err()).to_equal(true)
+        expect(smux_runtime_target_v3(state, clock, false, incarnation, "s", "missing", "p").is_err()).to_equal(true)
+        var pane = state.get_pane(0)
+        pane.child_incarnation = 18446744073709551615u64
+        val exhausted = state.replace_pane(0, pane)
+        expect(smux_runtime_target_v3(exhausted, clock, false, incarnation, "s", "w", "p").unwrap().vacant).to_equal(false)
+        pane = state.get_pane(0)
+        pane.helper_cleaned_awaiting_release = true
+        expect(smux_runtime_target_v3(state.replace_pane(0, pane), clock, false,
+            incarnation, "s", "w", "p").unwrap().vacant).to_equal(false)

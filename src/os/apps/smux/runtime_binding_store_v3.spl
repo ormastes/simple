@@ -1,0 +1,120 @@
+# Companion artifacts for the existing host/helper operation journal. These
+# records never admit an operation, release capacity or restore a byte handle.
+use os.apps.smux.runtime_binding_request_v3.{SmuxRuntimeBindRequestV3,
+    smux_runtime_bind_request_encode_v3, smux_runtime_bind_request_decode_v3, smux_runtime_bind_request_digest_v3}
+use os.apps.smux.runtime_binding_reply_v3.{SmuxRuntimeBindingReplyV3,
+    smux_runtime_binding_reply_encode_v3, smux_runtime_binding_reply_decode_v3}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded,
+    file_fsync, directory_fsync, secure_temp_dir, file_create_exclusive,
+    file_publish_noreplace}
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.stream_v2.{ContainerOutputPlanV2,
+    container_output_plan_encode_v2, container_output_plan_decode_v2}
+
+fn binding_artifact_path_v3(root: text, category: text, uid: text) -> Result<text, text>:
+    if not builder_identifier_valid_v1(uid): return Err("binding-artifact-uid-invalid")
+    Ok(root + "/smux-binding-" + category + "/" + sha256_text(uid) + ".sdn")
+
+fn binding_artifact_store_v3(root: text, category: text, uid: text, bytes: text,
+        maximum: i64 = 16384) -> Result<(), text>:
+    val path = binding_artifact_path_v3(root, category, uid)?
+    if bytes.bytes().len() == 0 or bytes.bytes().len() > maximum: return Err("binding-artifact-size")
+    val directory = root + "/smux-binding-" + category
+    if not file_exists(directory) and not dir_create(directory, true): return Err("binding-artifact-directory")
+    if file_exists(path):
+        if file_read_regular_no_follow_bounded(path, maximum)? != bytes: return Err("binding-artifact-conflict")
+    else:
+        # Protected HostLocalRoot journal ownership is still mandatory. Atomic
+        # no-replace publication additionally prevents accidental overwrite by
+        # a competing writer between existence check and publication.
+        val stage = secure_temp_dir(directory, ".binding-stage")?
+        val staged = stage + "/record.sdn"
+        if not file_create_exclusive(staged, bytes): return Err("binding-artifact-write")
+        if not file_set_mode(staged, 0o600) or file_mode_bits(staged) != 0o600: return Err("binding-artifact-mode")
+        if file_read_regular_no_follow_bounded(staged, maximum)? != bytes: return Err("binding-artifact-stage-readback")
+        if not file_fsync(staged) or not directory_fsync(stage): return Err("binding-artifact-stage-sync")
+        val _published = file_publish_noreplace(staged, path)?
+        val removed = dir_remove(stage, true)
+        if not removed: return Err("binding-artifact-stage-cleanup")
+    if file_read_regular_no_follow_bounded(path, maximum)? != bytes: return Err("binding-artifact-readback")
+    if file_mode_bits(path) != 0o600: return Err("binding-artifact-mode")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root):
+        return Err("binding-artifact-sync")
+    Ok(())
+
+pub fn smux_binding_record_matches_v3(request: SmuxRuntimeBindRequestV3,
+        reply: SmuxRuntimeBindingReplyV3) -> bool:
+    val digest = smux_runtime_bind_request_digest_v3(request)
+    if digest.is_err(): return false
+    (reply.binding_uid == request.binding_uid and reply.binding_digest == digest.unwrap() and
+        reply.service_incarnation == request.service_incarnation and
+        reply.workload_operation_id == request.workload_operation_id and
+        reply.helper_operation_id == request.helper_operation_id)
+
+pub fn smux_binding_request_store_v3(root: text, request: SmuxRuntimeBindRequestV3) -> Result<(), text>:
+    binding_artifact_store_v3(root, "requests", request.binding_uid, smux_runtime_bind_request_encode_v3(request)?)
+
+pub fn smux_binding_request_load_v3(root: text, uid: text) -> Result<SmuxRuntimeBindRequestV3, text>:
+    val bytes = file_read_regular_no_follow_bounded(binding_artifact_path_v3(root, "requests", uid)?, 2048)?
+    val request = smux_runtime_bind_request_decode_v3(bytes)?
+    if request.binding_uid != uid: return Err("binding-artifact-uid-mismatch")
+    Ok(request)
+
+pub fn smux_binding_plan_store_v3(root: text, request: SmuxRuntimeBindRequestV3,
+        reply: SmuxRuntimeBindingReplyV3) -> Result<(), text>:
+    if reply.status != "planned" or not smux_binding_record_matches_v3(request, reply):
+        return Err("binding-plan-correlation")
+    smux_binding_request_store_v3(root, request)?
+    binding_artifact_store_v3(root, "plans", request.binding_uid, smux_runtime_binding_reply_encode_v3(reply)?)
+
+pub fn smux_binding_plan_load_v3(root: text, request: SmuxRuntimeBindRequestV3) -> Result<SmuxRuntimeBindingReplyV3, text>:
+    val retained = smux_binding_request_load_v3(root, request.binding_uid)?
+    if smux_runtime_bind_request_encode_v3(retained)? != smux_runtime_bind_request_encode_v3(request)?:
+        return Err("binding-request-replay-conflict")
+    val bytes = file_read_regular_no_follow_bounded(binding_artifact_path_v3(root, "plans", request.binding_uid)?, 4096)?
+    val reply = smux_runtime_binding_reply_decode_v3(bytes)?
+    if reply.status != "planned" or not smux_binding_record_matches_v3(request, reply):
+        return Err("binding-plan-correlation")
+    Ok(reply)
+
+pub fn smux_binding_receipt_store_v3(root: text, request: SmuxRuntimeBindRequestV3,
+        reply: SmuxRuntimeBindingReplyV3) -> Result<(), text>:
+    val plan = smux_binding_plan_load_v3(root, request)?
+    if (reply.status == "planned" or not smux_binding_record_matches_v3(request, reply) or
+            reply.request_digest != plan.request_digest): return Err("binding-receipt-correlation")
+    binding_artifact_store_v3(root, "receipts", request.binding_uid, smux_runtime_binding_reply_encode_v3(reply)?)
+
+pub fn smux_binding_receipt_load_v3(root: text, request: SmuxRuntimeBindRequestV3) -> Result<SmuxRuntimeBindingReplyV3?, text>:
+    val plan = smux_binding_plan_load_v3(root, request)?
+    val path = binding_artifact_path_v3(root, "receipts", request.binding_uid)?
+    if not file_exists(path): return Ok(nil)
+    val reply = smux_runtime_binding_reply_decode_v3(file_read_regular_no_follow_bounded(path, 4096)?)?
+    if (reply.status == "planned" or not smux_binding_record_matches_v3(request, reply) or
+            reply.request_digest != plan.request_digest): return Err("binding-receipt-correlation")
+    Ok(Some(reply))
+
+# The authority reads these canonical planning bytes through its configured
+# protected root. A digest-only response never substitutes for the signed plan.
+pub fn smux_binding_output_plan_store_v3(root: text, request: SmuxRuntimeBindRequestV3,
+        plan: ContainerOutputPlanV2) -> Result<(), text>:
+    val retained = smux_binding_plan_load_v3(root, request)?
+    if (retained.request_digest != plan.request_digest or retained.binding_digest != plan.identity.binding_digest or
+            plan.identity.operation_id != request.helper_operation_id or
+            plan.identity.parent_operation_id != request.workload_operation_id or
+            plan.identity.parent_budget_digest != request.parent_budget_digest): return Err("binding-output-plan-correlation")
+    binding_artifact_store_v3(root, "output-plans", request.binding_uid, container_output_plan_encode_v2(plan)?, 2097152)
+
+pub fn smux_binding_output_plan_load_v3(root: text,
+        request: SmuxRuntimeBindRequestV3) -> Result<ContainerOutputPlanV2, text>:
+    val retained = smux_binding_plan_load_v3(root, request)?
+    val bytes = file_read_regular_no_follow_bounded(binding_artifact_path_v3(root, "output-plans", request.binding_uid)?, 2097152)?
+    val plan = container_output_plan_decode_v2(bytes)?
+    if (retained.request_digest != plan.request_digest or retained.binding_digest != plan.identity.binding_digest or
+            plan.identity.operation_id != request.helper_operation_id or
+            plan.identity.parent_operation_id != request.workload_operation_id or
+            plan.identity.parent_budget_digest != request.parent_budget_digest): return Err("binding-output-plan-correlation")
+    Ok(plan)

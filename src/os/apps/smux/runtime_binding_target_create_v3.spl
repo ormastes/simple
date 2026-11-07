@@ -1,0 +1,31 @@
+# Authenticated configured-owner adapter only. Existing API creates metadata
+# slots; this helper never selects a shell, spawns a child or owns a stream.
+use os.apps.smux.api.{smux_create_session, smux_list_sessions, smux_list_windows,
+    smux_list_panes, smux_owner_snapshot, smux_configuration_revision, smux_window_closing}
+use os.apps.smux.runtime_binding_target_v3.{smux_runtime_target_v3, smux_runtime_target_encode_v3}
+use std.common.contracts.mux.request_validation_v1.mux_validate_name_v1
+
+pub fn smux_runtime_target_create_v3(name: text, service_incarnation: text) -> Result<text, text>:
+    if service_incarnation.len() != 32: return Err("runtime-target-service-incarnation")
+    for ch in service_incarnation.chars():
+        if not "0123456789abcdef".contains(ch): return Err("runtime-target-service-incarnation")
+    if mux_validate_name_v1(name).is_err(): return Err("runtime-target-name-invalid")
+    var session_id = ""
+    var matches = 0
+    for session in smux_list_sessions():
+        if session.name == name:
+            session_id = session.id
+            matches = matches + 1
+    if matches > 1: return Err("runtime-target-name-ambiguous")
+    if matches == 0:
+        val session = smux_create_session(name)
+        if session.id == "": return Err("runtime-target-session-unavailable")
+        session_id = session.id
+    val windows = smux_list_windows(session_id)
+    if windows.len() != 1: return Err("runtime-target-window-ambiguous")
+    val panes = smux_list_panes(session_id, windows[0].id)
+    if panes.len() != 1: return Err("runtime-target-pane-ambiguous")
+    val target = smux_runtime_target_v3(smux_owner_snapshot(), smux_configuration_revision(),
+        smux_window_closing(session_id, windows[0].id), service_incarnation, session_id, windows[0].id, panes[0].id)?
+    if not target.vacant: return Err("runtime-target-occupied")
+    Ok(smux_runtime_target_encode_v3(target))

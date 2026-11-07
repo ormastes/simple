@@ -1,0 +1,89 @@
+# Trusted fixed-path configuration only. A valid policy is not a helper lease,
+# host reservation, signed grant or permission to open a provider stream.
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.contracts.container.stream_v2.{ContainerStreamPolicyV2,
+    ContainerOutputResourcesV2, container_stream_policy_digest_v2}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessBrokerBudgetV3,
+    group_process_cpu_quota_v3}
+use std.common.build_manager.contracts.BUILDER_MEMORY_LIMIT_MAX_V2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct SmuxRuntimeBindingPolicyV3:
+    stream: ContainerStreamPolicyV2
+    resources: ContainerOutputResourcesV2
+
+fn binding_policy_fields_v3(value: SdnValue, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("runtime-policy-object")
+    if fields.len() != names.len(): return Err("runtime-policy-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("runtime-policy-fields")
+    Ok(fields)
+
+fn binding_policy_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("runtime-policy-text")
+
+fn binding_policy_int_v3(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("runtime-policy-integer")
+
+pub fn smux_runtime_binding_policy_decode_v3(bytes: text) -> Result<SmuxRuntimeBindingPolicyV3, text>:
+    if bytes.bytes().len() == 0 or bytes.bytes().len() > 8388608: return Err("runtime-policy-size")
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 8388608,
+        max_depth: 8, max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 32))
+    if parsed.is_err(): return Err("runtime-policy-syntax")
+    val root = binding_policy_fields_v3(parsed.unwrap().value, ["version", "kind", "stream", "resources"])?
+    if binding_policy_int_v3(root, "version")? != 3: return Err("runtime-policy-version")
+    if binding_policy_text_v3(root, "kind")? != "smux-runtime-binding-policy": return Err("runtime-policy-kind")
+    val stream = binding_policy_fields_v3(root["stream"], ["root", "snapshotDigest", "cacheIdentity",
+        "brokerProgram", "brokerDigest", "environment", "directory", "delegatedCgroupPath",
+        "memoryPolicy", "timeoutMs", "brokerBudget", "childImageMode"])?
+    val broker = binding_policy_fields_v3(stream["brokerBudget"], ["cgroupPath", "device", "inode",
+        "generation", "policyDigest", "cpuQuotaUs", "cpuPeriodUs", "reservedCpuMillis",
+        "memoryLimitBytes", "reservedMemoryBytes"])?
+    val resources = binding_policy_fields_v3(root["resources"], ["cpuMillis", "memoryBytes"])?
+    var environment: [text] = []
+    match stream["environment"]:
+        case SdnValue.Array(entries):
+            if entries.len() > 64: return Err("runtime-policy-environment-bound")
+            for entry in entries:
+                match entry:
+                    case SdnValue.String(value): environment.push(value)
+                    case _: return Err("runtime-policy-environment-type")
+        case _: return Err("runtime-policy-environment-type")
+    val budget = GroupProcessBrokerBudgetV3(cgroup_path: binding_policy_text_v3(broker, "cgroupPath")?,
+        device: binding_policy_int_v3(broker, "device")?, inode: binding_policy_int_v3(broker, "inode")?,
+        generation: binding_policy_int_v3(broker, "generation")?, policy_digest: binding_policy_text_v3(broker, "policyDigest")?,
+        cpu_quota_us: binding_policy_int_v3(broker, "cpuQuotaUs")?, cpu_period_us: binding_policy_int_v3(broker, "cpuPeriodUs")?,
+        reserved_cpu_millis: binding_policy_int_v3(broker, "reservedCpuMillis")?,
+        memory_limit_bytes: binding_policy_int_v3(broker, "memoryLimitBytes")?,
+        reserved_memory_bytes: binding_policy_int_v3(broker, "reservedMemoryBytes")?)
+    val policy = ContainerStreamPolicyV2(root: binding_policy_text_v3(stream, "root")?,
+        snapshot_digest: binding_policy_text_v3(stream, "snapshotDigest")?, cache_identity: binding_policy_text_v3(stream, "cacheIdentity")?,
+        broker_program: binding_policy_text_v3(stream, "brokerProgram")?, broker_digest: binding_policy_text_v3(stream, "brokerDigest")?,
+        environment: environment, directory: binding_policy_text_v3(stream, "directory")?,
+        delegated_cgroup_path: binding_policy_text_v3(stream, "delegatedCgroupPath")?,
+        memory_policy: binding_policy_text_v3(stream, "memoryPolicy")?, timeout_ms: binding_policy_int_v3(stream, "timeoutMs")?,
+        broker_budget: budget, child_image_mode: binding_policy_text_v3(stream, "childImageMode")?)
+    val output = ContainerOutputResourcesV2(cpu_millis: binding_policy_int_v3(resources, "cpuMillis")?,
+        memory_bytes: binding_policy_int_v3(resources, "memoryBytes")?)
+    if output.cpu_millis <= 0 or output.memory_bytes <= 0 or output.memory_bytes > BUILDER_MEMORY_LIMIT_MAX_V2:
+        return Err("runtime-policy-resources")
+    val cpu = group_process_cpu_quota_v3(output.cpu_millis)
+    if cpu.is_err(): return Err("runtime-policy-cpu-quota")
+    val checked = container_stream_policy_digest_v2(policy)
+    if checked.is_err(): return Err(checked.unwrap_err())
+    Ok(SmuxRuntimeBindingPolicyV3(stream: policy, resources: output))
+
+pub fn smux_runtime_binding_policy_load_v3(local: HostLocalRootV1) -> Result<SmuxRuntimeBindingPolicyV3, text>:
+    # The host owner has verified/protected local.root before this call. No
+    # network field, optional override or fallback can select another policy.
+    val bytes = file_read_regular_no_follow_bounded(local.root + "/smux-runtime-policy.sdn", 8388608)?
+    smux_runtime_binding_policy_decode_v3(bytes)

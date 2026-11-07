@@ -1,0 +1,178 @@
+# AUTHORED_UNRUN. Real compiled CLI/socket acceptance, not Container binding.
+use std.spec.step
+use app.io.mod.{process_run_bounded, file_exists, file_hash_sha256,
+    file_is_regular_no_follow, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
+use std.sosix.process.sosix_process_read_stdout_ref_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use os.apps.smux.runtime_binding_protocol_v1.smux_runtime_binding_capabilities_decode_v1
+use test.helpers.smux_owned_process_fixture.{SmuxOwnedFixtureConfig, SmuxOwnedFixture,
+    owned_fixture_config_for, owned_fixture_empty, owned_fixture_start_process,
+    owned_fixture_note, owned_fixture_diagnostic, owned_fixture_digits,
+    owned_fixture_private_path, smux_owned_fixture_cleanup}
+
+pub struct SmuxCapabilitySocketFixture:
+    process: SmuxOwnedFixture
+    nonce: text
+    token: text
+    owner_path: text
+    address: text
+    stop_accepted: bool
+    owner_stdout_eof: bool
+
+pub fn capability_socket_note(original: SmuxCapabilitySocketFixture, reason: text) -> SmuxCapabilitySocketFixture:
+    var fixture = original
+    val redacted = if fixture.token == "": reason else: reason.replace(fixture.token, "[redacted]")
+    fixture.process = owned_fixture_note(fixture.process, owned_fixture_diagnostic(redacted))
+    fixture
+
+fn capability_socket_address(value: text) -> bool:
+    if not value.starts_with("127.0.0.1:"): return false
+    val port = value.substring(10)
+    if port.len() > 5 or not owned_fixture_digits(port): return false
+    val number = port.to_int() ?? 0
+    number > 0 and number <= 65535
+
+pub fn smux_capability_fixture_start(config: SmuxOwnedFixtureConfig, host_root: text = "") -> SmuxCapabilitySocketFixture:
+    var fixture = SmuxCapabilitySocketFixture(process: owned_fixture_empty(config, ""),
+        nonce: "", token: "", owner_path: "", address: "", stop_accepted: false, owner_stdout_eof: false)
+    val nonce = sosix_random_hex(16)
+    val token = sosix_random_hex(32)
+    if nonce == nil or token == nil: return capability_socket_note(fixture, "precondition: fresh owner credentials unavailable")
+    fixture.nonce = nonce.unwrap()
+    fixture.token = token.unwrap()
+    fixture.owner_path = config.root + "/smux-owner-" + fixture.nonce + ".state"
+    if file_exists(fixture.owner_path): return capability_socket_note(fixture, "precondition: owner file already exists")
+    if not file_atomic_write_mode(fixture.owner_path, fixture.nonce + " " + fixture.token + "\n", 0o600):
+        return capability_socket_note(fixture, "private mode600 owner file creation failed")
+    val private = owned_fixture_private_path(fixture.owner_path, "regular file", "600")
+    if private.is_err(): return capability_socket_note(fixture, private.unwrap_err())
+    step("Start the actual compiled smux owner under its retained broker")
+    val args = if host_root == "": ["--serve-owner-file", fixture.owner_path]
+        else: ["--serve-runtime-owner-file", fixture.owner_path, host_root]
+    fixture.process = owned_fixture_start_process(config, "smux-socket-" + fixture.nonce, args, 45000)
+    if fixture.process.failure != "": return fixture
+    # Publication proves endpoint discovery only. The reference PID names the
+    # broker; the file's child PID is diagnostic and must not be equated to it.
+    val deadline = sosix_time_now_monotonic_ms() + 8000
+    var turn = 0
+    var last_reason = "owner endpoint not yet published"
+    while turn < 160 and sosix_time_now_monotonic_ms() < deadline:
+        val retained = file_read_regular_no_follow_bounded(fixture.owner_path, 1024)
+        if retained.is_ok():
+            val fields = retained.unwrap().trim().split(" ")
+            if fields.len() == 4:
+                if fields[0] != fixture.nonce or fields[2] != fixture.token:
+                    return capability_socket_note(fixture, "owner publication credentials changed")
+                if (not capability_socket_address(fields[1]) or not owned_fixture_digits(fields[3]) or
+                        fields[3].len() > 10):
+                    return capability_socket_note(fixture, "owner publication address or diagnostic PID invalid")
+                val diagnostic_pid = fields[3].to_int() ?? 0
+                if diagnostic_pid <= 0: return capability_socket_note(fixture, "owner publication diagnostic PID is not positive")
+                val protected = owned_fixture_private_path(fixture.owner_path, "regular file", "600")
+                if protected.is_err(): return capability_socket_note(fixture, protected.unwrap_err())
+                fixture.address = fields[1]
+                return fixture
+            # Truncate/write publication can briefly expose incomplete bytes;
+            # no token is sent until the complete protected record validates.
+        else:
+            last_reason = owned_fixture_diagnostic(retained.unwrap_err())
+        turn = turn + 1
+        sosix_sleep_ms(50)
+    capability_socket_note(fixture, "bounded owner publication failed: " + last_reason)
+
+pub fn smux_capability_fixture_request(fixture: SmuxCapabilitySocketFixture,
+        token: text, command: [text]) -> (text, text, i64):
+    if fixture.address == "": return ("", "fixture endpoint unavailable", -1)
+    val config = fixture.process.config
+    val digest = file_hash_sha256(config.helper_program)
+    if (not file_is_regular_no_follow(config.helper_program) or digest == nil or
+            digest.unwrap() != config.helper_digest): return ("", "compiled smux identity changed", -1)
+    # Each request is a separate real compiled CLI process. This pathname/hash
+    # check is not a claim of a pinned request-process executable identity.
+    val (stdout, stderr, code) = process_run_bounded(config.helper_program,
+        ["--request", fixture.address, token] + command, 5000, 16384)
+    if stdout.bytes().len() >= 16384 or stderr.bytes().len() >= 16384:
+        return ("", "request capture saturated", -1)
+    (stdout, stderr, code)
+
+fn capability_socket_bind_refused(body: text) -> bool:
+    val parsed = sdn_parse_strict_v1(body, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 4, max_nodes: 64, max_rows: 16, max_cells: 64, max_columns: 16))
+    if parsed.is_err(): return false
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String("smux-runtime-binding-result"), "status": SdnValue.String("unsupported"),
+        "code": SdnValue.String("runtime-binding-owner-not-installed"),
+        "committed": SdnValue.Bool(false), "streamOwned": SdnValue.Bool(false)}
+    sdn_encode_canonical(parsed.unwrap().value) == sdn_encode_canonical(SdnValue.Dict(fields))
+
+pub fn capability_socket_exercise(original: SmuxCapabilitySocketFixture) -> SmuxCapabilitySocketFixture:
+    var fixture = original
+    if fixture.process.failure != "": return fixture
+    step("Run real compiled capability authentication refusal and legacy requests")
+    val (cap_body, cap_error, cap_code) = smux_capability_fixture_request(fixture, fixture.token,
+        ["runtime-binding-capabilities-v1"])
+    if cap_code != 0 or cap_error != "":
+        return capability_socket_note(fixture, "compiled capability request failed: " + cap_error)
+    val capability = smux_runtime_binding_capabilities_decode_v1(cap_body)
+    if capability.is_err(): return capability_socket_note(fixture, capability.unwrap_err())
+    if capability.unwrap().bind_existing_runtime or capability.unwrap().framed_core_mux:
+        return capability_socket_note(fixture, "discovery manufactured an installed runtime binding capability")
+    val (wrong_body, wrong_error, wrong_code) = smux_capability_fixture_request(fixture, "wrong-token",
+        ["runtime-binding-capabilities-v1"])
+    if wrong_code == 0 or wrong_body.trim() != "smux: unauthorized" or wrong_error != "":
+        return capability_socket_note(fixture, "compiled wrong-token request did not preserve authentication failure: " + wrong_error)
+    val (bind_body, bind_error, bind_code) = smux_capability_fixture_request(fixture, fixture.token,
+        ["bind-existing-runtime-v3", "unsupported-fixture-request"])
+    if bind_code == 0 or bind_error != "" or not capability_socket_bind_refused(bind_body):
+        return capability_socket_note(fixture, "compiled bind request did not preserve explicit unsupported refusal: " + bind_error)
+    val (list_body, list_error, list_code) = smux_capability_fixture_request(fixture, fixture.token, ["list"])
+    if list_code != 0 or list_error != "" or list_body.trim() != "smux: sessions=0":
+        return capability_socket_note(fixture, "compiled legacy list classification failed: " + list_error)
+    fixture
+
+pub fn smux_capability_fixture_stop(original: SmuxCapabilitySocketFixture) -> SmuxCapabilitySocketFixture:
+    var fixture = original
+    if fixture.process.owner == nil: return fixture
+    if fixture.address != "":
+        step("Stop the actual owner through its authenticated compiled client")
+        val (body, error, code) = smux_capability_fixture_request(fixture, fixture.token, ["stop-server"])
+        if code == 0 and error == "" and body.trim() == "smux: stopping server":
+            fixture.stop_accepted = true
+        else:
+            fixture = capability_socket_note(fixture, "authenticated compiled stop was not confirmed: " + error)
+    else:
+        fixture = capability_socket_note(fixture, "no validated owner endpoint; broker cleanup authority retained")
+    if fixture.stop_accepted and fixture.process.reference != nil:
+        # This is the fixture server's stdout, never an agent pipe. No other
+        # helper reads it; chunks are discarded and never copied to diagnostics.
+        val deadline = sosix_time_now_monotonic_ms() + 8000
+        var turn = 0
+        var seen_bytes: i64 = 0
+        while turn < 400 and sosix_time_now_monotonic_ms() < deadline and not fixture.owner_stdout_eof:
+            val chunk = sosix_process_read_stdout_ref_v1(fixture.process.reference.unwrap())
+            if chunk.is_err():
+                if chunk.unwrap_err() == "process_stdout_eof": fixture.owner_stdout_eof = true
+                else:
+                    fixture = capability_socket_note(fixture, "owner stdout read failed: " + chunk.unwrap_err())
+                    break
+            else:
+                val text = chunk.unwrap() ?? ""
+                seen_bytes = seen_bytes + text.bytes().len()
+                if seen_bytes > 4096:
+                    fixture = capability_socket_note(fixture, "owner stdout fixture bound exceeded")
+                    break
+            turn = turn + 1
+            if not fixture.owner_stdout_eof: sosix_sleep_ms(20)
+        if not fixture.owner_stdout_eof:
+            fixture = capability_socket_note(fixture, "bounded owner stdout EOF not observed")
+    # On startup/stop/read failure, the shared owner performs one bounded broker
+    # cancellation turn then waits actual terminal proof. No raw PID fallback.
+    fixture.process = smux_owned_fixture_cleanup(fixture.process)
+    fixture
+

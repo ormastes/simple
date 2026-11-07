@@ -7,19 +7,36 @@ use std.sosix.time.{sosix_time_now_monotonic_ms as time_now_monotonic_ms,
     sosix_sleep_ms as thread_sleep_ms}
 use std.sosix.pty.{sosix_pty_cleanup_pending as pty_cleanup_pending}
 use std.sosix.stdio.{sosix_println}
-use os.apps.smux.api.{smux_poll_output, smux_reset_for_test, smux_reap_expired_clients, smux_owner_snapshot}
+use os.apps.smux.api.{smux_poll_output, smux_reset_for_test, smux_reap_expired_clients,
+    smux_owner_snapshot, smux_configuration_revision, smux_window_closing}
 use os.apps.smux.service.ServiceState
 use os.apps.smux.smux_remote.{smux_remote_dispatch}
 use os.apps.smux.runtime_binding_protocol_v1.{smux_runtime_binding_capabilities_v1, smux_runtime_binding_refusal_v3}
 use os.apps.smux.client_leases.{SMUX_CLIENT_LEASE_SWEEP_MS}
 use std.common.crypto.constant_time.{constant_time_compare}
-use std.nogc_sync_mut.io.file_ops.{file_read, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.sosix.entropy.sosix_random_hex
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use os.apps.smux.runtime_binding_request_v3.smux_runtime_bind_request_from_token_v3
+use os.apps.smux.runtime_binding_target_v3.{smux_runtime_target_v3, smux_runtime_target_encode_v3}
+use os.apps.smux.runtime_binding_target_create_v3.smux_runtime_target_create_v3
+use os.apps.smux.runtime_binding_owner_v3.{SmuxRuntimeBindingOwnerV3,
+    smux_runtime_binding_owner_open_v3, smux_runtime_binding_owner_close_v3,
+    smux_runtime_binding_plan_v3, smux_runtime_binding_bind_v3, smux_runtime_binding_inspect_v3,
+    smux_runtime_binding_prepare_v3,
+    smux_runtime_binding_capabilities_v3, smux_runtime_binding_stop_allowed_v3}
 
 const REQUEST_LIMIT: i64 = 4096
 const REPLY_LIMIT: i64 = 65536
 const CLIENT_LIMIT: i64 = 16
 const CLIENT_DEADLINE_MS: i64 = 2000
+
+# Exclusive in-process host/smux composition, not an independent host daemon.
+# No wire request selects its root or policy; the host holds one journal writer.
+var _runtime_binding_owner: SmuxRuntimeBindingOwnerV3? = nil
 
 class PendingClient:
     stream: TcpStream
@@ -51,8 +68,8 @@ pub fn smux_server_stop_reply_v1(snapshot: ServiceState) -> text:
                 pane.terminal_ref != nil):
             return "smux: stop refused: terminal cleanup or host release pending"
         index = index + 1
-    # A future configured binding context must also retain/refuse stop for
-    # provider CleanupRequired owners that have no pane/reference yet.
+    # Authenticated dispatch separately checks the configured owner, including
+    # provider CleanupRequired authority that has no pane/reference yet.
     return "smux: stopping server"
 
 # One complete frame, without its newline. Authentication precedes command
@@ -70,10 +87,51 @@ pub fn smux_server_dispatch(request: text, token: text) -> text:
     # This authenticated text adapter negotiates explicit absence. It does not
     # expose runtime binding through the unauthenticated remote dispatcher.
     if command == "runtime-binding-capabilities-v1":
+        if _runtime_binding_owner != nil:
+            return smux_runtime_binding_capabilities_v3(_runtime_binding_owner.unwrap())
         return smux_runtime_binding_capabilities_v1()
-    if command == "bind-existing-runtime-v3" or command.starts_with("bind-existing-runtime-v3 "):
-        return smux_runtime_binding_refusal_v3()
+    val parts = command.split(" ")
+    if parts.len() == 0: return "smux: invalid request"
+    if parts[0] == "create-runtime-target-v3":
+        if _runtime_binding_owner == nil: return smux_runtime_binding_refusal_v3()
+        if parts.len() != 2: return "smux: invalid runtime target name"
+        val created = smux_runtime_target_create_v3(parts[1], _runtime_binding_owner.unwrap().service_incarnation)
+        if created.is_err(): return "smux: " + created.unwrap_err()
+        return created.unwrap()
+    if parts[0] == "plan-existing-runtime-v3" or parts[0] == "bind-existing-runtime-v3":
+        if _runtime_binding_owner == nil: return smux_runtime_binding_refusal_v3()
+        if parts.len() != 2: return "smux: invalid runtime binding request"
+        val request = smux_runtime_bind_request_from_token_v3(parts[1])
+        if request.is_err(): return "smux: invalid runtime binding request"
+        val owner = _runtime_binding_owner.unwrap()
+        val turn = if parts[0] == "plan-existing-runtime-v3":
+            smux_runtime_binding_plan_v3(owner, request.unwrap())
+        else:
+            smux_runtime_binding_bind_v3(owner, request.unwrap())
+        # Retain cleanup and uncertainty authority even when the reply fails.
+        _runtime_binding_owner = turn.owner
+        return turn.reply
+    if parts[0] == "inspect-runtime-binding-v3" or parts[0] == "prepare-runtime-helper-v3":
+        if _runtime_binding_owner == nil: return smux_runtime_binding_refusal_v3()
+        if parts.len() != 2 or not builder_identifier_valid_v1(parts[1]): return "smux: invalid runtime binding UID"
+        val turn = if parts[0] == "prepare-runtime-helper-v3":
+            smux_runtime_binding_prepare_v3(_runtime_binding_owner.unwrap(), parts[1])
+        else:
+            smux_runtime_binding_inspect_v3(_runtime_binding_owner.unwrap(), parts[1])
+        _runtime_binding_owner = turn.owner
+        return turn.reply
+    if parts[0] == "runtime-binding-target-v3":
+        if _runtime_binding_owner == nil: return smux_runtime_binding_refusal_v3()
+        if parts.len() != 4: return "smux: invalid runtime target"
+        val owner = _runtime_binding_owner.unwrap()
+        val target = smux_runtime_target_v3(smux_owner_snapshot(), smux_configuration_revision(),
+            smux_window_closing(parts[1], parts[2]), owner.service_incarnation, parts[1], parts[2], parts[3])
+        if target.is_err(): return "smux: " + target.unwrap_err()
+        return smux_runtime_target_encode_v3(target.unwrap())
     if command == "stop-server":
+        if (_runtime_binding_owner != nil and
+                not smux_runtime_binding_stop_allowed_v3(_runtime_binding_owner.unwrap())):
+            return "smux: stop refused: runtime helper cleanup or host release pending"
         return smux_server_stop_reply_v1(smux_owner_snapshot())
     return smux_remote_dispatch(command)
 
@@ -151,6 +209,39 @@ pub fn smux_server_serve_owner_file(path: text) -> i64:
         val _closed = listener.close()
         return 1
     _serve_on(listener, address, f[1])
+
+# The trusted host root is supplied only at owner startup. A timeout of a
+# synchronous request is uncertainty; inspect the SAME binding UID afterward.
+fn runtime_owner_file_private_v3(path: text) -> bool:
+    if (not path.starts_with("/") or path.ends_with("/") or path.bytes().len() > 4096 or
+            path.contains("\0") or path.contains("\n") or path.contains("\r")): return false
+    val components = path.split("/")
+    var parent = ""
+    var index = 1
+    while index < components.len() - 1:
+        if components[index] == "" or components[index] == "." or components[index] == "..": return false
+        parent = parent + "/" + components[index]
+        if not dir_is_real_no_follow(parent): return false
+        index = index + 1
+    if parent == "" or file_mode_bits(parent) != 0o700: return false
+    val leaf = components[components.len() - 1]
+    if leaf == "" or leaf == "." or leaf == ".." or file_mode_bits(path) != 0o600: return false
+    file_read_regular_no_follow_bounded(path, 512).is_ok()
+
+pub fn smux_server_serve_runtime_owner_file(path: text, host_root: text) -> i64:
+    if _runtime_binding_owner != nil: return 1
+    if not runtime_owner_file_private_v3(path): return 1
+    val raw = sosix_random_hex(16)
+    if raw == nil: return 1
+    val opened = smux_runtime_binding_owner_open_v3(host_root, raw ?? "")
+    if opened.is_err(): return 1
+    _runtime_binding_owner = opened.unwrap()
+    val code = smux_server_serve_owner_file(path)
+    val closed = smux_runtime_binding_owner_close_v3(_runtime_binding_owner.unwrap())
+    if closed.is_err(): return 1
+    if not closed.unwrap(): return 1
+    _runtime_binding_owner = nil
+    code
 
 fn _serve_on(bound_listener: TcpListener, address: text, token: text) -> i64:
     var listener = bound_listener
@@ -306,4 +397,4 @@ pub fn smux_server_request(address: text, token: text, command: text) -> Result<
     val _closed = stream.close()
     return Err("smux response timeout")
 
-export smux_server_dispatch, smux_server_stop_reply_v1, smux_server_decode_reply, smux_server_serve, smux_server_serve_owner_file, smux_server_request
+export smux_server_dispatch, smux_server_stop_reply_v1, smux_server_decode_reply, smux_server_serve, smux_server_serve_owner_file, smux_server_serve_runtime_owner_file, smux_server_request

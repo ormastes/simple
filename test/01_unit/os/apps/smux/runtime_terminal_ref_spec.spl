@@ -3,7 +3,11 @@
 use std.spec.{describe, it, expect, step}
 use std.sosix.process.{PipedProcessRefV1, PipedProcessOwnedTransferV2}
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2,
-    GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2, group_process_stream_identity_v2}
+    GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2, group_process_stream_identity_v2,
+    group_process_stream_identity_profiled_v3}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessBrokerBudgetV3,
+    GroupProcessStreamProfileV3, group_process_cpu_quota_v3}
+use os.apps.smux.vt_capture_state.vt_view_equal
 use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
 use os.apps.smux.service.{ServiceState, PaneRecord}
 use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
@@ -24,6 +28,25 @@ use os.apps.smux.service_revision.service_revision_new
 use os.apps.smux.server.{smux_server_stop_reply_v1, smux_server_dispatch}
 use os.apps.smux.smux_remote.smux_remote_reply_ok
 use os.apps.smux.api.smux_owner_snapshot
+use os.apps.smux.terminal_settlement_service_v3.terminal_transport_settle_owned_v3
+use std.nogc_sync_mut.orchestration.host_helper_settlement_v1.HostHelperSettlementAckV1
+
+# Synthetic typed ACK solely exercises the pure metadata transition. It is
+# never submitted to an API/native owner as proof of actual host settlement.
+fn terminal_settlement_ack_fixture_v3(transfer: PipedProcessOwnedTransferV2) -> HostHelperSettlementAckV1:
+    HostHelperSettlementAckV1(operation_id: transfer.owner.launch.worker_id, request_digest: "e".repeat(64),
+        prepared_receipt_digest: "b".repeat(64), native_identity_digest: transfer.owner.identity_digest,
+        tree_receipt_digest: "c".repeat(64), outcome_digest: "d".repeat(64), journal_revision: "f".repeat(64), journal_sequence: 1)
+
+fn terminal_cleaned_state_fixture_v3() -> ServiceState:
+    val base = terminal_ref_state()
+    val empty = PaneRecord.create(base.get_pane(0).pane)
+    val state = base.replace_pane(0, empty.with_owned_terminal_transfer(owned_terminal_fixture_v3(4096)))
+    var pane = state.get_pane(0).feed_screen("retained marker\r\n")
+    pane.tail = "retained history"
+    pane.helper_cleaned_awaiting_release = true
+    pane.terminal_eof = true
+    state.replace_pane(0, pane)
 
 # Shape-valid synthetic broker values for storage/comparison only. No filesystem
 # or native process operation is invoked with these fabricated authority values.
@@ -37,6 +60,22 @@ fn owned_terminal_fixture(memory: i64) -> PipedProcessOwnedTransferV2:
         generation: 1, snapshot_digest: digest, cache_identity: digest, memory_limit_bytes: memory,
         request: request, delegated_cgroup_path: "/synthetic/cgroup", transport_generation: 1)
     val identity = group_process_stream_identity_v2(launch)
+    val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: identity)
+    PipedProcessOwnedTransferV2(owner: owner, reference: PipedProcessRefV1(pid: 71,
+        generation: 1, group_root: launch.root, group_identity: identity))
+
+# Separate profiled fixture preserves the legacy V2 compatibility regression.
+fn owned_terminal_fixture_v3(memory: i64) -> PipedProcessOwnedTransferV2:
+    val legacy = owned_terminal_fixture(memory)
+    val digest = "a".repeat(64)
+    var launch = legacy.owner.launch
+    launch.memory_policy = "enforce"
+    launch.profile_v3 = GroupProcessStreamProfileV3(helper_cpu: group_process_cpu_quota_v3(10).unwrap(),
+            broker: GroupProcessBrokerBudgetV3(cgroup_path: "/synthetic/broker-cgroup", device: 1, inode: 2,
+                generation: 1, policy_digest: digest, cpu_quota_us: 1000, cpu_period_us: 100000,
+                reserved_cpu_millis: 10, memory_limit_bytes: 4096, reserved_memory_bytes: 4096),
+            child_image_mode: "sealed-main-image-v1")
+    val identity = group_process_stream_identity_profiled_v3(launch)
     val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: identity)
     PipedProcessOwnedTransferV2(owner: owner, reference: PipedProcessRefV1(pid: 71,
         generation: 1, group_root: launch.root, group_identity: identity))
@@ -55,6 +94,74 @@ fn terminal_ref_state() -> ServiceState:
     return state.add_pane(pane.with_terminal_ref(PipedProcessRefV1(pid: 71, generation: 1)))
 
 describe "smux canonical terminal ref state":
+    it "clears only settled authority after exact typed acknowledgement correlations":
+        step("Apply a pure settlement metadata transition while retaining captured bytes and incarnation")
+        val before = terminal_cleaned_state_fixture_v3()
+        val pane = before.get_pane(0)
+        val transfer = pane.owned_terminal_transfer.unwrap()
+        val clock = service_revision_new()
+        val ack = terminal_settlement_ack_fixture_v3(transfer)
+        val changed = terminal_transport_settle_owned_v3(before, clock, "s", "w", "p",
+            clock.epoch, clock.value, pane.child_incarnation, transfer, transfer.owner.launch.worker_id, ack.request_digest, ack).unwrap()
+        val after = changed.get_pane(0)
+        expect(after.owned_terminal_transfer == nil).to_equal(true)
+        expect(after.terminal_ref == nil).to_equal(true)
+        expect(after.helper_cleaned_awaiting_release).to_equal(false)
+        expect(after.child_pid).to_equal(-1)
+        expect(after.child_incarnation).to_equal(pane.child_incarnation)
+        expect(after.content_revision).to_equal(pane.content_revision)
+        expect(after.ingestion_sequence).to_equal(pane.ingestion_sequence)
+        expect(after.tail).to_equal(pane.tail)
+        expect(vt_view_equal(after.screen, pane.screen)).to_equal(true)
+        expect(after.terminal_eof).to_equal(true)
+        expect(terminal_transport_settle_owned_v3(changed, clock, "s", "w", "p", clock.epoch,
+            clock.value, pane.child_incarnation, transfer, transfer.owner.launch.worker_id, ack.request_digest, ack).is_err()).to_equal(true)
+
+    it "refuses mismatched or incomplete settlement acknowledgements without native effects":
+        step("Keep retained authority on wrong host correlations target fences or full owner bundle")
+        val before = terminal_cleaned_state_fixture_v3()
+        val pane = before.get_pane(0)
+        val transfer = pane.owned_terminal_transfer.unwrap()
+        val clock = service_revision_new()
+        for mismatch in ["operation", "request", "native", "prepared", "tree", "outcome", "revision", "sequence"]:
+            var ack = terminal_settlement_ack_fixture_v3(transfer)
+            if mismatch == "operation": ack.operation_id = "other-worker"
+            if mismatch == "request": ack.request_digest = "f".repeat(64)
+            if mismatch == "native": ack.native_identity_digest = "f".repeat(64)
+            if mismatch == "prepared": ack.prepared_receipt_digest = ""
+            if mismatch == "tree": ack.tree_receipt_digest = ""
+            if mismatch == "outcome": ack.outcome_digest = ""
+            if mismatch == "revision": ack.journal_revision = ""
+            if mismatch == "sequence": ack.journal_sequence = 0
+            expect(terminal_transport_settle_owned_v3(before, clock, "s", "w", "p", clock.epoch,
+                clock.value, pane.child_incarnation, transfer, transfer.owner.launch.worker_id, "e".repeat(64), ack).is_err()).to_equal(true)
+        val ack = terminal_settlement_ack_fixture_v3(transfer)
+        expect(terminal_transport_settle_owned_v3(before, clock, "s", "w", "p", clock.epoch,
+            clock.value + 1, pane.child_incarnation, transfer, transfer.owner.launch.worker_id, ack.request_digest, ack).is_err()).to_equal(true)
+        expect(terminal_transport_settle_owned_v3(before, clock, "s", "w", "p", clock.epoch,
+            clock.value, pane.child_incarnation + 1, transfer, transfer.owner.launch.worker_id, ack.request_digest, ack).is_err()).to_equal(true)
+        expect(terminal_transport_settle_owned_v3(before, clock, "s", "w", "p", clock.epoch,
+            clock.value, pane.child_incarnation, owned_terminal_fixture_v3(8192), transfer.owner.launch.worker_id, ack.request_digest, ack).is_err()).to_equal(true)
+        val foreign = before.add_session(MuxSession.create("foreign", "foreign"))
+        expect(terminal_transport_settle_owned_v3(foreign, clock, "foreign", "w", "p", clock.epoch,
+            clock.value, pane.child_incarnation, transfer, transfer.owner.launch.worker_id, ack.request_digest, ack).is_err()).to_equal(true)
+        expect(terminal_transport_settle_owned_v3(owned_terminal_state(), clock, "s", "w", "p", clock.epoch,
+            clock.value, pane.child_incarnation, transfer, transfer.owner.launch.worker_id, ack.request_digest, ack).is_err()).to_equal(true)
+
+    it "permits exact settlement compensation after configuration mutation exhaustion":
+        step("Retire retained cleanup authority without resetting an exhausted clock or child incarnation")
+        val before = terminal_cleaned_state_fixture_v3()
+        val pane = before.get_pane(0)
+        val transfer = pane.owned_terminal_transfer.unwrap()
+        val ack = terminal_settlement_ack_fixture_v3(transfer)
+        var clock = service_revision_new()
+        clock.value = 18446744073709551615u64
+        clock.valid = false
+        val changed = terminal_transport_settle_owned_v3(before, clock, "s", "w", "p", clock.epoch,
+            clock.value, pane.child_incarnation, transfer, transfer.owner.launch.worker_id, ack.request_digest, ack).unwrap()
+        expect(changed.get_pane(0).child_incarnation).to_equal(pane.child_incarnation)
+        expect(clock.value).to_equal(18446744073709551615u64)
+
     it "preserves canonical identity and read outcome through pane clones":
         step("Copy focus input geometry and terminal response state without losing cleanup authority")
         var pane = terminal_ref_state().get_pane(0)
