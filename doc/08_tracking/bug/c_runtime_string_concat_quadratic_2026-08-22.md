@@ -174,8 +174,17 @@ nothing.
   constructor initializer). Fixed a false negative on the way: statement-level
   `s = s + x` (STMT_ASSIGN stores target/value separately) never matched.
   Specs: `test/01_unit/app/lint_spec.spl` "COLL006 scope and robust escalation".
-- **Optimization (C):** still pending. The existing MIR pass
-  `src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl` is a dead stub —
-  `string_builder_opt_run_on_function` returns its input, and the transform never
-  initializes the parts local, never emits the join, and does not check reads of
-  `s` inside the loop. Status stays OPEN until C lands.
+- **Optimization (C):** implemented in `src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl`
+  (it replaces the earlier dead stub). The pass matches the lowered pair `tmp = rt_strcat_tagged(s, x); s = tmp`,
+  which is what both `s = s + x` and `s += x` lower to (`lower_compound_combine`). It rewrites that pair to
+  `sb = rt_string_builder_new(); push(sb, s)` in the preheader, `push(sb, x)` in the loop and
+  `s = rt_string_builder_finish(sb)` at every exit. It applies only when all of these hold:
+  `s` is a str-typed local referenced in the loop only by the concat pair; the temp is private;
+  there is a dedicated preheader; the exits have only loop predecessors; and no
+  return/throw/call-terminator leaves the loop. Unknown instruction kinds count as uses.
+  The pass is **opt-in** (`SIMPLE_MIR_STRING_BUILDER_OPT=1`) until native verification.
+  Specs: `test/01_unit/compiler/60.mir_opt/string_builder_opt_spec.spl` (MIR shape, 10 cases) and
+  `string_builder_append_behavior_spec.spl` (equality with the concat loop, and builder scaling
+  at N=10k/40k/160k measured 110.9 ms / 399 ms / 1,798 ms on the seed interpreter, i.e. linear).
+  Status: **fix-implemented-verification-pending**. Still to do: a native-lane run with the opt-in flag,
+  then default-on.
