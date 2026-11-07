@@ -1,2 +1,154 @@
-# Typed private Windows journal capability. Ownership and IO reuse retained_file.
-export use std.nogc_sync_mut.io.retained_file.{WindowsPrivateErrorV1, WindowsPrivateRootV1, WindowsPrivateFileV1, windows_private_root_open_v1}
+# Copyable values carry generation tokens only. Native IO owns the authoritative
+# phase, size, cursor, quota, root binding and cleanup state behind one lock.
+use std.nogc_sync_mut.io.windows_private_file_abi.*
+
+pub struct WindowsPrivateErrorV1:
+    message: text
+    cleanup_root: Option<WindowsPrivateRootV1>
+    cleanup_file: Option<WindowsPrivateFileV1>
+
+fn _private_error(message: text) -> WindowsPrivateErrorV1:
+    WindowsPrivateErrorV1(message: message, cleanup_root: None, cleanup_file: None)
+
+@unsafe(reason: "encodes bounded UTF16 in private malloc temporary", capabilities: [ffi, raw_ptr])
+fn _private_path(path: text) -> i64:
+    if path.byte_len() == 0 or path.byte_len() > 32760: return 0
+    val ptr = rt_windows_private_alloc_v1((path.byte_len() + 1) * 2)
+    if ptr == 0: return 0
+    var consumed = 0
+    var ordinal = 0
+    var offset = 0
+    while consumed < path.byte_len():
+        val scalar = path.char_code_at(ordinal)
+        if scalar <= 0 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343):
+            rt_windows_private_free_v1(ptr)
+            return 0
+        if scalar < 65536:
+            volatile_write_u16(ptr + offset * 2, scalar)
+            offset = offset + 1
+        else:
+            val value = scalar - 65536
+            volatile_write_u16(ptr + offset * 2, 55296 + (value >> 10))
+            volatile_write_u16(ptr + (offset + 1) * 2, 56320 + (value & 1023))
+            offset = offset + 2
+        ordinal = ordinal + 1
+        if scalar < 128: consumed = consumed + 1
+        elif scalar < 2048: consumed = consumed + 2
+        elif scalar < 65536: consumed = consumed + 3
+        else: consumed = consumed + 4
+    ptr
+
+fn _private_root_admit(token: i64) -> Result<WindowsPrivateRootV1, WindowsPrivateErrorV1>:
+    if token == -1: return Err(_private_error("WINDOWS_PRIVATE_ROOT_OPEN"))
+    val owner = WindowsPrivateRootV1(token: token)
+    if rt_windows_private_root_ready_v1(token) == 1: return Ok(owner)
+    Err(WindowsPrivateErrorV1(message: "WINDOWS_PRIVATE_ROOT_CLEANUP_REQUIRED", cleanup_root: Some(owner), cleanup_file: None))
+
+pub class WindowsPrivateRootV1:
+    token: i64
+
+    pub fn child_directory(name: text, create: bool) -> Result<WindowsPrivateRootV1, WindowsPrivateErrorV1>:
+        val path = _private_path(name)
+        if path == 0: return Err(_private_error("WINDOWS_PRIVATE_NAME"))
+        val creating = if create: 1 else: 0
+        val token = rt_windows_private_directory_v1(self.token, path, creating)
+        rt_windows_private_free_v1(path)
+        _private_root_admit(token)
+
+    pub fn create_private_stage(name: text, maximum: u64) -> Result<WindowsPrivateFileV1, WindowsPrivateErrorV1>:
+        self.open_child(name, maximum, true)
+
+    pub fn open_private_file(name: text, maximum: u64) -> Result<WindowsPrivateFileV1, WindowsPrivateErrorV1>:
+        self.open_child(name, maximum, false)
+
+    fn open_child(name: text, maximum: u64, create: bool) -> Result<WindowsPrivateFileV1, WindowsPrivateErrorV1>:
+        if maximum > 8388608u64: return Err(_private_error("WINDOWS_PRIVATE_FILE_QUOTA"))
+        val path = _private_path(name)
+        if path == 0: return Err(_private_error("WINDOWS_PRIVATE_NAME"))
+        val creating = if create: 1 else: 0
+        val token = rt_windows_private_file_v1(self.token, path, creating, maximum as i64)
+        rt_windows_private_free_v1(path)
+        if token == -1: return Err(_private_error("WINDOWS_PRIVATE_FILE_OPEN"))
+        val owner = WindowsPrivateFileV1(token: token)
+        if not owner.security_current():
+            return Err(WindowsPrivateErrorV1(message: "WINDOWS_PRIVATE_FILE_CLEANUP_REQUIRED", cleanup_root: None, cleanup_file: Some(owner)))
+        Ok(owner)
+
+    pub fn publish_no_replace(stage: WindowsPrivateFileV1, final_name: text) -> Result<bool, text>:
+        val path = _private_path(final_name)
+        if path == 0: return Err("WINDOWS_PRIVATE_NAME")
+        val status = rt_windows_private_publish_v1(self.token, stage.token, path)
+        rt_windows_private_free_v1(path)
+        if status == 1: return Ok(false)
+        if status != 0: return Err("WINDOWS_PRIVATE_PUBLISH")
+        Ok(true)
+
+    pub me close() -> bool:
+        rt_windows_private_root_close_v1(self.token) == 1
+
+pub class WindowsPrivateFileV1:
+    token: i64
+
+    pub fn security_current() -> bool:
+        rt_windows_private_check_v1(self.token, 8388608) == 1
+
+    @unsafe(reason: "writes bounded buffer through authoritative native file phase", capabilities: [ffi, raw_ptr])
+    pub me write(bytes: [u8]) -> Result<bool, text>:
+        if bytes.len() > 1048576: return Err("WINDOWS_PRIVATE_FILE_WRITE_QUOTA")
+        val buffer = rt_windows_private_alloc_v1(bytes.len() + 1)
+        if buffer == 0: return Err("WINDOWS_PRIVATE_FILE_MEMORY")
+        for index in 0..bytes.len(): volatile_write_u8(buffer + index, bytes[index] as i64)
+        var offset = 0
+        while offset < bytes.len():
+            val count = rt_windows_private_file_write_v1(self.token, buffer + offset, bytes.len() - offset)
+            if count <= 0 or count > bytes.len() - offset:
+                rt_windows_private_free_v1(buffer)
+                return Err("WINDOWS_PRIVATE_FILE_WRITE")
+            offset = offset + count
+        if bytes.len() == 0 and rt_windows_private_file_write_v1(self.token, buffer, 0) != 0:
+            rt_windows_private_free_v1(buffer)
+            return Err("WINDOWS_PRIVATE_FILE_WRITE")
+        rt_windows_private_free_v1(buffer)
+        Ok(true)
+
+    pub me seal() -> Result<bool, text>:
+        if rt_windows_private_file_seal_v1(self.token) != 1: return Err("WINDOWS_PRIVATE_FILE_SEAL")
+        Ok(true)
+
+    @unsafe(reason: "reads bounded chunks through native generation and identity lock", capabilities: [ffi, raw_ptr])
+    pub me read_all_bounded(maximum: i64) -> Result<[u8], text>:
+        if maximum < 0 or maximum > 8388608: return Err("WINDOWS_PRIVATE_FILE_READ_QUOTA")
+        val size = rt_windows_private_file_size_v1(self.token)
+        if size < 0 or size > maximum: return Err("WINDOWS_PRIVATE_FILE_READ_STATE")
+        val buffer = rt_windows_private_alloc_v1(1048576)
+        if buffer == 0: return Err("WINDOWS_PRIVATE_FILE_MEMORY")
+        var bytes: [u8] = []
+        var offset = 0
+        while offset < size:
+            val remaining = size - offset
+            val wanted = if remaining > 1048576: 1048576 else: remaining
+            val count = rt_windows_private_file_read_v1(self.token, offset, buffer, wanted)
+            if count != wanted:
+                rt_windows_private_free_v1(buffer)
+                return Err("WINDOWS_PRIVATE_FILE_READ")
+            for index in 0..count: bytes.push(volatile_read_u8(buffer + index) as u8)
+            offset = offset + count
+        rt_windows_private_free_v1(buffer)
+        if rt_windows_private_file_size_v1(self.token) != size: return Err("WINDOWS_PRIVATE_FILE_CHANGED")
+        Ok(bytes)
+
+    pub me close() -> bool:
+        rt_windows_private_file_close_v1(self.token) == 1
+
+pub fn windows_private_root_open_v1(path: text) -> Result<WindowsPrivateRootV1, WindowsPrivateErrorV1>:
+    @when(os="windows"):
+    val native = _private_path(path.replace("/", "\\"))
+    if native == 0: return Err(_private_error("WINDOWS_PRIVATE_ROOT_PATH"))
+    val token = rt_windows_private_root_open_v1(native)
+    rt_windows_private_free_v1(native)
+    _private_root_admit(token)
+    @else:
+    Err(_private_error("WINDOWS_PRIVATE_HOST_UNSUPPORTED"))
+    @end
+
+export WindowsPrivateRootV1, WindowsPrivateFileV1, WindowsPrivateErrorV1, windows_private_root_open_v1

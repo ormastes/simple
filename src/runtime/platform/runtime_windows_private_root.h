@@ -11,6 +11,45 @@
 #include <wchar.h>
 #include <stddef.h>
 
+#define WP_CAPACITY_V1 256
+#define WP_PENDING_V1 4
+typedef struct {
+    uint64_t generation;
+    int kind, phase;
+    void *owner;
+    int64_t root_token, maximum, position;
+    FILE_ID_INFO identity;
+    FILE_BASIC_INFO basic;
+    LARGE_INTEGER size;
+    HANDLE pending_handles[WP_PENDING_V1];
+    HLOCAL pending_memory[WP_PENDING_V1];
+} WpEntryV1;
+static WpEntryV1 wp_entries_v1[WP_CAPACITY_V1];
+static SRWLOCK wp_lock_v1=SRWLOCK_INIT;
+static uint64_t wp_generation_v1=0;
+/* Set only while the exclusive IO owner lock is held. Temporary OS resources
+ * remain attached to this exact generation if a release operation fails. */
+static WpEntryV1 *wp_active_v1;
+static int wp_pending_v1(WpEntryV1 *entry) {
+    if (!entry) return 1;
+    for (int i=0;i<WP_PENDING_V1;i++)
+        if (entry->pending_handles[i] || entry->pending_memory[i]) return 1;
+    return 0;
+}
+static int wp_token_release_v1(HANDLE handle) {
+    if (CloseHandle(handle)) return 1;
+    for (int i=0;i<WP_PENDING_V1;i++) if (!wp_active_v1->pending_handles[i]) {
+        wp_active_v1->pending_handles[i]=handle;return 0;
+    }
+    abort(); /* Opening another temporary without a reserved slot is a bug. */
+}
+static int wp_memory_release_v1(HLOCAL memory) {
+    if (!LocalFree(memory)) return 1;
+    for (int i=0;i<WP_PENDING_V1;i++) if (!wp_active_v1->pending_memory[i]) {
+        wp_active_v1->pending_memory[i]=memory;return 0;
+    }
+    abort();
+}
 typedef NTSTATUS (NTAPI *WpCreateV1)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,
     PIO_STATUS_BLOCK,PLARGE_INTEGER,ULONG,ULONG,ULONG,ULONG,PVOID,ULONG);
 typedef struct WpRootV1 {
@@ -25,11 +64,12 @@ static int wp_trusted_v1(PSID sid, PSID user) {
         IsWellKnownSid(sid,WinBuiltinAdministratorsSid));
 }
 static TOKEN_USER *wp_user_v1(void) {
+    if (!wp_active_v1 || wp_pending_v1(wp_active_v1)) return NULL;
     HANDLE token=NULL; DWORD size=0; TOKEN_USER *user=NULL;
     /* Reject impersonation rather than admitting a descriptor against the
      * process identity while operations execute as a different principal. */
     if (OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&token)) {
-        CloseHandle(token); return NULL;
+        wp_token_release_v1(token); return NULL;
     }
     if (GetLastError()!=ERROR_NO_TOKEN ||
         !OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token)) return NULL;
@@ -40,7 +80,7 @@ static TOKEN_USER *wp_user_v1(void) {
             free(user); user=NULL;
         }
     }
-    CloseHandle(token); return user;
+    if (!wp_token_release_v1(token)) {free(user);return NULL;} return user;
 }
 /* Ancestors may be readable; only the journal directory and its children
  * require privacy. All must reject untrusted mutation, including generic
@@ -77,7 +117,7 @@ static int wp_security_v1(HANDLE handle,int private_required) {
     }
     ok=1;
 done:
-    if (security) LocalFree(security); free(user); return ok;
+    if (security && !wp_memory_release_v1(security)) ok=0; free(user); return ok;
 }
 static int wp_kind_v1(HANDLE handle,int directory,int64_t maximum) {
     BY_HANDLE_FILE_INFORMATION info; LARGE_INTEGER size;
@@ -136,21 +176,16 @@ static int wp_close_v1(WpRootV1 **link) {
     if (lease->directory!=INVALID_HANDLE_VALUE && !CloseHandle(lease->directory)) return 0;
     free(lease); *link=NULL; return 1;
 }
-int64_t rt_windows_private_root_close_v1(int64_t raw) {
+static int64_t wp_root_close_impl_v1(int64_t raw) {
     WpRootV1 *lease=(WpRootV1*)(intptr_t)raw;
     return lease && wp_close_v1(&lease);
 }
-int64_t rt_windows_private_root_ready_v1(int64_t raw) {
+static int64_t wp_root_ready_impl_v1(int64_t raw) {
     WpRootV1 *lease=(WpRootV1*)(intptr_t)raw;
     if (!lease || !lease->ready || lease->closing) return 0;
     for (WpRootV1 *item=lease;item;item=item->parent)
         if (!wp_kind_v1(item->directory,1,0) || !wp_security_v1(item->directory,item==lease)) return 0;
     return 1;
-}
-int64_t rt_windows_private_root_identity_v1(int64_t raw,int64_t output) {
-    WpRootV1 *root=(WpRootV1*)(intptr_t)raw;
-    return output && rt_windows_private_root_ready_v1(raw) &&
-        GetFileInformationByHandleEx(root->directory,FileIdInfo,(void*)(intptr_t)output,24);
 }
 /* Failed admission returns a cleanup lease whenever close did not complete.
  * Its ready query is false; the caller must retain it and retry close. */
@@ -159,7 +194,7 @@ static int64_t wp_reject_v1(WpRootV1 *lease) {
     if (wp_close_v1(&lease)) return -1;
     return (int64_t)(intptr_t)lease;
 }
-int64_t rt_windows_private_root_open_v1(int64_t raw_path) {
+static int64_t wp_root_open_impl_v1(int64_t raw_path) {
     const wchar_t *path=(const wchar_t*)(intptr_t)raw_path;
     if (!path || wcslen(path)<4 || wcslen(path)>32760 ||
         !((path[0]>=L'A'&&path[0]<=L'Z')||(path[0]>=L'a'&&path[0]<=L'z')) ||
@@ -193,9 +228,9 @@ int64_t rt_windows_private_root_open_v1(int64_t raw_path) {
     }
     return wp_reject_v1(lease);
 }
-int64_t rt_windows_private_directory_v1(int64_t raw,int64_t raw_name,int64_t create) {
+static int64_t wp_directory_impl_v1(int64_t raw,int64_t raw_name,int64_t create) {
     WpRootV1 *root=(WpRootV1*)(intptr_t)raw;
-    if (!rt_windows_private_root_ready_v1(raw)) return -1;
+    if (!wp_root_ready_impl_v1(raw)) return -1;
     WpRootV1 *child=(WpRootV1*)calloc(1,sizeof(*child)); if (!child) return -1;
     child->directory=INVALID_HANDLE_VALUE;
     WpRootV1 **tail=&child->parent;
@@ -212,23 +247,23 @@ int64_t rt_windows_private_directory_v1(int64_t raw,int64_t raw_name,int64_t cre
         !wp_security_v1(child->directory,1)) return wp_reject_v1(child);
     child->ready=1;return (int64_t)(intptr_t)child;
 }
-int64_t rt_windows_private_check_v1(int64_t handle,int64_t maximum) {
+static int64_t wp_check_impl_v1(int64_t handle,int64_t maximum) {
     return wp_kind_v1((HANDLE)(intptr_t)handle,0,maximum) && wp_security_v1((HANDLE)(intptr_t)handle,1);
 }
-int64_t rt_windows_private_file_v1(int64_t raw,int64_t name,int64_t create,int64_t maximum) {
+static int64_t wp_file_impl_v1(int64_t raw,int64_t name,int64_t create,int64_t maximum) {
     WpRootV1 *root=(WpRootV1*)(intptr_t)raw;
-    if (maximum<0 || !rt_windows_private_root_ready_v1(raw)) return -1;
+    if (maximum<0 || !wp_root_ready_impl_v1(raw)) return -1;
     HANDLE handle=wp_relative_v1(root->directory,(const wchar_t*)(intptr_t)name,0,create!=0);
     if (handle==INVALID_HANDLE_VALUE) return -1;
     /* The typed owner checks admission; even a rejected handle is returned
      * so failed cleanup can never lose ownership. */
     return (int64_t)(intptr_t)handle;
 }
-int64_t rt_windows_private_publish_v1(int64_t raw,int64_t file,int64_t raw_name) {
+static int64_t wp_publish_impl_v1(int64_t raw,int64_t file,int64_t raw_name) {
     WpRootV1 *root=(WpRootV1*)(intptr_t)raw;
     HANDLE handle=(HANDLE)(intptr_t)file; const wchar_t *name=(const wchar_t*)(intptr_t)raw_name;
-    if (!rt_windows_private_root_ready_v1(raw) || !wp_name_v1(name) ||
-        !rt_windows_private_check_v1(file,INT64_MAX) || !FlushFileBuffers(handle)) return -1;
+    if (!wp_root_ready_impl_v1(raw) || !wp_name_v1(name) ||
+        !wp_check_impl_v1(file,INT64_MAX) || !FlushFileBuffers(handle)) return -1;
     size_t bytes=wcslen(name)*sizeof(wchar_t), size=sizeof(FILE_RENAME_INFO)+bytes;
     FILE_RENAME_INFO *rename=(FILE_RENAME_INFO*)calloc(1,size); if (!rename) return -1;
     rename->ReplaceIfExists=FALSE;rename->RootDirectory=root->directory;
@@ -236,8 +271,154 @@ int64_t rt_windows_private_publish_v1(int64_t raw,int64_t file,int64_t raw_name)
     int ok=SetFileInformationByHandle(handle,FileRenameInfo,rename,(DWORD)size);
     DWORD error=GetLastError();free(rename);
     if (!ok) return error==ERROR_ALREADY_EXISTS || error==ERROR_FILE_EXISTS?1:-1;
-    return rt_windows_private_check_v1(file,INT64_MAX)?0:-1;
+    return wp_check_impl_v1(file,INT64_MAX)?0:-1;
 }
+static WpEntryV1 *wp_find_v1(int64_t token,int kind) {
+    if (token<=0) return NULL;
+    unsigned slot=(unsigned)((uint64_t)token&255);
+    WpEntryV1 *entry=&wp_entries_v1[slot];
+    return entry->kind==kind && entry->generation==((uint64_t)token>>8)?entry:NULL;
+}
+static int64_t wp_reserve_v1(int kind) {
+    if (wp_generation_v1>=(uint64_t)INT64_MAX/256) return -1;
+    for (unsigned slot=0;slot<WP_CAPACITY_V1;slot++) if (!wp_entries_v1[slot].kind) {
+        WpEntryV1 *entry=&wp_entries_v1[slot];memset(entry,0,sizeof(*entry));
+        entry->kind=kind;entry->generation=++wp_generation_v1;
+        return (int64_t)((entry->generation<<8)|slot);
+    }
+    return -1;
+}
+static int wp_cleanup_v1(WpEntryV1 *entry) {
+    int ok=1;entry->phase=3;
+    if (entry->owner) {
+        int closed=entry->kind==1?wp_root_close_impl_v1((int64_t)(intptr_t)entry->owner):CloseHandle((HANDLE)entry->owner);
+        if (closed) entry->owner=NULL;else ok=0;
+    }
+    for (int i=0;i<WP_PENDING_V1;i++) {
+        if (entry->pending_handles[i]) {
+            if (CloseHandle(entry->pending_handles[i])) entry->pending_handles[i]=NULL;else ok=0;
+        }
+        if (entry->pending_memory[i]) {
+            if (!LocalFree(entry->pending_memory[i])) entry->pending_memory[i]=NULL;else ok=0;
+        }
+    }
+    if (ok) memset(entry,0,sizeof(*entry));
+    return ok;
+}
+static int64_t wp_finish_open_v1(int64_t token,int64_t owner) {
+    WpEntryV1 *entry=wp_active_v1;
+    entry->owner=owner==-1?NULL:(void*)(intptr_t)owner;
+    if (!entry->owner && !wp_pending_v1(entry)) {memset(entry,0,sizeof(*entry));return -1;}
+    return token;
+}
+static int wp_root_valid_v1(WpEntryV1 *entry) {
+    return entry && entry->owner && entry->phase!=3 && !wp_pending_v1(entry) &&
+        wp_root_ready_impl_v1((int64_t)(intptr_t)entry->owner);
+}
+static int wp_file_valid_v1(WpEntryV1 *entry) {
+    return entry && entry->owner && entry->phase!=3 && !wp_pending_v1(entry) &&
+        wp_check_impl_v1((int64_t)(intptr_t)entry->owner,entry->maximum);
+}
+static int wp_snapshot_v1(WpEntryV1 *entry) {
+    HANDLE handle=(HANDLE)entry->owner;
+    return GetFileInformationByHandleEx(handle,FileIdInfo,&entry->identity,sizeof(entry->identity)) &&
+        GetFileInformationByHandleEx(handle,FileBasicInfo,&entry->basic,sizeof(entry->basic)) &&
+        GetFileSizeEx(handle,&entry->size);
+}
+static int wp_unchanged_v1(WpEntryV1 *entry) {
+    FILE_ID_INFO identity;FILE_BASIC_INFO basic;LARGE_INTEGER size;
+    HANDLE handle=(HANDLE)entry->owner;
+    return wp_file_valid_v1(entry) &&
+        GetFileInformationByHandleEx(handle,FileIdInfo,&identity,sizeof(identity)) &&
+        GetFileInformationByHandleEx(handle,FileBasicInfo,&basic,sizeof(basic)) && GetFileSizeEx(handle,&size) &&
+        !memcmp(&identity,&entry->identity,sizeof(identity)) && size.QuadPart==entry->size.QuadPart &&
+        basic.LastWriteTime.QuadPart==entry->basic.LastWriteTime.QuadPart &&
+        basic.ChangeTime.QuadPart==entry->basic.ChangeTime.QuadPart;
+}
+int64_t rt_windows_private_root_open_v1(int64_t path) {
+    AcquireSRWLockExclusive(&wp_lock_v1);int64_t token=wp_reserve_v1(1);
+    if (token!=-1) {wp_active_v1=wp_find_v1(token,1);token=wp_finish_open_v1(token,wp_root_open_impl_v1(path));}
+    wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return token;
+}
+int64_t rt_windows_private_root_ready_v1(int64_t token) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *entry=wp_find_v1(token,1);wp_active_v1=entry;
+    int valid=wp_root_valid_v1(entry);wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return valid;
+}
+int64_t rt_windows_private_directory_v1(int64_t root,int64_t name,int64_t create) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *parent=wp_find_v1(root,1);
+    int64_t token=parent?wp_reserve_v1(1):-1;
+    if (token!=-1) {wp_active_v1=wp_find_v1(token,1);
+        token=wp_finish_open_v1(token,wp_root_valid_v1(parent)?
+            wp_directory_impl_v1((int64_t)(intptr_t)parent->owner,name,create):-1);}
+    wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return token;
+}
+int64_t rt_windows_private_file_v1(int64_t root,int64_t name,int64_t create,int64_t maximum) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *parent=wp_find_v1(root,1);
+    int64_t token=parent && maximum>=0 && maximum<=8388608?wp_reserve_v1(2):-1;
+    if (token!=-1) {WpEntryV1 *entry=wp_find_v1(token,2);wp_active_v1=entry;
+        entry->maximum=maximum;entry->root_token=root;entry->phase=create?0:1;
+        int64_t handle=wp_root_valid_v1(parent)?wp_file_impl_v1((int64_t)(intptr_t)parent->owner,name,create,maximum):-1;
+        token=wp_finish_open_v1(token,handle);
+        if (token!=-1 && handle!=-1 && !create && !wp_snapshot_v1(entry)) entry->phase=3;
+    }
+    wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return token;
+}
+int64_t rt_windows_private_check_v1(int64_t token,int64_t maximum) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *entry=wp_find_v1(token,2);wp_active_v1=entry;
+    int valid=entry && maximum>=entry->maximum && wp_file_valid_v1(entry);
+    wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return valid;
+}
+int64_t rt_windows_private_file_write_v1(int64_t token,int64_t buffer,int64_t length) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *entry=wp_find_v1(token,2);wp_active_v1=entry;int64_t result=-1;
+    if (entry && entry->phase==0 && length>=0 && length<=1048576 &&
+        length<=entry->maximum-entry->position && wp_file_valid_v1(entry)) {
+        DWORD count=0;
+        if (WriteFile((HANDLE)entry->owner,(void*)(intptr_t)buffer,(DWORD)length,&count,NULL)) {
+            entry->position+=count;result=count;
+        } else entry->phase=3;
+    }
+    wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return result;
+}
+int64_t rt_windows_private_file_seal_v1(int64_t token) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *entry=wp_find_v1(token,2);wp_active_v1=entry;int ok=0;
+    if (entry && entry->phase==0 && wp_file_valid_v1(entry) && FlushFileBuffers((HANDLE)entry->owner) && wp_snapshot_v1(entry)) {
+        entry->phase=1;ok=1;
+    }
+    wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return ok;
+}
+int64_t rt_windows_private_file_size_v1(int64_t token) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *entry=wp_find_v1(token,2);wp_active_v1=entry;
+    int64_t size=entry && (entry->phase==1 || entry->phase==2) && wp_unchanged_v1(entry)?entry->size.QuadPart:-1;
+    wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return size;
+}
+int64_t rt_windows_private_file_read_v1(int64_t token,int64_t offset,int64_t buffer,int64_t length) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *entry=wp_find_v1(token,2);wp_active_v1=entry;int64_t result=-1;
+    if (entry && (entry->phase==1 || entry->phase==2) && offset>=0 && length>=0 && length<=1048576 &&
+        offset<=entry->size.QuadPart && length<=entry->size.QuadPart-offset && wp_unchanged_v1(entry)) {
+        LARGE_INTEGER position;position.QuadPart=offset;DWORD count=0;
+        if (SetFilePointerEx((HANDLE)entry->owner,position,NULL,FILE_BEGIN) &&
+            ReadFile((HANDLE)entry->owner,(void*)(intptr_t)buffer,(DWORD)length,&count,NULL) && wp_unchanged_v1(entry)) result=count;
+    }
+    wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return result;
+}
+int64_t rt_windows_private_publish_v1(int64_t root,int64_t file,int64_t name) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *directory=wp_find_v1(root,1),*entry=wp_find_v1(file,2);
+    wp_active_v1=entry;int64_t result=-1;
+    if (entry && entry->root_token==root && entry->phase==1 && wp_root_valid_v1(directory) && wp_unchanged_v1(entry)) {
+        result=wp_publish_impl_v1((int64_t)(intptr_t)directory->owner,(int64_t)(intptr_t)entry->owner,name);
+        if (result==0) {entry->phase=2;if (!wp_snapshot_v1(entry)) {entry->phase=3;result=-1;}}
+    }
+    wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return result;
+}
+int64_t rt_windows_private_root_close_v1(int64_t token) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *entry=wp_find_v1(token,1);
+    int ok=entry && wp_cleanup_v1(entry);ReleaseSRWLockExclusive(&wp_lock_v1);return ok;
+}
+int64_t rt_windows_private_file_close_v1(int64_t token) {
+    AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *entry=wp_find_v1(token,2);
+    int ok=entry && wp_cleanup_v1(entry);ReleaseSRWLockExclusive(&wp_lock_v1);return ok;
+}
+
 #else
 int64_t rt_windows_private_root_open_v1(int64_t path) {(void)path;return -1;}
 int64_t rt_windows_private_directory_v1(int64_t root,int64_t name,int64_t create) {(void)root;(void)name;(void)create;return -1;}
@@ -246,6 +427,15 @@ int64_t rt_windows_private_publish_v1(int64_t root,int64_t file,int64_t name) {(
 int64_t rt_windows_private_check_v1(int64_t file,int64_t maximum) {(void)file;(void)maximum;return 0;}
 int64_t rt_windows_private_root_close_v1(int64_t root) {(void)root;return 0;}
 int64_t rt_windows_private_root_ready_v1(int64_t root) {(void)root;return 0;}
-int64_t rt_windows_private_root_identity_v1(int64_t root,int64_t output) {(void)root;(void)output;return 0;}
+int64_t rt_windows_private_file_close_v1(int64_t file) {(void)file;return 0;}
+int64_t rt_windows_private_file_write_v1(int64_t file,int64_t buffer,int64_t length) {(void)file;(void)buffer;(void)length;return -1;}
+int64_t rt_windows_private_file_read_v1(int64_t file,int64_t offset,int64_t buffer,int64_t length) {(void)file;(void)offset;(void)buffer;(void)length;return -1;}
+int64_t rt_windows_private_file_size_v1(int64_t file) {(void)file;return -1;}
+int64_t rt_windows_private_file_seal_v1(int64_t file) {(void)file;return 0;}
 #endif
+/* Private facade temporaries use malloc/free, whose release has no fallible
+ * OS handle semantics. They never use an unchecked HeapFree owner. */
+#include <stdlib.h>
+int64_t rt_windows_private_alloc_v1(int64_t size) {return size>0 && size<=2097168?(int64_t)(intptr_t)calloc(1,(size_t)size):0;}
+void rt_windows_private_free_v1(int64_t memory) {free((void*)(intptr_t)memory);}
 #endif

@@ -1,9 +1,13 @@
 # Windows private journal capability V1
 
-The typed owner is `std.nogc_sync_mut.io.windows_private_file_v1`, implemented
-inside the existing retained-file owner. The native Windows boundary is
+The typed owner is `std.nogc_sync_mut.io.windows_private_file_v1`. The native Windows boundary is
 `src/runtime/platform/runtime_windows_private_root.h`. There is no second
-process registry or journal authority.
+process registry or journal authority. The narrow native IO registry has 256
+slots and non-reused monotonic generations. Simple values contain only tokens;
+all validation, IO, close, publication, cursor/quota accounting and authoritative
+write/sealed/published transitions occur under one exclusive native owner lock.
+Copied stale values cannot dereference freed memory, close a recycled HANDLE,
+or write through a copy made before sealing. Exhaustion fails before OS effects.
 
 `windows_private_root_open_v1` admits an installed local fixed-volume absolute
 DOS path. It normalizes forward slashes, rejects UNC/device paths and substituted
@@ -47,7 +51,12 @@ succeeds. A failed close preserves the exact handle or remaining ancestry
 chain; it never fabricates a closed state. Native root admission returns a
 non-ready cleanup lease if attempted cleanup fails. The root-ready query
 revalidates all retained ancestry before further operations. There is no
-background retry or process-global leaked-handle quarantine.
+background retry. Failed token `CloseHandle` and security-descriptor `LocalFree`
+operations remain attached to the exact IO generation and block further use
+until explicit cleanup succeeds. UTF16 and byte-buffer temporaries use bounded
+`malloc` allocations with infallible `free`, avoiding unchecked `HeapFree`.
+Publication refreshes identity on the authoritative registry record after a
+successful rename, so the exact retained final handle supports readback.
 
 ## Verification status and required host evidence
 
@@ -61,8 +70,9 @@ installer-owned empty/private, foreign-read-ACL and reparse-root fixtures via
 `SIMPLE_WINDOWS_PRIVATE_EMPTY_ROOT`,
 `SIMPLE_WINDOWS_PRIVATE_FOREIGN_READ_ROOT`, and
 `SIMPLE_WINDOWS_PRIVATE_REPARSE_ROOT`. Missing fixtures fail explicitly. It
-checks actual publication, retained readback, privacy checks and collision
-preservation. Additional qualification must inject failed `CloseHandle`, deny
+checks actual publication, retained readback, privacy checks, collision
+preservation, copied-before-seal write rejection, and stale copied root/file
+rejection after slot reuse. Additional qualification must inject failed `CloseHandle`, deny
 generic read/write/delete/security-control rights, test owner mismatch and
 unprotected DACLs on root/stage/collision, race ancestry replacement, exercise
 8 MiB chunked IO, and independently attempt access as an untrusted principal.
