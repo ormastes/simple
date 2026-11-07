@@ -15,7 +15,7 @@
 #define WP_PENDING_V1 4
 typedef struct {
     uint64_t generation;
-    int kind, phase;
+    int kind, phase, created_stage;
     void *owner;
     int64_t root_token, maximum, position;
     FILE_ID_INFO identity;
@@ -104,8 +104,11 @@ static int wp_security_v1(HANDLE handle,int private_required) {
         ACE_HEADER *header=(ACE_HEADER*)raw;
         if (header->AceType==ACCESS_DENIED_ACE_TYPE) continue;
         if (header->AceType!=ACCESS_ALLOWED_ACE_TYPE) goto done;
-        if (header->AceSize<sizeof(ACCESS_ALLOWED_ACE)) goto done;
+        if (header->AceSize<offsetof(ACCESS_ALLOWED_ACE,SidStart)+8) goto done;
         ACCESS_ALLOWED_ACE *ace=(ACCESS_ALLOWED_ACE*)raw;
+        SID *sid=(SID*)&ace->SidStart;
+        if (sid->SubAuthorityCount>15 || GetSidLengthRequired(sid->SubAuthorityCount)>
+            header->AceSize-offsetof(ACCESS_ALLOWED_ACE,SidStart)) goto done;
         if (!IsValidSid((PSID)&ace->SidStart)) goto done;
         if (header->AceFlags&INHERIT_ONLY_ACE) continue;
         DWORD forbidden=FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_EA|
@@ -356,7 +359,7 @@ int64_t rt_windows_private_file_v1(int64_t root,int64_t name,int64_t create,int6
     AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *parent=wp_find_v1(root,1);
     int64_t token=parent && maximum>=0 && maximum<=8388608?wp_reserve_v1(2):-1;
     if (token!=-1) {WpEntryV1 *entry=wp_find_v1(token,2);wp_active_v1=entry;
-        entry->maximum=maximum;entry->root_token=root;entry->phase=create?0:1;
+        entry->maximum=maximum;entry->root_token=root;entry->phase=create?0:1;entry->created_stage=create!=0;
         int64_t handle=wp_root_valid_v1(parent)?wp_file_impl_v1((int64_t)(intptr_t)parent->owner,name,create,maximum):-1;
         token=wp_finish_open_v1(token,handle);
         if (token!=-1 && handle!=-1 && !create && !wp_snapshot_v1(entry)) entry->phase=3;
@@ -404,7 +407,7 @@ int64_t rt_windows_private_file_read_v1(int64_t token,int64_t offset,int64_t buf
 int64_t rt_windows_private_publish_v1(int64_t root,int64_t file,int64_t name) {
     AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *directory=wp_find_v1(root,1),*entry=wp_find_v1(file,2);
     wp_active_v1=entry;int64_t result=-1;
-    if (entry && entry->root_token==root && entry->phase==1 && wp_root_valid_v1(directory) && wp_unchanged_v1(entry)) {
+    if (entry && entry->created_stage && entry->root_token==root && entry->phase==1 && wp_root_valid_v1(directory) && wp_unchanged_v1(entry)) {
         result=wp_publish_impl_v1((int64_t)(intptr_t)directory->owner,(int64_t)(intptr_t)entry->owner,name);
         if (result==0) {entry->phase=2;if (!wp_snapshot_v1(entry)) {entry->phase=3;result=-1;}}
     }
