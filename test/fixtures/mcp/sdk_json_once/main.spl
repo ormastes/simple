@@ -1,0 +1,48 @@
+# Actual SDK serialization fixture. A strict independent JSON decoder is the oracle.
+use std.common.string_core.{char_from_code}
+use std.nogc_sync_mut.mcp_sdk.core.json.{LB, RB, jp, js, jo1, jo3}
+use std.nogc_sync_mut.mcp_sdk.core.types.{make_tool_result, make_tool_error,
+    tool_def, tool_def_to_json, resource_def, resource_def_to_json,
+    prompt_def, prompt_def_to_json, ServerInfo, server_info_to_json}
+use std.nogc_sync_mut.mcp_sdk.core.jsonrpc.{jsonrpc_error, jsonrpc_error_with_data}
+use std.nogc_sync_mut.mcp_sdk.core.errors.{McpError, mcp_error_to_jsonrpc}
+use std.nogc_sync_mut.mcp_sdk.server.state.{make_progress_notification,
+    make_log_notification, make_resource_updated_notification}
+use std.nogc_sync_mut.mcp_sdk.server.registry.{registry_reset, registry_register, registry_list_json}
+
+fn fixture_schema() -> text:
+    jo1(jp("type", js("object")))
+
+fn fixture_handler(args: text) -> text:
+    args
+
+fn emit(case_index: i64, kind: text, rendered: text):
+    print jo3(jp("case", str(case_index)), jp("kind", js(kind)), jp("rendered", rendered))
+
+fn main() -> i64:
+    var controls = ""
+    for code in range(0, 32):
+        controls = controls + char_from_code(code)
+    val raw_json = LB() + "\"device\":\"COM7\"" + RB()
+    val mixed = "한글\"" + char_from_code(0) + "😀끝"
+    val samples: [text] = ["", "quote \" slash \\", "line1\nline2\r\ttail", "한글 café 😀", controls, raw_json, mixed]
+    var case_index = 0
+    for sample in samples:
+        emit(case_index, "js", js(sample))
+        emit(case_index, "tool_result", make_tool_result("1", sample))
+        emit(case_index, "tool_error", make_tool_error("2", sample))
+        emit(case_index, "tool_def", tool_def_to_json(tool_def("probe", sample, fixture_schema())))
+        emit(case_index, "resource_def", resource_def_to_json(resource_def("file:///probe", "probe", sample, "text/plain")))
+        emit(case_index, "prompt_def", prompt_def_to_json(prompt_def("probe", sample, "[]")))
+        emit(case_index, "server_info", server_info_to_json(ServerInfo(name: "probe", version: "1", instructions: sample)))
+        emit(case_index, "rpc_error", jsonrpc_error("3", -32602, sample))
+        emit(case_index, "rpc_error_data", jsonrpc_error_with_data("4", -32602, sample, raw_json))
+        emit(case_index, "mcp_error", mcp_error_to_jsonrpc(McpError(category: "validation", message: sample, recoverable: true, details: sample)))
+        emit(case_index, "progress", make_progress_notification("probe", 1, 2, sample))
+        emit(case_index, "log", make_log_notification("info", sample, sample))
+        emit(case_index, "resource_update", make_resource_updated_notification(sample))
+        registry_reset()
+        registry_register("probe", sample, fixture_schema, fixture_handler)
+        emit(case_index, "registry", registry_list_json("5", ""))
+        case_index = case_index + 1
+    0

@@ -10,6 +10,7 @@ use compiler.hir.hir_definitions.{HirTypeKind}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_symbol_table_methods.*
+use compiler.mir.mir_lowering.MirLowering
 
 fn ready_helper_callee(func: ParserFunction) -> text:
     if func.body.stmts.len() != 1:
@@ -17,32 +18,29 @@ fn ready_helper_callee(func: ParserFunction) -> text:
     match func.body.stmts[0].kind:
         case StmtKind.Expr(expr):
             match expr.kind:
-                case ExprKind.Call(callee, args):
-                    match callee.kind:
-                        case ExprKind.Field(owner, method):
-                            if method != "from_value" or args.len() != 1:
-                                return "invalid-constructor"
-                            if args[0].has_name or args[0].name != "": return "invalid-positional-constructor-argument"
-                            match owner.kind:
-                                case ExprKind.Ident(name):
-                                    if name != "Future": return "invalid-owner"
-                                case _: return "invalid-owner-kind"
-                            match args[0].value.kind:
-                                case ExprKind.Call(body_callee, body_args):
-                                    if body_args.len() != func.params.len(): return "missing-argument"
-                                    var index = 0
-                                    while index < body_args.len():
-                                        if body_args[index].has_name or body_args[index].name != "": return "invalid-positional-body-argument"
-                                        match body_args[index].value.kind:
-                                            case ExprKind.Ident(name):
-                                                if name != func.params[index].name: return "wrong-argument"
-                                            case _: return "argument-reevaluation"
-                                        index = index + 1
-                                    match body_callee.kind:
-                                        case ExprKind.Ident(name): return name
-                                        case _: return "not-a-real-function"
-                                case _: return "not-a-call"
-                        case _: ()
+                case ExprKind.MethodCall(owner, method, args):
+                    if method != "from_value" or args.len() != 1:
+                        return "invalid-constructor"
+                    if args[0].has_name or args[0].name != "": return "invalid-positional-constructor-argument"
+                    match owner.kind:
+                        case ExprKind.Ident(name):
+                            if name != "Future": return "invalid-owner"
+                        case _: return "invalid-owner-kind"
+                    match args[0].value.kind:
+                        case ExprKind.Call(body_callee, body_args):
+                            if body_args.len() != func.params.len(): return "missing-argument"
+                            var index = 0
+                            while index < body_args.len():
+                                if body_args[index].has_name or body_args[index].name != "": return "invalid-positional-body-argument"
+                                match body_args[index].value.kind:
+                                    case ExprKind.Ident(name):
+                                        if name != func.params[index].name: return "wrong-argument"
+                                    case _: return "argument-reevaluation"
+                                index = index + 1
+                            match body_callee.kind:
+                                case ExprKind.Ident(name): return name
+                                case _: return "not-a-real-function"
+                        case _: return "not-a-call"
                 case _: ()
         case _: ()
     "invalid-wrapper"
@@ -83,7 +81,7 @@ describe "no-await lowering owns a separate synchronous return scope":
         match func.body.stmts[0].kind:
             case StmtKind.Expr(expr):
                 match expr.kind:
-                    case ExprKind.Call(_, args):
+                    case ExprKind.MethodCall(_, _, args):
                         expect(args.len()).to_equal(1)
                         match args[0].value.kind:
                             case ExprKind.Block(body): expect(body.stmts.len()).to_equal(1)
@@ -108,3 +106,22 @@ describe "no-await lowering owns a separate synchronous return scope":
         match parsed.functions["untouched"].body.stmts[0].kind:
             case StmtKind.Return(_): ()
             case _: fail("synchronous return was rewritten")
+
+fn native_mir_errors(source: text) -> text:
+    val path = "ready_native.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val _mir = lowering.lower_module(hir)
+    var report = ""
+    for error in lowering.errors:
+        report = report + error.message + "\n"
+    report
+
+describe "no-await ready wrapper lowers to native MIR":
+    it "resolves the Future owner as a static constructor, not a variable":
+        # Shape of src/compiler/90.tools/fix/main.spl:144 (`async fn main() -> Int`
+        # with no await), rejected by stage2 MIR as `undefined variable Future`.
+        val source = "enum Poll<T>:\n    Ready(T)\n    Pending\n\nclass Future<T>:\n    state: [u8]\n    poll_result: Poll<T>\n\n    static fn from_value(value: T) -> Future<T>:\n        Future(state: [], poll_result: Poll.Ready(value))\n\nasync fn main() -> i64:\n    val n = 3\n    n + 1\n"
+        expect(native_mir_errors(source)).to_equal("")
