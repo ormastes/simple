@@ -11,6 +11,8 @@ The original head `26c80e995b1c49f03262fa7f1a712f8431790603` and all evidence
 below remain historical pins. The two source commits were rebased in an
 isolated Linux worktree onto release
 `a6dca22ee32da27ff9e45a67ba86ae3ef587074e`, preserving newer release changes.
+Final source integration rebased that reviewed candidate onto release
+`8731af00a0fc9b264e5e38ca4034e27f6b04a69c` and resealed only the owned bug rows.
 The one stale `rt_process_run_tuple c-only` parity-baseline row was removed
 alongside its new Rust export. No capture semantics were changed beyond the
 original export and consumer block release.
