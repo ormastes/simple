@@ -6098,32 +6098,20 @@ impl MirLowering:
 
     me lower_gpu_intrinsic_call(name: text, args: [HirCallArg]) -> LocalId:
         """Lower GPU intrinsic function call to MIR GPU instruction."""
-        # Resolve dimension argument (default 0)
-        val dim = if args.len() > 0:
-            # Try to extract constant integer from the dimension argument
+        # Only these five operations consume a dimension. Atomic/data operands
+        # belong to their later lowering path and must not be evaluated here.
+        val takes_dimension = match name:
+            case "gpu_global_id" | "gpu_local_id" | "gpu_block_id" | "gpu_block_dim" | "gpu_grid_dim": true
+            case _: false
+        val dim = if takes_dimension and args.len() > 0:
             val dim_expr = args[0].value
             match dim_expr.kind:
-                case IntLit(value, _):
-                    value
+                case IntLit(value, _): value
                 case _:
-                    # SAME FAIL-OPEN CLASS as the unresolved-method const-0
-                    # placeholder further down this file: a value the lowering
-                    # could not determine was replaced by a plausible default
-                    # instead of a diagnostic. Here a NON-CONSTANT dimension
-                    # argument silently became dimension 0, so
-                    # `thread_idx(d)` for a computed `d` read the X index
-                    # whatever `d` was -- wrong data under exit 0.
-                    #
-                    # The intrinsic genuinely requires a compile-time constant
-                    # dimension (it selects which intrinsic to emit), so the
-                    # honest answer is a diagnostic. The `0` is retained only
-                    # as the placeholder the rest of this function needs to
-                    # keep building a well-formed MIR body; the error above
-                    # makes the build fail on every lane that reads it, and
-                    # the print makes it visible on the lanes that do not.
+                    # Preserve one evaluation for diagnostic recovery, then
+                    # prevent the placeholder index from being published.
                     val dim_local = self.lower_expr(dim_expr)
-                    self.error("GPU thread-index dimension must be a compile-time constant", nil)
-                    print "[mir-lower] WARNING: non-constant GPU thread-index dimension lowered to dimension 0 (silent-default risk)"
+                    self.error_fatal("GPU thread-index dimension must be a compile-time constant", Some(dim_expr.span))
                     0
         else:
             0
