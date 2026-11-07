@@ -30,7 +30,7 @@ use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1,
     runtime_state_empty, RUNTIME_PRIVILEGE_ROOTLESS, RUNTIME_PRIVILEGE_ROOT,
     RUNTIME_PRIVILEGE_UNKNOWN}
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout, process_run_bounded,
-    process_run_bounded_admitted_v1}
+    process_run_bounded_admitted_v1, process_run_bounded_observed_v1}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_publish_noreplace, file_remove, directory_fsync, file_is_regular_no_follow,
     file_read_regular_no_follow_bounded, file_lock, file_unlock}
 use std.nogc_sync_mut.sffi.fs.{file_atomic_write_mode}
@@ -74,6 +74,8 @@ pub struct ScriptedCommandResultV1:
     stdout: text
     stderr: text
     exit_code: i64
+    # Explicit fixture representation of the native bounded-capture flag.
+    output_limited: bool = false
 
 # Provider-local observed facts used by the common API's absence receipt. This
 # is not a lifecycle completion or helper-group reap receipt.
@@ -1500,6 +1502,9 @@ impl LinuxOciRuntimeProviderV1:
                         scripted.stderr.len() > OCI_MAX_OUTPUT_BYTES:
                     return RuntimeExecResultV1(stdout: "", stderr: "output-limit-exceeded",
                         exit_code: -1, matched: true)
+                if scripted.output_limited:
+                    return RuntimeExecResultV1(stdout: scripted.stdout,
+                        stderr: "container-effect-process-limit:output", exit_code: -1, matched: false)
                 return RuntimeExecResultV1(stdout: scripted.stdout,
                     stderr: scripted.stderr, exit_code: scripted.exit_code,
                     matched: true)
@@ -1515,6 +1520,22 @@ impl LinuxOciRuntimeProviderV1:
             val admitted = process_run_bounded_admitted_v1(routed.program, routed.args,
                 self.timeout_ms, OCI_MAX_OUTPUT_BYTES, self.effect_deadline.unwrap().expires_at_unix_ms)
             match admitted:
+                case Err(reason):
+                    return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
+                case Ok(result):
+                    if result.limit_exceeded:
+                        return RuntimeExecResultV1(stdout: result.stdout,
+                            stderr: "container-effect-process-limit:" + result.limit_type,
+                            exit_code: -1, matched: false)
+                    return RuntimeExecResultV1(stdout: result.stdout, stderr: result.stderr,
+                        exit_code: result.exit_code, matched: true)
+        if self.engine_policy.?:
+            # Structured ordinary capture has no launch authority/deadline.
+            # Its native saturation flags must survive read/reconcile/cleanup;
+            # legacy head/tail text markers with CLI status zero are not proof
+            # that logs or an inspection response were complete.
+            match process_run_bounded_observed_v1(routed.program, routed.args,
+                    self.timeout_ms, OCI_MAX_OUTPUT_BYTES):
                 case Err(reason):
                     return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
                 case Ok(result):
