@@ -1,0 +1,315 @@
+# NOT_RUN. Requires a qualified native compiler with the current internal worker
+# dispatcher and V4 group provider. Run this file in an isolated test process:
+# the fixture temporarily owns the entire process environment, then restores it.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.env.variables.{env_snapshot, env_restore, env_clear, env_set}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove, dir_list}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_delete}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use app.io.env_ops.{cwd}
+use app.io.cli_ops.{cli_kernel_executable_path}
+use app.io.time_ops.{sleep_ms}
+use std.io_runtime.{time_now_monotonic_ms}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
+    compiler_source_authority_publish_v1}
+use app.cli.native_build_main.{native_build_coordinator_prepublish_closure_v1,
+    native_build_hir_ledger_run_v1}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_prepare_v1, environment_variant_policy_handoff_attach_v1}
+use app.cli.worker_hir_profile_v1.{WorkerHirProfileV1, worker_hir_profile_admit_v1,
+    worker_hir_profile_for_owner_v1}
+use app.cli.worker_hir_owner_v1.{worker_hir_owner_start_v1, worker_hir_owner_retain_failure_v1}
+use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
+use std.common.process.observation_v4.*
+
+# Test-only lossless projection of an ACTUAL provider receipt to the published
+# 64-word codec layout. Positive decode must pass before corrupting its version.
+fn worker_hir_receipt_wire_v1(receipt: ProcessObservationReceiptV4) -> ProcessObservationWireV4:
+    val p = receipt.packet
+    var words: [i64] = []
+    words.push(4)
+    words.push(p.packet_kind as i64)
+    words.push(64)
+    words.push(p.status as i64)
+    words.push(p.request_id_high)
+    words.push(p.request_id_low)
+    words.push(p.ticket_high)
+    words.push(p.ticket_low)
+    words.push(p.phase as i64)
+    words.push(p.validity_bits)
+    words.push(p.failure_phase as i64)
+    words.push(p.failure_reason as i64)
+    words.push(p.errno_value)
+    words.push(p.exec_state as i64)
+    words.push(p.exec_errno)
+    words.push(p.pid)
+    words.push(p.raw_wait_status)
+    words.push(p.exit_code)
+    words.push(p.signal_number)
+    words.push(p.request_started_ns)
+    words.push(p.prepared_ns)
+    words.push(p.process_started_ns)
+    words.push(p.exec_confirmed_ns)
+    words.push(p.leader_waited_ns)
+    words.push(p.tree_empty_ns)
+    words.push(p.execution_deadline_ns)
+    words.push(p.kill_deadline_ns)
+    words.push(p.cleanup_deadline_ns)
+    words.push(if p.term_attempted: 1 else: 0)
+    words.push(if p.term_sent: 1 else: 0)
+    words.push(if p.kill_attempted: 1 else: 0)
+    words.push(if p.kill_sent: 1 else: 0)
+    words.push(p.clock_kind as i64)
+    words.push(p.clock_nominal_resolution_ns)
+    words.push(p.clock_effective_resolution_ns)
+    words.push(p.clock_cpu_resolution_ns)
+    words.push(p.user_cpu_ns)
+    words.push(p.system_cpu_ns)
+    words.push(p.total_cpu_ns)
+    words.push(p.child_direct_rss_bytes)
+    words.push(p.tree_metric_kind as i64)
+    words.push(p.tree_peak_bytes)
+    words.push(p.enforcement_kind as i64)
+    words.push(p.memory_limit_bytes)
+    words.push(p.limit_event_bits)
+    words.push(if p.tree_accounting_available: 1 else: 0)
+    words.push(if p.tree_control_available: 1 else: 0)
+    words.push(if p.leader_reaped: 1 else: 0)
+    words.push(if p.tree_empty: 1 else: 0)
+    words.push(p.stdout.state as i64)
+    words.push(p.stdout.errno_value)
+    words.push(p.stdout.seen_bytes)
+    words.push(p.stdout.retained_bytes)
+    words.push(p.stdout.delivered_bytes)
+    words.push(p.stderr.state as i64)
+    words.push(p.stderr.errno_value)
+    words.push(p.stderr.seen_bytes)
+    words.push(p.stderr.retained_bytes)
+    words.push(p.stderr.delivered_bytes)
+    words.push(p.eintr_retries)
+    words.push(receipt.stdout.len())
+    words.push(receipt.stderr.len())
+    words.push(receipt.binding_digest.len())
+    words.push(0)
+    ProcessObservationWireV4(words: words, stdout: receipt.stdout,
+        stderr: receipt.stderr, binding: receipt.binding_digest)
+
+var worker_hir_saved_environment_v1: [(text, text)] = []
+var worker_hir_fixture_root_v1: text = ""
+
+fn worker_hir_prepare_actual_profile_v1(name: text, entry_file: text = "entry.spl",
+        fail_fast: bool = false) -> WorkerHirProfileV1:
+    worker_hir_saved_environment_v1 = env_snapshot()
+    var captured_home: text? = nil
+    for pair in worker_hir_saved_environment_v1:
+        if pair.0 == "HOME": captured_home = Some(pair.1)
+    val root = cwd()
+    val binary = cli_kernel_executable_path()
+    worker_hir_fixture_root_v1 = root + "/build/worker-hir-spec-{getpid()}-" + name
+    expect(dir_create_all(root + "/build")).to_equal(true)
+    expect(file_create_exclusive(worker_hir_fixture_root_v1 + ".claim", "owned\n")).to_equal(true)
+    expect(dir_create_all(worker_hir_fixture_root_v1 + "/cache")).to_equal(true)
+    expect(dir_create_all(worker_hir_fixture_root_v1 + "/queue")).to_equal(true)
+    env_clear()
+    # The canonical builder's owned cache/no-fallback settings are retained,
+    # not omitted to make a bare-environment unit test pass.
+    match captured_home:
+        case Some(value): expect(env_set("HOME", value)).to_equal(true)
+        case None: pass
+    expect(env_set("PATH", "/usr/bin:/bin")).to_equal(true)
+    expect(env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", worker_hir_fixture_root_v1 + "/native")).to_equal(true)
+    expect(env_set("SIMPLE_RT_OBJ_CACHE_DIR", worker_hir_fixture_root_v1 + "/runtime")).to_equal(true)
+    expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_equal(true)
+    expect(env_set("SIMPLE_BINARY", binary)).to_equal(true)
+    expect(env_set("SIMPLE_BIN", binary)).to_equal(true)
+    expect(env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")).to_equal(true)
+    expect(env_set("SIMPLE_HIR_CACHE", "1")).to_equal(true)
+    expect(env_set("SIMPLE_HIR_CACHE_DIR", worker_hir_fixture_root_v1 + "/cache")).to_equal(true)
+    expect(env_set("SIMPLE_HIR_SHARD_QUEUE", worker_hir_fixture_root_v1 + "/queue")).to_equal(true)
+    val sources = ["test/fixtures/worker_hir_profile_v1", "src/lib"]
+    val authority = compiler_source_authority_acquire_v1(root,
+        worker_hir_fixture_root_v1 + "/inventory", sources, true)
+    expect(authority.valid).to_equal(true)
+    expect(compiler_source_authority_publish_v1(authority)).to_equal(true)
+    val entry = "test/fixtures/worker_hir_profile_v1/" + entry_file
+    var args = ["--entry-closure", "--entry", entry, "--source", sources[0],
+        "--source", sources[1], "--cache-dir", worker_hir_fixture_root_v1 + "/cache",
+        "--output", worker_hir_fixture_root_v1 + "/must-not-link"]
+    if fail_fast: args.push("--fail-fast")
+    expect(native_build_coordinator_prepublish_closure_v1(args)).to_equal(true)
+    val policy = environment_variant_policy_handoff_prepare_v1(args).unwrap()
+    val forwarded = environment_variant_policy_handoff_attach_v1(args, policy.encoded_payload).unwrap()
+    worker_hir_profile_for_owner_v1(worker_hir_profile_admit_v1(forwarded, entry,
+        sources, time_now_monotonic_ms() + 60000).unwrap(), "0/1@0", 1073741824)
+
+describe "worker HIR actual launch and retirement":
+    after_each:
+        if worker_hir_fixture_root_v1 != "":
+            env_restore(worker_hir_saved_environment_v1)
+            # A failed native retirement deliberately retains its files for
+            # investigation; never delete storage a live owner may still use.
+            worker_hir_fixture_root_v1 = ""
+            worker_hir_saved_environment_v1 = []
+
+    it "runs the production HIR ledger coordinator with canonical parent cache settings":
+        val profile = worker_hir_prepare_actual_profile_v1("coordinator")
+        val result = native_build_hir_ledger_run_v1(profile.argv, 1,
+            cli_kernel_executable_path(), 60000)
+        expect(result.code).to_equal(0)
+        expect(result.all_stopped).to_equal(true)
+        expect(result.total_claims).to_be_greater_than(0)
+        expect(result.blocked_reason).to_equal("")
+        var artifacts = 0
+        for path in dir_list(worker_hir_fixture_root_v1 + "/cache"):
+            if path.ends_with(".hir"): artifacts = artifacts + 1
+        expect(artifacts).to_be_greater_than(0)
+        expect(file_exists(worker_hir_fixture_root_v1 + "/must-not-link")).to_equal(false)
+
+    it "rejects loader injection through the production coordinator before worker launch":
+        val profile = worker_hir_prepare_actual_profile_v1("coordinator-reject")
+        expect(env_set("DYLD_INSERT_LIBRARIES", "/must-not-load/fixture.dylib")).to_equal(true)
+        val result = native_build_hir_ledger_run_v1(profile.argv, 1,
+            cli_kernel_executable_path(), 60000)
+        expect(result.code == 0).to_equal(false)
+        expect(result.all_stopped).to_equal(true)
+        expect(result.total_claims).to_equal(0)
+        expect(result.blocked_reason).to_contain("DYLD_INSERT_LIBRARIES")
+        for path in dir_list(worker_hir_fixture_root_v1 + "/cache"):
+            expect(path.ends_with(".hir")).to_equal(false)
+
+    it "retires the production two-worker pool after a real HIR failure":
+        val profile = worker_hir_prepare_actual_profile_v1("coordinator-failure", "bad_entry.spl", true)
+        val result = native_build_hir_ledger_run_v1(profile.argv, 2,
+            cli_kernel_executable_path(), 60000)
+        expect(result.code == 0).to_equal(false)
+        expect(result.all_stopped).to_equal(true)
+        expect(result.total_claims).to_be_greater_than(0)
+        expect(file_exists(worker_hir_fixture_root_v1 + "/must-not-link")).to_equal(false)
+        # The sibling may finish naturally before cancellation. This proves
+        # the pool barrier, not that a signal necessarily reached that sibling.
+
+    it "runs the internal HIR dispatcher and commits an actual HIR artifact":
+        val profile = worker_hir_prepare_actual_profile_v1("complete")
+        var worker = worker_hir_owner_start_v1(profile, cli_kernel_executable_path(), "0/1")
+        while not worker.done:
+            worker.tick(false)
+            if not worker.done: sleep_ms(10)
+        worker_hir_owner_retain_failure_v1(worker)
+        expect(worker.stopped).to_equal(true)
+        expect(worker.code).to_equal(0)
+        var artifacts = 0
+        for path in dir_list(worker_hir_fixture_root_v1 + "/cache"):
+            if path.ends_with(".hir"): artifacts = artifacts + 1
+        expect(artifacts).to_be_greater_than(0)
+        expect(file_exists(worker_hir_fixture_root_v1 + "/must-not-link")).to_equal(false)
+        expect(dir_remove(worker_hir_fixture_root_v1, true)).to_equal(true)
+        expect(file_delete(worker_hir_fixture_root_v1 + ".claim")).to_equal(true)
+
+    it "cancels an actual retained worker without turning cancellation into success":
+        val profile = worker_hir_prepare_actual_profile_v1("cancel")
+        var worker = worker_hir_owner_start_v1(profile, cli_kernel_executable_path(), "0/1")
+        expect(worker.reservations.len()).to_equal(1)
+        while not worker.done:
+            worker.tick(true)
+            if not worker.done: sleep_ms(10)
+        worker_hir_owner_retain_failure_v1(worker)
+        expect(worker.stopped).to_equal(true)
+        expect(worker.code == 0).to_equal(false)
+        expect(worker.cleanup_deadline_ms > 0).to_equal(true)
+
+    it "rejects an invalid shard through the actual worker entry before compile":
+        worker_hir_saved_environment_v1 = env_snapshot()
+        env_clear()
+        expect(env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")).to_equal(true)
+        expect(env_set("SIMPLE_HIR_WORKER_PROFILE_V1", "1")).to_equal(true)
+        expect(run_native_build_worker_entry(["--entry", "missing.spl", "--hir-shard=1/1"])).to_equal(1)
+        env_restore(worker_hir_saved_environment_v1)
+
+    it "keeps parent deadline expiry a failure after actual worker retirement":
+        var profile = worker_hir_prepare_actual_profile_v1("deadline")
+        profile.deadline_ms = time_now_monotonic_ms() + 500
+        var worker = worker_hir_owner_start_v1(profile, cli_kernel_executable_path(), "0/1")
+        expect(worker.reservations.len()).to_equal(1)
+        sleep_ms(510)
+        while not worker.done:
+            worker.tick(false)
+            if not worker.done: sleep_ms(10)
+        worker_hir_owner_retain_failure_v1(worker)
+        expect(worker.cancelled).to_equal(true)
+        expect(worker.stopped).to_equal(true)
+        expect(worker.code == 0).to_equal(false)
+
+    it "retains the same real reservation across Simple codec rejection and repeated acknowledgement":
+        val profile = worker_hir_prepare_actual_profile_v1("decode-fault")
+        var worker = worker_hir_owner_start_v1(profile, cli_kernel_executable_path(), "0/1")
+        expect(worker.reservations.len()).to_equal(1)
+        var reservation = worker.reservations[0]
+        var receipt = reservation.observe(0, true).unwrap()
+        val deadline = time_now_monotonic_ms() + 5000
+        while receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen and
+                receipt.packet.packet_kind != ProcessObservationPacketKindV4.CleanupFrozen and
+                time_now_monotonic_ms() < deadline:
+            sleep_ms(10)
+            receipt = reservation.observe(0, true).unwrap()
+        expect(receipt.packet.leader_reaped).to_equal(true)
+        expect(receipt.packet.tree_empty).to_equal(true)
+        val actual_wire = worker_hir_receipt_wire_v1(receipt)
+        expect(decode_process_observation_v4(actual_wire).is_ok()).to_equal(true)
+        var corrupt_words: [i64] = []
+        for word in actual_wire.words: corrupt_words.push(word)
+        corrupt_words[POV4_VERSION] = 0
+        val malformed = ProcessObservationWireV4(words: corrupt_words,
+            stdout: actual_wire.stdout, stderr: actual_wire.stderr, binding: actual_wire.binding)
+        expect(decode_process_observation_v4(malformed).is_err()).to_equal(true)
+        # Composition control: real observation projected losslessly to its
+        # codec wire, then corrupted locally. Not injection inside observe().
+        expect(reservation.confirm_release().is_err()).to_equal(true)
+        expect(reservation.acknowledge([]).is_err()).to_equal(true)
+        val first_ack = reservation.acknowledge(receipt.binding_digest).unwrap()
+        val repeated_ack = reservation.acknowledge(receipt.binding_digest).unwrap()
+        expect(first_ack.packet.packet_kind).to_equal(repeated_ack.packet.packet_kind)
+        expect(first_ack.binding_digest).to_equal(repeated_ack.binding_digest)
+        worker.reservations = [reservation]
+        while not worker.done:
+            worker.tick(true)
+            if not worker.done: sleep_ms(10)
+        worker_hir_owner_retain_failure_v1(worker)
+        expect(worker.stopped).to_equal(true)
+        expect(worker.reservations.len()).to_equal(0)
+        expect(worker.executable.len()).to_equal(0)
+        expect(worker.directory.len()).to_equal(0)
+        expect(worker.code == 0).to_equal(false)
+
+    it "bounds a failed clock observation while retaining the real lease for recovery":
+        val profile = worker_hir_prepare_actual_profile_v1("clock-fault")
+        var worker = worker_hir_owner_start_v1(profile, cli_kernel_executable_path(), "0/1")
+        expect(worker.reservations.len()).to_equal(1)
+        worker.tick_observed_v1(true, 0)
+        expect(worker.done).to_equal(true)
+        expect(worker.stopped).to_equal(false)
+        expect(worker.reservations.len()).to_equal(1)
+        expect(worker.reason).to_contain("clock unavailable")
+        # Test-supervisor recovery uses the SAME retained reservation directly.
+        # It does not alias/reset the failed production owner or its deadline.
+        var reservation = worker.reservations[0]
+        val recovery_deadline = time_now_monotonic_ms() + 5000
+        var receipt = reservation.observe(0, true).unwrap()
+        while receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen and
+                receipt.packet.packet_kind != ProcessObservationPacketKindV4.CleanupFrozen and
+                time_now_monotonic_ms() < recovery_deadline:
+            sleep_ms(10)
+            receipt = reservation.observe(0, true).unwrap()
+        expect(receipt.packet.leader_reaped).to_equal(true)
+        expect(receipt.packet.tree_empty).to_equal(true)
+        expect(reservation.acknowledge(receipt.binding_digest).is_ok()).to_equal(true)
+        expect(reservation.confirm_release().unwrap()).to_equal(true)
+        var directory = worker.directory[0]
+        var executable = worker.executable[0]
+        expect(directory.close().unwrap()).to_equal(true)
+        expect(executable.close().unwrap()).to_equal(true)
+        expect(reservation.released).to_equal(true)
+        expect(directory.closed).to_equal(true)
+        expect(executable.closed).to_equal(true)
+        expect(worker.done).to_equal(true)
+        expect(worker.stopped).to_equal(false)
+        expect(worker.code == 0).to_equal(false)
