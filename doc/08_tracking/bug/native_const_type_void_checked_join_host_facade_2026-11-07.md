@@ -69,8 +69,8 @@ fn m1(n: i64) -> Option<M>:
 `compile error: E-BACKEND-LLVM-CONST-TYPE: integer constant cannot define void;
 use an explicit MIR Cast for numeric conversion [module=main function=main.m1]`.
 Shape: an early `return <Enum value>` followed by a final enum value. Writing
-the body as `if n > 100: None else: Some(M(..))` compiles cleanly (MIR and
-backend), so the trigger is the early-return + tail combination, not the
+the body as `if n > 100: None else: Some(M(..))` compiles and runs (verified
+with a Stage 2 built from work/optional-record-some-literal-owner-20261107), so the trigger is the early-return + tail combination, not the
 Option record itself.
 
 Run-15 compiler closure: `grep -rl -e "cannot define void" -e CONST-TYPE`

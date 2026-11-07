@@ -50,23 +50,30 @@ same-shaped record).
 ## Fix (2026-11-07, work/optional-record-some-literal-owner-20261107)
 
 `remember_some_record_payload_owner` (`_MirLoweringExpr/optional_record_owner.spl`)
-records the payload's exact declaration for `Some(<record>)` under the same key
-form the callable-return registrar uses (`module_lowering.spl` prescan:
-`mir_class_identity_raw` for a class, `composite_layout_key` for a struct, both
-folded through `declared_struct_layout_key`). It is called from
-`lower_enum_construct_named` (`switch_operators_calls.spl`, Option `Some`
-witness branch) only for a `Named` payload with no type arguments whose symbol
-exists in the current table; generic, scalar and unknown payloads record
-nothing. The join is unchanged, so a Some literal of a different record still
-clears the owner and `checked_optional_record_type` still rejects it. Untracked
-arms stay fail-closed.
+keeps the payload's exact declaration for `Some(<record>)` in a separate
+join-only witness table, `optional_record_literal_owners`, under the key form
+the callable-return registrar uses (`mir_class_identity_raw` for a class,
+`composite_layout_key` for a struct, both folded through
+`declared_struct_layout_key`). It is called from `lower_enum_construct_named`
+(`switch_operators_calls.spl`, Option `Some` witness branch) only for a
+`Named` payload with no supplied type arguments whose symbol exists in the
+current table. `join_optional_record_owners` consults the witness only when a
+tracked (call) arm already established an owner: a same-owner literal agrees,
+a different-record literal clears the owner (still rejected). The witness never
+establishes an owner by itself, so a literal-only or literal+untracked local
+keeps its previous match route (review finding: storing it directly in
+`optional_record_owners` would have newly rejected those). Reassignment
+(`copy_optional_record_owner`) and `invalidate_optional_record_owner` blank a
+stale witness. Untracked arms stay fail-closed.
 
 Evidence:
 - Spec `test/01_unit/compiler/optional_record_some_literal_owner_spec.spl`
-  (seed-interpreted): red 0/5 before the helper existed, green 5/5 after
-  (same-owner join in either order resolves the provider; Twin-vs-Seed join
-  rejected with the unique-layout diagnostic; generic/scalar/unknown record
-  nothing; an untracked third arm still clears the owner). Neighbours
+  (seed-interpreted): red 0/6 on origin (helper missing), green 7/7 after
+  (class + struct keys equal the registrar's; literal alone never
+  establishes an owner; same-owner join in either order resolves the provider;
+  Twin-vs-Seed join rejected with the unique-layout diagnostic; untracked third
+  arm still clears; generic/scalar/unknown record nothing; stale witness dropped
+  on reassignment/invalidation). Neighbours
   `optional_record_nil_join_spec` 10/10 and
   `optional_record_qualified_dependency_spec` 7/7 green.
 - Native: see "Native red/green" below.
@@ -104,3 +111,11 @@ avoid the separate CONST-TYPE defect:
   snapshot at main.spl:24:22` (red).
 - Mismatch fixture `lit2` (`m1(n)` -> `Option<M>` vs `Some(N(..))`): red on the
   frozen binary and must stay red.
+- Stage 2 built from this branch (Rust seed `stage2-runtime-authority/simple`
+  with the run-15 Stage 2 argv, `--threads 2`, 8G scope; 1616 compiled, 0
+  failed, at `d590731f95d`, i.e. before the stale-witness blanking, which only
+  narrows): `red2` builds and runs, printing `5 12 10 -1 6 61` (expected
+  values). `lit2` (M vs N) is still rejected with the same diagnostic. The
+  original `red` fixture now passes MIR and stops only at the separate
+  CONST-TYPE defect (`native_const_type_void_checked_join_host_facade_2026-11-07`).
+  `vd` (second cause) is still red, as expected.
