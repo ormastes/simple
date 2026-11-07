@@ -487,7 +487,7 @@ class HirFrontendWalker:
     # ------------------------------------------------------------------
     # W-HIR-INFER-001/002: unresolved declaration type used later
     # ------------------------------------------------------------------
-    fn let_unresolved_reason(init: HirExpr) -> (text, text):
+    fn let_unresolved_reason(init: HirExpr, inferred_binding_type: HirType?) -> (text, text):
         match init.kind:
             case Call(callee, _, _):
                 var callee_sym = SymbolId(id: -1)
@@ -511,7 +511,21 @@ class HirFrontendWalker:
                 if not ret_known:
                     val s = self.hir.symbols.get_symbol(callee_sym)
                     if s.?:
-                        val st = s.unwrap().type_
+                        val symbol = s.unwrap()
+                        val st = symbol.type_
+                        # Imported generics intentionally omit this signature; do not
+                        # mistake their deferred specialization for an erased return.
+                        val owner = symbol.defining_module ?? ""
+                        if not st.? and symbol.kind == SymbolKind.Function and symbol.generic_param_count == 0 and owner != "" and owner != self.hir.name and owner != self.hir.path:
+                            # Inferred metadata is evidence of resolution, not a
+                            # written annotation. Preserve the provenance gate.
+                            if inferred_binding_type.?:
+                                if not hir_frontend_type_unresolved(self.hir, inferred_binding_type.unwrap()):
+                                    return ("", "")
+                            if init.has_type_:
+                                if not hir_frontend_type_unresolved(self.hir, init.type_):
+                                    return ("", "")
+                            return ("W-HIR-INFER-001", "callee `{callee_name}` has no available imported return signature")
                         if st.?:
                             match st.unwrap().kind:
                                 case Function(_, ret, _):
@@ -542,7 +556,7 @@ class HirFrontendWalker:
         # Let.type_ carries inferred initializer types too. Only the exact
         # AST lowering receipt can certify this declaration as unannotated.
         if hir_local_annotation_state(self.hir, sym) != 0: return
-        val (code, reason) = self.let_unresolved_reason(init)
+        val (code, reason) = self.let_unresolved_reason(init, declared)
         if code == "":
             return
         val anchor = first_set_span(stmt_span, init.span)
