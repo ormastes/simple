@@ -1,83 +1,17 @@
-# Canonical V2 logical-schema extension. SPL and SDN normalize into the same
-# input; frozen V1 remains the sole base name/type/default reconciliation owner.
+# V2 compatibility wrapper. Its nominal conversion/output/digest remain frozen;
+# common normalized reconciliation and property checks are shared with V3.
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.data.data_schema_contracts.*
 use compiler.common.data.data_schema_contracts_v2.*
+use compiler.common.data.data_schema_core_v1.*
 use compiler.common.data.data_schema_resolver.{data_schema_resolve_v1}
-
-pub fn data_schema_name_valid_v2(name: text) -> bool:
-    if name.len() == 0 or name.byte_len() > DATA_SCHEMA_MAX_NAME_BYTES_V2:
-        return false
-    var start = true
-    var index = 0
-    while index < name.len():
-        val c = name[index:index + 1]
-        val letter = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
-        if c == ".":
-            if start:
-                return false
-            start = true
-        else:
-            if not letter and (start or c < "0" or c > "9"):
-                return false
-            start = false
-        index = index + 1
-    not start
-
-pub fn data_schema_sorted_names_v2(items: [text]) -> [text]:
-    var out: [text] = []
-    for item in items:
-        if out.contains(item):
-            continue
-        var index = out.len()
-        out.push(item)
-        while index > 0 and out[index] < out[index - 1]:
-            val prior = out[index - 1]
-            out[index - 1] = out[index]
-            out[index] = prior
-            index = index - 1
-    out
-
-pub fn data_schema_invalid_v2(subject: text, at: DataDeclProvenanceV1, message: text) -> DataSchemaDiagnosticV1:
-    data_schema_diagnostic_v1(DataSchemaErrorKindV1.InvalidDeclaration, subject, at, at,
-        "{message} at {data_decl_provenance_text_v1(at)}")
+export use compiler.common.data.data_schema_property_resolver_v1.{data_schema_name_valid_v2, data_schema_sorted_names_v2, data_schema_invalid_v2, data_property_normalize_v2, data_property_canonical_v2}
+use compiler.common.data.data_schema_property_resolver_v1.{DataSchemaPropertyDeclV1, data_property_contract_error_v2, data_schema_view_error_v2, data_schema_resolved_views_v2, data_schema_properties_resolve_v2}
 
 fn data_schema_lp_v2(value: text) -> text:
     "{value.len()}:{value}"
 
-fn data_property_names_v2(items: [text]) -> text:
-    var out = ""
-    for item in items:
-        out = out + data_schema_lp_v2(item)
-    out
-
-pub fn data_property_normalize_v2(property: DataPropertyContractV2) -> DataPropertyContractV2:
-    var deps: [text] = []
-    for dependency in property.dependencies:
-        deps.push(dependency)
-    if property.forward_attr != "":
-        deps.push(property.forward_attr)
-    DataPropertyContractV2(kind: property.kind, visibility: property.visibility,
-        visibility_owner: property.visibility_owner, writable: property.writable,
-        mutation_owner: property.mutation_owner, getter: property.getter, setter: property.setter,
-        forward_attr: property.forward_attr, phase: property.phase,
-        read_effects: data_schema_sorted_names_v2(property.read_effects),
-        write_effects: data_schema_sorted_names_v2(property.write_effects),
-        dependencies: data_schema_sorted_names_v2(deps))
-
-# Length prefixes separate every variable-length semantic field and list.
-pub fn data_property_canonical_v2(property: DataPropertyContractV2) -> text:
-    val p = data_property_normalize_v2(property)
-    "kind={data_property_kind_code_v2(p.kind)}|visibility={data_visibility_code_v2(p.visibility)}|" +
-        data_schema_lp_v2(p.visibility_owner) + "writable={p.writable}|" +
-        data_schema_lp_v2(p.mutation_owner) + data_schema_lp_v2(p.getter) +
-        data_schema_lp_v2(p.setter) + data_schema_lp_v2(p.forward_attr) + data_schema_lp_v2(p.phase) +
-        "reads=" + data_schema_lp_v2(data_property_names_v2(p.read_effects)) +
-        "writes=" + data_schema_lp_v2(data_property_names_v2(p.write_effects)) +
-        "deps=" + data_schema_lp_v2(data_property_names_v2(p.dependencies))
-
 fn data_property_shape_v2(decl: DataAttrDeclV2) -> text:
-    val p = decl.property
     if decl.base.type_ref.args.len() > DATA_SCHEMA_MAX_PROPERTY_ITEMS_V2:
         return "generic argument limit exceeded"
     if decl.base.default_value.byte_len() > 65536:
@@ -89,77 +23,7 @@ fn data_property_shape_v2(decl: DataAttrDeclV2) -> text:
             return "generic arguments must be canonical flat nominal names"
     if not data_schema_name_valid_v2(decl.base.tree) or not data_schema_name_valid_v2(decl.base.view) or not data_schema_name_valid_v2(decl.base.name):
         return "tree, view and attribute must be canonical names"
-    if not data_schema_name_valid_v2(p.phase):
-        return "property needs an explicit canonical phase key"
-    val public = data_visibility_code_v2(p.visibility) == 1
-    if public and p.visibility_owner != "":
-        return "public visibility forbids a restriction owner"
-    if not public and not data_schema_name_valid_v2(p.visibility_owner):
-        return "restricted visibility needs a canonical restriction owner"
-    if p.writable and not data_schema_name_valid_v2(p.mutation_owner):
-        return "writable property needs an explicit canonical mutation owner"
-    if not p.writable and (p.mutation_owner != "" or p.write_effects.len() > 0):
-        return "read-only property forbids mutation owner and write effects"
-    if p.dependencies.len() > DATA_SCHEMA_MAX_PROPERTY_ITEMS_V2 or p.read_effects.len() > DATA_SCHEMA_MAX_PROPERTY_ITEMS_V2 or p.write_effects.len() > DATA_SCHEMA_MAX_PROPERTY_ITEMS_V2:
-        return "property dependency/effect limit exceeded"
-    if data_property_normalize_v2(p).dependencies.len() > DATA_SCHEMA_MAX_PROPERTY_ITEMS_V2:
-        return "normalized dependency limit exceeded (including forwarding target)"
-    for name in p.dependencies + p.read_effects + p.write_effects:
-        if not data_schema_name_valid_v2(name):
-            return "dependencies and effects must be canonical names"
-    val kind = data_property_kind_code_v2(p.kind)
-    if kind == 1:
-        if p.getter != "" or p.setter != "" or p.forward_attr != "":
-            return "stored property forbids getter, setter and forwarding target"
-    else:
-        if data_requiredness_code_v1(decl.base.requiredness) != 1 or decl.base.default_value != "":
-            return "computed and forwarded properties require readiness, not an initializer/default"
-        if kind == 2:
-            if not data_schema_name_valid_v2(p.getter) or p.forward_attr != "":
-                return "computed property needs a canonical getter and no forwarding target"
-            if p.writable and not data_schema_name_valid_v2(p.setter):
-                return "writable computed property needs a canonical setter"
-            if not p.writable and p.setter != "":
-                return "read-only computed property forbids a setter"
-        elif p.getter != "" or p.setter != "" or not data_schema_name_valid_v2(p.forward_attr):
-            return "forwarded property needs one canonical target and no getter/setter"
-    ""
-
-# Kahn's indexed elimination validates dependency + forwarding edges without
-# recursive evaluation or executing a getter/default. Cycles require a future
-# explicitly admitted construction-group contract, not implicit readiness.
-fn data_schema_dependency_cycle_v2(attrs: [DataResolvedAttrV1], properties: [DataResolvedPropertyV2], indexes: Dict<text, i64>) -> bool:
-    var indegree: [i64] = []
-    var heads: [i64] = []
-    var edge_users: [i64] = []
-    var edge_next: [i64] = []
-    var queue: [i64] = []
-    for attr in attrs:
-        heads.push(-1)
-    var index = 0
-    while index < attrs.len():
-        val deps = properties[index].property.dependencies
-        indegree.push(deps.len())
-        if deps.len() == 0:
-            queue.push(index)
-        for dep in deps:
-            val target = indexes[dep]
-            val edge = edge_users.len()
-            edge_users.push(index)
-            edge_next.push(heads[target])
-            heads[target] = edge
-        index = index + 1
-    var cursor = 0
-    while cursor < queue.len():
-        var edge = heads[queue[cursor]]
-        while edge >= 0:
-            val user = edge_users[edge]
-            indegree[user] = indegree[user] - 1
-            if indegree[user] == 0:
-                queue.push(user)
-            edge = edge_next[edge]
-        cursor = cursor + 1
-    cursor != attrs.len()
+    data_property_contract_error_v2(decl.property, decl.base.requiredness, decl.base.default_value)
 
 pub fn data_schema_digest_v2(base: DataSchemaSurfaceV1, views: [DataResolvedViewV2], properties: [DataResolvedPropertyV2]) -> text:
     var canonical = DATA_SCHEMA_DIGEST_DOMAIN_V2 + "\nbase=" + data_schema_lp_v2(base.schema_digest) + "\n"
@@ -185,14 +49,12 @@ pub fn data_schema_resolve_v2(authority: DataSchemaAuthorityV1, views: [DataView
             diags.push(data_schema_invalid_v2(alias.alias, nowhere, "alias names and targets must be canonical flat nominal names"))
     var view_names: [text] = []
     for view in views:
-        if view.tree != authority.tree or not authority.owners.contains(view.provenance.owner):
-            diags.push(data_schema_diagnostic_v1(DataSchemaErrorKindV1.UnauthorizedInjection, view.name,
-                view.provenance, view.provenance, "view owner has no authority over tree '{view.tree}'"))
-        elif not data_schema_name_valid_v2(view.name):
-            diags.push(data_schema_invalid_v2(view.name, view.provenance, "view must have a canonical name"))
+        if val diagnostic = data_schema_view_error_v2(authority, view):
+            diags.push(diagnostic)
         else:
             view_names.push(view.name)
     var base_decls: [DataAttrDeclV1] = []
+    var property_decls: [DataSchemaPropertyDeclV1] = []
     for decl in decls:
         val shape = data_property_shape_v2(decl)
         if shape != "":
@@ -200,68 +62,18 @@ pub fn data_schema_resolve_v2(authority: DataSchemaAuthorityV1, views: [DataView
         if not view_names.contains(decl.base.view):
             diags.push(data_schema_invalid_v2(decl.base.name, decl.base.provenance, "attribute view was not explicitly declared"))
         base_decls.push(decl.base)
+        property_decls.push(DataSchemaPropertyDeclV1(name: decl.base.name,
+            property: decl.property, provenance: decl.base.provenance))
     if diags.len() > 0:
         return Err(diags)
-    # One canonical base resolver, never a second type/default authority.
     val base = data_schema_resolve_v1(authority, base_decls, aliases)?
-    var resolved_views: [DataResolvedViewV2] = []
-    for name in data_schema_sorted_names_v2(view_names):
-        var provenances: [DataDeclProvenanceV1] = []
-        for view in views:
-            if view.name == name:
-                provenances.push(view.provenance)
-        resolved_views.push(DataResolvedViewV2(name: name, provenances: provenances))
-    var properties: [DataResolvedPropertyV2] = []
+    val resolved_views = data_schema_resolved_views_v2(views)
+    var core_attrs: [DataSchemaCoreAttrV1] = []
     for attr in base.attrs:
-        var selected = -1
-        var selected_key = ""
-        var index = 0
-        while index < decls.len():
-            val decl = decls[index]
-            if decl.base.name == attr.name:
-                val key = data_property_canonical_v2(decl.property)
-                if selected < 0:
-                    selected = index
-                    selected_key = key
-                elif key != selected_key:
-                    diags.push(data_schema_diagnostic_v1(DataSchemaErrorKindV1.InvalidDeclaration, attr.name,
-                        decls[selected].base.provenance, decl.base.provenance,
-                        "attribute property contract conflicts between {data_decl_provenance_text_v1(decls[selected].base.provenance)} and {data_decl_provenance_text_v1(decl.base.provenance)}"))
-            index = index + 1
-        properties.push(DataResolvedPropertyV2(attr_id: attr.id,
-            property: data_property_normalize_v2(decls[selected].property)))
-    if diags.len() > 0:
-        return Err(diags)
-    var attr_indexes: Dict<text, i64> = {}
-    var attr_index = 0
-    while attr_index < base.attrs.len():
-        attr_indexes[base.attrs[attr_index].name] = attr_index
-        attr_index = attr_index + 1
-    attr_index = 0
-    while attr_index < base.attrs.len():
-        val attr = base.attrs[attr_index]
-        val property = properties[attr_index].property
-        val at = attr.provenances[0]
-        for dependency in property.dependencies:
-            if not attr_indexes.contains_key(dependency):
-                diags.push(data_schema_invalid_v2(attr.name, at, "missing dependency '{dependency}'"))
-            else:
-                val target = attr_indexes[dependency]
-                for view in attr.views:
-                    if not base.attrs[target].views.contains(view):
-                        diags.push(data_schema_invalid_v2(attr.name, at, "dependency '{dependency}' does not apply to view '{view}'"))
-        if data_property_kind_code_v2(property.kind) == 3:
-            if attr_indexes.contains_key(property.forward_attr):
-                val target = attr_indexes[property.forward_attr]
-                if base.attrs[target].type_canonical != attr.type_canonical:
-                    diags.push(data_schema_invalid_v2(attr.name, at, "forward target has a different exact type"))
-                if property.writable and not properties[target].property.writable:
-                    diags.push(data_schema_invalid_v2(attr.name, at, "writable forwarding requires a writable target"))
-        attr_index = attr_index + 1
-    if diags.len() > 0:
-        return Err(diags)
-    if data_schema_dependency_cycle_v2(base.attrs, properties, attr_indexes):
-        return Err([data_schema_invalid_v2(authority.tree, nowhere, "property dependency/forwarding cycle")])
+        core_attrs.push(DataSchemaCoreAttrV1(id: attr.id, name: attr.name, type_key: attr.type_canonical,
+            requiredness: attr.requiredness, default_value: attr.default_value,
+            views: attr.views, provenances: attr.provenances))
+    val properties = data_schema_properties_resolve_v2(core_attrs, property_decls)?
     Ok(DataSchemaSurfaceV2(contract_version: DATA_SCHEMA_CONTRACT_V2, base: base,
         views: resolved_views, properties: properties,
         schema_digest: data_schema_digest_v2(base, resolved_views, properties)))

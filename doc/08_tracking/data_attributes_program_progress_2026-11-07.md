@@ -1,5 +1,21 @@
 # Unified attributes, layouts and XRay: finite delivery matrix
 
+## V3 canonical type follow-up (source draft)
+
+V2 structural PR [#7561](https://github.com/ormastes/simple/pull/7561) merged as
+`9f7c614fe06e66b16c965840525b7b08e6255069`; its 25 cases remain UNEXECUTED.
+The next [rich type resolver package](../05_design/compiler/data_schema_v3_exact_type_reducer.md)
+uses the separately owned semantic type codec/HIR adapter, a private shared
+normalized reducer, shared property checking and one versioned SDN normalizer.
+It preserves V1/V2 public outputs/digests and adds a distinct V3 rich surface.
+
+Implementation/test source is approved by Astra; runtime qualification pending.
+The dedicated V3 decoder returns explicitly unbound type expressions. Actual
+source/config binding and frozen consumer contexts remain the assigned W1b lane;
+transport fixtures do not finish that work. Lifecycle/storage/observation and
+three-family/native/BuildRunner gates below remain part of the accepted scope.
+No work package becomes complete solely because a richer schema record exists.
+
 Date: 2026-11-07. Accepted scope remains the
 [consolidated program](../03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md)
 and [selected node requirements](../02_requirements/feature/node_attributes.md).
