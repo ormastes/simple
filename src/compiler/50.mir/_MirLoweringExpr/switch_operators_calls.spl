@@ -904,6 +904,14 @@ impl MirLowering:
         -> x, any non-handle word -> itself (so a raw word that reached an
         Optional local through a path that does not box yet is left intact).
         doc/08_tracking/bug/optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md"""
+        self.option_scalar_payload_via(local, "rt_unwrap_or_self")
+
+    me option_scalar_payload_via(local: LocalId, unwrap_symbol: text) -> LocalId:
+        """option_scalar_payload_of with an explicit unwrap symbol. Declared
+        integer sinks pass rt_unwrap_or_trap, so a None reaching a
+        non-optional slot aborts instead of reading as its payload word 3.
+        Eq paths and other None-tolerant reads keep rt_unwrap_or_self.
+        doc/08_tracking/bug/native_option_int_sink_miss_and_payload_three_2026-11-07.md"""
         var inner_type: HirType? = nil
         match self.find_local_hir_type(local.id):
             case Some(found):
@@ -919,7 +927,7 @@ impl MirLowering:
             return local
         var b = self.builder
         val unwrap_fn = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_unwrap_or_self"),
+            MirConstValue.Str(unwrap_symbol),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         val unwrapped = b.emit_call(unwrap_fn, [mir_operand_copy(local)], MirType.i64())
@@ -956,12 +964,12 @@ impl MirLowering:
         array get/at/first/last producer. Other Optional(Any) producers
         (`any?` params, tagged raw-probe dict reads) carry a TAGGED payload;
         for those this returns the tagged word instead of the handle --
-        still wrong, no longer a pointer. A MISS (None, payload 3) also
-        yields 3 here, as rt_unwrap_or_self does for typed `[i64].get`.
-        Both are tracked in
+        still wrong, no longer a pointer. A None reaching the sink traps
+        (rt_unwrap_or_trap) instead of reading as its payload word 3.
+        Tracked in
         doc/08_tracking/bug/native_option_int_sink_miss_and_payload_three_2026-11-07.md
         doc/08_tracking/bug/native_list_any_get_i64_sink_returns_option_handle_2026-11-07.md"""
-        val scalar_payload = self.option_scalar_payload_of(local)
+        val scalar_payload = self.option_scalar_payload_via(local, "rt_unwrap_or_trap")
         if scalar_payload.id != local.id:
             return scalar_payload
         match sink_type.kind:
@@ -982,7 +990,7 @@ impl MirLowering:
             return local
         var b = self.builder
         val unwrap_fn = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_unwrap_or_self"),
+            MirConstValue.Str("rt_unwrap_or_trap"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         val unwrapped = b.emit_call(unwrap_fn, [mir_operand_copy(local)], MirType.i64())
