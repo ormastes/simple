@@ -147,9 +147,9 @@ fn _looks_like_int(s: text) -> bool:
 # Returns Ok((SdnValue, Dict<text, SdnSpan>)) or Err(error message).
 # The span map keys are dotted paths ("extension.id", "contributes.commands.0")
 # and the SdnSpan carries the 1-based line/column where that key (or array
-# element) starts. Dict keys are always covered for block mappings and
-# single-line inline collections; array elements are best-effort (single-line
-# inline collections only).
+# element) starts. Block mappings and indexed block-sequence entries retain
+# original rows and columns, including nested single-line inline collections.
+# Multiline inline collection interiors remain best-effort.
 fn parse_with_spans(source: text) -> Result<(SdnValue, Dict<text, SdnSpan>), text>:
     val result = parse(source)
     match result:
@@ -799,9 +799,67 @@ fn _sdn_inline_spans(s: text, prefix: text, line: i64, colbase: i64) -> [SdnSpan
         idx = idx + 1
     out
 
-# Walk a block mapping recording a span for every dict key. Mirrors
-# _sdn_parse_block's consumption logic. Returns (entries, next line index).
-fn _sdn_span_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([SdnSpanEntry], i64):
+# Mirror _sdn_parse_seq's item boundary without reparsing values. Each item
+# owns its own mapping scope; copied body lines retain their original row and
+# first-key column even when more than one space follows the dash.
+fn _sdn_span_seq(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64) -> ([SdnSpanEntry], i64):
+    var out: [SdnSpanEntry] = []
+    var i = start
+    var index = 0
+    var running = true
+    while running and i < lines.len():
+        val line = lines[i]
+        if line.trim() == "":
+            i = i + 1
+        else:
+            val ind = _sdn_indent(line)
+            val trimmed = line.trim()
+            if ind < indent or not (trimmed.starts_with("- ") or trimmed == "-"):
+                running = false
+            else:
+                var content_start = ind + 1
+                while content_start < line.byte_len() and line.substring(content_start, content_start + 1) == " ":
+                    content_start = content_start + 1
+                val rest = line.slice(content_start, line.byte_len()).trim()
+                val path = _sdn_join_path(prefix, index.to_text())
+                var body: [text] = [_sdn_spaces(ind + 2) + rest]
+                var j = i + 1
+                var inner = true
+                while inner and j < lines.len():
+                    if lines[j].trim() == "":
+                        body.push(lines[j])
+                        j = j + 1
+                    elif _sdn_indent(lines[j]) > ind:
+                        body.push(lines[j])
+                        j = j + 1
+                    else:
+                        inner = false
+                out.push(SdnSpanEntry(path: path, line: line_base + i + 1, col: content_start + 1))
+                if _sdn_top_sep(rest) >= 0:
+                    val child = _sdn_span_block(body, 0, ind + 2, path, line_base + i)
+                    for entry in child.0:
+                        # Parse using the same normalized dash head as the
+                        # value parser; restore only first-line coordinates.
+                        if entry.line == line_base + i + 1:
+                            out.push(SdnSpanEntry(path: entry.path, line: entry.line, col: entry.col + content_start - (ind + 2)))
+                        else:
+                            out.push(entry)
+                elif rest.starts_with("[") or rest.starts_with("{"):
+                    for entry in _sdn_inline_spans(rest, path, line_base + i + 1, content_start + 1):
+                        out.push(entry)
+                index = index + 1
+                i = j
+    (out, i)
+
+# Only root mapping admission and empty-valued mapping children select a
+# sequence. An item body itself must stay a mapping, like _sdn_parse_seq.
+fn _sdn_span_nested(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64) -> ([SdnSpanEntry], i64):
+    if _sdn_next_is_seq(lines, start, indent):
+        return _sdn_span_seq(lines, start, indent, prefix, line_base)
+    _sdn_span_block(lines, start, indent, prefix, line_base)
+
+# Walk a mapping using the same boundaries as _sdn_parse_block.
+fn _sdn_span_block(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64 = 0) -> ([SdnSpanEntry], i64):
     var out: [SdnSpanEntry] = []
     var i = start
     var running = true
@@ -816,15 +874,15 @@ fn _sdn_span_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([Sd
             else:
                 val t = line.trim()
                 val ci = _sdn_top_sep(t)
-                if ci < 0:
+                if t.starts_with("#") or ci < 0:
                     i = i + 1
                 else:
                     val key = t.slice(0, ci).trim()
                     val valstr = t.slice(ci + 1, t.byte_len()).trim()
                     val path = _sdn_join_path(prefix, key)
-                    out.push(SdnSpanEntry(path: path, line: i + 1, col: ind + 1))
+                    out.push(SdnSpanEntry(path: path, line: line_base + i + 1, col: ind + 1))
                     if valstr == "":
-                        val child = _sdn_span_block(lines, i + 1, ind + 1, path)
+                        val child = _sdn_span_nested(lines, i + 1, ind + 1, path, line_base)
                         for e in child.0:
                             out.push(e)
                         i = child.1
@@ -834,7 +892,7 @@ fn _sdn_span_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([Sd
                                 i = i + 1
                             case Ok(consumed):
                                 if consumed.1 == i and (valstr.starts_with("[") or valstr.starts_with("{")):
-                                    for e in _sdn_inline_spans(valstr, path, i + 1, _sdn_value_col(line, ind, ci)):
+                                    for e in _sdn_inline_spans(valstr, path, line_base + i + 1, _sdn_value_col(line, ind, ci)):
                                         out.push(e)
                                 i = consumed.1 + 1
     (out, i)
@@ -850,7 +908,7 @@ fn _sdn_collect_span_entries(source: text) -> [SdnSpanEntry]:
             return _sdn_inline_spans(trimmed, "", 1, _sdn_indent(source) + 1)
         return []
     if _sdn_top_sep(trimmed) >= 0:
-        val r = _sdn_span_block(_sdn_split_lines(source), 0, 0, "")
+        val r = _sdn_span_nested(_sdn_split_lines(source), 0, 0, "", 0)
         return r.0
     []
 
@@ -888,8 +946,66 @@ fn _sdn_inline_dup_issues(s: text, prefix: text, line: i64, colbase: i64) -> [Sd
         idx = idx + 1
     out
 
-# Walk a block mapping collecting duplicate-key issues per nesting level.
-fn _sdn_issue_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([SdnIssue], i64):
+# Mirror _sdn_parse_seq's item boundary without reparsing values. Each item
+# owns its own mapping scope; copied body lines retain their original row and
+# first-key column even when more than one space follows the dash.
+fn _sdn_issue_seq(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64) -> ([SdnIssue], i64):
+    var out: [SdnIssue] = []
+    var i = start
+    var index = 0
+    var running = true
+    while running and i < lines.len():
+        val line = lines[i]
+        if line.trim() == "":
+            i = i + 1
+        else:
+            val ind = _sdn_indent(line)
+            val trimmed = line.trim()
+            if ind < indent or not (trimmed.starts_with("- ") or trimmed == "-"):
+                running = false
+            else:
+                var content_start = ind + 1
+                while content_start < line.byte_len() and line.substring(content_start, content_start + 1) == " ":
+                    content_start = content_start + 1
+                val rest = line.slice(content_start, line.byte_len()).trim()
+                val path = _sdn_join_path(prefix, index.to_text())
+                var body: [text] = [_sdn_spaces(ind + 2) + rest]
+                var j = i + 1
+                var inner = true
+                while inner and j < lines.len():
+                    if lines[j].trim() == "":
+                        body.push(lines[j])
+                        j = j + 1
+                    elif _sdn_indent(lines[j]) > ind:
+                        body.push(lines[j])
+                        j = j + 1
+                    else:
+                        inner = false
+                if _sdn_top_sep(rest) >= 0:
+                    val child = _sdn_issue_block(body, 0, ind + 2, path, line_base + i)
+                    for entry in child.0:
+                        # Parse using the same normalized dash head as the
+                        # value parser; restore only first-line coordinates.
+                        if entry.line == line_base + i + 1:
+                            out.push(SdnIssue(kind: entry.kind, path: entry.path, message: entry.message, line: entry.line, col: entry.col + content_start - (ind + 2)))
+                        else:
+                            out.push(entry)
+                elif rest.starts_with("[") or rest.starts_with("{"):
+                    for entry in _sdn_inline_dup_issues(rest, path, line_base + i + 1, content_start + 1):
+                        out.push(entry)
+                index = index + 1
+                i = j
+    (out, i)
+
+# Only root mapping admission and empty-valued mapping children select a
+# sequence. An item body itself must stay a mapping, like _sdn_parse_seq.
+fn _sdn_issue_nested(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64) -> ([SdnIssue], i64):
+    if _sdn_next_is_seq(lines, start, indent):
+        return _sdn_issue_seq(lines, start, indent, prefix, line_base)
+    _sdn_issue_block(lines, start, indent, prefix, line_base)
+
+# Walk one mapping duplicate-key scope; sequence dispatch stays explicit.
+fn _sdn_issue_block(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64 = 0) -> ([SdnIssue], i64):
     var out: [SdnIssue] = []
     var seen: [text] = []
     var i = start
@@ -903,31 +1019,20 @@ fn _sdn_issue_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([S
             if ind < indent:
                 running = false
             else:
-                var t = line.trim()
-                # A `- ` line opens a new BLOCK SEQUENCE ENTRY. Its keys live in
-                # that entry's own scope, so the seen-key set restarts here and
-                # the marker is stripped before the key is read. Without this,
-                # `- name: a` / `- name: b` — two distinct entries — were
-                # reported as a duplicate `- name` key, and any strict consumer
-                # refused every multi-entry sequence.
-                var key_indent = ind
-                if t.starts_with("- "):
-                    seen = []
-                    t = t.slice(2, t.byte_len()).trim()
-                    key_indent = ind + 2
+                val t = line.trim()
                 val ci = _sdn_top_sep(t)
-                if ci < 0:
+                if t.starts_with("#") or ci < 0:
                     i = i + 1
                 else:
                     val key = t.slice(0, ci).trim()
                     val valstr = t.slice(ci + 1, t.byte_len()).trim()
                     val path = _sdn_join_path(prefix, key)
                     if _sdn_list_has(seen, key):
-                        out.push(SdnIssue(kind: "duplicate_key", path: path, message: "duplicate key '" + key + "'", line: i + 1, col: ind + 1))
+                        out.push(SdnIssue(kind: "duplicate_key", path: path, message: "duplicate key '" + key + "'", line: line_base + i + 1, col: ind + 1))
                     else:
                         seen.push(key)
                     if valstr == "":
-                        val child = _sdn_issue_block(lines, i + 1, key_indent + 1, path)
+                        val child = _sdn_issue_nested(lines, i + 1, ind + 1, path, line_base)
                         for e in child.0:
                             out.push(e)
                         i = child.1
@@ -937,7 +1042,7 @@ fn _sdn_issue_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([S
                                 i = i + 1
                             case Ok(consumed):
                                 if consumed.1 == i and (valstr.starts_with("[") or valstr.starts_with("{")):
-                                    for e in _sdn_inline_dup_issues(valstr, path, i + 1, _sdn_value_col(line, ind, ci)):
+                                    for e in _sdn_inline_dup_issues(valstr, path, line_base + i + 1, _sdn_value_col(line, ind, ci)):
                                         out.push(e)
                                 i = consumed.1 + 1
     (out, i)
@@ -953,7 +1058,7 @@ fn _sdn_collect_issues(source: text) -> [SdnIssue]:
             return _sdn_inline_dup_issues(trimmed, "", 1, _sdn_indent(source) + 1)
         return []
     if _sdn_top_sep(trimmed) >= 0:
-        val r = _sdn_issue_block(_sdn_split_lines(source), 0, 0, "")
+        val r = _sdn_issue_nested(_sdn_split_lines(source), 0, 0, "", 0)
         return r.0
     []
 
