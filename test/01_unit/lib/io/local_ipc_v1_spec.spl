@@ -1,0 +1,58 @@
+# Linux owner facade tests. No server execution or separate-UID claim.
+# NOT_RUN until an actual supported producer is allocated.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.local_ipc_v1.*
+use std.nogc_sync_mut.sosix.time.sosix_time_now_monotonic_ms
+
+describe "Owned local Unix facade":
+    it "rejects relative NUL and invalid expected UID before connecting":
+        val deadline = sosix_time_now_monotonic_ms() + 100
+        for path in ["relative", "/tmp/socket\0hidden"]:
+            val turn = local_unix_connect_v1(path, 0, deadline)
+            assert(not turn.owner.?)
+            assert(not turn.peer.?)
+            expect(turn.error).to_equal("local_unix_invalid_argument_or_path_policy")
+        for uid in [-1, 4294967296]:
+            val turn = local_unix_connect_v1("/tmp/socket", uid, deadline)
+            assert(not turn.owner.?)
+            expect(turn.error).to_equal("local_unix_invalid_argument_or_path_policy")
+
+    it "retains owner on invalid read write expiry and close input":
+        val owner = LocalUnixConnectionV1(token: 0)
+        val deadline = sosix_time_now_monotonic_ms() + 100
+        val read = local_unix_read_v1(owner, 1, deadline)
+        expect(read.owner.token).to_equal(owner.token)
+        expect(read.bytes.len()).to_equal(0)
+        assert(not read.eof)
+        expect(read.error).to_equal("local_unix_invalid_argument_or_path_policy")
+        val write = local_unix_write_some_v1(owner, [65u8], 0, 1, deadline)
+        expect(write.owner.token).to_equal(owner.token)
+        expect(write.accepted_bytes).to_equal(0)
+        expect(write.error).to_equal("local_unix_invalid_argument_or_path_policy")
+        val admitted = local_unix_write_some_admitted_v1(LocalUnixConnectionV1(token: 1), [65u8], 0, 1, deadline, 0)
+        expect(admitted.accepted_bytes).to_equal(0)
+        expect(admitted.error).to_equal("local_unix_invalid_argument_or_path_policy")
+        val close = local_unix_close_v1(owner)
+        assert(not close.closed)
+        expect(close.owner.unwrap().token).to_equal(owner.token)
+
+    it "distinguishes stale generation from EOF and retains the stale token diagnostic":
+        # Fresh fixture process has never allocated this maximal immediate token.
+        @when(os="linux"):
+        val expected_error = "local_unix_stale_owner"
+        @else:
+        val expected_error = "local_unix_unsupported"
+        @end
+        val owner = LocalUnixConnectionV1(token: 1152921504606846975)
+        val deadline = sosix_time_now_monotonic_ms() + 100
+        val read = local_unix_read_v1(owner, 1, deadline)
+        expect(read.error).to_equal(expected_error)
+        assert(not read.eof)
+        expect(read.bytes.len()).to_equal(0)
+        val write = local_unix_write_some_v1(owner, [65u8], 0, 1, deadline)
+        expect(write.error).to_equal(expected_error)
+        expect(write.accepted_bytes).to_equal(0)
+        val closed = local_unix_close_v1(owner)
+        expect(closed.error).to_equal(expected_error)
+        assert(not closed.closed)
+        expect(closed.owner.unwrap().token).to_equal(owner.token)

@@ -1978,6 +1978,14 @@ bool        rt_socket_set_nonblocking(int64_t fd, bool enabled);
 int64_t     rt_socket_nonblock_prepare(int64_t fd, int64_t mode);
 int64_t     rt_socket_nonblock_commit(int64_t fd, int64_t flags);
 int64_t     rt_socket_nonblock_mask(void);
+/* Local Unix byte owner. All receipts are reserved before descriptor effects;
+ * read result [status,eof,count,padded byte capacity], connect has 7 words. */
+SplArray* rt_local_unix_connect_v1(const char*,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_read_v1(int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_write_some_v1(int64_t,SplArray*,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_write_some_admitted_v1(int64_t,SplArray*,int64_t,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_close_v1(int64_t);
+
 
 /* ===== Raw 32-bit framebuffer operations ===== */
 
