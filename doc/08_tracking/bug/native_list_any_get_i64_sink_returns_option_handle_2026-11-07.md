@@ -75,13 +75,28 @@ would be wrong.
 
 ## Still open (not fixed here)
 
-- `if val v = w.get(0)` on a `list` binds `v` as `Any` and decodes the
-  already-decoded payload a second time (4 -> 0). Root: the producer decodes
-  an `Any` element to a raw int while `Any` consumers expect a tagged word.
-  Fixing the producer (keep `Any` payloads tagged) changes every `Optional(Any)`
-  consumer (`??` currently relies on the raw word) and needs native
-  verification; tracked here rather than widened silently.
-- **MISS into an i64 sink is still a silent wrong value (pre-existing, unchanged here):** the None handle carries payload 3 and `rt_unwrap_or_self` (`src/runtime/runtime_native.c:6269`, Rust `objects.rs:530`) returns it, so an out-of-range `get` reads as `3`. Same for typed `[i64].get`. A stored element `3` in a `list` is also classified None by the runtime Some check. Both are in follow-up `native_option_int_sink_miss_and_payload_three_2026-11-07`, which proposes `rt_unwrap_or_trap` at integer sinks.
+- `if val v = w.get(0)` on a `list` reads `v` as 0 natively (4 -> 0, and 3 -> 0).
+  **Not reproducible in MIR (2026-11-07).** The seed-interpreted HIR->MIR
+  lowering at release/1.0.0 `53419f623a5`, and also with `src/compiler`
+  reverted to the Stage 2 source commit `4ff1e3b51f5`, decodes the element
+  exactly once (one `rt_value_as_int_wide`, in `get_some`); the binder
+  (`exists_check_some`: `rt_unwrap_or_self`) and the branch body
+  (`rt_raw_i64_to_string(v)`, `v + 1`) use the raw word directly. Pinned by
+  the spec case "decodes an if-val binder on a list get exactly once"
+  (green before and after; not a red-first test). The `has_if_val_scalar_binding`
+  path in `mir_lowering_stmts.spl` only fires for Float/Bool binders, so an
+  `Any` binder never reaches it. Native, on the same Stage 2 binary, prints
+  `v=0` for both `[4]` and `[3]` and **enters** the branch for `[3]` while
+  `coal([3])` in the same program reads None: native disagrees with the
+  harness MIR and with itself, so the second decode is introduced below or
+  outside the MIR the harness produces (the Stage 2 compiler's own lowering
+  of these paths, or the cranelift/runtime layer). Running the harness with
+  `SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` emits no functions at
+  all, and no native-build switch dumps MIR (`emit_mir` is only ever set to
+  false), so the native MIR could not be compared. Next step: dump the Stage 2
+  native MIR for the probe (wire an emit-MIR option) and diff it against the
+  harness; no source edit until a path that exhibits the decode is found.
+- **MISS into an i64 sink is still a silent wrong value (pre-existing, unchanged here):** the None handle carries payload 3 and `rt_unwrap_or_self` (`src/runtime/runtime_native.c:6269`, Rust `objects.rs:530`) returns it, so an out-of-range `get` reads as `3`. Same for typed `[i64].get`. A stored element `3` in a `list` (and in `[i64]`) was also classified None by the runtime Some check; that one is now fixed in source (static Some in the bounds-checked some-arm). Both are in follow-up `native_option_int_sink_miss_and_payload_three_2026-11-07`, which proposes `rt_unwrap_or_trap` at integer sinks.
 - `option_payload_for_int_sink` assumes an int-decoded payload. That holds only for the array get/at/first/last producer: other `Optional(Any)` producers (`any?` params, tagged dict reads) hand over a tagged word. The limit is stated in the helper docstring.
 - The public array `get` contract (Option vs element) remains the open question
   of `array_get_contract_drift_crypto_2026-10-18`.

@@ -7218,7 +7218,19 @@ impl MirLowering:
         val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
         self.builder = b_get
         val elem_decoded = self.decode_runtime_value(elem_tagged, elem_type)
-        val some_handle = self.ensure_option_handle(elem_decoded, option_type)
+        # The some-arm is reached only after the bounds check, so the element
+        # is present by construction: build Some statically. Re-deriving
+        # presence at runtime (normalize_option_handle) compared the DECODED
+        # word with the nil sentinel, so a stored element 3 in a `list` or
+        # `[i64]` read back as None (`[3].get(0) ?? -1` gave -1). Boxed
+        # payloads keep the runtime path (the sentinel cannot collide there)
+        # and so do Optional elements (a stored handle must not be rewrapped).
+        # doc/08_tracking/bug/native_option_int_sink_miss_and_payload_three_2026-11-07.md
+        var elem_is_optional = false
+        match elem_hir_type.kind:
+            case HirTypeKind.Optional(_): elem_is_optional = true
+            case _: ()
+        val some_handle = if option_payload_is_boxed(option_type) or elem_is_optional: self.ensure_option_handle(elem_decoded, option_type) else: self.emit_option_handle_with_disc(elem_decoded, option_type, 0)
         var b_some_end = self.builder
         b_some_end.emit_copy(result_local, some_handle)
         b_some_end.terminate_goto(merge_block)
