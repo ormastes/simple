@@ -1,0 +1,114 @@
+# Windows startup receipt publication through generation-owned native privacy.
+# No path chmod/stat substitute and no dropped failed-admission cleanup token.
+use std.nogc_sync_mut.io.windows_private_file_v1.*
+use std.common.base_encoding.utilities.base_encoding_text_to_bytes
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+
+pub struct HostServicePrivateCleanupV2:
+    files: [WindowsPrivateFileV1]
+    roots: [WindowsPrivateRootV1]
+
+pub struct HostServicePrivateReceiptTurnV2:
+    receipt_path: text
+    cleanup: Option<HostServicePrivateCleanupV2>
+    error: text
+
+# Retry only generation-owned resources. Failed child closes retain all parent
+# roots; readiness is forbidden until this returns nil.
+pub fn host_service_private_cleanup_v2(cleanup: HostServicePrivateCleanupV2) -> Option<HostServicePrivateCleanupV2>:
+    var files: [WindowsPrivateFileV1] = []
+    for original in cleanup.files:
+        var file = original
+        if not file.close(): files.push(file)
+    if files.len() > 0:
+        return Some(HostServicePrivateCleanupV2(files: files, roots: cleanup.roots))
+    var roots = cleanup.roots
+    while roots.len() > 0:
+        var root = roots[roots.len() - 1]
+        if not root.close(): return Some(HostServicePrivateCleanupV2(files: [], roots: roots))
+        roots.pop()
+    nil
+
+fn host_service_private_finish_v2(cleanup: HostServicePrivateCleanupV2,
+        path: text, error: text) -> HostServicePrivateReceiptTurnV2:
+    val pending = host_service_private_cleanup_v2(cleanup)
+    val reason = if pending.is_some() and error == "": "host-service-private-close-pending" else: error
+    HostServicePrivateReceiptTurnV2(receipt_path: path, cleanup: pending, error: reason)
+
+fn host_service_private_open_error_v2(cleanup: HostServicePrivateCleanupV2,
+        error: WindowsPrivateErrorV1) -> HostServicePrivateReceiptTurnV2:
+    var retained = cleanup
+    if error.cleanup_file.is_some(): retained.files.push(error.cleanup_file.unwrap())
+    if error.cleanup_root.is_some(): retained.roots.push(error.cleanup_root.unwrap())
+    host_service_private_finish_v2(retained, "", error.message)
+
+fn host_service_private_directory_v2(root: WindowsPrivateRootV1) -> Result<WindowsPrivateRootV1, WindowsPrivateErrorV1>:
+    val existing = root.child_directory("service-reconciliations", false)
+    if existing.is_ok(): return existing
+    val open_error = existing.unwrap_err()
+    if open_error.cleanup_file.is_some() or open_error.cleanup_root.is_some(): return Err(open_error)
+    # Native create is exclusive FILE_CREATE, not open-or-create. Try it only
+    # after an owner-free failed open; a collision gets one secure reopen.
+    val created = root.child_directory("service-reconciliations", true)
+    if created.is_ok(): return created
+    val create_error = created.unwrap_err()
+    if create_error.cleanup_file.is_some() or create_error.cleanup_root.is_some(): return Err(create_error)
+    root.child_directory("service-reconciliations", false)
+
+pub fn host_service_private_receipt_store_v2(journal_root: text,
+        source: text) -> HostServicePrivateReceiptTurnV2:
+    var cleanup = HostServicePrivateCleanupV2(files: [], roots: [])
+    if str_len(source) <= 0 or str_len(source) > 4194304:
+        return HostServicePrivateReceiptTurnV2("", nil, "host-service-receipt-byte-limit")
+    val opened = windows_private_root_open_v1(journal_root)
+    if opened.is_err(): return host_service_private_open_error_v2(cleanup, opened.unwrap_err())
+    val journal = opened.unwrap()
+    cleanup.roots.push(journal)
+    val directory_result = host_service_private_directory_v2(journal)
+    if directory_result.is_err(): return host_service_private_open_error_v2(cleanup, directory_result.unwrap_err())
+    val directory = directory_result.unwrap()
+    cleanup.roots.push(directory)
+    val nonce = sosix_random_hex(32) ?? ""
+    if str_len(nonce) != 64: return host_service_private_finish_v2(cleanup, "", "host-service-receipt-entropy")
+    val final_name = sha256_text(source) + ".sdn"
+    val final_path = journal_root + "/service-reconciliations/" + final_name
+    val staged = directory.create_private_stage(".stage-" + nonce, 4194304u64)
+    if staged.is_err(): return host_service_private_open_error_v2(cleanup, staged.unwrap_err())
+    var stage = staged.unwrap()
+    cleanup.files.push(stage)
+    val expected = base_encoding_text_to_bytes(source)
+    var offset = 0
+    while offset < expected.len():
+        var chunk: [u8] = []
+        val remaining = expected.len() - offset
+        val count = if remaining > 1048576: 1048576 else: remaining
+        for index in 0..count: chunk.push(expected[offset + index])
+        val written = stage.write(chunk)
+        if written.is_err(): return host_service_private_finish_v2(cleanup, "", written.unwrap_err())
+        offset = offset + count
+    val sealed = stage.seal()
+    if sealed.is_err(): return host_service_private_finish_v2(cleanup, "", sealed.unwrap_err())
+    val staged_bytes = stage.read_all_bounded(4194304)
+    if staged_bytes.is_err(): return host_service_private_finish_v2(cleanup, "", staged_bytes.unwrap_err())
+    if staged_bytes.unwrap() != expected or not stage.security_current():
+        return host_service_private_finish_v2(cleanup, "", "host-service-private-stage-changed")
+    val published = directory.publish_no_replace(stage, final_name)
+    if published.is_err(): return host_service_private_finish_v2(cleanup, "", published.unwrap_err())
+    # A retained published handle must close before the exclusive final open.
+    # A collision is validated by the same native owner; never chmod/overwrite.
+    if not stage.close():
+        return HostServicePrivateReceiptTurnV2(final_path, Some(cleanup), "host-service-private-stage-close-pending")
+    cleanup.files = []
+    val final_result = directory.open_private_file(final_name, 4194304u64)
+    if final_result.is_err(): return host_service_private_open_error_v2(cleanup, final_result.unwrap_err())
+    var final_file = final_result.unwrap()
+    cleanup.files.push(final_file)
+    val actual = final_file.read_all_bounded(4194304)
+    if actual.is_err(): return host_service_private_finish_v2(cleanup, final_path, actual.unwrap_err())
+    if actual.unwrap() != expected or not final_file.security_current():
+        return host_service_private_finish_v2(cleanup, final_path, "host-service-private-final-changed")
+    # The native seal flushed the staged descriptor. The selected profile is
+    # process-crash only; this does not assert Windows directory power-loss flush.
+    host_service_private_finish_v2(cleanup, final_path, "")

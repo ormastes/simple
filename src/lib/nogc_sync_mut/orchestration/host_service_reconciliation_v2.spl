@@ -3,6 +3,7 @@
 # No inventory supplied by a request, boolean ready setter, or second ledger.
 # Durability profile is process-crash-v1; power-loss recovery is not claimed.
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.*
 use std.common.contracts.orchestration.host_capacity_v1.*
 use std.common.contracts.orchestration.host_reservation_codec_v1.*
 use std.common.contracts.container.execution_v2.*
@@ -26,6 +27,7 @@ pub struct HostServiceReconciliationTurnV2:
     admission: Option<ContainerServiceAdmissionV2>
     receipt_path: text
     error: text
+    privacy_cleanup: Option<HostServicePrivateCleanupV2> = nil
 
 fn host_service_writer_v2(owner: HostCapacityOwnerV1) -> Result<bool, text>:
     match distributed_operation_journal_lookup_v2(owner.journal, ""):
@@ -75,14 +77,28 @@ fn host_service_inventory_match_v2(owner: HostCapacityOwnerV1, scope: ContainerH
     Ok(true)
 
 fn host_service_receipt_store_v2(owner: HostCapacityOwnerV1, scope: ContainerHostScopeV2,
-        inventory_digest: text, classifications: [SdnValue]) -> Result<text, text>:
+        inventory_digest: text, classifications: [SdnValue]) -> HostServicePrivateReceiptTurnV2:
+    val scope_bytes = container_host_scope_bytes_v2(scope)
+    if scope_bytes.is_err(): return HostServicePrivateReceiptTurnV2("", nil, scope_bytes.unwrap_err())
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-service-reconciliation"),
-        "scope": SdnValue.String(container_host_scope_bytes_v2(scope)?),
+        "scope": SdnValue.String(scope_bytes.unwrap()),
         "inventoryDigest": SdnValue.String(inventory_digest), "journalAuthorityDigest": SdnValue.String(owner.journal.authority_digest),
         "journalCommitDigest": SdnValue.String(owner.journal.revision), "journalSequence": SdnValue.Int(owner.journal.sequence),
         "durabilityProfile": SdnValue.String("process-crash-v1"), "reservations": SdnValue.Array(classifications)}
     val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
-    val directory = owner.journal.root + "/service-reconciliations"
+    @when(os="windows"):
+    host_service_private_receipt_store_v2(owner.journal.root, bytes)
+    @else:
+    # Linux scripted-provider tests exercise reconciliation with a real local
+    # filesystem. This branch is never Windows ACL/privacy qualification.
+    val stored = host_service_posix_receipt_store_v2(owner.journal.root, bytes)
+    match stored:
+        case Ok(path): HostServicePrivateReceiptTurnV2(path, nil, "")
+        case Err(reason): HostServicePrivateReceiptTurnV2("", nil, reason)
+    @end
+
+fn host_service_posix_receipt_store_v2(journal_root: text, bytes: text) -> Result<text, text>:
+    val directory = journal_root + "/service-reconciliations"
     if not file_exists(directory) and not dir_create(directory, true): return Err("host-service-receipt-directory-failed")
     # A live quarantined owner may retry after cancellations advanced CURRENT.
     # Content addressing binds scope, refreshed inventory, journal commit and
@@ -104,9 +120,22 @@ fn host_service_receipt_store_v2(owner: HostCapacityOwnerV1, scope: ContainerHos
         if publication: dir_remove(stage, true)
     if file_read_regular_no_follow_bounded(path, 4194304)? != bytes: return Err("host-service-receipt-readback-failed")
     if file_mode_bits(path) != 0o600: return Err("host-service-receipt-mode-failed")
-    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(owner.journal.root):
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(journal_root):
         return Err("host-service-receipt-sync-failed")
     Ok(path)
+
+# The persistent host retains the whole failed turn. Cleanup is attempted before
+# another inventory/admission attempt; a pending native token cannot be dropped
+# by converting the previous error into a text-only retry.
+pub fn host_service_reconcile_retry_v2(previous: HostServiceReconciliationTurnV2) -> HostServiceReconciliationTurnV2:
+    var current = previous
+    if current.privacy_cleanup.is_some():
+        current.privacy_cleanup = host_service_private_cleanup_v2(current.privacy_cleanup.unwrap())
+        if current.privacy_cleanup.is_some():
+            current.admission = nil
+            current.error = "host-service-private-cleanup-pending"
+            return current
+    host_service_reconcile_v2(current.owner, current.container)
 
 pub fn host_service_reconcile_v2(owner: HostCapacityOwnerV1,
         container: SimpleContainerOwnerV2) -> HostServiceReconciliationTurnV2:
@@ -181,13 +210,15 @@ pub fn host_service_reconcile_v2(owner: HostCapacityOwnerV1,
     val capacity_checked = host_available_capacity_v1(current.ledger)
     if capacity_checked.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", capacity_checked.unwrap_err())
     val stored = host_service_receipt_store_v2(current, scope, refreshed.inventory_digest, classifications)
-    if stored.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", stored.unwrap_err())
+    if stored.error != "" or stored.cleanup.is_some():
+        return HostServiceReconciliationTurnV2(current, current_container, nil, stored.receipt_path,
+            if stored.error != "": stored.error else: "host-service-private-cleanup-pending", stored.cleanup)
     val admission = ContainerServiceAdmissionV2(scope_fence_id: fence.unwrap(), inventory_digest: refreshed.inventory_digest,
         host_journal_commit_digest: current.journal.revision, host_journal_revision: current.journal.sequence,
         durability_profile: "process-crash-v1")
     val enabled = simple_container_complete_quarantine_v2(current_container, admission)
     current_container = enabled.owner
     if enabled.error != "" or not enabled.admitted:
-        return HostServiceReconciliationTurnV2(current, current_container, nil, stored.unwrap(), "host-service-admission-refused:" + enabled.error)
+        return HostServiceReconciliationTurnV2(current, current_container, nil, stored.receipt_path, "host-service-admission-refused:" + enabled.error)
     current.ledger.continuity_proven = true
-    HostServiceReconciliationTurnV2(current, current_container, Some(admission), stored.unwrap(), "")
+    HostServiceReconciliationTurnV2(current, current_container, Some(admission), stored.receipt_path, "")

@@ -1,0 +1,77 @@
+# @req HOST-RECONCILIATION-PRIVATE-01 HOST-RECONCILIATION-PRIVATE-02
+# NOT_RUN. Requires real Windows and independently installed private ACL roots.
+use std.spec
+use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.*
+use std.nogc_sync_mut.io.windows_private_file_v1.*
+use std.nogc_sync_mut.io.env_ops.{host_os, env_get}
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.common.base_encoding.utilities.base_encoding_text_to_bytes
+use std.common.crypto.sha256.sha256_text
+
+fn private_receipt_fixture_v2() -> text:
+    expect(host_os()).to_equal("windows")
+    val parent = env_get("SIMPLE_HOST_RECEIPT_PRIVATE_PARENT") ?? ""
+    assert(parent != "")
+    var root = windows_private_root_open_v1(parent).unwrap()
+    val nonce = sosix_random_hex(16).unwrap()
+    val name = "host-receipt-" + nonce
+    var child = root.child_directory(name, true).unwrap()
+    assert(child.close())
+    assert(root.close())
+    parent + "/" + name
+
+fn private_receipt_read_v2(path: text, source: text) -> [u8]:
+    var root = windows_private_root_open_v1(path).unwrap()
+    var directory = root.child_directory("service-reconciliations", false).unwrap()
+    var file = directory.open_private_file(sha256_text(source) + ".sdn", 4194304u64).unwrap()
+    val bytes = file.read_all_bounded(4194304).unwrap()
+    assert(file.security_current())
+    assert(file.close())
+    assert(directory.close())
+    assert(root.close())
+    bytes
+
+describe "Host Windows startup receipt native private owner":
+    it "publishes immutable bytes and validates exact collision replay through native handles":
+        val root = private_receipt_fixture_v2()
+        val source = "version: 2\nkind: host-service-reconciliation\n"
+        val first = host_service_private_receipt_store_v2(root, source)
+        expect(first.error).to_equal("")
+        assert(first.cleanup.is_none())
+        expect(private_receipt_read_v2(root, source)).to_equal(base_encoding_text_to_bytes(source))
+        val replay = host_service_private_receipt_store_v2(root, source)
+        expect(replay.error).to_equal("")
+        assert(replay.cleanup.is_none())
+        expect(replay.receipt_path).to_equal(first.receipt_path)
+        expect(private_receipt_read_v2(root, source)).to_equal(base_encoding_text_to_bytes(source))
+
+    it "retains a wrong existing final and refuses to acknowledge a colliding receipt":
+        val path = private_receipt_fixture_v2()
+        val expected = "version: 2\nkind: host-service-reconciliation\n"
+        val wrong = base_encoding_text_to_bytes("version: 2\nkind: unrelated-proof\n")
+        var root = windows_private_root_open_v1(path).unwrap()
+        var directory = root.child_directory("service-reconciliations", true).unwrap()
+        var file = directory.create_private_stage("wrong-stage.sdn", 4194304u64).unwrap()
+        assert(file.write(wrong).unwrap())
+        assert(file.seal().unwrap())
+        assert(directory.publish_no_replace(file, sha256_text(expected) + ".sdn").unwrap())
+        assert(file.close())
+        assert(directory.close())
+        assert(root.close())
+        val refused = host_service_private_receipt_store_v2(path, expected)
+        expect(refused.error).to_equal("host-service-private-final-changed")
+        assert(refused.cleanup.is_none())
+        expect(private_receipt_read_v2(path, expected)).to_equal(wrong)
+
+    it "refuses a provisioned foreign-read ACL root without a POSIX permission fallback":
+        expect(host_os()).to_equal("windows")
+        val root = env_get("SIMPLE_WINDOWS_PRIVATE_FOREIGN_READ_ROOT") ?? ""
+        assert(root != "")
+        val refused = host_service_private_receipt_store_v2(root, "version: 2\n")
+        assert(refused.error != "")
+        expect(refused.receipt_path).to_equal("")
+        if refused.cleanup.is_some():
+            # Actual failed-admission tokens are retained and retried, never
+            # discarded by reducing the native error to a text-only Result.
+            val pending = host_service_private_cleanup_v2(refused.cleanup.unwrap())
+            assert(pending.is_none())

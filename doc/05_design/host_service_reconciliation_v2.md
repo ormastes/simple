@@ -1,6 +1,7 @@
 # Persistent startup reconciliation in the existing host ledger
 
-Status: source reviewed, eight scenarios authored, NOT_RUN. This is the actual
+Status: eight reconciliation scenarios and three Windows private-receipt
+scenarios authored, NOT_RUN. This is the actual
 startup transition; installed service root and persistent SDK routing remain
 separate composition work. No complete Windows host service is claimed here.
 
@@ -40,14 +41,27 @@ A retry after partial publication or cancellation preserves older turn receipts
 and publishes a distinct current receipt when the facts changed. An older receipt
 is never loaded as permission to activate the current owner.
 
-Publication writes into a newly owned private staging directory, checks exact
-bytes and mode0600, synchronizes the stage, then uses the existing filesystem
-no-replace publication owner. A failed or interrupted stage cannot occupy the
-final content-addressed path. Unknown stages remain evidence; this operation
-removes only its own successfully published stage. Every final receipt, including
-an already existing one, must pass no-follow readback and mode0600 checks before
-sync and acknowledgment. Corrupt or unsafe existing final entries remain blocked
-for explicit administrator reconciliation; no overwrite or silent repair occurs.
+On Windows, publication uses `windows_private_file_v1` generation-owned native
+root/file capabilities. The actual handle owner validates service ownership,
+protected DACL privacy and no-reparse ancestry. Complete bounded stage bytes are
+sealed/flushed and read back before native no-replace publication. The stage
+handle closes before opening the final entry, including collisions, through the
+same private directory owner. Final bytes and current security must match.
+No Windows chmod/stat permission check is used. Corrupt or unsafe final entries
+remain blocked without overwrite or repair. Interrupted stages remain evidence.
+
+Every native failed-admission file/root token and failed close is retained in
+`HostServicePrivateCleanupV2`. The reconciliation turn returns this cleanup with
+the updated ledger/container and no admission. Its persistent caller retains the
+whole turn and uses `host_service_reconcile_retry_v2`, which attempts cleanup
+before another inventory/readiness attempt. A pending cleanup never becomes a
+successful acknowledgment. This is an internal trusted owner boundary; no
+serialized cleanup or caller-supplied ready flag is accepted.
+
+Linux scripted-Windows-adapter tests retain the POSIX receipt implementation for
+state-machine verification only. Those tests do not qualify Windows privacy.
+The separate native Windows specs require an administrator-provisioned private
+parent and a foreign-read ACL negative fixture; missing fixtures fail.
 
 The selected WAL profile is `process-crash-v1`; archive fsync does not upgrade
 journal power-loss guarantees. Every fresh service startup must inventory again.
@@ -59,3 +73,6 @@ matching is bounded nested scanning performed once at startup, not per request;
 large-history latency/RSS remains unmeasured. Future optimization must preserve
 complete duplicate/charge checks. Specs use real journals and the actual Windows
 adapter's explicit scripted inventory seam, not native platform qualification.
+
+All local verification processes share CPU affinity `0-4` (five cores total).
+No compiler, native test or engine execution was run for this source checkpoint.
