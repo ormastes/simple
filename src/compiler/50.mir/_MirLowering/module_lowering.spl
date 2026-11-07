@@ -229,6 +229,21 @@ impl MirLowering:
         else:
             nil
 
+    me coalesce_operand_derivable(expr: HirExpr, depth: i64, visit_budget: [i64]) -> bool:
+        """True when `expr` is `opt ?? fallback` with a derivable fallback.
+        Only for comparison operands, whose bool result does not depend on
+        the coalesce's own type. If the left side recovers a type, its kind
+        must equal the fallback's; an unrecoverable left side (a call, a
+        `T?` value) adds no evidence either way."""
+        match expr.kind:
+            case NullCoalesce(left, right):
+                if val fallback_known = self.infer_unfolded_static_expr_type_bounded(right, depth + 1, visit_budget):
+                    if val left_known = self.infer_unfolded_static_expr_type_bounded(left, depth + 1, visit_budget):
+                        return left_known.kind == fallback_known.kind
+                    return true
+                false
+            case _: false
+
     me infer_unfolded_static_expr_type(expr: HirExpr) -> MirType?:
         # Shared across both binary branches so a repeated dependency cannot
         # turn type recovery into an exponential traversal.
@@ -326,6 +341,14 @@ impl MirLowering:
                 match op:
                     case HirBinOp.Eq | HirBinOp.NotEq | HirBinOp.Lt | HirBinOp.LtEq | HirBinOp.Gt | HirBinOp.GtEq:
                         if left_type.? and right_type.?: return Some(MirType.bool())
+                        # A comparison yields bool whatever its operands are,
+                        # so a `??` operand only has to be well-formed evidence
+                        # (`(env_get("X") ?? "") == "1"`). A standalone `??`
+                        # is NOT typed here: its value lowering takes the left
+                        # inner type, which this pass cannot see.
+                        val left_ok = left_type.? or self.coalesce_operand_derivable(left, depth + 1, visit_budget)
+                        val right_ok = right_type.? or self.coalesce_operand_derivable(right, depth + 1, visit_budget)
+                        if left_ok and right_ok: return Some(MirType.bool())
                     case HirBinOp.And | HirBinOp.Or:
                         if val left_known = left_type:
                             if val right_known = right_type:
