@@ -15,9 +15,10 @@ use std.common.task_runner.distributed_operation_journal_v2.distributed_operatio
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.common.crypto.sha256.sha256_text
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
-use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_publish_noreplace, secure_temp_dir, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
 use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
 
 pub struct HostServiceReconciliationTurnV2:
     owner: HostCapacityOwnerV1
@@ -87,9 +88,22 @@ fn host_service_receipt_store_v2(owner: HostCapacityOwnerV1, scope: ContainerHos
     # Content addressing binds scope, refreshed inventory, journal commit and
     # classifications without overwriting a previous reconciliation turn.
     val path = directory + "/" + sha256_text(bytes) + ".sdn"
-    val created = file_create_exclusive(path, bytes)
-    if created and not file_set_mode(path, 0o600): return Err("host-service-receipt-mode-failed")
+    if not file_exists(path):
+        # A partial write remains in this attempt's private stage. It cannot
+        # poison the canonical final name or overwrite older evidence.
+        val stage = secure_temp_dir(directory, ".reconciliation-stage")?
+        val staged = stage + "/receipt.sdn"
+        if not file_create_exclusive(staged, bytes): return Err("host-service-receipt-stage-write-failed")
+        if not file_set_mode(staged, 0o600) or file_mode_bits(staged) != 0o600:
+            return Err("host-service-receipt-mode-failed")
+        if file_read_regular_no_follow_bounded(staged, 4194304)? != bytes: return Err("host-service-receipt-stage-readback-failed")
+        if not file_fsync(staged) or not directory_fsync(stage): return Err("host-service-receipt-stage-sync-failed")
+        val publication = file_publish_noreplace(staged, path)?
+        # A competing/existing destination is checked below, never replaced.
+        # Preserve the private stage on refusal for diagnosis/reconciliation.
+        if publication: dir_remove(stage, true)
     if file_read_regular_no_follow_bounded(path, 4194304)? != bytes: return Err("host-service-receipt-readback-failed")
+    if file_mode_bits(path) != 0o600: return Err("host-service-receipt-mode-failed")
     if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(owner.journal.root):
         return Err("host-service-receipt-sync-failed")
     Ok(path)

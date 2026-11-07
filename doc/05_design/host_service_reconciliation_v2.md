@@ -1,6 +1,6 @@
 # Persistent startup reconciliation in the existing host ledger
 
-Status: source reviewed, seven scenarios authored, NOT_RUN. This is the actual
+Status: source reviewed, eight scenarios authored, NOT_RUN. This is the actual
 startup transition; installed service root and persistent SDK routing remain
 separate composition work. No complete Windows host service is claimed here.
 
@@ -35,6 +35,15 @@ canonical receipt, binding the refreshed inventory and actual journal commit.
 A retry after partial publication or cancellation preserves older turn receipts
 and publishes a distinct current receipt when the facts changed. An older receipt
 is never loaded as permission to activate the current owner.
+
+Publication writes into a newly owned private staging directory, checks exact
+bytes and mode0600, synchronizes the stage, then uses the existing filesystem
+no-replace publication owner. A failed or interrupted stage cannot occupy the
+final content-addressed path. Unknown stages remain evidence; this operation
+removes only its own successfully published stage. Every final receipt, including
+an already existing one, must pass no-follow readback and mode0600 checks before
+sync and acknowledgment. Corrupt or unsafe existing final entries remain blocked
+for explicit administrator reconciliation; no overwrite or silent repair occurs.
 
 The selected WAL profile is `process-crash-v1`; archive fsync does not upgrade
 journal power-loss guarantees. Every fresh service startup must inventory again.

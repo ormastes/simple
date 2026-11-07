@@ -13,7 +13,8 @@ use std.common.task_runner.distributed_operation_journal_v2.distributed_operatio
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_create_exclusive, file_remove}
 use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.file_system.metadata.file_mode_bits
-use std.nogc_sync_mut.io_runtime.dir_remove
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
 use std.common.sdn.value.SdnValue
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
@@ -43,6 +44,40 @@ fn reconciliation_classification_v2(path: text, operation_id: text) -> text:
     fail("required reconciliation classification missing")
 
 describe "Actual host service startup reconciliation with explicitly scripted Windows inventory":
+    it "refuses unsafe existing receipt permissions and preserves partial private stages during retry":
+        val fixture = host_reconciliation_fixture_v2("empty")
+        val directory = fixture.root + "/service-reconciliations"
+        assert(dir_create(directory, true))
+        val orphan = directory + "/.reconciliation-stage-interrupted"
+        assert(dir_create(orphan, true))
+        assert(file_create_exclusive(orphan + "/receipt.sdn", "partial staging bytes"))
+        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-service-reconciliation"),
+            "scope": SdnValue.String(container_host_scope_bytes_v2(fixture.scope).unwrap()),
+            "inventoryDigest": SdnValue.String(container_service_inventory_digest_v2("windows-docker-process", fixture.scope, []).unwrap()),
+            "journalAuthorityDigest": SdnValue.String(fixture.owner.journal.authority_digest),
+            "journalCommitDigest": SdnValue.String(fixture.owner.journal.revision),
+            "journalSequence": SdnValue.Int(fixture.owner.journal.sequence),
+            "durabilityProfile": SdnValue.String("process-crash-v1"), "reservations": SdnValue.Array([])}
+        val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+        val path = directory + "/" + sha256_text(bytes) + ".sdn"
+        assert(file_create_exclusive(path, bytes))
+        assert(file_set_mode(path, 0o644))
+        val refused = host_service_reconcile_v2(fixture.owner, host_reconciliation_retry_container_v2())
+        expect(refused.error).to_equal("host-service-receipt-mode-failed")
+        assert(not refused.admission.?)
+        host_reconciliation_assert_quarantined_v2(refused.container)
+        expect(file_mode_bits(path)).to_equal(0o644)
+        # Explicit local-admin repair of the fixture permission; production
+        # does not silently chmod an existing destination or delete evidence.
+        assert(file_set_mode(path, 0o600))
+        val retried = host_service_reconcile_v2(refused.owner, refused.container)
+        expect(retried.error).to_equal("")
+        expect(retried.receipt_path).to_equal(path)
+        expect(file_read_regular_no_follow_bounded(path, 4194304).unwrap()).to_equal(bytes)
+        expect(file_read_regular_no_follow_bounded(orphan + "/receipt.sdn", 4096).unwrap()).to_equal("partial staging bytes")
+        assert(host_capacity_owner_close_v1(retried.owner).unwrap())
+        dir_remove(fixture.root, true)
+
     it "retries publication after cancellation advanced the journal without a scope-only receipt collision":
         val fixture = host_reconciliation_fixture_v2("admitted")
         val directory = fixture.root + "/service-reconciliations"
