@@ -93,3 +93,36 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 "$BIN" test \
 3. If embedded comment is correct: file a product bug against the
    CUDA/OpenCL intrinsic arity-check path for returning Err instead.
 
+
+## 2026-11-07: stale arity oracles aligned; execution pending
+
+Reviewed against exact release `38207beccac49dd63b6316ad81f807cd84b9e58a`.
+The actual executable imports `plugins.backend_cuda.cuda_backend`, whose
+`validate_intrinsic` returns a structured CUDA error naming the intrinsic and
+exact argument count. The existing manual already documented rejection for
+these two CUDA cases while the executable still demanded successful PTX. The
+OpenCL vec emitters instead return diagnostic comments for missing arguments;
+those comments do not have the unsupported-source prefix its validator rejects.
+That is a different current contract, not evidence for replacing its Ok oracle
+with Err. Both backend contracts are retained unchanged.
+
+The two CUDA vec4 bad-arity scenarios now assert rejection, backend phase and
+the actual diagnostic (intrinsic plus exact count).
+Unexpected Ok fails the assertion without unwrapping the wrong Result variant.
+All valid-input controls and OpenCL diagnostic-comment scenarios remain
+byte-for-byte unchanged. Manual visibility metadata and the two corresponding
+manual flows are aligned. No production
+validator or device feature is weakened or changed.
+
+No compiler/spec/docgen/sspec-maintain execution was performed; status remains
+OPEN/WAIT_VERIFY. Other historically listed contract files were inspected by
+name at this pin. Their `spec_constants_contract_spec` diagnostic-comment cases
+use different OpenCL emitter comments not rejected by validate_generated_source
+and are not automatically the same Err/unwrap defect. Do not mechanically
+rewrite them to reject without a separate canonical contract.
+
+The vec manual also already rejects unsupported CUDA vector-result loads while
+the executable has older positive expectations. That pre-existing feature/oracle
+divergence is outside this arity correction; do not claim the entire vec suite
+green, invent vector support, or weaken those positive controls in this change.
+Actual execution plus the separate feature contract must resolve it.
