@@ -1,0 +1,111 @@
+"""
+Regression: native in-process `run` left multi-line brace-imports from
+`std.hardware.link_mux.*` unresolved (transport_sim_loopback, tap_create,
+mux_create, CH_JTAG ...).
+Bug: doc/08_tracking/bug/native_cli_run_std_hardware_brace_import_unresolved_2026-07-24.md
+
+Drives the pure-Simple pipeline the native CLI uses for `run`: the driver's
+import scanner/resolver, the pure-Simple frontend parser, module surfaces and
+HIR lowering, over the real probe sources (no stubs).
+"""
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths, _driver_entry_import_dirname, _driver_resolve_entry_import, _driver_module_aliases, _driver_module_name_from_path}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+val NEGATIVE_MODULE = "probe.negative_brace_import"
+val NEGATIVE_SOURCE = "use std.hardware.link_mux.mux.\{\n    transport_sim_loopback,\n    mux_create_misspelled\n\}\n\nfn go() -> i64:\n    val l = transport_sim_loopback()\n    val m = mux_create_misspelled(l)\n    0\n"
+
+struct ProbeClosure:
+    modules: Dict<text, Module>
+    surfaces: ModuleSurfacesByName
+    entry_module: text
+    seen: Dict<text, bool>
+    missing: [text]
+
+fn probe_closure(entry: text) -> ProbeClosure:
+    var queue: [text] = [entry]
+    var seen: Dict<text, bool> = {}
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var entry_module = ""
+    var missing: [text] = []
+    var cursor = 0
+    while cursor < queue.len():
+        val path = queue[cursor]
+        cursor = cursor + 1
+        if seen.has(path):
+            continue
+        seen[path] = true
+        val content = file_read_nullable(path) ?? ""
+        if content.len() == 0:
+            missing.push(path)
+        val module_name = _driver_module_name_from_path(path)
+        if path == entry:
+            entry_module = module_name
+        val aliases = _driver_module_aliases(path, content, module_name)
+        for source in aliases:
+            if not modules.has(source.module_name):
+                modules[source.module_name] = parse_full_frontend(source.content, source.module_name, source.path, Logger(level: 0))
+                sources.push(source)
+        for provider in _driver_entry_import_module_paths(content):
+            val resolved = _driver_resolve_entry_import(provider, _driver_entry_import_dirname(path))
+            if resolved != "" and not seen.has(resolved):
+                queue.push(resolved)
+    # Negative control: same std.hardware provider, one misspelled brace name.
+    modules[NEGATIVE_MODULE] = parse_full_frontend(NEGATIVE_SOURCE, NEGATIVE_MODULE, "probe/negative_brace_import.spl", Logger(level: 0))
+    sources.push(SourceFile(path: "probe/negative_brace_import.spl", content: NEGATIVE_SOURCE, module_name: NEGATIVE_MODULE))
+    val surfaces = match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(error):
+            ModuleSurfacesByName.empty()
+    ProbeClosure(modules: modules, surfaces: surfaces, entry_module: entry_module, seen: seen, missing: missing)
+
+fn lower_errors(modules: Dict<text, Module>, surfaces: ModuleSurfacesByName, owner: text) -> [text]:
+    if not modules.has(owner):
+        return ["probe module was not parsed: " + owner]
+    var lowering = hirlowering_for_module(owner, surfaces)
+    val hir = lowering.lower_module(modules[owner])
+    var messages: [text] = []
+    for error in lowering.errors:
+        messages.push(error.message)
+    messages
+
+fn probe_hir_errors(entry: text, provider: text) -> [text]:
+    val closure = probe_closure(entry)
+    if closure.missing.len() > 0:
+        return ["missing or empty probe source: {closure.missing}"]
+    if not closure.seen.has(provider):
+        return ["std.hardware provider was not loaded: " + provider]
+    lower_errors(closure.modules, closure.surfaces, closure.entry_module)
+
+describe "std.hardware brace-import HIR resolution":
+    it "resolves the multi-line std.hardware.link_mux brace-imports of jtag_route_probe":
+        val errors = probe_hir_errors("test/01_unit/lib/hardware/link_mux/jtag_route_probe.spl", "src/lib/hardware/link_mux/jtag_route.spl")
+        expect(errors).to_equal([])
+
+    it "resolves the multi-line std.hardware.link_mux brace-imports of mux_probe":
+        val errors = probe_hir_errors("test/01_unit/lib/hardware/link_mux/mux_probe.spl", "src/lib/hardware/link_mux/mux.spl")
+        expect(errors).to_equal([])
+
+    it "resolves the std.hardware.link_mux brace-imports of frame_probe":
+        val errors = probe_hir_errors("test/01_unit/lib/hardware/link_mux/frame_probe.spl", "src/lib/hardware/link_mux/frame.spl")
+        expect(errors).to_equal([])
+
+    it "loads the std.hardware providers into the closure (non-vacuity)":
+        val closure = probe_closure("test/01_unit/lib/hardware/link_mux/jtag_route_probe.spl")
+        expect(closure.seen.has("src/lib/hardware/link_mux/mux.spl")).to_equal(true)
+        expect(closure.seen.has("src/lib/hardware/link_mux/jtag_route.spl")).to_equal(true)
+
+    it "still reports a misspelled multi-line std.hardware brace-import (negative control)":
+        val closure = probe_closure("test/01_unit/lib/hardware/link_mux/jtag_route_probe.spl")
+        val errors = lower_errors(closure.modules, closure.surfaces, NEGATIVE_MODULE)
+        for message in errors:
+            print "[negative-control] {message}"
+        expect(errors.len() > 0).to_equal(true)

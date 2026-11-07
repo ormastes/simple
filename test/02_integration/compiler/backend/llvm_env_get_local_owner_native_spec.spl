@@ -1,0 +1,65 @@
+# Requires SIMPLE_BINARY to select a rebuilt admitted pure-Simple producer.
+# Authored native evidence gate; runtime verification remains pending.
+use std.spec.*
+use std.io_runtime.{env_get_opt, env_set, env_remove_process, file_exists, dir_create_all}
+use app.io.process_ops.{process_run_timeout}
+use app.io.sysinfo_ops.{getpid}
+
+val ABSENT_KEY = "SIMPLE_LLVM_ENV_OWNER_ABSENT_20261107"
+val POSITIVE_KEY = "SIMPLE_LLVM_ENV_OWNER_POSITIVE_20261107"
+
+fn restore_owner_env(key: text, previous: text?) -> bool:
+    if previous == nil: env_remove_process(key) else: env_set(key, previous!)
+
+fn check_env_owner_fixture(name: text, expected: text):
+    val producer = env_get_opt("SIMPLE_BINARY") ?? ""
+    expect(producer != "").to_equal(true)
+    expect(file_exists(producer)).to_equal(true)
+    val root = "build/tmp/llvm_env_owner_{getpid()}/{name}"
+    expect(dir_create_all(root)).to_equal(true)
+    val output = root + "/probe.exe"
+    val fixture = "test/fixtures/compiler/llvm_env_get_owner/{name}"
+    val old_absent = env_get_opt(ABSENT_KEY)
+    val old_positive = env_get_opt(POSITIVE_KEY)
+    val old_no_stub = env_get_opt("SIMPLE_NO_STUB_FALLBACK")
+    val cleared = env_remove_process(ABSENT_KEY)
+    val set_positive = env_set(POSITIVE_KEY, "runtime-value")
+    val no_stub = env_set("SIMPLE_NO_STUB_FALLBACK", "1")
+    val build = if cleared and set_positive and no_stub:
+        process_run_timeout(producer, ["native-build", "--backend", "llvm",
+            "--source", "src/lib", "--source", fixture, "--entry-closure",
+            "--entry", fixture + "/main.spl", "--cache-dir", root + "/cache",
+            "--output", output], 300000)
+    else:
+        ("", "failed to configure env_get regression environment", -1)
+    val run = if build.2 == 0 and file_exists(output):
+        process_run_timeout(output, [], 30000)
+    else:
+        ("", "env_get fixture did not produce an executable", -1)
+    val restored_absent = restore_owner_env(ABSENT_KEY, old_absent)
+    val restored_positive = restore_owner_env(POSITIVE_KEY, old_positive)
+    val restored_no_stub = restore_owner_env("SIMPLE_NO_STUB_FALLBACK", old_no_stub)
+    expect(cleared and set_positive and no_stub).to_equal(true)
+    expect(restored_absent and restored_positive and restored_no_stub).to_equal(true)
+    expect(build.2).to_equal(0)
+    expect((build.0 + build.1).contains("stub fallback")).to_equal(false)
+    expect(run.2).to_equal(0)
+    expect(run.1.trim()).to_equal("")
+    expect(run.0.replace("\r\n", "\n").trim()).to_equal(expected)
+
+describe "LLVM native env_get definition ownership":
+    slow_it "calls a source-local optional text definition before its caller":
+        step("An absent process key must still return the local Some payload")
+        check_env_owner_fixture("local_before", "env_get local before: local-value")
+
+    slow_it "calls a source-local definition after its caller and forward reference":
+        step("The aaa_caller body is emitted before env_get and must keep its source owner")
+        check_env_owner_fixture("local_after", "env_get local after: local-value")
+
+    slow_it "retains an imported bare extern alias on the runtime owner":
+        step("A separate provider's extern alias must read the positive environment value")
+        check_env_owner_fixture("imported_alias", "env_get imported alias: runtime-value")
+
+    slow_it "preserves a colliding local integer function's parameter and return ABI":
+        step("A local env_get(i64) returning i64 must compute 42 without a runtime alias")
+        check_env_owner_fixture("local_integer", "env_get local integer: 42")

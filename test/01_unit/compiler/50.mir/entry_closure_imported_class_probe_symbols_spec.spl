@@ -1,0 +1,179 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Entry-closure imported-class probe: call symbols and module-init bodies
+
+Bug: doc/08_tracking/bug/baremetal_entry_closure_class_instantiation_fault_2026-07-06.md
+
+The x86_64 `--entry-closure` probe (`class_fault_probe_entry.spl`) faulted
+when it instantiated `os.gui.class_probe.ProbeCounter`. The report lists three
+compiler-side candidates:
+
+- finding 1: no `__module_init_*` body exists, so `_probe_events: [u64] = []`
+  stays a raw-0 handle;
+- finding 3: the consumer's ctor/method call symbol differs from the symbol
+  the defining module emits, so the call binds to a weak NIL stub;
+- finding 4: a consumer lowered BEFORE the defining module (entry-first order)
+  sees no field layout for the imported class.
+
+This spec lowers the real probe module source and an entry-shaped consumer
+through pure-Simple HIR+MIR, consumer first, and checks at symbol level that
+every call target naming the probe's callables has a defined MIR body, and
+that the provider retains a dynamic module initializer body. It does not
+replace the QEMU CLASSOK marker run.
+"""
+
+# @tag: unit, compiler, mir, simpleos
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn lower_all(names: [text], srcs: [text], order: [i64]) -> ([MirModule], text):
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        val ast = parse_full_frontend(srcs[i], path, names[i], log)
+        modules[names[i]] = ast
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        asts.push(ast)
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    var errors = ""
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(names[i].replace(".", "/") + ".spl", surfaces)
+        hirs.push(hl.lower_module(asts[i]))
+        for e in hl.errors:
+            errors = errors + "hir[" + names[i] + "]: " + e.message + "\n"
+        i = i + 1
+    var pre: Dict<text, HirModule> = {}
+    i = 0
+    while i < names.len():
+        pre["m" + i.to_text()] = hirs[i]
+        i = i + 1
+    var out: [MirModule] = []
+    for idx in order:
+        var ml = MirLowering.new(hirs[idx].symbols)
+        var j = 0
+        while j < names.len():
+            ml.prescan_module_struct_names(pre, "m" + j.to_text())
+            j = j + 1
+        out.push(ml.lower_module(hirs[idx], hirs))
+        for e in ml.errors:
+            errors = errors + "mir[" + names[idx] + "]: " + e.message + "\n"
+    (out, errors)
+
+fn defined_names(mods: [MirModule]) -> [text]:
+    var names: [text] = []
+    for m in mods:
+        for f in mir_module_functions_sorted(m):
+            if f.blocks.len() > 0:
+                names.push(f.name)
+    names
+
+fn call_targets(mods: [MirModule]) -> [text]:
+    var targets: [text] = []
+    for m in mods:
+        for f in mir_module_functions_sorted(m):
+            for b in f.blocks:
+                for inst in b.instructions:
+                    match inst.kind:
+                        case Call(_, func, _):
+                            match func.kind:
+                                case Const(value, _):
+                                    match value:
+                                        case Str(s):
+                                            targets.push(s)
+                                        case _:
+                                            pass
+                                case _:
+                                    pass
+                        case _:
+                            pass
+    targets
+
+fn missing_bodies(mods: [MirModule], marker: text) -> text:
+    val defs = defined_names(mods)
+    var missing = ""
+    var seen = 0
+    for t in call_targets(mods):
+        if t.contains(marker):
+            seen = seen + 1
+            if not defs.contains(t):
+                missing = missing + t + ";"
+    if seen == 0:
+        return "no call target contains " + marker
+    missing
+
+fn dynamic_init_bodies(mods: [MirModule]) -> i64:
+    var count = 0
+    for name in defined_names(mods):
+        if name.starts_with("__module_init_") and name.ends_with("_dynamic"):
+            count = count + 1
+    count
+
+val PROVIDER_NAME = "os.gui.class_probe"
+val CONSUMER_NAME = "app.class_fault_probe_entry"
+val CONSUMER_SRC = lines([
+    "use os.gui.class_probe.\{ProbeCounter, probe_events_len\}",
+    "",
+    "fn spl_start() -> u64:",
+    "    var c = ProbeCounter.new()",
+    "    val bumped = c.bump(1)",
+    "    if bumped == 42 and probe_events_len() == 1:",
+    "        return c.count",
+    "    0"
+])
+
+fn probe_modules() -> ([MirModule], text):
+    val provider = rt_file_read_text("src/os/gui/class_probe.spl") ?? ""
+    expect(provider.contains("class ProbeCounter")).to_equal(true)
+    # Entry-first order: the consumer is lowered before the defining module.
+    lower_all([PROVIDER_NAME, CONSUMER_NAME], [provider, CONSUMER_SRC], [1, 0])
+
+describe "entry-closure imported-class probe symbols":
+    it "lowers the probe consumer and provider without MIR errors":
+        val r = probe_modules()
+        expect(r.1).to_equal("")
+
+    it "binds the imported ctor call to a defined body":
+        val r = probe_modules()
+        expect(missing_bodies(r.0, "ProbeCounter")).to_equal("")
+
+    it "binds the imported free-function call to a defined body":
+        val r = probe_modules()
+        expect(missing_bodies(r.0, "probe_events_len")).to_equal("")
+
+    it "retains a dynamic module initializer body for the heap-typed global":
+        val r = probe_modules()
+        expect(dynamic_init_bodies(r.0)).to_be_greater_than(0)
+
+    it "binds the imported mutating method call to a defined body":
+        val r = probe_modules()
+        expect(missing_bodies(r.0, "bump")).to_equal("")
+
+    it "detects an unbound call when the defining module is not lowered":
+        # Negative control: without the provider's MIR the ctor call has no
+        # body, so the checker above is not vacuous.
+        val provider = rt_file_read_text("src/os/gui/class_probe.spl") ?? ""
+        val r = lower_all([PROVIDER_NAME, CONSUMER_NAME], [provider, CONSUMER_SRC], [1])
+        expect(missing_bodies(r.0, "ProbeCounter")).to_contain("ProbeCounter")

@@ -1,0 +1,47 @@
+#!/bin/sh
+# Diagnostic reproducer: nonzero means the owner still violates the ABI.
+# Retain output and do not invert its status into a test PASS.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+root=$(git -C "$here" rev-parse --show-toplevel)
+arch=${1:?usage: run.shs x86_64|arm64 fresh-output-directory [source-revision]}
+out=${2:?fresh-output-directory required}
+case "$arch" in
+    x86_64) target=x86_64-unknown-linux-gnu; runner=${QEMU_X86_64:-qemu-x86_64} ;;
+    arm64) target=aarch64-unknown-linux-gnu; runner=${QEMU_AARCH64:-qemu-aarch64} ;;
+    *) echo 'unsupported architecture' >&2; exit 2 ;;
+esac
+[ ! -e "$out" ] || { echo 'refusing existing output directory' >&2; exit 2; }
+command -v "$runner" >/dev/null
+mkdir -p "$out"
+out=$(CDPATH= cd -- "$out" && pwd)
+cc=${CC:-clang}
+source_commit=$(git -C "$root" rev-parse "${3:-HEAD}^{commit}")
+source_root="$out/source"
+mkdir "$source_root"
+# Always materialize the exact commit, even for default HEAD. Dirty source or
+# headers in this worktree must not be attributed to a committed revision.
+git -C "$root" archive "$source_commit" examples/09_embedded/simple_os/arch >"$out/source.tar"
+tar -xf "$out/source.tar" -C "$source_root"
+owner="$source_root/examples/09_embedded/simple_os/arch/$arch/boot/baremetal_stubs.c"
+# Compile whole real owners, keep function sections, link only reachable code.
+# No extraction, replacement functions, libc runtime or production boot is used.
+"$cc" --target="$target" -O2 -ffreestanding -fno-builtin -fno-stack-protector \
+    -fno-pie -ffunction-sections -fdata-sections -c "$owner" -o "$out/owner.o" >"$out/compile.log" 2>&1
+"$cc" --target="$target" -O2 -ffreestanding -fno-builtin -fno-stack-protector \
+    -fno-pie -c "$here/main.c" -o "$out/test.o" >>"$out/compile.log" 2>&1
+"$cc" --target="$target" -c "$here/start.S" -o "$out/start.o" >>"$out/compile.log" 2>&1
+"$cc" --target="$target" -fuse-ld=lld -nostdlib -static \
+    -Wl,--gc-sections,-e,repro_start "$out/owner.o" "$out/test.o" "$out/start.o" \
+    -o "$out/repro" >>"$out/compile.log" 2>&1
+set +e
+timeout -k 2 15 "$runner" "$out/repro" >"$out/result.log" 2>&1
+result=$?
+set -e
+printf 'architecture: "%s"\nsource_commit: "%s"\nexit_code: %s\n' \
+    "$arch" "$source_commit" "$result" >"$out/result.sdn"
+linker=$("$cc" --print-prog-name=ld.lld)
+linker=$(command -v "$linker")
+sha256sum "$here/run.shs" "$out/source.tar" "$linker" "$owner" "$here/main.c" "$here/start.S" "$out/owner.o" "$out/repro" "$(command -v "$cc")" "$(command -v "$runner")" >"$out/sha256.txt"
+tail -1 "$out/result.log"
+exit "$result"

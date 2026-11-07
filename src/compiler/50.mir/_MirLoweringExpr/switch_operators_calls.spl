@@ -3210,7 +3210,7 @@ impl MirLowering:
                 var ik = LocalId(id: -1)
                 if val actual_type = typed_value:
                     ik = bt.new_temp(actual_type)
-                    bt.emit_const(ik, MirConstValue.Int(int_want), actual_type)
+                    bt.emit_const(ik, self.numeric_int_const_for(int_want, actual_type), actual_type)
                 else:
                     ik = bt.emit_const_int(int_want)
                 cmp_local = bt.emit_binop(MirBinOp.Eq, mir_operand_copy(value_local), mir_operand_copy(ik), MirType.bool())
@@ -4766,7 +4766,14 @@ impl MirLowering:
                     # struct/class, that name is authoritative and takes
                     # precedence over the global map below.
                     var scrutinee_payload_struct = ""
-                    val exact_err_record = enum_name == "Result" and enum_variants[ci] == "Err" and self.result_err_record_owners.contains(scrut_local.id)
+                    # An owner of "" is a join/invalidation of unknown
+                    # provenance, not a provider record. When the subject's
+                    # declared Result already names the Err payload type, bind
+                    # from that declaration; only an otherwise untyped subject
+                    # keeps the fail-closed exact-record check
+                    # (simple_ring_result_payload_provenance_2026-11-06 defect 2).
+                    val err_owner_present = enum_name == "Result" and enum_variants[ci] == "Err" and self.result_err_record_owners.contains(scrut_local.id)
+                    val exact_err_record = err_owner_present and ((self.result_err_record_owners.get(scrut_local.id) ?? "") != "" or result_payload_type == nil)
                     val exact_optional_record = enum_name == "Option" and enum_variants[ci] == "Some" and self.optional_record_owners.contains(scrut_local.id)
                     var optional_record_type = HirType(kind: HirTypeKind.Error, span: scrutinee.span)
                     if exact_optional_record:
@@ -8997,6 +9004,12 @@ impl MirLowering:
                     continue
             var arg_local = if current_arg_index < call_param_types.len() and not arg.has_name:
                 self.lower_expr_for_slot(arg_value, call_param_types[current_arg_index])
+            elif current_arg_index < call_param_types.len():
+                # Named free-call args are passed in SOURCE order (HIR
+                # call_arity rejects a misbinding positional), so this slot's
+                # declared type is the one the value lands in: `takef(x: 3)`
+                # with `x: f64` is the float 3.0, not an i64 word.
+                self.lower_int_literal_for_float_slot(arg_value, call_param_types[current_arg_index]) ?? self.lower_expr(arg_value)
             else:
                 self.lower_expr(arg_value)
             arg_source_locals[arg_operands.len()] = arg_local.id

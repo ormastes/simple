@@ -5,6 +5,7 @@
 # Design: doc/05_design/simple_web_server_lib_api.md
 
 use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 use std.nogc_sync_mut.http_server.types.{
     HttpRequest, HttpMethod, http_method_from_text
 }
@@ -17,19 +18,95 @@ export use std.common.net.http_core.{
     content_length_from_text, body_decision
 }
 
-# The native `read_line` API uses a 4096-byte buffer (4095 payload bytes plus
-# its terminator). It stops at that boundary even
-# when no newline was found, silently returning a truncated line that is
-# indistinguishable from a short one by length alone — so a `> max` length
-# check can never fire for such input (see
+# The native C `rt_io_tcp_read_line` uses a 4096-byte buffer and silently
+# truncates a longer line (see
 # doc/08_tracking/bug/lab_http_parser_oversized_header_line_silently_truncated_not_rejected_2026-08-07.md).
-# The truncation signature IS detectable here: `read_line()` returns the line
-# INCLUDING its terminating newline, so a raw line that is >= the runtime cap
-# and does NOT end in "\n" was cut mid-line and must be rejected, not parsed.
+# This parser no longer reads through it: `_scalar_read_line` below bounds each
+# line at the configured limit + CRLF and reports SCALAR_LINE_TOO_LONG itself.
+# The one remaining way to get a newline-less line is EOF mid-line;
+# `line_truncated_by_runtime` keeps the historical 431 for such a line at or
+# above this cap (shorter ones get 400 Incomplete). The vector parser shares
+# the cap for its own line bound.
 val RUNTIME_READ_LINE_CAP: i32 = 4096
 
 fn line_truncated_by_runtime(raw: text) -> bool:
     (raw.len() >= RUNTIME_READ_LINE_CAP - 1 and not raw.ends_with("\n"))
+
+# Request lines and headers are read through a per-request read-ahead buffer,
+# not `TcpStream.read_line()`: that API issues one recv(1) per byte (it must
+# not consume past the newline and has no peek), which measured ~1.4 us/byte
+# on Windows — 105 ms for a 75 KB header block, i.e. the whole per-request
+# latency of the AVX server perf lane. Read-ahead may pull body bytes into the
+# buffer; they are handed to the body read below. Bytes past the declared body
+# (pipelined requests) are dropped: every caller serves one request and closes.
+val SCALAR_READ_CHUNK: i64 = 8192
+val SCALAR_LINE_OK: i32 = 0
+val SCALAR_LINE_EOF: i32 = 1
+val SCALAR_LINE_ERROR: i32 = 2
+val SCALAR_LINE_TOO_LONG: i32 = 3
+
+class HttpScalarReadAheadV1:
+    chunk: [u8]
+    cursor: i64
+
+class HttpScalarLineOwnedV1:
+    ahead: HttpScalarReadAheadV1
+    # Raw line including its "\n" (absent only for a final unterminated line).
+    line: text
+    status: i32
+    error: text
+
+fn _scalar_line(ahead: HttpScalarReadAheadV1, line: text, status: i32, error: text) -> HttpScalarLineOwnedV1:
+    HttpScalarLineOwnedV1(ahead: ahead, line: line, status: status, error: error)
+
+fn _scalar_decode_line(ahead: HttpScalarReadAheadV1, bytes: [u8]) -> HttpScalarLineOwnedV1:
+    match io_legacy_utf8(bytes):
+        Ok(value): _scalar_line(ahead, value, SCALAR_LINE_OK, "")
+        Err(message): _scalar_line(ahead, "", SCALAR_LINE_ERROR, message)
+
+# Reads one line (newline included). A line whose length exceeds max_bytes
+# without a newline stops early with SCALAR_LINE_TOO_LONG and its length so
+# far, so an unterminated flood is never buffered without bound.
+fn _scalar_read_line(stream: TcpStream, ahead: HttpScalarReadAheadV1, max_bytes: i64) -> HttpScalarLineOwnedV1:
+    var out = ahead
+    var bytes: [u8] = []
+    loop:
+        if out.cursor >= out.chunk.len():
+            match stream.read(SCALAR_READ_CHUNK):
+                Err(e):
+                    return _scalar_line(out, "", SCALAR_LINE_ERROR, "{e}")
+                Ok(chunk):
+                    if chunk.len() == 0:
+                        if bytes.len() == 0:
+                            return _scalar_line(out, "", SCALAR_LINE_EOF, "end of stream")
+                        return _scalar_decode_line(out, bytes)
+                    out.chunk = chunk
+                    out.cursor = 0
+        val b = out.chunk[out.cursor as i32]
+        out.cursor = out.cursor + 1
+        bytes.push(b)
+        if b == 10u8:
+            return _scalar_decode_line(out, bytes)
+        if bytes.len() > max_bytes:
+            return _scalar_line(out, "", SCALAR_LINE_TOO_LONG, "{bytes.len()}")
+
+# Exactly `count` body bytes: buffered read-ahead first, then the socket.
+fn _scalar_read_body(stream: TcpStream, ahead: HttpScalarReadAheadV1, count: i64) -> Result<text, text>:
+    var body: [u8] = []
+    var i = ahead.cursor
+    while i < ahead.chunk.len() and body.len() < count:
+        body.push(ahead.chunk[i as i32])
+        i = i + 1
+    if body.len() < count:
+        match stream.read_exact(count - body.len()):
+            Ok(rest):
+                for b in rest:
+                    body.push(b)
+            Err(_):
+                return Err("400 Failed to read request body")
+    match io_legacy_utf8(body):
+        Ok(value): Ok(value)
+        Err(_): Err("400 Failed to read request body")
 
 # =============================================================================
 # Public API
@@ -48,115 +125,114 @@ fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_heade
     return parse_request_with_policy_limits(stream, max_request_line, max_header_count, max_header_line, max_body, max_header_count + 1)
 
 fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, max_header_count: i32, max_header_line: i32, max_body: i32, max_read_iters: i32) -> Result<HttpRequest, text>:
-    match stream.read_line():
-        Err(e):
-            return Err("Failed to read request line: {e}")
-        Ok(request_line):
-            # Reject a runtime-truncated (no-newline, at-cap) request line —
-            # the `> max_request_line` check below can never see it.
-            if line_truncated_by_runtime(request_line):
-                return Err("431 Request line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
-            if not request_line.ends_with("\n"):
-                return Err("400 Incomplete request line")
-            val line = request_line_without_terminator(request_line)
-            if line == "":
-                return Err("Empty request line")
+    var ahead = HttpScalarReadAheadV1(chunk: [], cursor: 0)
+    val first = _scalar_read_line(stream, ahead, (max_request_line as i64) + 2)
+    ahead = first.ahead
+    if first.status == SCALAR_LINE_TOO_LONG:
+        return Err("431 Request line too long: {first.error} bytes")
+    if first.status != SCALAR_LINE_OK:
+        return Err("Failed to read request line: {first.error}")
+    val request_line = first.line
+    # A newline-less line here means EOF mid-line (see RUNTIME_READ_LINE_CAP).
+    if line_truncated_by_runtime(request_line):
+        return Err("431 Request line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
+    if not request_line.ends_with("\n"):
+        return Err("400 Incomplete request line")
+    val line = request_line_without_terminator(request_line)
+    if line == "":
+        return Err("Empty request line")
 
-            # Count the request-line payload exactly. Trimming first would let
-            # leading/trailing whitespace evade the configured byte bound.
-            if line.len() > max_request_line:
-                return Err("431 Request line too long: {line.len()} bytes")
+    # Count the request-line payload exactly. Trimming first would let
+    # leading/trailing whitespace evade the configured byte bound.
+    if line.len() > max_request_line:
+        return Err("431 Request line too long: {line.len()} bytes")
 
-            val parsed = parse_request_line(line)
-            val method_str = parsed.0
-            val raw_path = parsed.1
-            val version = parsed.2
+    val parsed = parse_request_line(line)
+    val method_str = parsed.0
+    val raw_path = parsed.1
+    val version = parsed.2
 
-            if method_str == "" or raw_path == "" or not _method_supported(method_str):
-                return Err("Malformed request line: {line}")
-            if version != "HTTP/1.1" and version != "HTTP/1.0":
-                return Err("Unsupported HTTP version: {version}")
+    if method_str == "" or raw_path == "" or not _method_supported(method_str):
+        return Err("Malformed request line: {line}")
+    if version != "HTTP/1.1" and version != "HTTP/1.0":
+        return Err("Unsupported HTTP version: {version}")
 
-            val method = http_method_from_text(method_str)
+    val method = http_method_from_text(method_str)
 
-            var path = raw_path
-            var query = ""
-            val qmark = raw_path.index_of("?")
-            if qmark >= 0:
-                path = raw_path.slice(0, qmark)
-                query = raw_path.slice(qmark + 1, raw_path.len())
+    var path = raw_path
+    var query = ""
+    val qmark = raw_path.index_of("?")
+    if qmark >= 0:
+        path = raw_path.slice(0, qmark)
+        query = raw_path.slice(qmark + 1, raw_path.len())
 
-            var headers: [(text, text)] = []
-            var header_count: i32 = 0
-            var read_iters: i32 = 0
-            loop:
-                read_iters = read_iters + 1
-                if read_iters > max_read_iters:
-                    return Err("408 Request header read iteration limit exceeded")
-                match stream.read_line():
-                    Ok(header_line):
-                        # Reject a runtime-truncated (no-newline, at-cap)
-                        # header line — the `> max_header_line` check below is
-                        # structurally unreachable for it (the runtime already
-                        # cut the line to exactly the cap).
-                        if line_truncated_by_runtime(header_line):
-                            return Err("431 Header line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
-                        if not header_line.ends_with("\n"):
-                            return Err("400 Incomplete request headers")
-                        val header_payload = request_line_without_terminator(header_line)
-                        if header_payload.len() > max_header_line:
-                            return Err("431 Header line too long: {header_payload.len()} bytes")
-                        if header_payload == "":
-                            break
-                        if header_payload.starts_with(" ") or header_payload.starts_with("\t"):
-                            return Err("400 Obsolete folded header is not supported")
-                        val hl = header_payload.trim()
-                        if hl == "":
-                            return Err("400 Malformed whitespace-only header line")
-                        # AC-1 / finding 2: header count limit
-                        header_count = header_count + 1
-                        if header_count > max_header_count:
-                            return Err("431 Too many headers: {header_count}")
-                        val colon = hl.index_of(":")
-                        if colon <= 0:
-                            return Err("400 Malformed header line")
-                        val name = hl.slice(0, colon).trim()
-                        val value = hl.slice(colon + 1, hl.len()).trim()
-                        if name == "" or name.contains(" ") or name.contains("\t"):
-                            return Err("400 Invalid header name")
-                        headers.push((name, value))
-                    Err(_):
-                        # EOF before the empty header terminator is incomplete
-                        # framing, not an implicit end-of-headers marker.
-                        return Err("400 Incomplete request headers")
+    var headers: [(text, text)] = []
+    var header_count: i32 = 0
+    var read_iters: i32 = 0
+    loop:
+        read_iters = read_iters + 1
+        if read_iters > max_read_iters:
+            return Err("408 Request header read iteration limit exceeded")
+        val next = _scalar_read_line(stream, ahead, (max_header_line as i64) + 2)
+        ahead = next.ahead
+        if next.status == SCALAR_LINE_TOO_LONG:
+            return Err("431 Header line too long: {next.error} bytes")
+        if next.status != SCALAR_LINE_OK:
+            # EOF before the empty header terminator is incomplete
+            # framing, not an implicit end-of-headers marker.
+            return Err("400 Incomplete request headers")
+        val header_line = next.line
+        # A newline-less line here means EOF mid-line (see RUNTIME_READ_LINE_CAP).
+        if line_truncated_by_runtime(header_line):
+            return Err("431 Header line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
+        if not header_line.ends_with("\n"):
+            return Err("400 Incomplete request headers")
+        val header_payload = request_line_without_terminator(header_line)
+        if header_payload.len() > max_header_line:
+            return Err("431 Header line too long: {header_payload.len()} bytes")
+        if header_payload == "":
+            break
+        if header_payload.starts_with(" ") or header_payload.starts_with("\t"):
+            return Err("400 Obsolete folded header is not supported")
+        val hl = header_payload.trim()
+        if hl == "":
+            return Err("400 Malformed whitespace-only header line")
+        # AC-1 / finding 2: header count limit
+        header_count = header_count + 1
+        if header_count > max_header_count:
+            return Err("431 Too many headers: {header_count}")
+        val colon = hl.index_of(":")
+        if colon <= 0:
+            return Err("400 Malformed header line")
+        val name = hl.slice(0, colon).trim()
+        val value = hl.slice(colon + 1, hl.len()).trim()
+        if name == "" or name.contains(" ") or name.contains("\t"):
+            return Err("400 Invalid header name")
+        headers.push((name, value))
 
-            val decision = headers_decision(headers, max_body)
-            if decision.0 != "":
-                return Err(decision.0)
-            val host_error = request_host_error(headers, version)
-            if host_error != "":
-                return Err(host_error)
-            val content_length = decision.1
+    val decision = headers_decision(headers, max_body)
+    if decision.0 != "":
+        return Err(decision.0)
+    val host_error = request_host_error(headers, version)
+    if host_error != "":
+        return Err(host_error)
+    val content_length = decision.1
 
-            var body = ""
-            if content_length > 0:
-                match stream.read_bytes(content_length):
-                    Ok(data):
-                        if data.len() != content_length:
-                            return Err("400 Incomplete request body")
-                        body = data
-                    Err(_):
-                        return Err("400 Failed to read request body")
+    var body = ""
+    if content_length > 0:
+        match _scalar_read_body(stream, ahead, content_length as i64):
+            Ok(data): body = data
+            Err(error): return Err(error)
 
-            return Ok(HttpRequest(
-                method: method,
-                path: path,
-                query: query,
-                version: version,
-                headers: headers,
-                body: body,
-                remote_addr: ""
-            ))
+    return Ok(HttpRequest(
+        method: method,
+        path: path,
+        query: query,
+        version: version,
+        headers: headers,
+        body: body,
+        remote_addr: ""
+    ))
 
 # headers_decision inspects parsed headers and decides how the body must be
 # handled. Returns (err, content_length): err is "" when the request is

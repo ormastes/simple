@@ -99,3 +99,7 @@ it is a regression guard, not proof of a fix. Read with the v4 codec rework: the
 `FlatPoolReader` part of the 916be6c2 diagnostics is likely stale. Status stays
 OPEN: the other groups (`ord`, process_ops/env_ops `Result`/handle methods,
 enum arms) and the native helper builds themselves still need a native producer.
+
+## Reopened 2026-11-07
+
+PR #7408 changed these rows on seed-only evidence, which is insufficient. Stage3 (native) still fails: on s3_fable54m, s3_fable56 and s3_fable57s the 12-line fixture C:/dev/p3new/s3sanity/root/test/s3sanity/vb_mm1.spl (struct + impl method + one call) fails during HIR lowering with `[simple-runtime][error] rejected invalid array handle before dereference` followed by `unresolved method call: get route=runtime-fallback key=test.s3sanity.vb_mm1.Custom::get struct_method_syms=yes record_instance_method=n/a lookup_method_in_type=no receiver_has_type=false`. The same file without the call passes; fixture test/fixtures/compiler/native_entry_own_class_methods has the same shape. Status: OPEN, root-cause lane in progress.

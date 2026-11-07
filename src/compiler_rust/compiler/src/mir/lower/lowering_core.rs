@@ -1678,6 +1678,45 @@ impl<'a> MirLowerer<'a> {
         self.unbox_scalar_for_raw_slot(TypeId::BOOL, TypeId::ANY, reg)
     }
 
+    /// The numeric value of an integer literal (or its negation) — the only
+    /// integer forms `float_slot_from_int_literal` rewrites.
+    fn int_literal_value(expr: &HirExpr) -> Option<i64> {
+        match &expr.kind {
+            HirExprKind::Integer(n) => Some(*n),
+            HirExprKind::Unary {
+                op: crate::hir::UnaryOp::Neg,
+                operand,
+            } => match operand.kind {
+                HirExprKind::Integer(n) => Some(n.wrapping_neg()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// An integer literal flowing into a DECLARED `f32`/`f64` slot (call
+    /// argument, annotated binding, assignment, `return`, function tail,
+    /// struct field) is a float constant. HIR types the literal `i64`, so it
+    /// lowered to `ConstInt 3` and codegen moved those raw bits into the f64
+    /// slot: `fn takef(x: f64) -> f64: x * 2.0` / `takef(3)` printed the
+    /// denormal 3e-323 under `simple run` (the JIT lane). Mirrors the
+    /// pure-Simple MIR fix `lower_int_literal_for_float_slot` (PR #7416).
+    /// Returns `value` unchanged when the slot or the expression does not match.
+    pub(super) fn float_slot_from_int_literal(
+        &mut self,
+        declared_ty: TypeId,
+        value_expr: &HirExpr,
+        value: VReg,
+    ) -> MirLowerResult<VReg> {
+        if !matches!(declared_ty, TypeId::F32 | TypeId::F64) {
+            return Ok(value);
+        }
+        match Self::int_literal_value(value_expr) {
+            Some(n) => self.lower_float_expr(n as f64),
+            None => Ok(value),
+        }
+    }
+
     pub(super) fn unbox_scalar_for_raw_slot(
         &mut self,
         declared_ty: TypeId,

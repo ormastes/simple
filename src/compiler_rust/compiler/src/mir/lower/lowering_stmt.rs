@@ -351,9 +351,11 @@ impl<'a> MirLowerer<'a> {
                         }
                     }
 
-                    let vreg = self.lower_expr(val)?;
+                    let raw_vreg = self.lower_expr(val)?;
+                    // `val y: f64 = 3` — the literal is a float constant.
+                    let vreg = self.float_slot_from_int_literal(effective_declared_ty, val, raw_vreg)?;
                     let local_idx = *local_index;
-                    let value_ty = val.ty;
+                    let value_ty = if vreg != raw_vreg { effective_declared_ty } else { val.ty };
 
                     // Bug (seed_array_local_alias_cow_bypass_2026-07-17): `var c = arr`
                     // for an array-typed `arr` aliased the SAME rt_array heap handle
@@ -513,8 +515,10 @@ impl<'a> MirLowerer<'a> {
                     self.record_len_local_source(*local_index, None);
                     self.record_array_capacity_local_source(*local_index, None);
                 }
-                let val_reg = self.lower_expr(value)?;
-                let ty = value.ty;
+                let raw_val_reg = self.lower_expr(value)?;
+                // `z = 4` into an f32/f64 local or field is a float constant.
+                let val_reg = self.float_slot_from_int_literal(target.ty, value, raw_val_reg)?;
+                let ty = if val_reg != raw_val_reg { target.ty } else { value.ty };
 
                 // Emit unit bound check if assigning to a unit type with constraints
                 self.emit_unit_bound_check(ty, val_reg)?;
@@ -1217,6 +1221,8 @@ impl<'a> MirLowerer<'a> {
                     // invalid tag, printed as `<value:0x7>` by rt_to_string and
                     // unwrapped to nil by `!`. Same rule as a `T?`/`Any` local.
                     let ret_ty = self.with_func(|func, _| func.return_type)?;
+                    // `-> f64` returning `3` returns a float constant.
+                    let reg = self.float_slot_from_int_literal(ret_ty, v, reg)?;
                     let reg = self.box_scalar_for_tagged_slot(ret_ty, v.ty, reg)?;
                     // ...and the mirror: a RAW scalar return slot fed by a
                     // TAGGED value (`-> i64` returning an `ANY` expression, e.g.
@@ -1435,6 +1441,8 @@ impl<'a> MirLowerer<'a> {
                 // pinned the defect to this path.
                 // See doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
                 let ret_ty = self.expr_stmt_tail_ty()?;
+                // `fn tail3() -> f64: 3` — the tail literal is a float constant.
+                let vreg = self.float_slot_from_int_literal(ret_ty, expr, vreg)?;
                 let vreg = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, vreg)?;
                 let vreg = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, vreg)?;
                 self.last_expr_value = Some(vreg);

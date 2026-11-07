@@ -1,0 +1,55 @@
+# External watchdog measures whole-process elapsed/RSS, including input loading.
+# argv: expected.receipt workload.rows encode|digest|publish isolated-cache
+# Immutable input hashes and size caps are checked by the launch owner.
+use std.sffi.cli_args.{cli_get_args}
+use std.io_runtime.{file_read_nullable}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.reverse_reference_receipt.{
+    ReverseReferenceProjectionV1, ReverseReferenceGenerationReceiptV1,
+    reverse_reference_projection_decode_v1, reverse_reference_receipt_encode_v1,
+    reverse_reference_receipt_digest_v1, reverse_reference_publish_generation_v1,
+    reverse_reference_receipt_pointer_v1, reverse_reference_receipt_file_v1,
+    reverse_reference_receipt_dir_v1}
+
+fn main() -> i64:
+    val args = cli_get_args()
+    if args.len() != 5: return 10
+    val expected_input = file_read_nullable(args[1])
+    val row_input = file_read_nullable(args[2])
+    if expected_input == nil or row_input == nil: return 11
+    val expected = expected_input!
+    val header = expected.split("\n")
+    if header.len() < 6: return 12
+    var schema: i64 = 0
+    if header[0] == "simple-reverse-reference-generation-receipt-v1": schema = 1
+    elif header[0] == "simple-reverse-reference-generation-receipt-v2": schema = 2
+    else: return 13
+    if header[1] != "schema={schema}": return 14
+    if not header[2].starts_with("owner=") or not header[3].starts_with("root="): return 15
+    val rows = row_input!.split("\n")
+    if header[4] != "count={rows.len()}" or header.len() != rows.len() + 5: return 16
+    var projections: [ReverseReferenceProjectionV1] = []
+    for row in rows:
+        val decoded = reverse_reference_projection_decode_v1(row)
+        if decoded == nil: return 17
+        projections.push(decoded!)
+    val receipt = ReverseReferenceGenerationReceiptV1(schema,
+        header[2].substring(6, header[2].len()),
+        header[3].substring(5, header[3].len()), projections)
+    val expected_digest = "sha256:" + sha256_text(expected)
+    if args[3] == "encode":
+        val encoded = reverse_reference_receipt_encode_v1(receipt)
+        if encoded != expected: return 20
+        if "sha256:" + sha256_text(encoded) != expected_digest: return 21
+    elif args[3] == "digest":
+        if reverse_reference_receipt_digest_v1(receipt) != expected_digest: return 22
+    elif args[3] == "publish":
+        if not reverse_reference_publish_generation_v1(args[4], receipt): return 23
+        val pointer = file_read_nullable(reverse_reference_receipt_pointer_v1(args[4]))
+        if pointer == nil or pointer! != expected_digest: return 24
+        val content = file_read_nullable(reverse_reference_receipt_file_v1(
+            reverse_reference_receipt_dir_v1(args[4]), expected_digest))
+        if content == nil or content! != expected: return 25
+    else: return 26
+    print "PASS:reverse-reference-paired-bytes"
+    0

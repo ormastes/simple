@@ -19696,6 +19696,16 @@ static int ws_compat_setsockopt(SOCKET s, int level, int name, const void* value
         DWORD ms = (DWORD)tv->tv_sec * 1000u + (DWORD)((tv->tv_usec + 999) / 1000);
         return setsockopt(s, level, name, (const char*)&ms, (int)sizeof(ms));
     }
+    /* On a Winsock STREAM socket SO_REUSEADDR also lets a second socket bind a
+     * port another socket is actively listening on. The BSD meaning callers
+     * want (rebind over TIME_WAIT) is already Windows' default, so drop it.
+     * Not SO_EXCLUSIVEADDRUSE: that refuses a quick restart on the same port.
+     * Datagram sockets keep it: multicast receivers share a port through it. */
+    if (level == SOL_SOCKET && name == SO_REUSEADDR) {
+        int type = 0;
+        int type_len = (int)sizeof(type);
+        if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char*)&type, &type_len) == 0 && type == SOCK_STREAM) return 0;
+    }
     return setsockopt(s, level, name, (const char*)value, length);
 }
 

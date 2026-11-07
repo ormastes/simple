@@ -10153,3 +10153,27 @@ fn core_c_vector_provider_pin_is_validated_and_scoped_to_the_loader_tu() {
     assert_ne!(none, b);
     assert_ne!(a, b);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_freestanding_qualified_to_bare_does_not_alias_weak_undefined() {
+    // ELF weak undefined is nm `w`, never a usable bare definition.
+    let temp = tempfile::tempdir().unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+    let src = temp.path().join("weak_undefined.c");
+    let obj = temp.path().join("weak_undefined.o");
+    std::fs::write(&src, r#"
+        extern long rt_io_tcp_bind(long) __attribute__((weak));
+        extern long os__kernel__boot__tcp_baremetal_min__rt_io_tcp_bind(long);
+        long caller_use(long x) {
+            return (rt_io_tcp_bind ? rt_io_tcp_bind(x) : 0)
+                + os__kernel__boot__tcp_baremetal_min__rt_io_tcp_bind(x);
+        }
+    "#).unwrap();
+    assert!(std::process::Command::new(&cc).arg("-c").arg(&src)
+        .arg("-o").arg(&obj).status().unwrap().success());
+    let symbols = NativeProjectBuilder::read_global_symbol_types(&obj).unwrap();
+    assert!(symbols.iter().any(|(kind, name)| kind == "w" && name == "rt_io_tcp_bind"));
+    let aliases = NativeProjectBuilder::freestanding_qualified_to_bare_defsyms(&[obj], &[]).unwrap();
+    assert_eq!(aliases, Vec::<(String, String)>::new());
+}
