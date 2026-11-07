@@ -1,0 +1,30 @@
+use std.spec.{describe, it, expect}
+use app.mcpgdb.clangd_documents_v1.{ClangdDocumentV1, clangd_absolute_path_v1, clangd_file_uri_v1, clangd_position_valid_v1}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+describe "resident clangd Windows documents":
+    it "encodes Unicode spaces percent and fragments as UTF8 file URI bytes":
+        expect(clangd_file_uri_v1("C:/work/한 글#%.cpp").unwrap()).to_equal("file:///C:/work/%ED%95%9C%20%EA%B8%80%23%25.cpp")
+        expect(clangd_file_uri_v1("//server/share/file name.cpp").unwrap()).to_equal("file://server/share/file%20name.cpp")
+
+    it "normalizes lexical components without claiming filesystem resolution":
+        expect(clangd_absolute_path_v1("C:/work/project", "../header.hpp").unwrap()).to_equal("C:/work/header.hpp")
+        expect(clangd_absolute_path_v1("", "c:\\work\\.\\source.cpp").unwrap()).to_equal("C:/work/source.cpp")
+        expect(clangd_absolute_path_v1("", "C:/../escape").is_err()).to_equal(true)
+        expect(clangd_absolute_path_v1("", "//server/share/../escape").is_err()).to_equal(true)
+        expect(clangd_absolute_path_v1("C:/work", "C:relative.cpp").is_err()).to_equal(true)
+        expect(clangd_absolute_path_v1("", "//?/C:/work").is_err()).to_equal(true)
+        for component in ["NUL.cpp", "COM1", "LPT².log", "bad\nname", "x:y", "wild*card", "trailing."]:
+            expect(clangd_absolute_path_v1("C:/work", component).is_err()).to_equal(true)
+
+    it "counts supplementary Unicode as two UTF16 code units":
+        val content = "한😀x\r\nnext"
+        val document = ClangdDocumentV1(path: "C:/x.cpp", uri: "file:///C:/x.cpp", bytes: text_to_utf8_bytes(content), content: content, version: 1)
+        expect(clangd_position_valid_v1(document, 0, 0)).to_equal(true)
+        expect(clangd_position_valid_v1(document, 0, 1)).to_equal(true)
+        expect(clangd_position_valid_v1(document, 0, 2)).to_equal(false)
+        expect(clangd_position_valid_v1(document, 0, 3)).to_equal(true)
+        expect(clangd_position_valid_v1(document, 0, 4)).to_equal(true)
+        expect(clangd_position_valid_v1(document, 0, 5)).to_equal(false)
+        expect(clangd_position_valid_v1(document, 1, 4)).to_equal(true)
+        expect(clangd_position_valid_v1(document, 2, 0)).to_equal(false)

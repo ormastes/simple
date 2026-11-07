@@ -29,10 +29,30 @@ typedef struct OwnedWinLease {
     uint64_t input_len, input_written;
     DWORD input_requested;
     int input_contract_v3, input_pending, input_stopping;
+    /* used=3 belongs to InteractiveV1. Legacy find/sweep never accepts it.
+     * Permanent-slot gate excludes recycling during lock-free resolution. */
+    volatile LONG interactive_gate, interactive_refs;
+    uint64_t interactive_generation;
+    void* interactive_state;
+    /* Permanent atomic resolver identity: excluded from legacy reset. */
+    volatile LONG64 interactive_epoch, interactive_intent, interactive_seal;
+    PVOID volatile interactive_wake; /* permanent same-slot service event */
 } OwnedWinLease;
 
 static SRWLOCK owned_win_leases_lock = SRWLOCK_INIT;
 static OwnedWinLease owned_win_leases[OWNED_WIN_ASYNC_SLOTS];
+#if UINTPTR_MAX == UINT64_MAX
+static void oiv1_legacy_unlocked_maintenance(void);
+#endif
+
+#ifdef SIMPLE_RUNTIME_INTERACTIVE_V1_TEST_HOOKS
+/* Contention-only instrumentation. The real legacy CreateProcess follows
+ * after the gate; this hook never manufactures spawn or exit evidence. */
+static HANDLE oiv1_test_batch_entered, oiv1_test_batch_release;
+void simple_owned_interactive_v1_test_batch_gate(HANDLE entered,HANDLE release) {
+    oiv1_test_batch_entered=entered; oiv1_test_batch_release=release;
+}
+#endif
 
 static void owned_win_lease_dispose(OwnedWinLease* slot) {
     owned_win_close(&slot->job); /* KILL_ON_JOB_CLOSE remains armed. */
@@ -47,7 +67,7 @@ static void owned_win_lease_dispose(OwnedWinLease* slot) {
     RT_OWNED_HOST_FREE(slot->input);
     RT_OWNED_HOST_FREE(slot->out.buf);
     RT_OWNED_HOST_FREE(slot->err.buf);
-    memset(slot, 0, sizeof(*slot));
+    memset(slot, 0, offsetof(OwnedWinLease, interactive_epoch));
 }
 
 static OwnedWinLease* owned_win_lease_find(RtOwnedProcessTokenV2 token) {
@@ -191,7 +211,7 @@ static bool owned_win_start(const char* cmd, const char* const* argv,
     char* command = NULL; WCHAR* wide_command = NULL; WCHAR* application = NULL;
     LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
     if (!slot) { error = EAGAIN; goto done; }
-    memset(slot, 0, sizeof(*slot)); slot->used = 2; slot->exit_code = -1;
+    memset(slot, 0, offsetof(OwnedWinLease, interactive_epoch)); slot->used = 2; slot->exit_code = -1;
     for (int attempts = 0; attempts < 8; attempts++) {
         if (!owned_win_random_token(&slot->token)) { error = EIO; goto done; }
         if ((slot->token.high || slot->token.low) && !owned_win_lease_find(slot->token)) break;
@@ -259,6 +279,12 @@ static bool owned_win_start(const char* cmd, const char* const* argv,
     startup.StartupInfo.hStdError = slot->err.write_end;
     startup.lpAttributeList = attributes;
     slot->started = GetTickCount64();
+#ifdef SIMPLE_RUNTIME_INTERACTIVE_V1_TEST_HOOKS
+    if (oiv1_test_batch_entered && oiv1_test_batch_release) {
+        SetEvent(oiv1_test_batch_entered);
+        WaitForSingleObject(oiv1_test_batch_release,INFINITE);
+    }
+#endif
     if (!CreateProcessW(application, wide_command, NULL, NULL, TRUE,
         EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW,
         NULL, NULL, &startup.StartupInfo, &child)) {
@@ -294,6 +320,9 @@ done:
     }
     receipt->runtime_error = error;
     ReleaseSRWLockExclusive(&owned_win_leases_lock);
+#if UINTPTR_MAX == UINT64_MAX
+    oiv1_legacy_unlocked_maintenance();
+#endif
     return error == 0;
 }
 

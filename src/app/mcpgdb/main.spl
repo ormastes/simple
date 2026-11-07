@@ -1,4 +1,5 @@
 use app.mcpgdb.windows_gdb_v1.{windows_gdb_handles_v1, windows_gdb_dispatch_v1, windows_gdb_shutdown_v1}
+use app.mcpgdb.windows_clangd_v1.{windows_clangd_handles_v1, windows_clangd_dispatch_v1, windows_clangd_workspace_v1, windows_clangd_shutdown_v1}
 use app.mcpgdb.runner_outcome_v1.{mcpgdb_runner_outcome_v1}
 # mcpgdb MCP production wrapper — cold frontend with repo-local heavy runners
 #
@@ -267,7 +268,11 @@ fn run_runner_content(name: text, args: text) -> Result<text, text>:
         Ok(_): pass
         Err(reason): return Err(reason)
     if is_windows_platform() and windows_gdb_handles_v1(name):
-        return windows_gdb_dispatch_v1(name, args)
+        val result = windows_gdb_dispatch_v1(name, args)?
+        if name == "workspace_open": windows_clangd_workspace_v1(args)?
+        return Ok(result)
+    if is_windows_platform() and windows_clangd_handles_v1(name):
+        return windows_clangd_dispatch_v1(name, args)
     if mcpgdb_windows_persistent_v1(name):
         return Err("resident Windows clangd provider is not implemented")
     var service_session_id = ""
@@ -452,14 +457,20 @@ fn main() -> i64:
 
     val t = StdioTransport.json_lines()
     mcp_serve(t)
+    var cleanup_failed = false
     if is_windows_platform():
         match windows_gdb_shutdown_v1():
             Ok(_): pass
             Err(reason):
                 error("mcpgdb", reason)
-                return 1
+                cleanup_failed = true
+        match windows_clangd_shutdown_v1():
+            Ok(_): pass
+            Err(reason):
+                error("mcpgdb", reason)
+                cleanup_failed = true
     match mcpgdb_bundle_validate_v1(true):
-        Ok(_): 0
+        Ok(_): if cleanup_failed: 1 else: 0
         Err(reason):
             error("mcpgdb", reason)
             1

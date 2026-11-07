@@ -1690,6 +1690,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // this spec resolve_runtime_func drops whole modules to the interpreter.
     RuntimeFuncSpec::new("rt_process_run_owned_bounded_value", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_run_owned_observed_bounded_value", &[I64, I64, I64, I64, I64], &[I64]),
+    // InteractiveV1 shares the C owner; only command text expands to ptr+len.
+    RuntimeFuncSpec::new("rt_process_owned_interactive_v1_capabilities_value", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_interactive_v1_deadline_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_interactive_v1_start_value", &[I64, I64, I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_interactive_v1_write_some_value", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_interactive_v1_poll_value", &[I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_interactive_v1_close_stdin_value", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_interactive_v1_cancel_value", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_interactive_v1_collect_value", &[I64, I64, I64, I8], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_interactive_v1_release_value", &[I64], &[I64]),
     // Owned-process V3 opaque adapter.  `text` command expands to (ptr, len),
     // so the Simple six-argument start declaration has a seven-word native
     // call signature.  All projections return runtime-owned i64/byte arrays;

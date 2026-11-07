@@ -6016,6 +6016,8 @@ typedef struct OwnedWinV3Slot {
     RtOwnedProcessTokenV2 token;
     int active, closing, published;
     uint32_t refs;
+    int interactive_mode;
+    volatile LONG interactive_refs;
 } OwnedWinV3Slot;
 
 static OwnedWinV3Slot owned_win_v3_slots[OWNED_WIN_V3_SLOTS];
@@ -6094,7 +6096,7 @@ static int owned_win_v3_take(int64_t raw_handle, int consume, RtOwnedProcessToke
     AcquireSRWLockExclusive(&owned_win_v3_lock);
     for (uint32_t i = 0; i < OWNED_WIN_V3_SLOTS; i++) {
         OwnedWinV3Slot* slot = &owned_win_v3_slots[i];
-        if (slot->active && slot->published && !slot->closing &&
+        if (slot->active && !slot->interactive_mode && slot->published && !slot->closing &&
             slot->handle == (uint64_t)raw_handle && (!consume || slot->refs == 0)) {
             if (consume) slot->closing = 1; else slot->refs++;
             *token = slot->token; *index = i;
@@ -6582,4 +6584,9 @@ int64_t rt_linux_group_stream_no_child_scope_v2(const char*r,int64_t n,const cha
 int64_t rt_linux_group_stream_collect_no_child_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return ENOTSUP;}
 SplArray* rt_linux_group_collected_stream_v2(int64_t token){(void)token;return group_stream_unavailable_v2(10);}
 int64_t rt_linux_group_stream_release_inherited_v2(void){return ENOTSUP;}
+#endif
+
+/* One raw-span owner bridge in both native-C and Rust runtime profiles. */
+#if UINTPTR_MAX == UINT64_MAX
+#include "runtime_process_interactive_v1_impl.h"
 #endif

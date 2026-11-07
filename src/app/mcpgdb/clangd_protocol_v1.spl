@@ -1,0 +1,90 @@
+use std.common.json.value.{JsonValue, json_value_field, json_value_has}
+use app.mcpgdb.clangd_documents_v1.{ClangdDocumentV1}
+
+pub fn clangd_object_v1(keys: [text], values: [JsonValue]) -> JsonValue:
+    JsonValue.Object(keys, values)
+
+pub fn clangd_request_message_v1(id: i64, method: text, params: JsonValue) -> JsonValue:
+    JsonValue.Object(["jsonrpc", "id", "method", "params"], [JsonValue.Str("2.0"), JsonValue.Int(id), JsonValue.Str(method), params])
+
+pub fn clangd_notification_v1(method: text, params: JsonValue) -> JsonValue:
+    JsonValue.Object(["jsonrpc", "method", "params"], [JsonValue.Str("2.0"), JsonValue.Str(method), params])
+
+pub fn clangd_initialize_message_v1(id: i64, root_uri: text) -> JsonValue:
+    val general = JsonValue.Object(["positionEncodings"], [JsonValue.Array([JsonValue.Str("utf-16")])])
+    val workspace = JsonValue.Object(["configuration", "workspaceFolders"], [JsonValue.Bool(true), JsonValue.Bool(true)])
+    val caps = JsonValue.Object(["general", "workspace", "offsetEncoding"], [general, workspace, JsonValue.Array([JsonValue.Str("utf-16")])])
+    val folder = JsonValue.Object(["uri", "name"], [JsonValue.Str(root_uri), JsonValue.Str("workspace")])
+    val params = JsonValue.Object(["processId", "rootUri", "capabilities", "workspaceFolders"], [JsonValue.Null, JsonValue.Str(root_uri), caps, JsonValue.Array([folder])])
+    clangd_request_message_v1(id, "initialize", params)
+
+pub fn clangd_initialize_validate_v1(response: JsonValue) -> Result<bool, text>:
+    if json_value_has(response, "error"):
+        return Err("clangd initialize returned an error")
+    val result = json_value_field(response, "result")
+    val caps = json_value_field(result, "capabilities")
+    match caps:
+        JsonValue.Object(keys, values): pass
+        _: return Err("clangd initialize omitted capabilities")
+    if json_value_has(caps, "positionEncoding"):
+        match json_value_field(caps, "positionEncoding"):
+            JsonValue.Str(encoding):
+                if encoding != "utf-16": return Err("clangd selected unsupported position encoding")
+            _: return Err("invalid clangd position encoding")
+    # Clangd's older offsetEncoding extension must agree with LSP UTF-16.
+    if json_value_has(result, "offsetEncoding"):
+        match json_value_field(result, "offsetEncoding"):
+            JsonValue.Str(encoding):
+                if encoding != "utf-16": return Err("clangd selected unsupported offset encoding")
+            _: return Err("invalid clangd offset encoding")
+    Ok(true)
+
+pub fn clangd_document_message_v1(document: ClangdDocumentV1, opened: bool) -> JsonValue:
+    if not opened:
+        val item = JsonValue.Object(["uri", "languageId", "version", "text"], [JsonValue.Str(document.uri), JsonValue.Str("cpp"), JsonValue.Int(document.version), JsonValue.Str(document.content)])
+        return clangd_notification_v1("textDocument/didOpen", JsonValue.Object(["textDocument"], [item]))
+    val item = JsonValue.Object(["uri", "version"], [JsonValue.Str(document.uri), JsonValue.Int(document.version)])
+    val changed = JsonValue.Object(["text"], [JsonValue.Str(document.content)])
+    clangd_notification_v1("textDocument/didChange", JsonValue.Object(["textDocument", "contentChanges"], [item, JsonValue.Array([changed])]))
+
+pub fn clangd_query_params_v1(document: ClangdDocumentV1, method: text, line: i64, character: i64) -> JsonValue:
+    val doc = JsonValue.Object(["uri"], [JsonValue.Str(document.uri)])
+    if method == "textDocument/documentSymbol":
+        return JsonValue.Object(["textDocument"], [doc])
+    val position = JsonValue.Object(["line", "character"], [JsonValue.Int(line), JsonValue.Int(character)])
+    if method == "textDocument/references":
+        val context = JsonValue.Object(["includeDeclaration"], [JsonValue.Bool(true)])
+        return JsonValue.Object(["textDocument", "position", "context"], [doc, position, context])
+    JsonValue.Object(["textDocument", "position"], [doc, position])
+
+# Server requests have their own typed ID namespace. Echo it exactly.
+pub fn clangd_server_reply_v1(message: JsonValue, root_uri: text) -> Result<JsonValue, text>:
+    if not json_value_has(message, "id"):
+        return Err("notification is not a server request")
+    val id = json_value_field(message, "id")
+    match id:
+        JsonValue.Int(number): pass
+        JsonValue.Str(value): pass
+        _: return Err("invalid clangd server request ID")
+    val method = match json_value_field(message, "method"):
+        JsonValue.Str(value): value
+        _: return Err("invalid clangd server method")
+    var result = JsonValue.Null
+    if method == "workspace/configuration":
+        val params = json_value_field(message, "params")
+        val items = match json_value_field(params, "items"):
+            JsonValue.Array(values): values
+            _: return Err("invalid clangd configuration request")
+        if items.len() > 64:
+            return Err("clangd configuration request exceeds limit")
+        var values: [JsonValue] = []
+        for item in items:
+            values.push(JsonValue.Null)
+        result = JsonValue.Array(values)
+    elif method == "workspace/workspaceFolders":
+        val folder = JsonValue.Object(["uri", "name"], [JsonValue.Str(root_uri), JsonValue.Str("workspace")])
+        result = JsonValue.Array([folder])
+    elif method != "window/workDoneProgress/create":
+        val error = JsonValue.Object(["code", "message"], [JsonValue.Int(-32601), JsonValue.Str("client method not supported")])
+        return Ok(JsonValue.Object(["jsonrpc", "id", "error"], [JsonValue.Str("2.0"), id, error]))
+    Ok(JsonValue.Object(["jsonrpc", "id", "result"], [JsonValue.Str("2.0"), id, result]))

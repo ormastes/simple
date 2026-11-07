@@ -1,0 +1,87 @@
+use std.spec.{describe, it, expect}
+use app.mcpgdb.clangd_frames_v1.{ClangdFramesV1, clangd_frame_encode_v1, clangd_response_matches_v1}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.json.value.{JsonValue, json_value_field, json_value_serialize}
+
+fn byte_part_v1(bytes: [u8], begin: i64, end: i64) -> [u8]:
+    var out: [u8] = []
+    var index = begin
+    while index < end:
+        out.push(bytes[index])
+        index = index + 1
+    out
+
+fn response_v1(id: i64) -> JsonValue:
+    JsonValue.Object(["jsonrpc", "id", "result"], [JsonValue.Str("2.0"), JsonValue.Int(id), JsonValue.Str("한글 😀")])
+
+describe "resident clangd incremental LSP frames":
+    it "retains every split point including Unicode byte boundaries":
+        val encoded = clangd_frame_encode_v1(response_v1(1)).unwrap()
+        var split = 0
+        while split <= encoded.len():
+            var codec = ClangdFramesV1.empty()
+            expect(codec.feed(byte_part_v1(encoded, 0, split)).is_ok()).to_equal(true)
+            expect(codec.feed(byte_part_v1(encoded, split, encoded.len())).is_ok()).to_equal(true)
+            val message = codec.take().unwrap()
+            expect(clangd_response_matches_v1(message, 1)).to_equal(true)
+            expect(json_value_serialize(json_value_field(message, "result"))).to_equal(json_value_serialize(JsonValue.Str("한글 😀")))
+            expect(codec.frames.len()).to_equal(0)
+            expect(codec.queued_bytes).to_equal(0)
+            expect(codec.finish().is_ok()).to_equal(true)
+            split = split + 1
+
+    it "handles one-byte delivery and multiple concatenated frames":
+        var codec = ClangdFramesV1.empty()
+        for id in [1, 10]:
+            for byte in clangd_frame_encode_v1(response_v1(id)).unwrap():
+                expect(codec.feed([byte]).is_ok()).to_equal(true)
+        expect(clangd_response_matches_v1(codec.take().unwrap(), 1)).to_equal(true)
+        expect(clangd_response_matches_v1(codec.take().unwrap(), 10)).to_equal(true)
+        expect(codec.queued_bytes).to_equal(0)
+
+    it "does not match string IDs, substrings, notifications or ambiguous responses":
+        expect(clangd_response_matches_v1(response_v1(10), 1)).to_equal(false)
+        val string_id = JsonValue.Object(["id", "result"], [JsonValue.Str("1"), JsonValue.Null])
+        expect(clangd_response_matches_v1(string_id, 1)).to_equal(false)
+        val notification = JsonValue.Object(["method", "params"], [JsonValue.Str("note"), JsonValue.Str("id:1")])
+        expect(clangd_response_matches_v1(notification, 1)).to_equal(false)
+        val ambiguous = JsonValue.Object(["id", "result", "error"], [JsonValue.Int(1), JsonValue.Null, JsonValue.Null])
+        expect(clangd_response_matches_v1(ambiguous, 1)).to_equal(false)
+
+    it "rejects duplicate lengths, invalid UTF8 and incomplete EOF":
+        var duplicate = ClangdFramesV1.empty()
+        expect(duplicate.feed(text_to_utf8_bytes("Content-Length: 2\r\ncontent-length: 2\r\n\r\n")).is_err()).to_equal(true)
+        var utf8 = ClangdFramesV1.empty()
+        expect(utf8.feed(text_to_utf8_bytes("Content-Length: 1\r\n\r\n")).is_ok()).to_equal(true)
+        expect(utf8.feed([255 as u8]).is_err()).to_equal(true)
+        var partial = ClangdFramesV1.empty()
+        expect(partial.feed(text_to_utf8_bytes("Content-Length: 2\r\n\r\n{")).is_ok()).to_equal(true)
+        expect(partial.finish().is_err()).to_equal(true)
+
+    it "rejects oversized bodies before allocating their payload":
+        var codec = ClangdFramesV1.empty()
+        expect(codec.feed(text_to_utf8_bytes("Content-Length: 4194305\r\n\r\n")).is_err()).to_equal(true)
+        expect(codec.body.len()).to_equal(0)
+
+    it "bounds parser nesting while ignoring brackets in quoted text":
+        for depth in [63, 64]:
+            var nested = "0"
+            var level = 0
+            while level < depth:
+                nested = "[" + nested + "]"
+                level = level + 1
+            val body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":" + nested + "}"
+            val wire = "Content-Length: " + text_to_utf8_bytes(body).len().to_string() + "\r\n\r\n" + body
+            var codec = ClangdFramesV1.empty()
+            expect(codec.feed(text_to_utf8_bytes(wire)).is_ok()).to_equal(depth == 63)
+        var codec = ClangdFramesV1.empty()
+        val quoted = JsonValue.Object(["jsonrpc", "id", "result"], [JsonValue.Str("2.0"), JsonValue.Int(1), JsonValue.Str("[ { \\\" ] }")])
+        expect(codec.feed(clangd_frame_encode_v1(quoted).unwrap()).is_ok()).to_equal(true)
+        expect(json_value_serialize(codec.take().unwrap())).to_equal(json_value_serialize(quoted))
+
+    it "rejects a duplicate JSON field and remains poisoned":
+        val body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"id\":2,\"result\":null}"
+        var codec = ClangdFramesV1.empty()
+        val wire = "Content-Length: " + text_to_utf8_bytes(body).len().to_string() + "\r\n\r\n" + body
+        expect(codec.feed(text_to_utf8_bytes(wire)).is_err()).to_equal(true)
+        expect(codec.feed(clangd_frame_encode_v1(response_v1(1)).unwrap()).is_err()).to_equal(true)

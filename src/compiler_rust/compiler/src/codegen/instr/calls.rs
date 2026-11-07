@@ -466,6 +466,14 @@ mod tests {
             super::process_c_runtime_arg_indices("rt_process_owned_v3_start_value"),
             Some((&[0][..], &[1][..]))
         );
+        assert_eq!(
+            super::process_c_runtime_arg_indices("rt_process_owned_interactive_v1_start_value"),
+            Some((&[0][..], &[1][..]))
+        );
+        assert_eq!(
+            super::process_c_runtime_arg_indices("rt_process_owned_interactive_v1_write_some_value"),
+            None
+        );
     }
 
     #[test]
@@ -3563,7 +3571,8 @@ pub(crate) fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static
         // `Resource limit exceeded (infrastructure)` (2026-10-20).
         | "rt_process_run_owned_bounded_value"
         | "rt_process_run_owned_observed_bounded_value"
-        | "rt_process_owned_v3_start_value" => Some((&[0], &[1])),
+        | "rt_process_owned_v3_start_value"
+        | "rt_process_owned_interactive_v1_start_value" => Some((&[0], &[1])),
         _ => None,
     }
 }

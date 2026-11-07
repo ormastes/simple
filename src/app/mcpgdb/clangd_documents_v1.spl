@@ -1,0 +1,132 @@
+# Bounded document admission and lexical file URI conversion. No process owner.
+use app.io.mod.{file_read_regular_no_follow_bounded_bytes}
+use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text}
+use std.common.encoding.external_text.{external_text_decode, utf8_format}
+
+pub fn clangd_absolute_path_v1(root: text, requested: text) -> Result<text, text>:
+    var path = requested.replace("\\", "/")
+    if path == "" or path.contains("\0"):
+        return Err("empty or NUL document path")
+    var drive = path.len() >= 3 and path.byte_at(1) == 58 and path.byte_at(2) == 47
+    var unc = path.starts_with("//")
+    if not drive and not unc:
+        if path.starts_with("/") or path.contains(":"):
+            return Err("ambiguous Windows document path")
+        path = root.replace("\\", "/") + "/" + path
+        drive = path.len() >= 3 and path.byte_at(1) == 58 and path.byte_at(2) == 47
+        unc = path.starts_with("//")
+    if not drive and not unc:
+        return Err("absolute Windows workspace required")
+    if path.len() > 32768:
+        return Err("Windows path exceeds limit")
+    if path.starts_with("//?/") or path.starts_with("//./"):
+        return Err("device namespace is not a file URI")
+    var prefix = "//"
+    var suffix = path.substring(2)
+    var protected_count = 2
+    if drive:
+        val letter = path.byte_at(0)
+        if not ((letter >= 65 and letter <= 90) or (letter >= 97 and letter <= 122)):
+            return Err("invalid Windows drive")
+        prefix = path.substring(0, 1).upper() + ":/"
+        suffix = path.substring(3)
+        protected_count = 0
+    var components: [text] = []
+    for component in suffix.split("/"):
+        if component != "" and component != ".":
+            if component == "..":
+                if components.len() <= protected_count:
+                    return Err("path escapes volume root")
+                var retained: [text] = []
+                var index = 0
+                while index + 1 < components.len():
+                    retained.push(components[index])
+                    index = index + 1
+                components = retained
+            else:
+                if component.contains(":") or component.ends_with(".") or component.ends_with(" "):
+                    return Err("ambiguous Windows path component")
+                var offset = 0
+                while offset < component.len():
+                    val code = component.byte_at(offset)
+                    if code < 32 or code == 127 or code == 34 or code == 60 or code == 62 or code == 124 or code == 63 or code == 42:
+                        return Err("invalid Windows path component")
+                    offset = offset + 1
+                val stem = component.split(".")[0].upper()
+                if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"].contains(stem):
+                    return Err("reserved Windows device component")
+                components.push(component)
+    if unc and components.len() < 2:
+        return Err("UNC path requires server and share")
+    Ok(prefix + components.join("/"))
+
+pub fn clangd_file_uri_v1(absolute_path: text) -> Result<text, text>:
+    val normalized = clangd_absolute_path_v1("", absolute_path)?
+    val bytes = match boxed_text_bytes_checked(normalized):
+        Ok(value): value
+        Err(_): return Err("cannot encode document URI")
+    val hex = "0123456789ABCDEF"
+    var encoded = ""
+    var index = 0
+    while index < bytes.len():
+        val value = bytes[index] as i64
+        if (value >= 65 and value <= 90) or (value >= 97 and value <= 122) or (value >= 48 and value <= 57) or value == 45 or value == 46 or value == 95 or value == 126 or value == 47 or (value == 58 and index == 1):
+            encoded = encoded + bytes_to_text([value as u8])
+        else:
+            val high = value / 16
+            val low = value % 16
+            encoded = encoded + "%" + hex.substring(high, high + 1) + hex.substring(low, low + 1)
+        index = index + 1
+    if normalized.starts_with("//"):
+        return Ok("file:" + encoded)
+    Ok("file:///" + encoded)
+
+pub struct ClangdDocumentV1:
+    path: text
+    uri: text
+    bytes: [u8]
+    content: text
+    version: i64
+
+pub fn clangd_document_read_v1(root: text, requested: text, version: i64) -> Result<ClangdDocumentV1, text>:
+    val path = clangd_absolute_path_v1(root, requested)?
+    val uri = clangd_file_uri_v1(path)?
+    val bytes = file_read_regular_no_follow_bounded_bytes(path, 4194304)?
+    val content = match external_text_decode(bytes, utf8_format()):
+        Ok(value): value
+        Err(error): return Err("document is not UTF-8: " + error.reason)
+    Ok(ClangdDocumentV1(path: path, uri: uri, bytes: bytes, content: content, version: version))
+
+# LSP positions are UTF-16 code units, not UTF-8 offsets or scalar indexes.
+# Documents are strictly decoded before this function is called.
+pub fn clangd_position_valid_v1(document: ClangdDocumentV1, line: i64, character: i64) -> bool:
+    if line < 0 or character < 0:
+        return false
+    var current_line = 0
+    var column = 0
+    var index = 0
+    while index < document.bytes.len():
+        val byte = document.bytes[index] as i64
+        if current_line == line and column == character:
+            return true
+        if byte == 13 or byte == 10:
+            if current_line == line:
+                return false
+            if byte == 13 and index + 1 < document.bytes.len() and document.bytes[index + 1] == 10:
+                index = index + 1
+            current_line = current_line + 1
+            column = 0
+            index = index + 1
+        else:
+            var width = 1
+            var units = 1
+            if byte >= 240:
+                width = 4
+                units = 2
+            elif byte >= 224:
+                width = 3
+            elif byte >= 192:
+                width = 2
+            column = column + units
+            index = index + width
+    current_line == line and column == character
