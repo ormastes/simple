@@ -21,3 +21,10 @@ The source scenarios check file bytes, native security decisions, authoritative
 phase transitions, exact close results and collision preservation. Production
 qualification additionally requires an independent untrusted-user access oracle
 and release-failure injection for retained cleanup handles and descriptors.
+
+The authored native fixture
+`src/runtime/test/rt_windows_private_post_rename_selfcheck.c` wraps only the
+test translation unit's security query after observing a real successful
+rename. It verifies that the ensuing error consumes publication and a copied
+token cannot republish the final entry. It is **NOT_RUN**; no Windows or
+power-loss qualification follows from its presence in the repository.

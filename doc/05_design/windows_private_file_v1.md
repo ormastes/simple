@@ -58,6 +58,9 @@ until explicit cleanup succeeds. UTF16 and byte-buffer temporaries use bounded
 `malloc` allocations with infallible `free`, avoiding unchecked `HeapFree`.
 Publication refreshes identity on the authoritative registry record after a
 successful rename, so the exact retained final handle supports readback.
+The successful kernel rename consumes publication immediately under the native
+owner lock. A subsequent security or snapshot failure makes the owner cleanup
+only; no copy can rename the published receipt again after that error.
 
 ## Verification status and required host evidence
 
@@ -77,6 +80,11 @@ rejection after slot reuse. Additional qualification must inject failed `CloseHa
 generic read/write/delete/security-control rights, test owner mismatch and
 unprotected DACLs on root/stage/collision, race ancestry replacement, exercise
 8 MiB chunked IO, and independently attempt access as an untrusted principal.
+`src/runtime/test/rt_windows_private_post_rename_selfcheck.c` provides a
+test-only failed-security-query wrapper after a real successful kernel rename.
+It checks that a retry cannot move the published entry. The production provider
+has no injected-success or fault bypass. This authored native regression is
+also **NOT_RUN** until a Windows fixture and build are available.
 
 The supported durability profile is **process crash**, with an observed
 successful `FlushFileBuffers` on the exact file before publication. Durable

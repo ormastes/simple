@@ -268,9 +268,11 @@ static int64_t wp_file_impl_v1(int64_t raw,int64_t name,int64_t create,int64_t m
      * so failed cleanup can never lose ownership. */
     return (int64_t)(intptr_t)handle;
 }
-static int64_t wp_publish_impl_v1(int64_t raw,int64_t file,int64_t raw_name) {
+static int64_t wp_publish_impl_v1(int64_t raw,WpEntryV1 *entry,int64_t raw_name) {
     WpRootV1 *root=(WpRootV1*)(intptr_t)raw;
-    HANDLE handle=(HANDLE)(intptr_t)file; const wchar_t *name=(const wchar_t*)(intptr_t)raw_name;
+    HANDLE handle=(HANDLE)entry->owner;
+    int64_t file=(int64_t)(intptr_t)handle;
+    const wchar_t *name=(const wchar_t*)(intptr_t)raw_name;
     if (!wp_root_ready_impl_v1(raw) || !wp_name_v1(name) ||
         !wp_check_impl_v1(file,INT64_MAX) || !FlushFileBuffers(handle)) return -1;
     size_t bytes=wcslen(name)*sizeof(wchar_t), size=sizeof(FILE_RENAME_INFO)+bytes;
@@ -278,6 +280,10 @@ static int64_t wp_publish_impl_v1(int64_t raw,int64_t file,int64_t raw_name) {
     rename->ReplaceIfExists=FALSE;rename->RootDirectory=root->directory;
     rename->FileNameLength=(DWORD)bytes;memcpy(rename->FileName,name,bytes);
     int ok=SetFileInformationByHandle(handle,FileRenameInfo,rename,(DWORD)size);
+    /* This is the effect linearization point. The exclusive IO lock remains
+     * held, and every alias observes publication consumed even if a subsequent
+     * security query, temporary release or identity snapshot fails. */
+    if (ok) entry->phase=2;
     DWORD error=GetLastError();free(rename);
     if (!ok) return error==ERROR_ALREADY_EXISTS || error==ERROR_FILE_EXISTS?1:-1;
     return wp_check_impl_v1(file,INT64_MAX)?0:-1;
@@ -414,8 +420,8 @@ int64_t rt_windows_private_publish_v1(int64_t root,int64_t file,int64_t name) {
     AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *directory=wp_find_v1(root,1),*entry=wp_find_v1(file,2);
     wp_active_v1=entry;int64_t result=-1;
     if (entry && entry->created_stage && entry->root_token==root && entry->phase==1 && wp_root_valid_v1(directory) && wp_unchanged_v1(entry)) {
-        result=wp_publish_impl_v1((int64_t)(intptr_t)directory->owner,(int64_t)(intptr_t)entry->owner,name);
-        if (result==0) {entry->phase=2;if (!wp_snapshot_v1(entry)) {entry->phase=3;result=-1;}}
+        result=wp_publish_impl_v1((int64_t)(intptr_t)directory->owner,entry,name);
+        if (entry->phase==2 && (result!=0 || !wp_snapshot_v1(entry))) {entry->phase=3;result=-1;}
     }
     wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return result;
 }
