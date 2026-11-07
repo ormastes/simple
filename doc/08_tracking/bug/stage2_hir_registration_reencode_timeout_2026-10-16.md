@@ -67,6 +67,8 @@ Verification pending (Windows host, admitted Stage 2 + phase-verification matrix
 
 ```bash
 . scripts/setup/windows-gitbash-bootstrap-env.shs
+SIMPLE_COMPILER_PHASE_PROFILE=1 sh scripts/bootstrap/bootstrap-windows.sh --full-bootstrap --stop-after-stage2
+# Linux x86_64 (where the 3,601 s timeout was measured):
 SIMPLE_COMPILER_PHASE_PROFILE=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2
 ```
 
