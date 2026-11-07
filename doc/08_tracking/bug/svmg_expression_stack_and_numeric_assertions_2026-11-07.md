@@ -14,7 +14,7 @@ Status: source repair reviewed; runtime verification pending
   reference VM's 256-word stack.
 - Discarded block tails emitted `DROP` after `print` or `For`, although those
   expressions leave no operand word. A consumed conditional also accepted a
-  present tail containing `print`, a loop or an assertion without a value.
+  present tail containing `print` or a loop without a value.
 - `expect(actual).to_equal(expected)` selected `FEQ` when either operand was
   floating. Integer `1065353216` could therefore compare equal to float `1.0`
   because their raw words coincide. The symmetric operand order was affected.
