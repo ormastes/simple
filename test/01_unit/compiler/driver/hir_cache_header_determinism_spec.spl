@@ -1,0 +1,42 @@
+# @req: REQ-COMPILER-DRIVER-001
+# Bug hir_cache_never_hits_header_rejected_2026-10-26: a repeated identical
+# build never hit the HIR cache (rejected=header:1). The HIR header folds the
+# compiler identity; when that identity is the per-process
+# `uncacheable-<pid>-<time>` token the header differs on every run while the
+# entry key does not, so no lookup can ever pass the header check.
+use std.spec.*
+use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_identity_scope_v1, hir_cache_header_diff_v1}
+use compiler.driver.driver_build.incremental.{native_build_frontend_identity, native_build_frontend_identity_from}
+
+describe "HIR cache header determinism":
+    """
+    The identity folded into a HIR cache header must be identical when built
+    twice in one process; a per-process identity must disable the cache.
+    """
+    it "builds the same frontend identity twice in one process":
+        step("Build the compiler frontend identity twice and compare")
+        val first = native_build_frontend_identity()
+        val second = native_build_frontend_identity()
+        expect(first).to_equal(second)
+        expect(hir_cache_header_diff_v1(first, second)).to_equal("")
+
+    it "keeps a hashed identity stable across per-process tokens":
+        step("Fold two different per-process tokens into a hashed identity")
+        val a = native_build_frontend_identity_from("abc", "fp", "1-100")
+        val b = native_build_frontend_identity_from("abc", "fp", "2-200")
+        expect(a).to_equal(b)
+        expect(hir_cache_identity_scope_v1("compiler=" + a, "", "1")).to_equal("compiler=" + a)
+
+    it "disables the HIR cache for an uncacheable per-process identity":
+        step("An unhashable executable yields a per-process identity")
+        val a = native_build_frontend_identity_from("", "fp", "1-100")
+        val b = native_build_frontend_identity_from("", "fp", "2-200")
+        expect(a == b).to_equal(false)
+        expect(hir_cache_identity_scope_v1("lane=x;compiler=" + a, "", "1")).to_equal("")
+        expect(hir_cache_identity_scope_v1("", "compiler=" + b, "0")).to_equal("")
+
+    it "names the first differing header field on a header rejection":
+        step("Diff a stored header against the expected one")
+        expect(hir_cache_header_diff_v1("v4 codec lane=a;compiler=x", "v4 codec lane=a;compiler=y")).to_equal("field=3 stored=compiler=x expected=compiler=y")
+        expect(hir_cache_header_diff_v1("v4 a", "v4 a b")).to_equal("field=2 stored=<absent> expected=b")
+        expect(hir_cache_header_diff_v1("same", "same")).to_equal("")
