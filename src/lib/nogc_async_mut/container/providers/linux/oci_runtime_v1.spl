@@ -17,6 +17,9 @@ use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.common.contracts.container.command_v1.oci_command_parts_v1
 use std.common.contracts.container.execution_options_v1.oci_execution_options_v1
 use std.nogc_async_mut.container.providers.linux.execution_user_v2.{build_execution_user_command_v2, linux_oci_execution_user_parse_v2}
+use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_command_v2
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, process_spawn_piped_owned_v2}
 pub use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
 use std.nogc_async_mut.container.providers.linux.request_v1.{linux_oci_request_bounds_v1, linux_oci_request_digest_v1}
 use std.common.contracts.container.bound_intent_v2.{RuntimeBoundIntentV2, runtime_bound_intent_encode_v2, runtime_bound_intent_decode_v2, runtime_bound_intent_match_v2}
@@ -351,6 +354,52 @@ impl LinuxOciRuntimeProviderV1:
             reason: "exact-native-execution-user-v1")
         Ok(LinuxOciExecutionUserObservationV2(operation: operation, selected_user: selected,
             observed_unix_ms: observed_ms, provider_identity_digest: baseline.identity_digest))
+
+    pub fn output_engine_observation_v2(request: LinuxOciRequestV1,
+            expected: RuntimeIdentityV1, pin: text) -> Result<LinuxOciEngineObservationV1, text>:
+        val valid = self.validate(request)
+        if not valid.accepted: return Err(valid.reason)
+        if self.engine != OCI_ENGINE_PODMAN or not self.engine_policy.?:
+            return Err("output-managed-podman-required")
+        if not builder_digest_valid_v1(expected.native_id): return Err("output-full-native-id-required")
+        val retained = self.retained_intent_v1(request)?
+        if retained.pod_uid != expected.pod_uid or retained.attempt != expected.attempt or
+                retained.provider_generation != expected.provider_generation or
+                retained.operation_id != expected.operation_id or retained.engine != expected.engine or
+                retained.native_id != expected.native_id or retained.node_boot_id != expected.node_boot_id:
+            return Err("output-retained-identity-mismatch")
+        val observed = self.engine_observation_v1()?
+        if observed.identity_digest != pin: return Err("output-provider-identity-mismatch")
+        Ok(observed)
+
+    pub me open_output_session_v2(request: LinuxOciRequestV1, expected: RuntimeIdentityV1,
+            pin: text, launch: GroupProcessStreamLaunchV2) -> PipedProcessOwnedSpawnV2:
+        val observed = match self.output_engine_observation_v2(request, expected, pin):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        val command = match linux_oci_output_command_v2(self.engine_policy.unwrap(), expected):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        if launch.request.program != command.program or not _args_equal(launch.request.args, command.args) or
+                launch.request.producer_digest != observed.executable_digest:
+            return PipedProcessOwnedSpawnV2.Rejected("output-launch-engine-route-mismatch")
+        # Fresh recovery inspects the already-qualified exact retained ID; it
+        # cannot discover by name and never creates or starts the workload.
+        val recovered = self.recover(request)
+        if recovered.status != RUNTIME_STATUS_OK or recovered.state.phase != RUNTIME_PHASE_RUNNING:
+            return PipedProcessOwnedSpawnV2.Rejected("output-native-running-identity-unproven: " + recovered.reason)
+        val actual = recovered.state.identity
+        if actual.native_id != expected.native_id or actual.operation_id != expected.operation_id or
+                actual.pod_uid != expected.pod_uid or actual.attempt != expected.attempt or
+                actual.provider_generation != expected.provider_generation or actual.node_boot_id != expected.node_boot_id or
+                actual.engine != expected.engine:
+            return PipedProcessOwnedSpawnV2.Rejected("output-native-identity-mismatch")
+        # Canonical owner performs the final deadline/profile/native capability
+        # checks and exclusive durable broker.claim before fork. Preserve every
+        # postlaunch owner, including CleanupRequired with no reference.
+        if self.scripted:
+            return PipedProcessOwnedSpawnV2.Rejected("output-scripted-provider-native-spawn-forbidden")
+        process_spawn_piped_owned_v2(launch)
 
     # A deterministic executor seam for contract tests.  Each result is
     # matched by operation, program, and exact argv; an unmatched command is
