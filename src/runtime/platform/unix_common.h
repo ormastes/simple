@@ -205,7 +205,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t p
     if (fd < 0) return -1;
 
     if (timeout_secs <= 0) {
-        int result = flock(fd, LOCK_EX);
+        int result = flock(fd, LOCK_EX | LOCK_NB);
         if (result == 0) return fd;
         close(fd);
         return -1;
