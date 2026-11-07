@@ -1,0 +1,169 @@
+# Test-only real Ed25519 keys and actual native-private Windows fixture setup.
+# Never production trust roots; no fake engine success or deployment owner.
+use std.spec
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.{HostEnrollmentCredentialV1, host_enrollment_credential_encode_v1}
+use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.*
+use std.nogc_sync_mut.io.windows_private_file_v1.*
+use std.nogc_sync_mut.io.env_ops.{host_os, env_get}
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.nogc_sync_mut.sosix.time.sosix_time_now_unix_micros
+use std.nogc_sync_mut.io.external_text_io.io_legacy_utf8
+use std.nogc_async_mut.container.api_v2.simple_container_observe_v2
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.*
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_encode_grant_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.binary_inspect.bytes_to_hex_canonical
+use std.common.base_encoding.utilities.base_encoding_text_to_bytes
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct WindowsDeploymentFixtureV2:
+    anchor: HostWindowsDeploymentAnchorV2
+    binding: HostServiceEnrollmentBindingV2
+    credential: HostEnrollmentCredentialV1
+    configuration: text
+    engine: text
+    broker: text
+
+pub fn windows_deployment_binding_data_v2() -> HostServiceEnrollmentBindingV2:
+    HostServiceEnrollmentBindingV2(physical_host_id: "worker_1", service_scope_id: "service_1",
+        config_digest: "b".repeat(64), policy_digest: "c".repeat(64), policy_revision: 4,
+        native_machine_id: "windows-machine-guid-v1:12345678-1234-1234-1234-123456789abc",
+        provider_identity_digest: "a".repeat(64), engine_policy_digest: "e".repeat(64),
+        machine_parent: "C:/installed/hosts", backend: "windows-docker-process", broker_policy_digest: "d".repeat(64),
+        physical_cpu_millis: 2000, physical_memory_bytes: 512, reserved_cpu_millis: 100, reserved_memory_bytes: 128)
+
+fn deployment_fixture_key_v2(key: DistributedAuthorityKeyV2) -> SdnValue:
+    var public_bytes: [i64] = []
+    for byte in key.public_key: public_bytes.push(byte as i64)
+    SdnValue.Dict({"identity": SdnValue.String(key.identity), "role": SdnValue.String(key.role),
+        "revision": SdnValue.Int(key.revision), "publicKeyHex": SdnValue.String(bytes_to_hex_canonical(public_bytes)),
+        "principal": SdnValue.String(key.principal), "project": SdnValue.String(key.project), "hostId": SdnValue.String(key.host_id),
+        "operations": SdnValue.Array([SdnValue.String("host_enroll_v1")]), "maximumMemoryBytes": SdnValue.Int(key.maximum_memory_bytes),
+        "maximumDurationMs": SdnValue.Int(key.maximum_duration_ms), "policyRevision": SdnValue.Int(key.policy_revision),
+        "revocationEpoch": SdnValue.Int(key.revocation_epoch), "expiresAt": SdnValue.Int(key.expires_at), "revoked": SdnValue.Bool(false)})
+
+fn deployment_fixture_admission_v2(error: WindowsPrivateErrorV1, prior: HostServicePrivateCleanupV2):
+    var cleanup = prior
+    if error.cleanup_file.is_some(): cleanup.files.push(error.cleanup_file.unwrap())
+    if error.cleanup_root.is_some(): cleanup.roots.push(error.cleanup_root.unwrap())
+    assert(host_service_private_cleanup_v2(cleanup).is_none())
+    fail("native deployment fixture admission failed: " + error.message)
+
+fn deployment_fixture_source_v2(root: WindowsPrivateRootV1, name: text) -> text:
+    val opened = root.open_private_file(name, 1048576u64)
+    if opened.is_err():
+        deployment_fixture_admission_v2(opened.unwrap_err(), HostServicePrivateCleanupV2(files: [], roots: [root]))
+        return ""
+    var file = opened.unwrap()
+    val bytes = file.read_all_bounded(1048576)
+    assert(file.close())
+    io_legacy_utf8(bytes.unwrap()).unwrap()
+
+# poison=true does not call the observer in fixture setup. Its deliberately
+# invalid pinned engine policy detects observation-before-SDK ordering without
+# invoking or emulating an engine. The normal case requires actual Docker.
+pub fn windows_deployment_fixture_v2(poison: bool = false) -> WindowsDeploymentFixtureV2:
+    expect(host_os()).to_equal("windows")
+    val installed = env_get("SIMPLE_WINDOWS_DEPLOYMENT_PRIVATE_PARENT") ?? ""
+    assert(installed != "")
+    val opened = windows_private_root_open_v1(installed)
+    if opened.is_err():
+        deployment_fixture_admission_v2(opened.unwrap_err(), HostServicePrivateCleanupV2(files: [], roots: []))
+    var base = opened.unwrap()
+    val engine = if poison: "kind: poisoned-observer-policy\n" else: deployment_fixture_source_v2(base, "engine-policy.sdn")
+    val broker = if poison: "kind: opaque-broker-fixture\n" else: deployment_fixture_source_v2(base, "broker-policy.sdn")
+    val child_name = "deployment-case-" + sosix_random_hex(16).unwrap()
+    val created = base.child_directory(child_name, true)
+    if created.is_err():
+        deployment_fixture_admission_v2(created.unwrap_err(), HostServicePrivateCleanupV2(files: [], roots: [base]))
+    var parent = created.unwrap()
+    var binding = windows_deployment_binding_data_v2()
+    binding.machine_parent = installed.replace("\\", "/") + "/" + child_name
+    if not poison:
+        val observed = simple_container_observe_v2("windows-docker-process", engine).unwrap()
+        binding.native_machine_id = observed.native_machine_id
+        binding.provider_identity_digest = observed.provider_identity_digest
+    val configuration = "apiVersion: orchestration.simple/v1alpha1\nkind: HostConfig\nmetadata:\n    name: host\n    namespace: admin\nspec:\n" +
+        "    physicalHostId: worker_1\n    serviceScopeId: service_1\n    controllerRef: issuer_1\n    enrollmentCredentialRef: enrollment\n" +
+        "    runtimeClassRef: windows-docker-process\n    journalRoot: journal\n    workspaceRoots: [work]\n    budget:\n" +
+        "        cpu: 2000m\n        memory: 512\n        exclusiveDeviceIds: []\n    maintenanceIntervalMs: 100\n    maximumJournalEvents: 10000\n"
+    var fixture = verification_fixture()
+    val now = sosix_time_now_unix_micros() / 1000
+    fixture.issuer.operations = ["host_enroll_v1"]
+    fixture.approver.operations = ["host_enroll_v1"]
+    fixture.issuer.expires_at = now + 120000
+    fixture.approver.expires_at = now + 120000
+    val policy = sdn_encode_canonical(SdnValue.Dict({"version": SdnValue.Int(1), "generation": SdnValue.Int(7),
+        "policyRevision": SdnValue.Int(4), "revocationEpoch": SdnValue.Int(2), "sessionGeneration": SdnValue.Int(3),
+        "keys": SdnValue.Array([deployment_fixture_key_v2(fixture.issuer), deployment_fixture_key_v2(fixture.approver)])})) + "\n"
+    binding.config_digest = sha256_text(configuration)
+    binding.policy_digest = sha256_text(policy)
+    binding.engine_policy_digest = sha256_text(engine)
+    binding.broker_policy_digest = sha256_text(broker)
+    fixture.request.operation = "host_enroll_v1"
+    fixture.request.payload_digest = host_service_enrollment_payload_digest_v2(binding).unwrap()
+    fixture.request.environment_digest = binding.provider_identity_digest
+    fixture.signed.grant.operations = ["host_enroll_v1"]
+    fixture.signed.grant.environment_digest = binding.provider_identity_digest
+    fixture.signed.grant.expires_at = now + 60000
+    fixture.signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1),
+        distributed_grant_signature_message_v2(fixture.signed).unwrap()).signature
+    fixture.approval.expires_at = now + 45000
+    fixture.approval.grant_digest = sha256_text(distributed_encode_grant_v2(fixture.signed.grant).unwrap())
+    fixture.approval.request_digest = sha256_text(distributed_encode_operation_v2(fixture.request).unwrap())
+    fixture.approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65),
+        distributed_approval_signature_message_v2(fixture.approval).unwrap()).signature
+    val staged = parent.create_private_stage("policy-stage.sdn", 1048576u64)
+    if staged.is_err():
+        deployment_fixture_admission_v2(staged.unwrap_err(), HostServicePrivateCleanupV2(files: [], roots: [base, parent]))
+    var stage = staged.unwrap()
+    assert(stage.write(base_encoding_text_to_bytes(policy)).unwrap())
+    assert(stage.seal().unwrap())
+    assert(parent.publish_no_replace(stage, "authority-policy.sdn").unwrap())
+    assert(stage.close())
+    assert(parent.close())
+    assert(base.close())
+    WindowsDeploymentFixtureV2(anchor: HostWindowsDeploymentAnchorV2(binding.machine_parent, binding.policy_digest),
+        binding: binding, credential: HostEnrollmentCredentialV1(fixture.request, fixture.signed, fixture.approval),
+        configuration: configuration, engine: engine, broker: broker)
+
+export WindowsDeploymentFixtureV2, windows_deployment_binding_data_v2, windows_deployment_fixture_v2
+
+fn deployment_fixture_store_v2(root: WindowsPrivateRootV1, name: text, source: text):
+    var stage = root.create_private_stage("seed-" + sha256_text(name), 1048576u64).unwrap()
+    assert(stage.write(base_encoding_text_to_bytes(source)).unwrap())
+    assert(stage.seal().unwrap())
+    assert(root.publish_no_replace(stage, name).unwrap())
+    assert(stage.close())
+
+# Administrative fixture seeding only. A partial prefix models interrupted
+# publication without claiming a real crash. A complete unsigned-rebound copy
+# tests SDK provenance denial; this function never constructs a role owner.
+pub fn windows_deployment_seed_v2(fixture: WindowsDeploymentFixtureV2,
+        credential: HostEnrollmentCredentialV1, complete: bool):
+    var parent = windows_private_root_open_v1(fixture.anchor.machine_parent).unwrap()
+    val policy = deployment_fixture_source_v2(parent, "authority-policy.sdn")
+    val nonce = sosix_random_hex(32).unwrap()
+    val encoded = host_enrollment_credential_encode_v1(credential).unwrap()
+    val at = sosix_time_now_unix_micros() / 1000
+    val claim = host_windows_deployment_claim_bytes_v2(fixture.binding, credential.operation.id,
+        sha256_text(encoded), nonce, at).unwrap()
+    deployment_fixture_store_v2(parent, host_windows_deployment_claim_name_v2(fixture.binding).unwrap(), claim)
+    if complete:
+        var child = parent.child_directory("host-root-" + nonce, true).unwrap()
+        val sources = [fixture.configuration, policy, fixture.engine, fixture.broker,
+            host_service_enrollment_payload_bytes_v2(fixture.binding).unwrap(), encoded,
+            host_windows_deployment_manifest_bytes_v2(fixture.binding, claim, at).unwrap()]
+        val names = ["host-config.sdn", "authority-policy.sdn", "engine-policy.sdn", "broker-policy.sdn",
+            "enrollment-binding.sdn", "enrollment-credential.sdn", "host-root.sdn"]
+        for index in 0..7: deployment_fixture_store_v2(child, names[index], sources[index])
+        assert(child.close())
+    assert(parent.close())
+
+export windows_deployment_seed_v2
