@@ -1,0 +1,144 @@
+# Finite HTTP/1.1 codec; transport ownership/submission status is external.
+use std.common.string_core.str_len
+use std.common.base_encoding.utilities.validated_utf8_bytes_to_text_linear
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_async_mut.container.providers.linux.engine_exec_codec_v3.{LinuxEngineExecHttpRequestV3,
+    LINUX_ENGINE_EXEC_BODY_LIMIT_V3}
+
+pub struct LinuxEngineExecHttpResponseV3:
+    action: text
+    status: i64
+    content_type: text
+    body: text
+
+pub fn linux_engine_exec_http_encode_v3(request: LinuxEngineExecHttpRequestV3) -> Result<[u8], text>:
+    if not builder_digest_valid_v1(request.request_digest) or not builder_digest_valid_v1(request.parent_native_id):
+        return Err("engine-exec-http-request-identity")
+    if ((request.action == "create" and request.method != "POST") or
+            (request.action == "inspect" and request.method != "GET") or
+            (request.action == "start" and request.method != "POST") or
+            not ["create", "inspect", "start"].contains(request.action)):
+        return Err("engine-exec-http-action")
+    if not request.path.starts_with("/v5.2.5/libpod/") or str_len(request.path) > 256:
+        return Err("engine-exec-http-path")
+    val expected_path = if request.action == "create":
+        "/v5.2.5/libpod/containers/" + request.parent_native_id + "/exec"
+    else:
+        "/v5.2.5/libpod/exec/" + request.native_exec_id + (if request.action == "inspect": "/json" else: "/start")
+    if request.path != expected_path: return Err("engine-exec-http-path")
+    if request.action == "create":
+        if request.native_exec_id != "": return Err("engine-exec-http-request-identity")
+    else:
+        if not builder_digest_valid_v1(request.native_exec_id) or request.native_exec_id == request.parent_native_id:
+            return Err("engine-exec-http-request-identity")
+    if request.action == "inspect" and request.body != "": return Err("engine-exec-http-request-body")
+    if request.action == "start" and request.body != "{\"Detach\":true,\"Tty\":false}":
+        return Err("engine-exec-http-request-body")
+    for byte in request.path.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 122) or byte == 47 or byte == 46):
+            return Err("engine-exec-http-path")
+    if request.content_type != "application/json" or str_len(request.body) > LINUX_ENGINE_EXEC_BODY_LIMIT_V3:
+        return Err("engine-exec-http-request-body")
+    val wire = request.method + " " + request.path + " HTTP/1.1\r\nHost: localhost\r\n" +
+        "Content-Type: application/json\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: " +
+        str_len(request.body).to_text() + "\r\n\r\n" + request.body
+    Ok(wire.bytes())
+
+pub fn linux_engine_exec_http_decode_v3(action: text, wire: [u8]) -> Result<LinuxEngineExecHttpResponseV3, text>:
+    if not ["create", "inspect", "start"].contains(action): return Err("engine-exec-http-action")
+    if wire.len() > LINUX_ENGINE_EXEC_BODY_LIMIT_V3 + 16384: return Err("engine-exec-http-wire-bound")
+    var end = -1
+    var index = 0
+    while index + 3 < wire.len() and index + 4 <= 16384:
+        if wire[index] == 13 and wire[index + 1] == 10 and wire[index + 2] == 13 and wire[index + 3] == 10:
+            end = index + 4
+            break
+        index = index + 1
+    if end < 0: return Err("engine-exec-http-header-bound")
+    val header = validated_utf8_bytes_to_text_linear(wire[0:end])?
+    index = 0
+    while index < str_len(header):
+        val byte = header.byte_at(index)
+        if byte == 13:
+            if index + 1 >= str_len(header) or header.byte_at(index + 1) != 10:
+                return Err("engine-exec-http-header-control")
+        if byte == 10:
+            if index == 0 or header.byte_at(index - 1) != 13:
+                return Err("engine-exec-http-header-control")
+        index = index + 1
+    for byte in header.bytes():
+        if byte != 9 and byte != 10 and byte != 13 and (byte < 32 or byte > 126):
+            return Err("engine-exec-http-header-control")
+    val lines = header.substring(0, str_len(header) - 4).split("\r\n")
+    if lines.len() < 2 or lines.len() > 65: return Err("engine-exec-http-header-count")
+    for line in lines:
+        for byte in line.bytes():
+            if byte == 10 or byte == 13: return Err("engine-exec-http-header-control")
+    val expected_status = if action == "create": 201 else: 200
+    if not lines[0].starts_with("HTTP/1.1 " + expected_status.to_text() + " "):
+        return Err("engine-exec-http-status")
+    for byte in lines[0].bytes():
+        if byte < 32 or byte > 126: return Err("engine-exec-http-status")
+    var seen: [text] = []
+    var length: i64 = -1
+    var content_type = ""
+    index = 1
+    while index < lines.len():
+        val line = lines[index]
+        val colon = line.index_of(":")
+        if colon <= 0 or colon > 64: return Err("engine-exec-http-header-name")
+        val name = line.substring(0, colon).lower()
+        for byte in name.bytes():
+            if not ((byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or byte == 45):
+                return Err("engine-exec-http-header-name")
+        if seen.contains(name): return Err("engine-exec-http-duplicate-header")
+        seen.push(name)
+        val value = line.substring(colon + 1).trim()
+        for byte in value.bytes():
+            if byte < 32 or byte > 126: return Err("engine-exec-http-header-control")
+        if name == "content-length":
+            if value == "" or (str_len(value) > 1 and value.starts_with("0")): return Err("engine-exec-http-length")
+            length = 0
+            for byte in value.bytes():
+                if byte < 48 or byte > 57: return Err("engine-exec-http-length")
+                val digit = (byte as i64) - 48
+                if length > (LINUX_ENGINE_EXEC_BODY_LIMIT_V3 - digit) / 10: return Err("engine-exec-http-body-bound")
+                length = length * 10 + digit
+        elif name == "content-type": content_type = value.lower()
+        elif name == "connection":
+            if value.lower() != "close": return Err("engine-exec-http-connection")
+        elif ["transfer-encoding", "content-encoding", "upgrade", "location"].contains(name):
+            return Err("engine-exec-http-framing-refused")
+        index = index + 1
+    if length < 0 or wire.len() - end != length: return Err("engine-exec-http-incomplete-or-trailing")
+    val expected_type = if action == "start": "text/plain; charset=us-ascii" else: "application/json"
+    if content_type != expected_type: return Err("engine-exec-http-content-type")
+    val body = validated_utf8_bytes_to_text_linear(wire[end:])?
+    if action == "start" and body != "\n": return Err("engine-exec-http-start-body")
+    Ok(LinuxEngineExecHttpResponseV3(action: action, status: expected_status, content_type: content_type, body: body))
+
+pub fn linux_engine_exec_query_digest_v3(request: LinuxEngineExecHttpRequestV3,
+        socket_policy_digest: text) -> Result<text, text>:
+    if not builder_digest_valid_v1(socket_policy_digest): return Err("engine-exec-socket-policy-digest")
+    val validated = linux_engine_exec_http_encode_v3(request)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-engine-exec-http-query-v3"),
+        "action": SdnValue.String(request.action), "method": SdnValue.String(request.method),
+        "path": SdnValue.String(request.path), "contentType": SdnValue.String(request.content_type),
+        "bodyDigest": SdnValue.String(sha256_text(request.body)), "requestDigest": SdnValue.String(request.request_digest),
+        "parentNativeId": SdnValue.String(request.parent_native_id), "nativeExecId": SdnValue.String(request.native_exec_id),
+        "socketPolicyDigest": SdnValue.String(socket_policy_digest)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+pub fn linux_engine_exec_response_evidence_digest_v3(action: text, wire: [u8],
+        query_digest: text) -> Result<text, text>:
+    if not builder_digest_valid_v1(query_digest): return Err("engine-exec-query-digest")
+    val response = linux_engine_exec_http_decode_v3(action, wire)?
+    val raw = validated_utf8_bytes_to_text_linear(wire)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-engine-exec-http-evidence-v3"),
+        "queryDigest": SdnValue.String(query_digest), "wireDigest": SdnValue.String(sha256_text(raw)),
+        "action": SdnValue.String(action), "status": SdnValue.Int(response.status),
+        "contentType": SdnValue.String(response.content_type), "bodyDigest": SdnValue.String(sha256_text(response.body))}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))

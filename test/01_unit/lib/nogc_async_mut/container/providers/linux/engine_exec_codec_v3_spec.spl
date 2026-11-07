@@ -1,0 +1,109 @@
+# Pure request/response parsing only; no Engine/native transport is simulated.
+use std.spec.*
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.string_core.str_len
+use std.nogc_async_mut.container.providers.linux.engine_exec_codec_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_exec_http_v3.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+
+fn _engine_exec_request_fixture_v3() -> ContainerExecRequestV3:
+    val parent = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2()).plan
+    val runtime = RuntimeIdentityV1(pod_uid: parent.workload_uid, attempt: parent.attempt,
+        provider_generation: parent.provider_generation, operation_id: parent.operation_id,
+        engine: "podman", native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap())
+    ContainerExecRequestV3(parent: parent, parent_runtime: runtime, operation_id: "exec-api", nonce: "d".repeat(64),
+        argv: ["/bin/echo", "literal ; $(task)", "", "first\nsecond"],
+        environment: [ContainerExecEnvironmentEntryV3.Literal("A", "value ; $(task)\n")],
+        working_directory: "/work", selected_user: "1000:1001", terminal_mode: "none", stdin_requested: false, timeout_ms: 5000)
+
+fn _engine_exec_inspect_fixture_v3(arguments: text = "[\"literal ; $(task)\",\"\",\"first\\nsecond\"]") -> text:
+    "{\"CanRemove\":false,\"ContainerID\":\"" + "b".repeat(64) + "\",\"DetachKeys\":\"\",\"ExitCode\":0,\"ID\":\"" + "c".repeat(64) + "\",\"OpenStderr\":false,\"OpenStdin\":false,\"OpenStdout\":false,\"Running\":false,\"Pid\":0,\"ProcessConfig\":{\"arguments\":" + arguments + ",\"entrypoint\":\"/bin/echo\",\"privileged\":false,\"tty\":false,\"user\":\"1000:1001\"}}"
+
+fn _engine_exec_wire_fixture_v3(status: text, content_type: text, body: text) -> [u8]:
+    ("HTTP/1.1 " + status + "\r\nContent-Type: " + content_type + "\r\nContent-Length: " + str_len(body).to_text() +
+        "\r\nConnection: close\r\n\r\n" + body).bytes()
+
+describe "finite pinned Podman Engine exec codec":
+    it "encodes independent exact JSON preserving literal argv environment and numeric user":
+        val request = _engine_exec_request_fixture_v3()
+        val create = linux_engine_exec_create_request_v3(request).unwrap()
+        expect(create.path).to_equal("/v5.2.5/libpod/containers/" + "b".repeat(64) + "/exec")
+        expect(create.method).to_equal("POST")
+        expect(create.body).to_equal("{\"Cmd\":[\"/bin/echo\",\"literal ; $(task)\",\"\",\"first\\nsecond\"],\"Env\":[\"A=value ; $(task)\\n\"],\"User\":\"1000:1001\",\"WorkingDir\":\"/work\",\"Privileged\":false,\"Tty\":false,\"AttachStdin\":false,\"AttachStdout\":false,\"AttachStderr\":false}")
+        val wire = linux_engine_exec_http_encode_v3(create).unwrap()
+        expect(wire).to_equal(("POST " + create.path + " HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: " + str_len(create.body).to_text() + "\r\n\r\n" + create.body).bytes())
+        expect(create.body.contains(request.nonce)).to_equal(false)
+
+    it "refuses unresolved secrets interactive modes wrong parents and invalid native exec IDs":
+        val request = _engine_exec_request_fixture_v3()
+        for kind in ["secret", "tty", "stdin", "timeout", "parent"]:
+            var changed = request
+            if kind == "secret": changed.environment = [ContainerExecEnvironmentEntryV3.SecretReference("A", "secret/key", "a".repeat(64))]
+            if kind == "tty": changed.terminal_mode = "tty"
+            if kind == "stdin": changed.stdin_requested = true
+            if kind == "timeout": changed.timeout_ms = 60001
+            if kind == "parent": changed.parent_runtime.native_id = "name"
+            expect(linux_engine_exec_create_request_v3(changed).is_err()).to_equal(true)
+        for native in ["--all", "name", "c".repeat(63), "b".repeat(64)]:
+            expect(linux_engine_exec_inspect_request_v3(request, native).is_err()).to_equal(true)
+
+    it "requires exact create Id and strict finite JSON without guessing a birth from partial response":
+        val body = "{\"Id\":\"" + "c".repeat(64) + "\"}\n"
+        expect(linux_engine_exec_create_id_v3(body, "b".repeat(64)).unwrap()).to_equal("c".repeat(64))
+        for changed in ["{", body + "{}", body.replace("Id", "ID"), body.replace("c".repeat(64), "name"),
+                body.replace("c".repeat(64), "b".repeat(64)), "{\"Id\":null}", "{\"Id\":{\"a\":{\"b\":{}}}}",
+                "{\"Id\":\"" + "c".repeat(64) + "\",\"Id\":\"" + "c".repeat(64) + "\"}"]:
+            expect(linux_engine_exec_create_id_v3(changed, "b".repeat(64)).is_err()).to_equal(true)
+
+    it "matches exact exec parent process options and permits null tail only for command-only requests":
+        val request = _engine_exec_request_fixture_v3()
+        val inspected = linux_engine_exec_inspect_decode_v3(_engine_exec_inspect_fixture_v3(), request, "c".repeat(64)).unwrap()
+        expect(inspected.running).to_equal(false)
+        expect(inspected.exit_code).to_equal(0)
+        expect(inspected.pid).to_equal(0)
+        var command_only = request
+        command_only.argv = ["/bin/echo"]
+        expect(linux_engine_exec_inspect_decode_v3(_engine_exec_inspect_fixture_v3("null"), command_only, "c".repeat(64)).is_ok()).to_equal(true)
+        expect(linux_engine_exec_inspect_decode_v3(_engine_exec_inspect_fixture_v3("null"), request, "c".repeat(64)).is_err()).to_equal(true)
+        for changed in [_engine_exec_inspect_fixture_v3().replace("1000:1001", "builder"),
+                _engine_exec_inspect_fixture_v3().replace("\"privileged\":false", "\"privileged\":true"),
+                _engine_exec_inspect_fixture_v3().replace("\"OpenStdin\":false", "\"OpenStdin\":true"),
+                _engine_exec_inspect_fixture_v3().replace("\"Running\":false", "\"Running\":true"),
+                _engine_exec_inspect_fixture_v3().replace("\"Pid\":0", "\"Pid\":1.0"),
+                _engine_exec_inspect_fixture_v3().replace("b".repeat(64), "e".repeat(64))]:
+            expect(linux_engine_exec_inspect_decode_v3(changed, request, "c".repeat(64)).is_err()).to_equal(true)
+
+    it "uses pinned detached start request and exact status200 ASCII LF response":
+        val request = _engine_exec_request_fixture_v3()
+        val start = linux_engine_exec_start_request_v3(request, "c".repeat(64)).unwrap()
+        expect(start.path).to_equal("/v5.2.5/libpod/exec/" + "c".repeat(64) + "/start")
+        expect(start.body).to_equal("{\"Detach\":true,\"Tty\":false}")
+        expect(linux_engine_exec_http_decode_v3("start", _engine_exec_wire_fixture_v3("200 OK", "text/plain; charset=us-ascii", "\n")).unwrap().body).to_equal("\n")
+        for body in ["", "\"\"\n", "\n\n"]:
+            expect(linux_engine_exec_http_decode_v3("start", _engine_exec_wire_fixture_v3("200 OK", "text/plain; charset=us-ascii", body)).is_err()).to_equal(true)
+        expect(linux_engine_exec_http_decode_v3("start", _engine_exec_wire_fixture_v3("204 No Content", "text/plain; charset=us-ascii", "")).is_err()).to_equal(true)
+
+    it "refuses duplicates injection overflow chunking incomplete and trailing finite HTTP framing":
+        val body = "{\"Id\":\"" + "c".repeat(64) + "\"}\n"
+        val wire_text = "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: " + str_len(body).to_text() + "\r\nConnection: close\r\n\r\n" + body
+        expect(linux_engine_exec_http_decode_v3("create", wire_text.bytes()).unwrap().body).to_equal(body)
+        for changed in [wire_text + "x", wire_text.substring(0, str_len(wire_text) - 1),
+                wire_text.replace("Content-Length:", "Content-Length: 999999999999999999999999999999\r\nX-Length:"),
+                wire_text.replace("Connection: close", "Content-Length: 1\r\nConnection: close"),
+                wire_text.replace("Connection: close", "Transfer-Encoding: chunked\r\nConnection: close"),
+                wire_text.replace("Created", "Created\nInjected: yes"),
+                wire_text.replace("Created", "Created\tInjected"),
+                wire_text.replace("\r\nConnection: close", "\n\r\nConnection: close"),
+                wire_text.replace("\r\nConnection: close", "\r\r\nConnection: close"),
+                wire_text.replace("application/json", "application/sdn"), wire_text.replace("201 Created", "200 OK")]:
+            expect(linux_engine_exec_http_decode_v3("create", changed.bytes()).is_err()).to_equal(true)
+
+    it "hashes actual HTTP evidence in a distinct socket-policy domain without CLI commands":
+        val create = linux_engine_exec_create_request_v3(_engine_exec_request_fixture_v3()).unwrap()
+        val query = linux_engine_exec_query_digest_v3(create, "a".repeat(64)).unwrap()
+        expect(linux_engine_exec_query_digest_v3(create, "d".repeat(64)).unwrap() == query).to_equal(false)
+        val body = "{\"Id\":\"" + "c".repeat(64) + "\"}\n"
+        val evidence = linux_engine_exec_response_evidence_digest_v3("create", _engine_exec_wire_fixture_v3("201 Created", "application/json", body), query).unwrap()
+        expect(linux_engine_exec_response_evidence_digest_v3("create", _engine_exec_wire_fixture_v3("201 Another", "application/json", body), query).unwrap() == evidence).to_equal(false)
