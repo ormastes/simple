@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn spawn_is_refused_when_no_sandbox_exists() {
-        let args = [Value::text("cmd"), Value::Array(vec![])];
+        let args = [Value::text("cmd"), Value::Nil];
         assert_eq!(rt_browser_renderer_spawn_sandboxed(&args).unwrap(), Value::Int(-1));
         assert_eq!(rt_browser_renderer_sandbox_enter(&[]).unwrap(), Value::Bool(false));
         assert_eq!(rt_browser_renderer_sandbox_netns_active(&[]).unwrap(), Value::Bool(false));
