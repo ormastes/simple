@@ -1,6 +1,7 @@
 # Linux OCI execution request values and immutable payload identity.
 use std.common.contracts.container.execution_options_v1.{OciEnvironmentEntryV1, oci_execution_options_v1}
 use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
 
 pub struct LinuxOciRequestV1:
     pod_uid: text
@@ -36,6 +37,9 @@ pub struct LinuxOciRequestV1:
     user_uid: i64 = -1
     user_gid: i64 = -1
     user_namespace_mode: text = ""
+    # A selected candidate uses V4 data; legacy effect paths refuse it until a
+    # separately installed containment owner exists. Empty preserves V1–V3.
+    containment_profile_digest: text = ""
 
 pub fn linux_oci_user_selection_v3(request: LinuxOciRequestV1) -> bool:
     request.user_uid != -1 or request.user_gid != -1 or request.user_namespace_mode != ""
@@ -44,6 +48,8 @@ pub fn linux_oci_user_selection_v3(request: LinuxOciRequestV1) -> bool:
 # intent. Every execution field, including currently inert fields, is included.
 # Field hashes keep arbitrary UTF-8 and delimiters unambiguous in canonical SDN.
 fn request_fields_v1(request: LinuxOciRequestV1) -> Result<[text], text>:
+    if request.containment_profile_digest != "" and not builder_digest_valid_v1(request.containment_profile_digest):
+        return Err("request-containment-profile-digest-invalid")
     if linux_oci_user_selection_v3(request):
         if (request.user_uid < 0 or request.user_uid > 4294967294 or
                 request.user_gid < 0 or request.user_gid > 4294967294 or request.user_namespace_mode != "keep-id"):
@@ -89,6 +95,10 @@ pub fn linux_oci_request_digest_v1(request: LinuxOciRequestV1) -> Result<text, t
         body = "version: 3\nkind: linux-oci-request-digest\nterminalMode: " + request.terminal_mode + "\n" +
             "userUid: " + request.user_uid.to_text() + "\nuserGid: " + request.user_gid.to_text() +
             "\nuserNamespaceMode: keep-id\n"
+    if request.containment_profile_digest != "":
+        body = "version: 4\nkind: linux-oci-request-digest\nterminalMode: " + request.terminal_mode + "\n" +
+            "userUid: " + request.user_uid.to_text() + "\nuserGid: " + request.user_gid.to_text() + "\n" +
+            "userNamespaceMode: \"" + request.user_namespace_mode + "\"\ncontainmentProfileDigest: \"" + request.containment_profile_digest + "\"\n"
     var index = 0
     while index < names.len():
         body = body + names[index] + "Digest: \"" + sha256_text(values[index]) + "\"\n"
