@@ -20894,6 +20894,13 @@ void rt_trap_unimplemented(const char *symbol) {
  * plus the legacy untagged id 0 used by pure-Simple MIR); older hashed
  * Result values are still matched by Ok/Err name hash. */
 int64_t rt_unwrap_or_trap(int64_t value) {
+    /* Flat nil is absent, just like boxed Option.None. Check before the
+     * non-enum passthrough so false, zero and present Char stay unchanged. */
+    if (value == rt_core_nil()) {
+        fprintf(stderr, "simple runtime: .unwrap() called on None\n");
+        fflush(stderr);
+        abort();
+    }
     int64_t enum_id = rt_enum_id(value);
     int64_t discriminant;
     if (enum_id < 0) return value;
