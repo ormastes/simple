@@ -1,5 +1,6 @@
 /* AUTHORED_UNRUN. Actual private files/kernel no-replace, no socket claims.
- * Requires isolated privileged Linux fixture for the actual foreign-UID case.
+ * Default/--privileged requires root for the actual foreign-UID case.
+ * --unprivileged explicitly reports that case BLOCKED, never passed/skipped.
  * close fault injection consumes the REAL fd, then returns EINTR once. */
 #define _GNU_SOURCE
 #include <unistd.h>
@@ -61,7 +62,11 @@ int main(int argc,char **argv) {
         assert(rt_retained_private_credential_close_v1(token)==0);
         return result==0?0:2;
     }
-    if (geteuid()!=0) { fprintf(stderr,"precondition: isolated privileged UID-mismatch fixture required\n"); return 1; }
+    int unprivileged=argc==2 && !strcmp(argv[1],"--unprivileged");
+    if (!(argc==1 || unprivileged || (argc==2 && !strcmp(argv[1],"--privileged")))) {
+        fprintf(stderr,"usage: %s [--privileged|--unprivileged]\n",argv[0]); return 1;
+    }
+    if (!unprivileged && geteuid()!=0) { fprintf(stderr,"precondition: isolated privileged UID-mismatch fixture required; foreign-UID BLOCKED\n"); return 1; }
     char root[]="/tmp/simple-private-credential-XXXXXX"; assert(mkdtemp(root)); assert(chmod(root,0700)==0);
     char path[512],ready_path[520],ready[512];
     snprintf(path,sizeof(path),"%s/owner",root); snprintf(ready_path,sizeof(ready_path),"%s.ready",path);
@@ -88,7 +93,10 @@ int main(int argc,char **argv) {
     struct stat live; assert(fstat(unrelated,&live)==0); assert(close(unrelated)==0);
     /* Exact final mode, foreign UID and symlink rejection use real metadata. */
     assert(chmod(path,0640)==0); int64_t denied=acquire(path); assert(denied>0 && rt_retained_private_credential_state_v1(denied)==RPC_UNCERTAIN); assert(rt_retained_private_credential_close_v1(denied)==0);
-    assert(chmod(path,0600)==0); assert(chown(path,1,1)==0); denied=acquire(path); assert(denied>0 && rt_retained_private_credential_state_v1(denied)==RPC_UNCERTAIN); assert(rt_retained_private_credential_close_v1(denied)==0); assert(chown(path,0,0)==0);
+    assert(chmod(path,0600)==0);
+    if (!unprivileged) {
+        assert(chown(path,1,1)==0); denied=acquire(path); assert(denied>0 && rt_retained_private_credential_state_v1(denied)==RPC_UNCERTAIN); assert(rt_retained_private_credential_close_v1(denied)==0); assert(chown(path,0,0)==0);
+    }
     char alias[512]; snprintf(alias,sizeof(alias),"%s/alias",root); assert(symlink("owner",alias)==0);
     denied=acquire(alias); assert(denied>0 && rt_retained_private_credential_state_v1(denied)==RPC_UNCERTAIN); assert(rt_retained_private_credential_close_v1(denied)==0); assert(unlink(alias)==0);
     /* No writer exists: a blocking leaf open would hit the global watchdog. */
@@ -113,6 +121,12 @@ int main(int argc,char **argv) {
     int results[2]; for (int i=0;i<2;i++) { assert(waitpid(racers[i],&status,0)==racers[i] && WIFEXITED(status)); results[i]=WEXITSTATUS(status); }
     assert((results[0]==0 && results[1]==2)||(results[0]==2 && results[1]==0)); ready_bytes(ready,sizeof(ready),racers[results[0]==0?0:1]); same_file(ready_path,ready);
     same_file(path,initial); assert(unlink(path)==0 && unlink(ready_path)==0 && rmdir(root)==0);
+    if (unprivileged) {
+        puts("unprivileged subset PASS");
+        puts("foreign-UID BLOCKED: requires isolated privileged fixture");
+    } else {
+        puts("privileged full fixture PASS: includes actual foreign-UID rejection");
+    }
     return 0;
 #endif
 }

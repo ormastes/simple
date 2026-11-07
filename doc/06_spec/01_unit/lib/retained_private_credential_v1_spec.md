@@ -14,3 +14,17 @@ The test's loopback port 1 is protocol validation data only. No listening socket
 The native prevention selfcheck uses real Linux private files and kernel no-replace publication. It checks copied generations, duplicate publication, fork rejection, mode and actual foreign-UID rejection, symlink, unwritten FIFO and writable-ancestor refusal, directory rename anchoring, final content/permissions, and separate exec-process competing publishers. FIFO acquisition must return without a writer; a blocking-open regression hits the failing watchdog. It requires an isolated privileged Linux fixture for the actual foreign-UID case and fails its precondition otherwise. A 20-second watchdog bounds the selfcheck.
 
 Its close fault injection performs the real OS close, then reports EINTR once. This tests consumed-descriptor error handling and proves a later copied close cannot affect an unrelated reused descriptor. It is not a simulated successful native operation or evidence that a particular kernel close failure occurred naturally. The uncertain token remains queryable; descriptor effects are never retried.
+
+The native selfcheck's default mode and explicit `--privileged` require an
+isolated UID-0 Linux fixture and retain the actual foreign-UID ownership test.
+Without that fixture they fail precondition with exit 1; no elevation is
+attempted. Explicit `--unprivileged` runs all other assertions unchanged,
+including real filesystem/mode, copied generation, fork, FIFO, consumed-close,
+anchored rename, private final content and competing exec-process publication.
+Its successful output says `unprivileged subset PASS` and separately
+`foreign-UID BLOCKED: requires isolated privileged fixture`. That subset's
+exit 0 never qualifies the missing UID case or the privileged full fixture.
+Unknown mode arguments fail usage. Both modes retain the watchdog.
+
+Both modes remain **AUTHORED_UNRUN** in this source checkpoint; no new runtime
+PASS is recorded here.

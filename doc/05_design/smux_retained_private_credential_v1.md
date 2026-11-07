@@ -1,5 +1,11 @@
 # Retained private credential V1
 
+Native prevention qualification has two explicit scopes. Default/`--privileged`
+requires an isolated UID-0 fixture to check an actual foreign-UID file.
+`--unprivileged` retains all other real native assertions and labels its result
+as subset-only, with foreign-UID **BLOCKED**. No automatic elevation or implicit
+successful skip is permitted. Neither mode has been executed at this checkpoint.
+
 Leaf opens also use O_NONBLOCK so a substituted FIFO cannot wait for a writer
 before regular-file validation. Cryptographic entropy uses nonblocking
 getrandom and fails if unavailable. Publication snapshots both borrowed input
