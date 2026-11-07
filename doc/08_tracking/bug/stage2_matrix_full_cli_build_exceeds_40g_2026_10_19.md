@@ -140,3 +140,39 @@ Findings against base `origin/release/1.0.0` @ 27e65c24371:
 next sanctioned Stage 2 rerun (s2d). Close this bug as fixed if that peak is
 under 40 GiB. If it is not, reopen it with `SIMPLE_PHASE_RSS=1` per-phase
 attribution.
+
+## 2026-11-07 Phase-4 q0019 / q0021 (mem-p4cap, evidence; no code change)
+
+Jobs (s4e queue, `C:/dev/p3new/s4/out/s4e_q/<id>`, binary
+`s3_fable57s_p4.exe`, 24,489,472 bytes, built 2026-11-07 08:30 +0900):
+
+| job | MIR shards planned | first obj | objs | peak tree | verdict |
+|---|---|---|---|---|---|
+| q0021 (L2 08:46) | 2 | 688.8 s | 5 | 16.35 GB | killed at cap 16 |
+| q0019 (L2 10:29) | 1 | none | 0 | 24.37 GB | killed (cap/commit) |
+
+Both `native-build.log.err` files print
+`[mir-shard] disabled: output format re-reads MIR set`. The command
+(`fable_s4e_build.ps1`: `native-build --entry-closure ... -o simple_s4.exe`)
+selects `OutputFormat.Both`. On `origin/release/1.0.0` Both no longer refuses
+(728ddb0170f + 5a45cad0d94, 2026-11-02: per-module SMF parts,
+`smf_staged_output_format_refusal_v1` refuses only SMF / self-contained). The
+binary lacks that fix: it contains no `MIR shard SMF part` string (the error
+text 5a45cad0d94 added), so its baked source predates 2026-11-02. With the
+refusal, the whole MIR closure stays in `ctx.mir_modules` through codegen,
+the term this bug already names as dominant.
+
+Root cause for these jobs: a stale stage3 producer, not a new retention path
+in source. Nothing to change in `src/` for it.
+
+Second gap (harness, not product): `fable_s4e_build.ps1` does not set
+`SIMPLE_NATIVE_STAGED_CODEGEN_BATCH`, and its default is 0 (off) outside the
+bootstrap scripts (`native_staged_codegen_batch_size_v1`). With `shards=1`
+(q0019) nothing evicts MIR even on a fixed binary. Phase-4 runs should set
+`SIMPLE_NATIVE_STAGED_CODEGEN_BATCH=32`, like the bootstrap lane.
+
+Required check to close: on the next stage3 built from source that includes
+728ddb0170f (Fable owns stage3 builds), rerun q0019 and q0021 with
+`SIMPLE_NATIVE_STAGED_CODEGEN_BATCH=32` under cap 16. Pass = no
+`[mir-shard] disabled` line and peak tree RSS under 16 GB. Record the
+before/after peak and wall time here.

@@ -16,6 +16,13 @@ use crate::mir::{
 
 use super::types_util::type_to_cranelift;
 
+
+// Also compiled by the standalone compiler backfill; keep the policy in one
+// dependency-free source rather than importing this module's HIR/MIR owners.
+#[path = "function_alignment.rs"]
+mod function_alignment;
+pub use function_alignment::{define_function_aligned, MIN_FUNCTION_ALIGNMENT};
+
 /// Stable runtime type ID shared by native enum constructors and match checks.
 /// IDs 0 and 1 are reserved for the built-in Result and Option types.
 pub(crate) fn enum_runtime_type_id(runtime_name: &str) -> u32 {
@@ -88,7 +95,7 @@ pub fn create_body_stub<M: Module>(
         builder.finalize();
     }
 
-    module.define_function(func_id, ctx).map_err(|e| e.to_string())?;
+    define_function_aligned(module, func_id, ctx).map_err(|e| e.to_string())?;
     module.clear_context(ctx);
 
     Ok(func_id)

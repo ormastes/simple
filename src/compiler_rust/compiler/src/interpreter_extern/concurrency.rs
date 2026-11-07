@@ -389,11 +389,11 @@ pub fn rt_thread_spawn_isolated_with_context(
     }
 
     // Extract the closure
-    let (params, body, captured_env) = match &args[0] {
-        Value::Lambda { params, body, env } => (params.clone(), body.clone(), Env::clone(env)),
-        _ => {
+    let (params, body, captured_env) = match isolated_entry_as_lambda(&args[0]) {
+        Some(entry) => entry,
+        None => {
             return Err(CompileError::Runtime(
-                "rt_thread_spawn_isolated expects first argument to be a closure".to_string(),
+                "rt_thread_spawn_isolated expects first argument to be a closure or function".to_string(),
             ))
         }
     };
@@ -429,6 +429,28 @@ pub fn rt_thread_spawn_isolated_with_context(
     Ok(Value::Int(handle_id))
 }
 
+/// A thread entry is a closure or a named function value. A named function is
+/// run as the equivalent call `name(p0, p1, ...)` over its captured environment,
+/// so `spawn(worker_fn, a, b)` behaves like `spawn(, b: worker_fn(a, b), a, b)`.
+fn isolated_entry_as_lambda(entry: &Value) -> Option<(Vec<String>, Box<Expr>, Env)> {
+    match entry {
+        Value::Lambda { params, body, env } => Some((params.clone(), body.clone(), Env::clone(env))),
+        Value::Function { name, def, captured_env } => {
+            let params: Vec<String> = def.params.iter().map(|p| p.name.clone()).collect();
+            let call_args = params
+                .iter()
+                .map(|p| simple_parser::ast::Argument::new(None, Expr::Identifier(p.clone())))
+                .collect();
+            let body = Box::new(Expr::Call {
+                callee: Box::new(Expr::Identifier(name.clone())),
+                args: call_args,
+            });
+            Some((params, body, Env::clone(captured_env)))
+        }
+        _ => None,
+    }
+}
+
 /// Spawn isolated thread with explicit arguments and interpreter context
 ///
 /// Executes the closure synchronously with full interpreter context.
@@ -448,11 +470,11 @@ pub fn rt_thread_spawn_isolated_with_args_context(
     }
 
     // Extract the closure
-    let (params, body, captured_env) = match &args[0] {
-        Value::Lambda { params, body, env } => (params.clone(), body.clone(), Env::clone(env)),
-        _ => {
+    let (params, body, captured_env) = match isolated_entry_as_lambda(&args[0]) {
+        Some(entry) => entry,
+        None => {
             return Err(CompileError::Runtime(
-                "rt_thread_spawn_isolated_with_args expects first argument to be a closure".to_string(),
+                "rt_thread_spawn_isolated_with_args expects first argument to be a closure or function".to_string(),
             ))
         }
     };

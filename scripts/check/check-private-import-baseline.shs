@@ -1,0 +1,142 @@
+#!/bin/sh
+# Ratchet gate for scripts/check/private_import_baseline.txt.
+#
+# The baseline freezes legacy `file|name` pairs: a private (bare `fn`, not
+# exported) top-level fn that other directories import via a braced `use`.
+# The interpreter warns on those and ERRORS on any pair not listed. This gate:
+#   1. fails on a STALE entry -- the file is gone, or `name` is no longer a
+#      private top-level fn there (became `pub`, exported, renamed, removed);
+#   2. fails if the baseline GAINED any line relative to a base revision, so
+#      it can only shrink (removals only).
+#
+#   sh scripts/check/check-private-import-baseline.shs [--root DIR] [--base REV] [--selftest]
+#
+# --base defaults to the merge-base of HEAD with origin/release/1.0.0; when the
+# base revision has no baseline file (the introducing change) the ratchet check
+# is skipped and says so.
+#
+# Last stdout line is the verdict:
+#   PASS - <n> baseline entries checked, 0 stale, 0 added vs <base>   (exit 0)
+#   FAIL - ...                                                        (exit 1)
+#   ERROR - nothing was checked (<reason>)                            (exit 2)
+set -u
+
+BASELINE_REL="scripts/check/private_import_baseline.txt"
+
+stale_scan() {
+    scan_root=$1
+    base="$scan_root/$BASELINE_REL"
+    (cd "$scan_root" && awk -F'|' '
+        function load(f,   line, n, rest) {
+            delete priv; delete expo
+            if ((getline line < f) < 0) { missing = 1; close(f); return }
+            missing = 0
+            do {
+                if (match(line, /^fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                    n = substr(line, RSTART, RLENGTH); sub(/^fn[ \t]+/, "", n); priv[n] = 1
+                } else if (match(line, /^export[ \t]+/) && line !~ /^export[ \t]+use[ \t]/) {
+                    rest = substr(line, RLENGTH + 1); gsub(/[,]/, " ", rest)
+                    split(rest, parts, /[ \t]+/)
+                    for (i in parts) if (parts[i] != "") expo[parts[i]] = 1
+                }
+            } while ((getline line < f) > 0)
+            close(f)
+        }
+        {
+            f = $1; name = $2
+            if (f != cur) { cur = f; load(f) }
+            if (missing || !(name in priv) || (name in expo)) print $0
+        }' "$BASELINE_REL")
+}
+
+# prints added lines (current minus base); returns 3 when base has no baseline.
+added_scan() {
+    ascan_root=$1; abase=$2
+    tmp_base=$(mktemp) || return 4
+    if ! git -C "$ascan_root" show "$abase:$BASELINE_REL" > "$tmp_base" 2>/dev/null; then
+        rm -f "$tmp_base"; return 3
+    fi
+    LC_ALL=C sort -u "$tmp_base" > "$tmp_base.s"
+    LC_ALL=C sort -u "$ascan_root/$BASELINE_REL" > "$tmp_base.c"
+    LC_ALL=C comm -13 "$tmp_base.s" "$tmp_base.c"
+    rm -f "$tmp_base" "$tmp_base.s" "$tmp_base.c"
+    return 0
+}
+
+scan() {
+    sroot=$1; sbase=$2
+    file="$sroot/$BASELINE_REL"
+    [ -f "$file" ] || { echo "ERROR - nothing was checked (missing $file)"; return 2; }
+    total=$(wc -l < "$file" | tr -d ' ')
+    [ "$total" -gt 0 ] || { echo "ERROR - nothing was checked (empty baseline)"; return 2; }
+    stale=$(stale_scan "$sroot")
+    if [ -n "$stale" ]; then
+        k=$(printf '%s\n' "$stale" | wc -l | tr -d ' ')
+        first=$(printf '%s\n' "$stale" | head -5 | tr '\n' ' ')
+        echo "FAIL - $total checked, $k stale: $first"
+        return 1
+    fi
+    if [ -z "$sbase" ]; then
+        sbase=$(git -C "$sroot" merge-base HEAD origin/release/1.0.0 2>/dev/null || true)
+    fi
+    if [ -z "$sbase" ]; then
+        echo "ERROR - nothing was checked (no --base given and no merge-base with origin/release/1.0.0)"
+        return 2
+    fi
+    added=$(added_scan "$sroot" "$sbase"); arc=$?
+    case $arc in
+        3) echo "PASS - $total baseline entries checked, 0 stale; ratchet skipped (base $sbase has no baseline: introducing change)"; return 0 ;;
+        0) ;;
+        *) echo "ERROR - nothing was checked (ratchet scan failed)"; return 2 ;;
+    esac
+    if [ -n "$added" ]; then
+        k=$(printf '%s\n' "$added" | wc -l | tr -d ' ')
+        first=$(printf '%s\n' "$added" | head -5 | tr '\n' ' ')
+        echo "FAIL - baseline gained $k line(s) vs $sbase (removals only): $first"
+        return 1
+    fi
+    echo "PASS - $total baseline entries checked, 0 stale, 0 added vs $sbase"
+    return 0
+}
+
+selftest() {
+    d=$(mktemp -d) || { echo "ERROR - nothing was checked (mktemp)"; return 2; }
+    trap 'rm -rf "$d"' EXIT INT TERM HUP
+    mkdir -p "$d/scripts/check" "$d/lib"
+    printf 'fn live() -> i64:\n    1\npub fn promoted() -> i64:\n    2\nfn exported() -> i64:\n    3\nexport exported\nfn other() -> i64:\n    4\n' > "$d/lib/m.spl"
+    (cd "$d" && git init -q && git config core.autocrlf false && git config user.email t@t && git config user.name t \
+        && printf 'lib/m.spl|live\nlib/m.spl|other\n' > "$BASELINE_REL" && git add -A && git commit -qm base) \
+        || { echo "ERROR - selftest: git fixture failed"; return 2; }
+    b=$(git -C "$d" rev-parse HEAD)
+    out=$(scan "$d" "$b" | tail -1); case $out in PASS*) ;; *) echo "ERROR - selftest: live entries must PASS ($out)"; return 2 ;; esac
+    printf 'lib/m.spl|live\n' > "$d/$BASELINE_REL"
+    out=$(scan "$d" "$b" | tail -1); case $out in PASS*) ;; *) echo "ERROR - selftest: a removal must PASS ($out)"; return 2 ;; esac
+    printf 'lib/m.spl|live\nlib/m.spl|other\nlib/m.spl|promoted\n' > "$d/$BASELINE_REL"
+    out=$(scan "$d" "$b" | tail -1); case $out in FAIL*promoted*) ;; *) echo "ERROR - selftest: pub entry must be stale ($out)"; return 2 ;; esac
+    printf 'lib/m.spl|live\nlib/m.spl|other\nlib/m.spl|exported\n' > "$d/$BASELINE_REL"
+    out=$(scan "$d" "$b" | tail -1); case $out in FAIL*) ;; *) echo "ERROR - selftest: exported entry must be stale ($out)"; return 2 ;; esac
+    printf 'fn extra() -> i64:\n    5\n' >> "$d/lib/m.spl"
+    printf 'lib/m.spl|live\nlib/m.spl|other\nlib/m.spl|extra\n' > "$d/$BASELINE_REL"
+    out=$(scan "$d" "$b" | tail -1); case $out in FAIL*gained*extra*) ;; *) echo "ERROR - selftest: an added line must FAIL the ratchet ($out)"; return 2 ;; esac
+    printf 'lib/gone.spl|live\n' > "$d/$BASELINE_REL"
+    out=$(scan "$d" "$b" | tail -1); case $out in FAIL*) ;; *) echo "ERROR - selftest: missing file must be stale ($out)"; return 2 ;; esac
+    : > "$d/$BASELINE_REL"
+    scan "$d" "$b" >/dev/null; [ $? -eq 2 ] || { echo "ERROR - selftest: empty baseline must ERROR"; return 2; }
+    return 0
+}
+
+main_root=.
+main_base=
+mode=scan
+while [ $# -gt 0 ]; do
+    case $1 in
+        --root) main_root=$2; shift ;;
+        --base) main_base=$2; shift ;;
+        --selftest) mode=selftest ;;
+        *) echo "ERROR - nothing was checked (unknown arg $1)"; exit 2 ;;
+    esac
+    shift
+done
+( selftest ) || exit 2
+[ "$mode" = selftest ] && { echo "PASS - selftest fixtures ok"; exit 0; }
+scan "$main_root" "$main_base"

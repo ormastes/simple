@@ -308,3 +308,12 @@ pub(super) fn validate_trait_impl_arity(ast_module: &simple_parser::ast::Module)
         Err(LowerError::Unsupported(format!("trait conformance: {}", problems.join("; "))))
     }
 }
+
+/// Reject duplicate `impl` methods (same type, name and signature) so the JIT
+/// agrees with the interpreter (bug compiler_interpreter_integration_real_gaps_found_2026-09-06 gap 1).
+pub(super) fn validate_no_duplicate_impl_methods(ast_module: &simple_parser::ast::Module) -> LowerResult<()> {
+    match crate::impl_duplicate_check::find_duplicate_impl_method(&ast_module.items) {
+        Some(message) => Err(LowerError::Unsupported(message)),
+        None => Ok(()),
+    }
+}

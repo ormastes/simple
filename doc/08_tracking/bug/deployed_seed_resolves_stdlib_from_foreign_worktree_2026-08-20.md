@@ -51,3 +51,8 @@ compile-time baked source root; or redeploy a seed built in this worktree.
 `test/01_unit/app/office/sheets/access_controller_spec.spl` —
 "fails closed on a non-numeric match_count expectation" asserts the new
 guard's reason text and stays RED under the foreign-tree stdlib.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Same evidence and gate as deployed_binary_reads_stdlib_from_its_build_worktree_2026-08-25: scripts/check/check-stdlib-invoking-tree-wins.shs.

@@ -1428,9 +1428,11 @@ pub fn rt_file_mmap_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("rt_file_mmap_read_bytes requires 1 argument"));
     }
     let path = extract_path(args, 0)?;
-    let bytes =
-        fs::read(&path).map_err(|error| CompileError::runtime(format!("rt_file_mmap_read_bytes failed: {error}")))?;
-    Ok(Value::byte_array(bytes))
+    match fs::read(&path) {
+        Ok(bytes) => Ok(Value::byte_array(bytes)),
+        // Declared `[i64]?`: nil means mapping or read failure (C-runtime parity).
+        Err(_) => Ok(Value::Nil),
+    }
 }
 
 /// Identity function the optimizer must not see through.
@@ -3041,9 +3043,8 @@ mod tests {
         }
 
         let missing = dir.path().join("missing.bin").to_string_lossy().to_string();
-        let error =
-            rt_file_mmap_read_bytes(&[Value::text(missing)]).expect_err("missing mmap input must not become Nil");
-        assert!(error.to_string().contains("rt_file_mmap_read_bytes failed"));
+        let missing_result = rt_file_mmap_read_bytes(&[Value::text(missing)]).expect("missing mmap input yields nil, not an abort");
+        assert!(matches!(missing_result, Value::Nil), "declared [i64]? failure state is nil");
 
         let arity = rt_file_mmap_read_bytes(&[]).expect_err("mmap byte reader must reject missing arguments");
         assert!(arity.to_string().contains("requires 1 argument"));

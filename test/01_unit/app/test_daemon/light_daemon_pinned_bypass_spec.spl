@@ -1,0 +1,34 @@
+use std.spec.*
+use app.test_daemon.light_protocol.{light_request_encode_v2, light_request_parse_v2}
+use app.test_runner_new.daemon_backlog.{daemon_platform_bypass, daemon_backlog_bypass, count_pending_requests}
+
+# light_daemon_cannot_serve_pinned_native_exec_2026-11-03: decision = KEEP the
+# documented bypass. The v2 request carries path/expiry/env digest/generation
+# and NO binary or exec mode, so the daemon cannot serve a pinned native run
+# and the client must divert (compiler/binary-override/invoker bypass in
+# test_runner_client.spl). Behavioural pins reachable on any host; the
+# end-to-end client bypass messages are Linux-only (daemon_platform_bypass).
+# host-linux (client lane, run on Linux):
+#   bin/simple test <spec> --compiler=<x>   -> prints "compiler-select: ... bypassing test daemon"
+
+describe "light daemon pinned-binary bypass contract":
+    it "v2 request round-trips exactly four fields: no binary or exec mode can ride it":
+        val wire = light_request_encode_v2("a_spec.spl", 123, "digest", "gen")
+        val parsed = light_request_parse_v2(wire)
+        expect(parsed.0).to_equal("a_spec.spl")
+        expect(parsed.1).to_equal(123)
+        expect(parsed.2).to_equal("digest")
+        expect(parsed.3).to_equal("gen")
+        # A binary smuggled in as an extra header line is read as part of the path,
+        # never as a binary selection.
+        val smuggled = light_request_parse_v2("{wire}\nbinary=/x/simple")
+        expect(smuggled.0).to_contain("binary=/x/simple")
+
+    it "non-Linux hosts always bypass the light daemon":
+        expect(daemon_platform_bypass("windows")).to_equal(true)
+        expect(daemon_platform_bypass("macos")).to_equal(true)
+        expect(daemon_platform_bypass("linux")).to_equal(false)
+
+    it "a queued backlog diverts to the direct lane; in-flight and tmp entries are counted correctly":
+        expect(daemon_backlog_bypass(0)).to_equal(false)
+        expect(count_pending_requests(["a.req", "b.req.tmp", "c.resp"])).to_equal(1)

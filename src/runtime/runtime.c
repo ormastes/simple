@@ -1695,6 +1695,18 @@ int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t ex
     return expected_enum_id == 0 || enum_value->enum_id == 0 || enum_value->enum_id == (int32_t)expected_enum_id;
 }
 
+/* Cumulative example counters owned by the runtime. std.spec reads them through
+ * rt_bdd_executed_total / rt_bdd_failed_total (the interpreter bridge in
+ * interpreter_call/bdd.rs mirrors this contract). */
+static _Atomic int64_t g_bdd_total_passed = 0;
+static _Atomic int64_t g_bdd_total_failed = 0;
+
+void rt_bdd_record_result(int64_t passed) {
+    if (passed) atomic_fetch_add(&g_bdd_total_passed, 1); else atomic_fetch_add(&g_bdd_total_failed, 1);
+}
+int64_t rt_bdd_executed_total(void) { return atomic_load(&g_bdd_total_passed) + atomic_load(&g_bdd_total_failed); }
+int64_t rt_bdd_failed_total(void) { return atomic_load(&g_bdd_total_failed); }
+
 /* Standalone core-C requires the native BDD state and actual assertions.
  * The legacy hosted compatibility callbacks intentionally do nothing. */
 #if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
@@ -1710,7 +1722,7 @@ SPL_RUNTIME_NATIVE_TWIN void rt_bdd_it_start_rv(int64_t name_rv) {
 }
 
 SPL_RUNTIME_NATIVE_TWIN void rt_bdd_it_end(int64_t passed) {
-    (void)passed;
+    rt_bdd_record_result(passed);
 }
 
 SPL_RUNTIME_NATIVE_TWIN void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {

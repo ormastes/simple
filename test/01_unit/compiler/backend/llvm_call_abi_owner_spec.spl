@@ -1,0 +1,160 @@
+# Authored reproductions; no admitted source-matched runtime execution yet.
+use std.spec.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn abi_function(id: i64, name: text, params: [MirType], returns: MirType, locals: [MirLocal], instructions: [MirInst], result: MirOperand?) -> MirFunction:
+    MirFunction(symbol: SymbolId(id: id), name: name,
+        signature: MirSignature(params: params, return_type: returns, is_variadic: false), locals: locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: instructions,
+            terminator: MirTerminator.Ret(result))], entry_block: BlockId.entry(), span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+
+fn abi_const(value: MirConstValue, type_: MirType) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(value, type_))
+
+fn abi_ref(name: text, returns: MirType) -> MirOperand:
+    abi_const(MirConstValue.Str(name), MirType(kind: MirTypeKind.FuncPtr(
+        MirSignature(params: [], return_type: returns, is_variadic: false, params_known: true))))
+
+fn abi_local(id: i64, type_: MirType, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some("v{id}"), type_: type_, kind: kind, is_ghost: false)
+
+fn abi_module(functions: [MirFunction]) -> MirModule:
+    var table: Dict<SymbolId, MirFunction> = {}
+    for function in functions: table[function.symbol] = function
+    MirModule(name: "test.call_abi", functions: table, statics: {}, constants: {}, types: {})
+
+fn abi_ir(module: MirModule, bootstrap: bool) -> text:
+    var translator = MirToLlvm.create("test.call_abi", CodegenTarget.X86_64, nil)
+    translator.set_group_bootstrap_mode(bootstrap)
+    translator.translate_module_with_entry(module, true)
+
+fn abi_call_count(output: text, marker: text) -> i64:
+    var count = 0
+    for line in output.split("\n"):
+        if line.contains("call ") and line.contains(marker): count = count + 1
+    count
+
+describe "LLVM call ABI follows its declaration owner":
+    it "keeps local argv and eprint aliases on their scalar definitions in either emission order":
+        step("Each valid MIR local alias returns i64 rather than the runtime helper's ABI")
+        for name in ["get_args", "get_cli_args", "sys_get_args", "eprint"]:
+            for caller_name in ["aaa_caller", "zzz_caller"]:
+                for bootstrap in [false, true]:
+                    val local = abi_function(1, name, [], MirType.i64(), [], [],
+                        Some(abi_const(MirConstValue.Int(42), MirType.i64())))
+                    val dest = LocalId(id: 0)
+                    val caller = abi_function(2, caller_name, [], MirType.i64(),
+                        [abi_local(0, MirType.i64(), LocalKind.Temp)],
+                        [MirInst(kind: MirInstKind.Call(Some(dest), abi_ref(name, MirType.i64()), []), span: nil)],
+                        Some(mir_operand_copy(dest)))
+                    val output = abi_ir(abi_module([local, caller]), bootstrap)
+                    expect(output).to_contain("define i64 @{name}()")
+                    expect(output).to_contain("call i64 @{name}()")
+                    expect(abi_call_count(output, "@rt_get_args(")).to_equal(0)
+                    expect(abi_call_count(output, "@rt_eprint(")).to_equal(0)
+
+    it "retains nonlocal argv and eprint aliases on their runtime owners":
+        step("A bodyless alias must retain its runtime routing after ownership guards are added")
+        for name in ["get_args", "get_cli_args", "sys_get_args", "eprint"]:
+            val caller = abi_function(2, "caller", [], MirType.unit(), [],
+                [MirInst(kind: MirInstKind.Call(nil, abi_ref(name, MirType.unit()), []), span: nil)], nil)
+            val output = abi_ir(abi_module([caller]), false)
+            val runtime = if name == "eprint": "rt_eprint" else: "rt_get_args"
+            expect(abi_call_count(output, "@{runtime}(")).to_equal(1)
+            expect(abi_call_count(output, "@{name}(")).to_equal(0)
+            if name != "eprint":
+                expect(output).to_contain("call ptr @rt_get_args()")
+
+    it "keeps a local floating return ABI when the direct operand has an erased word signature":
+        step("The definition's double result is authoritative over call-site i64 metadata")
+        val real = MirType(kind: MirTypeKind.F64)
+        val local = abi_function(1, "floating", [], real, [], [], Some(abi_const(MirConstValue.Float(1.25), real)))
+        val dest = LocalId(id: 0)
+        val caller = abi_function(2, "aaa_caller", [], real, [abi_local(0, real, LocalKind.Temp)],
+            [MirInst(kind: MirInstKind.Call(Some(dest), abi_ref("floating", MirType.i64()), []), span: nil)],
+            Some(mir_operand_copy(dest)))
+        val output = abi_ir(abi_module([local, caller]), false)
+        expect(output).to_contain("define double @floating()")
+        expect(output).to_contain("call double @floating()")
+        expect(abi_call_count(output, "call i64 @floating(")).to_equal(0)
+
+    it "keeps a discarded direct result's nonvoid ABI":
+        step("Call(nil, ...) discards a result without changing the declared return convention")
+        val real = MirType(kind: MirTypeKind.F64)
+        val local = abi_function(1, "floating", [], real, [], [], Some(abi_const(MirConstValue.Float(1.25), real)))
+        val caller = abi_function(2, "aaa_caller", [], MirType.unit(), [],
+            [MirInst(kind: MirInstKind.Call(nil, abi_ref("floating", real), []), span: nil)], nil)
+        val output = abi_ir(abi_module([local, caller]), false)
+        expect(output).to_contain("  call double @floating()")
+        expect(abi_call_count(output, "call void @floating(")).to_equal(0)
+
+    it "preserves a fixed extern's unsigned narrow return when widening the result":
+        step("An extern u8 return is zero-extended to the caller's i64 result")
+        val tiny = MirType(kind: MirTypeKind.U8)
+        val dest = LocalId(id: 0)
+        val caller = abi_function(2, "aaa_caller", [], MirType.i64(), [abi_local(0, tiny, LocalKind.Temp)],
+            [MirInst(kind: MirInstKind.Call(Some(dest), abi_ref("external_byte", tiny), []), span: nil)],
+            Some(mir_operand_copy(dest)))
+        val output = abi_ir(abi_module([caller]), false)
+        expect(output).to_contain("declare i8 @external_byte()")
+        expect(output).to_contain("call i8 @external_byte()")
+        expect(output).to_contain("zext i8 %l0 to i64")
+
+    it "preserves typed unsigned results through a generic Call with a local function pointer":
+        step("A local callee has no named-function registry entry and must retain its MIR result signedness")
+        val tiny = MirType(kind: MirTypeKind.U8)
+        val signature = MirSignature(params: [], return_type: tiny, is_variadic: false, params_known: true)
+        val pointer = MirType(kind: MirTypeKind.FuncPtr(signature))
+        val dest = LocalId(id: 0)
+        val caller = abi_function(2, "aaa_caller", [pointer], MirType.i64(),
+            [abi_local(0, tiny, LocalKind.Temp), abi_local(1, pointer, LocalKind.Arg(0))],
+            [MirInst(kind: MirInstKind.Call(Some(dest), mir_operand_copy(LocalId(id: 1)), []), span: nil)],
+            Some(mir_operand_copy(dest)))
+        val output = abi_ir(abi_module([caller]), false)
+        expect(output).to_contain("call i8 %l1()")
+        expect(output).to_contain("zext i8 %l0 to i64")
+
+    it "retains dedicated CallIndirect signatures for consumed and discarded floating results":
+        step("Dedicated indirect calls retain double returns without any runtime alias mapping")
+        val real = MirType(kind: MirTypeKind.F64)
+        val signature = MirSignature(params: [], return_type: real, is_variadic: false, params_known: true)
+        val pointer = MirType(kind: MirTypeKind.FuncPtr(signature))
+        for consumed in [true, false]:
+            val dest = if consumed: Some(LocalId(id: 0)) else: nil
+            val returns = if consumed: real else: MirType.unit()
+            val result = if consumed: Some(mir_operand_copy(LocalId(id: 0))) else: nil
+            val caller = abi_function(2, "aaa_caller", [pointer], returns,
+                [abi_local(0, real, LocalKind.Temp), abi_local(1, pointer, LocalKind.Arg(0))],
+                [MirInst(kind: MirInstKind.CallIndirect(dest, mir_operand_copy(LocalId(id: 1)), [], signature), span: nil)], result)
+            val output = abi_ir(abi_module([caller]), false)
+            expect(abi_call_count(output, "call double %l1(")).to_equal(1)
+            expect(abi_call_count(output, "call void %l1(")).to_equal(0)
+
+    it "preserves declaration return authority through both function operand entry points":
+        step("Indexed and legacy function references cannot replace an existing declaration ABI")
+        var translator = MirToLlvm.create("test.call_abi", CodegenTarget.X86_64, nil)
+        translator.remember_function_return_type("floating", "double")
+        translator.remember_function_return_unsigned("floating", false)
+        val erased = abi_ref("floating", MirType.i64())
+        expect(translator.translate_operand(erased)).to_equal("@floating")
+        expect(translator.lookup_function_return_type("floating")).to_equal("double")
+        expect(translator.translate_operand_at([erased], 0)).to_equal("@floating")
+        expect(translator.lookup_function_return_type("floating")).to_equal("double")
+
+    it "records an extern return's unsigned identity through the legacy function operand path":
+        step("Both function operand paths retain the declared u8 signedness")
+        var translator = MirToLlvm.create("test.call_abi", CodegenTarget.X86_64, nil)
+        val tiny = abi_ref("external_byte", MirType(kind: MirTypeKind.U8))
+        expect(translator.translate_operand(tiny)).to_equal("@external_byte")
+        expect(translator.lookup_function_return_type("external_byte")).to_equal("i8")
+        expect(translator.lookup_function_return_unsigned("external_byte")).to_equal(true)

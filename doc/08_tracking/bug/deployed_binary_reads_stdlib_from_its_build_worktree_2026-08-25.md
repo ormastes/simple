@@ -102,3 +102,8 @@ Any measurement of `src/lib/**` behaviour taken with this deployed binary, from 
 than `parsefix-iso`, is **unverified** — it may have exercised either tree. This includes green
 results: a spec that passes may be passing against foreign source.
 
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Not reproducible on the current seed (sentinel 888 in an invoking-tree src/lib shadowing std.async_core is read; build tree has the module too). Gate: scripts/check/check-stdlib-invoking-tree-wins.shs --selftest <binary>. Run it against each deployed Linux binary to confirm.

@@ -145,3 +145,34 @@ remains pending per the board-runnable rule (no QEMU/board boot attempted
 this pass).
 
 **Revalidated 2026-11-02: still plausible because INVESTIGATING (root-cause candidates verified in binary artifacts; fix pending probe confirmation); no merged fix commit with a passing regression is cited in this doc.**
+
+## Re-verification 2026-11-07 (work/simpleos-p1-codegen-20261107) — findings 1-3 do not reproduce on current seed; finding 4 and board run unverified
+
+New seed test
+`src/compiler_rust/compiler/tests/baremetal_entry_closure_imported_class_x86_64_none.rs`
+builds this record's probe shape (shared module: scalar global read by a
+static ctor, heap-typed `[u64] = []` global pushed by a `me` method; entry
+module instantiates the imported class) through `NativeProjectBuilder` with
+`--entry-closure --target x86_64-unknown-none --backend cranelift
+--opt-level=aggressive --emit-archive` and inspects every archive member:
+
+- finding 1: `__module_init_class_probe` is DEFINED (plus the
+  `__simple_call_module_inits` aggregator) — the heap-typed global gets an
+  initializer (`codegen/common_backend.rs::generate_module_init` +
+  `native_project/module_global_init.rs`).
+- findings 2/3: every non-`rt_*` undefined reference
+  (`class_probe__ProbeCounter_dot_new`, `..._dot_bump`,
+  `class_probe__probe_events_len`, ...) has a matching definition in the
+  closure under one mangling, so nothing falls through to an `auto_stubs.c`
+  weak NIL stub.
+
+`cargo test --release -p simple-compiler --test baremetal_entry_closure_imported_class_x86_64_none`
+-> 1 passed. No product code changed (no red state existed to fix).
+
+Unverified: finding 4 (field-layout ordering) is not exercised at runtime by
+this static check, and the real `class_fault_probe_entry.spl` QEMU/board run
+(S1..S5/CLASSOK) was not performed (no QEMU-system/board in this session).
+Status stays INVESTIGATING until that run is done.
+
+These tests are local-only: CI `rust-tests.yml:112` excludes `simple-compiler`
+from `cargo test`, and they need clang/ld.lld (X86 target) and `qemu-x86_64`.

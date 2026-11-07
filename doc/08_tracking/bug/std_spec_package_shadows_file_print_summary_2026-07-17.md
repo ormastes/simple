@@ -329,3 +329,11 @@ Qualification requires targeted Rust checks plus a separately built, exactly
 identified Phase 1 producer and the original canonical skip fixture; an old
 producer cannot validate the source repair. No runtime or production PASS is
 claimed by this draft.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Resolution is fixed; the accessor defect remains: after a top-level describe runs one passing example, get_executed_test_count() is 0 (describe resets BDD_COUNTS; summary reads dead module vars). RED repro: test/01_unit/lib/spec_summary_after_describe_spec.spl. Fix needs a Rust bridge in interpreter_call/bdd.rs (cumulative counter + extern) and spec.spl rewiring: owner decision on the bridge name and native-lane behaviour.
+
+
+Round 15 update: runtime-owned cumulative BDD counter (interpreter bridge bdd.rs + runtime.c, read by spec.spl). On a seed built from this tree, spec_summary_after_describe_spec goes RED -> GREEN (get_executed_test_count()==1). Native C twin not run here (verification-pending on a native build).

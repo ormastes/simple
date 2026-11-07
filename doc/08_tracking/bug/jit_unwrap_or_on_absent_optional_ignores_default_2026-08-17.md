@@ -121,3 +121,16 @@ it is out of scope for a pure-Simple fix. Root cause file:line for the JIT arm
 still NOT located — deliberately not guessed at.
 
 **Revalidated 2026-11-02: still plausible because the report title (JIT: `.unwrap_or(default)` on an absent optional returns nil instead of the def) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Fixed 2026-11-07 — float default passed unboxed to `rt_unwrap_or_value`
+
+Root cause: the Cranelift method-call tail
+(`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`, the
+`rt_unwrap_or_value` arg loop) tag-boxed only an INT default. A float default
+reached the runtime as raw f64 bits; on the absent path those bits came back
+and were decoded as a tagged int, so `"abc".parse_float().unwrap_or(-1.0)`
+printed `-577023702256844800` (= 0xBFF0000000000000 >> 3). Fix: box F32/F64
+defaults via `rt_value_float`. Regression: `parse_float_none_unwrap_default`
+in `test/01_unit/compiler/codegen/probe_parse_family_option_jit.spl` — ALL PASS
+under both `SIMPLE_EXECUTION_MODE=jit` and `interpreter` on the rebuilt seed
+(Windows, clang-cl); red on the pre-fix seed.

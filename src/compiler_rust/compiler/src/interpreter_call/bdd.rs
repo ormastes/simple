@@ -148,6 +148,10 @@ thread_local! {
     pub(crate) static BDD_INDENT: RefCell<usize> = const { RefCell::new(0) };
     // (passed, failed) counts for current describe block
     pub(crate) static BDD_COUNTS: RefCell<(usize, usize)> = const { RefCell::new((0, 0)) };
+    // (passed, failed) cumulative over the whole process. BDD_COUNTS is reset when
+    // a top-level describe ends, so summary accessors imported from std.spec
+    // (`get_executed_test_count`) read these through `rt_bdd_*_total` instead.
+    pub(crate) static BDD_TOTALS: RefCell<(i64, i64)> = const { RefCell::new((0, 0)) };
     // Whether current "it" block has a failed expectation
     pub(crate) static BDD_EXPECT_FAILED: RefCell<bool> = const { RefCell::new(false) };
     // Whether we're currently inside an "it" block (expect should be silent)
@@ -1108,6 +1112,7 @@ pub(super) fn eval_bdd_builtin(
                     println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
                     println!("{}  \x1b[31m{}\x1b[0m", indent_str, e);
                     BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
+                    BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
                     let desc_path = get_current_describe_path();
                     record_test_result(desc_path, name_str.clone(), false, false);
                     // Don't propagate the error - allow other tests to run
@@ -1156,6 +1161,7 @@ pub(super) fn eval_bdd_builtin(
                             println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
                         }
                         BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
+                        BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
                         record_test_result(desc_path, name_str.clone(), false, false);
                     } else if pending {
                         // Same rule as spec.spl `_execute_it`: the pending counter
@@ -1169,6 +1175,7 @@ pub(super) fn eval_bdd_builtin(
                     } else {
                         println!("{}\x1b[32m✓ {}\x1b[0m", indent_str, name_str);
                         BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
+                        BDD_TOTALS.with(|cell| cell.borrow_mut().0 += 1);
                         record_test_result(desc_path, name_str.clone(), true, false);
                     }
 
@@ -2314,6 +2321,7 @@ pub fn clear_bdd_state() {
     // Clear local BDD state
     BDD_INDENT.with(|cell| *cell.borrow_mut() = 0);
     BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
+    BDD_TOTALS.with(|cell| *cell.borrow_mut() = (0, 0));
     BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
@@ -2455,5 +2463,52 @@ mod failure_retention_tests {
         assert!(out.contains("failure-15"), "{out}");
         assert!(!out.contains("failure-16"), "cap exceeded: {out}");
         assert!(out.contains("+4 more"), "missing overflow note: {out}");
+    }
+}
+
+/// `rt_bdd_executed_total() -> i64`: examples executed (passed + failed) so far.
+pub(crate) fn rt_bdd_executed_total(_args: &[crate::value::Value]) -> Result<crate::value::Value, CompileError> {
+    Ok(crate::value::Value::Int(BDD_TOTALS.with(|cell| {
+        let t = cell.borrow();
+        t.0 + t.1
+    })))
+}
+
+/// `rt_bdd_failed_total() -> i64`: examples that failed so far.
+pub(crate) fn rt_bdd_failed_total(_args: &[crate::value::Value]) -> Result<crate::value::Value, CompileError> {
+    Ok(crate::value::Value::Int(BDD_TOTALS.with(|cell| cell.borrow().1)))
+}
+
+/// `rt_bdd_record_result(passed: bool)`: lets the pure-Simple runner (spec.spl's
+/// own `_execute_it`) feed the same cumulative counter the intrinsics feed.
+pub(crate) fn rt_bdd_record_result(args: &[crate::value::Value]) -> Result<crate::value::Value, CompileError> {
+    let passed = match args.first() {
+        Some(crate::value::Value::Bool(b)) => *b,
+        Some(crate::value::Value::Int(i)) => *i != 0,
+        _ => false,
+    };
+    BDD_TOTALS.with(|cell| {
+        let mut t = cell.borrow_mut();
+        if passed { t.0 += 1 } else { t.1 += 1 }
+    });
+    Ok(crate::value::Value::Nil)
+}
+
+#[cfg(test)]
+mod totals_tests {
+    use super::*;
+    use crate::value::Value;
+
+    #[test]
+    fn totals_accumulate_and_survive_count_reset() {
+        clear_bdd_state();
+        rt_bdd_record_result(&[Value::Bool(true)]).unwrap();
+        rt_bdd_record_result(&[Value::Bool(false)]).unwrap();
+        // The per-describe reset must not touch the cumulative totals.
+        BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
+        assert!(matches!(rt_bdd_executed_total(&[]).unwrap(), Value::Int(2)));
+        assert!(matches!(rt_bdd_failed_total(&[]).unwrap(), Value::Int(1)));
+        clear_bdd_state();
+        assert!(matches!(rt_bdd_executed_total(&[]).unwrap(), Value::Int(0)));
     }
 }

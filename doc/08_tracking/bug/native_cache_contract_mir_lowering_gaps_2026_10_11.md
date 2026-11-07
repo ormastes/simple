@@ -24,3 +24,15 @@ DEFERRED. Blocker: the failing evidence is a native HIR/MIR run of the canonical
 - Record operator owner and section iteration owner: no retained repro (evidence was under /home/yoon) and no native Simple MIR runnable in the seed lane; NOT fixed here. Workarounds kept.
 
 Stage3 verify: revert the two `_copy_*_entries_v1` workarounds in canonical_cache_codec_v1.spl to `values.copy()` and run `test/01_unit/compiler/cache/cache_contract_codec_spec.spl` on stage3.
+
+## 2026-11-07 m-misc: seed-interpreter root causes (partial)
+
+Measured with a seed built from release/1.0.0 at cf999844c18 plus this fix (Windows, interpreter mode):
+- The `package_init_tld_physical_binding_v1_spec` failures (4/8) came from the seed interpreter, not the codec:
+  (1) `u8 << 8` stayed u8 (fixed upstream in 8def57c3b55, but the deployed seed predates it);
+  (2) inside an imported module, `f(r.read_u8())` evaluated the `me` method argument twice, so the TLD1 role
+      byte was read from the wrong offset (`unknown_tld_role`). That is fixed in current source; the Nov 7 10:34 seed still has it;
+  (3) `i64 | u8` / `i64 ^ u8` narrowed to u8 (`300 | 80` came out as 124). Fixed in this PR (`uint_arith_wrap_width`).
+- Result: package_init_tld 8/8 PASS. semantic_scope_authority 3/10 (now fails with `PinOrClosureMismatch`, so the decode-level
+  failure is gone). cache_contract_codec_spec still runs past 600 s. Still OPEN.
+- Regression spec: test/01_unit/compiler/95.interp/mixed_width_bitwise_and_method_arg_spec.spl (3/6 on the old seed, 6/6 fixed).
