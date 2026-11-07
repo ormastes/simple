@@ -1,0 +1,49 @@
+# Receipt integrity codec. A digest is not authenticated host provenance.
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, as_dict, as_text, as_int, only_known, require, reject}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub fn host_prepare_response_encode_v1(receipt: HostPreparedReservationReceiptV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2) -> Result<text, text>:
+    val checked = host_reservation_match_receipt_v1(receipt, intent, operation)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("host-prepare-response"), "operationId": SdnValue.String(receipt.operation_id),
+        "envelopeDigest": SdnValue.String(receipt.envelope_digest), "intentDigest": SdnValue.String(receipt.intent_digest),
+        "preparedRevision": SdnValue.Int(receipt.prepared_revision), "receiptDigest": SdnValue.String(receipt.receipt_digest)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.len() > 4096: return Err("host-prepare-response-too-large")
+    Ok(source)
+
+fn host_response_fields_v1(source: text) -> Result<HostPreparedReservationReceiptV1, RejectionV1>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 4096, max_depth: 2, max_nodes: 16,
+        max_rows: 0, max_cells: 0, max_columns: 8)
+    val parsed = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err(RejectionV1(kind: issue.code, path: "", message: issue.message, line: issue.line, col: issue.column))
+    val spans: Dict<text, SdnSpan> = {}
+    val fields = as_dict(parsed.value, "", spans)?
+    only_known(fields, ["version", "kind", "operationId", "envelopeDigest", "intentDigest", "preparedRevision", "receiptDigest"], "", spans)?
+    val version = as_int(require(fields, "version", "", spans)?, "version", spans)?
+    val kind = as_text(require(fields, "kind", "", spans)?, "kind", spans)?
+    if version != 1 or kind != "host-prepare-response": return Err(reject("version", "", "unsupported prepare response", spans))
+    val operation_id = as_text(require(fields, "operationId", "", spans)?, "operationId", spans)?
+    val envelope = as_text(require(fields, "envelopeDigest", "", spans)?, "envelopeDigest", spans)?
+    val intent = as_text(require(fields, "intentDigest", "", spans)?, "intentDigest", spans)?
+    val revision = as_int(require(fields, "preparedRevision", "", spans)?, "preparedRevision", spans)?
+    val digest = as_text(require(fields, "receiptDigest", "", spans)?, "receiptDigest", spans)?
+    Ok(HostPreparedReservationReceiptV1(operation_id: operation_id, envelope_digest: envelope,
+        intent_digest: intent, prepared_revision: revision, receipt_digest: digest))
+
+pub fn host_prepare_response_decode_v1(source: text, intent: HostReservationIntentV1,
+        operation: OperationEnvelopeV2) -> Result<HostPreparedReservationReceiptV1, text>:
+    if source.len() > 4096: return Err("host-prepare-response-too-large")
+    val receipt = match host_response_fields_v1(source):
+        case Ok(value): value
+        case Err(reason): return Err("host-prepare-response-invalid:" + reason.kind + ":" + reason.path)
+    val canonical = host_prepare_response_encode_v1(receipt, intent, operation)?
+    if canonical != source: return Err("host-prepare-response-not-canonical")
+    Ok(receipt)
