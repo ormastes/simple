@@ -6,6 +6,7 @@ use compiler.common.library_mode_policy_v1.{library_mode_policy_v1}
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.driver.driver_hir_cache.{
     hir_cache_key, hir_cache_header, hir_cache_enabled, hir_cache_store_in_owned_scope,
+    HirEncodedBodyV1, hir_encoded_body_for_v1,
     hir_cache_load_in_owned_scope, hir_cache_last_warnings,
     hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1
 }
@@ -110,7 +111,8 @@ fn hir_body_archive_content_key_v1(input_key: text, body_digest: text, warnings_
     sha256_text("owned-hir-body-content-v1\n" + input_key + "\n" + body_digest + "\n" + warnings_digest + "\n")
 
 fn hir_body_archive_store_in_owned_scope_v1(
-    input: HirBodyArchiveInputV1, module: HirModule, warnings: [text]
+    input: HirBodyArchiveInputV1, module: HirModule, warnings: [text],
+    encoded: HirEncodedBodyV1? = nil
 ) -> Result<HirBodyArchiveV1, text>:
     # The caller owns an ACTIVE scope and has initialized the cache identity
     # before opening it. This helper acquires/releases/promotes no lease roots.
@@ -124,11 +126,21 @@ fn hir_body_archive_store_in_owned_scope_v1(
     val input_key = hir_body_archive_input_key_v1(input)
     val identity_valid = input_key != ""
     val source_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry, input.library_mode, input.native_target)
-    val blob = if identity_valid: hir_module_encode(module) else: ""
-    val body_digest = sha256_text(blob)
+    # One encode serves both the body digest and the cache publication; a
+    # caller that already encoded this unchanged module in the same scope
+    # passes its receipt (stage2_hir_registration_reencode_timeout_2026-10-16).
+    var body: HirEncodedBodyV1? = nil
+    var blob = ""
+    var body_digest = sha256_text("")
+    if identity_valid:
+        val receipt = hir_encoded_body_for_v1(encoded, module)
+        body = Some(receipt)
+        blob = receipt.blob
+        if blob != "":
+            body_digest = receipt.digest
     val warnings_digest = hir_body_archive_warnings_digest_v1(warnings)
     val key = hir_body_archive_content_key_v1(input_key, body_digest, warnings_digest)
-    val stored = blob != "" and hir_cache_store_in_owned_scope(key, module, warnings, "", input.library_mode)
+    val stored = blob != "" and hir_cache_store_in_owned_scope(key, module, warnings, "", input.library_mode, body)
     if not identity_valid:
         return Err("body archive identity unavailable")
     if not stored:
