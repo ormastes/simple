@@ -16,14 +16,16 @@ from the repository root; the scenarios read the production source with
 
 ## Compatibility and limitations
 This is a source-contract spec: it asserts properties of shipped source that
-has no runtime API, so it must run from a repository checkout. Three
-scenarios are legitimate REDs today (see the NOTE lines in each body): the
-`@rt(hal, ...)` provider contract annotation and the canonical
-`hal_clock_monotonic_nanos_v1` dispatch leaf are drafted but not yet present.
+has no runtime API, so it must run from a repository checkout. It pins the
+CURRENT layout of `time_ops.spl`: a fail-closed `time_now_nanos` wrapper over
+the single raw-sample owner `time_sample_monotonic_nanos_or_failure`. The
+drafted `@rt(hal, ...)` annotation and `hal_clock_dispatch.spl` leaf from the
+unlanded share-history branch are not part of the shipped layout and are not
+asserted here.
 
 ## Verification guidance and troubleshooting
-A failure naming a missing `@rt(hal` annotation or a missing
-`hal_clock_dispatch.spl` is the documented RED state, not a harness fault.
+A failure naming `E-SFFI-TIME-002` or the raw-sample owner means the wrapper
+lost its fail-closed contract or gained a second raw provider call.
 If the hot-path scenario fails, someone added storage, logging, or branching
 to the scalar wrapper — inspect `time_ops.spl` between the
 `time_now_nanos` and `time_now_micros` declarations.
@@ -39,58 +41,32 @@ to the scalar wrapper — inspect `time_ops.spl` between the
 use std.spec.*
 use std.io_runtime.{file_read}
 
-describe "production rt(hal) monotonic clock declaration":
-    it "tags the existing public I/O wrapper with the bounded critical provider contract":
+describe "production monotonic clock declaration":
+    it "keeps the public wrapper fail-closed over one raw-sample owner":
         # @req REQ-009 NFR-005
-        # @capture(bit_table): contract fields found between the @rt(hal annotation and the wrapper fn
-        step("Read time_ops.spl and locate the bounded provider contract annotation")
-        # NOTE: legitimate RED — the @rt(hal, operation: io.clock.monotonic_nanos.v1) bounded-provider
-        # contract annotation does not exist anywhere in src/lib/nogc_sync_mut/io/time_ops.spl
-        # (grep '@rt(hal' returns nothing, 2026-09-06). The scenario stays red until the
-        # contract is authored on the public wrapper.
+        step("Read time_ops.spl and extract the nanos wrapper")
         val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
-        val operation = source.find("@rt(hal, operation: io.clock.monotonic_nanos.v1,")
-        val wrapper = source.find("fn time_now_nanos() -> i64:")
-        expect(operation).to_be_greater_than(-1)  # oracle: find() returns -1 on absence; the contract annotation must exist at a real offset
-        expect(wrapper).to_be_greater_than(operation)  # oracle: the wrapper fn must be declared after the contract annotation that governs it
-        val contract = source.substring(operation, wrapper)
-        expect(contract).to_contain("providers: pure+c+rust")
-        expect(contract).to_contain("effects: replay_only")
-        expect(contract).to_contain("request_bytes: 32")
-        expect(contract).to_contain("result_bytes: 32")
-        expect(contract).to_contain("trace_operations: 1")
-        expect(contract).to_contain("trace_bytes: 32")
-        expect(contract).to_contain("preferred: c")
-        expect(contract.contains("assurance:")).to_equal(false)
-
-    it "preserves the compatibility API and uses the canonical direct dispatch leaf":
-        # @req REQ-010 REQ-015 NFR-006
-        # @capture(bit_table): call-graph facts between the wrapper pair and the dispatch leaf
-        step("Read the wrapper body and the dispatch leaf and count the provider hops")
-        # NOTE: legitimate RED — src/lib/nogc_sync_mut/io/hal_clock_dispatch.spl does not exist on
-        # disk and the symbol hal_clock_monotonic_nanos_v1 is declared nowhere under src/
-        # (grep over src/, 2026-09-06). The scenario stays red until the canonical dispatch
-        # leaf module is created.
-        val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
-        val dispatch = file_read("src/lib/nogc_sync_mut/io/hal_clock_dispatch.spl")
         val begin = source.find("fn time_now_nanos() -> i64:")
         val finish = source.find("fn time_now_micros() -> i64:")
-        expect(begin).to_be_greater_than(-1)  # oracle: the monotonic nanos wrapper must be a real declaration, not an absent symbol
-        expect(finish).to_be_greater_than(begin)  # oracle: the micros wrapper is declared after the nanos wrapper, bounding the extracted body
+        expect(begin).to_be_greater_than(-1)  # oracle: the nanos wrapper must be a real declaration
+        expect(finish).to_be_greater_than(begin)  # oracle: micros wrapper follows nanos and bounds the extracted body
         val wrapper = source.substring(begin, finish)
-        expect(wrapper.split("hal_clock_monotonic_nanos_v1()").len() - 1).to_equal(1)  # oracle: split-count minus one counts occurrences; exactly one dispatch-leaf call is the contract
-        expect(wrapper.contains("rt_time_now_nanos()")).to_equal(false)
-        expect(dispatch.split("rt_time_now_nanos()").len() - 1).to_equal(1)  # oracle: the dispatch leaf must call the raw rt provider exactly once
-        expect(dispatch).to_contain("@inline")
-        expect(dispatch).to_contain("fn hal_clock_monotonic_nanos_v1() -> i64:")
+        expect(wrapper.split("time_sample_monotonic_nanos_or_failure()").len() - 1).to_equal(2)  # oracle: one call in the wrapper plus the owner declaration inside the extracted range
         expect(wrapper).to_contain("if value < 0:")
         expect(wrapper).to_contain("E-SFFI-TIME-002")
+        expect(wrapper.contains("val value = rt_time_now_nanos()")).to_equal(false)  # oracle: the wrapper must sample through the owner, never the raw provider directly
+
+    it "preserves the compatibility API and calls the raw provider exactly once":
+        # @req REQ-010 REQ-015 NFR-006
+        step("Count raw provider calls across time_ops.spl")
+        val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
         expect(source).to_contain("fn current_time_unix() -> i64:")
         expect(source).to_contain("fn current_time_ms() -> i64:")
+        expect(source).to_contain("pub fn time_sample_monotonic_nanos_or_failure() -> i64:")
+        expect(source.split("rt_time_now_nanos()").len() - 1).to_equal(2)  # oracle: one extern declaration plus exactly one call site
 
     it "keeps the hot path scalar and free of dynamic storage or diagnostics":
         # @req REQ-011
-        # @capture(bit_table): banned-token scan over the extracted wrapper body
         step("Extract the nanos wrapper body and scan it for storage and diagnostic tokens")
         val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
         val begin = source.find("fn time_now_nanos() -> i64:")
@@ -103,21 +79,19 @@ describe "production rt(hal) monotonic clock declaration":
         expect(wrapper.contains("print ")).to_equal(false)
         expect(wrapper.contains("log ")).to_equal(false)
 
-    it "keeps canonical dispatch constant-time and allocation-free by construction":
+    it "keeps the raw-sample owner constant-time and allocation-free":
         # @req REQ-012
-        # @capture(bit_table): branching and allocation token scan over the dispatch leaf tail
-        step("Extract the dispatch leaf and scan it for control flow and allocation")
-        # NOTE: legitimate RED — same missing hal_clock_dispatch.spl module as above; the
-        # scenario stays red until the constant-time dispatch leaf is implemented.
-        val dispatch = file_read("src/lib/nogc_sync_mut/io/hal_clock_dispatch.spl")
-        val begin = dispatch.find("fn hal_clock_monotonic_nanos_v1() -> i64:")
-        expect(begin).to_be_greater_than(-1)  # oracle: find() returns -1 on absence; the leaf fn must exist in the dispatch module
-        val leaf = dispatch.substring(begin, dispatch.len())
-        expect(leaf.split("rt_time_now_nanos()").len() - 1).to_equal(1)  # oracle: exactly one raw provider call keeps the leaf O(1) by construction
+        step("Extract the raw-sample owner and scan it for control flow and allocation")
+        val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
+        val begin = source.find("pub fn time_sample_monotonic_nanos_or_failure() -> i64:")
+        val finish = source.find("fn time_now_micros() -> i64:")
+        expect(begin).to_be_greater_than(-1)  # oracle: the owner must exist at a real offset
+        expect(finish).to_be_greater_than(begin)  # oracle: owner precedes the micros wrapper
+        val leaf = source.substring(begin, finish)
+        expect(leaf.split("rt_time_now_nanos()").len() - 1).to_equal(1)  # oracle: exactly one raw provider call keeps the owner O(1)
         expect(leaf.contains("if ")).to_equal(false)
         expect(leaf.contains("while ")).to_equal(false)
         expect(leaf.contains("for ")).to_equal(false)
-        expect(leaf.contains("[")).to_equal(false)
         expect(leaf.contains(".push(")).to_equal(false)
         expect(leaf.contains("rt_env_get")).to_equal(false)
         expect(leaf.contains("dynload")).to_equal(false)

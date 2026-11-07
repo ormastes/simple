@@ -157,11 +157,13 @@ describe "Pure device callback capsule":
         val wrapper = source.substring(
             source.find("fn hal_device_pure_route_prepare_v1("),
             source.find("@export(\"C\", name: \"rt_hal_device_pure_prepare_callback_v1\")"))
-        expect(wrapper.find("registry_sealed_v1, 1")).to_be_greater_than(-1)  # oracle: the wrapper must seal the registry
-        expect(wrapper.find("registry_lock_v1, 0")).to_be_greater_than(
-            wrapper.find("registry_sealed_v1, 1"))  # oracle: the lock is taken only after the seal
-        expect(wrapper.find("rt_hal_device_route_prepare_v1(")).to_be_greater_than(
-            wrapper.find("registry_lock_v1, 0"))  # oracle: dispatch happens last, under the lock
+        val seal_at = wrapper.find("registry_sealed_v1, 1")
+        expect(seal_at).to_be_greater_than(-1)  # oracle: the wrapper must seal the registry
+        val after_seal = wrapper.substring(seal_at, wrapper.len())
+        val unlock_after_seal = after_seal.find("registry_lock_v1, 0)")
+        expect(unlock_after_seal).to_be_greater_than(-1)  # oracle: the lock is released only after the seal (the earlier compare-exchange "lock_v1, 0, 1" and error-path unlocks precede the seal)
+        expect(after_seal.find("rt_hal_device_route_prepare_v1(")).to_be_greater_than(
+            unlock_after_seal)  # oracle: dispatch happens last, after the post-seal unlock
         step("Confirm no linear scan of the capsule array survives")
         val keeps_linear_scan_out = source.contains("while i < _rt_hal_device_pure_capsules_v1.len()")
         expect(keeps_linear_scan_out).to_equal(false)  # oracle: lookup must stay O(1); no linear while-scan may return
