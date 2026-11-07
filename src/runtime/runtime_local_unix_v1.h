@@ -15,6 +15,11 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <stdatomic.h>
+#include <sys/vfs.h>
+#include <sys/ioctl.h>
+#include <linux/nsfs.h>
+#include <linux/magic.h>
+#include <sched.h>
 
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "local Unix origin guard requires lock-free unsigned int atomics");
 _Static_assert(sizeof(pid_t) <= sizeof(unsigned int), "local Unix origin PID must fit unsigned int");
@@ -27,6 +32,18 @@ static ino_t lu_origin_namespace_inode_v1;
 static int lu_namespace_v1(struct stat* observed) {
     return stat("/proc/self/ns/pid",observed)==0;
 }
+/* Virgin identity must be an actual kernel PID-namespace handle, not merely a
+ * pathname stat. No generic runtime allocation; checked close is never retried. */
+static int lu_initial_namespace_v1(struct stat* observed) {
+    int fd=open("/proc/self/ns/pid",O_RDONLY|O_CLOEXEC);
+    if(fd<0)return 0;
+    struct statfs filesystem;
+    int valid=fstat(fd,observed)==0&&fstatfs(fd,&filesystem)==0&&
+        (unsigned long)filesystem.f_type==(unsigned long)NSFS_MAGIC&&
+        ioctl(fd,NS_GET_NSTYPE)==CLONE_NEWPID;
+    int closed=close(fd);
+    return valid&&closed==0;
+}
 /* Observe real PID+namespace before any owner lock/allocation. A virgin winner
  * publishes an immutable pair. Other threads/processes never wait for an
  * incomplete publication and never reset/reconstruct inherited registry state.
@@ -37,13 +54,16 @@ static int lu_origin_v1(void) {
     if(atomic_load_explicit(&lu_process_quarantined_v1,memory_order_acquire))return 0;
     struct stat namespace_identity;
     pid_t observed=getpid();
-    if(observed<=0||!lu_namespace_v1(&namespace_identity)) {
+    unsigned int origin=atomic_load_explicit(&lu_process_origin_v1,memory_order_acquire);
+    /* Never wait on an origin whose immutable pair is not yet published. */
+    if(origin!=0&&atomic_load_explicit(&lu_process_origin_ready_v1,memory_order_acquire)!=1)return 0;
+    int observed_namespace=origin==0?lu_initial_namespace_v1(&namespace_identity):lu_namespace_v1(&namespace_identity);
+    if(observed<=0||!observed_namespace) {
         if(atomic_load_explicit(&lu_process_origin_ready_v1,memory_order_acquire)==1)
             atomic_store_explicit(&lu_process_quarantined_v1,1,memory_order_release);
         return 0;
     }
     unsigned int pid=(unsigned int)observed;
-    unsigned int origin=atomic_load_explicit(&lu_process_origin_v1,memory_order_acquire);
     if(origin==0) {
         unsigned int expected=0;
         if(atomic_compare_exchange_strong_explicit(&lu_process_origin_v1,&expected,pid,

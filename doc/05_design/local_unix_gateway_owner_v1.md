@@ -24,8 +24,12 @@ truncating the returned identity. Native read receipts reserve their entire
 `maximum+3` integer capacity before receive; only the reported count contains
 bytes, and unused capacity is zero padding.
 
-Every native entry first observes its PID and `/proc/self/ns/pid` device/inode,
-then checks a lock-free atomic process-origin latch. Namespace observation
+The first native entry opens `/proc/self/ns/pid` and requires descriptor fstat,
+NSFS filesystem identity and `NS_GET_NSTYPE == CLONE_NEWPID`, then checks close
+exactly once before latching the PID and namespace device/inode. A regular file
+at that path cannot establish origin. Later entries compare actual path-stat
+identity to the immutable pair, without requiring a fresh descriptor.
+The process-origin latch is lock-free. Namespace observation
 failure refuses the call. The first claimant publishes its immutable namespace
 pair with release/acquire readiness; concurrent readers refuse an incomplete
 publication instead of waiting or reading partial identity. PID alone is not
