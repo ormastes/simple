@@ -72,18 +72,23 @@ stale_scan() (
 )
 
 # prints added lines (current minus base); returns 3 when base has no baseline.
-added_scan() {
+added_scan() (
     ascan_root=$1; abase=$2
-    tmp_base=$(mktemp) || return 4
-    if ! git -C "$ascan_root" show "$abase:$BASELINE_REL" > "$tmp_base" 2>/dev/null; then
-        rm -f "$tmp_base"; return 3
-    fi
-    LC_ALL=C sort -u "$tmp_base" > "$tmp_base.s"
-    LC_ALL=C sort -u "$ascan_root/$BASELINE_REL" > "$tmp_base.c"
-    LC_ALL=C comm -13 "$tmp_base.s" "$tmp_base.c"
-    rm -f "$tmp_base" "$tmp_base.s" "$tmp_base.c"
+    tmp_base=$(mktemp -d) || return 4
+    trap 'rm -rf "$tmp_base"' EXIT INT TERM HUP
+    commit=$(git -C "$ascan_root" rev-parse --verify "$abase^{commit}" 2>/dev/null) || return 4
+    entry=$(git -C "$ascan_root" ls-tree "$commit" -- "$BASELINE_REL" 2>/dev/null) || return 4
+    # Only a confirmed absent path is an introducing change. An unreadable
+    # object at an existing path must not waive the no-growth comparison.
+    [ -n "$entry" ] || return 3
+    kind=$(printf '%s\n' "$entry" | awk '{ print $2 }')
+    [ "$kind" = blob ] || return 4
+    git -C "$ascan_root" show "$commit:$BASELINE_REL" > "$tmp_base/base" 2>/dev/null || return 4
+    LC_ALL=C sort -u "$tmp_base/base" > "$tmp_base/sorted" || return 4
+    LC_ALL=C sort -u "$ascan_root/$BASELINE_REL" > "$tmp_base/current" || return 4
+    LC_ALL=C comm -13 "$tmp_base/sorted" "$tmp_base/current" || return 4
     return 0
-}
+)
 
 scan() {
     sroot=$1; sbase=$2
@@ -195,6 +200,22 @@ selftest() {
     git -C "$d" update-index --skip-worktree lib/m.spl
     out=$(scan "$d" "$b"); rc=$?
     [ "$rc" -eq 1 ] || { echo "ERROR - selftest: sparse empty file passed ($out)"; return 2; }
+    # A real base commit with an unreadable baseline object is not an
+    # introducing change, even if the current baseline has gained a row.
+    git -C "$d" show "$b:lib/m.spl" > "$d/lib/m.spl" || return 2
+    printf 'fn extra() -> i64:\n    5\n' >> "$d/lib/m.spl"
+    printf 'lib/m.spl|live\nlib/m.spl|other\nlib/m.spl|extra\n' > "$d/$BASELINE_REL"
+    baseline_blob=$(git -C "$d" rev-parse "$b:$BASELINE_REL") || return 2
+    object="$d/.git/objects/$(printf '%.2s' "$baseline_blob")/${baseline_blob#??}"
+    mv "$object" "$d/base-blob-backup" || return 2
+    out=$(scan "$d" "$b" 2>/dev/null); rc=$?
+    mv "$d/base-blob-backup" "$object" || return 2
+    [ "$rc" -eq 2 ] || { echo "ERROR - selftest: missing base blob skipped ratchet ($out)"; return 2; }
+    # A genuinely absent baseline path still permits the introducing change.
+    empty_tree=$(git -C "$d" mktree </dev/null) || return 2
+    intro=$(printf 'intro fixture\n' | git -C "$d" commit-tree "$empty_tree") || return 2
+    out=$(scan "$d" "$intro"); rc=$?
+    [ "$rc" -eq 0 ] || { echo "ERROR - selftest: confirmed introducing change failed ($out)"; return 2; }
     : > "$d/$BASELINE_REL"
     scan "$d" "$b" >/dev/null; [ $? -eq 2 ] || { echo "ERROR - selftest: empty baseline must ERROR"; return 2; }
     return 0
