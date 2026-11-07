@@ -23,3 +23,8 @@ No native container success, timing/RSS measurement, SPipe execution, docgen
 PASS, or power-loss durability experiment is claimed. See
 `doc/05_design/oci_request_binding_admission.md` for provenance, migration policy,
 trusted-directory limits, and remaining verification.
+
+The command follow-up admits the already-digested executable override. The
+unsupported-effects loop now covers environment, working directory, and terminal
+modes only. Schema decoding still grants no execution authority by itself; mode
+replay continues through the provider's actual immutable payload binding.

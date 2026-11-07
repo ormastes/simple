@@ -1,0 +1,145 @@
+use std.spec.*
+use std.common.contracts.container.runtime_v1.RUNTIME_STATUS_OK
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+
+fn _entrypoint_request_v1() -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "build-1", attempt: 1, operation_id: "create-build",
+        image: "example/compiler@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        bundle_path: "", command: ["/agent binary", "--interactive", ""],
+        args: ["literal ; $(task)", "--entrypoint=untrusted"],
+        timeout_ms: 5000, cpu_limit_millis: 1000,
+        memory_limit_bytes: 268435456, pid_limit: 64,
+        network_policy: "none", filesystem_policy: "read-only")
+
+describe "Linux OCI explicit executable override":
+    it "constructs exact Podman and Docker argv without interpreting workload values":
+        var request = _entrypoint_request_v1()
+        expect(request.replace_entrypoint).to_equal(false)
+        request.replace_entrypoint = true
+        for engine in [OCI_ENGINE_PODMAN, OCI_ENGINE_DOCKER]:
+            val built = build_create_command(engine, "/var/lib/simpleorch",
+                request, "create-build", 7, "boot-1")
+            expect(built.0).to_equal("")
+            expect(built.1.program).to_equal(engine)
+            expect(built.1.args).to_equal(["create", "--name", "simpleorch-build-1-1",
+                "--label", "io.simpleorch.pod_uid=build-1",
+                "--label", "io.simpleorch.attempt=1",
+                "--label", "io.simpleorch.node_boot_id=boot-1",
+                "--label", "io.simpleorch.provider_generation=7",
+                "--label", "io.simpleorch.operation_id=create-build",
+                "--cpu-period", "100000", "--cpu-quota", "100000",
+                "--memory", "268435456", "--pids-limit", "64",
+                "--network", "none", "--read-only", "--security-opt",
+                "no-new-privileges", "--cap-drop", "ALL",
+                "--entrypoint", "/agent binary", request.image,
+                "--interactive", "", "literal ; $(task)", "--entrypoint=untrusted"])
+
+    it "preserves build entrypoint then read-only input and writable output mount order":
+        var request = _entrypoint_request_v1()
+        request.command = ["/agent", "--flag"]
+        request.args = ["tail"]
+        request.build_input_root = "/build/inputs"
+        request.build_output_root = "/build/outputs"
+        val built = build_create_command(OCI_ENGINE_PODMAN, "/var/lib/simpleorch",
+            request, "create-build", 7, "boot-1")
+        expect(built.0).to_equal("")
+        expect(built.1.args).to_equal(["create", "--name", "simpleorch-build-1-1",
+            "--label", "io.simpleorch.pod_uid=build-1",
+            "--label", "io.simpleorch.attempt=1",
+            "--label", "io.simpleorch.node_boot_id=boot-1",
+            "--label", "io.simpleorch.provider_generation=7",
+            "--label", "io.simpleorch.operation_id=create-build",
+            "--cpu-period", "100000", "--cpu-quota", "100000",
+            "--memory", "268435456", "--pids-limit", "64",
+            "--network", "none", "--read-only", "--security-opt",
+            "no-new-privileges", "--cap-drop", "ALL",
+            "--entrypoint", "/agent", "--mount",
+            "type=bind,source=/build/inputs,target=/simple-build/inputs,readonly",
+            "--mount", "type=bind,source=/build/outputs,target=/simple-build/outputs",
+            request.image, "--flag", "tail"])
+        request.command = []
+        expect(build_create_command(OCI_ENGINE_PODMAN, "/var/lib/simpleorch",
+            request, "create-build", 7, "boot-1").0).to_equal("build-command-empty")
+
+    it "rejects malformed override through both validate and standalone builder":
+        val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_ENGINE_PODMAN,
+            "/var/lib/simpleorch", "boot-1", 7, false)
+        var request = _entrypoint_request_v1()
+        request.replace_entrypoint = true
+        for executable in ["", "--privileged", "[\"/bin/sh\"]", "null", "/bin/sh\0suffix"]:
+            request.command = [executable]
+            val valid = provider.validate(request)
+            expect(valid.accepted).to_equal(false)
+            val owner = LinuxOciRuntimeProviderV1.scripted("linux", OCI_ENGINE_PODMAN,
+                "/unused/entrypoint", "boot-1", 7, [])
+            expect(owner.prepare_pod(request).reason).to_equal(valid.reason)
+            expect(owner.retained_state_count()).to_equal(0)
+            expect(owner.executor_call_count()).to_equal(0)
+            val built = build_create_command(OCI_ENGINE_PODMAN, "/var/lib/simpleorch",
+                request, "create-build", 7, "boot-1")
+            expect(built.0).to_equal(valid.reason)
+            expect(built.1.program).to_equal("")
+            expect(built.1.args).to_equal([])
+        request.command = []
+        expect(provider.validate(request).reason).to_equal("entrypoint-command-empty")
+        expect(build_create_command(OCI_ENGINE_PODMAN, "/var/lib/simpleorch",
+            request, "create-build", 7, "boot-1").0).to_equal("entrypoint-command-empty")
+        request.command = ["/agent"]
+        request.args = ["arg\0suffix"]
+        expect(provider.validate(request).reason).to_equal("request-field-contains-nul")
+        expect(build_create_command(OCI_ENGINE_PODMAN, "/var/lib/simpleorch",
+            request, "create-build", 7, "boot-1").0).to_equal("request-field-contains-nul")
+
+    it "rejects an override which the bare runc builder cannot implement":
+        var request = _entrypoint_request_v1()
+        request.replace_entrypoint = true
+        request.bundle_path = "/bundle"
+        val built = build_create_command(OCI_ENGINE_RUNC, "/var/lib/simpleorch",
+            request, "create-build", 7, "boot-1")
+        expect(built.0).to_equal("runc-entrypoint-override-unsupported")
+        expect(built.1.program).to_equal("")
+
+    it "binds mode changes in either direction before effects and preserves identical replay":
+        for replace in [false, true]:
+            var original = _entrypoint_request_v1()
+            original.command = ["/agent", "tail"]
+            original.replace_entrypoint = replace
+            val command = build_create_command(OCI_ENGINE_PODMAN, "/unused/entrypoint",
+                original, "create-build", 7, "boot-1").1
+            val owner = LinuxOciRuntimeProviderV1.scripted("linux", OCI_ENGINE_PODMAN,
+                "/unused/entrypoint", "boot-1", 7,
+                [ScriptedCommandResultV1(operation: command.operation, program: command.program,
+                    args: command.args, stdout: "native-entrypoint", stderr: "", exit_code: 0)])
+            expect(owner.prepare_pod(original).status).to_equal(RUNTIME_STATUS_OK)
+            var changed = original
+            changed.replace_entrypoint = not replace
+            expect(owner.prepare_pod(changed).reason).to_equal("intent-request-mismatch")
+            expect(owner.create(changed).reason).to_equal("intent-request-mismatch")
+            expect(owner.executor_call_count()).to_equal(0)
+            expect(owner.create(original).status).to_equal(RUNTIME_STATUS_OK)
+            expect(owner.create(original).status).to_equal(RUNTIME_STATUS_OK)
+            expect(owner.create(changed).reason).to_equal("intent-request-mismatch")
+            expect(owner.executor_call_count()).to_equal(1)
+
+    it "preserves empty leading and trailing workload arguments in the full provider vector":
+        var request = _entrypoint_request_v1()
+        request.command = ["/bin/echo", ""]
+        request.args = ["a b", ""]
+        request.replace_entrypoint = true
+        val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_ENGINE_PODMAN,
+            "/unused/entrypoint", "boot-1", 7, false)
+        expect(provider.validate(request).accepted).to_equal(true)
+        val built = build_create_command(OCI_ENGINE_PODMAN, "/unused/entrypoint",
+            request, "create-build", 7, "boot-1")
+        expect(built.0).to_equal("")
+        expect(built.1.args).to_equal(["create", "--name", "simpleorch-build-1-1",
+            "--label", "io.simpleorch.pod_uid=build-1",
+            "--label", "io.simpleorch.attempt=1",
+            "--label", "io.simpleorch.node_boot_id=boot-1",
+            "--label", "io.simpleorch.provider_generation=7",
+            "--label", "io.simpleorch.operation_id=create-build",
+            "--cpu-period", "100000", "--cpu-quota", "100000",
+            "--memory", "268435456", "--pids-limit", "64",
+            "--network", "none", "--read-only", "--security-opt",
+            "no-new-privileges", "--cap-drop", "ALL",
+            "--entrypoint", "/bin/echo", request.image, "", "a b", ""])

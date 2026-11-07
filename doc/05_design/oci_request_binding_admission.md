@@ -113,3 +113,13 @@ SHA256 dependency reaches the same secure-memory closure. Repeating that known
 unchanged producer failure is not new evidence. No diagnostic build or execution
 was attempted in this worker. These source artifacts add no runtime qualification
 or production readiness claim.
+
+## Follow-up executable mode source admission
+
+The subsequent command slice is documented in
+`doc/05_design/oci_command_entrypoint_admission.md`. It admits the already-bound
+`replace_entrypoint` execution mapping and CI request selection without changing
+the foundation's schema/digest or journal rules. Foundation-era statements that
+this specific effect is refused describe the preceding foundation boundary;
+environment, working-directory, and terminal effects remain refused. Runtime
+validation remains blocked/unexecuted in both slices.
