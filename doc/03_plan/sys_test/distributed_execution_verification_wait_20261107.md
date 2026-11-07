@@ -484,3 +484,72 @@ Producer bridge/pristine/full-CLI, actual SSpec/docgen, canonical provider ABI,
 host execution composition, Podman availability, CoreMux output adoption and
 parent RUN evidence remain open. Only real future execution can change those
 rows to diagnostic or admitted PASS, with the evidence class retained explicitly.
+
+## Subsequent Linux native pipe-registry verification — 2026-11-07
+
+The continued goal run executed the C registry selfcheck from draft #7603 at
+`c65e96f575708dfb2c6948779c72c7d4a2a289de`. Its syntax check, compilation and one
+native run passed. This supersedes only the earlier NOT_RUN status of that
+Linux C selfcheck. The original handoff did not execute runtime tests; the
+subsequent evidence is recorded separately below. The three Simple facade
+scenarios, Windows behavior, smux consumer and full system remain unverified.
+The draft remains AWAITING_VERIFICATION and is not admitted or merged by this
+result. No previously passing diagnostic was repeated.
+
+The harness includes the actual `runtime_process.c` owner and links normal
+CoreC owners. It exercised real child processes/pipes, exact generation lookup
+with deterministic same-PID registry coexistence/replacement, stale operations,
+UTF-8 partial writes/tail/EOF, pipe saturation and invalid bounds, input limits,
+generation exhaustion and independent legacy-PID compatibility. Forwarding
+syscall observers confirmed no wait or signal from unsupported POSIX lifecycle
+queries. The harness's test-only retirement/reaping is not a production cleanup
+capability, and the deterministic registry case is not an observed kernel PID
+reuse race. No branch-coverage measurement was taken.
+
+Both compilation and execution inherited CPU affinity `0-4`. Compilation used
+a 120-second timeout and execution a 30-second timeout, each with a five-second
+termination grace. Assertions remained enabled (`-O0`, no `NDEBUG`). There were
+no runtime/provider stubs or duplicate `runtime_process.o`: the owner is compiled
+through the harness include exactly once. Source hashes were checked before and
+after compilation; the executable hash was checked before and after execution.
+
+- Build: exit 0, empty compiler log, source unchanged.
+- Run: exit 0; `piped process Ref V1 registry/reader boundary: PASS`.
+- Executable SHA-256: `c188c0d8dd467462c71f47fedd74324270e0bf6674e5e256458b92f344c441c4`.
+- This is a native C boundary result, not an admitted Simple/compiler result.
+- POSIX liveness and close remain unsupported; the passing test verifies their
+  refusal and retained ownership, not operational process supervision.
+
+The retained local evidence directory is:
+
+`/home/yoon/dev/simple-piped-generation-owner-20261107/build/root-piped-ref-verification-20261107`
+
+It contains `inputs.sdn` (compiler and source/header hashes), `command.txt`,
+`build-result.sdn`, `build.log`, `run-result.sdn`, `run.log` and `selfcheck`. The
+manifest digests are retained in the central SDN status. These local artifacts
+are not claimed to be uploaded CI artifacts; another host must reproduce them
+from the pinned draft source. System-header/SDK inputs are not an admitted
+toolchain receipt.
+
+The compiler invocation, adapted from the existing native CoreC process checks,
+is retained verbatim in `command.txt`. It uses `clang`, the test translation
+unit, and these production owners: `runtime_native`, `runtime_legacy_core`,
+`runtime_memory`, `runtime_simd_dispatch`, `runtime_simd_utf8`,
+`runtime_process_owned`, `runtime_process_tree`, `runtime_memtrack`,
+`runtime_fork`, `runtime_timestamp`, and `runtime_thread`; all from the same
+draft checkout. Flags preserve the standalone CoreC memory/timestamp ownership
+and native array packing contract. No Rust seed or compiler bootstrap was run.
+
+Astra independently checked the source/binary hashes, actual CoreC composition,
+active assertions and executable reachability without rerunning the test. The
+original child invocation was:
+
+```text
+timeout --kill-after=5s 30s /home/yoon/dev/simple-piped-generation-owner-20261107/build/root-piped-ref-verification-20261107/selfcheck
+```
+
+It inherited affinity `0-4` from the `taskset -c 0-4 python3 -` parent that
+recorded the run. `run-command.sdn` preserves this original invocation after
+the review requested it; no rerun was used to produce that record. The exact
+wall-clock start timestamp was not captured. Elapsed time is recorded, and this
+limitation remains explicit rather than inferring a start time from file dates.
