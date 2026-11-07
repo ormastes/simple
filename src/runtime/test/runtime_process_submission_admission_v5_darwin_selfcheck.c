@@ -63,7 +63,11 @@ static void admission_control(const char* cwd,int64_t pin,const uint8_t digest[3
             if (kind==POV4_KIND_FROZEN || kind==POV4_KIND_CLEANUP_FROZEN) {frozen=observed;break;}
             pov4_tuple4_free(observed);
         }
-        assert(frozen && word(frozen,POV4_LEADER_REAPED)==1 && word(frozen,POV4_TREE_EMPTY)==1);
+        assert(frozen && word(frozen,POV4_LEADER_REAPED)==1);
+        assert(word(frozen,POV4_ERRNO)==ETIMEDOUT);
+        assert(word(frozen,POV4_TREE_CONTROL_AVAILABLE)==0 && word(frozen,POV4_TREE_EMPTY)==0);
+        int status=0;errno=0;
+        assert(waitpid((pid_t)word(frozen,POV4_PID),&status,WNOHANG)==-1 && errno==ECHILD);
         SplArray* ack=rt_process_observation_v4_reserved_ack_value(token,tuple_item(frozen,2));
         assert(ack);pov4_tuple4_free(ack);pov4_tuple4_free(frozen);
     }

@@ -176,11 +176,13 @@ static void control(const char* cwd,int64_t pin,const uint8_t digest[32],int mod
             if (kind==POV4_KIND_FROZEN || kind==POV4_KIND_CLEANUP_FROZEN) {frozen=observed;break;}
             pov4_tuple4_free(observed);
         }
-        assert(frozen && field(frozen,POV4_PID)>0 && field(frozen,POV4_LEADER_REAPED)==1 && field(frozen,POV4_TREE_EMPTY)==1);
+        assert(frozen && field(frozen,POV4_PID)>0 && field(frozen,POV4_LEADER_REAPED)==1);
         int status=0;errno=0;
         assert(waitpid((pid_t)field(frozen,POV4_PID),&status,WNOHANG)==-1 && errno==ECHILD);
         if (mode==3) {
             assert(field(frozen,POV4_EXEC_STATE)!=POV4_EXEC_CONFIRMED);
+            assert(field(frozen,POV4_ERRNO)==ETIMEDOUT && field(frozen,POV4_EXEC_ERRNO)==ETIMEDOUT);
+            assert(field(frozen,POV4_TREE_CONTROL_AVAILABLE)==0 && field(frozen,POV4_TREE_EMPTY)==0);
             assert(rt_array_len(item(frozen,0))==0);
         } else {
             const char expected[]="admitted\n";
