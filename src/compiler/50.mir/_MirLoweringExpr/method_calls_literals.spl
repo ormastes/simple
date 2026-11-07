@@ -2758,7 +2758,7 @@ impl MirLowering:
                     case HirTypeKind.Str: declared_text_receiver = true
                     case _: ()
         val primitive_text_method_shape =
-            method == "trim" or method == "strip" or method == "lower" or
+            method == "byte_len" or method == "trim" or method == "strip" or method == "lower" or
             method == "to_lower" or method == "to_upper" or method == "split" or
             method == "rpartition" or method == "slice" or method == "substring" or
             method == "replace" or method == "rfind" or method == "find" or method == "index_of" or
@@ -2805,7 +2805,7 @@ impl MirLowering:
         # `to_f64`/`to_f32` parse text only on a PROVEN text receiver. An
         # erased word reaching them is far more often a raw number, which the
         # numeric conversion arm below owns.
-        val erased_text_shape = primitive_text_method_shape and method != "to_f64" and method != "to_f32"
+        val erased_text_shape = primitive_text_method_shape and method != "byte_len" and method != "to_f64" and method != "to_f32"
         if erased_text_shape and not resolution_is_static_method and not primitive_text_receiver and resolution_is_unresolved and not predicate_has_custom_owner:
             var erased_recv_ty_ok = false
             # `has_type_` is the presence bit; an untyped receiver carries a
@@ -3464,6 +3464,21 @@ impl MirLowering:
                 self.aggregate_literal_operand(args[1].value, value_local, boxed_value)], MirType.i64())
             self.builder = b_set
             return receiver_local
+
+        # byte_len is a TEXT-only byte accessor, never the generic collection
+        # length fallback. Keep nominal/static owners and erased words intact.
+        if method == "byte_len" and args.len() == 0 and text_builtin_resolution_allowed and not resolution_is_static_method and not predicate_has_custom_owner:
+            val text_local = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
+            val byte_len_operand = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_len"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_byte_len = self.builder
+            val byte_length = b_byte_len.emit_call(byte_len_operand, [mir_operand_copy(text_local)], MirType.i64())
+            self.builder = b_byte_len
+            if val length = byte_length:
+                return length
+            return text_local
 
         # Built-in collections implement Len.is_empty() as `self.len() == 0`.
         # The native MIR path already has concrete runtime dispatch for len,
