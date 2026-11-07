@@ -134,6 +134,10 @@ added_scan() (
     return 0
 )
 
+# first5 TEXT -> first 5 lines joined by spaces. awk drains all input, so the
+# producer never hits EPIPE (`printf | head -5` printed "printf: I/O error").
+first5() { printf '%s\n' "$1" | awk 'NR <= 5 { printf "%s ", $0 }'; }
+
 scan() {
     sroot=$1; sbase=$2
     file="$sroot/$BASELINE_REL"
@@ -145,7 +149,7 @@ scan() {
     }
     if [ -n "$stale" ]; then
         k=$(printf '%s\n' "$stale" | wc -l | tr -d ' ')
-        first=$(printf '%s\n' "$stale" | head -5 | tr '\n' ' ')
+        first=$(first5 "$stale")
         echo "FAIL - $total checked, $k stale: $first"
         return 1
     fi
@@ -167,7 +171,7 @@ scan() {
     esac
     if [ -n "$added" ]; then
         k=$(printf '%s\n' "$added" | wc -l | tr -d ' ')
-        first=$(printf '%s\n' "$added" | head -5 | tr '\n' ' ')
+        first=$(first5 "$added")
         echo "FAIL - baseline gained $k line(s) vs $sbase (removals only): $first"
         return 1
     fi
@@ -228,6 +232,10 @@ selftest() {
     printf 'invalid index\n' > "$d/corrupt-index"
     out=$(GIT_INDEX_FILE="$d/corrupt-index" scan "$d" "$b" 2>/dev/null); rc=$?
     [ "$rc" -eq 2 ] || { echo "ERROR - selftest: corrupt index did not ERROR ($out)"; return 2; }
+    big=$(awk 'BEGIN { for (i = 0; i < 20000; i++) print "lib/x.spl|n" i }')
+    err=$(first5 "$big" 2>&1 >/dev/null)
+    [ -z "$err" ] || { echo "ERROR - selftest: first5 wrote to stderr ($err)"; return 2; }
+    [ "$(first5 "$big")" = "lib/x.spl|n0 lib/x.spl|n1 lib/x.spl|n2 lib/x.spl|n3 lib/x.spl|n4 " ] || { echo "ERROR - selftest: first5 output wrong"; return 2; }
     git -C "$d" update-index --info-only --cacheinfo "100644,1111111111111111111111111111111111111111,lib/m.spl" || return 2
     git -C "$d" update-index --skip-worktree lib/m.spl
     out=$(scan "$d" "$b" 2>/dev/null); rc=$?
