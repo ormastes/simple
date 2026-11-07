@@ -1,0 +1,184 @@
+# AUTHORED / NOT_RUN. Identity/solver controls only; no primitive matrix or
+# compiler entrypoint execution is claimed by these in-process fixtures.
+use std.spec.*
+use compiler.hir.hir_types.{SymbolTable, SymbolId, SymbolKind, Visibility, HirSymbol, HirType, HirTypeKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.traits.builtin_trait_declarations_v1.*
+use compiler.traits.trait_solver.{TraitSolver, Obligation, ObligationCause, trait_reverse_symbol_identity_v1}
+use compiler.traits.trait_impl.{ImplBlock}
+
+fn builtin_fixture_owner(padding: i64) -> BuiltinTraitDeclarationOwnerV1:
+    var table = SymbolTable.new()
+    for index in 0..padding:
+        val _id = table.define("local_{index}", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, Some("fixture"))
+    builtin_trait_declarations_create_v1(table).unwrap()
+
+describe "Canonical builtin trait declaration ownership":
+    it "allocates real identities without capturing local or imported spellings":
+        var table = SymbolTable.new()
+        val local = table.define("Ord", SymbolKind.Trait, nil, Span.empty(), Visibility.Public, false, Some("fixture.local"))
+        val imported = table.define("Clone", SymbolKind.Trait, nil, Span.empty(), Visibility.Public, false, Some("fixture.provider"))
+        expect(imported.id).to_equal(1)
+        val original_count = table.symbols.len()
+        val original_next = table.next_symbol_id
+        val owned = builtin_trait_declarations_create_v1(table).unwrap()
+        expect(table.symbols.len()).to_equal(original_count)
+        expect(table.next_symbol_id).to_equal(original_next)
+        expect(owned.symbols.current_scope.id).to_equal(table.current_scope.id)
+        expect(owned.symbols.lookup_or_invalid("Ord").id).to_equal(local.id)
+        expect(owned.symbols.lookup_or_invalid("Clone").id).to_equal(imported.id)
+        val clone = builtin_trait_declaration_v1(owned.declarations, owned.symbols, BuiltinTraitKindV1.Clone).unwrap()
+        expect(clone.id.id == imported.id).to_equal(false)
+        expect(clone.kind == SymbolKind.Trait).to_equal(true)
+        expect(owned.declarations.bindings.len()).to_equal(7)
+
+    it "allows later user declarations without reusing builtin exact-name indexes":
+        val owned = builtin_fixture_owner(0)
+        var symbols = owned.symbols
+        val local = symbols.define("Ord", SymbolKind.Trait, nil, Span.empty(), Visibility.Public, false, Some("user"))
+        val builtin = builtin_trait_declaration_v1(owned.declarations, symbols, BuiltinTraitKindV1.Ord).unwrap()
+        expect(symbols.lookup_or_invalid("Ord").id).to_equal(local.id)
+        expect(local.id == builtin.id.id).to_equal(false)
+
+    it "rebinds validated provider identity to a different consumer-local ID":
+        val provider = builtin_fixture_owner(0)
+        val consumer = builtin_fixture_owner(12)
+        val original = builtin_trait_declaration_v1(provider.declarations, provider.symbols, BuiltinTraitKindV1.Eq).unwrap()
+        val local = builtin_trait_declaration_rebind_v1(provider, consumer, BuiltinTraitKindV1.Eq).unwrap()
+        expect(original.id.id == local.id.id).to_equal(false)
+        expect(trait_reverse_symbol_identity_v1(original)).to_equal(trait_reverse_symbol_identity_v1(local))
+
+    it "refuses preexisting internal names without allocating or changing scopes":
+        val original = builtin_fixture_owner(0)
+        val count = original.symbols.symbols.len()
+        val next_id = original.symbols.next_symbol_id
+        val scope = original.symbols.current_scope.id
+        expect(builtin_trait_declarations_create_v1(original.symbols).is_err()).to_equal(true)
+        expect(original.symbols.symbols.len()).to_equal(count)
+        expect(original.symbols.next_symbol_id).to_equal(next_id)
+        expect(original.symbols.current_scope.id).to_equal(scope)
+
+    it "rejects exhausted counters and reserved-ID collisions without changing input":
+        for symbol_start in [-1, 9223372036854775800, 9223372036854775807]:
+            var table = SymbolTable.new()
+            table.next_symbol_id = symbol_start
+            expect(builtin_trait_declarations_create_v1(table).is_err()).to_equal(true)
+            expect(table.next_symbol_id).to_equal(symbol_start)
+            expect(table.symbols.len()).to_equal(0)
+            expect(table.next_scope_id).to_equal(1)
+            expect(table.current_scope.id).to_equal(0)
+        for scope_start in [-1, 9223372036854775807]:
+            var table = SymbolTable.new()
+            table.next_scope_id = scope_start
+            expect(builtin_trait_declarations_create_v1(table).is_err()).to_equal(true)
+            expect(table.next_scope_id).to_equal(scope_start)
+            expect(table.next_symbol_id).to_equal(0)
+            expect(table.scopes.len()).to_equal(1)
+        var reserved = SymbolTable.new()
+        reserved.next_symbol_id = 9223372036854775799
+        reserved.structural_union_owners[9223372036854775799] = "reserved"
+        expect(builtin_trait_declarations_create_v1(reserved).is_err()).to_equal(true)
+        expect(reserved.next_symbol_id).to_equal(9223372036854775799)
+        expect(reserved.symbols.len()).to_equal(0)
+
+    it "admits the last complete allocation window without overflowing counters":
+        var table = SymbolTable.new()
+        table.next_symbol_id = 9223372036854775799
+        table.next_scope_id = 9223372036854775806
+        val owned = builtin_trait_declarations_create_v1(table).unwrap()
+        expect(owned.symbols.next_symbol_id).to_equal(9223372036854775807)
+        expect(owned.symbols.next_scope_id).to_equal(9223372036854775807)
+        expect(builtin_trait_declarations_validate_v1(owned.declarations, owned.symbols)).to_equal("")
+        expect(table.next_symbol_id).to_equal(9223372036854775799)
+        expect(table.next_scope_id).to_equal(9223372036854775806)
+
+    it "rejects mutated provider rows before any consumer binding is returned":
+        val provider = builtin_fixture_owner(0)
+        val consumer = builtin_fixture_owner(12)
+        val original = builtin_trait_declaration_v1(provider.declarations, provider.symbols, BuiltinTraitKindV1.Eq).unwrap()
+        provider.symbols.symbols[original.id.id] = HirSymbol(..original, kind: SymbolKind.Variable)
+        expect(builtin_trait_declaration_rebind_v1(provider, consumer, BuiltinTraitKindV1.Eq).is_err()).to_equal(true)
+
+    it "validates every row before mutating the solver":
+        var owned = builtin_fixture_owner(0)
+        var solver = TraitSolver.create_with_symbols(owned.symbols)
+        val last = owned.declarations.bindings[6]
+        owned.declarations.bindings[6] = BuiltinTraitBindingV1(kind: last.kind, symbol: owned.declarations.bindings[0].symbol)
+        expect(builtin_trait_declarations_install_v1(owned, solver).is_err()).to_equal(true)
+        expect(solver.traits.len()).to_equal(0)
+        expect(solver.assoc_resolver.traits.len()).to_equal(0)
+
+    it "rejects false owners and stale IDs instead of granting by spelling":
+        val false_owner = builtin_fixture_owner(0)
+        val row = false_owner.symbols.symbols[false_owner.declarations.owner.id]
+        false_owner.symbols.symbols[row.id.id] = HirSymbol(..row, defining_module: Some("user.spoof"))
+        expect(builtin_trait_declaration_v1(false_owner.declarations, false_owner.symbols, BuiltinTraitKindV1.Clone).is_err()).to_equal(true)
+        var stale = builtin_fixture_owner(0)
+        stale.declarations.bindings[0] = BuiltinTraitBindingV1(kind: BuiltinTraitKindV1.Clone, symbol: SymbolId(id: 999999))
+        expect(builtin_trait_declaration_v1(stale.declarations, stale.symbols, BuiltinTraitKindV1.Clone).is_err()).to_equal(true)
+
+    it "rejects a solver with a different module-local symbol owner":
+        val owner = builtin_fixture_owner(0)
+        val unrelated = builtin_fixture_owner(12)
+        var solver = TraitSolver.create_with_symbols(unrelated.symbols)
+        expect(builtin_trait_declarations_install_v1(owner, solver).is_err()).to_equal(true)
+        expect(solver.traits.len()).to_equal(0)
+
+    it "rejects public owner and trait rows even when all identity fields match":
+        for mutate_owner in [true, false]:
+            for mutate_visibility in [true, false]:
+                val owned = builtin_fixture_owner(0)
+                val id = if mutate_owner: owned.declarations.owner else: owned.declarations.bindings[0].symbol
+                val row = owned.symbols.symbols[id.id]
+                owned.symbols.symbols[id.id] = if mutate_visibility:
+                    HirSymbol(..row, visibility: Visibility.Public)
+                else:
+                    HirSymbol(..row, is_public: true)
+                var solver = TraitSolver.create_with_symbols(owned.symbols)
+                expect(builtin_trait_declarations_validate_v1(owned.declarations, owned.symbols) != "").to_equal(true)
+                expect(builtin_trait_declarations_install_v1(owned, solver).is_err()).to_equal(true)
+                expect(solver.traits.len()).to_equal(0)
+                expect(solver.assoc_resolver.traits.len()).to_equal(0)
+
+    it "rejects divergent solver rows before any installation mutation":
+        val owned = builtin_fixture_owner(0)
+        val other = builtin_fixture_owner(0)
+        val id = other.declarations.bindings[6].symbol
+        val row = other.symbols.symbols[id.id]
+        var changed_span = Span.empty()
+        changed_span.line = 9
+        other.symbols.symbols[id.id] = HirSymbol(..row, span: changed_span)
+        var solver = TraitSolver.create_with_symbols(other.symbols)
+        expect(builtin_trait_declarations_install_v1(owned, solver).is_err()).to_equal(true)
+        expect(solver.traits.len()).to_equal(0)
+        expect(solver.assoc_resolver.traits.len()).to_equal(0)
+
+    it "registers exact supertrait edges without installing any primitive impl":
+        val owned = builtin_fixture_owner(4)
+        var solver = TraitSolver.create_with_symbols(owned.symbols)
+        expect(builtin_trait_declarations_install_v1(owned, solver).is_ok()).to_equal(true)
+        val copy = builtin_trait_declaration_v1(owned.declarations, owned.symbols, BuiltinTraitKindV1.Copy).unwrap()
+        val clone = builtin_trait_declaration_v1(owned.declarations, owned.symbols, BuiltinTraitKindV1.Clone).unwrap()
+        val ord = builtin_trait_declaration_v1(owned.declarations, owned.symbols, BuiltinTraitKindV1.Ord).unwrap()
+        val eq = builtin_trait_declaration_v1(owned.declarations, owned.symbols, BuiltinTraitKindV1.Eq).unwrap()
+        expect(solver.traits[copy].supertraits[0].id.id).to_equal(clone.id.id)
+        expect(solver.traits[ord].supertraits[0].id.id).to_equal(eq.id.id)
+        expect(solver.impls.len()).to_equal(0)
+        expect(builtin_trait_declarations_install_v1(owned, solver).is_err()).to_equal(true)
+        expect(solver.traits.len()).to_equal(7)
+
+    it "uses the existing obligation solver to enforce Ord entails Eq":
+        val owned = builtin_fixture_owner(0)
+        var symbols = owned.symbols
+        val record = symbols.define("Record", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, Some("fixture"))
+        val ty = HirType(kind: HirTypeKind.Named(record, []), span: Span.empty())
+        var solver = TraitSolver.create_with_symbols(symbols)
+        expect(builtin_trait_declarations_install_v1(owned, solver).is_ok()).to_equal(true)
+        val ord = builtin_trait_declaration_v1(owned.declarations, symbols, BuiltinTraitKindV1.Ord).unwrap()
+        val eq = builtin_trait_declaration_v1(owned.declarations, symbols, BuiltinTraitKindV1.Eq).unwrap()
+        solver.add_impl(ImplBlock.create(ord, ty, Span.empty()))
+        val obligation = Obligation.create(ty, ord, ObligationCause.BuiltIn, Span.empty())
+        expect(solver.solve_obligation(obligation).is_err()).to_equal(true)
+        solver.add_impl(ImplBlock.create(eq, ty, Span.empty()))
+        expect(solver.solve_obligation(obligation).is_ok()).to_equal(true)
