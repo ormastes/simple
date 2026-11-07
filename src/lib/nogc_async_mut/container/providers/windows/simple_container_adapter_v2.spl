@@ -1,0 +1,269 @@
+# Windows leaf behind the Simple Container V2 execution API. SOURCE-ONLY NOT_RUN.
+# Native machine/boot observations come from the platform owner, never policy.
+# state_root is validated caller scope, not a claim that this adapter journals.
+# Recovery/cleanup require this instance's retained successful-create authority;
+# reopening cannot import copied RuntimeIntentV1 as cleanup authorization.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2,
+    ContainerExecutionRequestV2, ContainerHostObservationV2, ContainerRequestProjectionV2, container_scope_fence_id_v2}
+use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceiptV2,
+    container_runtime_query_digest_v2, container_runtime_observation_digest_v2}
+use std.common.contracts.container.runtime_v1.{RuntimeIntentV1, RuntimeOperationV1, RuntimeIdentityV1,
+    RuntimeProviderV1, runtime_state_empty, runtime_command_empty,
+    RUNTIME_STATUS_OK, RUNTIME_STATUS_BLOCKED, RUNTIME_STATUS_REJECTED}
+use std.nogc_sync_mut.io.windows_host_identity_v1.windows_host_identity_v1
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
+    WindowsDockerPolicyV1, WindowsDockerRequestV1, windows_docker_token_v1,
+    windows_docker_request_digest_v1, WINDOWS_DOCKER_MAX_RECORDS_V1}
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_decode_v1
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.windows_docker_request_decode_v1
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+
+pub const WINDOWS_SIMPLE_CONTAINER_BACKEND_V2 = "windows-docker-process"
+
+struct WindowsRetainedAuthorityV2:
+    workload_uid: text
+    attempt: i64
+    operation_id: text
+    request_digest: text
+    native_id: text
+    active: bool
+
+fn safe_state_root(root: text) -> bool:
+    if root.len() < 4 or root.len() > 512: return false
+    val drive = root.byte_at(0)
+    if not ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)): return false
+    if root.byte_at(1) != 58 or root.byte_at(2) != 92: return false
+    val tail = root.substring(2, root.len())
+    not root.contains("\0") and not root.contains("\n") and not root.contains("\r") and
+        not root.contains("..") and not root.contains("\"") and not root.contains("|") and
+        not root.contains("/") and not tail.contains(":")
+
+fn rejected(action: text, reason: text, status: text = RUNTIME_STATUS_BLOCKED) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: status, operation: action, command: runtime_command_empty(),
+        state: runtime_state_empty(), exit_code: -1, stdout: "", stderr: "", reason: reason)
+
+pub class WindowsSimpleContainerAdapterV2:
+    policy: WindowsDockerPolicyV1
+    policy_bytes: text
+    state_root: text
+    scope: ContainerHostScopeV2
+    observed: ContainerHostObservationV2
+    var provider: WindowsDockerRuntimeProviderV1
+    var authority: [WindowsRetainedAuthorityV2]
+
+impl WindowsSimpleContainerAdapterV2:
+    pub static fn observe(policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
+        val policy = windows_docker_policy_decode_v1(policy_bytes)?
+        val native = windows_host_identity_v1()?
+        if native.native_machine_id == "" or native.boot_counter < 0 or native.architecture == "":
+            return Err("windows-container-native-host-observation-missing")
+        if native.boot_assurance != "successful-boot-counter":
+            return Err("windows-container-native-assurance-unsupported")
+        var provider = WindowsDockerRuntimeProviderV1.new(policy)
+        val engine = provider.probe()
+        if not engine.engine_present or not engine.healthy:
+            return Err("windows-container-engine-observation-failed:" + engine.reason)
+        # The counter is lower-assurance data, never a native boot incarnation.
+        # Canonical policy is validated by decode; field hashes prevent ambiguity.
+        val identity = "windows-container-provider-v2\n" + sha256_text(policy_bytes) + "\n" +
+            sha256_text(native.native_machine_id) + "\n" + sha256_text(native.architecture)
+        Ok(ContainerHostObservationV2(backend: WINDOWS_SIMPLE_CONTAINER_BACKEND_V2,
+            native_machine_id: native.native_machine_id, native_boot_id: "",
+            provider_identity_digest: sha256_text(identity), execution_os: "windows",
+            architecture: native.architecture, continuity_assurance: "machine-boot-counter-v1",
+            boot_observation: native.boot_counter.to_text()))
+
+    pub fn observation() -> ContainerHostObservationV2: self.observed
+
+    pub static fn open(policy_bytes: text, state_root: text, scope: ContainerHostScopeV2,
+            expected_provider_identity_digest: text, timeout_ms: i64) -> Result<WindowsSimpleContainerAdapterV2, text>:
+        val policy = windows_docker_policy_decode_v1(policy_bytes)?
+        if not safe_state_root(state_root): return Err("windows-container-state-root-invalid")
+        if not windows_docker_token_v1(scope.physical_host_id) or not windows_docker_token_v1(scope.service_scope_id):
+            return Err("windows-container-host-scope-invalid")
+        if timeout_ms != policy.timeout_ms or scope.provider_generation != policy.provider_generation:
+            return Err("windows-container-policy-scope-mismatch")
+        val observed = WindowsSimpleContainerAdapterV2.observe(policy_bytes)?
+        # Enabling a lower-assurance route requires the shared fresh service
+        # incarnation and startup quarantine owner; counter equality is not it.
+        if observed.continuity_assurance != "native-boot-incarnation-v1":
+            return Err("windows-container-fresh-service-incarnation-required")
+        if scope.native_machine_id != observed.native_machine_id:
+            return Err("windows-container-native-machine-mismatch")
+        if scope.boot_id != observed.native_boot_id:
+            return Err("windows-container-native-boot-mismatch")
+        if expected_provider_identity_digest != observed.provider_identity_digest:
+            return Err("windows-container-provider-identity-mismatch")
+        var effective_policy = policy
+        effective_policy.node_boot_id = container_scope_fence_id_v2(scope)?
+        var provider = WindowsDockerRuntimeProviderV1.new(effective_policy)
+        val bound = provider.bind_managed_scope_v2(scope)?
+        Ok(WindowsSimpleContainerAdapterV2(policy: effective_policy, policy_bytes: policy_bytes,
+            state_root: state_root, scope: scope, observed: observed, provider: provider, authority: []))
+
+    fn _decode(request: ContainerExecutionRequestV2) -> Result<WindowsDockerRequestV1, text>:
+        val plan = request.plan
+        if plan.backend != WINDOWS_SIMPLE_CONTAINER_BACKEND_V2 or
+                plan.physical_host_id != self.scope.physical_host_id or plan.service_scope_id != self.scope.service_scope_id or
+                plan.boot_id != self.scope.boot_id or plan.provider_generation != self.scope.provider_generation or
+                plan.native_machine_id != self.scope.native_machine_id or plan.continuity_mode != self.scope.continuity_mode or
+                plan.continuity_id != self.scope.continuity_id:
+            return Err("windows-container-request-scope-mismatch")
+        val decoded = windows_docker_request_decode_v1(self.policy, request.request_bytes)?
+        val digest = windows_docker_request_digest_v1(self.policy, decoded)?
+        if plan.workload_uid != decoded.pod_uid or plan.attempt != decoded.attempt or
+                plan.operation_id != decoded.operation_id or plan.request_digest != digest:
+            return Err("windows-container-request-binding-mismatch")
+        Ok(decoded)
+
+    pub fn validate(request: ContainerExecutionRequestV2) -> Result<bool, text>:
+        val decoded = self._decode(request)?
+        Ok(true)
+
+    pub fn project(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
+        val decoded = self._decode(request)?
+        val digest = windows_docker_request_digest_v1(self.policy, decoded)?
+        if decoded.cpu_count <= 0 or decoded.cpu_count > 256:
+            return Err("windows-container-cpu-projection-overflow")
+        Ok(ContainerRequestProjectionV2(workload_uid: decoded.pod_uid, attempt: decoded.attempt,
+            operation_id: decoded.operation_id, request_digest: digest, cpu_millis: decoded.cpu_count * 1000,
+            memory_bytes: decoded.memory_limit_bytes, timeout_ms: self.policy.timeout_ms,
+            has_devices: false, has_workspace: false))
+
+    fn _fresh() -> Result<bool, text>:
+        val current = WindowsSimpleContainerAdapterV2.observe(self.policy_bytes)?
+        if current.backend != self.observed.backend or current.native_machine_id != self.observed.native_machine_id or
+                current.native_boot_id != self.observed.native_boot_id or current.execution_os != self.observed.execution_os or
+                current.architecture != self.observed.architecture or current.provider_identity_digest != self.observed.provider_identity_digest or
+                current.continuity_assurance != self.observed.continuity_assurance or
+                current.boot_observation != self.observed.boot_observation:
+            return Err("windows-container-live-host-or-provider-drift")
+        Ok(true)
+
+    fn _authority_index(request: ContainerExecutionRequestV2) -> i64:
+        var index = 0
+        while index < self.authority.len():
+            val entry = self.authority[index]
+            if entry.workload_uid == request.plan.workload_uid and entry.attempt == request.plan.attempt: return index
+            index = index + 1
+        -1
+
+    fn _owned(request: ContainerExecutionRequestV2) -> Result<i64, text>:
+        val index = self._authority_index(request)
+        if index < 0: return Err("windows-container-no-retained-recovery-authority")
+        val entry = self.authority[index]
+        if not entry.active or entry.operation_id != request.plan.operation_id or entry.request_digest != request.plan.request_digest:
+            return Err("windows-container-retained-authority-mismatch")
+        Ok(index)
+
+    me fn _retain(request: ContainerExecutionRequestV2, result: RuntimeOperationV1):
+        val entry = WindowsRetainedAuthorityV2(workload_uid: request.plan.workload_uid, attempt: request.plan.attempt,
+            operation_id: request.plan.operation_id, request_digest: request.plan.request_digest,
+            native_id: result.state.identity.native_id, active: true)
+        val index = self._authority_index(request)
+        if index < 0: self.authority.push(entry)
+        else: self.authority[index] = entry
+
+    pub me fn read(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
+        if action != "inspect" and action != "logs" and action != "wait":
+            return rejected(action, "windows-container-read-action-unsupported", RUNTIME_STATUS_REJECTED)
+        val decoded = match self._decode(request):
+            case Ok(value): value
+            case Err(reason): return rejected(action, reason, RUNTIME_STATUS_REJECTED)
+        val owned = self._owned(request)
+        match owned:
+            case Err(reason): return rejected(action, reason)
+            case Ok(_): ()
+        val fresh = self._fresh()
+        match fresh:
+            case Err(reason): return rejected(action, reason)
+            case Ok(_): ()
+        match action:
+            case "inspect": self.provider.inspect(decoded)
+            case "logs": self.provider.logs(decoded)
+            case "wait": self.provider.wait(decoded)
+            case _: rejected(action, "windows-container-read-action-unsupported", RUNTIME_STATUS_REJECTED)
+
+    pub me fn apply(action: text, request: ContainerExecutionRequestV2,
+            deadline: ContainerEffectDeadlineV1) -> RuntimeOperationV1:
+        if not ["prepare", "create", "start", "inspect", "logs", "wait", "stop", "destroy"].contains(action):
+            return rejected(action, "windows-container-action-unsupported", RUNTIME_STATUS_REJECTED)
+        if action == "inspect" or action == "logs" or action == "wait": return self.read(action, request)
+        val decoded = match self._decode(request):
+            case Ok(value): value
+            case Err(reason): return rejected(action, reason, RUNTIME_STATUS_REJECTED)
+        if action != "prepare" and action != "create":
+            val owned = self._owned(request)
+            match owned:
+                case Err(reason): return rejected(action, reason)
+                case Ok(_): ()
+        if action == "create" and self._authority_index(request) < 0 and self.authority.len() >= WINDOWS_DOCKER_MAX_RECORDS_V1:
+            return rejected(action, "windows-container-retained-authority-limit")
+        val fresh = self._fresh()
+        match fresh:
+            case Err(reason): return rejected(action, reason)
+            case Ok(_): ()
+        if action == "create" or action == "start":
+            val admitted = self.provider.set_launch_deadline_v1(deadline)
+            match admitted:
+                case Err(reason): return rejected(action, reason)
+                case Ok(_): ()
+        val result = match action:
+            case "prepare": self.provider.prepare_pod(decoded)
+            case "create": self.provider.create(decoded)
+            case "start": self.provider.start(decoded)
+            case "inspect": self.provider.inspect(decoded)
+            case "logs": self.provider.logs(decoded)
+            case "wait": self.provider.wait(decoded)
+            case "stop": self.provider.stop(decoded)
+            case "destroy": self.provider.destroy(decoded)
+            case _: return rejected(action, "windows-container-action-unsupported", RUNTIME_STATUS_REJECTED)
+        if result.status == RUNTIME_STATUS_OK:
+            if action == "create" or action == "start": self._retain(request, result)
+            if action == "destroy":
+                val index = self._authority_index(request)
+                var authority = self.authority[index]
+                authority.active = false
+                self.authority[index] = authority
+        result
+
+    pub me fn recover(request: ContainerExecutionRequestV2, intent: RuntimeIntentV1) -> RuntimeOperationV1:
+        val decoded = match self._decode(request):
+            case Ok(value): value
+            case Err(reason): return rejected("recover", reason, RUNTIME_STATUS_REJECTED)
+        val index = match self._owned(request):
+            case Ok(value): value
+            case Err(reason): return rejected("recover", reason)
+        if self.authority[index].native_id != intent.native_id:
+            return rejected("recover", "windows-container-recovery-native-id-not-authorized")
+        val fresh = self._fresh()
+        match fresh:
+            case Err(reason): return rejected("recover", reason)
+            case Ok(_): ()
+        self.provider.recover(decoded, intent)
+
+    pub me fn absence(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> Result<ContainerAbsenceReceiptV2, text>:
+        val decoded = self._decode(request)?
+        # Read-only evidence remains available after a successful destroy has
+        # retired mutation authority; no new cleanup right is granted here.
+        val index = self._authority_index(request)
+        if index < 0: return Err("windows-container-no-retained-absence-authority")
+        val retained = self.authority[index]
+        if retained.operation_id != request.plan.operation_id or retained.request_digest != request.plan.request_digest or
+                retained.native_id != expected.native_id:
+            return Err("windows-container-absence-authority-mismatch")
+        val fresh = self._fresh()?
+        val observed = self.provider.absence(decoded, expected)?
+        val query_digest = container_runtime_query_digest_v2(observed.0.command)?
+        val evidence_digest = container_runtime_observation_digest_v2(observed.0)?
+        Ok(ContainerAbsenceReceiptV2(backend: WINDOWS_SIMPLE_CONTAINER_BACKEND_V2, scope: self.scope,
+            identity: expected, request_digest: request.plan.request_digest,
+            provider_identity_digest: self.observed.provider_identity_digest, observed_unix_ms: observed.1,
+            query_digest: query_digest, evidence_digest: evidence_digest,
+            proof_kind: "exact-native-object-absence-v1"))
+
+    pub fn intent(request: ContainerExecutionRequestV2) -> Result<RuntimeIntentV1, text>:
+        val decoded = self._decode(request)?
+        self.provider.intent(decoded)

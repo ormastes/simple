@@ -32,3 +32,10 @@ Caller persistence and crash reconciliation are external boundaries. No native I
 means no guessed recovery. A repeated destroy or a timeout after actual removal
 can remain blocked: the provider does not convert arbitrary inspection errors to
 absence. These source contracts require actual Windows execution before admission.
+
+Common launch-admission scenarios require an explicit context bound to the semantic
+request digest and operation, reject absent/expired grants before create, and
+preserve the separately authorized operation timeout. Independent absence scenarios
+query the exact retained ID even when the cache says exited; only successful empty
+native output yields a receipt. Present IDs and failed queries yield no absence.
+The provider re-observes its engine around that query and records a trusted sample.

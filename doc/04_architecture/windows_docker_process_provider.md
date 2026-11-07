@@ -40,3 +40,30 @@ stop/destroy and restart recovery measurements require an admitted compiled
 Windows runner and live source-matched fixture. Repeated engine checks are
 intentional identity invalidation checks; caching them across a mutation would
 hide daemon replacement. Large inventories and full engine scans are forbidden.
+
+## Shared Simple Container API and continuity
+
+All orchestrator/host consumers route through `std.nogc_async_mut.container.api_v2`.
+The Windows adapter owns typed policy/request projection and delegates Docker
+commands to Windows leaves. Linux remains its own Podman leaf behind the same API.
+The common scope separately carries native machine identity, physical-host alias,
+service scope, provider generation, continuity mode/id and actual native boot ID.
+The legacy RuntimeIdentity boot slot carries the canonical scope hash as an
+internal fence only. Managed Docker labels retain actual `simple.boot` separately
+from `simple.fence`, plus physical/service/incarnation/mode/native-machine labels.
+
+Windows MachineGuid and architecture are native OS observations. The documented
+successful-boot counter is typed lower-assurance data and cannot prove continuity
+after restore/reset. Native CNG creates a service-incarnation nonce; copied text
+is not live authority. The finite strong-boot factory refuses this weak route.
+Host/orchestrator must supply the actual persistent owner, startup managed-scope
+inventory quarantine and separately epoch-bound grants before Windows activation.
+The inventory helper returns conservative quarantine candidates, including exited
+and dead objects; failures or uncertainty never release capacity or adopt objects.
+
+Create/start use the common grant-bound launch deadline after observations and the
+shared admitted native capture owner at the spawn boundary. Expiry does not cap
+workload lifetime or grant cleanup authority. Read/log/wait require no fabricated
+fresh launch grant. Stop/destroy require retained explicitly authorized lifecycle
+ownership. Independent absence uses a fresh successful empty exact-ID query, not
+a destroyed cache phase; common evidence serializes the actual query/result.

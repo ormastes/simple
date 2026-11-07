@@ -31,3 +31,15 @@ destroy may remain blocked. The minimal policy environment is explicit, but
 executable path sealing and untrusted-client Docker pipe brokerage are not supplied.
 The explicit controller/host Windows V2 dispatch source follow-up is owned by
 those lanes and is not implemented by this provider commit.
+
+## Common API follow-up
+
+Reviewed additions route through the common Container API, normalize semantic
+digests to raw64, add explicit managed scope labels, independently observe absence
+and use shared launch-deadline admission without lifetime clipping. Native Windows
+MachineGuid/architecture, lower-assurance boot counter, CNG service nonce and
+bounded managed inventory are source implementations with authored negative specs.
+The finite common factory explicitly refuses service continuity; persistent host
+ownership/quarantine integration is the next separately owned dependency.
+Captured native deadline/thread ownership is a separate reviewed commit/evidence
+lane; its Linux native results do not qualify Windows execution.

@@ -1,0 +1,72 @@
+# Trusted administrator policy serialization, separate from workload requests.
+# Strict canonical SDN: duplicate, unknown, missing, mistyped and noncanonical
+# fields fail closed. Decoding a policy does not qualify its host/image pair.
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
+    WindowsDockerPolicyV1, windows_docker_policy_reason_v1}
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, reject,
+    parse_resource_document, as_dict, as_int, only_known, require}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub const WINDOWS_DOCKER_POLICY_MAX_BYTES_V1: i64 = 16384
+
+pub fn windows_docker_policy_encode_v1(policy: WindowsDockerPolicyV1) -> Result<text, text>:
+    val reason = windows_docker_policy_reason_v1(policy)
+    if reason != "": return Err(reason)
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "kind": SdnValue.String("windows-docker-policy"),
+        "dockerExecutable": SdnValue.String(policy.docker_executable), "endpoint": SdnValue.String(policy.endpoint),
+        "engineId": SdnValue.String(policy.engine_id), "nodeBootId": SdnValue.String(policy.node_boot_id),
+        "providerGeneration": SdnValue.Int(policy.provider_generation),
+        "expectedKernelVersion": SdnValue.String(policy.expected_kernel_version),
+        "imageOsVersion": SdnValue.String(policy.image_os_version),
+        "expectedImageId": SdnValue.String(policy.expected_image_id),
+        "timeoutMs": SdnValue.Int(policy.timeout_ms), "maxOutputBytes": SdnValue.Int(policy.max_output_bytes),
+        "systemRoot": SdnValue.String(policy.system_root), "tempDirectory": SdnValue.String(policy.temp_directory)
+    }
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.len() > WINDOWS_DOCKER_POLICY_MAX_BYTES_V1: return Err("docker-policy-record-byte-limit")
+    Ok(source)
+
+fn field_text(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val value = require(fields, key, "", spans)?
+    match value:
+        case SdnValue.String(content): Ok(content)
+        case _: Err(reject("type", key, "expected text", spans))
+
+fn field_integer(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>) -> Result<i64, RejectionV1>:
+    as_int(require(fields, key, "", spans)?, key, spans)
+
+fn decode_fields(source: text) -> Result<WindowsDockerPolicyV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    val spans = parsed.1
+    val fields = as_dict(parsed.0, "", spans)?
+    only_known(fields, ["version", "kind", "dockerExecutable", "endpoint", "engineId", "nodeBootId",
+        "providerGeneration", "expectedKernelVersion", "imageOsVersion", "expectedImageId",
+        "timeoutMs", "maxOutputBytes", "systemRoot", "tempDirectory"], "", spans)?
+    if field_integer(fields, "version", spans)? != 1:
+        return Err(reject("version", "version", "unsupported policy version", spans))
+    if field_text(fields, "kind", spans)? != "windows-docker-policy":
+        return Err(reject("kind", "kind", "wrong policy kind", spans))
+    val policy = WindowsDockerPolicyV1(docker_executable: field_text(fields, "dockerExecutable", spans)?,
+        endpoint: field_text(fields, "endpoint", spans)?, engine_id: field_text(fields, "engineId", spans)?,
+        node_boot_id: field_text(fields, "nodeBootId", spans)?, provider_generation: field_integer(fields, "providerGeneration", spans)?,
+        expected_kernel_version: field_text(fields, "expectedKernelVersion", spans)?,
+        image_os_version: field_text(fields, "imageOsVersion", spans)?, expected_image_id: field_text(fields, "expectedImageId", spans)?,
+        timeout_ms: field_integer(fields, "timeoutMs", spans)?, max_output_bytes: field_integer(fields, "maxOutputBytes", spans)?,
+        system_root: field_text(fields, "systemRoot", spans)?, temp_directory: field_text(fields, "tempDirectory", spans)?)
+    val reason = windows_docker_policy_reason_v1(policy)
+    if reason != "": return Err(reject("policy", "", reason, spans))
+    Ok(policy)
+
+pub fn windows_docker_policy_decode_v1(source: text) -> Result<WindowsDockerPolicyV1, text>:
+    if source == "" or source.len() > WINDOWS_DOCKER_POLICY_MAX_BYTES_V1:
+        return Err("docker-policy-record-byte-limit")
+    val policy = match decode_fields(source):
+        case Ok(value): value
+        case Err(reason): return Err("docker-policy-record-invalid:" + reason.kind + ":" + reason.path)
+    val canonical = windows_docker_policy_encode_v1(policy)?
+    if source != canonical: return Err("docker-policy-record-not-canonical")
+    Ok(policy)

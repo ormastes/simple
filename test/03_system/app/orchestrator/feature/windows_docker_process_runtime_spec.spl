@@ -2,6 +2,7 @@
 # @req REQ-WDP-001 REQ-WDP-002 REQ-WDP-004 REQ-WDP-005 REQ-WDP-006
 # Runtime qualification and SPipe/docgen: NOT_RUN.
 use std.spec.*
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
 use std.common.contracts.container.runtime_v1.{RuntimeIntentV1, RuntimeProviderV1}
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
 use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
@@ -64,6 +65,14 @@ fn creation_script() -> [WindowsDockerScriptedResultV1]:
     [engine_response(), image_response(), engine_response(), image_response(),
         create_response(), engine_response(), inspect_response("created")]
 
+fn runtime_provider(script: [WindowsDockerScriptedResultV1]) -> WindowsDockerRuntimeProviderV1:
+    var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+    val digest = windows_docker_request_digest_v1(runtime_policy(), runtime_request()).unwrap()
+    val deadline = container_effect_deadline_v1(digest, "operation-a", ["create", "start"], 2000).unwrap()
+    expect(provider.set_launch_deadline_v1(deadline).unwrap()).to_equal(true)
+    expect(provider.set_scripted_admission_clock_v1(1000).unwrap()).to_equal(true)
+    provider
+
 fn retained_intent() -> RuntimeIntentV1:
     RuntimeIntentV1(pod_uid: "workload-a", attempt: 2, provider_generation: 4,
         operation_id: "operation-a", engine: "windows-docker-process-v1", native_id: runtime_id(),
@@ -72,7 +81,7 @@ fn retained_intent() -> RuntimeIntentV1:
 describe "Windows Docker engine admission":
     it "keeps a scripted healthy engine separate from live launch qualification":
         step("Observe the scripted engine and retain an unavailable launch capability")
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), [engine_response()])
+        var provider = runtime_provider([engine_response()])
         val probe = provider.probe()
         expect(probe.healthy).to_equal(true)
         expect(probe.launch_capable).to_equal(false)
@@ -83,7 +92,7 @@ describe "Windows Docker engine admission":
                 "windows|engine-b|10.0 20348 (20348.2402.amd64fre)"]:
             var engine = engine_response()
             engine.stdout = output
-            var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), [engine])
+            var provider = runtime_provider([engine])
             val prepared = provider.prepare_pod(runtime_request())
             expect(prepared.status).to_equal("blocked")
             expect(prepared.reason).to_equal("docker-live-engine-identity-mismatch")
@@ -95,17 +104,17 @@ describe "Windows Docker engine admission":
                 "windows|sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|10.0.20348.2402\nother@sha256:bbbb"]:
             var image = image_response()
             image.stdout = output
-            var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), [engine_response(), image])
+            var provider = runtime_provider([engine_response(), image])
             expect(provider.prepare_pod(runtime_request()).status).to_equal("blocked")
             expect(provider.retained_record_count()).to_equal(0)
             expect(provider.consumed_script_count()).to_equal(2)
 
     it "fails an unmatched or exhausted script without inventing execution success":
-        var exhausted = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), [])
+        var exhausted = runtime_provider([])
         expect(exhausted.prepare_pod(runtime_request()).reason).to_equal("docker-script-exhausted")
         var wrong = engine_response()
         wrong.args = ["--version"]
-        var mismatched = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), [wrong])
+        var mismatched = runtime_provider([wrong])
         expect(mismatched.prepare_pod(runtime_request()).reason).to_equal("docker-script-command-mismatch")
         expect(mismatched.consumed_script_count()).to_equal(0)
 
@@ -117,7 +126,7 @@ describe "Windows Docker exact lifecycle":
             response("start", ["start", runtime_id()], runtime_id() + "\n"), engine_response(), inspect_response("running"),
             engine_response(), inspect_response("running"), response("wait", ["wait", runtime_id()], "17\n"),
             engine_response(), inspect_response("exited", 17)]
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+        var provider = runtime_provider(script)
         expect(provider.prepare_pod(request).state.phase).to_equal("prepared")
         expect(provider.intent(request).unwrap().native_id).to_equal("")
         step("Create with process isolation and accept only the full inspected native ID")
@@ -136,7 +145,7 @@ describe "Windows Docker exact lifecycle":
     it "accepts an already exited short-lived process after a confirmed start":
         val script = creation_script() + [engine_response(), inspect_response("created"),
             response("start", ["start", runtime_id()], runtime_id()), engine_response(), inspect_response("exited", 17)]
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+        var provider = runtime_provider(script)
         expect(provider.prepare_pod(runtime_request()).status).to_equal("ok")
         expect(provider.create(runtime_request()).status).to_equal("ok")
         val started = provider.start(runtime_request())
@@ -147,7 +156,7 @@ describe "Windows Docker exact lifecycle":
     it "retains ambiguous create and refuses a second native create":
         step("Lose the create response and keep the attempt unavailable for retry")
         val script = [engine_response(), image_response(), engine_response(), image_response(), create_response(-1, true)]
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+        var provider = runtime_provider(script)
         expect(provider.prepare_pod(runtime_request()).status).to_equal("ok")
         val failed = provider.create(runtime_request())
         expect(failed.status).to_equal("blocked")
@@ -163,7 +172,7 @@ describe "Windows Docker exact lifecycle":
             inspected.stdout = observation("created").replace("|process|", replacement)
             val script = [engine_response(), image_response(), engine_response(), image_response(),
                 create_response(), engine_response(), inspected]
-            var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+            var provider = runtime_provider(script)
             expect(provider.prepare_pod(runtime_request()).status).to_equal("ok")
             val rejected = provider.create(runtime_request())
             expect(rejected.status).to_equal("blocked")
@@ -176,7 +185,7 @@ describe "Windows Docker exact lifecycle":
     it "blocks a mutation when the daemon changes after native creation":
         var changed_engine = engine_response()
         changed_engine.stdout = "windows|replacement|10.0 20348 (20348.2402.amd64fre)"
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), creation_script() + [changed_engine])
+        var provider = runtime_provider(creation_script() + [changed_engine])
         expect(provider.prepare_pod(runtime_request()).status).to_equal("ok")
         expect(provider.create(runtime_request()).status).to_equal("ok")
         val blocked = provider.start(runtime_request())
@@ -185,7 +194,7 @@ describe "Windows Docker exact lifecycle":
         expect(provider.consumed_script_count()).to_equal(8)
 
     it "binds operation identity separately from the immutable request digest":
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), [engine_response(), image_response()])
+        var provider = runtime_provider([engine_response(), image_response()])
         val original = runtime_request()
         expect(provider.prepare_pod(original).status).to_equal("ok")
         var replay = original
@@ -200,7 +209,7 @@ describe "Windows Docker recovery and exact cleanup":
     it "recovers only the retained full ID after live engine, image and ownership inspection":
         step("Reopen a provider with the original request and exact retained identity")
         val script = [engine_response(), image_response(), inspect_response("running")]
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+        var provider = runtime_provider(script)
         val result = provider.recover(runtime_request(), retained_intent())
         expect(result.status).to_equal("ok")
         expect(result.state.phase).to_equal("running")
@@ -212,19 +221,19 @@ describe "Windows Docker recovery and exact cleanup":
         for native_id in ["workload-a", "cccccccccccc", ""]:
             var intent = retained_intent()
             intent.native_id = native_id
-            var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), [])
+            var provider = runtime_provider([])
             expect(provider.recover(runtime_request(), intent).reason).to_equal("docker-recovery-intent-mismatch")
             expect(provider.consumed_script_count()).to_equal(0)
         var stale = retained_intent()
         stale.provider_generation = 3
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), [])
+        var provider = runtime_provider([])
         expect(provider.recover(runtime_request(), stale).reason).to_equal("docker-recovery-intent-mismatch")
 
     it "rejects copied ownership labels from another operation or request":
         for token in ["|operation-a|", "|boot-a|", "|process|", "|ContainerUser|", "|none|"]:
             var inspected = inspect_response("running")
             inspected.stdout = observation("running").replace(token, "|forged|")
-            var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), [engine_response(), image_response(), inspected])
+            var provider = runtime_provider([engine_response(), image_response(), inspected])
             val result = provider.recover(runtime_request(), retained_intent())
             expect(result.status).to_equal("blocked")
             expect(result.reason).to_equal("docker-inspect-ownership-or-isolation-mismatch")
@@ -235,7 +244,7 @@ describe "Windows Docker recovery and exact cleanup":
         val script = [engine_response(), image_response(), inspect_response("exited", 17),
             engine_response(), inspect_response("exited", 17), response("destroy", ["rm", runtime_id()], runtime_id() + "\n"),
             engine_response(), response("verify-absence", ["container", "ls", "--all", "--no-trunc", "--filter", "id=" + runtime_id(), "--format", "{{{{.ID}}}}"], "")]
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+        var provider = runtime_provider(script)
         expect(provider.recover(runtime_request(), retained_intent()).status).to_equal("ok")
         val destroyed = provider.destroy(runtime_request())
         expect(destroyed.status).to_equal("ok")
@@ -247,7 +256,7 @@ describe "Windows Docker recovery and exact cleanup":
         val script = [engine_response(), image_response(), inspect_response("exited", 17),
             engine_response(), inspect_response("exited", 17), response("destroy", ["rm", runtime_id()], runtime_id()),
             engine_response(), response("verify-absence", ["container", "ls", "--all", "--no-trunc", "--filter", "id=" + runtime_id(), "--format", "{{{{.ID}}}}"], "", 1)]
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+        var provider = runtime_provider(script)
         expect(provider.recover(runtime_request(), retained_intent()).status).to_equal("ok")
         val failed = provider.destroy(runtime_request())
         expect(failed.status).to_equal("blocked")
@@ -256,7 +265,7 @@ describe "Windows Docker recovery and exact cleanup":
 
     it "does not stop or remove a running workload without the required force choice":
         val script = [engine_response(), image_response(), inspect_response("running"), engine_response(), inspect_response("running")]
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+        var provider = runtime_provider(script)
         expect(provider.recover(runtime_request(), retained_intent()).status).to_equal("ok")
         expect(provider.destroy(runtime_request()).reason).to_equal("docker-destroy-running-requires-force")
         expect(provider.consumed_script_count()).to_equal(5)
@@ -265,9 +274,64 @@ describe "Windows Docker recovery and exact cleanup":
         step("Keep output-limit failure separate from successful complete log capture")
         val script = [engine_response(), image_response(), inspect_response("exited", 17),
             engine_response(), inspect_response("exited", 17), response("logs", ["logs", "--tail", "1000", runtime_id()], "prefix", 0, true)]
-        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+        var provider = runtime_provider(script)
         expect(provider.recover(runtime_request(), retained_intent()).status).to_equal("ok")
         val result = provider.logs(runtime_request())
         expect(result.status).to_equal("blocked")
         expect(result.stdout).to_equal("")
         expect(result.reason).to_equal("docker-execution-limit-exceeded")
+
+
+describe "Windows common Container launch admission":
+    it "requires a launch deadline after observations and before native create":
+        val script = [engine_response(), image_response(), engine_response(), image_response()]
+        var provider = WindowsDockerRuntimeProviderV1.scripted(runtime_policy(), script)
+        expect(provider.prepare_pod(runtime_request()).status).to_equal("ok")
+        val refused = provider.create(runtime_request())
+        expect(refused.reason).to_equal("docker-launch-deadline-required")
+        expect(refused.state.phase).to_equal("prepared")
+        expect(provider.consumed_script_count()).to_equal(4)
+
+    it "does not execute create when the launch grant expires during observations":
+        var provider = runtime_provider([engine_response(), image_response(), engine_response(), image_response()])
+        expect(provider.prepare_pod(runtime_request()).status).to_equal("ok")
+        expect(provider.set_scripted_admission_clock_v1(2000).unwrap()).to_equal(true)
+        val refused = provider.create(runtime_request())
+        expect(refused.status).to_equal("blocked")
+        expect(refused.state.phase).to_equal("prepared")
+        expect(provider.consumed_script_count()).to_equal(4)
+
+    it "preserves the separately authorized operation timeout instead of clipping it to grant expiry":
+        val policy = runtime_policy()
+        expect(policy.timeout_ms).to_equal(5000)
+        var provider = runtime_provider(creation_script())
+        expect(provider.prepare_pod(runtime_request()).status).to_equal("ok")
+        expect(provider.set_scripted_admission_clock_v1(1999).unwrap()).to_equal(true)
+        expect(provider.create(runtime_request()).status).to_equal("ok")
+        expect(provider.policy.timeout_ms).to_equal(5000)
+
+
+describe "Independent Windows native absence evidence":
+    it "queries the retained exact object independently of cached lifecycle phase":
+        step("Collect fresh positive-empty exact-ID evidence instead of trusting destroyed metadata")
+        val script = [engine_response(), image_response(), inspect_response("exited", 17), engine_response(),
+            response("verify-absence", ["container", "ls", "--all", "--no-trunc", "--filter", "id=" + runtime_id(), "--format", "{{{{.ID}}}}"], ""), engine_response()]
+        var provider = runtime_provider(script)
+        val recovered = provider.recover(runtime_request(), retained_intent())
+        expect(recovered.state.phase).to_equal("exited")
+        val observed = provider.absence(runtime_request(), recovered.state.identity).unwrap()
+        expect(observed.0.operation).to_equal("verify-absence")
+        expect(observed.0.exit_code).to_equal(0)
+        expect(observed.0.stdout).to_equal("")
+        expect(observed.0.command.args[7]).to_equal("id=" + runtime_id())
+        expect(observed.1).to_equal(1000)
+        expect(provider.consumed_script_count()).to_equal(6)
+
+    it "refuses presence and failed native queries as absence evidence":
+        for response_code in [0, 1]:
+            val script = [engine_response(), image_response(), inspect_response("exited", 17), engine_response(),
+                response("verify-absence", ["container", "ls", "--all", "--no-trunc", "--filter", "id=" + runtime_id(), "--format", "{{{{.ID}}}}"], runtime_id(), response_code)]
+            var provider = runtime_provider(script)
+            val recovered = provider.recover(runtime_request(), retained_intent())
+            expect(provider.absence(runtime_request(), recovered.state.identity).is_err()).to_equal(true)
+            expect(provider.consumed_script_count()).to_equal(5)

@@ -37,3 +37,23 @@ Native capture copies only SystemRoot, TEMP and TMP from explicit policy. It doe
 not inherit Docker context/host/TLS/config/plugin environment variables. Docker's
 executable and local pipe are explicit arguments. Executable path sealing is not
 provided: this is a trusted-administrator process boundary.
+
+## V2 API source integration
+
+`simple_container_adapter_v2.spl` implements the common factory, projection,
+apply/read, intent/recovery and independent absence ports. `docker_policy_codec_v1`
+keeps trusted canonical policy separate from request input. Semantic/provider
+digests use the common raw64 SHA256 spelling; Docker image IDs/references retain
+their required `sha256:` spelling. Operation identity remains independently bound.
+`docker_scope_v2` binds explicit labels and exact scoped inspection.
+
+`windows_host_identity_v1` owns bounded direct registry/native-architecture reads;
+`windows_service_incarnation_v1` owns 32 CNG random bytes for one service start.
+Neither fabricates an OS boot incarnation. `docker_inventory_v2` brackets bounded
+managed inventory with engine/membership observations and rejects incomplete rows.
+Its 30-second acceptance budget detects late results but cannot preempt governor
+slot waiting; it is not a hard response deadline.
+
+The persistent service-incarnation owner is implemented by the shared host lane;
+this source retains a fail-closed activation gate until that owner is supplied.
+All native Windows and common-API lifecycle qualification is still NOT_RUN.
