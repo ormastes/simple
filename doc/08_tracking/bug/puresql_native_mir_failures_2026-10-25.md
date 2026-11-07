@@ -89,3 +89,8 @@ is unresolved.
 - Semantics: `test/02_integration/lib/database/pure_sql_native_mir_regression_spec.spl`
   (auto INTEGER PRIMARY KEY, INSERT OR REPLACE, LIKE prefix/suffix) 3/3 pass in the
   interpreter.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+test/01_unit/compiler/50.mir/puresql_native_mir_causes_spec.spl: causes 1-3 shapes lower with 0 MIR errors in the seed-run self-hosted lowering (harness verified non-vacuous). Retiring the 9 workaround sites needs a Stage 2 native-build of pure_database.

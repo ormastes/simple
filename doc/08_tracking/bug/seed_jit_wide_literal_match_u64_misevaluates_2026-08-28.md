@@ -73,3 +73,11 @@ interpreter answers `false` for `sup(0x8000000000000000)` against a
 `case 0x8000000000000000` arm on a `u64` scrutinee (JIT: `true`). The literal
 arm is presumably compared as a signed i64 against a `Value::UInt`. This
 belongs to the seed-interpreter owner.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Interpreter high-bit literal arm already fixed in source (777859ac906); the stock seed binary predates it. Spec test/01_unit/lib/nogc_async_mut_noalloc/u64_literal_match_prevention_spec.spl is RED on the stale seed (arms above i64::MAX) and expected GREEN on a seed rebuilt from this tree.
+
+
+Round 15 update: verified on a seed built from this tree (D:/dev/wt/target-stdlib): u64_literal_match_prevention_spec 3/3 GREEN (was RED on the stale seed).

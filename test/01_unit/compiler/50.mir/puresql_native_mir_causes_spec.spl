@@ -1,0 +1,53 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: the three pure_sql native-MIR failure shapes lower without errors
+
+Bug puresql_native_mir_failures_2026_10_25. The source workarounds in
+pure_database.spl stay in place; these specs pin the intended-syntax shapes so
+the compiler is the thing that is held accountable.
+
+1. an enum-returning call pushed into `[Enum]`, then indexed (`arr[k].is_null()`)
+2. `Some(<trait value>)` re-wrapped from an `if val` binding of a trait object
+3. flow-narrowed two-hop optional field read keeps `text` (`expr.right.value`)
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn mir_error_count(src: text) -> i64:
+    val file = "testdata/puresql_causes_spec.spl"
+    val parsed = parse_full_frontend(src, file, "puresql_causes_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    lowering.errors.len()
+
+val CAUSE1 = "enum DbValue:\n    Null\n    Int(i64)\n\nimpl DbValue:\n    fn is_null() -> bool:\n        match self:\n            case DbValue.Null: true\n            case _: false\n\nfn make(n: i64) -> DbValue:\n    if n == 0: DbValue.Null else: DbValue.Int(n)\n\nfn pk(n: i64) -> bool:\n    var arr: [DbValue] = []\n    arr.push(make(n))\n    arr[0].is_null()\n"
+
+val CAUSE2 = "trait Reducer:\n    fn name() -> text\n\nclass Concrete:\n    n: i64\n\nimpl Reducer for Concrete:\n    fn name() -> text:\n        \"c\"\n\nclass Slot:\n    reducer: Reducer\n\nfn rewrap(slot: Slot?) -> text:\n    if val Some(s) = slot:\n        val again = Slot(reducer: s.reducer)\n        return again.reducer.name()\n    \"none\"\n"
+
+val CAUSE3 = "class Leaf:\n    value: text\n\nclass Node:\n    right: Leaf?\n\nfn first(where_expr: Node?) -> text:\n    if not where_expr.?:\n        return \"\"\n    val expr = where_expr\n    if not expr.right.?:\n        return \"\"\n    val pattern = expr.right.value\n    pattern.slice(0, 1)\n"
+
+describe "pure_sql native MIR failure shapes":
+    it "cause 1: enum call result pushed into [Enum] then indexed lowers cleanly":
+        expect(mir_error_count(CAUSE1)).to_equal(0)
+
+    it "cause 2: trait-typed field of an Option payload re-wrapped lowers cleanly":
+        expect(mir_error_count(CAUSE2)).to_equal(0)
+
+    it "cause 3: flow-narrowed two-hop optional read keeps text so slice resolves":
+        expect(mir_error_count(CAUSE3)).to_equal(0)
+
+    it "harness is non-vacuous: a MIR-fatal source reports errors":
+        # An unresolved method call is MIR-fatal ("unresolved method call").
+        val bad = "fn bad(a: [i64]) -> i64:\n    a.zzz_no_such_method(1)\n"
+        expect(mir_error_count(bad) > 0).to_equal(true)

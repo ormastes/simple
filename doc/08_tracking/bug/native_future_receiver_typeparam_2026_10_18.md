@@ -222,3 +222,8 @@ parse->HIR->MIR on current release/1.0.0 with 0 HIR/MIR errors, so the failure n
 construction (9ed67154123, dd0b28e9c72). Stage3 repro: native-build a module whose function
 returns `Future<bool>` via `Future.from_value(true)` imported from std; expect the
 `E-MIR-TYPE-TypeParam` diagnostic if still broken. Status stays open.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+MIR-level spec test/01_unit/compiler/50.mir/generic_static_receiver_typeparam_spec.spl (single module, inferred + explicit receiver) is green: the failure needs the imported std Future owner. Native verification: native-build test/fixtures/compiler/async_file_future_receiver/main.spl.

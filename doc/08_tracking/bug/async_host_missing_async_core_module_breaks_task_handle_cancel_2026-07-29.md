@@ -133,3 +133,8 @@ cancellation 2026-07-29), plus one missing seed extern
 (`spl_condvar_create`) and one nil-lease edge in `sync.spl`
 (`mutex_lifetime` on nil in the 65-sequential-locks test). Fixing those needs
 the seed interpreter/compiler fix, not more lib work.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Module exists; stale repro fixed (Poll.unwrap was removed, spec now uses poll_unwrap): test/01_unit/lib/async_core_spec.spl 7/7. Prevention: test/01_unit/lib/async_core_importers_prevention_spec.spl (every name an importer takes from std.async_core is exported). Remaining red specs (async_mutex_suspend, handle_cleanup, host_promise_terminal) are the seed hybrid-engine stale-snapshot defect: needs Rust seed change, not fixed here.

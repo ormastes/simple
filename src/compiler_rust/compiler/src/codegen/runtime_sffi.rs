@@ -2440,6 +2440,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_bdd_it_start", &[I64, I64], &[]), // name_ptr, name_len
     RuntimeFuncSpec::new("rt_bdd_it_end", &[I64], &[]),        // passed
     RuntimeFuncSpec::new("rt_bdd_has_failure", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_bdd_record_result", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_bdd_executed_total", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_bdd_failed_total", &[], &[I64]),
     RuntimeFuncSpec::new("rt_bdd_note_skip", &[], &[]),
     RuntimeFuncSpec::new("rt_bdd_expect_fail", &[I64, I64], &[]), // msg_ptr, msg_len
     RuntimeFuncSpec::new("rt_bdd_fail_rv", &[I64], &[]),           // msg (RuntimeValue text)

@@ -280,6 +280,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         };
     }
     insert_simple!("abs", math::abs);
+    insert_simple!("rt_bdd_executed_total", crate::interpreter::interpreter_call::bdd::rt_bdd_executed_total);
+    insert_simple!("rt_bdd_failed_total", crate::interpreter::interpreter_call::bdd::rt_bdd_failed_total);
+    insert_simple!("rt_bdd_record_result", crate::interpreter::interpreter_call::bdd::rt_bdd_record_result);
     insert_simple!("rt_host_memory_headroom_bytes_v1", host_capacity::memory_headroom);
     insert_simple!("rt_host_commit_headroom_bytes_v1", host_capacity::commit_headroom);
     insert_simple!("rt_host_disk_headroom_bytes_v1", host_capacity::disk_headroom);
@@ -1213,6 +1216,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_font_glyph_index", font::rt_font_glyph_index_fn);
     insert_simple!("rt_font_glyph_bitmap", font::rt_font_glyph_bitmap_fn);
     insert_simple!("rt_font_glyph_advance", font::rt_font_glyph_advance_fn);
+    insert_simple!("rt_font_glyph_bitmap_index", font::rt_font_glyph_bitmap_index_fn);
+    insert_simple!("rt_font_glyph_advance_index", font::rt_font_glyph_advance_index_fn);
     insert_simple!("rt_font_line_height", font::rt_font_line_height_fn);
     insert_simple!("rt_font_ascent", font::rt_font_ascent_fn);
     insert_simple!("rt_font_bitmap_width", font::rt_font_bitmap_width_fn);
