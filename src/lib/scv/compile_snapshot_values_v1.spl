@@ -1,7 +1,7 @@
 # Shared snapshot values and metadata helpers; no filesystem deletion authority.
 use app.io.mod.{file_exists, file_read_regular_no_follow_bounded}
 use std.common.crypto.sha256.{sha256_text}
-use std.scv.compile_source_inventory.{compile_source_inventory_identity_cmp_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_identity_cmp_v1, compile_source_inventory_digest_valid_v1}
 
 val SCV_COMPILE_METADATA_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
 
@@ -9,6 +9,11 @@ export ScvCompileSnapshotV1, scv_compile_snapshot_invalid_v1
 export scv_compile_snapshot_sorted_unique_v1, scv_compile_snapshot_revision_id_v1
 export scv_compile_snapshot_provenance_v1, scv_compile_snapshot_receipt_v1
 export scv_compile_snapshot_read_text_v1
+export scv_compile_snapshot_revision_id_v2, scv_compile_snapshot_provenance_v2
+export scv_compile_snapshot_revision_supported_v1, scv_compile_snapshot_is_bundle_v2
+export scv_compile_snapshot_provenance_for_revision_v1, scv_compile_snapshot_header_for_revision_v1
+export scv_compile_snapshot_receipt_path_v1
+export scv_compile_snapshot_metadata_matches_v2
 
 struct ScvCompileSnapshotV1:
     valid: bool
@@ -85,12 +90,64 @@ fn scv_compile_snapshot_revision_id_v1(
     "scv-revision-v1-" + sha256_text(
         "simple/scv-compile-revision/v1|{tree_id}|{inventory_digest}")
 
+fn scv_compile_snapshot_revision_id_v2(tree_id: text, inventory_digest: text) -> text:
+    "scv-revision-v2-" + sha256_text(
+        "simple/scv-compile-revision/v2|{tree_id}|{inventory_digest}")
+
+fn scv_compile_snapshot_revision_supported_v1(revision: text) -> bool:
+    (revision.starts_with("scv-revision-v1-") or revision.starts_with("scv-revision-v2-")) and
+        compile_source_inventory_digest_valid_v1(revision.substring(16))
+
+fn scv_compile_snapshot_is_bundle_v2(revision: text) -> bool:
+    revision.starts_with("scv-revision-v2-") and
+        compile_source_inventory_digest_valid_v1(revision.substring(16))
+
+fn scv_compile_snapshot_header_for_revision_v1(revision: text) -> text:
+    if not scv_compile_snapshot_revision_supported_v1(revision): return ""
+    if scv_compile_snapshot_is_bundle_v2(revision): "simple-scv-compile-snapshot-v2"
+    else: "simple-scv-compile-snapshot-v1"
+
+fn scv_compile_snapshot_receipt_path_v1(cache_root: text, snapshot_root: text, revision: text) -> text:
+    if not scv_compile_snapshot_revision_supported_v1(revision): return ""
+    if scv_compile_snapshot_is_bundle_v2(revision): snapshot_root + "/SCV_COMPILE_RECEIPT"
+    else: "{cache_root}/receipts/{revision}.receipt"
+
+fn scv_compile_snapshot_metadata_matches_v2(actual: text, expected: text) -> bool:
+    # Length plus the existing raw UTF-8 digest preserves embedded-NUL bytes;
+    # a C-string equality provider alone is not a metadata byte comparison.
+    actual.byte_len() == expected.byte_len() and sha256_text(actual) == sha256_text(expected)
+
 fn scv_compile_snapshot_provenance_v1(
     revision_id: text, commit_id: text, tree_id: text,
     inventory_digest: text, inventory_count: i64
 ) -> text:
+    scv_compile_snapshot_provenance_with_header_v1("simple-scv-compile-snapshot-v1",
+        revision_id, commit_id, tree_id, inventory_digest, inventory_count)
+
+fn scv_compile_snapshot_provenance_v2(
+    revision_id: text, commit_id: text, tree_id: text,
+    inventory_digest: text, inventory_count: i64
+) -> text:
+    scv_compile_snapshot_provenance_with_header_v1("simple-scv-compile-snapshot-v2",
+        revision_id, commit_id, tree_id, inventory_digest, inventory_count)
+
+fn scv_compile_snapshot_provenance_for_revision_v1(
+    revision_id: text, commit_id: text, tree_id: text,
+    inventory_digest: text, inventory_count: i64
+) -> text:
+    # Formatting is not admission. Preserve the legacy formatter/error order
+    # even for malformed v1 IDs; the owner-path validator still rejects them.
+    if revision_id.starts_with("scv-revision-v2-"):
+        scv_compile_snapshot_provenance_v2(revision_id, commit_id, tree_id, inventory_digest, inventory_count)
+    else:
+        scv_compile_snapshot_provenance_v1(revision_id, commit_id, tree_id, inventory_digest, inventory_count)
+
+fn scv_compile_snapshot_provenance_with_header_v1(
+    header: text, revision_id: text, commit_id: text, tree_id: text,
+    inventory_digest: text, inventory_count: i64
+) -> text:
     [
-        "simple-scv-compile-snapshot-v1",
+        header,
         "revision={revision_id}",
         "commit={commit_id}",
         "tree={tree_id}",
