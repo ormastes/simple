@@ -222,7 +222,7 @@ pub(super) fn eval_call_expr(
                 // of deep-copying the dict on every call (value semantics are
                 // kept: a second owner still forces the copy-on-write clone).
                 let owned_call = match env.get(var_name) {
-                    Some(Value::Object { class, .. }) => resolve_object_method(classes, impl_methods, class, method),
+                    Some(Value::Object { class, fields }) => resolve_object_method(classes, impl_methods, class, fields, method),
                     _ => None,
                 };
                 if let Some(resolved) = owned_call {
@@ -344,8 +344,8 @@ pub(super) fn eval_call_expr(
                         Some(Value::Object {
                             fields: parent_fields, ..
                         }) => match parent_fields.get(field) {
-                            Some(Value::Object { class: field_class, .. }) => {
-                                resolve_object_method(classes, impl_methods, field_class, method)
+                            Some(Value::Object { class: field_class, fields: field_fields }) => {
+                                resolve_object_method(classes, impl_methods, field_class, field_fields, method)
                             }
                             _ => None,
                         },

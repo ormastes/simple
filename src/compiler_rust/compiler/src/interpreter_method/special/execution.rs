@@ -333,11 +333,14 @@ pub fn resolve_object_method(
     classes: &HashMap<String, Arc<ClassDef>>,
     impl_methods: &ImplMethods,
     class: &str,
+    fields: &HashMap<String, Value>,
     method: &str,
 ) -> Option<ResolvedMethod> {
-    if let Some(class_def) = classes.get(class) {
-        if let Some(idx) = lookup_class_method_index(class_def, class, method) {
-            return Some(ResolvedMethod::Class(Arc::clone(class_def), idx));
+    // Module-qualified: the instance's own field set picks between same-named
+    // classes (see `resolve_class_for_receiver`).
+    if let Some(class_def) = crate::interpreter::resolve_class_for_receiver(classes, class, fields) {
+        if let Some(idx) = lookup_class_method_index(&class_def, class, method) {
+            return Some(ResolvedMethod::Class(Arc::clone(&class_def), idx));
         }
     }
     if let Some(methods) = impl_methods.get(class) {
