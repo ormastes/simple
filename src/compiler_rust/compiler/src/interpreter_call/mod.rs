@@ -918,7 +918,7 @@ pub(crate) fn evaluate_call(
         // The sentinel is written by crate::decorator_apply and is scoped to
         // the same Env as the binding.
         // Only worth the key build + env cascade once a decorator has bound
-        // anything on this thread (see decorator_apply::DECORATED_FN_BOUND).
+        // anything in this process (see decorator_apply::DECORATED_FN_BOUND).
         if crate::decorator_apply::any_decorated_fn_bound()
             && env.get(&crate::decorator_apply::decorated_fn_key(name)).is_some()
         {
