@@ -416,13 +416,26 @@ impl _Lowerer:
         if params.len() != args.len():
             self.fail("call to '{name}' has {args.len()} argument(s), expected {params.len()}")
             return
+        # Calls nested in later arguments may use these same callee parameter
+        # slots. Preserve each argument in a disjoint call-site temporary until
+        # all arguments have been evaluated, in source order.
+        var arg_slots: [i64] = []
         var i = 0
         while i < args.len() and self.ok():
-            val param_slot = self.slot_for(SymbolId(id: params[i]))
-            self.emit_pushi(param_slot)
+            val arg_slot = self.alloc_slot()
+            arg_slots = arg_slots.push(arg_slot)
+            self.emit_pushi(arg_slot)
             self.lower_expr(args[i].value)
             if self.ok():
                 self.emit_op(OP_STORE32)
+            i = i + 1
+        i = 0
+        while i < args.len() and self.ok():
+            val param_slot = self.slot_for(SymbolId(id: params[i]))
+            self.emit_pushi(param_slot)
+            self.emit_pushi(arg_slots[i])
+            self.emit_op(OP_LOAD32)
+            self.emit_op(OP_STORE32)
             i = i + 1
         if self.ok():
             self.emit_op(OP_CALL)
@@ -810,6 +823,9 @@ impl _Lowerer:
                 self.store_local_expr(var_, start!)
                 if not self.ok():
                     return
+                val counter_slot = self.slot_for(var_)
+                val previous_slot = self.alloc_slot()
+                val step_slot = self.alloc_slot()
                 val loop_head = self.code.len()
                 self.load_local(var_)
                 self.lower_expr(end!)
@@ -821,11 +837,37 @@ impl _Lowerer:
                 if not self.ok():
                     return
                 val step_expr = step ?? HirExpr(kind: HirExprKind.IntLit(1, None), has_type_: false, type_: _dummy_type(), span: Span.empty())
-                self.compound_assign(var_, OP_ADD, step_expr)
+                self.emit_pushi(previous_slot)
+                self.load_local(var_)
+                self.emit_op(OP_STORE32)
+                self.emit_pushi(step_slot)
+                self.lower_expr(step_expr)
                 if not self.ok():
                     return
+                self.emit_op(OP_STORE32)
+                self.emit_pushi(counter_slot)
+                self.emit_pushi(previous_slot)
+                self.emit_op(OP_LOAD32)
+                self.emit_pushi(step_slot)
+                self.emit_op(OP_LOAD32)
+                self.emit_op(OP_ADD)
+                self.emit_op(OP_STORE32)
+                # A positive step can wrap i32::MAX to a negative word before
+                # the next bound check. That finishes this ascending range;
+                # taking the backedge would turn a finite range into a timeout.
+                self.emit_pushi(step_slot)
+                self.emit_op(OP_LOAD32)
+                self.emit_pushi(0)
+                self.emit_op(OP_GT)
+                self.load_local(var_)
+                self.emit_pushi(previous_slot)
+                self.emit_op(OP_LOAD32)
+                self.emit_op(OP_LT)
+                self.emit_op(OP_AND)
+                val overflow_exit_patch = self.emit_jump(OP_JNZ)
                 self.emit_jump_back(OP_JMP, loop_head)
                 self.patch_rel16(exit_patch, self.code.len())
+                self.patch_rel16(overflow_exit_patch, self.code.len())
             case HirExprKind.Var(arr_symbol):
                 self.lower_for_array(var_, arr_symbol, body)
             case HirExprKind.NamedVar(arr_symbol, _):
@@ -892,6 +934,9 @@ impl _Lowerer:
             if self.ok():
                 self.lower_stmt(stmt)
         if self.ok() and h.body.has:
+            if not self.expr_leaves_value(h.body.value):
+                self.fail("helper fn '{h.name}' requires a tail value; print, loops and assertions produce no value")
+                return
             self.emit_pushi(ret_slot)
             self.lower_expr(h.body.value)
             if self.ok():
