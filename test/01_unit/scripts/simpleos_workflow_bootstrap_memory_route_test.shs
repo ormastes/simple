@@ -1,0 +1,41 @@
+#!/bin/sh
+# The hosted runner cannot admit two 9 GiB file workers plus the 24 GiB
+# reserve. Every production host-bootstrap step must select the explicit
+# whole-program route rather than fail before candidate admission.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+workflow=$root/.github/workflows/simpleos-build.yml
+bootstrap=$root/scripts/bootstrap/bootstrap-from-scratch.sh
+
+python3 - "$workflow" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    workflow = yaml.safe_load(stream)
+
+expected = {
+    "toolchain_artifacts_phase2": "Build admitted pure-Simple host on this runner",
+    "smoke": "Build and deploy admitted pure-Simple host CLI",
+    "full": "Build and deploy admitted pure-Simple host CLI",
+}
+for job_name, step_name in expected.items():
+    steps = workflow["jobs"][job_name]["steps"]
+    matches = [step for step in steps if step.get("name") == step_name]
+    assert len(matches) == 1, f"{job_name}: expected one {step_name!r}, found {len(matches)}"
+    value = matches[0].get("env", {}).get("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM")
+    assert str(value) == "1", f"{job_name}: whole-program route is {value!r}"
+
+print("PASS: all hosted SimpleOS bootstrap jobs select the admitted whole-program route")
+PY
+
+perl -0ne '
+    /sanity_bootstrap_whole_program_present=\$\{SIMPLE_BOOTSTRAP_WHOLE_PROGRAM\+x\}/
+        or die "FAIL: stage2 sanity does not capture whole-program presence\n";
+    /reason=invalid-bootstrap-whole-program raw_status=125/
+        or die "FAIL: stage2 sanity does not reject malformed whole-program policy\n";
+    /SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=\$\{sanity_bootstrap_whole_program\}\s*export SIMPLE_BOOTSTRAP_WHOLE_PROGRAM/s
+        or die "FAIL: stage2 sanity does not restore whole-program policy after scrub\n";
+' "$bootstrap"
+echo "PASS: stage2 candidate sanity transports whole-program policy across its environment scrub"

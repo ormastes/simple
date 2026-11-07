@@ -19731,9 +19731,16 @@ static int ws_compat_fcntl(SOCKET s, int command, int argument) {
 #define MSG_NOSIGNAL 0
 #endif /* _WIN32 */
 
+/* Socket address operands arrive in BOTH text conventions: a tagged
+ * RtCoreString (seed, interpreter, and the compiler's boxed-text externs such
+ * as rt_io_tcp_bind) or the bare char* the compiler's default extern text
+ * bridge produces (rt_interp_cstr unwrap). Measured on the Windows Stage 2
+ * build of avx_server_loadgen: rt_io_tcp_connect received the raw buffer, the
+ * tagged-only decode returned NULL, and every connect failed in 0 us before a
+ * socket existed. rt_interp_cstr is the runtime's existing tagged-or-raw
+ * autodetector (NULL for nil and low words). */
 static const char* rt_extract_cstr(int64_t text_val) {
-    RtCoreString* s = rt_core_as_string(text_val);
-    return s ? s->data : NULL;
+    return rt_interp_cstr(text_val);
 }
 
 static int rt_parse_addr_port(const char* addr_str, struct sockaddr_in* sa) {
