@@ -1198,7 +1198,7 @@ pub unsafe extern "C" fn rt_cranelift_define_function(module: i64, _func_id: i64
     match func_id_result {
         Ok(id) => {
             let mut ctx = finished.ctx;
-            match mod_ctx.module.define_function(id, &mut ctx) {
+            match crate::codegen::shared::define_function_aligned(&mut mod_ctx.module, id, &mut ctx) {
                 Ok(_) => {
                     mod_ctx.func_ids.insert(finished.name, id);
                     true
@@ -2124,7 +2124,7 @@ pub unsafe extern "C" fn rt_cranelift_aot_define_function(
     match func_id_result {
         Ok(id) => {
             let mut ctx = finished.ctx;
-            match mod_ctx.module.define_function(id, &mut ctx) {
+            match crate::codegen::shared::define_function_aligned(&mut mod_ctx.module, id, &mut ctx) {
                 Ok(_) => {
                     mod_ctx.func_ids.insert(name, id);
                     true
@@ -2556,6 +2556,79 @@ mod tests {
             assert!(object
                 .sections()
                 .any(|section| { section.name().unwrap_or("").contains("fma_probe") && section.size() > 0 }));
+        }
+    }
+
+    /// Regression for doc/08_tracking/bug/cranelift_aot_functions_byte_aligned_2026-11-07.md:
+    /// every AOT function must land at a 16-byte-aligned address (its per-function
+    /// text section must carry >= 16 alignment, and the symbol offset inside it
+    /// must be 16-aligned). Before the fix x86_64 sections were 1-byte aligned
+    /// (`IMAGE_SCN_ALIGN_1BYTES` on COFF).
+    #[test]
+    fn test_aot_functions_are_16_byte_aligned() {
+        use object::{Object, ObjectSection, ObjectSymbol, SymbolSection};
+
+        for target in ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-gnu", "aarch64-unknown-linux-gnu"] {
+            unsafe {
+                let name = "fn_align_probe";
+                let cpu = "generic";
+                let module = spl_cranelift_new_aot_module_config_v2(
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    target.as_ptr() as i64,
+                    target.len() as i64,
+                    cpu.as_ptr() as i64,
+                    cpu.len() as i64,
+                    2,
+                    0,
+                    0,
+                );
+                assert!(module > 0, "{target}: module");
+                // Different immediates give different body lengths, so an
+                // unaligned layout cannot be aligned by accident.
+                let values: [i64; 5] = [1, 0x1234_5678_9abc, -7, 300, 0x7fff_ffff_ffff];
+                for (i, value) in values.iter().enumerate() {
+                    let fname = format!("fnalign_{i}");
+                    let sig = rt_cranelift_new_signature(0);
+                    rt_cranelift_sig_set_return(sig, CL_TYPE_I64);
+                    let ctx = rt_cranelift_begin_function(module, fname.as_ptr() as i64, fname.len() as i64, sig);
+                    assert!(ctx > 0, "{target}: begin {fname}");
+                    let block = rt_cranelift_create_block(ctx);
+                    rt_cranelift_switch_to_block(ctx, block);
+                    rt_cranelift_seal_block(ctx, block);
+                    let v = rt_cranelift_iconst(ctx, CL_TYPE_I64, *value);
+                    rt_cranelift_return(ctx, v);
+                    let finished = rt_cranelift_end_function(ctx);
+                    assert!(finished > 0, "{target}: end {fname}");
+                    assert!(rt_cranelift_aot_define_function(module, 0, 0, finished), "{target}: define {fname}");
+                }
+                let temp_dir = tempfile::tempdir().unwrap();
+                let path = temp_dir.path().join("fnalign.o");
+                let path = path.to_string_lossy();
+                assert!(rt_cranelift_emit_object_raw(module, path.as_ptr() as i64, path.len() as i64));
+                let bytes = std::fs::read(path.as_ref()).unwrap();
+                let object = object::File::parse(bytes.as_slice()).unwrap();
+                let mut checked = 0;
+                for symbol in object.symbols() {
+                    let sym_name = symbol.name().unwrap_or("");
+                    if !sym_name.trim_start_matches('_').starts_with("fnalign_") {
+                        continue;
+                    }
+                    let SymbolSection::Section(index) = symbol.section() else {
+                        panic!("{target}: {sym_name} not defined in a section");
+                    };
+                    let section = object.section_by_index(index).unwrap();
+                    assert!(
+                        section.align() >= 16,
+                        "{target}: section of {sym_name} has alignment {}",
+                        section.align()
+                    );
+                    assert_eq!(symbol.address() % 16, 0, "{target}: {sym_name} at {:#x}", symbol.address());
+                    checked += 1;
+                }
+                assert_eq!(checked, values.len(), "{target}: checked symbols");
+                rt_cranelift_free_module(module);
+            }
         }
     }
 

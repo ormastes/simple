@@ -1988,7 +1988,7 @@ impl<M: Module> CodegenBackend<M> {
         }
 
         // Define the function (may fail if verifier errors are critical)
-        match self.module.define_function(func_id, &mut self.ctx) {
+        match crate::codegen::shared::define_function_aligned(&mut self.module, func_id, &mut self.ctx) {
             Ok(()) => {}
             Err(e) => {
                 return Err(BackendError::ModuleError(format!(
@@ -2416,7 +2416,7 @@ impl<M: Module> CodegenBackend<M> {
                 builder.finalize();
 
                 // Try to define the stub
-                if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+                if let Err(e) = crate::codegen::shared::define_function_aligned(&mut self.module, func_id, &mut self.ctx) {
                     eprintln!("[ERROR] Failed to create stub for '{}': {}", func.name, e);
                 }
                 self.module.clear_context(&mut self.ctx);
@@ -3069,8 +3069,7 @@ impl<M: Module> CodegenBackend<M> {
         builder.finalize();
 
         // Define the function
-        self.module
-            .define_function(func_id, &mut self.ctx)
+        crate::codegen::shared::define_function_aligned(&mut self.module, func_id, &mut self.ctx)
             .map_err(|e| BackendError::ModuleError(format!("define __module_init: {e}")))?;
         self.module.clear_context(&mut self.ctx);
 
