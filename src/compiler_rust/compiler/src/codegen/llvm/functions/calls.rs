@@ -2039,6 +2039,16 @@ impl LlvmBackend {
             .map(|s| s.as_str())
             .unwrap_or(func_name_raw);
         let resolved_text_runtime = super::super::resolved_text_runtime_method(resolved_name);
+        let resolved_dotted = resolved_name.replace("_dot_", ".");
+        let exact_builtin_byte_len = resolved_dotted.rsplit_once('.').is_some_and(|(owner, method)| {
+            method == "byte_len"
+                && !owner.contains("__")
+                && !owner.contains('.')
+                && super::super::qualified_runtime_method_owner_is_builtin(resolved_name)
+        });
+        if exact_builtin_byte_len && resolved_text_runtime != Some("rt_string_len") {
+            return Err(CompileError::semantic("byte_len requires a text receiver"));
+        }
         let receiver_is_exact_string = args
             .first()
             .and_then(|receiver| vreg_types.get(receiver))
@@ -2306,6 +2316,18 @@ impl LlvmBackend {
         .or(resolved_text_runtime);
 
         if let Some(rt_fn_name) = bare_rt_redirect {
+            if rt_fn_name == "rt_string_len" {
+                // byte_len is text-only and accepts exactly the receiver.
+                // Do not let a malformed call declare a different runtime ABI.
+                if args.len() != 1 {
+                    return Err(CompileError::semantic("text.byte_len expects one receiver and no arguments"));
+                }
+                if vreg_types.get(&args[0]).is_some_and(|ty| {
+                    *ty != crate::hir::TypeId::STRING && *ty != crate::hir::TypeId::ANY
+                }) {
+                    return Err(CompileError::semantic("text.byte_len requires a text receiver"));
+                }
+            }
             let needs_receiver = !matches!(rt_fn_name, "rt_enum_payload" | "rt_enum_check_discriminant");
             if needs_receiver && args.is_empty() {
                 return Err(crate::error::factory::llvm_build_failed(
