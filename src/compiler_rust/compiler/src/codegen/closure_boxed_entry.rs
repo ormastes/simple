@@ -346,8 +346,7 @@ impl<M: Module> CodegenBackend<M> {
             b.finalize();
         }
 
-        self.module
-            .define_function(func_id, &mut self.ctx)
+        crate::codegen::shared::define_function_aligned(&mut self.module, func_id, &mut self.ctx)
             .map_err(|e| BackendError::ModuleError(format!("define {symbol}: {e}")))?;
         self.module.clear_context(&mut self.ctx);
         Ok(())
@@ -662,8 +661,7 @@ impl<M: Module> CodegenBackend<M> {
                 b.ins().return_(&results);
                 b.finalize();
             }
-            self.module
-                .define_function(func_id, &mut self.ctx)
+            crate::codegen::shared::define_function_aligned(&mut self.module, func_id, &mut self.ctx)
                 .map_err(|e| BackendError::ModuleError(format!("define {symbol}: {e}")))?;
             self.module.clear_context(&mut self.ctx);
             thunked.insert(func.name.clone());
