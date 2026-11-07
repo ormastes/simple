@@ -15,7 +15,7 @@ use compiler.common.api_export_closure_facts_v1.{ApiExportClosureStatusV1, ApiEx
     ApiExportClosureFactsV1}
 use compiler.common.api_publication_decision_v1.{ApiPublicationDispositionV1,
     api_publication_disposition_v1, decide_api_publication_v1}
-use compiler.common.api_publication_activation_v1.{extreme_public_api_active_v1,
+use compiler.common.api_publication_activation_v1.{extreme_public_api_active_v1, extreme_public_api_warn_only_v1,
     extreme_public_api_denies_cached_admission_v1}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{Module}
@@ -169,12 +169,17 @@ describe "extreme_public_api named rule":
         expect(no_routes.checked_roots).to_equal(0)
         expect(no_routes.unknown_reasons).to_contain("export-routes-not-collected")
 
-    it "refuses cached admission only when active at a denying profile":
+    it "refuses cached admission only when explicitly enabled at a denying profile":
         env_remove_process("SIMPLE_EXTREME_PUBLIC_API")
         env_set_process("SIMPLE_SAFETY_PROFILE", "robust")
+        expect(extreme_public_api_active_v1()).to_equal(true)
+        expect(extreme_public_api_warn_only_v1()).to_equal(true)
+        expect(extreme_public_api_denies_cached_admission_v1()).to_equal(false)
+        env_set_process("SIMPLE_EXTREME_PUBLIC_API", "0")
         expect(extreme_public_api_active_v1()).to_equal(false)
         expect(extreme_public_api_denies_cached_admission_v1()).to_equal(false)
         env_set_process("SIMPLE_EXTREME_PUBLIC_API", "1")
+        expect(extreme_public_api_warn_only_v1()).to_equal(false)
         expect(extreme_public_api_denies_cached_admission_v1()).to_equal(true)
         env_set_process("SIMPLE_SAFETY_PROFILE", "strict")
         expect(extreme_public_api_denies_cached_admission_v1()).to_equal(false)
@@ -198,7 +203,7 @@ describe "extreme_public_api named rule":
         expect(warned.allowed).to_equal(true)
         expect(warned.diagnostics.len()).to_be_greater_than(0)
         expect(warned_ctx.has_errors()).to_equal(false)
-        env_remove_process("SIMPLE_EXTREME_PUBLIC_API")
+        env_set_process("SIMPLE_EXTREME_PUBLIC_API", "0")
         env_set_process("SIMPLE_SAFETY_PROFILE", "robust")
         val inactive_ctx = fixture_context()
         val inactive = guard_api_publication_v1(inactive_ctx)
@@ -206,3 +211,30 @@ describe "extreme_public_api named rule":
         expect(inactive.unknown_reasons).to_contain("rule-inactive")
         expect(inactive_ctx.has_errors()).to_equal(false)
         env_remove_process("SIMPLE_SAFETY_PROFILE")
+
+    it "warns only, with one summary per module, when the flag is unset (temporary default)":
+        env_remove_process("SIMPLE_EXTREME_PUBLIC_API")
+        env_remove_process("SIMPLE_EXTREME_PUBLIC_API_VERBOSE")
+        env_set_process("SIMPLE_SAFETY_PROFILE", "robust")
+        val ctx = fixture_context()
+        val decision = guard_api_publication_v1(ctx)
+        expect(decision.active).to_equal(true)
+        expect(decision.allowed).to_equal(true)
+        expect(decision.violating_roots).to_be_greater_than(0)
+        expect(ctx.has_errors()).to_equal(false)
+        expect(ctx.api_publication_decision.unwrap().allowed).to_equal(true)
+        env_set_process("SIMPLE_EXTREME_PUBLIC_API_VERBOSE", "1")
+        val verbose_ctx = fixture_context()
+        val verbose = guard_api_publication_v1(verbose_ctx)
+        expect(verbose.allowed).to_equal(true)
+        expect(verbose_ctx.has_errors()).to_equal(false)
+        env_remove_process("SIMPLE_EXTREME_PUBLIC_API_VERBOSE")
+        env_remove_process("SIMPLE_SAFETY_PROFILE")
+
+    it "decides warn-only as Warn at robust without denying":
+        val exposure = {"m": violating_module("m", 5, -1)}
+        val routes = routes_of([joined_route("e", "m", 5, ApiExportJoinV1.Joined)])
+        val decision = decide_api_publication_v1(true, "robust", exposure, routes, nil, true)
+        expect(decision.allowed).to_equal(true)
+        expect(decision.violating_roots).to_be_greater_than(0)
+        expect(decision.diagnostics.len()).to_be_greater_than(0)

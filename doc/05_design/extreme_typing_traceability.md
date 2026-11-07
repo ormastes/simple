@@ -318,6 +318,16 @@ profile rather than bypassed (owner audit step 4). Staged AOT flush / AOP
 recheck of generated exports (AC-EAPI-005) and REPL/dynload parity (E4) are
 not covered by this slice.
 
+**Temporary warn-only default (2026-11-07, owner decision "warn in temp").**
+With `SIMPLE_EXTREME_PUBLIC_API` unset the rule runs at every profile in a
+warn-only mode: violations and Unknowns become warnings (one summary warning
+per exporter module; `SIMPLE_EXTREME_PUBLIC_API_VERBOSE=1` lists each), the
+decision is never `allowed=false`, and cached SMF / native no-op admission is
+not refused. `SIMPLE_EXTREME_PUBLIC_API=1` keeps the profile dispositions
+(deny at robust and above); `SIMPLE_EXTREME_PUBLIC_API=0` turns the rule off.
+This is temporary: the default flips to deny at robust once the E3 stdlib
+migration lands (drop `extreme_public_api_warn_only_v1`).
+
 Spec `test/01_unit/compiler/driver/api_publication_guard_v1_spec.spl` (7
 cases) covers the disposition ladder, inactivity, joined-root denial at
 robust/warn at strict, private-local exclusion, unknown roots, cached-admission
