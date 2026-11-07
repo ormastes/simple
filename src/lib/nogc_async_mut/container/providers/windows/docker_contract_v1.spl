@@ -17,6 +17,8 @@ pub const WINDOWS_DOCKER_INSPECT_FORMAT_V1 = "{{{{.Id}}}}|{{{{.Image}}}}|{{{{.Co
 
 pub const WINDOWS_DOCKER_MOUNTS_FORMAT_V3 = "|{{{{len .Mounts}}}}|{{{{range .Mounts}}}}{{{{.Type}}}}|{{{{.Source}}}}|{{{{.Destination}}}}|{{{{.RW}}}}{{{{end}}}}"
 
+pub const WINDOWS_DOCKER_TERMINAL_FORMAT_V4 = "|{{{{.Config.Tty}}}}|{{{{.Config.OpenStdin}}}}|{{{{.Config.StdinOnce}}}}|{{{{.Config.AttachStdin}}}}"
+
 pub struct WindowsDockerPolicyV1:
     docker_executable: text
     endpoint: text
@@ -50,6 +52,8 @@ pub struct WindowsDockerRequestV1:
     network: text
     working_directory: text = ""
     mounts: [WindowsDockerMountV1] = []
+    terminal_tty: bool = false
+    stdin_open: bool = false
 
 pub struct WindowsDockerScriptedResultV1:
     operation: text
@@ -188,6 +192,10 @@ pub fn windows_docker_request_digest_v1(policy: WindowsDockerPolicyV1,
     if request.mounts.len() > 0:
         fields.push(policy.workspace_root)
         body = "version: 3\nkind: windows-docker-request\nfields:\n"
+    if request.terminal_tty or request.stdin_open:
+        fields.push(if request.terminal_tty: "true" else: "false")
+        fields.push(if request.stdin_open: "true" else: "false")
+        body = "version: 4\nkind: windows-docker-request\nfields:\n"
     for field in fields: body = body + "    - \"" + sha256_text(field) + "\"\n"
     body = body + "commandCount: " + request.command.len().to_text() + "\ncommand:\n"
     for value in request.command: body = body + "    - \"" + sha256_text(value) + "\"\n"
@@ -227,6 +235,8 @@ pub fn windows_docker_create_command_v1(policy: WindowsDockerPolicyV1,
         "simple.request=" + digest]
     for label in labels: args = args + ["--label", label]
     if request.working_directory != "": args = args + ["--workdir", request.working_directory]
+    if request.terminal_tty: args = args + ["--tty"]
+    if request.stdin_open: args = args + ["--interactive"]
     for mount in request.mounts:
         var specification = "type=bind,source=" + mount.host_root + ",target=" + mount.guest_root
         if mount.read_only: specification = specification + ",readonly"

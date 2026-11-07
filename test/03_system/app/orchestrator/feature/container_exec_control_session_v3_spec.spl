@@ -1,0 +1,67 @@
+# @req ORCH-02 HOST-02
+# Actual common preflight refusal calls only. Execution NOT_RUN.
+# No Windows native probe/pipe/session owner or positive observation is mocked.
+use std.nogc_async_mut.container.exec_control_session_v3.*
+use std.nogc_async_mut.container.api_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+
+fn control_windows_parent_v3() -> RuntimeIdentityV1:
+    val request = windows_adapter_request_fixture_v2()
+    RuntimeIdentityV1(pod_uid: request.plan.workload_uid, attempt: request.plan.attempt, operation_id: request.plan.operation_id,
+        provider_generation: request.plan.provider_generation, engine: "docker", native_id: windows_adapter_native_id_fixture_v2(),
+        node_boot_id: container_scope_fence_id_v2(windows_adapter_scope_fixture_v2()).unwrap())
+
+describe "actual common Windows control session preflight refusals":
+    it "refuses empty or overbound installed policy while retaining the actual owner":
+        step("refuses empty or overbound installed policy while retaining the actual owner")
+        val owner = windows_adapter_owner_fixture_v2([], [])
+        for bytes in ["", "x".repeat(1048577)]:
+            val turn = simple_container_exec_control_begin_v3(owner, windows_adapter_request_fixture_v2(), control_windows_parent_v3(), bytes)
+            expect(turn.phase).to_equal("rejected")
+            expect(turn.error).to_equal("container-control-session-policy-bound")
+            expect(turn.session == nil and turn.observation == nil).to_equal(true)
+            expect(simple_container_scope_v2(turn.owner)).to_equal(simple_container_scope_v2(owner))
+            expect(windows_adapter_consumed_fixture_v2(turn.owner)).to_equal(0)
+
+    it "refuses Linux without fabricating an asynchronous session or fallback":
+        step("refuses Linux without fabricating an asynchronous session or fallback")
+        val owner = linux_container_owner_fixture_v2([], [])
+        val request = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+        val turn = simple_container_exec_control_begin_v3(owner, request, control_windows_parent_v3(), "not interpreted for Linux")
+        expect(turn.error).to_equal("container-control-session-linux-finite-route-required")
+        expect(turn.session == nil and turn.observation == nil).to_equal(true)
+        expect(simple_container_scope_v2(turn.owner)).to_equal(simple_container_scope_v2(owner))
+
+    it "refuses mismatched exact parent before the adapter can open a native exchange":
+        step("refuses mismatched exact parent before the adapter can open a native exchange")
+        val owner = windows_adapter_owner_fixture_v2([], [])
+        val request = windows_adapter_request_fixture_v2()
+        for field in ["uid", "attempt", "operation", "generation", "engine", "native", "fence"]:
+            var expected = control_windows_parent_v3()
+            if field == "uid": expected.pod_uid = "other-workload"
+            if field == "attempt": expected.attempt = expected.attempt + 1
+            if field == "operation": expected.operation_id = "other-operation"
+            if field == "generation": expected.provider_generation = expected.provider_generation + 1
+            if field == "engine": expected.engine = "podman"
+            if field == "native": expected.native_id = "short"
+            if field == "fence": expected.node_boot_id = "a".repeat(64)
+            val turn = simple_container_exec_control_begin_v3(owner, request, expected, "not interpreted after parent refusal")
+            expect(turn.error == "").to_equal(false)
+            expect(turn.session == nil and turn.observation == nil).to_equal(true)
+            expect(windows_adapter_consumed_fixture_v2(turn.owner)).to_equal(0)
+
+    it "rejects scripted observation before actual adapter begin and preserves backend scope and baseline":
+        step("rejects scripted observation before actual adapter begin and preserves backend scope and baseline")
+        val owner = windows_adapter_owner_fixture_v2([], [])
+        val turn = simple_container_exec_control_begin_v3(owner, windows_adapter_request_fixture_v2(), control_windows_parent_v3(),
+            "bounded protected bytes deliberately not interpreted for a scripted owner")
+        expect(turn.error).to_equal("container-control-session-scripted-observer-forbidden")
+        expect(turn.session == nil and turn.observation == nil).to_equal(true)
+        expect(simple_container_backend_v2(turn.owner)).to_equal("windows-docker-process")
+        expect(simple_container_scope_v2(turn.owner)).to_equal(simple_container_scope_v2(owner))
+        expect(simple_container_observation_v2(turn.owner).provider_identity_digest).to_equal(simple_container_observation_v2(owner).provider_identity_digest)
+        expect(windows_adapter_consumed_fixture_v2(turn.owner)).to_equal(0)
+        # No fabricated native probe exists to invoke poll/collect in this test.

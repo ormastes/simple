@@ -1,0 +1,233 @@
+# Windows Docker stream templates. These pure values are not launch or input
+# authority. The private provider broker owns native exec births and Job leases.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.exec_v3.{ContainerExecRequestV3, ContainerExecBirthReceiptV3, ContainerExecEnvironmentEntryV3,
+    container_exec_request_digest_v3, container_exec_birth_encode_v3, container_exec_birth_match_v3}
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2, container_output_identity_digest_v2}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub const WINDOWS_STREAM_HEADER_LIMIT_V3: i64 = 16384
+pub const WINDOWS_STREAM_CONTROL_LIMIT_V3: i64 = 262144
+pub const WINDOWS_STREAM_FRAME_LIMIT_V3: i64 = 1048576
+pub const WINDOWS_STREAM_PENDING_LIMIT_V3: i64 = 1048576
+
+pub struct WindowsContainerStreamPolicyV3:
+    root: text
+    broker_program: text
+    broker_digest: text
+    environment: [text]
+    directory: text
+    api_version: text
+    timeout_ms: i64
+
+pub struct WindowsContainerStreamIntentV3:
+    operation_kind: text
+    exec_request: ContainerExecRequestV3?
+    tty: bool
+    stdin_requested: bool
+    initial_rows: i64
+    initial_cols: i64
+    nonce: text
+
+pub struct WindowsContainerStreamPlanV3:
+    workload: ContainerExecutionPlanV2
+    runtime: RuntimeIdentityV1
+    identity: ContainerOutputIdentityV2
+    resources: ContainerOutputResourcesV2
+    provider_identity_digest: text
+    exec_control_identity_digest: text
+    policy_digest: text
+    intent: WindowsContainerStreamIntentV3
+    broker_template_digest: text
+    request_digest: text
+
+# Actual Engine create response, retained by the broker before exec/start.
+# Requested User plus observed container Config.User is not an exec-token fact.
+pub struct WindowsExecBirthMappingV3:
+    birth: ContainerExecBirthReceiptV3
+    stream_template_digest: text
+    user_assurance: text
+
+pub enum WindowsContainerStreamStageV3:
+    Planned
+    CreatedExec(birth: WindowsExecBirthMappingV3)
+    StartReserved(birth: WindowsExecBirthMappingV3)
+    StartedExec(birth: WindowsExecBirthMappingV3)
+    UnknownCreate
+    UnknownStart(birth: WindowsExecBirthMappingV3)
+
+pub fn windows_container_stream_path_v3(value: text) -> bool:
+    if value.len() < 3 or value.len() > 512: return false
+    val drive = value.byte_at(0)
+    if not ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)) or
+            value.byte_at(1) != 58 or value.byte_at(2) != 92: return false
+    for ch in value.substring(2, value.len()).chars():
+        val scalar = ch.char_code_at(0)
+        if scalar < 32 or (scalar >= 127 and scalar <= 159) or
+                ch == "/" or ch == ":" or ch == "\"" or ch == "*" or ch == "?" or ch == "|":
+            return false
+    if value.len() == 3: return true
+    for part in value.substring(3, value.len()).split("\\"):
+        if part == "" or part == "." or part == ".." or part.ends_with(".") or part.ends_with(" "):
+            return false
+    true
+
+fn environment_values(entries: [(text, text)]) -> Result<[SdnValue], text>:
+    if entries.len() > 64: return Err("windows-stream-environment-count")
+    var values: [SdnValue] = []
+    var names: [text] = []
+    var size: i64 = 0
+    for entry in entries:
+        val (name, value) = entry
+        if name == "" or name.len() > 128 or value.len() > 8192 or value.contains("\0"):
+            return Err("windows-stream-environment-invalid")
+        for ch in name.chars():
+            if not ((ch >= "A" and ch <= "Z") or (ch >= "a" and ch <= "z") or
+                    (ch >= "0" and ch <= "9") or ch == "_"):
+                return Err("windows-stream-environment-name")
+        val folded = name.to_upper()
+        if names.contains(folded): return Err("windows-stream-environment-duplicate")
+        names.push(folded)
+        size = size + name.len() + value.len()
+        if size > 65536: return Err("windows-stream-environment-size")
+        values.push(SdnValue.Array([SdnValue.String(name), SdnValue.String(value)]))
+    Ok(values)
+
+pub fn windows_container_stream_policy_bytes_v3(policy: WindowsContainerStreamPolicyV3) -> Result<text, text>:
+    for path in [policy.root, policy.broker_program, policy.directory]:
+        if not windows_container_stream_path_v3(path): return Err("windows-stream-policy-path")
+    if policy.root.len() <= 3 or not builder_digest_valid_v1(policy.broker_digest) or
+            policy.api_version != "1.48" or policy.timeout_ms <= 0 or policy.timeout_ms > 86400000:
+        return Err("windows-stream-policy-invalid")
+    var environment: [(text, text)] = []
+    for entry in policy.environment:
+        val parts = entry.split("=")
+        if parts.len() < 2: return Err("windows-stream-policy-environment-assignment")
+        environment.push((parts[0], entry.substring(parts[0].len() + 1, entry.len())))
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-container-stream-policy-v3"),
+        "root": SdnValue.String(policy.root), "brokerProgram": SdnValue.String(policy.broker_program),
+        "brokerDigest": SdnValue.String(policy.broker_digest), "environment": SdnValue.Array(environment_values(environment)?),
+        "directory": SdnValue.String(policy.directory), "apiVersion": SdnValue.String(policy.api_version),
+        "timeoutMs": SdnValue.Int(policy.timeout_ms), "headerLimit": SdnValue.Int(WINDOWS_STREAM_HEADER_LIMIT_V3),
+        "controlLimit": SdnValue.Int(WINDOWS_STREAM_CONTROL_LIMIT_V3), "frameLimit": SdnValue.Int(WINDOWS_STREAM_FRAME_LIMIT_V3),
+        "pendingLimit": SdnValue.Int(WINDOWS_STREAM_PENDING_LIMIT_V3)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn windows_container_stream_policy_digest_v3(policy: WindowsContainerStreamPolicyV3) -> Result<text, text>:
+    Ok(sha256_text(windows_container_stream_policy_bytes_v3(policy)?))
+
+pub fn windows_container_stream_intent_bytes_v3(intent: WindowsContainerStreamIntentV3) -> Result<text, text>:
+    if not builder_digest_valid_v1(intent.nonce): return Err("windows-stream-intent-nonce")
+    if intent.operation_kind != "output-follow" and intent.operation_kind != "primary-attach" and
+            intent.operation_kind != "exec": return Err("windows-stream-operation-kind")
+    if intent.initial_rows < 0 or intent.initial_rows > 32767 or intent.initial_cols < 0 or intent.initial_cols > 32767:
+        return Err("windows-stream-initial-geometry")
+    if intent.tty:
+        if intent.initial_rows == 0 or intent.initial_cols == 0: return Err("windows-stream-initial-geometry")
+    elif intent.initial_rows != 0 or intent.initial_cols != 0:
+        return Err("windows-stream-raw-geometry")
+    if intent.operation_kind == "output-follow" and intent.stdin_requested:
+        return Err("windows-stream-output-input-forbidden")
+    var exec_digest = ""
+    match intent.exec_request:
+        case Some(request):
+            if intent.operation_kind != "exec": return Err("windows-stream-attach-exec-fields")
+            if request.parent.backend != "windows-docker-process" or request.selected_user != "ContainerUser" or
+                    not windows_container_stream_path_v3(request.working_directory) or
+                    request.nonce != intent.nonce or request.stdin_requested != intent.stdin_requested or
+                    request.terminal_mode != (if intent.tty: "tty" else: "none"):
+                return Err("windows-stream-exec-intent-mismatch")
+            var names: [text] = []
+            for entry in request.environment:
+                val name = match entry:
+                    case ContainerExecEnvironmentEntryV3.Literal(key, _): key
+                    case ContainerExecEnvironmentEntryV3.SecretReference(key, _, _): key
+                val folded = name.to_upper()
+                if names.contains(folded): return Err("windows-stream-environment-duplicate")
+                names.push(folded)
+            exec_digest = container_exec_request_digest_v3(request)?
+        case None:
+            if intent.operation_kind == "exec": return Err("windows-stream-exec-request-required")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-container-stream-intent-v3"),
+        "operationKind": SdnValue.String(intent.operation_kind), "execRequestDigest": SdnValue.String(exec_digest),
+        "tty": SdnValue.Bool(intent.tty),
+        "stdinRequested": SdnValue.Bool(intent.stdin_requested), "initialRows": SdnValue.Int(intent.initial_rows),
+        "initialCols": SdnValue.Int(intent.initial_cols), "nonce": SdnValue.String(intent.nonce),
+        "execRequestedUser": SdnValue.String(if intent.operation_kind == "exec": "ContainerUser" else: ""),
+        "execPrivileged": SdnValue.Bool(false)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn windows_container_stream_scope_v3(plan: WindowsContainerStreamPlanV3) -> ContainerHostScopeV2:
+    val value = plan.workload
+    ContainerHostScopeV2(physical_host_id: value.physical_host_id, service_scope_id: value.service_scope_id,
+        boot_id: value.boot_id, provider_generation: value.provider_generation, native_machine_id: value.native_machine_id,
+        continuity_mode: value.continuity_mode, continuity_id: value.continuity_id)
+
+fn runtime_equal(left: RuntimeIdentityV1, right: RuntimeIdentityV1) -> bool:
+    left.pod_uid == right.pod_uid and left.attempt == right.attempt and
+        left.provider_generation == right.provider_generation and left.operation_id == right.operation_id and
+        left.engine == right.engine and left.native_id == right.native_id and left.node_boot_id == right.node_boot_id
+
+# Template excludes request_digest and generated native exec IDs. The broker
+# template digest includes the exact installed broker invocation/config bytes.
+pub fn windows_container_stream_plan_digest_v3(plan: WindowsContainerStreamPlanV3) -> Result<text, text>:
+    if plan.intent.operation_kind == "exec":
+        if not builder_digest_valid_v1(plan.exec_control_identity_digest):
+            return Err("windows-stream-exec-control-pin-required")
+    elif plan.exec_control_identity_digest != "":
+        return Err("windows-stream-attach-exec-control-pin-forbidden")
+    if plan.workload.backend != "windows-docker-process" or plan.runtime.engine != "docker" or
+            plan.runtime.pod_uid != plan.workload.workload_uid or plan.runtime.attempt != plan.workload.attempt or
+            plan.runtime.operation_id != plan.workload.operation_id or
+            plan.runtime.provider_generation != plan.workload.provider_generation or
+            plan.identity.parent_operation_id != plan.workload.operation_id or
+            plan.runtime.node_boot_id != container_scope_fence_id_v2(windows_container_stream_scope_v3(plan))?:
+        return Err("windows-stream-target-binding")
+    match plan.intent.exec_request:
+        case Some(request):
+            if container_execution_plan_bytes_v2(request.parent)? != container_execution_plan_bytes_v2(plan.workload)? or
+                    request.operation_id == plan.identity.operation_id or not runtime_equal(request.parent_runtime, plan.runtime):
+                return Err("windows-stream-exec-parent-or-helper-mismatch")
+        case None: pass
+    for digest in [plan.runtime.native_id, plan.provider_identity_digest, plan.policy_digest, plan.broker_template_digest]:
+        if not builder_digest_valid_v1(digest): return Err("windows-stream-plan-digest")
+    if plan.resources.cpu_millis <= 0 or plan.resources.cpu_millis > 64000 or
+            plan.resources.memory_bytes <= 0 or plan.resources.memory_bytes > 1125899906842624:
+        return Err("windows-stream-plan-resources")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-container-stream-plan-v3"),
+        "workload": SdnValue.String(container_execution_plan_bytes_v2(plan.workload)?),
+        "runtimeId": SdnValue.String(plan.runtime.native_id), "runtimeFence": SdnValue.String(plan.runtime.node_boot_id),
+        "helperIdentity": SdnValue.String(container_output_identity_digest_v2(plan.identity)?),
+        "cpuMillis": SdnValue.Int(plan.resources.cpu_millis), "memoryBytes": SdnValue.Int(plan.resources.memory_bytes),
+        "providerIdentity": SdnValue.String(plan.provider_identity_digest), "policyDigest": SdnValue.String(plan.policy_digest),
+        "execControlIdentity": SdnValue.String(plan.exec_control_identity_digest),
+        "intent": SdnValue.String(windows_container_stream_intent_bytes_v3(plan.intent)?),
+        "brokerTemplateDigest": SdnValue.String(plan.broker_template_digest)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+pub fn windows_exec_birth_mapping_bytes_v3(mapping: WindowsExecBirthMappingV3) -> Result<text, text>:
+    if not builder_digest_valid_v1(mapping.stream_template_digest): return Err("windows-exec-birth-digest")
+    if mapping.user_assurance != "requested-exec-user-container-observed-v1":
+        return Err("windows-exec-birth-assurance")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-exec-birth-mapping-v3"),
+        "birth": SdnValue.String(container_exec_birth_encode_v3(mapping.birth)?),
+        "streamTemplateDigest": SdnValue.String(mapping.stream_template_digest),
+        "userAssurance": SdnValue.String(mapping.user_assurance)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn windows_exec_birth_matches_v3(plan: WindowsContainerStreamPlanV3, mapping: WindowsExecBirthMappingV3) -> Result<bool, text>:
+    val encoded = windows_exec_birth_mapping_bytes_v3(mapping)?
+    val digest = windows_container_stream_plan_digest_v3(plan)?
+    if plan.request_digest != digest or plan.intent.operation_kind != "exec" or
+            mapping.stream_template_digest != digest or not runtime_equal(mapping.birth.parent_runtime, plan.runtime) or
+            mapping.birth.provider_identity_digest != plan.exec_control_identity_digest:
+        return Err("windows-exec-birth-template-mismatch")
+    val request = match plan.intent.exec_request:
+        case Some(value): value
+        case None: return Err("windows-stream-exec-request-required")
+    val matched = container_exec_birth_match_v3(mapping.birth, request)?
+    Ok(true)

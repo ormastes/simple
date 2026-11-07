@@ -25,8 +25,23 @@ use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
 use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.{windows_docker_policy_decode_v1, windows_docker_policy_encode_v1}
 use std.nogc_async_mut.container.providers.windows.docker_codec_v1.windows_docker_request_decode_v1
 use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+use std.common.contracts.container.windows_stream_v3.{WindowsContainerStreamPolicyV3, WindowsContainerStreamIntentV3,
+    WindowsContainerStreamPlanV3}
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2}
+use std.nogc_async_mut.container.providers.windows.docker_stream_plan_v3.windows_docker_stream_template_v3
+use std.common.contracts.container.exec_control_v3.container_exec_control_observation_match_v3
+use std.nogc_async_mut.container.providers.windows.docker_exec_control_policy_v3.{WindowsInstalledExecControlProfileV3,
+    windows_installed_exec_control_profile_decode_v3, windows_installed_exec_control_profile_digest_v3}
+use std.nogc_async_mut.container.providers.windows.docker_exec_control_probe_v3.{WindowsDockerExecControlProbeV3,
+    WindowsDockerExecControlProbeOutcomeV3}
 
 pub const WINDOWS_SIMPLE_CONTAINER_BACKEND_V2 = "windows-docker-process"
+
+# Even a refused planning attempt returns its supplied native probe owner.
+pub struct WindowsExecStreamPlanTurnV3:
+    probe: WindowsDockerExecControlProbeV3
+    plan: WindowsContainerStreamPlanV3?
+    error: text
 
 # Explicit synthetic inventory batches, never a native inventory fallback.
 pub struct WindowsServiceInventorySampleV2:
@@ -183,6 +198,84 @@ impl WindowsSimpleContainerAdapterV2:
             boot_observation: native.boot_counter.to_text()))
 
     pub fn observation() -> ContainerHostObservationV2: self.observed
+
+    me fn _exec_control_profile_v3(installed_policy_bytes: text, request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1) -> Result<WindowsInstalledExecControlProfileV3, text>:
+        val native = self._decode(request)?
+        val owned = self._owned(request)?
+        if self.authority[owned].native_id != expected.native_id:
+            return Err("windows-control-retained-native-id-mismatch")
+        val profile = windows_installed_exec_control_profile_decode_v3(installed_policy_bytes)?
+        if windows_docker_policy_encode_v1(profile.docker_policy)? != self.policy_bytes:
+            return Err("windows-control-installed-parent-policy-mismatch")
+        Ok(profile)
+
+    # installed_policy_bytes comes only from the host's protected installed
+    # metadata owner. It is never accepted from the workload request packet.
+    pub me fn begin_exec_control_probe_v3(installed_policy_bytes: text, request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1) -> WindowsDockerExecControlProbeOutcomeV3:
+        if self.is_scripted_fixture_v2():
+            return WindowsDockerExecControlProbeOutcomeV3.Rejected("windows-control-scripted-native-mixing-refused")
+        val profile = match self._exec_control_profile_v3(installed_policy_bytes, request, expected):
+            case Ok(value): value
+            case Err(reason): return WindowsDockerExecControlProbeOutcomeV3.Rejected(reason)
+        match self._fresh():
+            case Err(reason): return WindowsDockerExecControlProbeOutcomeV3.Rejected(reason)
+            case Ok(_): ()
+        WindowsDockerExecControlProbeV3.begin_v3(request, expected, profile, self.observed)
+
+    pub me fn stream_plan_with_control_v3(installed_policy_bytes: text, request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1, identity: ContainerOutputIdentityV2, resources: ContainerOutputResourcesV2,
+            intent: WindowsContainerStreamIntentV3, probe: WindowsDockerExecControlProbeV3) -> WindowsExecStreamPlanTurnV3:
+        if self.is_scripted_fixture_v2():
+            return WindowsExecStreamPlanTurnV3(probe: probe, plan: None, error: "windows-control-scripted-native-mixing-refused")
+        val observation = match probe.observation_v3():
+            case Ok(value): value
+            case Err(reason): return WindowsExecStreamPlanTurnV3(probe: probe, plan: None, error: reason)
+        val profile = match self._exec_control_profile_v3(installed_policy_bytes, request, expected):
+            case Ok(value): value
+            case Err(reason): return WindowsExecStreamPlanTurnV3(probe: probe, plan: None, error: reason)
+        val policy_digest = match windows_installed_exec_control_profile_digest_v3(profile):
+            case Ok(value): value
+            case Err(reason): return WindowsExecStreamPlanTurnV3(probe: probe, plan: None, error: reason)
+        match container_exec_control_observation_match_v3(observation, request, expected,
+                self.observed.provider_identity_digest, policy_digest):
+            case Err(reason): return WindowsExecStreamPlanTurnV3(probe: probe, plan: None, error: reason)
+            case Ok(_): ()
+        if intent.operation_kind != "exec":
+            return WindowsExecStreamPlanTurnV3(probe: probe, plan: None, error: "windows-control-exec-plan-required")
+        match self._stream_plan_v3(request, expected, identity, profile.stream_policy, resources, intent,
+                observation.exec_control_identity_digest):
+            case Ok(plan): WindowsExecStreamPlanTurnV3(probe: probe, plan: Some(plan), error: "")
+            case Err(reason): WindowsExecStreamPlanTurnV3(probe: probe, plan: None, error: reason)
+
+    # This is an observed template, not launch/input/resize authority and not an
+    # advertisement of Windows qualification. The shared V3 facade retains the
+    # mutated leaf after the exact provider inspection.
+    pub me fn stream_plan_v3(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            identity: ContainerOutputIdentityV2, policy: WindowsContainerStreamPolicyV3,
+            resources: ContainerOutputResourcesV2, intent: WindowsContainerStreamIntentV3) -> Result<WindowsContainerStreamPlanV3, text>:
+        # Exec planning uses the completed actual asynchronous probe entry above.
+        # Baseline CLI identity and caller policy cannot supply its distinct pin.
+        if intent.operation_kind == "exec": return Err("windows-stream-native-exec-control-observation-required")
+        self._stream_plan_v3(request, expected, identity, policy, resources, intent, "")
+
+    me fn _stream_plan_v3(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            identity: ContainerOutputIdentityV2, policy: WindowsContainerStreamPolicyV3,
+            resources: ContainerOutputResourcesV2, intent: WindowsContainerStreamIntentV3,
+            exec_control_pin: text) -> Result<WindowsContainerStreamPlanV3, text>:
+        val native = self._decode(request)?
+        val owned = self._owned(request)?
+        if self.authority[owned].native_id != expected.native_id:
+            return Err("windows-stream-retained-native-id-mismatch")
+        val planned = windows_docker_stream_template_v3(request, native, expected, identity, resources,
+            policy, intent, self.policy, self.observed.provider_identity_digest, exec_control_pin)?
+        val current = self._fresh()?
+        val observed = self.provider.inspect(native)
+        if observed.status != RUNTIME_STATUS_OK or observed.state.identity.native_id != expected.native_id:
+            return Err("windows-stream-exact-target-observation-failed:" + observed.reason)
+        if observed.state.phase != "running": return Err("windows-stream-running-target-required")
+        Ok(planned.0)
 
     pub static fn open(policy_bytes: text, state_root: text, scope: ContainerHostScopeV2,
             expected_provider_identity_digest: text, timeout_ms: i64) -> Result<WindowsSimpleContainerAdapterV2, text>:

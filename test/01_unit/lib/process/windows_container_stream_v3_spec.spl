@@ -1,0 +1,156 @@
+# @req REQ-WDS-001 REQ-WDS-002 REQ-WDS-005 REQ-WDS-007
+# Authored pure contract assertions; NOT_RUN (compiler retry budget exhausted).
+use std.spec.*
+use std.common.contracts.container.windows_stream_v3.*
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2}
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+
+fn stream_digest_fixture_v3() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn stream_runtime_fixture_v3() -> RuntimeIdentityV1:
+    val plan = windows_adapter_request_fixture_v2().plan
+    RuntimeIdentityV1(pod_uid: plan.workload_uid, attempt: plan.attempt,
+        operation_id: plan.operation_id, engine: "docker",
+        native_id: windows_adapter_native_id_fixture_v2(),
+        node_boot_id: container_scope_fence_id_v2(windows_adapter_scope_fixture_v2()).unwrap(),
+        provider_generation: plan.provider_generation)
+
+fn stream_intent_fixture_v3() -> WindowsContainerStreamIntentV3:
+    val request = ContainerExecRequestV3(parent: windows_adapter_request_fixture_v2().plan,
+        parent_runtime: stream_runtime_fixture_v3(), operation_id: "exec-a",
+        nonce: stream_digest_fixture_v3(), argv: ["C:\\work\\producer.exe", "test"],
+        environment: [ContainerExecEnvironmentEntryV3.Literal("TASK", "fixture")],
+        working_directory: "C:\\work", selected_user: "ContainerUser", terminal_mode: "tty",
+        stdin_requested: true, timeout_ms: 5000)
+    WindowsContainerStreamIntentV3(operation_kind: "exec", exec_request: Some(request), tty: true,
+        stdin_requested: true, initial_rows: 24, initial_cols: 80, nonce: stream_digest_fixture_v3())
+
+fn stream_policy_fixture_v3() -> WindowsContainerStreamPolicyV3:
+    WindowsContainerStreamPolicyV3(root: "C:\\Simple\\brokers\\fixture", broker_program: "C:\\Simple\\broker.exe",
+        broker_digest: stream_digest_fixture_v3(), environment: ["SystemRoot=C:\\Windows"],
+        directory: "C:\\Simple", api_version: "1.48", timeout_ms: 60000)
+
+fn stream_plan_fixture_v3() -> WindowsContainerStreamPlanV3:
+    val digest = stream_digest_fixture_v3()
+    var plan = WindowsContainerStreamPlanV3(workload: windows_adapter_request_fixture_v2().plan,
+        runtime: stream_runtime_fixture_v3(),
+        identity: ContainerOutputIdentityV2(operation_id: "helper-exec", parent_operation_id: "operation-a",
+            parent_operation_digest: digest, parent_assignment_digest: digest, parent_budget_digest: digest,
+            binding_digest: digest), resources: ContainerOutputResourcesV2(cpu_millis: 100, memory_bytes: 67108864),
+        provider_identity_digest: digest,
+        exec_control_identity_digest: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        policy_digest: windows_container_stream_policy_digest_v3(stream_policy_fixture_v3()).unwrap(),
+        intent: stream_intent_fixture_v3(), broker_template_digest: digest, request_digest: "")
+    plan.request_digest = windows_container_stream_plan_digest_v3(plan).unwrap()
+    plan
+
+fn stream_birth_fixture_v3(plan: WindowsContainerStreamPlanV3) -> WindowsExecBirthMappingV3:
+    val request = plan.intent.exec_request.unwrap()
+    val birth = ContainerExecBirthReceiptV3(request_digest: container_exec_request_digest_v3(request).unwrap(),
+        parent_runtime: plan.runtime, native_exec_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        provider_identity_digest: plan.exec_control_identity_digest, created_unix_ms: 1000,
+        query_digest: stream_digest_fixture_v3(), evidence_digest: stream_digest_fixture_v3(),
+        proof_kind: "exact-native-exec-birth-v3")
+    WindowsExecBirthMappingV3(birth: birth, stream_template_digest: plan.request_digest,
+        user_assurance: "requested-exec-user-container-observed-v1")
+
+describe "Windows stream immutable request and actual exec birth binding":
+    it "binds exact argv boundaries, requested input and geometry without creating authority":
+        step("Change each effectful field and observe a different pre-admitted template digest")
+        val original = stream_plan_fixture_v3()
+        var changed = original
+        var request = changed.intent.exec_request.unwrap()
+        request.argv = ["C:\\work\\producer.exe test"]
+        changed.intent.exec_request = Some(request)
+        expect(windows_container_stream_plan_digest_v3(changed).unwrap() == original.request_digest).to_equal(false)
+        changed = original
+        changed.intent.stdin_requested = false
+        request = changed.intent.exec_request.unwrap()
+        request.stdin_requested = false
+        changed.intent.exec_request = Some(request)
+        expect(windows_container_stream_plan_digest_v3(changed).unwrap() == original.request_digest).to_equal(false)
+        changed = original
+        changed.intent.initial_cols = 81
+        expect(windows_container_stream_plan_digest_v3(changed).unwrap() == original.request_digest).to_equal(false)
+        changed = original
+        request = changed.intent.exec_request.unwrap()
+        request.environment = [ContainerExecEnvironmentEntryV3.Literal("TASK", "changed")]
+        changed.intent.exec_request = Some(request)
+        expect(windows_container_stream_plan_digest_v3(changed).unwrap() == original.request_digest).to_equal(false)
+
+    it "rejects wrong native target or template before using an actual exec birth":
+        val plan = stream_plan_fixture_v3()
+        val birth = stream_birth_fixture_v3(plan)
+        expect(windows_exec_birth_matches_v3(plan, birth).unwrap()).to_equal(true)
+        var changed = birth
+        changed.birth.parent_runtime.native_id = changed.birth.native_exec_id
+        expect(windows_exec_birth_matches_v3(plan, changed).is_err()).to_equal(true)
+        changed = birth
+        changed.stream_template_digest = stream_digest_fixture_v3()
+        expect(windows_exec_birth_matches_v3(plan, changed).is_err()).to_equal(true)
+        changed = birth
+        changed.birth.native_exec_id = "1234"
+        expect(windows_exec_birth_matches_v3(plan, changed).is_err()).to_equal(true)
+        changed = birth
+        changed.birth.provider_identity_digest = plan.provider_identity_digest
+        expect(windows_exec_birth_matches_v3(plan, changed).is_err()).to_equal(true)
+        changed = birth
+        changed.user_assurance = "observed-exec-token"
+        expect(windows_exec_birth_matches_v3(plan, changed).is_err()).to_equal(true)
+
+    it "refuses cross-service runtime fences and Linux Docker reinterpretation":
+        var plan = stream_plan_fixture_v3()
+        plan.runtime = windows_adapter_inventory_fixture_v2().runtime
+        expect(windows_container_stream_plan_digest_v3(plan).is_err()).to_equal(true)
+        plan = stream_plan_fixture_v3()
+        plan.workload.continuity_id = "different-service-incarnation"
+        expect(windows_container_stream_plan_digest_v3(plan).is_err()).to_equal(true)
+        plan = stream_plan_fixture_v3()
+        plan.workload.backend = "linux-podman"
+        expect(windows_container_stream_plan_digest_v3(plan).is_err()).to_equal(true)
+        plan = stream_plan_fixture_v3()
+        plan.identity.operation_id = plan.workload.operation_id
+        expect(windows_container_stream_plan_digest_v3(plan).is_err()).to_equal(true)
+        plan = stream_plan_fixture_v3()
+        plan.exec_control_identity_digest = ""
+        expect(windows_container_stream_plan_digest_v3(plan).is_err()).to_equal(true)
+
+    it "rejects hidden exec fields on attach and input on output-follow":
+        var intent = stream_intent_fixture_v3()
+        intent.operation_kind = "primary-attach"
+        expect(windows_container_stream_intent_bytes_v3(intent).is_err()).to_equal(true)
+        intent.exec_request = nil
+        expect(windows_container_stream_intent_bytes_v3(intent).is_ok()).to_equal(true)
+        intent.operation_kind = "output-follow"
+        expect(windows_container_stream_intent_bytes_v3(intent).is_err()).to_equal(true)
+        intent.stdin_requested = false
+        expect(windows_container_stream_intent_bytes_v3(intent).is_ok()).to_equal(true)
+
+    it "rejects case-alias environment collisions and unsupported API negotiation":
+        var policy = stream_policy_fixture_v3()
+        policy.environment = ["Path=C:\\one", "PATH=C:\\two"]
+        expect(windows_container_stream_policy_bytes_v3(policy).is_err()).to_equal(true)
+        policy = stream_policy_fixture_v3()
+        policy.api_version = "auto"
+        expect(windows_container_stream_policy_bytes_v3(policy).is_err()).to_equal(true)
+        var intent = stream_intent_fixture_v3()
+        var request = intent.exec_request.unwrap()
+        request.environment = [ContainerExecEnvironmentEntryV3.Literal("Task", "one"), ContainerExecEnvironmentEntryV3.Literal("TASK", "two")]
+        intent.exec_request = Some(request)
+        expect(windows_container_stream_intent_bytes_v3(intent).is_err()).to_equal(true)
+        intent = stream_intent_fixture_v3()
+        intent.tty = false
+        expect(windows_container_stream_intent_bytes_v3(intent).is_err()).to_equal(true)
+
+    it "binds helper budget and broker identity independently of the parent container":
+        val original = stream_plan_fixture_v3()
+        var changed = original
+        changed.resources.memory_bytes = changed.resources.memory_bytes + 1
+        expect(windows_container_stream_plan_digest_v3(changed).unwrap() == original.request_digest).to_equal(false)
+        changed = original
+        changed.broker_template_digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        expect(windows_container_stream_plan_digest_v3(changed).unwrap() == original.request_digest).to_equal(false)

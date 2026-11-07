@@ -9,7 +9,7 @@ pub use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
     WINDOWS_DOCKER_ENGINE_V1, WINDOWS_DOCKER_NATIVE_ENGINE_V1, WINDOWS_DOCKER_MAX_RECORDS_V1, WINDOWS_DOCKER_MAX_SCRIPT_V1,
     WINDOWS_DOCKER_MAX_SCRIPT_BYTES_V1, WINDOWS_DOCKER_INFO_FORMAT_V1,
-    WINDOWS_DOCKER_IMAGE_FORMAT_V1, WINDOWS_DOCKER_INSPECT_FORMAT_V1, WINDOWS_DOCKER_MOUNTS_FORMAT_V3,
+    WINDOWS_DOCKER_IMAGE_FORMAT_V1, WINDOWS_DOCKER_INSPECT_FORMAT_V1, WINDOWS_DOCKER_MOUNTS_FORMAT_V3, WINDOWS_DOCKER_TERMINAL_FORMAT_V4,
     windows_docker_request_reason_v1, windows_docker_policy_reason_v1,
     windows_docker_request_digest_v1, windows_docker_command_v1,
     windows_docker_create_command_v1, windows_docker_args_equal_v1, windows_docker_id_v1}
@@ -232,12 +232,15 @@ impl WindowsDockerRuntimeProviderV1:
         var format = match self.managed_scope:
             case Some(_): WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2
             case nil: WINDOWS_DOCKER_INSPECT_FORMAT_V1
-        var inspect_mounts = request.mounts.len() > 0 or request.working_directory != ""
+        val inspect_terminal = request.terminal_tty or request.stdin_open
+        val terminal_fields = if inspect_terminal: 4 else: 0
+        var inspect_mounts = request.mounts.len() > 0 or request.working_directory != "" or inspect_terminal
         match self.managed_scope:
             case Some(_): inspect_mounts = true
             case nil: ()
         if request.working_directory != "": format = format + "|{{{{.Config.WorkingDir}}}}"
         if inspect_mounts: format = format + WINDOWS_DOCKER_MOUNTS_FORMAT_V3
+        if inspect_terminal: format = format + WINDOWS_DOCKER_TERMINAL_FORMAT_V4
         val command = windows_docker_command_v1(self.policy, "inspect",
             ["container", "inspect", "--format", format, native_id])
         val run = self._execute(command)?
@@ -265,17 +268,26 @@ impl WindowsDockerRuntimeProviderV1:
             count = count + 1
         if inspect_mounts:
             if request.mounts.len() == 0:
-                if fields.len() != count + 2: return Err("docker-inspect-mount-field-count")
+                if fields.len() != count + 2 + terminal_fields: return Err("docker-inspect-mount-field-count")
                 if fields[count] != "0" or fields[count + 1] != "": return Err("docker-inspect-mount-mismatch")
                 count = count + 2
             else:
-                if fields.len() != count + 5: return Err("docker-inspect-mount-field-count")
+                if fields.len() != count + 5 + terminal_fields: return Err("docker-inspect-mount-field-count")
                 val mount = request.mounts[0]
                 val expected_rw = if mount.read_only: "false" else: "true"
                 if fields[count] != "1" or fields[count + 1] != "bind" or fields[count + 2] != mount.host_root or
                         fields[count + 3] != mount.guest_root or fields[count + 4] != expected_rw:
                     return Err("docker-inspect-mount-mismatch")
                 count = count + 5
+        if inspect_terminal:
+            if fields.len() != count + 4: return Err("docker-inspect-terminal-field-count")
+            val tty = if request.terminal_tty: "true" else: "false"
+            val stdin = if request.stdin_open: "true" else: "false"
+            # Official CLI opts.go sets AttachStdin for --interactive and then
+            # StdinOnce when OpenStdin && AttachStdin. No -a override is emitted.
+            if fields[count] != tty or fields[count + 1] != stdin or fields[count + 2] != stdin or fields[count + 3] != stdin:
+                return Err("docker-inspect-terminal-binding-mismatch")
+            count = count + 4
         if fields.len() != count: return Err("docker-inspect-field-count")
         var index = 0
         while index < expected.len():

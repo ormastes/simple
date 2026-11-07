@@ -1,0 +1,255 @@
+# Read-only actual Engine control observation. No exec/helper grant is decoded
+# here. Each turn retains the exact native exchange until collection succeeds.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.exec_control_v3.{ContainerExecControlObservationV3,
+    container_exec_control_parent_match_v3, container_exec_control_observation_match_v3}
+use std.common.process.windows_engine_pipe_v1.WindowsEnginePipeObservationV1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.io.time_ops.{time_sample_monotonic_nanos_or_failure, time_sample_unix_micros_or_failure}
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.windows_docker_request_decode_v1
+use std.nogc_async_mut.container.providers.windows.docker_exec_control_policy_v3.{WindowsInstalledExecControlProfileV3,
+    windows_installed_exec_control_profile_digest_v3}
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.*
+use std.nogc_async_mut.container.providers.windows.docker_engine_exchange_v3.*
+
+pub enum WindowsDockerExecControlProbeOutcomeV3:
+    Pending(owner: WindowsDockerExecControlProbeV3)
+    Complete(owner: WindowsDockerExecControlProbeV3)
+    Closed(owner: WindowsDockerExecControlProbeV3)
+    CleanupRequired(owner: WindowsDockerExecControlProbeV3, reason: text)
+    Rejected(reason: text)
+
+pub class WindowsDockerExecControlProbeV3:
+    request: ContainerExecutionRequestV2
+    expected: RuntimeIdentityV1
+    scope: ContainerHostScopeV2
+    installed: WindowsDockerPolicyV1
+    native_request: WindowsDockerRequestV1
+    baseline_pin: text
+    policy_digest: text
+    exchange: WindowsDockerEngineExchangeV3?
+    phase: text
+    started_nanos: i64
+    deadline_nanos: i64
+    info_body: [u8]
+    info_endpoint: WindowsEnginePipeObservationV1?
+    observed: ContainerExecControlObservationV3?
+    error: text
+
+fn control_scope_v3(plan: ContainerExecutionPlanV2) -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+
+fn control_endpoint_value_v3(value: WindowsEnginePipeObservationV1) -> Result<SdnValue, text>:
+    if value.server_pid <= 0 or not ["system", "administrators"].contains(value.owner_class) or
+            not value.dacl_protected or value.untrusted_control_rights:
+        return Err("windows-control-endpoint-observation-invalid")
+    Ok(SdnValue.Dict({"serverPid": SdnValue.Int(value.server_pid), "ownerClass": SdnValue.String(value.owner_class),
+        "protectedDacl": SdnValue.Bool(value.dacl_protected), "foreignControl": SdnValue.Bool(value.untrusted_control_rights)}))
+
+impl WindowsDockerExecControlProbeV3:
+    # Caller is the retained adapter, which freshly checks native host continuity
+    # and existing exact runtime authority before beginning this read-only probe.
+    pub static fn begin_v3(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            profile: WindowsInstalledExecControlProfileV3,
+            baseline: ContainerHostObservationV2) -> WindowsDockerExecControlProbeOutcomeV3:
+        match container_exec_control_parent_match_v3(request, expected):
+            case Err(reason): return WindowsDockerExecControlProbeOutcomeV3.Rejected(reason)
+            case Ok(_): ()
+        val scope = control_scope_v3(request.plan)
+        val fence = match container_scope_fence_id_v2(scope):
+            case Ok(value): value
+            case Err(reason): return WindowsDockerExecControlProbeOutcomeV3.Rejected(reason)
+        # Match the same legacy internal fence transformation as the retained
+        # adapter. The installed wrapper hash keeps its ORIGINAL policy bytes.
+        var installed = profile.docker_policy
+        installed.node_boot_id = fence
+        val native = match windows_docker_request_decode_v1(installed, request.request_bytes):
+            case Ok(value): value
+            case Err(reason): return WindowsDockerExecControlProbeOutcomeV3.Rejected(reason)
+        val digest = match windows_docker_request_digest_v1(installed, native):
+            case Ok(value): value
+            case Err(reason): return WindowsDockerExecControlProbeOutcomeV3.Rejected(reason)
+        if request.plan.backend != "windows-docker-process" or baseline.backend != request.plan.backend or
+                baseline.execution_os != "windows" or baseline.native_machine_id != scope.native_machine_id or
+                not builder_digest_valid_v1(baseline.provider_identity_digest) or request.plan.request_digest != digest or
+                request.plan.workload_uid != native.pod_uid or request.plan.attempt != native.attempt or
+                request.plan.operation_id != native.operation_id or expected.engine != "docker" or
+                expected.pod_uid != native.pod_uid or expected.attempt != native.attempt or
+                expected.operation_id != native.operation_id or expected.provider_generation != scope.provider_generation or
+                expected.node_boot_id != fence or installed.node_boot_id != fence or
+                installed.provider_generation != scope.provider_generation or not builder_digest_valid_v1(expected.native_id):
+            return WindowsDockerExecControlProbeOutcomeV3.Rejected("windows-control-retained-parent-binding")
+        val policy_digest = match windows_installed_exec_control_profile_digest_v3(profile):
+            case Ok(value): value
+            case Err(reason): return WindowsDockerExecControlProbeOutcomeV3.Rejected(reason)
+        if installed.timeout_ms <= 0 or installed.timeout_ms > WINDOWS_DOCKER_ENGINE_EXCHANGE_TIMEOUT_MAX_V3:
+            return WindowsDockerExecControlProbeOutcomeV3.Rejected("windows-control-observation-window-bound")
+        val started = time_sample_monotonic_nanos_or_failure()
+        if started < 0 or started > 9223372036854775807 - installed.timeout_ms * 1000000:
+            return WindowsDockerExecControlProbeOutcomeV3.Rejected("windows-control-monotonic-clock")
+        var owner = WindowsDockerExecControlProbeV3(request: request, expected: expected, scope: scope,
+            installed: installed, native_request: native, baseline_pin: baseline.provider_identity_digest,
+            policy_digest: policy_digest, exchange: None, phase: "open-info", started_nanos: started,
+            deadline_nanos: started + installed.timeout_ms * 1000000, info_body: [], info_endpoint: None,
+            observed: None, error: "")
+        owner.poll_v3()
+
+    pub fn phase_v3() -> text: self.phase
+    pub fn error_v3() -> text: self.error
+    pub fn has_owned_exchange_v3() -> bool: self.exchange != None
+
+    pub fn observation_v3() -> Result<ContainerExecControlObservationV3, text>:
+        if self.phase != "complete" or self.exchange != None or self.observed == None:
+            return Err("windows-control-observation-not-complete")
+        Ok(self.observed.unwrap())
+
+    fn _remaining_ms() -> Result<i64, text>:
+        val now = time_sample_monotonic_nanos_or_failure()
+        if now < self.started_nanos or now >= self.deadline_nanos:
+            return Err("windows-control-observation-window-expired")
+        val remaining = (self.deadline_nanos - now) / 1000000
+        if remaining <= 0: return Err("windows-control-observation-window-expired")
+        Ok(remaining)
+
+    me fn _accept(result: WindowsDockerEngineExchangeOutcomeV3) -> Result<bool, text>:
+        match result:
+            case WindowsDockerEngineExchangeOutcomeV3.Ready(owner):
+                self.exchange = Some(owner)
+                Ok(true)
+            case WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(owner, reason):
+                self.exchange = Some(owner)
+                Err(reason)
+            case WindowsDockerEngineExchangeOutcomeV3.Rejected(reason): Err(reason)
+
+    me fn _failure(reason: text) -> WindowsDockerExecControlProbeOutcomeV3:
+        if self.error == "": self.error = reason
+        self.phase = "failed"
+        self.observed = None
+        if val current = self.exchange:
+            var owner = current
+            val retained = self._accept(owner.cancel_v3())
+        WindowsDockerExecControlProbeOutcomeV3.CleanupRequired(self, reason)
+
+    me fn _collect_exchange() -> Result<bool, text>:
+        if val current = self.exchange:
+            var owner = current
+            val accepted = self._accept(owner.collect_v3())?
+            if self.exchange.unwrap().has_owned_pipe_v3(): return Err("windows-control-native-cleanup-retained")
+            self.exchange = None
+        Ok(true)
+
+    me fn _finish(inspect_body: [u8], endpoint: WindowsEnginePipeObservationV1) -> Result<bool, text>:
+        val info_endpoint = match self.info_endpoint:
+            case Some(value): value
+            case None: return Err("windows-control-info-endpoint-missing")
+        val info_value = control_endpoint_value_v3(info_endpoint)?
+        val inspect_value = control_endpoint_value_v3(endpoint)?
+        if info_endpoint.server_pid != endpoint.server_pid: return Err("windows-control-engine-changed-between-queries")
+        val binding = windows_engine_container_binding_decode_v3(self.info_body, inspect_body,
+            self.expected.native_id, self.installed, self.native_request, self.scope, self.native_request.terminal_tty)?
+        if not binding.container.running: return Err("windows-control-parent-not-running")
+        if binding.request_digest != self.request.plan.request_digest: return Err("windows-control-parent-request-changed")
+        val pin_fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-engine-exec-control-identity-v3"),
+            "parentProviderIdentity": SdnValue.String(self.baseline_pin), "installedPolicy": SdnValue.String(self.policy_digest),
+            "engineId": SdnValue.String(binding.engine.engine_id), "kernelVersion": SdnValue.String(binding.engine.kernel_version),
+            "executionOs": SdnValue.String(binding.engine.os_type), "apiVersion": SdnValue.String("1.48"),
+            "endpointProfile": SdnValue.String("fixed-local-docker-pipe-private-instance-v1")}
+        val pin = sha256_text(sdn_encode_canonical(SdnValue.Dict(pin_fields)))
+        val info_query = windows_docker_engine_exchange_serialize_v3(windows_engine_info_v3("1.48")?)?
+        val inspect_query = windows_docker_engine_exchange_serialize_v3(windows_engine_container_inspect_v3("1.48", self.expected.native_id)?)?
+        val queries = SdnValue.Array([SdnValue.String(sha256_u8_hex(info_query)), SdnValue.String(sha256_u8_hex(inspect_query))])
+        val query_digest = sha256_text(sdn_encode_canonical(queries))
+        val evidence: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-engine-control-observation-v3"),
+            "queries": SdnValue.String(query_digest), "infoBody": SdnValue.String(sha256_u8_hex(self.info_body)),
+            "containerBody": SdnValue.String(sha256_u8_hex(inspect_body)), "infoEndpoint": info_value,
+            "inspectEndpoint": inspect_value, "scope": SdnValue.String(container_host_scope_bytes_v2(self.scope)?),
+            "parentId": SdnValue.String(self.expected.native_id), "parentRequest": SdnValue.String(self.request.plan.request_digest),
+            "execControlIdentity": SdnValue.String(pin)}
+        val now = time_sample_unix_micros_or_failure()
+        if now <= 0: return Err("windows-control-observation-clock")
+        val observed = ContainerExecControlObservationV3(backend: "windows-docker-process", scope: self.scope,
+            parent_runtime: self.expected, parent_request_digest: self.request.plan.request_digest,
+            parent_provider_identity_digest: self.baseline_pin, exec_control_identity_digest: pin,
+            installed_policy_digest: self.policy_digest, api_version: "1.48", observed_unix_ms: now / 1000,
+            query_digest: query_digest, evidence_digest: sha256_text(sdn_encode_canonical(SdnValue.Dict(evidence))))
+        val matched = container_exec_control_observation_match_v3(observed, self.request, self.expected,
+            self.baseline_pin, self.policy_digest)?
+        self.observed = Some(observed)
+        Ok(true)
+
+    # One connection open, one exchange advancement, or one collection per turn.
+    # No waiting loop, workload effect, or caller-provided control pin exists.
+    pub me fn poll_v3() -> WindowsDockerExecControlProbeOutcomeV3:
+        if self.phase == "complete": return WindowsDockerExecControlProbeOutcomeV3.Complete(self)
+        if self.phase == "closed": return WindowsDockerExecControlProbeOutcomeV3.Closed(self)
+        if self.phase == "failed": return WindowsDockerExecControlProbeOutcomeV3.CleanupRequired(self, self.error)
+        val remaining = match self._remaining_ms():
+            case Ok(value): value
+            case Err(reason): return self._failure(reason)
+        if self.phase == "close-info" or self.phase == "close-inspect":
+            match self._collect_exchange():
+                case Err(reason): return self._failure(reason)
+                case Ok(_): ()
+            match self._remaining_ms():
+                case Err(reason): return self._failure(reason)
+                case Ok(_): ()
+            self.phase = if self.phase == "close-info": "open-inspect" else: "complete"
+            if self.phase == "complete": return WindowsDockerExecControlProbeOutcomeV3.Complete(self)
+            return WindowsDockerExecControlProbeOutcomeV3.Pending(self)
+        if self.phase == "open-info" or self.phase == "open-inspect":
+            val query = if self.phase == "open-info": windows_engine_info_v3("1.48") else: windows_engine_container_inspect_v3("1.48", self.expected.native_id)
+            val request = match query:
+                case Ok(value): value
+                case Err(reason): return self._failure(reason)
+            match self._accept(WindowsDockerEngineExchangeV3.begin_read_only_v3(request, remaining)):
+                case Err(reason): return self._failure(reason)
+                case Ok(_): ()
+            self.phase = if self.phase == "open-info": "read-info" else: "read-inspect"
+            return WindowsDockerExecControlProbeOutcomeV3.Pending(self)
+        var current = match self.exchange:
+            case Some(value): value
+            case None: return self._failure("windows-control-exchange-missing")
+        match self._accept(current.poll_v3()):
+            case Err(reason): return self._failure(reason)
+            case Ok(_): ()
+        val owner = self.exchange.unwrap()
+        if owner.phase_v3() != WindowsDockerEngineExchangePhaseV3.ControlComplete:
+            return WindowsDockerExecControlProbeOutcomeV3.Pending(self)
+        val response = match owner.response_v3():
+            case Some(value): value
+            case None: return self._failure("windows-control-response-missing")
+        val endpoint = match owner.observation_v3():
+            case Ok(value): value
+            case Err(reason): return self._failure(reason)
+        if self.phase == "read-info":
+            match windows_engine_info_decode_v3(response.body):
+                case Err(reason): return self._failure(reason)
+                case Ok(value):
+                    if value.engine_id != self.installed.engine_id or value.kernel_version != self.installed.expected_kernel_version:
+                        return self._failure("windows-control-installed-engine-mismatch")
+            self.info_body = response.body
+            self.info_endpoint = Some(endpoint)
+            self.phase = "close-info"
+        elif self.phase == "read-inspect":
+            match self._finish(response.body, endpoint):
+                case Err(reason): return self._failure(reason)
+                case Ok(_): ()
+            self.phase = "close-inspect"
+        else: return self._failure("windows-control-probe-phase-invalid")
+        WindowsDockerExecControlProbeOutcomeV3.Pending(self)
+
+    # Cleanup never requires a fresh launch grant and never proves exec absence.
+    pub me fn collect_v3() -> WindowsDockerExecControlProbeOutcomeV3:
+        match self._collect_exchange():
+            case Err(reason): return WindowsDockerExecControlProbeOutcomeV3.CleanupRequired(self, reason)
+            case Ok(_): ()
+        self.observed = None
+        self.phase = "closed"
+        WindowsDockerExecControlProbeOutcomeV3.Closed(self)

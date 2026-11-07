@@ -1,0 +1,218 @@
+# Pure framing/context vectors. SOURCE-ONLY NOT_RUN; no connected pipe.
+use std.spec.*
+use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text}
+use std.common.process.windows_engine_pipe_v1.WindowsEnginePipeWriteContextV1
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.*
+use std.nogc_async_mut.container.providers.windows.docker_engine_exchange_v3.*
+
+# Retain unexpected native ownership before a failing negative assertion. This
+# is cleanup retention only, never a second reader or an admission capability.
+var exchange_retained_v3: [WindowsDockerEngineExchangeV3] = []
+
+fn exchange_cid_v3() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn exchange_eid_v3() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+fn exchange_bytes_v3(value: text) -> [u8]: boxed_text_bytes_checked(value).unwrap()
+fn exchange_exec_v3(tty: bool = false, stdin: bool = false) -> WindowsEngineExecRequestV3:
+    WindowsEngineExecRequestV3(container_id: exchange_cid_v3(), argv: ["C:\\work\\tool.exe", "a b", "λ", "a=b"],
+        environment: [("TASK", "a=b"), ("PATH", "C:\\work")], working_directory: "C:\\work", tty: tty, stdin_requested: stdin)
+fn exchange_context_v3(action: text) -> WindowsEnginePipeWriteContextV1:
+    WindowsEnginePipeWriteContextV1(action: action, request_digest: exchange_cid_v3(), operation_id: "exec-child-1", expires_at_unix_ms: 1)
+fn exchange_rejected_v3(outcome: WindowsDockerEngineExchangeOutcomeV3) -> bool:
+    match outcome:
+        case WindowsDockerEngineExchangeOutcomeV3.Rejected(_): true
+        case WindowsDockerEngineExchangeOutcomeV3.Ready(owner):
+            exchange_retained_v3.push(owner)
+            false
+        case WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(owner, _reason):
+            exchange_retained_v3.push(owner)
+            false
+fn exchange_rejection_reason_v3(outcome: WindowsDockerEngineExchangeOutcomeV3) -> text:
+    match outcome:
+        case WindowsDockerEngineExchangeOutcomeV3.Rejected(reason): reason
+        case WindowsDockerEngineExchangeOutcomeV3.Ready(owner):
+            exchange_retained_v3.push(owner)
+            "unexpected-native-owner:ready"
+        case WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(owner, _reason):
+            exchange_retained_v3.push(owner)
+            "unexpected-native-owner:cleanup-required"
+
+describe "Windows private Engine exact HTTP request serialization":
+    it "serializes a fixed local Host, explicit version and exact Content-Length":
+        step("Serialize the exact fixed Engine info request without a network effect")
+        val request = windows_engine_info_v3("1.48").unwrap()
+        expect(bytes_to_text(windows_docker_engine_exchange_serialize_v3(request).unwrap())).to_equal(
+            "GET /v1.48/info HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+
+    it "preserves binary JSON body bytes and all supported exact codec endpoints":
+        step("Rebuild every codec operation and retain exact body bytes including UTF8")
+        val requests = [windows_engine_info_v3("1.48").unwrap(),
+            windows_engine_container_inspect_v3("1.48", exchange_cid_v3()).unwrap(),
+            windows_engine_exec_inspect_v3("1.48", exchange_eid_v3()).unwrap(),
+            windows_engine_attach_v3("1.48", exchange_cid_v3(), false, false).unwrap(),
+            windows_engine_attach_v3("1.48", exchange_cid_v3(), true, true).unwrap(),
+            windows_engine_exec_create_v3("1.48", exchange_exec_v3()).unwrap(),
+            windows_engine_exec_create_v3("1.48", exchange_exec_v3(true, true)).unwrap(),
+            windows_engine_exec_start_v3("1.48", exchange_eid_v3(), true).unwrap(),
+            windows_engine_exec_start_v3("1.48", exchange_eid_v3(), false).unwrap(),
+            windows_engine_exec_resize_v3("1.48", exchange_eid_v3(), 24, 80, true).unwrap(),
+            windows_engine_container_resize_v3("1.48", exchange_cid_v3(), 32767, 1, true).unwrap()]
+        for request in requests:
+            val wire = windows_docker_engine_exchange_serialize_v3(request).unwrap()
+            expect(wire.len() > request.body.len()).to_equal(true)
+            val body = [for index in (wire.len() - request.body.len())..wire.len(): wire[index]]
+            expect(body).to_equal(request.body)
+            expect(wire.len() <= WINDOWS_DOCKER_ENGINE_EXCHANGE_REQUEST_MAX_V3).to_equal(true)
+
+    it "rejects remote targets, header injection, duplicates and altered fixed framing":
+        step("Reject modified request targets, methods and headers before pipe admission")
+        val original = windows_engine_info_v3("1.48").unwrap()
+        var request = original
+        for target in ["http://remote/v1.48/info", "/v1.48/info\r\nInjected: yes", "/v1.47/info", "/v1.48/info?extra=1"]:
+            request = original
+            request.target = target
+            expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+        request = original
+        request.method = "POST"
+        expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+        for headers in [[("Host", "remote"), ("Content-Length", "0"), ("Connection", "close")],
+                original.headers + [("Content-Length", "0")], original.headers + [("Transfer-Encoding", "chunked")],
+                original.headers + [("X-Injected", "yes\r\nAnother: value")]]:
+            request = original
+            request.headers = headers
+            expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+        request = original
+        request.hijack = true
+        expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+        request = original
+        request.target = "/v1.48/info" + bytes_to_text([for index in 0..1025: 120u8])
+        expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+        request = original
+        request.headers = original.headers + [("Extra", bytes_to_text([for index in 0..129: 120u8]))]
+        expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+        request = original
+        request.operation = "arbitrary-post"
+        expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+
+    it "rejects noncanonical or malformed exec JSON and inconsistent flags":
+        step("Reject duplicate keys, unknown keys, wrong user, flags and body limits")
+        val original = windows_engine_exec_create_v3("1.48", exchange_exec_v3()).unwrap()
+        val source = bytes_to_text(original.body)
+        for body in [source.replace("\"User\":\"ContainerUser\"", "\"User\":\"ContainerAdministrator\""),
+                source.replace("\"User\":", "\"User\":\"ContainerUser\",\"User\":"),
+                source.replace("\"Privileged\":false", "\"Privileged\":true"),
+                source.replace("\"AttachStdout\":true", "\"AttachStdout\":false"),
+                source.replace("\"Tty\":false", "\"Tty\":true"),
+                source.replace("\"Cmd\":", "\"Unknown\":false,\"Cmd\":"),
+                source.replace("\"Env\":[", "\"Env\":[false,"), "{" + source, " " + source]:
+            expect(body == source).to_equal(false)
+            var request = original
+            request.body = exchange_bytes_v3(body)
+            expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+        var request = original
+        request.body = [for index in 0..(WINDOWS_ENGINE_REQUEST_MAX_V3 + 1): 32u8]
+        expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+        request.body = [255u8]
+        expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+        var started = windows_engine_exec_start_v3("1.48", exchange_eid_v3(), false).unwrap()
+        started.body = exchange_bytes_v3("{\"Detach\":true,\"Tty\":false}")
+        expect(windows_docker_engine_exchange_serialize_v3(started).is_err()).to_equal(true)
+
+    it "rejects ambiguous resize syntax and exact ID endpoint mutations":
+        val original = windows_engine_exec_resize_v3("1.48", exchange_eid_v3(), 24, 80, true).unwrap()
+        for suffix in ["/resize?h=024&w=80", "/resize?h=24&w=80&extra=1", "/resize?h=0&w=80", "/resize?h=24&w=-1", "/resize?h=24&w=32768"]:
+            var request = original
+            request.target = "/v1.48/exec/" + exchange_eid_v3() + suffix
+            expect(windows_docker_engine_exchange_serialize_v3(request).is_err()).to_equal(true)
+        var inspect = windows_engine_container_inspect_v3("1.48", exchange_cid_v3()).unwrap()
+        inspect.target = inspect.target.replace(exchange_cid_v3(), "short")
+        expect(windows_docker_engine_exchange_serialize_v3(inspect).is_err()).to_equal(true)
+
+describe "Windows Engine transport metadata is not authority":
+    it "requires exact create/start action metadata and forbids it for all other operations":
+        step("Validate context shape only; native write still checks the actual expiry")
+        val create = windows_engine_exec_create_v3("1.48", exchange_exec_v3()).unwrap()
+        val start = windows_engine_exec_start_v3("1.48", exchange_eid_v3(), false).unwrap()
+        expect(windows_docker_engine_exchange_context_reason_v3(create, None) != "").to_equal(true)
+        expect(windows_docker_engine_exchange_context_reason_v3(start, None) != "").to_equal(true)
+        expect(windows_docker_engine_exchange_context_reason_v3(create, Some(exchange_context_v3("start"))) != "").to_equal(true)
+        expect(windows_docker_engine_exchange_context_reason_v3(start, Some(exchange_context_v3("create"))) != "").to_equal(true)
+        expect(windows_docker_engine_exchange_context_reason_v3(create, Some(exchange_context_v3("create")))).to_equal("")
+        expect(windows_docker_engine_exchange_context_reason_v3(start, Some(exchange_context_v3("start")))).to_equal("")
+        for request in [windows_engine_info_v3("1.48").unwrap(), windows_engine_container_inspect_v3("1.48", exchange_cid_v3()).unwrap(),
+                windows_engine_exec_inspect_v3("1.48", exchange_eid_v3()).unwrap(),
+                windows_engine_attach_v3("1.48", exchange_cid_v3(), false, false).unwrap(),
+                windows_engine_exec_resize_v3("1.48", exchange_eid_v3(), 24, 80, true).unwrap(),
+                windows_engine_container_resize_v3("1.48", exchange_cid_v3(), 24, 80, true).unwrap()]:
+            expect(windows_docker_engine_exchange_context_reason_v3(request, None)).to_equal("")
+            expect(windows_docker_engine_exchange_context_reason_v3(request, Some(exchange_context_v3("create"))) != "").to_equal(true)
+        var context = exchange_context_v3("create")
+        context.request_digest = "sha256:" + exchange_cid_v3()
+        expect(windows_docker_engine_exchange_context_reason_v3(create, Some(context)) != "").to_equal(true)
+
+    it "rejects bad bounds and missing effect metadata before acquiring any native owner":
+        step("Reject pre-admission inputs without opening the fixed pipe")
+        val request = windows_engine_info_v3("1.48").unwrap()
+        expect(exchange_rejected_v3(WindowsDockerEngineExchangeV3.begin_v3(request, None, 0))).to_equal(true)
+        expect(exchange_rejected_v3(WindowsDockerEngineExchangeV3.begin_v3(request, None, WINDOWS_DOCKER_ENGINE_EXCHANGE_TIMEOUT_MAX_V3 + 1))).to_equal(true)
+        val create = windows_engine_exec_create_v3("1.48", exchange_exec_v3()).unwrap()
+        expect(exchange_rejected_v3(WindowsDockerEngineExchangeV3.begin_v3(create, None, 1000))).to_equal(true)
+
+describe "Windows read-only exchange admission before native IO":
+    it "admits only canonical info and exact container inspection wire bytes":
+        step("Compare the two admitted read-only requests with their exact codec serialization")
+        for request in [windows_engine_info_v3("1.48").unwrap(),
+                windows_engine_container_inspect_v3("1.48", exchange_cid_v3()).unwrap()]:
+            expect(windows_docker_engine_exchange_read_only_serialize_v3(request).unwrap()).to_equal(
+                windows_docker_engine_exchange_serialize_v3(request).unwrap())
+
+    it "rejects create and start with matching live-looking data context before pipe acquisition":
+        step("Pass correctly framed mutations and matching metadata through both public entries")
+        for request in [windows_engine_exec_create_v3("1.48", exchange_exec_v3()).unwrap(),
+                windows_engine_exec_start_v3("1.48", exchange_eid_v3(), false).unwrap()]:
+            var context = exchange_context_v3(if request.operation == "exec-create": "create" else: "start")
+            context.expires_at_unix_ms = 9223372036854775807
+            expect(windows_docker_engine_exchange_context_reason_v3(request, Some(context))).to_equal("")
+            expect(windows_docker_engine_exchange_serialize_v3(request).is_ok()).to_equal(true)
+            expect(exchange_rejection_reason_v3(WindowsDockerEngineExchangeV3.begin_v3(request, Some(context), 1000))).to_equal(
+                "engine-exchange-read-only-operation-required")
+            expect(exchange_rejection_reason_v3(WindowsDockerEngineExchangeV3.begin_read_only_v3(request, 1000))).to_equal(
+                "engine-exchange-read-only-operation-required")
+
+    it "rejects attach resize and exec inspection outside the read-only probe allowlist":
+        step("Reject every otherwise-valid non-probe endpoint without a platform-specific result")
+        for request in [windows_engine_attach_v3("1.48", exchange_cid_v3(), true, true).unwrap(),
+                windows_engine_exec_resize_v3("1.48", exchange_eid_v3(), 24, 80, true).unwrap(),
+                windows_engine_container_resize_v3("1.48", exchange_cid_v3(), 24, 80, true).unwrap(),
+                windows_engine_exec_inspect_v3("1.48", exchange_eid_v3()).unwrap()]:
+            expect(exchange_rejection_reason_v3(WindowsDockerEngineExchangeV3.begin_v3(request, None, 1000))).to_equal(
+                "engine-exchange-read-only-operation-required")
+            expect(exchange_rejection_reason_v3(WindowsDockerEngineExchangeV3.begin_read_only_v3(request, 1000))).to_equal(
+                "engine-exchange-read-only-operation-required")
+
+    it "rejects a mutation disguised with an admitted operation label":
+        step("Change only the operation label while retaining the actual mutating request")
+        for operation in ["info", "container-inspect"]:
+            var request = windows_engine_exec_start_v3("1.48", exchange_eid_v3(), false).unwrap()
+            request.operation = operation
+            val reason = windows_docker_engine_exchange_read_only_serialize_v3(request).unwrap_err()
+            expect(exchange_rejection_reason_v3(WindowsDockerEngineExchangeV3.begin_read_only_v3(request, 1000))).to_equal(reason)
+            expect(exchange_rejection_reason_v3(WindowsDockerEngineExchangeV3.begin_v3(request, None, 1000))).to_equal(reason)
+
+    it "rejects method body and hijack changes on the exact info target":
+        step("Require complete canonical read-only framing before touching native IO")
+        val original = windows_engine_info_v3("1.48").unwrap()
+        var method = original
+        method.method = "POST"
+        var body = original
+        body.body = [120u8]
+        var hijack = original
+        hijack.hijack = true
+        for request in [method, body, hijack]:
+            expect(exchange_rejection_reason_v3(WindowsDockerEngineExchangeV3.begin_read_only_v3(request, 1000))).to_equal(
+                "engine-exchange-request-not-exact-codec-output")
+
+    it "refuses write-context metadata even for an admitted GET":
+        step("Reject data context rather than treating it as an effect capability")
+        val request = windows_engine_info_v3("1.48").unwrap()
+        expect(exchange_rejection_reason_v3(WindowsDockerEngineExchangeV3.begin_v3(request, Some(exchange_context_v3("create")), 1000))).to_equal(
+            "engine-exchange-read-only-context-forbidden")
