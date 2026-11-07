@@ -47,11 +47,57 @@ pub(crate) fn get_vreg_or_default<M: Module>(
 /// (`runtime/src/value/heap.rs`), so applying them on a hosted build turns an
 /// honest `-1` sentinel into a confidently wrong length read out of an
 /// unrelated field.
+/// Byte/element length of any runtime collection (strings answer their BYTE
+/// length). Used where the unit must stay bytes: slice normalisation,
+/// `is_empty`, array merge counts. Generic `.len()` goes through
+/// `inline_runtime_len_value_with` so text answers code points.
 pub(crate) fn inline_runtime_len_value(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,
     baremetal: bool,
     fam_arrays: bool,
+) -> cranelift_codegen::ir::Value {
+    inline_runtime_len_value_with(builder, value, baremetal, fam_arrays, None)
+}
+
+/// Declare `rt_string_char_count` (on demand, like the closures_structs
+/// method path) and return a FuncRef for the current function. `None` only
+/// when the module refuses the import, in which case the caller keeps the
+/// byte length rather than guessing.
+pub(crate) fn declare_string_char_count_ref<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+) -> Option<cranelift_codegen::ir::FuncRef> {
+    let name = "rt_string_char_count";
+    let func_id = if let Some(&fid) = ctx.runtime_funcs.get(name) {
+        fid
+    } else {
+        let call_conv = ctx.module.isa().default_call_conv();
+        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        match ctx.module.declare_function(name, cranelift_module::Linkage::Import, &sig) {
+            Ok(fid) => {
+                ctx.func_ids.or_insert(name.to_string(), fid);
+                fid
+            }
+            Err(_) => return None,
+        }
+    };
+    Some(ctx.module.declare_func_in_func(func_id, builder.func))
+}
+
+/// Generic `.len()`: with `string_char_count` set, a text receiver answers
+/// its code-point count by calling `rt_string_char_count` (design
+/// doc/05_design/language/text/text_len_counts_characters_2026-11-07.md);
+/// every other receiver keeps the inline header load. With `None` text
+/// answers bytes (see `inline_runtime_len_value`).
+pub(crate) fn inline_runtime_len_value_with(
+    builder: &mut FunctionBuilder,
+    value: cranelift_codegen::ir::Value,
+    baremetal: bool,
+    fam_arrays: bool,
+    string_char_count: Option<cranelift_codegen::ir::FuncRef>,
 ) -> cranelift_codegen::ir::Value {
     let invalid = builder.ins().iconst(types::I64, -1);
     let tag_mask = builder.ins().iconst(types::I64, 7);
@@ -75,6 +121,21 @@ pub(crate) fn inline_runtime_len_value(
     let is_core_string = builder.ins().icmp_imm(IntCC::Equal, kind_u32, 0x5354_5231);
     let is_heap_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
     let is_string = builder.ins().bor(is_core_string, is_heap_string);
+    if let Some(char_count) = string_char_count {
+        // Text: code points via the runtime (one UTF-8 walker for all lanes;
+        // a hand-rolled lead-byte loop would diverge from the lossy runtime
+        // count on invalid bytes).
+        let string_block = builder.create_block();
+        let rest_block = builder.create_block();
+        builder.ins().brif(is_string, string_block, &[], rest_block, &[]);
+        builder.switch_to_block(string_block);
+        let call = adapted_call(builder, char_count, &[value]);
+        let count = builder.inst_results(call)[0];
+        builder.ins().jump(done_block, &[count]);
+        builder.seal_block(string_block);
+        builder.switch_to_block(rest_block);
+        builder.seal_block(rest_block);
+    }
     let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
     // RuntimeDict (object_type 0x03) shares the {header, len, capacity} header
     // layout, so its entry count is likewise stored at offset 8. Without this

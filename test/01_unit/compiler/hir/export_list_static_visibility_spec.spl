@@ -6,6 +6,8 @@
 # Bug: doc/08_tracking/bug/export_list_static_visibility_not_lifted_2026-11-06.md
 
 use std.spec
+use std.env.variables.{env_get, env_has, env_set, env_unset}
+use compiler.hir.hir_definitions.{HirModule}
 use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.hirlowering_for_module
@@ -14,7 +16,7 @@ use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfa
 use compiler.frontend.parser_types.ParserModule
 use compiler.common.dependency.visibility.{Visibility}
 
-val OWNER_SOURCE = "var EXPORTED_STATE = \"\"\nvar PRIVATE_STATE = 0\nval EXPORTED_CODE = \"T4010\"\npub(package) var PACKAGE_STATE = 0\nexport EXPORTED_STATE, EXPORTED_CODE, PACKAGE_STATE\n"
+val OWNER_SOURCE = "var EXPORTED_STATE = \"\"\nvar PRIVATE_STATE = 0\nval EXPORTED_CODE = \"T4010\"\npub(package) var PACKAGE_STATE = 0\nexport EXPORTED_STATE, EXPORTED_CODE, PACKAGE_STATE\n" + "var PRIVATE_SEED: i64 = 7\nval EXPORTED_RUNTIME: i64 = PRIVATE_SEED * 1024\nval PRIVATE_RUNTIME: i64 = PRIVATE_SEED * 1024\nval SECTION_LIMIT: i64 = 128 * 1024 * 1024\nval PACKAGE_LIMIT: i64 = 512 * 1024 * 1024\nval MODULE_LIMIT: i64 = 16 * 1024 * 1024\nval PRIVATE_LIMIT: i64 = 16 * 1024 * 1024\nval EXPORTED_FAMILIES: [text] = [\"direct-import-export\", \"trait-type-implementation\", \"unresolved-method-candidate\", \"annotation-consumer\", \"generic-specialization\", \"aop-consumer\", \"runtime-provider\", \"initializer-dependent\", \"module-scc-artifact\", \"emitted-symbol-relocation\"]\nval PRIVATE_FAMILIES: [text] = [\"private\"]\npub(package) val PACKAGE_FAMILIES: [text] = [\"package\"]\npub(package) val PACKAGE_RUNTIME: i64 = PRIVATE_SEED * 1024\nexport EXPORTED_RUNTIME, SECTION_LIMIT, PACKAGE_LIMIT, MODULE_LIMIT, EXPORTED_FAMILIES, PACKAGE_FAMILIES, PACKAGE_RUNTIME\n"
 
 fn owner_constant_visibility(name: text) -> text:
     val log = Logger(level: 0)
@@ -45,6 +47,38 @@ fn owner_constant_is_public(name: text) -> bool:
             return constant.is_public
     false
 
+# Exercise the actual ordinary and bootstrap-recovery owners independently.
+# Restore process policy before assertions, including the missing-value case.
+fn owner_constant_contract(name: text, bootstrap: bool, direct_bootstrap: bool = false) -> text:
+    val had_bootstrap = env_has("SIMPLE_BOOTSTRAP")
+    val prior_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    val configured = env_set("SIMPLE_BOOTSTRAP", if bootstrap: "1" else: "0")
+    val log = Logger(level: 0)
+    val parsed = parse_full_frontend(OWNER_SOURCE, "src/app/owner_probe/state.spl", "app.owner_probe.state", log)
+    val no_modules: Dict<text, ParserModule> = {}
+    val surfaces: ModuleSurfacesByName = module_surfaces_from_modules(no_modules, []).unwrap()
+    var lowering = hirlowering_for_module("src/app/owner_probe/state.spl", surfaces)
+    val active = lowering.ambient_bootstrap_enabled()
+    val module: HirModule = if bootstrap and not direct_bootstrap: lowering.lower_parser_module_unstub(parsed, false) else: lowering.lower_module(parsed)
+    var result = "missing"
+    for key in module.constants.keys():
+        val constant = module.constants[key]
+        if constant.name == name:
+            val visibility = match constant.visibility:
+                case Visibility.Public: "public"
+                case Visibility.Private: "private"
+                case _: "scoped"
+            result = visibility + (if constant.is_public: ":digest-public" else: ":digest-private")
+    if had_bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", prior_bootstrap ?? "")
+    else:
+        env_unset("SIMPLE_BOOTSTRAP")
+    if not configured or active != bootstrap:
+        return "bootstrap-policy-not-selected"
+    if lowering.errors.len() != 0:
+        return "lowering-errors"
+    result
+
 describe "export list lifts module static visibility":
     it "makes an exported private var Public":
         expect(owner_constant_visibility("EXPORTED_STATE")).to_equal("public")
@@ -60,3 +94,35 @@ describe "export list lifts module static visibility":
 
     it "leaves an explicit scoped visibility unchanged":
         expect(owner_constant_visibility("PACKAGE_STATE")).to_equal("scoped")
+
+    it "lifts exported array and runtime expression in ordinary lowering":
+        expect(owner_constant_contract("EXPORTED_FAMILIES", false)).to_equal("public:digest-public")
+        expect(owner_constant_contract("EXPORTED_RUNTIME", false)).to_equal("public:digest-public")
+
+    it "lifts exported array and runtime expression in bootstrap recovery":
+        expect(owner_constant_contract("EXPORTED_FAMILIES", true)).to_equal("public:digest-public")
+        expect(owner_constant_contract("EXPORTED_RUNTIME", true)).to_equal("public:digest-public")
+        expect(owner_constant_contract("EXPORTED_STATE", true)).to_equal("public:digest-public")
+
+    it "preserves the guaranteed inline arithmetic path for the three driver budgets":
+        for bootstrap in [false, true]:
+            for name in ["SECTION_LIMIT", "PACKAGE_LIMIT", "MODULE_LIMIT", "EXPORTED_CODE"]:
+                expect(owner_constant_contract(name, bootstrap)).to_equal("private:digest-private")
+
+    it "does not widen nonexported arrays runtime values or folded arithmetic":
+        for bootstrap in [false, true]:
+            for name in ["PRIVATE_FAMILIES", "PRIVATE_RUNTIME", "PRIVATE_LIMIT", "PRIVATE_STATE"]:
+                expect(owner_constant_contract(name, bootstrap)).to_equal("private:digest-private")
+
+    it "preserves scoped array and runtime storage even when explicitly exported":
+        for bootstrap in [false, true]:
+            expect(owner_constant_contract("PACKAGE_FAMILIES", bootstrap).starts_with("scoped:")).to_equal(true)
+            expect(owner_constant_contract("PACKAGE_RUNTIME", bootstrap).starts_with("scoped:")).to_equal(true)
+
+    it "applies export visibility in direct bootstrap lower_module before outer recovery":
+        expect(owner_constant_contract("EXPORTED_FAMILIES", true, true)).to_equal("public:digest-public")
+        expect(owner_constant_contract("EXPORTED_RUNTIME", true, true)).to_equal("public:digest-public")
+        expect(owner_constant_contract("EXPORTED_STATE", true, true)).to_equal("public:digest-public")
+        expect(owner_constant_contract("PRIVATE_FAMILIES", true, true)).to_equal("private:digest-private")
+        expect(owner_constant_contract("SECTION_LIMIT", true, true)).to_equal("private:digest-private")
+        expect(owner_constant_contract("PACKAGE_FAMILIES", true, true).starts_with("scoped:")).to_equal(true)

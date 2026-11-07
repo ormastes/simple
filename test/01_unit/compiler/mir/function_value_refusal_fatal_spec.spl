@@ -1,0 +1,88 @@
+"""Unresolved function values must not publish integer-zero function pointers."""
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.mir.mir_data.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.driver.driver_mir_error_owner.{driver_mir_error_is_fatal_owned_v1}
+
+fn function_refusal_span() -> Span:
+    var span = Span.empty()
+    span.file = "function_value.spl"
+    span.line = 14
+    span.col = 3
+    span
+
+fn function_refusal_lowering(symbols: SymbolTable) -> MirLowering:
+    var lowering = MirLowering.new(symbols)
+    lowering.current_function_names = ["probe"]
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 100), "function_value_probe",
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    lowering.builder = builder
+    lowering
+
+describe "Function-value refusal blocks code publication":
+    it "marks a missing declared function signature fatal at its source span":
+        step("Lower a known function symbol with no retained function type")
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("probe", SymbolKind.Function, nil,
+            Span.empty(), Visibility.Public, false, nil)
+        var lowering = function_refusal_lowering(symbols)
+        val recovered = lowering.try_lower_function_value(symbol.id, function_refusal_span())
+        expect(recovered.?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(1)
+        val diagnostic = lowering.errors[0]
+        expect(diagnostic.message).to_equal("cannot lower 'probe' as a function value: no resolved function type")
+        expect(diagnostic.fatal).to_equal(true)
+        expect(driver_mir_error_is_fatal_owned_v1(diagnostic)).to_equal(true)
+        expect(diagnostic.span.?).to_equal(true)
+        if val span = diagnostic.span:
+            expect(span.file).to_equal("function_value.spl")
+            expect(span.line).to_equal(14)
+            expect(span.col).to_equal(3)
+
+    it "rejects an unresolved return before any parameter type lowering can mask the defect":
+        step("Lower a known zero-parameter function whose optional return still contains T")
+        val parameter = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+        val unresolved_return = HirType(kind: HirTypeKind.Optional(parameter), span: Span.empty())
+        val signature = HirType(kind: HirTypeKind.Function([], unresolved_return, []), span: Span.empty())
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("probe", SymbolKind.Function, signature,
+            Span.empty(), Visibility.Public, false, nil)
+        var lowering = function_refusal_lowering(symbols)
+        val recovered = lowering.try_lower_function_value(symbol.id, function_refusal_span())
+        expect(recovered.?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(1)
+        val diagnostic = lowering.errors[0]
+        expect(diagnostic.message).to_equal("cannot lower generic or unresolved function 'probe' as a value here; instantiate a concrete signature first")
+        expect(diagnostic.fatal).to_equal(true)
+        expect(driver_mir_error_is_fatal_owned_v1(diagnostic)).to_equal(true)
+
+    it "keeps concrete function values and their full ABI signature":
+        step("Lower a concrete i32-to-bool function value without a diagnostic")
+        val argument_type = HirType(kind: HirTypeKind.Int(32, true), span: Span.empty())
+        val result_type = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+        val signature = HirType(kind: HirTypeKind.Function([argument_type], result_type, []), span: Span.empty())
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("probe", SymbolKind.Function, signature,
+            Span.empty(), Visibility.Public, false, nil)
+        var lowering = function_refusal_lowering(symbols)
+        val recovered = lowering.try_lower_function_value(symbol.id, function_refusal_span())
+        expect(recovered.?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        var retained_function_type = false
+        if val local = recovered:
+            val definition = lowering.builder.locals[local.id]
+            match definition.type_.kind:
+                case MirTypeKind.FuncPtr(actual):
+                    retained_function_type = true
+                    expect(actual.params.len()).to_equal(1)
+                    expect(actual.params[0].kind).to_equal(MirTypeKind.I32)
+                    expect(actual.return_type.kind).to_equal(MirTypeKind.Bool)
+                case _: ()
+        expect(retained_function_type).to_equal(true)

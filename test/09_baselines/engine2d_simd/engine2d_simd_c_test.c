@@ -24,7 +24,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
+#include "runtime_simd_dispatch.h"
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 #  include <arm_neon.h>
@@ -34,7 +36,6 @@
  * dead on aarch64 but must resolve if this gate is ever compiled on x86. */
 #if defined(__x86_64__) || defined(_M_X64)
 #  include <immintrin.h>
-static int simd_detect_avx2(void) { return 0; }
 #endif
 
 #if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
@@ -53,21 +54,24 @@ static int simd_detect_avx2(void) { return 0; }
  * Independent scalar references (the "spec"). Do NOT use the kernel helpers.
  * ------------------------------------------------------------------------- */
 
-/* src-over blend reference, truncating floor formula. s/d are packed
- * 0xAARRGGBB in the low 32 bits of an int64_t. */
+/* Straight-alpha src-over, with the two floor divisions required by
+ * doc/03_plan/ui/perf/engine2d_simd_blend_span_kernel_design_plan_2026-08-07.md.
+ * Destination coverage must be attenuated before unpremultiplying RGB.
+ * s/d are packed 0xAARRGGBB in the low 32 bits of an int64_t. */
 static int64_t ref_blend_pixel(int64_t s, int64_t d) {
     uint32_t sp = (uint32_t)(uint64_t)s;
     uint32_t dp = (uint32_t)(uint64_t)d;
     uint32_t sa = (sp >> 24) & 0xFFu;
     if (sa == 255u) return (int64_t)(uint64_t)sp;          /* full src pixel */
     if (sa == 0u)   return (int64_t)(uint64_t)dp;          /* full dst pixel */
-    uint32_t inv = 255u - sa;
-    uint32_t sr = (sp >> 16) & 0xFFu, sg = (sp >> 8) & 0xFFu, sb = sp & 0xFFu;
-    uint32_t dr = (dp >> 16) & 0xFFu, dg = (dp >> 8) & 0xFFu, db = dp & 0xFFu;
-    uint32_t r = (sr * sa + dr * inv) / 255u;
-    uint32_t g = (sg * sa + dg * inv) / 255u;
-    uint32_t b = (sb * sa + db * inv) / 255u;
-    uint32_t out = (255u << 24) | (r << 16) | (g << 8) | b; /* alpha forced 255 */
+    uint64_t coverage[2] = {sa, ((dp >> 24) * (255u - sa)) / 255u};
+    uint64_t total = coverage[0] + coverage[1];
+    uint32_t out = (uint32_t)total << 24;
+    for (unsigned shift = 0; shift < 24; shift += 8) {
+        uint64_t premultiplied = ((sp >> shift) & 255u) * coverage[0]
+                               + ((dp >> shift) & 255u) * coverage[1];
+        out |= (uint32_t)(premultiplied / total) << shift;
+    }
     return (int64_t)(uint64_t)out;
 }
 
@@ -78,6 +82,27 @@ static void fail(const char* what, long long extra) {
         fprintf(stderr, "  MISMATCH: %s (%lld)\n", what, extra);
     }
     g_failures++;
+}
+
+/* Fixed answers from the scalar-oracle spec independently anchor the oracle,
+ * including transparent coverage and destination-weight floor rounding. */
+static void test_blend_contract_vectors(void) {
+    const uint32_t vectors[][3] = {
+        {0x80FFFFFFu, 0x00000000u, 0x80FFFFFFu},
+        {0x80FF0000u, 0xFF0000FFu, 0xFF80007Fu},
+        {0x64FF0000u, 0xC80000FFu, 0xDD73008Bu},
+        {0x00123456u, 0x00765432u, 0x00765432u},
+        {0xFF123456u, 0x00765432u, 0xFF123456u}
+    };
+    for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+        int64_t src = vectors[i][0], dst = vectors[i][1], out = -1;
+        if (ref_blend_pixel(src, dst) != vectors[i][2])
+            fail("reference contract vector", i);
+        if (engine2d_blend_pixel(src, dst) != vectors[i][2])
+            fail("scalar contract vector", i);
+        engine2d_blend_into(&out, &dst, &src, 1);
+        if (out != vectors[i][2]) fail("SIMD contract vector", i);
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -212,6 +237,7 @@ int main(void) {
 
     test_fill();
     test_copy();
+    test_blend_contract_vectors();
     test_blend_into();
     test_blend_exhaustive();
 

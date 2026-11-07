@@ -36,7 +36,8 @@ do not do that; see `.claude/rules/testing.md`.
 # @manual_section: primary
 
 use std.spec
-use std.nogc_async_mut.io.tls_common.{wire_to_bytes, bytes_to_wire, encode_u24_be}
+use std.nogc_async_mut.io.tls_handshake.{build_alpn_extension_block}
+use std.nogc_async_mut.io.tls_common.{wire_to_bytes, bytes_to_wire, encode_u24_be, tls_aes_gcm_encrypt, tls_aes_gcm_decrypt}
 
 # @step: Round-trip a single byte value through bytes_to_wire/wire_to_bytes
 fn roundtrip_single_byte(value: i64) -> [i64]:
@@ -105,3 +106,26 @@ describe "wire_to_bytes / bytes_to_wire over the full 0-255 byte range":
         while i < 6:
             expect(decoded[i]).to_equal(original[i])
             i = i + 1
+
+    it "preserves byte lengths through AES-GCM for multibyte wire key nonce plaintext and AAD":
+        # Authored regression for codepoint len versus byte ABI; execution pending.
+        val key = bytes_to_wire([194, 169, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        val iv = bytes_to_wire([194, 169, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        val original = [194, 169, 0, 226, 130, 172]
+        val plaintext = bytes_to_wire(original)
+        val aad = bytes_to_wire([194, 169, 0])
+        val encrypted = tls_aes_gcm_encrypt(key, iv, plaintext, aad)
+        expect(encrypted.byte_len()).to_equal(22)
+        val decrypted = tls_aes_gcm_decrypt(key, iv, encrypted, aad)
+        expect(decrypted != nil).to_equal(true)
+        if val recovered = decrypted:
+            expect(recovered.byte_len()).to_equal(6)
+            expect(wire_to_bytes(recovered)).to_equal(original)
+        else:
+            fail("AES-GCM must authenticate and preserve every wire byte")
+
+    it "encodes opaque multibyte ALPN identifiers with wire byte lengths":
+        # Two protocol bytes happen to form one Unicode code point.
+        val block = build_alpn_extension_block(bytes_to_wire([194, 169]))
+        expect(block.byte_len()).to_equal(11)
+        expect(wire_to_bytes(block)).to_equal([0, 9, 0, 16, 0, 5, 0, 3, 2, 194, 169])

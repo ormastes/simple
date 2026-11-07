@@ -1,0 +1,43 @@
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim,
+    hir_shard_recovery_terminal, hir_shard_recovery_loaded_complete_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, getpid}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+
+fn check(condition: bool, name: text) -> i64:
+    if condition: return 0
+    print("FAIL: {name}")
+    1
+
+fn main() -> i64:
+    val queue = "build/hir-unit-terminal/ledger-{getpid()}"
+    if not dir_create_all(queue): return 90
+    val dependency = "/fixture/import.spl"
+    val foreign = "/fixture/foreign.spl"
+    val target = "/fixture/target.spl"
+    val normal = "/fixture/normal.spl"
+    val dep_base = "{queue}/{sha256_text(dependency)}"
+    val foreign_base = "{queue}/{sha256_text(foreign)}"
+    val target_base = "{queue}/{sha256_text(target)}"
+    val normal_base = "{queue}/{sha256_text(normal)}"
+    var failures = 0
+    failures = failures + check(not hir_shard_recovery_terminal(queue, "unit", dependency, "PASS", true), "unclaimed terminal stays forbidden")
+    failures = failures + check(hir_shard_recovery_loaded_complete_v1(queue, "unit", dependency, true, true), "unit import load needs no terminal")
+    failures = failures + check(not file_exists("{dep_base}.claim"), "import load creates no claim")
+    failures = failures + check(not file_exists("{dep_base}.terminal"), "import load creates no terminal")
+    failures = failures + check(hir_shard_recovery_claim(queue, "other", foreign, "key-foreign") == 1, "foreign claim established")
+    failures = failures + check(hir_shard_recovery_loaded_complete_v1(queue, "unit", foreign, true, true), "unit load does not terminalize another owner")
+    failures = failures + check(not file_exists("{foreign_base}.terminal"), "foreign terminal remains absent")
+    failures = failures + check(hir_shard_recovery_claim(queue, "unit", target, "key-target") == 1, "unit target claim established")
+    failures = failures + check(hir_shard_recovery_terminal(queue, "unit", target, "PASS", false), "unit transaction records uncached completion")
+    val original = file_read("{target_base}.terminal")
+    failures = failures + check(hir_shard_recovery_loaded_complete_v1(queue, "unit", target, true, true), "reload does not replace transaction receipt")
+    failures = failures + check(file_read("{target_base}.terminal") == original, "original receipt bytes retained")
+    failures = failures + check(hir_shard_recovery_claim(queue, "normal", normal, "key-normal") == 1, "normal shard claim established")
+    failures = failures + check(hir_shard_recovery_loaded_complete_v1(queue, "normal", normal, true, false), "normal shard publishes completion")
+    failures = failures + check(hir_shard_recovery_loaded_complete_v1(queue, "normal", normal, true, false), "normal completion remains idempotent")
+    failures = failures + check(not hir_shard_recovery_loaded_complete_v1(queue, "normal", normal, false, false), "conflicting normal completion rejected")
+    failures = failures + check(not hir_shard_recovery_loaded_complete_v1(queue, "other", normal, true, false), "foreign normal completion rejected")
+    failures = failures + check(file_read("{normal_base}.terminal").ends_with("CACHE_STORED\n"), "normal cache evidence unchanged")
+    print("HIR unit terminal assertions=17 failures={failures}")
+    failures

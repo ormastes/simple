@@ -130,11 +130,12 @@ kill_tree() {
     _kt_walk "$1" "$2" "$_kt_pairs"
 }
 _kt_walk() {
-    _kt_root=$1; _kt_sig=$2; _kt_pairs=$3
-    for _kt_c in $(printf '%s\n' "$_kt_pairs" | awk -v p="$_kt_root" '$2==p{print $1}'); do
-        _kt_walk "$_kt_c" "$_kt_sig" "$_kt_pairs"
+    # Function positional parameters survive recursive calls in POSIX sh.
+    # Global root/signal variables would retain the last descendant on return.
+    for _kt_c in $(printf '%s\n' "$3" | awk -v p="$1" '$2==p{print $1}'); do
+        _kt_walk "$_kt_c" "$2" "$3"
     done
-    kill "-$_kt_sig" "$_kt_root" 2>/dev/null
+    kill "-$2" "$1" 2>/dev/null
 }
 
 # cont_tree ROOT_PID: SIGCONT ROOT_PID and every live descendant,
@@ -157,11 +158,11 @@ cont_tree() {
     _ct_walk "$1" "$_ct_pairs"
 }
 _ct_walk() {
-    _ct_root=$1; _ct_pairs=$2
-    for _ct_c in $(printf '%s\n' "$_ct_pairs" | awk -v p="$_ct_root" '$2==p{print $1}'); do
-        _ct_walk "$_ct_c" "$_ct_pairs"
+    # Keep this invocation's root and snapshot across recursive calls.
+    for _ct_c in $(printf '%s\n' "$2" | awk -v p="$1" '$2==p{print $1}'); do
+        _ct_walk "$_ct_c" "$2"
     done
-    kill -CONT "$_ct_root" 2>/dev/null
+    kill -CONT "$1" 2>/dev/null
 }
 
 # kill_row PID SIG: the one function every kill site (budget-kill, the
@@ -521,7 +522,9 @@ run_tier() {
 if [ "$DO_SELFTEST" = 1 ]; then
     ST_FAILURES=0
     ST_T=$(mktemp -d) || exit 2
-    trap 'rm -rf "$ST_T"' EXIT INT TERM
+    # Preserve per-case diagnostics, including startup failures before a PID.
+    trap 'printf "run-gate-tier: selftest evidence retained at %s\n" "$ST_T" >&2' EXIT
+    trap 'exit 2' INT TERM
 
     st_report() {
         if [ "$1" = ok ]; then
@@ -740,25 +743,41 @@ EOF
     sh "$0" --tier local --manifest-file "$ST_T/m11.sdn" --budget 30 --jobs 2 --results "$ST_T/r11.out" \
         >/dev/null 2>"$ST_T/r11.err" &
     runner_pid=$!
-    # Wait for the grandchild pidfile to appear (row actually launched)
-    # rather than a fixed sleep guessing at scheduling.
-    _w=0
-    while [ ! -s "$ST_T/gc11.pid" ] && [ "$_w" -lt 50 ]; do sleep 0.1 2>/dev/null || sleep 1; _w=$((_w + 1)); done
+    # Interrupt only after the grandchild is observed alive. A fixed poll
+    # count can expire during runner startup and test no active row at all.
+    # Use a bounded wall deadline, and stop waiting if the runner exits.
+    _ready_deadline=$(( $(now_ms) + 30000 ))
+    while [ ! -s "$ST_T/gc11.pid" ] && kill -0 "$runner_pid" 2>/dev/null && [ "$(now_ms)" -lt "$_ready_deadline" ]; do
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    gc11_pid=$(cat "$ST_T/gc11.pid" 2>/dev/null || echo)
+    gc11_ready=0
+    if [ -n "$gc11_pid" ] && kill -0 "$gc11_pid" 2>/dev/null; then gc11_ready=1; fi
+    # On a readiness failure this is owned cleanup, not interruption evidence.
     kill -TERM "$runner_pid" 2>/dev/null
     wait "$runner_pid" 2>/dev/null
     rc=$?
     sleep 1
     gc11_pid=$(cat "$ST_T/gc11.pid" 2>/dev/null || echo)
     if [ -n "$gc11_pid" ] && kill -0 "$gc11_pid" 2>/dev/null; then gc11_alive=1; else gc11_alive=0; fi
-    if [ "$rc" -ne 0 ] && [ -n "$gc11_pid" ] && [ "$gc11_alive" -eq 0 ]; then
+    if [ "$gc11_ready" -ne 1 ]; then
+        st_report bad "(S11) setup failed: grandchild readiness was not observed before the deadline or runner exit" "rc=$rc stderr=$(cat "$ST_T/r11.err" 2>/dev/null)"
+    elif [ "$rc" -ne 0 ] && [ "$gc11_alive" -eq 0 ]; then
         st_report ok "(S11) INT/TERM to the runner kills active rows (pid $gc11_pid) and exits non-zero (rc=$rc)"
     else
         st_report bad "(S11) INT/TERM to the runner kills active rows and exits non-zero" "rc=$rc gc_pid=${gc11_pid:-none} alive=$gc11_alive"
     fi
     unset GC11_PIDFILE
 
+    # (12) Force recursive fallback coverage even when setsid masks errors.
+    if sh "$(dirname -- "$0")/check-gate-tier-tree-cleanup.shs" "$0" >"$ST_T/tree-cleanup.out" 2>&1; then
+        st_report ok "(S12) recursive cleanup preserves every ancestor"
+    else
+        st_report bad "(S12) recursive cleanup preserves every ancestor" "$(cat "$ST_T/tree-cleanup.out")"
+    fi
+
     if [ "$ST_FAILURES" -eq 0 ]; then
-        echo "run-gate-tier: selftest PASS — 11 fixture(s), 0 failed"
+        echo "run-gate-tier: selftest PASS — 12 fixture(s), 0 failed"
         exit 0
     fi
     echo "run-gate-tier: selftest FAIL — $ST_FAILURES fixture(s) failed"

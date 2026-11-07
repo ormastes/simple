@@ -37,6 +37,40 @@ fn _engine_expected_create_v1() -> [text]:
         "/agent", "literal ; $(task)"]
 
 describe "Linux OCI trusted local administrator engine policy":
+    it "roundtrips Unicode paths and observes full Unicode storage option values":
+        var policy = _engine_policy_v1()
+        policy.expected_graph_root = "/home/한글/storage"
+        policy.storage_options = ["overlay.mount_program=/opt/é/fuse-overlayfs"]
+        val encoded = match linux_oci_engine_policy_encode_v1(policy):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val decoded = match linux_oci_engine_policy_decode_v1(encoded):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(decoded.expected_graph_root).to_equal(policy.expected_graph_root)
+        expect(decoded.storage_options).to_equal(policy.storage_options)
+        val source = _engine_info_v1().replace("/home/test/storage", policy.expected_graph_root).replace("\"graphOptions\":{}",
+            "\"graphOptions\":{\"overlay.mount_program\":{\"Executable\":\"/opt/é/fuse-overlayfs\",\"Version\":\"1.0\",\"Package\":\"fuse\"}}")
+        match linux_oci_engine_info_observation_v1(policy, source, "a".repeat(64), 1000):
+            case Ok(value):
+                expect(value.graph_root).to_equal(policy.expected_graph_root)
+                expect(value.storage_options).to_equal(policy.storage_options)
+            case Err(reason): fail(reason)
+
+    it "limits Unicode paths and option values by encoded bytes":
+        var policy = _engine_policy_v1()
+        policy.expected_graph_root = "/" + "é".repeat(2048)
+        expect(linux_oci_engine_policy_error_v1(policy)).to_equal("engine-policy-storage-path-invalid")
+        policy = _engine_policy_v1()
+        policy.storage_options = ["overlay.key=" + "é".repeat(2048)]
+        expect(linux_oci_engine_policy_error_v1(policy)).to_equal("engine-policy-storage-option-invalid")
+
+    it "rejects Unicode output above the byte budget before parsing JSON":
+        val source = "{\"ignored\":\"" + "é".repeat(32768) + "\"}"
+        match linux_oci_engine_info_observation_v1(_engine_policy_v1(), source, "a".repeat(64), 1000):
+            case Err(reason): expect(reason).to_equal("engine-info-json-limit")
+            case Ok(_): fail("oversize UTF-8 output must reject")
+
     it "roundtrips canonical policy bytes and binds ordered storage options":
         var policy = _engine_policy_v1()
         val bytes = match linux_oci_engine_policy_encode_v1(policy):

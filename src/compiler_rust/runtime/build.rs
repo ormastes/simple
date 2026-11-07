@@ -37,8 +37,12 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned_cwd_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned_sha256_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned_windows_async_private.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_scv_wasm_ffi.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_scv_wasm_ffi.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_headroom.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_pow_nativeall.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_pow_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_dynload.c");
     println!("cargo:rerun-if-changed=../../runtime/simple_gpu_provider_abi_v1.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime.h");
@@ -275,6 +279,22 @@ mod declaration_tests {
     use super::{runtime_signature_scan, runtime_symbol_alias, runtime_symbol_declaration};
 
     #[test]
+    fn scalar_export_inventory_matches_selected_c_owners() {
+        let runtime_root = std::path::Path::new(file!()).parent().unwrap().join("../../runtime");
+        let mut core = std::collections::HashSet::new();
+        super::collect_c_runtime_exports(&runtime_root, "windows", false, &mut core);
+        assert!(!core.contains("__simple_pow"), "core C owns its intrinsic provider");
+        assert!(core.contains("rt_host_commit_headroom_bytes_v1"));
+        let mut native_all = std::collections::HashSet::new();
+        super::collect_c_runtime_exports(&runtime_root, "windows", true, &mut native_all);
+        assert!(native_all.contains("__simple_pow"));
+        assert!(native_all.contains("rt_host_commit_headroom_bytes_v1"));
+        let source = std::fs::read_to_string(runtime_root.join("runtime_pow_nativeall.c")).unwrap();
+        assert_eq!(super::runtime_export_scan::c_function_definitions(&source),
+            std::collections::HashSet::from(["__simple_pow".to_string()]));
+    }
+
+    #[test]
     fn struct_allocator_i64_machine_signature_keeps_pointer_return() {
         let canonical = runtime_signature_scan::RuntimeSignature {
             params: vec!["I64".to_string()],
@@ -419,6 +439,8 @@ fn compile_c_runtime_sources() {
         // also declares extern "C" live in runtime_packed_span.c, also never
         // registered here.
         "runtime_packed_span.c",
+        // Raw callback bridge: copies provider output before releasing its handle.
+        "runtime_scv_wasm_ffi.c",
         // rt_process_run_owned_bounded_value / observed sibling + rt_process_owned_* (Vulkan
         // Engine2D native-JIT blocker, doc/08_tracking/bug/
         // vulkan_engine2d_native_jit_missing_rt_struct_receiver_valid_2026-08-12.md
@@ -581,6 +603,7 @@ fn compile_c_runtime_sources() {
         // One registry owns authentication and every session/resource lease.
         // Keep the Rust legacy GPU/dynlib APIs; do not create duplicate owners.
         c_sources.push("runtime_dynload.c");
+        c_sources.push("runtime_pow_nativeall.c");
         build.define("SIMPLE_GPU_PROVIDER_REGISTRY_ONLY", None);
     }
     for source in &c_sources {
@@ -714,12 +737,16 @@ fn collect_defined_runtime_symbols(
 
 fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: bool, exported: &mut HashSet<String>) {
     if native_all_provider {
+        let pow = fs::read_to_string(root.join("runtime_pow_nativeall.c"))
+            .expect("read native-all integer power owner");
+        exported.extend(runtime_export_scan::c_function_definitions(&pow));
         let source = fs::read_to_string(root.join("runtime_dynload.c"))
             .expect("read native-all GPU registry owner");
         exported.extend(runtime_export_scan::c_function_definitions(&source)
             .into_iter().filter(|symbol| symbol.starts_with("rt_gpu_provider_")));
     }
     const LINKED_C_SOURCES: &[&str] = &[
+        "runtime_scv_wasm_ffi.c",
         "runtime_memory_headroom.c",
         "runtime_memory.c",
         "runtime_alloc_observer.c",
