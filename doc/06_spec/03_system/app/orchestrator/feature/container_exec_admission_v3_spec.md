@@ -15,7 +15,7 @@ this carrier. No host journal, broker claim or provider is mocked.
 |---|---|
 | matches exact request provider and live exec admission window | Accept exact expected request/provider and return900 then1 milliseconds remaining from the actual common deadline helper. This proves structural matching only. |
 | refuses changed request nonce argv or exact parent container identity | Change nonce, argv or exact parent native CID in expected request; refuse each mismatch. |
-| refuses operation id action payload host and malformed shared envelope | Change operation ID/action/payload/physical alias, or set invalid shared-envelope memory; refuse all. |
+| refuses operation id action payload host and malformed shared envelope | Change operation ID/action/payload/physical alias, set invalid shared-envelope memory, or narrow duration below the requested control window; refuse all. |
 | refuses provider mismatch invalid retained digests and noncanonical proof identities | Refuse different/malformed provider pin, invalid parent/proof digests, empty grant, invalid issuer and overlong approver. |
 | refuses widened actions stale deadline bindings expiry and unavailable clock | Refuse exec+attach widening, stale deadline operation/digest, exact-boundary expiry and negative clock. |
 
@@ -26,5 +26,7 @@ well-shaped carrier cannot provide either guarantee. Original intent and flat re
 operation. Parent/proof digest fields are not independently read from journals. The provider pin is the exec-control identity and must match the original intent
 and actual-owner expected control baseline; parent provider pin remains in intent.
 Deadline is a new-effect window only, never exec lifetime, PID stop, auto-kill or
-capacity release. Running/unknown execs remain owned and charged after expiry or
+capacity release. The requested control timeout must not exceed the child
+operation duration; this relation does not turn it into an enforced exec lifetime.
+Running/unknown execs remain owned and charged after expiry or
 disconnect. Builds/tests were prohibited for this source task.
