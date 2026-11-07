@@ -73,6 +73,20 @@ fn renderer_tagged_concat_flow(llvm: text, renderer: text) -> bool:
                 return true
     false
 
+fn named_fixture_function_body(llvm: text, function_name: text) -> text:
+    var collecting = false
+    var body = ""
+    for line in llvm.split("\n"):
+        if not collecting:
+            if line.starts_with("define ") and (line.contains("@" + function_name + "(") or line.contains("." + function_name + "(")):
+                collecting = true
+        else:
+            if line.trim() == "}":
+                return body
+            body = body + line + "\n"
+    # Missing/malformed definitions cannot satisfy the constructor assertions.
+    ""
+
 fn counted_segment_flow(llvm: text, byte_count: i64) -> bool:
     # Follow the actual MIR integer constant into the constructor length slot.
     for line in llvm.split("\n"):
@@ -139,8 +153,12 @@ describe "numeric interpolation tagged-handle ABI":
         expect(find_call_line(llvm, "rt_string_new(")).to_contain("= call i64 @rt_string_new(ptr ")
         expect(find_call_line(llvm, "rt_strcat(")).to_equal("")
         # The prefix hé is three UTF-8 bytes; a\0 is two counted bytes.
-        expect(counted_segment_flow(llvm, 3)).to_equal(true)
-        expect(counted_segment_flow(llvm, 2)).to_equal(true)
+        val unicode_body = named_fixture_function_body(llvm, "unicode_segment")
+        val nul_body = named_fixture_function_body(llvm, "nul_segment")
+        expect(unicode_body != "").to_equal(true)
+        expect(nul_body != "").to_equal(true)
+        expect(counted_segment_flow(unicode_body, 3)).to_equal(true)
+        expect(counted_segment_flow(nul_body, 2)).to_equal(true)
 
         val i64_call = find_call_line(llvm, "rt_raw_i64_to_string(")
         val u64_call = find_call_line(llvm, "rt_raw_u64_to_string(")

@@ -102,7 +102,9 @@ expect(tagged_text_consumer_call()).to_equal("count=42")
 The real frontend → HIR → MIR → LLVM pipeline must retain renderer handles
 through `inttoptr` into `rt_strcat_tagged`, without `rt_interp_cstr` unwrapping
 or raw `rt_strcat`. Counted segment constructor arguments must retain the
-three-byte Unicode prefix and two-byte embedded-NUL prefix lengths.
+three-byte Unicode prefix and two-byte embedded-NUL prefix lengths, scoped
+to their respective named function bodies so other fixture segments cannot
+satisfy the assertions.
 
 This scenario has been updated manually from the executable SSpec; execution
 is pending a rebuilt compiler. It does not assert a passing runtime result.
@@ -123,8 +125,12 @@ expect(llvm).to_contain("declare ptr @rt_strcat_tagged(ptr, ptr)")
 expect(find_call_line(llvm, "rt_string_new(")).to_contain("= call i64 @rt_string_new(ptr ")
 expect(find_call_line(llvm, "rt_strcat(")).to_equal("")
 # The prefix hé is three UTF-8 bytes; a\0 is two counted bytes.
-expect(counted_segment_flow(llvm, 3)).to_equal(true)
-expect(counted_segment_flow(llvm, 2)).to_equal(true)
+val unicode_body = named_fixture_function_body(llvm, "unicode_segment")
+val nul_body = named_fixture_function_body(llvm, "nul_segment")
+expect(unicode_body != "").to_equal(true)
+expect(nul_body != "").to_equal(true)
+expect(counted_segment_flow(unicode_body, 3)).to_equal(true)
+expect(counted_segment_flow(nul_body, 2)).to_equal(true)
 
 val i64_call = find_call_line(llvm, "rt_raw_i64_to_string(")
 val u64_call = find_call_line(llvm, "rt_raw_u64_to_string(")

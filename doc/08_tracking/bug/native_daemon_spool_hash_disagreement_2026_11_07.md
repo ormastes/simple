@@ -110,3 +110,9 @@ Static pre-commit gates: direct-env-runtime-guard `--working` and `--staged`
 PASS; existing numeric scalar ABI shell contract PASS; staged whitespace check
 PASS; executable spec files under `doc/06_spec` count `0`. No executable compiler
 pipeline or native probe PASS is claimed by these static checks.
+
+Astra review tightened the constructor-length regression: Unicode/NUL checks
+now extract their respective named LLVM function bodies before tracing length
+SSA. Numeric segments in other functions cannot satisfy these byte-count
+assertions. Missing or unterminated definitions fail instead of supplying a
+fallback body. Executable validation remains pending; this is a test repair.
