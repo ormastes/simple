@@ -1413,6 +1413,24 @@ impl MirLowering:
             # lowered (see the reordering in module_lowering.spl), so every
             # function body sees the full set.
 
+    me lower_collection_element_type(element: HirType, owner: HirType) -> MirType:
+        """Element type of an array/slice. bug=inferarm_mir_2026-10-31: an
+        un-annotated empty-array local (`var x = []`) can reach MIR with its
+        element still an unresolved inference variable. Owner decision
+        2026-11-06: a missing inference resolves to the erased element T --
+        MIR's unknown-element stand-in (I64, see mir_elem_type_is_unspecific),
+        which the push/assign element tracking (remember_local_hir_type,
+        inferred_array_elem_state) refines from later uses. Under the robust
+        or critical safety profile it is a compile error instead."""
+        match element.kind:
+            case HirTypeKind.Infer(_, _):
+                val profile = mir_lower_env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+                val span: Span? = if owner.span.file != "" or owner.span.line > 0: Some(owner.span) else: nil
+                if profile == "robust" or profile == "critical":
+                    self.error_fatal("E-MIR-EMPTY-ARRAY-ELEM: element type of an empty array could not be inferred from later uses; robust mode requires an annotation (`var x: [T] = []`)", span)
+                MirType.i64()
+            case _: self.lower_type(element)
+
     me lower_type(type_: HirType) -> MirType:
         """Lower HIR type to MIR type."""
         if type_ == nil:
@@ -1587,7 +1605,7 @@ impl MirLowering:
                 MirType(kind: MirTypeKind.Tuple(mir_elements))
             case HirTypeKind.Array(element, size):
                 val array_size = if size != nil: size else: 0
-                MirType(kind: MirTypeKind.Array(self.lower_type(element), array_size))
+                MirType(kind: MirTypeKind.Array(self.lower_collection_element_type(element, type_), array_size))
             case HirTypeKind.Dict(key, value):
                 MirType(kind: MirTypeKind.Dict(self.lower_type(key), self.lower_type(value)))
             case HirTypeKind.Ref(inner, mutable):
@@ -1714,7 +1732,7 @@ impl MirLowering:
                 self.lower_type(inner)
             case HirTypeKind.Slice(element):
                 # Real lowering: MirTypeKind.Slice exists (mir_types.spl:159).
-                MirType(kind: MirTypeKind.Slice(self.lower_type(element)))
+                MirType(kind: MirTypeKind.Slice(self.lower_collection_element_type(element, type_)))
             case HirTypeKind.Function(params, ret, _):
                 # Real lowering: a function type is a code pointer at MIR level.
                 var mir_params: [MirType] = []

@@ -117,9 +117,10 @@ describe "methods-mir-20261031 receiver shapes":
         val d = lower_one(lines(["fn make_lit(n: i64):", "    val out = [n]", "    out", "", "fn use_lit() -> i64:", "    make_lit(3).len()"]))
         expect(d).to_equal("")
 
-    it "shape 2 untyped call-initialized tail binding stays fail-closed (no guessed type)":
+    it "shape 2 untyped call-initialized tail binding returns dynamically (owner decision 2026-11-06: infer, warn)":
         val d = lower_one(lines(["fn build(n: i64) -> [i64]:", "    [n]", "", "fn make_any(n: i64):", "    val out = build(n)", "    out", "", "fn use_any() -> i64:", "    make_any(3).len()"]))
-        expect(d).to_contain("unresolved method call: len")
+        expect(d.contains("unresolved method call")).to_equal(false)
+        expect(d).to_contain("W-RET-INFER-001")
 
     it "custom-owner len on a nominal receiver still uses its own method":
         val d = lower_one(lines(["class Bag:", "    n: i64", "    fn len() -> i64:", "        self.n", "", "fn make_bag():", "    val b: Bag = Bag(n: 2)", "    b", "", "fn bag_len() -> i64:", "    make_bag().len()"]))
@@ -164,3 +165,22 @@ describe "methods-mir-20261031 receiver shapes":
         val d = lower_one(lines(["fn c(s):", "    s.contains(\"a\")", "", "fn f2(s):", "    s.find(\"a\", 0)", "", "fn sub(s):", "    s.substring(0, 1)", "", "fn ch(n):", "    n.chr()"]))
         expect(d.contains("unresolved method call")).to_equal(false)
         expect(d).to_equal("")
+
+describe "methods-mir-20261031 cross-module receiver shapes":
+    it "shape 4 imported call-result receiver .is_err() lowers clean":
+        val a = lines(["pub fn check(v: i64) -> Result<i64, text>:", "    if v > 0:", "        return Ok(v)", "    Err(\"neg\")"])
+        val b = lines(["use app.lib.*", "", "fn direct(v: i64) -> bool:", "    check(v).is_err()", "", "fn direct_ok(v: i64) -> bool:", "    check(v).is_ok()"])
+        val d = lower_closure(["app.lib", "app.main"], [a, b])
+        expect(d.contains("unresolved method call")).to_equal(false)
+
+    it "shape 5 unsafe-block value of an imported array fn lowers clean":
+        val a = lines(["pub fn probe_words() -> [i64]:", "    [1, 2]"])
+        val b = lines(["use app.lib.*", "", "fn words_len() -> i64:", "    val w = unsafe:", "        probe_words()", "    w.len()"])
+        val d = lower_closure(["app.lib", "app.main"], [a, b])
+        expect(d.contains("unresolved method call")).to_equal(false)
+
+    it "shape 6 imported enum payload binder receiver lowers clean":
+        val a = lines(["pub enum Outcome:", "    Success(code: [u8], n: i64)", "    Failure(msg: text)"])
+        val b = lines(["use app.lib.*", "", "fn code_len(o: Outcome) -> i64:", "    match o:", "        case Success(code, _):", "            code.len()", "        case Failure(msg):", "            msg.len()"])
+        val d = lower_closure(["app.lib", "app.main"], [a, b])
+        expect(d.contains("unresolved method call")).to_equal(false)

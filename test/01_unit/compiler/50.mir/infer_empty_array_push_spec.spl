@@ -22,6 +22,8 @@ use compiler.hir.hir_types.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
+use compiler.common.diagnostics.span.Span
+use std.io_runtime.{env_get, env_set}
 
 fn lines(xs: [text]) -> text:
     xs.join("\n") + "\n"
@@ -83,3 +85,34 @@ describe "inferarm-mir-20261031 empty array local":
         val d = lower_one(lines(["fn collect_join(xs: [text]) -> text:", "    var out = []", "    for x in xs:", "        out.push(x)", "    out.join(\",\")"]))
         expect(d.contains("infer-arm")).to_equal(false)
         expect(d).to_equal("")
+
+fn infer_ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn mir_diag(l: MirLowering) -> text:
+    var out = ""
+    for e in l.errors:
+        out = out + e.message + "\n"
+    out
+
+describe "inferarm-mir-20261031 unresolved empty-array element type":
+    it "Array(Infer) resolves to the erased element T (MIR unknown-element stand-in) by default":
+        val old = env_get("SIMPLE_SAFETY_PROFILE")
+        env_set("SIMPLE_SAFETY_PROFILE", "")
+        var l = MirLowering.new(SymbolTable.new())
+        val r = l.lower_type(infer_ty(HirTypeKind.Array(infer_ty(HirTypeKind.Infer(0, 0)), nil)))
+        env_set("SIMPLE_SAFETY_PROFILE", old)
+        expect(mir_diag(l)).to_equal("")
+        match r.kind:
+            case MirTypeKind.Array(elem, _):
+                expect(elem.kind == MirTypeKind.I64).to_equal(true)
+            case _:
+                expect("not-array").to_equal("array")
+
+    it "Array(Infer) is a compile error in robust mode":
+        val old = env_get("SIMPLE_SAFETY_PROFILE")
+        env_set("SIMPLE_SAFETY_PROFILE", "robust")
+        var l = MirLowering.new(SymbolTable.new())
+        l.lower_type(infer_ty(HirTypeKind.Array(infer_ty(HirTypeKind.Infer(0, 0)), nil)))
+        env_set("SIMPLE_SAFETY_PROFILE", old)
+        expect(mir_diag(l)).to_contain("E-MIR-EMPTY-ARRAY-ELEM")
