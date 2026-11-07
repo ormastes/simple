@@ -58,6 +58,36 @@ describe "core evaluator array value boundaries":
         expect(val_is_int(result)).to_equal(true)
         if val_is_int(result): expect(val_get_int(result)).to_equal(0)
 
+    it "preserves enum read precedence despite a same-named global variant binding":
+        val source = "enum State:\n    State\n    End\nimpl State:\n    fn score(self) -> i64:\n        match self:\n            case State.End: 7\n            case State.State: 3\nfn consume(value) -> i64:\n    value.score()\nfn main() -> i64:\n    val reference = State.End\n    if reference.score() != 7: return 1\n    if consume(State.End) != 7: return 2\n    if State.End.score() != 7: return 3\n    0\n"
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+    it "preserves static function field precedence over a same-named value binding":
+        val source = "fn Marker__pick() -> i64:\n    7\nvar Marker = 0\nfn consume(value) -> i64:\n    value()\nfn main() -> i64:\n    val reference = Marker.pick\n    if reference() != 7: return 1\n    if consume(Marker.pick) != 7: return 2\n    0\n"
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+    it "keeps ordinary non-ASCII text index semantics in arguments and method receivers":
+        val source = "var effects = 0\nfn index() -> i64:\n    effects += 1\n    0\nfn consume(value: text) -> text:\n    value\nfn main() -> i64:\n    val text = \"éλ\"\n    val reference = text[0]\n    if consume(text[index()]) != reference: return 1\n    if text[index()].len() != reference.len(): return 2\n    if effects != 2: return 3\n    0\n"
+        val result = cow_run(source)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_int(result)).to_equal(true)
+        if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+    it "isolates value array arguments from mutable struct and class receiver fields":
+        val declarations = "    items: [i64]\n    me deliver(values: [i64]) -> i64:\n        self.items[0] = 9\n        if values[0] != 1: return 1\n        values[1] = 8\n        if self.items[1] != 2: return 2\n        0\n"
+        for kind in ["struct", "class"]:
+            val source = kind + " Sender:\n" + declarations + "fn main() -> i64:\n    var sender = Sender(items: [1, 2])\n    if sender.deliver(sender.items) != 0: return 1\n    if sender.items[0] != 9: return 2\n    if sender.items[1] != 2: return 3\n    0\n"
+            val result = cow_run(source)
+            expect(eval_has_error()).to_equal(false)
+            expect(val_is_int(result)).to_equal(true)
+            if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
     it "detaches after final-index callbacks snapshot an ancestor for assignment and compound":
         val declarations = "var source = [[1]]\nvar saved = [[0]]\nvar effects = 0\nfn index() -> i64:\n    effects += 1\n    saved = source\n    0\n"
         for operation in ["= 9", "+= 8"]:

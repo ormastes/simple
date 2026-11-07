@@ -101,6 +101,32 @@ mutable output parameter explicitly.
 
 ## Verification boundary and next admission
 
+### PR 7664 read-parity correction
+
+The initial candidate classified field places by whether their root name was
+bound in the environment. That changed existing read precedence: declaring an
+enum `State` with variant `State` binds that name as a global value, but ordinary
+`State.End` still resolves the known enum variant first. Value arguments and
+method receivers must preserve the same precedence. The live field reader and
+place preparation now share its canonical special-field dispatch (BDD,
+namespace, enum, static function and deferred lookup). A special result is a
+value root, rather than a writable storage path, and each dispatch/base
+expression executes once. Text indexing in places uses the original `s[index]`
+expression; no slice/index Unicode equivalence is assumed.
+
+Parsed controls compare direct reads with argument and receiver reads for the
+bound enum-name collision, registered static function references and non-ASCII
+text indices. Index callbacks assert once-only evaluation. Mutable struct and
+class receiver controls pass the receiver's own array field by value, mutate
+both sides in the method, and assert isolation. Such receiver fields are not
+part of the explicit argument overlap guard: safety comes from capturing value
+arguments before mutable receiver resolution and the array ownership gates.
+This does not claim a compile-time receiver/argument alias diagnostic.
+
+A targeted owned `.spl` consumer audit across `src` and `test` found no remaining
+`val_arrays` references after replacing the one external raw array write and its
+obsolete source pin. This is source ownership evidence, not execution evidence.
+
 Only source inspection and whitespace checking have run. No Simple lint/check,
 SSpec, standalone fixture, native smoke or performance execution has run. No
 Rust seed is an eligible substitute. The sole bootstrap owner must supply an

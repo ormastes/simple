@@ -4,7 +4,8 @@ use compiler.core.ast.expr_get
 use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_INDEX, EXPR_IDENT, expr_owner_int}
 use compiler.core.interpreter.eval.{eval_expr, eval_had_error, eval_set_error, eval_current_decl_id}
 use compiler.core.interpreter.eval_calls.{interp_struct_is_value_type, val_copy_if_value_struct}
-use compiler.core.interpreter.env.{env_lookup, env_assign, env_has_frame, env_set_local}
+use compiler.core.interpreter.eval_access.eval_resolve_special_field_read
+use compiler.core.interpreter.env.{env_assign, env_has_frame, env_set_local}
 use compiler.core.interpreter.resolve.resolve_is_fast_local
 use compiler.core.interpreter.value.*
 
@@ -42,7 +43,7 @@ class InterpreterValuePlace:
             val text_value = val_get_text(self.value)
             val index = val_get_int(key)
             if index >= 0 and index < text_value.len():
-                child = val_make_text(text_value[index:index + 1])
+                child = val_make_text(text_value[index])
         if child < 0:
             eval_set_error("invalid index in value path")
             return
@@ -131,17 +132,14 @@ class InterpreterValuePlace:
             return
         eval_set_error("invalid mut argument writeback path")
 
-fn eval_value_place_namespace_root(eid: i64) -> bool:
-    val node = expr_get(eid)
-    if node.tag == EXPR_FIELD_ACCESS or node.tag == EXPR_INDEX:
-        return eval_value_place_namespace_root(node.left)
-    node.tag == EXPR_IDENT and env_lookup(node.s_val) < 0
-
 fn eval_prepare_value_place(eid: i64) -> InterpreterValuePlace:
     val node = expr_get(eid)
-    # Bare BDD matcher fields execute assertions in the regular field reader.
-    val matcher_field = node.tag == EXPR_FIELD_ACCESS and (node.s_val == "to_be_nil" or node.s_val == "to_not_be_nil")
-    if (node.tag == EXPR_FIELD_ACCESS or node.tag == EXPR_INDEX) and not matcher_field and not eval_value_place_namespace_root(eid):
+    if node.tag == EXPR_FIELD_ACCESS:
+        # Namespace/enum/static precedence is independent of a same-named
+        # environment binding. Special forms execute once and are value roots.
+        val special = eval_resolve_special_field_read(eid)
+        if special != -2: return eval_value_place_from_value(eid, special)
+    if node.tag == EXPR_FIELD_ACCESS or node.tag == EXPR_INDEX:
         val place = eval_prepare_value_place(node.left)
         if eval_had_error: return place
         if node.tag == EXPR_FIELD_ACCESS:
@@ -150,7 +148,11 @@ fn eval_prepare_value_place(eid: i64) -> InterpreterValuePlace:
             val key = eval_expr(node.right)
             if not eval_had_error: place.append_index(key)
         return place
-    var value = eval_expr(eid)
+    eval_value_place_from_value(eid, eval_expr(eid))
+
+fn eval_value_place_from_value(eid: i64, incoming: i64) -> InterpreterValuePlace:
+    val node = expr_get(eid)
+    var value = incoming
     val name = if node.tag == EXPR_IDENT: node.s_val else: ""
     if name == "" and not eval_had_error:
         value = val_copy_if_value_struct(value)
