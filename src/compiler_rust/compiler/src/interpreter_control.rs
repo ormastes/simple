@@ -2551,12 +2551,55 @@ fn inline_int_steps_max_depth(steps: &[InlineIntStep]) -> Option<usize> {
     }
 }
 
+/// Name bound by a plain immutable `val name[: i64] = ...` block-local.
+fn inline_block_local_val_name(let_stmt: &simple_parser::ast::LetStmt) -> Option<String> {
+    if let_stmt.mutability.is_mutable()
+        || let_stmt.is_ghost
+        || let_stmt.is_suspend
+        || let_stmt.value.is_none()
+        || !matches!(let_stmt.storage_class, simple_parser::ast::StorageClass::Auto)
+        || !let_stmt.ty.as_ref().is_none_or(inline_int_type_is_integer)
+    {
+        return None;
+    }
+    match &let_stmt.pattern {
+        simple_parser::ast::Pattern::Identifier(name) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// Replace every read of `name` in `expr` with `replacement`. Only integer
+/// literals, identifiers and binary operators are rewritten; any other form
+/// declines, because it could hide a read of `name` this walk cannot see.
+fn substitute_inline_int_local(expr: &Expr, name: &str, replacement: &Expr) -> Option<Expr> {
+    match expr {
+        Expr::Integer(_) | Expr::TypedInteger(..) => Some(expr.clone()),
+        Expr::Identifier(id) if id == name => Some(replacement.clone()),
+        Expr::Identifier(_) => Some(expr.clone()),
+        Expr::Binary { op, left, right } => Some(Expr::Binary {
+            op: op.clone(),
+            left: Box::new(substitute_inline_int_local(left, name, replacement)?),
+            right: Box::new(substitute_inline_int_local(right, name, replacement)?),
+        }),
+        _ => None,
+    }
+}
+
+
 fn parse_inline_int_expr_loop(
     while_stmt: &WhileStmt,
     env: &Env,
     functions: &HashMap<String, Arc<FunctionDef>>,
 ) -> Option<InlineIntExprLoop> {
-    let [value_node, increment_node] = while_stmt.body.statements.as_slice() else {
+    // Optional leading block-local integer `val t = <int expr>`: `t` is pure and
+    // read-only, so it is spliced into the target expression (the matched
+    // no-declaration shape) instead of disqualifying the whole loop.
+    // Bug: interpreter_val_decl_in_loop_body_declines_every_matcher_2026-09-13.
+    let (local_val, rest) = match while_stmt.body.statements.as_slice() {
+        [Node::Let(let_stmt), rest @ ..] => (Some(let_stmt), rest),
+        rest => (None, rest),
+    };
+    let [value_node, increment_node] = rest else {
         return None;
     };
     let Node::Assignment(value_assign) = value_node else {
@@ -2582,7 +2625,19 @@ fn parse_inline_int_expr_loop(
     }
 
     let mut steps = Vec::new();
-    emit_inline_int_expr(&value_assign.value, None, &index, env, functions, 0, &mut steps)?;
+    let substituted;
+    let target_expr = match local_val {
+        Some(let_stmt) => {
+            let name = inline_block_local_val_name(let_stmt)?;
+            if name == *target || name == index {
+                return None;
+            }
+            substituted = substitute_inline_int_local(&value_assign.value, &name, let_stmt.value.as_ref()?)?;
+            &substituted
+        }
+        None => &value_assign.value,
+    };
+    emit_inline_int_expr(target_expr, None, &index, env, functions, 0, &mut steps)?;
     Some(InlineIntExprLoop {
         target: target.clone(),
         index,

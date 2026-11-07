@@ -12,6 +12,7 @@ pub fn native_jit_cleanup_handle(handle: i64) -> i64 {
 
 pub(crate) mod fs_probe;
 pub mod repl_runner;
+pub mod impl_duplicate_check;
 pub mod mock_helper;
 pub mod aop_config;
 pub mod api_surface;
