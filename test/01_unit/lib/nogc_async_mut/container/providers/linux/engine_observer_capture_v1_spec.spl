@@ -1,0 +1,45 @@
+# The pure result helper is called by the actual engine observer after native
+# structured capture. These fixtures are not live executable observations.
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.ProcessResult
+use std.nogc_async_mut.container.providers.linux.engine_observer_v1.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+
+fn _capture_info_fixture_v1() -> text:
+    "{\"host\":{\"security\":{\"rootless\":true},\"serviceIsRemote\":false},\"store\":{\"graphRoot\":\"/home/test/storage\",\"runRoot\":\"/run/user/1000/storage\",\"graphDriverName\":\"overlay\",\"graphOptions\":{}},\"version\":{\"Version\":\"5.0.0\"}}"
+
+fn _capture_result_fixture_v1() -> ProcessResult:
+    ProcessResult(stdout: _capture_info_fixture_v1(), stderr: "", exit_code: 0, limit_exceeded: false, limit_type: "")
+
+describe "CLI engine observer authoritative capture flags":
+    it "processes complete unsaturated info through the live-used helper":
+        val observed = linux_oci_engine_capture_observation_v1(linux_container_policy_fixture_v2(),
+            _capture_result_fixture_v1(), "a".repeat(64)).unwrap()
+        expect(observed.identity_digest).to_equal(linux_container_engine_fixture_v2().identity_digest)
+        var warning = _capture_result_fixture_v1()
+        warning.stderr = "warning"
+        expect(linux_oci_engine_capture_observation_v1(linux_container_policy_fixture_v2(), warning,
+            "a".repeat(64)).unwrap().identity_digest).to_equal(observed.identity_digest)
+
+    it "rejects valid JSON prefix with stdout stderr or timeout saturation despite exit zero":
+        for kind in ["stdout", "stderr", "timeout", "inconsistent-type", "inconsistent-flag"]:
+            var result = _capture_result_fixture_v1()
+            result.limit_exceeded = true
+            result.limit_type = "output"
+            if kind == "stderr": result.stderr = "saturated stderr prefix"
+            if kind == "timeout": result.limit_type = "timeout"
+            if kind == "inconsistent-type": result.limit_exceeded = false
+            if kind == "inconsistent-flag": result.limit_type = ""
+            expect(result.exit_code).to_equal(0)
+            expect(linux_oci_engine_capture_observation_v1(linux_container_policy_fixture_v2(), result,
+                "a".repeat(64))).to_equal(Err("engine-info-output-or-time-limit"))
+
+    it "rejects cancellation nonzero status and oversized streams before parsing info":
+        for kind in ["cancel", "failed", "stdout", "stderr"]:
+            var result = _capture_result_fixture_v1()
+            if kind == "cancel": result.exit_code = 130
+            if kind == "failed": result.exit_code = 125
+            if kind == "stdout": result.stdout = result.stdout + " ".repeat(65536)
+            if kind == "stderr": result.stderr = "x".repeat(65537)
+            expect(linux_oci_engine_capture_observation_v1(linux_container_policy_fixture_v2(), result,
+                "a".repeat(64)).is_err()).to_equal(true)
