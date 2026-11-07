@@ -138,7 +138,7 @@ fn native_inline_asm_riscv_target_preserves_raw_instructions() {
 }
 
 #[test]
-fn native_inline_asm_skips_unresolved_simple_operands() {
+fn native_inline_asm_rejects_unresolved_simple_operands() {
     let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_operand_skip", |f| {
@@ -157,19 +157,17 @@ fn native_inline_asm_skips_unresolved_simple_operands() {
     }));
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let c_path = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target(
+    let err = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target(
         dir.path(),
         Some(("x86_64-unknown-none", "", "")),
     )
-    .expect("write asm c")
-    .expect("asm c");
-    let c = std::fs::read_to_string(c_path).expect("read asm c");
-    assert!(!c.contains("mov {out}, cr3"));
-    assert!(c.contains("skipped Simple asm with unresolved operands"));
+    .expect_err("unresolved operand must fail sidecar generation");
+    assert!(err.contains("E-ASM-UNRESOLVED"));
+    assert!(err.contains("mov {out}, cr3"));
 }
 
 #[test]
-fn native_inline_asm_c_skips_simple_operand_directives() {
+fn native_inline_asm_c_rejects_simple_operand_directives() {
     let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_simple_operands", |f| {
@@ -197,19 +195,10 @@ fn native_inline_asm_c_skips_simple_operand_directives() {
     }));
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let c_path = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c(dir.path())
-        .expect("write asm c")
-        .expect("asm c");
-    let c = std::fs::read_to_string(c_path).expect("read asm c");
-    assert!(c.contains("\"nop\\n\""));
-    assert!(!c.contains("in(reg) id"));
-    assert!(!c.contains("out (reg) result"));
-    assert!(!c.contains("clobber_abi"));
-
-    let object = crate::pipeline::native_project::inline_asm_emit::compile_inline_asm_c(dir.path(), None)
-        .expect("compile asm c")
-        .expect("valid asm object");
-    assert!(object.exists());
+    let err = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c(dir.path())
+        .expect_err("unresolved constraint directives must fail sidecar generation");
+    assert!(err.contains("E-ASM-UNRESOLVED"));
+    assert!(err.contains("in(reg) id"));
 }
 
 #[test]
