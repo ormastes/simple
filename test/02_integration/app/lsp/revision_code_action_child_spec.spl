@@ -1,0 +1,69 @@
+# Actual child integrations require the configured admitted self-hosted runtime.
+# NOT_RUN until root grants a runtime slot; no seed or fake executable.
+use std.spec
+use std.spec.step
+use std.common.string_core.{str_len}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize, json_parse_value_strict, json_value_field, json_value_items, json_value_has, json_value_text_or}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_code_action}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_sync_apply}
+use std.nogc_sync_mut.lsp.lsp_query_command.{LspQueryCommandV1, lsp_run_query_command_v1}
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.io_runtime.{file_delete, dir_remove}
+use std.nogc_sync_mut.io_runtime.{cwd, env_get}
+
+fn lsp_child_open(uri: text, version: i64, source: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version)), ("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", document)]))
+
+fn lsp_child_request(uri: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri))])
+    val position = json_value_object_from([("line", JsonValue.Int(0)), ("character", JsonValue.Int(0))])
+    val range = json_value_object_from([("start", position), ("end", position)])
+    json_value_serialize(json_value_object_from([("textDocument", document), ("range", range)]))
+
+describe "Revision action actual child admission":
+    it "runs the actual public codeAction child route with an admitted configured runtime":
+        step("Require an explicit runtime then invoke the production query child")
+        val binary = env_get("SIMPLE_BINARY") ?? ""
+        expect(binary == "").to_equal(false)
+        val root = secure_temp_dir(cwd(), "simple-lsp-child-").unwrap()
+        val path = root + "/source.spl"
+        val uri = "file://" + path
+        val source = "# TODO: repair\nfn f(): 1\n"
+        expect(file_write(path, source)).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didOpen", lsp_child_open(uri, 31, source))).to_equal(true)
+        val response = lsp_handle_code_action("24", lsp_child_request(uri))
+        val wire = json_parse_value_strict(response).unwrap()
+        expect(json_value_has(wire, "error")).to_equal(false)
+        val actions = json_value_items(json_value_field(wire, "result"))
+        var found = false
+        for action in actions:
+            if json_value_text_or(json_value_field(action, "title"), "").contains("TODO") and json_value_has(action, "edit"):
+                found = true
+                val documents = json_value_items(json_value_field(json_value_field(action, "edit"), "documentChanges"))
+                expect(json_value_field(json_value_field(documents[0], "textDocument"), "version")).to_equal(JsonValue.Int(31))
+        expect(found).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didClose", lsp_child_open(uri, 31, source))).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+        expect(dir_remove(root, false)).to_equal(true)
+
+    it "refuses oversized actual child capture at the owner before parsing":
+        step("Bound real stdout from a Simple child fixture")
+        val binary = env_get("SIMPLE_BINARY") ?? ""
+        expect(binary == "").to_equal(false)
+        val command = LspQueryCommandV1(args: ["test/fixture/lsp/revision_output_limit.spl"], timeout_ms: 60000)
+        val (healthy, healthy_error, healthy_code) = process_run_bounded(binary, command.args, command.timeout_ms, 9437184)
+        expect(healthy_code).to_equal(0)
+        expect(healthy_error).to_equal("")
+        expect(str_len(healthy)).to_equal(8388641)
+        expect(healthy).to_start_with("LSP_OUTPUT_START\n")
+        expect(healthy).to_end_with("LSP_OUTPUT_END\n")
+        val (captured, capture_error, capture_code) = process_run_bounded(binary, command.args, command.timeout_ms, 4194304)
+        expect(capture_code).to_equal(0)
+        expect(capture_error).to_equal("")
+        expect(str_len(captured)).to_equal(4194304)
+        expect(captured).to_start_with("LSP_OUTPUT_START\n")
+        val (output, code) = lsp_run_query_command_v1(binary, command, 4194304)
+        expect(code).to_equal(-10001)
+        expect(output).to_equal("")

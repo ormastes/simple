@@ -35,6 +35,15 @@
 # Runtime prefixes are DERIVED from src/runtime/runtime.h's declarations, not
 # hardcoded to rt_ (measured: rt_, spl_, simple_).
 #
+# Windows x64 binary scope: require a readable complete COFF table and inspect
+# named runtime PE imports against their exact application-directory DLL owner.
+# Missing owner/evidence, other machines, ordinal/delay imports and forwarded
+# runtime exports are ERROR. An inspected owner missing the name is FAIL.
+# This is static candidate-owner evidence, not proof of the loader's complete
+# dependency search, transitive DLL closure, ABI compatibility or compiler health.
+# PE exports never replace primary COFF evidence. Select compatible tools with
+# NM and PE_READOBJ; Windows selftests use LLVM tools beside PE_READOBJ.
+#
 # Verdict (always the last line of stdout), preceded by two status lines
 # `binaries=<status>` and `archive=<status>` so a PASS can never be mistaken for
 # a stronger claim than what was actually inspected:
@@ -122,6 +131,20 @@ case "$UNAME_S" in
     Darwin) SYM_UNDERSCORE=1 ;;
     *)      SYM_UNDERSCORE=0 ;;
 esac
+PE_WINDOWS=0
+case "$UNAME_S" in MINGW*|MSYS*|CYGWIN*) PE_WINDOWS=1;; esac
+PE_READOBJ=${PE_READOBJ:-llvm-readobj}
+if [ "$PE_WINDOWS" -eq 1 ] && [ "$SELFTEST_ONLY" -eq 1 ] &&
+   { [ "$ARCHIVE_ONLY" -eq 1 ] || [ -n "$EXPLICIT_BINS" ] || [ "$SCAN_ROOT" != "$ROOT_DIR" ]; }; then
+    echo 'ERROR — Windows selftest-only requires its own fixture dispatch, without --bin/--root/--archive-only'
+    exit 2
+fi
+if [ "$PE_WINDOWS" -eq 1 ] && [ "$ARCHIVE_ONLY" -eq 0 ]; then
+    if ! command -v "$PE_READOBJ" >/dev/null 2>&1 || ! command -v perl >/dev/null 2>&1; then
+        echo 'ERROR — nothing was checked (Windows PE reader or Perl unavailable)'
+        exit 2
+    fi
+fi
 
 # Normalise a stream of symbol names on stdin to the source-level spelling.
 # Strips exactly ONE leading underscore on Mach-O and nothing anywhere else, so
@@ -204,6 +227,27 @@ check_binary() {
         echo "ERROR — nothing was checked (unreadable artifact: $cb_label)"
         exit 2
     fi
+    if [ "$PE_WINDOWS" -eq 1 ]; then
+        cb_pe_result="$TMPROOT/pe-result.$BIN_COUNT"
+        perl "$ROOT_DIR/scripts/check/lib/pe-runtime-import-owner-check.pl" \
+            "$cb_path" "$NM" "$PE_READOBJ" "$PREFIX_RE" "$TMPROOT/pe.$BIN_COUNT" > "$cb_pe_result"
+        cb_pe_rc=$?
+        case "$cb_pe_rc" in
+            0|1) ;;
+            *) cat "$cb_pe_result"; echo "ERROR — nothing was checked (Windows import-owner evidence incomplete: $cb_label)"; exit 2;;
+        esac
+        cb_count=$(awk -F'\t' '$1=="checked"{print $2}' "$cb_pe_result")
+        case "$cb_count" in ''|*[!0-9]*) echo 'ERROR — invalid Windows checker count'; exit 2;; esac
+        CHECKED_SYMS=$((CHECKED_SYMS + cb_count))
+        BIN_COUNT=$((BIN_COUNT + 1))
+        while IFS="$(printf '\t')" read -r cb_kind cb_detail; do
+            if [ "$cb_kind" = missing ]; then
+                OFFENDER_COUNT=$((OFFENDER_COUNT + 1))
+                OFFENDERS="$OFFENDERS $cb_label:$cb_detail"
+            fi
+        done < "$cb_pe_result"
+        return 0
+    fi
     cb_u="$TMPROOT/undef"
     cb_all="$TMPROOT/allsyms"
     "$NM" -a "$cb_path" >"$cb_all" 2>/dev/null
@@ -241,6 +285,11 @@ collect_binaries() {
     if [ -n "$EXPLICIT_BINS" ]; then
         echo "$EXPLICIT_BINS" | "$GREP" -v '^$'
         return 0
+    fi
+    if [ "$PE_WINDOWS" -eq 1 ]; then
+        ( cd "$SCAN_ROOT" 2>/dev/null && git ls-files 'bootstrap/*simple' 'bootstrap/**/simple' 'bootstrap/*simple.exe' 'bootstrap/**/simple.exe' 2>/dev/null ) \
+            | "$GREP" -E '(^|/)simple(\.exe)?$' | sort -u
+        return
     fi
     ( cd "$SCAN_ROOT" 2>/dev/null && git ls-files 'bootstrap/*simple' 'bootstrap/**/simple' 2>/dev/null ) \
         | "$GREP" -E '(^|/)simple$' | sort -u
@@ -323,6 +372,18 @@ check_archive() {
 
 # ---------------------------------------------------------------- selftest ---
 selftest() {
+    if [ "$PE_WINDOWS" -eq 1 ]; then
+        st_reader=$(command -v "$PE_READOBJ") || return 2
+        st_powershell=$(command -v powershell.exe) || return 2
+        st_bash=$(command -v bash) || return 2
+        st_script=$(cygpath -m "$ROOT_DIR/scripts/check/tests/check-no-unresolved-runtime-symbols-windows.ps1") || return 2
+        st_evidence=$(cygpath -m "$TMPROOT/windows-selftest") || return 2
+        st_llvm=$(cygpath -m "$(dirname "$st_reader")") || return 2
+        st_bash=$(cygpath -m "$st_bash") || return 2
+        "$st_powershell" -NoProfile -NonInteractive -File "$st_script" \
+            -Phase All -EvidenceDir "$st_evidence" -LlvmBin "$st_llvm" -Bash "$st_bash"
+        return $?
+    fi
     st_cc=""
     for c in cc gcc clang; do
         command -v "$c" >/dev/null 2>&1 && { st_cc=$c; break; }
@@ -471,7 +532,14 @@ if [ -z "$EXPLICIT_BINS" ] && [ "$SCAN_ROOT" = "$ROOT_DIR" ]; then
         echo "ERROR — nothing was checked (selftest failed)"
         exit 2
     fi
-    [ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — selftest only, 6 fixture(s) checked"; exit 0; }
+    if [ "$SELFTEST_ONLY" -eq 1 ]; then
+        if [ "$PE_WINDOWS" -eq 1 ]; then
+            echo 'PASS — selftest only, Windows x64 COFF and import-owner fixtures checked'
+        else
+            echo 'PASS — selftest only, 6 fixture(s) checked'
+        fi
+        exit 0
+    fi
 fi
 
 # ------------------------------------------------------------------- scan ----
@@ -496,7 +564,13 @@ if [ "$ARCHIVE_ONLY" -eq 0 ]; then
     fi
 fi
 
+# Preserve each explicit Windows path, including spaces. The old whitespace
+# split turned a single --bin path into several unrelated artifacts.
+BIN_SAVED_IFS=$IFS
+IFS='
+'
 for b in $BINS; do
+    IFS=$BIN_SAVED_IFS
     if [ -n "$EXPLICIT_BINS" ]; then
         check_binary "$b" "$b"
         continue
@@ -515,6 +589,7 @@ for b in $BINS; do
         check_binary "$src" "$b"
     fi
 done
+IFS=$BIN_SAVED_IFS
 
 [ -n "$EXPLICIT_BINS" ] || check_archive
 
@@ -537,6 +612,9 @@ LIBS_NOTE=""
 [ "$BIN_STATUS" = "pending" ] && BIN_STATUS="checked($BIN_COUNT binary(ies))$LIBS_NOTE"
 echo "binaries=$BIN_STATUS"
 echo "archive=$ARCHIVE_STATUS"
+if [ "$PE_WINDOWS" -eq 1 ] && [ "$BIN_COUNT" -gt 0 ]; then
+    echo 'binary_scope=windows-x64-full-coff-and-named-runtime-import-application-owner-evidence'
+fi
 if [ "$TOTAL_OFFENDERS" -gt 0 ]; then
     echo "FAIL — $TOTAL_CHECKED symbol(s) checked across $BIN_COUNT binary(ies) + archive, $TOTAL_OFFENDERS unresolved:$OFFENDERS$ARCHIVE_MISSING"
     exit 1

@@ -1,0 +1,266 @@
+# Provider-local trusted-admin policy. This is not a sealed executable contract.
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, reject,
+    parse_resource_document, as_dict, as_array, as_int, only_known, require}
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get}
+
+pub const LINUX_OCI_ENGINE_MODE_TRUSTED_ADMIN_V1 = "trusted-local-admin-v1"
+pub const LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1: i64 = 65536
+
+pub struct LinuxOciEnginePolicyV1:
+    mode: text
+    executable_path: text
+    expected_uid: i64
+    expected_graph_root: text
+    expected_run_root: text
+    expected_storage_driver: text
+    storage_options: [text] = []
+
+pub struct LinuxOciEngineObservationV1:
+    policy_digest: text
+    executable_path: text
+    executable_digest: text
+    uid: i64
+    rootless: bool
+    graph_root: text
+    run_root: text
+    storage_driver: text
+    engine_version: text
+    identity_digest: text
+    storage_options: [text] = []
+    storage_options_observation_digest: text = ""
+
+fn _engine_path_valid_v1(path: text) -> bool:
+    if path == "" or path.len() > 4096 or not path.starts_with("/") or
+            path.contains("\0") or path.contains("\n") or path.contains("\r"):
+        return false
+    if path == "/": return true
+    if path.ends_with("/") or path.contains("//"): return false
+    for segment in path.split("/"):
+        if segment == "." or segment == "..": return false
+    true
+
+fn _engine_option_key_v1(option: text) -> text:
+    val parts = option.split("=")
+    if parts.len() < 2: return ""
+    parts[0]
+
+pub fn linux_oci_engine_policy_error_v1(policy: LinuxOciEnginePolicyV1) -> text:
+    if policy.mode != LINUX_OCI_ENGINE_MODE_TRUSTED_ADMIN_V1: return "engine-policy-mode-unsupported"
+    # The retained directory owner requires a non-root parent directory.
+    if not _engine_path_valid_v1(policy.executable_path) or policy.executable_path.split("/").len() < 3:
+        return "engine-policy-executable-path-invalid"
+    if policy.expected_uid <= 0 or policy.expected_uid > 4294967295:
+        return "engine-policy-rootless-uid-invalid"
+    if policy.expected_graph_root == "/" or policy.expected_run_root == "/" or
+            not _engine_path_valid_v1(policy.expected_graph_root) or not _engine_path_valid_v1(policy.expected_run_root):
+        return "engine-policy-storage-path-invalid"
+    val allowed = "abcdefghijklmnopqrstuvwxyz0123456789_-"
+    if policy.expected_storage_driver == "" or policy.expected_storage_driver.len() > 64:
+        return "engine-policy-storage-driver-invalid"
+    for index in 0..policy.expected_storage_driver.len():
+        if not allowed.contains(policy.expected_storage_driver.substring(index, index + 1)):
+            return "engine-policy-storage-driver-invalid"
+    if policy.storage_options.len() > 32: return "engine-policy-storage-options-limit"
+    var keys: [text] = []
+    for option in policy.storage_options:
+        if option.len() > 4096 or option.contains("\0") or option.contains("\n") or option.contains("\r"):
+            return "engine-policy-storage-option-invalid"
+        val key = _engine_option_key_v1(option)
+        if key == "" or key.starts_with("-") or keys.contains(key):
+            return "engine-policy-storage-option-key-invalid"
+        keys.push(key)
+    ""
+
+pub fn linux_oci_engine_executable_metadata_error_v1(owner_uid: i64, effective_uid: i64,
+        mode: i64, expected_uid: i64) -> text:
+    if effective_uid != expected_uid or expected_uid <= 0 or (owner_uid != 0 and owner_uid != effective_uid):
+        return "engine-executable-owner-mismatch"
+    if (mode & 18) != 0 or (mode & 73) == 0 or (mode & 3072) != 0:
+        return "engine-executable-mode-unsafe"
+    ""
+
+pub fn linux_oci_engine_policy_encode_v1(policy: LinuxOciEnginePolicyV1) -> Result<text, text>:
+    val error = linux_oci_engine_policy_error_v1(policy)
+    if error != "": return Err(error)
+    var options: [SdnValue] = []
+    for option in policy.storage_options: options.push(SdnValue.String(option))
+    val encoded = sdn_encode_canonical(SdnValue.Dict({"version": SdnValue.Int(1),
+        "kind": SdnValue.String("linux-oci-engine-policy"), "mode": SdnValue.String(policy.mode),
+        "executablePath": SdnValue.String(policy.executable_path), "expectedUid": SdnValue.Int(policy.expected_uid),
+        "expectedGraphRoot": SdnValue.String(policy.expected_graph_root),
+        "expectedRunRoot": SdnValue.String(policy.expected_run_root),
+        "expectedStorageDriver": SdnValue.String(policy.expected_storage_driver),
+        "storageOptionCount": SdnValue.Int(policy.storage_options.len()),
+        "storageOptions": SdnValue.Array(options)})) + "\n"
+    if encoded.len() > 163840: return Err("engine-policy-record-too-large")
+    Ok(encoded)
+
+pub fn linux_oci_engine_policy_digest_v1(policy: LinuxOciEnginePolicyV1) -> Result<text, text>:
+    Ok(sha256_text(linux_oci_engine_policy_encode_v1(policy)?))
+
+fn _engine_policy_text_v1(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    match require(fields, key, "", spans)?:
+        case SdnValue.String(value): Ok(value)
+        case _: Err(reject("type", key, "expected text", spans))
+
+fn _engine_policy_decode_fields_v1(source: text) -> Result<LinuxOciEnginePolicyV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    val spans = parsed.1
+    val fields = as_dict(parsed.0, "", spans)?
+    only_known(fields, ["version", "kind", "mode", "executablePath", "expectedUid",
+        "expectedGraphRoot", "expectedRunRoot", "expectedStorageDriver", "storageOptionCount", "storageOptions"], "", spans)?
+    if as_int(require(fields, "version", "", spans)?, "version", spans)? != 1:
+        return Err(reject("version", "version", "unsupported policy version", spans))
+    if _engine_policy_text_v1(fields, "kind", spans)? != "linux-oci-engine-policy":
+        return Err(reject("kind", "kind", "unsupported policy kind", spans))
+    val values = as_array(require(fields, "storageOptions", "", spans)?, "storageOptions", spans)?
+    if values.len() > 32: return Err(reject("limit", "storageOptions", "too many options", spans))
+    if as_int(require(fields, "storageOptionCount", "", spans)?, "storageOptionCount", spans)? != values.len():
+        return Err(reject("count", "storageOptionCount", "option count mismatch", spans))
+    var options: [text] = []
+    for value in values:
+        match value:
+            case SdnValue.String(option): options.push(option)
+            case _: return Err(reject("type", "storageOptions", "expected text", spans))
+    Ok(LinuxOciEnginePolicyV1(mode: _engine_policy_text_v1(fields, "mode", spans)?,
+        executable_path: _engine_policy_text_v1(fields, "executablePath", spans)?,
+        expected_uid: as_int(require(fields, "expectedUid", "", spans)?, "expectedUid", spans)?,
+        expected_graph_root: _engine_policy_text_v1(fields, "expectedGraphRoot", spans)?,
+        expected_run_root: _engine_policy_text_v1(fields, "expectedRunRoot", spans)?,
+        expected_storage_driver: _engine_policy_text_v1(fields, "expectedStorageDriver", spans)?,
+        storage_options: options))
+
+pub fn linux_oci_engine_policy_decode_v1(source: text) -> Result<LinuxOciEnginePolicyV1, text>:
+    if source.len() > 163840: return Err("engine-policy-record-too-large")
+    # Canonical policies are one inline map plus a final newline. Reject
+    # indentation documents and deep inline values before the SDN parser.
+    if source.len() < 3 or not source.starts_with("{") or not source.ends_with("}\n"):
+        return Err("engine-policy-record-not-canonical")
+    if source.substring(0, source.len() - 1).contains("\n") or not _engine_json_depth_v1(source):
+        return Err("engine-policy-record-depth-invalid")
+    val policy = match _engine_policy_decode_fields_v1(source):
+        case Ok(value): value
+        case Err(error): return Err("engine-policy-record-invalid:" + error.kind + ":" + error.path)
+    if linux_oci_engine_policy_encode_v1(policy)? != source: return Err("engine-policy-record-not-canonical")
+    Ok(policy)
+
+pub fn linux_oci_engine_route_v1(policy: LinuxOciEnginePolicyV1, arguments: [text]) -> Result<[text], text>:
+    val error = linux_oci_engine_policy_error_v1(policy)
+    if error != "": return Err(error)
+    var routed = ["--remote=false", "--root", policy.expected_graph_root,
+        "--runroot", policy.expected_run_root, "--storage-driver", policy.expected_storage_driver]
+    if policy.storage_options.len() == 0: routed.push("--storage-opt=")
+    for option in policy.storage_options: routed.push("--storage-opt=" + option)
+    for argument in arguments:
+        if argument.contains("\0"): return Err("engine-route-argument-contains-nul")
+        routed.push(argument)
+    Ok(routed)
+
+fn _engine_json_depth_v1(source: text) -> bool:
+    var depth = 0
+    var quoted = false
+    var escaped = false
+    for index in 0..source.len():
+        val byte = source.byte_at(index)
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        elif byte == 34: quoted = true
+        elif byte == 123 or byte == 91:
+            depth = depth + 1
+            if depth > 16: return false
+        elif byte == 125 or byte == 93:
+            depth = depth - 1
+            if depth < 0: return false
+    not quoted and depth == 0
+
+fn _engine_json_field_v1(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(field): Ok(field)
+        case nil: Err("engine-info-field-missing:" + key)
+
+fn _engine_json_text_v1(value: JsonValue, key: text) -> Result<text, text>:
+    match _engine_json_field_v1(value, key)?:
+        case JsonValue.Str(field): Ok(field)
+        case _: Err("engine-info-field-not-text:" + key)
+
+pub fn linux_oci_engine_identity_digest_v1(observed: LinuxOciEngineObservationV1) -> text:
+    var options: [SdnValue] = []
+    for option in observed.storage_options: options.push(SdnValue.String(option))
+    sha256_text(sdn_encode_canonical(SdnValue.Dict({"version": SdnValue.Int(1),
+        "policyDigest": SdnValue.String(observed.policy_digest),
+        "executablePath": SdnValue.String(observed.executable_path),
+        "executableDigest": SdnValue.String(observed.executable_digest), "uid": SdnValue.Int(observed.uid),
+        "rootless": SdnValue.Bool(observed.rootless), "graphRoot": SdnValue.String(observed.graph_root),
+        "runRoot": SdnValue.String(observed.run_root), "storageDriver": SdnValue.String(observed.storage_driver),
+        "engineVersion": SdnValue.String(observed.engine_version),
+        "storageOptions": SdnValue.Array(options),
+        "storageOptionsObservationDigest": SdnValue.String(observed.storage_options_observation_digest)})))
+
+pub fn linux_oci_engine_observation_match_v1(policy: LinuxOciEnginePolicyV1,
+        observed: LinuxOciEngineObservationV1) -> Result<bool, text>:
+    if observed.policy_digest != linux_oci_engine_policy_digest_v1(policy)?: return Err("engine-policy-digest-mismatch")
+    if observed.executable_path != policy.executable_path: return Err("engine-executable-path-mismatch")
+    if not builder_digest_valid_v1(observed.executable_digest): return Err("engine-executable-digest-invalid")
+    if observed.uid != policy.expected_uid or not observed.rootless: return Err("engine-rootless-uid-mismatch")
+    if observed.graph_root != policy.expected_graph_root or observed.run_root != policy.expected_run_root or
+            observed.storage_driver != policy.expected_storage_driver: return Err("engine-storage-scope-mismatch")
+    if observed.storage_options != policy.storage_options: return Err("engine-storage-options-mismatch")
+    if not builder_digest_valid_v1(observed.storage_options_observation_digest): return Err("engine-storage-options-observation-invalid")
+    if observed.engine_version == "" or observed.engine_version.len() > 256: return Err("engine-version-invalid")
+    if observed.identity_digest != linux_oci_engine_identity_digest_v1(observed): return Err("engine-identity-digest-mismatch")
+    Ok(true)
+
+pub fn linux_oci_engine_info_observation_v1(policy: LinuxOciEnginePolicyV1, source: text,
+        executable_digest: text, effective_uid: i64) -> Result<LinuxOciEngineObservationV1, text>:
+    if source.len() > LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1 or not _engine_json_depth_v1(source):
+        return Err("engine-info-json-limit")
+    val info = json_parse_value_strict(source)?
+    val host = _engine_json_field_v1(info, "host")?
+    match _engine_json_field_v1(host, "serviceIsRemote")?:
+        case JsonValue.Bool(false): pass
+        case _: return Err("engine-info-local-required")
+    match _engine_json_field_v1(_engine_json_field_v1(host, "security")?, "rootless")?:
+        case JsonValue.Bool(true): pass
+        case _: return Err("engine-info-rootless-required")
+    val store = _engine_json_field_v1(info, "store")?
+    val graph = _engine_json_field_v1(store, "graphOptions")?
+    var graph_fields: Dict<text, SdnValue> = {}
+    match graph:
+        case JsonValue.Object(keys: keys, values: values):
+            if keys.len() != policy.storage_options.len(): return Err("engine-storage-options-mismatch")
+            for option in policy.storage_options:
+                val key = _engine_option_key_v1(option)
+                val expected = option.substring(key.len() + 1, option.len())
+                val actual = _engine_json_field_v1(graph, key)?
+                match actual:
+                    case JsonValue.Str(value):
+                        if value != expected: return Err("engine-storage-options-mismatch")
+                        graph_fields[key] = SdnValue.String(value)
+                    case JsonValue.Object(keys: fields, values: ignored):
+                        if key != "overlay.mount_program" or fields.len() != 3 or not _engine_path_valid_v1(expected):
+                            return Err("engine-storage-option-observation-unsupported")
+                        val executable = _engine_json_text_v1(actual, "Executable")?
+                        val version = _engine_json_text_v1(actual, "Version")?
+                        val package_info = _engine_json_text_v1(actual, "Package")?
+                        if executable != expected: return Err("engine-storage-options-mismatch")
+                        graph_fields[key] = SdnValue.Dict({"Executable": SdnValue.String(executable),
+                            "Version": SdnValue.String(version), "Package": SdnValue.String(package_info)})
+                    case _: return Err("engine-storage-option-observation-unsupported")
+        case _: return Err("engine-storage-options-object-required")
+    var observed = LinuxOciEngineObservationV1(policy_digest: linux_oci_engine_policy_digest_v1(policy)?,
+        executable_path: policy.executable_path, executable_digest: executable_digest, uid: effective_uid,
+        rootless: true, graph_root: _engine_json_text_v1(store, "graphRoot")?,
+        run_root: _engine_json_text_v1(store, "runRoot")?, storage_driver: _engine_json_text_v1(store, "graphDriverName")?,
+        engine_version: _engine_json_text_v1(_engine_json_field_v1(info, "version")?, "Version")?,
+        identity_digest: "", storage_options: policy.storage_options,
+        storage_options_observation_digest: sha256_text(sdn_encode_canonical(SdnValue.Dict(graph_fields))))
+    observed.identity_digest = linux_oci_engine_identity_digest_v1(observed)
+    val matched = linux_oci_engine_observation_match_v1(policy, observed)?
+    Ok(observed)

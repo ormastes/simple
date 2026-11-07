@@ -152,6 +152,20 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
             } else if self.peek_through_newlines_and_indents_is(&TokenKind::Pipe) {
+                // The lookahead has buffered the next meaningful token without
+                // consuming it. At an arm's column this `|` starts the NEXT
+                // arm; consuming it as BitOr folds that pattern into this body.
+                // Same-line BitOr and deeper-indented continuations still use
+                // the existing operator paths, including inside arm bodies.
+                let starts_next_arm = self.match_arm_column.is_some_and(|column| {
+                    self.pending_tokens
+                        .iter()
+                        .find(|token| !matches!(token.kind, TokenKind::Newline | TokenKind::Indent))
+                        .is_some_and(|token| token.kind == TokenKind::Pipe && token.span.column <= column)
+                });
+                if starts_next_arm {
+                    break;
+                }
                 // Case 2: operator on next line (leading continuation)
                 self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
                 self.advance(); // consume the operator
