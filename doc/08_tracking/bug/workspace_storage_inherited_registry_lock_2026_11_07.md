@@ -1,8 +1,10 @@
 # Fork descendants inherited workspace storage authority and registry locks
 
-Status: source repair and focused native regression in progress. This finding
-affects the previously merged native workspace registry; the storage, mapping
-and preparation component PASS records did not exercise fork-child isolation.
+Status: repaired at `257e6f8fc28254efbd96ea9f34ed62685721fd17`, independently
+reviewed, with one focused native build/run exit 0/0. It executed 182 parent and
+49 child checks. This finding affects the previously merged native workspace
+registry; the storage, mapping and preparation component PASS records did not
+exercise fork-child isolation. Full platform/SSpec qualification remains pending.
 
 The shared owner in `src/runtime/runtime_workspace_storage_v1.c` used a static
 pthread mutex without checking the creating process. A child forked while a
@@ -47,10 +49,10 @@ Text refusal also must avoid `rt_string_new("", 0)`: that function takes the
 runtime's short-string cache lock, which can independently be inherited locked.
 The child-origin branch needs a valid nonallocating refusal representation.
 
-The focused regression will fork while the real parent registry mutex is held,
+The focused regression forks while the real parent registry mutex is held,
 invoke the public storage, user-observation and preparation entries in the
 child under a finite timeout, and assert refusal without touching parent state.
-The parent must retain its mutex/registry and remain usable afterward. A linker
+The parent retains its mutex/registry and remains usable afterward. A linker
 allocation-call witness must reject any child call to `rt_string_new`, proving
 that refusal never reaches the inherited runtime cache lock. This observes the
 actual call boundary; it does not manufacture a successful owner. This
@@ -71,3 +73,10 @@ the real internal release primitive while another thread holds the real
 registry gate, and checks generation/busy mismatches refuse both releases.
 This is explicitly mechanism coverage; actual quota/keeper preparation remains
 unqualified.
+
+The exact native receipt and logs are tracked under
+`doc/06_spec/02_integration/lib/storage_roots/workspace_storage_fork_origin_v1_native/`.
+Five source-review revisions preceded this sixth and final review/verification
+cycle. No historical green fixture was repeated, and no further repair/retry
+was performed. The source fixture header records its authored-before-execution
+status; this subsequent source-bound receipt records the actual run.
