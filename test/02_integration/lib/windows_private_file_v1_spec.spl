@@ -1,0 +1,95 @@
+# Native Windows only. Missing installed ACL fixtures fail; they never skip.
+use std.spec
+use std.nogc_sync_mut.io.env_ops.{host_os, env_get}
+use std.nogc_sync_mut.io.windows_private_file_v1.*
+
+fn private_root_rejected(path: text) -> bool:
+    match windows_private_root_open_v1(path):
+        case Ok(owner):
+            var root = owner
+            val closed = root.close()
+            false
+        case Err(error):
+            if val retained = error.cleanup_root:
+                var cleanup = retained
+                expect(cleanup.close()).to_equal(true)
+            true
+
+fn private_roundtrip(path: text) -> bool:
+    match windows_private_root_open_v1(path):
+        case Err(error):
+            if val retained = error.cleanup_root:
+                var cleanup = retained
+                expect(cleanup.close()).to_equal(true)
+            false
+        case Ok(owner):
+            var root = owner
+            match root.create_private_stage("stage-one.sdn", 8388608u64):
+                case Err(error):
+                    if val retained = error.cleanup_file:
+                        var cleanup = retained
+                        expect(cleanup.close()).to_equal(true)
+                    expect(root.close()).to_equal(true)
+                    false
+                case Ok(file):
+                    var stage = file
+                    val bytes = [115u8, 100u8, 110u8, 10u8]
+                    expect(stage.write(bytes)).to_equal(Ok(true))
+                    expect(stage.seal()).to_equal(Ok(true))
+                    expect(stage.read_all_bounded(8388608)).to_equal(Ok(bytes))
+                    expect(root.publish_no_replace(stage, "receipt.sdn")).to_equal(Ok(true))
+                    expect(stage.security_current()).to_equal(true)
+                    expect(stage.close()).to_equal(true)
+                    match root.open_private_file("receipt.sdn", 8388608u64):
+                        case Err(error):
+                            if val retained = error.cleanup_file:
+                                var cleanup = retained
+                                expect(cleanup.close()).to_equal(true)
+                            expect(root.close()).to_equal(true)
+                            return false
+                        case Ok(file):
+                            var final = file
+                            expect(final.read_all_bounded(8388608)).to_equal(Ok(bytes))
+                            expect(final.close()).to_equal(true)
+                    match root.create_private_stage("stage-two.sdn", 8388608u64):
+                        case Err(error):
+                            if val retained = error.cleanup_file:
+                                var cleanup = retained
+                                expect(cleanup.close()).to_equal(true)
+                            expect(root.close()).to_equal(true)
+                            return false
+                        case Ok(file):
+                            var collision = file
+                            expect(collision.write([88u8])).to_equal(Ok(true))
+                            expect(collision.seal()).to_equal(Ok(true))
+                            expect(root.publish_no_replace(collision, "receipt.sdn")).to_equal(Ok(false))
+                            expect(collision.close()).to_equal(true)
+                    match root.open_private_file("receipt.sdn", 8388608u64):
+                        case Err(error):
+                            if val retained = error.cleanup_file:
+                                var cleanup = retained
+                                expect(cleanup.close()).to_equal(true)
+                            expect(root.close()).to_equal(true)
+                            return false
+                        case Ok(file):
+                            var final = file
+                            expect(final.read_all_bounded(8388608)).to_equal(Ok(bytes))
+                            expect(final.security_current()).to_equal(true)
+                            expect(final.close()).to_equal(true)
+                    root.close()
+
+describe "private Windows journal capability":
+    it "REQ-WIN-PRIVATE-001 rejects foreign read ACL and reparse root fixtures":
+        expect(host_os()).to_equal("windows")
+        val foreign_read = env_get("SIMPLE_WINDOWS_PRIVATE_FOREIGN_READ_ROOT") ?? ""
+        val reparse = env_get("SIMPLE_WINDOWS_PRIVATE_REPARSE_ROOT") ?? ""
+        expect(foreign_read != "").to_equal(true)
+        expect(reparse != "").to_equal(true)
+        expect(private_root_rejected(foreign_read)).to_equal(true)
+        expect(private_root_rejected(reparse)).to_equal(true)
+
+    it "REQ-WIN-PRIVATE-002 publishes private bytes without replacing a collision":
+        expect(host_os()).to_equal("windows")
+        val root = env_get("SIMPLE_WINDOWS_PRIVATE_EMPTY_ROOT") ?? ""
+        expect(root != "").to_equal(true)
+        expect(private_roundtrip(root)).to_equal(true)

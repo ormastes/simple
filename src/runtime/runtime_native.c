@@ -56,6 +56,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include <string.h>
 #include <limits.h>
 #include <errno.h>
+#include "platform/runtime_windows_private_root.h"
 #include <math.h>
 #include <signal.h>
 #include <time.h>
