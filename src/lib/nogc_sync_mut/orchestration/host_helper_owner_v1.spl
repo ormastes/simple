@@ -25,6 +25,7 @@ use std.common.sdn.encode.sdn_encode_canonical
 
 pub use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
 use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_store_v1, host_helper_execution_proof_store_v1}
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.{HostParentBudgetRecordV1, host_parent_budget_match_retained_v1}
 
 pub struct HostHelperLeaseV1:
     plan: HostHelperPlanV1
@@ -66,8 +67,8 @@ fn host_helper_parent_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV
     val fence = container_scope_fence_id_v2(scope)?
     val plan_valid = host_helper_plan_bytes_v1(plan)?
     val operation_valid = host_helper_reservation_match_operation_v1(request.intent, request.operation)?
-    val budget_valid = controller_parent_budget_match_v1(budget, request.budget_proof.operation,
-        request.parent_binding, request.parent_controller_operation)?
+    val budget_valid = host_parent_budget_match_retained_v1(owner,
+        HostParentBudgetRecordV1(request.budget_proof, request.parent_binding, request.parent_controller_operation), scope)?
     if (container_scope_fence_id_v2(plan.scope)? != fence or container_scope_fence_id_v2(budget.scope)? != fence or
             owner.ledger.capacity.boot_id != fence or owner.ledger.capacity.physical_host_id != scope.physical_host_id or
             owner.ledger.capacity.provider_generation != scope.provider_generation):
@@ -88,16 +89,8 @@ fn host_helper_parent_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV
         return Err("helper-duration-outside-parent-budget")
     val parent = request.parent_binding.host_operation
     val parent_state = daemon_operation_exact_v2(owner.journal, parent)?
-    if parent_state.state != "admitted" and parent_state.state != "executing" and parent_state.state != "outcome-unknown":
-        return Err("helper-parent-inactive")
     if plan.helper_kind == "attach-broker" and parent_state.state == "admitted":
         return Err("helper-parent-execution-intent-required")
-    val retained = file_read_regular_no_follow_bounded(owner.journal.root + "/reservation-payloads/" + parent.payload_digest + ".sdn", 65536)?
-    if retained != host_reservation_encode_intent_v1(request.parent_binding.host_intent)?:
-        return Err("helper-retained-parent-mismatch")
-    if (budget.maximum_cpu_millis > owner.ledger.capacity.cpu_millis or
-            budget.maximum_memory_bytes > owner.ledger.capacity.memory_bytes):
-        return Err("helper-budget-outside-physical-capacity")
     if (request.operation.principal != parent.principal or request.operation.project != parent.project or
             request.operation.environment_digest != parent.environment_digest):
         return Err("helper-parent-principal-mismatch")

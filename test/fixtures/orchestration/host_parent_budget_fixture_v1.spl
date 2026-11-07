@@ -1,0 +1,39 @@
+# Real retained parent and signatures; an unused explicit Container fixture
+# supplies the typed local root. No provider command is executed by planning.
+use test.fixtures.orchestration.host_helper_fixture_v1.*
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.*
+use test.fixtures.orchestration.host_enrollment_claim_fixture_v1.*
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.HostEnrollmentBindingV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_v1
+use std.common.contracts.orchestration.host_config_v1.decode_host_config
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+pub struct HostParentBudgetFixtureV1:
+    local: HostLocalRootV1
+    record: HostParentBudgetRecordV1
+    provider_root: text
+
+pub fn host_parent_budget_fixture_v1() -> HostParentBudgetFixtureV1:
+    val helper = host_helper_fixture_v1()
+    val provider = host_execution_fixture_v2("success")
+    assert(host_capacity_owner_close_v1(provider.owner).unwrap())
+    val configuration = host_claim_fixture_v1()
+    var config = decode_host_config(configuration.configuration_bytes).unwrap()
+    config.physical_host_id = helper.scope.physical_host_id
+    config.service_scope_id = helper.scope.service_scope_id
+    dir_remove(configuration.parent, true)
+    val binding = HostEnrollmentBindingV1(config_digest: "a".repeat(64), policy_digest: helper.policy.source_digest,
+        native_machine_id: helper.scope.native_machine_id, native_boot_id: helper.scope.boot_id,
+        provider_identity_digest: provider.provider_digest, machine_parent: "/fixture-only")
+    val local = HostLocalRootV1(root: helper.root, binding: binding, config: config, policy: helper.policy,
+        scope: helper.scope, container: provider.container, capacity: helper.owner)
+    val record = HostParentBudgetRecordV1(helper.request.budget_proof, helper.request.parent_binding,
+        helper.request.parent_controller_operation)
+    HostParentBudgetFixtureV1(local, record, provider.root)
+
+pub fn host_parent_budget_fixture_close_v1(fixture: HostParentBudgetFixtureV1):
+    assert(host_capacity_owner_close_v1(fixture.local.capacity).unwrap())
+    dir_remove(fixture.local.root, true)
+    dir_remove(fixture.provider_root, true)

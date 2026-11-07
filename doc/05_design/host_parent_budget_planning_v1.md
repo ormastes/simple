@@ -1,0 +1,11 @@
+# Parent-budget planning before helper admission
+
+The configured host owner now accepts `host-parent-budget <protected-root> <record-file>`. A bounded canonical `HostParentBudgetRecordV1` contains the existing controller budget proof, exact parent assignment binding and original controller operation. No helper operation or packet is required. The host verifies actual signed grant and approval, current policy/session/time, exact retained parent envelope and reservation, current scope and physical ceiling before publishing a reference.
+
+`host_parent_budget_store_v1` retains immutable canonical bytes under the same host journal root and returns the existing budget digest. Private staging and no-replace publication keep partial writes away from the final name. Exact readback, permissions and synchronization precede a second fresh authority check. Repeating identical bytes is idempotent. A changed proof with the same budget digest is deliberately refused; proof renewal needs an explicit future reference revision rather than overwriting existing provenance.
+
+`host_parent_budget_load_v1` selects only by budget digest and expected parent operation, then repeats current signature/context/parent checks. Protected bytes are not cached authorization. A valid record permits planning only: helper preparation and begin still verify the distinct signed helper action, physical ledger and aggregate parent-plus-all-helper budget immediately before effects.
+
+The shared `host_parent_budget_match_retained_v1` also serves actual helper admission, avoiding a second implementation of parent-chain and retained allocation checks. No journal append, provider command, native stream or capacity release occurs in this planning path. Its current finite trusted-root route is Linux Podman; persistent Windows publication requires the native private-file capability being implemented separately. POSIX permission bits do not establish Windows ACL privacy.
+
+Four source scenarios use real signatures and the actual parent journal, checking pre-helper publication/load, refreshed expiry, changed scope/parent, forged signature, strict canonical decode and immutable corruption refusal. Their unused Container fixture runs no commands. All are authored NOT_RUN; no native/compiler qualification is claimed.

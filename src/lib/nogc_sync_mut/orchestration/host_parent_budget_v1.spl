@@ -1,0 +1,172 @@
+# Protected planning provenance before a helper packet exists. A decoded record
+# is data; store/load both verify fresh signatures against the configured owner.
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.common.contracts.orchestration.controller_parent_budget_v1.*
+use std.common.contracts.orchestration.assignment_v1.{ControllerAssignmentBindingV1, controller_assignment_bytes_v1, controller_assignment_decode_reference_v1, controller_assignment_restore_v1}
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, distributed_grant_authorize_v2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_publish_noreplace, secure_temp_dir, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+
+pub struct HostParentBudgetRecordV1:
+    proof: ControllerParentBudgetProofV1
+    parent_binding: ControllerAssignmentBindingV1
+    parent_controller_operation: OperationEnvelopeV2
+
+pub fn host_parent_budget_record_encode_v1(record: HostParentBudgetRecordV1) -> Result<text, text>:
+    val matched = controller_parent_budget_match_v1(record.proof.budget, record.proof.operation,
+        record.parent_binding, record.parent_controller_operation)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-parent-budget"),
+        "proof": SdnValue.String(controller_parent_budget_proof_encode_v1(record.proof)?),
+        "parentBinding": SdnValue.String(controller_assignment_bytes_v1(record.parent_binding)?),
+        "parentIntent": SdnValue.String(host_reservation_encode_intent_v1(record.parent_binding.host_intent)?),
+        "parentHostOperation": SdnValue.String(distributed_encode_operation_v2(record.parent_binding.host_operation)?),
+        "parentControllerOperation": SdnValue.String(distributed_encode_operation_v2(record.parent_controller_operation)?)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(bytes) > 2097152: return Err("parent-budget-record-size")
+    Ok(bytes)
+
+fn parent_budget_text_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("parent-budget-record-type:" + name)
+
+pub fn host_parent_budget_record_decode_v1(source: text) -> Result<HostParentBudgetRecordV1, text>:
+    if str_len(source) == 0 or str_len(source) > 2097152: return Err("parent-budget-record-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+            max_depth: 2, max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(issue): return Err("parent-budget-record-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(values): values
+        case _: return Err("parent-budget-record-object-required")
+    val names = ["version", "kind", "proof", "parentBinding", "parentIntent", "parentHostOperation", "parentControllerOperation"]
+    for name in fields.keys():
+        if not names.contains(name): return Err("parent-budget-record-unknown-field:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("parent-budget-record-missing-field:" + name)
+    if fields["version"] != SdnValue.Int(1) or parent_budget_text_v1(fields, "kind")? != "host-parent-budget":
+        return Err("parent-budget-record-version")
+    val reference = controller_assignment_decode_reference_v1(parent_budget_text_v1(fields, "parentBinding")?)?
+    val binding = controller_assignment_restore_v1(reference, parent_budget_text_v1(fields, "parentIntent")?,
+        parent_budget_text_v1(fields, "parentHostOperation")?)?
+    val record = HostParentBudgetRecordV1(proof: controller_parent_budget_proof_decode_v1(parent_budget_text_v1(fields, "proof")?)?,
+        parent_binding: binding, parent_controller_operation: distributed_decode_operation_v2(parent_budget_text_v1(fields, "parentControllerOperation")?)?)
+    if host_parent_budget_record_encode_v1(record)? != source: return Err("parent-budget-record-noncanonical")
+    Ok(record)
+
+# Shared by pre-helper planning and actual helper admission. No synthetic helper
+# is needed to prove an existing parent allocation and its exact signed chain.
+pub fn host_parent_budget_match_retained_v1(owner: HostCapacityOwnerV1,
+        record: HostParentBudgetRecordV1, scope: ContainerHostScopeV2) -> Result<bool, text>:
+    val proof = record.proof
+    val budget = proof.budget
+    val matched = controller_parent_budget_match_v1(budget, proof.operation,
+        record.parent_binding, record.parent_controller_operation)?
+    val fence = container_scope_fence_id_v2(scope)?
+    if (container_scope_fence_id_v2(budget.scope)? != fence or owner.ledger.capacity.boot_id != fence or
+            owner.ledger.capacity.physical_host_id != scope.physical_host_id or
+            owner.ledger.capacity.provider_generation != scope.provider_generation):
+        return Err("helper-current-scope-mismatch")
+    val parent = record.parent_binding.host_operation
+    val state = daemon_operation_exact_v2(owner.journal, parent)?
+    if not ["admitted", "executing", "outcome-unknown"].contains(state.state): return Err("helper-parent-inactive")
+    val retained = file_read_regular_no_follow_bounded(owner.journal.root + "/reservation-payloads/" + parent.payload_digest + ".sdn", 65536)?
+    if retained != host_reservation_encode_intent_v1(record.parent_binding.host_intent)?: return Err("helper-retained-parent-mismatch")
+    if budget.maximum_cpu_millis > owner.ledger.capacity.cpu_millis or budget.maximum_memory_bytes > owner.ledger.capacity.memory_bytes:
+        return Err("helper-budget-outside-physical-capacity")
+    var found = false
+    for row in owner.ledger.reservations:
+        if row.operation_id != parent.id: continue
+        if (row.state == HostReservationStateV1.Released or row.payload_digest != parent.payload_digest or
+                row.cpu_millis != record.parent_binding.host_intent.reservation.cpu_millis or
+                row.memory_bytes != record.parent_binding.host_intent.reservation.memory_bytes):
+            return Err("helper-parent-allocation-unavailable")
+        found = true
+    if not found: return Err("helper-parent-allocation-unavailable")
+    Ok(true)
+
+fn parent_budget_context_v1(before: HostReservationAuthorizationContextV1,
+        current: HostReservationAuthorizationContextV1, policy: LocalAuthorityPolicyV1) -> Result<bool, text>:
+    if (current.grant_clock <= 0 or current.monotonic_ms < 0 or current.grant_clock < before.grant_clock or
+            current.monotonic_ms < before.monotonic_ms): return Err("parent-budget-clock-invalid-or-regressed")
+    if (current.policy_revision != before.policy_revision or current.revocation_epoch != before.revocation_epoch or
+            current.session_generation != before.session_generation or current.policy_revision != policy.snapshot.policy_revision or
+            current.revocation_epoch != policy.snapshot.revocation_epoch or current.session_generation != policy.session_generation):
+        return Err("parent-budget-authority-context-changed")
+    Ok(true)
+
+fn parent_budget_authorize_v1(local: HostLocalRootV1, record: HostParentBudgetRecordV1,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> Result<bool, text>:
+    if not local.capacity.ledger.continuity_proven: return Err("host-reconciliation-required")
+    if local.capacity.ledger.revision != local.capacity.journal.sequence + 1: return Err("parent-budget-projection-stale")
+    val matched = host_parent_budget_match_retained_v1(local.capacity, record, local.scope)?
+    val valid_context = parent_budget_context_v1(context, context, local.policy)?
+    val proof = record.proof
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(local.policy.snapshot, proof.signed, proof.approval,
+        proof.operation, context.grant_clock, local.policy.snapshot.generation, context.policy_revision,
+        context.revocation_epoch, context.session_generation)?
+    val current = refresh()
+    val fresh = parent_budget_context_v1(context, current, local.policy)?
+    if proof.approval.expires_at <= current.grant_clock: return Err("APPROVAL_EXPIRED")
+    val reason = distributed_grant_authorize_v2(grant, proof.operation, current.grant_clock,
+        current.policy_revision, current.revocation_epoch, current.session_generation)
+    if reason != "": return Err(reason)
+    val current_signatures = distributed_verify_grant_approval_from_snapshot_v2(local.policy.snapshot,
+        proof.signed, proof.approval, proof.operation, current.grant_clock, local.policy.snapshot.generation,
+        current.policy_revision, current.revocation_epoch, current.session_generation)?
+    Ok(true)
+
+pub fn host_parent_budget_store_v1(local: HostLocalRootV1, record: HostParentBudgetRecordV1,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> Result<text, text>:
+    val verified = parent_budget_authorize_v1(local, record, context, refresh)?
+    val bytes = host_parent_budget_record_encode_v1(record)?
+    val digest = controller_parent_budget_digest_v1(record.proof.budget)?
+    val directory = local.capacity.journal.root + "/host-parent-budget-records"
+    if not file_exists(directory) and not dir_create(directory, true): return Err("parent-budget-directory-unavailable")
+    val path = directory + "/" + digest + ".sdn"
+    if not file_exists(path):
+        val stage = secure_temp_dir(directory, ".parent-budget-stage")?
+        val staged = stage + "/record.sdn"
+        if not file_create_exclusive(staged, bytes): return Err("parent-budget-stage-write-failed")
+        if not file_set_mode(staged, 0o600) or file_mode_bits(staged) != 0o600: return Err("parent-budget-record-mode")
+        if file_read_regular_no_follow_bounded(staged, 2097152)? != bytes: return Err("parent-budget-stage-readback")
+        if not file_fsync(staged) or not directory_fsync(stage): return Err("parent-budget-stage-sync")
+        if file_publish_noreplace(staged, path)?: dir_remove(stage, true)
+    if file_read_regular_no_follow_bounded(path, 2097152)? != bytes: return Err("parent-budget-retained-record-mismatch")
+    if file_mode_bits(path) != 0o600: return Err("parent-budget-record-mode")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(local.capacity.journal.root):
+        return Err("parent-budget-record-sync")
+    # Publication alone is not current planning permission. An expiry during
+    # synchronization leaves immutable evidence but does not return a grant.
+    val still_verified = parent_budget_authorize_v1(local, record, context, refresh)?
+    Ok(digest)
+
+pub fn host_parent_budget_load_v1(local: HostLocalRootV1, budget_digest: text,
+        parent_operation_id: text, context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> Result<HostParentBudgetRecordV1, text>:
+    if not builder_digest_valid_v1(budget_digest): return Err("parent-budget-reference-invalid")
+    val path = local.capacity.journal.root + "/host-parent-budget-records/" + budget_digest + ".sdn"
+    val record = host_parent_budget_record_decode_v1(file_read_regular_no_follow_bounded(path, 2097152)?)?
+    if file_mode_bits(path) != 0o600: return Err("parent-budget-record-mode")
+    if (controller_parent_budget_digest_v1(record.proof.budget)? != budget_digest or
+            record.proof.budget.parent_operation_id != parent_operation_id): return Err("parent-budget-reference-mismatch")
+    val verified = parent_budget_authorize_v1(local, record, context, refresh)?
+    Ok(record)
