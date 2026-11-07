@@ -1070,6 +1070,35 @@ pub fn parser_declaration_metadata_promote_transient_owner() -> bool:
         representation_parser_promote_transient_owner_v1() and
         lock_level_metadata_promote()
 
+# The PENDING_* pools are encoded by the cache capture and read after the
+# per-file transient scope ends (see extend_decls.spl's promote note). They
+# are private to this module, so they are promoted here rather than from
+# extend_decls, whose cross-module read of them had no import and failed
+# native codegen (stage2 run 15: imported non-public module static
+# PENDING_CLOCKED_ARGS).
+# @workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22 reason=extend_pending_pools_dangle_across_transient_scope
+extern fn rt_array_free<T>(array: [T])
+
+fn _pending_pool_promote_i64(root: [[i64]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+fn _pending_pool_promote_text(root: [[text]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+pub fn parser_pending_pools_promote_transient_owners() -> bool:
+    var promoted = true
+    promoted = _pending_pool_promote_text([PENDING_SFFI_KEYS]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_SFFI_VALUES]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_CLOCKED_ARGS]) and promoted
+    promoted = _pending_pool_promote_i64([PENDING_VHDL_GENERIC_ARGS]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_UNSAFE_CAPS]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_DECL_ATTRS]) and promoted
+    promoted
+
 fn parser_record_enum_open_regions(enum_name: text, complete_open: bool, dyn_open: bool):
     val c = if complete_open: "1" else: "0"
     val d = if dyn_open: "1" else: "0"
@@ -2373,6 +2402,7 @@ fn parse_module_body():
 
 export parse_enum_decl, parse_module_body, parser_enum_attributes_for, parser_class_attributes_for, parser_record_class_attributes
 export parser_enum_open_regions_for
+export parser_pending_pools_promote_transient_owners
 
 # ===== Bitfield Declaration =====
 

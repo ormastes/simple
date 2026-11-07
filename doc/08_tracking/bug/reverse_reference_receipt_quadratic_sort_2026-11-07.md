@@ -2,6 +2,12 @@
 
 Status: source repair authored; native correctness and performance qualification NOT_RUN.
 
+## Text-length migration follow-up
+
+The 2026-11-07 pending-PR audit found that the NUL scan introduced by #7444 used `value.len()` as the bound for `byte_at`. This is a byte count on the current release, but the code-point length change in #7436 would miss an embedded NUL after a multibyte prefix. Explicit bytes `C3 A9 C3 A9 C3 A9 00 7A` have eight bytes and five code points, with NUL at byte six. Missing it can select canonical full-byte sorting instead of the required legacy NUL comparison.
+
+The scan now caches `std.common.string_core.str_len(value)`, the existing exported wrapper over the stored-byte `rt_string_len` owner. It requires no new method-lowering support, byte-array allocation, or runtime export. The historical wire oracle also uses this byte-count owner. Two authored scenarios cover accented and emoji prefixes, equal-prefix suffix ordering, duplicate rows, a NUL-free neighbor, terminal NUL, and exact digest bytes. They remain NOT_RUN; a code-point-length core-C execution is required to demonstrate the original regression. The pending migration must still repair other framing/comparator byte lengths; this narrow fix does not qualify that rollout.
+
 ## Actual evidence
 Other-session a92 producer a92bc18646b859ee6b034ff7a97de2e9175d30accb787e18373bd7e436c73459, source d21afc1bf024c08f476b744f8a8c2a606c501205, LLVM/Darwin. One1second10ms sample of PID7431 contained76/77mainthread stacks in reverse_reference_sorted_v1. Retained CURRENT receipt contained73779rows and37075600bytes. FullCLI completed16/3086modules at6325785ms; individual staged codegen intervals2478759ms and1293892ms. Point-in-time sampling does not attribute the whole build or establish a candidate speedup. Raw evidence lives in campaign runtime-audit/a92-fullcli-stack-sample.txt and a92-reverse-receipt-bottleneck.md. Other-session source/process/caches were not altered.
 

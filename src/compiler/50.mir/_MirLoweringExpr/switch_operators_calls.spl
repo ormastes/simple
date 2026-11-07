@@ -932,6 +932,66 @@ impl MirLowering:
             self.static_scalar_locals[payload_local.id] = true
         payload_local
 
+    me option_payload_for_int_sink(local: LocalId, sink_type: HirType) -> LocalId:
+        """Payload-typed USE of an Optional local in a declared INTEGER sink
+        (`-> i64` tail/return, `val y: i64 = ...`).
+
+        Extends option_scalar_payload_of to an `Optional(Any)` local: a
+        `list` (= `Array(Any)`) `get`/`at` result (lower_array_first_or_last)
+        is a real Option handle whose payload was already decoded to a raw
+        i64 word (lower_type(Any) = i64). option_scalar_payload_of skips it
+        because Any is not a plain scalar, so the HANDLE pointer reached the
+        integer slot (`w.get(0)` with w = [4] read back 200634408607585).
+        Only integer sinks are covered: the decoded payload is an integer
+        word, and a float/bool sink would reinterpret it.
+        Limit: the "payload already decoded" premise holds only for the
+        array get/at/first/last producer. Other Optional(Any) producers
+        (`any?` params, tagged raw-probe dict reads) carry a TAGGED payload;
+        for those this returns the tagged word instead of the handle --
+        still wrong, no longer a pointer. A MISS (None, payload 3) also
+        yields 3 here, as rt_unwrap_or_self does for typed `[i64].get`.
+        Both are tracked in
+        doc/08_tracking/bug/native_option_int_sink_miss_and_payload_three_2026-11-07.md
+        doc/08_tracking/bug/native_list_any_get_i64_sink_returns_option_handle_2026-11-07.md"""
+        val scalar_payload = self.option_scalar_payload_of(local)
+        if scalar_payload.id != local.id:
+            return scalar_payload
+        match sink_type.kind:
+            case HirTypeKind.Int(_, _): ()
+            case _: return local
+        var inner_is_any = false
+        match self.find_local_hir_type(local.id):
+            case Some(found):
+                if found != nil and found != 0:
+                    match found.kind:
+                        case HirTypeKind.Optional(optional_inner):
+                            match optional_inner.kind:
+                                case HirTypeKind.Any: inner_is_any = true
+                                case _: ()
+                        case _: ()
+            case None: ()
+        if not inner_is_any:
+            return local
+        var b = self.builder
+        val unwrap_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_unwrap_or_self"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val unwrapped = b.emit_call(unwrap_fn, [mir_operand_copy(local)], MirType.i64())
+        var payload_local = unwrapped ?? local
+        if unwrapped != nil:
+            val sink_mir_type = self.lower_type(sink_type)
+            if sink_mir_type.kind != MirTypeKind.I64:
+                payload_local = b.emit_cast(mir_operand_copy(payload_local), sink_mir_type)
+        self.builder = b
+        if unwrapped != nil:
+            # Raw integer word: register the sink's scalar type so the
+            # following local_needs_erased_decode check does not decode it
+            # a second time.
+            self.remember_local_hir_type(payload_local.id, sink_type, 0, 0)
+            self.static_scalar_locals[payload_local.id] = true
+        payload_local
+
     me local_is_declared_scalar_optional(local: LocalId) -> bool:
         match self.find_local_hir_type(local.id):
             case Some(found):
@@ -4819,9 +4879,14 @@ impl MirLowering:
                                 if result_payload_type != nil and declared_tuple:
                                     if val native_tuple = self.wrapper_owned_native_tuple_payload_type(found_payload_type):
                                         self.recover_result_tuple_payload(pl, native_tuple)
+                                    elif val try_tuple = self.result_try_tuple_payload_type(found_payload_type):
+                                        # Same slot admission as unwrap and `?`
+                                        # (text, proven records, collections).
+                                        self.recover_result_tuple_payload(pl, try_tuple)
                                     else:
-                                        # No new admission for text/record/erased
-                                        # extras: preserve the existing decoder.
+                                        # Unadmitted slots (e.g. f32) have no native
+                                        # slot proof; the old decoder bound no field.
+                                        self.error_fatal("unsupported Result tuple payload element type: {self.result_tuple_rejected_element(found_payload_type)}", Some(scrutinee.span))
                                         self.decode_declared_enum_payload_slot(pl, found_payload_type)
                                 else:
                                     self.decode_declared_enum_payload_slot(pl, found_payload_type)
@@ -4955,10 +5020,13 @@ impl MirLowering:
                             if val admitted_tuple = wrapper_native_tuple_payload_type(wrapper_payload):
                                 native_tuple_type = Some(admitted_tuple)
                                 native_tuple_fields = fields
+                            elif val try_tuple = self.result_try_tuple_payload_type(wrapper_payload):
+                                # Same slot admission as unwrap and `?`.
+                                native_tuple_type = Some(try_tuple)
+                                native_tuple_fields = fields
                             else:
-                                # Unadmitted extras retain the previous match
-                                # representation route, without a new error.
-                                ()
+                                # Unadmitted slots (e.g. f32) have no native slot proof.
+                                self.error_fatal("unsupported Result tuple payload element type: {self.result_tuple_rejected_element(wrapper_payload)}", Some(scrutinee.span))
                         case _: ()
                 self.builder.enum_semantic_node = semantic_pattern_root
                 var bp = self.builder

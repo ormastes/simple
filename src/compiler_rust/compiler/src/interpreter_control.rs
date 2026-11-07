@@ -2571,15 +2571,18 @@ fn inline_block_local_val_name(let_stmt: &simple_parser::ast::LetStmt) -> Option
 /// Replace every read of `name` in `expr` with `replacement`. Only integer
 /// literals, identifiers and binary operators are rewritten; any other form
 /// declines, because it could hide a read of `name` this walk cannot see.
-fn substitute_inline_int_local(expr: &Expr, name: &str, replacement: &Expr) -> Option<Expr> {
+fn substitute_inline_int_local(expr: &Expr, name: &str, replacement: &Expr, uses: &mut usize) -> Option<Expr> {
     match expr {
         Expr::Integer(_) | Expr::TypedInteger(..) => Some(expr.clone()),
-        Expr::Identifier(id) if id == name => Some(replacement.clone()),
+        Expr::Identifier(id) if id == name => {
+            *uses += 1;
+            Some(replacement.clone())
+        }
         Expr::Identifier(_) => Some(expr.clone()),
         Expr::Binary { op, left, right } => Some(Expr::Binary {
             op: op.clone(),
-            left: Box::new(substitute_inline_int_local(left, name, replacement)?),
-            right: Box::new(substitute_inline_int_local(right, name, replacement)?),
+            left: Box::new(substitute_inline_int_local(left, name, replacement, uses)?),
+            right: Box::new(substitute_inline_int_local(right, name, replacement, uses)?),
         }),
         _ => None,
     }
@@ -2632,7 +2635,15 @@ fn parse_inline_int_expr_loop(
             if name == *target || name == index {
                 return None;
             }
-            substituted = substitute_inline_int_local(&value_assign.value, &name, let_stmt.value.as_ref()?)?;
+            let mut uses = 0usize;
+            substituted =
+                substitute_inline_int_local(&value_assign.value, &name, let_stmt.value.as_ref()?, &mut uses)?;
+            // An initializer that is never read is never evaluated once spliced,
+            // so a trapping one (`val y = i % 0`) would silently stop trapping.
+            // Decline: the generic path evaluates it exactly once per iteration.
+            if uses == 0 {
+                return None;
+            }
             &substituted
         }
         None => &value_assign.value,
