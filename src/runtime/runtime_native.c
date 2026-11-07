@@ -21673,3 +21673,6 @@ int64_t rt_collection_set(int64_t receiver, int64_t key, int64_t value) {
  * bundle_* ABI that used to live here was removed 2026-10-19. */
 #define SIMPLE_RUNTIME_HOSTED_SAFE_ARTIFACT_OWNER_V1 1
 #include "runtime_hosted_safe_artifact_v1.c"
+
+/* Single hosted owner for read-back workspace storage capabilities. */
+#include "runtime_workspace_storage_v1.c"

@@ -2394,6 +2394,9 @@ void     rt_rank_select_free(int64_t handle);
 
 /* ===== Reserved-Field Cache Helpers ===== */
 
+/* Workspace storage ABI: tagged text, scalar leases, no cleanup side effects. */
+#include "runtime_workspace_storage_v1.h"
+
 /* Forward decl: RtCoreString is defined in runtime_native.c */
 struct RtCoreString;
 void     rt_str_cache_cp_count(struct RtCoreString* s, uint64_t count);

@@ -1,0 +1,163 @@
+/* Hosted native workspace storage capability. Included once by the hosted
+ * runtime owner, or compiled with that owner for the focused native fixture. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+#include "runtime.h"
+#include "runtime_workspace_storage_v1.h"
+#include <errno.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(__linux__)
+#include <pthread.h>
+#include "runtime_workspace_storage_linux_private.h"
+static pthread_mutex_t ws_lock_v1 = PTHREAD_MUTEX_INITIALIZER;
+static int ws_lock_acquire_v1(void) { return pthread_mutex_lock(&ws_lock_v1); }
+static void ws_lock_release_v1(void) { (void)pthread_mutex_unlock(&ws_lock_v1); }
+#elif defined(_WIN32)
+#include "runtime_workspace_storage_windows_private.h"
+static SRWLOCK ws_lock_v1 = SRWLOCK_INIT;
+static int ws_lock_acquire_v1(void) { AcquireSRWLockExclusive(&ws_lock_v1); return 0; }
+static void ws_lock_release_v1(void) { ReleaseSRWLockExclusive(&ws_lock_v1); }
+#else
+typedef struct { int unused; } WsNativeV1;
+static int ws_lock_acquire_v1(void) { return ENOTSUP; }
+static void ws_lock_release_v1(void) {}
+static void ws_native_close_v1(WsNativeV1* n) { (void)n; }
+static int ws_native_open_v1(WsNativeV1* n,const char* k,const char* p,const char* l,
+    const char* pi,const char* wi,uint32_t q,int64_t h,int64_t* u,int64_t* i) {
+    (void)n;(void)k;(void)p;(void)l;(void)pi;(void)wi;(void)q;(void)h;(void)u;(void)i;return ENOTSUP;
+}
+static int ws_native_observe_v1(WsNativeV1* n,const char* l,const char* p,const char* w,
+    int64_t h,int64_t* u,int64_t* i) {(void)n;(void)l;(void)p;(void)w;(void)h;(void)u;(void)i;return ENOTSUP;}
+static int ws_native_release_if_absent_v1(WsNativeV1* n,const char* l,int64_t h,int64_t* u,int64_t* i) {
+    (void)n;(void)l;(void)h;(void)u;(void)i;return ENOTSUP;
+}
+#endif
+
+#define WS_SLOT_COUNT_V1 32
+typedef struct {
+    int64_t token, hard_bytes, used_bytes, used_inodes;
+    uint32_t quota;
+    int released;
+    char kind[64], parent[4096], leaf[128], pool[256], workspace[256], policy[65];
+    WsNativeV1 native;
+} WsSlotV1;
+static WsSlotV1 ws_slots_v1[WS_SLOT_COUNT_V1];
+static int64_t ws_next_token_v1 = 1;
+
+static int ws_copy_text_v1(int64_t value, char* output, size_t capacity) {
+    int64_t count = rt_string_len(value);
+    const uint8_t* bytes = rt_string_data(value);
+    if (!bytes || count <= 0 || (uint64_t)count >= capacity ||
+            memchr(bytes,0,(size_t)count) || memchr(bytes,'\n',(size_t)count) ||
+            memchr(bytes,'\r',(size_t)count) || memchr(bytes,'\t',(size_t)count)) return 0;
+    memcpy(output, bytes, (size_t)count); output[count] = 0; return 1;
+}
+static int ws_digest_v1(const char* value) {
+    if (strlen(value) != 64) return 0;
+    for (size_t i=0;i<64;i++) if (!((value[i]>='0'&&value[i]<='9') ||
+            (value[i]>='a'&&value[i]<='f'))) return 0;
+    return 1;
+}
+static int ws_leaf_v1(const char* value) {
+    if (!strcmp(value,".") || !strcmp(value,"..")) return 0;
+    for (size_t i=0;value[i];i++) {
+        unsigned char c=(unsigned char)value[i];
+        if (!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'||c=='.')) return 0;
+    }
+    return 1;
+}
+static WsSlotV1* ws_find_v1(int64_t token) {
+    if (token <= 0) return NULL;
+    for (size_t i=0;i<WS_SLOT_COUNT_V1;i++) if (ws_slots_v1[i].token==token) return &ws_slots_v1[i];
+    return NULL;
+}
+static int64_t ws_open_or_recover_v1(int64_t kind,int64_t parent,int64_t leaf,
+        int64_t pool,int64_t workspace,int64_t quota,int64_t hard,int64_t policy,int recover) {
+    WsSlotV1 candidate; memset(&candidate,0,sizeof(candidate));
+    if (!ws_copy_text_v1(kind,candidate.kind,sizeof(candidate.kind)) ||
+            !ws_copy_text_v1(parent,candidate.parent,sizeof(candidate.parent)) ||
+            !ws_copy_text_v1(leaf,candidate.leaf,sizeof(candidate.leaf)) ||
+            !ws_copy_text_v1(pool,candidate.pool,sizeof(candidate.pool)) ||
+            !ws_copy_text_v1(workspace,candidate.workspace,sizeof(candidate.workspace)) ||
+            !ws_copy_text_v1(policy,candidate.policy,sizeof(candidate.policy)) ||
+            !ws_leaf_v1(candidate.leaf) || !ws_digest_v1(candidate.policy) ||
+            quota < 0 || (uint64_t)quota > UINT32_MAX || hard <= 0 || hard > INT64_C(1125899906842624)) return -EINVAL;
+    candidate.quota=(uint32_t)quota; candidate.hard_bytes=hard;
+    int lock_error=ws_lock_acquire_v1(); if(lock_error)return -lock_error;
+    size_t slot=WS_SLOT_COUNT_V1;
+    for(size_t i=0;i<WS_SLOT_COUNT_V1;i++) {
+        WsSlotV1* existing=&ws_slots_v1[i];
+        /* One scope may not acquire independent concurrent native leases.
+         * Host replay must reuse its live owner or recover after process exit. */
+        if(existing->token&&(!strcmp(existing->pool,candidate.pool))&&
+                (!strcmp(existing->workspace,candidate.workspace)||existing->quota==candidate.quota)) {
+            if(recover&&!strcmp(existing->kind,candidate.kind)&&!strcmp(existing->parent,candidate.parent)&&
+                    !strcmp(existing->leaf,candidate.leaf)&&!strcmp(existing->workspace,candidate.workspace)&&
+                    !strcmp(existing->policy,candidate.policy)&&existing->quota==candidate.quota&&existing->hard_bytes==hard) {
+                /* Recover retained cleanup authority even when observation is
+                 * currently failing. This is a lease, not a readiness receipt. */
+                if(!existing->released)(void)ws_native_observe_v1(&existing->native,existing->leaf,existing->pool,
+                    existing->workspace,hard,&existing->used_bytes,&existing->used_inodes);
+                int64_t token=existing->token;ws_lock_release_v1();return token;
+            }
+            ws_lock_release_v1();return -EBUSY;
+        }
+        if(!existing->token&&slot==WS_SLOT_COUNT_V1)slot=i;
+    }
+    if(slot==WS_SLOT_COUNT_V1||ws_next_token_v1==INT64_MAX) {ws_lock_release_v1();return -ENOSPC;}
+    int error=ws_native_open_v1(&candidate.native,candidate.kind,candidate.parent,candidate.leaf,
+        candidate.pool,candidate.workspace,candidate.quota,hard,&candidate.used_bytes,&candidate.used_inodes);
+    if(error) {ws_native_close_v1(&candidate.native);ws_lock_release_v1();return -error;}
+    candidate.token=ws_next_token_v1++;ws_slots_v1[slot]=candidate;
+    ws_lock_release_v1();return candidate.token;
+}
+int64_t rt_workspace_storage_open_v1(int64_t kind,int64_t parent,int64_t leaf,
+        int64_t pool,int64_t workspace,int64_t quota,int64_t hard,int64_t policy) {
+    return ws_open_or_recover_v1(kind,parent,leaf,pool,workspace,quota,hard,policy,0);
+}
+int64_t rt_workspace_storage_recover_v1(int64_t kind,int64_t parent,int64_t leaf,
+        int64_t pool,int64_t workspace,int64_t quota,int64_t hard,int64_t policy) {
+    return ws_open_or_recover_v1(kind,parent,leaf,pool,workspace,quota,hard,policy,1);
+}
+int64_t rt_workspace_storage_observe_v1(int64_t token) {
+    char result[1024]; result[0]=0;
+    if(ws_lock_acquire_v1())return rt_string_new((const uint8_t*)"",0);
+    WsSlotV1* slot=ws_find_v1(token);
+    if(slot) {
+        int error=slot->released?0:ws_native_observe_v1(&slot->native,slot->leaf,slot->pool,
+            slot->workspace,slot->hard_bytes,&slot->used_bytes,&slot->used_inodes);
+        if(!error) {
+            int count=snprintf(result,sizeof(result),"workspace-storage-native-v1\n%s\n%s\n%s\n%u\n%lld\n%lld\n%lld\n%s\n%s\n",
+                slot->kind,slot->pool,slot->workspace,slot->quota,(long long)slot->hard_bytes,
+                (long long)slot->used_bytes,(long long)slot->used_inodes,slot->policy,
+                slot->released?"released":"retained");
+            if(count<0||(size_t)count>=sizeof(result))result[0]=0;
+        }
+    }
+    ws_lock_release_v1();return rt_string_new((const uint8_t*)result,strlen(result));
+}
+int64_t rt_workspace_storage_release_if_absent_v1(int64_t token) {
+    int error=ws_lock_acquire_v1();if(error)return -error;
+    WsSlotV1* slot=ws_find_v1(token);
+    if(!slot) {ws_lock_release_v1();return -ESTALE;}
+    if(!slot->released) {
+        error=ws_native_release_if_absent_v1(&slot->native,slot->leaf,slot->hard_bytes,
+            &slot->used_bytes,&slot->used_inodes);
+        if(!error)slot->released=1;
+    }
+    ws_lock_release_v1();return -error;
+}
+int64_t rt_workspace_storage_forget_released_v1(int64_t token) {
+    int error=ws_lock_acquire_v1();if(error)return -error;
+    WsSlotV1* slot=ws_find_v1(token);
+    if(!slot)error=ESTALE;
+    else if(!slot->released)error=EBUSY;
+    else {ws_native_close_v1(&slot->native);memset(slot,0,sizeof(*slot));}
+    ws_lock_release_v1();return -error;
+}
