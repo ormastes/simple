@@ -33,5 +33,20 @@ int main(void) {
     assert(spl_ordered_key_cmp(str("same"), str("same")) == 0);
     assert(spl_ordered_key_cmp(rt_dict_new(8), rt_dict_new(8)) == 2);
     assert(spl_ordered_key_cmp(str("text"), rt_value_int(1)) == 2);
+
+    /* Erased-key hash: equal keys hash equally, text by content (FNV-1a,
+     * = std.hash `impl Hash for text`), integers by value (= Hash for i64). */
+    int64_t hash_a = str("equal text");
+    int64_t hash_b = str("equal text");
+    assert(hash_a != hash_b);
+    assert(spl_erased_key_hash(hash_a) == spl_erased_key_hash(hash_b));
+    assert(spl_erased_key_hash(hash_a) == rt_hash_text(hash_a));
+    assert(spl_erased_key_hash(str("")) == (int64_t)UINT64_C(14695981039346656037));
+    assert(spl_erased_key_hash(str("a")) != spl_erased_key_hash(str("b")));
+    assert(spl_erased_key_hash(rt_value_int(42)) == 42);
+    assert(spl_erased_key_hash(rt_value_int(-5)) == -5);
+    assert(spl_erased_key_hash(17) == spl_erased_key_hash(17)); /* raw word */
+    assert(spl_erased_key_hash(wide_low) == INT64_C(1152921504606846976));
+    assert(spl_erased_key_hash(rt_value_u64(INT64_MAX)) == INT64_MAX);
     return 0;
 }

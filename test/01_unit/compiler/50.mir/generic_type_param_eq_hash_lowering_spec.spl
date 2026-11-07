@@ -1,0 +1,221 @@
+# @req REQ-SSPEC-COMPILER
+# @req REQ-GENERIC-ANNOTATION-FIELD
+# @tag: unit, compiler, mir, generics
+#
+# Erased generic bodies compare and hash `K` values (bootstrap run 15, Stage 2
+# row compiler_cli_build). Two MIR refusals blocked the self-hosted compiler:
+#
+# - `entries[i].key == key` in adaptive_map.spl: the indexed element of a
+#   `[OrderedMapEntry<K, V>]` local loses its instance arguments, so the field
+#   read is noted as a value "of struct K" and `==` died with "operator
+#   overload for struct K". The SAME comparison through `for entry in xs`
+#   already lowered to the tag-aware `rt_native_eq`. Equality against a peer
+#   that is itself an erased type-parameter value now takes that same path.
+#   Arithmetic on such a field, and `==` with no erased peer, stay refused.
+# - `key.hash()` on `K` (map.spl hash_key) had no native lowering at all
+#   ("unresolved method call: hash ... route=runtime-fallback"). It now calls
+#   the representation-aware runtime hash `spl_erased_key_hash`, which hashes
+#   text by content, scalars by value, and traps on any other handle.
+#
+# Each example runs HIR -> 50.mir -> MirToLlvm in-process.
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val MODULE = "gteh_probe"
+
+val PRELUDE = "struct Entry<K, V>:\n" +
+    "    key: K\n" +
+    "    value: V\n" +
+    "\n" +
+    "struct W<T>:\n" +
+    "    v: T\n" +
+    "\n"
+
+# The std.hash trait, as hash.spl declares it, for the where-bound shapes.
+val HASH_TRAIT = "trait Hash:\n" +
+    "    fn hash() -> i64\n" +
+    "\n"
+
+# Methods live in the struct body, the shape of AdaptiveMap and Map.
+val BAG_HEAD = "struct Bag<K, V>:\n" +
+    "    items: [Entry<K, V>]\n" +
+    "    linear: bool\n" +
+    "\n"
+
+struct Shaped:
+    ir: text
+    errors: [text]
+
+fn shape(body: text) -> Shaped:
+    val src = PRELUDE + body
+    val file = "testdata/gteh_probe.spl"
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parse_full_frontend(src, file, MODULE, Logger(level: 0)))
+    var errors: [text] = []
+    for e in hl.errors:
+        errors.push("hir: " + e.message)
+    val m: HirModule = hir
+    var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(m)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        errors.push("mir: " + e.message)
+    val ir = MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir)
+    Shaped(ir: ir, errors: errors)
+
+fn function_body(ir: text, fn_name: text) -> [text]:
+    """Lines of the LLVM function whose `define` names `fn_name`."""
+    var out: [text] = []
+    var inside = false
+    for line in ir.split("\n"):
+        val l: text = line
+        if l.starts_with("define ") and (l.contains("." + fn_name + "(") or l.contains("@" + fn_name + "(")):
+            inside = true
+        if inside:
+            out = out.push(l)
+            if l.len() == 1:
+                inside = false
+    out
+
+fn calls(lines: [text], symbol: text) -> bool:
+    for line in lines:
+        val l: text = line
+        if l.contains("call ") and l.contains("@" + symbol + "("):
+            return true
+    false
+
+fn first_error(s: Shaped) -> text:
+    if s.errors.len() > 0:
+        return s.errors[0]
+    ""
+
+fn refused_as_struct(s: Shaped) -> bool:
+    first_error(s).contains("operator overload for struct")
+
+describe "erased generic `==` on a type-parameter field":
+    it "indexed element of a copied field array compares with rt_native_eq":
+        val s = shape(
+            BAG_HEAD +
+            "    fn zzz_has_copy(key: K) -> bool:\n" +
+            "        var entries = self.items\n" +
+            "        for i in 0..entries.len():\n" +
+            "            if entries[i].key == key:\n" +
+            "                return true\n" +
+            "        false\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_has_copy"), "rt_native_eq")).to_equal(true)
+
+    it "`!=` on the same shape is the negated runtime equality":
+        val s = shape(
+            BAG_HEAD +
+            "    fn zzz_count_other(key: K) -> i64:\n" +
+            "        var entries = self.items\n" +
+            "        var n = 0\n" +
+            "        for i in 0..entries.len():\n" +
+            "            if entries[i].key != key:\n" +
+            "                n = n + 1\n" +
+            "        n\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_count_other"), "rt_native_eq")).to_equal(true)
+
+    it "for-in over a method result with early returns (adaptive_map remove shape)":
+        val s = shape(
+            BAG_HEAD +
+            "    fn snapshot() -> [Entry<K, V>]:\n" +
+            "        if self.linear:\n" +
+            "            return self.items\n" +
+            "        return []\n" +
+            "\n" +
+            "    fn zzz_has_snapshot(key: K) -> bool:\n" +
+            "        for entry in self.snapshot():\n" +
+            "            if entry.key == key:\n" +
+            "                return true\n" +
+            "        false\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_has_snapshot"), "rt_native_eq")).to_equal(true)
+
+    it "direct for-in over the field keeps its runtime equality":
+        val s = shape(
+            BAG_HEAD +
+            "    fn zzz_has_direct(key: K) -> bool:\n" +
+            "        for entry in self.items:\n" +
+            "            if entry.key == key:\n" +
+            "                return true\n" +
+            "        false\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_has_direct"), "rt_native_eq")).to_equal(true)
+
+    it "arithmetic on an unknown-instance field is still refused":
+        val s = shape(
+            "fn zzz_add(r: W) -> i64:\n" +
+            "    r.v + r.v\n")
+        expect(refused_as_struct(s)).to_equal(true)
+
+    it "`==` between two unknown-instance fields with no erased peer is still refused":
+        val s = shape(
+            "fn zzz_same(r: W) -> bool:\n" +
+            "    r.v == r.v\n")
+        expect(refused_as_struct(s)).to_equal(true)
+
+describe "erased generic `.hash()` on a type parameter":
+    it "a bare K receiver calls the runtime erased-key hash":
+        val s = shape(
+            "fn zzz_hash_key<K>(key: K) -> i64:\n" +
+            "    key.hash()\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_hash_key"), "spl_erased_key_hash")).to_equal(true)
+
+    it "a K parameter of a struct method (Map.hash_key shape)":
+        val s = shape(
+            BAG_HEAD +
+            "    fn zzz_hash_key_method(key: K) -> i64:\n" +
+            "        key.hash()\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_hash_key_method"), "spl_erased_key_hash")).to_equal(true)
+
+    it "a K field of an erased instance calls the runtime erased-key hash":
+        val s = shape(
+            BAG_HEAD +
+            "    fn zzz_first_hash() -> i64:\n" +
+            "        for entry in self.items:\n" +
+            "            return entry.key.hash()\n" +
+            "        0\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_first_hash"), "spl_erased_key_hash")).to_equal(true)
+
+    it "a text receiver keeps the text hash":
+        val s = shape(
+            "fn zzz_hash_text(s: text) -> i64:\n" +
+            "    s.hash()\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_hash_text"), "rt_hash_text")).to_equal(true)
+        expect(calls(function_body(s.ir, "zzz_hash_text"), "spl_erased_key_hash")).to_equal(false)
+
+    it "array elements hash through the erased-key hash (std.hash hash_array shape)":
+        val s = shape(
+            HASH_TRAIT +
+            "fn zzz_hash_array<T>(arr: [T]) -> i64 where T: Hash:\n" +
+            "    var h = 7\n" +
+            "    for elem in arr:\n" +
+            "        h = h xor elem.hash()\n" +
+            "    h\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_hash_array"), "spl_erased_key_hash")).to_equal(true)
+
+    it "tuple members hash through the erased-key hash (std.hash hash_tuple2 shape)":
+        val s = shape(
+            HASH_TRAIT +
+            "fn zzz_hash_pair<T1, T2>(t: (T1, T2)) -> i64 where T1: Hash, T2: Hash:\n" +
+            "    t.0.hash() xor t.1.hash()\n")
+        expect(first_error(s)).to_equal("")
+        expect(calls(function_body(s.ir, "zzz_hash_pair"), "spl_erased_key_hash")).to_equal(true)

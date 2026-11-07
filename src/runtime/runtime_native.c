@@ -5692,6 +5692,42 @@ int64_t spl_ordered_key_cmp(int64_t left, int64_t right) {
     return a < b ? -1 : (a > b ? 1 : 0);
 }
 
+/* `.hash()` on an erased generic value (`key.hash()` with `key: K`, e.g.
+ * Map.hash_key). Erased bodies carry no trait dictionary, so 50.mir lowers
+ * the call here. Keys equal under rt_native_eq hash equally:
+ *   - text: FNV-1a over the bytes (= rt_hash_text = std.hash Hash for text)
+ *   - integer words and wide/unsigned boxes: the value (= Hash for i64)
+ *   - registered boxed floats: IEEE bits, with both zeros hashing to 0
+ * Any other registered handle (array, dict, record, enum) has no address-free
+ * hash at this boundary; abort instead of hashing its address. */
+int64_t spl_erased_key_hash(int64_t value) {
+    uintptr_t raw = (uintptr_t)value;
+    uintptr_t candidate = (raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP
+        ? raw & ~RT_VALUE_TAG_MASK : raw;
+    if (candidate >= 4096 &&
+            rt_core_is_registered_immortal_ptr((void*)candidate)) {
+        uint32_t kind = rt_core_registered_object_kind((void*)candidate);
+        if (kind != RT_VALUE_HEAP_STRING && kind != RT_VALUE_HEAP_FLOAT &&
+                kind != RT_VALUE_HEAP_INT && kind != RT_VALUE_HEAP_UINT) {
+            fprintf(stderr, "spl_erased_key_hash: key type has no supported native hash (heap kind %u)\n",
+                (unsigned)kind);
+            abort();
+        }
+    }
+    if (rt_core_as_string(value)) return rt_hash_text(value);
+    RtCoreFloat* boxed_float = rt_core_as_heap_float(value);
+    if (boxed_float) {
+        double d = boxed_float->value;
+        if (d == 0.0) return 0;
+        uint64_t bits;
+        memcpy(&bits, &d, sizeof(bits));
+        return (int64_t)bits;
+    }
+    RtCoreUInt* boxed_uint = rt_core_as_heap_uint(value);
+    if (boxed_uint) return (int64_t)boxed_uint->value;
+    return rt_core_numeric_arg(value);
+}
+
 /* Shared telemetry uses this runtime owner for text, builders, and nil. */
 #include "runtime_collection_capture_impl.h"
 

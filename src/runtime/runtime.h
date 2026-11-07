@@ -914,6 +914,7 @@ int64_t  rt_native_neq(int64_t left, int64_t right);
 int64_t  rt_native_cmp(int64_t left, int64_t right);
 /* OrderedMap key comparison: 2 means unsupported erased key representation. */
 int64_t  spl_ordered_key_cmp(int64_t left, int64_t right);
+int64_t  spl_erased_key_hash(int64_t value);
 int64_t  spl_collection_capture_begin(int64_t target);
 int64_t  spl_collection_capture_note_size(int64_t site, int64_t target, int64_t size);
 int64_t  spl_collection_capture_note_lookup(int64_t site, int64_t target, int64_t found);

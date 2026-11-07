@@ -26,3 +26,26 @@ next step (blocked this session: C: had 2.4 GB free, below the 8 GB probe budget
 
 ## Verification
 Prevention spec green on origin (10/10). Native confirmation pending.
+
+## Additional reproduction (2026-11-07, run-15 Stage 2 on aarch64)
+The bootstrap run-15 Stage 2 binary
+(`/home/yoon/dev/simple-bootstrap/build/bootstrap-opus-15/stage2/aarch64-unknown-linux-gnu/simple`,
+`SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 native-build`) fails the same way on a non-generic
+four-line function, so the shape is not specific to `host_facade`:
+
+```simple
+fn plain_flag(xs: [i64]) -> bool:
+    var found = false
+    for i in 0..xs.len():
+        if xs[i] == 2:
+            found = true
+    found
+```
+
+`E-BACKEND-LLVM-CONST-TYPE: integer constant cannot define void ... function=...plain_flag`.
+Every probe with an else-less assigning `if` inside a loop body hit it (3 of 3); a
+loop-free probe in the same file compiled.
+This supports hypothesis (1): the seed-built Stage 2 miscompiles the lowering of an
+else-less `if` statement. It also blocks native runtime verification of any
+Stage-2-built probe that uses that shape (found while verifying the erased generic
+`==`/`.hash()` lowering for adaptive_map/map/hash).

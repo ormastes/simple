@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 
-use crate::value::collections::{rt_string_data, rt_string_len};
+use crate::value::collections::{rt_hash_text, rt_string_data, rt_string_len};
 use crate::value::core::RuntimeValue;
 use crate::value::heap::{is_registered_heap_ptr, HeapHeader, HeapObjectType};
 use crate::value::tags;
@@ -142,6 +142,46 @@ pub extern "C" fn spl_ordered_key_cmp(left: i64, right: i64) -> i64 {
     )
 }
 
+/// `.hash()` on an erased generic value (`key.hash()` with `key: K`), matching
+/// the core-C `spl_erased_key_hash`. Keys equal under `rt_native_eq` hash
+/// equally: text by FNV-1a content (= `rt_hash_text`), integer words and
+/// wide/unsigned boxes by value, boxed floats by IEEE bits with both zeros
+/// hashing to 0. Any other registered handle has no address-free hash here,
+/// so the process aborts instead of hashing an address.
+#[no_mangle]
+pub extern "C" fn spl_erased_key_hash(value: i64) -> i64 {
+    if let Some(kind) = registered_kind(value) {
+        if !matches!(
+            kind,
+            HeapObjectType::String | HeapObjectType::Float | HeapObjectType::Int | HeapObjectType::UInt
+        ) {
+            eprintln!("spl_erased_key_hash: key type has no supported native hash ({:?})", kind);
+            std::process::abort();
+        }
+    }
+    let v = RuntimeValue::from_raw(value as u64);
+    match v.heap_type() {
+        Some(HeapObjectType::String) => rt_hash_text(v),
+        Some(HeapObjectType::Float) => {
+            let f = v.as_float();
+            if f == 0.0 {
+                0
+            } else {
+                f.to_bits() as i64
+            }
+        }
+        _ => {
+            if let Some(unsigned) = v.as_heap_u64() {
+                unsigned as i64
+            } else if let Some(wide) = v.as_heap_i64() {
+                wide
+            } else {
+                numeric_word(value)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +302,24 @@ mod tests {
         let nan = boxed_float(f64::NAN);
         assert_eq!(spl_ordered_key_cmp(nan, one), 0);
         assert_eq!(spl_ordered_key_cmp(one, nan), 0);
+    }
+
+    #[test]
+    fn erased_key_hash_agrees_with_equality_for_supported_keys() {
+        let left = text(b"equal text");
+        let right = text(b"equal text");
+        assert_ne!(left, right);
+        assert_eq!(spl_erased_key_hash(left), spl_erased_key_hash(right));
+        assert_eq!(spl_erased_key_hash(left), rt_hash_text(RuntimeValue::from_raw(left as u64)));
+        assert_eq!(spl_erased_key_hash(text(b"")), 14695981039346656037u64 as i64);
+        assert_ne!(spl_erased_key_hash(text(b"a")), spl_erased_key_hash(text(b"b")));
+        assert_eq!(spl_erased_key_hash(raw(RuntimeValue::from_int(42))), 42);
+        assert_eq!(spl_erased_key_hash(raw(RuntimeValue::from_int(-5))), -5);
+        assert_eq!(spl_erased_key_hash(raw(RuntimeValue::from_int(i64::MIN))), i64::MIN);
+        assert_eq!(spl_erased_key_hash(17), spl_erased_key_hash(17));
+        assert_eq!(spl_erased_key_hash(raw(RuntimeValue::from_u64(u64::MAX))), -1);
+        assert_eq!(spl_erased_key_hash(boxed_float(-0.0)), 0);
+        assert_eq!(spl_erased_key_hash(boxed_float(0.0)), 0);
+        assert_eq!(spl_erased_key_hash(boxed_float(1.5)), spl_erased_key_hash(boxed_float(1.5)));
     }
 }

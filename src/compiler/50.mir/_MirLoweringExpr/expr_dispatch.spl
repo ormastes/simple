@@ -1902,6 +1902,66 @@ impl MirLowering:
         self.builder = b
         result
 
+    fn hir_type_is_bare_type_param(ty: HirType) -> bool:
+        """`ty` is a bare type parameter in either spelling: `TypeParam`, or
+        `Named` of a symbol declared as a type parameter (a method of an
+        argumentless `impl Bag:` sees its owner's `K` that way)."""
+        match ty.kind:
+            case HirTypeKind.TypeParam(_, _): return true
+            case HirTypeKind.Named(sym, _):
+                if val info = self.symbols.get_symbol_raw(sym.id):
+                    return info.kind == SymbolKind.TypeParam
+                return false
+            case _: return false
+
+    me declared_tuple_member_is_type_param(tuple_base: HirExpr, member_idx: i64) -> bool:
+        """Member `member_idx` of a declared tuple binding is a bare type
+        parameter (`t.0` on `t: (T1, T2)`); false when nothing declares it."""
+        if member_idx < 0:
+            return false
+        if val tuple_declared = self.receiver_declared_type(tuple_base):
+            match tuple_declared.kind:
+                case HirTypeKind.Tuple(tuple_members):
+                    if member_idx < tuple_members.len():
+                        val tuple_member: HirType = tuple_members[member_idx]
+                        return self.hir_type_is_bare_type_param(tuple_member)
+                case _: ()
+        false
+
+    fn local_is_type_param_value(local: LocalId) -> bool:
+        """The local's own HIR type is a bare type parameter (an erased word)."""
+        if val local_hir = self.find_local_hir_type(local.id):
+            return self.hir_type_is_bare_type_param(local_hir)
+        false
+
+    fn local_is_noted_type_param_field(local: LocalId) -> bool:
+        """A type-param field read whose instance nothing records: the Field
+        arm notes the parameter's own name as the value's struct owner."""
+        val note = self.struct_value_syms.get(local.id) ?? ""
+        if note == "":
+            return false
+        if val local_hir = self.find_local_hir_type(local.id):
+            match local_hir.kind:
+                case HirTypeKind.TypeParam(param_name, _):
+                    return note == param_name
+                case HirTypeKind.Named(sym, _):
+                    if val info = self.symbols.get_symbol_raw(sym.id):
+                        return info.kind == SymbolKind.TypeParam and note == info.name
+                    return false
+                case _: return false
+        false
+
+    fn binop_is_erased_type_param_equality(op: HirBinOp, left: LocalId, right: LocalId) -> bool:
+        """`==`/`!=` where both operands are erased type-parameter values and
+        at least one is NOT a noted unknown-instance field read -- i.e. a
+        value of the current erased generic body (a `key: K` parameter)."""
+        match op:
+            case Eq | NotEq: ()
+            case _: return false
+        if not self.local_is_type_param_value(left) or not self.local_is_type_param_value(right):
+            return false
+        not self.local_is_noted_type_param_field(left) or not self.local_is_noted_type_param_field(right)
+
     me emit_text_word_eq(left: LocalId, right: LocalId) -> LocalId:
         """Text content equality (raw or tagged operands), as a Bool local."""
         val eq_func = MirOperand(kind: MirOperandKind.Const(
@@ -5162,6 +5222,25 @@ impl MirLowering:
                     if binop_right_owner != "": binop_right_owner else: binop_right_struct
                 else:
                     ""
+                # Erased generic equality (bootstrap run 15, adaptive_map
+                # `entries[i].key == key`): a type-parameter field read whose
+                # instance nothing records is noted as a value "of struct K"
+                # so arithmetic on it stays refused. `==`/`!=` against a peer
+                # that is an un-noted erased type-parameter value of this body
+                # is the erased contract the for-in spelling already lowers:
+                # tag-aware rt_native_eq. Without such a peer it stays refused.
+                if binop_struct_name != "" and self.binop_is_erased_type_param_equality(op, left_local, right_local):
+                    val erased_eq_local = self.emit_runtime_word_eq(left_local, right_local)
+                    match op:
+                        case NotEq:
+                            var b_erased_ne = self.builder
+                            val erased_false = b_erased_ne.new_temp(MirType.bool())
+                            b_erased_ne.emit_const(erased_false, MirConstValue.Bool(false), MirType.bool())
+                            val erased_ne_local = b_erased_ne.emit_binop(MirBinOp.Eq, mir_operand_copy(erased_eq_local), mir_operand_copy(erased_false), MirType.bool())
+                            self.builder = b_erased_ne
+                            return erased_ne_local
+                        case _:
+                            return erased_eq_local
                 if binop_struct_name != "":
                     var binop_dunder = ""
                     match op:
