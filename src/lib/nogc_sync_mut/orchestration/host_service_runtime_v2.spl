@@ -1,0 +1,259 @@
+# Finite parent-owned bootstrap/turn/stop composition. No process jobs, provider
+# effects, wire stop action, priority latency guarantee or readiness attestation.
+use std.nogc_sync_mut.orchestration.host_service_gateway_v2.*
+use std.nogc_sync_mut.orchestration.host_service_peer_policy_v2.HostServicePeerPolicySnapshotV2
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.{HostServiceRequestV2, host_service_error_payload_v2}
+use std.nogc_sync_mut.daemon_sdk.local_gateway_service_v2.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_v1.{LocalGatewayRequestV1, LocalGatewayResponseV1, LocalGatewayOwnedResponseV1}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenCleanupV2, DistributedOperationJournalCleanupTurnV2}
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct HostServiceRuntimeConfigV2:
+    protected_root: text
+    expected_transport_policy_digest: text
+    client_uid: i64
+    work_path: text
+    control_path: text
+    work_connections: i64
+    control_connections: i64
+    request_timeout_ms: i64
+
+# Data-only identity retained after close; no HostLocalRoot/journal/provider copy.
+pub struct HostServiceRuntimeIdentityV2:
+    peers: HostServicePeerPolicySnapshotV2
+    protected_root: text
+    configured_scope: text
+    actual_scope: text
+    client_uid: i64
+
+pub struct HostServiceRuntimeCleanupStatusV2:
+    identity: HostServiceRuntimeIdentityV2
+    state: FileLockReleaseStateV2
+    closed: bool
+    retained: bool
+    error: text
+
+pub enum HostServiceRuntimeDomainV2:
+    Live(HostServiceGatewayV2)
+    CleanupOnly(HostServiceRuntimeCleanupStatusV2)
+    Closed(HostServiceRuntimeIdentityV2)
+
+# There is exactly one actual domain location. No SDK owner is fabricated for
+# selected-client failure before listen; no stale domain survives writer close.
+pub enum HostServiceRuntimePortV2:
+    DomainOnly(HostServiceGatewayV2)
+    Transport(LocalGatewayServiceV2<HostServiceRuntimeDomainV2>)
+    NoTransport(HostServiceRuntimeIdentityV2)
+
+pub enum HostServiceRuntimePhaseV2:
+    Live
+    OpenBlocked
+    JournalCleanup
+    TransportCleanup
+    Closed
+
+pub struct HostServiceRuntimeV2:
+    port: HostServiceRuntimePortV2
+    phase: HostServiceRuntimePhaseV2
+    journal_cleanup: Option<DistributedOperationJournalCleanupTurnV2>
+    error: text
+
+pub enum HostServiceRuntimeOpenV2:
+    Ready(HostServiceRuntimeV2)
+    OwnedFailure(HostServiceRuntimeV2, text)
+    Rejected(text)
+    OpenCleanupRequired(DistributedOperationJournalOpenCleanupV2, text)
+    CloseCleanupRequired(DistributedOperationJournalCleanupTurnV2, text)
+
+pub struct HostServiceRuntimeTurnV2:
+    runtime: HostServiceRuntimeV2
+    handled_control: i64
+    handled_work: i64
+    closed: bool
+    error: text
+
+fn runtime_identity_v2(gateway: HostServiceGatewayV2, client_uid: i64) -> HostServiceRuntimeIdentityV2:
+    HostServiceRuntimeIdentityV2(gateway.peers, gateway.domain.local.root,
+        gateway.domain.local.config.service_scope_id, gateway.domain.local.scope.service_scope_id, client_uid)
+
+fn runtime_selected_error_v2(gateway: HostServiceGatewayV2, client_uid: i64) -> text:
+    if client_uid == gateway.peers.service_uid: return "host-runtime-service-client-uid-equal"
+    var count = 0
+    for rule in gateway.peers.policy.rules:
+        if rule.peer_uid == client_uid:
+            count = count + 1
+            if not rule.actions.contains("host-status"): return "host-runtime-client-status-required"
+    if count != 1: return "host-runtime-client-uid-not-unique-mapped"
+    ""
+
+pub fn host_service_runtime_open_v2(config: HostServiceRuntimeConfigV2) -> HostServiceRuntimeOpenV2:
+    val gateway = match host_service_gateway_open_v2(config.protected_root, config.expected_transport_policy_digest):
+        case HostServiceGatewayOpenV2.Rejected(reason): return HostServiceRuntimeOpenV2.Rejected(reason)
+        case HostServiceGatewayOpenV2.OpenCleanupRequired(cleanup, reason): return HostServiceRuntimeOpenV2.OpenCleanupRequired(cleanup, reason)
+        case HostServiceGatewayOpenV2.CloseCleanupRequired(turn, reason): return HostServiceRuntimeOpenV2.CloseCleanupRequired(turn, reason)
+        case HostServiceGatewayOpenV2.Ready(value): value
+    var runtime = HostServiceRuntimeV2(HostServiceRuntimePortV2.DomainOnly(gateway), HostServiceRuntimePhaseV2.OpenBlocked, nil, "")
+    val selected = runtime_selected_error_v2(gateway, config.client_uid)
+    if selected != "":
+        runtime.error = selected
+        return HostServiceRuntimeOpenV2.OwnedFailure(runtime, selected)
+    val transport_config = LocalGatewayServiceConfigV2(work_path: config.work_path, control_path: config.control_path,
+        service_uid: gateway.peers.service_uid, client_uid: config.client_uid,
+        work_connections: config.work_connections, control_connections: config.control_connections,
+        request_timeout_ms: config.request_timeout_ms)
+    val service = local_gateway_service_open_v2<HostServiceRuntimeDomainV2>(HostServiceRuntimeDomainV2.Live(gateway), transport_config)
+    runtime.port = HostServiceRuntimePortV2.Transport(service)
+    if service.phase != 1 or service.error != "":
+        runtime.error = if service.error == "": "host-runtime-transport-open-blocked" else: service.error
+        return HostServiceRuntimeOpenV2.OwnedFailure(runtime, runtime.error)
+    runtime.phase = HostServiceRuntimePhaseV2.Live
+    HostServiceRuntimeOpenV2.Ready(runtime)
+
+fn runtime_cleanup_peer_v2(status: HostServiceRuntimeCleanupStatusV2, incoming: LocalGatewayRequestV1) -> Result<bool, text>:
+    val identity = status.identity
+    val peer = host_service_gateway_map_peer_v2(identity.peers, identity.protected_root,
+        identity.configured_scope, identity.actual_scope, incoming)?
+    if incoming.peer_uid != identity.client_uid: return Err("host-runtime-selected-client-required")
+    if incoming.action != "host-status": return Err("host-runtime-cleanup-only")
+    Ok(true)
+
+pub fn host_service_runtime_classify_v2(owner: HostServiceRuntimeDomainV2,
+        incoming: LocalGatewayRequestV1) -> Result<LocalGatewayDispatchClassV2, text>:
+    match owner:
+        case HostServiceRuntimeDomainV2.Live(gateway):
+            match host_service_gateway_classify_v2(gateway, incoming)?:
+                case HostServiceDispatchClassV2.ControlRead: Ok(LocalGatewayDispatchClassV2.ControlRead)
+                case HostServiceDispatchClassV2.Work: Ok(LocalGatewayDispatchClassV2.Work)
+        case HostServiceRuntimeDomainV2.CleanupOnly(status):
+            val mapped = runtime_cleanup_peer_v2(status, incoming)?
+            Ok(LocalGatewayDispatchClassV2.ControlRead)
+        case HostServiceRuntimeDomainV2.Closed(_): Err("host-runtime-closed")
+
+fn runtime_release_state_v2(state: FileLockReleaseStateV2) -> text:
+    match state:
+        case FileLockReleaseStateV2.Released: "released"
+        case FileLockReleaseStateV2.Retained: "retained"
+        case FileLockReleaseStateV2.Unknown: "unknown"
+        case FileLockReleaseStateV2.ConsumedError: "consumed-error"
+        case FileLockReleaseStateV2.Stale: "stale"
+
+pub fn host_service_runtime_callback_v2(owner: HostServiceRuntimeDomainV2,
+        incoming: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<HostServiceRuntimeDomainV2>:
+    match owner:
+        case HostServiceRuntimeDomainV2.Live(gateway):
+            val turn = host_service_gateway_callback_v2(gateway, incoming)
+            LocalGatewayOwnedResponseV1(HostServiceRuntimeDomainV2.Live(turn.owner), turn.response)
+        case HostServiceRuntimeDomainV2.CleanupOnly(status):
+            val mapped = runtime_cleanup_peer_v2(status, incoming)
+            if mapped.is_err():
+                val request = HostServiceRequestV2(incoming.action, incoming.operation_id, incoming.payload)
+                return LocalGatewayOwnedResponseV1(owner, LocalGatewayResponseV1(incoming.request_id, 1,
+                    host_service_error_payload_v2(request, mapped.unwrap_err(), true)))
+            val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-runtime-cleanup-status"),
+                "phase": SdnValue.String("journal-cleanup"), "cleanupState": SdnValue.String(runtime_release_state_v2(status.state)),
+                "closed": SdnValue.Bool(status.closed), "cleanupRetained": SdnValue.Bool(status.retained),
+                "recoveryRequired": SdnValue.Bool(true), "error": SdnValue.String(status.error)}
+            LocalGatewayOwnedResponseV1(owner, LocalGatewayResponseV1(incoming.request_id, 2, sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
+        case HostServiceRuntimeDomainV2.Closed(_):
+            val request = HostServiceRequestV2(incoming.action, incoming.operation_id, incoming.payload)
+            LocalGatewayOwnedResponseV1(owner, LocalGatewayResponseV1(incoming.request_id, 2,
+                host_service_error_payload_v2(request, "host-runtime-closed", true)))
+
+pub fn host_service_runtime_turn_v2(runtime: HostServiceRuntimeV2) -> HostServiceRuntimeTurnV2:
+    var current = runtime
+    if current.phase != HostServiceRuntimePhaseV2.Live and current.phase != HostServiceRuntimePhaseV2.JournalCleanup:
+        return HostServiceRuntimeTurnV2(current, 0, 0, current.phase == HostServiceRuntimePhaseV2.Closed, current.error)
+    match current.port:
+        case HostServiceRuntimePortV2.Transport(service):
+            # Partial phase4 transport is local-cleanup-only, never relabeled1.
+            if service.phase != 1: return HostServiceRuntimeTurnV2(current, 0, 0, false, current.error)
+            val turn = local_gateway_service_turn_v2<HostServiceRuntimeDomainV2>(service,
+                host_service_runtime_classify_v2, host_service_runtime_callback_v2)
+            current.port = HostServiceRuntimePortV2.Transport(turn.service)
+            HostServiceRuntimeTurnV2(current, turn.handled_control, turn.handled_work, false, turn.error)
+        case _: HostServiceRuntimeTurnV2(current, 0, 0, false, current.error)
+
+fn runtime_release_ok_v2(turn: DistributedOperationJournalCleanupTurnV2) -> bool:
+    turn.state == FileLockReleaseStateV2.Released and turn.closed and turn.cleanup.is_none() and turn.error == ""
+
+fn runtime_close_error_v2(turn: DistributedOperationJournalCleanupTurnV2) -> text:
+    if turn.error != "": turn.error
+    else: "host-runtime-journal-release-unconfirmed:" + runtime_release_state_v2(turn.state)
+
+fn runtime_finish_transport_v2(runtime: HostServiceRuntimeV2) -> HostServiceRuntimeTurnV2:
+    var current = runtime
+    current.phase = HostServiceRuntimePhaseV2.TransportCleanup
+    match current.port:
+        case HostServiceRuntimePortV2.Transport(service):
+            val stopped = local_gateway_service_stop_v2<HostServiceRuntimeDomainV2>(service)
+            current.port = HostServiceRuntimePortV2.Transport(stopped.service)
+            if stopped.service.phase == 3: current.phase = HostServiceRuntimePhaseV2.Closed
+            val error = if stopped.error != "": stopped.error else: current.error
+            current.error = error
+            return HostServiceRuntimeTurnV2(current, 0, 0, current.phase == HostServiceRuntimePhaseV2.Closed, error)
+        case HostServiceRuntimePortV2.NoTransport(_):
+            current.phase = HostServiceRuntimePhaseV2.Closed
+            HostServiceRuntimeTurnV2(current, 0, 0, true, current.error)
+        case HostServiceRuntimePortV2.DomainOnly(_):
+            HostServiceRuntimeTurnV2(current, 0, 0, false, "host-runtime-domain-release-required")
+
+fn runtime_accept_close_v2(runtime: HostServiceRuntimeV2, identity: HostServiceRuntimeIdentityV2,
+        closed: DistributedOperationJournalCleanupTurnV2) -> HostServiceRuntimeTurnV2:
+    var current = runtime
+    # Preserve canonical outcome before changing callback owner or stopping any
+    # listener. Cleanup callback state contains only copied data, not the WAL.
+    current.journal_cleanup = Some(closed)
+    val status = HostServiceRuntimeCleanupStatusV2(identity, closed.state, closed.closed, closed.cleanup.is_some(), closed.error)
+    match current.port:
+        case HostServiceRuntimePortV2.Transport(service):
+            var retained = service
+            retained.owner = if runtime_release_ok_v2(closed): HostServiceRuntimeDomainV2.Closed(identity)
+                else: HostServiceRuntimeDomainV2.CleanupOnly(status)
+            current.port = HostServiceRuntimePortV2.Transport(retained)
+        case _: current.port = HostServiceRuntimePortV2.NoTransport(identity)
+    if not runtime_release_ok_v2(closed):
+        current.phase = HostServiceRuntimePhaseV2.JournalCleanup
+        return HostServiceRuntimeTurnV2(current, 0, 0, false, runtime_close_error_v2(closed))
+    runtime_finish_transport_v2(current)
+
+# Trusted local administrative call only. There is deliberately no wire stop.
+pub fn host_service_runtime_stop_v2(runtime: HostServiceRuntimeV2) -> HostServiceRuntimeTurnV2:
+    if runtime.phase == HostServiceRuntimePhaseV2.Closed:
+        return HostServiceRuntimeTurnV2(runtime, 0, 0, true, runtime.error)
+    if runtime.phase == HostServiceRuntimePhaseV2.JournalCleanup:
+        return HostServiceRuntimeTurnV2(runtime, 0, 0, false, "host-runtime-exact-cleanup-retry-required")
+    if runtime.phase == HostServiceRuntimePhaseV2.TransportCleanup: return runtime_finish_transport_v2(runtime)
+    match runtime.port:
+        case HostServiceRuntimePortV2.DomainOnly(gateway):
+            val identity = runtime_identity_v2(gateway, -1)
+            val closed = host_service_gateway_close_v2(gateway)
+            runtime_accept_close_v2(runtime, identity, closed)
+        case HostServiceRuntimePortV2.Transport(service):
+            match service.owner:
+                case HostServiceRuntimeDomainV2.Live(gateway):
+                    val identity = runtime_identity_v2(gateway, service.config.client_uid)
+                    val closed = host_service_gateway_close_v2(gateway)
+                    runtime_accept_close_v2(runtime, identity, closed)
+                case _: HostServiceRuntimeTurnV2(runtime, 0, 0, false, "host-runtime-close-owner-state")
+        case _: HostServiceRuntimeTurnV2(runtime, 0, 0, false, "host-runtime-close-owner-state")
+
+pub fn host_service_runtime_retry_cleanup_v2(runtime: HostServiceRuntimeV2) -> HostServiceRuntimeTurnV2:
+    if runtime.phase != HostServiceRuntimePhaseV2.JournalCleanup or runtime.journal_cleanup.is_none():
+        return HostServiceRuntimeTurnV2(runtime, 0, 0, false, "host-runtime-no-pending-journal-cleanup")
+    val pending = runtime.journal_cleanup.unwrap()
+    if pending.state != FileLockReleaseStateV2.Retained or pending.cleanup.is_none():
+        return HostServiceRuntimeTurnV2(runtime, 0, 0, false, runtime_close_error_v2(pending))
+    val identity = match runtime.port:
+        case HostServiceRuntimePortV2.NoTransport(value): value
+        case HostServiceRuntimePortV2.Transport(service):
+            match service.owner:
+                case HostServiceRuntimeDomainV2.CleanupOnly(status): status.identity
+                case _: return HostServiceRuntimeTurnV2(runtime, 0, 0, false, "host-runtime-cleanup-owner-state")
+        case _: return HostServiceRuntimeTurnV2(runtime, 0, 0, false, "host-runtime-cleanup-owner-state")
+    val retried = host_service_gateway_open_cleanup_v2(pending.cleanup.unwrap())
+    runtime_accept_close_v2(runtime, identity, retried)
+
+pub fn host_service_runtime_retry_open_cleanup_v2(cleanup: DistributedOperationJournalOpenCleanupV2) -> DistributedOperationJournalCleanupTurnV2:
+    host_service_gateway_open_cleanup_v2(cleanup)
