@@ -74,3 +74,14 @@ worker-side growth (a no-GC-runtime eviction cannot reclaim; see
 mir_shard_commit_blowup_full_closure_2026-11-05.md) is unchanged — the knob
 admits lanes whose measured need genuinely fits (warm cache), it does not
 make an 18 GiB worker fit a small host.
+
+## Note (2026-11-07, Phase 2 Lane 1)
+
+fix-implemented-verification-pending: `shard_tree_headroom_kib_for_v1` now falls back to the host-scaled
+`build_memory_reserve_default_kib_v1(total_kib)` (min(24 GiB, RAM/2)) instead of the flat 24 GiB, so a 32 GiB
+host with ~28 GiB free admits 1 HIR worker (was 0). Seed-verified:
+`test/01_unit/app/cli/shard_headroom_host_scaled_spec.spl` (RED 1/7 -> GREEN 7/7). Real proof needs a Windows
+32 GiB Stage 2 run: `[hir-shard] tree budget clamped ... headroom 16777216 kB` and >1 worker in the next sanctioned bootstrap.
+Not changed: per-worker estimates already equal measured peaks (parse 3.8 GB, HIR/MIR 9 GB, observed-peak raising exists);
+MIR estimate scaling by closure size (17.7 GB at 3,004 modules) is not wired -- shard counts, not module counts, reach run_ledger_shards.
+The Windows SIMPLE_PARSE_SHARD_MAX=1 pin is untouched (owner policy).
