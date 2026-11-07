@@ -1,0 +1,74 @@
+# Versioned storage value for an immutable execution request. This codec does
+# not authorize effects or replace the provider's writer/transition owner.
+use std.common.contracts.container.runtime_v1.RuntimeIntentV1
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, reject, parse_resource_document, as_dict, as_text, as_int, only_known, require}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub struct RuntimeBoundIntentV2:
+    identity: RuntimeIntentV1
+    request_digest: text
+
+fn intent_token_v2(value: text) -> bool:
+    if value == "" or value.len() > 256: return false
+    val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    var index = 0
+    while index < value.len():
+        if not allowed.contains(value.substring(index, index + 1)): return false
+        index = index + 1
+    true
+
+pub fn runtime_bound_intent_encode_v2(bound: RuntimeBoundIntentV2) -> Result<text, text>:
+    val row = bound.identity
+    if not intent_token_v2(row.pod_uid) or not intent_token_v2(row.operation_id) or
+            not intent_token_v2(row.node_boot_id): return Err("intent-identity-invalid")
+    if row.attempt <= 0 or row.provider_generation <= 0: return Err("intent-generation-invalid")
+    if row.engine != "podman" and row.engine != "docker": return Err("intent-engine-unsupported")
+    if row.native_id != "" and not intent_token_v2(row.native_id): return Err("intent-native-id-invalid")
+    if not ["prepared", "created", "running", "exited", "stopped", "destroyed", "unknown"].contains(row.phase):
+        return Err("intent-phase-invalid")
+    if not builder_digest_valid_v1(bound.request_digest): return Err("intent-request-digest-invalid")
+    Ok("version: 2\npodUid: \"{row.pod_uid}\"\nattempt: {row.attempt}\nproviderGeneration: {row.provider_generation}\noperationId: \"{row.operation_id}\"\nengine: \"{row.engine}\"\nnativeId: \"{row.native_id}\"\nnodeBootId: \"{row.node_boot_id}\"\nphase: \"{row.phase}\"\nrequestDigest: \"{bound.request_digest}\"\n")
+
+fn intent_text_v2(fields: Dict<text, SdnValue>, key: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    as_text(require(fields, key, "", spans)?, key, spans)
+
+fn intent_integer_v2(fields: Dict<text, SdnValue>, key: text, spans: Dict<text, SdnSpan>) -> Result<i64, RejectionV1>:
+    as_int(require(fields, key, "", spans)?, key, spans)
+
+fn intent_fields_v2(source: text) -> Result<RuntimeBoundIntentV2, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    val spans = parsed.1
+    val fields = as_dict(parsed.0, "", spans)?
+    only_known(fields, ["version", "podUid", "attempt", "providerGeneration", "operationId", "engine", "nativeId", "nodeBootId", "phase", "requestDigest"], "", spans)?
+    val version = intent_integer_v2(fields, "version", spans)?
+    if version != 2: return Err(reject("version", "version", "unsupported intent version", spans))
+    val generation = intent_integer_v2(fields, "providerGeneration", spans)?
+    val row = RuntimeIntentV1(pod_uid: intent_text_v2(fields, "podUid", spans)?,
+        attempt: intent_integer_v2(fields, "attempt", spans)?,
+        provider_generation: generation,
+        operation_id: intent_text_v2(fields, "operationId", spans)?,
+        engine: intent_text_v2(fields, "engine", spans)?,
+        native_id: intent_text_v2(fields, "nativeId", spans)?,
+        node_boot_id: intent_text_v2(fields, "nodeBootId", spans)?,
+        phase: intent_text_v2(fields, "phase", spans)?)
+    Ok(RuntimeBoundIntentV2(identity: row, request_digest: intent_text_v2(fields, "requestDigest", spans)?))
+
+pub fn runtime_bound_intent_decode_v2(source: text) -> Result<RuntimeBoundIntentV2, text>:
+    if source.len() > 8192: return Err("intent-record-too-large")
+    if source.starts_with("runtime-intent-v1|"): return Err("intent-legacy-unbound")
+    val bound = match intent_fields_v2(source):
+        case Ok(value): value
+        case Err(reason): return Err("intent-record-invalid:" + reason.kind + ":" + reason.path)
+    val canonical = runtime_bound_intent_encode_v2(bound)?
+    if canonical != source: return Err("intent-record-not-canonical")
+    Ok(bound)
+
+pub fn runtime_bound_intent_match_v2(bound: RuntimeBoundIntentV2,
+        request_digest: text, operation_id: text) -> Result<bool, text>:
+    val checked = runtime_bound_intent_encode_v2(bound)?
+    if not builder_digest_valid_v1(request_digest): return Err("intent-request-digest-invalid")
+    if bound.request_digest != request_digest: return Err("intent-request-mismatch")
+    if operation_id != "" and operation_id != bound.identity.operation_id:
+        return Err("intent-operation-id-mismatch")
+    Ok(true)
