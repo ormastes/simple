@@ -14,6 +14,13 @@
 #include <fcntl.h>
 #include <assert.h>
 static int fail_consumed_close_once=0;
+static int fail_namespace_stat_once=0;
+static int credential_test_stat(const char *path,struct stat *out) {
+    if (fail_namespace_stat_once && !strcmp(path,"/proc/self/ns/pid")) {
+        fail_namespace_stat_once=0; errno=EIO; return -1;
+    }
+    return stat(path,out);
+}
 static int credential_test_close(int fd) {
     int result=close(fd);
     if (fail_consumed_close_once && result==0) {
@@ -22,9 +29,11 @@ static int credential_test_close(int fd) {
     return result;
 }
 #define close credential_test_close
+#define stat(path,out) credential_test_stat(path,out)
 #define SIMPLE_RETAINED_PRIVATE_CREDENTIAL_IMPLEMENTATION
 #include "../../../src/runtime/runtime_retained_private_credential_v1.h"
 #undef close
+#undef stat
 
 static const char initial[]="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n";
 static const char incarnation[]="cccccccccccccccccccccccccccccccc";
@@ -53,6 +62,51 @@ int main(int argc,char **argv) {
     (void)argc;(void)argv; fprintf(stderr,"precondition: actual Linux owner required\n"); return 1;
 #else
     alarm(20);
+    if (argc==3 && !strcmp(argv[1],"--origin-mismatch-contract")) {
+        int64_t token=acquire(argv[2]); assert(token>0);
+        assert(rt_retained_private_credential_state_v1(token)==RPC_OPEN);
+        /* Isolated single-threaded test-only snapshot injection. PID remains
+         * actual/current, so rejection specifically depends on namespace inode.
+         * This is NOT namespace creation or namespace-transition evidence.
+         * No production setter/reset hook exists; this exec process exits. */
+        assert(simple_private_credentials_origin_pid_v1==getpid());
+        simple_private_credentials_origin_inode_v1^=(ino_t)1;
+        assert(pthread_mutex_lock(&simple_private_credentials_lock_v1)==0);
+        assert(rt_retained_private_credential_state_v1(token)==RPC_FORK);
+        simple_private_credentials_origin_inode_v1^=(ino_t)1;
+        assert(rt_retained_private_credential_close_v1(token)==RPC_STATE);
+        assert(atomic_load_explicit(&simple_private_credentials_origin_phase_v1,memory_order_acquire)==3);
+        assert(pthread_mutex_unlock(&simple_private_credentials_lock_v1)==0);
+        return 0;
+    }
+    if (argc==3 && !strcmp(argv[1],"--origin-stat-contract")) {
+        int64_t token=acquire(argv[2]); assert(token>0);
+        assert(rt_retained_private_credential_state_v1(token)==RPC_OPEN);
+        assert(pthread_mutex_lock(&simple_private_credentials_lock_v1)==0);
+        /* Only this namespace stat call fails; subsequent calls use real stat.
+         * Restored availability must not re-admit the quarantined registry. */
+        fail_namespace_stat_once=1;
+        assert(rt_retained_private_credential_state_v1(token)==RPC_IO);
+        assert(fail_namespace_stat_once==0);
+        struct stat actual; assert(stat("/proc/self/ns/pid",&actual)==0);
+        assert(rt_retained_private_credential_state_v1(token)==RPC_STATE);
+        assert(rt_retained_private_credential_close_v1(token)==RPC_STATE);
+        assert(atomic_load_explicit(&simple_private_credentials_origin_phase_v1,memory_order_acquire)==3);
+        assert(pthread_mutex_unlock(&simple_private_credentials_lock_v1)==0);
+        return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"--origin-initializing-contract")) {
+        /* Test-only inherited/interrupted publication shape, never reset. */
+        atomic_store_explicit(&simple_private_credentials_origin_phase_v1,1,memory_order_release);
+        assert(pthread_mutex_lock(&simple_private_credentials_lock_v1)==0);
+        assert(rt_retained_private_credential_state_v1(1)==RPC_STATE);
+        pid_t inherited=fork(); assert(inherited>=0);
+        if (!inherited) _exit(rt_retained_private_credential_state_v1(1)==RPC_STATE?0:1);
+        int inherited_status=0;
+        assert(waitpid(inherited,&inherited_status,0)==inherited && WIFEXITED(inherited_status) && WEXITSTATUS(inherited_status)==0);
+        assert(pthread_mutex_unlock(&simple_private_credentials_lock_v1)==0);
+        return 0;
+    }
     if (argc==3 && !strcmp(argv[1],"--race")) {
         char ready[512]; ready_bytes(ready,sizeof(ready),getpid());
         int64_t token=acquire(argv[2]); assert(token>0);
@@ -76,9 +130,22 @@ int main(int argc,char **argv) {
     int64_t successor=acquire(path); assert(successor>first);
     assert(rt_retained_private_credential_close_v1(copied)==RPC_STALE);
     uint8_t readback[512]; assert(rt_retained_private_credential_read_v1(successor,ptr(readback),512)==(int64_t)strlen(initial));
+    /* A misplaced origin guard would deadlock on this inherited held mutex. */
+    assert(pthread_mutex_lock(&simple_private_credentials_lock_v1)==0);
     pid_t child=fork(); assert(child>=0);
     if (!child) _exit(rt_retained_private_credential_close_v1(successor)==RPC_FORK?0:1);
     int status=0; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==0);
+    assert(pthread_mutex_unlock(&simple_private_credentials_lock_v1)==0);
+    const char *origin_modes[]={"--origin-mismatch-contract","--origin-initializing-contract","--origin-stat-contract"};
+    for (int i=0;i<3;i++) {
+        child=fork(); assert(child>=0);
+        if (!child) {
+            if (i!=1) execl(argv[0],argv[0],origin_modes[i],path,(char *)NULL);
+            else execl(argv[0],argv[0],origin_modes[i],(char *)NULL);
+            _exit(99);
+        }
+        assert(waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==0);
+    }
     assert(publish(successor,ready)==0); assert(publish(successor,ready)==RPC_STATE);
     assert(rt_retained_private_credential_close_v1(successor)==0); same_file(path,initial); same_file(ready_path,ready);
     int64_t conflict=acquire(path); assert(conflict>0 && publish(conflict,ready)==RPC_CONFLICT);
@@ -125,8 +192,10 @@ int main(int argc,char **argv) {
         puts("unprivileged subset PASS");
         puts("foreign-UID BLOCKED: requires isolated privileged fixture");
     } else {
-        puts("privileged full fixture PASS: includes actual foreign-UID rejection");
+        puts("privileged credential cases PASS: includes actual foreign-UID rejection");
     }
+    puts("origin publication/mismatch/quarantine contract PASS: isolated fault injection only");
+    puts("actual PID-namespace transition BLOCKED: no authorized namespace fixture");
     return 0;
 #endif
 }

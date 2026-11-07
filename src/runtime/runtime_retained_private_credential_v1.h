@@ -39,13 +39,52 @@ typedef struct {
 } SimplePrivateCredentialV1;
 static SimplePrivateCredentialV1 simple_private_credentials_v1[32];
 static pthread_mutex_t simple_private_credentials_lock_v1=PTHREAD_MUTEX_INITIALIZER;
-static atomic_int_fast64_t simple_private_credentials_pid_v1=0;
+/* Publication must not inherit a hidden atomic-library mutex after fork. */
+_Static_assert(ATOMIC_INT_LOCK_FREE==2,"private credential origin phase must be lock-free");
+static atomic_int simple_private_credentials_origin_phase_v1=0;
+static pid_t simple_private_credentials_origin_pid_v1;
+static dev_t simple_private_credentials_origin_device_v1;
+static ino_t simple_private_credentials_origin_inode_v1;
 static int64_t simple_private_credentials_next_v1=1;
 static int rpc_lock_v1(void) {
-    int_fast64_t expected=0, actual=(int_fast64_t)getpid();
-    atomic_compare_exchange_strong(&simple_private_credentials_pid_v1,&expected,actual);
-    if (atomic_load(&simple_private_credentials_pid_v1)!=actual) return RPC_FORK;
-    return pthread_mutex_lock(&simple_private_credentials_lock_v1)==0 ? 0 : RPC_IO;
+    int phase=atomic_load_explicit(&simple_private_credentials_origin_phase_v1,memory_order_acquire);
+    if (phase==0) {
+        int expected=0;
+        if (atomic_compare_exchange_strong_explicit(&simple_private_credentials_origin_phase_v1,
+                &expected,1,memory_order_acq_rel,memory_order_acquire)) {
+            struct stat origin;
+            /* Failure leaves Initializing permanently: never reset/adopt. */
+            if (stat("/proc/self/ns/pid",&origin)!=0) return RPC_IO;
+            simple_private_credentials_origin_pid_v1=getpid();
+            simple_private_credentials_origin_device_v1=origin.st_dev;
+            simple_private_credentials_origin_inode_v1=origin.st_ino;
+            atomic_store_explicit(&simple_private_credentials_origin_phase_v1,2,memory_order_release);
+            phase=2;
+        } else phase=expected;
+    }
+    /* Transient initialization, including an inherited Initializing snapshot,
+     * refuses without spinning, touching registry state or locking a mutex. */
+    if (phase!=2) return RPC_STATE;
+    struct stat current;
+    if (stat("/proc/self/ns/pid",&current)!=0) {
+        atomic_store_explicit(&simple_private_credentials_origin_phase_v1,3,memory_order_release);
+        return RPC_IO;
+    }
+    if (getpid()!=simple_private_credentials_origin_pid_v1 ||
+        current.st_dev!=simple_private_credentials_origin_device_v1 ||
+        current.st_ino!=simple_private_credentials_origin_inode_v1) {
+        atomic_store_explicit(&simple_private_credentials_origin_phase_v1,3,memory_order_release);
+        return RPC_FORK;
+    }
+    if (atomic_load_explicit(&simple_private_credentials_origin_phase_v1,memory_order_acquire)!=2) return RPC_STATE;
+    if (pthread_mutex_lock(&simple_private_credentials_lock_v1)!=0) return RPC_IO;
+    if (atomic_load_explicit(&simple_private_credentials_origin_phase_v1,memory_order_acquire)!=2) {
+        /* This invocation acquired the mutex: use only its ordinary matched
+         * unlock, with no new origin syscall/recheck, before refusing access. */
+        pthread_mutex_unlock(&simple_private_credentials_lock_v1);
+        return RPC_STATE;
+    }
+    return 0;
 }
 static SimplePrivateCredentialV1 *rpc_find_v1(int64_t token) {
     if (token<=0) return NULL;

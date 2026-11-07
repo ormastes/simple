@@ -1,5 +1,30 @@
 # Retained private credential V1
 
+Established Ready origin stat failure or observed mismatch permanently stores
+phase 3 Quarantined. Restoring stat availability or the prior origin values
+never re-admits this process-local registry. Initial acquisition failure keeps
+phase 1 Initializing instead. Entry checks quarantine before locking and again
+after acquiring the mutex, before any owner access. A post-acquisition refusal
+uses only that same invocation's ordinary matched unlock; no extra origin
+syscall/recheck is added to normal unlock. The operation boundary is public
+entry/lock acquisition, not continuous origin polling inside an admitted call.
+
+Origin identity is the actual getpid plus device/inode from
+`stat("/proc/self/ns/pid")`, checked before any registry/mutex access. A
+compile-time assertion requires lock-free `atomic_int`. The sole CAS winner
+publishes Uninitialized→Initializing, writes immutable PID/device/inode, then
+release-publishes Ready. Acquire readers refuse Initializing without spinning
+or reading partial fields. Namespace stat failure refuses with IO error;
+observed origin mismatch refuses as fork-token. Failed/interrupted initialization
+is never reset or adopted. This blocks equal numeric PIDs across PID namespaces,
+including inherited PID 1, instead of relying on PID alone.
+
+Source prevention includes isolated exec-only injected namespace-inode mismatch
+and Initializing-shape assertions. These are labeled contract tests and do not
+claim actual namespace creation/transition. Actual namespace qualification is
+**BLOCKED** pending a separately authorized fixture; no privilege is requested
+or used for namespace operations here.
+
 Native prevention qualification has two explicit scopes. Default/`--privileged`
 requires an isolated UID-0 fixture to check an actual foreign-UID file.
 `--unprivileged` retains all other real native assertions and labels its result

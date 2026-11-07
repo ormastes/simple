@@ -1,5 +1,32 @@
 # Canonical private credential owner
 
+An isolated test-only stat wrapper now injects one EIO for the established
+namespace identity probe, then restores actual stat. With the registry mutex
+held, that first entry must fail IO and all later entries must refuse before
+the mutex despite restored availability. The mismatch case likewise restores
+the injected inode value and verifies permanent quarantine. These are fault
+injection contract assertions, not real namespace-transition qualification.
+Public entry checks origin/quarantine before lock and phase again after lock;
+normal matched unlock adds no new fallible origin syscall. The privileged
+output is labeled `privileged credential cases PASS`, never full-boundary PASS.
+
+Origin prevention now binds actual PID and `/proc/self/ns/pid` device/inode
+before registry/mutex access. Native source asserts the phase atomic is always
+lock-free and publishes immutable origin fields through CAS Initializing then
+release/acquire Ready. Unready/stat failure refuses without reset or spinning.
+Ordinary fork rejection remains an actual fork assertion. Separate isolated
+exec processes inject only a namespace-inode snapshot mismatch with the actual
+PID unchanged, and an Initializing snapshot inherited through an actual fork,
+to exercise those refusal branches. The ordinary actual fork case holds the
+registry mutex across fork, child refusal and parent wait. Injected mismatch
+and Initializing cases likewise hold the mutex during refusal. Moving origin
+checks after mutex acquisition therefore deadlocks and fails the watchdog.
+They never reset/re-adopt origin or create a PID namespace. Output labels these
+as injected contract assertions and says `actual PID-namespace transition
+BLOCKED: no authorized namespace fixture`. A successful ordinary/unprivileged
+fixture therefore never qualifies real namespace transitions. All remain
+**AUTHORED_UNRUN** after this incremental source fix.
+
 Status: **AUTHORED_UNRUN**. No compilation, native prevention selfcheck, Simple test or platform qualification has run.
 
 Simple source: `test/01_unit/lib/retained_private_credential_v1_spec.spl`.
