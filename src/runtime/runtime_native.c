@@ -17615,11 +17615,21 @@ int rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* c
 static int rt_core_mkdir_one(const char* path) {
     if (!path || !*path) return 0;
 #if defined(_WIN32)
-    if (mkdir(path) == 0) return 1;
+    /* Use the same UTF-8/extended-path owner as Windows file operations. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) return 0;
+    int ok = CreateDirectoryW(wide_path, NULL) != 0;
+    if (!ok) {
+        DWORD attrs = GetFileAttributesW(wide_path);
+        ok = attrs != INVALID_FILE_ATTRIBUTES &&
+             (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    }
+    free(wide_path);
+    return ok;
 #else
     if (mkdir(path, 0777) == 0) return 1;
-#endif
     return rt_is_dir(path) ? 1 : 0;
+#endif
 }
 
 /* C-string worker for rt_dir_create_all / rt_mkdir_p. */
