@@ -1,0 +1,98 @@
+use std.spec.*
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.api_v2.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+
+fn _selected_request_v3() -> LinuxOciRequestV1:
+    var request = linux_container_leaf_fixture_v2()
+    request.user_uid = 1000
+    request.user_gid = 1001
+    request.user_namespace_mode = "keep-id"
+    request
+
+describe "versioned explicit numeric OCI user selection":
+    it "preserves frozen historical V1 and V2 request digests and exact retained bytes":
+        var request = linux_container_leaf_fixture_v2()
+        val digest1 = "de002d8540c5c6aead5437c7a33a633554e6540bdd447b34fbde4bb357723d2c"
+        val digest2 = "28394fe48d36fac5849d29d8f350c34ce407c1b5a69876f1b2523093aa2d0624"
+        val expected1 = "{args: [literal], attempt: 1, buildInputRoot: \"\", buildOutputRoot: \"\", bundlePath: \"\", command: [/agent], cpuLimitMillis: 1000, environment: [], filesystemPolicy: read-only, image: \"" + request.image + "\", kind: linux-oci-retained-request, memoryLimitBytes: 268435456, networkPolicy: none, operationId: create-api, pidLimit: 64, podUid: workload-1, replaceEntrypoint: false, requestDigest: " + digest1 + ", timeoutMs: 5000, version: 1, workingDirectory: \"\"}\n"
+        expect(linux_oci_request_digest_v1(request).unwrap()).to_equal(digest1)
+        expect(linux_oci_retained_request_encode_v1(request).unwrap()).to_equal(expected1)
+        expect(linux_oci_retained_request_decode_v1(expected1).unwrap().user_uid).to_equal(-1)
+        request.terminal_mode = "tty"
+        val expected2 = expected1.replace(digest1, digest2).replace(", timeoutMs:", ", terminalMode: tty, timeoutMs:").replace("version: 1", "version: 2")
+        expect(linux_oci_request_digest_v1(request).unwrap()).to_equal(digest2)
+        expect(linux_oci_retained_request_encode_v1(request).unwrap()).to_equal(expected2)
+        expect(linux_oci_retained_request_decode_v1(expected2).unwrap().user_namespace_mode).to_equal("")
+
+    it "roundtrips selected V3 fields and refuses downgrade tampering and omitted fields":
+        val request = _selected_request_v3()
+        val body = linux_oci_retained_request_encode_v1(request).unwrap()
+        expect(body.contains("version: 3")).to_equal(true)
+        val decoded = linux_oci_retained_request_decode_v1(body).unwrap()
+        expect(decoded.user_uid).to_equal(1000)
+        expect(decoded.user_gid).to_equal(1001)
+        expect(decoded.user_namespace_mode).to_equal("keep-id")
+        expect(linux_oci_request_digest_v1(decoded)).to_equal(linux_oci_request_digest_v1(request))
+        for changed in [body.replace("version: 3", "version: 1"), body.replace("userUid: 1000", "userUid: 1002"),
+                body.replace("userGid: 1001, ", ""), body.replace("userNamespaceMode: keep-id", "userNamespaceMode: host")]:
+            expect(linux_oci_retained_request_decode_v1(changed).is_err()).to_equal(true)
+
+    it "refuses partial out of range and unsupported namespace selections before effects":
+        for invalid in ["uid", "gid", "mode", "negative", "overflow"]:
+            var request = _selected_request_v3()
+            if invalid == "uid": request.user_uid = -1
+            if invalid == "gid": request.user_gid = -1
+            if invalid == "mode": request.user_namespace_mode = "host"
+            if invalid == "negative": request.user_uid = -2
+            if invalid == "overflow": request.user_gid = 4294967295
+            expect(linux_oci_request_bounds_v1(request).is_err()).to_equal(true)
+            expect(build_create_command("podman", "/unused/api", request, "create-api", 7, "boot").0.len()).to_be_greater_than(0)
+        for engine in ["docker", "runc"]:
+            expect(build_create_command(engine, "/unused/api", _selected_request_v3(), "create-api", 7, "boot").0).to_equal("user-selection-podman-only")
+        for uid in [0, 4294967294]:
+            var request = _selected_request_v3()
+            request.user_uid = uid
+            request.user_gid = uid
+            expect(linux_oci_request_bounds_v1(request).is_ok()).to_equal(true)
+
+    it "constructs independent exact Podman numeric pair and keep-id flags":
+        val request = _selected_request_v3()
+        val built = build_create_command("podman", "/unused/api", request, "create-api", 7, "boot-1")
+        expect(built.0).to_equal("")
+        expect(built.1.args).to_equal(["create", "--name", "simpleorch-workload-1-1",
+            "--label", "io.simpleorch.pod_uid=workload-1", "--label", "io.simpleorch.attempt=1",
+            "--label", "io.simpleorch.node_boot_id=boot-1", "--label", "io.simpleorch.provider_generation=7",
+            "--label", "io.simpleorch.operation_id=create-api", "--cpu-period", "100000", "--cpu-quota", "100000",
+            "--memory", "268435456", "--pids-limit", "64", "--network", "none", "--read-only",
+            "--security-opt", "no-new-privileges", "--cap-drop", "ALL", "--http-proxy=false",
+            "--user", "1000:1001", "--userns=keep-id", request.image, "/agent", "literal"])
+
+    it "binds changed numeric UID GID and namespace before repeated common create effects":
+        val leaf = _selected_request_v3()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, "b".repeat(64))], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap()
+        val created = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+        for field in ["uid", "gid", "absent"]:
+            var changed = leaf
+            if field == "uid": changed.user_uid = 1002
+            if field == "gid": changed.user_gid = 1002
+            if field == "absent":
+                changed.user_uid = -1
+                changed.user_gid = -1
+                changed.user_namespace_mode = ""
+            val altered = linux_container_request_fixture_v2(changed)
+            val context = container_effect_deadline_v1(altered.plan.request_digest, "create-api", ["create"], 100).unwrap()
+            expect(simple_container_apply_v2(created.owner, "create", altered, context).operation.reason).to_equal("intent-request-mismatch")
+        expect(adapter.provider.executor_call_count()).to_equal(1)

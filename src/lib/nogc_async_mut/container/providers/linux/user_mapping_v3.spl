@@ -1,0 +1,149 @@
+# Linux native mapping proof composition. All native handles stay in process.
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeIntentV1, RuntimeCommandV1, RuntimeOperationV1}
+use std.common.contracts.container.execution_evidence_v2.{container_runtime_query_digest_v2, container_runtime_observation_digest_v2}
+use std.common.json.value.{JsonValue, json_value_get, json_value_as_text, json_value_keys}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1,
+    linux_oci_request_bounds_v1, linux_oci_user_selection_v3}
+use std.nogc_async_mut.container.providers.linux.execution_user_v2.linux_oci_flat_inspect_json_v2
+use std.nogc_sync_mut.io.linux_container_user_observation_v1.{LinuxContainerUserObservationV1,
+    LinuxContainerUserObservationFailureV1, linux_container_user_observation_close_v1}
+
+pub struct LinuxOciUserMappingInspectV3:
+    pid: i64
+    cgroup_path: text
+    configured_user: text
+
+pub struct LinuxOciUserMappingFactsV3:
+    before: RuntimeOperationV1
+    after: RuntimeOperationV1
+    request_digest: text
+    provider_identity_digest: text
+    binding_digest: text
+    selected_uid: i64
+    selected_gid: i64
+    user_namespace_mode: text
+
+pub enum LinuxOciUserMappingOutcomeV3:
+    Observed(facts: LinuxOciUserMappingFactsV3, native: LinuxContainerUserObservationV1)
+    CleanupRequired(native: LinuxContainerUserObservationV1, reason: text)
+    InitialCleanupRequired(failure: LinuxContainerUserObservationFailureV1)
+    Rejected(reason: text)
+
+pub fn linux_oci_mapping_identity_equal_v3(retained: RuntimeIntentV1, expected: RuntimeIdentityV1) -> bool:
+    retained.pod_uid == expected.pod_uid and retained.attempt == expected.attempt and
+        retained.operation_id == expected.operation_id and retained.engine == expected.engine and
+        retained.native_id == expected.native_id and retained.node_boot_id == expected.node_boot_id and
+        retained.provider_generation == expected.provider_generation
+
+pub fn linux_oci_mapping_command_v3(native_id: text) -> Result<RuntimeCommandV1, text>:
+    if not builder_digest_valid_v1(native_id): return Err("user-mapping-full-native-id-required")
+    val format = "{\"id\":{{json .Id}},\"pod_uid\":{{json (index .Config.Labels \"io.simpleorch.pod_uid\")}},\"attempt\":{{json (index .Config.Labels \"io.simpleorch.attempt\")}},\"node_boot_id\":{{json (index .Config.Labels \"io.simpleorch.node_boot_id\")}},\"provider_generation\":{{json (index .Config.Labels \"io.simpleorch.provider_generation\")}},\"operation_id\":{{json (index .Config.Labels \"io.simpleorch.operation_id\")}},\"user\":{{json .Config.User}},\"pid\":{{json .State.Pid}},\"cgroup\":{{json .State.CgroupPath}},\"status\":{{json .State.Status}}}"
+    Ok(RuntimeCommandV1(operation: "user-mapping", program: "podman", args: ["container", "inspect", "--format", format, native_id]))
+
+fn mapping_string_v3(value: JsonValue, key: text) -> Result<text, text>:
+    val member = match json_value_get(value, key):
+        case Some(found): found
+        case None: return Err("user-mapping-field-missing")
+    match json_value_as_text(member):
+        case Some(found): Ok(found)
+        case None: Err("user-mapping-field-type")
+
+pub fn linux_oci_mapping_inspect_v3(raw: text, expected: RuntimeIdentityV1,
+        request: LinuxOciRequestV1) -> Result<LinuxOciUserMappingInspectV3, text>:
+    val bounded = linux_oci_request_bounds_v1(request)?
+    if not linux_oci_user_selection_v3(request) or expected.engine != "podman" or not builder_digest_valid_v1(expected.native_id):
+        return Err("user-mapping-explicit-selection-identity-required")
+    val value = linux_oci_flat_inspect_json_v2(raw)?
+    if json_value_keys(value).len() != 10: return Err("user-mapping-fields")
+    if (mapping_string_v3(value, "id")? != expected.native_id or
+            mapping_string_v3(value, "pod_uid")? != expected.pod_uid or
+            mapping_string_v3(value, "attempt")? != expected.attempt.to_text() or
+            mapping_string_v3(value, "node_boot_id")? != expected.node_boot_id or
+            mapping_string_v3(value, "provider_generation")? != expected.provider_generation.to_text() or
+            mapping_string_v3(value, "operation_id")? != expected.operation_id):
+        return Err("user-mapping-inspect-identity-mismatch")
+    val user = mapping_string_v3(value, "user")?
+    if user != request.user_uid.to_text() + ":" + request.user_gid.to_text(): return Err("user-mapping-configured-user-mismatch")
+    if mapping_string_v3(value, "status")? != "running": return Err("user-mapping-not-running")
+    val pid_value = match json_value_get(value, "pid"):
+        case Some(found): found
+        case None: return Err("user-mapping-pid-missing")
+    val pid = match pid_value:
+        case JsonValue.Int(found): found
+        case _: return Err("user-mapping-pid-type")
+    if pid <= 0 or pid > 2147483647: return Err("user-mapping-pid-invalid")
+    val cgroup = mapping_string_v3(value, "cgroup")?
+    if (not cgroup.starts_with("/") or cgroup == "/" or str_len(cgroup) > 4095 or
+            cgroup.contains("//") or cgroup.ends_with("/")): return Err("user-mapping-cgroup-invalid")
+    var byte_index = 0
+    while byte_index < str_len(cgroup):
+        val byte = cgroup.byte_at(byte_index)
+        if byte < 32 or byte == 127: return Err("user-mapping-cgroup-invalid")
+        byte_index = byte_index + 1
+    var owned = false
+    for component in cgroup.split("/"):
+        if (component == "." or component == ".." or component.contains("\0") or
+                component.contains("\n") or component.contains("\r")): return Err("user-mapping-cgroup-invalid")
+        if (component == "libpod-" + expected.native_id or component == "libpod-" + expected.native_id + ".scope" or
+                component == "libpod-payload-" + expected.native_id): owned = true
+    if not owned: return Err("user-mapping-cgroup-container-mismatch")
+    Ok(LinuxOciUserMappingInspectV3(pid: pid, cgroup_path: cgroup, configured_user: user))
+
+pub fn linux_oci_mapping_binding_v3(request: LinuxOciRequestV1, expected: RuntimeIdentityV1,
+        pin: text, before: RuntimeOperationV1) -> Result<text, text>:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-oci-user-mapping-v3"),
+        "requestDigest": SdnValue.String(linux_oci_request_digest_v1(request)?),
+        "nativeId": SdnValue.String(expected.native_id), "operation": SdnValue.String(expected.operation_id),
+        "podUid": SdnValue.String(expected.pod_uid), "attempt": SdnValue.Int(expected.attempt),
+        "providerGeneration": SdnValue.Int(expected.provider_generation), "scopeFence": SdnValue.String(expected.node_boot_id),
+        "engine": SdnValue.String(expected.engine), "providerIdentity": SdnValue.String(pin),
+        "selectedUid": SdnValue.Int(request.user_uid), "selectedGid": SdnValue.Int(request.user_gid),
+        "namespace": SdnValue.String(request.user_namespace_mode),
+        "queryDigest": SdnValue.String(container_runtime_query_digest_v2(before.command)?),
+        "evidenceDigest": SdnValue.String(container_runtime_observation_digest_v2(before)?)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+pub fn linux_oci_mapping_reject_owned_v3(native: LinuxContainerUserObservationV1, reason: text) -> LinuxOciUserMappingOutcomeV3:
+    match linux_container_user_observation_close_v1(native):
+        case Ok(_): LinuxOciUserMappingOutcomeV3.Rejected(reason)
+        case Err(close_error): LinuxOciUserMappingOutcomeV3.CleanupRequired(native, reason + "; " + close_error)
+
+pub fn linux_oci_mapping_same_native_v3(left: LinuxContainerUserObservationV1,
+        right: LinuxContainerUserObservationV1) -> bool:
+    left.native_token == right.native_token and left.binding_digest == right.binding_digest and
+        left.pid == right.pid and left.process_start_ticks == right.process_start_ticks and
+        left.cgroup_path == right.cgroup_path and left.uid_map_digest == right.uid_map_digest and
+        left.gid_map_digest == right.gid_map_digest and left.container_effective_uid == right.container_effective_uid and
+        left.container_effective_gid == right.container_effective_gid and
+        left.mapped_effective_uid == right.mapped_effective_uid and left.mapped_effective_gid == right.mapped_effective_gid and
+        left.mapped_filesystem_uid == right.mapped_filesystem_uid and left.mapped_filesystem_gid == right.mapped_filesystem_gid and
+        left.observer_effective_uid == right.observer_effective_uid and left.observer_effective_gid == right.observer_effective_gid and
+        left.target_userns_device == right.target_userns_device and left.target_userns_inode == right.target_userns_inode and
+        left.observer_userns_device == right.observer_userns_device and left.observer_userns_inode == right.observer_userns_inode
+
+# Integrity of the public snapshot, never a decoder or native authority. The
+# opaque native token deliberately does not enter serializable evidence.
+pub fn linux_oci_mapping_native_digest_v3(native: LinuxContainerUserObservationV1) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-container-native-user-evidence-v3"),
+        "pid": SdnValue.Int(native.pid), "processStartTicks": SdnValue.Int(native.process_start_ticks),
+        "observerEffectiveUid": SdnValue.Int(native.observer_effective_uid),
+        "observerEffectiveGid": SdnValue.Int(native.observer_effective_gid),
+        "mappedEffectiveUid": SdnValue.Int(native.mapped_effective_uid),
+        "mappedEffectiveGid": SdnValue.Int(native.mapped_effective_gid),
+        "mappedFilesystemUid": SdnValue.Int(native.mapped_filesystem_uid),
+        "mappedFilesystemGid": SdnValue.Int(native.mapped_filesystem_gid),
+        "containerEffectiveUid": SdnValue.Int(native.container_effective_uid),
+        "containerEffectiveGid": SdnValue.Int(native.container_effective_gid),
+        "targetUsernsDevice": SdnValue.Int(native.target_userns_device),
+        "targetUsernsInode": SdnValue.Int(native.target_userns_inode),
+        "observerUsernsDevice": SdnValue.Int(native.observer_userns_device),
+        "observerUsernsInode": SdnValue.Int(native.observer_userns_inode),
+        "cgroupPath": SdnValue.String(native.cgroup_path), "uidMapDigest": SdnValue.String(native.uid_map_digest),
+        "gidMapDigest": SdnValue.String(native.gid_map_digest), "observedUnixMs": SdnValue.Int(native.observed_unix_ms),
+        "bindingDigest": SdnValue.String(native.binding_digest)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))

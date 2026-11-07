@@ -15,6 +15,7 @@
 #if defined(__linux__)
 #include <pthread.h>
 #include "runtime_workspace_storage_linux_private.h"
+#include "runtime_workspace_user_observation_linux_private.h"
 static pthread_mutex_t ws_lock_v1 = PTHREAD_MUTEX_INITIALIZER;
 static int ws_lock_acquire_v1(void) { return pthread_mutex_lock(&ws_lock_v1); }
 static void ws_lock_release_v1(void) { (void)pthread_mutex_unlock(&ws_lock_v1); }
@@ -39,13 +40,18 @@ static int ws_native_release_if_absent_v1(WsNativeV1* n,const char* l,int64_t h,
 }
 #endif
 
+#if !defined(__linux__)
+typedef struct { int unavailable; } WsUserNativeV1;
+#endif
+
 #define WS_SLOT_COUNT_V1 32
 typedef struct {
     int64_t token, hard_bytes, used_bytes, used_inodes;
     uint32_t quota;
-    int released;
+    int released, role; /* 1 storage owner, 2 read-only external user observation */
     char kind[64], parent[4096], leaf[128], pool[256], workspace[256], policy[65];
     WsNativeV1 native;
+    WsUserNativeV1 user;
 } WsSlotV1;
 static WsSlotV1 ws_slots_v1[WS_SLOT_COUNT_V1];
 static int64_t ws_next_token_v1 = 1;
@@ -88,14 +94,14 @@ static int64_t ws_open_or_recover_v1(int64_t kind,int64_t parent,int64_t leaf,
             !ws_copy_text_v1(policy,candidate.policy,sizeof(candidate.policy)) ||
             !ws_leaf_v1(candidate.leaf) || !ws_digest_v1(candidate.policy) ||
             quota < 0 || (uint64_t)quota > UINT32_MAX || hard <= 0 || hard > INT64_C(1125899906842624)) return -EINVAL;
-    candidate.quota=(uint32_t)quota; candidate.hard_bytes=hard;
+    candidate.quota=(uint32_t)quota; candidate.hard_bytes=hard;candidate.role=1;
     int lock_error=ws_lock_acquire_v1(); if(lock_error)return -lock_error;
     size_t slot=WS_SLOT_COUNT_V1;
     for(size_t i=0;i<WS_SLOT_COUNT_V1;i++) {
         WsSlotV1* existing=&ws_slots_v1[i];
         /* One scope may not acquire independent concurrent native leases.
          * Host replay must reuse its live owner or recover after process exit. */
-        if(existing->token&&(!strcmp(existing->pool,candidate.pool))&&
+        if(existing->token&&existing->role==1&&(!strcmp(existing->pool,candidate.pool))&&
                 (!strcmp(existing->workspace,candidate.workspace)||existing->quota==candidate.quota)) {
             if(recover&&!strcmp(existing->kind,candidate.kind)&&!strcmp(existing->parent,candidate.parent)&&
                     !strcmp(existing->leaf,candidate.leaf)&&!strcmp(existing->workspace,candidate.workspace)&&
@@ -129,7 +135,7 @@ int64_t rt_workspace_storage_observe_v1(int64_t token) {
     char result[1024]; result[0]=0;
     if(ws_lock_acquire_v1())return rt_string_new((const uint8_t*)"",0);
     WsSlotV1* slot=ws_find_v1(token);
-    if(slot) {
+    if(slot&&slot->role==1) {
         int error=slot->released?0:ws_native_observe_v1(&slot->native,slot->leaf,slot->pool,
             slot->workspace,slot->hard_bytes,&slot->used_bytes,&slot->used_inodes);
         if(!error) {
@@ -145,7 +151,7 @@ int64_t rt_workspace_storage_observe_v1(int64_t token) {
 int64_t rt_workspace_storage_release_if_absent_v1(int64_t token) {
     int error=ws_lock_acquire_v1();if(error)return -error;
     WsSlotV1* slot=ws_find_v1(token);
-    if(!slot) {ws_lock_release_v1();return -ESTALE;}
+    if(!slot||slot->role!=1) {ws_lock_release_v1();return -ESTALE;}
     if(!slot->released) {
         error=ws_native_release_if_absent_v1(&slot->native,slot->leaf,slot->hard_bytes,
             &slot->used_bytes,&slot->used_inodes);
@@ -156,8 +162,65 @@ int64_t rt_workspace_storage_release_if_absent_v1(int64_t token) {
 int64_t rt_workspace_storage_forget_released_v1(int64_t token) {
     int error=ws_lock_acquire_v1();if(error)return -error;
     WsSlotV1* slot=ws_find_v1(token);
-    if(!slot)error=ESTALE;
+    if(!slot||slot->role!=1)error=ESTALE;
     else if(!slot->released)error=EBUSY;
     else {ws_native_close_v1(&slot->native);memset(slot,0,sizeof(*slot));}
     ws_lock_release_v1();return -error;
+}
+
+int64_t rt_linux_container_user_open_v1(int64_t pid,int64_t cgroup,int64_t binding) {
+#if defined(__linux__)
+    WsSlotV1 candidate;memset(&candidate,0,sizeof(candidate));candidate.role=2;
+    if(pid<=0||pid>INT_MAX||!ws_copy_text_v1(cgroup,candidate.parent,sizeof(candidate.parent))||
+            !ws_copy_text_v1(binding,candidate.policy,sizeof(candidate.policy))||!ws_digest_v1(candidate.policy))return -EINVAL;
+    int error=ws_lock_acquire_v1();if(error)return -error;
+    size_t slot=WS_SLOT_COUNT_V1;
+    for(size_t i=0;i<WS_SLOT_COUNT_V1;i++)if(!ws_slots_v1[i].token){slot=i;break;}
+    if(slot==WS_SLOT_COUNT_V1||ws_next_token_v1==INT64_MAX){ws_lock_release_v1();return -ENOSPC;}
+    error=ws_user_open_v1(&candidate.user,(pid_t)pid,candidate.parent);
+    if(error){ws_user_close_v1(&candidate.user);ws_lock_release_v1();return -error;}
+    candidate.token=ws_next_token_v1++;ws_slots_v1[slot]=candidate;
+    ws_lock_release_v1();return candidate.token;
+#else
+    (void)pid;(void)cgroup;(void)binding;return -ENOTSUP;
+#endif
+}
+int64_t rt_linux_container_user_observe_v1(int64_t token,int64_t binding) {
+    char result[6144];result[0]=0;
+#if defined(__linux__)
+    char expected[65];
+    if(!ws_copy_text_v1(binding,expected,sizeof(expected))||!ws_digest_v1(expected))return rt_string_new((const uint8_t*)"",0);
+    if(ws_lock_acquire_v1())return rt_string_new((const uint8_t*)"",0);
+    WsSlotV1* slot=ws_find_v1(token);
+    if(slot&&slot->role==2&&!strcmp(slot->policy,expected)&&!ws_user_refresh_v1(&slot->user,slot->parent)) {
+        struct timespec now;
+        if(clock_gettime(CLOCK_REALTIME,&now)==0&&now.tv_sec>0&&now.tv_sec<INT64_MAX/1000) {
+            WsUserFactsV1* f=&slot->user.facts;
+            int count=snprintf(result,sizeof(result),"linux-container-user-native-v1\n%lld\n%ld\n%llu\n%u\n%u\n%u\n%u\n%u\n%u\n%u\n%u\n%llu\n%llu\n%llu\n%llu\n%s\n%s\n%s\n%lld\n%s\n",
+                (long long)token,(long)slot->user.pid,(unsigned long long)f->start_ticks,
+                f->observer_uid,f->observer_gid,f->effective_uid,f->effective_gid,f->filesystem_uid,f->filesystem_gid,
+                f->container_uid,f->container_gid,(unsigned long long)f->target_ns_device,(unsigned long long)f->target_ns_inode,
+                (unsigned long long)f->observer_ns_device,(unsigned long long)f->observer_ns_inode,
+                f->cgroup,f->uid_digest,f->gid_digest,(long long)now.tv_sec*1000+now.tv_nsec/1000000,slot->policy);
+            if(count<0||(size_t)count>=sizeof(result))result[0]=0;
+        }
+    }
+    ws_lock_release_v1();
+#else
+    (void)token;(void)binding;
+#endif
+    return rt_string_new((const uint8_t*)result,strlen(result));
+}
+int64_t rt_linux_container_user_close_v1(int64_t token,int64_t binding) {
+#if defined(__linux__)
+    char expected[65];
+    if(!ws_copy_text_v1(binding,expected,sizeof(expected))||!ws_digest_v1(expected))return -EINVAL;
+    int error=ws_lock_acquire_v1();if(error)return -error;
+    WsSlotV1* slot=ws_find_v1(token);
+    if(!slot||slot->role!=2||strcmp(slot->policy,expected))error=ESTALE;
+    else {ws_user_close_v1(&slot->user);memset(slot,0,sizeof(*slot));}
+    ws_lock_release_v1();return -error;
+#else
+    (void)token;(void)binding;return -ENOTSUP;
+#endif
 }

@@ -11,4 +11,9 @@ int64_t rt_workspace_storage_recover_v1(int64_t kind, int64_t parent, int64_t le
 int64_t rt_workspace_storage_observe_v1(int64_t token);
 int64_t rt_workspace_storage_release_if_absent_v1(int64_t token);
 int64_t rt_workspace_storage_forget_released_v1(int64_t token);
+/* Read-only process observation shares the storage registry, with a distinct
+ * slot kind. These handles never grant process adoption or control. */
+int64_t rt_linux_container_user_open_v1(int64_t pid,int64_t cgroup,int64_t binding);
+int64_t rt_linux_container_user_observe_v1(int64_t token,int64_t binding);
+int64_t rt_linux_container_user_close_v1(int64_t token,int64_t binding);
 #endif
