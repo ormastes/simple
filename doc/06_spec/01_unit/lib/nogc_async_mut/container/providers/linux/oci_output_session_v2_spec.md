@@ -2,7 +2,7 @@
 
 Source: `test/01_unit/lib/nogc_async_mut/container/providers/linux/oci_output_session_v2_spec.spl`.
 
-Manual source mirror: seven authored cases, UNEXECUTED. No native process reference, verified lease or output evidence is fabricated.
+Manual source mirror: nine authored cases, UNEXECUTED. No native process reference, verified lease or output evidence is fabricated.
 
 | Case | Assertion |
 |---|---|
@@ -13,5 +13,7 @@ Manual source mirror: seven authored cases, UNEXECUTED. No native process refere
 | Native boundary | Actual scripted create and fresh exact running recovery consume their expected vectors, then explicit fixture refusal prevents native spawn. |
 | Plan scope | Backend/engine mismatch and wrong full scope fence fail common plan digest validation. |
 | Common open admission | Real Host fixture request/receipt structurally aligned only for negative testing; independently corrupted parent plan, resource demand, operation ID/action/host, receipt and deadline reject through actual common open with no additional executor attempt. |
+| Scripted capability | Actual common capability query refuses scripted native availability and keeps input/geometry/interactive false; no native query is issued. |
+| Capability correlation | Changed plan digest, owner scope and provider observation pin refuse before native capability admission. |
 
 Pending native evidence: real Host-admitted open, exact owned Ready/CleanupRequired transfer, adoption rollback, close/reap retention, duplicate durable claim refusal and actual output capture. Unit source does not qualify these outcomes.

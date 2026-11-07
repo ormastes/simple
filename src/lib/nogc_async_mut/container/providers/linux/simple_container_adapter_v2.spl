@@ -29,6 +29,9 @@ use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, Contain
     container_stream_policy_digest_v2, container_output_plan_digest_v2, container_output_admission_validate_v2}
 use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_launch_template_v2
 use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
+use std.common.contracts.container.output_capabilities_v2.ContainerOutputCapabilitiesV2
+use std.nogc_sync_mut.io.linux_process_owner.linux_process_stream_template_admit_v3
+use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_command_v2
 
 pub const LINUX_SIMPLE_CONTAINER_BACKEND_V2 = "linux-podman"
 
@@ -307,6 +310,48 @@ impl LinuxSimpleContainerAdapterV2:
             launch_template: launch, request_digest: "")
         plan.request_digest = container_output_plan_digest_v2(plan)?
         Ok(plan)
+
+    pub fn output_capabilities(plan: ContainerOutputPlanV2) -> ContainerOutputCapabilitiesV2:
+        match self._output_capability_observe_v2(plan):
+            case Ok(_): ContainerOutputCapabilitiesV2(output_follow_supported: true,
+                reason: "container-output-plan-native-admission-observed")
+            case Err(reason): ContainerOutputCapabilitiesV2(output_follow_supported: false, reason: reason)
+
+    fn _output_capability_observe_v2(plan: ContainerOutputPlanV2) -> Result<bool, text>:
+        if plan.request_digest != container_output_plan_digest_v2(plan)?:
+            return Err("container-output-plan-digest-mismatch")
+        val workload = plan.workload
+        val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id,
+            service_scope_id: workload.service_scope_id, boot_id: workload.boot_id,
+            provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+            continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+        if container_host_scope_bytes_v2(scope)? != container_host_scope_bytes_v2(self.scope)? or
+                workload.backend != LINUX_SIMPLE_CONTAINER_BACKEND_V2:
+            return Err("container-output-plan-owner-mismatch")
+        if plan.provider_identity_digest != self._observed_host.provider_identity_digest:
+            return Err("container-output-plan-provider-mismatch")
+        if plan.launch_template.profile_v3.unwrap().child_image_mode != "trusted-local-admin-image-fd-v1":
+            return Err("container-output-engine-image-mode-unsupported")
+        # Scripted observations cannot advertise actual native availability.
+        if self.provider.scripted: return Err("container-output-scripted-capability-unavailable")
+        if not self.provider.live_enabled: return Err("container-output-provider-unavailable")
+        val current = self.provider.engine_observation_v1()?
+        if current.identity_digest != plan.provider_identity_digest:
+            return Err("container-output-plan-provider-changed")
+        val policy = match self.provider.engine_policy:
+            case Some(value): value
+            case None: return Err("container-output-managed-policy-required")
+        val command = linux_oci_output_command_v2(policy, plan.runtime)?
+        val child = plan.launch_template.request
+        if child.program != command.program or child.args != command.args or
+                child.producer_digest != current.executable_digest:
+            return Err("container-output-plan-engine-route-mismatch")
+        # Current kernel and enrolled broker/cgroup admission observation,
+        # using the canonical pregrant template. This does not inspect the
+        # current container or prove attach readiness. Open does that work.
+        # No fake deadline, claim, reservation or fork is created here.
+        linux_process_stream_template_admit_v3(plan.launch_template)?
+        Ok(true)
 
     pub me open_output_session(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
             identity: ContainerOutputIdentityV2, helper: ContainerHelperAdmissionV2,

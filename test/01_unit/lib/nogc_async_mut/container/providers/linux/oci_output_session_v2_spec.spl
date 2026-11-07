@@ -12,6 +12,7 @@ use std.nogc_async_mut.container.providers.linux.output_session_v2.*
 use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.LinuxSimpleContainerAdapterV2
 use std.nogc_async_mut.container.api_v2.*
 use std.nogc_async_mut.container.stream_v2.*
+use std.nogc_async_mut.container.output_capabilities_v2.simple_container_output_capabilities_v2
 use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
 use test.fixtures.orchestration.host_helper_fixture_v1.host_helper_fixture_v1
 use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_receipt_v1
@@ -225,3 +226,35 @@ describe "Linux output-follow owned launch planning":
                 case _: fail("corrupted helper carrier must not acquire a native owner")
             expect(adapter.provider.executor_call_count()).to_equal(1)
             expect(adapter.provider.scripted_cursor).to_equal(1)
+
+    it "never advertises native output capability from scripted observations or OS selection":
+        val plan = _output_common_plan_fixture_v2()
+        val adapter = linux_container_adapter_fixture_v2([], [])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val capability = simple_container_output_capabilities_v2(owner, plan)
+        expect(capability.output_follow_supported).to_equal(false)
+        expect(capability.reason).to_equal("container-output-scripted-capability-unavailable")
+        expect(capability.input_supported).to_equal(false)
+        expect(capability.geometry_supported).to_equal(false)
+        expect(capability.interactive).to_equal(false)
+        expect(adapter.provider.executor_call_count()).to_equal(0)
+
+    it "rejects altered plan bytes or owner correlation before native capability admission":
+        val original = _output_common_plan_fixture_v2()
+        val adapter = linux_container_adapter_fixture_v2([], [])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        var changed = original
+        changed.request_digest = "e".repeat(64)
+        expect(simple_container_output_capabilities_v2(owner, changed).reason).to_equal("container-output-plan-digest-mismatch")
+        changed = original
+        changed.workload.service_scope_id = "foreign"
+        var changed_scope = linux_container_scope_fixture_v2()
+        changed_scope.service_scope_id = "foreign"
+        changed.runtime.node_boot_id = container_scope_fence_id_v2(changed_scope).unwrap()
+        changed.request_digest = container_output_plan_digest_v2(changed).unwrap()
+        expect(simple_container_output_capabilities_v2(owner, changed).reason).to_equal("container-output-plan-owner-mismatch")
+        changed = original
+        changed.provider_identity_digest = "e".repeat(64)
+        changed.request_digest = container_output_plan_digest_v2(changed).unwrap()
+        expect(simple_container_output_capabilities_v2(owner, changed).reason).to_equal("container-output-plan-provider-mismatch")
+        expect(adapter.provider.executor_call_count()).to_equal(0)

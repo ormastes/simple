@@ -69,3 +69,14 @@ prove the workload remains alive; retain cleanup authority across failed adoptio
 EOF and broker failure; collect the real helper reap receipt before Host release.
 Missing Podman, approved image, delegated cgroup, broker budget or native producer
 is BLOCKED, never a passing skip. No runtime test was executed for this slice.
+
+`simple_container_output_capabilities_v2(owner, plan)` is the common configured
+discovery port after actual planning. It verifies the plan digest, owning scope,
+current engine identity and exact engine route, then calls the canonical native
+`linux_process_stream_template_admit_v3` preflight. That port observes the current
+kernel/broker/delegation prerequisites without a helper claim, reservation or fork.
+No expiry is fabricated for planning. Scripted providers and the V2 Windows
+transport return unsupported. A positive result is a current observation for the
+provided plan, not target authorization, reserved resources or attach readiness;
+open still rederives the plan and verifies the actual admitted helper. Startup
+without a plan advertises planning support only, with bind availability false.
