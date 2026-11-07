@@ -96,3 +96,44 @@ raw byte position using a byte-count-safe primitive instead of `len()`/
 - `test/01_unit/lib/nogc_async_mut/io/tls_common_wire_to_bytes_repro_spec.spl`
   (reproduction spec for the original, now-fixed defect; GREEN, 4/4).
 
+## 2026-11-07 implementation
+
+The confirmed boundary defect spans both directions. Native `rt_byte_char(0)`
+is a NUL-terminated C string and therefore represents an empty string, while
+the seed interpreter encoded bytes 128-255 as Unicode scalars. Consequently a
+single-character construction cannot own arbitrary wire bytes consistently.
+
+`bytes_to_wire` now validates and collects a complete `[u8]` buffer and crosses
+the dedicated counted `rt_tls_wire_from_bytes` ABI once. Unlike public
+`rt_bytes_to_text`, the TLS-only carrier does not repair malformed UTF-8;
+`wire_to_bytes` uses `text.to_bytes()`,
+which returns integer storage bytes rather than Unicode character codes.
+`encode_u8`/`encode_u16_be`/`encode_u24_be` route through the same owner.
+Coverage now includes all 256 byte values, embedded NUL, and raw sequences that
+also form valid UTF-8 (`C2 80` and `E2 82 AC`).
+
+Focused pure-Simple native verification parsed, lowered, and borrow-checked the
+standalone all-byte fixture, but the admitted Stage-1 compiler stopped in its
+LLVM backend with pre-existing `E-BACKEND-LLVM-CONST-TYPE` diagnostics. The
+SPipe spec could not be loaded from the intentionally sparse worktree because
+its broader `std.spec`/TLS dependency closure was absent. Release verification
+must run the expanded spec with a current admitted full-tree runtime.
+
+An Astra review rejected the first candidate because it used public
+`rt_bytes_to_text`, whose native implementations intentionally replace `FF`
+with `EF BF BD`. The dedicated ABI above is the correction: interpreter, Rust
+runtime and native C implementations construct counted
+text from the exact input bytes, while ordinary text conversion remains
+unchanged. Runtime unit coverage asserts the complete 0-255 sequence in both
+packed and boxed array layouts plus embedded NUL and mixed UTF-8-shaped bytes.
+
+A second Astra review found duplicate C providers and a boxed-array-unsafe
+hosted copy. Final C ownership is singular: `runtime_native.c` implements the
+packed/boxed-aware ABI; `runtime.c` and `runtime_core_io_exports.c` do not
+export it. The canonical runtime symbol manifest lists the ABI exactly once
+and has an exact-count/tier regression test. A standalone C probe passed packed
+and boxed arrays containing every value 0-255, embedded NUL, and
+`C2 80 00 E2 82 AC FF`; adjacent public lossy-conversion checks remained
+green. Object inspection reported one native export, zero core-IO exports, and
+one C source owner.
+

@@ -477,6 +477,7 @@ pub use sffi::{
     rt_write_u32s_to_raw_checksum,
     rt_write_fill_u32s_to_raw_checksum,
     rt_bytes_to_text,
+    rt_tls_wire_from_bytes,
     rt_text_to_bytes,
     rt_file_write_bytes,
     rt_file_write_bytes_array,

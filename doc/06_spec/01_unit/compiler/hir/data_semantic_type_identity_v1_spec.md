@@ -22,6 +22,11 @@ admitted execution, docgen and maintenance verification pending.
 | Unresolved metadata | Inference/error/parameter/projection and ownerless nominal metadata fail closed. |
 | Type text | Checked parsing rejects malformed syntax, extra declarations, empty and NUL input. |
 | Projection budgets | Wide HIR fails before collecting children; aggregate nodes are bounded across sibling subtrees. |
+| Implicit erasure | Real parsed Q, nested Q, container/nominal arguments, tuple/function children and bare Dict lower without diagnostics but cannot enter concrete schema admission. |
+| Written Any | Ordinary unsafe written-Any permission cannot admit Any or nested Any to this concrete schema slice. |
+| Alias erasure/defaults | Parsed erased alias targets/defaults fail; an explicit concrete generic argument succeeds. |
+| Declared Q control | A real nominal Q and nested aliases using it bind successfully. |
+| Semantic policy traversal | Every projected child shape, including function Throws, rejects Any only in concrete mode; transport still represents it and concrete function controls preserve the exact descriptor. |
 
 These are expected assertions, not executed results. No successful runtime,
 full-W1 admission or compiler qualification follows from this manual alone.

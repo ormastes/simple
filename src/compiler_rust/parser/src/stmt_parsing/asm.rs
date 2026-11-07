@@ -60,6 +60,7 @@ impl<'a> Parser<'a> {
 
         let mut instructions = Vec::new();
         let mut clobbers = Vec::new();
+        let mut constraints = Vec::new();
 
         if self.is_asm_string_token() {
             let instr = self.expect_string_value()?;
@@ -70,7 +71,7 @@ impl<'a> Parser<'a> {
             }
         } else if self.check(&TokenKind::Newline) {
             let block = self.parse_block()?;
-            Self::extract_asm_block_strings(&block, &mut instructions, start_span)?;
+            Self::extract_asm_block_contents(&block, &mut instructions, &mut constraints, start_span)?;
         } else {
             return Err(ParseError::syntax_error_with_span(
                 "expected string literal or indented block after 'asm:'".to_string(),
@@ -89,7 +90,7 @@ impl<'a> Parser<'a> {
             instructions,
             target_match: vec![],
             clobbers,
-            constraints: vec![],
+            constraints,
         }))
     }
 
@@ -454,8 +455,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn extract_asm_block_strings(block: &Block, instructions: &mut Vec<String>, span: Span) -> Result<(), ParseError> {
-        for stmt in &block.statements {
+    fn extract_asm_block_contents(
+        block: &Block,
+        instructions: &mut Vec<String>,
+        constraints: &mut Vec<AsmConstraint>,
+        span: Span,
+    ) -> Result<(), ParseError> {
+        let mut index = 0;
+        while index < block.statements.len() {
+            let stmt = &block.statements[index];
             match stmt {
                 Node::Expression(Expr::String(s)) => instructions.push(s.clone()),
                 Node::Expression(Expr::FString { parts, .. }) => {
@@ -470,9 +478,9 @@ impl<'a> Parser<'a> {
                                     // `expect_string_value` documents for the parenthesized
                                     // form. The braces MUST survive parsing so MIR lowering
                                     // can rewrite them to LLVM's `$N`
-                                    // (mir/asm_operands.rs::rewrite_asm_placeholders) and so
-                                    // the C sidecar, which cannot bind operands, can
-                                    // RECOGNISE an operand-bearing line and skip it.
+                                    // (mir/asm_operands.rs::rewrite_asm_placeholders). The C
+                                    // sidecar cannot bind operands and must reject such lines
+                                    // instead of silently compiling a no-op.
                                     //
                                     // Flattening to the bare rendered token is what emitted
                                     // `csrr 0, mcause`, `mv out, tp` and `invlpg [addr]`
@@ -507,10 +515,134 @@ impl<'a> Parser<'a> {
                     }
                     instructions.push(text);
                 }
-                _ => {}
+                Node::Expression(expr) => {
+                    let (trailing, consumed) = if Self::block_constraint_needs_operand(expr) {
+                        (Some(Self::block_constraint_operand(block, index + 1, span)?), 1)
+                    } else {
+                        (None, 0)
+                    };
+                    let Some(constraint) = Self::constraint_from_block_expr(expr, None, trailing, span)? else {
+                        return Err(ParseError::syntax_error_with_span(
+                            "unsupported statement in inline asm block; expected an instruction string or operand constraint".to_string(),
+                            span,
+                        ));
+                    };
+                    constraints.push(constraint);
+                    index += consumed;
+                }
+                Node::Assignment(assign) => {
+                    let binding = match &assign.target {
+                        Expr::Identifier(name) => name.clone(),
+                        _ => {
+                            return Err(ParseError::syntax_error_with_span(
+                                "asm operand binding must be an identifier".to_string(),
+                                span,
+                            ));
+                        }
+                    };
+                    let (trailing, consumed) = if Self::block_constraint_needs_operand(&assign.value) {
+                        (Some(Self::block_constraint_operand(block, index + 1, span)?), 1)
+                    } else {
+                        (None, 0)
+                    };
+                    let Some(constraint) = Self::constraint_from_block_expr(&assign.value, Some(binding), trailing, span)? else {
+                        return Err(ParseError::syntax_error_with_span(
+                            "unsupported assignment in inline asm block; expected a named operand constraint".to_string(),
+                            span,
+                        ));
+                    };
+                    constraints.push(constraint);
+                    index += consumed;
+                }
+                _ => {
+                    return Err(ParseError::syntax_error_with_span(
+                        "unsupported statement in inline asm block; expected an instruction string or operand constraint".to_string(),
+                        span,
+                    ));
+                }
             }
+            index += 1;
         }
         Ok(())
+    }
+
+    fn block_constraint_needs_operand(expr: &Expr) -> bool {
+        matches!(expr,
+            Expr::Call { callee, args }
+                if matches!(callee.as_ref(), Expr::Identifier(kind)
+                    if matches!(kind.as_str(), "in" | "out" | "inout" | "lateout"))
+                    && args.len() == 1)
+    }
+
+    fn block_constraint_operand(block: &Block, index: usize, span: Span) -> Result<Expr, ParseError> {
+        match block.statements.get(index) {
+            Some(Node::Expression(operand)) => Ok(operand.clone()),
+            _ => Err(ParseError::syntax_error_with_span(
+                "asm operand constraint requires a following operand expression".to_string(),
+                span,
+            )),
+        }
+    }
+
+    fn constraint_from_block_expr(
+        expr: &Expr,
+        name: Option<String>,
+        trailing_operand: Option<Expr>,
+        span: Span,
+    ) -> Result<Option<AsmConstraint>, ParseError> {
+        let Expr::Call { callee, args } = expr else { return Ok(None) };
+        let Expr::Identifier(kind) = callee.as_ref() else { return Ok(None) };
+        let (kind, reg_class, operand) = match kind.as_str() {
+            "in" | "out" | "inout" | "lateout" if args.len() == 1 || args.len() == 2 => {
+                let Expr::Identifier(reg_class) = &args[0].value else {
+                    return Err(ParseError::syntax_error_with_span(
+                        "asm operand register class must be an identifier".to_string(), span,
+                    ));
+                };
+                let kind = match kind.as_str() {
+                    "in" => AsmConstraintKind::In,
+                    "out" => AsmConstraintKind::Out,
+                    "inout" => AsmConstraintKind::InOut,
+                    _ => AsmConstraintKind::LateOut,
+                };
+                let operand = if args.len() == 2 {
+                    args[1].value.clone()
+                } else {
+                    trailing_operand.ok_or_else(|| ParseError::syntax_error_with_span(
+                        "asm operand constraint requires a following operand expression".to_string(), span,
+                    ))?
+                };
+                (kind, Some(reg_class.clone()), Some(operand))
+            }
+            "in" | "out" | "inout" | "lateout" => return Err(ParseError::syntax_error_with_span(
+                "asm operand constraint requires a register class and exactly one operand".to_string(), span,
+            )),
+            "clobber" if args.len() == 1 => {
+                let class = match &args[0].value {
+                    Expr::Identifier(s) | Expr::String(s) => s.clone(),
+                    _ => return Err(ParseError::syntax_error_with_span("unsupported asm clobber name".to_string(), span)),
+                };
+                (AsmConstraintKind::Clobber, Some(class), None)
+            }
+            "clobber_abi" if args.len() == 1 => {
+                let Expr::String(abi) = &args[0].value else {
+                    return Err(ParseError::syntax_error_with_span("clobber_abi requires a string literal".to_string(), span));
+                };
+                (AsmConstraintKind::ClobberAbi(abi.clone()), None, None)
+            }
+            "options" if !args.is_empty() => {
+                let mut opts = Vec::with_capacity(args.len());
+                for arg in args {
+                    let Expr::Identifier(option) = &arg.value else {
+                        return Err(ParseError::syntax_error_with_span("asm options must be identifiers".to_string(), span));
+                    };
+                    opts.push(option.clone());
+                }
+                (AsmConstraintKind::Options(opts), None, None)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(AsmConstraint { span, name, kind, reg_class, operand }))
     }
 
     fn parse_asm_match(&mut self, start_span: Span) -> Result<Node, ParseError> {
@@ -664,7 +796,7 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::Node;
+    use crate::ast::{AsmConstraintKind, Expr, Node};
 
     fn parse_succeeds(source: &str) {
         let mut parser = crate::Parser::new(source);
@@ -735,6 +867,34 @@ mod tests {
                 "call {3}".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_asm_block_collects_riscv_and_x86_operand_constraints() {
+        let riscv = parse_first_asm(
+            "fn test(mcause: u64):\n    asm volatile:\n        \"csrr {0}, mcause\"\n        out(reg) mcause\n",
+        );
+        assert_eq!(riscv.constraints.len(), 1);
+        assert!(matches!(&riscv.constraints[0].kind, AsmConstraintKind::Out));
+        assert_eq!(riscv.constraints[0].reg_class.as_deref(), Some("reg"));
+        assert_eq!(riscv.constraints[0].operand, Some(Expr::Identifier("mcause".to_string())));
+
+        let x86 = parse_first_asm(
+            "fn test(vaddr: u64):\n    asm volatile:\n        \"invlpg [{addr}]\"\n        addr = in(reg) vaddr\n",
+        );
+        assert_eq!(x86.constraints.len(), 1);
+        assert_eq!(x86.constraints[0].name.as_deref(), Some("addr"));
+        assert!(matches!(&x86.constraints[0].kind, AsmConstraintKind::In));
+        assert_eq!(x86.constraints[0].operand, Some(Expr::Identifier("vaddr".to_string())));
+    }
+
+    #[test]
+    fn test_asm_block_rejects_unrecognized_statements() {
+        let mut parser = crate::Parser::new(
+            "fn test():\n    asm volatile:\n        \"nop\"\n        do_something()\n",
+        );
+        let err = parser.parse().err().expect("unsupported asm statement must fail");
+        assert!(format!("{err}").contains("unsupported statement in inline asm block"));
     }
 
     /// The parenthesized form already preserved braces; the block form must now

@@ -1,0 +1,26 @@
+"""Exactly one process of a sharded native build owns SIMPLE_MEM_SNAPSHOT_FILE.
+
+Stage 3 (coordinator route, SIMPLE_FILE_WORKERS=0 two-pass) failed with
+`[mir-shard] owner=1/2@0 status=BLOCKED`: every MIR shard worker
+(SIMPLE_MIR_SHARD=i/n) re-runs the pipeline through HIR and inherited the
+parent's SIMPLE_MEM_SNAPSHOT_FILE; the runtime opens it O_EXCL, so the second
+opener failed "SIMPLE_MEM_SNAPSHOT_FILE could not be established safely".
+Shard children (HIR or MIR) must never own the sink; the single-process build
+and the final link worker (SIMPLE_MIR_SHARD_LINK, no shard spec) must.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.driver.driver_mem_snapshot.{mem_snapshot_owner_v1}
+
+describe "mem_snapshot_owner_v1":
+    it "lets the single-process build and the final link worker own the sink":
+        expect(mem_snapshot_owner_v1(false, false)).to_equal(true)
+
+    it "refuses ownership to a HIR shard child":
+        expect(mem_snapshot_owner_v1(true, false)).to_equal(false)
+
+    it "refuses ownership to a MIR shard child":
+        expect(mem_snapshot_owner_v1(false, true)).to_equal(false)
+
+    it "refuses ownership when both shard roles are present":
+        expect(mem_snapshot_owner_v1(true, true)).to_equal(false)

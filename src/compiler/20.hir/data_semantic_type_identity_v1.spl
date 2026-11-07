@@ -65,13 +65,13 @@ impl HirLowering:
                 return Ok(hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind).split("::"))
         return Err("type identity imported nominal origin is not retained by its semantic owner")
 
-    me data_type_children_v1(values: [HirType], depth: i64, remaining: i64) -> Result<DataTypeChildrenProjectionV1, text>:
+    me data_type_children_v1(values: [HirType], depth: i64, remaining: i64, allow_any: bool) -> Result<DataTypeChildrenProjectionV1, text>:
         if values.len() > 256: return Err("semantic type child count bound")
         var children: [text] = []
         var nodes: i64 = 0
         var bytes: i64 = 0
         for value in values:
-            val child = self.data_type_node_v1(value, depth + 1, remaining - nodes)?
+            val child = self.data_type_node_v1(value, depth + 1, remaining - nodes, allow_any)?
             val count = child.canonical.bytes().len()
             if count > DATA_SEMANTIC_TYPE_MAX_BYTES_V1 - bytes: return Err("semantic type aggregate child byte bound")
             bytes = bytes + count
@@ -79,7 +79,7 @@ impl HirLowering:
             children = children.push(child.canonical)
         Ok(DataTypeChildrenProjectionV1(children: children, nodes: nodes, byte_len: bytes))
 
-    me data_type_node_v1(value: HirType, depth: i64, remaining: i64) -> Result<DataTypeProjectionV1, text>:
+    me data_type_node_v1(value: HirType, depth: i64, remaining: i64, allow_any: bool) -> Result<DataTypeProjectionV1, text>:
         if depth > DATA_SEMANTIC_TYPE_MAX_DEPTH_V1: return Err("semantic type nesting exceeds identity depth bound")
         if remaining < 1: return Err("semantic type aggregate node bound")
         var tag = ""
@@ -98,7 +98,9 @@ impl HirLowering:
             case HirTypeKind.Str: tag = "text"
             case HirTypeKind.Unit: tag = "unit"
             case HirTypeKind.Never: tag = "never"
-            case HirTypeKind.Any: tag = "any"
+            case HirTypeKind.Any:
+                if not allow_any: return Err("concrete schema binding cannot admit Any or erased type information")
+                tag = "any"
             case HirTypeKind.Named(symbol, arguments):
                 tag = "named"
                 fields = self.data_nominal_type_fields_v1(symbol)?
@@ -158,7 +160,7 @@ impl HirLowering:
                 fields = ["{parameters.len()}"]
                 declared_effects = effects
             case _: return Err("semantic type is unresolved or outside the versioned identity vocabulary")
-        val projected = self.data_type_children_v1(child_types, depth, remaining - 1)?
+        val projected = self.data_type_children_v1(child_types, depth, remaining - 1, allow_any)?
         var children = projected.children
         var nodes = 1 + projected.nodes
         var emitted_bytes = projected.byte_len
@@ -176,7 +178,7 @@ impl HirLowering:
                 case EffectKind.Allocates: effect_tag = "effect.allocates"
                 case EffectKind.Throws(error_type):
                     effect_tag = "effect.throws"
-                    val child = self.data_type_node_v1(error_type, depth + 2, remaining - nodes)?
+                    val child = self.data_type_node_v1(error_type, depth + 2, remaining - nodes, allow_any)?
                     nodes = nodes + child.nodes
                     effect_children = [child.canonical]
                 case _: return Err("semantic function effect is unresolved or has no bound identity")
@@ -198,5 +200,13 @@ impl HirLowering:
 
     me data_type_identity_v1(value: HirType) -> Result<DataSemanticTypeIdentityV1, text>:
         if self.errors.len() != 0: return Err("semantic type owner has unresolved diagnostics")
-        val projected = self.data_type_node_v1(value, 0, DATA_SEMANTIC_TYPE_MAX_NODES_V1)?
+        val projected = self.data_type_node_v1(value, 0, DATA_SEMANTIC_TYPE_MAX_NODES_V1, true)?
+        data_semantic_type_identity_v1(projected.canonical)
+
+    # Admission policy for concrete managed schemas, after canonical lowering.
+    # Share the bounded semantic traversal, including function Throws payloads;
+    # transport-only callers retain Any through data_type_identity_v1 above.
+    me data_concrete_type_identity_v1(value: HirType) -> Result<DataSemanticTypeIdentityV1, text>:
+        if self.errors.len() != 0: return Err("semantic type owner has unresolved diagnostics")
+        val projected = self.data_type_node_v1(value, 0, DATA_SEMANTIC_TYPE_MAX_NODES_V1, false)?
         data_semantic_type_identity_v1(projected.canonical)
