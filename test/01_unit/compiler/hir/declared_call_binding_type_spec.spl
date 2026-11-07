@@ -5,7 +5,7 @@ use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, SymbolId, SymbolKind}
 use compiler.hir.hir_symbol_table_methods.*
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind, MethodResolution}
-use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return, hir_binding_method_call_return}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind}
 
 fn binding_type(kind: HirTypeKind) -> HirType:
     HirType(kind: kind, span: Span.empty())
@@ -28,8 +28,8 @@ describe "declared direct-call type transport for bindings":
         val right = table.define("fetch", SymbolKind.Function,
             binding_type(HirTypeKind.Function([], right_result, [])), Span.empty(), Visibility.Public, false, "right.spl")
         expect(left.id == right.id).to_equal(false)
-        val left_type = hir_binding_direct_call_return(direct_binding_call(left, "right.fetch"), table)
-        val right_type = hir_binding_direct_call_return(direct_binding_call(right, "left.fetch"), table)
+        val left_type = hir_binding_direct_call_return_kind(direct_binding_call(left, "right.fetch").kind, table)
+        val right_type = hir_binding_direct_call_return_kind(direct_binding_call(right, "left.fetch").kind, table)
         expect(left_type != nil and right_type != nil).to_equal(true)
         match left_type.unwrap().kind:
             case HirTypeKind.Result(ok, _): expect(ok.kind).to_equal(HirTypeKind.Str)
@@ -38,8 +38,8 @@ describe "declared direct-call type transport for bindings":
             case HirTypeKind.Result(ok, _): expect(ok.kind).to_equal(HirTypeKind.Int(64, true))
             case _: panic("right call borrowed another owner")
         val shadow = table.define("fetch", SymbolKind.Variable, integer, Span.empty(), Visibility.Private, false, nil)
-        expect(hir_binding_direct_call_return(direct_binding_call(shadow, "fetch"), table) == nil).to_equal(true)
-        expect(hir_binding_direct_call_return(direct_binding_call(SymbolId(id: 999999), "fetch"), table) == nil).to_equal(true)
+        expect(hir_binding_direct_call_return_kind(direct_binding_call(shadow, "fetch").kind, table) == nil).to_equal(true)
+        expect(hir_binding_direct_call_return_kind(direct_binding_call(SymbolId(id: 999999), "fetch").kind, table) == nil).to_equal(true)
 
     it "leaves generic and unsettled return inference to its owning pass":
         val table = SymbolTable.new()
@@ -49,13 +49,13 @@ describe "declared direct-call type transport for bindings":
         var declaration = table.get_symbol_raw(generic.id).unwrap()
         declaration.generic_param_count = 1
         table.register_preserved_symbol(declaration)
-        expect(hir_binding_direct_call_return(direct_binding_call(generic, "generic"), table) == nil).to_equal(true)
+        expect(hir_binding_direct_call_return_kind(direct_binding_call(generic, "generic").kind, table) == nil).to_equal(true)
         val ordinary = table.define("ordinary", SymbolKind.Function, signature, Span.empty(), Visibility.Public, false, nil)
-        expect(hir_binding_direct_call_return(direct_binding_call(ordinary, "ordinary", [text_type]), table) == nil).to_equal(true)
+        expect(hir_binding_direct_call_return_kind(direct_binding_call(ordinary, "ordinary", [text_type]).kind, table) == nil).to_equal(true)
         val unsettled = binding_type(HirTypeKind.Result(text_type, binding_type(HirTypeKind.Infer(0, 0))))
         val unknown = table.define("unknown", SymbolKind.Function,
             binding_type(HirTypeKind.Function([], unsettled, [])), Span.empty(), Visibility.Public, false, nil)
-        expect(hir_binding_direct_call_return(direct_binding_call(unknown, "unknown"), table) == nil).to_equal(true)
+        expect(hir_binding_direct_call_return_kind(direct_binding_call(unknown, "unknown").kind, table) == nil).to_equal(true)
 
     it "transports an owner method's declared return through a receiver binding":
         # layout_symbol_function_pattern_owner_2026_10_11: `val sym = self.get_symbol(id)`
@@ -70,7 +70,7 @@ describe "declared direct-call type transport for bindings":
         val receiver = HirExpr(kind: HirExprKind.Var(receiver_sym), has_type_: false, type_: nil, span: Span.empty())
         val call = HirExpr(kind: HirExprKind.MethodCall(receiver, "lookup", [], MethodResolution.Unresolved),
             has_type_: false, type_: nil, span: Span.empty())
-        val found = hir_binding_method_call_return(call, table)
+        val found = hir_binding_method_call_return_kind(call.kind, table)
         expect(found != nil).to_equal(true)
         match found.unwrap().kind:
             case HirTypeKind.Optional(inner):
@@ -80,4 +80,4 @@ describe "declared direct-call type transport for bindings":
             case _: panic("method return lost Optional")
         val missing = HirExpr(kind: HirExprKind.MethodCall(receiver, "absent", [], MethodResolution.Unresolved),
             has_type_: false, type_: nil, span: Span.empty())
-        expect(hir_binding_method_call_return(missing, table) == nil).to_equal(true)
+        expect(hir_binding_method_call_return_kind(missing.kind, table) == nil).to_equal(true)
