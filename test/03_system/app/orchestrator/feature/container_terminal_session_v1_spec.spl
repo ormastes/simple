@@ -1,0 +1,185 @@
+use std.spec.{describe, it, expect, step}
+# @req ORCH-02 HOST-02
+# Pure plan/archive/helper integrity, never native attachment or Input rights.
+# Execution NOT_RUN. Full typed daemon template, no fake native owner.
+use std.common.contracts.container.primary_attach_v1.*
+use std.common.contracts.container.stream_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.build_manager.group_process_stream_profile_v3.*
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_digest_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_bind_intent_v1, host_helper_reservation_receipt_v1}
+use test.fixtures.orchestration.host_helper_fixture_v1.host_helper_fixture_v1
+
+use std.nogc_async_mut.container.terminal_session_v1.*
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedTransferV2, PipedProcessRefV1}
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.nogc_sync_mut.io.process_input_control_v1.{ProcessInputControlStateV1, ProcessInputWriteDispositionV1}
+
+# Pure plan/helper fixture adapted from container_primary_attach_v1_spec.
+# Invalid transfer below is deliberately NOT a successful native owner fixture.
+fn primary_fixture_v1() -> ContainerPrimaryAttachPlanV1:
+    val workload = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "workload", attempt: 2,
+        operation_id: "parent-operation", request_digest: "a".repeat(64), physical_host_id: "authorized-alias",
+        service_scope_id: "service", boot_id: "boot", provider_generation: 7, native_machine_id: "machine",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id, service_scope_id: workload.service_scope_id,
+        boot_id: workload.boot_id, provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: workload.workload_uid, attempt: workload.attempt,
+        operation_id: workload.operation_id, provider_generation: workload.provider_generation, engine: "podman",
+        native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val identity = ContainerOutputIdentityV2(operation_id: "output-operation", parent_operation_id: workload.operation_id,
+        parent_operation_digest: "c".repeat(64), parent_assignment_digest: "d".repeat(64),
+        parent_budget_digest: "e".repeat(64), binding_digest: "f".repeat(64))
+    val args = ["attach", "--no-stdin=false", "--sig-proxy=false", "--detach-keys=", runtime.native_id]
+    val request = GroupProcessStreamRequestV2(program: "/usr/bin/podman", producer_digest: "1".repeat(64), args: args,
+        environment: ["LANG=C", "TERM=dumb"], directory: "/trusted/work", inputs: [], timeout_ms: 30000,
+        broker_program: "/trusted/broker", broker_digest: "2".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2("/usr/bin/podman", args), launch_deadline_unix_ms: 0)
+    val budget = GroupProcessBrokerBudgetV3(cgroup_path: "/delegated/broker", device: 1, inode: 2, generation: 3,
+        policy_digest: "3".repeat(64), cpu_quota_us: 10000, cpu_period_us: 100000,
+        reserved_cpu_millis: 100, memory_limit_bytes: 16777216, reserved_memory_bytes: 16777216)
+    val profile = GroupProcessStreamProfileV3(helper_cpu: group_process_cpu_quota_v3(50).unwrap(),
+        broker: budget, child_image_mode: "trusted-local-admin-image-fd-v1")
+    val launch = GroupProcessStreamLaunchV2(root: "/trusted/output", worker_id: identity.operation_id, generation: 7,
+        snapshot_digest: "4".repeat(64), cache_identity: "5".repeat(64), memory_limit_bytes: 33554432,
+        request: request, delegated_cgroup_path: "/delegated/helpers", memory_policy: "enforce", transport_generation: 0,
+        profile_v3: Some(profile))
+    var plan = ContainerPrimaryAttachPlanV1(terminal_mode: "stdin", workload: workload, runtime: runtime, identity: identity,
+        resources: ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), provider_identity_digest: "6".repeat(64),
+        policy_digest: "7".repeat(64), launch_template: launch, request_digest: "")
+    plan.request_digest = container_primary_attach_plan_digest_v1(plan).unwrap()
+    plan
+
+fn primary_helper_v1(plan: ContainerPrimaryAttachPlanV1) -> ContainerHelperAdmissionV2:
+    val fixture = host_helper_fixture_v1()
+    val work = plan.workload
+    val scope = ContainerHostScopeV2(physical_host_id: work.physical_host_id, service_scope_id: work.service_scope_id,
+        boot_id: work.boot_id, provider_generation: work.provider_generation, native_machine_id: work.native_machine_id,
+        continuity_mode: work.continuity_mode, continuity_id: work.continuity_id)
+    var helper = fixture.request.plan
+    helper.operation_id = plan.identity.operation_id
+    helper.helper_kind = "attach-broker"
+    helper.parent_operation_id = plan.identity.parent_operation_id
+    helper.parent_operation_digest = plan.identity.parent_operation_digest
+    helper.parent_assignment_digest = plan.identity.parent_assignment_digest
+    helper.parent_budget_digest = plan.identity.parent_budget_digest
+    helper.request_digest = plan.request_digest
+    helper.scope = scope
+    var intent = fixture.request.intent
+    intent.physical_host_id = scope.physical_host_id
+    intent.reservation.operation_id = plan.identity.operation_id
+    intent.reservation.service_scope_id = scope.service_scope_id
+    intent.reservation.cpu_millis = plan.resources.cpu_millis
+    intent.reservation.memory_bytes = plan.resources.memory_bytes
+    intent.fence.boot_id = container_scope_fence_id_v2(scope).unwrap()
+    intent.fence.provider_generation = scope.provider_generation
+    intent.plan_digest = host_helper_plan_digest_v1(helper).unwrap()
+    intent = host_reservation_bind_intent_v1(intent).unwrap()
+    var operation = fixture.request.operation
+    operation.id = plan.identity.operation_id
+    operation.host_id = scope.physical_host_id
+    operation.memory_bytes = plan.resources.memory_bytes
+    operation.duration_ms = plan.launch_template.request.timeout_ms
+    operation.payload_digest = intent.reservation.payload_digest
+    val receipt = host_helper_reservation_receipt_v1(intent, operation).unwrap()
+    ContainerHelperAdmissionV2(plan: helper, intent: intent, operation: operation, receipt: receipt,
+        deadline: container_effect_deadline_v1(plan.request_digest, plan.identity.operation_id, ["attach"], 1000).unwrap(),
+        grant_id: "grant", issuer_id: "issuer", approver_id: "approver", cpu_millis: plan.resources.cpu_millis, memory_bytes: plan.resources.memory_bytes)
+
+fn terminal_invalid_transfer_v1(plan: ContainerPrimaryAttachPlanV1) -> PipedProcessOwnedTransferV2:
+    PipedProcessOwnedTransferV2(owner: GroupProcessStreamOwnerV2(launch: plan.launch_template,
+        identity_digest: "0".repeat(64)), reference: PipedProcessRefV1(pid: 0, generation: 0))
+
+# State metadata only, not an observed native handle or cleanup proof.
+fn terminal_virgin_state_v1() -> ProcessInputControlStateV1:
+    ProcessInputControlStateV1(controlled: true, active: false, revision: 0, expires_monotonic_ns: 0,
+        current_attempt_sequence: 0, last_attempt_sequence: 0, last_accepted_bytes: 0, last_status: 0,
+        last_disposition: ProcessInputWriteDispositionV1.Rejected, last_revision: 0, last_expires_monotonic_ns: 0,
+        target_digest: "", nonce_digest: "", last_target_digest: "", last_nonce_digest: "")
+
+describe "tagged terminal owner rejection and retained retirement":
+    it "retains the transfer when canonical primary plan integrity fails":
+        step("retains the transfer when canonical primary plan integrity fails")
+        var plan = primary_fixture_v1()
+        val helper = primary_helper_v1(plan)
+        val transfer = terminal_invalid_transfer_v1(plan)
+        plan.request_digest = "0".repeat(64)
+        val turn = container_primary_attach_session_v1(plan, helper, transfer)
+        expect(turn.session == nil).to_equal(true)
+        expect(turn.cleanup_transfer != nil).to_equal(true)
+        expect(turn.cleanup_transfer.unwrap().owner.launch).to_equal(transfer.owner.launch)
+        expect(turn.error != "").to_equal(true)
+
+    it "rejects a helper request rebind before native input control":
+        step("rejects a helper request rebind before native input control")
+        val plan = primary_fixture_v1()
+        var helper = primary_helper_v1(plan)
+        helper.deadline.request_digest = "0".repeat(64)
+        val transfer = terminal_invalid_transfer_v1(plan)
+        val turn = container_primary_attach_session_v1(plan, helper, transfer)
+        expect(turn.session == nil).to_equal(true)
+        expect(turn.cleanup_transfer.unwrap().reference).to_equal(transfer.reference)
+        expect(turn.error != "").to_equal(true)
+
+    it "refuses a planning template as an actual native transfer":
+        step("refuses a planning template as an actual native transfer")
+        val plan = primary_fixture_v1()
+        val helper = primary_helper_v1(plan)
+        expect(container_primary_attach_admission_validate_v1(plan, helper).is_ok()).to_equal(true)
+        val transfer = terminal_invalid_transfer_v1(plan)
+        val turn = container_primary_attach_session_v1(plan, helper, transfer)
+        expect(turn.session == nil).to_equal(true)
+        expect(turn.cleanup_transfer.unwrap().reference.pid).to_equal(0)
+        expect(turn.error != "").to_equal(true)
+
+    it "requires virgin controlled state rather than an inactive revoked slot":
+        step("requires virgin controlled state rather than an inactive revoked slot")
+        val virgin = terminal_virgin_state_v1()
+        expect(container_primary_attach_input_state_validate_v1(virgin).is_ok()).to_equal(true)
+        var changed = virgin
+        changed.controlled = false
+        expect(container_primary_attach_input_state_validate_v1(changed).is_err()).to_equal(true)
+        changed = virgin
+        changed.active = true
+        expect(container_primary_attach_input_state_validate_v1(changed).is_err()).to_equal(true)
+        changed = virgin
+        changed.revision = 1
+        changed.expires_monotonic_ns = 100
+        changed.target_digest = "a".repeat(64)
+        changed.nonce_digest = "b".repeat(64)
+        expect(container_primary_attach_input_state_validate_v1(changed).is_err()).to_equal(true)
+
+    it "rejects every retained attempt counter status and digest in virgin state":
+        step("rejects every retained attempt counter status and digest in virgin state")
+        val virgin = terminal_virgin_state_v1()
+        for field in ["expiry", "sequence", "last-sequence", "accepted", "status", "disposition", "last-revision",
+                "last-expiry", "target", "nonce", "last-target", "last-nonce"]:
+            var changed = virgin
+            match field:
+                case "expiry": changed.expires_monotonic_ns = 1
+                case "sequence": changed.current_attempt_sequence = 1
+                case "last-sequence": changed.last_attempt_sequence = 1
+                case "accepted": changed.last_accepted_bytes = 1
+                case "status": changed.last_status = -3
+                case "disposition": changed.last_disposition = ProcessInputWriteDispositionV1.Unknown
+                case "last-revision": changed.last_revision = 1
+                case "last-expiry": changed.last_expires_monotonic_ns = 1
+                case "target": changed.target_digest = "a".repeat(64)
+                case "nonce": changed.nonce_digest = "b".repeat(64)
+                case "last-target": changed.last_target_digest = "c".repeat(64)
+                case "last-nonce": changed.last_nonce_digest = "d".repeat(64)
+                case _: assert(false)
+            expect(container_primary_attach_input_state_validate_v1(changed).is_err()).to_equal(true)
+
+    it "never accepts an invalid output transfer as native identity proof":
+        step("never accepts an invalid output transfer as native identity proof")
+        val plan = primary_fixture_v1()
+        val transfer = terminal_invalid_transfer_v1(plan)
+        val output = ContainerOwnedTerminalSessionV1.OutputFollow(transfer)
+        expect(container_terminal_validate_v1(output).is_err()).to_equal(true)
+        expect(container_terminal_identity_equal_v1(output, output)).to_equal(false)
+        expect(container_terminal_output_matches_v1(output, transfer)).to_equal(false)

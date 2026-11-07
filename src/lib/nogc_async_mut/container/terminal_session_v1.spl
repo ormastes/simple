@@ -1,0 +1,244 @@
+# Process-local tagged ownership, never a decoder or an Input/Geometry grant.
+# Native input-control dependency is separately reviewed/landed. No writes here.
+use std.common.contracts.container.primary_attach_v1.*
+use std.common.contracts.container.stream_v2.ContainerHelperAdmissionV2
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_template_digest_v3}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1, GroupedReapReceiptV1}
+use std.nogc_sync_mut.io.group_process_owner.{group_process_stream_owner_validate_v2,
+    group_process_stream_cleanup_proof_v2, group_process_stream_collect_reap_v2}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.contracts.mux.request_validation_v1.mux_validate_name_v1
+use std.common.contracts.mux.session_runtime_control_v1.session_runtime_control_incarnation_valid_v1
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedTransferV2, PipedProcessRefV1,
+    process_validate_piped_owned_transfer_v2, process_piped_owned_transfer_equal_v2,
+    process_cleanup_piped_owned_v2, process_retire_piped_owned_v2}
+use std.nogc_sync_mut.io.process_input_control_v1.{process_input_control_enable_ref_v1,
+    process_input_control_state_ref_v1, ProcessInputControlStateV1, ProcessInputWriteDispositionV1}
+
+pub struct ContainerPrimaryAttachAdoptionV1:
+    binding_uid: text
+    service_incarnation: text
+    session_id: text
+    window_id: text
+    pane_id: text
+    service_epoch: i64
+    child_incarnation: i64
+
+# Module-private fields prevent callers relabeling a transfer or asserting native
+# cleanup. Class copying is NOT a noncopyability guarantee: keep one canonical
+# returned session; stale copies confer no new native or adoption authority.
+pub class ContainerPrimaryAttachSessionV1:
+    plan: ContainerPrimaryAttachPlanV1
+    transfer: PipedProcessOwnedTransferV2
+    adoption: ContainerPrimaryAttachAdoptionV1? = nil
+    native_cleaned: bool = false
+
+# Metadata projections only; no transfer/native-owner accessor is exported.
+pub fn container_primary_attach_plan_v1(session: ContainerPrimaryAttachSessionV1) -> ContainerPrimaryAttachPlanV1:
+    session.plan
+
+pub fn container_primary_attach_adoption_v1(session: ContainerPrimaryAttachSessionV1) -> ContainerPrimaryAttachAdoptionV1?:
+    session.adoption
+
+pub fn container_primary_attach_native_cleaned_v1(session: ContainerPrimaryAttachSessionV1) -> bool:
+    session.native_cleaned
+
+# This pure check is consumed by the actual constructor's native state receipt.
+# The all-zero history and Rejected disposition match native slot initialization;
+# merely inactive/revoked state cannot remint a primary session.
+pub fn container_primary_attach_input_state_validate_v1(state: ProcessInputControlStateV1) -> Result<(), text>:
+    if (not state.controlled or state.active or state.revision != 0 or state.expires_monotonic_ns != 0 or
+            state.current_attempt_sequence != 0 or state.last_attempt_sequence != 0 or
+            state.last_accepted_bytes != 0 or state.last_status != 0 or
+            state.last_disposition != ProcessInputWriteDispositionV1.Rejected or
+            state.last_revision != 0 or state.last_expires_monotonic_ns != 0 or
+            state.target_digest != "" or state.nonce_digest != "" or
+            state.last_target_digest != "" or state.last_nonce_digest != ""):
+        return Err("container-terminal-input-control-not-virgin")
+    Ok(())
+
+pub enum ContainerOwnedTerminalSessionV1:
+    OutputFollow(transfer: PipedProcessOwnedTransferV2)
+    PrimaryAttach(session: ContainerPrimaryAttachSessionV1)
+
+pub struct ContainerPrimaryAttachSessionTurnV1:
+    session: ContainerPrimaryAttachSessionV1?
+    cleanup_transfer: PipedProcessOwnedTransferV2?
+    error: text
+
+pub struct ContainerPrimaryAttachAdoptionTurnV1:
+    session: ContainerPrimaryAttachSessionV1
+    error: text
+
+pub struct ContainerTerminalCleanupTurnV1:
+    session: ContainerOwnedTerminalSessionV1
+    cleaned: bool
+    error: text
+
+pub struct ContainerPrimaryAttachReapTurnV1:
+    session: ContainerPrimaryAttachSessionV1
+    receipt: GroupedReapReceiptV1?
+    error: text
+
+fn terminal_primary_launch_match_v1(plan: ContainerPrimaryAttachPlanV1,
+        actual: GroupProcessStreamLaunchV2) -> Result<bool, text>:
+    val digest = container_primary_attach_plan_digest_v1(plan)?
+    if digest != plan.request_digest: return Err("container-terminal-plan-digest-mismatch")
+    if (actual.transport_generation <= 0 or actual.request.launch_deadline_unix_ms <= 0 or
+            group_process_stream_template_digest_v3(actual)? != group_process_stream_template_digest_v3(plan.launch_template)?):
+        return Err("container-terminal-launch-template-mismatch")
+    Ok(true)
+
+fn terminal_primary_transfer_match_v1(plan: ContainerPrimaryAttachPlanV1,
+        transfer: PipedProcessOwnedTransferV2) -> Result<bool, text>:
+    terminal_primary_launch_match_v1(plan, transfer.owner.launch)?
+    process_validate_piped_owned_transfer_v2(transfer)?
+    Ok(true)
+
+fn terminal_primary_helper_match_v1(plan: ContainerPrimaryAttachPlanV1,
+        helper: ContainerHelperAdmissionV2, transfer: PipedProcessOwnedTransferV2) -> Result<bool, text>:
+    container_primary_attach_admission_validate_v1(plan, helper)?
+    terminal_primary_launch_match_v1(plan, transfer.owner.launch)?
+    val invalid = group_process_stream_owner_validate_v2(transfer.owner)
+    if invalid != "": return Err(invalid)
+    if transfer.owner.launch.request.launch_deadline_unix_ms != helper.deadline.expires_at_unix_ms:
+        return Err("container-terminal-helper-expiry-mismatch")
+    Ok(true)
+
+# Exactly one retained owner: a session on success, the original transfer on any
+# failure, including native enable success followed by a failed state query.
+pub fn container_primary_attach_session_v1(plan: ContainerPrimaryAttachPlanV1,
+        helper: ContainerHelperAdmissionV2, transfer: PipedProcessOwnedTransferV2) -> ContainerPrimaryAttachSessionTurnV1:
+    val checked = terminal_primary_helper_match_v1(plan, helper, transfer)
+    if checked.is_err():
+        return ContainerPrimaryAttachSessionTurnV1(session: nil, cleanup_transfer: Some(transfer), error: checked.unwrap_err())
+    val matched = terminal_primary_transfer_match_v1(plan, transfer)
+    if matched.is_err():
+        return ContainerPrimaryAttachSessionTurnV1(session: nil, cleanup_transfer: Some(transfer), error: matched.unwrap_err())
+    val enabled = process_input_control_enable_ref_v1(transfer.reference)
+    if enabled.is_err():
+        return ContainerPrimaryAttachSessionTurnV1(session: nil, cleanup_transfer: Some(transfer), error: enabled.unwrap_err())
+    val observed = process_input_control_state_ref_v1(transfer.reference)
+    if observed.is_err():
+        return ContainerPrimaryAttachSessionTurnV1(session: nil, cleanup_transfer: Some(transfer), error: observed.unwrap_err())
+    val state = observed.unwrap()
+    val virgin = container_primary_attach_input_state_validate_v1(state)
+    if virgin.is_err():
+        return ContainerPrimaryAttachSessionTurnV1(session: nil, cleanup_transfer: Some(transfer), error: virgin.unwrap_err())
+    ContainerPrimaryAttachSessionTurnV1(session: Some(ContainerPrimaryAttachSessionV1(plan: plan, transfer: transfer)),
+        cleanup_transfer: nil, error: "")
+
+pub fn container_terminal_validate_v1(session: ContainerOwnedTerminalSessionV1) -> Result<(), text>:
+    match session:
+        case ContainerOwnedTerminalSessionV1.OutputFollow(transfer):
+            process_validate_piped_owned_transfer_v2(transfer)?
+            Ok(())
+        case ContainerOwnedTerminalSessionV1.PrimaryAttach(primary):
+            if primary.native_cleaned: return Err("container-terminal-native-cleaned")
+            terminal_primary_transfer_match_v1(primary.plan, primary.transfer)?
+            val state = process_input_control_state_ref_v1(primary.transfer.reference)?
+            if not state.controlled: return Err("container-terminal-input-control-not-enabled")
+            Ok(())
+
+pub fn container_terminal_reference_v1(session: ContainerOwnedTerminalSessionV1) -> Result<PipedProcessRefV1, text>:
+    # Stored correlation only: native reads validate the full exact reference.
+    # Avoid full plan hashing and state queries in each sole-reader drain.
+    match session:
+        case ContainerOwnedTerminalSessionV1.OutputFollow(transfer): Ok(transfer.reference)
+        case ContainerOwnedTerminalSessionV1.PrimaryAttach(primary):
+            if primary.native_cleaned: return Err("container-terminal-native-cleaned")
+            Ok(primary.transfer.reference)
+
+# Correlation only: excluding adoption/progress conveys no adoption or control
+# authority. The caller must replace its canonical owner with every returned turn.
+pub fn container_terminal_identity_equal_v1(left: ContainerOwnedTerminalSessionV1,
+        right: ContainerOwnedTerminalSessionV1) -> bool:
+    match left:
+        case ContainerOwnedTerminalSessionV1.OutputFollow(a):
+            match right:
+                case ContainerOwnedTerminalSessionV1.OutputFollow(b): process_piped_owned_transfer_equal_v2(a, b)
+                case _: false
+        case ContainerOwnedTerminalSessionV1.PrimaryAttach(a):
+            match right:
+                case ContainerOwnedTerminalSessionV1.PrimaryAttach(b):
+                    val first = container_primary_attach_plan_encode_v1(a.plan)
+                    val second = container_primary_attach_plan_encode_v1(b.plan)
+                    (first.is_ok() and second.is_ok() and first.unwrap() == second.unwrap() and
+                        process_piped_owned_transfer_equal_v2(a.transfer, b.transfer))
+                case _: false
+
+pub fn container_terminal_output_matches_v1(session: ContainerOwnedTerminalSessionV1,
+        transfer: PipedProcessOwnedTransferV2) -> bool:
+    match session:
+        case ContainerOwnedTerminalSessionV1.OutputFollow(output): process_piped_owned_transfer_equal_v2(output, transfer)
+        case _: false
+
+fn terminal_adoption_valid_v1(value: ContainerPrimaryAttachAdoptionV1) -> bool:
+    (builder_identifier_valid_v1(value.binding_uid) and
+        session_runtime_control_incarnation_valid_v1(value.service_incarnation) and
+        mux_validate_name_v1(value.session_id).is_ok() and mux_validate_name_v1(value.window_id).is_ok() and
+        mux_validate_name_v1(value.pane_id).is_ok() and value.service_epoch > 0 and value.child_incarnation > 0)
+
+fn terminal_adoption_equal_v1(a: ContainerPrimaryAttachAdoptionV1, b: ContainerPrimaryAttachAdoptionV1) -> bool:
+    (a.binding_uid == b.binding_uid and a.service_incarnation == b.service_incarnation and
+        a.session_id == b.session_id and a.window_id == b.window_id and a.pane_id == b.pane_id and
+        a.service_epoch == b.service_epoch and a.child_incarnation == b.child_incarnation)
+
+# Actual Pane/service owner supplies these facts; this function grants no rights.
+pub fn container_primary_attach_adopt_v1(session: ContainerPrimaryAttachSessionV1,
+        adoption: ContainerPrimaryAttachAdoptionV1) -> ContainerPrimaryAttachAdoptionTurnV1:
+    if session.native_cleaned:
+        return ContainerPrimaryAttachAdoptionTurnV1(session: session, error: "container-terminal-native-cleaned")
+    if not terminal_adoption_valid_v1(adoption):
+        return ContainerPrimaryAttachAdoptionTurnV1(session: session, error: "container-terminal-adoption-invalid")
+    if session.adoption != nil:
+        if not terminal_adoption_equal_v1(session.adoption.unwrap(), adoption):
+            return ContainerPrimaryAttachAdoptionTurnV1(session: session, error: "container-terminal-adoption-rebind")
+    val checked = container_terminal_validate_v1(ContainerOwnedTerminalSessionV1.PrimaryAttach(session))
+    if checked.is_err(): return ContainerPrimaryAttachAdoptionTurnV1(session: session, error: checked.unwrap_err())
+    if session.adoption != nil: return ContainerPrimaryAttachAdoptionTurnV1(session: session, error: "")
+    var adopted = session
+    adopted.adoption = Some(adoption)
+    ContainerPrimaryAttachAdoptionTurnV1(session: adopted, error: "")
+
+# Cleanup owns only exact native retirement. It grants no workload completion or
+# Host settlement. A cleaned primary stays retained until actual Host ACK.
+# native_cleaned is historical actual cleanup success, set only here or by reap.
+pub fn container_terminal_cleanup_v1(session: ContainerOwnedTerminalSessionV1) -> ContainerTerminalCleanupTurnV1:
+    match session:
+        case ContainerOwnedTerminalSessionV1.OutputFollow(transfer):
+            val result = process_cleanup_piped_owned_v2(transfer.owner, Some(transfer.reference))
+            if result.is_err(): return ContainerTerminalCleanupTurnV1(session: session, cleaned: false, error: result.unwrap_err())
+            ContainerTerminalCleanupTurnV1(session: session, cleaned: true, error: "")
+        case ContainerOwnedTerminalSessionV1.PrimaryAttach(primary):
+            if primary.native_cleaned: return ContainerTerminalCleanupTurnV1(session: session, cleaned: true, error: "")
+            val result = process_cleanup_piped_owned_v2(primary.transfer.owner, Some(primary.transfer.reference))
+            if result.is_err(): return ContainerTerminalCleanupTurnV1(session: session, cleaned: false, error: result.unwrap_err())
+            var retired = primary
+            retired.native_cleaned = true
+            ContainerTerminalCleanupTurnV1(session: ContainerOwnedTerminalSessionV1.PrimaryAttach(retired), cleaned: true, error: "")
+
+# Settlement observation only: prove the exact owned group already terminal before
+# recovery retirement. No cancel, stale-reference query, caller receipt or kill.
+pub fn container_primary_attach_collect_reap_v1(session: ContainerPrimaryAttachSessionV1,
+        helper: ContainerHelperAdmissionV2, lease: GroupedActionLeaseV1) -> ContainerPrimaryAttachReapTurnV1:
+    # Check the immutable lease domains first; wrong leases never touch native IO.
+    val launch = session.transfer.owner.launch
+    if (lease.group_id != helper.plan.parent_operation_id or lease.action_id != helper.operation.id or
+            lease.worker_id != helper.operation.id or lease.generation != helper.plan.scope.provider_generation or
+            lease.lease_id != helper.receipt.receipt_digest or lease.snapshot_digest != launch.snapshot_digest or
+            lease.cache_identity != launch.cache_identity):
+        return ContainerPrimaryAttachReapTurnV1(session: session, receipt: nil, error: "container-terminal-reap-lease-mismatch")
+    val checked = terminal_primary_helper_match_v1(session.plan, helper, session.transfer)
+    if checked.is_err(): return ContainerPrimaryAttachReapTurnV1(session: session, receipt: nil, error: checked.unwrap_err())
+    val native = session.transfer.owner
+    val proof = group_process_stream_cleanup_proof_v2(native)
+    if proof.is_err(): return ContainerPrimaryAttachReapTurnV1(session: session, receipt: nil, error: proof.unwrap_err())
+    if proof.unwrap() == "": return ContainerPrimaryAttachReapTurnV1(session: session, receipt: nil, error: "container-terminal-cleanup-proof-empty")
+    val cleaned = process_retire_piped_owned_v2(native, nil)
+    if cleaned.is_err(): return ContainerPrimaryAttachReapTurnV1(session: session, receipt: nil, error: cleaned.unwrap_err())
+    var retired = session
+    retired.native_cleaned = true
+    val collected = group_process_stream_collect_reap_v2(native, lease)
+    if collected.is_err(): return ContainerPrimaryAttachReapTurnV1(session: retired, receipt: nil, error: collected.unwrap_err())
+    ContainerPrimaryAttachReapTurnV1(session: retired, receipt: Some(collected.unwrap()), error: "")

@@ -11,7 +11,8 @@ come from their executable assertions, not from an observed run.
 1. Roundtrips canonical data and stable digest without authorizing execution.
 2. Rejects payload tampering unknown fields and noncanonical retained bytes.
 3. Hashes vector boundaries and every new mode while separating operation identity.
-4. Decodes new schema fields as data while provider and builder reject their effects.
+4. Roundtrips execution fields; terminal argv construction is explicit while an
+   unconfigured provider still refuses terminal effects.
 
 Provider fixtures use real owner methods and exact argv matching. Optional real
 journal persistence exercises canonical publication and format-preserving V1
@@ -25,8 +26,12 @@ PASS, or power-loss durability experiment is claimed. See
 trusted-directory limits, and remaining verification.
 
 The command follow-up admits the already-digested executable override. The
-unsupported-effects loop now covers environment, working directory, and terminal
-modes only. Schema decoding still grants no execution authority by itself; mode
+execution-options loop covers environment, working directory, and terminal
+modes. Schema decoding still grants no execution authority by itself; mode
 replay continues through the provider's actual immutable payload binding.
 
-Execution-options source update (UNEXECUTED): Podman create vectors now include `--http-proxy=false`; typed environment/cwd are admitted, terminal effects remain refused. See `doc/05_design/oci_execution_options_effects.md` and the eleven-case system specification mirror.
+Execution-options source update (UNEXECUTED): Podman create vectors include
+`--http-proxy=false`; typed environment/cwd are admitted. Managed Podman now
+maps signed `stdin`/`tty` modes to explicit creation flags, while unconfigured
+providers refuse them. See `doc/05_design/podman_primary_attach_v1.md` and its
+authored, NOT_RUN primary attach scenarios. No live terminal claim is made.
