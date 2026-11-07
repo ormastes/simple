@@ -2,7 +2,7 @@
 use std.common.string_core.str_len
 use std.common.base_encoding.utilities.validated_utf8_bytes_to_text_linear
 use std.common.build_manager.contracts.builder_digest_valid_v1
-use std.common.crypto.sha256.sha256_text
+use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new}
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.nogc_async_mut.container.providers.linux.engine_exec_codec_v3.{LinuxEngineExecHttpRequestV3,
@@ -13,6 +13,7 @@ pub struct LinuxEngineExecHttpResponseV3:
     status: i64
     content_type: text
     body: text
+    api_version: text
 
 pub fn linux_engine_exec_http_encode_v3(request: LinuxEngineExecHttpRequestV3) -> Result<[u8], text>:
     if not builder_digest_valid_v1(request.request_digest) or not builder_digest_valid_v1(request.parent_native_id):
@@ -47,9 +48,44 @@ pub fn linux_engine_exec_http_encode_v3(request: LinuxEngineExecHttpRequestV3) -
         str_len(request.body).to_text() + "\r\n\r\n" + request.body
     Ok(wire.bytes())
 
-pub fn linux_engine_exec_http_decode_v3(action: text, wire: [u8]) -> Result<LinuxEngineExecHttpResponseV3, text>:
-    if not ["create", "inspect", "start"].contains(action): return Err("engine-exec-http-action")
-    if wire.len() > LINUX_ENGINE_EXEC_BODY_LIMIT_V3 + 16384: return Err("engine-exec-http-wire-bound")
+fn engine_http_chunked_body_v3(wire: [u8], start: i64) -> Result<[u8], text>:
+    var cursor = start
+    var chunks = 0
+    var body: [u8] = []
+    while true:
+        var size: i64 = 0
+        var digits = 0
+        while true:
+            if cursor >= wire.len(): return Err("engine-http-chunk-incomplete")
+            val byte = wire[cursor]
+            if byte == 13: break
+            var digit: i64 = -1
+            if byte >= 48 and byte <= 57: digit = (byte as i64) - 48
+            elif byte >= 97 and byte <= 102: digit = (byte as i64) - 87
+            elif byte >= 65 and byte <= 70: digit = (byte as i64) - 55
+            if digit < 0 or digits >= 16: return Err("engine-http-chunk-size")
+            if size > (LINUX_ENGINE_EXEC_BODY_LIMIT_V3 - digit) / 16: return Err("engine-http-chunk-bound")
+            size = size * 16 + digit
+            digits = digits + 1
+            cursor = cursor + 1
+        if digits == 0 or cursor + 1 >= wire.len() or wire[cursor + 1] != 10:
+            return Err("engine-http-chunk-size")
+        cursor = cursor + 2
+        if size == 0:
+            if (cursor + 2 != wire.len() or wire[cursor] != 13 or wire[cursor + 1] != 10):
+                return Err("engine-http-chunk-trailer-or-trailing")
+            return Ok(body)
+        if chunks >= 1024 or size > LINUX_ENGINE_EXEC_BODY_LIMIT_V3 - body.len(): return Err("engine-http-chunk-bound")
+        if size > wire.len() - cursor - 2: return Err("engine-http-chunk-incomplete")
+        if wire[cursor + size] != 13 or wire[cursor + size + 1] != 10:
+            return Err("engine-http-chunk-delimiter")
+        for offset in 0..size: body.push(wire[cursor + offset])
+        cursor = cursor + size + 2
+        chunks = chunks + 1
+
+fn engine_http_decode_v3(action: text, wire: [u8]) -> Result<LinuxEngineExecHttpResponseV3, text>:
+    if not ["create", "inspect", "start", "info"].contains(action): return Err("engine-exec-http-action")
+    if wire.len() > 2 * LINUX_ENGINE_EXEC_BODY_LIMIT_V3 + 16384: return Err("engine-exec-http-wire-bound")
     var end = -1
     var index = 0
     while index + 3 < wire.len() and index + 4 <= 16384:
@@ -85,6 +121,8 @@ pub fn linux_engine_exec_http_decode_v3(action: text, wire: [u8]) -> Result<Linu
     var seen: [text] = []
     var length: i64 = -1
     var content_type = ""
+    var api_version = ""
+    var chunked = false
     index = 1
     while index < lines.len():
         val line = lines[index]
@@ -108,17 +146,37 @@ pub fn linux_engine_exec_http_decode_v3(action: text, wire: [u8]) -> Result<Linu
                 if length > (LINUX_ENGINE_EXEC_BODY_LIMIT_V3 - digit) / 10: return Err("engine-exec-http-body-bound")
                 length = length * 10 + digit
         elif name == "content-type": content_type = value.lower()
+        elif name == "libpod-api-version": api_version = value
         elif name == "connection":
             if value.lower() != "close": return Err("engine-exec-http-connection")
-        elif ["transfer-encoding", "content-encoding", "upgrade", "location"].contains(name):
+        elif name == "transfer-encoding":
+            if value.lower() != "chunked": return Err("engine-exec-http-framing-refused")
+            chunked = true
+        elif ["content-encoding", "upgrade", "location"].contains(name):
             return Err("engine-exec-http-framing-refused")
         index = index + 1
-    if length < 0 or wire.len() - end != length: return Err("engine-exec-http-incomplete-or-trailing")
+    if ((chunked and length >= 0) or (not chunked and length < 0)): return Err("engine-exec-http-framing-conflict")
+    val body_bytes = if chunked:
+        engine_http_chunked_body_v3(wire, end)?
+    else:
+        if wire.len() - end != length: return Err("engine-exec-http-incomplete-or-trailing")
+        wire[end:]
     val expected_type = if action == "start": "text/plain; charset=us-ascii" else: "application/json"
     if content_type != expected_type: return Err("engine-exec-http-content-type")
-    val body = validated_utf8_bytes_to_text_linear(wire[end:])?
+    val body = validated_utf8_bytes_to_text_linear(body_bytes)?
     if action == "start" and body != "\n": return Err("engine-exec-http-start-body")
-    Ok(LinuxEngineExecHttpResponseV3(action: action, status: expected_status, content_type: content_type, body: body))
+    if action == "info" and api_version != "5.2.5": return Err("engine-info-api-version-mismatch")
+    Ok(LinuxEngineExecHttpResponseV3(action: action, status: expected_status, content_type: content_type, body: body, api_version: api_version))
+
+pub fn linux_engine_exec_http_decode_v3(action: text, wire: [u8]) -> Result<LinuxEngineExecHttpResponseV3, text>:
+    if not ["create", "inspect", "start"].contains(action): return Err("engine-exec-http-action")
+    engine_http_decode_v3(action, wire)
+
+pub fn linux_engine_info_http_request_v3() -> [u8]:
+    "GET /v5.2.5/libpod/info HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".bytes()
+
+pub fn linux_engine_info_http_decode_v3(wire: [u8]) -> Result<LinuxEngineExecHttpResponseV3, text>:
+    engine_http_decode_v3("info", wire)
 
 pub fn linux_engine_exec_query_digest_v3(request: LinuxEngineExecHttpRequestV3,
         socket_policy_digest: text) -> Result<text, text>:
@@ -136,9 +194,13 @@ pub fn linux_engine_exec_response_evidence_digest_v3(action: text, wire: [u8],
         query_digest: text) -> Result<text, text>:
     if not builder_digest_valid_v1(query_digest): return Err("engine-exec-query-digest")
     val response = linux_engine_exec_http_decode_v3(action, wire)?
-    val raw = validated_utf8_bytes_to_text_linear(wire)?
+    val stream = sha256_stream_v1_new()
+    if not stream.update(wire): return Err("engine-exec-wire-digest-unavailable")
+    val wire_digest = match stream.finish_hex():
+        case Some(value): value
+        case None: return Err("engine-exec-wire-digest-unavailable")
     val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-engine-exec-http-evidence-v3"),
-        "queryDigest": SdnValue.String(query_digest), "wireDigest": SdnValue.String(sha256_text(raw)),
+        "queryDigest": SdnValue.String(query_digest), "wireDigest": SdnValue.String(wire_digest),
         "action": SdnValue.String(action), "status": SdnValue.Int(response.status),
         "contentType": SdnValue.String(response.content_type), "bodyDigest": SdnValue.String(sha256_text(response.body))}
     Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))

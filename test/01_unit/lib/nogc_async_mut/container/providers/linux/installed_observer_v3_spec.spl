@@ -1,0 +1,110 @@
+# Pure correlation fixtures are NOT native peers or factory admission evidence.
+# Only negative pre-I/O arguments call the actual probe. Native positive NOT_RUN.
+use std.spec.*
+use std.common.string_core.str_len
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use std.nogc_async_mut.container.providers.linux.installed_observer_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_sync_mut.io.local_ipc_v1.LocalUnixPeerV1
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.linux_container_policy_fixture_v2
+
+fn _installed_info_fixture_v3() -> text:
+    "{\"host\":{\"security\":{\"rootless\":true},\"serviceIsRemote\":false},\"store\":{\"graphRoot\":\"/home/test/storage\",\"runRoot\":\"/run/user/1000/storage\",\"graphDriverName\":\"overlay\",\"graphOptions\":{}},\"version\":{\"Version\":\"5.2.5\"}}"
+
+fn _installed_probe_policy_fixture_v3() -> LinuxOciInstalledPolicyV3:
+    LinuxOciInstalledPolicyV3(cli_policy: linux_container_policy_fixture_v2(),
+        socket_path: "/run/user/1000/podman/podman.sock", expected_service_uid: 1000, api_version: "5.2.5")
+
+fn _installed_probe_cli_fixture_v3() -> LinuxOciEngineObservationV1:
+    linux_oci_engine_info_observation_v1(linux_container_policy_fixture_v2(), _installed_info_fixture_v3(), "a".repeat(64), 1000).unwrap()
+
+fn _installed_probe_peer_fixture_v3() -> LocalUnixPeerV1:
+    LocalUnixPeerV1(uid: 1000, gid: 1000, pid: 4242, socket_device: 4, socket_inode: 7)
+
+fn _installed_probe_wire_fixture_v3(body: text) -> [u8]:
+    ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLibpod-API-Version: 5.2.5\r\nContent-Length: " +
+        str_len(body).to_text() + "\r\nConnection: close\r\n\r\n" + body).bytes()
+
+describe "actual installed probe composition and pure correlation":
+    it "correlates exact service info peer and CLI under a distinct installed identity":
+        val policy = _installed_probe_policy_fixture_v3()
+        val cli = _installed_probe_cli_fixture_v3()
+        val observed = linux_oci_installed_correlate_v3(policy, cli, _installed_probe_peer_fixture_v3(),
+            _installed_probe_wire_fixture_v3(_installed_info_fixture_v3()), 100).unwrap()
+        expect(observed.api_version).to_equal("5.2.5")
+        expect(observed.policy_digest).to_equal(linux_oci_installed_policy_digest_v3(policy).unwrap())
+        expect(observed.cli.identity_digest).to_equal(cli.identity_digest)
+        expect(observed.identity_digest == cli.identity_digest).to_equal(false)
+        expect(observed.observed_unix_ms).to_equal(100)
+        expect(observed.query_digest.len()).to_equal(64)
+        expect(observed.evidence_digest.len()).to_equal(64)
+
+    it "binds actual peer process and endpoint identity while excluding counts and observation time from stable identity":
+        val policy = _installed_probe_policy_fixture_v3()
+        val cli = _installed_probe_cli_fixture_v3()
+        val peer = _installed_probe_peer_fixture_v3()
+        val wire = _installed_probe_wire_fixture_v3(_installed_info_fixture_v3())
+        val before = linux_oci_installed_correlate_v3(policy, cli, peer, wire, 100).unwrap()
+        for field in ["pid", "gid", "device", "inode"]:
+            var changed = peer
+            if field == "pid": changed.pid = 4243
+            if field == "gid": changed.gid = 1001
+            if field == "device": changed.socket_device = 5
+            if field == "inode": changed.socket_inode = 8
+            expect(linux_oci_installed_correlate_v3(policy, cli, changed, wire, 100).unwrap().identity_digest == before.identity_digest).to_equal(false)
+        val later_body = _installed_info_fixture_v3().replace("\"store\":{", "\"store\":{\"containerStore\":{\"number\":9},")
+        val later = linux_oci_installed_correlate_v3(policy, cli, peer, _installed_probe_wire_fixture_v3(later_body), 101).unwrap()
+        expect(later.identity_digest).to_equal(before.identity_digest)
+        expect(later.query_digest).to_equal(before.query_digest)
+        expect(later.evidence_digest == before.evidence_digest).to_equal(false)
+
+    it "rejects different API body CLI versions and mismatched store rootless or remote observations":
+        val policy = _installed_probe_policy_fixture_v3()
+        val cli = _installed_probe_cli_fixture_v3()
+        val peer = _installed_probe_peer_fixture_v3()
+        for body in [_installed_info_fixture_v3().replace("5.2.5", "5.3.0"),
+                _installed_info_fixture_v3().replace("/home/test/storage", "/home/test/foreign"),
+                _installed_info_fixture_v3().replace("/run/user/1000/storage", "/run/user/1000/foreign"),
+                _installed_info_fixture_v3().replace("overlay", "vfs"),
+                _installed_info_fixture_v3().replace("\"rootless\":true", "\"rootless\":false"),
+                _installed_info_fixture_v3().replace("\"serviceIsRemote\":false", "\"serviceIsRemote\":true")]:
+            expect(linux_oci_installed_correlate_v3(policy, cli, peer, _installed_probe_wire_fixture_v3(body), 100).is_err()).to_equal(true)
+        val wire_text = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLibpod-API-Version: 5.3.0\r\nContent-Length: " + str_len(_installed_info_fixture_v3()).to_text() + "\r\n\r\n" + _installed_info_fixture_v3()
+        expect(linux_oci_installed_correlate_v3(policy, cli, peer, wire_text.bytes(), 100).is_err()).to_equal(true)
+        val old_cli = linux_oci_engine_info_observation_v1(policy.cli_policy, _installed_info_fixture_v3().replace("5.2.5", "5.0.0"), "a".repeat(64), 1000).unwrap()
+        expect(linux_oci_installed_correlate_v3(policy, old_cli, peer, _installed_probe_wire_fixture_v3(_installed_info_fixture_v3()), 100).is_err()).to_equal(true)
+
+    it "rejects invalid peer facts and observation clock without inventing a native connection":
+        val policy = _installed_probe_policy_fixture_v3()
+        val cli = _installed_probe_cli_fixture_v3()
+        val wire = _installed_probe_wire_fixture_v3(_installed_info_fixture_v3())
+        for field in ["uid", "gid", "pid", "device", "inode"]:
+            var peer = _installed_probe_peer_fixture_v3()
+            if field == "uid": peer.uid = 1001
+            if field == "gid": peer.gid = -1
+            if field == "pid": peer.pid = 0
+            if field == "device": peer.socket_device = -1
+            if field == "inode": peer.socket_inode = 0
+            expect(linux_oci_installed_correlate_v3(policy, cli, peer, wire, 100).is_err()).to_equal(true)
+        expect(linux_oci_installed_correlate_v3(policy, cli, _installed_probe_peer_fixture_v3(), wire, 0).is_err()).to_equal(true)
+        var boundary = _installed_probe_peer_fixture_v3()
+        boundary.socket_device = 1152921504606846975
+        boundary.socket_inode = 1152921504606846975
+        expect(linux_oci_installed_correlate_v3(policy, cli, boundary, wire, 100).is_ok()).to_equal(true)
+        boundary.socket_device = 1152921504606846976
+        expect(linux_oci_installed_correlate_v3(policy, cli, boundary, wire, 100).is_err()).to_equal(true)
+        boundary.socket_device = 4
+        boundary.socket_inode = 1152921504606846976
+        expect(linux_oci_installed_correlate_v3(policy, cli, boundary, wire, 100).is_err()).to_equal(true)
+
+    it "bounds the one monotonic deadline and rejects invalid actual probe arguments before CLI or socket work":
+        expect(linux_oci_installed_deadline_v3(100, 30000).unwrap()).to_equal(30100)
+        for now in [0, -1]: expect(linux_oci_installed_deadline_v3(now, 10).is_err()).to_equal(true)
+        for timeout in [0, -1, 30001]: expect(linux_oci_installed_deadline_v3(100, timeout).is_err()).to_equal(true)
+        expect(linux_oci_installed_deadline_v3(9223372036854775800, 10).is_err()).to_equal(true)
+        var policy = _installed_probe_policy_fixture_v3()
+        policy.api_version = "unsupported"
+        val invalid = linux_oci_installed_probe_v3(policy, 100)
+        expect(invalid.error).to_equal("installed-policy-api-version-unsupported")
+        expect(invalid.connection).to_equal(nil)
+        expect(invalid.observation).to_equal(nil)
