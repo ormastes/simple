@@ -1,0 +1,89 @@
+use std.spec.*
+use std.fs.{read_file}
+use std.nogc_sync_mut.io.dir_ops.{dir_list}
+use app.nvme_spec_import.gen_scenarios.{spec_timeout_secs_for, timeout_header_line, gen_one, gen_bringup, DEFAULT_FILE_BUDGET_SECS}
+use app.nvme_spec_import.feature_map.{nvme_features}
+
+# Bug: nvme_gen_spec_exceeds_runner_budget_after_rescoring_2026-09-01.
+# Each covered cell of a generated nvme_gen_*_spec.spl runs a minutes-long
+# firmware program, so the file's budget must scale with its bound programs
+# (runner `# @timeout_secs` directive). Coverage is never unbound.
+# Guards: (a) the GENERATOR emits the directive (so regeneration keeps it),
+# (b) EVERY committed generated file declares exactly what the generator rule says.
+
+val GEN_DIR_PATH = "test/03_system/app/nvme_firmware/generated/"
+val RUN_MARK = "_run(\"bin/simple run "
+
+fn _count(hay: text, needle: text) -> i64:
+    var n: i64 = 0
+    var from: i64 = 0
+    while true:
+        val idx = hay.index_of(needle, from) ?? -1
+        if idx < 0:
+            break
+        n = n + 1
+        from = idx + needle.len()
+    n
+
+fn _declared(content: text) -> i64:
+    val key = "# @timeout_secs "
+    val idx = content.index_of(key) ?? -1
+    if idx < 0:
+        return 0
+    val rest = content.substring(idx + key.len(), idx + key.len() + 8)
+    val line = rest.split("\n")[0].trim()
+    line.to_int() ?? 0
+
+fn _expected(programs: i64) -> i64:
+    val secs = spec_timeout_secs_for(programs)
+    if secs > DEFAULT_FILE_BUDGET_SECS:
+        return secs
+    0
+
+describe "timeout rule":
+    it "keeps the default budget for small files and scales with bound programs":
+        expect(spec_timeout_secs_for(0)).to_equal(DEFAULT_FILE_BUDGET_SECS)
+        expect(spec_timeout_secs_for(2)).to_equal(DEFAULT_FILE_BUDGET_SECS)
+        expect(spec_timeout_secs_for(3)).to_be_greater_than(DEFAULT_FILE_BUDGET_SECS)
+        expect(spec_timeout_secs_for(5)).to_be_greater_than(spec_timeout_secs_for(4))
+
+    it "emits the header line only when the default budget is not enough":
+        expect(timeout_header_line(2)).to_equal("")
+        expect(timeout_header_line(5)).to_equal("# @timeout_secs " + "{spec_timeout_secs_for(5)}" + "\n")
+        expect(timeout_header_line(3).starts_with("# @timeout_secs ")).to_equal(true)
+
+describe "generator output carries the directive":
+    it "gen_one emits the line matching the bound programs of every feature":
+        var checked = 0
+        for f in nvme_features():
+            val content = gen_one(f, 0).content
+            val programs = _count(content, RUN_MARK)
+            expect(_declared(content)).to_equal(_expected(programs))
+            checked = checked + 1
+        expect(checked).to_be_greater_than(0)
+
+    it "gen_one emits a directive for a many-program feature (nvm_write)":
+        var found = false
+        for f in nvme_features():
+            if f.id == "nvm_write":
+                found = true
+                val content = gen_one(f, 0).content
+                expect(_count(content, RUN_MARK)).to_be_greater_than(2)
+                expect(content).to_contain("# @timeout_secs ")
+        expect(found).to_equal(true)
+
+    it "gen_bringup emits the directive":
+        val content = gen_bringup().content
+        expect(_declared(content)).to_equal(_expected(_count(content, RUN_MARK)))
+        expect(_declared(content)).to_be_greater_than(0)
+
+describe "committed generated specs declare enough budget":
+    it "EVERY nvme_gen_*_spec.spl declares exactly the generator rule for its programs":
+        var checked = 0
+        for name in (dir_list(GEN_DIR_PATH) ?? []):
+            if name.starts_with("nvme_gen_") and name.ends_with("_spec.spl"):
+                val c = read_file(GEN_DIR_PATH + name) ?? ""
+                val programs = _count(c, RUN_MARK)
+                expect(_declared(c)).to_equal(_expected(programs))
+                checked = checked + 1
+        expect(checked).to_be_greater_than(15)
