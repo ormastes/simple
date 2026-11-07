@@ -62,27 +62,31 @@ its documentation.
 
 ### Complexity
 
-`len()` becomes O(n) on non-ASCII text (`rt_string_char_count`), O(1) on
-ASCII when the runtime's ASCII fast path applies. `for i in 0..s.len(): s[i]`
+`len()` becomes O(n) on text (`rt_string_char_count` walks the bytes; there
+is no ASCII fast path yet — add one only if a measured regression warrants
+it). `for i in 0..s.len(): s[i]`
 is O(n^2) on non-ASCII; the existing lint warns and `s.chars()` is the loop
 form. If a measured regression appears on a hot path, record it as a bug and
 cache an `is_ascii`/`char_count` word on `RuntimeString` rather than reverting.
 
 ## What changes in code
 
-1. Seed interpreter: `interpreter_method/string.rs:23` (`"len" | "length"`
+1. (C1) Seed interpreter: `interpreter_method/string.rs:23` (`"len" | "length"`
    split from `"byte_len"`), `interpreter/expr/calls.rs:1062` (property
-   form), `interpreter/expr/collections.rs:451` (`Value::Str` slice by code
-   point; `StrBytes` receivers stay byte-based).
-2. Seed JIT/LLVM: `codegen/instr/calls.rs`, `closures_structs.rs`,
-   `codegen/llvm/functions.rs` — route text `"len" | "length"` to
-   `rt_string_char_count`; `rt_slice` string branch slices by code point.
-   `rt_len`/`rt_string_len` keep returning bytes (they back `byte_len` and
-   `rt_*` byte externs).
+   form). (C2) `interpreter/expr/collections.rs:451` (`Value::Str` slice by
+   code point; `StrBytes` receivers stay byte-based).
+2. (C1) Seed JIT: the inline `rt_len` helper (`codegen/instr/helpers.rs`)
+   gains a text branch that calls `rt_string_char_count`; the Rust and C
+   runtime `rt_len` String arm returns `rt_string_char_count` (the LLVM seed
+   lane and the pure-Simple `rt_len` recovery path ride on it). So generic
+   `rt_len` = code points for text, while `rt_string_len` keeps returning
+   bytes (it backs `byte_len` and the `rt_*` byte externs). The LLVM lane's
+   one-arg `substring(start)` default end moves from `rt_len` to
+   `rt_string_len`. (C2) `rt_slice` string branch slices by code point.
 3. Pure-Simple MIR (`50.mir/_MirLoweringExpr/method_calls_literals.spl`):
-   add `byte_len` and `char_count` arms (today none exist, so a stage2/3
-   compile of a `byte_len()` caller is unlowered); route text `len` to
-   `rt_string_char_count`.
+   (B) add `byte_len` and `char_count` arms (today none exist, so a stage2/3
+   compile of a `byte_len()` caller is unlowered); (C1) route text `len` to
+   `rt_string_char_count` (`is_empty` keeps the O(1) `rt_string_len` test).
 4. Callers: every `len()` used as a byte offset/size switches to `byte_len()`
    BEFORE the flip (audit method: receiver co-occurs with `byte_at`,
    `substring`, `index_of`, `char_code_at`, `to_bytes`, an `rt_*` byte extern,
