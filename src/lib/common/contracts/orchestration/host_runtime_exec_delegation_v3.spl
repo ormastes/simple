@@ -1,0 +1,117 @@
+# DATA delegation only, never a native admission/lease decoder. Actual broker
+# must verify protected origin, retained journal BEGIN, fresh SDK proofs and
+# installed loader/owner provenance before constructing any live admission.
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
+use std.common.contracts.container.exec_v3.container_exec_request_digest_v3
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_deadline_v1, container_effect_remaining_ms_v1}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct HostRuntimeExecDelegationV3:
+    request: HostRuntimeExecRequestV3
+    installation: HostExecControlInstallationRequestV3
+    installation_artifact_digest: text
+    begin_journal_sequence: i64
+    begin_journal_commit_digest: text
+    control_observation_digest: text
+    observed_unix_ms: i64
+    deadline: ContainerEffectDeadlineV1
+
+pub fn host_runtime_exec_delegation_encode_v3(value: HostRuntimeExecDelegationV3) -> Result<text, text>:
+    val request = host_runtime_exec_request_encode_v3(value.request)?
+    val installation = host_exec_control_installation_request_encode_v3(value.installation)?
+    for digest in [value.installation_artifact_digest, value.begin_journal_commit_digest, value.control_observation_digest]:
+        if not builder_digest_valid_v1(digest): return Err("host-exec-delegation-digest-invalid")
+    if (value.installation_artifact_digest != host_exec_control_installation_intent_digest_v3(value.installation.intent)? or
+            value.begin_journal_sequence <= 0 or value.observed_unix_ms <= 0):
+        return Err("host-exec-delegation-origin-binding-invalid")
+    val parent = value.request.intent.request.parent
+    if (value.installation.operation.id == value.request.operation.id or
+            value.installation.operation.id == parent.operation_id):
+        return Err("host-exec-delegation-operation-collision")
+    val scope = ContainerHostScopeV2(physical_host_id: parent.physical_host_id, service_scope_id: parent.service_scope_id,
+        boot_id: parent.boot_id, provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
+        continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
+    if (container_scope_fence_id_v2(value.installation.intent.scope)? != container_scope_fence_id_v2(scope)? or
+            value.installation.intent.provider_identity_digest != value.request.intent.parent_provider_identity_digest):
+        return Err("host-exec-delegation-installed-parent-mismatch")
+    if value.deadline.actions != ["exec"]: return Err("host-exec-delegation-deadline-actions")
+    val grant_expiry = value.request.signed.grant.expires_at
+    val approval_expiry = value.request.approval.expires_at
+    val expiry = if grant_expiry < approval_expiry: grant_expiry else: approval_expiry
+    if value.deadline.expires_at_unix_ms != expiry:
+        return Err("host-exec-delegation-deadline-expiry-mismatch")
+    val request_digest = container_exec_request_digest_v3(value.request.intent.request)?
+    # This validates pure recorded times only. No actual clock/fresh authority is
+    # sampled or implied by decoding a historical delegation.
+    val remaining = container_effect_remaining_ms_v1(value.deadline, request_digest,
+        value.request.operation.id, "exec", value.observed_unix_ms)?
+    val actions = SdnValue.Array([SdnValue.String("exec")])
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-runtime-exec-delegation"),
+        "request": SdnValue.String(request), "installation": SdnValue.String(installation),
+        "installationArtifactDigest": SdnValue.String(value.installation_artifact_digest),
+        "beginJournalSequence": SdnValue.Int(value.begin_journal_sequence), "beginJournalCommitDigest": SdnValue.String(value.begin_journal_commit_digest),
+        "controlObservationDigest": SdnValue.String(value.control_observation_digest), "observedUnixMs": SdnValue.Int(value.observed_unix_ms),
+        "deadlineRequestDigest": SdnValue.String(value.deadline.request_digest), "deadlineOperationId": SdnValue.String(value.deadline.operation_id),
+        "deadlineActions": actions, "deadlineExpiresAtUnixMs": SdnValue.Int(value.deadline.expires_at_unix_ms)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 4194304: return Err("host-exec-delegation-source-size")
+    Ok(source)
+
+pub fn host_runtime_exec_delegation_digest_v3(value: HostRuntimeExecDelegationV3) -> Result<text, text>:
+    val source = host_runtime_exec_delegation_encode_v3(value)?
+    Ok(sha256_text(source))
+
+fn delegation_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-exec-delegation-text-required:" + key)
+
+fn delegation_int_v3(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-exec-delegation-integer-required:" + key)
+
+pub fn host_runtime_exec_delegation_decode_v3(source: text) -> Result<HostRuntimeExecDelegationV3, text>:
+    if str_len(source) == 0 or str_len(source) > 4194304: return Err("host-exec-delegation-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4194304,
+            max_depth: 3, max_nodes: 40, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("host-exec-delegation-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-exec-delegation-object-required")
+    val names = ["version", "kind", "request", "installation", "installationArtifactDigest", "beginJournalSequence",
+        "beginJournalCommitDigest", "controlObservationDigest", "observedUnixMs", "deadlineRequestDigest", "deadlineOperationId",
+        "deadlineActions", "deadlineExpiresAtUnixMs"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("host-exec-delegation-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("host-exec-delegation-missing-field:" + key)
+    if delegation_int_v3(fields, "version")? != 3 or delegation_text_v3(fields, "kind")? != "host-runtime-exec-delegation":
+        return Err("host-exec-delegation-version-kind")
+    var actions: [text] = []
+    match fields["deadlineActions"]:
+        case SdnValue.Array(values):
+            if values.len() != 1: return Err("host-exec-delegation-deadline-actions")
+            for item in values:
+                match item:
+                    case SdnValue.String(value): actions.push(value)
+                    case _: return Err("host-exec-delegation-deadline-actions")
+        case _: return Err("host-exec-delegation-deadline-actions")
+    val value = HostRuntimeExecDelegationV3(request: host_runtime_exec_request_decode_v3(delegation_text_v3(fields, "request")?)?,
+        installation: host_exec_control_installation_request_decode_v3(delegation_text_v3(fields, "installation")?)?,
+        installation_artifact_digest: delegation_text_v3(fields, "installationArtifactDigest")?,
+        begin_journal_sequence: delegation_int_v3(fields, "beginJournalSequence")?, begin_journal_commit_digest: delegation_text_v3(fields, "beginJournalCommitDigest")?,
+        control_observation_digest: delegation_text_v3(fields, "controlObservationDigest")?, observed_unix_ms: delegation_int_v3(fields, "observedUnixMs")?,
+        deadline: container_effect_deadline_v1(delegation_text_v3(fields, "deadlineRequestDigest")?, delegation_text_v3(fields, "deadlineOperationId")?,
+            actions, delegation_int_v3(fields, "deadlineExpiresAtUnixMs")?)?)
+    if host_runtime_exec_delegation_encode_v3(value)? != source: return Err("host-exec-delegation-noncanonical")
+    Ok(value)

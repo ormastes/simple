@@ -2,7 +2,10 @@
 # exec birth or permission to replace parent/provider/control owners is implied.
 use std.common.contracts.container.execution_v2.*
 use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
-use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
 
 pub struct ContainerExecControlObservationV3:
     backend: text
@@ -58,3 +61,30 @@ pub fn container_exec_control_observation_match_v3(value: ContainerExecControlOb
             actual.native_id != expected.native_id or actual.node_boot_id != expected.node_boot_id):
         return Err("container-exec-control-observation-mismatch")
     Ok(true)
+
+# All-field metadata integrity only; this does not authenticate its producer or
+# reconstruct a native owner. No observation decoder is introduced.
+pub fn container_exec_control_observation_digest_v3(value: ContainerExecControlObservationV3) -> Result<text, text>:
+    val profile = ((value.backend == "linux-podman" and value.api_version == "5.2.5") or
+        (value.backend == "windows-docker-process" and value.api_version == "1.48"))
+    if not profile or value.observed_unix_ms <= 0: return Err("container-exec-control-profile-clock-invalid")
+    val scope = container_host_scope_bytes_v2(value.scope)?
+    val runtime = value.parent_runtime
+    val engine = if value.backend == "linux-podman": "podman" else: "docker"
+    if (not builder_identifier_valid_v1(runtime.pod_uid) or not builder_identifier_valid_v1(runtime.operation_id) or
+            runtime.attempt <= 0 or runtime.provider_generation != value.scope.provider_generation or runtime.engine != engine or
+            not builder_digest_valid_v1(runtime.native_id) or runtime.node_boot_id != container_scope_fence_id_v2(value.scope)?):
+        return Err("container-exec-control-parent-mismatch")
+    for digest in [value.parent_request_digest, value.parent_provider_identity_digest, value.exec_control_identity_digest,
+            value.installed_policy_digest, value.query_digest, value.evidence_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-exec-control-digest-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("container-exec-control-observation"),
+        "backend": SdnValue.String(value.backend), "scope": SdnValue.String(scope), "parentPodUid": SdnValue.String(runtime.pod_uid),
+        "parentAttempt": SdnValue.Int(runtime.attempt), "parentOperationId": SdnValue.String(runtime.operation_id),
+        "parentProviderGeneration": SdnValue.Int(runtime.provider_generation), "parentEngine": SdnValue.String(runtime.engine),
+        "parentNativeId": SdnValue.String(runtime.native_id), "parentScopeFence": SdnValue.String(runtime.node_boot_id),
+        "parentRequestDigest": SdnValue.String(value.parent_request_digest), "parentProviderIdentityDigest": SdnValue.String(value.parent_provider_identity_digest),
+        "execControlIdentityDigest": SdnValue.String(value.exec_control_identity_digest), "installedPolicyDigest": SdnValue.String(value.installed_policy_digest),
+        "apiVersion": SdnValue.String(value.api_version), "observedUnixMs": SdnValue.Int(value.observed_unix_ms),
+        "queryDigest": SdnValue.String(value.query_digest), "evidenceDigest": SdnValue.String(value.evidence_digest)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
