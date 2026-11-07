@@ -1,0 +1,120 @@
+# Actual claim consumer with SCRIPTED lower installed-state IO. NOT_RUN.
+# No native concurrency, deployment installation, Host signature or Engine fact.
+use std.spec.*
+use std.common.contracts.container.exec_v3.ContainerExecEnvironmentEntryV3
+use std.common.contracts.container.windows_stream_v3.windows_container_stream_plan_digest_v3
+use std.nogc_async_mut.container.providers.windows.docker_exec_claim_v3.*
+use test.fixtures.orchestration.windows_docker_exec_claim_fixture_v3.*
+
+describe "Windows installed-state claim consumer":
+    it "reserves create and start only after readback and never restarts":
+        step("Persist create, bind a synthetic birth, reserve start once, then reopen")
+        val plan = claim_fixture_named_plan_v3("claim-start-once")
+        var owner = claim_fixture_owner_v3(claim_fixture_open_v3(plan)).unwrap()
+        expect(owner.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.CreateReserved)
+        val birth = claim_fixture_synthetic_birth_v3(plan)
+        owner = claim_fixture_owner_v3(owner.persist_actual_birth_v3(birth)).unwrap()
+        expect(owner.birth_v3().unwrap().birth.native_exec_id).to_equal(birth.birth.native_exec_id)
+        owner = claim_fixture_failure_owner_v3(owner.reserve_start_v3(claim_fixture_admission_v3(plan, true))).unwrap()
+        expect(owner.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.CreatedExec)
+        owner = claim_fixture_owner_v3(owner.reserve_start_v3(claim_fixture_admission_v3(plan))).unwrap()
+        expect(owner.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.StartReserved)
+        owner = claim_fixture_failure_owner_v3(owner.reserve_start_v3(claim_fixture_admission_v3(plan))).unwrap()
+        expect(owner.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.UnknownStart)
+        owner = claim_fixture_owner_v3(owner.close_v3()).unwrap()
+        expect(owner.has_owned_access_v3()).to_equal(false)
+        owner = claim_fixture_owner_v3(claim_fixture_open_v3(plan)).unwrap()
+        expect(owner.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.UnknownStart)
+        owner = claim_fixture_failure_owner_v3(owner.reserve_start_v3(claim_fixture_admission_v3(plan))).unwrap()
+        expect(claim_fixture_publications_v3(plan, "create")).to_equal(1)
+        expect(claim_fixture_publications_v3(plan, "start")).to_equal(1)
+        owner = claim_fixture_owner_v3(owner.close_v3()).unwrap()
+
+    it "retains unknown create across a second access and restart without another publication":
+        step("Interleave two access instances in one namespace while create remains unresolved")
+        val plan = claim_fixture_named_plan_v3("claim-two-accesses")
+        var first = claim_fixture_owner_v3(claim_fixture_open_v3(plan)).unwrap()
+        var second = claim_fixture_failure_owner_v3(claim_fixture_open_v3(plan)).unwrap()
+        expect(second.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.UnknownCreate)
+        expect(second.birth_v3()).to_be_nil()
+        second = claim_fixture_failure_owner_v3(second.reserve_create_v3(claim_fixture_admission_v3(plan))).unwrap()
+        first = claim_fixture_owner_v3(first.close_v3()).unwrap()
+        second = claim_fixture_owner_v3(second.close_v3()).unwrap()
+        var reopened = claim_fixture_failure_owner_v3(claim_fixture_open_v3(plan)).unwrap()
+        expect(reopened.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.UnknownCreate)
+        expect(claim_fixture_publications_v3(plan, "create")).to_equal(1)
+        reopened = claim_fixture_owner_v3(reopened.close_v3()).unwrap()
+
+    it "collides on the same child operation after helper argv or environment changes":
+        step("Keep scope and child operation fixed while changing immutable template content")
+        val plan = claim_fixture_named_plan_v3("claim-changed-content")
+        var first = claim_fixture_owner_v3(claim_fixture_open_v3(plan)).unwrap()
+        for mutation in ["helper", "argv", "environment"]:
+            var changed = plan
+            if mutation == "helper": changed.identity.operation_id = "different-helper-attempt"
+            else:
+                var request = changed.intent.exec_request.unwrap()
+                if mutation == "argv": request.argv = ["C:\\work\\tool.exe", "different"]
+                else: request.environment = [ContainerExecEnvironmentEntryV3.Literal("TASK", "different")]
+                changed.intent.exec_request = Some(request)
+            changed.request_digest = windows_container_stream_plan_digest_v3(changed).unwrap()
+            expect(claim_fixture_access_v3(changed).namespace).to_equal(claim_fixture_access_v3(plan).namespace)
+            var rejected = claim_fixture_failure_owner_v3(claim_fixture_open_v3(changed)).unwrap()
+            expect(rejected.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.UnknownCreate)
+            expect(rejected.birth_v3()).to_be_nil()
+            expect(claim_fixture_publications_v3(changed, "create")).to_equal(1)
+            rejected = claim_fixture_owner_v3(rejected.close_v3()).unwrap()
+        first = claim_fixture_owner_v3(first.close_v3()).unwrap()
+
+    it "fails before publication on installed binding mismatch and retains access":
+        step("Reject a supplied installation pin differing from the retained access binding")
+        val plan = claim_fixture_named_plan_v3("claim-installation-mismatch")
+        var owner = claim_fixture_failure_owner_v3(WindowsDockerExecClaimV3.from_installed_access_v3(
+            claim_fixture_access_v3(plan), plan, claim_fixture_query_v3(plan), claim_fixture_admission_v3(plan),
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", claim_fixture_digest_v3())).unwrap()
+        expect(owner.has_owned_access_v3()).to_equal(true)
+        expect(owner.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.UnknownCreate)
+        expect(claim_fixture_publications_v3(plan, "create")).to_equal(0)
+        owner = claim_fixture_owner_v3(owner.close_v3()).unwrap()
+
+    it "keeps publication uncertainty and retries cleanup on the retained updated access":
+        step("Fail scripted readback after publication, then fail one close")
+        val plan = claim_fixture_named_plan_v3("claim-readback-close-fault")
+        var owner = claim_fixture_failure_owner_v3(claim_fixture_open_v3(plan, true, 1)).unwrap()
+        expect(owner.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.UnknownCreate)
+        expect(claim_fixture_publications_v3(plan, "create")).to_equal(1)
+        owner = claim_fixture_failure_owner_v3(owner.reserve_create_v3(claim_fixture_admission_v3(plan))).unwrap()
+        owner = claim_fixture_failure_owner_v3(owner.close_v3()).unwrap()
+        expect(owner.has_owned_access_v3()).to_equal(true)
+        owner = claim_fixture_owner_v3(owner.close_v3()).unwrap()
+        expect(owner.has_owned_access_v3()).to_equal(false)
+        var reopened = claim_fixture_failure_owner_v3(claim_fixture_open_v3(plan)).unwrap()
+        expect(reopened.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.UnknownCreate)
+        reopened = claim_fixture_owner_v3(reopened.close_v3()).unwrap()
+
+    it "keeps an invalid candidate diagnostic and refuses start":
+        step("Reject mismatched birth provenance without publishing a verified birth")
+        val plan = claim_fixture_named_plan_v3("claim-invalid-birth")
+        var owner = claim_fixture_owner_v3(claim_fixture_open_v3(plan)).unwrap()
+        var invalid = claim_fixture_synthetic_birth_v3(plan)
+        invalid.birth.provider_identity_digest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        owner = claim_fixture_failure_owner_v3(owner.persist_actual_birth_v3(invalid)).unwrap()
+        expect(owner.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.UnknownCreate)
+        expect(owner.birth_v3()).to_be_nil()
+        expect(owner.pending_birth_v3().unwrap().birth.native_exec_id).to_equal(invalid.birth.native_exec_id)
+        owner = claim_fixture_failure_owner_v3(owner.reserve_start_v3(claim_fixture_admission_v3(plan))).unwrap()
+        expect(claim_fixture_publications_v3(plan, "birth")).to_equal(0)
+        expect(claim_fixture_publications_v3(plan, "start")).to_equal(0)
+        owner = claim_fixture_owner_v3(owner.close_v3()).unwrap()
+
+    it "does not turn an unreadable start record into permission after restart":
+        step("Reopen a birth-only namespace and retain unknown start rather than infer absence")
+        val plan = claim_fixture_named_plan_v3("claim-birth-only-restart")
+        var owner = claim_fixture_owner_v3(claim_fixture_open_v3(plan)).unwrap()
+        owner = claim_fixture_owner_v3(owner.persist_actual_birth_v3(claim_fixture_synthetic_birth_v3(plan))).unwrap()
+        owner = claim_fixture_owner_v3(owner.close_v3()).unwrap()
+        owner = claim_fixture_failure_owner_v3(claim_fixture_open_v3(plan)).unwrap()
+        expect(owner.phase_v3()).to_equal(WindowsDockerExecClaimPhaseV3.UnknownStart)
+        owner = claim_fixture_failure_owner_v3(owner.reserve_start_v3(claim_fixture_admission_v3(plan))).unwrap()
+        expect(claim_fixture_publications_v3(plan, "start")).to_equal(0)
+        owner = claim_fixture_owner_v3(owner.close_v3()).unwrap()
