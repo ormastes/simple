@@ -10,8 +10,9 @@
 # ids are not unique, so the duplication sat on `main` undetected.
 #
 # This checks bug_db.sdn (`bugs` and `bugs_active` tables) and todo_db.sdn
-# (`todos` table): every row's leading `id` column must be unique WITHIN its
-# table. A table is identified by its header line `<name> |id, ...|`; rows
+# (`todos` table): bugs and bugs_active share ONE logical bug ID namespace;
+# todos has its own namespace. Child metadata tables contain references, not
+# primary IDs, and are excluded. A table is identified by its header line `<name> |id, ...|`; rows
 # are the non-empty, non-header lines that follow up to the next header or
 # EOF. Quoted commas inside a description field are respected so a
 # description containing a comma does not shift the id column.
@@ -49,7 +50,12 @@ scan_file() {
             # literal " |" introducing the column spec.
             if (line ~ /^[A-Za-z_][A-Za-z0-9_]* \|/) {
                 split(line, parts, " ")
-                table = parts[1]
+                if (parts[1] == "bugs" || parts[1] == "bugs_active")
+                    table = "bugs/bugs_active"
+                else if (parts[1] == "todos")
+                    table = "todos"
+                else
+                    table = ""
                 next
             }
             if (table == "") next
@@ -108,19 +114,22 @@ EOF
         *) echo "SELFTEST FAIL: fixture 2 expected FAIL naming todos:0, got: $out" >&2; exit 1 ;;
     esac
 
-    # Fixture 3: two tables in one file, duplicate ids across tables are
-    # NOT an offense (ids are scoped per-table) — must PASS.
+    # Fixture 3: split bug partitions are one logical primary-ID namespace.
     cat > "$tmp/twotables.sdn" <<'EOF'
 bugs |id, title|
     0, "bug zero"
     1, "bug one"
 bugs_active |id, title|
-    0, "active zero (same id, different table — allowed)"
+    0, "active duplicate zero"
 EOF
-    out=$(sh "$0" "$tmp/twotables.sdn") || { echo "SELFTEST FAIL: fixture 3 (cross-table) unexpectedly failed: $out" >&2; exit 1; }
+    set +e
+    out=$(sh "$0" "$tmp/twotables.sdn" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -eq 1 ] || { echo "SELFTEST FAIL: fixture 3 expected exit 1, got $rc: $out" >&2; exit 1; }
     case "$out" in
-        "PASS —"*) ;;
-        *) echo "SELFTEST FAIL: fixture 3 expected PASS, got: $out" >&2; exit 1 ;;
+        *"bugs/bugs_active:0 (x2)"*) ;;
+        *) echo "SELFTEST FAIL: fixture 3 expected combined bug namespace: $out" >&2; exit 1 ;;
     esac
 
     # Fixture 4: empty scan must ERROR, never a vacuous pass.
@@ -137,7 +146,74 @@ EOF
         *) echo "SELFTEST FAIL: fixture 4 expected ERROR, got: $out" >&2; exit 1 ;;
     esac
 
-    echo "SELFTEST PASS: 4/4 fixtures"
+    # Fixture 5: distinct split bug IDs pass; a todo may reuse a bug ID.
+    cat > "$tmp/distinct.sdn" <<'EOF'
+bugs |id, title|
+    0, "bug zero"
+bugs_active |id, title|
+    1, "active one"
+todos |id, description|
+    0, "independent todo zero"
+EOF
+    out=$(sh "$0" "$tmp/distinct.sdn") || { echo "SELFTEST FAIL: fixture 5: $out" >&2; exit 1; }
+    case "$out" in
+        "PASS — 3 row(s) checked across 2 table(s),"*) ;;
+        *) echo "SELFTEST FAIL: fixture 5 expected 3 primary rows in 2 namespaces: $out" >&2; exit 1 ;;
+    esac
+
+    # Fixture 6: repeated child references and string IDs are not primary bugs.
+    cat > "$tmp/metadata.sdn" <<'EOF'
+bugs_active |id, title|
+    "quoted,id", "has, a comma"
+bug_descriptions |bug_id, line_num, content|
+    "quoted,id", 0, "first line"
+    "quoted,id", 1, "second line"
+strings |id, value|
+    0, "first"
+    0, "second"
+bugs |id, title|
+    "other,id", "another, title"
+EOF
+    out=$(sh "$0" "$tmp/metadata.sdn") || { echo "SELFTEST FAIL: fixture 6: $out" >&2; exit 1; }
+    case "$out" in
+        "PASS — 2 row(s) checked across 1 table(s),"*) ;;
+        *) echo "SELFTEST FAIL: fixture 6 metadata counted as primary rows: $out" >&2; exit 1 ;;
+    esac
+
+    # Fixture 7: quotes and embedded commas cannot hide a duplicate bug ID.
+    cat > "$tmp/quoted-dup.sdn" <<'EOF'
+bugs |id, title|
+    "quoted,id", "old, title"
+bugs_active |id, title|
+    "quoted,id", "active, title"
+EOF
+    set +e
+    out=$(sh "$0" "$tmp/quoted-dup.sdn" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -eq 1 ] || { echo "SELFTEST FAIL: fixture 7 expected exit 1, got $rc: $out" >&2; exit 1; }
+    case "$out" in
+        *"bugs/bugs_active:quoted,id (x2)"*) ;;
+        *) echo "SELFTEST FAIL: fixture 7 expected quoted ID diagnostic: $out" >&2; exit 1 ;;
+    esac
+
+    # Fixture 8: metadata alone is zero primary rows, never a vacuous PASS.
+    cat > "$tmp/metadata-only.sdn" <<'EOF'
+bug_descriptions |bug_id, line_num, content|
+    reference, 0, "line zero"
+    reference, 1, "line one"
+EOF
+    set +e
+    out=$(sh "$0" "$tmp/metadata-only.sdn" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] || { echo "SELFTEST FAIL: fixture 8 expected exit 2, got $rc: $out" >&2; exit 1; }
+    case "$out" in
+        *"ERROR —"*"0 rows found"*) ;;
+        *) echo "SELFTEST FAIL: fixture 8 expected empty-primary ERROR: $out" >&2; exit 1 ;;
+    esac
+
+    echo "SELFTEST PASS: 8/8 fixtures"
     trap - EXIT
     rm -rf "$tmp"
 }
