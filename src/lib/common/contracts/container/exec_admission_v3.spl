@@ -1,0 +1,48 @@
+# Trusted nonserialized carrier after host verification. No decoder exists.
+# Structural matching does not verify signatures, establish journal begin,
+# prevent copying, or grant authority: the actual broker needs the host verified
+# lease and an exclusive same-operation claim before any native exec creation.
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_remaining_ms_v1}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.orchestration.host_runtime_exec_v3.{HostRuntimeExecIntentV3, host_runtime_exec_match_operation_v3}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+
+pub struct ContainerExecAdmissionV3:
+    intent: HostRuntimeExecIntentV3
+    request: ContainerExecRequestV3
+    operation: OperationEnvelopeV2
+    parent_operation_digest: text
+    parent_assignment_digest: text
+    # Exec control owner pin; parent engine baseline remains in original intent.
+    provider_identity_digest: text
+    deadline: ContainerEffectDeadlineV1
+    grant_id: text
+    issuer_id: text
+    approver_id: text
+    execution_proof_digest: text
+
+pub fn container_exec_admission_match_v3(admission: ContainerExecAdmissionV3,
+        expected_request: ContainerExecRequestV3, expected_provider_identity_digest: text,
+        now_unix_ms: i64) -> Result<i64, text>:
+    val digest = container_exec_request_digest_v3(expected_request)?
+    if container_exec_request_digest_v3(admission.request)? != digest:
+        return Err("container-exec-admission-request-mismatch")
+    val matched = host_runtime_exec_match_operation_v3(admission.intent, admission.operation)?
+    if (container_exec_request_digest_v3(admission.intent.request)? != digest or
+            admission.parent_operation_digest != admission.intent.parent_operation_digest or
+            admission.parent_assignment_digest != admission.intent.parent_assignment_digest or
+            admission.provider_identity_digest != admission.intent.exec_control_identity_digest):
+        return Err("container-exec-admission-original-intent-mismatch")
+    for value in [admission.parent_operation_digest, admission.parent_assignment_digest,
+            admission.provider_identity_digest, admission.execution_proof_digest, expected_provider_identity_digest]:
+        if not builder_digest_valid_v1(value): return Err("container-exec-admission-digest-invalid")
+    if admission.provider_identity_digest != expected_provider_identity_digest:
+        return Err("container-exec-admission-provider-mismatch")
+    for value in [admission.grant_id, admission.issuer_id, admission.approver_id]:
+        if not builder_identifier_valid_v1(value): return Err("container-exec-admission-authority-identity-invalid")
+    if admission.deadline.actions != ["exec"]:
+        return Err("container-exec-admission-actions-mismatch")
+    # Remaining admission window only, never exec lifetime, auto-kill or release.
+    container_effect_remaining_ms_v1(admission.deadline, digest,
+        expected_request.operation_id, "exec", now_unix_ms)
