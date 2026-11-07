@@ -1981,6 +1981,16 @@ int64_t rt_transient_array_scope_state_v1(void) {
     return rt_core_transient_array_scope_paused ? 2 : 1;
 }
 
+/* Identity of this thread's actual live scope, not a borrowed lease. Pause
+ * preserves it; end retires it; begin's existing nonwrapping counter never
+ * reissues an identity. An inactive/foreign context observes zero. */
+int64_t rt_transient_array_scope_identity_v1(void) {
+    if (!rt_core_transient_array_scope_active ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
+    return (int64_t)rt_core_transient_array_scope_id;
+}
+
 int8_t rt_transient_array_scope_begin(void) {
     if (rt_core_transient_array_scope_active || rt_core_transient_heap_scope_object_len != 0 ||
         rt_core_transient_raw_alloc_len != 0) return 0;

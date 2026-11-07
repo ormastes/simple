@@ -1,6 +1,44 @@
 use super::*;
 
 #[test]
+fn identity_tracks_real_scope_and_never_reuses_retired_id() {
+    assert_eq!(rt_transient_array_scope_identity_v1(), 0);
+    assert!(rt_transient_array_scope_begin());
+    let first = rt_transient_array_scope_identity_v1();
+    assert!(first > 0);
+    assert!(!rt_transient_array_scope_begin());
+    assert_eq!(rt_transient_array_scope_identity_v1(), first);
+    let other = std::thread::spawn(|| {
+        assert_eq!(rt_transient_array_scope_identity_v1(), 0);
+        assert!(rt_transient_array_scope_begin());
+        let id = rt_transient_array_scope_identity_v1();
+        assert!(id > 0);
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(rt_transient_array_scope_identity_v1(), 0);
+        id
+    }).join().unwrap();
+    assert_ne!(other, first);
+    assert_eq!(rt_transient_array_scope_identity_v1(), first);
+    assert!(rt_transient_array_scope_pause());
+    assert_eq!(rt_transient_array_scope_identity_v1(), first);
+    assert!(!rt_transient_array_scope_begin());
+    assert!(rt_transient_array_scope_end());
+    assert_eq!(rt_transient_array_scope_identity_v1(), 0);
+    assert!(rt_transient_array_scope_begin());
+    assert!(rt_transient_array_scope_identity_v1() > first);
+    assert!(rt_transient_array_scope_end());
+}
+
+#[test]
+fn identity_exhaustion_retires_without_wrapping() {
+    let counter = std::sync::atomic::AtomicU32::new(u32::MAX - 1);
+    assert_eq!(next_transient_scope_identity(&counter), Some(u32::MAX - 1));
+    assert_eq!(next_transient_scope_identity(&counter), Some(u32::MAX));
+    assert_eq!(next_transient_scope_identity(&counter), None);
+    assert_eq!(next_transient_scope_identity(&counter), None);
+}
+
+#[test]
 fn state_query_tracks_actual_lifecycle_without_mutation() {
     assert_eq!(rt_transient_array_scope_state_v1(), 0);
     assert!(!rt_transient_array_scope_pause());

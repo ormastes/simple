@@ -568,6 +568,15 @@ pub fn rt_transient_array_scope_state_v1(args: &[Value]) -> Result<Value, Compil
     Ok(Value::Int(simple_runtime::value::rt_transient_array_scope_state_v1()))
 }
 
+pub fn rt_transient_array_scope_identity_v1(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_array_scope_identity_v1 requires 0 arguments",
+        ));
+    }
+    Ok(Value::Int(simple_runtime::value::rt_transient_array_scope_identity_v1()))
+}
+
 pub fn rt_transient_array_scope_end(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
         return Err(CompileError::runtime(
