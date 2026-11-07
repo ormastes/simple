@@ -36,8 +36,8 @@ exactly-once claim follows from this API.
 
 `test/fixtures/daemon_sdk/owned_poll_v1.spl` defines the real-file test oracles and
 agreed helpers: `owned_poll_root`, `owned_poll_owner`, `owned_poll_handler`,
-`owned_poll_rejecting_handler`, `owned_poll_cleanup`. The rejecting callback calls
-explicitly imported `fail`; it never supplies an assumed successful effect.
+`owned_poll_rejecting_handler`, `owned_poll_cleanup`. The rejecting callback
+asserts false if invoked; it never supplies an assumed successful effect.
 
 Eight SSpec cases cover idle/stopped identity, two-handler accumulation in one
 batch, response publication refusal, response identity refusal, acknowledgement
@@ -56,7 +56,16 @@ successful request acknowledgement. Even this subset still depends on ordinary
 spool admission for its publication-failure case; no hash workaround is added.
 The known compiler text-hash ABI issue remains an independent dependency.
 
-Execution at authorship: NOT_RUN. Admitted SSpec, native execution, generated
+The first native diagnostic build at `094cafa9524` failed before linking because
+importing `std.spec.fail` expanded the closure into `crypto.secure_memory`, where
+the unadmitted producer could not resolve `fill_span` at four call sites. The
+100 failed-module labels are one aggregate failure, not independent defects.
+The forbidden callback now uses the equivalent built-in `assert(false)` so the
+native oracle has no SSpec dependency; the actual SSpec wrapper remains intact.
+This changes no product behavior and weakens no expected result. A bounded
+second build with the changed closure is authorized; its result is separate.
+
+Admitted SSpec, native execution, generated
 manual scores, branch coverage, legacy callback execution and full-library/
 MCP gates are not inferred from source review. A generic `me`/adapter compilation
 failure must be attributed to the actual toolchain, not hidden with another
