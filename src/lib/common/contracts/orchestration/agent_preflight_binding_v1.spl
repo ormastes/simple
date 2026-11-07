@@ -1,0 +1,138 @@
+# Expected immutable association only: no observed capability, authorization,
+# capacity reservation or permission to execute follows from these bytes.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_authority_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict, as_int, only_known}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct AgentPreflightBindingV1:
+    controller_id: text
+    session_uid: text
+    source_digest: text
+    catalog_digest: text
+    task_digest: text
+    image_digest: text
+    probe_producer_digest: text
+    nonce: text
+    preflight: ContainerExecutionPlanV2
+    agent_provider: text
+    executable_path: text
+    execution_os: text
+    architecture: text
+    selected_user: text
+
+fn agent_preflight_path_valid_v1(path: text, os: text) -> bool:
+    if str_len(path) == 0 or str_len(path) > 4096 or path.contains("\0") or path.contains("\n") or
+            path.contains("\r") or path.contains("\t") or path.contains(".."):
+        return false
+    if os == "linux": return path.starts_with("/") and path != "/"
+    if os != "windows" or path.len() < 4: return false
+    val drive = path.substring(0, 1)
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(drive) and path.substring(1, 2) == ":" and
+        (path.substring(2, 3) == "/" or path.substring(2, 3) == "\\")
+
+pub fn agent_preflight_binding_encode_v1(value: AgentPreflightBindingV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(value.controller_id) or not builder_identifier_valid_v1(value.session_uid) or
+            value.session_uid == value.preflight.workload_uid:
+        return Err("agent-preflight-identity-invalid")
+    for digest in [value.source_digest, value.catalog_digest, value.task_digest, value.image_digest,
+            value.probe_producer_digest, value.nonce]:
+        if not builder_digest_valid_v1(digest): return Err("agent-preflight-digest-invalid")
+    if not ["codex", "claude", "kimi"].contains(value.agent_provider) or
+            not ["x86_64", "aarch64"].contains(value.architecture):
+        return Err("agent-preflight-provider-architecture-invalid")
+    if (value.preflight.backend == "linux-podman" and value.execution_os != "linux") or
+            (value.preflight.backend == "windows-docker-process" and value.execution_os != "windows") or
+            not agent_preflight_path_valid_v1(value.executable_path, value.execution_os):
+        return Err("agent-preflight-platform-path-invalid")
+    if str_len(value.selected_user) == 0 or str_len(value.selected_user) > 256 or
+            value.selected_user.contains("\0") or value.selected_user.contains("\n") or
+            value.selected_user.contains("\r") or value.selected_user.contains("\t"):
+        return Err("agent-preflight-selected-user-invalid")
+    val plan = container_execution_plan_bytes_v2(value.preflight)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("agent-preflight-binding"),
+        "controllerId": SdnValue.String(value.controller_id),
+        "sessionUid": SdnValue.String(value.session_uid),
+        "sourceDigest": SdnValue.String(value.source_digest),
+        "catalogDigest": SdnValue.String(value.catalog_digest),
+        "taskDigest": SdnValue.String(value.task_digest),
+        "imageDigest": SdnValue.String(value.image_digest),
+        "probeProducerDigest": SdnValue.String(value.probe_producer_digest),
+        "nonce": SdnValue.String(value.nonce),
+        "agentProvider": SdnValue.String(value.agent_provider),
+        "executablePath": SdnValue.String(value.executable_path),
+        "executionOS": SdnValue.String(value.execution_os),
+        "architecture": SdnValue.String(value.architecture),
+        "selectedUser": SdnValue.String(value.selected_user),
+        "preflight": SdnValue.String(plan)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 65536: return Err("agent-preflight-source-size")
+    Ok(source)
+
+pub fn agent_preflight_binding_digest_v1(value: AgentPreflightBindingV1) -> Result<text, text>:
+    val source = agent_preflight_binding_encode_v1(value)?
+    Ok(sha256_text(source))
+
+fn agent_preflight_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("agent-preflight-text-required:" + key)
+
+pub fn agent_preflight_binding_decode_v1(source: text) -> Result<AgentPreflightBindingV1, text>:
+    if str_len(source) == 0 or str_len(source) > 65536: return Err("agent-preflight-source-size")
+    val parsed = match parse_resource_document(source):
+        case Ok(value): value
+        case Err(_): return Err("agent-preflight-syntax")
+    val fields = match as_dict(parsed.0, "", parsed.1):
+        case Ok(value): value
+        case Err(_): return Err("agent-preflight-object-required")
+    val names = ["version", "kind", "preflight", "controllerId", "sessionUid", "sourceDigest", "catalogDigest", "taskDigest", "imageDigest", "probeProducerDigest", "nonce", "agentProvider", "executablePath", "executionOS", "architecture", "selectedUser"]
+    if only_known(fields, names, "", parsed.1).is_err(): return Err("agent-preflight-unknown-field")
+    for key in names:
+        if not fields.contains_key(key): return Err("agent-preflight-missing-field:" + key)
+    val version = match as_int(fields["version"], "version", parsed.1):
+        case Ok(value): value
+        case Err(_): return Err("agent-preflight-version")
+    if version != 1 or agent_preflight_text_v1(fields, "kind")? != "agent-preflight-binding":
+        return Err("agent-preflight-version")
+    val value = AgentPreflightBindingV1(
+        controller_id: agent_preflight_text_v1(fields, "controllerId")?,
+        session_uid: agent_preflight_text_v1(fields, "sessionUid")?,
+        source_digest: agent_preflight_text_v1(fields, "sourceDigest")?,
+        catalog_digest: agent_preflight_text_v1(fields, "catalogDigest")?,
+        task_digest: agent_preflight_text_v1(fields, "taskDigest")?,
+        image_digest: agent_preflight_text_v1(fields, "imageDigest")?,
+        probe_producer_digest: agent_preflight_text_v1(fields, "probeProducerDigest")?,
+        nonce: agent_preflight_text_v1(fields, "nonce")?,
+        agent_provider: agent_preflight_text_v1(fields, "agentProvider")?,
+        executable_path: agent_preflight_text_v1(fields, "executablePath")?,
+        execution_os: agent_preflight_text_v1(fields, "executionOS")?,
+        architecture: agent_preflight_text_v1(fields, "architecture")?,
+        selected_user: agent_preflight_text_v1(fields, "selectedUser")?,
+        preflight: container_execution_plan_decode_v2(agent_preflight_text_v1(fields, "preflight")?)?)
+    if agent_preflight_binding_encode_v1(value)? != source: return Err("agent-preflight-noncanonical")
+    Ok(value)
+
+pub fn agent_preflight_operation_id_v1(controller_id: text, session_uid: text) -> Result<text, text>:
+    if not builder_identifier_valid_v1(controller_id) or not builder_identifier_valid_v1(session_uid):
+        return Err("agent-preflight-identity-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("controller-agent-preflight-operation"),
+        "controllerId": SdnValue.String(controller_id), "sessionUid": SdnValue.String(session_uid)}
+    Ok("preflight-" + sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
+
+# Single pending metadata association per controller/session. A conflicting
+# payload under this ID requires journal reconciliation, never a new operation.
+pub fn agent_preflight_operation_v1(value: AgentPreflightBindingV1) -> Result<OperationEnvelopeV2, text>:
+    val digest = agent_preflight_binding_digest_v1(value)?
+    val authority = controller_assignment_authority_v1(value.controller_id)?
+    val id = agent_preflight_operation_id_v1(value.controller_id, value.session_uid)?
+    Ok(OperationEnvelopeV2(version: 2, id: id, payload_digest: digest,
+        principal: value.controller_id, project: value.controller_id, host_id: value.controller_id,
+        operation: "controller_agent_preflight_v1", environment_digest: authority, policy_revision: 1,
+        revocation_epoch: 0, session_generation: 1, memory_bytes: 1, duration_ms: 1))
