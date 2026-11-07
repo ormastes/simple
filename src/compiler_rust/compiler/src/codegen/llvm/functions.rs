@@ -4281,7 +4281,7 @@ mod tests {
         let ast = simple_parser::Parser::new(source).parse().unwrap();
         let hir = crate::hir::lower(&ast).unwrap();
         let mir = crate::mir::lower_to_mir(&hir).unwrap();
-        let backend = LlvmBackend::new(Target::host()).unwrap();
+        let mut backend = LlvmBackend::new(Target::host()).unwrap();
         backend.create_module("byte_len_source").unwrap();
         backend.compile(&mir).unwrap();
         backend.verify().unwrap();

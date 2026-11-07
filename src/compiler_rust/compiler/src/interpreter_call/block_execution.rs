@@ -1,6 +1,6 @@
 // Block closure execution helpers for interpreter_call module
 
-use super::super::interpreter_control::{assert_stmt_failure, is_condition_present, optional_let_binding, LetBind};
+use super::super::interpreter_control::{assert_stmt_failure, is_condition_present, optional_let_binding_condition, LetBind};
 use super::super::interpreter_helpers::{
     bind_for_pattern_value, bind_pattern_value, handle_method_call_with_self_update,
     range_object_values, restore_pattern_scope, save_pattern_scope,
@@ -273,7 +273,7 @@ fn evaluate_block_while_condition(
     };
     let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
 
-    let decision: WhileConditionDecision = match optional_let_binding(pattern, &value) {
+    let decision: WhileConditionDecision = match optional_let_binding_condition(pattern, &value, &while_stmt.condition)? {
         LetBind::Skip => WhileConditionDecision::Stop,
         LetBind::Bind(name, inner) => {
             let mut bindings = HashMap::with_capacity(1);
@@ -642,7 +642,7 @@ pub(super) fn exec_block_closure_into(
                         enums,
                         impl_methods,
                     )?;
-                    match optional_let_binding(pattern, &value) {
+                    match optional_let_binding_condition(pattern, &value, &if_stmt.condition)? {
                         LetBind::Bind(name, inner) => {
                             // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                             // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -726,7 +726,7 @@ pub(super) fn exec_block_closure_into(
                     for (elif_idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
                         if let Some(pattern) = pattern {
                             let value = evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
-                            match optional_let_binding(pattern, &value) {
+                            match optional_let_binding_condition(pattern, &value, cond)? {
                                 LetBind::Bind(name, inner) => {
                                     // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                                     // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -1635,7 +1635,7 @@ fn exec_block_closure_mut_inner(
                     // above (bug #188a) — `pattern_matches` alone always matches a bare
                     // identifier pattern, even against nil/None, so it must be tried first.
                     let value = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
-                    match optional_let_binding(pattern, &value) {
+                    match optional_let_binding_condition(pattern, &value, &if_stmt.condition)? {
                         LetBind::Bind(name, inner) => {
                             // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                             // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -1716,7 +1716,7 @@ fn exec_block_closure_mut_inner(
                     for (elif_idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
                         if let Some(pattern) = pattern {
                             let value = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
-                            match optional_let_binding(pattern, &value) {
+                            match optional_let_binding_condition(pattern, &value, cond)? {
                                 LetBind::Bind(name, inner) => {
                                     // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                                     // so is load-bearing, not cosmetic: `Env::insert` alone leaves

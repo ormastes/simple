@@ -1,0 +1,219 @@
+# Authored/unexecuted policy source regressions, not live Podman qualification.
+use std.spec.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.common.contracts.container.runtime_v1.*
+
+fn _engine_policy_v1() -> LinuxOciEnginePolicyV1:
+    LinuxOciEnginePolicyV1(mode: "trusted-local-admin-v1", executable_path: "/usr/bin/podman",
+        expected_uid: 1000, expected_graph_root: "/home/test/storage", expected_run_root: "/run/user/1000/storage",
+        expected_storage_driver: "overlay")
+
+fn _engine_info_v1() -> text:
+    "{\"host\":{\"security\":{\"rootless\":true},\"serviceIsRemote\":false}," +
+        "\"store\":{\"graphRoot\":\"/home/test/storage\",\"runRoot\":\"/run/user/1000/storage\"," +
+        "\"graphDriverName\":\"overlay\",\"graphOptions\":{}},\"version\":{\"Version\":\"5.0.0\"}}"
+
+fn _engine_observation_v1() -> LinuxOciEngineObservationV1:
+    match linux_oci_engine_info_observation_v1(_engine_policy_v1(), _engine_info_v1(), "a".repeat(64), 1000):
+        case Ok(value): value
+        case Err(reason): fail(reason)
+
+fn _engine_request_v1() -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "policy-1", attempt: 1, operation_id: "create-policy",
+        image: "example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        bundle_path: "", command: ["/agent"], args: ["literal ; $(task)"], timeout_ms: 5000,
+        cpu_limit_millis: 1000, memory_limit_bytes: 268435456, pid_limit: 64,
+        network_policy: "none", filesystem_policy: "read-only")
+
+fn _engine_expected_create_v1() -> [text]:
+    ["--remote=false", "--root", "/home/test/storage", "--runroot", "/run/user/1000/storage",
+        "--storage-driver", "overlay", "--storage-opt=", "create", "--name", "simpleorch-policy-1-1",
+        "--label", "io.simpleorch.pod_uid=policy-1", "--label", "io.simpleorch.attempt=1",
+        "--label", "io.simpleorch.node_boot_id=boot-1", "--label", "io.simpleorch.provider_generation=7",
+        "--label", "io.simpleorch.operation_id=create-policy", "--cpu-period", "100000", "--cpu-quota", "100000",
+        "--memory", "268435456", "--pids-limit", "64", "--network", "none", "--read-only",
+        "--security-opt", "no-new-privileges", "--cap-drop", "ALL", _engine_request_v1().image,
+        "/agent", "literal ; $(task)"]
+
+describe "Linux OCI trusted local administrator engine policy":
+    it "roundtrips canonical policy bytes and binds ordered storage options":
+        var policy = _engine_policy_v1()
+        val bytes = match linux_oci_engine_policy_encode_v1(policy):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val decoded = match linux_oci_engine_policy_decode_v1(bytes):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(decoded.executable_path).to_equal(policy.executable_path)
+        expect(decoded.storage_options).to_equal([])
+        expect(linux_oci_engine_policy_digest_v1(decoded)).to_equal(linux_oci_engine_policy_digest_v1(policy))
+        val original = linux_oci_engine_policy_digest_v1(policy)
+        policy.storage_options = ["overlay.one=x", "overlay.two=y"]
+        expect(linux_oci_engine_policy_digest_v1(policy) == original).to_equal(false)
+        val ordered = linux_oci_engine_policy_digest_v1(policy)
+        policy.storage_options = ["overlay.two=y", "overlay.one=x"]
+        expect(linux_oci_engine_policy_digest_v1(policy) == ordered).to_equal(false)
+
+    it "refuses unknown noncanonical oversized and deeply nested policy data before parsing":
+        val bytes = match linux_oci_engine_policy_encode_v1(_engine_policy_v1()):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        for source in [bytes + "\n", bytes.replace("version: 1", "unexpected: true, version: 1"),
+                bytes.replace("version: 1", "version: 1, version: 1"),
+                bytes.replace("expectedUid: 1000, ", ""), bytes.replace("expectedUid: 1000", "expectedUid: wrong"),
+                "{" + "[".repeat(20) + "0" + "]".repeat(20) + "}\n", "x".repeat(163841)]:
+            match linux_oci_engine_policy_decode_v1(source):
+                case Err(reason): expect(reason.len()).to_be_greater_than(0)
+                case Ok(_): fail("invalid policy bytes must reject")
+
+    it "rejects unsupported modes paths and option aliases before native observation":
+        var policy = _engine_policy_v1()
+        policy.mode = "sealed-v1"
+        expect(linux_oci_engine_policy_error_v1(policy)).to_equal("engine-policy-mode-unsupported")
+        match LinuxOciRuntimeProviderV1.new_with_engine_policy("linux", "podman", "/unused", "boot", 1, policy):
+            case Err(reason): expect(reason).to_equal("engine-policy-mode-unsupported")
+            case Ok(_): fail("unsupported mode must not observe or construct")
+        policy = _engine_policy_v1()
+        policy.executable_path = "podman"
+        expect(linux_oci_engine_policy_error_v1(policy)).to_equal("engine-policy-executable-path-invalid")
+        policy.executable_path = "/podman"
+        expect(linux_oci_engine_policy_error_v1(policy)).to_equal("engine-policy-executable-path-invalid")
+        match LinuxOciRuntimeProviderV1.new_with_engine_policy("linux", "podman", "/unused", "boot", 1, policy):
+            case Err(reason): expect(reason).to_equal("engine-policy-executable-path-invalid")
+            case Ok(_): fail("unsupported root parent must reject before native observation")
+        policy.executable_path = "/usr/bin/podman"
+        expect(linux_oci_engine_policy_error_v1(policy)).to_equal("")
+        policy = _engine_policy_v1()
+        policy.expected_graph_root = "/"
+        expect(linux_oci_engine_policy_error_v1(policy)).to_equal("engine-policy-storage-path-invalid")
+        policy = _engine_policy_v1()
+        policy.expected_run_root = "/"
+        expect(linux_oci_engine_policy_error_v1(policy)).to_equal("engine-policy-storage-path-invalid")
+        policy = _engine_policy_v1()
+        policy.storage_options = ["overlay.x=one", "overlay.x=two"]
+        expect(linux_oci_engine_policy_error_v1(policy)).to_equal("engine-policy-storage-option-key-invalid")
+
+    it "rejects setuid setgid writable and nonexecutable metadata while accepting trusted owners":
+        expect(linux_oci_engine_executable_metadata_error_v1(0, 1000, 0o100755, 1000)).to_equal("")
+        expect(linux_oci_engine_executable_metadata_error_v1(1000, 1000, 0o100755, 1000)).to_equal("")
+        for mode in [0o104755, 0o102755, 0o100775, 0o100757, 0o100644]:
+            expect(linux_oci_engine_executable_metadata_error_v1(0, 1000, mode, 1000)).to_equal("engine-executable-mode-unsafe")
+        expect(linux_oci_engine_executable_metadata_error_v1(2000, 1000, 0o100755, 1000)).to_equal("engine-executable-owner-mismatch")
+        expect(linux_oci_engine_executable_metadata_error_v1(0, 2000, 0o100755, 1000)).to_equal("engine-executable-owner-mismatch")
+
+    it "routes exact scoped argv and explicit empty storage options without PATH fallback":
+        val arguments = match linux_oci_engine_route_v1(_engine_policy_v1(), ["info", "--format", "json"]):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(arguments).to_equal(["--remote=false", "--root", "/home/test/storage",
+            "--runroot", "/run/user/1000/storage", "--storage-driver", "overlay", "--storage-opt=",
+            "info", "--format", "json"])
+        var policy = _engine_policy_v1()
+        policy.storage_options = ["overlay.mount_program=/usr/bin/fuse-overlayfs"]
+        val selected = match linux_oci_engine_route_v1(policy, ["logs", "literal ; $(task)"]):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(selected).to_equal(["--remote=false", "--root", "/home/test/storage",
+            "--runroot", "/run/user/1000/storage", "--storage-driver", "overlay",
+            "--storage-opt=overlay.mount_program=/usr/bin/fuse-overlayfs", "logs", "literal ; $(task)"])
+        match linux_oci_engine_route_v1(_engine_policy_v1(), ["logs", "a\0b"]):
+            case Err(reason): expect(reason).to_equal("engine-route-argument-contains-nul")
+            case Ok(_): fail("NUL argv must reject")
+        policy.storage_options = ["overlay.key=a\0b"]
+        expect(linux_oci_engine_policy_error_v1(policy)).to_equal("engine-policy-storage-option-invalid")
+
+    it "observes exact local rootless uid roots driver version and binary digest":
+        val observed = _engine_observation_v1()
+        expect(observed.uid).to_equal(1000)
+        expect(observed.rootless).to_equal(true)
+        expect(observed.executable_digest).to_equal("a".repeat(64))
+        expect(observed.engine_version).to_equal("5.0.0")
+        expect(linux_oci_engine_observation_match_v1(_engine_policy_v1(), observed)).to_equal(Ok(true))
+        for source in [_engine_info_v1().replace("\"rootless\":true", "\"rootless\":false"),
+                _engine_info_v1().replace("\"serviceIsRemote\":false", "\"serviceIsRemote\":true"),
+                _engine_info_v1().replace("/home/test/storage", "/other/storage"),
+                _engine_info_v1().replace("/run/user/1000/storage", "/other/run"),
+                _engine_info_v1().replace("overlay", "vfs")]:
+            match linux_oci_engine_info_observation_v1(_engine_policy_v1(), source, "a".repeat(64), 1000):
+                case Err(reason): expect(reason.len()).to_be_greater_than(0)
+                case Ok(_): fail("mismatched scope must reject")
+        match linux_oci_engine_info_observation_v1(_engine_policy_v1(), _engine_info_v1(), "a".repeat(64), 2000):
+            case Err(reason): expect(reason).to_equal("engine-rootless-uid-mismatch")
+            case Ok(_): fail("wrong native effective uid must reject")
+
+    it "rejects duplicate malformed missing and excessive depth JSON observations":
+        for source in ["{}", "{broken", _engine_info_v1() + " true", _engine_info_v1().replace("\"rootless\":true", "\"rootless\":true,\"rootless\":true"),
+                "[".repeat(17) + "0" + "]".repeat(17), "x".repeat(65537)]:
+            match linux_oci_engine_info_observation_v1(_engine_policy_v1(), source, "a".repeat(64), 1000):
+                case Err(reason): expect(reason.len()).to_be_greater_than(0)
+                case Ok(_): fail("invalid bounded observation must reject")
+
+    it "matches scalar storage options and the upstream overlay mount-program object":
+        var policy = _engine_policy_v1()
+        policy.storage_options = ["overlay.mount_program=/usr/bin/fuse-overlayfs"]
+        val source = _engine_info_v1().replace("\"graphOptions\":{}",
+            "\"graphOptions\":{\"overlay.mount_program\":{\"Executable\":\"/usr/bin/fuse-overlayfs\",\"Version\":\"1.0\",\"Package\":\"fuse\"}}")
+        val observed = match linux_oci_engine_info_observation_v1(policy, source, "a".repeat(64), 1000):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(observed.storage_options).to_equal(policy.storage_options)
+        val changed = match linux_oci_engine_info_observation_v1(policy, source.replace("1.0", "2.0"), "a".repeat(64), 1000):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(changed.identity_digest == observed.identity_digest).to_equal(false)
+        match linux_oci_engine_info_observation_v1(policy, source.replace("/usr/bin/fuse-overlayfs", "/usr/bin/other"), "a".repeat(64), 1000):
+            case Err(reason): expect(reason).to_equal("engine-storage-options-mismatch")
+            case Ok(_): fail("wrong mount program executable must reject")
+        policy.storage_options = ["overlay.key=literal"]
+        val scalar = _engine_info_v1().replace("\"graphOptions\":{}", "\"graphOptions\":{\"overlay.key\":\"literal\"}")
+        match linux_oci_engine_info_observation_v1(policy, scalar, "a".repeat(64), 1000):
+            case Ok(value): expect(value.storage_options).to_equal(policy.storage_options)
+            case Err(reason): fail(reason)
+        match linux_oci_engine_info_observation_v1(policy, scalar.replace("literal", "different"), "a".repeat(64), 1000):
+            case Err(reason): expect(reason).to_equal("engine-storage-options-mismatch")
+            case Ok(_): fail("wrong scalar storage option must reject")
+
+    it "refuses unobservable storage option object forms instead of guessing":
+        var policy = _engine_policy_v1()
+        policy.storage_options = ["overlay.other=x"]
+        val source = _engine_info_v1().replace("\"graphOptions\":{}", "\"graphOptions\":{\"overlay.other\":{}}")
+        match linux_oci_engine_info_observation_v1(policy, source, "a".repeat(64), 1000):
+            case Err(reason): expect(reason).to_equal("engine-storage-option-observation-unsupported")
+            case Ok(_): fail("unknown object adapter must reject")
+
+    it "executes an exact scripted absolute route and reports the identical selected command":
+        val expected = _engine_expected_create_v1()
+        val observed = _engine_observation_v1()
+        val provider = match LinuxOciRuntimeProviderV1.scripted_with_engine_policy("linux", "podman",
+                "/unused/policy", "boot-1", 7, _engine_policy_v1(), observed, observed,
+                [ScriptedCommandResultV1(operation: "create", program: "/usr/bin/podman", args: expected,
+                    stdout: "native-policy", stderr: "", exit_code: 0)]):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val result = provider.create(_engine_request_v1())
+        expect(result.status).to_equal(RUNTIME_STATUS_OK)
+        expect(result.command.program).to_equal("/usr/bin/podman")
+        expect(result.command.args).to_equal(expected)
+        expect(provider.scripted_cursor).to_equal(1)
+
+    it "retains baseline and refuses a changed observed executable before scripted effect consumption":
+        val baseline = _engine_observation_v1()
+        val changed = match linux_oci_engine_info_observation_v1(_engine_policy_v1(), _engine_info_v1(), "b".repeat(64), 1000):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val would_execute = _engine_expected_create_v1()
+        val provider = match LinuxOciRuntimeProviderV1.scripted_with_engine_policy("linux", "podman",
+                "/unused/policy", "boot-1", 7, _engine_policy_v1(), baseline, changed,
+                [ScriptedCommandResultV1(operation: "create", program: "/usr/bin/podman", args: would_execute,
+                    stdout: "unexpected-native", stderr: "", exit_code: 0)]):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        match provider.engine_observation_v1():
+            case Err(reason): expect(reason).to_equal("engine-observation-identity-changed")
+            case Ok(_): fail("changed executable must not silently update baseline")
+        val refused = provider.create(_engine_request_v1())
+        expect(refused.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(refused.reason).to_contain("engine-observation-identity-changed")
+        expect(provider.engine_baseline.unwrap().identity_digest).to_equal(baseline.identity_digest)
+        expect(provider.scripted_cursor).to_equal(0)

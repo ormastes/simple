@@ -324,6 +324,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_match_arm_expr(&mut self) -> Result<MatchArm, ParseError> {
+        let enclosing_column = self.match_arm_column.replace(self.current.span.column);
+        let result = self.parse_match_arm_expr_body();
+        self.match_arm_column = enclosing_column;
+        result
+    }
+
+    fn parse_match_arm_expr_body(&mut self) -> Result<MatchArm, ParseError> {
         use crate::token::Span;
         let start_span = self.current.span;
 

@@ -27,7 +27,8 @@ use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TY
 use compiler.core.interpreter.env.*
 use compiler.core.interpreter.value.*
 use compiler.core.interpreter.ops.*
-use compiler.core.interpreter.eval_calls.{val_copy_if_value_struct}
+use compiler.core.interpreter.eval_calls.{val_copy_if_value_struct, val_make_array_snapshot}
+use compiler.core.interpreter.value_places.{eval_mutable_value_place, eval_prepare_value_place}
 use compiler.core.interpreter.resolve.{resolve_is_fast_local}
 
 # Raw O(1) byte read out of the text buffer. Registered for this engine in
@@ -243,7 +244,7 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             var result: [i64] = []
             for p in limited:
                 result.push(val_make_text(p))
-            return val_make_array(result)
+            return val_make_array_snapshot(result)
         return val_make_array([val_make_text(s)])
 
     if method_name == "split_lines" or method_name == "lines":
@@ -261,7 +262,7 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
         var result: [i64] = []
         for p in parts:
             result.push(val_make_text(p))
-        return val_make_array(result)
+        return val_make_array_snapshot(result)
 
     if method_name == "trim" or method_name == "strip":
         return val_make_text(s.trim())
@@ -455,15 +456,14 @@ fn eval_index_expr(eid: i64) -> i64:
     if eval_had_error: return -1
 
     if val_is_array(base_val):
-        val elements = val_get_array(base_val)
         if not val_is_int(index_val):
             eval_set_error("type error: array index must be int, got " + val_kind_name(val_get_kind(index_val)))
             return -1
         val idx = val_get_int(index_val)
         if idx >= 0:
-            val len = elements.len()
+            val len = val_array_len(base_val)
             if idx < len:
-                return elements[idx]
+                return val_array_at(base_val, idx)
         eval_set_error("array index out of bounds: " + "{idx}")
         return -1
 
@@ -571,7 +571,7 @@ fn eval_slice_expr(eid: i64) -> i64:
             for i in start_idx..end_idx:
                 result.push(elements[i])
 
-        return val_make_array(result)
+        return val_make_array_snapshot(result)
 
     eval_set_error("cannot slice " + val_kind_name(val_get_kind(base_val)))
     -1
@@ -584,7 +584,7 @@ fn eval_array_lit(eid: i64) -> i64:
     for e_eid in elem_eids:
         val ev = eval_expr(e_eid)
         if eval_had_error: return -1
-        elements.push(ev)
+        elements.push(val_copy_if_value_struct(ev))
     val_make_array(elements)
 
 # ===== Tuple Literal =====
@@ -596,7 +596,7 @@ fn eval_tuple_lit(eid: i64) -> i64:
     for e_eid in elem_eids:
         val ev = eval_expr(e_eid)
         if eval_had_error: return -1
-        elements.push(ev)
+        elements.push(val_copy_if_value_struct(ev))
     val_make_array(elements)
 
 # ===== Struct Literal =====
@@ -616,7 +616,7 @@ fn eval_struct_lit(eid: i64) -> i64:
     for fv_eid in field_value_eids:
         val fv = eval_expr(fv_eid)
         if eval_had_error: return -1
-        field_values.push(fv)
+        field_values.push(val_copy_if_value_struct(fv))
 
     val_make_struct(type_name, field_names, field_values)
 
@@ -634,7 +634,7 @@ fn eval_dict_lit(eid: i64) -> i64:
         val value = eval_expr(value_eids[i])
         if eval_had_error: return -1
         field_names.push(val_to_text(key))
-        field_values.push(value)
+        field_values.push(val_copy_if_value_struct(value))
         i = i + 1
     val_make_struct("__dict", field_names, field_values)
 
@@ -645,8 +645,9 @@ fn eval_assign_expr(eid: i64) -> i64:
     val target_eid = e_node.left
     val value_eid = e_node.right
 
-    val new_val = eval_expr(value_eid)
+    val incoming = eval_expr(value_eid)
     if eval_had_error: return -1
+    val new_val = val_copy_if_value_struct(incoming)
 
     val target_node = expr_get(target_eid)
     val target_tag = target_node.tag
@@ -669,7 +670,7 @@ fn eval_assign_expr(eid: i64) -> i64:
     if target_tag == EXPR_FIELD_ACCESS:
         val base_eid2 = target_node.left
         val field_name = target_node.s_val
-        val base_val = eval_expr(base_eid2)
+        val base_val = eval_mutable_value_place(base_eid2)
         if eval_had_error: return -1
         if val_is_struct(base_val):
             # S1 copy-site 4 (struct field store). THIS is the live path for
@@ -678,7 +679,7 @@ fn eval_assign_expr(eid: i64) -> i64:
             # eval_stmts.spl's STMT_ASSIGN handler. Storing a value-type struct
             # stores a SNAPSHOT; class values fall through the gate unchanged
             # and stay aliased.
-            val store_val = val_copy_if_value_struct(new_val)
+            val store_val = new_val
             # Fast path: cached field index
             val cached_idx = expr_owner_int(target_eid)
             if cached_idx >= 0:
@@ -698,9 +699,11 @@ fn eval_assign_expr(eid: i64) -> i64:
         return -1
 
     if target_tag == EXPR_INDEX:
-        val base_val = eval_expr(target_node.left)
+        val base_place = eval_prepare_value_place(target_node.left)
         if eval_had_error: return -1
         val key_val = eval_expr(target_node.right)
+        if eval_had_error: return -1
+        val base_val = base_place.mutable_value()
         if eval_had_error: return -1
         if val_is_struct(base_val) and val_get_struct_name(base_val) == "__dict":
             val_struct_upsert_field(base_val, val_to_text(key_val), new_val)
@@ -754,7 +757,7 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
     if target_tag == EXPR_FIELD_ACCESS:
         val fa_base_eid = target_node.left
         val fa_field = target_node.s_val
-        val fa_base = eval_expr(fa_base_eid)
+        val fa_base = eval_mutable_value_place(fa_base_eid)
         if eval_had_error: return -1
         if val_is_struct(fa_base) == false:
             eval_set_error("cannot compound-assign field on " + val_kind_name(val_get_kind(fa_base)))
@@ -778,23 +781,24 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
     # the element is updated through the base handle, so array value semantics are
     # unchanged (the base is whatever place the sub-expression already resolved to).
     if target_tag == EXPR_INDEX:
-        val ix_base = eval_expr(target_node.left)
+        val ix_place = eval_prepare_value_place(target_node.left)
         if eval_had_error: return -1
         val ix_key = eval_expr(target_node.right)
+        if eval_had_error: return -1
+        val ix_base = ix_place.mutable_value()
         if eval_had_error: return -1
 
         if val_is_array(ix_base):
             if val_is_int(ix_key):
-                val ix_elems = val_get_array(ix_base)
                 val ix_i = val_get_int(ix_key)
                 var ix_in_range = false
                 if ix_i >= 0:
-                    if ix_i < ix_elems.len():
+                    if ix_i < val_array_len(ix_base):
                         ix_in_range = true
                 if ix_in_range == false:
                     eval_set_error("array index out of bounds: " + "{ix_i}")
                     return -1
-                val ix_old = ix_elems[ix_i]
+                val ix_old = val_array_at(ix_base, ix_i)
                 val ix_rhs = rhs_val
                 val ix_new = val_compound_op(op, ix_old, ix_rhs)
                 if ix_new < 0:
@@ -929,13 +933,14 @@ fn eval_enum_variant_call(type_name: text, variant_name: text, arg_eids: [i64]) 
     if arg_eids.len() == 1:
         payload_val = eval_expr(arg_eids[0])
         if eval_had_error: return -1
+        payload_val = val_copy_if_value_struct(payload_val)
     elif arg_eids.len() > 1:
         # Multiple args → tuple payload
         var payload_elems: [i64] = []
         for aeid in arg_eids:
             val av = eval_expr(aeid)
             if eval_had_error: return -1
-            payload_elems.push(av)
+            payload_elems.push(val_copy_if_value_struct(av))
         payload_val = val_make_array(payload_elems)
     val full_name = type_name + "::" + variant_name
     var field_names: [text] = []
@@ -1017,11 +1022,11 @@ fn eval_list_comp(eid: i64) -> i64:
 
     val iterable_array = val_iterable_array(iterable_val)
     if iterable_array >= 0:
-        val elements = val_get_array(iterable_array)
+        val elements = val_get_array(val_copy_if_value_struct(iterable_array))
         for elem_vid in elements:
             if eval_had_error: break
             env_push_scope()
-            env_define(iter_name, elem_vid)
+            env_define(iter_name, val_copy_if_value_struct(elem_vid))
             # Check condition if present
             var include = true
             if cond_eid >= 0:
@@ -1035,7 +1040,7 @@ fn eval_list_comp(eid: i64) -> i64:
                 if eval_had_error:
                     env_pop_scope()
                     return -1
-                result_elements.push(body_val)
+                result_elements.push(val_copy_if_value_struct(body_val))
             env_pop_scope()
         return val_make_array(result_elements)
 
@@ -1077,7 +1082,7 @@ fn eval_list_comp(eid: i64) -> i64:
                     if eval_had_error:
                         env_pop_scope()
                         return -1
-                    result_elements.push(body_val)
+                    result_elements.push(val_copy_if_value_struct(body_val))
                 env_pop_scope()
                 # Same checked-increment parity guard as eval_for_expr.
                 if current == 9223372036854775807: break

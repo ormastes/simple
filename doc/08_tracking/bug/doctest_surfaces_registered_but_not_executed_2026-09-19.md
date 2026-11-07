@@ -131,3 +131,12 @@ The real, in-scope gap is the 1,632 + 89 above.
   surface caught the first time it was actually run.
 - `rt_file_stat_returns_size_on_interpret_lane_2026-09-19` — same session, also
   found by exercising something nothing routinely exercises.
+
+## 2026-11-07 Tooling/test group: legacy extraction owner (candidate)
+
+Source review at release `b40b744b1a68f34aa56b27109a8503a6e98e4289` found that the canonical library extractor already recognizes ordinary `#` fences, preserves nested body indentation, and has authored unit coverage. The legacy `app.test_runner_new.doctest_runner.extract_doctests` still duplicates the older parser: it accepts only `##`/`///` and trims body indentation. This is a concrete remaining consumer defect; it is not proof of the historical full CLI route that produced all 36 zero-example results.
+
+The isolated repair delegates only this compatibility API's source extraction to `std.test_runner.doctest_runner.extract_doctests`, converting its five record fields back to the existing app-local `Doctest`. Other public function signatures, the legacy two-argument execution API, markdown scope and all default/opt-in policy remain unchanged. A wholesale facade replacement was deliberately avoided because the current canonical execution owner requires an explicit binary argument.
+
+Four discriminating regression cases cover ordinary-hash/nested indentation, double-hash should-fail metadata, triple-slash comments and an unclosed negative. A direct native fixture calls the production compatibility API and continues every case. Both are authored but not executed yet; actual producer/resource admission and independent source review are pending. Keep the broad doctest-surface bug OPEN, including its separate markdown-scope policy question and full-CLI execution qualification.
+

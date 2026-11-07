@@ -1592,6 +1592,10 @@ static int rt_core_dict_has(RtCoreDict* d, int64_t key);
 static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed);
 
 static _Atomic size_t rt_core_heap_registry_count = 0;
+/* Successful heap-object registrations since process start. Unlike the live
+ * registry count, releases never decrement this counter; duplicate registrations
+ * and registry rehashing do not increment it. Mirrors Rust total_allocs. */
+static _Atomic int64_t rt_core_heap_total_allocs = 0;
 
 /* Aux-byte accounting: container BACKING buffers (RtCoreArray.data,
  * RtCoreDict.entries) live in allocations separate from the object header,
@@ -1880,6 +1884,7 @@ static int rt_core_register_mutex(RtCoreMutex* mutex) {
     }
     rt_core_mutex_registry[rt_core_mutex_registry_len++] = mutex;
     atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
     atomic_flag_clear_explicit(&rt_core_mutex_registry_lock, memory_order_release);
     return 1;
 }
@@ -1943,6 +1948,12 @@ static int rt_core_register_enum(RtCoreEnum* e) {
 
 static int rt_core_is_registered_enum(RtCoreEnum* e) {
     return rt_core_is_registered_immortal_ptr(e);
+}
+
+/* Monotonic successful heap-object allocation registrations, not live count,
+ * raw allocator calls, or a modeled collection-operation count. */
+int64_t rt_heap_alloc_count(void) {
+    return atomic_load_explicit(&rt_core_heap_total_allocs, memory_order_relaxed);
 }
 
 int64_t rt_heap_registry_count(void) {
@@ -2499,6 +2510,7 @@ static int rt_core_register_immortal_ptr(void* ptr) {
         /* Inherited address: present, or re-registered after its erase. */
         if (core_immortal_erased_drop((uintptr_t)ptr)) {
             atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
         }
         rt_core_immortal_registry_release();
         return 1;
@@ -2524,6 +2536,7 @@ static int rt_core_register_immortal_ptr(void* ptr) {
     int inserted = rt_core_immortal_registry_insert_raw((uintptr_t)ptr);
     if (inserted) {
         atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
     }
     rt_core_immortal_registry_release();
     return 1;

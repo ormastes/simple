@@ -22,7 +22,16 @@ var val_kinds: [i64] = []
 var val_ints: [i64] = []
 var val_floats: [f64] = []
 var val_texts: [text] = []
-pub var val_arrays: [[i64]] = []        # array of value_id arrays
+var val_array_backings: [i64] = []
+# Array ValueIds own descriptors, not their element storage. Sharing a
+# descriptor copies one integer; only a writer copies its backing row.
+var array_storage: [[i64]] = []
+var array_storage_refs: [i64] = []
+var array_storage_epochs: [i64] = []
+var array_storage_owned: [{i64: i64}] = []
+var array_storage_free: [i64] = []
+var array_cow_copies: i64 = 0
+var array_cow_slots: i64 = 0
 var val_struct_names: [text] = []   # struct type name
 var val_struct_fields: [[text]] = []  # struct field names
 var val_struct_values: [[i64]] = []   # struct field value_ids
@@ -61,7 +70,14 @@ fn val_reset():
     val_ints = []
     val_floats = []
     val_texts = []
-    val_arrays = []
+    val_array_backings = []
+    array_storage = []
+    array_storage_refs = []
+    array_storage_epochs = []
+    array_storage_owned = []
+    array_storage_free = []
+    array_cow_copies = 0
+    array_cow_slots = 0
     val_struct_names = []
     val_struct_fields = []
     val_struct_values = []
@@ -110,7 +126,7 @@ fn val_alloc(kind: i64) -> i64:
         val_ints[idx] = 0
         val_floats[idx] = 0.0
         val_texts[idx] = ""
-        val_arrays[idx] = []
+        val_array_backings[idx] = -1
         val_struct_names[idx] = ""
         val_struct_fields[idx] = []
         val_struct_values[idx] = []
@@ -123,7 +139,7 @@ fn val_alloc(kind: i64) -> i64:
     val_ints.push(0)
     val_floats.push(0.0)
     val_texts.push("")
-    val_arrays.push([])
+    val_array_backings.push(-1)
     val_struct_names.push("")
     val_struct_fields.push([])
     val_struct_values.push([])
@@ -136,12 +152,15 @@ fn val_alloc(kind: i64) -> i64:
 # Release a value slot back to the free list for reuse.
 # Do NOT free cached singletons (nil, true, false, small ints, empty text).
 fn val_free(vid: i64):
-    if vid < 0: return
-    # Don't free cached values (first 259 slots: nil + true + false + empty_text + 256 ints)
-    if cache_initialized and vid < 260: return
+    if vid < 0 or vid >= val_kinds.len(): return
+    # The cache includes common text literals as well as the small integers.
+    if cache_initialized and cache_ints.len() > 0 and vid <= cache_ints[cache_ints.len() - 1]: return
+    if val_kinds[vid] == VAL_NIL: return
+    if val_kinds[vid] == VAL_ARRAY:
+        val_array_storage_release(val_array_backings[vid])
     val_kinds[vid] = VAL_NIL
     val_texts[vid] = ""
-    val_arrays[vid] = []
+    val_array_backings[vid] = -1
     val_struct_names[vid] = ""
     val_struct_fields[vid] = []
     val_struct_values[vid] = []
@@ -188,9 +207,113 @@ fn val_make_text(s: text) -> i64:
     idx
 
 fn val_make_array(elements: [i64]) -> i64:
+    # The caller transfers owned guest elements. Copy the host ID vector so
+    # later edits of a construction buffer cannot mutate this backing.
+    var owned: [i64] = []
+    for element in elements: owned.push(element)
     val idx = val_alloc(VAL_ARRAY)
-    val_arrays[idx] = elements
+    val_array_backings[idx] = val_array_storage_new(owned, 0)
     idx
+
+fn val_array_storage_new(elements: [i64], epoch: i64) -> i64:
+    if array_storage_free.len() > 0:
+        val slot = array_storage_free[array_storage_free.len() - 1]
+        array_storage_free.pop()
+        array_storage[slot] = elements
+        array_storage_refs[slot] = 1
+        array_storage_epochs[slot] = epoch
+        array_storage_owned[slot] = {}
+        return slot
+    val slot = array_storage.len()
+    array_storage.push(elements)
+    array_storage_refs.push(1)
+    array_storage_epochs.push(epoch)
+    array_storage_owned.push({})
+    slot
+
+fn val_array_storage_release(slot: i64):
+    if slot < 0 or slot >= array_storage_refs.len(): return
+    array_storage_refs[slot] = array_storage_refs[slot] - 1
+    if array_storage_refs[slot] == 0:
+        # Child ValueIds belong to the value arena, including class identities.
+        # Releasing a backing does not recursively release its guest values.
+        array_storage[slot] = []
+        array_storage_owned[slot] = {}
+        array_storage_free.push(slot)
+
+fn val_array_storage_id(vid: i64) -> i64:
+    if vid < 0 or vid >= val_array_backings.len(): return -1
+    if val_kinds[vid] != VAL_ARRAY: return -1
+    val_array_backings[vid]
+
+fn val_array_storage_count() -> i64: array_storage.len()
+fn val_array_cow_copy_count() -> i64: array_cow_copies
+fn val_array_cow_copied_slots() -> i64: array_cow_slots
+
+fn val_array_copy(vid: i64) -> i64:
+    val_array_share(vid, true)
+
+# Internal readonly traversal lease. Its caller must snapshot any escaping
+# value children, never mutate this descriptor, and release it on every exit.
+fn val_array_read_lease(vid: i64) -> i64:
+    val_array_share(vid, false)
+
+fn val_array_share(vid: i64, snapshot: bool) -> i64:
+    val slot = val_array_storage_id(vid)
+    if slot < 0: return vid
+    val copied = val_alloc(VAL_ARRAY)
+    val_array_backings[copied] = slot
+    array_storage_refs[slot] = array_storage_refs[slot] + 1
+    if not snapshot: return copied
+    # Invalidate sparse child-ownership witnesses for both descriptors in O(1).
+    # Zero denotes a fresh row whose incoming values were already snapshots.
+    if array_storage_epochs[slot] == 9223372036854775807:
+        array_storage_epochs[slot] = 1
+        array_storage_owned[slot] = {}
+    else:
+        array_storage_epochs[slot] = array_storage_epochs[slot] + 1
+    copied
+
+fn val_array_ensure_unique(vid: i64) -> bool:
+    val slot = val_array_storage_id(vid)
+    if slot < 0: return false
+    if array_storage_refs[slot] == 1: return true
+    var copied: [i64] = []
+    var index: i64 = 0
+    while index < array_storage[slot].len():
+        val element = array_storage[slot][index]
+        # Nested arrays get distinct descriptors; their backing stays shared.
+        # Value structs are cloned lazily by mutable-place traversal.
+        copied.push(if val_is_array(element): val_array_copy(element) else: element)
+        index = index + 1
+    val replacement = val_array_storage_new(copied, 1)
+    array_cow_copies = array_cow_copies + 1
+    array_cow_slots = array_cow_slots + index
+    val_array_storage_release(slot)
+    val_array_backings[vid] = replacement
+    true
+
+fn val_array_element_owned(vid: i64, index: i64) -> bool:
+    val slot = val_array_storage_id(vid)
+    if slot < 0: return false
+    val epoch = array_storage_epochs[slot]
+    epoch == 0 or (array_storage_owned[slot].get(index) ?? -1) == epoch
+
+fn val_array_mark_element_owned(vid: i64, index: i64):
+    val slot = val_array_storage_id(vid)
+    if slot >= 0 and array_storage_epochs[slot] != 0:
+        array_storage_owned[slot][index] = array_storage_epochs[slot]
+
+fn val_array_len(vid: i64) -> i64:
+    val slot = val_array_storage_id(vid)
+    if slot < 0: return 0
+    array_storage[slot].len()
+
+fn val_array_at(vid: i64, index: i64) -> i64:
+    val slot = val_array_storage_id(vid)
+    if slot < 0 or index < 0: return -1
+    if index >= array_storage[slot].len(): return -1
+    array_storage[slot][index]
 
 fn val_make_struct(type_name: text, field_names: [text], field_values: [i64]) -> i64:
     val idx = val_alloc(VAL_STRUCT)
@@ -236,38 +359,45 @@ fn val_get_text(vid: i64) -> text:
     val_texts[vid]
 
 fn val_get_array(vid: i64) -> [i64]:
-    val_arrays[vid]
+    val slot = val_array_storage_id(vid)
+    if slot < 0: return []
+    array_storage[slot]
 
 # Owner-scoped mutation helpers keep the arena storage private when evaluator
 # operations are compiled as separate native modules.
 fn val_array_set(vid: i64, index: i64, value: i64) -> bool:
-    if vid < 0 or vid >= val_arrays.len():
-        return false
-    if index < 0 or index >= val_arrays[vid].len():
-        return false
-    val_arrays[vid][index] = value
+    if index < 0 or index >= val_array_len(vid): return false
+    if not val_array_ensure_unique(vid): return false
+    val slot = val_array_storage_id(vid)
+    array_storage[slot][index] = value
+    val_array_mark_element_owned(vid, index)
     true
 
 fn val_array_push(vid: i64, value: i64) -> bool:
-    if vid < 0 or vid >= val_arrays.len():
-        return false
-    val_arrays[vid].push(value)
+    if not val_array_ensure_unique(vid): return false
+    val slot = val_array_storage_id(vid)
+    val index = array_storage[slot].len()
+    array_storage[slot].push(value)
+    val_array_mark_element_owned(vid, index)
     true
 
 fn val_array_clear(vid: i64) -> bool:
-    if vid < 0 or vid >= val_arrays.len():
-        return false
-    val_arrays[vid] = []
+    val slot = val_array_storage_id(vid)
+    if slot < 0: return false
+    # Discarding a shared row needs no element copies.
+    val replacement = val_array_storage_new([], 0)
+    val_array_storage_release(slot)
+    val_array_backings[vid] = replacement
     true
 
 fn val_array_pop(vid: i64) -> i64:
-    if vid < 0 or vid >= val_arrays.len():
-        return val_make_nil()
-    val count = val_arrays[vid].len()
+    val count = val_array_len(vid)
     if count == 0:
         return val_make_nil()
-    val result = val_arrays[vid][count - 1]
-    val_arrays[vid] = val_arrays[vid][0:count - 1]
+    if not val_array_ensure_unique(vid): return val_make_nil()
+    val slot = val_array_storage_id(vid)
+    val result = array_storage[slot][count - 1]
+    array_storage[slot].pop()
     result
 
 fn val_get_struct_name(vid: i64) -> text:
@@ -393,7 +523,7 @@ fn val_is_truthy(vid: i64) -> bool:
     if kind == VAL_INT: return val_ints[vid] != 0
     if kind == VAL_FLOAT: return val_floats[vid] != 0.0
     if kind == VAL_TEXT: return val_texts[vid] != ""
-    if kind == VAL_ARRAY: return val_arrays[vid].len() > 0
+    if kind == VAL_ARRAY: return val_array_len(vid) > 0
     true
 
 fn val_exists(vid: i64) -> bool:
@@ -404,7 +534,7 @@ fn val_exists(vid: i64) -> bool:
     val kind = val_kinds[vid]
     if kind == VAL_NIL: return false
     if kind == VAL_TEXT: return val_texts[vid] != ""
-    if kind == VAL_ARRAY: return val_arrays[vid].len() > 0
+    if kind == VAL_ARRAY: return val_array_len(vid) > 0
     true
 
 # ===== String Conversion =====
@@ -420,7 +550,7 @@ fn val_to_text(vid: i64) -> text:
     if kind == VAL_FLOAT: return "{val_floats[vid]}"
     if kind == VAL_TEXT: return val_texts[vid]
     if kind == VAL_ARRAY:
-        val elems = val_arrays[vid]
+        val elems = val_get_array(vid)
         var parts: [text] = []
         for eid in elems:
             parts.push(val_to_text(eid))
