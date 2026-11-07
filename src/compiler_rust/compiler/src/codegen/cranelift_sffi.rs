@@ -1198,7 +1198,7 @@ pub unsafe extern "C" fn rt_cranelift_define_function(module: i64, _func_id: i64
     match func_id_result {
         Ok(id) => {
             let mut ctx = finished.ctx;
-            match crate::codegen::shared::define_function_aligned(&mut mod_ctx.module, id, &mut ctx) {
+            match super::shared::define_function_aligned(&mut mod_ctx.module, id, &mut ctx) {
                 Ok(_) => {
                     mod_ctx.func_ids.insert(finished.name, id);
                     true
@@ -2124,7 +2124,7 @@ pub unsafe extern "C" fn rt_cranelift_aot_define_function(
     match func_id_result {
         Ok(id) => {
             let mut ctx = finished.ctx;
-            match crate::codegen::shared::define_function_aligned(&mut mod_ctx.module, id, &mut ctx) {
+            match super::shared::define_function_aligned(&mut mod_ctx.module, id, &mut ctx) {
                 Ok(_) => {
                     mod_ctx.func_ids.insert(name, id);
                     true
