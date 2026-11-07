@@ -140,6 +140,7 @@ static int64_t ws_origin_empty_v1(void) {
 #include "runtime_workspace_user_observation_linux_private.h"
 #include "runtime_workspace_executable_prep_linux_private.h"
 #include "runtime_workspace_containment_linux_private.h"
+#include "runtime_workspace_kernel_observation_linux_private.h"
 static pthread_mutex_t ws_lock_v1 = PTHREAD_MUTEX_INITIALIZER;
 static int ws_lock_acquire_v1(void) {
     int error=ws_origin_guard_v1();if(error)return error;
@@ -534,4 +535,41 @@ int64_t rt_linux_container_containment_close_v1(int64_t token,int64_t binding) {
 #else
     (void)token;(void)binding;return -ENOTSUP;
 #endif
+}
+
+/* Descriptive running-kernel/context facts. No terminal or eligibility bit. */
+int64_t rt_linux_container_containment_kernel_observe_v1(int64_t token,int64_t binding,
+        int64_t release,int64_t build,int64_t profile) {
+    if(ws_origin_guard_v1())return ws_origin_empty_v1();
+    char output[2048]={0};
+#if defined(__linux__)
+    char expected_binding[65],expected_release[257],expected_build[129],expected_profile[65];
+    if(!ws_copy_text_v1(binding,expected_binding,sizeof(expected_binding))||!ws_digest_v1(expected_binding)||
+       !ws_copy_text_v1(release,expected_release,sizeof(expected_release))||!ws_kernel_release_v1(expected_release)||
+       !ws_copy_text_v1(build,expected_build,sizeof(expected_build))||!ws_kernel_hex_v1(expected_build)||
+       !ws_copy_text_v1(profile,expected_profile,sizeof(expected_profile))||!ws_digest_v1(expected_profile))
+        return rt_string_new((const uint8_t*)"",0);
+    if(ws_lock_acquire_v1())return rt_string_new((const uint8_t*)"",0);
+    WsSlotV1* slot=ws_find_v1(token);WsKernelFactsV1 f;
+    if(slot&&slot->role==3&&!slot->busy&&!strcmp(slot->policy,expected_binding)&&
+       !ws_kernel_observe_v1(&slot->containment,expected_release,expected_build,&f)) {
+        WsContainNativeV1* n=&slot->containment;struct timespec now;
+        if(!clock_gettime(CLOCK_REALTIME,&now)&&now.tv_sec>0&&now.tv_sec<(INT64_MAX-999)/1000) {
+            int used=snprintf(output,sizeof(output),"linux-container-kernel-native-v1\n%lld\n%s\n%s\n%s\n%s\n%s\n%ld\n%ld\n%d\n%d\n%d\n%d\n%d\n%d\n%llu\n%llu\n%llu\n%llu\n%llu\n%llu\n%llu\n%llu\n%llu\n%llu\n%llu\n%llu\n%lld\n",
+                (long long)token,expected_binding,expected_profile,f.release,f.build_id,f.notes_digest,(long)f.pid,(long)f.tid,
+                f.seccomp,f.status_seccomp,f.tracer,f.dumpable,f.nnp,f.status_nnp,
+                (unsigned long long)f.proc_device,(unsigned long long)f.proc_inode,(unsigned long long)f.sysfs_device,
+                (unsigned long long)f.sysfs_inode,(unsigned long long)f.notes_device,(unsigned long long)f.notes_inode,
+                (unsigned long long)n->ns_device[2],(unsigned long long)n->ns_inode[2],
+                (unsigned long long)n->ns_device[3],(unsigned long long)n->ns_inode[3],
+                (unsigned long long)n->ns_device[4],(unsigned long long)n->ns_inode[4],
+                (long long)now.tv_sec*1000+now.tv_nsec/1000000);
+            if(used<=0||(size_t)used>=sizeof(output))output[0]=0;
+        }
+    }
+    ws_lock_release_v1();if(ws_origin_guard_v1())return ws_origin_empty_v1();
+#else
+    (void)token;(void)binding;(void)release;(void)build;(void)profile;
+#endif
+    return rt_string_new((const uint8_t*)output,strlen(output));
 }

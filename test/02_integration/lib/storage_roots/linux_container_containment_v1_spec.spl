@@ -2,6 +2,7 @@
 use std.spec.{describe, it, expect, step, fail}
 use std.nogc_sync_mut.io.linux_container_containment_v1.*
 use std.nogc_sync_mut.io.sysinfo_ops.getpid
+use std.common.contracts.container.kernel_qualification_v1.ContainerKernelQualificationProfileV1
 
 var retained_containment_owners_v1: [LinuxContainerContainmentOwnerV1] = []
 
@@ -36,4 +37,24 @@ describe "retained Linux containment observation refusal":
         if closed.owner != nil: retained_containment_owners_v1.push(closed.owner.unwrap())
         expect(closed.closed).to_equal(true)
         expect(closed.owner == nil).to_equal(true)
+        expect(closed.error).to_equal("")
+
+    it "preserves partial native ownership when kernel context cannot be observed":
+        step("Retain the actual failed capture through kernel profile observation")
+        val captured = linux_container_containment_capture_v1(getpid(), "/not-the-current-cgroup", "a".repeat(64))
+        if captured.owner == nil:
+            fail("actual Core-C partial owner required; platform absence is not a pass")
+            return
+        val owner = captured.owner.unwrap()
+        retained_containment_owners_v1.push(owner)
+        val profile = ContainerKernelQualificationProfileV1(kernel_release: "6.12.0-installed", kernel_build_id: "ab",
+            source_manifest_digest: "a".repeat(64), config_digest: "b".repeat(64), patch_manifest_digest: "c".repeat(64),
+            rule_id: "linux-v6.12-core-events-deactivation-v1")
+        val observed = linux_container_containment_kernel_observe_v1(owner, profile)
+        retained_containment_owners_v1.push(observed.owner)
+        expect(observed.facts == nil).to_equal(true)
+        expect(observed.error != "").to_equal(true)
+        val closed = linux_container_containment_close_v1(observed.owner)
+        if closed.owner != nil: retained_containment_owners_v1.push(closed.owner.unwrap())
+        expect(closed.closed).to_equal(true)
         expect(closed.error).to_equal("")

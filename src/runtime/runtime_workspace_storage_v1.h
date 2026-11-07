@@ -22,4 +22,6 @@ int64_t rt_workspace_storage_prepare_executable_v1(int64_t storage_token,int64_t
 int64_t rt_linux_container_containment_capture_v1(int64_t pid,int64_t cgroup,int64_t binding);
 int64_t rt_linux_container_containment_observe_v1(int64_t token,int64_t binding);
 int64_t rt_linux_container_containment_close_v1(int64_t token,int64_t binding);
+int64_t rt_linux_container_containment_kernel_observe_v1(int64_t token,int64_t binding,
+    int64_t release,int64_t build,int64_t profile);
 #endif
