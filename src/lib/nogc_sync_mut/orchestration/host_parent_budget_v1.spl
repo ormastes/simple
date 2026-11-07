@@ -8,6 +8,7 @@ use std.common.contracts.orchestration.assignment_v1.{ControllerAssignmentBindin
 use std.common.contracts.orchestration.host_reservation_codec_v1.*
 use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.nogc_async_mut.container.api_v2.simple_container_backend_v2
 use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, distributed_grant_authorize_v2}
 use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
@@ -27,6 +28,15 @@ pub struct HostParentBudgetRecordV1:
     proof: ControllerParentBudgetProofV1
     parent_binding: ControllerAssignmentBindingV1
     parent_controller_operation: OperationEnvelopeV2
+
+fn parent_budget_private_store_v1(local: HostLocalRootV1) -> Result<bool, text>:
+    @when(os="linux"):
+    if simple_container_backend_v2(local.container) != "linux-podman":
+        return Err("parent-budget-private-storage-platform-unsupported")
+    @when(os="linux"):
+    return Ok(true)
+    @else:
+    return Err("parent-budget-private-storage-platform-unsupported")
 
 pub fn host_parent_budget_record_encode_v1(record: HostParentBudgetRecordV1) -> Result<text, text>:
     val matched = controller_parent_budget_match_v1(record.proof.budget, record.proof.operation,
@@ -136,6 +146,7 @@ fn parent_budget_authorize_v1(local: HostLocalRootV1, record: HostParentBudgetRe
 pub fn host_parent_budget_store_v1(local: HostLocalRootV1, record: HostParentBudgetRecordV1,
         context: HostReservationAuthorizationContextV1,
         refresh: fn() -> HostReservationAuthorizationContextV1) -> Result<text, text>:
+    val privacy = parent_budget_private_store_v1(local)?
     val verified = parent_budget_authorize_v1(local, record, context, refresh)?
     val bytes = host_parent_budget_record_encode_v1(record)?
     val digest = controller_parent_budget_digest_v1(record.proof.budget)?
@@ -162,6 +173,7 @@ pub fn host_parent_budget_store_v1(local: HostLocalRootV1, record: HostParentBud
 pub fn host_parent_budget_load_v1(local: HostLocalRootV1, budget_digest: text,
         parent_operation_id: text, context: HostReservationAuthorizationContextV1,
         refresh: fn() -> HostReservationAuthorizationContextV1) -> Result<HostParentBudgetRecordV1, text>:
+    val privacy = parent_budget_private_store_v1(local)?
     if not builder_digest_valid_v1(budget_digest): return Err("parent-budget-reference-invalid")
     val path = local.capacity.journal.root + "/host-parent-budget-records/" + budget_digest + ".sdn"
     val record = host_parent_budget_record_decode_v1(file_read_regular_no_follow_bounded(path, 2097152)?)?
