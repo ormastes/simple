@@ -686,12 +686,26 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::InlineAsm {
-            instructions, volatile, dialect, ..
+            instructions,
+            volatile,
+            dialect,
+            constraints,
+            inputs,
+            outputs,
         } => {
-            // Cranelift has no inline asm: blocks go to a C sidecar TU with no
-            // operand binding (inline_asm_emit.rs). Operand-bound blocks keep
-            // their `$N` placeholders and are skipped there exactly as the
-            // `{name}` form was before; only `--backend llvm` binds operands.
+            // Cranelift has no inline asm: raw blocks go to a C sidecar TU,
+            // which cannot bind operands or preserve LLVM register constraints.
+            // Volatile raw blocks lower to the memory clobber only; allow that
+            // one sidecar-equivalent constraint and reject all other bindings.
+            if !inputs.is_empty() || !outputs.is_empty() || {
+                let constraints = constraints.trim();
+                !constraints.is_empty() && constraints != "~{memory}"
+            } {
+                return Err(
+                    "E-ASM-OPERANDS-UNSUPPORTED: Cranelift C sidecar cannot preserve inline asm inputs, outputs, or register constraints; use the LLVM backend"
+                        .to_string(),
+                );
+            }
             let symbol = crate::codegen::inline_asm::register_inline_asm(instructions, *volatile, *dialect);
             let func_id = if let Some(func_id) = ctx.func_ids.get(&symbol).copied() {
                 func_id
