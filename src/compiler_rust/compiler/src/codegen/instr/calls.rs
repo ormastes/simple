@@ -646,7 +646,8 @@ fn compile_inline_len<M: Module>(
     let result = if trusted_array {
         inline_runtime_array_len_value(builder, value, ctx.fam_arrays)
     } else {
-        inline_runtime_len_value(builder, value, ctx.baremetal, ctx.fam_arrays)
+        let char_count = super::helpers::declare_string_char_count_ref(ctx, builder);
+        super::helpers::inline_runtime_len_value_with(builder, value, ctx.baremetal, ctx.fam_arrays, char_count)
     };
     ctx.vreg_values.insert(*dest, result);
     Ok(true)

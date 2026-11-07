@@ -1058,9 +1058,9 @@ pub(super) fn eval_call_expr(
                 // String property access (e.g., str.len, str.is_empty)
                 // Also supports no-paren method calls (e.g., str.upper, str.trim)
                 Value::Str(ref s) => match field.as_str() {
-                    "len" => Ok(Value::Int(s.len() as i64)),
+                    // Code points, like the method form (interpreter_method/string.rs).
+                    "len" | "char_count" => Ok(Value::Int(s.chars().count() as i64)),
                     "byte_len" => Ok(Value::Int(s.len() as i64)),
-                    "char_count" => Ok(Value::Int(s.chars().count() as i64)),
                     "is_empty" => Ok(Value::Bool(s.is_empty())),
                     _ => {
                         // Try calling as a no-arg method (e.g., str.upper, str.trim)

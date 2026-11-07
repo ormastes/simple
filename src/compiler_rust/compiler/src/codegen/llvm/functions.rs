@@ -2628,7 +2628,10 @@ impl LlvmBackend {
                     }
                 }
 
-                // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver), 1)
+                // Special case: substring(start) → rt_slice(receiver, start, rt_string_len(receiver), 1)
+                // substring is a BYTE-offset API, so its default end is the byte
+                // length (rt_string_len), never rt_len, which counts code points
+                // on text since design text_len_counts_characters_2026-11-07.
                 if method == "substring" && args.len() == 1 {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
@@ -2636,11 +2639,11 @@ impl LlvmBackend {
                     let start_casted = self.coerce_value_to_type(start_val, Some(i64_type.into()), builder)?;
                     let len_fn_type = i64_type.fn_type(&[i64_type.into()], false);
                     let len_func = module
-                        .get_function("rt_len")
-                        .unwrap_or_else(|| module.add_function("rt_len", len_fn_type, None));
+                        .get_function("rt_string_len")
+                        .unwrap_or_else(|| module.add_function("rt_string_len", len_fn_type, None));
                     let len_call = builder
-                        .build_call(len_func, &[recv_casted.into()], "text_len")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
+                        .build_call(len_func, &[recv_casted.into()], "text_byte_len")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len for substring", &e))?;
                     let end_val = len_call
                         .try_as_basic_value()
                         .basic()

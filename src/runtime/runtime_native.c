@@ -4859,7 +4859,9 @@ int64_t rt_tagged_add(int64_t left, int64_t right) {
 
 int64_t rt_len(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (s) return (int64_t)s->len;
+    /* Generic `.len()` on text counts code points (design
+     * text_len_counts_characters_2026-11-07); rt_string_len stays bytes. */
+    if (s) return rt_string_char_count(value);
     RtCoreArray* a = rt_core_as_array(value);
     return a ? a->len : 0;
 }

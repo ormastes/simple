@@ -4099,7 +4099,10 @@ pub extern "C" fn rt_string_len(string: RuntimeValue) -> i64 {
 pub extern "C" fn rt_len(value: RuntimeValue) -> i64 {
     match value.heap_type() {
         Some(HeapObjectType::Array) => rt_array_len(value),
-        Some(HeapObjectType::String) => rt_string_len(value),
+        // Generic `.len()` on text counts code points (design
+        // text_len_counts_characters_2026-11-07); `rt_string_len` stays the
+        // byte count behind `byte_len()` and the byte externs.
+        Some(HeapObjectType::String) => rt_string_char_count(value),
         Some(HeapObjectType::Tuple) => rt_tuple_len(value),
         Some(HeapObjectType::Dict) => super::dict::rt_dict_len(value),
         _ => -1,
@@ -4445,9 +4448,22 @@ fn new_string(s: &str) -> RuntimeValue {
 /// and `rt_len`.
 #[no_mangle]
 pub extern "C" fn rt_string_char_count(string: RuntimeValue) -> i64 {
-    match string_as_str(string) {
-        Some(s) => s.chars().count() as i64,
-        None => -1,
+    // Backs generic `.len()` on text (design text_len_counts_characters_2026-11-07),
+    // so it must never answer -1 for a real string: bytes that are not valid
+    // UTF-8 (a raw byte slice, a lossy fragment) are counted by lead byte, the
+    // same walk the C runtime's rt_utf8_width does.
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return len;
+    }
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.chars().count() as i64,
+        Err(_) => bytes.iter().filter(|b| (**b & 0xC0) != 0x80).count() as i64,
     }
 }
 
