@@ -52,6 +52,7 @@ use os.apps.smux.pane_io_service.{pane_release_best_effort as _release_child,
     pane_capture_frame_state}
 use os.apps.smux.session_lifecycle.{rename_session_state, remove_session_state, remove_window_state}
 use os.apps.smux.child_lifecycle.{close_owned_children}
+use std.sosix.process.{PipedProcessRefV1, sosix_process_is_piped_alive_ref_v1, sosix_process_close_piped_ref_v1}
 use os.apps.smux.pane_lifecycle.{PaneClosePending, close_pane_state,
     pane_close_window_pending, pane_close_poll_windows, pane_close_forget}
 use os.apps.smux.split_checkpoint.{SplitCheckpoint, split_checkpoint_capture, split_checkpoint_restore}
@@ -118,6 +119,18 @@ fn _geometry_quarantine(window_id: text, outcome: WindowGeometryUpdate):
 # Test support
 
 pub fn smux_reset_for_test():
+    # Do not erase a canonical owner when native teardown refuses. Completed
+    # closes may publish, while the failed reference remains available to retry.
+    var released = _svc
+    var canonical_index = 0
+    while canonical_index < released.pane_count:
+        val pane = released.get_pane(canonical_index)
+        if val reference = pane.terminal_ref:
+            if sosix_process_close_piped_ref_v1(reference).is_err():
+                _svc = _publish(released)
+                return
+            released = released.replace_pane(canonical_index, pane.with_pty(-1, -1))
+        canonical_index = canonical_index + 1
     _revisions = service_revision_reset(_revisions)
     smux_notifications_clear_all()
     # Empty incarnation triggers fresh secure entropy on the next admission.
@@ -128,8 +141,8 @@ pub fn smux_reset_for_test():
     _closing_panes = []
     # Reap every attached child first: a reset must not leak processes.
     var i = 0
-    while i < _svc.pane_count:
-        _release_child(_svc.get_pane(i))
+    while i < released.pane_count:
+        _release_child(released.get_pane(i))
         i = i + 1
     _svc = _publish(ServiceState.empty())
 
@@ -568,6 +581,43 @@ pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: te
     val updated = pane_spawn_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, cmd, args)
     if updated.commit: _svc = _publish(updated.state)
     return updated.result
+
+# Trusted local transfer only: the provider retains ownership on any refusal.
+# This output-only relay is adopted, not proof the engine attached or is ready.
+# Never expose the reference through the textual protocol or infer runtime
+# identity from its diagnostic PID. The existing pane poller is its sole reader.
+# References expire with their issuing process registry; restart recovery must
+# obtain a fresh canonical owner rather than deserialize a saved PID/generation.
+pub fn smux_pane_adopt_terminal_transport(session_id: text, window_id: text,
+        pane_id: text, expected_epoch: u64, expected_revision: u64,
+        expected_child_incarnation: u64, reference: PipedProcessRefV1) -> Result<i64, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
+    if _revisions.epoch != expected_epoch or _revisions.value != expected_revision:
+        return Err("terminal transport configuration changed")
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing")
+    val si = _svc.find_session_idx(session_id)
+    val wi = _svc.find_window_idx(window_id)
+    val pi = _svc.find_pane_idx(pane_id)
+    if si < 0 or wi < 0 or pi < 0: return Err("unknown terminal transport target")
+    val pane = _svc.get_pane(pi)
+    if (pane.pane.session_id != session_id or pane.pane.window_id != window_id or
+            _svc.get_window(wi).session_id != session_id): return Err("foreign terminal transport target")
+    if pane.child_incarnation != expected_child_incarnation: return Err("terminal transport incarnation changed")
+    if pane.terminal_ref != nil or pane.child_pid > 0 or pane.pty_fd >= 0:
+        return Err("pane already owns a child or pending transport")
+    if not pane.can_attach(): return Err("pane incarnation or content revision exhausted")
+    if reference.pid <= 0 or reference.generation <= 0: return Err("terminal transport reference invalid")
+    # A canonical reference may have only one pane reader in this owner.
+    var index = 0
+    while index < _svc.pane_count:
+        if _svc.get_pane(index).same_terminal_ref(reference):
+            return Err("terminal transport already owned by a pane")
+        index = index + 1
+    val alive = sosix_process_is_piped_alive_ref_v1(reference)
+    if alive.is_err(): return Err(alive.unwrap_err())
+    if not alive.unwrap(): return Err("terminal transport is not live at adoption")
+    _svc = _publish(_svc.replace_pane(pi, pane.with_terminal_ref(reference)))
+    return Ok(reference.pid)
 
 # Attaches a child on a real pseudo-terminal sized to the pane geometry.
 # `command_line` is handed to the platform launcher as one line (a shell path
