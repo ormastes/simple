@@ -192,3 +192,8 @@ Divergence A residual fixed in the seed BDD assertion path
 compared with a literal `nil` now keeps its `T?` value. Repro:
 `test/01_unit/compiler/interpreter/exists_check_presence_regression_spec.spl` case "optional .? passes the payload through". Divergence C
 (module-private `val` imports) is outside the `.?` family and stays open.
+
+## 2026-11-07 (round 15) status correction
+Verdict: fixed (already). Divergence A is a reclassified call-site idiom trap (census converted
+2026-08-16) and is pinned by `test/03_system/feature/usage/exists_check_bool_comparison_trap_spec.spl`;
+the "PARTIAL FIX / 43 sites remain" header above is stale. Prevention spec path is that same file.

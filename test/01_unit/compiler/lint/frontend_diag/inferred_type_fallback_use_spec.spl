@@ -5,8 +5,9 @@
 Bug class: doc/08_tracking/bug/stage2_imported_fn_foreign_struct_return_type_erased_2026-10-10.md
 (58 `test_interp` sites): `val src = node_get(0)` where `node_get` is imported
 and returns a struct from a THIRD module this module does not import. The
-binding's type is erased, and `for x in src` / `src.len()` fail far away in MIR
-lowering. This rule reports at the DECLARATION, names the callee and the
+historical binding type was erased, and receiver uses failed far away in MIR
+lowering. Current nominal-return controls require the owner layout to survive;
+warning controls deliberately declare the imported return as `Any`. This rule reports at the DECLARATION, names the callee and the
 unresolved type, and says which later use needs the type.
 
 W-HIR-INFER-002 is the sibling for `var c = []` / `{}` with no element type
@@ -25,15 +26,20 @@ use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirBlock, HirStmt, HirStmtKind, HirExprKind}
 use compiler.hir.binding_annotation_provenance.{hir_local_annotation_state, hir_local_annotation_copy}
 use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, hir_frontend_findings_with_code, HirFrontendFinding}
 use compiler.tools.lint._LintMain.config_and_model.{build_default_levels}
 
 val model_src = "pub struct Node:\n    n: i64\n\npub fn make() -> Node:\n    Node(n: 1)\n"
 val api_src = "use lib.model.\{Node, make\}\n\npub fn node_get(i: i64) -> Node:\n    make()\n\npub fn names() -> [text]:\n    []\n"
+# Explicit erasure keeps the diagnostic controls independent of nominal owner transport.
+val erased_api_src = api_src.replace("-> Node:", "-> Any:")
+
 # Facade that RE-EXPORTS the model: a consumer importing only lib.facade can
 # still see Node (glob or explicit item), and must not be warned.
 val facade_src = "export use lib.model.*\n\npub fn node_get(i: i64) -> Node:\n    make()\n"
+val erased_facade_src = facade_src.replace("-> Node:", "-> Any:")
 
 fn lower_consumer_with_api(src: text, api_source: text) -> HirModule:
     val log = Logger(level: 0)
@@ -82,6 +88,106 @@ fn imported_node_return_has_layout(hir: HirModule) -> bool:
                     case _: return false
             case _: return false
     false
+
+# Phase-contract controls: parsed source owns identities and annotation receipts;
+# the omitted return naturally supplies a missing imported signature.
+# Only the two retained type carriers are changed below.
+fn isolate_return_metadata(block: HirBlock, target: SymbolId, concrete: HirType, binding_known: bool, initializer_known: bool) -> (HirBlock, i64):
+    var rewritten = block
+    var statements: [HirStmt] = []
+    var selected = 0
+    for original in block.stmts:
+        var statement = original
+        match original.kind:
+            case HirStmtKind.Let(symbol, _, init):
+                if symbol.id == target.id:
+                    val unresolved = HirType(kind: HirTypeKind.Error, span: init.span)
+                    val binding_type = if binding_known: concrete else: unresolved
+                    var initializer = init
+                    initializer.has_type_ = initializer_known or not binding_known
+                    initializer.type_ = if initializer_known: concrete else: unresolved
+                    statement.kind = HirStmtKind.Let(symbol, binding_type, initializer)
+                    selected = selected + 1
+            case HirStmtKind.Block(nested):
+                val (updated, count) = isolate_return_metadata(nested, target, concrete, binding_known, initializer_known)
+                statement.kind = HirStmtKind.Block(updated)
+                selected = selected + count
+            case _: ()
+        statements.push(statement)
+    rewritten.stmts = statements
+    (rewritten, selected)
+
+fn check_isolated_return_metadata(binding_known: bool, initializer_known: bool):
+    val source = "use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n"
+    var hir = lower_consumer_with_api(source, api_src.replace("-> Node:", ":"))
+    var target = SymbolId(id: -1)
+    var callee = SymbolId(id: -1)
+    var concrete: HirType? = nil
+    var targets = 0
+    var callees = 0
+    for entry in hir.symbols.symbols.values():
+        if entry.name == "src":
+            target = entry.id
+            targets = targets + 1
+        if entry.name == "node_get":
+            callee = entry.id
+            concrete = Some(HirType(kind: HirTypeKind.Int(64, true), span: entry.span))
+            callees = callees + 1
+            expect(entry.kind == SymbolKind.Function).to_equal(true)
+            expect(entry.generic_param_count).to_equal(0)
+            expect(entry.defining_module ?? "").to_equal("lib.api")
+            expect(entry.type_.?).to_equal(false)
+    expect(targets).to_equal(1)
+    expect(callees).to_equal(1)
+    expect(hir_local_annotation_state(hir, target)).to_equal(0)
+    expect(hir.symbols.get_symbol(callee).unwrap().type_.?).to_equal(false)
+    var replaced = 0
+    for key in hir.functions.keys():
+        var function = hir.functions[key]
+        if function.name != "f": continue
+        val (body, count) = isolate_return_metadata(function.body, target, concrete.unwrap(), binding_known, initializer_known)
+        function.body = body
+        hir.functions[key] = function
+        replaced = replaced + count
+    expect(replaced).to_equal(1)
+    # Read the stored module back, so assertions cover the value-semantics writes.
+    for function in hir.functions.values():
+        if function.name != "f": continue
+        check_return_metadata_carriers(function.body, target, binding_known, initializer_known, callee)
+    val findings = infer_findings(hir, "W-HIR-INFER-001")
+    val expected = if binding_known or initializer_known: 0 else: 1
+    expect(findings.len()).to_equal(expected)
+    for finding in findings:
+        expect(finding.message).to_contain("callee `node_get` has no available imported return signature")
+        expect(finding.message).to_contain("type of `src` could not be determined at its declaration")
+        expect(finding.function_name).to_equal("f")
+        expect(finding.line).to_equal(4)
+
+fn check_return_metadata_carriers(block: HirBlock, target: SymbolId, binding_known: bool, initializer_known: bool, callee: SymbolId):
+    for statement in block.stmts:
+        match statement.kind:
+            case HirStmtKind.Let(symbol, binding_type, init):
+                if symbol.id != target.id: continue
+                match binding_type.kind:
+                    case HirTypeKind.Int(64, true): expect(binding_known).to_equal(true)
+                    case HirTypeKind.Error: expect(binding_known).to_equal(false)
+                    case _: fail("unexpected isolated binding type")
+                expect(init.has_type_).to_equal(initializer_known or not binding_known)
+                match init.type_.kind:
+                    case HirTypeKind.Int(64, true): expect(initializer_known).to_equal(true)
+                    case HirTypeKind.Error: expect(initializer_known).to_equal(false)
+                    case _: fail("unexpected isolated initializer type")
+                match init.kind:
+                    case HirExprKind.Call(callee_expr, _, _):
+                        match callee_expr.kind:
+                            case HirExprKind.Var(symbol): expect(symbol.id).to_equal(callee.id)
+                            case HirExprKind.NamedVar(symbol, name):
+                                expect(symbol.id).to_equal(callee.id)
+                                expect(name).to_equal("node_get")
+                            case _: fail("isolated initializer must retain its imported callee")
+                    case _: fail("isolated initializer must remain a call")
+            case HirStmtKind.Block(nested): check_return_metadata_carriers(nested, target, binding_known, initializer_known, callee)
+            case _: ()
 
 describe "Canonical return-layout and annotation provenance controls":
     it "retains the exact third-module return layout without a direct type import":
@@ -154,10 +260,8 @@ describe "Canonical return-layout and annotation provenance controls":
         expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
 
 describe "W-HIR-INFER-001 at the erased declaration":
-    # PENDING (seed interpreter skips; compiled lanes still run and fail): doc/08_tracking/bug/hir_any_alias_and_inferred_fallback_diag_gaps_2026-10-30.md
-    pending("names the binding, the callee and the `for` use when an imported fn returns a third-module struct [blocked: HIR cross-module inferred fallback gap]")
-    skip_it "names the binding, the callee and the `for` use when an imported fn returns a third-module struct":
-        val hir = lower_consumer("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for x in src:\n        n = n + 1\n    n\n")
+    it "names the binding, callee and for use for an imported explicit Any return":
+        val hir = lower_consumer_with_api("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for x in src:\n        n = n + 1\n    n\n", erased_api_src)
         val ws = infer_findings(hir, "W-HIR-INFER-001")
         expect(ws.len()).to_equal(1)
         expect(ws[0].message).to_contain("type of `src` could not be determined at its declaration")
@@ -168,13 +272,47 @@ describe "W-HIR-INFER-001 at the erased declaration":
         expect(ws[0].line).to_equal(4)
         expect(ws[0].family).to_equal("inferred_type_fallback_use")
 
-    # PENDING (seed interpreter skips; compiled lanes still run and fail): doc/08_tracking/bug/hir_any_alias_and_inferred_fallback_diag_gaps_2026-10-30.md
-    pending("reports once per binding even when it is used as receiver, index base and field base [blocked: HIR cross-module inferred fallback gap]")
-    skip_it "reports once per binding even when it is used as receiver, index base and field base":
-        val hir = lower_consumer("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    val a = src.len()\n    val b = src[0]\n    val c = src.n\n    a + b + c\n")
+    it "reports an imported Any return once per binding across receiver, index and field uses":
+        val hir = lower_consumer_with_api("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    val a = src.len()\n    val b = src[0]\n    val c = src.n\n    a + b + c\n", erased_api_src)
         val ws = infer_findings(hir, "W-HIR-INFER-001")
         expect(ws.len()).to_equal(1)
         expect(ws[0].message).to_contain("a method-call receiver")
+
+describe "W-HIR-INFER-001 for an unavailable imported return signature":
+    it "reports an omitted provider or facade return once at its inferred declaration":
+        for provider in [api_src, facade_src]:
+            val omitted = provider.replace("-> Node:", ":")
+            val hir = lower_consumer_with_api("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    val a = src.len()\n    val b = src[0]\n    src.n\n", omitted)
+            val ws = infer_findings(hir, "W-HIR-INFER-001")
+            expect(ws.len()).to_equal(1)
+            for finding in ws:
+                expect(finding.message).to_contain("type of `src` could not be determined at its declaration")
+                expect(finding.message).to_contain("callee `node_get` has no available imported return signature")
+                expect(finding.message).to_contain("a method-call receiver")
+                expect(finding.line).to_equal(4)
+                expect(finding.function_name).to_equal("f")
+                expect(finding.family).to_equal("inferred_type_fallback_use")
+
+    it "suppresses a missing signature warning using only resolved binding metadata":
+        check_isolated_return_metadata(true, false)
+
+    it "suppresses a missing signature warning using only resolved initializer metadata":
+        check_isolated_return_metadata(false, true)
+
+    it "reports a missing signature when both retained metadata carriers are unresolved":
+        check_isolated_return_metadata(false, false)
+
+    it "does not classify a deliberately deferred generic imported signature":
+        val provider = "pub fn node_get<T>(value: T) -> T:\n    value\n"
+        val hir = lower_consumer_with_api("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n", provider)
+        var found_generic = false
+        for symbol in hir.symbols.symbols.values():
+            if symbol.name == "node_get":
+                expect(symbol.generic_param_count).to_equal(1)
+                expect(symbol.type_.?).to_equal(false)
+                found_generic = true
+        expect(found_generic).to_equal(true)
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
 
 describe "W-HIR-INFER-002 for untyped empty collections":
     it "reports empty collections in literal tuple val and var bindings":
@@ -218,10 +356,8 @@ describe "W-HIR-INFER-001 stays silent when the type is known":
         val hir = lower_consumer_with_api("use lib.api.\{node_get, Node\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n", facade_src)
         expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
 
-    # PENDING (seed interpreter skips; compiled lanes still run and fail): doc/08_tracking/bug/hir_any_alias_and_inferred_fallback_diag_gaps_2026-10-30.md
-    pending("still fires when only the facade FUNCTION is imported and the re-exported type is not [blocked: HIR cross-module inferred fallback gap]")
-    skip_it "still fires when only the facade FUNCTION is imported and the re-exported type is not":
-        val hir = lower_consumer_with_api("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n", facade_src)
+    it "reports a facade function explicit Any return despite its nominal re-export":
+        val hir = lower_consumer_with_api("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n", erased_facade_src)
         expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(1)
 
     it "does not fire when the callee itself is unresolved (that is a lowering error, not an erased type)":

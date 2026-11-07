@@ -1,0 +1,161 @@
+# @req REQ-SSPEC-COMPILER
+# Inject missing/placeholder metadata independently of the declared binding.
+use std.spec
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_types.*
+use compiler.mir.native_trait_metadata.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.native_trait_conversion.*
+use compiler.mir._MirLowering.native_trait_registration.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn trait_source_test_type(mode: text, source: SymbolId, other: SymbolId) -> HirType:
+    val span = Span.empty()
+    val source_type = HirType(kind: HirTypeKind.Named(source, []), span: span)
+    val other_type = HirType(kind: HirTypeKind.Named(other, []), span: span)
+    match mode:
+        case "source": source_type
+        case "other": other_type
+        case "optional-source": HirType(kind: HirTypeKind.Optional(source_type), span: span)
+        case "optional-other": HirType(kind: HirTypeKind.Optional(other_type), span: span)
+        case "optional-error": HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Error, span: span)), span: span)
+        case "any": HirType(kind: HirTypeKind.Any, span: span)
+        case "unit": HirType(kind: HirTypeKind.Unit, span: span)
+        case "infer": HirType(kind: HirTypeKind.Infer(7, 0), span: span)
+        case _: HirType(kind: HirTypeKind.Error, span: span)
+
+fn trait_source_selected_label(local_mode: text, expression_mode: text,
+        binding_mode: text = "unbound", named: bool = false) -> text:
+    val span = Span.empty()
+    var symbols = SymbolTable.new()
+    val source = symbols.define("SourceReader", SymbolKind.Trait, nil, span, Visibility.Public, false, nil)
+    val other = symbols.define("OtherReader", SymbolKind.Trait, nil, span, Visibility.Public, false, nil)
+    val declared = trait_source_test_type("optional-source", source, other)
+    val binding = symbols.define("source", SymbolKind.Variable, Some(declared), span, Visibility.Private, false, nil)
+    var lowering = MirLowering.new_for_target(symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val local = LocalId(id: 91)
+    if local_mode != "missing":
+        lowering.remember_local_hir_type(local.id, trait_source_test_type(local_mode, source, other), 0, 0)
+    if binding_mode == "same":
+        lowering.bind_local(binding.id, local)
+    elif binding_mode == "other":
+        val bound = LocalId(id: 92)
+        lowering.bind_local(binding.id, bound)
+        lowering.remember_local_hir_type(bound.id, trait_source_test_type("optional-other", source, other), 0, 0)
+    val kind = if named: HirExprKind.NamedVar(binding, "source") else: HirExprKind.Var(binding)
+    val expression = HirExpr(kind: kind, has_type_: expression_mode != "missing",
+        type_: trait_source_test_type(expression_mode, source, other), span: span)
+    if val selected = lowering.native_trait_declared_source_type(local, expression):
+        match selected.kind:
+            case HirTypeKind.Any: return "any"
+            case HirTypeKind.Unit: return "unit"
+            case HirTypeKind.Named(owner, _):
+                if owner.id == source.id: return "source"
+                if owner.id == other.id: return "other"
+            case HirTypeKind.Optional(inner):
+                match inner.kind:
+                    case HirTypeKind.Named(owner, _):
+                        if owner.id == source.id: return "optional-source"
+                        if owner.id == other.id: return "optional-other"
+                    case HirTypeKind.Error: return "optional-error"
+                    case _: ()
+            case _: ()
+    "unexpected"
+
+fn trait_source_concrete_conversion(local_mode: text, expression_mode: text, named: bool) -> bool:
+    val span = Span.empty()
+    var symbols = SymbolTable.new()
+    val owner = "trait_source_conversion"
+    val trait_symbol = symbols.define("Reader", SymbolKind.Trait, nil, span, Visibility.Public, false, Some(owner))
+    val concrete_symbol = symbols.define("ReaderValue", SymbolKind.Class, nil, span, Visibility.Public, false, Some(owner))
+    val expected = HirType(kind: HirTypeKind.Named(trait_symbol, []), span: span)
+    val concrete = HirType(kind: HirTypeKind.Named(concrete_symbol, []), span: span)
+    val binding = symbols.define("source", SymbolKind.Variable, Some(concrete), span, Visibility.Private, false, Some(owner))
+    val function = symbols.define("convert", SymbolKind.Function, nil, span, Visibility.Private, false, Some(owner))
+    var lowering = MirLowering.new_for_target(symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.current_module_id = owner
+    lowering.native_trait_layouts.push(NativeTraitLayout(owner: owner + "::Reader", methods: [], object_safe: true))
+    lowering.native_trait_implementations.push(NativeTraitImplementation(trait_owner: owner + "::Reader",
+        concrete_owner: owner + "::ReaderValue", methods: [], concrete_type: concrete,
+        concrete_name: "ReaderValue", reference_semantics: true, signatures: []))
+    var builder = lowering.builder
+    builder.begin_function(function, "convert", MirSignature(params: [], return_type: MirType.i64(),
+        is_variadic: false, params_known: true), span)
+    val local = builder.emit_const_int(17)
+    lowering.builder = builder
+    lowering.bind_local(binding.id, local)
+    if local_mode != "missing":
+        lowering.remember_local_hir_type(local.id, trait_source_test_type(local_mode, concrete_symbol, trait_symbol), 0, 0)
+    val kind = if named: HirExprKind.NamedVar(binding, "source") else: HirExprKind.Var(binding)
+    val expression = HirExpr(kind: kind, has_type_: expression_mode != "missing",
+        type_: trait_source_test_type(expression_mode, concrete_symbol, trait_symbol), span: span)
+    # No struct_value_syms construction provenance: recovery must use metadata.
+    val converted = lowering.coerce_native_trait_object(local, expression, expected)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(lowering.native_trait_thunks.len()).to_equal(2)
+    if val recovered = lowering.find_local_hir_type(converted.id):
+        match recovered.kind:
+            case HirTypeKind.Named(symbol, _):
+                return converted.id != local.id and symbol.id == trait_symbol.id
+            case _: ()
+    false
+
+describe "native optional trait source metadata recovery":
+    it "recovers the declared owner when both metadata channels are missing":
+        expect(trait_source_selected_label("missing", "missing")).to_equal("optional-source")
+    it "ignores Error duplicated into local and expression metadata":
+        expect(trait_source_selected_label("error", "error")).to_equal("optional-source")
+    it "ignores Infer duplicated into local and expression metadata":
+        expect(trait_source_selected_label("infer", "infer")).to_equal("optional-source")
+    it "uses explicit expression metadata after an unknown local":
+        expect(trait_source_selected_label("error", "optional-other")).to_equal("optional-other")
+    it "preserves a contradictory local optional owner over expression and declaration":
+        expect(trait_source_selected_label("optional-other", "optional-source")).to_equal("optional-other")
+    it "does not replace Any local metadata with a declared trait":
+        expect(trait_source_selected_label("any", "optional-source")).to_equal("any")
+    it "does not replace explicit Any expression metadata":
+        expect(trait_source_selected_label("infer", "any")).to_equal("any")
+    it "does not erase a concrete nonoptional local type":
+        expect(trait_source_selected_label("unit", "optional-source")).to_equal("unit")
+    it "preserves upstream declaration recovery for an expression Unit placeholder":
+        expect(trait_source_selected_label("missing", "unit")).to_equal("optional-source")
+    it "does not reinterpret a nested unknown optional payload":
+        expect(trait_source_selected_label("optional-error", "optional-source")).to_equal("optional-error")
+    it "preserves a distinct nonoptional trait owner":
+        expect(trait_source_selected_label("other", "optional-source")).to_equal("other")
+    it "recovers a bound Var declaration after Error local metadata":
+        for expression_mode in ["missing", "error", "infer"]:
+            expect(trait_source_selected_label("error", expression_mode, "same")).to_equal("optional-source")
+    it "recovers a bound Var declaration after Infer local metadata":
+        for expression_mode in ["missing", "error", "infer"]:
+            expect(trait_source_selected_label("infer", expression_mode, "same")).to_equal("optional-source")
+    it "recovers a bound NamedVar declaration after Error local metadata":
+        for expression_mode in ["missing", "error", "infer"]:
+            expect(trait_source_selected_label("error", expression_mode, "same", true)).to_equal("optional-source")
+    it "recovers a bound NamedVar declaration after Infer local metadata":
+        for expression_mode in ["missing", "error", "infer"]:
+            expect(trait_source_selected_label("infer", expression_mode, "same", true)).to_equal("optional-source")
+    it "retains a concrete type on a different bound local before the declaration":
+        expect(trait_source_selected_label("error", "missing", "other")).to_equal("optional-other")
+        expect(trait_source_selected_label("infer", "error", "other", true)).to_equal("optional-other")
+    it "retains concrete supplied local precedence for bound expressions":
+        expect(trait_source_selected_label("optional-other", "optional-source", "same")).to_equal("optional-other")
+        expect(trait_source_selected_label("unit", "optional-source", "same", true)).to_equal("unit")
+
+describe "native concrete trait conversion metadata recovery":
+    it "converts bound Var and NamedVar sources using the recovered concrete declaration":
+        for named in [false, true]:
+            for local_mode in ["error", "infer"]:
+                for expression_mode in ["missing", "error", "infer"]:
+                    expect(trait_source_concrete_conversion(local_mode, expression_mode, named)).to_equal(true)
+    it "converts using explicit concrete expression metadata after an unknown local":
+        expect(trait_source_concrete_conversion("error", "source", false)).to_equal(true)
+        expect(trait_source_concrete_conversion("infer", "source", true)).to_equal(true)
+    it "retains concrete local precedence over contradictory trait expression metadata":
+        expect(trait_source_concrete_conversion("source", "other", false)).to_equal(true)
+        expect(trait_source_concrete_conversion("source", "other", true)).to_equal(true)

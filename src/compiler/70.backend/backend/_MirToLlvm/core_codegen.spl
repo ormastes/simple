@@ -501,7 +501,13 @@ impl MirTextCodegen for MirToLlvm:
         self.fn_xray_mode = {}
         self.xray_module_on = false
         for fn_owner in mir_module_functions_sorted(module):
-            if mir_runtime_owned_call_name(fn_owner.name):
+            # Source-facing runtime aliases can also have ordinary local bodies.
+            # Remember their identity before emission: callers may sort before
+            # definitions. These aliases are not reserved runtime symbols, so
+            # llvm_function_symbol_name keeps their normal local names.
+            if (mir_runtime_owned_call_name(fn_owner.name) or fn_owner.name == "env_get" or
+                fn_owner.name == "get_args" or fn_owner.name == "get_cli_args" or
+                fn_owner.name == "sys_get_args" or fn_owner.name == "eprint"):
                 self.owned_name_has_local[fn_owner.name] = true
             # `@export("C", name: "...")`: record the requested ABI symbol so
             # llvm_function_symbol_name can honour it in BOTH mangling modes.
@@ -867,6 +873,7 @@ impl MirTextCodegen for MirToLlvm:
             val llvm_ty: text = self.llvm_type_text(local.type_)
             val local_id = self.local_id_value(local.id)
             self.local_types[local_id] = llvm_ty
+            self.remember_gep_pointer_type(local_id, local.type_)
             # Prime every local's unsigned bit upfront from its MIR-declared
             # type (U8/U16/U32/U64) -- this is what makes an unsigned
             # function PARAMETER (an Arg-kind local, never Alloc'd) visible
@@ -2200,6 +2207,8 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
         val dest_id = self.local_id_value(dest)
+        if not self.local_types.has(dest_id):
+            self.remember_gep_pointer_type(dest_id, ty)
         val dest_name = self.get_local(dest_id)
         # SSA rewrites create fresh destinations that have no MirLocal entry.
         # For those, get_local_type falls back to native int and can poison a
@@ -2329,6 +2338,7 @@ impl MirTextCodegen for MirToLlvm:
         self.defined_locals[dest_id] = true
         val dest_name = self.get_local(dest_id)
         val src_name = self.local_value_text(src_id)
+        self.inherit_gep_pointer_type(dest_name, src_name)
         # Bug #149: `get_local_type` checks the STICKY `ptr_locals`/
         # `bool_locals` flags before `local_types`. Those flags are set once,
         # upfront, from every local's MIR-DECLARED type (translate_function's
@@ -2710,14 +2720,17 @@ impl MirTextCodegen for MirToLlvm:
         # Each facade is guarded by its post-split word count (cmd = ptr + len),
         # like the MIR split and the Cranelift remap: a different-arity import
         # of the same name (wasm `rt_process_run(cmd) -> i64`) keeps its callee.
-        # A bare `env_get` callee (an importer's view of the @always_inline
+        # A nonlocal bare `env_get` callee (an importer's view of the @always_inline
         # config.env_get / std.env.env_get providers) carries ONE boxed text
         # word -- MIR's (ptr, len) split is keyed on `rt_env_get`, not on the
         # alias. Route it to the boxed entry rt_env_get_value like a one-word
         # rt_env_get; the (ptr, len) owner rt_env_get would read the handle as
         # key_ptr and a stale register as key_len
         # (always_inline_cross_module_text_extern_abi_dropped_2026-11-06).
-        var call_func_name = if bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args": "@rt_get_args" elif bare_name_for_call == "env_get" and args.len() == 1: "@rt_env_get_value" elif bare_name_for_call == "env_get": "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif bare_name_for_call == "eprint": "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_run" and args.len() == 3: "@rt_process_run_tuple" elif bare_name_for_call == "rt_process_run_bounded" and args.len() == 5: "@rt_process_run_bounded_tuple" elif bare_name_for_call == "rt_process_run_bounded_bytes" and args.len() == 5: "@rt_process_run_bounded_bytes_tuple" elif bare_name_for_call == "rt_cpuid_tuple" and args.len() == 2: "@rt_cpuid_tuple_block" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_name_for_call == "rt_process_run_timeout" and args.len() == 4: "@rt_process_run_timeout_tuple" elif bare_name_for_call == "rt_process_run_owned_observed_bounded_value" and args.len() == 5: "@rt_process_run_owned_observed_bounded_text" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
+        val imported_env_get = bare_name_for_call == "env_get" and not self.owned_name_has_local.has("env_get")
+        val imported_argv = (bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args") and not self.owned_name_has_local.has(bare_name_for_call)
+        val imported_eprint = bare_name_for_call == "eprint" and not self.owned_name_has_local.has("eprint")
+        var call_func_name = if imported_argv: "@rt_get_args" elif imported_env_get and args.len() == 1: "@rt_env_get_value" elif imported_env_get: "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif imported_eprint: "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_run" and args.len() == 3: "@rt_process_run_tuple" elif bare_name_for_call == "rt_process_run_bounded" and args.len() == 5: "@rt_process_run_bounded_tuple" elif bare_name_for_call == "rt_process_run_bounded_bytes" and args.len() == 5: "@rt_process_run_bounded_bytes_tuple" elif bare_name_for_call == "rt_cpuid_tuple" and args.len() == 2: "@rt_cpuid_tuple_block" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_name_for_call == "rt_process_run_timeout" and args.len() == 4: "@rt_process_run_timeout_tuple" elif bare_name_for_call == "rt_process_run_owned_observed_bounded_value" and args.len() == 5: "@rt_process_run_owned_observed_bounded_text" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
         call_func_name = self.normalize_call_callee(call_func_name)
         # Inline typed-bytes LE loads (no per-call registry lock). Only when
         # the destination is a plain i64; anything else keeps the runtime call.
@@ -2805,7 +2818,7 @@ impl MirTextCodegen for MirToLlvm:
                 var known_ret_ty = self.lookup_function_return_type(call_func_name)
                 if self.bootstrap_mode_enabled():
                     val bare_func_name = if call_func_name.starts_with("@"): call_func_name[1:] else: call_func_name
-                    if bare_func_name == "get_args" or bare_func_name == "get_cli_args" or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
+                    if imported_argv or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
                         known_ret_ty = "ptr"
                     elif bare_func_name == "rt_get_args":
                         known_ret_ty = "ptr"
@@ -2813,9 +2826,9 @@ impl MirTextCodegen for MirToLlvm:
                         # Bootstrap array element accessor returns a tagged handle
                         # (ptr), matching `declare ptr @rt_array_get(ptr, i64)`.
                         known_ret_ty = "ptr"
-                    elif bare_func_name == "env_get" or bare_func_name == "rt_env_get" or bare_func_name == "rt_env_get_value":
+                    elif imported_env_get or bare_func_name == "rt_env_get" or bare_func_name == "rt_env_get_value":
                         known_ret_ty = "ptr"
-                    elif bare_func_name == "eprint":
+                    elif imported_eprint:
                         known_ret_ty = "void"
                 if known_ret_ty != "" and known_ret_ty != "nil" and known_ret_ty != "void":
                     ret_ty = known_ret_ty
@@ -2829,7 +2842,10 @@ impl MirTextCodegen for MirToLlvm:
                 # A narrower-than-i64 unsigned return (e.g. `fn f() -> u8`)
                 # must be tracked so a later print(f()) zext's instead of
                 # sext's. See is_unsigned_mir_kind / lookup_function_return_unsigned.
-                self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
+                # An indirect/local-pointer callee has no named return entry;
+                # retain its typed MIR destination's signedness in that case.
+                if known_ret_ty != "" and known_ret_ty != "nil":
+                    self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
                 val call_line = "  {name} = call {ret_ty} {call_sig}{call_func_name}({args_str})"
                 if ir_handle >= 0:
                     val emitted_call = "\n{call_line}"
@@ -2837,7 +2853,10 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit(call_line)
         else:
-            val call_line = "  call void {call_sig}{call_func_name}({args_str})"
+            # Discarding a value does not change the callee's return ABI.
+            val declared_return = self.lookup_function_return_type(call_func_name)
+            val ignored_return = if imported_argv or call_func_name == "@rt_get_args": "ptr" elif declared_return == "" or declared_return == "nil": "void" else: self.valid_llvm_type(declared_return)
+            val call_line = "  call {ignored_return} {call_sig}{call_func_name}({args_str})"
             if ir_handle >= 0:
                 val emitted_call = "\n{call_line}"
                 _sffi_string_builder_push(ir_handle, emitted_call)
@@ -2890,8 +2909,10 @@ impl MirTextCodegen for MirToLlvm:
                         match const_val:
                             case Str(name):
                                 val resolved = self.llvm_function_symbol_name(name)
-                                val return_types: [MirType] = [signature.return_type]
-                                self.remember_function_return_type(resolved, self.llvm_type_text_at(return_types, 0))
+                                if self.lookup_function_return_type(resolved) == "" and signature.return_type != nil:
+                                    val return_types: [MirType] = [signature.return_type]
+                                    self.remember_function_return_type(resolved, self.llvm_type_text_at(return_types, 0))
+                                    self.remember_function_return_unsigned(resolved, self.is_unsigned_mir_kind(signature.return_type.kind))
                                 self.remember_external_call_signature(resolved, signature)
                                 self.unknown_func_decls[resolved] = true
                                 "@{resolved}"
@@ -2969,8 +2990,9 @@ impl MirTextCodegen for MirToLlvm:
                         match const_val:
                             case Str(name):
                                 val resolved = self.llvm_function_symbol_name(name)
-                                if signature.return_type != nil:
+                                if self.lookup_function_return_type(resolved) == "" and signature.return_type != nil:
                                     self.remember_function_return_type(resolved, self.llvm_type_text(signature.return_type))
+                                    self.remember_function_return_unsigned(resolved, self.is_unsigned_mir_kind(signature.return_type.kind))
                                 self.remember_external_call_signature(resolved, signature)
                                 self.unknown_func_decls[resolved] = true
                                 "@{resolved}"
@@ -3222,6 +3244,7 @@ impl MirTextCodegen for MirToLlvm:
         # Same fact, keyed by the emitted name -- the lookup that actually
         # round-trips. See alloca_elem_type_for_value.
         self.alloca_elem_types_by_name[dest_name] = llvm_ty
+        self.remember_gep_element_type(dest_name, llvm_ty)
         self.alloca_elem_unsigned[dest_id] = self.is_unsigned_mir_kind(ty.kind)
         self.builder.emit_alloca(dest_name, llvm_ty)
 

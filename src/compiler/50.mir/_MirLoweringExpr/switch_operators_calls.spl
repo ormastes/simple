@@ -2212,43 +2212,6 @@ impl MirLowering:
             return builtin_ret_ty
         self.resolved_call_return_type(symbol)
 
-    me try_lower_bootstrap_cli_arg_index(base: HirExpr, index_local: LocalId) -> LocalId?:
-        if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
-            return nil
-        match base.kind:
-            case Call(callee, args, _):
-                if args.len() != 0:
-                    return nil
-                match callee.kind:
-                    case Var(symbol):
-                        val call_name = self.bootstrap_resolved_call_name(symbol)
-                        if call_name == "get_cli_args" or call_name == "get_args":
-                            val func_operand = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str("spl_get_arg"),
-                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: self.bootstrap_text_type(), is_variadic: false)))
-                            ))
-                            var b = self.builder
-                            val result = b.emit_call(func_operand, [mir_operand_copy(index_local)], self.bootstrap_text_type())
-                            self.builder = b
-                            if val result_local = result:
-                                return Some(result_local)
-                    case NamedVar(_, callee_name):
-                        if callee_name == "get_cli_args" or callee_name == "get_args":
-                            val func_operand = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str("spl_get_arg"),
-                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: self.bootstrap_text_type(), is_variadic: false)))
-                            ))
-                            var b = self.builder
-                            val result = b.emit_call(func_operand, [mir_operand_copy(index_local)], self.bootstrap_text_type())
-                            self.builder = b
-                            if val result_local = result:
-                                return Some(result_local)
-                    case _:
-                        ()
-            case _:
-                ()
-        nil
-
     me lower_bootstrap_print_call(args: [HirCallArg], rt_name: text) -> LocalId:
         # A plain literal already has static UTF-8 bytes. Pass its address and
         # length directly to the runtime writer: boxing it and then unwrapping
@@ -3210,7 +3173,7 @@ impl MirLowering:
                 var ik = LocalId(id: -1)
                 if val actual_type = typed_value:
                     ik = bt.new_temp(actual_type)
-                    bt.emit_const(ik, MirConstValue.Int(int_want), actual_type)
+                    bt.emit_const(ik, self.numeric_int_const_for(int_want, actual_type), actual_type)
                 else:
                     ik = bt.emit_const_int(int_want)
                 cmp_local = bt.emit_binop(MirBinOp.Eq, mir_operand_copy(value_local), mir_operand_copy(ik), MirType.bool())
@@ -4766,7 +4729,15 @@ impl MirLowering:
                     # struct/class, that name is authoritative and takes
                     # precedence over the global map below.
                     var scrutinee_payload_struct = ""
-                    val exact_err_record = enum_name == "Result" and enum_variants[ci] == "Err" and self.result_err_record_owners.contains(scrut_local.id)
+                    var scrutinee_payload_is_enum = false
+                    # An owner of "" is a join/invalidation of unknown
+                    # provenance, not a provider record. When the subject's
+                    # declared Result already names the Err payload type, bind
+                    # from that declaration; only an otherwise untyped subject
+                    # keeps the fail-closed exact-record check
+                    # (simple_ring_result_payload_provenance_2026-11-06 defect 2).
+                    val err_owner_present = enum_name == "Result" and enum_variants[ci] == "Err" and self.result_err_record_owners.contains(scrut_local.id)
+                    val exact_err_record = err_owner_present and ((self.result_err_record_owners.get(scrut_local.id) ?? "") != "" or result_payload_type == nil)
                     val exact_optional_record = enum_name == "Option" and enum_variants[ci] == "Some" and self.optional_record_owners.contains(scrut_local.id)
                     var optional_record_type = HirType(kind: HirTypeKind.Error, span: scrutinee.span)
                     if exact_optional_record:
@@ -4793,6 +4764,8 @@ impl MirLowering:
                                     match rpt_symbol.kind:
                                         case SymbolKind.Class | SymbolKind.Struct:
                                             scrutinee_payload_struct = rpt_symbol.name
+                                        case SymbolKind.Enum:
+                                            scrutinee_payload_is_enum = true
                                         case _: ()
                             case _: ()
                     val payload_hir_type: HirType? = match result_payload_type:
@@ -4946,10 +4919,10 @@ impl MirLowering:
                         # Scrutinee-instantiation-derived name: immune to the
                         # global-map collision above.
                         self.struct_value_syms[bound_payload.id] = scrutinee_payload_struct
-                    elif payload_struct != nil and payload_struct != "" and not hir_payload_type_is_structural(result_payload_type):
+                    elif payload_struct != nil and payload_struct != "" and not scrutinee_payload_is_enum and not hir_payload_type_is_structural(result_payload_type):
                         # The closure-global slot is only a guess for an
                         # unknown payload. A known structural payload (`T?`,
-                        # array, tuple, primitive) is never a record value
+                        # array, tuple, primitive) or declared enum is never a record value
                         # (simple_ring_result_payload_provenance_2026-11-06).
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
                     else:
@@ -8311,6 +8284,9 @@ impl MirLowering:
                 var b = lw.builder
                 b.begin_function(gen_symbol, gen_name, sig, lam.span)
                 lw.builder = b
+                # Freeze the argument-local offset before entry hooks append
+                # result temporaries. The hidden environment is offset - 1.
+                val offset = lw.builder.locals.len() - arity
                 # Lifted closures are the compiler-owned task/thread entry
                 # boundary. Register their execution owner before user code;
                 # static-off emits no call or dependency.
@@ -8318,7 +8294,6 @@ impl MirLowering:
                 # Map each lambda parameter symbol to its Arg local. begin_function
                 # lays out [ _return?, Arg0..Arg(n-1) ]; the argument-local offset
                 # is (locals.len() - arity), matching function_lowering.spl.
-                val offset = lw.builder.locals.len() - arity
                 var qi = 0
                 while qi < arity:
                     val psym = param_syms[qi]
@@ -8732,7 +8707,7 @@ impl MirLowering:
                 return self.lower_bootstrap_print_call(args, "rt_println")
             if direct_name == "_cli_eprint":
                 return self.lower_bootstrap_print_call(args, "rt_print")
-            if direct_name == "eprint":
+            if direct_name == "eprint" and not self.is_known_top_level_function(direct_name, direct_symbol):
                 return self.lower_bootstrap_print_call(args, "rt_eprintln")
             if direct_name == "println":
                 return self.lower_bootstrap_print_call(args, "rt_println")
@@ -8997,6 +8972,12 @@ impl MirLowering:
                     continue
             var arg_local = if current_arg_index < call_param_types.len() and not arg.has_name:
                 self.lower_expr_for_slot(arg_value, call_param_types[current_arg_index])
+            elif current_arg_index < call_param_types.len():
+                # Named free-call args are passed in SOURCE order (HIR
+                # call_arity rejects a misbinding positional), so this slot's
+                # declared type is the one the value lands in: `takef(x: 3)`
+                # with `x: f64` is the float 3.0, not an i64 word.
+                self.lower_int_literal_for_float_slot(arg_value, call_param_types[current_arg_index]) ?? self.lower_expr(arg_value)
             else:
                 self.lower_expr(arg_value)
             arg_source_locals[arg_operands.len()] = arg_local.id

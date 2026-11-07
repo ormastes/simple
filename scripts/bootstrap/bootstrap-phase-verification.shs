@@ -644,10 +644,23 @@ stage2_row_delegation_env() {
   fi
 }
 
+# Only the delegated Stage2 slim command surface can use the focused entry.
+# An in-process or full verification still requires the complete CLI.
+bootstrap_phase_select_compiler_cli() {
+  compiler_cli_entry=src/app/cli/_CliMain/main_and_help.spl
+  compiler_cli_cache_name=full-cli
+  if [ "$phase" = stage2 ] && [ "$stage2_slim_profile" -eq 1 ] && [ "$stage2_test_delegate" -eq 1 ]; then
+    compiler_cli_entry=src/app/cli/bootstrap_verify_main.spl
+    compiler_cli_cache_name=verification-cli
+  fi
+}
+bootstrap_phase_select_compiler_cli
+
 : >"$summary" || die "cannot initialize verification summary"
 {
   echo "schema=bootstrap-phase-verification-v1"
   echo "phase=$phase"
+  echo "compiler_cli_entry=$compiler_cli_entry"
   echo "verification_backend=$verification_backend"
   echo "strategy=$strategy"
   echo "repository_test_execution=$repository_test_execution"
@@ -1286,6 +1299,12 @@ run_task() {
 # every source check/test invocation to the exact pair constructed by this
 # verification run.  It is created once with noclobber and then made read-only;
 # validating both hashes before and after a command rejects a concurrent swap.
+bootstrap_phase_validate_cli_profile_receipt() {
+  cli_profile_receipt=$1
+  [ "$(manifest_value compiler_cli_entry "$cli_profile_receipt")" = "$compiler_cli_entry" ] || return 1
+  [ "$(manifest_value compiler_cli_profile "$cli_profile_receipt")" = "$compiler_cli_cache_name" ] || return 1
+}
+
 write_command_owner_receipt() {
   receipt=$1
   cli=$2
@@ -1307,6 +1326,7 @@ write_command_owner_receipt() {
     [ "$(manifest_value compiler_snapshot_sha256 "$receipt")" = "$snapshot_sha" ] || return 1
     [ "$(manifest_value runtime_identity_sha256 "$receipt")" = "$runtime_cache_identity" ] || return 1
     validate_target_c_receipt "$receipt" || return 1
+    bootstrap_phase_validate_cli_profile_receipt "$receipt" || return 1
     [ "$(manifest_value compiler_cli_path "$receipt")" = "$cli" ] || return 1
     [ "$(manifest_value compiler_cli_sha256 "$receipt")" = "$cli_sha" ] || return 1
     [ "$(manifest_value test_runner_path "$receipt")" = "$runner" ] || return 1
@@ -1326,6 +1346,8 @@ write_command_owner_receipt() {
       echo "compiler_snapshot_sha256=$snapshot_sha"
       echo "runtime_identity_sha256=$runtime_cache_identity"
       write_target_c_receipt_fields || exit 1
+      echo "compiler_cli_entry=$compiler_cli_entry"
+      echo "compiler_cli_profile=$compiler_cli_cache_name"
       echo "compiler_cli_path=$cli"
       echo "compiler_cli_sha256=$cli_sha"
       echo "test_runner_path=$runner"
@@ -1385,6 +1407,7 @@ validate_command_owner_receipt() {
   [ "$(manifest_value compiler_snapshot_sha256 "$vcor_receipt")" = "$snapshot_sha" ] || return 1
   [ "$(manifest_value runtime_identity_sha256 "$vcor_receipt")" = "$runtime_cache_identity" ] || return 1
   validate_target_c_receipt "$vcor_receipt" || return 1
+  bootstrap_phase_validate_cli_profile_receipt "$vcor_receipt" || return 1
   vcor_cli=$(manifest_value compiler_cli_path "$vcor_receipt")
   vcor_cli_sha=$(manifest_value compiler_cli_sha256 "$vcor_receipt")
   vcor_runner=$(manifest_value test_runner_path "$vcor_receipt")
@@ -2600,6 +2623,9 @@ else
     # Concurrent producers own separate object/cache and temporary state,
     # including the slim Phase2 profile.
     tool_cache_cli="$tool_cache/full-cli"
+    if [ "$compiler_cli_cache_name" != full-cli ]; then
+      tool_cache_cli="$tool_cache/$compiler_cli_cache_name"
+    fi
     tool_cache_runner="$tool_cache/test-runner"
     mkdir -p "$tool_cache_cli" "$tool_cache_runner"
     mkdir -p "$tool_outputs"
@@ -2610,7 +2636,7 @@ else
          phase_workers="$work_root/$phase-tool-workers"
          mkdir -p "$phase_workers/cli" "$phase_workers/runner" || die "cannot isolate phase C builders"
          rm -f "$phase_workers/cli/result" "$phase_workers/runner/result"
-         run_phase_c_tool_worker cli compiler_cli_build src/app/cli/_CliMain/main_and_help.spl \
+         run_phase_c_tool_worker cli compiler_cli_build "$compiler_cli_entry" \
            "$compiler_cli" "$tool_cache_cli" "$phase_worker_threads" &
          phase_cli_pid=$!
          run_phase_c_tool_worker runner test_runner_build src/app/test_runner_new/main.spl \
@@ -2633,7 +2659,7 @@ else
          if [ "$tool_build_concurrency" -eq 1 ]; then
            phase_serial_threads=$build_threads
          fi
-         run_phase_c_tool_build compiler_cli_build src/app/cli/_CliMain/main_and_help.spl "$compiler_cli" "$tool_cache_cli" "$phase_serial_threads"
+         run_phase_c_tool_build compiler_cli_build "$compiler_cli_entry" "$compiler_cli" "$tool_cache_cli" "$phase_serial_threads"
         compiler_cli_ready=$matrix_task_passed
          run_phase_c_tool_build test_runner_build src/app/test_runner_new/main.spl "$test_runner" "$tool_cache_runner" "$phase_serial_threads"
         test_runner_ready=$matrix_task_passed
@@ -2749,7 +2775,8 @@ else
     if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then
       validate_phase_c_tool_binding || die "target C inputs changed before owner publication"
     fi
-    command_owner_lineage_sha=$(printf '%s\n' "$compiler_cli_sha" "$test_runner_sha" "$mcp_server_sha" |
+    command_owner_lineage_sha=$(printf '%s\n' "$compiler_cli_entry" "$compiler_cli_cache_name" \
+      "$compiler_cli_sha" "$test_runner_sha" "$mcp_server_sha" |
       hash_stream)
     command_owner_receipt="$tool_outputs/command-owners.$command_owner_lineage_sha.env"
     write_command_owner_receipt "$command_owner_receipt" "$compiler_cli" "$compiler_cli_sha" \

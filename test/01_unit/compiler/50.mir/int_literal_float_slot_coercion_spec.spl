@@ -106,3 +106,45 @@ describe "Integer literal into a float slot lowers to a float constant":
         val mir = lower_int_float_fixture("fn takei(x: i64) -> i64:\n    x * 2\n\nfn caller() -> i64:\n    takei(37)\n")
         expect(int_const_count(mir, "caller", 37)).to_equal(1)
         expect(float_const_count(mir, "caller", 37.0)).to_equal(0)
+
+    it "named call argument: takef(x: 37)":
+        step("A named argument bound to an f64 parameter is a float constant")
+        val mir = lower_int_float_fixture("fn takef(x: f64) -> f64:\n    x * 2.0\n\nfn caller() -> f64:\n    takef(x: 37)\n")
+        expect(int_const_count(mir, "caller", 37)).to_equal(0)
+        expect(float_const_count(mir, "caller", 37.0)).to_equal(1)
+
+    it "keeps a named integer argument integer":
+        step("A named argument bound to an i64 parameter stays i64")
+        val mir = lower_int_float_fixture("fn takei(x: i64) -> i64:\n    x * 2\n\nfn caller() -> i64:\n    takei(x: 37)\n")
+        expect(int_const_count(mir, "caller", 37)).to_equal(1)
+        expect(float_const_count(mir, "caller", 37.0)).to_equal(0)
+
+    it "optional float binding: val d: f64? = 37":
+        step("The Some payload of an f64? slot is the float 37.0")
+        val mir = lower_int_float_fixture("fn bind() -> i64:\n    val d: f64? = 37\n    if d != nil: return 1\n    0\n")
+        expect(int_const_count(mir, "bind", 37)).to_equal(0)
+        expect(float_const_count(mir, "bind", 37.0)).to_equal(1)
+
+    it "optional float call argument: takeo(37) with x: f64?":
+        step("An int literal passed to an f64? parameter is the float 37.0")
+        val mir = lower_int_float_fixture("fn takeo(x: f64?) -> i64:\n    if x != nil: return 1\n    0\n\nfn caller() -> i64:\n    takeo(37)\n")
+        expect(int_const_count(mir, "caller", 37)).to_equal(0)
+        expect(float_const_count(mir, "caller", 37.0)).to_equal(1)
+
+    it "numeric int defaults for a float-typed slot take the Float form":
+        step("numeric_int_const_for never emits a float-typed Int (a bit pattern)")
+        val path = "int_literal_float_slot_coercion.spl"
+        val ast = parse_full_frontend("fn z() -> i64:\n    0\n", path, path, Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir = hir_lowering.lower_module(ast)
+        val lowering = MirLowering.new(hir.symbols)
+        var float_one = false
+        match lowering.numeric_int_const_for(1, MirType.f64()):
+            case MirConstValue.Float(v): float_one = v == 1.0
+            case _: ()
+        expect(float_one).to_equal(true)
+        var int_one = false
+        match lowering.numeric_int_const_for(1, MirType.i64()):
+            case MirConstValue.Int(v): int_one = v == 1
+            case _: ()
+        expect(int_one).to_equal(true)

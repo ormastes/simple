@@ -103,3 +103,11 @@ Verified (aarch64 Linux host, source-level + host cc only):
 Not verified here (no hardware/semihosting on this host): actual baremetal
 boot on any target; the change is ABI-visible only at runtime<->codegen bool
 boundaries, which is exactly the defect.
+
+## Scoped C consumer repair — 2026-11-07
+
+The ARM64 and x86_64 primitive logical consumers still interpreted tagged false (19) as integer2, converted tagged true (11) to false, and recognized encoded integers0/8 as booleans. The scoped repair handles11/19 first, retains prior nonboolean integer truthiness, preserves tagged booleans in conversion and keeps the predicate's raw0/1 result ABI. No compiler or runtime representation is changed.
+
+The whole-production-object reproducer landed in #7447 records the original release failing25 of190 assertions per architecture and the candidate repair passing190/190 on both. The seven producer owners and two logical owners also have a focused native regression. Both checks are now CI-wired for owner/header/test changes, including the complete-object QEMU user-mode regression. The current release integration is validated with exact input identities in the landing receipt.
+
+Astra reviewed the production C patch and confirmed that compiler/lib/MCP-specific conditional gates do not automatically apply to these embedded C files. This records completion of the primitive C consumer repair only. It does not claim a device boot, a Simple-generated caller, full owner branch coverage, or broader system qualification; those remain separate acceptance work. No broad bug closure is added here.

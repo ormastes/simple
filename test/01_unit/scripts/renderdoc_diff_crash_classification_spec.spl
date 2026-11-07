@@ -1,0 +1,24 @@
+use std.spec.*
+use std.io_runtime.{cwd, file_write, file_delete, getpid}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+# renderdoc_seed_sigbus_cross_module_call_2026-09-13: a seed that SIGBUS/SEGVs
+# (rc 138/139) with no verdict must be reported as a seed crash, never as "no
+# run subcommand". Real-seed reproduction (needs Linux/x86_64 or macOS host):
+#   SIMPLE_SEED=<seed> sh scripts/check/check-renderdoc-web-diff.shs --selftest   (host-linux)
+
+fn run_with_fake_seed(rc: i64) -> text:
+    val fake = cwd() + "/build/fake_seed_{getpid()}_{rc}.sh"
+    val _w = file_write(fake, "#!/bin/sh\nexit {rc}\n")
+    val (out, _e, _c) = process_run_bounded("sh", ["-c", "chmod +x '" + fake + "' && SIMPLE_SEED='" + fake + "' sh scripts/check/check-renderdoc-web-diff.shs --selftest"], 120000, 65536)
+    val _d = file_delete(fake)
+    out
+
+describe "renderdoc diff liveness probe crash classification":
+    it "REPRO: rc 138 (SIGBUS) is reported as a seed JIT crash":
+        val out = run_with_fake_seed(138)
+        expect(out).to_contain("renderdoc_diff_status=blocked:seed-jit-crash-rc138")
+
+    it "PREVENTION: rc 139 likewise; an ordinary non-zero exit keeps the missing-subcommand wording":
+        expect(run_with_fake_seed(139)).to_contain("blocked:seed-jit-crash-rc139")
+        expect(run_with_fake_seed(1)).to_contain("blocked:simple-binary-cannot-run")

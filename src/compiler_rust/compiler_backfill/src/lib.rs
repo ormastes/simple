@@ -1,4 +1,8 @@
+#[path = "../../compiler/src/codegen/function_alignment.rs"]
+mod function_alignment;
+
 mod shared {
+    pub use super::function_alignment::define_function_aligned;
     use cranelift_codegen::isa::CallConv;
 
     pub fn platform_call_conv() -> CallConv {

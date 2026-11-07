@@ -92,3 +92,65 @@ list. Both need a debugging pass on the HIR diagnostics walker.
 ## Unblock
 
 Fix the walker. Then remove the `pending` markers that link here.
+
+
+## 2026-11-07: replace obsolete nominal-return pending controls
+
+The three skipped W-HIR-INFER-001 expectations used explicit `-> Node`
+contracts. They contradict the active controls that require imported and facade
+nominal return layouts to survive with zero warnings. They are replaced with
+real parsed provider/facade `-> Any` contracts, retaining declaration message,
+source line, function, family, and once-per-binding assertions. The original
+nominal owner-layout positives remain unchanged. No production signature is invented or changed.
+
+Omitted-return inference is a separate open investigation: the imported surface
+callable builder returns nil for a non-extern callable without an explicit return
+type. Before this repair, the diagnostic did not classify a call whose return
+signature was unknown. These explicit-Any controls do not qualify that path.
+
+Validation: authored source assertions only; semantic tests NOT_RUN pending an
+admitted full CLI. Removal of the obsolete pending markers is not a runtime PASS.
+
+The narrow diagnostic repair now recognizes an exact imported Function symbol
+with no available signature, only when it has a nonlocal defining module and
+zero generic parameters. Generic imports intentionally defer their signatures
+and are excluded. Genuine omitted-return provider/facade controls assert one
+declaration warning across multiple receiver uses. Broader imported return
+inference remains OPEN; this repair diagnoses absence rather than inferring
+a return type or transporting a nominal owner. Runtime remains NOT_RUN.
+
+Source-review cycle 2 also restricts the new missing-signature warning when
+retained inferred binding metadata or a present initializer type already
+resolves. This does not change the exact annotation-provenance gate. A
+source-produced nominal-owner fixture deliberately removes only the callable
+signature to exercise that phase contract; this mutation control is not a
+claim that the natural pipeline currently performs such removal.
+
+
+### Astra follow-up: independent retained-metadata prevention controls
+
+Replaced the overlapping resolved-owner fixture with independent binding-only,
+initializer-only, and both-unresolved cases. All start from real parsed omitted
+return imports, assert exact symbol/provenance/signature identity, and inspect
+the stored rewritten carriers. The ordinary provider/facade source reproduction
+remains unchanged. No production policy changed. Authored manual:
+`doc/06_spec/01_unit/compiler/lint/frontend_diag/inferred_type_fallback_use_spec.md`.
+
+Runtime and mutation execution remain NOT_RUN. The ordinary `simple check`
+path lacks the frozen import surfaces needed to reproduce this cross-module
+condition; external full-driver reproduction remains OPEN rather than treating
+a missing warning on that different route as success.
+
+
+### Supported external driver reproduction authored
+
+`test/02_integration/compiler/hir/inferred_return_diagnostic_cli_spec.spl`
+uses the actual `native-build` multi-module route with typecheck warnings
+enabled, pinned SIMPLE_BIN, four isolated fixture/cache/output directories,
+120-second/4-MiB child bounds and retained logs/status. Provider/facade omitted
+returns require exactly one missing-signature diagnostic; completed exit 0 or 1
+qualifies only warning emission, never successful compilation. Worker failure
+markers and abnormal child statuses cannot pass. Explicit Node negatives
+require successful compilation and no warning. Source path confirmed through
+`native_build_compile_with_collection_profile` -> `compiler_driver_run_compile`.
+No production changes. All four external examples remain NOT_RUN.

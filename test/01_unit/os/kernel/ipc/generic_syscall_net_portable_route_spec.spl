@@ -1,0 +1,83 @@
+"""
+## Purpose and audience
+Purpose: Pin the generic `syscall_handler` socket cases (70-76) to the shared
+checked socket owner instead of the retired ENOSYS IPC forwarder.
+Audience: kernel engineers maintaining the trap-bridge syscall dispatcher.
+## Operator workflow
+Run with the unit suite. A `-38` result means a socket syscall reached the
+dead `_forward_net_ipc` path; a success under a wildcard grant means the
+generic dispatcher forked the exact-authority policy.
+## Compatibility and limitations
+Host-only routing contract. Live NIC, EL0 traps and QEMU/board boots are out
+of scope and remain unverified here.
+# @manual: primary
+REQ-OS-KERNEL-001
+"""
+# @req: REQ-OS-KERNEL-001
+
+use std.spec.{describe, it, expect}
+use os.kernel.ipc.syscall.{syscall_handler}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.types.task_types.{TaskPriority}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet}
+use os.kernel.types.syscall_types.{SyscallArgs}
+
+fn _args(id: u64, a0: u64, a1: u64, a2: u64) -> SyscallArgs:
+    SyscallArgs(id: id, arg0: a0, arg1: a1, arg2: a2, arg3: 0, arg4: 0, arg5: 0)
+
+describe "generic syscall_handler socket route":
+    it "reaches the socket owner from the exact NetSocketCreate grant":
+        var scheduler = Scheduler.new()
+        val caller = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        var ipc = IpcManager.new()
+        val granted = ipc.mint_task_capability_set(caller, [CapabilityKind.NetSocketCreate])
+        expect(granted != nil).to_equal(true)
+        val r = syscall_handler(_args(70u64, 2u64, 1u64, 0u64), scheduler, ipc, KernelLog.new(16))
+        expect(r.value != -38).to_equal(true)
+        expect(r.value != -1).to_equal(true)
+
+    it "does not let outbound connect authority allocate a socket":
+        var scheduler = Scheduler.new()
+        val caller = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        var ipc = IpcManager.new()
+        val granted = ipc.mint_task_capability_set(caller, [CapabilityKind.NetConnect(port: 0u16)])
+        expect(granted != nil).to_equal(true)
+        val r = syscall_handler(_args(70u64, 2u64, 1u64, 0u64), scheduler, ipc, KernelLog.new(16))
+        expect(r.value).to_equal(-1)
+
+    it "denies listen on an unbound descriptor despite a wildcard listener grant":
+        var scheduler = Scheduler.new()
+        val caller = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        var ipc = IpcManager.new()
+        val granted = ipc.mint_task_capability_set(caller, [CapabilityKind.NetListen(port: 0u16)])
+        expect(granted != nil).to_equal(true)
+        val r = syscall_handler(_args(72u64, 9999u64, 4u64, 0u64), scheduler, ipc, KernelLog.new(16))
+        expect(r.value).to_equal(-1)
+
+    it "copies the connect sockaddr through the checked owner":
+        var scheduler = Scheduler.new()
+        val caller = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        var ipc = IpcManager.new()
+        val granted = ipc.mint_task_capability_set(caller, [CapabilityKind.NetConnect(port: 0u16)])
+        expect(granted != nil).to_equal(true)
+        val short_addr = syscall_handler(_args(73u64, 3u64, 0u64, 4u64), scheduler, ipc, KernelLog.new(16))
+        expect(short_addr.value).to_equal(-14)
+
+    it "rejects a short bind sockaddr before any socket effect":
+        var scheduler = Scheduler.new()
+        val caller = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        var ipc = IpcManager.new()
+        val granted = ipc.mint_task_capability_set(caller, [
+            CapabilityKind.NetBindIpv4(address: 0u32, port: 8080u16),
+            CapabilityKind.NetListen(port: 8080u16)
+        ])
+        expect(granted != nil).to_equal(true)
+        val r = syscall_handler(_args(71u64, 3u64, 0u64, 4u64), scheduler, ipc, KernelLog.new(16))
+        expect(r.value).to_equal(-14)
