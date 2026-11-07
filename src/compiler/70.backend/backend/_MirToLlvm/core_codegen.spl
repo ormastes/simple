@@ -1605,7 +1605,7 @@ impl MirTextCodegen for MirToLlvm:
             return callee
         "@{callee}"
 
-    me emit_value_type_conversion(value: text, src_ty: text, dst_ty: text, src_unsigned: bool) -> text:
+    me emit_value_type_conversion(value: text, src_ty: text, dst_ty: text, src_unsigned: bool, dst_unsigned: bool = false) -> text:
         """Emit a verified scalar conversion for value_as_type callers."""
         if src_ty == "void" or src_ty == "unit":
             # A void tail expression (e.g. `exit(...)` as the last statement of
@@ -1636,6 +1636,8 @@ impl MirTextCodegen for MirToLlvm:
             cast_inst = "zext"
         if src_unsigned and cast_inst == "sitofp":
             cast_inst = "uitofp"
+        if dst_unsigned and cast_inst == "fptosi":
+            cast_inst = "fptoui"
         if cast_inst.len() == 0:
             # No scalar meaning (e.g. ptr -> i8 would truncate an address).
             # Recorded, not panicked: `undef` keeps the rest of the function
@@ -1647,9 +1649,10 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
         tmp
 
-    me value_as_type_signed(value: text, from_ty: text, to_ty: text, src_unsigned: bool) -> text:
+    me value_as_type_signed(value: text, from_ty: text, to_ty: text, src_unsigned: bool, dst_unsigned: bool = false) -> text:
         """Same as value_as_type, but widening picks zext when src_unsigned
         is set (MIR-level U8/U16/U32 source) instead of always sext'ing.
+        dst_unsigned selects fptoui for an explicitly unsigned integer target.
         See select_widen_instruction / is_unsigned_mir_kind."""
         var src_ty = self.valid_llvm_type(from_ty)
         # contains_key + index read, never `.get()`: a native `Dict.get()` HIT
@@ -1665,7 +1668,7 @@ impl MirTextCodegen for MirToLlvm:
         # must zext, not sext -- select_cast_instruction has no signedness
         # input and always sext's i8/i16/i32 widening (only correct for
         # signed sources). See is_unsigned_mir_kind.
-        self.emit_value_type_conversion(value, src_ty, dst_ty, src_unsigned)
+        self.emit_value_type_conversion(value, src_ty, dst_ty, src_unsigned, dst_unsigned)
 
     me get_operand_unsigned(operand: MirOperand) -> bool:
         """Best-effort MIR-level signedness for an operand: true for a Const
@@ -2473,7 +2476,7 @@ impl MirTextCodegen for MirToLlvm:
                 val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_fadd(dest_name, ty, left_val, right_val)
-                elif is_signed_int_type(ty):
+                elif is_signed_int_type(ty) and not bin_unsigned:
                     self.builder.emit_add_nsw(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_add(dest_name, ty, left_val, right_val)
@@ -2482,7 +2485,7 @@ impl MirTextCodegen for MirToLlvm:
                 val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_fsub(dest_name, ty, left_val, right_val)
-                elif is_signed_int_type(ty):
+                elif is_signed_int_type(ty) and not bin_unsigned:
                     self.builder.emit_sub_nsw(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_sub(dest_name, ty, left_val, right_val)
@@ -2491,7 +2494,7 @@ impl MirTextCodegen for MirToLlvm:
                 val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_fmul(dest_name, ty, left_val, right_val)
-                elif is_signed_int_type(ty):
+                elif is_signed_int_type(ty) and not bin_unsigned:
                     self.builder.emit_mul_nsw(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_mul(dest_name, ty, left_val, right_val)
