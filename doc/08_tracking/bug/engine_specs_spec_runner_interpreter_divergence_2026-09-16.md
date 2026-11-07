@@ -48,3 +48,29 @@ Reproduce each shape with a minimal `.spl` fixture under both `bin/simple run`
 and the test-runner path, fix the interpreter divergences in the runner
 (`src/app/test_runner_new/` / interpreter core), then re-run the 8 spec files
 listed above — all must reach `outcome=OK` without spec-side weakening.
+
+## 2026-11-07 — shape 3 root cause and fix (round 15, PR "interp: module-qualified type registry")
+
+Shape 3 (`unknown static method one on class Vec3`) is a seed-interpreter
+registry defect, not a runner one: the class/struct registry consulted by
+static-path calls, `Value::Constructor` calls and instance dispatch was the
+flat bare-name map (last registration wins), and the per-module table that
+`owner_module_class` reads (`MODULE_CLASSES_CACHE`) was itself overwritten by
+bare name every time any module's `impl Name:` block was evaluated
+(`evaluation_helpers.rs`, "Update MODULE_CLASSES_CACHE with the enriched
+class definition" loop), so module A's cached `Vec3` became module B's.
+
+Fix (`src/compiler_rust/compiler/src/module_cache.rs`):
+`resolve_class_in_scope` — executing module's own definition, then its
+`use m.{Name}` / `use m.*` binding, then the unique owned definition, else an
+"ambiguous type" error; `resolve_class_for_instance` — the definition whose
+fields are exactly the instance's; `refresh_cached_class` — enrichment moves
+only the slot holding the pre-enrichment allocation; entry-declared classes
+are recorded under `<entry>`. Static-path dispatch resolves the class BEFORE
+the bare-name `GLOBAL_IMPL_METHODS` merge.
+
+Repro: `test/01_unit/compiler/95.interp/interpreter/module_qualified_type_registry_spec.spl`
+(fixtures `test/helpers/modqual/`), RED on the pre-fix seed with exactly
+`unknown static method zero on class Vec3` and `class Config has no field named backend`.
+Prevention: `..._prevention_spec.spl` (same dir). Shapes 1, 2 and 4 are
+separate defects and are not addressed by this change.

@@ -34,3 +34,15 @@ Reproduce: `bin/simple test <spec with the 6 imports of cuda_jit_lane_executor +
 Unblocks when: a pure-Simple self-hosted `bin/simple` is deployed (the bootstrap redeploy is
 tracked separately), or the seed's cross-module member resolution is keyed by class identity.
 
+
+## 2026-11-07 — seed cross-module class resolution keyed by owner (round 15)
+
+The seed now resolves a bare class name through the using module's own
+definitions and imports (`resolve_class_in_scope`), and dispatches an
+instance's method against the definition whose fields match the instance
+(`resolve_class_for_instance`), instead of the flat last-registration-wins
+map; see `engine_specs_spec_runner_interpreter_divergence_2026-09-16.md`
+(2026-11-07 note) for the mechanism and the repro/prevention specs. Whether
+the `ParserModule has no field named friends` member collision in this lane
+is fully covered is reported in the PR table from a re-run of
+`test/03_system/gpu_lane/cuda_jit_hello_spec.spl` on the fixed seed.
