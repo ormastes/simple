@@ -1,0 +1,79 @@
+# Immutable helper intent. This is not a budget grant or a resource lease.
+# The host admits a distinct HostReservationIntentV1 in its EXISTING physical
+# ledger, accounts parent+helper allocations, and commits before helper effects.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2, container_host_scope_decode_v2}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct HostHelperPlanV1:
+    operation_id: text
+    helper_kind: text
+    parent_operation_id: text
+    parent_operation_digest: text
+    parent_assignment_digest: text
+    parent_budget_digest: text
+    request_digest: text
+    scope: ContainerHostScopeV2
+
+pub fn host_helper_plan_bytes_v1(plan: HostHelperPlanV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(plan.operation_id) or
+            not builder_identifier_valid_v1(plan.parent_operation_id) or
+            plan.operation_id == plan.parent_operation_id:
+        return Err("helper-operation-identity-invalid")
+    if not ["attach-broker", "agent-image-probe"].contains(plan.helper_kind):
+        return Err("helper-kind-unsupported")
+    for digest in [plan.parent_operation_digest, plan.parent_assignment_digest, plan.parent_budget_digest, plan.request_digest]:
+        if not builder_digest_valid_v1(digest): return Err("helper-binding-digest-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("host-helper-plan"),
+        "operationId": SdnValue.String(plan.operation_id), "helperKind": SdnValue.String(plan.helper_kind),
+        "parentOperationId": SdnValue.String(plan.parent_operation_id),
+        "parentOperationDigest": SdnValue.String(plan.parent_operation_digest),
+        "parentAssignmentDigest": SdnValue.String(plan.parent_assignment_digest),
+        "parentBudgetDigest": SdnValue.String(plan.parent_budget_digest),
+        "requestDigest": SdnValue.String(plan.request_digest),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(plan.scope)?)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 16384: return Err("helper-plan-size")
+    Ok(source)
+
+pub fn host_helper_plan_digest_v1(plan: HostHelperPlanV1) -> Result<text, text>:
+    Ok(sha256_text(host_helper_plan_bytes_v1(plan)?))
+
+pub fn host_helper_plan_decode_v1(source: text) -> Result<HostHelperPlanV1, text>:
+    if str_len(source) == 0 or str_len(source) > 16384: return Err("helper-plan-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 16384, max_depth: 2,
+        max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 12)
+    val document = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("helper-plan-syntax:" + issue.code)
+    val fields = match document.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("helper-plan-object")
+    val names = ["version", "kind", "operationId", "helperKind", "parentOperationId",
+        "parentOperationDigest", "parentAssignmentDigest", "parentBudgetDigest", "requestDigest", "scope"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("helper-plan-unknown-field")
+    for key in names:
+        if not fields.contains_key(key): return Err("helper-plan-missing:" + key)
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 1: return Err("helper-plan-version")
+        case _: return Err("helper-plan-version")
+    var values: [text] = []
+    for key in ["kind", "operationId", "helperKind", "parentOperationId", "parentOperationDigest",
+            "parentAssignmentDigest", "parentBudgetDigest", "requestDigest", "scope"]:
+        match fields[key]:
+            case SdnValue.String(value): values.push(value)
+            case _: return Err("helper-plan-field-type:" + key)
+    if values[0] != "host-helper-plan": return Err("helper-plan-kind")
+    val plan = HostHelperPlanV1(operation_id: values[1], helper_kind: values[2], parent_operation_id: values[3],
+        parent_operation_digest: values[4], parent_assignment_digest: values[5], parent_budget_digest: values[6], request_digest: values[7],
+        scope: container_host_scope_decode_v2(values[8])?)
+    if host_helper_plan_bytes_v1(plan)? != source: return Err("helper-plan-noncanonical")
+    Ok(plan)

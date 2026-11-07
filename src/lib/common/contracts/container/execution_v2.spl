@@ -1,0 +1,233 @@
+# Portable execution values and wire integrity only. No provider or host calls.
+# Opaque request bytes require backend-owned semantic decoding/digest checks.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+
+pub struct ContainerHostScopeV2:
+    physical_host_id: text
+    service_scope_id: text
+    boot_id: text
+    provider_generation: i64
+    native_machine_id: text
+    continuity_mode: text
+    continuity_id: text
+
+pub struct ContainerExecutionPlanV2:
+    backend: text
+    workload_uid: text
+    attempt: i64
+    operation_id: text
+    request_digest: text
+    physical_host_id: text
+    service_scope_id: text
+    boot_id: text
+    provider_generation: i64
+    native_machine_id: text
+    continuity_mode: text
+    continuity_id: text
+
+pub struct ContainerExecutionRequestV2:
+    plan: ContainerExecutionPlanV2
+    request_bytes: text
+
+pub struct ContainerHostObservationV2:
+    backend: text
+    native_machine_id: text
+    native_boot_id: text
+    provider_identity_digest: text
+    execution_os: text
+    architecture: text
+    continuity_assurance: text
+    boot_observation: text
+
+pub struct ContainerRequestProjectionV2:
+    workload_uid: text
+    attempt: i64
+    operation_id: text
+    request_digest: text
+    cpu_millis: i64
+    memory_bytes: i64
+    timeout_ms: i64
+    has_devices: bool
+    has_workspace: bool
+
+# Derived from the backend's actual effect mapping, not caller assertions.
+# An unresolved image entrypoint or working directory must return an error.
+pub struct ContainerMountProjectionV2:
+    host_root: text
+    guest_root: text
+    read_only: bool
+
+pub struct ContainerActionProjectionV2:
+    argv: [text]
+    working_directory: text
+    mounts: [ContainerMountProjectionV2]
+
+# Trusted persistent owner input; no nonce or claim of continuity comes from a
+# request. The platform owner mints the new service incarnation itself.
+pub struct ContainerServiceScopeBasisV2:
+    physical_host_id: text
+    service_scope_id: text
+    native_machine_id: text
+    provider_generation: i64
+
+# Complete observations of the previous managed scope. Every entry remains
+# quarantined until the host reconciles its exact retained request and charges.
+pub struct ContainerServiceInventoryEntryV2:
+    scope: ContainerHostScopeV2
+    runtime: RuntimeIdentityV1
+    request_digest: text
+    cpu_millis: i64
+    memory_bytes: i64
+
+fn execution_fields_v2(source: text, maximum: i64, nodes: i64, columns: i64) -> Result<Dict<text, SdnValue>, text>:
+    if str_len(source) == 0 or str_len(source) > maximum: return Err("container-execution-source-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: maximum, max_depth: 2,
+        max_nodes: nodes, max_rows: 0, max_cells: 0, max_columns: columns)
+    val parsed = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("container-execution-syntax:" + issue.code)
+    match parsed.value:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("container-execution-object-required")
+
+fn execution_known_v2(fields: Dict<text, SdnValue>, names: [text]) -> Result<bool, text>:
+    for key in fields.keys():
+        if not names.contains(key): return Err("container-execution-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("container-execution-missing-field:" + key)
+    Ok(true)
+
+fn execution_text_v2(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("container-execution-text-required:" + key)
+
+fn execution_integer_v2(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("container-execution-integer-required:" + key)
+
+fn execution_native_identifier_v2(value: text) -> bool:
+    val count = str_len(value)
+    if count == 0 or count > 256: return false
+    var index = 0
+    while index < count:
+        val byte = value.byte_at(index)
+        if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or
+                (byte >= 97 and byte <= 122) or byte == 95 or byte == 45 or byte == 58):
+            return false
+        index = index + 1
+    true
+
+fn execution_scope_valid_v2(scope: ContainerHostScopeV2) -> Result<bool, text>:
+    for identity in [scope.physical_host_id, scope.service_scope_id]:
+        if not builder_identifier_valid_v1(identity): return Err("container-execution-scope-identity-invalid")
+    if not execution_native_identifier_v2(scope.native_machine_id) or not execution_native_identifier_v2(scope.continuity_id):
+        return Err("container-execution-native-identifier-invalid")
+    if scope.provider_generation <= 0: return Err("container-execution-scope-generation-invalid")
+    if scope.continuity_mode == "native-boot-incarnation-v1":
+        if not builder_identifier_valid_v1(scope.boot_id) or scope.boot_id != scope.continuity_id:
+            return Err("container-execution-native-continuity-invalid")
+    elif scope.continuity_mode == "service-incarnation-v1":
+        if scope.boot_id != "": return Err("container-execution-service-boot-must-be-empty")
+    else:
+        return Err("container-execution-continuity-mode-unsupported")
+    Ok(true)
+
+pub fn container_host_scope_bytes_v2(scope: ContainerHostScopeV2) -> Result<text, text>:
+    val valid = execution_scope_valid_v2(scope)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("container-host-scope"),
+        "physicalHostId": SdnValue.String(scope.physical_host_id), "nativeMachineId": SdnValue.String(scope.native_machine_id),
+        "serviceScopeId": SdnValue.String(scope.service_scope_id), "bootId": SdnValue.String(scope.boot_id),
+        "providerGeneration": SdnValue.Int(scope.provider_generation), "continuityMode": SdnValue.String(scope.continuity_mode),
+        "continuityId": SdnValue.String(scope.continuity_id)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn container_host_scope_decode_v2(source: text) -> Result<ContainerHostScopeV2, text>:
+    val fields = execution_fields_v2(source, 16384, 24, 12)?
+    val known = execution_known_v2(fields, ["version", "kind", "physicalHostId", "nativeMachineId", "serviceScopeId",
+        "bootId", "providerGeneration", "continuityMode", "continuityId"])?
+    if execution_integer_v2(fields, "version")? != 2 or execution_text_v2(fields, "kind")? != "container-host-scope":
+        return Err("container-execution-scope-version")
+    val scope = ContainerHostScopeV2(physical_host_id: execution_text_v2(fields, "physicalHostId")?,
+        native_machine_id: execution_text_v2(fields, "nativeMachineId")?, service_scope_id: execution_text_v2(fields, "serviceScopeId")?,
+        boot_id: execution_text_v2(fields, "bootId")?, provider_generation: execution_integer_v2(fields, "providerGeneration")?,
+        continuity_mode: execution_text_v2(fields, "continuityMode")?, continuity_id: execution_text_v2(fields, "continuityId")?)
+    if container_host_scope_bytes_v2(scope)? != source: return Err("container-execution-scope-noncanonical")
+    Ok(scope)
+
+# Internal legacy fencing token only, NEVER evidence of an observed OS boot.
+pub fn container_scope_fence_id_v2(scope: ContainerHostScopeV2) -> Result<text, text>:
+    val bytes = container_host_scope_bytes_v2(scope)?
+    Ok(sha256_text(bytes))
+
+pub fn container_execution_plan_bytes_v2(plan: ContainerExecutionPlanV2) -> Result<text, text>:
+    if plan.backend != "linux-podman" and plan.backend != "windows-docker-process":
+        return Err("container-execution-backend-unsupported")
+    for identity in [plan.workload_uid, plan.operation_id]:
+        if not builder_identifier_valid_v1(identity): return Err("container-execution-identity-invalid")
+    if plan.attempt <= 0 or not builder_digest_valid_v1(plan.request_digest): return Err("container-execution-plan-invalid")
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val scoped = execution_scope_valid_v2(scope)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "kind": SdnValue.String("container-execution-plan"), "backend": SdnValue.String(plan.backend),
+        "workloadUid": SdnValue.String(plan.workload_uid), "attempt": SdnValue.Int(plan.attempt),
+        "operationId": SdnValue.String(plan.operation_id), "requestDigest": SdnValue.String(plan.request_digest),
+        "physicalHostId": SdnValue.String(plan.physical_host_id), "serviceScopeId": SdnValue.String(plan.service_scope_id),
+        "bootId": SdnValue.String(plan.boot_id), "providerGeneration": SdnValue.Int(plan.provider_generation),
+        "nativeMachineId": SdnValue.String(plan.native_machine_id), "continuityMode": SdnValue.String(plan.continuity_mode),
+        "continuityId": SdnValue.String(plan.continuity_id)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn container_execution_plan_digest_v2(plan: ContainerExecutionPlanV2) -> Result<text, text>:
+    val bytes = container_execution_plan_bytes_v2(plan)?
+    Ok(sha256_text(bytes))
+
+pub fn container_execution_plan_decode_v2(source: text) -> Result<ContainerExecutionPlanV2, text>:
+    val fields = execution_fields_v2(source, 16384, 40, 20)?
+    val known = execution_known_v2(fields, ["version", "kind", "backend", "workloadUid", "attempt", "operationId",
+        "requestDigest", "physicalHostId", "serviceScopeId", "bootId", "providerGeneration", "nativeMachineId", "continuityMode", "continuityId"])?
+    if execution_integer_v2(fields, "version")? != 2 or execution_text_v2(fields, "kind")? != "container-execution-plan":
+        return Err("container-execution-plan-version")
+    val plan = ContainerExecutionPlanV2(backend: execution_text_v2(fields, "backend")?,
+        workload_uid: execution_text_v2(fields, "workloadUid")?, attempt: execution_integer_v2(fields, "attempt")?,
+        operation_id: execution_text_v2(fields, "operationId")?, request_digest: execution_text_v2(fields, "requestDigest")?,
+        physical_host_id: execution_text_v2(fields, "physicalHostId")?, service_scope_id: execution_text_v2(fields, "serviceScopeId")?,
+        boot_id: execution_text_v2(fields, "bootId")?, provider_generation: execution_integer_v2(fields, "providerGeneration")?,
+        native_machine_id: execution_text_v2(fields, "nativeMachineId")?, continuity_mode: execution_text_v2(fields, "continuityMode")?,
+        continuity_id: execution_text_v2(fields, "continuityId")?)
+    if container_execution_plan_bytes_v2(plan)? != source: return Err("container-execution-plan-noncanonical")
+    Ok(plan)
+
+pub fn container_execution_request_encode_v2(request: ContainerExecutionRequestV2) -> Result<text, text>:
+    val count = str_len(request.request_bytes)
+    if count == 0 or count > 1048576: return Err("container-execution-body-size")
+    val plan = container_execution_plan_bytes_v2(request.plan)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "kind": SdnValue.String("container-execution-request"), "plan": SdnValue.String(plan),
+        "requestBytes": SdnValue.String(request.request_bytes)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 2097152: return Err("container-execution-request-too-large")
+    Ok(source)
+
+pub fn container_execution_request_decode_v2(source: text) -> Result<ContainerExecutionRequestV2, text>:
+    if str_len(source) > 2097152: return Err("container-execution-request-too-large")
+    val fields = execution_fields_v2(source, 2097152, 12, 8)?
+    val known = execution_known_v2(fields, ["version", "kind", "plan", "requestBytes"])?
+    if execution_integer_v2(fields, "version")? != 2 or execution_text_v2(fields, "kind")? != "container-execution-request":
+        return Err("container-execution-request-version")
+    val body = execution_text_v2(fields, "requestBytes")?
+    if str_len(body) == 0 or str_len(body) > 1048576: return Err("container-execution-body-size")
+    val request = ContainerExecutionRequestV2(plan: container_execution_plan_decode_v2(execution_text_v2(fields, "plan")?)?,
+        request_bytes: body)
+    if container_execution_request_encode_v2(request)? != source: return Err("container-execution-request-noncanonical")
+    Ok(request)

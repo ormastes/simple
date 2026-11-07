@@ -1,0 +1,215 @@
+# Untrusted completion claims; authority keys and expected observations come only
+# from the protected parent. A valid signature does not observe output bytes.
+# Replay consumption/cancellation and controller-epoch fencing remain parent-owned.
+use std.common.build_manager.contracts.{BuildTaskV1, builder_identifier_valid_v1,
+    builder_digest_valid_v1, builder_task_identity_v1, builder_validate_task_v1}
+use std.common.build_manager.codec.{builder_wire_line_v1, BuilderWireReaderV1,
+    builder_encode_task_v1}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2,
+    DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2,
+    distributed_grant_digest_v2}
+use app.llm_caret.workbench.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_authority_key_check_v2, distributed_verify_grant_approval_v2,
+    distributed_signature_bytes_v2}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_verify
+
+pub val REMOTE_COMPLETION_MAX_BYTES_V1: i64 = 4096
+pub val REMOTE_COMPLETION_INTEGER_MAX_V1: i64 = 9999999999999999
+
+struct RemoteCompletionEnvelopeV1:
+    version: i64
+    task_identity: text
+    host_id: text
+    assignment_digest: text
+    controller_epoch: i64
+    operation_id: text
+    request_digest: text
+    grant_digest: text
+    result_digest: text
+    process_digest: text
+    output_inventory_digest: text
+    tests_digest: text
+    signer_id: text
+    key_revision: i64
+    completed_at: i64
+    tree_reaped: bool
+    signature: [u8]
+
+# Frozen assignment and independently measured parent observations. Never create
+# this value by copying the corresponding fields from an arriving envelope.
+struct RemoteCompletionBindingV1:
+    task_identity: text
+    host_id: text
+    assignment_digest: text
+    controller_epoch: i64
+    operation_id: text
+    result_digest: text
+    process_digest: text
+    output_inventory_digest: text
+    tests_digest: text
+
+fn remote_completion_metadata_validate_v1(value: RemoteCompletionEnvelopeV1) -> text:
+    if value.version != 1: return "COMPLETION_VERSION_UNSUPPORTED"
+    if not builder_identifier_valid_v1(value.host_id) or
+            not builder_identifier_valid_v1(value.operation_id) or
+            not builder_identifier_valid_v1(value.signer_id):
+        return "COMPLETION_IDENTITY_INVALID"
+    for digest in [value.task_identity, value.assignment_digest, value.request_digest,
+            value.grant_digest, value.result_digest, value.process_digest,
+            value.output_inventory_digest, value.tests_digest]:
+        if not builder_digest_valid_v1(digest): return "COMPLETION_DIGEST_INVALID"
+    if value.controller_epoch <= 0 or value.controller_epoch > REMOTE_COMPLETION_INTEGER_MAX_V1 or
+            value.key_revision <= 0 or value.key_revision > REMOTE_COMPLETION_INTEGER_MAX_V1 or
+            value.completed_at < 0 or value.completed_at > REMOTE_COMPLETION_INTEGER_MAX_V1:
+        return "COMPLETION_INTEGER_INVALID"
+    ""
+
+# Fixed order, explicit domain/version, canonical escaping, bounded scalars.
+# Signature bytes are excluded so the producer can build this before signing.
+fn remote_completion_signature_text_v1(value: RemoteCompletionEnvelopeV1) -> Result<text, text>:
+    val reason = remote_completion_metadata_validate_v1(value)
+    if reason != "": return Err(reason)
+    var reaped = "false"
+    if value.tree_reaped: reaped = "true"
+    var lines: [text] = []
+    for field in ["SIMPLE_REMOTE_COMPLETION_SIGNATURE_V1", "{value.version}",
+            value.task_identity, value.host_id, value.assignment_digest,
+            "{value.controller_epoch}", value.operation_id, value.request_digest,
+            value.grant_digest, value.result_digest, value.process_digest,
+            value.output_inventory_digest, value.tests_digest, value.signer_id,
+            "{value.key_revision}", "{value.completed_at}", reaped]:
+        lines.push(builder_wire_line_v1(field))
+    val message = lines.join("")
+    if message.byte_len() > REMOTE_COMPLETION_MAX_BYTES_V1: return Err("COMPLETION_WIRE_TOO_LARGE")
+    Ok(message)
+
+fn remote_completion_signature_message_v1(value: RemoteCompletionEnvelopeV1) -> Result<[u8], text>:
+    val message = remote_completion_signature_text_v1(value)?
+    Ok(distributed_signature_bytes_v2(message))
+
+fn remote_completion_signature_hex_v1(signature: [u8]) -> text:
+    val alphabet = "0123456789abcdef"
+    var encoded = ""
+    for byte in signature:
+        val number = byte as i64
+        encoded = encoded + alphabet.substring(number / 16, number / 16 + 1) +
+            alphabet.substring(number % 16, number % 16 + 1)
+    encoded
+
+fn remote_completion_hex_digit_v1(value: text) -> i64:
+    val alphabet = "0123456789abcdef"
+    for i in 0..16:
+        if value == alphabet.substring(i, i + 1): return i
+    -1
+
+fn remote_completion_encode_v1(value: RemoteCompletionEnvelopeV1) -> Result<text, text>:
+    val message = remote_completion_signature_text_v1(value)?
+    if value.signature.len() != 64: return Err("COMPLETION_SIGNATURE_INVALID")
+    val wire = builder_wire_line_v1("SIMPLE_REMOTE_COMPLETION_ENVELOPE_V1") +
+        message + builder_wire_line_v1(remote_completion_signature_hex_v1(value.signature))
+    if wire.byte_len() > REMOTE_COMPLETION_MAX_BYTES_V1: return Err("COMPLETION_WIRE_TOO_LARGE")
+    Ok(wire)
+
+fn remote_completion_decode_v1(wire: text) -> Result<RemoteCompletionEnvelopeV1, text>:
+    if wire.byte_len() > REMOTE_COMPLETION_MAX_BYTES_V1: return Err("COMPLETION_WIRE_TOO_LARGE")
+    var reader = BuilderWireReaderV1.create(wire)
+    if reader.scalar() != "SIMPLE_REMOTE_COMPLETION_ENVELOPE_V1" or
+            reader.scalar() != "SIMPLE_REMOTE_COMPLETION_SIGNATURE_V1":
+        return Err("COMPLETION_WIRE_VERSION_INVALID")
+    val version = reader.number(REMOTE_COMPLETION_INTEGER_MAX_V1, false)
+    val task_identity = reader.scalar()
+    val host_id = reader.scalar()
+    val assignment_digest = reader.scalar()
+    val controller_epoch = reader.number(REMOTE_COMPLETION_INTEGER_MAX_V1, false)
+    val operation_id = reader.scalar()
+    val request_digest = reader.scalar()
+    val grant_digest = reader.scalar()
+    val result_digest = reader.scalar()
+    val process_digest = reader.scalar()
+    val output_inventory_digest = reader.scalar()
+    val tests_digest = reader.scalar()
+    val signer_id = reader.scalar()
+    val key_revision = reader.number(REMOTE_COMPLETION_INTEGER_MAX_V1, false)
+    val completed_at = reader.number(REMOTE_COMPLETION_INTEGER_MAX_V1, false)
+    val reaped = reader.scalar()
+    val signature_hex = reader.scalar()
+    if reader.complete_error() != "": return Err("COMPLETION_WIRE_INVALID")
+    if reaped != "true" and reaped != "false": return Err("COMPLETION_REAPED_INVALID")
+    if signature_hex.byte_len() != 128: return Err("COMPLETION_SIGNATURE_INVALID")
+    var signature: [u8] = []
+    for i in 0..64:
+        val high = remote_completion_hex_digit_v1(signature_hex.substring(i * 2, i * 2 + 1))
+        val low = remote_completion_hex_digit_v1(signature_hex.substring(i * 2 + 1, i * 2 + 2))
+        if high < 0 or low < 0: return Err("COMPLETION_SIGNATURE_INVALID")
+        signature.push((high * 16 + low) as u8)
+    val value = RemoteCompletionEnvelopeV1(version: version, task_identity: task_identity,
+        host_id: host_id, assignment_digest: assignment_digest, controller_epoch: controller_epoch,
+        operation_id: operation_id, request_digest: request_digest, grant_digest: grant_digest,
+        result_digest: result_digest, process_digest: process_digest,
+        output_inventory_digest: output_inventory_digest, tests_digest: tests_digest,
+        signer_id: signer_id, key_revision: key_revision, completed_at: completed_at,
+        tree_reaped: reaped == "true", signature: signature)
+    val canonical = remote_completion_encode_v1(value)?
+    if canonical != wire: return Err("COMPLETION_WIRE_NONCANONICAL")
+    Ok(value)
+
+fn remote_verify_completion_v1(value: RemoteCompletionEnvelopeV1,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        issuer: DistributedAuthorityKeyV2, approver: DistributedAuthorityKeyV2,
+        host_key: DistributedAuthorityKeyV2, request: OperationEnvelopeV2,
+        task: BuildTaskV1, expected: RemoteCompletionBindingV1, now: i64,
+        policy_revision: i64, revocation_epoch: i64,
+        session_generation: i64) -> Result<RemoteCompletionEnvelopeV1, text>:
+    val metadata_error = remote_completion_metadata_validate_v1(value)
+    if metadata_error != "": return Err(metadata_error)
+    if value.signature.len() != 64: return Err("COMPLETION_SIGNATURE_INVALID")
+    # Authenticate the original approval and grant, including current revocation,
+    # policy and session state; completion signatures cannot replace admission.
+    val grant = distributed_verify_grant_approval_v2(signed, approval, issuer, approver,
+        request, now, policy_revision, revocation_epoch, session_generation)?
+    val host_error = distributed_authority_key_check_v2(host_key, "execution-host",
+        value.signer_id, value.key_revision, grant, now, policy_revision, revocation_epoch)
+    if host_error != "": return Err(host_error)
+    if host_key.public_key == issuer.public_key or host_key.public_key == approver.public_key:
+        return Err("COMPLETION_ROLES_NOT_SEPARATE")
+    if request.operation != "build" and request.operation != "test":
+        return Err("COMPLETION_OPERATION_DENIED")
+    if builder_validate_task_v1(task) != "": return Err("COMPLETION_TASK_INVALID")
+    if request.payload_digest != sha256_text(builder_encode_task_v1(task)) or
+            value.task_identity != builder_task_identity_v1(task) or
+            value.task_identity != expected.task_identity:
+        return Err("COMPLETION_TASK_MISMATCH")
+    if task.timeout_ms != request.duration_ms or task.memory_limit_bytes != request.memory_bytes or
+            task.memory_policy != "enforce":
+        return Err("COMPLETION_RESOURCE_MISMATCH")
+    if value.host_id != request.host_id or value.host_id != expected.host_id:
+        return Err("COMPLETION_HOST_MISMATCH")
+    if value.operation_id != request.id or value.operation_id != expected.operation_id:
+        return Err("COMPLETION_OPERATION_MISMATCH")
+    if value.assignment_digest != expected.assignment_digest or
+            value.controller_epoch != expected.controller_epoch:
+        return Err("COMPLETION_ASSIGNMENT_STALE")
+    val request_wire = distributed_encode_operation_v2(request)?
+    val grant_digest = distributed_grant_digest_v2(grant)?
+    if value.request_digest != sha256_text(request_wire) or value.grant_digest != grant_digest:
+        return Err("COMPLETION_AUTHORIZATION_MISMATCH")
+    if not value.tree_reaped: return Err("COMPLETION_TREE_NOT_REAPED")
+    if value.completed_at > now or value.completed_at >= grant.expires_at:
+        return Err("COMPLETION_TIME_INVALID")
+    # These four expected digests MUST describe the parent's actual measured
+    # result/process evidence and read-back output/test bytes, including failures.
+    if value.result_digest != expected.result_digest or value.process_digest != expected.process_digest or
+            value.output_inventory_digest != expected.output_inventory_digest or
+            value.tests_digest != expected.tests_digest:
+        return Err("COMPLETION_OBSERVATION_MISMATCH")
+    val message = remote_completion_signature_message_v1(value)?
+    if not pure_ed25519_verify(host_key.public_key, message, value.signature):
+        return Err("COMPLETION_SIGNATURE_INVALID")
+    Ok(value)
+
+export RemoteCompletionEnvelopeV1, RemoteCompletionBindingV1
+export remote_completion_signature_message_v1, remote_completion_encode_v1, remote_completion_decode_v1
+export remote_verify_completion_v1

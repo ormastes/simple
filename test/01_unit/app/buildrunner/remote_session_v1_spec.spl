@@ -1,0 +1,89 @@
+use std.spec.{describe, it, expect}
+use std.common.contracts.distributed_operation_state_v2.{DistributedOperationStateV2,
+    distributed_operation_initial_v2, distributed_operation_transition_v2}
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.sha256.sha256_text
+use app.buildrunner.remote_session_v1.remote_operation_collectable_v1
+use test.fixtures.buildrunner.remote_authority_v1.remote_authority_fixture_v1
+
+# These are pure gate specifications, not execution or durable-journal evidence.
+fn session_operation_initial_v1() -> DistributedOperationStateV2:
+    val fixture = remote_authority_fixture_v1()
+    val envelope = distributed_encode_operation_v2(fixture.request).unwrap()
+    distributed_operation_initial_v2(envelope).unwrap()
+
+fn session_operation_executing_v1() -> DistributedOperationStateV2:
+    distributed_operation_transition_v2(session_operation_initial_v1(), "executing", "").unwrap()
+
+describe "Remote parent session operation collection gate V1":
+    it "accepts an exactly bound executing operation":
+        val prior = session_operation_executing_v1()
+        expect(prior.operation_id).to_equal("operation_1")
+        expect(prior.envelope_digest).to_equal(sha256_text(prior.envelope))
+        expect(remote_operation_collectable_v1(prior, prior.operation_id, prior.envelope))
+            .to_equal(Ok(true))
+
+    it "accepts an exactly bound operation awaiting authoritative reconciliation":
+        val executing = session_operation_executing_v1()
+        val prior = distributed_operation_transition_v2(executing, "outcome-unknown", "").unwrap()
+        expect(remote_operation_collectable_v1(prior, prior.operation_id, prior.envelope))
+            .to_equal(Ok(true))
+
+    it "rejects an admitted operation before execution starts":
+        val prior = session_operation_initial_v1()
+        expect(remote_operation_collectable_v1(prior, prior.operation_id, prior.envelope))
+            .to_equal(Err("REMOTE_EXECUTION_NOT_STARTED"))
+
+    it "rejects cancellation from every collectable predecessor":
+        val executing = session_operation_executing_v1()
+        val unknown = distributed_operation_transition_v2(executing, "outcome-unknown", "").unwrap()
+        for state in [executing, unknown]:
+            val prior = distributed_operation_transition_v2(state, "cancelled",
+                sha256_text("durable cancellation record")).unwrap()
+            expect(remote_operation_collectable_v1(prior, prior.operation_id, prior.envelope))
+                .to_equal(Err("REMOTE_EXECUTION_CANCELLED"))
+
+    it "rejects completed and failed operation replay from either predecessor":
+        val executing = session_operation_executing_v1()
+        val unknown = distributed_operation_transition_v2(executing, "outcome-unknown", "").unwrap()
+        for state in [executing, unknown]:
+            for terminal in ["completed", "failed"]:
+                val prior = distributed_operation_transition_v2(state, terminal,
+                    sha256_text("retained " + terminal + " outcome")).unwrap()
+                expect(remote_operation_collectable_v1(prior, prior.operation_id, prior.envelope))
+                    .to_equal(Err("REMOTE_COMPLETION_REPLAY"))
+
+    it "rejects replay against a different requested operation id":
+        val prior = session_operation_executing_v1()
+        expect(remote_operation_collectable_v1(prior, "operation_2", prior.envelope))
+            .to_equal(Err("REMOTE_OPERATION_BINDING_DIFFERS"))
+        var changed = prior
+        changed.operation_id = "operation_2"
+        expect(remote_operation_collectable_v1(changed, "operation_1", prior.envelope))
+            .to_equal(Err("REMOTE_OPERATION_BINDING_DIFFERS"))
+
+    it "rejects a different valid encoded operation envelope":
+        val prior = session_operation_executing_v1()
+        val fixture = remote_authority_fixture_v1()
+        var request = fixture.request
+        request.payload_digest = sha256_text("substituted build task")
+        val changed_envelope = distributed_encode_operation_v2(request).unwrap()
+        expect(remote_operation_collectable_v1(prior, prior.operation_id, changed_envelope))
+            .to_equal(Err("REMOTE_OPERATION_BINDING_DIFFERS"))
+
+    it "rejects a changed retained envelope despite a matching new caller envelope":
+        val original = session_operation_executing_v1()
+        val fixture = remote_authority_fixture_v1()
+        var request = fixture.request
+        request.payload_digest = sha256_text("changed retained task")
+        var prior = original
+        prior.envelope = distributed_encode_operation_v2(request).unwrap()
+        # Both text values match, but the committed digest is still original.
+        expect(remote_operation_collectable_v1(prior, prior.operation_id, prior.envelope))
+            .to_equal(Err("REMOTE_OPERATION_BINDING_DIFFERS"))
+
+    it "rejects a retained hash mismatch even when envelope and id text match":
+        var prior = session_operation_executing_v1()
+        prior.envelope_digest = sha256_text("unrelated retained hash")
+        expect(remote_operation_collectable_v1(prior, prior.operation_id, prior.envelope))
+            .to_equal(Err("REMOTE_OPERATION_BINDING_DIFFERS"))

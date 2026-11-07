@@ -557,3 +557,11 @@ Tests covering simple container cross host, AC-01 exact host guest and isolation
 
 
 </details>
+
+## 2026-11-07 Windows source amendment
+
+The Windows provider-probe scenario now expects the historical HCS intent builder
+to remain unavailable even when a caller marks a copied scripted probe as live.
+The helper never executed a workload. Docker process-only execution has a separate
+Windows provider and requires its own live gate. This manual amendment is authored;
+admitted docgen/SPipe regeneration is NOT_RUN.

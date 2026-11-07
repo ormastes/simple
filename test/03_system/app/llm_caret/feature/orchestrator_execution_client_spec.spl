@@ -1,0 +1,146 @@
+# AUTHORED_UNRUN. Production codec/client cases with synthetic wire facts;
+# these are not process execution, container or completed AgentSession proof.
+# @req REQ-CARET-EXECUTION-001 REQ-CARET-EXECUTION-002 REQ-CARET-EXECUTION-003
+use std.spec.{describe, it, expect, step}
+use app.llm_caret.orchestrator_execution_client_v2.{CaretExecutionRequestV2,
+    caret_execution_argv_v2, caret_execution_timeout_ms_v2, caret_execution_decode_v2,
+    caret_execution_request_v2, caret_execution_output_v2}
+use std.common.contracts.orchestration.controller_execution_reply_v2.{ControllerExecutionReplyV2,
+    controller_execution_reply_encode_v2}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.{HostExecutionObservationV2,
+    host_execution_observation_encode_v2}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn execution_request(action: text) -> CaretExecutionRequestV2:
+    CaretExecutionRequestV2(executable: "/opt/simple/simple_orchestrator", action: action,
+        state_root: "/private/controller state", controller_id: "controller-a", request_uid: "request-a",
+        packet_path: if action == "inspect-execution": "" else: "/private/packet with spaces.sdn")
+
+fn prepared_host_reply(operation: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("host-local-operation-state"), "operationId": SdnValue.String(operation),
+        "state": SdnValue.String("admitted"), "executionObserved": SdnValue.Bool(false)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn execution_reply(status: text, nested: text) -> ControllerExecutionReplyV2:
+    ControllerExecutionReplyV2(controller_id: "controller-a", request_uid: "request-a",
+        controller_operation_id: "controller-op-a", host_operation_id: "host-op-a",
+        assignment_digest: "a".repeat(64), plan_digest: "b".repeat(64), request_digest: "c".repeat(64),
+        status: status, host_response: nested, observation_digest: sha256_text(nested))
+
+fn observed_host_reply(phase: text, engine: text) -> HostExecutionObservationV2:
+    val native = engine == "podman"
+    val scope = ContainerHostScopeV2(physical_host_id: "host-a", service_scope_id: "scope-a",
+        native_machine_id: "machine-a", boot_id: if native: "boot-a" else: "",
+        provider_generation: 1, continuity_mode: if native: "native-boot-incarnation-v1" else: "service-incarnation-v1",
+        continuity_id: if native: "boot-a" else: "service-a")
+    HostExecutionObservationV2(scope: scope, operation_id: "host-op-a", operation_digest: "d".repeat(64),
+        plan_digest: "b".repeat(64), request_digest: "c".repeat(64), grant_id: "grant-a",
+        principal: "principal-a", issuer_id: "issuer-a", approver_id: "approver-a",
+        provider_identity_digest: "e".repeat(64), observed_unix_ms: 10, observed_monotonic_ms: 5,
+        phase: phase, create_status: "ok", start_status: "ok", inspect_status: "ok", reason: "",
+        runtime: RuntimeIdentityV1(pod_uid: "workload-a", attempt: 1, operation_id: "host-op-a",
+            provider_generation: 1, engine: engine, native_id: "f".repeat(64),
+            node_boot_id: container_scope_fence_id_v2(scope).unwrap()))
+
+describe "Caret correlated execution client":
+    it "passes exact separate arguments and protocol transport budgets":
+        step("Build distinct dispatch resume and execution inspection requests")
+        for action in ["dispatch", "resume-execution"]:
+            val args = caret_execution_argv_v2(execution_request(action)).unwrap()
+            expect(args).to_equal([action, "/private/controller state", "controller-a", "request-a", "/private/packet with spaces.sdn"])
+            expect(caret_execution_timeout_ms_v2(action)).to_equal(120000)
+        expect(caret_execution_argv_v2(execution_request("inspect-execution")).unwrap()).to_equal(
+            ["inspect-execution", "/private/controller state", "controller-a", "request-a"])
+        expect(caret_execution_timeout_ms_v2("inspect-execution")).to_equal(30000)
+
+    it "rejects invalid calls before invoking any controller":
+        step("Reject relative executables extra inspection packets and metadata actions")
+        var relative = execution_request("dispatch")
+        relative.executable = "simple_orchestrator"
+        var extra = execution_request("inspect-execution")
+        extra.packet_path = "/private/unexpected.sdn"
+        for request in [relative, extra, execution_request("submit")]:
+            val reply = caret_execution_request_v2(request)
+            expect(reply.confirmed).to_equal(false)
+            expect(reply.reconciliation_required).to_equal(false)
+            expect(reply.request_uid).to_equal("request-a")
+
+    it "confirms correlated preparation without claiming observed execution":
+        step("Validate exact nested prepared fields and preserve the original UID")
+        val wire = controller_execution_reply_encode_v2(execution_reply("host-prepared", prepared_host_reply("host-op-a"))).unwrap()
+        val reply = caret_execution_decode_v2(execution_request("dispatch"), wire, "", 0)
+        expect(reply.confirmed).to_equal(true)
+        expect(reply.status).to_equal("host-prepared")
+        expect(reply.runtime_phase).to_equal("unobserved")
+        expect(reply.output).to_equal(wire)
+        expect(caret_execution_output_v2(reply)).to_contain("completionObserved: false")
+
+    it "preserves validated native and service continuity observations without completion":
+        step("Decode both provider observations and keep exited distinct from completion")
+        for engine in ["podman", "docker"]:
+            val nested = host_execution_observation_encode_v2(observed_host_reply("exited", engine)).unwrap()
+            val wire = controller_execution_reply_encode_v2(execution_reply("runtime-observed", nested)).unwrap()
+            val reply = caret_execution_decode_v2(execution_request("inspect-execution"), wire, "", 0)
+            expect(reply.confirmed).to_equal(true)
+            expect(reply.runtime_phase).to_equal("exited")
+            expect(reply.output).to_equal(wire)
+            expect(caret_execution_output_v2(reply)).to_contain("completionObserved: false")
+
+    it "rejects wrong outer and nested execution identities even with valid digests":
+        step("Correlate controller UID host operation plan and semantic request")
+        val request = execution_request("inspect-execution")
+        var wrong_uid = execution_reply("host-prepared", prepared_host_reply("host-op-a"))
+        wrong_uid.request_uid = "other-request"
+        var wrong_controller = wrong_uid
+        wrong_controller.request_uid = "request-a"
+        wrong_controller.controller_id = "other-controller"
+        for value in [wrong_uid, wrong_controller,
+                execution_reply("host-prepared", prepared_host_reply("other-host-op"))]:
+            val reply = caret_execution_decode_v2(request, controller_execution_reply_encode_v2(value).unwrap(), "", 0)
+            expect(reply.confirmed).to_equal(false)
+            expect(reply.reconciliation_required).to_equal(true)
+            expect(reply.request_uid).to_equal("request-a")
+        for field in ["operation", "plan", "request"]:
+            var observed = observed_host_reply("running", "podman")
+            if field == "operation":
+                observed.operation_id = "other-op"
+                observed.runtime.operation_id = "other-op"
+            elif field == "plan": observed.plan_digest = "a".repeat(64)
+            else: observed.request_digest = "a".repeat(64)
+            val nested = host_execution_observation_encode_v2(observed).unwrap()
+            val wire = controller_execution_reply_encode_v2(execution_reply("runtime-observed", nested)).unwrap()
+            expect(caret_execution_decode_v2(request, wire, "", 0).code).to_equal("execution-host-correlation-mismatch")
+
+    it "rejects unknown versions completion claims and invalid nested observations":
+        step("Require the shared strict codecs instead of trusting a status string")
+        val prepared = controller_execution_reply_encode_v2(execution_reply("host-prepared", prepared_host_reply("host-op-a"))).unwrap()
+        val invalid_nested = controller_execution_reply_encode_v2(execution_reply("runtime-observed", "not an observation")).unwrap()
+        for wire in [prepared.replace("version: 2", "version: 99"),
+                prepared.replace("completionObserved: false", "completionObserved: true"),
+                prepared + "extra: true\n", invalid_nested,
+                controller_execution_reply_encode_v2(execution_reply("host-prepared",
+                    prepared_host_reply("host-op-a") + "extra: true\n")).unwrap()]:
+            val reply = caret_execution_decode_v2(execution_request("dispatch"), wire, "", 0)
+            expect(reply.confirmed).to_equal(false)
+            expect(reply.reconciliation_required).to_equal(true)
+
+    it "retains uncertainty on controller failures stderr and saturated capture":
+        step("Keep the same request identity and never infer a safe retry from malformed output")
+        val wire = controller_execution_reply_encode_v2(execution_reply("host-prepared", prepared_host_reply("host-op-a"))).unwrap()
+        for code in [1, 2, 124]:
+            val reply = caret_execution_decode_v2(execution_request("dispatch"), wire, "", code)
+            expect(reply.confirmed).to_equal(false)
+            expect(reply.reconciliation_required).to_equal(true)
+            expect(reply.request_uid).to_equal("request-a")
+        val timed_out = caret_execution_decode_v2(execution_request("dispatch"), wire, "\nTIMEOUT\n", -1)
+        expect(timed_out.code).to_equal("controller-timeout")
+        expect(timed_out.reconciliation_required).to_equal(true)
+        expect(timed_out.request_uid).to_equal("request-a")
+        expect(caret_execution_decode_v2(execution_request("dispatch"), wire, "diagnostic", 0).confirmed).to_equal(false)
+        expect(caret_execution_decode_v2(execution_request("dispatch"), "x".repeat(262144), "", 0).code).to_equal("controller-output-invalid")
+        expect(caret_execution_decode_v2(execution_request("dispatch"), "", "", 0).confirmed).to_equal(false)

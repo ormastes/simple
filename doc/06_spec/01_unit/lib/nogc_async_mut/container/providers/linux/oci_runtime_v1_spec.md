@@ -45,3 +45,5 @@ No native container success, timing/RSS measurement, SPipe execution, docgen
 PASS, or power-loss durability experiment is claimed. See
 `doc/05_design/oci_request_binding_admission.md` for provenance, migration policy,
 trusted-directory limits, and remaining verification.
+
+Execution-options source update (UNEXECUTED): Podman create vectors now include `--http-proxy=false`; typed environment/cwd are admitted, terminal effects remain refused. See `doc/05_design/oci_execution_options_effects.md` and the eleven-case system specification mirror.

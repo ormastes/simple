@@ -1,3 +1,4 @@
+use std.common.json.value.{json_parse_value_strict, json_value_field, json_value_serialize}
 # MCP SDK - McpServer Facade Unit Tests (A4)
 #
 # Proves AC-1 (golden transcript) and AC-2 (laziness gate) from the plan.
@@ -14,6 +15,7 @@ use std.spec
 use std.mcp_sdk.server.app.{
     mcp_server_init,
     mcp_server_tool,
+    mcp_server_tool_result,
     mcp_server_handle,
     mcp_serve,
     mcp_server_reset
@@ -298,3 +300,34 @@ describe "mcp_server_handle individual methods":
         expect(has_error).to_equal(true)
         val has_code = resp.contains("-32601")
         expect(has_code).to_equal(true)
+
+
+# Backward-compatible opt-in typed outcomes use the existing transcript helpers.
+describe "McpServer structured tool outcomes":
+    it "preserves Err as isError while legacy and typed literal text stay successful":
+        mcp_server_reset()
+        mcp_server_init("typed-outcomes", "1")
+        mcp_server_tool("legacy", "Legacy text", fn() -> text: "{}",
+            fn(args: text) -> text: "error: literal successful text")
+        mcp_server_tool_result("typed_ok", "Typed success", fn() -> text: "{}",
+            fn(args: text) -> Result<text, text>: Ok("error: literal successful text"))
+        mcp_server_tool_result("typed_error", "Typed failure", fn() -> text: "{}",
+            fn(args: text) -> Result<text, text>: Err("backend refused"))
+        val legacy = json_parse_value_strict(unwrap_resp(mcp_server_handle(make_tools_call_msg("legacy")))).unwrap()
+        val ok = json_parse_value_strict(unwrap_resp(mcp_server_handle(make_tools_call_msg("typed_ok")))).unwrap()
+        val error = json_parse_value_strict(unwrap_resp(mcp_server_handle(make_tools_call_msg("typed_error")))).unwrap()
+        expect(json_value_serialize(json_value_field(json_value_field(legacy, "result"), "isError"))).to_equal("null")
+        expect(json_value_serialize(json_value_field(json_value_field(ok, "result"), "isError"))).to_equal("null")
+        expect(json_value_serialize(json_value_field(json_value_field(error, "result"), "isError"))).to_equal("true")
+        expect(registry_schemas_built()).to_equal(0)
+
+    it "clears typed handlers during reset without changing the legacy API":
+        mcp_server_reset()
+        mcp_server_init("typed-reset", "1")
+        mcp_server_tool_result("same", "Typed failure", fn() -> text: "{}",
+            fn(args: text) -> Result<text, text>: Err("old error"))
+        mcp_server_reset()
+        mcp_server_tool("same", "Legacy success", fn() -> text: "{}",
+            fn(args: text) -> text: "new content")
+        val response = json_parse_value_strict(unwrap_resp(mcp_server_handle(make_tools_call_msg("same")))).unwrap()
+        expect(json_value_serialize(json_value_field(json_value_field(response, "result"), "isError"))).to_equal("null")

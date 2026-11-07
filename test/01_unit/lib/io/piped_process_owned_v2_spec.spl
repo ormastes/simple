@@ -1,0 +1,81 @@
+# @req GSTREAM-04 GSTREAM-05 GSTREAM-06
+# These pure owner/binding cases do not claim native stream execution coverage.
+use std.spec.{describe, it, expect, fail}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2, GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2, group_process_stream_identity_v2}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, PipedProcessOwnedTransferV2, PipedProcessOwnedSpawnV2, process_piped_ref_equal_v1, process_piped_owned_transfer_equal_v2, process_validate_piped_owned_transfer_v2, process_spawn_piped_owned_v2, process_cleanup_piped_owned_v2}
+
+fn owned_stream_fixture_v2() -> GroupProcessStreamOwnerV2:
+    val program = "/opt/child"
+    val args = ["--plain"]
+    val request = GroupProcessStreamRequestV2(program: program, producer_digest: "a".repeat(64),
+        args: args, environment: [], directory: "/work", inputs: [], timeout_ms: 0,
+        broker_program: "/opt/broker", broker_digest: "b".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2(program, args), launch_deadline_unix_ms: 1)
+    val launch = GroupProcessStreamLaunchV2(root: "/work/owner", worker_id: "worker_1", generation: 7,
+        snapshot_digest: "c".repeat(64), cache_identity: "d".repeat(64), memory_limit_bytes: 1048576,
+        request: request, delegated_cgroup_path: "/sys/fs/cgroup/delegated", transport_generation: 34)
+    GroupProcessStreamOwnerV2(launch: launch, identity_digest: group_process_stream_identity_v2(launch))
+
+fn owned_stream_reference_v2(owner: GroupProcessStreamOwnerV2) -> PipedProcessRefV1:
+    PipedProcessRefV1(pid: 123, generation: owner.launch.transport_generation,
+        group_root: owner.launch.root, group_identity: owner.identity_digest)
+
+describe "owned piped stream transfer authority":
+    it "compares generation and complete group binding even when PID is unchanged":
+        val owner = owned_stream_fixture_v2()
+        val original = owned_stream_reference_v2(owner)
+        expect(process_piped_ref_equal_v1(original, original)).to_equal(true)
+        var changed = original
+        changed.generation = changed.generation + 1
+        expect(process_piped_ref_equal_v1(original, changed)).to_equal(false)
+        changed = original
+        changed.group_root = "/work/successor"
+        expect(process_piped_ref_equal_v1(original, changed)).to_equal(false)
+        changed = original
+        changed.group_identity = "e".repeat(64)
+        expect(process_piped_ref_equal_v1(original, changed)).to_equal(false)
+
+    it "retains cleanup identity after launch authority expiry without extending lifetime":
+        val owner = owned_stream_fixture_v2()
+        expect(owner.launch.request.launch_deadline_unix_ms).to_equal(1)
+        expect(group_process_stream_owner_validate_v2(owner)).to_equal("")
+        expect(owner.launch.request.timeout_ms).to_equal(0)
+
+    it "rejects owner and reference mismatch before any native operation":
+        val owner = owned_stream_fixture_v2()
+        var reference = owned_stream_reference_v2(owner)
+        reference.group_identity = "e".repeat(64)
+        val transfer = PipedProcessOwnedTransferV2(owner: owner, reference: reference)
+        match process_validate_piped_owned_transfer_v2(transfer):
+            case Ok(_): fail("mismatched transfer reached a valid native owner")
+            case Err(reason): expect(reason).to_equal("process_owned_transfer_binding_mismatch")
+
+    it "refuses immutable request tampering and never cleans up through a different owner":
+        var owner = owned_stream_fixture_v2()
+        var launch = owner.launch
+        launch.memory_limit_bytes = launch.memory_limit_bytes + 1
+        owner.launch = launch
+        expect(group_process_stream_owner_validate_v2(owner)).to_equal("stream owner request identity differs")
+        match process_cleanup_piped_owned_v2(owner, nil):
+            case Ok(_): fail("tampered owner was accepted for cleanup")
+            case Err(reason): expect(reason).to_equal("stream owner request identity differs")
+
+    it "rejects replay of an already assigned transport before capability admission or fork":
+        val owner = owned_stream_fixture_v2()
+        match process_spawn_piped_owned_v2(owner.launch):
+            case PipedProcessOwnedSpawnV2.Rejected(reason): expect(reason).to_equal("process_transport_already_assigned")
+            case _: fail("assigned transport was relaunched")
+
+    it "compares retained owner request and reference together without adopting a PID":
+        val owner = owned_stream_fixture_v2()
+        val reference = owned_stream_reference_v2(owner)
+        val original = PipedProcessOwnedTransferV2(owner: owner, reference: reference)
+        expect(process_piped_owned_transfer_equal_v2(original, original)).to_equal(true)
+        var changed = owner
+        var launch = changed.launch
+        launch.cache_identity = "f".repeat(64)
+        changed.launch = launch
+        changed.identity_digest = group_process_stream_identity_v2(launch)
+        val successor = PipedProcessOwnedTransferV2(owner: changed, reference: owned_stream_reference_v2(changed))
+        expect(process_piped_owned_transfer_equal_v2(original, successor)).to_equal(false)

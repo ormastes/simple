@@ -1,0 +1,179 @@
+# Dedicated test producer entrypoint. Runs inside the already-owned execution
+# workspace (native domain or Simple Container API workload), not on the remote
+# controller. The outer owner still supplies process/container cleanup authority.
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, remote_policy_bind_v1,
+    remote_policy_decode_v1, remote_test_report_validate_v1}
+use app.buildrunner.remote_test_report_v1.remote_test_report_from_events_v1
+use app.buildrunner.remote_capture_v1.remote_capture_path_v1
+use app.bootstrap_builder.codec.builder_read_task_v1
+use app.bootstrap_builder.transport.builder_transport_parent_v1
+use app.bootstrap_builder.worker.builder_worker_verify_inputs_v1
+use std.common.build_manager.contracts.{BuildTaskV1, builder_relative_path_valid_v1}
+use std.common.traceability.run_plan.{TraceRunPlan, TraceCaseEventFile}
+use std.common.traceability.run_plan_codec.{decode_trace_run_plan, encode_trace_run_plan}
+use std.common.traceability.case_events.decode_trace_case_events
+use std.common.crypto.sha256.sha256_text
+use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+use std.test_runner.test_runner_types.{TestExecutionMode, TestOptions, test_file_result_outcome_class}
+use std.test_runner.test_runner_execute.run_test_file_native
+use app.io.env_ops.env_set
+use app.io.file_ops.{file_read_regular_no_follow_bounded, file_hash_sha256,
+    file_atomic_write, path_absolute}
+
+fn remote_test_options_v1(args: [text], paths: [text]) -> Result<TestOptions, text>:
+    val args_error = test_args_validation_error(args)
+    if args_error != "": return Err(args_error)
+    # The general CLI normalizes native-source to LLVM and a backend to Native,
+    # even over an explicit interpreter/compile mode. Preserve the approved
+    # action's original intent before applying that normalization.
+    var backend_explicit = false
+    for index in 0..args.len():
+        val argument = args[index]
+        if argument == "--compile": return Err("REMOTE_TEST_NATIVE_MODE_REQUIRED")
+        if argument.starts_with("--mode=") and argument != "--mode=native":
+            return Err("REMOTE_TEST_NATIVE_MODE_REQUIRED")
+        if argument == "--mode" and (index + 1 >= args.len() or args[index + 1] != "native"):
+            return Err("REMOTE_TEST_NATIVE_MODE_REQUIRED")
+        if argument == "--native-backend" or argument.starts_with("--native-backend="):
+            backend_explicit = true
+    if not backend_explicit: return Err("REMOTE_TEST_EXPLICIT_NATIVE_BACKEND_REQUIRED")
+    val options = parse_test_args(args)
+    match options.mode:
+        TestExecutionMode.Native: pass
+        _: return Err("REMOTE_TEST_NATIVE_MODE_REQUIRED")
+    if (options.native_backend != "llvm" and options.native_backend != "cranelift") or
+            options.coverage or options.safe_mode or options.no_limits:
+        return Err("REMOTE_TEST_EXPLICIT_NATIVE_BACKEND_REQUIRED")
+    val selected = if options.paths.len() > 0: options.paths else: [options.path]
+    if selected != paths or options.list or options.list_ignored or options.list_skip_features or options.only_skipped or
+            options.only_slow or options.tag != "" or options.planned_only:
+        return Err("REMOTE_TEST_SELECTION_DIFFERS")
+    Ok(options)
+
+fn remote_test_run_owned_v1(task: BuildTaskV1, policy: RemoteEvidencePolicyV1,
+        plan: TraceRunPlan, attempt_root: text) -> Result<bool, text>:
+    val _policy = remote_policy_bind_v1(task, policy)?
+    if policy.action_kind != "test": return Err("REMOTE_TEST_ACTION_REQUIRED")
+    val work = attempt_root + "/work"
+    if path_absolute(".") != path_absolute(work): return Err("REMOTE_TEST_WORKSPACE_DIFFERS")
+    val invalid_inputs = builder_worker_verify_inputs_v1(task, attempt_root)
+    if invalid_inputs != "": return Err(invalid_inputs)
+    # Freeze the case plan before invoking any test. The report reconciler repeats
+    # this binding after execution, but a stale plan must not launch code at all.
+    val plan_digest = sha256_text(encode_trace_run_plan(plan)?)
+    var plan_pinned = false
+    for input in task.inputs:
+        if input.path == "remote-tests/" + task.id + ".sdn" and input.digest == plan_digest:
+            plan_pinned = true
+    if not plan_pinned or plan.run_id != policy.operation_id or
+            plan.subject_id != task.source_digest or plan.binary_id != task.producer_digest or
+            plan.configuration_id != task.toolchain_digest or plan.cases.len() != policy.expected_tests.len():
+        return Err("REMOTE_TEST_PLAN_NOT_ADMITTED")
+    var paths: [text] = []
+    for index in 0..plan.cases.len():
+        val planned = plan.cases[index]
+        if planned.case_id != policy.expected_tests[index] or not builder_relative_path_valid_v1(planned.test_path):
+            return Err("REMOTE_TEST_SELECTION_DIFFERS")
+        var pinned = false
+        for input in task.inputs:
+            if input.path == planned.test_path: pinned = true
+        if not pinned: return Err("REMOTE_TEST_SOURCE_NOT_PINNED")
+        if not paths.contains(planned.test_path): paths = paths.push(planned.test_path)
+    var options = remote_test_options_v1(task.args, paths)?
+    # The dedicated producer has one fixed compiler location. No environment
+    # selection, Rust seed fallback or result cache can replace its pinned image.
+    var compiler_digest = ""
+    var runtime_pinned = false
+    for input in policy.toolchain_inputs:
+        if input.path == "tools/simple": compiler_digest = input.digest
+        if input.path.starts_with("tools/runtime/"): runtime_pinned = true
+    if compiler_digest == "": return Err("REMOTE_TEST_COMPILER_NOT_PINNED")
+    if not runtime_pinned: return Err("REMOTE_TEST_RUNTIME_NOT_PINNED")
+    var library_pinned = false
+    for input in task.inputs:
+        if input.path.starts_with("src/"): library_pinned = true
+    if not library_pinned: return Err("REMOTE_TEST_LIBRARY_NOT_PINNED")
+    # Native source selectors may only name directories within the already
+    # verified snapshot. Reject empty/default discovery and external roots.
+    if options.native_source_roots.len() == 0: return Err("REMOTE_TEST_SOURCE_ROOTS_REQUIRED")
+    for source_root in options.native_source_roots:
+        if not builder_relative_path_valid_v1(source_root): return Err("REMOTE_TEST_SOURCE_ROOT_UNSAFE")
+        var root_pinned = false
+        for input in task.inputs:
+            if input.path.starts_with(source_root + "/"): root_pinned = true
+        if not root_pinned: return Err("REMOTE_TEST_SOURCE_ROOT_NOT_PINNED")
+    val compiler_path = remote_capture_path_v1(work, "tools/simple")?
+    val actual_compiler = file_hash_sha256(compiler_path)
+    if actual_compiler == nil or actual_compiler.unwrap() != compiler_digest:
+        return Err("REMOTE_TEST_COMPILER_CHANGED")
+    options.compiler_binary = compiler_path
+    # The shared runner treats an empty selector as discovery even when a
+    # resolved binary is present. This private resolved selector keeps its
+    # existing explicit-binary arm; it is never exposed as a CLI selector.
+    options.compiler = "remote-pinned"
+    options.force_rebuild = true
+    options.assert_ran = true
+    options.no_db = true
+    options.parallel = false
+    options.sequential = true
+    options.max_workers = 1
+    # This is the dedicated producer's own process environment. The parent
+    # controller/host environment is never mutated by this entrypoint.
+    if not env_set("SIMPLE_TRACE_CASE_EVENTS", "1") or not env_set("SIMPLE_BINARY", compiler_path) or
+            not env_set("SIMPLE_RUNTIME_PATH", work + "/tools/runtime") or
+            not env_set("SIMPLE_LIB", work + "/src") or
+            not env_set("SIMPLE_NO_STUB_FALLBACK", "1") or
+            not env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", "1") or
+            not env_set("SIMPLE_NATIVE_BUILD_THREADS", "1") or
+            not env_set("SIMPLE_MCDC_MODE", "off") or
+            not env_set("SIMPLE_COVERAGE_FALLBACK", "") or
+            not env_set("SIMPLE_MCDC_MANIFEST_ABSENT", "error"):
+        return Err("REMOTE_TEST_EVENT_TRANSPORT_UNAVAILABLE")
+    var actual: [TraceCaseEventFile] = []
+    for path in paths:
+        val _safe_path = remote_capture_path_v1(work, path)?
+        val executed = run_test_file_native(path, options)
+        if executed.cached or test_file_result_outcome_class(executed) != "OK" or
+                executed.skipped != 0 or executed.pending != 0 or executed.trace_case_events_sdn == "" or
+                executed.degraded_reason != "" or executed.mcdc_skip_reason != "":
+            return Err("REMOTE_TEST_EXECUTION_INCOMPLETE")
+        actual = actual.push(TraceCaseEventFile(path, decode_trace_case_events(executed.trace_case_events_sdn)?))
+    val after = builder_worker_verify_inputs_v1(task, attempt_root)
+    if after != "": return Err(after)
+    val report = remote_test_report_from_events_v1(task, policy, plan, actual)?
+    val destination = remote_capture_path_v1(work, policy.test_report_path)?
+    if not file_atomic_write(destination, report): return Err("REMOTE_TEST_REPORT_WRITE_FAILED")
+    val saved = file_read_regular_no_follow_bounded(destination, policy.maximum_bytes)?
+    val _checked = remote_test_report_validate_v1(task, policy, saved)?
+    Ok(true)
+
+fn remote_test_runner_main_v1() -> i64:
+    # Existing BuildRunner launches producer.exe with cwd=<attempt>/work and
+    # retains request.sdn one level above it. Never accept an arbitrary manifest
+    # path or signing key from this producer's user arguments.
+    val work = path_absolute(".")
+    val root = builder_transport_parent_v1(work)
+    val task = match builder_read_task_v1(root + "/request.sdn"):
+        Ok(value): value
+        Err(_reason): return 2
+    val policy_payload = match file_read_regular_no_follow_bounded(work + "/remote-policy/" + task.id + ".sdn", 1048576):
+        Ok(value): value
+        Err(_reason): return 2
+    val policy = match remote_policy_decode_v1(policy_payload):
+        Ok(value): value
+        Err(_reason): return 2
+    val plan_payload = match file_read_regular_no_follow_bounded(work + "/remote-tests/" + task.id + ".sdn", 1048576):
+        Ok(value): value
+        Err(_reason): return 2
+    val plan = match decode_trace_run_plan(plan_payload):
+        Ok(value): value
+        Err(_reason): return 2
+    match remote_test_run_owned_v1(task, policy, plan, root):
+        Ok(_): 0
+        Err(_reason): 1
+
+fn main() -> i64:
+    remote_test_runner_main_v1()
+
+export remote_test_run_owned_v1, remote_test_runner_main_v1
+export remote_test_options_v1

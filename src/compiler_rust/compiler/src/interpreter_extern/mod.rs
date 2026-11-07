@@ -443,6 +443,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_transient_array_scope_pause", memory::rt_transient_array_scope_pause);
     insert_simple!("rt_transient_array_scope_end", memory::rt_transient_array_scope_end);
     insert_simple!("rt_transient_array_scope_state_v1", memory::rt_transient_array_scope_state_v1);
+    insert_simple!("rt_transient_array_scope_identity_v1", memory::rt_transient_array_scope_identity_v1);
+    insert_simple!("rt_allocation_owner_identity_v1", memory::rt_allocation_owner_identity_v1);
     insert_simple!("rt_transient_heap_promote", memory::rt_transient_heap_promote);
     insert_simple!("rt_transient_heap_promote_share_begin", memory::rt_transient_heap_promote_share_begin);
     insert_simple!("rt_transient_heap_promote_share_end", memory::rt_transient_heap_promote_share_end);
@@ -2063,6 +2065,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         insert_simple!("rt_process_observation_v4_pin_cwd_value", pov4::pin_cwd);
         insert_simple!("rt_process_observation_v4_cwd_digest_value", pov4::cwd_digest);
         insert_simple!("rt_process_observation_v4_close_cwd_value", pov4::close_cwd);
+        insert_simple!("rt_process_observation_v4_reserved_matches_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserve_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserved_state_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserved_start_pinned_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserved_observe_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserved_ack_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserved_confirm_release_value", pov4::reservation_unavailable);
         insert_simple!("rt_process_observation_v4_start_value", system::rt_process_observation_v4_provider_unavailable);
         insert_simple!("rt_process_observation_v4_start_pinned_value", pov4::start_pinned);
         insert_simple!("rt_process_observation_v4_poll_value", pov4::poll);
@@ -2101,6 +2110,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // registered here (found by the same extern census as the entry above).
     insert_simple!("rt_process_write_stdin_some", system::rt_process_write_stdin_some);
     insert_simple!("rt_process_read_stdout", system::rt_process_read_stdout);
+    insert_simple!("rt_process_piped_exit_status_value", system::rt_process_piped_exit_status_value);
+    insert_simple!("rt_process_stdout_state", system::rt_process_stdout_state);
     insert_simple!("rt_process_is_alive", system::rt_process_is_alive);
     insert_simple!("rt_process_close_piped", system::rt_process_close_piped);
     insert_simple!("rt_process_spawn_guarded", system::rt_process_spawn_guarded);
@@ -3959,6 +3970,8 @@ mod tests {
             "rt_transient_array_scope_pause",
             "rt_transient_array_scope_end",
             "rt_transient_array_scope_state_v1",
+            "rt_transient_array_scope_identity_v1",
+            "rt_allocation_owner_identity_v1",
             "rt_transient_heap_promote",
             "rt_transient_heap_promote_share_begin",
             "rt_transient_heap_promote_share_end",

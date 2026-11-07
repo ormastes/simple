@@ -1,0 +1,286 @@
+# Output plan wire data carries integrity only. Trusted in-process admission
+# has no decoder: only the host's verified helper lease may construct one.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.orchestration.host_helper_plan_v1.{HostHelperPlanV1, host_helper_plan_bytes_v1}
+use std.common.contracts.orchestration.host_reservation_codec_v1.{HostPreparedReservationReceiptV1, host_reservation_receipt_integrity_v1}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessBrokerBudgetV3, GroupProcessStreamProfileV3, group_process_cpu_quota_v3, group_process_stream_profile_validate_v3}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_template_digest_v3, group_process_stream_template_encode_v3, group_process_stream_template_decode_v3}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct ContainerOutputIdentityV2:
+    operation_id: text
+    parent_operation_id: text
+    parent_operation_digest: text
+    parent_assignment_digest: text
+    parent_budget_digest: text
+    binding_digest: text
+
+pub struct ContainerOutputResourcesV2:
+    cpu_millis: i64
+    memory_bytes: i64
+
+pub struct ContainerStreamPolicyV2:
+    root: text
+    snapshot_digest: text
+    cache_identity: text
+    broker_program: text
+    broker_digest: text
+    environment: [text]
+    directory: text
+    delegated_cgroup_path: text
+    memory_policy: text
+    timeout_ms: i64
+    broker_budget: GroupProcessBrokerBudgetV3
+    child_image_mode: text
+
+pub struct ContainerOutputPlanV2:
+    mode: text
+    workload: ContainerExecutionPlanV2
+    runtime: RuntimeIdentityV1
+    identity: ContainerOutputIdentityV2
+    resources: ContainerOutputResourcesV2
+    provider_identity_digest: text
+    policy_digest: text
+    launch_template: GroupProcessStreamLaunchV2
+    request_digest: text
+
+pub struct ContainerHelperAdmissionV2:
+    plan: HostHelperPlanV1
+    operation: OperationEnvelopeV2
+    receipt: HostPreparedReservationReceiptV1
+    deadline: ContainerEffectDeadlineV1
+    grant_id: text
+    issuer_id: text
+    approver_id: text
+    cpu_millis: i64
+    memory_bytes: i64
+
+pub fn container_stream_absolute_path_v2(path: text) -> bool:
+    if not path.starts_with("/") or str_len(path) > 4095 or path.contains("\0") or
+            path.contains("\n") or path.contains("\r") or path.contains("//"):
+        return false
+    if path != "/" and path.ends_with("/"): return false
+    for part in path.split("/"):
+        if part == "." or part == "..": return false
+    true
+
+pub fn container_output_identity_digest_v2(identity: ContainerOutputIdentityV2) -> Result<text, text>:
+    if not builder_identifier_valid_v1(identity.operation_id) or
+            not builder_identifier_valid_v1(identity.parent_operation_id) or
+            identity.operation_id == identity.parent_operation_id:
+        return Err("container-output-operation-identity-invalid")
+    for digest in [identity.parent_operation_digest, identity.parent_assignment_digest,
+            identity.parent_budget_digest, identity.binding_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-output-binding-invalid")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("container-output-identity-v2"),
+        "operation": SdnValue.String(identity.operation_id), "parentOperation": SdnValue.String(identity.parent_operation_id),
+        "parentDigest": SdnValue.String(identity.parent_operation_digest),
+        "assignmentDigest": SdnValue.String(identity.parent_assignment_digest),
+        "budgetDigest": SdnValue.String(identity.parent_budget_digest), "bindingDigest": SdnValue.String(identity.binding_digest)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+pub fn container_stream_policy_digest_v2(policy: ContainerStreamPolicyV2) -> Result<text, text>:
+    for path in [policy.root, policy.broker_program, policy.directory, policy.delegated_cgroup_path]:
+        if not container_stream_absolute_path_v2(path): return Err("container-stream-policy-path-invalid")
+    if policy.root == "/" or policy.timeout_ms <= 0 or policy.memory_policy != "enforce":
+        return Err("container-stream-policy-bound-invalid")
+    for digest in [policy.snapshot_digest, policy.cache_identity, policy.broker_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-stream-policy-digest-invalid")
+    # Validate the broker and mode through the canonical profile owner. The
+    # helper quota here is a validation input; actual quota is plan.resources.
+    val profile = GroupProcessStreamProfileV3(helper_cpu: group_process_cpu_quota_v3(1)?,
+        broker: policy.broker_budget, child_image_mode: policy.child_image_mode)
+    val profile_error = group_process_stream_profile_validate_v3(profile)
+    if profile_error != "": return Err(profile_error)
+    if policy.environment.len() > 64: return Err("container-stream-environment-bound")
+    var environment: [SdnValue] = []
+    var names: [text] = []
+    for entry in policy.environment:
+        if str_len(entry) > 16384 or entry.contains("\0"): return Err("container-stream-environment-invalid")
+        val parts = entry.split("=")
+        if parts.len() < 2 or parts[0] == "" or names.contains(parts[0]):
+            return Err("container-stream-environment-invalid")
+        names.push(parts[0])
+        environment.push(SdnValue.String(entry))
+    val broker = policy.broker_budget
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("container-stream-policy-v2"),
+        "root": SdnValue.String(policy.root), "snapshot": SdnValue.String(policy.snapshot_digest),
+        "cache": SdnValue.String(policy.cache_identity), "broker": SdnValue.String(policy.broker_program),
+        "brokerDigest": SdnValue.String(policy.broker_digest), "environment": SdnValue.Array(environment),
+        "directory": SdnValue.String(policy.directory), "delegation": SdnValue.String(policy.delegated_cgroup_path),
+        "memoryPolicy": SdnValue.String(policy.memory_policy), "timeoutMs": SdnValue.Int(policy.timeout_ms),
+        "childImageMode": SdnValue.String(policy.child_image_mode), "brokerCgroup": SdnValue.String(broker.cgroup_path),
+        "brokerDevice": SdnValue.Int(broker.device), "brokerInode": SdnValue.Int(broker.inode),
+        "brokerGeneration": SdnValue.Int(broker.generation), "brokerPolicy": SdnValue.String(broker.policy_digest),
+        "brokerQuota": SdnValue.Int(broker.cpu_quota_us), "brokerPeriod": SdnValue.Int(broker.cpu_period_us),
+        "brokerCpuReserved": SdnValue.Int(broker.reserved_cpu_millis),
+        "brokerMemoryLimit": SdnValue.Int(broker.memory_limit_bytes), "brokerMemoryReserved": SdnValue.Int(broker.reserved_memory_bytes)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+# The outer digest binds the target/pane request and parent budget as well as
+# the daemon's canonical template. Generated transport and grant expiry remain
+# outside the pre-admission template; the actual owner receipt binds them.
+pub fn container_output_plan_digest_v2(plan: ContainerOutputPlanV2) -> Result<text, text>:
+    if plan.mode != "output-follow" or plan.resources.cpu_millis <= 0 or plan.resources.memory_bytes <= 0:
+        return Err("container-output-mode-or-resources-invalid")
+    if plan.identity.parent_operation_id != plan.workload.operation_id or
+            plan.runtime.operation_id != plan.workload.operation_id or
+            plan.runtime.pod_uid != plan.workload.workload_uid or plan.runtime.attempt != plan.workload.attempt or
+            plan.runtime.provider_generation != plan.workload.provider_generation:
+        return Err("container-output-runtime-workload-mismatch")
+    val workload = plan.workload
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id,
+        service_scope_id: workload.service_scope_id, boot_id: workload.boot_id,
+        provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    if (workload.backend != "linux-podman" or plan.runtime.engine != "podman") and
+            (workload.backend != "windows-docker-process" or plan.runtime.engine != "docker"):
+        return Err("container-output-backend-runtime-mismatch")
+    if plan.runtime.node_boot_id != container_scope_fence_id_v2(scope)?:
+        return Err("container-output-runtime-scope-mismatch")
+    for digest in [plan.provider_identity_digest, plan.policy_digest, plan.runtime.native_id]:
+        if not builder_digest_valid_v1(digest): return Err("container-output-observation-invalid")
+    val launch = plan.launch_template
+    if launch.worker_id != plan.identity.operation_id or launch.generation != plan.workload.provider_generation or
+            launch.memory_limit_bytes != plan.resources.memory_bytes or launch.transport_generation != 0 or
+            launch.request.launch_deadline_unix_ms != 0:
+        return Err("container-output-template-mismatch")
+    val profile = match launch.profile_v3:
+        case Some(value): value
+        case None: return Err("container-output-profile-required")
+    if profile.helper_cpu.cpu_millis != plan.resources.cpu_millis:
+        return Err("container-output-cpu-mismatch")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("container-output-plan-v2"),
+        "mode": SdnValue.String(plan.mode), "workload": SdnValue.String(container_execution_plan_bytes_v2(plan.workload)?),
+        "identityDigest": SdnValue.String(container_output_identity_digest_v2(plan.identity)?),
+        "engine": SdnValue.String(plan.runtime.engine), "nativeId": SdnValue.String(plan.runtime.native_id),
+        "runtimeFence": SdnValue.String(plan.runtime.node_boot_id),
+        "cpuMillis": SdnValue.Int(plan.resources.cpu_millis), "memoryBytes": SdnValue.Int(plan.resources.memory_bytes),
+        "providerIdentity": SdnValue.String(plan.provider_identity_digest), "policyDigest": SdnValue.String(plan.policy_digest),
+        "launchTemplateDigest": SdnValue.String(group_process_stream_template_digest_v3(launch)?)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+# Structural matching only. A copied carrier does not grant another launch;
+# the daemon's exclusive per-helper claim independently prevents respawn.
+pub fn container_output_admission_validate_v2(plan: ContainerOutputPlanV2,
+        helper: ContainerHelperAdmissionV2) -> Result<bool, text>:
+    val digest = container_output_plan_digest_v2(plan)?
+    if plan.request_digest != digest or helper.plan.request_digest != digest or
+            helper.deadline.request_digest != digest or helper.deadline.operation_id != plan.identity.operation_id or
+            helper.deadline.actions != ["attach"] or helper.deadline.expires_at_unix_ms <= 0:
+        return Err("container-output-admission-template-mismatch")
+    val encoded_plan = host_helper_plan_bytes_v1(helper.plan)?
+    if helper.plan.helper_kind != "attach-broker" or helper.plan.operation_id != plan.identity.operation_id or
+            helper.plan.parent_operation_id != plan.identity.parent_operation_id or
+            helper.plan.parent_operation_digest != plan.identity.parent_operation_digest or
+            helper.plan.parent_assignment_digest != plan.identity.parent_assignment_digest or
+            helper.plan.parent_budget_digest != plan.identity.parent_budget_digest:
+        return Err("container-output-admission-parent-mismatch")
+    val workload = plan.workload
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id,
+        service_scope_id: workload.service_scope_id, boot_id: workload.boot_id,
+        provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    if container_host_scope_bytes_v2(helper.plan.scope)? != container_host_scope_bytes_v2(scope)? or
+            plan.runtime.node_boot_id != container_scope_fence_id_v2(scope)?:
+        return Err("container-output-admission-scope-mismatch")
+    if helper.cpu_millis != plan.resources.cpu_millis or helper.memory_bytes != plan.resources.memory_bytes or
+            helper.operation.memory_bytes != helper.memory_bytes or
+            helper.operation.duration_ms < plan.launch_template.request.timeout_ms:
+        return Err("container-output-admission-resource-mismatch")
+    if helper.operation.operation != "host_helper_reservation_v1" or
+            helper.operation.host_id != scope.physical_host_id or
+            helper.operation.id != plan.identity.operation_id:
+        return Err("container-output-admission-operation-mismatch")
+    val receipt_integrity = host_reservation_receipt_integrity_v1(helper.receipt, helper.operation)?
+    for identity in [helper.grant_id, helper.issuer_id, helper.approver_id]:
+        if not builder_identifier_valid_v1(identity): return Err("container-output-admission-principal-invalid")
+    Ok(true)
+
+# Retained plan data is not an admission or restored host lease. The common
+# open owner still requires a fresh actual plan and verified helper authority.
+pub fn container_output_plan_encode_v2(plan: ContainerOutputPlanV2) -> Result<text, text>:
+    if plan.request_digest != container_output_plan_digest_v2(plan)?:
+        return Err("container-output-plan-request-digest-mismatch")
+    val workload_bytes = container_execution_plan_bytes_v2(plan.workload)?
+    val template_bytes = group_process_stream_template_encode_v3(plan.launch_template)?
+    if str_len(workload_bytes) > 2097152 or str_len(template_bytes) > 2097152:
+        return Err("container-output-plan-nested-size")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("container-output-plan"),
+        "mode": SdnValue.String(plan.mode),
+        "workload": SdnValue.String(workload_bytes),
+        "runtimePodUid": SdnValue.String(plan.runtime.pod_uid),
+        "runtimeAttempt": SdnValue.Int(plan.runtime.attempt),
+        "runtimeProviderGeneration": SdnValue.Int(plan.runtime.provider_generation),
+        "runtimeOperationId": SdnValue.String(plan.runtime.operation_id),
+        "runtimeEngine": SdnValue.String(plan.runtime.engine),
+        "runtimeNativeId": SdnValue.String(plan.runtime.native_id),
+        "runtimeFence": SdnValue.String(plan.runtime.node_boot_id),
+        "operationId": SdnValue.String(plan.identity.operation_id),
+        "parentOperationId": SdnValue.String(plan.identity.parent_operation_id),
+        "parentOperationDigest": SdnValue.String(plan.identity.parent_operation_digest),
+        "parentAssignmentDigest": SdnValue.String(plan.identity.parent_assignment_digest),
+        "parentBudgetDigest": SdnValue.String(plan.identity.parent_budget_digest),
+        "bindingDigest": SdnValue.String(plan.identity.binding_digest),
+        "cpuMillis": SdnValue.Int(plan.resources.cpu_millis),
+        "memoryBytes": SdnValue.Int(plan.resources.memory_bytes),
+        "providerIdentityDigest": SdnValue.String(plan.provider_identity_digest),
+        "policyDigest": SdnValue.String(plan.policy_digest),
+        "requestDigest": SdnValue.String(plan.request_digest),
+        "launchTemplate": SdnValue.String(template_bytes)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 2097152: return Err("container-output-plan-source-size")
+    Ok(source)
+
+fn output_plan_text_v2(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("container-output-plan-text-required:" + key)
+
+fn output_plan_int_v2(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("container-output-plan-integer-required:" + key)
+
+pub fn container_output_plan_decode_v2(source: text) -> Result<ContainerOutputPlanV2, text>:
+    if str_len(source) == 0 or str_len(source) > 2097152: return Err("container-output-plan-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(value): value
+        case Err(_): return Err("container-output-plan-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("container-output-plan-object-required")
+    val names = ["version", "kind", "mode", "workload", "runtimePodUid", "runtimeAttempt", "runtimeProviderGeneration", "runtimeOperationId", "runtimeEngine", "runtimeNativeId", "runtimeFence", "operationId", "parentOperationId", "parentOperationDigest", "parentAssignmentDigest", "parentBudgetDigest", "bindingDigest", "cpuMillis", "memoryBytes", "providerIdentityDigest", "policyDigest", "requestDigest", "launchTemplate"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("container-output-plan-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("container-output-plan-missing-field:" + key)
+    if output_plan_int_v2(fields, "version")? != 2 or output_plan_text_v2(fields, "kind")? != "container-output-plan":
+        return Err("container-output-plan-version-kind")
+    val runtime = RuntimeIdentityV1(pod_uid: output_plan_text_v2(fields, "runtimePodUid")?,
+        attempt: output_plan_int_v2(fields, "runtimeAttempt")?, provider_generation: output_plan_int_v2(fields, "runtimeProviderGeneration")?,
+        operation_id: output_plan_text_v2(fields, "runtimeOperationId")?, engine: output_plan_text_v2(fields, "runtimeEngine")?,
+        native_id: output_plan_text_v2(fields, "runtimeNativeId")?, node_boot_id: output_plan_text_v2(fields, "runtimeFence")?)
+    val identity = ContainerOutputIdentityV2(operation_id: output_plan_text_v2(fields, "operationId")?,
+        parent_operation_id: output_plan_text_v2(fields, "parentOperationId")?,
+        parent_operation_digest: output_plan_text_v2(fields, "parentOperationDigest")?,
+        parent_assignment_digest: output_plan_text_v2(fields, "parentAssignmentDigest")?,
+        parent_budget_digest: output_plan_text_v2(fields, "parentBudgetDigest")?, binding_digest: output_plan_text_v2(fields, "bindingDigest")?)
+    val plan = ContainerOutputPlanV2(mode: output_plan_text_v2(fields, "mode")?,
+        workload: container_execution_plan_decode_v2(output_plan_text_v2(fields, "workload")?)?, runtime: runtime, identity: identity,
+        resources: ContainerOutputResourcesV2(cpu_millis: output_plan_int_v2(fields, "cpuMillis")?, memory_bytes: output_plan_int_v2(fields, "memoryBytes")?),
+        provider_identity_digest: output_plan_text_v2(fields, "providerIdentityDigest")?, policy_digest: output_plan_text_v2(fields, "policyDigest")?,
+        launch_template: group_process_stream_template_decode_v3(output_plan_text_v2(fields, "launchTemplate")?)?,
+        request_digest: output_plan_text_v2(fields, "requestDigest")?)
+    if container_output_plan_encode_v2(plan)? != source: return Err("container-output-plan-noncanonical")
+    Ok(plan)

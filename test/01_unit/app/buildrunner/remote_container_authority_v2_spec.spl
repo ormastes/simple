@@ -1,0 +1,234 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use app.buildrunner.remote_container_authority_v2.{RemoteContainerCompletionV2,
+    RemoteContainerBindingV2, remote_container_completion_signature_message_v2,
+    remote_container_completion_encode_v2, remote_container_completion_decode_v2,
+    remote_container_verify_completion_v2}
+use app.buildrunner.remote_authority_v1.remote_completion_encode_v1
+use test.fixtures.buildrunner.remote_authority_v1.{RemoteAuthorityFixtureV1,
+    remote_authority_fixture_v1}
+use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.{verification_seed,
+    verification_bytes}
+
+struct ContainerAuthorityFixtureV2:
+    original: RemoteAuthorityFixtureV1
+    value: RemoteContainerCompletionV2
+    expected: RemoteContainerBindingV2
+
+# Independently assembled V2 signing bytes. Fixture digest subjects are opaque
+# crypto test inputs, not claims that a container evidence record was collected.
+fn container_golden_v2(value: RemoteContainerCompletionV2) -> text:
+    ["SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V2", str(value.version), value.task_identity,
+        value.host_id, value.assignment_digest, str(value.controller_epoch), value.operation_id,
+        value.request_digest, value.grant_digest, value.result_digest, value.execution_digest,
+        value.stdout_digest, value.stderr_digest, value.output_inventory_digest, value.tests_digest,
+        value.signer_id, str(value.key_revision), str(value.completed_at), ""].join("\n")
+
+fn container_resign_v2(value: RemoteContainerCompletionV2) -> RemoteContainerCompletionV2:
+    var signed = value
+    val signature = pure_ed25519_sign_from_seed_v1(verification_seed(129),
+        verification_bytes(container_golden_v2(value)))
+    signed.signature = signature.signature
+    signed
+
+fn container_fixture_v2() -> ContainerAuthorityFixtureV2:
+    val original = remote_authority_fixture_v1()
+    val value = container_resign_v2(RemoteContainerCompletionV2(version: 2,
+        task_identity: original.expected.task_identity, host_id: original.expected.host_id,
+        assignment_digest: original.expected.assignment_digest, controller_epoch: original.expected.controller_epoch,
+        operation_id: original.expected.operation_id, request_digest: original.completion.request_digest,
+        grant_digest: original.completion.grant_digest, result_digest: original.expected.result_digest,
+        execution_digest: sha256_text("container execution digest unit subject"),
+        stdout_digest: sha256_text("container stdout fixture\n"), stderr_digest: sha256_text(""),
+        output_inventory_digest: original.expected.output_inventory_digest, tests_digest: original.expected.tests_digest,
+        signer_id: original.host_key.identity, key_revision: original.host_key.revision,
+        completed_at: 99, signature: []))
+    val expected = RemoteContainerBindingV2(original.expected.task_identity, original.expected.host_id,
+        original.expected.assignment_digest, original.expected.controller_epoch, original.expected.operation_id,
+        original.expected.result_digest, sha256_text("container execution digest unit subject"),
+        sha256_text("container stdout fixture\n"), sha256_text(""),
+        original.expected.output_inventory_digest, original.expected.tests_digest)
+    ContainerAuthorityFixtureV2(original, value, expected)
+
+fn container_error_v2(fixture: ContainerAuthorityFixtureV2, now: i64 = 100,
+        policy_revision: i64 = 4, revocation_epoch: i64 = 2, session_generation: i64 = 3) -> text:
+    val original = fixture.original
+    match remote_container_verify_completion_v2(fixture.value, original.signed, original.approval,
+            original.issuer, original.approver, original.host_key, original.request, original.task,
+            fixture.expected, now, policy_revision, revocation_epoch, session_generation):
+        case Ok(value): ""
+        case Err(reason): reason
+
+describe "Container completion authority V2":
+    it "authenticates the V2 golden message and exact original authority bindings":
+        val fixture = container_fixture_v2()
+        expect(remote_container_completion_signature_message_v2(fixture.value).unwrap())
+            .to_equal(verification_bytes(container_golden_v2(fixture.value)))
+        expect(container_error_v2(fixture)).to_equal("")
+        val wire = remote_container_completion_encode_v2(fixture.value).unwrap()
+        val decoded = remote_container_completion_decode_v2(wire).unwrap()
+        expect(remote_container_completion_encode_v2(decoded).unwrap()).to_equal(wire)
+        expect(decoded.execution_digest).to_equal(fixture.expected.execution_digest)
+        expect(decoded.stdout_digest).to_equal(fixture.expected.stdout_digest)
+        expect(decoded.stderr_digest).to_equal(fixture.expected.stderr_digest)
+
+    it "rejects signature corruption and mutations even when measured digests also change":
+        val base = container_fixture_v2()
+        var corrupt = base
+        corrupt.value.signature[0] = corrupt.value.signature[0] ^ 1u8
+        expect(container_error_v2(corrupt)).to_equal("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+        var execution = base
+        execution.value.execution_digest = sha256_text("other execution")
+        execution.expected.execution_digest = execution.value.execution_digest
+        var stdout = base
+        stdout.value.stdout_digest = sha256_text("other stdout")
+        stdout.expected.stdout_digest = stdout.value.stdout_digest
+        var tests = base
+        tests.value.tests_digest = sha256_text("other tests")
+        tests.expected.tests_digest = tests.value.tests_digest
+        var outputs = base
+        outputs.value.output_inventory_digest = sha256_text("other outputs")
+        outputs.expected.output_inventory_digest = outputs.value.output_inventory_digest
+        for fixture in [execution, stdout, tests, outputs]:
+            expect(container_error_v2(fixture)).to_equal("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+
+    it "requires actual parent result execution log output and test digest agreement":
+        val base = container_fixture_v2()
+        var result = base.expected
+        result.result_digest = sha256_text("different result")
+        var execution = base.expected
+        execution.execution_digest = sha256_text("different execution evidence")
+        var stdout = base.expected
+        stdout.stdout_digest = sha256_text("different stdout")
+        var stderr = base.expected
+        stderr.stderr_digest = sha256_text("different stderr")
+        var outputs = base.expected
+        outputs.output_inventory_digest = sha256_text("different output inventory")
+        var tests = base.expected
+        tests.tests_digest = sha256_text("different test inventory")
+        for expected in [result, execution, stdout, stderr, outputs, tests]:
+            var fixture = base
+            fixture.expected = expected
+            expect(container_error_v2(fixture)).to_equal("CONTAINER_COMPLETION_OBSERVATION_MISMATCH")
+
+    it "requires current scoped host credentials and separate host issuer approver roles":
+        val base = container_fixture_v2()
+        var revoked = base
+        revoked.original.host_key.revoked = true
+        expect(container_error_v2(revoked)).to_equal("AUTHORITY_KEY_REVOKED")
+        var role = base
+        role.original.host_key.role = "human-approver"
+        var rotated = base
+        rotated.original.host_key.revision = 2
+        for fixture in [role, rotated]:
+            expect(container_error_v2(fixture)).to_equal("AUTHORITY_KEY_MISMATCH")
+        var scoped = base
+        scoped.original.host_key.host_id = "another_worker"
+        expect(container_error_v2(scoped)).to_equal("AUTHORITY_SCOPE_DENIED")
+        for key in [base.original.issuer.public_key, base.original.approver.public_key]:
+            var fixture = base
+            fixture.original.host_key.public_key = key
+            expect(container_error_v2(fixture)).to_equal("CONTAINER_COMPLETION_ROLES_NOT_SEPARATE")
+
+    it "revalidates original issuer and approval signatures":
+        val base = container_fixture_v2()
+        var issuer = base
+        issuer.original.signed.signature[0] = issuer.original.signed.signature[0] ^ 1u8
+        expect(container_error_v2(issuer)).to_equal("ISSUER_SIGNATURE_INVALID")
+        var approval = base
+        approval.original.approval.signature[0] = approval.original.approval.signature[0] ^ 1u8
+        expect(container_error_v2(approval)).to_equal("APPROVAL_SIGNATURE_INVALID")
+
+    it "binds the exact original task and request rather than replacement claims":
+        val base = container_fixture_v2()
+        var args = base.original.task
+        args.args = ["compile", "different.spl"]
+        var source = base.original.task
+        source.source_digest = sha256_text("different source")
+        var toolchain = base.original.task
+        toolchain.toolchain_digest = sha256_text("different toolchain")
+        var attempt = base.original.task
+        attempt.attempt = 2
+        var inputs = base.original.task
+        inputs.inputs = []
+        var outputs = base.original.task
+        outputs.outputs = ["different.o"]
+        for task in [args, source, toolchain, attempt, inputs, outputs]:
+            var fixture = base
+            fixture.original.task = task
+            expect(container_error_v2(fixture)).to_equal("CONTAINER_COMPLETION_TASK_MISMATCH")
+        var request = base
+        request.original.request.payload_digest = sha256_text("replacement request task")
+        expect(container_error_v2(request)).to_equal("APPROVAL_PAYLOAD_MISMATCH")
+        var digest = base
+        digest.value.request_digest = sha256_text("replacement request digest")
+        digest.value = container_resign_v2(digest.value)
+        expect(container_error_v2(digest)).to_equal("CONTAINER_COMPLETION_AUTHORIZATION_MISMATCH")
+        var grant = base
+        grant.value.grant_digest = sha256_text("replacement grant digest")
+        grant.value = container_resign_v2(grant.value)
+        expect(container_error_v2(grant)).to_equal("CONTAINER_COMPLETION_AUTHORIZATION_MISMATCH")
+
+    it "rejects stale assignment and controller fences or different host and operation":
+        val base = container_fixture_v2()
+        var epoch = base.expected
+        epoch.controller_epoch = 8
+        var assignment = base.expected
+        assignment.assignment_digest = sha256_text("replacement assignment")
+        for expected in [epoch, assignment]:
+            var fixture = base
+            fixture.expected = expected
+            expect(container_error_v2(fixture)).to_equal("CONTAINER_COMPLETION_ASSIGNMENT_STALE")
+        var host = base
+        host.value.host_id = "worker_2"
+        host.value = container_resign_v2(host.value)
+        expect(container_error_v2(host)).to_equal("CONTAINER_COMPLETION_HOST_MISMATCH")
+        var operation = base
+        operation.value.operation_id = "operation_2"
+        operation.value = container_resign_v2(operation.value)
+        expect(container_error_v2(operation)).to_equal("CONTAINER_COMPLETION_OPERATION_MISMATCH")
+
+    it "rejects native V1 signatures wire records and version downgrade":
+        val base = container_fixture_v2()
+        var downgrade = base
+        downgrade.value.signature = base.original.completion.signature
+        expect(container_error_v2(downgrade)).to_equal("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+        downgrade = base
+        downgrade.value.version = 1
+        expect(container_error_v2(downgrade)).to_equal("CONTAINER_COMPLETION_VERSION_UNSUPPORTED")
+        val native_wire = remote_completion_encode_v1(base.original.completion).unwrap()
+        expect(remote_container_completion_decode_v2(native_wire).unwrap_err())
+            .to_equal("CONTAINER_COMPLETION_WIRE_VERSION_INVALID")
+
+    it "requires current time policy revocation and session context":
+        val base = container_fixture_v2()
+        var future = base
+        future.value.completed_at = 101
+        future.value = container_resign_v2(future.value)
+        expect(container_error_v2(future)).to_equal("CONTAINER_COMPLETION_TIME_INVALID")
+        expect(container_error_v2(base, 201)).to_equal("GRANT_EXPIRED")
+        var expired = base
+        expired.original.host_key.expires_at = 99
+        expect(container_error_v2(expired)).to_equal("AUTHORITY_KEY_EXPIRED")
+        expect(container_error_v2(base, 100, 5)).to_equal("POLICY_STALE")
+        expect(container_error_v2(base, 100, 4, 3)).to_equal("GRANT_REVOKED")
+        expect(container_error_v2(base, 100, 4, 2, 4)).to_equal("SESSION_STALE")
+
+    it "rejects oversized truncated extra noncanonical and malformed signature wire":
+        val fixture = container_fixture_v2()
+        val wire = remote_container_completion_encode_v2(fixture.value).unwrap()
+        expect(remote_container_completion_decode_v2("x".repeat(16385)).unwrap_err())
+            .to_equal("CONTAINER_COMPLETION_WIRE_TOO_LARGE")
+        expect(remote_container_completion_decode_v2(wire[0:wire.len() - 1]).unwrap_err())
+            .to_equal("CONTAINER_COMPLETION_WIRE_INVALID")
+        expect(remote_container_completion_decode_v2(wire + "extra\n").unwrap_err())
+            .to_equal("CONTAINER_COMPLETION_WIRE_INVALID")
+        expect(remote_container_completion_decode_v2(wire.replace("\n2\n", "\n02\n")).unwrap_err())
+            .to_equal("CONTAINER_COMPLETION_WIRE_INVALID")
+        val rows = wire.split("\n")
+        val signature_hex = rows[rows.len() - 2]
+        expect(remote_container_completion_decode_v2(wire.replace(signature_hex, "g".repeat(128))).unwrap_err())
+            .to_equal("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+        expect(remote_container_completion_decode_v2(wire.replace(signature_hex, "a".repeat(126))).unwrap_err())
+            .to_equal("CONTAINER_COMPLETION_SIGNATURE_INVALID")

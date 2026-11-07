@@ -1,0 +1,92 @@
+use std.spec.{describe, it, expect}
+use std.test_runner.test_runner_types.TestExecutionMode
+use app.buildrunner.remote_test_runner_v1.remote_test_options_v1
+
+# Argument admission only: these specs never invoke native compilation or tests.
+# Shared --native-source validation expects the repository cwd and existing src/.
+fn runner_paths_v1() -> [text]:
+    ["test/01_unit/app/buildrunner/remote_evidence_v1_spec.spl",
+        "test/01_unit/app/buildrunner/remote_session_v1_spec.spl"]
+
+describe "Remote test producer argument admission V1":
+    it "accepts explicit native LLVM options and preserves exact ordered paths":
+        val paths = runner_paths_v1()
+        val options = remote_test_options_v1(["--mode", "native", "--native-backend", "llvm",
+            "--native-source", "src", paths[0], paths[1]], paths).unwrap()
+        expect(options.mode).to_equal(TestExecutionMode.Native)
+        expect(options.native_backend).to_equal("llvm")
+        expect(options.native_source_roots).to_equal(["src"])
+        expect(options.paths).to_equal(paths)
+        expect(options.path).to_equal(paths[0])
+        expect(options.path_explicit).to_equal(true)
+        expect(options.coverage).to_equal(false)
+        expect(options.safe_mode).to_equal(false)
+        expect(options.no_limits).to_equal(false)
+
+    it "accepts explicit native Cranelift equals options and an exact single path":
+        val path = runner_paths_v1()[0]
+        val options = remote_test_options_v1(["--mode=native", "--native-backend=cranelift",
+            "--native-source=src", path], [path]).unwrap()
+        expect(options.mode).to_equal(TestExecutionMode.Native)
+        expect(options.native_backend).to_equal("cranelift")
+        expect(options.native_source_roots).to_equal(["src"])
+        expect(options.paths).to_equal([path])
+
+    it "rejects interpreter and compile declarations despite backend normalization":
+        val path = runner_paths_v1()[0]
+        for mode in ["interpreter", "compile"]:
+            expect(remote_test_options_v1(["--mode", mode, "--native-backend=llvm", path], [path]).unwrap_err())
+                .to_equal("REMOTE_TEST_NATIVE_MODE_REQUIRED")
+            expect(remote_test_options_v1(["--mode=" + mode, "--native-backend=cranelift", path], [path]).unwrap_err())
+                .to_equal("REMOTE_TEST_NATIVE_MODE_REQUIRED")
+        expect(remote_test_options_v1(["--compile", "--native-backend=llvm", path], [path]).unwrap_err())
+            .to_equal("REMOTE_TEST_NATIVE_MODE_REQUIRED")
+
+    it "requires an explicit backend even when source roots imply default LLVM":
+        val path = runner_paths_v1()[0]
+        expect(remote_test_options_v1(["--mode=native", path], [path]).unwrap_err())
+            .to_equal("REMOTE_TEST_EXPLICIT_NATIVE_BACKEND_REQUIRED")
+        expect(remote_test_options_v1(["--mode=native", "--native-source=src", path], [path]).unwrap_err())
+            .to_equal("REMOTE_TEST_EXPLICIT_NATIVE_BACKEND_REQUIRED")
+
+    it "rejects coverage safe mode aliases and disabled limits":
+        val path = runner_paths_v1()[0]
+        for flag in ["--coverage", "--safe-mode", "--safe", "--no-limits"]:
+            expect(remote_test_options_v1(["--mode=native", "--native-backend=llvm", flag, path], [path]).unwrap_err())
+                .to_equal("REMOTE_TEST_EXPLICIT_NATIVE_BACKEND_REQUIRED")
+
+    it "rejects listing skipped slow and planned-only selection switches":
+        val path = runner_paths_v1()[0]
+        for flag in ["--list", "--list-ignored", "--list-skip-features", "--skip-features",
+                "--only-skipped", "--only-slow", "--planned-only", "--pending"]:
+            expect(remote_test_options_v1(["--mode=native", "--native-backend=llvm", flag, path], [path]).unwrap_err())
+                .to_equal("REMOTE_TEST_SELECTION_DIFFERS")
+
+    it "rejects the shared parser's actual tag filter syntax":
+        val path = runner_paths_v1()[0]
+        expect(remote_test_options_v1(["--mode=native", "--native-backend=llvm",
+            "--tag", "requires-native", path], [path]).unwrap_err())
+            .to_equal("REMOTE_TEST_SELECTION_DIFFERS")
+
+    it "rejects missing extra changed reordered and duplicate selected paths":
+        val paths = runner_paths_v1()
+        val native_args = ["--mode=native", "--native-backend=llvm"]
+        expect(remote_test_options_v1(["--mode=native", "--native-backend=llvm", paths[0]], paths).unwrap_err())
+            .to_equal("REMOTE_TEST_SELECTION_DIFFERS")
+        expect(remote_test_options_v1(["--mode=native", "--native-backend=llvm", paths[0], paths[1]], [paths[0]]).unwrap_err())
+            .to_equal("REMOTE_TEST_SELECTION_DIFFERS")
+        expect(remote_test_options_v1(["--mode=native", "--native-backend=llvm", "test/other_spec.spl"], [paths[0]]).unwrap_err())
+            .to_equal("REMOTE_TEST_SELECTION_DIFFERS")
+        expect(remote_test_options_v1(["--mode=native", "--native-backend=llvm", paths[1], paths[0]], paths).unwrap_err())
+            .to_equal("REMOTE_TEST_SELECTION_DIFFERS")
+        expect(remote_test_options_v1(["--mode=native", "--native-backend=llvm", paths[0], paths[0]], paths).unwrap_err())
+            .to_equal("REMOTE_TEST_SELECTION_DIFFERS")
+        expect(remote_test_options_v1(native_args, paths).unwrap_err())
+            .to_equal("REMOTE_TEST_SELECTION_DIFFERS")
+
+    it "preserves shared parser rejection for malformed backend options":
+        val path = runner_paths_v1()[0]
+        expect(remote_test_options_v1(["--mode=native", "--native-backend=auto", path], [path]).unwrap_err())
+            .to_equal("invalid value for --native-backend: auto (expected llvm or cranelift)")
+        expect(remote_test_options_v1(["--mode=native", "--native-backend="], [path]).unwrap_err())
+            .to_equal("missing value for --native-backend")

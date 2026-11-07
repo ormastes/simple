@@ -1,0 +1,335 @@
+# Windows Docker process-only contract scenarios.
+# @req REQ-WDP-001 REQ-WDP-002 REQ-WDP-003 REQ-WDP-005 REQ-WDP-006
+# Runtime qualification: NOT_RUN; these fixtures do not invoke Windows or Docker.
+use std.spec.*
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.*
+
+fn contract_policy() -> WindowsDockerPolicyV1:
+    WindowsDockerPolicyV1(docker_executable: "C:\\Program Files\\Docker\\docker.exe",
+        endpoint: "npipe:////./pipe/docker_engine", engine_id: "engine-a",
+        node_boot_id: "boot-a", provider_generation: 4,
+        expected_kernel_version: "10.0 20348 (20348.2402.amd64fre)",
+        image_os_version: "10.0.20348.2402",
+        expected_image_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        timeout_ms: 5000, max_output_bytes: 8192,
+        system_root: "C:\\Windows", temp_directory: "C:\\Temp")
+
+fn contract_request() -> WindowsDockerRequestV1:
+    WindowsDockerRequestV1(pod_uid: "workload-a", attempt: 2, operation_id: "operation-a",
+        image: "mcr.microsoft.com/windows/servercore@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        command: ["C:\\work\\fixture.exe", "--exit"], args: ["17"],
+        cpu_count: 2, memory_limit_bytes: 536870912, network: "none")
+
+fn contract_digest(policy: WindowsDockerPolicyV1, request: WindowsDockerRequestV1) -> text:
+    match windows_docker_request_digest_v1(policy, request):
+        case Ok(value): return value
+        case Err(reason): fail("fixture request rejected: " + reason)
+    "unreachable"
+
+describe "Windows Docker request admission":
+    it "keeps explicit host and image version observations distinct":
+        step("Select exact engine and image metadata without claiming compatibility")
+        val policy = contract_policy()
+        expect(windows_docker_policy_reason_v1(policy)).to_equal("")
+        expect(policy.expected_kernel_version == policy.image_os_version).to_equal(false)
+        expect(windows_docker_request_reason_v1(policy, contract_request())).to_equal("")
+
+    it "rejects remote endpoints and implicit executable resolution":
+        step("Refuse a remote daemon or a Docker command found through PATH")
+        var policy = contract_policy()
+        policy.endpoint = "tcp://remote:2375"
+        expect(windows_docker_policy_reason_v1(policy)).to_equal("docker-local-pipe-required")
+        policy = contract_policy()
+        policy.docker_executable = "docker.exe"
+        expect(windows_docker_policy_reason_v1(policy)).to_equal("docker-absolute-executable-required")
+        policy.docker_executable = "C:\\tools\\..\\docker.exe"
+        expect(windows_docker_policy_reason_v1(policy)).to_equal("docker-absolute-executable-required")
+
+    it "requires engine, boot and generation identity plus finite bounds":
+        var policy = contract_policy()
+        policy.engine_id = ""
+        expect(windows_docker_policy_reason_v1(policy)).to_equal("docker-policy-identity-invalid")
+        policy = contract_policy()
+        policy.provider_generation = 0
+        expect(windows_docker_policy_reason_v1(policy)).to_equal("docker-policy-identity-invalid")
+        policy = contract_policy()
+        policy.timeout_ms = 0
+        expect(windows_docker_policy_reason_v1(policy)).to_equal("docker-execution-bounds-invalid")
+        policy = contract_policy()
+        policy.max_output_bytes = 1048577
+        expect(windows_docker_policy_reason_v1(policy)).to_equal("docker-execution-bounds-invalid")
+        policy = contract_policy()
+        policy.system_root = "."
+        expect(windows_docker_policy_reason_v1(policy)).to_equal("docker-child-environment-invalid")
+
+    it "rejects mutable images, short digests and invalid logical identities":
+        var request = contract_request()
+        request.image = "mcr.microsoft.com/windows/servercore:ltsc2022"
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-full-image-digest-required")
+        request.image = "image@sha256:abcd"
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-full-image-digest-required")
+        request = contract_request()
+        request.operation_id = "a|forged"
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-request-identity-invalid")
+        request = contract_request()
+        request.attempt = 0
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-request-identity-invalid")
+
+    it "rejects unsupported networking and invalid resource ceilings":
+        var request = contract_request()
+        request.network = "nat"
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-network-none-required")
+        request = contract_request()
+        request.cpu_count = 0
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-resource-limit-invalid")
+        request = contract_request()
+        request.memory_limit_bytes = 1
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-resource-limit-invalid")
+
+    it "rejects an absent entrypoint and NUL before command execution":
+        var request = contract_request()
+        request.command = []
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-command-count-invalid")
+        request = contract_request()
+        request.args = ["a\0b"]
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-argument-invalid")
+
+    it "preserves command arguments as individual values without shell interpretation":
+        step("Build process-isolated Docker argv with a spaced executable and shell-looking data")
+        val policy = contract_policy()
+        var request = contract_request()
+        request.command = ["C:\\Program Files\\fixture.exe", "--exit"]
+        request.args = ["17", "a b", "$(whoami); & echo forged", ""]
+        val command = windows_docker_create_command_v1(policy, request).unwrap()
+        expect(command.program).to_equal(policy.docker_executable)
+        expect(command.args[0]).to_equal("--host")
+        expect(command.args[1]).to_equal(policy.endpoint)
+        expect(command.args[2]).to_equal("create")
+        expect(command.args[3]).to_equal("--isolation=process")
+        expect(command.args[4]).to_equal("--user")
+        expect(command.args[5]).to_equal("ContainerUser")
+        expect(command.args[6]).to_equal("--network")
+        expect(command.args[7]).to_equal("none")
+        expect(command.args[8]).to_equal("--cpu-count")
+        expect(command.args[9]).to_equal("2")
+        expect(command.args[10]).to_equal("--memory")
+        expect(command.args[11]).to_equal("536870912")
+        val count = command.args.len()
+        expect(command.args[count - 8]).to_equal("--entrypoint")
+        expect(command.args[count - 7]).to_equal(request.command[0])
+        expect(command.args[count - 6]).to_equal(request.image)
+        expect(command.args[count - 5]).to_equal("--exit")
+        expect(command.args[count - 4]).to_equal("17")
+        expect(command.args[count - 3]).to_equal("a b")
+        expect(command.args[count - 2]).to_equal("$(whoami); & echo forged")
+        expect(command.args[count - 1]).to_equal("")
+        expect(command.args.contains("--privileged")).to_equal(false)
+        expect(command.args.contains("--isolation=hyperv")).to_equal(false)
+
+    it "binds argument boundaries, resources and selected engine policy in the digest":
+        step("Change one admitted execution field and reject reuse of its previous digest")
+        val policy = contract_policy()
+        val request = contract_request()
+        val original = contract_digest(policy, request)
+        expect(windows_docker_id_v1(original)).to_equal(true)
+        expect(original.len()).to_equal(64)
+        var changed = request
+        changed.args = ["1", "7"]
+        expect(contract_digest(policy, changed) == original).to_equal(false)
+        changed = request
+        changed.cpu_count = 3
+        expect(contract_digest(policy, changed) == original).to_equal(false)
+        changed = request
+        changed.command = ["C:\\work\\fixture.exe"]
+        changed.args = ["--exit", "17"]
+        expect(contract_digest(policy, changed) == original).to_equal(false)
+        var other_policy = policy
+        other_policy.engine_id = "engine-b"
+        expect(contract_digest(other_policy, request) == original).to_equal(false)
+
+    it "requires full lowercase native identities instead of names or prefixes":
+        step("Admit one complete native ID and refuse plausible cleanup aliases")
+        expect(windows_docker_id_v1("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")).to_equal(true)
+        expect(windows_docker_id_v1("cccccccccccc")).to_equal(false)
+        expect(windows_docker_id_v1("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")).to_equal(false)
+        expect(windows_docker_id_v1("workload-a")).to_equal(false)
+        expect(windows_docker_id_v1("--all")).to_equal(false)
+
+fn codec_error(source: text) -> text:
+    match windows_docker_request_decode_v1(contract_policy(), source):
+        case Ok(_): fail("invalid Windows request record accepted")
+        case Err(reason): return reason
+    "unreachable"
+
+describe "Windows canonical SDN request records":
+    it "round trips typed arguments and retains operation identity separately":
+        step("Persist canonical SDN and decode it against the trusted local policy")
+        val policy = contract_policy()
+        var request = contract_request()
+        request.args = ["spaces and \"quotes\"", "line one\nline two", "", "17"]
+        val source = windows_docker_request_encode_v1(policy, request).unwrap()
+        val decoded = windows_docker_request_decode_v1(policy, source).unwrap()
+        expect(decoded.pod_uid).to_equal(request.pod_uid)
+        expect(decoded.operation_id).to_equal(request.operation_id)
+        expect(decoded.args).to_equal(request.args)
+        expect(decoded.command).to_equal(request.command)
+        expect(windows_docker_request_encode_v1(policy, decoded).unwrap()).to_equal(source)
+        expect(source.contains("requestDigest:")).to_equal(true)
+
+    it "rejects duplicate, unknown, missing and incorrectly typed fields":
+        val source = windows_docker_request_encode_v1(contract_policy(), contract_request()).unwrap()
+        expect(codec_error(source.replace("version: 1", "version: 1, version: 1"))).to_contain("duplicate_key")
+        expect(codec_error(source.replace("version: 1", "version: 1, unexpected: true"))).to_contain("unknown_field")
+        expect(codec_error(source.replace("cpuCount: 2, ", ""))).to_contain("missing_field")
+        expect(codec_error(source.replace("cpuCount: 2", "cpuCount: true"))).to_contain("type:cpuCount")
+
+    it "rejects digest tampering, wrong schema and noncanonical serialization":
+        val source = windows_docker_request_encode_v1(contract_policy(), contract_request()).unwrap()
+        expect(codec_error(source.replace("cpuCount: 2", "cpuCount: 3"))).to_contain("digest:requestDigest")
+        expect(codec_error(source.replace("version: 1", "version: 4"))).to_contain("version:version")
+        expect(codec_error(source.replace("windows-docker-request", "linux-request"))).to_contain("kind:kind")
+        expect(codec_error(source + "\n")).to_equal("docker-request-record-not-canonical")
+        expect(codec_error("")).to_equal("docker-request-record-byte-limit")
+
+    it "refuses another trusted policy even when the retained payload is canonical":
+        val source = windows_docker_request_encode_v1(contract_policy(), contract_request()).unwrap()
+        var policy = contract_policy()
+        policy.engine_id = "engine-b"
+        match windows_docker_request_decode_v1(policy, source):
+            case Ok(_): fail("record from another engine policy accepted")
+            case Err(reason): expect(reason).to_contain("digest:requestDigest")
+
+
+describe "Explicit Windows working directory":
+    it "preserves default version one and binds an explicitly selected directory in version two":
+        val policy = contract_policy()
+        var request = contract_request()
+        val original = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(original.contains("version: 1")).to_equal(true)
+        expect(original.contains("workingDirectory")).to_equal(false)
+        val first_digest = contract_digest(policy, request)
+        request.working_directory = "C:\\work"
+        val explicit = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(explicit.contains("version: 2")).to_equal(true)
+        expect(windows_docker_request_decode_v1(policy, explicit).unwrap().working_directory).to_equal("C:\\work")
+        expect(contract_digest(policy, request) == first_digest).to_equal(false)
+        val command = windows_docker_create_command_v1(policy, request).unwrap()
+        expect(command.args.contains("--workdir")).to_equal(true)
+        expect(command.args.contains("C:\\work")).to_equal(true)
+        request.working_directory = "C:\\"
+        expect(windows_docker_request_reason_v1(policy, request)).to_equal("")
+        request.working_directory = "relative"
+        expect(windows_docker_request_reason_v1(policy, request)).to_equal("docker-working-directory-invalid")
+
+    it "rejects directory fields outside their explicit version and refuses missing version-two directories":
+        val policy = contract_policy()
+        var request = contract_request()
+        val original = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(codec_error(original.replace("version: 1", "version: 2"))).to_contain("workingDirectory")
+        request.working_directory = "C:\\work"
+        val explicit = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(codec_error(explicit.replace("version: 2", "version: 1"))).to_contain("version:workingDirectory")
+        expect(codec_error(explicit.replace("C:\\\\work", "C:\\\\else"))).to_contain("digest:requestDigest")
+
+
+fn workspace_contract_policy_v3() -> WindowsDockerPolicyV1:
+    var policy = contract_policy()
+    policy.workspace_root = "C:\\protected-workspaces"
+    policy
+
+fn workspace_contract_request_v3() -> WindowsDockerRequestV1:
+    var request = contract_request()
+    request.working_directory = "C:\\work\\src"
+    request.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces\\attempt-a",
+        guest_root: "C:\\work", read_only: false)]
+    request
+
+describe "Windows protected workspace bind mount":
+    it "emits an actual bind mount and version three canonical record with strict typed fields":
+        step("Bind a protected attempt directory to the explicit in-container work root")
+        val policy = workspace_contract_policy_v3()
+        val request = workspace_contract_request_v3()
+        expect(windows_docker_request_reason_v1(policy, request)).to_equal("")
+        val command = windows_docker_create_command_v1(policy, request).unwrap()
+        expect(command.args.contains("--mount")).to_equal(true)
+        expect(command.args.contains("type=bind,source=C:\\protected-workspaces\\attempt-a,target=C:\\work")).to_equal(true)
+        val source = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(source.contains("version: 3")).to_equal(true)
+        expect(source.contains("mounts:")).to_equal(true)
+        val decoded = windows_docker_request_decode_v1(policy, source).unwrap()
+        expect(decoded.mounts.len()).to_equal(1)
+        expect(decoded.mounts[0].host_root).to_equal(request.mounts[0].host_root)
+        expect(decoded.mounts[0].guest_root).to_equal("C:\\work")
+        expect(decoded.mounts[0].read_only).to_equal(false)
+        expect(decoded.working_directory).to_equal("C:\\work\\src")
+        expect(windows_docker_request_encode_v1(policy, decoded).unwrap()).to_equal(source)
+
+    it "binds protected root and every typed mount field into the semantic digest":
+        val policy = workspace_contract_policy_v3()
+        val base = workspace_contract_request_v3()
+        val digest = contract_digest(policy, base)
+        var changed = workspace_contract_request_v3()
+        changed.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces\\attempt-b", guest_root: "C:\\work", read_only: false)]
+        expect(contract_digest(policy, changed) == digest).to_equal(false)
+        changed = workspace_contract_request_v3()
+        changed.mounts = [WindowsDockerMountV1(host_root: base.mounts[0].host_root, guest_root: "C:\\other", read_only: false)]
+        changed.working_directory = "C:\\other\\src"
+        expect(contract_digest(policy, changed) == digest).to_equal(false)
+        changed = workspace_contract_request_v3()
+        changed.mounts = [WindowsDockerMountV1(host_root: base.mounts[0].host_root, guest_root: "C:\\work", read_only: true)]
+        expect(contract_digest(policy, changed) == digest).to_equal(false)
+        expect(windows_docker_create_command_v1(policy, changed).unwrap().args.contains("type=bind,source=C:\\protected-workspaces\\attempt-a,target=C:\\work,readonly")).to_equal(true)
+        var narrower = policy
+        narrower.workspace_root = "C:\\protected-workspaces\\attempt-a"
+        changed.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces\\attempt-a\\child", guest_root: "C:\\work", read_only: false)]
+        expect(contract_digest(policy, changed) == contract_digest(narrower, changed)).to_equal(false)
+
+    it "requires one strict descendant of an administrator protected root and an in-mount directory":
+        var request = workspace_contract_request_v3()
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-policy-workspace-root-required")
+        request.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces", guest_root: "C:\\work", read_only: false)]
+        expect(windows_docker_request_reason_v1(workspace_contract_policy_v3(), request)).to_equal("docker-workspace-host-outside-protected-root")
+        request.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces-evil\\attempt-a", guest_root: "C:\\work", read_only: false)]
+        expect(windows_docker_request_reason_v1(workspace_contract_policy_v3(), request)).to_equal("docker-workspace-host-outside-protected-root")
+        request = workspace_contract_request_v3()
+        request.working_directory = "C:\\work-evil"
+        expect(windows_docker_request_reason_v1(workspace_contract_policy_v3(), request)).to_equal("docker-workspace-directory-outside-mount")
+        request.working_directory = ""
+        expect(windows_docker_request_reason_v1(workspace_contract_policy_v3(), request)).to_equal("docker-workspace-directory-required")
+        request = workspace_contract_request_v3()
+        request.mounts = request.mounts + request.mounts
+        expect(windows_docker_request_reason_v1(workspace_contract_policy_v3(), request)).to_equal("docker-workspace-mount-count-invalid")
+
+    it "rejects mount-option injection, controls, relative paths, aliases and traversal":
+        for path in ["relative", "C:\\work,readonly", "C:\\work=other", "C:\\work\"quoted", "C:\\work|forged", "C:\\work\\..\\escape", "C:\\work\\.\\alias", "C:\\work\\child ", "C:\\work\nchild", "C:\\work:stream", "C:/work"]:
+            expect(windows_docker_mount_path_v1(path)).to_equal(false)
+        for path in ["C:\\protected-workspaces\\attempt-a", "C:\\Program Files\\workspace"]:
+            expect(windows_docker_mount_path_v1(path)).to_equal(true)
+
+    it "rejects duplicate, unknown, missing and mistyped nested mount records":
+        val policy = workspace_contract_policy_v3()
+        val source = windows_docker_request_encode_v1(policy, workspace_contract_request_v3()).unwrap()
+        expect(source.contains("readOnly: false")).to_equal(true)
+        for malformed in [source.replace("readOnly: false", "readOnly: false, readOnly: false"),
+                source.replace("readOnly: false", "readOnly: false, unknown: true"),
+                source.replace(", readOnly: false", ""),
+                source.replace("readOnly: false", "readOnly: \"false\""),
+                source.replace("mounts: [", "mounts: [nil, ")]:
+            expect(malformed == source).to_equal(false)
+            expect(windows_docker_request_decode_v1(policy, malformed).is_err()).to_equal(true)
+        expect(windows_docker_request_decode_v1(policy, source.replace("version: 3", "version: 2")).is_err()).to_equal(true)
+
+    it "keeps legacy policy version one bytes and adds protected roots only in version two":
+        val original = windows_docker_policy_encode_v1(contract_policy()).unwrap()
+        expect(original.contains("version: 1")).to_equal(true)
+        expect(original.contains("workspaceRoot")).to_equal(false)
+        val protected = windows_docker_policy_encode_v1(workspace_contract_policy_v3()).unwrap()
+        expect(protected.contains("version: 2")).to_equal(true)
+        expect(windows_docker_policy_decode_v1(protected).unwrap().workspace_root).to_equal("C:\\protected-workspaces")
+        expect(windows_docker_policy_decode_v1(protected.replace("version: 2", "version: 1")).is_err()).to_equal(true)
+        expect(windows_docker_policy_decode_v1(original.replace("version: 1", "version: 2")).is_err()).to_equal(true)
+        var invalid = contract_policy()
+        invalid.workspace_root = "C:\\"
+        expect(windows_docker_policy_reason_v1(invalid)).to_equal("docker-policy-workspace-root-invalid")

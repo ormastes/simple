@@ -1,0 +1,350 @@
+# @req HOST-EXECUTION-01 HOST-EXECUTION-02 HOST-EXECUTION-03
+# NOT_RUN: real journal+Ed25519; provider calls are explicitly scripted simulation.
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.*
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.common.contracts.orchestration.host_execute_request_v2.*
+use std.common.contracts.container.execution_v2.{container_scope_fence_id_v2, container_execution_request_decode_v2}
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+
+fn host_execution_turn_fixture_v2(fixture: HostExecutionFixtureV2) -> HostExecutionTurnV2:
+    host_authorized_execute_v2(fixture.owner, fixture.container, host_execute_request_encode_v2(fixture.envelope).unwrap(),
+        fixture.policy, fixture.provider_digest, "user_1", fixture.context, host_execution_clock_v2)
+
+fn host_execution_charged_v2(turn: HostExecutionTurnV2):
+    assert(turn.owner.journal.operations["operation_1"].state == "executing")
+    assert(host_available_capacity_v1(turn.owner.ledger).unwrap().cpu_millis == 1000)
+    assert(host_available_capacity_v1(turn.owner.ledger).unwrap().memory_bytes == 1536)
+
+describe "Finite signed host execution with explicitly scripted provider":
+    it "commits execution before provider commands and publishes exact inspected observation":
+        val fixture = host_execution_fixture_v2("success")
+        assert(host_authorized_execution_check_v2(fixture.owner, fixture.container,
+            host_execute_request_encode_v2(fixture.envelope).unwrap(), fixture.policy,
+            fixture.provider_digest, "user_1", fixture.context).unwrap())
+        expect(distributed_operation_journal_lookup_v2(fixture.owner.journal, "operation_1").unwrap().state).to_equal("admitted")
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        assert(not file_exists(fixture.root + "/host-execute-packets"))
+        val turn = host_execution_turn_fixture_v2(fixture)
+        expect(turn.error).to_equal("")
+        assert(not turn.recovery_required)
+        host_execution_charged_v2(turn)
+        expect(fixture.provider.scripted_cursor).to_equal(3)
+        val observed = turn.observation.unwrap()
+        expect(observed.phase).to_equal("running")
+        expect(observed.runtime.native_id).to_equal("1".repeat(64))
+        expect(observed.runtime.node_boot_id).to_equal(container_scope_fence_id_v2(fixture.scope).unwrap())
+        expect(observed.scope.boot_id).to_equal("boot-1")
+        expect(observed.runtime.provider_generation).to_equal(7)
+        expect(observed.provider_identity_digest).to_equal(fixture.provider_digest)
+        expect(observed.operation_digest).to_equal(sha256_text(distributed_encode_operation_v2(fixture.envelope.operation).unwrap()))
+        val saved = host_execution_observation_load_v2(turn.owner.journal.root, "operation_1").unwrap()
+        expect(host_execution_observation_encode_v2(saved).unwrap()).to_equal(host_execution_observation_encode_v2(observed).unwrap())
+        val packet = file_read_regular_no_follow_bounded(turn.owner.journal.root + "/host-execute-packets/" + sha256_text("operation_1") + ".sdn", 2097152).unwrap()
+        expect(packet).to_equal(host_execute_request_encode_v2(fixture.envelope).unwrap())
+        val before = fixture.provider.scripted_cursor
+        val replay = host_authorized_execute_v2(turn.owner, turn.container, packet, fixture.policy,
+            fixture.provider_digest, "user_1", fixture.context, host_execution_clock_v2)
+        expect(replay.error).to_equal("execution-reconciliation-required")
+        expect(fixture.provider.scripted_cursor).to_equal(before)
+        assert(replay.recovery_required)
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+        val reopened = host_capacity_owner_open_v1(turn.owner.journal.root, turn.owner.ledger.capacity, "d".repeat(64), 50, true).unwrap()
+        expect(reopened.journal.operations["operation_1"].state).to_equal("outcome-unknown")
+        val unknown = host_authorized_execute_v2(reopened, turn.container, packet, fixture.policy,
+            fixture.provider_digest, "user_1", fixture.context, host_execution_clock_v2)
+        expect(unknown.error).to_equal("execution-reconciliation-required")
+        expect(fixture.provider.scripted_cursor).to_equal(before)
+        assert(host_available_capacity_v1(unknown.owner.ledger).unwrap().cpu_millis == 1000)
+        assert(host_capacity_owner_close_v1(unknown.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "rejects real signature corruption, request identity mismatch and provider observation drift before native commands":
+        var fixture = host_execution_fixture_v2("success")
+        fixture.envelope.approval.signature[0] = ((fixture.envelope.approval.signature[0] as i64 + 1) % 256) as u8
+        val forged = host_execution_turn_fixture_v2(fixture)
+        expect(forged.error).to_equal("APPROVAL_SIGNATURE_INVALID")
+        expect(forged.owner.journal.sequence).to_equal(fixture.owner.journal.sequence)
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        assert(host_capacity_owner_close_v1(forged.owner).unwrap())
+        dir_remove(fixture.root, true)
+        fixture = host_execution_fixture_v2("success")
+        fixture = host_execution_request_mismatch_fixture_v2(fixture)
+        val mismatched = host_execution_turn_fixture_v2(fixture)
+        expect(mismatched.error).to_equal("container-adapter-request-identity-mismatch")
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        assert(host_capacity_owner_close_v1(mismatched.owner).unwrap())
+        dir_remove(fixture.root, true)
+        fixture = host_execution_fixture_v2("success")
+        host_execution_drift_fixture_v2(fixture)
+        val changed = host_execution_turn_fixture_v2(fixture)
+        expect(changed.error).to_contain("engine-observation-identity-changed")
+        host_execution_charged_v2(changed)
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        assert(host_capacity_owner_close_v1(changed.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+        fixture = host_execution_fixture_v2("unsupported-device")
+        val device = host_execution_turn_fixture_v2(fixture)
+        expect(device.error).to_equal("host-execution-allocation-adapter-unavailable")
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        expect(distributed_operation_journal_lookup_v2(device.owner.journal, "operation_1").unwrap().state).to_equal("admitted")
+        assert(host_capacity_owner_close_v1(device.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+        fixture = host_execution_fixture_v2("wrong-backend")
+        val backend = host_execution_turn_fixture_v2(fixture)
+        expect(backend.error).to_equal("host-execution-provider-identity-mismatch")
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        expect(distributed_operation_journal_lookup_v2(backend.owner.journal, "operation_1").unwrap().state).to_equal("admitted")
+        assert(host_capacity_owner_close_v1(backend.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "keeps failed start and mismatching or failed independent inspect charged and non-successful":
+        for mode in ["create-failed", "start-failed", "inspect-mismatch", "inspect-failed", "short-native-id"]:
+            val fixture = host_execution_fixture_v2(mode)
+            val turn = host_execution_turn_fixture_v2(fixture)
+            assert(turn.error != "")
+            assert(turn.recovery_required)
+            host_execution_charged_v2(turn)
+            expect(fixture.provider.scripted_cursor).to_equal(if mode == "create-failed": 1 elif mode == "short-native-id": 2 else: 3)
+            val saved = host_execution_observation_load_v2(turn.owner.journal.root, "operation_1").unwrap()
+            expect(saved.reason).to_equal(turn.error)
+            if mode == "create-failed":
+                expect(saved.create_status).to_equal("rejected")
+                expect(saved.start_status).to_equal("not-attempted")
+                expect(saved.phase).to_equal("unknown")
+            elif mode == "short-native-id":
+                expect(turn.error).to_equal("host-execution-created-identity-mismatch")
+                expect(saved.start_status).to_equal("not-attempted")
+                expect(saved.phase).to_equal("unknown")
+                expect(saved.runtime.native_id).to_equal("")
+            elif mode == "start-failed":
+                expect(saved.start_status).to_equal("rejected")
+                expect(saved.phase).to_equal("created")
+            else:
+                expect(saved.phase).to_equal("unknown")
+                expect(saved.runtime.native_id).to_equal("")
+            assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+            dir_remove(fixture.root, true)
+
+    it "rechecks expiry after create and never starts an expired authorization":
+        val fixture = host_execution_fixture_v2("expiry-before-start")
+        val clock_path = fixture.root + "/execution-clock"
+        assert(file_atomic_write_mode(clock_path, "commit", 0o600))
+        val clock = fn() -> HostReservationAuthorizationContextV1:
+            val phase = file_read_regular_no_follow_bounded(clock_path, 64).unwrap()
+            if phase == "commit":
+                assert(file_atomic_write_mode(clock_path, "create", 0o600))
+                return host_execution_clock_v2()
+            if phase == "create":
+                assert(file_atomic_write_mode(clock_path, "expired", 0o600))
+                var create_context = host_execution_clock_v2()
+                create_context.grant_clock = 150
+                create_context.monotonic_ms = 15
+                return create_context
+            host_execution_expired_clock_v2()
+        val turn = host_authorized_execute_v2(fixture.owner, fixture.container,
+            host_execute_request_encode_v2(fixture.envelope).unwrap(), fixture.policy, fixture.provider_digest,
+            "user_1", fixture.context, clock)
+        expect(turn.error).to_equal("APPROVAL_EXPIRED")
+        host_execution_charged_v2(turn)
+        expect(fixture.provider.scripted_cursor).to_equal(2)
+        val observation = turn.observation.unwrap()
+        expect(observation.start_status).to_equal("not-attempted")
+        expect(observation.phase).to_equal("created")
+        assert(turn.recovery_required)
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+        # Host refresh still reports100; the real provider deadline fixture
+        # samples190 only at its final native boundary, after observation.
+        val native_expired = host_execution_fixture_v2("effect-expired")
+        val refused = host_execution_turn_fixture_v2(native_expired)
+        expect(refused.error).to_contain("container-effect-deadline-expired")
+        expect(native_expired.provider.scripted_cursor).to_equal(0)
+        expect(native_expired.provider.scripted_effect_clock_cursor).to_equal(1)
+        host_execution_charged_v2(refused)
+        assert(refused.recovery_required)
+        assert(host_capacity_owner_close_v1(refused.owner).unwrap())
+        dir_remove(native_expired.root, true)
+
+    it "rejects expiry before begin and after begin before create without native calls":
+        val before = host_execution_fixture_v2("success")
+        assert(host_authorized_execution_check_v2(before.owner, before.container,
+            host_execute_request_encode_v2(before.envelope).unwrap(), before.policy,
+            before.provider_digest, "user_1", before.context).unwrap())
+        # A staging preflight is not authority for a later expired launch.
+        val rejected = host_authorized_execute_v2(before.owner, before.container,
+            host_execute_request_encode_v2(before.envelope).unwrap(), before.policy, before.provider_digest,
+            "user_1", before.context, host_execution_expired_clock_v2)
+        expect(rejected.error).to_equal("APPROVAL_EXPIRED")
+        expect(rejected.owner.journal.sequence).to_equal(before.owner.journal.sequence)
+        expect(before.provider.scripted_cursor).to_equal(0)
+        assert(host_capacity_owner_close_v1(rejected.owner).unwrap())
+        dir_remove(before.root, true)
+        val fixture = host_execution_fixture_v2("success")
+        val clock_path = fixture.root + "/precreate-clock"
+        assert(file_atomic_write_mode(clock_path, "commit", 0o600))
+        val clock = fn() -> HostReservationAuthorizationContextV1:
+            if file_read_regular_no_follow_bounded(clock_path, 64).unwrap() == "commit":
+                assert(file_atomic_write_mode(clock_path, "expired", 0o600))
+                return host_execution_clock_v2()
+            host_execution_expired_clock_v2()
+        val turn = host_authorized_execute_v2(fixture.owner, fixture.container,
+            host_execute_request_encode_v2(fixture.envelope).unwrap(), fixture.policy, fixture.provider_digest,
+            "user_1", fixture.context, clock)
+        expect(turn.error).to_equal("APPROVAL_EXPIRED")
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        host_execution_charged_v2(turn)
+        val observed = host_execution_observation_load_v2(turn.owner.journal.root, "operation_1").unwrap()
+        expect(observed.create_status).to_equal("not-attempted")
+        expect(observed.start_status).to_equal("not-attempted")
+        expect(observed.phase).to_equal("unknown")
+        assert(turn.recovery_required)
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "returns committed owner and in-memory facts if actual observation publication is obstructed":
+        val fixture = host_execution_fixture_v2("success")
+        val blocker = fixture.owner.journal.root + "/host-execution-observations-v2"
+        assert(file_atomic_write_mode(blocker, "owned filesystem obstruction", 0o600))
+        val turn = host_execution_turn_fixture_v2(fixture)
+        assert(turn.error != "")
+        assert(turn.recovery_required)
+        assert(turn.observation.?)
+        host_execution_charged_v2(turn)
+        expect(fixture.provider.scripted_cursor).to_equal(3)
+        expect(file_read_regular_no_follow_bounded(blocker, 128).unwrap()).to_equal("owned filesystem obstruction")
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+        val intent_fixture = host_execution_fixture_v2("intent-obstructed")
+        val intent_blocker = intent_fixture.owner.journal.root + "/host-execution-intents"
+        assert(file_atomic_write_mode(intent_blocker, "owned creation-identity obstruction", 0o600))
+        val retained = host_execution_turn_fixture_v2(intent_fixture)
+        expect(retained.error).to_contain("host-execution-intent-publication-failed")
+        assert(retained.recovery_required)
+        host_execution_charged_v2(retained)
+        expect(intent_fixture.provider.scripted_cursor).to_equal(2)
+        expect(retained.observation.unwrap().start_status).to_equal("not-attempted")
+        expect(retained.observation.unwrap().phase).to_equal("created")
+        expect(file_read_regular_no_follow_bounded(intent_blocker, 128).unwrap()).to_equal("owned creation-identity obstruction")
+        assert(host_capacity_owner_close_v1(retained.owner).unwrap())
+        dir_remove(intent_fixture.root, true)
+
+    it "archives equal semantic requests independently by operation through the shared executor":
+        val first = host_execution_fixture_v2("success")
+        val first_packet = host_execute_request_encode_v2(first.envelope).unwrap()
+        val first_turn = host_authorized_execute_v2(first.owner, first.container, first_packet, first.policy,
+            first.provider_digest, "user_1", first.context, host_execution_expired_clock_v2)
+        expect(first_turn.error).to_equal("APPROVAL_EXPIRED")
+        expect(first.provider.scripted_cursor).to_equal(0)
+        val second = host_execution_fixture_v2("success", "second_operation")
+        val transferred = host_execution_retarget_owner_v2(second, first_turn.owner)
+        expect(transferred.envelope.execution.plan.request_digest).to_equal(first.envelope.execution.plan.request_digest)
+        val second_packet = host_execute_request_encode_v2(transferred.envelope).unwrap()
+        val second_turn = host_authorized_execute_v2(transferred.owner, transferred.container, second_packet, transferred.policy,
+            transferred.provider_digest, "user_1", transferred.context, host_execution_expired_clock_v2)
+        expect(second_turn.error).to_equal("APPROVAL_EXPIRED")
+        expect(transferred.provider.scripted_cursor).to_equal(0)
+        val root = second_turn.owner.journal.root
+        val first_bytes = file_read_regular_no_follow_bounded(root + "/host-execution-requests/" + sha256_text("operation_1") + ".sdn", 2097152).unwrap()
+        val second_bytes = file_read_regular_no_follow_bounded(root + "/host-execution-requests/" + sha256_text("second_operation") + ".sdn", 2097152).unwrap()
+        expect(container_execution_request_decode_v2(first_bytes).unwrap().plan.operation_id).to_equal("operation_1")
+        expect(container_execution_request_decode_v2(second_bytes).unwrap().plan.operation_id).to_equal("second_operation")
+        expect(file_read_regular_no_follow_bounded(root + "/host-execute-packets/" + sha256_text("operation_1") + ".sdn", 2097152).unwrap()).to_equal(first_packet)
+        expect(file_read_regular_no_follow_bounded(root + "/host-execute-packets/" + sha256_text("second_operation") + ".sdn", 2097152).unwrap()).to_equal(second_packet)
+        expect(second_turn.owner.journal.operations["operation_1"].state).to_equal("admitted")
+        expect(second_turn.owner.journal.operations["second_operation"].state).to_equal("admitted")
+        assert(host_capacity_owner_close_v1(second_turn.owner).unwrap())
+        assert(host_capacity_owner_close_v1(second.owner).unwrap())
+        dir_remove(first.root, true)
+        dir_remove(second.root, true)
+
+    it "requires bounded canonical observation bytes and rejects differing retained observations":
+        val fixture = host_execution_fixture_v2("success")
+        val turn = host_execution_turn_fixture_v2(fixture)
+        val observation = turn.observation.unwrap()
+        val bytes = host_execution_observation_encode_v2(observation).unwrap()
+        expect(host_execution_observation_decode_v2(bytes + "\n").unwrap_err()).to_equal("host-observation-noncanonical")
+        expect(host_execution_observation_decode_v2("😀".repeat(20000)).unwrap_err()).to_equal("host-observation-size")
+        var changed = observation
+        changed.reason = "different retained fact"
+        expect(host_execution_observation_store_v2(turn.owner.journal.root, changed).unwrap_err()).to_equal("host-observation-retained-mismatch")
+        expect(host_execution_observation_load_v2(turn.owner.journal.root, "operation_1").unwrap().reason).to_equal(observation.reason)
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "updates only bounded inspection facts while preserving original correlation and monotonic cache":
+        val fixture = host_execution_fixture_v2("success")
+        val turn = host_execution_turn_fixture_v2(fixture)
+        val original = turn.observation.unwrap()
+        val original_bytes = host_execution_observation_encode_v2(original).unwrap()
+        var inspected = original
+        inspected.phase = "exited"
+        inspected.reason = "independent inspect observed exited; not waited"
+        inspected.observed_unix_ms = original.observed_unix_ms + 10
+        inspected.observed_monotonic_ms = original.observed_monotonic_ms + 10
+        val path = host_execution_inspection_store_v2(turn.owner.journal.root, inspected).unwrap()
+        expect(file_read_regular_no_follow_bounded(path, 65536).unwrap()).to_equal(host_execution_observation_encode_v2(inspected).unwrap())
+        expect(host_execution_observation_encode_v2(host_execution_observation_load_v2(turn.owner.journal.root, "operation_1").unwrap()).unwrap()).to_equal(original_bytes)
+        var changed = inspected
+        changed.runtime.native_id = "2".repeat(64)
+        expect(host_execution_inspection_store_v2(turn.owner.journal.root, changed).unwrap_err()).to_equal("host-inspection-correlation-mismatch")
+        changed = inspected
+        changed.start_status = "rejected"
+        expect(host_execution_inspection_store_v2(turn.owner.journal.root, changed).unwrap_err()).to_equal("host-inspection-correlation-mismatch")
+        changed = inspected
+        changed.observed_unix_ms = original.observed_unix_ms
+        changed.observed_monotonic_ms = original.observed_monotonic_ms
+        expect(host_execution_inspection_store_v2(turn.owner.journal.root, changed).unwrap_err()).to_equal("host-inspection-clock-regressed")
+        expect(file_read_regular_no_follow_bounded(path, 65536).unwrap()).to_equal(host_execution_observation_encode_v2(inspected).unwrap())
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "prevents all provider commands when the actual begin transition reaches the exact preparation deadline":
+        val fixture = host_execution_fixture_v2("success")
+        val deadline = fixture.envelope.intent.reservation.prepare_deadline_ms
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            var context = host_execution_clock_v2()
+            context.monotonic_ms = deadline
+            context
+        val packet = host_execute_request_encode_v2(fixture.envelope).unwrap()
+        val turn = host_authorized_execute_v2(fixture.owner, fixture.container, packet, fixture.policy,
+            fixture.provider_digest, "user_1", fixture.context, refresh)
+        # Grant/approval clocks remain valid. Exact monotonic deadline fails
+        # inside host_capacity_owner_begin, after archive and before create.
+        expect(turn.error).to_equal("execution-authorization-expired")
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        expect(turn.owner.journal.sequence).to_equal(fixture.owner.journal.sequence)
+        expect(distributed_operation_journal_lookup_v2(turn.owner.journal, "operation_1").unwrap().state).to_equal("admitted")
+        expect(host_available_capacity_v1(turn.owner.ledger).unwrap().cpu_millis).to_equal(1000)
+        expect(host_available_capacity_v1(turn.owner.ledger).unwrap().memory_bytes).to_equal(1536)
+        expect(file_read_regular_no_follow_bounded(turn.owner.journal.root + "/host-execute-packets/" + sha256_text("operation_1") + ".sdn", 2097152).unwrap()).to_equal(packet)
+        assert(not turn.observation.?)
+        assert(not turn.recovery_required)
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "rejects a second real writer without replacing the live journal lease or launching commands":
+        val fixture = host_execution_fixture_v2("success")
+        val lease_path = fixture.owner.journal.root + "/parent.lease"
+        val original_lease = file_read_regular_no_follow_bounded(lease_path, 512).unwrap()
+        val second = host_capacity_owner_open_v1(fixture.owner.journal.root, fixture.owner.ledger.capacity,
+            "e".repeat(64), 50, true)
+        assert(second.is_err())
+        expect(second.unwrap_err()).to_equal("OPERATION_JOURNAL_ALREADY_OWNED")
+        expect(file_read_regular_no_follow_bounded(lease_path, 512).unwrap()).to_equal(original_lease)
+        expect(distributed_operation_journal_lookup_v2(fixture.owner.journal, "operation_1").unwrap().state).to_equal("admitted")
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        expect(host_available_capacity_v1(fixture.owner.ledger).unwrap().cpu_millis).to_equal(1000)
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+        dir_remove(fixture.root, true)

@@ -16,6 +16,15 @@ pub struct RuntimeClassV1:
     architecture: text
     isolation: text
 
+# Explicit supported backend pairs only. Declarative policy is not observed
+# platform capability, enrollment, or permission to start a container.
+pub fn runtime_class_backend_v1(runtime: RuntimeClassV1) -> Result<text, text>:
+    if runtime.provider == "podman" and runtime.execution_os == "linux" and runtime.isolation == "rootless":
+        return Ok("linux-podman")
+    if runtime.provider == "docker" and runtime.execution_os == "windows" and runtime.isolation == "process":
+        return Ok("windows-docker-process")
+    Err("runtime-class-platform-provider-isolation-mismatch")
+
 fn policy_text(value: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
     match value:
         case SdnValue.String(raw):
@@ -66,10 +75,11 @@ pub fn decode_runtime_class_value(value: SdnValue, spans: Dict<text, SdnSpan>, p
     val path = prefix + "spec"
     val fields = as_dict(require(top, "spec", envelope, spans)?, path, spans)?
     only_known(fields, ["provider", "executionOS", "architecture", "isolation"], path, spans)?
-    # First executable provider lane. Adding another lane requires its own
-    # explicit schema and provider integration; there is no fallback here.
-    val provider = policy_choice(fields, "provider", path, ["podman"], spans)?
-    val execution_os = policy_choice(fields, "executionOS", path, ["linux"], spans)?
+    val provider = policy_choice(fields, "provider", path, ["podman", "docker"], spans)?
+    val execution_os = policy_choice(fields, "executionOS", path, ["linux", "windows"], spans)?
     val architecture = policy_choice(fields, "architecture", path, ["aarch64", "x86_64"], spans)?
-    val isolation = policy_choice(fields, "isolation", path, ["rootless"], spans)?
-    Ok(RuntimeClassV1(meta: meta, provider: provider, execution_os: execution_os, architecture: architecture, isolation: isolation))
+    val isolation = policy_choice(fields, "isolation", path, ["rootless", "process"], spans)?
+    val runtime = RuntimeClassV1(meta: meta, provider: provider, execution_os: execution_os, architecture: architecture, isolation: isolation)
+    if runtime_class_backend_v1(runtime).is_err():
+        return Err(reject("unsupported_policy", path + ".provider", "expected linux/podman/rootless or windows/docker/process", spans))
+    Ok(runtime)

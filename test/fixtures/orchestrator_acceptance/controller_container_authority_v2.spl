@@ -1,0 +1,105 @@
+# Actual SDK signature/snapshot and controller correlation functions only.
+# Typed host status/projection/observation fixtures are NOT host/provider stubs,
+# native proof or replacement for the core's actual host-validate call.
+use test.fixtures.orchestrator_acceptance.controller_container_dispatch_v2.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_authority_v2.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v2.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_create_v2
+use std.common.contracts.orchestration.controller_dispatch_request_v2.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_reservation_bind_intent_v1
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct ControllerContainerAuthorityFixtureV2:
+    packet: ControllerDispatchRequestV2
+    context: ControllerDispatchContextV1
+    status: text
+    validation: text
+    prepared: text
+    observation: HostExecutionObservationV2
+
+fn container_authority_seed_v2(offset: i64) -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..32: bytes.push((offset + index) as u8)
+    bytes
+
+fn container_authority_key_v2(id: text, role: text, host: text, offset: i64) -> DistributedAuthorityKeyV2:
+    val actual = pure_ed25519_sign_from_seed_v1(container_authority_seed_v2(offset), [])
+    val actions = if host == "controller": ["controller_assignment_v1", "controller_execute_v1"] else: ["host_reservation_v1", "host_execute_v1"]
+    DistributedAuthorityKeyV2(identity: id, role: role, revision: 1, public_key: actual.public_key,
+        principal: "user", project: "project", host_id: host, operations: actions,
+        maximum_memory_bytes: 16000, maximum_duration_ms: 2000, policy_revision: 1,
+        revocation_epoch: 0, expires_at: 2000, revoked: false)
+
+pub fn controller_container_authority_fixture_v2(backend: text) -> ControllerContainerAuthorityFixtureV2:
+    val original = controller_container_wire_fixture_v2(backend)
+    var packet = original.dispatch
+    val enrollment = "d".repeat(64)
+    val authority = "host-" + enrollment
+    packet.binding.host_intent.fence.authority_id = authority
+    packet.binding.host_intent = host_reservation_bind_intent_v1(packet.binding.host_intent).unwrap()
+    packet.binding.host_operation.payload_digest = packet.binding.host_intent.reservation.payload_digest
+    packet.operation.payload_digest = sha256_text(controller_assignment_bytes_v1(packet.binding).unwrap())
+    packet = controller_container_renew_fixture_v2(packet)
+    val host = packet.binding.host_operation.host_id
+    val keys = [container_authority_key_v2("controller-issuer", "grant-issuer", "controller", 1),
+        container_authority_key_v2("controller-approver", "human-approver", "controller", 65),
+        container_authority_key_v2("host-issuer", "grant-issuer", host, 129),
+        container_authority_key_v2("host-approver", "human-approver", host, 193)]
+    val snapshot = distributed_authority_snapshot_create_v2(keys, 2, 1, 0).unwrap()
+    val context = ControllerDispatchContextV1(config: ControllerDispatchConfigV1(controller_id: "controller", controller_epoch: 1,
+        target: "local-inprocess", host_root: "/tmp/actual-host-unit-boundary", host_authority_id: authority,
+        provider_identity_digest: "f".repeat(64), authority_policy_digest: "e".repeat(64)),
+        policy: LocalAuthorityPolicyV1(snapshot: snapshot, session_generation: 3, source_digest: "e".repeat(64)))
+    val plan = packet.execution.plan
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val status_fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-local-status"),
+        "physicalHostId": SdnValue.String(scope.physical_host_id), "serviceScopeId": SdnValue.String(scope.service_scope_id),
+        "authorityId": SdnValue.String(authority), "bootId": SdnValue.String(scope.boot_id),
+        "fenceId": SdnValue.String(container_scope_fence_id_v2(scope).unwrap()), "nativeMachineId": SdnValue.String(scope.native_machine_id),
+        "continuityMode": SdnValue.String(scope.continuity_mode), "continuityId": SdnValue.String(scope.continuity_id),
+        "providerGeneration": SdnValue.Int(scope.provider_generation), "revision": SdnValue.Int(7),
+        "cpuMillis": SdnValue.Int(8000), "memoryBytes": SdnValue.Int(16000),
+        "availableCpuMillis": SdnValue.Int(6000), "availableMemoryBytes": SdnValue.Int(12000), "retainedReservations": SdnValue.Int(1),
+        "providerIdentityDigest": SdnValue.String(context.config.provider_identity_digest), "enrollmentBindingDigest": SdnValue.String(enrollment)}
+    val validation_fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-container-validation"),
+        "backend": SdnValue.String(backend), "operationId": SdnValue.String(plan.operation_id), "workloadUid": SdnValue.String(plan.workload_uid),
+        "attempt": SdnValue.Int(plan.attempt), "requestDigest": SdnValue.String(plan.request_digest),
+        "planDigest": SdnValue.String(container_execution_plan_digest_v2(plan).unwrap()),
+        "cpuMillis": SdnValue.Int(packet.binding.host_intent.reservation.cpu_millis),
+        "memoryBytes": SdnValue.Int(packet.binding.host_intent.reservation.memory_bytes), "timeoutMs": SdnValue.Int(50),
+        "hasDevices": SdnValue.Bool(false), "hasWorkspace": SdnValue.Bool(false), "executionAuthorized": SdnValue.Bool(false)}
+    val prepared_fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-local-operation-state"),
+        "operationId": SdnValue.String(plan.operation_id), "state": SdnValue.String("admitted"), "executionObserved": SdnValue.Bool(false)}
+    val runtime = RuntimeIdentityV1(pod_uid: plan.workload_uid, attempt: plan.attempt, provider_generation: plan.provider_generation,
+        operation_id: plan.operation_id, engine: if backend == "linux-podman": "podman" else: "docker", native_id: "c".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val observation = HostExecutionObservationV2(scope: scope, operation_id: plan.operation_id,
+        operation_digest: sha256_text(distributed_encode_operation_v2(packet.binding.host_operation).unwrap()),
+        plan_digest: container_execution_plan_digest_v2(plan).unwrap(), request_digest: plan.request_digest,
+        grant_id: packet.host_execution_signed.grant.id, principal: packet.binding.host_operation.principal,
+        issuer_id: packet.host_execution_signed.issuer_id, approver_id: packet.host_execution_approval.approver_id,
+        provider_identity_digest: context.config.provider_identity_digest, observed_unix_ms: 100, observed_monotonic_ms: 50,
+        phase: "running", create_status: "ok", start_status: "ok", inspect_status: "ok", reason: "constructed-correlation-only", runtime: runtime)
+    ControllerContainerAuthorityFixtureV2(packet: packet, context: context,
+        status: sdn_encode_canonical(SdnValue.Dict(status_fields)) + "\n",
+        validation: sdn_encode_canonical(SdnValue.Dict(validation_fields)) + "\n",
+        prepared: sdn_encode_canonical(SdnValue.Dict(prepared_fields)) + "\n", observation: observation)
+
+pub fn controller_container_forge_v2(signature: [u8]) -> [u8]:
+    var changed: [u8] = []
+    for byte in signature: changed.push(byte)
+    changed[0] = ((changed[0] as i64 + 1) % 256) as u8
+    changed

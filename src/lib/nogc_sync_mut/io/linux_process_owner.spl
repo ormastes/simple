@@ -251,3 +251,271 @@ fn _file_sha256_matches(path: text, expected: text) -> bool:
     if val digest = file_hash_sha256(path):
         return digest == expected
     false
+
+# Explicit group-stream profile; V1 file-capture requests stay unchanged.
+use std.common.build_manager.group_process_stream_protocol_v2.{
+    GroupProcessStreamLaunchV2, group_process_stream_launch_validate_profiled_v3, group_process_stream_identity_profiled_v3,
+    group_process_stream_template_encode_v3
+}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessStreamProfileV3}
+use std.common.string_core.{str_len}
+
+@unsafe(reason: "real delegated cgroup/pidfd/kill capability admission before any helper fork", capabilities: [ffi])
+extern fn rt_linux_group_stream_admit_v2(path: text, path_len: i64) -> i64
+@unsafe(reason: "pinned detached broker gets exact ticket FD4/5 handoff; post-fork uncertainty retains ticket", capabilities: [ffi])
+extern fn rt_linux_group_launch_stream_broker_v2(program: text, program_len: i64,
+    digest: text, digest_len: i64, args: [text], generation: i64, root: text,
+    root_len: i64, identity: text, identity_len: i64, delegated: text, delegated_len: i64,
+    launch_deadline_unix_ms: i64) -> [i64]
+@unsafe(reason: "same cgroup/pidfd owner, fixed inherited streams, retained token on exec failure", capabilities: [ffi])
+extern fn rt_linux_group_start_stream_v2(program: text, program_len: i64, digest: text,
+    digest_len: i64, args: [text], environment: [text], directory: text, directory_len: i64,
+    root: text, root_len: i64, identity: text, identity_len: i64,
+    memory_limit_bytes: i64, timeout_ms: i64, launch_deadline_unix_ms: i64) -> [i64]
+
+enum LinuxProcessStreamStartV2:
+    Unknown(reason: text)
+    Ready(lease: LinuxProcessLeaseV1)
+    CleanupRequired(lease: LinuxProcessLeaseV1, reason: text)
+    NoChildCleanupRequired(lease: LinuxProcessLeaseV1, reason: text)
+    Rejected(reason: text)
+
+fn linux_process_stream_admit_v2(delegated_path: text) -> Result<(), text>:
+    if not linux_process_absolute_v1(delegated_path): return Err("Linux stream requires a delegated cgroup path")
+    val status = unsafe(capabilities: [ffi]):
+        rt_linux_group_stream_admit_v2(delegated_path, str_len(delegated_path))
+    if status != 0: return Err("Linux stream capability admission failed: {status}")
+    Ok(())
+
+fn linux_process_launch_stream_broker_v2(program: text, digest: text, args: [text],
+        generation: i64, root: text, identity: text, delegated_path: text,
+        launch_deadline_unix_ms: i64) -> Result<i64, text>:
+    if not linux_process_absolute_v1(program) or not linux_process_absolute_v1(root) or
+            not builder_digest_valid_v1(digest) or not builder_digest_valid_v1(identity) or generation <= 0:
+        return Err("invalid Linux stream broker launch binding")
+    val status = unsafe(capabilities: [ffi]):
+        rt_linux_group_launch_stream_broker_v2(program, str_len(program), digest, str_len(digest),
+            args, generation, root, str_len(root), identity, str_len(identity), delegated_path,
+            str_len(delegated_path), launch_deadline_unix_ms)
+    if status.len() != 2: return Err("Linux stream broker launch receipt unknown; cleanup required")
+    if status[0] <= 0 or status[1] != 0:
+        return Err("Linux stream broker launch not confirmed; cleanup required: {status[1]}")
+    Ok(status[0])
+
+fn linux_process_stream_start_v2(launch: GroupProcessStreamLaunchV2,
+        identity: text, memory_limit_bytes: i64) -> LinuxProcessStreamStartV2:
+    val invalid = group_process_stream_launch_validate_profiled_v3(launch)
+    if invalid != "": return LinuxProcessStreamStartV2.Rejected(invalid)
+    if launch.transport_generation <= 0 or group_process_stream_identity_profiled_v3(launch) != identity:
+        return LinuxProcessStreamStartV2.Rejected("Linux stream immutable identity mismatch")
+    if launch.profile_v3 != nil and memory_limit_bytes != launch.memory_limit_bytes:
+        return LinuxProcessStreamStartV2.Rejected("profiled helper memory differs from admitted request")
+    val request = launch.request
+    for path in [request.program, request.directory, request.broker_program, launch.root, launch.delegated_cgroup_path]:
+        if not linux_process_absolute_v1(path): return LinuxProcessStreamStartV2.Rejected("Linux stream path/delegation invalid")
+    if not file_is_regular_no_follow(request.program) or not _file_sha256_matches(request.program, request.producer_digest):
+        return LinuxProcessStreamStartV2.Rejected("Linux stream executable differs from pinned digest")
+    if not _file_sha256_matches(launch.root + "/broker.request.sdn", identity):
+        return LinuxProcessStreamStartV2.Rejected("Linux stream immutable request differs")
+    for input in request.inputs:
+        if not file_is_regular_no_follow(input.path) or not _file_sha256_matches(input.path, input.digest):
+            return LinuxProcessStreamStartV2.Rejected("Linux stream input differs: " + input.path)
+    val status = match launch.profile_v3:
+        case None:
+            unsafe(capabilities: [ffi]):
+                rt_linux_group_start_stream_v2(request.program, str_len(request.program), request.producer_digest,
+                    str_len(request.producer_digest), request.args, request.environment, request.directory,
+                    str_len(request.directory), launch.root, str_len(launch.root), identity, str_len(identity),
+                    memory_limit_bytes, request.timeout_ms, request.launch_deadline_unix_ms)
+        case Some(profile):
+            val broker = profile.broker
+            val words = _linux_process_stream_profile_words_v3(profile)
+            unsafe(capabilities: [ffi]):
+                rt_linux_group_start_stream_profiled_v3(request.program, str_len(request.program), request.producer_digest,
+                    str_len(request.producer_digest), request.args, request.environment, request.directory,
+                    str_len(request.directory), launch.root, str_len(launch.root), identity, str_len(identity),
+                    memory_limit_bytes, request.timeout_ms, request.launch_deadline_unix_ms,
+                    broker.cgroup_path, str_len(broker.cgroup_path), broker.policy_digest, str_len(broker.policy_digest), words)
+    if status.len() != 2:
+        return LinuxProcessStreamStartV2.Unknown("Linux stream native start receipt unknown; broker must retain authority")
+    if status[0] > 0:
+        val lease = LinuxProcessLeaseV1(status[0])
+        val kind = linux_process_stream_no_child_scope_v2(launch.root, identity)
+        if kind == 1 or kind == 2:
+            return LinuxProcessStreamStartV2.NoChildCleanupRequired(lease, "Linux scope cleanup retained without child launch: {status[1]}")
+        if kind < 0: return LinuxProcessStreamStartV2.Unknown("native stream scope classification unknown")
+        if status[1] != 0: return LinuxProcessStreamStartV2.CleanupRequired(lease, "Linux stream exec/admission failed: {status[1]}")
+        return LinuxProcessStreamStartV2.Ready(lease)
+    LinuxProcessStreamStartV2.Rejected("Linux stream pre-start admission rejected: {status[1]}")
+
+export LinuxProcessStreamStartV2, linux_process_stream_admit_v2
+export linux_process_launch_stream_broker_v2, linux_process_stream_start_v2
+
+@unsafe(reason: "immutable projection of the same genuinely collected cgroup receipt; no OS access", capabilities: [ffi])
+extern fn rt_linux_group_collected_stream_v2(token: i64) -> [i64]
+@unsafe(reason: "release inherited stream endpoints only when this broker has no live native group lease", capabilities: [ffi])
+extern fn rt_linux_group_stream_release_inherited_v2() -> i64
+
+fn linux_process_collected_stream_v2(lease: LinuxProcessLeaseV1) -> Result<LinuxProcessPollV1, text>:
+    val fields = unsafe(capabilities: [ffi]): rt_linux_group_collected_stream_v2(lease.token)
+    linux_process_poll_decode_v1(fields)
+
+fn linux_process_stream_release_inherited_v2() -> Result<(), text>:
+    val status = unsafe(capabilities: [ffi]): rt_linux_group_stream_release_inherited_v2()
+    if status != 0: return Err("stream inherited descriptor release failed: {status}")
+    Ok(())
+
+export linux_process_collected_stream_v2, linux_process_stream_release_inherited_v2
+
+@unsafe(reason: "recover only the actual exact-bound native stream lease, without allocating a result or guessing a token", capabilities: [ffi])
+extern fn rt_linux_group_stream_recover_lease_v2(root: text, root_len: i64,
+    identity: text, identity_len: i64) -> i64
+
+fn linux_process_stream_recover_lease_v2(root: text, identity: text) -> LinuxProcessStreamStartV2:
+    val token = unsafe(capabilities: [ffi]):
+        rt_linux_group_stream_recover_lease_v2(root, str_len(root), identity, str_len(identity))
+    if token > 0:
+        val kind = linux_process_stream_no_child_scope_v2(root, identity)
+        if kind == 1 or kind == 2:
+            return LinuxProcessStreamStartV2.NoChildCleanupRequired(LinuxProcessLeaseV1(token), "recovered actual no-child scope cleanup")
+        if kind < 0: return LinuxProcessStreamStartV2.Unknown("native stream scope classification unknown")
+        return LinuxProcessStreamStartV2.CleanupRequired(LinuxProcessLeaseV1(token), "recovered actual native stream lease after uncertain receipt")
+    if token == 0: return LinuxProcessStreamStartV2.Rejected("native stream start admitted no group")
+    LinuxProcessStreamStartV2.Unknown("native stream ownership recovery remains uncertain")
+
+export linux_process_stream_recover_lease_v2
+
+@unsafe(reason: "classify exact native retained no-child scope, never reaped-leader evidence", capabilities: [ffi])
+extern fn rt_linux_group_stream_no_child_scope_v2(root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "cleanup only an actual no-child cgroup after kernel-empty proof; no leader wait/reap", capabilities: [ffi])
+extern fn rt_linux_group_stream_collect_no_child_v2(root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+
+fn linux_process_stream_no_child_scope_v2(root: text, identity: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_linux_group_stream_no_child_scope_v2(root, str_len(root), identity, str_len(identity))
+
+fn linux_process_stream_collect_no_child_v2(root: text, identity: text) -> Result<(), text>:
+    val status = unsafe(capabilities: [ffi]):
+        rt_linux_group_stream_collect_no_child_v2(root, str_len(root), identity, str_len(identity))
+    if status != 0: return Err("native no-child scope cleanup remains unproven: {status}")
+    Ok(())
+
+export linux_process_stream_no_child_scope_v2, linux_process_stream_collect_no_child_v2
+
+# V3 adds exact resource and executable policy to the existing Linux owner.
+# These are counted-text/typed-array OS leaves; there is no second registry.
+@unsafe(reason: "verify approved target broker cgroup identity/caps and sibling CPU delegation before fork", capabilities: [ffi])
+extern fn rt_linux_group_stream_admit_profiled_v3(delegated: text, delegated_len: i64,
+    broker_path: text, broker_path_len: i64, policy: text, policy_len: i64, words: [i64]) -> i64
+@unsafe(reason: "verify current broker membership and actual approved shared CPU/memory cap", capabilities: [ffi])
+extern fn rt_linux_group_stream_verify_broker_profiled_v3(delegated: text, delegated_len: i64,
+    broker_path: text, broker_path_len: i64, policy: text, policy_len: i64, words: [i64]) -> i64
+@unsafe(reason: "existing detached broker enters approved shared cgroup at clone with exact ticket handoff", capabilities: [ffi])
+extern fn rt_linux_group_launch_stream_broker_profiled_v3(program: text, program_len: i64,
+    digest: text, digest_len: i64, args: [text], generation: i64, root: text,
+    root_len: i64, identity: text, identity_len: i64, delegated: text, delegated_len: i64,
+    launch_deadline_unix_ms: i64, broker_path: text, broker_path_len: i64,
+    policy: text, policy_len: i64, words: [i64]) -> [i64]
+@unsafe(reason: "acquire only a fresh owned parent with CPU and memory delegation, preserving typed cleanup receipt", capabilities: [ffi])
+extern fn rt_linux_group_parent_acquire_profiled_at_v3(delegated: text, delegated_len: i64,
+    root: text, root_len: i64, identity: text, identity_len: i64) -> [i64]
+@unsafe(reason: "verify/write/readback child CPU cap before clone and apply explicit child image mode", capabilities: [ffi])
+extern fn rt_linux_group_start_stream_profiled_v3(program: text, program_len: i64, digest: text,
+    digest_len: i64, args: [text], environment: [text], directory: text, directory_len: i64,
+    root: text, root_len: i64, identity: text, identity_len: i64,
+    memory_limit_bytes: i64, timeout_ms: i64, launch_deadline_unix_ms: i64,
+    broker_path: text, broker_path_len: i64, policy: text, policy_len: i64, words: [i64]) -> [i64]
+
+fn _linux_process_stream_profile_words_v3(profile: GroupProcessStreamProfileV3) -> [i64]:
+    val helper = profile.helper_cpu
+    val broker = profile.broker
+    val mode = if profile.child_image_mode == "sealed-main-image-v1": 0 else:
+        if profile.child_image_mode == "trusted-local-admin-image-fd-v1": 1 else: -1
+    [helper.cpu_millis, helper.quota_us, helper.period_us, broker.device, broker.inode,
+        broker.generation, broker.cpu_quota_us, broker.cpu_period_us, broker.reserved_cpu_millis,
+        broker.memory_limit_bytes, broker.reserved_memory_bytes, mode]
+
+fn linux_process_stream_admit_profiled_v3(launch: GroupProcessStreamLaunchV2) -> Result<(), text>:
+    val invalid = group_process_stream_launch_validate_profiled_v3(launch)
+    if invalid != "": return Err(invalid)
+    _linux_process_stream_target_admit_v3(launch)
+
+# Observational planning port. Canonical templates accept zero dynamic fields;
+# no deadline is invented and no ticket, claim, helper or reservation is created.
+# Success describes current target admission only, never future launch readiness.
+fn linux_process_stream_template_admit_v3(launch: GroupProcessStreamLaunchV2) -> Result<(), text>:
+    val _template = group_process_stream_template_encode_v3(launch)?
+    _linux_process_stream_target_admit_v3(launch)
+
+fn _linux_process_stream_target_admit_v3(launch: GroupProcessStreamLaunchV2) -> Result<(), text>:
+    match launch.profile_v3:
+        case None: linux_process_stream_admit_v2(launch.delegated_cgroup_path)
+        case Some(profile):
+            val broker = profile.broker
+            val words = _linux_process_stream_profile_words_v3(profile)
+            val status = unsafe(capabilities: [ffi]):
+                rt_linux_group_stream_admit_profiled_v3(launch.delegated_cgroup_path, str_len(launch.delegated_cgroup_path),
+                    broker.cgroup_path, str_len(broker.cgroup_path), broker.policy_digest, str_len(broker.policy_digest), words)
+            if status != 0: return Err("profiled Linux stream admission failed: {status}")
+            Ok(())
+
+fn linux_process_stream_verify_broker_profiled_v3(launch: GroupProcessStreamLaunchV2) -> Result<(), text>:
+    val invalid = group_process_stream_launch_validate_profiled_v3(launch)
+    if invalid != "": return Err(invalid)
+    match launch.profile_v3:
+        case None: Ok(())
+        case Some(profile):
+            val broker = profile.broker
+            val words = _linux_process_stream_profile_words_v3(profile)
+            val status = unsafe(capabilities: [ffi]):
+                rt_linux_group_stream_verify_broker_profiled_v3(launch.delegated_cgroup_path, str_len(launch.delegated_cgroup_path),
+                    broker.cgroup_path, str_len(broker.cgroup_path), broker.policy_digest, str_len(broker.policy_digest), words)
+            if status != 0: return Err("current broker resource placement differs from admitted policy: {status}")
+            Ok(())
+
+fn linux_process_launch_stream_broker_profiled_v3(launch: GroupProcessStreamLaunchV2,
+        identity: text) -> Result<i64, text>:
+    val invalid = group_process_stream_launch_validate_profiled_v3(launch)
+    if invalid != "": return Err(invalid)
+    if launch.transport_generation <= 0 or group_process_stream_identity_profiled_v3(launch) != identity:
+        return Err("profiled broker launch identity differs")
+    val request = launch.request
+    val args = ["--broker-root", launch.root, "--request-digest", identity]
+    match launch.profile_v3:
+        case None:
+            linux_process_launch_stream_broker_v2(request.broker_program, request.broker_digest,
+                args, launch.transport_generation, launch.root, identity,
+                launch.delegated_cgroup_path, request.launch_deadline_unix_ms)
+        case Some(profile):
+            val broker = profile.broker
+            val words = _linux_process_stream_profile_words_v3(profile)
+            val status = unsafe(capabilities: [ffi]):
+                rt_linux_group_launch_stream_broker_profiled_v3(request.broker_program, str_len(request.broker_program),
+                    request.broker_digest, str_len(request.broker_digest), args, launch.transport_generation,
+                    launch.root, str_len(launch.root), identity, str_len(identity),
+                    launch.delegated_cgroup_path, str_len(launch.delegated_cgroup_path), request.launch_deadline_unix_ms,
+                    broker.cgroup_path, str_len(broker.cgroup_path), broker.policy_digest, str_len(broker.policy_digest), words)
+            if status.len() != 2: return Err("profiled broker launch receipt unknown; cleanup required")
+            if status[0] <= 0 or status[1] != 0: return Err("profiled broker launch unconfirmed; cleanup required: {status[1]}")
+            Ok(status[0])
+
+fn linux_cgroup_parent_admit_profiled_v3(launch: GroupProcessStreamLaunchV2,
+        identity: text) -> LinuxCgroupParentAdmissionV1:
+    val invalid = group_process_stream_launch_validate_profiled_v3(launch)
+    if invalid != "": return LinuxCgroupParentAdmissionV1.Rejected(invalid)
+    if launch.transport_generation <= 0 or group_process_stream_identity_profiled_v3(launch) != identity:
+        return LinuxCgroupParentAdmissionV1.Rejected("profiled parent immutable identity differs")
+    match launch.profile_v3:
+        case None: linux_cgroup_parent_admit_at_v2(launch.delegated_cgroup_path, launch.root, identity)
+        case Some(_profile):
+            match linux_process_stream_verify_broker_profiled_v3(launch):
+                case Err(reason): return LinuxCgroupParentAdmissionV1.Rejected(reason)
+                case Ok(_): pass
+            val fields = unsafe(capabilities: [ffi]):
+                rt_linux_group_parent_acquire_profiled_at_v3(launch.delegated_cgroup_path, str_len(launch.delegated_cgroup_path),
+                    launch.root, str_len(launch.root), identity, str_len(identity))
+            linux_cgroup_parent_decode_at_v2(fields, launch.delegated_cgroup_path, identity)
+
+export linux_process_stream_admit_profiled_v3, linux_process_stream_verify_broker_profiled_v3
+export linux_process_launch_stream_broker_profiled_v3, linux_cgroup_parent_admit_profiled_v3
+export linux_process_stream_template_admit_v3

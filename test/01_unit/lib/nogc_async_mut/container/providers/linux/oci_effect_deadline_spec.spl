@@ -1,0 +1,126 @@
+# AUTHORED_UNRUN. Scripted clocks/effects are explicit unit seams, not native
+# pre-exec qualification. Exact argv has separate independent-vector specs.
+use std.spec.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.contracts.container.runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.linux_oci_request_digest_v1
+
+fn deadline_request_v1() -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "deadline-pod", attempt: 1, operation_id: "deadline-create",
+        image: "example/agent@sha256:" + "a".repeat(64), bundle_path: "",
+        command: ["/agent"], args: [], timeout_ms: 5000, cpu_limit_millis: 1000,
+        memory_limit_bytes: 268435456, pid_limit: 64, network_policy: "none", filesystem_policy: "read-only")
+
+fn deadline_policy_v1() -> LinuxOciEnginePolicyV1:
+    LinuxOciEnginePolicyV1(mode: "trusted-local-admin-v1", executable_path: "/usr/bin/podman",
+        expected_uid: 1000, expected_graph_root: "/home/test/storage", expected_run_root: "/run/user/1000/storage",
+        expected_storage_driver: "overlay")
+
+fn deadline_observation_v1(digest: text) -> LinuxOciEngineObservationV1:
+    val source = "{\"host\":{\"security\":{\"rootless\":true},\"serviceIsRemote\":false}," +
+        "\"store\":{\"graphRoot\":\"/home/test/storage\",\"runRoot\":\"/run/user/1000/storage\"," +
+        "\"graphDriverName\":\"overlay\",\"graphOptions\":{}},\"version\":{\"Version\":\"5.0.0\"}}"
+    match linux_oci_engine_info_observation_v1(deadline_policy_v1(), source, digest, 1000):
+        case Ok(value): value
+        case Err(reason): fail(reason)
+
+fn deadline_context_v1(actions: [text] = ["create", "start"]) -> ContainerEffectDeadlineV1:
+    val digest = match linux_oci_request_digest_v1(deadline_request_v1()):
+        case Ok(value): value
+        case Err(reason): fail(reason)
+    match container_effect_deadline_v1(digest, "deadline-create", actions, 2000):
+        case Ok(value): value
+        case Err(reason): fail(reason)
+
+fn deadline_provider_v1(clock: [i64], changed_observation: bool = false,
+        native_output: text = "") -> LinuxOciRuntimeProviderV1:
+    val request = deadline_request_v1()
+    # Existing builder is fixture setup only. Assertions below establish final
+    # admission ordering/consumption, not builder correctness.
+    val create = build_create_command("podman", "/unused/deadline", request, "deadline-create", 7, "boot-1")
+    if create.0 != "": fail(create.0)
+    val arguments = match linux_oci_engine_route_v1(deadline_policy_v1(), create.1.args):
+        case Ok(value): value
+        case Err(reason): fail(reason)
+    val baseline = deadline_observation_v1("a".repeat(64))
+    val current = deadline_observation_v1(if changed_observation: "b".repeat(64) else: "a".repeat(64))
+    val provider = match LinuxOciRuntimeProviderV1.scripted_with_engine_policy("linux", "podman",
+            "/unused/deadline", "boot-1", 7, deadline_policy_v1(), baseline, current,
+            [ScriptedCommandResultV1(operation: "create", program: "/usr/bin/podman", args: arguments,
+                stdout: if native_output == "": "b".repeat(64) else: native_output,
+                stderr: "", exit_code: 0)], 5000):
+        case Ok(value): value
+        case Err(reason): fail(reason)
+    expect(provider.set_scripted_effect_clock_v1(clock)).to_equal(Ok(()))
+    provider
+
+describe "Linux managed launch admission deadline":
+    it "refuses a managed create without a verified-consumer deadline context":
+        val provider = deadline_provider_v1([1000])
+        val result = provider.create(deadline_request_v1())
+        expect(result.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(result.reason).to_contain("container-effect-deadline-required")
+        expect(provider.scripted_cursor).to_equal(0)
+
+    it "rejects expiry between earlier host verification and the final provider sample":
+        val context = deadline_context_v1()
+        expect(container_effect_remaining_ms_v1(context, context.request_digest,
+            context.operation_id, "create", 1999)).to_equal(Ok(1))
+        val provider = deadline_provider_v1([2000])
+        expect(provider.set_effect_deadline_v1(context)).to_equal(Ok(()))
+        val result = provider.create(deadline_request_v1())
+        expect(result.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(result.reason).to_contain("container-effect-deadline-expired")
+        expect(provider.scripted_effect_clock_cursor).to_equal(1)
+        expect(provider.scripted_cursor).to_equal(0)
+
+    it "checks the final clock only after the engine observation has matched":
+        val provider = deadline_provider_v1([1999], true)
+        expect(provider.set_effect_deadline_v1(deadline_context_v1())).to_equal(Ok(()))
+        val result = provider.create(deadline_request_v1())
+        expect(result.reason).to_contain("engine-observation-identity-changed")
+        expect(provider.scripted_effect_clock_cursor).to_equal(0)
+        expect(provider.scripted_cursor).to_equal(0)
+
+    it "admits a valid final launch without shortening the separately signed lifetime":
+        val provider = deadline_provider_v1([1999])
+        expect(provider.set_effect_deadline_v1(deadline_context_v1())).to_equal(Ok(()))
+        val result = provider.create(deadline_request_v1())
+        expect(result.status).to_equal(RUNTIME_STATUS_OK)
+        expect(provider.scripted_cursor).to_equal(1)
+        expect(provider.timeout_ms).to_equal(5000)
+
+    it "rejects a failed native-clock sample before consuming a launch effect":
+        val provider = deadline_provider_v1([-1])
+        expect(provider.set_effect_deadline_v1(deadline_context_v1())).to_equal(Ok(()))
+        val result = provider.create(deadline_request_v1())
+        expect(result.reason).to_contain("container-effect-clock-unavailable")
+        expect(provider.scripted_cursor).to_equal(0)
+
+    it "binds the deadline to request ownership and the actual launch action":
+        val provider = deadline_provider_v1([1000])
+        val context = deadline_context_v1(["start"])
+        expect(provider.set_effect_deadline_v1(context)).to_equal(Ok(()))
+        val result = provider.create(deadline_request_v1())
+        expect(result.reason).to_contain("container-effect-action-not-authorized")
+        expect(provider.scripted_cursor).to_equal(0)
+
+    it "does not allow production callers to replace the native clock":
+        val provider = LinuxOciRuntimeProviderV1.new("linux", "podman", "/unused/deadline", "boot-1", 7, false)
+        expect(provider.set_scripted_effect_clock_v1([1000])).to_equal(Err("container-effect-clock-fixture-only"))
+
+    it "retains uncertain create ownership for names partial IDs options and contradictory output":
+        for output in ["--all", "friendly-name", "abc123", "b".repeat(64) + "\n" + "c".repeat(64),
+                " " + "b".repeat(64), "b".repeat(64) + "\nwarning"]:
+            val provider = deadline_provider_v1([1000], false, output)
+            expect(provider.set_effect_deadline_v1(deadline_context_v1())).to_equal(Ok(()))
+            val result = provider.create(deadline_request_v1())
+            expect(result.status).to_equal(RUNTIME_STATUS_REJECTED)
+            expect(result.reason).to_contain("native-create-returned-unqualified-id")
+            expect(provider.scripted_cursor).to_equal(1)
+            val retained = provider.retained_intent_v1(deadline_request_v1()).unwrap()
+            expect(retained.operation_id).to_equal("deadline-create")
+            expect(retained.native_id).to_equal("")
+            expect(retained.phase).to_equal(RUNTIME_PHASE_PREPARED)

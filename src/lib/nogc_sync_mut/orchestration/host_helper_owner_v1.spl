@@ -1,0 +1,263 @@
+# Trusted same-process helper admission. No lease decoder exists: wire data
+# must pass signature/parent-budget checks before this owner returns a lease.
+# Capacity is the existing physical ledger, never a second helper scheduler.
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.common.contracts.orchestration.host_helper_plan_v1.*
+use std.common.contracts.orchestration.controller_parent_budget_v1.*
+use std.common.contracts.orchestration.assignment_v1.{ControllerAssignmentBindingV1, controller_assignment_bytes_v1}
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.{HostLedgerFenceV1, HostReservationStateV1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_deadline_v1}
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2, distributed_grant_authorize_v2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_store_v1, host_helper_execution_proof_store_v1}
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.{HostParentBudgetRecordV1, host_parent_budget_match_retained_v1}
+
+pub struct HostHelperLeaseV1:
+    plan: HostHelperPlanV1
+    operation: OperationEnvelopeV2
+    receipt: HostPreparedReservationReceiptV1
+    deadline: ContainerEffectDeadlineV1
+    grant_id: text
+    issuer_id: text
+    approver_id: text
+    cpu_millis: i64
+    memory_bytes: i64
+
+pub struct HostHelperPrepareTurnV1:
+    owner: HostCapacityOwnerV1
+    receipt: Option<HostPreparedReservationReceiptV1>
+    recovery_required: bool
+    error: text
+
+pub struct HostHelperExecutionTurnV1:
+    owner: HostCapacityOwnerV1
+    lease: Option<HostHelperLeaseV1>
+    recovery_required: bool
+    error: text
+
+fn host_helper_context_v1(before: HostReservationAuthorizationContextV1,
+        after: HostReservationAuthorizationContextV1, policy: LocalAuthorityPolicyV1) -> Result<bool, text>:
+    if (after.grant_clock <= 0 or after.monotonic_ms < 0 or after.grant_clock < before.grant_clock or
+            after.monotonic_ms < before.monotonic_ms): return Err("helper-clock-invalid-or-regressed")
+    if (after.policy_revision != before.policy_revision or after.revocation_epoch != before.revocation_epoch or
+            after.session_generation != before.session_generation or after.policy_revision != policy.snapshot.policy_revision or
+            after.revocation_epoch != policy.snapshot.revocation_epoch or after.session_generation != policy.session_generation):
+        return Err("helper-authority-context-changed")
+    Ok(true)
+
+fn host_helper_parent_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV1,
+        scope: ContainerHostScopeV2) -> Result<bool, text>:
+    val plan = request.plan
+    val budget = request.budget_proof.budget
+    val fence = container_scope_fence_id_v2(scope)?
+    val plan_valid = host_helper_plan_bytes_v1(plan)?
+    val operation_valid = host_helper_reservation_match_operation_v1(request.intent, request.operation)?
+    val budget_valid = host_parent_budget_match_retained_v1(owner,
+        HostParentBudgetRecordV1(request.budget_proof, request.parent_binding, request.parent_controller_operation), scope)?
+    if (container_scope_fence_id_v2(plan.scope)? != fence or container_scope_fence_id_v2(budget.scope)? != fence or
+            owner.ledger.capacity.boot_id != fence or owner.ledger.capacity.physical_host_id != scope.physical_host_id or
+            owner.ledger.capacity.provider_generation != scope.provider_generation):
+        return Err("helper-current-scope-mismatch")
+    if (request.intent.physical_host_id != scope.physical_host_id or request.intent.fence.boot_id != fence or
+            request.intent.fence.authority_id != owner.ledger.capacity.authority_id or
+            request.intent.fence.provider_generation != scope.provider_generation or
+            request.intent.reservation.service_scope_id != scope.service_scope_id):
+        return Err("helper-reservation-scope-mismatch")
+    if request.intent.reservation.cpu_millis <= 0 or request.intent.reservation.memory_bytes <= 0:
+        return Err("helper-resource-budget-required")
+    if (plan.operation_id != request.operation.id or request.intent.plan_digest != host_helper_plan_digest_v1(plan)? or
+            plan.parent_budget_digest != controller_parent_budget_digest_v1(budget)? or
+            plan.parent_operation_id != budget.parent_operation_id or plan.parent_operation_digest != budget.parent_operation_digest or
+            plan.parent_assignment_digest != budget.parent_assignment_digest):
+        return Err("helper-parent-budget-binding-mismatch")
+    if request.operation.duration_ms > request.budget_proof.operation.duration_ms:
+        return Err("helper-duration-outside-parent-budget")
+    val parent = request.parent_binding.host_operation
+    val parent_state = daemon_operation_exact_v2(owner.journal, parent)?
+    if plan.helper_kind == "attach-broker" and parent_state.state == "admitted":
+        return Err("helper-parent-execution-intent-required")
+    if (request.operation.principal != parent.principal or request.operation.project != parent.project or
+            request.operation.environment_digest != parent.environment_digest):
+        return Err("helper-parent-principal-mismatch")
+    Ok(true)
+
+# Bounded by the existing 4096-row ledger limit. The parent plus EVERY retained
+# sibling is charged, even when a caller presents a renewed budget proof. A
+# missing/corrupt plan refuses admission rather than hiding an older allocation.
+fn host_helper_aggregate_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV1) -> Result<bool, text>:
+    var cpu = request.budget_proof.budget.maximum_cpu_millis
+    var memory = request.budget_proof.budget.maximum_memory_bytes
+    var parent_found = false
+    var helper_found = false
+    for row in owner.ledger.reservations:
+        if row.state == HostReservationStateV1.Released: continue
+        var charged = row.operation_id == request.plan.parent_operation_id
+        if charged: parent_found = true
+        else:
+            val state = owner.journal.operations[row.operation_id]
+            val operation = distributed_decode_operation_v2(state.envelope)?
+            if operation.operation == "host_helper_reservation_v1":
+                val intent = host_reservation_decode_intent_v1(file_read_regular_no_follow_bounded(
+                    owner.journal.root + "/reservation-payloads/" + row.payload_digest + ".sdn", 65536)?)?
+                val plan = host_helper_plan_decode_v1(file_read_regular_no_follow_bounded(
+                    owner.journal.root + "/host-helper-plans/" + intent.plan_digest + ".sdn", 16384)?)?
+                if host_helper_plan_digest_v1(plan)? != intent.plan_digest or plan.operation_id != row.operation_id:
+                    return Err("helper-retained-sibling-mismatch")
+                charged = plan.parent_operation_id == request.plan.parent_operation_id
+                if (charged and (plan.parent_operation_digest != request.plan.parent_operation_digest or
+                        plan.parent_assignment_digest != request.plan.parent_assignment_digest)):
+                    return Err("helper-retained-parent-chain-mismatch")
+        if charged:
+            if row.cpu_millis > cpu or row.memory_bytes > memory: return Err("helper-parent-budget-exhausted")
+            cpu = cpu - row.cpu_millis
+            memory = memory - row.memory_bytes
+            if row.operation_id == request.operation.id: helper_found = true
+    if not parent_found: return Err("helper-parent-allocation-unavailable")
+    if not helper_found and (request.intent.reservation.cpu_millis > cpu or request.intent.reservation.memory_bytes > memory):
+        return Err("helper-parent-budget-exhausted")
+    Ok(true)
+
+fn host_helper_store_v1(root: text, directory_name: text, key: text, bytes: text) -> Result<bool, text>:
+    if str_len(bytes) > 1048576: return Err("helper-retained-object-size")
+    val directory = root + "/" + directory_name
+    if not file_exists(directory) and not dir_create(directory, true): return Err("helper-object-directory-unavailable")
+    val path = directory + "/" + key + ".sdn"
+    val created = file_create_exclusive(path, bytes)
+    if created and not file_set_mode(path, 0o600): return Err("helper-object-mode-failed")
+    if file_read_regular_no_follow_bounded(path, 1048576)? != bytes: return Err("helper-retained-object-mismatch")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root): return Err("helper-object-sync-failed")
+    Ok(true)
+
+fn host_helper_retain_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV1) -> Result<bool, text>:
+    val plan = host_helper_store_v1(owner.journal.root, "host-helper-plans", host_helper_plan_digest_v1(request.plan)?, host_helper_plan_bytes_v1(request.plan)?)?
+    val budget = host_helper_store_v1(owner.journal.root, "host-helper-budgets", request.plan.parent_budget_digest,
+        controller_parent_budget_bytes_v1(request.budget_proof.budget)?)?
+    val parent: Dict<text, SdnValue> = {"binding": SdnValue.String(controller_assignment_bytes_v1(request.parent_binding)?),
+        "operation": SdnValue.String(distributed_encode_operation_v2(request.parent_controller_operation)?)}
+    val pinned = host_helper_store_v1(owner.journal.root, "host-helper-parents", sha256_text(request.plan.parent_operation_id),
+        sdn_encode_canonical(SdnValue.Dict(parent)) + "\n")?
+    val proof = controller_parent_budget_proof_encode_v1(request.budget_proof)?
+    val proof_stored = host_helper_store_v1(owner.journal.root, "host-helper-budget-proofs", sha256_text(proof), proof)?
+    val packet_stored = host_helper_request_store_v1(owner.journal.root, request)?
+    Ok(true)
+
+fn host_helper_verify_budget_v1(request: HostHelperRequestV1, policy: LocalAuthorityPolicyV1,
+        context: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
+    val proof = request.budget_proof
+    distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, proof.signed, proof.approval,
+        proof.operation, context.grant_clock, policy.snapshot.generation, context.policy_revision,
+        context.revocation_epoch, context.session_generation)
+
+fn host_helper_fresh_v1(request: HostHelperRequestV1, grant: ExecutionGrantV2,
+        approval: DistributedSignedApprovalV2, operation: OperationEnvelopeV2,
+        budget_grant: ExecutionGrantV2, context: HostReservationAuthorizationContextV1) -> Result<i64, text>:
+    if approval.expires_at <= context.grant_clock or request.budget_proof.approval.expires_at <= context.grant_clock:
+        return Err("APPROVAL_EXPIRED")
+    val authorized = distributed_grant_authorize_v2(grant, operation, context.grant_clock,
+        context.policy_revision, context.revocation_epoch, context.session_generation)
+    if authorized != "": return Err(authorized)
+    val budget_authorized = distributed_grant_authorize_v2(budget_grant, request.budget_proof.operation,
+        context.grant_clock, context.policy_revision, context.revocation_epoch, context.session_generation)
+    if budget_authorized != "": return Err(budget_authorized)
+    var expiry = grant.expires_at
+    for bound in [approval.expires_at, budget_grant.expires_at, request.budget_proof.approval.expires_at]:
+        if bound < expiry: expiry = bound
+    Ok(expiry)
+
+pub fn host_helper_prepare_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV1,
+        policy: LocalAuthorityPolicyV1, scope: ContainerHostScopeV2,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> HostHelperPrepareTurnV1:
+    val result = host_helper_prepare_checked_v1(owner, request, policy, scope, context, refresh)
+    match result:
+        case Ok(value): value
+        case Err(reason): HostHelperPrepareTurnV1(owner, nil, true, reason)
+
+fn host_helper_prepare_checked_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV1,
+        policy: LocalAuthorityPolicyV1, scope: ContainerHostScopeV2,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> Result<HostHelperPrepareTurnV1, text>:
+    val current = host_helper_context_v1(context, context, policy)?
+    val parent = host_helper_parent_v1(owner, request, scope)?
+    val aggregate = host_helper_aggregate_v1(owner, request)?
+    val budget_grant = host_helper_verify_budget_v1(request, policy, context)?
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, request.signed, request.approval,
+        request.operation, context.grant_clock, policy.snapshot.generation, context.policy_revision,
+        context.revocation_epoch, context.session_generation)?
+    val retained = host_helper_retain_v1(owner, request)?
+    val fresh = refresh()
+    val refreshed = host_helper_context_v1(context, fresh, policy)?
+    val expiry = host_helper_fresh_v1(request, grant, request.approval, request.operation, budget_grant, fresh)?
+    val receipt = host_helper_reservation_receipt_v1(request.intent, request.operation)?
+    val prepared = host_capacity_owner_prepare_helper_v1(owner, request.intent, request.operation, grant, fresh)?
+    Ok(HostHelperPrepareTurnV1(prepared, Some(receipt), false, ""))
+
+pub fn host_helper_begin_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV1,
+        receipt: HostPreparedReservationReceiptV1, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2, policy: LocalAuthorityPolicyV1, scope: ContainerHostScopeV2,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> HostHelperExecutionTurnV1:
+    val checked = host_helper_begin_checked_v1(owner, request, receipt, signed, approval, policy, scope, context, refresh)
+    match checked:
+        case Ok(turn): turn
+        case Err(reason): HostHelperExecutionTurnV1(owner, nil, true, reason)
+
+fn host_helper_begin_checked_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV1,
+        receipt: HostPreparedReservationReceiptV1, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2, policy: LocalAuthorityPolicyV1, scope: ContainerHostScopeV2,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> Result<HostHelperExecutionTurnV1, text>:
+    val current = host_helper_context_v1(context, context, policy)?
+    # Reject executing/unknown replay before retained object IO or begin. A
+    # committed helper never receives another transient launch lease.
+    val original = daemon_operation_exact_v2(owner.journal, request.operation)?
+    if original.state != "admitted": return Err("helper-execution-reconciliation-required")
+    val parent = host_helper_parent_v1(owner, request, scope)?
+    val aggregate = host_helper_aggregate_v1(owner, request)?
+    val budget_grant = host_helper_verify_budget_v1(request, policy, context)?
+    var operation = request.operation
+    operation.operation = "host_helper_execute_v1"
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, signed, approval,
+        operation, context.grant_clock, policy.snapshot.generation, context.policy_revision,
+        context.revocation_epoch, context.session_generation)?
+    val retained = host_helper_retain_v1(owner, request)?
+    val fresh = refresh()
+    val refreshed = host_helper_context_v1(context, fresh, policy)?
+    val checked_expiry = host_helper_fresh_v1(request, grant, approval, operation, budget_grant, fresh)?
+    val execution_proof = host_helper_execution_proof_store_v1(owner.journal.root, request, signed, approval)?
+    # Proof publication/readback/sync can consume the remaining lifetime.
+    val commit = refresh()
+    val commit_context = host_helper_context_v1(fresh, commit, policy)?
+    val expiry = host_helper_fresh_v1(request, grant, approval, operation, budget_grant, commit)?
+    val action = if request.plan.helper_kind == "attach-broker": "attach" else: "exec"
+    val deadline = container_effect_deadline_v1(request.plan.request_digest, request.operation.id, [action], expiry)?
+    val cap = owner.ledger.capacity
+    val fence = HostLedgerFenceV1(authority_id: cap.authority_id, boot_id: cap.boot_id,
+        provider_generation: cap.provider_generation, revision: owner.ledger.revision)
+    val executing = host_capacity_owner_begin_helper_v1(owner, request.intent, request.operation, receipt, fence, grant, commit)?
+    # From this point every failure retains the committed owner. A late expiry
+    # grants no helper capability and does not optimistically free its charge.
+    val launch = refresh()
+    val launch_context = host_helper_context_v1(commit, launch, policy)
+    if launch_context.is_err(): return Ok(HostHelperExecutionTurnV1(executing, nil, true, launch_context.unwrap_err()))
+    val launch_authority = host_helper_fresh_v1(request, grant, approval, operation, budget_grant, launch)
+    if launch_authority.is_err(): return Ok(HostHelperExecutionTurnV1(executing, nil, true, launch_authority.unwrap_err()))
+    val lease = HostHelperLeaseV1(plan: request.plan, operation: request.operation, receipt: receipt,
+        deadline: deadline, grant_id: grant.id, issuer_id: signed.issuer_id, approver_id: approval.approver_id,
+        cpu_millis: request.intent.reservation.cpu_millis, memory_bytes: request.intent.reservation.memory_bytes)
+    Ok(HostHelperExecutionTurnV1(executing, Some(lease), false, ""))

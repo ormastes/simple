@@ -1,0 +1,374 @@
+# Actual local-inprocess dispatch. Controller and host keep separate writer
+# leases/journals; the host command core remains the only provider effect owner.
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_authority_v2.*
+use std.nogc_sync_mut.orchestration.agent_preflight_authority_v1.controller_preflight_authorize_v1
+use std.nogc_sync_mut.orchestration.agent_preflight_objects_v1.{agent_preflight_for_workload_v1, agent_preflight_objects_read_v1, agent_preflight_proof_retain_v1}
+use std.common.contracts.orchestration.agent_preflight_dispatch_v1.*
+use std.common.contracts.orchestration.agent_preflight_binding_v1.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_objects_v2.*
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.nogc_sync_mut.orchestration.assignment_commit_v1.ControllerAssignmentContextV1
+use std.nogc_sync_mut.orchestration.host_local_command_v1.host_local_command_v1
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.common.contracts.orchestration.controller_dispatch_request_v2.*
+use std.common.contracts.orchestration.host_prepare_request_v1.*
+use std.common.contracts.orchestration.host_prepare_response_v1.host_prepare_response_decode_v1
+use std.common.contracts.orchestration.host_execute_request_v2.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes_v1
+use std.nogc_sync_mut.orchestration.desired_input_objects_v1.controller_desired_operation_id_v1
+use std.common.contracts.orchestration.workload_fence_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.controller_execution_reply_v2.*
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn dispatch_host_call_v2(owner: ControllerWorkloadStoreV1, context: ControllerDispatchContextV1,
+        action: text, argument: text) -> Result<text, text>:
+    val args = if action == "host-status": [action, context.config.host_root]
+        else: [action, context.config.host_root, argument]
+    val reply = host_local_command_v1(args)
+    # Even an error may follow a host effect. Preserve bytes before reporting;
+    # never transform a failed response into permission to repeat execution.
+    val retained = controller_dispatch_message_retain_v2(owner.journal.root, reply.output)?
+    if reply.exit_code != 0:
+        return Err("dispatch-host-unconfirmed:" + action + ":" + sha256_text(reply.output))
+    Ok(reply.output)
+
+fn dispatch_status_text_v2(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("dispatch-host-status-missing:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("dispatch-host-status-type:" + key)
+
+fn dispatch_status_int_v2(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key): return Err("dispatch-host-status-missing:" + key)
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("dispatch-host-status-type:" + key)
+
+pub fn controller_dispatch_host_status_v2(context: ControllerDispatchContextV1,
+        packet: ControllerDispatchRequestV2, source: text) -> Result<bool, text>:
+    if str_len(source) == 0 or str_len(source) > 4096: return Err("dispatch-host-status-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 4096, max_depth: 2,
+        max_nodes: 48, max_rows: 0, max_cells: 0, max_columns: 24)
+    val document = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("dispatch-host-status-syntax:" + issue.code)
+    if sdn_encode_canonical(document.value) + "\n" != source: return Err("dispatch-host-status-noncanonical")
+    val fields = match document.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("dispatch-host-status-object")
+    val allowed = ["version", "kind", "physicalHostId", "serviceScopeId", "authorityId",
+        "bootId", "fenceId", "nativeMachineId", "continuityMode", "continuityId", "providerGeneration", "revision", "cpuMillis", "memoryBytes",
+        "availableCpuMillis", "availableMemoryBytes", "retainedReservations",
+        "providerIdentityDigest", "enrollmentBindingDigest"]
+    for key in fields.keys():
+        if not allowed.contains(key): return Err("dispatch-host-status-unknown-field")
+    for key in allowed:
+        if not fields.contains_key(key): return Err("dispatch-host-status-missing:" + key)
+    if dispatch_status_int_v2(fields, "version")? != 2 or
+            dispatch_status_text_v2(fields, "kind")? != "host-local-status": return Err("dispatch-host-status-version")
+    for key in ["revision", "cpuMillis", "memoryBytes", "availableCpuMillis", "availableMemoryBytes", "retainedReservations"]:
+        if dispatch_status_int_v2(fields, key)? < 0: return Err("dispatch-host-status-negative:" + key)
+    if dispatch_status_int_v2(fields, "availableCpuMillis")? > dispatch_status_int_v2(fields, "cpuMillis")? or
+            dispatch_status_int_v2(fields, "availableMemoryBytes")? > dispatch_status_int_v2(fields, "memoryBytes")?:
+        return Err("dispatch-host-status-capacity-invalid")
+    val intent = packet.binding.host_intent
+    if dispatch_status_text_v2(fields, "authorityId")? != context.config.host_authority_id or
+            dispatch_status_text_v2(fields, "authorityId")? != intent.fence.authority_id or
+            "host-" + dispatch_status_text_v2(fields, "enrollmentBindingDigest")? != context.config.host_authority_id or
+            dispatch_status_text_v2(fields, "providerIdentityDigest")? != context.config.provider_identity_digest or
+            dispatch_status_text_v2(fields, "physicalHostId")? != intent.physical_host_id or
+            dispatch_status_text_v2(fields, "serviceScopeId")? != packet.execution.plan.service_scope_id or
+            dispatch_status_text_v2(fields, "bootId")? != packet.execution.plan.boot_id or
+            dispatch_status_text_v2(fields, "fenceId")? != intent.fence.boot_id or
+            dispatch_status_text_v2(fields, "nativeMachineId")? != packet.execution.plan.native_machine_id or
+            dispatch_status_text_v2(fields, "continuityMode")? != packet.execution.plan.continuity_mode or
+            dispatch_status_text_v2(fields, "continuityId")? != packet.execution.plan.continuity_id or
+            dispatch_status_int_v2(fields, "providerGeneration")? != packet.execution.plan.provider_generation:
+        return Err("dispatch-host-continuity-mismatch")
+    # Revision may legitimately advance during exact replay. The host performs
+    # authoritative fresh admission/capacity/deadline checks under its writer.
+    Ok(true)
+
+fn dispatch_prepared_state_v2(packet: ControllerDispatchRequestV2, source: text) -> bool:
+    val expected: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("host-local-operation-state"),
+        "operationId": SdnValue.String(packet.binding.host_operation.id),
+        "state": SdnValue.String("admitted"), "executionObserved": SdnValue.Bool(false)}
+    source == sdn_encode_canonical(SdnValue.Dict(expected)) + "\n"
+
+pub fn controller_dispatch_observation_match_v2(context: ControllerDispatchContextV1,
+        packet: ControllerDispatchRequestV2, observation: HostExecutionObservationV2,
+        exact_execution_proof: bool) -> Result<bool, text>:
+    val operation = packet.binding.host_operation
+    val expected_engine = if packet.execution.plan.backend == "linux-podman": "podman" else: "docker"
+    if observation.phase != "prepared" and observation.phase != "unknown" and
+            not builder_digest_valid_v1(observation.runtime.native_id): return Err("dispatch-host-native-identity-required")
+    if observation.operation_id != operation.id or
+            observation.operation_digest != sha256_text(distributed_encode_operation_v2(operation)?) or
+            observation.plan_digest != container_execution_plan_digest_v2(packet.execution.plan)? or
+            observation.request_digest != packet.execution.plan.request_digest or
+            observation.principal != operation.principal or
+            observation.provider_identity_digest != context.config.provider_identity_digest or
+            container_scope_fence_id_v2(observation.scope)? != packet.binding.host_intent.fence.boot_id or
+            observation.runtime.engine != expected_engine or
+            observation.runtime.pod_uid != packet.execution.plan.workload_uid or
+            observation.runtime.attempt != packet.execution.plan.attempt or
+            observation.runtime.operation_id != operation.id or
+            observation.runtime.node_boot_id != packet.binding.host_intent.fence.boot_id or
+            observation.runtime.provider_generation != packet.execution.plan.provider_generation:
+        return Err("dispatch-host-observation-mismatch")
+    if exact_execution_proof and (observation.grant_id != packet.host_execution_signed.grant.id or
+            observation.issuer_id != packet.host_execution_signed.issuer_id or
+            observation.approver_id != packet.host_execution_approval.approver_id):
+        return Err("dispatch-host-observation-proof-mismatch")
+    Ok(true)
+
+pub fn controller_dispatch_validation_match_v2(packet: ControllerDispatchRequestV2, source: text) -> Result<bool, text>:
+    if str_len(source) == 0 or str_len(source) > 4096: return Err("dispatch-host-validation-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4096,
+            max_depth: 2, max_nodes: 40, max_rows: 0, max_cells: 0, max_columns: 20)):
+        case Ok(value): value
+        case Err(issue): return Err("dispatch-host-validation-syntax:" + issue.code)
+    if sdn_encode_canonical(parsed.value) + "\n" != source: return Err("dispatch-host-validation-noncanonical")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("dispatch-host-validation-object")
+    val names = ["version", "kind", "backend", "operationId", "workloadUid", "attempt", "requestDigest", "planDigest",
+        "cpuMillis", "memoryBytes", "timeoutMs", "hasDevices", "hasWorkspace", "executionAuthorized"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("dispatch-host-validation-unknown:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("dispatch-host-validation-missing:" + key)
+    val plan = packet.execution.plan
+    val reservation = packet.binding.host_intent.reservation
+    if dispatch_status_int_v2(fields, "version")? != 2 or
+            dispatch_status_text_v2(fields, "kind")? != "host-container-validation" or
+            dispatch_status_text_v2(fields, "backend")? != plan.backend or
+            dispatch_status_text_v2(fields, "operationId")? != plan.operation_id or
+            dispatch_status_text_v2(fields, "workloadUid")? != plan.workload_uid or
+            dispatch_status_int_v2(fields, "attempt")? != plan.attempt or
+            dispatch_status_text_v2(fields, "requestDigest")? != plan.request_digest or
+            dispatch_status_text_v2(fields, "planDigest")? != container_execution_plan_digest_v2(plan)? or
+            dispatch_status_int_v2(fields, "cpuMillis")? != reservation.cpu_millis or
+            dispatch_status_int_v2(fields, "memoryBytes")? != reservation.memory_bytes:
+        return Err("dispatch-host-validation-binding-mismatch")
+    val timeout = dispatch_status_int_v2(fields, "timeoutMs")?
+    if timeout <= 0 or timeout > packet.binding.host_operation.duration_ms:
+        return Err("dispatch-timeout-outside-grant")
+    for key in ["hasDevices", "hasWorkspace", "executionAuthorized"]:
+        match fields[key]:
+            case SdnValue.Bool(value):
+                if key == "executionAuthorized" and value: return Err("dispatch-validation-claims-authorization")
+                if key == "hasDevices" and value != (reservation.exclusive_devices.len() > 0):
+                    return Err("dispatch-validation-device-mismatch")
+            case _: return Err("dispatch-validation-boolean-required:" + key)
+    Ok(true)
+
+pub fn controller_dispatch_response_v2(context: ControllerDispatchContextV1, packet: ControllerDispatchRequestV2,
+        source: text, exact_execution_proof: bool) -> Result<text, text>:
+    var status = "host-prepared"
+    if not dispatch_prepared_state_v2(packet, source):
+        val observation = host_execution_observation_decode_v2(source)?
+        val matched = controller_dispatch_observation_match_v2(context, packet, observation, exact_execution_proof)?
+        status = "runtime-observed"
+    controller_execution_reply_encode_v2(ControllerExecutionReplyV2(controller_id: packet.binding.controller_id,
+        request_uid: packet.binding.workload_uid, controller_operation_id: packet.operation.id,
+        host_operation_id: packet.binding.host_operation.id,
+        assignment_digest: sha256_text(controller_assignment_bytes_v1(packet.binding)?),
+        plan_digest: container_execution_plan_digest_v2(packet.execution.plan)?, request_digest: packet.execution.plan.request_digest,
+        status: status, host_response: source, observation_digest: sha256_text(source)))
+
+
+fn dispatch_assignment_context_v2(owner: ControllerWorkloadStoreV1,
+        context: ControllerDispatchContextV1, uid: text, now: i64) -> Result<ControllerAssignmentContextV1, text>:
+    val state = controller_workload_store_lookup_v1(owner, uid)?
+    Ok(ControllerAssignmentContextV1(workload: state, controller_epoch: context.config.controller_epoch,
+        grant_clock: now, policy_revision: context.policy.snapshot.policy_revision,
+        revocation_epoch: context.policy.snapshot.revocation_epoch,
+        session_generation: context.policy.session_generation))
+
+fn dispatch_run_v2(owner: ControllerWorkloadStoreV1, root: text, controller: text,
+        uid: text, packet: ControllerDispatchRequestV2, resume: bool,
+        preflight_authorization: Option<AgentPreflightDispatchV1> = None) -> Result<text, text>:
+    if packet.binding.workload_uid != uid: return Err("dispatch-request-uid-mismatch")
+    val context = controller_dispatch_context_load_v1(root, controller)?
+    var now = controller_dispatch_grant_clock_v1()?
+    var proofs = controller_dispatch_authorize_v2(context, packet, now)?
+    var current = owner
+    # Generic resolved dispatch cannot bypass a retained AgentSession source.
+    # AgentSession dispatch requires its separate immutable resolution chain.
+    val desired_id = controller_desired_operation_id_v1(controller, uid)?
+    val desired = distributed_operation_journal_lookup_v2(current.journal, desired_id)
+    if desired.is_ok(): return Err("agent-assignment-retained-request-required")
+    if desired.unwrap_err() != "OPERATION_NOT_FOUND": return Err(desired.unwrap_err())
+    val preflight_allowed = controller_workload_store_preflight_guard_v1(current, packet.execution.plan)?
+    val associated = agent_preflight_for_workload_v1(current.journal, controller, uid)?
+    if associated.is_some():
+        val authorization = match preflight_authorization:
+            case Some(value): value
+            case None: return Err("agent-preflight-authorized-route-required")
+        if agent_preflight_binding_digest_v1(authorization.binding)? != agent_preflight_binding_digest_v1(associated.unwrap())?:
+            return Err("agent-preflight-authorization-association-mismatch")
+        val expected_authorized = controller_preflight_authorize_v1(context, authorization, now)?
+    val existing = daemon_operation_exact_v2(current.journal, packet.operation)
+    if existing.is_err() and existing.unwrap_err() != "OPERATION_NOT_FOUND": return Err(existing.unwrap_err())
+    if resume and (existing.is_err() or existing.unwrap().state != "completed"):
+        return Err("dispatch-resume-committed-assignment-required")
+    val status_bytes = dispatch_host_call_v2(current, context, "host-status", "")?
+    val continuity = controller_dispatch_host_status_v2(context, packet, status_bytes)?
+    val validation_path = controller_dispatch_message_retain_v2(current.journal.root,
+        container_execution_request_encode_v2(packet.execution)?)?
+    val validation_reply = dispatch_host_call_v2(current, context, "host-validate", validation_path)?
+    val validated = controller_dispatch_validation_match_v2(packet, validation_reply)?
+    now = controller_dispatch_grant_clock_v1()?
+    proofs = controller_dispatch_authorize_v2(context, packet, now)?
+    val retained = controller_dispatch_packet_retain_v2(current.journal.root, packet)?
+    val state = controller_workload_store_lookup_v1(current, uid)
+    if state.is_err():
+        if state.unwrap_err() != "workload-not-found": return Err(state.unwrap_err())
+        val initial = controller_workload_create_v1(controller, context.config.controller_epoch, uid,
+            packet.binding.desired_revision, packet.binding.host_intent.plan_digest)?
+        current = controller_workload_store_create_v1(current, initial)?
+    val before_bind = controller_workload_store_lookup_v1(current, uid)?
+    current = controller_workload_store_bind_v1(current, uid, before_bind.revision, packet.binding)?
+    var assignment_context = dispatch_assignment_context_v2(current, context, uid, now)?
+    if existing.is_ok() and existing.unwrap().state == "completed":
+        val inspected = dispatch_host_call_v2(current, context, "host-inspect", packet.binding.host_operation.id)?
+        if not resume or not dispatch_prepared_state_v2(packet, inspected):
+            return controller_dispatch_response_v2(context, packet, inspected, false)
+    else:
+        if existing.is_err():
+            current = controller_workload_store_admit_assignment_v1(current, packet.binding,
+                packet.operation, proofs.assignment, assignment_context)?
+        val admitted = daemon_operation_exact_v2(current.journal, packet.operation)?
+        if admitted.state == "admitted":
+            current = controller_workload_store_begin_prepare_v1(current, packet.binding,
+                packet.operation, proofs.assignment, assignment_context)?
+        elif admitted.state != "executing" and admitted.state != "outcome-unknown":
+            return Err("dispatch-assignment-state-invalid")
+        # Reconcile only the exact immutable prepare; the host lookup-first
+        # owner refuses expired/executing/unknown reservations without reallocating.
+        val prepare = HostPrepareRequestV1(intent: packet.binding.host_intent,
+            operation: packet.binding.host_operation, signed: packet.prepare_signed, approval: packet.prepare_approval)
+        val path = controller_dispatch_message_retain_v2(current.journal.root, host_prepare_request_encode_v1(prepare)?)?
+        val response = dispatch_host_call_v2(current, context, "host-prepare", path)?
+        val receipt = host_prepare_response_decode_v1(response, packet.binding.host_intent, packet.binding.host_operation)?
+        current = controller_workload_store_commit_assignment_v1(current, uid,
+            packet.operation, receipt, proofs.assignment, assignment_context)?
+    # Re-read private policy and actual clock after the prepare/inspection turn;
+    # the writer refreshes cancellation and the exact assignment before execute.
+    val fresh = controller_dispatch_context_load_v1(root, controller)?
+    val execution_clock = controller_dispatch_grant_clock_v1()?
+    val fresh_proofs = controller_dispatch_authorize_v2(fresh, packet, execution_clock)?
+    val preflight_still_allowed = controller_workload_store_preflight_guard_v1(current, packet.execution.plan)?
+    if preflight_authorization.is_some():
+        val still_authorized = controller_preflight_authorize_v1(fresh, preflight_authorization.unwrap(), execution_clock)?
+    assignment_context = dispatch_assignment_context_v2(current, fresh, uid, execution_clock)?
+    val ready = controller_workload_store_execution_ready_v1(current, uid, packet.operation,
+        fresh_proofs.execution, assignment_context)?
+    val execute = HostExecuteRequestV2(intent: packet.binding.host_intent, operation: packet.binding.host_operation,
+        receipt: ready.host_receipt, execution: packet.execution,
+        signed: packet.host_execution_signed, approval: packet.host_execution_approval)
+    val path = controller_dispatch_message_retain_v2(current.journal.root, host_execute_request_encode_v2(execute)?)?
+    val response = dispatch_host_call_v2(current, fresh, "host-execute", path)?
+    controller_dispatch_response_v2(fresh, packet, response, true)
+
+fn dispatch_open_v2(root: text, controller: text, uid: text) -> Result<ControllerWorkloadStoreV1, text>:
+    if not builder_identifier_valid_v1(uid): return Err("dispatch-request-uid-invalid")
+    val context = controller_dispatch_context_load_v1(root, controller)?
+    val nonce = sosix_random_hex(32)
+    if not nonce.?: return Err("dispatch-owner-entropy-unavailable")
+    controller_workload_store_open_v1(root + "/journal", controller, nonce ?? "", 100000)
+
+fn dispatch_finish_v2(owner: ControllerWorkloadStoreV1, result: Result<text, text>) -> Result<text, text>:
+    # Close validates the original exact lease, not an old projection revision.
+    # Every mutation has already been committed by the threaded domain owner.
+    val closed = controller_workload_store_close_v1(owner)?
+    if not closed: return Err("dispatch-owner-close-unconfirmed")
+    result
+
+pub fn controller_dispatch_v2(root: text, controller: text, uid: text,
+        source: text, resume: bool = false) -> Result<text, text>:
+    val packet = controller_dispatch_request_decode_v2(source)?
+    val owner = dispatch_open_v2(root, controller, uid)?
+    val result = dispatch_run_v2(owner, root, controller, uid, packet, resume)
+    dispatch_finish_v2(owner, result)
+
+fn preflight_reply_v1(binding: AgentPreflightBindingV1, execution_reply: text) -> Result<text, text>:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("agent-preflight-execution"),
+        "controllerId": SdnValue.String(binding.controller_id), "sessionUid": SdnValue.String(binding.session_uid),
+        "preflightUid": SdnValue.String(binding.preflight.workload_uid),
+        "bindingDigest": SdnValue.String(agent_preflight_binding_digest_v1(binding)?),
+        "status": SdnValue.String(if execution_reply == "": "association-retained" else: "probe-status-observed"),
+        "executionReply": SdnValue.String(execution_reply), "agentSessionExecutionAuthorized": SdnValue.Bool(false)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn preflight_dispatch_owned_v1(owner: ControllerWorkloadStoreV1, root: text, controller: text,
+        uid: text, packet: AgentPreflightDispatchV1, resume: bool) -> Result<text, text>:
+    if packet.binding.session_uid != uid: return Err("agent-preflight-session-uid-mismatch")
+    val context = controller_dispatch_context_load_v1(root, controller)?
+    val now = controller_dispatch_grant_clock_v1()?
+    val authorized = controller_preflight_authorize_v1(context, packet, now)?
+    val execution_proofs = controller_dispatch_authorize_v2(context, packet.dispatch, now)?
+    # Archive exact proof bytes before publishing the association. Only a
+    # committed association permits the ordinary charged workload to launch.
+    val proof_retained = agent_preflight_proof_retain_v1(owner.journal.root, packet)?
+    val associated = controller_workload_store_preflight_v1(owner, packet.binding)?
+    val reply = dispatch_run_v2(associated, root, controller, packet.binding.preflight.workload_uid,
+        packet.dispatch, resume, Some(packet))?
+    preflight_reply_v1(packet.binding, reply)
+
+pub fn controller_dispatch_preflight_v1(root: text, controller: text, uid: text,
+        source: text, resume: bool = false) -> Result<text, text>:
+    val packet = agent_preflight_dispatch_decode_v1(source)?
+    val owner = dispatch_open_v2(root, controller, uid)?
+    val result = preflight_dispatch_owned_v1(owner, root, controller, uid, packet, resume)
+    dispatch_finish_v2(owner, result)
+
+fn dispatch_inspect_owned_v2(owner: ControllerWorkloadStoreV1, root: text,
+        controller: text, uid: text) -> Result<text, text>:
+    val context = controller_dispatch_context_load_v1(root, controller)?
+    val binding = controller_workload_store_assignment_v1(owner, uid)?
+    val packet = controller_dispatch_packet_load_v2(owner.journal.root,
+        sha256_text(controller_assignment_bytes_v1(binding)?))?
+    if packet.binding.workload_uid != uid or packet.binding.controller_id != controller:
+        return Err("dispatch-retained-controller-mismatch")
+    val original = daemon_operation_exact_v2(owner.journal, packet.operation)?
+    val status = dispatch_host_call_v2(owner, context, "host-status", "")?
+    val checked = controller_dispatch_host_status_v2(context, packet, status)?
+    val response = dispatch_host_call_v2(owner, context, "host-inspect", binding.host_operation.id)?
+    controller_dispatch_response_v2(context, packet, response, false)
+
+pub fn controller_inspect_execution_v2(root: text, controller: text, uid: text) -> Result<text, text>:
+    val owner = dispatch_open_v2(root, controller, uid)?
+    val result = dispatch_inspect_owned_v2(owner, root, controller, uid)
+    dispatch_finish_v2(owner, result)
+
+fn preflight_inspect_owned_v1(owner: ControllerWorkloadStoreV1, root: text,
+        controller: text, uid: text) -> Result<text, text>:
+    val id = agent_preflight_operation_id_v1(controller, uid)?
+    val record = distributed_operation_journal_lookup_v2(owner.journal, id)?
+    val operation = distributed_decode_operation_v2(record.envelope)?
+    val binding = agent_preflight_objects_read_v1(owner.journal, operation, controller)?
+    if record.state != "completed" or record.outcome_digest != operation.payload_digest:
+        return Err("agent-preflight-association-not-committed")
+    if not owner.rows.contains_key(binding.preflight.workload_uid): return preflight_reply_v1(binding, "")
+    val reply = dispatch_inspect_owned_v2(owner, root, controller, binding.preflight.workload_uid)?
+    preflight_reply_v1(binding, reply)
+
+pub fn controller_inspect_preflight_v1(root: text, controller: text, uid: text) -> Result<text, text>:
+    val owner = dispatch_open_v2(root, controller, uid)?
+    val result = preflight_inspect_owned_v1(owner, root, controller, uid)
+    dispatch_finish_v2(owner, result)

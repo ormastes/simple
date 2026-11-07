@@ -1,0 +1,227 @@
+# Authored/unexecuted. No fixture substitutes for native owner capability.
+use std.spec.*
+use std.common.contracts.container.stream_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.build_manager.group_process_stream_profile_v3.GroupProcessBrokerBudgetV3
+use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_digest_v3,
+    group_process_stream_template_encode_v3}
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.output_session_v2.*
+use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.LinuxSimpleContainerAdapterV2
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.stream_v2.*
+use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
+use test.fixtures.orchestration.host_helper_fixture_v1.host_helper_fixture_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_receipt_v1
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+
+fn _output_identity_fixture_v2() -> ContainerOutputIdentityV2:
+    ContainerOutputIdentityV2(operation_id: "output-api", parent_operation_id: "create-api",
+        parent_operation_digest: "a".repeat(64), parent_assignment_digest: "b".repeat(64),
+        parent_budget_digest: "c".repeat(64), binding_digest: "d".repeat(64))
+
+fn _output_policy_fixture_v2() -> ContainerStreamPolicyV2:
+    ContainerStreamPolicyV2(root: "/trusted/output", snapshot_digest: "a".repeat(64),
+        cache_identity: "b".repeat(64), broker_program: "/trusted/broker", broker_digest: "c".repeat(64),
+        environment: ["LANG=C"], directory: "/trusted/work", delegated_cgroup_path: "/delegated/helpers",
+        memory_policy: "enforce", timeout_ms: 30000,
+        broker_budget: GroupProcessBrokerBudgetV3(cgroup_path: "/delegated/broker", device: 1, inode: 2,
+            generation: 3, policy_digest: "d".repeat(64), cpu_quota_us: 10000, cpu_period_us: 100000,
+            reserved_cpu_millis: 100, memory_limit_bytes: 16777216, reserved_memory_bytes: 16777216),
+        child_image_mode: "trusted-local-admin-image-fd-v1")
+
+fn _output_common_plan_fixture_v2() -> ContainerOutputPlanV2:
+    val leaf = linux_container_leaf_fixture_v2()
+    val request = linux_container_request_fixture_v2(leaf)
+    val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+    val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+    val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, "b".repeat(64))], [1])
+    val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+    val deadline = container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap()
+    val created = simple_container_apply_v2(owner, "create", request, deadline)
+    assert(created.operation.status == RUNTIME_STATUS_OK)
+    val plan = simple_container_output_plan_v2(created.owner, request, created.operation.state.identity,
+        _output_identity_fixture_v2(), _output_policy_fixture_v2(),
+        ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432)).unwrap()
+    assert(adapter.provider.executor_call_count() == 1)
+    plan
+
+describe "Linux output-follow owned launch planning":
+    it "uses actual common planning with exact absolute output-only attach argv":
+        val plan = _output_common_plan_fixture_v2()
+        expect(plan.launch_template.request.program).to_equal("/usr/bin/podman")
+        expect(plan.launch_template.request.args).to_equal(["--remote=false", "--root", "/home/test/storage",
+            "--runroot", "/run/user/1000/storage", "--storage-driver", "overlay", "--storage-opt=",
+            "attach", "--no-stdin", "--sig-proxy=false", "b".repeat(64)])
+        expect(plan.launch_template.worker_id).to_equal("output-api")
+        expect(plan.launch_template.generation).to_equal(7)
+        expect(plan.launch_template.root).to_equal("/trusted/output/output-" + container_output_identity_digest_v2(plan.identity).unwrap())
+        expect(plan.launch_template.transport_generation).to_equal(0)
+        expect(plan.launch_template.request.launch_deadline_unix_ms).to_equal(0)
+        expect(plan.launch_template.profile_v3.unwrap().helper_cpu.cpu_millis).to_equal(50)
+        expect(plan.launch_template.memory_limit_bytes).to_equal(33554432)
+
+    it "uses canonical daemon normalization and binds all helper target demand":
+        val plan = _output_common_plan_fixture_v2()
+        val digest = group_process_stream_template_digest_v3(plan.launch_template).unwrap()
+        var dynamic = plan.launch_template
+        dynamic.transport_generation = 99
+        var request = dynamic.request
+        request.launch_deadline_unix_ms = 100
+        dynamic.request = request
+        expect(group_process_stream_template_digest_v3(dynamic).unwrap()).to_equal(digest)
+        expect(group_process_stream_template_encode_v3(plan.launch_template).unwrap().len()).to_be_greater_than(0)
+        expect(plan.request_digest).to_equal(container_output_plan_digest_v2(plan).unwrap())
+        var changed = plan
+        changed.identity.binding_digest = "e".repeat(64)
+        expect(container_output_plan_digest_v2(changed).unwrap() == plan.request_digest).to_equal(false)
+        changed = plan
+        changed.runtime.native_id = "c".repeat(64)
+        expect(container_output_plan_digest_v2(changed).unwrap() == plan.request_digest).to_equal(false)
+
+    it "refuses unsupported image modes bad parent and unqualified target IDs":
+        val plan = _output_common_plan_fixture_v2()
+        for kind in ["mode", "parent", "native", "generation"]:
+            var policy = _output_policy_fixture_v2()
+            var identity = plan.identity
+            var runtime = plan.runtime
+            var generation = 7
+            if kind == "mode": policy.child_image_mode = "sealed-main-image-v1"
+            if kind == "parent": identity.parent_operation_id = "foreign"
+            if kind == "native": runtime.native_id = "--all"
+            if kind == "generation": generation = 8
+            expect(linux_oci_output_launch_template_v2(policy, identity, plan.resources, runtime, generation,
+                linux_container_policy_fixture_v2(), linux_container_engine_fixture_v2()).is_err()).to_equal(true)
+
+    it "refuses malformed policy and resources before a native owned launch exists":
+        val plan = _output_common_plan_fixture_v2()
+        var policy = _output_policy_fixture_v2()
+        policy.environment = ["A=one", "A=two"]
+        expect(container_stream_policy_digest_v2(policy).is_err()).to_equal(true)
+        policy = _output_policy_fixture_v2()
+        policy.root = "/"
+        expect(container_stream_policy_digest_v2(policy).is_err()).to_equal(true)
+        var changed = plan
+        changed.resources.cpu_millis = 0
+        expect(container_output_plan_digest_v2(changed).is_err()).to_equal(true)
+        changed = plan
+        changed.launch_template.transport_generation = 1
+        expect(container_output_plan_digest_v2(changed).is_err()).to_equal(true)
+
+    it "checks fresh exact running identity but never spawns a native helper from scripted observations":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val inspect = build_inspect_command("podman", "/unused/api", native).1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, native),
+            linux_container_script_result_fixture_v2(inspect, "workload-1|1|" + fence + "|7|create-api|" + native + "|running")], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap()
+        val created = simple_container_apply_v2(owner, "create", request, deadline)
+        val plan = simple_container_output_plan_v2(created.owner, request, created.operation.state.identity,
+            _output_identity_fixture_v2(), _output_policy_fixture_v2(),
+            ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432)).unwrap()
+        var launch = plan.launch_template
+        var child = launch.request
+        child.launch_deadline_unix_ms = 100
+        launch.request = child
+        match adapter.provider.open_output_session_v2(leaf, created.operation.state.identity,
+                plan.provider_identity_digest, launch):
+            case PipedProcessOwnedSpawnV2.Rejected(reason):
+                expect(reason).to_equal("output-scripted-provider-native-spawn-forbidden")
+            case _: fail("scripted observations cannot authorize native owned launch")
+        expect(adapter.provider.scripted_cursor).to_equal(2)
+        expect(adapter.provider.executor_call_count()).to_equal(2)
+
+    it "rejects backend engine and full scope fence disagreement in the common plan":
+        val plan = _output_common_plan_fixture_v2()
+        var changed = plan
+        changed.runtime.engine = "docker"
+        expect(container_output_plan_digest_v2(changed).is_err()).to_equal(true)
+        changed = plan
+        changed.workload.backend = "windows-docker-process"
+        expect(container_output_plan_digest_v2(changed).is_err()).to_equal(true)
+        changed = plan
+        changed.runtime.node_boot_id = "c".repeat(64)
+        expect(container_output_plan_digest_v2(changed).is_err()).to_equal(true)
+
+    it "rejects corrupted helper carriers through common open before fresh inspect or spawn":
+        # The real fixture provides a request/receipt with real signatures and
+        # journal setup. Structural alignment below is NOT a verified helper
+        # lease and is never submitted unchanged as launch authority.
+        val fixture = host_helper_fixture_v1()
+        val leaf = linux_container_leaf_fixture_v2()
+        val scope = fixture.scope
+        var request = linux_container_request_fixture_v2(leaf)
+        request.plan.physical_host_id = scope.physical_host_id
+        request.plan.service_scope_id = scope.service_scope_id
+        request.plan.boot_id = scope.boot_id
+        request.plan.provider_generation = scope.provider_generation
+        request.plan.native_machine_id = scope.native_machine_id
+        request.plan.continuity_mode = scope.continuity_mode
+        request.plan.continuity_id = scope.continuity_id
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val engine = linux_container_engine_fixture_v2()
+        val provider = LinuxOciRuntimeProviderV1.scripted_with_engine_policy("linux", "podman", "/unused/api",
+            fence, 7, linux_container_policy_fixture_v2(), engine, engine,
+            [linux_container_script_result_fixture_v2(create, "b".repeat(64))]).unwrap()
+        val clock = provider.set_scripted_effect_clock_v1([1]).unwrap()
+        val observed = ContainerHostObservationV2(backend: "linux-podman", native_machine_id: scope.native_machine_id,
+            native_boot_id: scope.boot_id, provider_identity_digest: engine.identity_digest,
+            execution_os: "linux", architecture: "x86_64", continuity_assurance: scope.continuity_mode,
+            boot_observation: scope.continuity_id)
+        val adapter = LinuxSimpleContainerAdapterV2.scripted_fixture_v2(scope, provider, observed, 3000).unwrap()
+        val owner = simple_container_scripted_linux_fixture_v2(scope, adapter)
+        val launch_deadline = container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap()
+        val created = simple_container_apply_v2(owner, "create", request, launch_deadline)
+        var identity = _output_identity_fixture_v2()
+        identity.operation_id = fixture.request.operation.id
+        var policy = _output_policy_fixture_v2()
+        policy.timeout_ms = 100
+        val resources = ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: fixture.request.operation.memory_bytes)
+        val plan = simple_container_output_plan_v2(created.owner, request, created.operation.state.identity,
+            identity, policy, resources).unwrap()
+        var helper_plan = fixture.request.plan
+        helper_plan.helper_kind = "attach-broker"
+        helper_plan.parent_operation_id = identity.parent_operation_id
+        helper_plan.parent_operation_digest = identity.parent_operation_digest
+        helper_plan.parent_assignment_digest = identity.parent_assignment_digest
+        helper_plan.parent_budget_digest = identity.parent_budget_digest
+        helper_plan.request_digest = plan.request_digest
+        helper_plan.scope = scope
+        val receipt = host_helper_reservation_receipt_v1(fixture.request.intent, fixture.request.operation).unwrap()
+        val helper = ContainerHelperAdmissionV2(plan: helper_plan, operation: fixture.request.operation,
+            receipt: receipt, deadline: container_effect_deadline_v1(plan.request_digest, identity.operation_id, ["attach"], 100).unwrap(),
+            grant_id: fixture.execution_signed.grant.id, issuer_id: fixture.execution_signed.issuer_id,
+            approver_id: fixture.execution_approval.approver_id, cpu_millis: resources.cpu_millis,
+            memory_bytes: resources.memory_bytes)
+        # This is structural matching only; no test asserts authenticated lease.
+        expect(container_output_admission_validate_v2(plan, helper).unwrap()).to_equal(true)
+        for kind in ["plan", "resources", "operation", "action", "host", "receipt", "deadline"]:
+            var corrupt = helper
+            if kind == "plan": corrupt.plan.parent_operation_digest = "e".repeat(64)
+            if kind == "resources": corrupt.memory_bytes = corrupt.memory_bytes + 1
+            if kind == "operation": corrupt.operation.id = "foreign"
+            if kind == "action": corrupt.operation.operation = "host_reservation_v1"
+            if kind == "host": corrupt.operation.host_id = "foreign"
+            if kind == "receipt": corrupt.receipt.receipt_digest = "e".repeat(64)
+            if kind == "deadline": corrupt.deadline.request_digest = "e".repeat(64)
+            val refused = simple_container_open_output_v2(created.owner, request,
+                created.operation.state.identity, identity, corrupt, policy)
+            match refused.spawn:
+                case PipedProcessOwnedSpawnV2.Rejected(reason):
+                    if kind == "plan": expect(reason).to_equal("container-output-admission-parent-mismatch")
+                    if kind == "resources": expect(reason).to_equal("container-output-admission-template-mismatch")
+                    if kind == "operation" or kind == "action" or kind == "host":
+                        expect(reason).to_equal("container-output-admission-operation-mismatch")
+                    if kind == "receipt": expect(reason).to_equal("reservation-receipt-mismatch")
+                    if kind == "deadline": expect(reason).to_equal("container-output-admission-template-mismatch")
+                case _: fail("corrupted helper carrier must not acquire a native owner")
+            expect(adapter.provider.executor_call_count()).to_equal(1)
+            expect(adapter.provider.scripted_cursor).to_equal(1)

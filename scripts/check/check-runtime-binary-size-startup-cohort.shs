@@ -11,8 +11,13 @@ uint() { value=$(field "$1" "$2") || fail "missing-$2"; case "$value" in ''|*[!0
 RECEIPT= SAMPLES= SIMPLE= INTERPRETER= C_BINARY= PYTHON= STAGE4= NOGC= PROVIDERS=
 MATCH_SIMPLE= MATCH_C= MATCH_SOURCE= MATCH_STDOUT= MATCH_ARCHIVE= MATCH_RECEIPT=
 MATCH_CLANG= MATCH_LLD= MATCH_STRIP=
+# The measurements remain caller-supplied; this validates Stage4 authority only.
+STAGE4_COMPILER= STAGE4_SOURCE=
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --help) printf '%s\n' 'BS7 supplied-evidence cohort: --stage4-receipt COMPILER.provenance.env --stage4-compiler COMPILER --stage4-source-root SOURCE_ROOT are mandatory canonical Stage4 inputs.' 'Other required inputs: samples, NoGC/provider observations, separate interpreter/Python and matched Simple/C link artifacts. This tool does not acquire those measurements.'; exit 0;;
+        --stage4-compiler) STAGE4_COMPILER=$2; shift 2;;
+        --stage4-source-root) STAGE4_SOURCE=$2; shift 2;;
         --receipt) RECEIPT=$2; shift 2;; --samples) SAMPLES=$2; shift 2;;
         --simple-binary) SIMPLE=$2; shift 2;; --c-binary) C_BINARY=$2; shift 2;;
         --interpreter-binary) INTERPRETER=$2; shift 2;;
@@ -40,8 +45,19 @@ eq_field "$RECEIPT" schema simple.runtime-binary-size-startup-cohort/v1
 mode=$(field "$RECEIPT" cohort_mode) || fail missing-cohort-mode
 case "$mode" in development) minimum=30;; release) minimum=100;; *) fail invalid-cohort-mode;; esac
 eq_field "$RECEIPT" qualification ADMITTED_STAGE4
-eq_field "$STAGE4" stage 4
-case "$(field "$STAGE4" compiler_kind || true)" in *seed*|*rust*) fail stage4-is-seed;; esac
+# Use canonical Stage4 provenance, never a caller-invented stage=4 label.
+[ -n "$STAGE4_COMPILER" ] && [ -n "$STAGE4_SOURCE" ] || fail actual-stage4-compiler-and-source-required
+[ -f "$STAGE4_COMPILER" ] && [ ! -L "$STAGE4_COMPILER" ] && [ -x "$STAGE4_COMPILER" ] || fail invalid-stage4-compiler
+[ -d "$STAGE4_SOURCE" ] || fail invalid-stage4-source-root
+bs7_check_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$bs7_check_root/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$bs7_check_root/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+[ "$(bootstrap_stage3_manifest_value schema "$STAGE4")" = simple-bootstrap-stage4-provenance-v1 ] || fail canonical-stage4-schema-required
+[ "$(bootstrap_stage3_manifest_value artifact_kind "$STAGE4")" = pure-simple-full-cli ] || fail canonical-stage4-full-cli-required
+stage4_verify_candidate_provenance "$STAGE4" "$STAGE4_COMPILER" "$STAGE4_SOURCE" || fail canonical-stage4-provenance-refused
 eq_field "$RECEIPT" stage4_receipt_sha256 "$(hash_file "$STAGE4")"
 eq_field "$RECEIPT" simple_binary_sha256 "$(hash_file "$SIMPLE")"
 eq_field "$RECEIPT" interpreter_binary_sha256 "$(hash_file "$INTERPRETER")"

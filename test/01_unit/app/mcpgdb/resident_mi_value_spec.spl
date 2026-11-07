@@ -1,0 +1,27 @@
+use std.spec
+use std.nogc_async_mut.debug.remote.protocol.gdb_mi_parser.{GdbMiParser}
+use app.mcpgdb.json_helpers.{js}
+use app.mcpgdb.resident_mi_value_v1.{resident_mi_payload_json_v1, resident_mi_field_v1}
+use app.mcpgdb.resident_mi_v1.{resident_mi_quote_v1}
+use std.common.json.value.{json_parse_value_strict, json_value_field, json_value_at, json_value_text_or}
+
+describe "Resident MI immutable value adaptation":
+    it "does not reinterpret an escaped Windows path backslash as newline or tab":
+        val wanted = r"C:\native\temp.spl"
+        val quoted = js(wanted)
+        expect(GdbMiParser.unescape_string(quoted)).to_equal(wanted)
+        expect(resident_mi_field_v1("fullname=" + quoted, "fullname")).to_equal(wanted)
+        expect(GdbMiParser.unescape_mi_string(r"first\nsecond")).to_equal("first\nsecond")
+
+    it "decodes nested frames and variables without a mutable Dict":
+        val payload = "frame={level=\"0\",func=\"debug_target\"},variables=[{name=\"local\",value=\"35\"}]"
+        val value = json_parse_value_strict(resident_mi_payload_json_v1(payload).unwrap()).unwrap()
+        expect(json_value_text_or(json_value_field(json_value_field(value, "frame"), "func"), "")).to_equal("debug_target")
+        val local = json_value_at(json_value_field(value, "variables"), 0)
+        expect(json_value_text_or(json_value_field(local, "name"), "")).to_equal("local")
+        expect(json_value_text_or(json_value_field(local, "value"), "")).to_equal("35")
+
+    it "rejects malformed nested values and injected command frame boundaries":
+        expect(resident_mi_payload_json_v1("frame={level=\"0\"").is_err()).to_equal(true)
+        expect(resident_mi_quote_v1("show version\n-gdb-exit").is_err()).to_equal(true)
+        expect(resident_mi_quote_v1("shell\twhoami").is_err()).to_equal(true)

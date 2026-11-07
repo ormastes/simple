@@ -5154,15 +5154,16 @@ impl MirLowering:
         self.builder = b_cond
 
         # Element: x = rt_array_get(arr, i)
-        # A `[u8]` element reads through rt_bytes_u8_at, the accessor the
-        # index read `arr[i]` uses (expr_dispatch.spl typed_u8_runtime_read):
-        # rt_array_get hands back the RAW byte of a packed array, so the
-        # decode below turned 56 into 7.
-        val for_typed_u8 = match element_type.kind:
-            case MirTypeKind.U8: true
-            case _: false
+        # Typed unsigned arrays use the same checked providers as `arr[i]`.
+        # Providers normalize boxed and packed layouts to raw element bits;
+        # generic tagged decode below must not shift packed bytes or words.
+        val for_raw_unsigned_getter = match element_type.kind:
+            case MirTypeKind.U8: "rt_bytes_u8_at"
+            case MirTypeKind.U32: "rt_typed_words_u32_at"
+            case MirTypeKind.U64: "rt_typed_words_u64_at"
+            case _: ""
         val get_func = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str(if for_typed_u8: "rt_bytes_u8_at" else: "rt_array_get"),
+            MirConstValue.Str(if for_raw_unsigned_getter != "": for_raw_unsigned_getter else: "rt_array_get"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
         ))
         var b_get = self.builder
@@ -5209,10 +5210,10 @@ impl MirLowering:
         if for_has_real_struct_name:
             self.mark_runtime_value_local(elem_local.id)
         var decoded_elem = elem_local
-        if for_typed_u8:
-            var b_byte = self.builder
-            decoded_elem = b_byte.emit_cast(mir_operand_copy(elem_local), element_type)
-            self.builder = b_byte
+        if for_raw_unsigned_getter != "":
+            var b_unsigned = self.builder
+            decoded_elem = b_unsigned.emit_cast(mir_operand_copy(elem_local), element_type)
+            self.builder = b_unsigned
         elif erased_element_hir != nil and not for_has_real_struct_name:
             # Erased `[T]` element: tagged word, no decode (see the
             # erased_element_hir declaration above).

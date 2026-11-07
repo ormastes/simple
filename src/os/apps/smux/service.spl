@@ -16,7 +16,8 @@ use os.apps.smux.vt_screen.{VtScreen, vt_new, vt_feed, vt_resize, vt_text,
 use os.apps.smux.input_queue.{PaneInput, pane_input_new}
 use os.apps.smux.vt_capture_state.{vt_view_equal}
 use std.common.text_bytes.{text_to_bytes}
-use std.sosix.process.PipedProcessRefV1
+use std.sosix.process.{PipedProcessRefV1, sosix_process_piped_ref_equal_v1,
+    PipedProcessOwnedTransferV2, sosix_process_piped_owned_transfer_equal_v2}
 use os.apps.smux.vt_retention.{vt_tail_retain}
 
 # =========================================================================
@@ -53,6 +54,8 @@ struct PaneRecord:
     terminal_pipe: bool = false
     terminal_eof: bool = false
     terminal_read_error: text = ""
+    owned_terminal_transfer: PipedProcessOwnedTransferV2? = nil
+    helper_cleaned_awaiting_release: bool = false
 
     fn with_input(input: PaneInput) -> PaneRecord:
         var out = self
@@ -112,6 +115,7 @@ struct PaneRecord:
         return out
 
     fn with_child(pid: i64) -> PaneRecord:
+        if self.owned_terminal_transfer != nil or self.helper_cleaned_awaiting_release: return self
         var out = self
         out.input = pane_input_new()
         out.child_pid = pid
@@ -128,9 +132,26 @@ struct PaneRecord:
         if reference == nil: return false
         val left = self.terminal_ref.unwrap()
         val right = reference.unwrap()
-        return left.pid == right.pid and left.generation == right.generation
+        return sosix_process_piped_ref_equal_v1(left, right)
+
+    fn same_owned_terminal_transfer(transfer: PipedProcessOwnedTransferV2?) -> bool:
+        if self.owned_terminal_transfer == nil: return transfer == nil
+        if transfer == nil: return false
+        return sosix_process_piped_owned_transfer_equal_v2(self.owned_terminal_transfer.unwrap(), transfer.unwrap())
+
+    fn with_owned_terminal_transfer(transfer: PipedProcessOwnedTransferV2) -> PaneRecord:
+        # Existing owned authority can be released only by a future verified
+        # host acknowledgement, never by a generic pane replacement helper.
+        if self.owned_terminal_transfer != nil or self.helper_cleaned_awaiting_release: return self
+        var out = self.with_terminal_ref(transfer.reference)
+        if self.same_terminal_ref(transfer.reference):
+            out.child_incarnation = self.child_incarnation + 1
+        out.owned_terminal_transfer = transfer
+        out.helper_cleaned_awaiting_release = false
+        return out
 
     fn with_terminal_ref(reference: PipedProcessRefV1) -> PaneRecord:
+        if self.owned_terminal_transfer != nil or self.helper_cleaned_awaiting_release: return self
         # Re-projecting one identity must not erase EOF/failure or queued state.
         if self.same_terminal_ref(reference): return self
         var out = self
@@ -154,6 +175,7 @@ struct PaneRecord:
         return self.pty_fd >= 0 or self.terminal_pipe
 
     fn with_pty(pid: i64, fd: i64) -> PaneRecord:
+        if self.owned_terminal_transfer != nil or self.helper_cleaned_awaiting_release: return self
         var out = self
         out.input = pane_input_new()
         out.child_pid = pid
@@ -175,6 +197,7 @@ struct PaneRecord:
         return out
 
     fn can_attach() -> bool:
+        if self.owned_terminal_transfer != nil or self.helper_cleaned_awaiting_release: return false
         return self.child_incarnation < 18446744073709551615u64 and self.content_revision < 18446744073709551615u64
 
     fn can_ingest() -> bool:

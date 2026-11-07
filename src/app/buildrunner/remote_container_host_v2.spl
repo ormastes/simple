@@ -1,0 +1,246 @@
+# Host-private container producer. Every lifecycle effect/observation uses the
+# Simple Container API. Only actual wait + exact native-object absence can sign.
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2,
+    simple_container_observation_v2, simple_container_project_v2,
+    simple_container_action_project_v2, simple_container_apply_v2,
+    simple_container_read_v2, simple_container_absence_v2, simple_container_execution_user_v2,
+    simple_container_intent_v2, simple_container_recover_v2}
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerActionProjectionV2}
+use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceiptV2, ContainerExecutionUserReceiptV2,
+    container_execution_evidence_v2, container_execution_evidence_encode_v2, container_execution_user_receipt_encode_v2}
+use app.buildrunner.remote_container_workspace_probe_v2.remote_container_workspace_receipt_validate_v2
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_deadline_v1}
+use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RuntimeIdentityV1}
+use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_admit_v1}
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, RemoteOutputBytesV1}
+use app.buildrunner.remote_container_evidence_v2.*
+use app.buildrunner.remote_container_authority_v2.*
+use app.buildrunner.remote_capture_v1.remote_capture_path_v1
+use app.bootstrap_builder.worker.builder_worker_verify_inputs_v1
+use std.common.build_manager.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1, builder_task_identity_v1}
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.text_bytes.text_to_utf8_bytes
+use app.io.file_ops.{file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes, path_absolute}
+
+fn remote_container_action_bind_v2(task: BuildTaskV1, host_root: text,
+        action: ContainerActionProjectionV2) -> Result<bool, text>:
+    if action.mounts.len() != 1 or action.mounts[0].read_only or
+            action.mounts[0].host_root != host_root:
+        return Err("REMOTE_CONTAINER_WORKSPACE_DIFFERS")
+    val guest = action.mounts[0].guest_root.replace("\\", "/")
+    if guest == "" or action.argv.len() != task.args.len() + 1 or
+            action.argv[0].replace("\\", "/") != guest + "/producer.exe" or
+            action.working_directory.replace("\\", "/") != guest + "/work":
+        return Err("REMOTE_CONTAINER_ACTION_DIFFERS")
+    for index in 0..task.args.len():
+        if action.argv[index + 1] != task.args[index]: return Err("REMOTE_CONTAINER_ACTION_DIFFERS")
+    Ok(true)
+
+fn remote_container_runtime_same_v2(left: RuntimeIdentityV1, right: RuntimeIdentityV1) -> bool:
+    left.pod_uid == right.pod_uid and left.attempt == right.attempt and
+        left.provider_generation == right.provider_generation and left.operation_id == right.operation_id and
+        left.engine == right.engine and left.native_id == right.native_id and left.node_boot_id == right.node_boot_id
+
+class RemoteContainerExecutionV2:
+    owner: SimpleContainerOwnerV2
+    request: ContainerExecutionRequestV2
+    task: BuildTaskV1
+    policy: RemoteEvidencePolicyV1
+    host_root: text
+    provider_identity_digest: text
+    operation_digest: text
+    grant_digest: text
+    deadline: ContainerEffectDeadlineV1
+    started: bool
+    cancelled: bool
+    runtime_identity: RuntimeIdentityV1?
+    selected_user: ContainerExecutionUserReceiptV2?
+    wait_observation: RuntimeOperationV1?
+    log_observation: RuntimeOperationV1?
+    absence: ContainerAbsenceReceiptV2?
+    retained: RemoteContainerBundleV2?
+
+impl RemoteContainerExecutionV2:
+    me start(context: RemoteAuthorityContextV1) -> Result<bool, text>:
+        if self.started or self.cancelled: return Err("REMOTE_CONTAINER_START_REPLAY")
+        val _authorized = remote_context_admit_v1(context, self.task, self.policy)?
+        if context.requested.isolation_class != "native-container" or
+                context.observed.isolation_class != "native-container":
+            return Err("REMOTE_CONTAINER_ISOLATION_REQUIRED")
+        if sha256_text(distributed_encode_operation_v2(context.request)?) != self.operation_digest or
+                distributed_grant_digest_v2(context.signed.grant)? != self.grant_digest:
+            return Err("REMOTE_EXECUTION_AUTHORITY_CHANGED")
+        # Consume start authority before the first side effect. Errors preserve
+        # the updated owner for recovery/cleanup and never authorize blind retry.
+        self.started = true
+        for action in ["prepare", "create", "start"]:
+            val turn = simple_container_apply_v2(self.owner, action, self.request, self.deadline)
+            self.owner = turn.owner
+            if turn.operation.status != "ok": return Err(turn.operation.reason)
+            if (action == "create" or action == "start") and turn.operation.state.identity.native_id != "":
+                self.runtime_identity = Some(turn.operation.state.identity)
+            if action == "create":
+                if self.runtime_identity == nil: return Err("REMOTE_CONTAINER_CREATE_IDENTITY_UNRESOLVED")
+                val user = simple_container_execution_user_v2(self.owner, self.request, self.runtime_identity.unwrap())
+                self.owner = user.owner
+                if user.error != "" or user.receipt == nil: return Err("REMOTE_CONTAINER_SELECTED_USER_UNRESOLVED")
+                self.selected_user = user.receipt
+        Ok(true)
+
+    me cancel() -> Result<bool, text>:
+        self.cancelled = true
+        if self.runtime_identity == nil:
+            # A failed confirmation can follow an actual create. Recover only
+            # the common owner's retained exact candidate; never create again
+            # or invent a runtime identity to make cleanup appear successful.
+            val intent = simple_container_intent_v2(self.owner, self.request)?
+            val recovered = simple_container_recover_v2(self.owner, self.request, intent)
+            self.owner = recovered.owner
+            if recovered.operation.status != "ok" or recovered.operation.state.identity.native_id == "":
+                return Err("REMOTE_CONTAINER_CANCEL_IDENTITY_UNRESOLVED")
+            self.runtime_identity = Some(recovered.operation.state.identity)
+        val stopped = simple_container_apply_v2(self.owner, "stop", self.request, self.deadline)
+        self.owner = stopped.owner
+        val destroyed = simple_container_apply_v2(self.owner, "destroy", self.request, self.deadline)
+        self.owner = destroyed.owner
+        # Destruction exit is not absence. Cancellation remains unqualified
+        # until the common owner observes absence of an exact retained identity.
+        if self.runtime_identity == nil: return Err("REMOTE_CONTAINER_CANCEL_ABSENCE_UNRESOLVED")
+        val absent = simple_container_absence_v2(self.owner, self.request, self.runtime_identity.unwrap())
+        self.owner = absent.owner
+        if absent.error != "" or absent.receipt == nil: return Err("REMOTE_CONTAINER_CANCEL_ABSENCE_UNRESOLVED")
+        self.absence = absent.receipt
+        Ok(true)
+
+    me collect(observe_authority: fn() -> Result<RemoteAuthorityContextV1, text>,
+            private_seed: [u8]) -> Result<RemoteContainerBundleV2, text>:
+        if not self.started or self.cancelled or self.selected_user == nil:
+            return Err("REMOTE_CONTAINER_EXECUTION_NOT_COLLECTABLE")
+        val before = observe_authority()?
+        val _authorized = remote_context_admit_v1(before, self.task, self.policy)?
+        if sha256_text(distributed_encode_operation_v2(before.request)?) != self.operation_digest or
+                distributed_grant_digest_v2(before.signed.grant)? != self.grant_digest:
+            return Err("REMOTE_EXECUTION_AUTHORITY_CHANGED")
+        if self.retained != nil: return Ok(self.retained.unwrap())
+        if self.wait_observation == nil:
+            val waiting = simple_container_read_v2(self.owner, "wait", self.request)
+            self.owner = waiting.owner
+            if waiting.operation.status != "ok" or waiting.operation.state.phase != "exited":
+                return Err("REMOTE_CONTAINER_WAIT_UNRESOLVED")
+            self.wait_observation = Some(waiting.operation)
+            self.runtime_identity = Some(waiting.operation.state.identity)
+        val waited = self.wait_observation.unwrap()
+        if self.log_observation == nil:
+            val logs = simple_container_read_v2(self.owner, "logs", self.request)
+            self.owner = logs.owner
+            if logs.operation.status != "ok" or logs.operation.command.program == "" or
+                    not remote_container_runtime_same_v2(logs.operation.state.identity, waited.state.identity):
+                return Err("REMOTE_CONTAINER_LOGS_UNRESOLVED")
+            self.log_observation = Some(logs.operation)
+        if self.absence == nil:
+            val destroyed = simple_container_apply_v2(self.owner, "destroy", self.request, self.deadline)
+            self.owner = destroyed.owner
+            val absent = simple_container_absence_v2(self.owner, self.request, waited.state.identity)
+            self.owner = absent.owner
+            if absent.error != "" or absent.receipt == nil: return Err("REMOTE_CONTAINER_ABSENCE_UNRESOLVED")
+            self.absence = absent.receipt
+        # Wait is retained from BEFORE destruction. Never invent a fresh wait
+        # from a tombstone or turn a helper command's exit into workload cleanup.
+        val execution = container_execution_evidence_v2(self.request.plan, waited, self.absence.unwrap())?
+        val logs = self.log_observation.unwrap()
+        val stdout = text_to_utf8_bytes(logs.stdout)
+        val stderr = text_to_utf8_bytes(logs.stderr)
+        val probe = file_read_regular_no_follow_bounded(remote_capture_path_v1(self.host_root,
+            "work/remote-workspace/" + self.task.id + ".probe.sdn")?, 256)?
+        var remaining = self.policy.maximum_bytes
+        for size in [container_execution_evidence_encode_v2(execution)?.byte_len(),
+                container_execution_user_receipt_encode_v2(self.selected_user.unwrap())?.byte_len(),
+                probe.byte_len(), stdout.len(), stderr.len()]:
+            if size > remaining: return Err("REMOTE_EVIDENCE_EXCEEDS_BOUND")
+            remaining = remaining - size
+        val inputs_error = builder_worker_verify_inputs_v1(self.task, self.host_root)
+        if inputs_error != "": return Err(inputs_error)
+        val request_bytes = file_read_regular_no_follow_bounded(remote_capture_path_v1(self.host_root, "request.sdn")?, 16777216)?
+        if request_bytes != builder_encode_task_v1(self.task): return Err("REMOTE_CONTAINER_TASK_MANIFEST_CHANGED")
+        var outputs: [RemoteOutputBytesV1] = []
+        var observed: [BuildInputV1] = []
+        if execution.exit_code == 0:
+            for path in self.task.outputs:
+                val content = file_read_regular_no_follow_bounded_bytes(
+                    remote_capture_path_v1(self.host_root, "work/" + path)?, remaining)?
+                remaining = remaining - content.len()
+                outputs = outputs.push(RemoteOutputBytesV1(path, content))
+                observed = observed.push(BuildInputV1(path, sha256_u8_hex(content)))
+        val result = BuildResultV1(self.task.id, self.task.attempt, builder_task_identity_v1(self.task),
+            self.policy.host_id, if execution.exit_code == 0: "OK" else: "ERROR",
+            execution.exit_code, observed, -1, -1, -1)
+        val bytes = RemoteContainerBytesV2(execution, stdout, stderr, outputs, self.selected_user.unwrap(), probe)
+        val frozen = remote_container_evidence_freeze_v2(self.task, result, self.policy, self.request,
+            self.provider_identity_digest, bytes)?
+        # Fresh protected authorization after potentially slow wait/cleanup/hash.
+        val context = observe_authority()?
+        val _fresh = remote_context_admit_v1(context, self.task, self.policy)?
+        if sha256_text(distributed_encode_operation_v2(context.request)?) != self.operation_digest or
+                distributed_grant_digest_v2(context.signed.grant)? != self.grant_digest or
+                context.now < execution.absence.observed_unix_ms:
+            return Err("REMOTE_EXECUTION_AUTHORITY_CHANGED")
+        if private_seed.len() != 32 or pure_ed25519_keypair_from_seed(private_seed).1 != context.host_key.public_key:
+            return Err("REMOTE_HOST_SIGNING_KEY_DIFFERS")
+        var completion = RemoteContainerCompletionV2(2, builder_task_identity_v1(self.task), self.policy.host_id,
+            self.policy.assignment_digest, self.policy.controller_epoch, self.policy.operation_id,
+            self.operation_digest, self.grant_digest, frozen.result_digest, frozen.execution_digest,
+            frozen.stdout_digest, frozen.stderr_digest, frozen.output_inventory_digest, frozen.tests_digest,
+            context.host_key.identity, context.host_key.revision, context.now, [])
+        completion.signature = pure_ed25519_sign(private_seed, context.host_key.public_key,
+            remote_container_completion_signature_message_v2(completion)?)
+        val expected = RemoteContainerBindingV2(completion.task_identity, completion.host_id,
+            completion.assignment_digest, completion.controller_epoch, completion.operation_id,
+            frozen.result_digest, frozen.execution_digest, frozen.stdout_digest, frozen.stderr_digest,
+            frozen.output_inventory_digest, frozen.tests_digest)
+        val _checked = remote_container_verify_completion_v2(completion, context.signed, context.approval,
+            context.issuer, context.approver, context.host_key, context.request, self.task, expected,
+            context.now, context.policy_revision, context.revocation_epoch, context.session_generation)?
+        val bundle = RemoteContainerBundleV2(result, bytes, completion)
+        self.retained = Some(bundle)
+        Ok(bundle)
+
+fn remote_container_owner_v2(owner: SimpleContainerOwnerV2, task: BuildTaskV1,
+        policy: RemoteEvidencePolicyV1, request: ContainerExecutionRequestV2,
+        context: RemoteAuthorityContextV1, host_root: text) -> Result<RemoteContainerExecutionV2, text>:
+    val _authorized = remote_context_admit_v1(context, task, policy)?
+    if context.requested.isolation_class != "native-container" or context.observed.isolation_class != "native-container":
+        return Err("REMOTE_CONTAINER_ISOLATION_REQUIRED")
+    if host_root == "" or path_absolute(host_root) != host_root: return Err("REMOTE_CONTAINER_ROOT_NOT_CANONICAL")
+    val observation = simple_container_observation_v2(owner)
+    val _bound = remote_container_request_bind_v2(task, policy, request, observation.provider_identity_digest)?
+    val projected = simple_container_project_v2(owner, request)?
+    if projected.memory_bytes != task.memory_limit_bytes or projected.timeout_ms != task.timeout_ms or
+            projected.has_devices or not projected.has_workspace:
+        return Err("REMOTE_CONTAINER_RESOURCE_BINDING_DIFFERS")
+    val _action = remote_container_action_bind_v2(task, host_root, simple_container_action_project_v2(owner, request)?)?
+    val inputs_error = builder_worker_verify_inputs_v1(task, host_root)
+    if inputs_error != "": return Err(inputs_error)
+    if file_read_regular_no_follow_bounded(remote_capture_path_v1(host_root, "request.sdn")?, 16777216)? !=
+            builder_encode_task_v1(task): return Err("REMOTE_CONTAINER_TASK_MANIFEST_CHANGED")
+    val nonce = file_read_regular_no_follow_bounded(remote_capture_path_v1(host_root, "workspace-nonce.claim")?, 65)?
+    val task_nonce = file_read_regular_no_follow_bounded(remote_capture_path_v1(host_root,
+        "work/remote-workspace/" + task.id + ".nonce")?, 65)?
+    if nonce != task_nonce or nonce.byte_len() != 65: return Err("REMOTE_CONTAINER_HOST_NONCE_DIFFERS")
+    # Validate the exact host-generated nonce against the approved input before
+    # any effect. This value is never accepted from a completion response alone.
+    val raw_nonce = nonce.trim()
+    val receipt_shape = "SIMPLE-REMOTE-CONTAINER-WORKSPACE-PROBE-2\n" + builder_task_identity_v1(task) +
+        "\n" + raw_nonce + "\nwrite-read-delete\n"
+    val _nonce_pin = remote_container_workspace_receipt_validate_v2(task, raw_nonce, receipt_shape)?
+    val expiry = if context.signed.grant.expires_at < context.approval.expires_at:
+        context.signed.grant.expires_at else: context.approval.expires_at
+    val deadline = container_effect_deadline_v1(request.plan.request_digest, policy.operation_id,
+        ["create", "start"], expiry)?
+    Ok(RemoteContainerExecutionV2(owner, request, task, policy, host_root,
+        observation.provider_identity_digest, sha256_text(distributed_encode_operation_v2(context.request)?),
+        distributed_grant_digest_v2(context.signed.grant)?, deadline, false, false, nil, nil, nil, nil, nil, nil))
+
+export RemoteContainerExecutionV2, remote_container_owner_v2, remote_container_action_bind_v2

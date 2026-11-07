@@ -37,6 +37,7 @@ thread_local! {
 }
 
 static SESSION_HEAP_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static TRANSIENT_HEAP_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 /// Objects owned by a build session (doc/05_design/compiler/memory/
 /// build_session_memory_model_v1.md §2-§4). Rust objects carry no scope tag,
@@ -94,6 +95,7 @@ pub fn session_heap_owns(value: RuntimeValue) -> bool {
 }
 
 struct TransientHeapScope {
+    id: u32,
     paused: bool,
     objects: Vec<RuntimeValue>,
     /// Lazily built header-address -> `objects` position index, so promotion
@@ -215,6 +217,10 @@ pub fn transient_heap_scope_paused() -> bool {
     TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().is_some_and(|scope| scope.paused))
 }
 
+fn allocation_uses_session_v1(alloc_depth: i32, module_running: bool) -> bool {
+    alloc_depth > 0 || !module_running
+}
+
 pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
     // A live session owns what a paused/absent module scope would have left
     // permanent, and everything inside rt_session_alloc_begin/end (I3).
@@ -225,7 +231,7 @@ pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
         };
         let module_running =
             TRANSIENT_HEAP_SCOPE.with(|scope| scope.borrow().as_ref().is_some_and(|scope| !scope.paused));
-        if session.alloc_depth > 0 || !module_running {
+        if allocation_uses_session_v1(session.alloc_depth, module_running) {
             session.adopt(value);
             return true;
         }
@@ -2988,10 +2994,14 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
         if slot.is_some() {
             return false;
         }
+        let Some(id) = next_transient_scope_identity(&TRANSIENT_HEAP_NEXT_ID) else {
+            return false;
+        };
         if unsafe { rt_transient_raw_scope_begin() } == 0 {
             return false;
         }
         *slot = Some(TransientHeapScope {
+            id,
             paused: false,
             objects: Vec::new(),
             by_ptr: Default::default(),
@@ -3021,6 +3031,36 @@ pub extern "C" fn rt_transient_array_scope_state_v1() -> i64 {
         None => 0,
         Some(scope) if scope.paused => 2,
         Some(_) => 1,
+    })
+}
+
+fn next_transient_scope_identity(counter: &std::sync::atomic::AtomicU32) -> Option<u32> {
+    use std::sync::atomic::Ordering as AtomicOrdering;
+    counter.fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |next| {
+        if next == 0 { None } else { Some(next.checked_add(1).unwrap_or(0)) }
+    }).ok()
+}
+
+/// Current-thread allocator identity; observing it never opens or claims a scope.
+#[no_mangle]
+pub extern "C" fn rt_transient_array_scope_identity_v1() -> i64 {
+    TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().map_or(0, |scope| i64::from(scope.id)))
+}
+
+/// Actual new-object owner, with disjoint signed domains; observation only.
+#[no_mangle]
+pub extern "C" fn rt_allocation_owner_identity_v1() -> i64 {
+    TRANSIENT_HEAP_SCOPE.with(|scope| {
+        let scope = scope.borrow();
+        let running = scope.as_ref().is_some_and(|scope| !scope.paused);
+        SESSION_HEAP.with(|session| {
+            if let Some(session) = session.borrow().as_ref() {
+                if allocation_uses_session_v1(session.alloc_depth, running) {
+                    return -i64::from(session.id);
+                }
+            }
+            if running { i64::from(scope.as_ref().unwrap().id) } else { 0 }
+        })
     })
 }
 

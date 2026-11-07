@@ -1,0 +1,57 @@
+# Immutable task-to-argv evidence. Not an image/workspace plan or launch grant.
+use std.common.contracts.orchestration.agent_policy_resolution_v1.AgentPolicyResolutionV1
+use std.common.contracts.orchestration.agent_cli_v1.{AgentCliCapabilityV1, AgentCliRequestV1, AgentCliInvocationV1, agent_cli_invocation_v1}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+# The authorized task owner supplies these exact immutable bytes. A matching
+# digest is integrity evidence, never proof that a caller may access the task.
+pub struct AgentTaskInputV1:
+    ns: text
+    reference: text
+    content: text
+    content_digest: text
+
+pub struct AgentInvocationBindingV1:
+    source_digest: text
+    catalog_digest: text
+    task_digest: text
+    invocation: AgentCliInvocationV1
+    binding_digest: text
+
+pub fn bind_agent_task_invocation_v1(policy: AgentPolicyResolutionV1,
+        task: AgentTaskInputV1, capability: AgentCliCapabilityV1,
+        model: text, resume_id: text) -> Result<AgentInvocationBindingV1, text>:
+    if not builder_digest_valid_v1(policy.source_digest) or not builder_digest_valid_v1(policy.catalog_digest):
+        return Err("agent-binding-policy-digest-invalid")
+    if task.ns != policy.session.meta.ns or task.reference != policy.session.agent.task_ref:
+        return Err("agent-task-reference-mismatch")
+    if not builder_digest_valid_v1(task.content_digest) or sha256_text(task.content) != task.content_digest:
+        return Err("agent-task-content-mismatch")
+    if capability.provider != policy.session.agent.provider: return Err("agent-cli-provider-mismatch")
+    # AgentSession is interactive. An unsupported interactive provider must not
+    # silently receive a one-shot noninteractive command instead.
+    val invocation = agent_cli_invocation_v1(capability, AgentCliRequestV1(mode: "interactive",
+        prompt: task.content, model: model, resume_id: resume_id))?
+    var arguments: [SdnValue] = []
+    for arg in invocation.argv: arguments.push(SdnValue.String(sha256_text(arg)))
+    # Hash each arbitrary text component; ordered argv remains ordered and
+    # unambiguous without storing task text in a normal diagnostic receipt.
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("agent-invocation-binding"),
+        "sourceDigest": SdnValue.String(policy.source_digest),
+        "catalogDigest": SdnValue.String(policy.catalog_digest),
+        "taskNamespaceDigest": SdnValue.String(sha256_text(task.ns)),
+        "taskReferenceDigest": SdnValue.String(sha256_text(task.reference)),
+        "taskDigest": SdnValue.String(task.content_digest),
+        "provider": SdnValue.String(invocation.provider),
+        "cliVersion": SdnValue.String(invocation.version),
+        "executableDigest": SdnValue.String(invocation.executable_digest),
+        "mode": SdnValue.String("interactive"),
+        "outputFormat": SdnValue.String(invocation.output_format),
+        "argumentDigests": SdnValue.Array(arguments)}
+    val digest = sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+    Ok(AgentInvocationBindingV1(source_digest: policy.source_digest, catalog_digest: policy.catalog_digest,
+        task_digest: task.content_digest, invocation: invocation, binding_digest: digest))

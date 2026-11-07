@@ -37,3 +37,5 @@ No build was started: the campaign's unchanged `fill_span` producer failure and
 absence of Podman remain blockers. Source guards and a draft PR must not be
 reported as a runtime test PASS. All future verification jobs require root's
 allocation within the shared five-CPU limit.
+
+Execution-options source update (UNEXECUTED): Podman create vectors now include `--http-proxy=false`; typed environment/cwd are admitted, terminal effects remain refused. See `doc/05_design/oci_execution_options_effects.md` and the eleven-case system specification mirror.

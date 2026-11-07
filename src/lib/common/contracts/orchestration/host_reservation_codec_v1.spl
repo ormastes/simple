@@ -27,20 +27,54 @@ pub struct HostPreparedReservationReceiptV1:
 
 pub fn host_reservation_receipt_v1(intent: HostReservationIntentV1,
         operation: OperationEnvelopeV2) -> Result<HostPreparedReservationReceiptV1, text>:
-    val matching = host_reservation_match_operation_v1(intent, operation)?
+    host_reservation_receipt_for_action_v1(intent, operation, false)
+
+pub fn host_helper_reservation_receipt_v1(intent: HostReservationIntentV1,
+        operation: OperationEnvelopeV2) -> Result<HostPreparedReservationReceiptV1, text>:
+    host_reservation_receipt_for_action_v1(intent, operation, true)
+
+fn host_reservation_receipt_for_action_v1(intent: HostReservationIntentV1,
+        operation: OperationEnvelopeV2, helper: bool) -> Result<HostPreparedReservationReceiptV1, text>:
+    val matching = if helper: host_helper_reservation_match_operation_v1(intent, operation)?
+        else: host_reservation_match_operation_v1(intent, operation)?
     if intent.fence.revision == 9223372036854775807:
         return Err("reservation-receipt-revision-overflow")
     val envelope = distributed_encode_operation_v2(operation)?
     val envelope_digest = sha256_text(envelope)
     val revision = intent.fence.revision + 1
-    val body = "kind: host-prepared-reservation-v1\noperationId: \"{operation.id}\"\nenvelopeDigest: \"{envelope_digest}\"\nintentDigest: \"{operation.payload_digest}\"\npreparedRevision: {revision}\n"
     Ok(HostPreparedReservationReceiptV1(operation_id: operation.id,
         envelope_digest: envelope_digest, intent_digest: operation.payload_digest,
-        prepared_revision: revision, receipt_digest: sha256_text(body)))
+        prepared_revision: revision, receipt_digest: host_reservation_receipt_digest_v1(operation, envelope_digest, revision)))
+
+fn host_reservation_receipt_digest_v1(operation: OperationEnvelopeV2, envelope_digest: text, revision: i64) -> text:
+    val body = "kind: host-prepared-reservation-v1\noperationId: \"{operation.id}\"\nenvelopeDigest: \"{envelope_digest}\"\nintentDigest: \"{operation.payload_digest}\"\npreparedRevision: {revision}\n"
+    sha256_text(body)
+
+# Integrity only, for a trusted carrier that retains the original operation.
+# Without the full intent this cannot prove its fence, admission or signatures.
+pub fn host_reservation_receipt_integrity_v1(receipt: HostPreparedReservationReceiptV1,
+        operation: OperationEnvelopeV2) -> Result<bool, text>:
+    if operation.operation != "host_reservation_v1" and operation.operation != "host_helper_reservation_v1":
+        return Err("reservation-operation-mismatch")
+    val digest = sha256_text(distributed_encode_operation_v2(operation)?)
+    if (receipt.operation_id != operation.id or receipt.envelope_digest != digest or
+            receipt.intent_digest != operation.payload_digest or receipt.prepared_revision <= 0 or
+            receipt.receipt_digest != host_reservation_receipt_digest_v1(operation, digest, receipt.prepared_revision)):
+        return Err("reservation-receipt-mismatch")
+    Ok(true)
 
 pub fn host_reservation_match_receipt_v1(receipt: HostPreparedReservationReceiptV1,
         intent: HostReservationIntentV1, operation: OperationEnvelopeV2) -> Result<bool, text>:
     val expected = host_reservation_receipt_v1(intent, operation)?
+    host_reservation_compare_receipt_v1(receipt, expected)
+
+pub fn host_helper_reservation_match_receipt_v1(receipt: HostPreparedReservationReceiptV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2) -> Result<bool, text>:
+    val expected = host_helper_reservation_receipt_v1(intent, operation)?
+    host_reservation_compare_receipt_v1(receipt, expected)
+
+fn host_reservation_compare_receipt_v1(receipt: HostPreparedReservationReceiptV1,
+        expected: HostPreparedReservationReceiptV1) -> Result<bool, text>:
     if receipt.operation_id != expected.operation_id or receipt.envelope_digest != expected.envelope_digest or
             receipt.intent_digest != expected.intent_digest or receipt.prepared_revision != expected.prepared_revision or
             receipt.receipt_digest != expected.receipt_digest:
@@ -53,6 +87,11 @@ pub fn host_reservation_match_receipt_v1(receipt: HostPreparedReservationReceipt
 pub fn host_reservation_abort_outcome_v1(intent: HostReservationIntentV1,
         operation: OperationEnvelopeV2) -> Result<text, text>:
     val receipt = host_reservation_receipt_v1(intent, operation)?
+    Ok("kind: host-prepared-abort-v1\nreceiptDigest: \"{receipt.receipt_digest}\"\nexecutionStarted: false\n")
+
+pub fn host_helper_reservation_abort_outcome_v1(intent: HostReservationIntentV1,
+        operation: OperationEnvelopeV2) -> Result<text, text>:
+    val receipt = host_helper_reservation_receipt_v1(intent, operation)?
     Ok("kind: host-prepared-abort-v1\nreceiptDigest: \"{receipt.receipt_digest}\"\nexecutionStarted: false\n")
 
 # The row's payload_digest is deliberately excluded from its own preimage.
@@ -166,10 +205,20 @@ pub fn host_reservation_decode_intent_v1(source: text) -> Result<HostReservation
 # are additional host-owner steps; this function never authorizes native effects.
 pub fn host_reservation_match_operation_v1(intent: HostReservationIntentV1,
         operation: OperationEnvelopeV2) -> Result<bool, text>:
+    host_reservation_match_action_v1(intent, operation, "host_reservation_v1")
+
+# Separate fixed action entrypoint; normal preparation never accepts a helper
+# grant by relabelling its immutable operation or silently widening its action.
+pub fn host_helper_reservation_match_operation_v1(intent: HostReservationIntentV1,
+        operation: OperationEnvelopeV2) -> Result<bool, text>:
+    host_reservation_match_action_v1(intent, operation, "host_helper_reservation_v1")
+
+fn host_reservation_match_action_v1(intent: HostReservationIntentV1,
+        operation: OperationEnvelopeV2, action: text) -> Result<bool, text>:
     val encoded_operation = distributed_encode_operation_v2(operation)?
     val payload = host_reservation_encode_intent_v1(intent)?
     val digest = sha256_text(payload)
-    if operation.operation != "host_reservation_v1" or operation.id != intent.reservation.operation_id or
+    if operation.operation != action or operation.id != intent.reservation.operation_id or
             operation.host_id != intent.physical_host_id or operation.memory_bytes != intent.reservation.memory_bytes or
             operation.payload_digest != digest or intent.reservation.payload_digest != digest:
         return Err("reservation-operation-mismatch")

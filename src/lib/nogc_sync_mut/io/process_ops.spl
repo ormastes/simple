@@ -4,7 +4,8 @@
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host, host_path_is_absolute}
 use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native, process_capture_unbounded_native}
-use std.nogc_sync_mut.sffi.process_environment_capture.{process_environment_capture_native_v1, process_environment_spawn_native_v1}
+use std.nogc_sync_mut.sffi.process_environment_capture.{process_environment_capture_native_v1, process_environment_spawn_native_v1, process_capture_admitted_native_v1, process_capture_observed_native_v1}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
 use std.common.process.observation_v1.{
     ProcessObservationProviderV1, ObservedProcessStartStatusV1,
@@ -90,6 +91,20 @@ extern fn rt_process_observation_v4_pin_cwd_value(path: text) -> i64
 extern fn rt_process_observation_v4_cwd_digest_value(handle: i64) -> [u8]
 @unsafe(reason: "native sealed cwd identity close", capabilities: [ffi])
 extern fn rt_process_observation_v4_close_cwd_value(handle: i64) -> i32
+@unsafe(reason: "bounded native reservation before any child effect", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserve_value() -> i64
+@unsafe(reason: "validate receipt identity against retained native reservation", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_matches_value(token: i64, rh: i64, rl: i64, th: i64, tl: i64) -> i64
+@unsafe(reason: "query exact retained reservation state", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_state_value(token: i64) -> i64
+@unsafe(reason: "at most one start under preexisting reservation authority", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_start_pinned_value(token: i64, executable: i64, cwd: i64, binding: [u8]) -> i64
+@unsafe(reason: "nullable observation cannot consume reservation authority", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_observe_value(token: i64, wait_ns: i64, retire: i64) -> ([u8], [u8], [u8], [i64])?
+@unsafe(reason: "idempotent frozen acknowledgement retained until confirmation", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_ack_value(token: i64, digest: [u8]) -> ([u8], [u8], [u8], [i64])?
+@unsafe(reason: "scalar explicit terminal reservation release", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_confirm_release_value(token: i64) -> i64
 @unsafe(reason: "native V4 unpinned start is an explicit unavailable receipt", capabilities: [ffi])
 extern fn rt_process_observation_v4_start_value(binding: [u8]) -> ([u8], [u8], [u8], [i64])
 @unsafe(reason: "native exact pinned V4 process start", capabilities: [ffi])
@@ -892,6 +907,23 @@ pub fn process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64:
 # Stdout drain state is independent of child liveness: 0=open/deferred,
 # 1=observed EOF with buffered tail delivered, -1=terminal read error/unknown.
 # Exited children retain their stdout owner until drain completion or close.
+# Additive native C ABI; requires a runtime built with the matching owner.
+@unsafe(reason: "versioned actual piped-child exit receipt before handle close", capabilities: [ffi])
+extern fn rt_process_piped_exit_status_value(pid: i64) -> [i64]
+
+pub fn process_piped_exit_status_v1(pid: i64) -> Result<i64?, text>:
+    val words = unsafe(capabilities: [ffi]): rt_process_piped_exit_status_value(pid)
+    if words.len() != 4 or words[0] != 1:
+        return Err("piped child exit receipt invalid")
+    if words[3] != 0 or words[1] < 0:
+        return Err("piped child exit query failed: " + str(words[3]))
+    if words[1] == 0:
+        if words[2] != 0: return Err("pending piped exit receipt contains a terminal code")
+        return Ok(nil)
+    if words[1] != 1: return Err("piped child exit state invalid")
+    if words[2] < 0: return Err("piped child terminal exit code invalid")
+    Ok(Some(words[2]))
+
 pub fn process_read_stdout_result(pid: i64) -> Result<text?, text>:
     val chunk = process_read_stdout(pid)
     if chunk.len() > 0:
@@ -1291,6 +1323,103 @@ pub class ProcessObservationLeaseV4:
         self.active = false
         Ok(receipt)
 
+# The reservation, not a decoded receipt or PID, owns every post-start outcome.
+# Pins remain retained until confirm_release succeeds; close failures remain
+# on the original pin objects and must be retried by their owner.
+pub const PROCESS_OBSERVATION_RESERVED_READY_V4: i64 = 1
+pub const PROCESS_OBSERVATION_RESERVED_ATTEMPTING_V4: i64 = 2
+pub const PROCESS_OBSERVATION_RESERVED_NO_CHILD_V4: i64 = 3
+pub const PROCESS_OBSERVATION_RESERVED_OWNED_V4: i64 = 4
+pub const PROCESS_OBSERVATION_RESERVED_ACKED_V4: i64 = 5
+
+pub class ProcessObservationReservationV4:
+    token: i64
+    executable: OwnedExecutablePin
+    cwd: OwnedCwdPinV4
+    var released: bool
+    var acknowledgement_validated: bool
+
+    fn validate_receipt(self, receipt: ProcessObservationReceiptV4) -> Result<ProcessObservationReceiptV4, text>:
+        val packet = receipt.packet
+        val matches = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_matches_value(self.token,
+                packet.request_id_high, packet.request_id_low,
+                packet.ticket_high, packet.ticket_low)
+        if matches != 1:
+            return Err("process receipt does not match retained reservation")
+        Ok(receipt)
+
+    pub fn state(self) -> Result<i64, text>:
+        if self.released: return Err("process reservation already released")
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_state_value(self.token)
+        if value < 0: return Err("process reservation state unavailable: {value}")
+        Ok(value)
+
+    pub me fn start(self, request: ProcessObservationRequestV4) -> Result<i64, text>:
+        if self.released: return Err("process reservation already released")
+        val bound = _process_observation_bound_request_v4(self.executable, self.cwd, request)?
+        val encoded = canonical_encode_process_observation_request_v4(bound)?
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_start_pinned_value(
+                self.token, self.executable.handle, self.cwd.handle, encoded)
+        if value < 0:
+            return Err("process reservation start refused; retain owner and query state: {value}")
+        Ok(value)
+
+    pub fn observe(self, caller_wait_ns: i64, retire: bool) -> Result<ProcessObservationReceiptV4, text>:
+        if self.released: return Err("process reservation already released")
+        val wire = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_observe_value(
+                self.token, caller_wait_ns, if retire: 1 else: 0)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; reservation retained")
+        self.validate_receipt(_process_observation_wire_v4(stdout, stderr, binding, words)?)
+
+    pub me fn acknowledge(self, digest: [u8]) -> Result<ProcessObservationReceiptV4, text>:
+        if self.released: return Err("process reservation already released")
+        if digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+            return Err("process reservation acknowledgement digest malformed")
+        val wire = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_ack_value(self.token, digest)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process acknowledgement unavailable; retry with retained reservation")
+        val receipt = _process_observation_wire_v4(stdout, stderr, binding, words)?
+        if (receipt.packet.packet_kind != ProcessObservationPacketKindV4.Ack and
+                receipt.packet.packet_kind != ProcessObservationPacketKindV4.CleanupAck) or
+                receipt.binding_digest != digest:
+            return Err("process reservation acknowledgement mismatch; retry retained owner")
+        val checked = self.validate_receipt(receipt)?
+        self.acknowledgement_validated = true
+        Ok(checked)
+
+    pub me fn confirm_release(self) -> Result<bool, text>:
+        if self.released: return Ok(true)
+        val current = self.state()?
+        if current == PROCESS_OBSERVATION_RESERVED_ACKED_V4 and not self.acknowledgement_validated:
+            return Err("process reservation acknowledgement must be decoded before confirmation")
+        if current != PROCESS_OBSERVATION_RESERVED_READY_V4 and
+                current != PROCESS_OBSERVATION_RESERVED_NO_CHILD_V4 and
+                current != PROCESS_OBSERVATION_RESERVED_ACKED_V4:
+            return Err("process reservation still owns possible child; retirement required")
+        val result = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_confirm_release_value(self.token)
+        if result != 1: return Err("process reservation release failed; retain owner: {result}")
+        self.released = true
+        Ok(true)
+
+pub fn process_observation_owner_reserve_v4(
+    executable: OwnedExecutablePin, cwd: OwnedCwdPinV4
+) -> Result<ProcessObservationReservationV4, text>:
+    if executable.closed or cwd.closed:
+        return Err("process reservation requires live pins")
+    val token = unsafe(capabilities: [ffi]): rt_process_observation_v4_reserve_value()
+    if token <= 0: return Err("process reservation unavailable: {token}")
+    Ok(ProcessObservationReservationV4(token: token, executable: executable,
+        cwd: cwd, released: false, acknowledgement_validated: false))
+
 pub struct ProcessObservationStartV4:
     receipt: ProcessObservationReceiptV4
     lease: ProcessObservationLeaseV4
@@ -1624,6 +1753,95 @@ pub fn process_spawn_environment_overlay_native_v1(command: text, args: [text], 
     val (resolved_command, resolved_arguments) = _resolve_posix_tool(command, args)
     process_environment_spawn_native_v1(host_path_native(resolved_command), resolved_arguments, environment, 0)
 
+# Exact executable admission, independent of the running process timeout.
+# No shell/tool lookup. Admission is sampled AFTER governor wait; native capture
+# rechecks pre-fork/pre-exec or pre-CreateProcess/pre-ResumeThread. This does not
+# turn ordinary capture into a ProcessOwnedV4 lifetime/cleanup capability.
+fn process_admitted_capture_v1(command: text, args: [text], environment: [text], mode: i64,
+        timeout_ms: i64, max_output_bytes: i64, expires_at_unix_ms: i64) -> Result<ProcessResult, text>:
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return Err("launch-admission-requires-native-core-c-provider-before-effect")
+    if not host_path_is_absolute(command) or command.contains("\u{0}") or args.len() > 32768 or
+            timeout_ms <= 0 or max_output_bytes <= 0 or max_output_bytes > 16777216 or expires_at_unix_ms <= 0:
+        return Err("launch-admission-invalid-input-before-effect")
+    var size = command.len()
+    for arg in args:
+        if arg.contains("\u{0}") or arg.len() > 16777216: return Err("launch-admission-invalid-argument-before-effect")
+        size = size + arg.len()
+        if size > 4194304: return Err("launch-admission-argument-byte-limit-before-effect")
+    proc_slot_acquire()
+    val sampled_micros = time_sample_unix_micros_or_failure()
+    if sampled_micros <= 0:
+        proc_slot_release()
+        return Err("launch-admission-clock-unavailable-before-effect")
+    if sampled_micros / 1000 >= expires_at_unix_ms:
+        proc_slot_release()
+        return Err("launch-deadline-expired-before-effect")
+    val outcome = process_capture_admitted_native_v1(host_path_native(command), args,
+        environment, mode, timeout_ms, max_output_bytes, expires_at_unix_ms)
+    proc_slot_release()
+    val result = outcome?
+    val flags = result.3
+    if flags % 64 >= 32: return Err("launch-deadline-expired-before-effect")
+    if flags >= 64: return Err("launch-admission-provider-rejected-before-effect")
+    if flags % 32 >= 8: return Err("launch-admission-native-failure-effect-uncertain")
+    val timed_out = flags % 2 == 1
+    val output_limited = flags % 8 >= 2
+    Ok(ProcessResult(stdout: result.0, stderr: result.1, exit_code: result.2,
+        limit_exceeded: timed_out or output_limited,
+        limit_type: if timed_out: "timeout" else: if output_limited: "output" else: ""))
+
+# Linux/other POSIX capture inherits the trusted parent environment exactly as
+# the existing native capture owner does; mode2 never means empty environment.
+pub fn process_run_bounded_admitted_v1(command: text, args: [text], timeout_ms: i64,
+        max_output_bytes: i64, expires_at_unix_ms: i64) -> Result<ProcessResult, text>:
+    process_admitted_capture_v1(command, args, [], 2, timeout_ms, max_output_bytes, expires_at_unix_ms)
+
+# Ordinary native capture with authoritative timeout/output flags, inherited
+# trusted environment, and no launch deadline or fabricated expiration value.
+pub fn process_run_bounded_observed_v1(command: text, args: [text], timeout_ms: i64,
+        max_output_bytes: i64) -> Result<ProcessResult, text>:
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return Err("observed-capture-requires-native-core-c-provider-before-effect")
+    if not host_path_is_absolute(command) or command.contains("\u{0}") or args.len() > 32768 or
+            timeout_ms <= 0 or max_output_bytes <= 0 or max_output_bytes > 16777216:
+        return Err("observed-capture-invalid-input-before-effect")
+    var size = command.len()
+    for arg in args:
+        if arg.contains("\u{0}") or arg.len() > 16777216: return Err("observed-capture-invalid-argument-before-effect")
+        size = size + arg.len()
+        if size > 4194304: return Err("observed-capture-argument-byte-limit-before-effect")
+    proc_slot_acquire()
+    val outcome = process_capture_observed_native_v1(host_path_native(command), args, timeout_ms, max_output_bytes)
+    proc_slot_release()
+    val result = outcome?
+    val flags = result.3
+    if flags >= 32: return Err("observed-capture-provider-rejected-before-effect")
+    if flags >= 8: return Err("observed-capture-native-failure-effect-uncertain")
+    val timed_out = flags % 2 == 1
+    val output_limited = flags % 8 >= 2
+    Ok(ProcessResult(stdout: result.0, stderr: result.1, exit_code: result.2,
+        limit_exceeded: timed_out or output_limited,
+        limit_type: if timed_out: "timeout" else: if output_limited: "output" else: ""))
+
+# Explicit clean copied environment remains Windows-only. No Linux empty-env
+# fallback and no overlay/inherited Docker selector variables are admitted.
+pub fn process_run_bounded_environment_admitted_v1(command: text, args: [text], environment: [(text, text)],
+        timeout_ms: i64, max_output_bytes: i64, expires_at_unix_ms: i64) -> Result<ProcessResult, text>:
+    if not host_is_windows_host(): return Err("launch-admission-explicit-environment-unsupported-before-effect")
+    if environment.len() > 65536: return Err("launch-admission-environment-count-before-effect")
+    var flattened: [text] = []
+    var size = 0
+    for (key, value) in environment:
+        if not process_environment_key_valid_v1(key) or value.contains("\u{0}"):
+            return Err("launch-admission-invalid-environment-before-effect")
+        size = size + key.len() + value.len()
+        if size > 4194304: return Err("launch-admission-environment-byte-limit-before-effect")
+        flattened.push(key + "=" + value)
+    process_admitted_capture_v1(command, args, flattened, 1, timeout_ms, max_output_bytes, expires_at_unix_ms)
+
 pub fn process_run_bounded_native(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
     """Native tuple compatibility entry with positive timeout/capture limits.
 
@@ -1735,10 +1953,27 @@ pub fn process_bounded_kill_signal(exit_code: i64) -> i64:
 # Copying a Ref does not create another stdout reader or remote authority.
 use std.common.text_bytes.{boxed_text_bytes_checked}
 use std.common.string_core.{str_len}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_launch_validate_profiled_v3, group_process_stream_launch_encode_profiled_v3, group_process_stream_identity_profiled_v3}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2, group_process_stream_prepare_v2, group_process_stream_recover_v2, group_process_stream_confirm_v2, group_process_stream_probe_bound_v2, group_process_stream_cancel_v2, group_process_stream_cleanup_proof_v2}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_process_stream_admit_profiled_v3, linux_process_launch_stream_broker_profiled_v3}
 
 struct PipedProcessRefV1:
     pid: i64
     generation: i64
+    group_root: text = ""
+    group_identity: text = ""
+
+struct PipedProcessOwnedTransferV2:
+    owner: GroupProcessStreamOwnerV2
+    reference: PipedProcessRefV1
+
+enum PipedProcessOwnedSpawnV2:
+    # Transfer availability only. This is not application/attach success or an
+    # attestation that child code executed; consumers remain opening until
+    # their own qualified provider/stream observation.
+    Ready(owner: GroupProcessStreamOwnerV2, reference: PipedProcessRefV1)
+    CleanupRequired(owner: GroupProcessStreamOwnerV2, reference: PipedProcessRefV1?, reason: text)
+    Rejected(reason: text)
 
 val PIPED_PROCESS_REF_V1_MAX_ARGS: i64 = 64
 
@@ -1759,6 +1994,25 @@ extern fn rt_process_is_piped_alive_ref_v1(pid: i64, generation: i64) -> i64
 @unsafe(reason: "same-registry exact-reference close claim: 0 success, -2 stale or duplicate, -3 POSIX unsupported, -1 cleanup failure", capabilities: [ffi])
 extern fn rt_process_close_piped_ref_v1(pid: i64, generation: i64) -> i64
 
+@unsafe(reason: "reserve only pipe descriptors and a unique generation in the existing registry", capabilities: [ffi])
+extern fn rt_process_stream_reserve_v2() -> i64
+@unsafe(reason: "bind a reserved generation to a pinned protected root and immutable request digest", capabilities: [ffi])
+extern fn rt_process_stream_bind_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "release a ticket only when the canonical launcher proves no process was launched", capabilities: [ffi])
+extern fn rt_process_stream_abandon_unlaunched_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "retrieve a PID only from the exact generation and immutable group binding", capabilities: [ffi])
+extern fn rt_process_stream_pid_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "retire bound descriptors only when pinned-root terminal bytes match canonical verified proof", capabilities: [ffi])
+extern fn rt_process_stream_retire_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64, proof: text, proof_len: i64) -> i64
+@unsafe(reason: "read the sole native stream after atomic reference and group-binding validation", capabilities: [ffi])
+extern fn rt_process_read_stdout_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> text
+@unsafe(reason: "observe exact bound stream EOF without process polling or another reader", capabilities: [ffi])
+extern fn rt_process_stdout_state_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "validate exact bound registry ownership without read, wait or signal", capabilities: [ffi])
+extern fn rt_process_validate_piped_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "write bytes only after atomic reference and group-binding validation", capabilities: [ffi])
+extern fn rt_process_write_stdin_some_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
+
 fn _piped_ref_input_error_v1(value: text) -> text:
     match boxed_text_bytes_checked(value):
         case Err(reason): return "process_input_encoding_failed"
@@ -1768,7 +2022,118 @@ fn _piped_ref_input_error_v1(value: text) -> text:
     ""
 
 fn _piped_ref_valid_v1(process: PipedProcessRefV1) -> bool:
-    process.pid > 0 and process.generation > 0
+    (process.pid > 0 and process.generation > 0 and ((process.group_root == "" and process.group_identity == "") or
+        (process.group_root != "" and process.group_identity != "")))
+
+pub fn process_piped_ref_equal_v1(left: PipedProcessRefV1, right: PipedProcessRefV1) -> bool:
+    (left.pid == right.pid and left.generation == right.generation and
+        left.group_root == right.group_root and left.group_identity == right.group_identity)
+
+pub fn process_validate_piped_owned_transfer_v2(transfer: PipedProcessOwnedTransferV2) -> Result<(), text>:
+    val owner = transfer.owner
+    val invalid = group_process_stream_owner_validate_v2(owner)
+    if invalid != "": return Err(invalid)
+    val reference = transfer.reference
+    if (reference.group_root != owner.launch.root or reference.group_identity != owner.identity_digest or
+            reference.generation != owner.launch.transport_generation):
+        return Err("process_owned_transfer_binding_mismatch")
+    process_validate_piped_ref_v1(reference)
+
+pub fn process_piped_owned_transfer_equal_v2(left: PipedProcessOwnedTransferV2,
+        right: PipedProcessOwnedTransferV2) -> bool:
+    if (group_process_stream_owner_validate_v2(left.owner) != "" or
+            group_process_stream_owner_validate_v2(right.owner) != ""): return false
+    (process_piped_ref_equal_v1(left.reference, right.reference) and
+        left.owner.identity_digest == right.owner.identity_digest and
+        group_process_stream_launch_encode_profiled_v3(left.owner.launch) == group_process_stream_launch_encode_profiled_v3(right.owner.launch))
+
+fn _process_stream_reference_v2(owner: GroupProcessStreamOwnerV2) -> PipedProcessRefV1?:
+    val launch = owner.launch
+    val pid = unsafe(capabilities: [ffi]):
+        rt_process_stream_pid_v2(launch.transport_generation, launch.root, str_len(launch.root),
+            owner.identity_digest, str_len(owner.identity_digest))
+    if pid <= 0: return nil
+    Some(PipedProcessRefV1(pid: pid, generation: launch.transport_generation,
+        group_root: launch.root, group_identity: owner.identity_digest))
+
+fn _process_stream_reject_or_retain_v2(owner: GroupProcessStreamOwnerV2, reason: text) -> PipedProcessOwnedSpawnV2:
+    val launch = owner.launch
+    val abandoned = unsafe(capabilities: [ffi]):
+        rt_process_stream_abandon_unlaunched_v2(launch.transport_generation, launch.root, str_len(launch.root),
+            owner.identity_digest, str_len(owner.identity_digest))
+    if abandoned == 0: return PipedProcessOwnedSpawnV2.Rejected(reason)
+    PipedProcessOwnedSpawnV2.CleanupRequired(owner, _process_stream_reference_v2(owner), reason)
+
+pub fn process_spawn_piped_owned_v2(launch: GroupProcessStreamLaunchV2) -> PipedProcessOwnedSpawnV2:
+    if launch.transport_generation != 0: return PipedProcessOwnedSpawnV2.Rejected("process_transport_already_assigned")
+    val invalid = group_process_stream_launch_validate_profiled_v3(launch)
+    if invalid != "": return PipedProcessOwnedSpawnV2.Rejected(invalid)
+    if group_process_stream_launch_encode_profiled_v3(launch) == "":
+        return PipedProcessOwnedSpawnV2.Rejected("process_stream_request_exceeds_wire_bound")
+    # Admission checks the actual platform and delegation before any ticket or fork.
+    match linux_process_stream_admit_profiled_v3(launch):
+        case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        case Ok(_): pass
+    val now = time_now_unix_micros()
+    if now <= 0 or now / 1000 >= launch.request.launch_deadline_unix_ms:
+        return PipedProcessOwnedSpawnV2.Rejected("process_launch_authority_expired")
+    val generation = unsafe(capabilities: [ffi]): rt_process_stream_reserve_v2()
+    if generation <= 0: return PipedProcessOwnedSpawnV2.Rejected("process_stream_reservation_failed")
+    var prepared = launch
+    prepared.transport_generation = generation
+    val owner = GroupProcessStreamOwnerV2(launch: prepared, identity_digest: group_process_stream_identity_profiled_v3(prepared))
+    val bound = unsafe(capabilities: [ffi]):
+        rt_process_stream_bind_v2(generation, prepared.root, str_len(prepared.root),
+            owner.identity_digest, str_len(owner.identity_digest))
+    if bound != 0: return _process_stream_reject_or_retain_v2(owner, "process_stream_binding_failed")
+    match group_process_stream_prepare_v2(prepared):
+        case Err(reason): return _process_stream_reject_or_retain_v2(owner, reason)
+        case Ok(_): pass
+    match linux_process_launch_stream_broker_profiled_v3(prepared, owner.identity_digest):
+        case Err(reason): return _process_stream_reject_or_retain_v2(owner, reason)
+        case Ok(_): pass
+    val reference = _process_stream_reference_v2(owner)
+    match reference:
+        case None: return PipedProcessOwnedSpawnV2.CleanupRequired(owner, nil, "process_stream_handoff_unknown")
+        case Some(exact):
+            match group_process_stream_confirm_v2(owner):
+                case Err(reason): return PipedProcessOwnedSpawnV2.CleanupRequired(owner, reference, reason)
+                case Ok(observed):
+                    if observed.terminal:
+                        return PipedProcessOwnedSpawnV2.CleanupRequired(owner, reference, "process_stream_already_terminal")
+                    return PipedProcessOwnedSpawnV2.Ready(owner, exact)
+
+pub fn process_cleanup_piped_owned_v2(owner: GroupProcessStreamOwnerV2,
+        reference: PipedProcessRefV1?) -> Result<(), text>:
+    val invalid = group_process_stream_owner_validate_v2(owner)
+    if invalid != "": return Err(invalid)
+    match reference:
+        case Some(exact):
+            val _valid = process_validate_piped_owned_transfer_v2(PipedProcessOwnedTransferV2(owner: owner, reference: exact))?
+        case None: pass
+    # A bounded cancel turn is not proof. Only the canonical durable terminal
+    # receipt permits descriptor retirement; all failures retain the owner.
+    # A no-child admission receipt needs no control response from an exited
+    # broker. Otherwise request cancellation and require its collected proof.
+    val proof = match group_process_stream_cleanup_proof_v2(owner):
+        case Ok(value): value
+        case Err(_pending):
+            val _cancelled = group_process_stream_cancel_v2(owner)?
+            group_process_stream_cleanup_proof_v2(owner)?
+    val launch = owner.launch
+    val retired = unsafe(capabilities: [ffi]):
+        rt_process_stream_retire_v2(launch.transport_generation, launch.root, str_len(launch.root),
+            owner.identity_digest, str_len(owner.identity_digest), proof, str_len(proof))
+    if retired == -2:
+        match reference:
+            # Recovery after host loss has no native endpoint to retire. The
+            # exact durable cleanup proof was still required above; no slot
+            # with another generation or binding is touched by this outcome.
+            case None: return Ok(())
+            case Some(_): return Err("stale_process_reference")
+    if retired != 0: return Err("process_stream_retirement_failed")
+    # Durable owner/receipt files remain for the host ledger's separate reap ack.
+    Ok(())
 
 pub fn process_spawn_piped_ref_v1(cmd: text, args: [text]) -> Result<PipedProcessRefV1, text>:
     if cmd == "": return Err("empty_process_command")
@@ -1800,7 +2165,11 @@ pub fn process_validate_piped_ref_v1(process: PipedProcessRefV1) -> Result<(), t
     if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
     var validated: i64 = -1
     unsafe(capabilities: [ffi]):
-        validated = rt_process_validate_piped_ref_v1(process.pid, process.generation)
+        if process.group_root != "":
+            validated = rt_process_validate_piped_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity))
+        else:
+            validated = rt_process_validate_piped_ref_v1(process.pid, process.generation)
     if validated == -2: return Err("stale_process_reference")
     if validated != 0: return Err("process_reference_validation_failed")
     Ok(())
@@ -1809,11 +2178,19 @@ pub fn process_read_stdout_ref_v1(process: PipedProcessRefV1) -> Result<text?, t
     if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
     var chunk: text = ""
     unsafe(capabilities: [ffi]):
-        chunk = rt_process_read_stdout_ref_v1(process.pid, process.generation)
+        if process.group_root != "":
+            chunk = rt_process_read_stdout_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity))
+        else:
+            chunk = rt_process_read_stdout_ref_v1(process.pid, process.generation)
     if chunk != "": return Ok(Some(chunk))
     var state: i64 = -1
     unsafe(capabilities: [ffi]):
-        state = rt_process_stdout_state_ref_v1(process.pid, process.generation)
+        if process.group_root != "":
+            state = rt_process_stdout_state_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity))
+        else:
+            state = rt_process_stdout_state_ref_v1(process.pid, process.generation)
     if state == 0: return Ok(nil)
     if state == 1: return Err("process_stdout_eof")
     if state == -2: return Err("stale_process_reference")
@@ -1827,14 +2204,25 @@ pub fn process_write_stdin_some_ref_v1(process: PipedProcessRefV1, data: text,
         return Err("invalid_process_write_range")
     var written: i64 = -1
     unsafe(capabilities: [ffi]):
-        written = rt_process_write_stdin_some_ref_v1(process.pid, process.generation,
-            data, data_bytes, offset, max_bytes)
+        if process.group_root != "":
+            written = rt_process_write_stdin_some_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity),
+                data, data_bytes, offset, max_bytes)
+        else:
+            written = rt_process_write_stdin_some_ref_v1(process.pid, process.generation,
+                data, data_bytes, offset, max_bytes)
     if written == -2: return Err("stale_process_reference")
     if written < 0: return Err("process_write_failed")
     Ok(written)
 
 pub fn process_is_piped_alive_ref_v1(process: PipedProcessRefV1) -> Result<bool, text>:
     if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    if process.group_root != "":
+        val _valid = process_validate_piped_ref_v1(process)?
+        val observed = group_process_stream_probe_bound_v2(process.group_root, process.group_identity)?
+        # The owned workload remains live until the broker proves its tree empty;
+        # EOF and a reaped leader alone do not settle descendants or capacity.
+        return Ok(not observed.terminal)
     var alive: i64 = -1
     unsafe(capabilities: [ffi]):
         alive = rt_process_is_piped_alive_ref_v1(process.pid, process.generation)
@@ -1846,6 +2234,10 @@ pub fn process_is_piped_alive_ref_v1(process: PipedProcessRefV1) -> Result<bool,
 
 pub fn process_close_piped_ref_v1(process: PipedProcessRefV1) -> Result<(), text>:
     if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    if process.group_root != "":
+        val _valid = process_validate_piped_ref_v1(process)?
+        val owner = group_process_stream_recover_v2(process.group_root, process.group_identity)?
+        return process_cleanup_piped_owned_v2(owner, Some(process))
     var closed: i64 = -1
     unsafe(capabilities: [ffi]):
         closed = rt_process_close_piped_ref_v1(process.pid, process.generation)

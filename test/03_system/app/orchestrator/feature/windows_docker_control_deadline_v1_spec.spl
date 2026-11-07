@@ -1,0 +1,104 @@
+# @req REQ-WDP-011
+# Actual scripted Windows provider control; SOURCE-ONLY NOT_RUN.
+use std.spec.*
+use std.common.contracts.container.control_deadline_v1.{ContainerControlDeadlineV1, container_control_deadline_v1}
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerScriptedResultV1, windows_docker_request_digest_v1}
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+
+fn control_stop_tail_v1() -> [WindowsDockerScriptedResultV1]:
+    val id = windows_adapter_native_id_fixture_v2()
+    [windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("running"),
+        windows_adapter_response_fixture_v2("stop", ["stop", "--time", "10", id], id + "\n"),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("exited")]
+
+fn control_destroy_tail_v1() -> [WindowsDockerScriptedResultV1]:
+    val id = windows_adapter_native_id_fixture_v2()
+    [windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("exited"),
+        windows_adapter_response_fixture_v2("destroy", ["rm", id], id + "\n"),
+        windows_adapter_engine_fixture_v2(),
+        windows_adapter_response_fixture_v2("verify-absence", ["container", "ls", "--all", "--no-trunc",
+            "--filter", "id=" + id, "--format", "{{{{.ID}}}}"], "")]
+
+fn started_control_provider_v1(tail: [WindowsDockerScriptedResultV1]) -> WindowsDockerRuntimeProviderV1:
+    var script = windows_adapter_failed_create_script_v2()
+    script[5] = windows_adapter_engine_fixture_v2()
+    script.push(windows_adapter_inspect_fixture_v2("created"))
+    val id = windows_adapter_native_id_fixture_v2()
+    script = script + [windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("created"),
+        windows_adapter_response_fixture_v2("start", ["start", id], id + "\n"),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("running")] + tail
+    var provider = WindowsDockerRuntimeProviderV1.scripted(windows_adapter_policy_fixture_v2(), script)
+    expect(provider.bind_managed_scope_v2(windows_adapter_scope_fixture_v2()).unwrap()).to_equal(true)
+    expect(provider.set_scripted_admission_clock_v1(1000).unwrap()).to_equal(true)
+    expect(provider.set_launch_deadline_v1(windows_adapter_deadline_fixture_v2()).unwrap()).to_equal(true)
+    val request = windows_adapter_native_request_fixture_v2()
+    expect(provider.prepare_pod(request).status).to_equal("ok")
+    expect(provider.create(request).status).to_equal("ok")
+    expect(provider.start(request).status).to_equal("ok")
+    expect(provider.consumed_script_count()).to_equal(12)
+    provider
+
+fn control_context_fixture_v1(actions: [text], expiry: i64 = 4000) -> ContainerControlDeadlineV1:
+    val request = windows_adapter_native_request_fixture_v2()
+    val digest = windows_docker_request_digest_v1(windows_adapter_policy_fixture_v2(), request).unwrap()
+    container_control_deadline_v1(digest, request.operation_id, actions, expiry).unwrap()
+
+describe "Windows fresh cleanup deadline at the actual command boundary":
+    it "checks the final clock after guard observations and consumes no expired stop command":
+        step("Finish actual scoped engine/inspection guards before sampling the cleanup admission clock")
+        var provider = started_control_provider_v1(control_stop_tail_v1())
+        expect(provider.set_scripted_admission_clock_v1(3000).unwrap()).to_equal(true)
+        val request = windows_adapter_native_request_fixture_v2()
+        val result = provider.control(request, "stop", control_context_fixture_v1(["stop"], 3000))
+        expect(result.status).to_equal("blocked")
+        expect(provider.consumed_script_count()).to_equal(14)
+        expect(provider.intent(request).unwrap().phase).to_equal("running")
+
+    it "rejects request, original operation and action mismatches without a cleanup effect":
+        val request = windows_adapter_native_request_fixture_v2()
+        var wrong_digest = control_context_fixture_v1(["stop"])
+        wrong_digest.request_digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        var wrong_operation = control_context_fixture_v1(["stop"])
+        wrong_operation.operation_id = "another-original-operation"
+        for context in [wrong_digest, wrong_operation, control_context_fixture_v1(["destroy"])]:
+            var provider = started_control_provider_v1(control_stop_tail_v1())
+            expect(provider.set_scripted_admission_clock_v1(3000).unwrap()).to_equal(true)
+            val rejected = provider.control(request, "stop", context)
+            expect(rejected.status).to_equal("blocked")
+            expect(provider.consumed_script_count()).to_equal(14)
+            expect(provider.intent(request).unwrap().phase).to_equal("running")
+        var provider = started_control_provider_v1([])
+        expect(provider.control(request, "start", control_context_fixture_v1(["stop"])).status).to_equal("blocked")
+        expect(provider.consumed_script_count()).to_equal(12)
+
+    it "uses separate fresh cleanup authority after the retained launch grant expires":
+        step("Keep the workload running after launch expiry until a separate cleanup call is admitted")
+        var provider = started_control_provider_v1(control_stop_tail_v1() + control_destroy_tail_v1())
+        expect(provider.set_scripted_admission_clock_v1(3000).unwrap()).to_equal(true)
+        val request = windows_adapter_native_request_fixture_v2()
+        expect(provider.intent(request).unwrap().phase).to_equal("running")
+        expect(provider.consumed_script_count()).to_equal(12)
+        val stopped = provider.control(request, "stop", control_context_fixture_v1(["stop"]))
+        expect(stopped.status).to_equal("ok")
+        expect(stopped.state.phase).to_equal("exited")
+        expect(stopped.command.args).to_equal(["--host", windows_adapter_policy_fixture_v2().endpoint,
+            "stop", "--time", "10", windows_adapter_native_id_fixture_v2()])
+        expect(provider.consumed_script_count()).to_equal(17)
+        val destroyed = provider.control(request, "destroy", control_context_fixture_v1(["destroy"]))
+        expect(destroyed.status).to_equal("ok")
+        expect(destroyed.state.phase).to_equal("destroyed")
+        expect(destroyed.command.args).to_equal(["--host", windows_adapter_policy_fixture_v2().endpoint,
+            "rm", windows_adapter_native_id_fixture_v2()])
+        expect(provider.consumed_script_count()).to_equal(22)
+
+    it "does not persist a successful stop context for a later destroy":
+        var provider = started_control_provider_v1(control_stop_tail_v1() + control_destroy_tail_v1())
+        expect(provider.set_scripted_admission_clock_v1(3000).unwrap()).to_equal(true)
+        val request = windows_adapter_native_request_fixture_v2()
+        expect(provider.control(request, "stop", control_context_fixture_v1(["stop"], 3500)).status).to_equal("ok")
+        expect(provider.set_scripted_admission_clock_v1(4000).unwrap()).to_equal(true)
+        val refused = provider.control(request, "destroy", control_context_fixture_v1(["destroy"], 3500))
+        expect(refused.status).to_equal("blocked")
+        expect(provider.consumed_script_count()).to_equal(19)
+        expect(provider.intent(request).unwrap().phase).to_equal("exited")

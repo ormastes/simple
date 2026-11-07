@@ -2,7 +2,7 @@
 # saved: rollback preserves fresh pane owners and restores only window geometry.
 use os.apps.smux.contract.{MuxWindow}
 use os.apps.smux.service.{ServiceState}
-use std.sosix.process.PipedProcessRefV1
+use std.sosix.process.{PipedProcessRefV1, PipedProcessOwnedTransferV2}
 use os.apps.smux.mux_rects.{MuxRect}
 use os.apps.smux.pane_presentation.{pane_presentations_equal}
 use os.apps.smux.window_layout_service.{window_viewport_rects, resize_layout_children,
@@ -18,6 +18,8 @@ class SplitCheckpoint:
     pty_fds: [i64]
     terminal_refs: [PipedProcessRefV1?]
     child_incarnations: [u64]
+    owned_transfers: [PipedProcessOwnedTransferV2?]
+    helpers_cleaned: [bool]
 
 fn same_rects(left: [MuxRect], right: [MuxRect]) -> bool:
     if left.len() != right.len(): return false
@@ -36,16 +38,21 @@ pub fn split_checkpoint_capture(before: ServiceState, after: ServiceState, sessi
     var handles: [i64] = []
     var references: [PipedProcessRefV1?] = []
     var incarnations: [u64] = []
+    var owned: [PipedProcessOwnedTransferV2?] = []
+    var cleaned: [bool] = []
     for rect in expected:
         val pane = after.get_pane(after.find_pane_idx(rect.pane_id))
         pids.push(pane.child_pid)
         handles.push(pane.pty_fd)
         references.push(pane.terminal_ref)
         incarnations.push(pane.child_incarnation)
+        owned.push(pane.owned_terminal_transfer)
+        cleaned.push(pane.helper_cleaned_awaiting_release)
     return SplitCheckpoint(before: before.get_window(before.find_window_idx(window)),
         after: after.get_window(after.find_window_idx(window)), added_pane: added,
         previous: window_viewport_rects(before, session, window), expected: expected,
-        child_pids: pids, pty_fds: handles, terminal_refs: references, child_incarnations: incarnations)
+        child_pids: pids, pty_fds: handles, terminal_refs: references, child_incarnations: incarnations,
+        owned_transfers: owned, helpers_cleaned: cleaned)
 
 pub fn split_checkpoint_restore(st: ServiceState, checkpoint: SplitCheckpoint) -> WindowGeometryUpdate:
     val prior = checkpoint.before
@@ -79,6 +86,9 @@ pub fn split_checkpoint_restore(st: ServiceState, checkpoint: SplitCheckpoint) -
             return geometry_failure(st, "split rollback child changed")
         if not pane.same_terminal_ref(checkpoint.terminal_refs[i]) or pane.child_incarnation != checkpoint.child_incarnations[i]:
             return geometry_failure(st, "split rollback canonical child changed")
+        if (not pane.same_owned_terminal_transfer(checkpoint.owned_transfers[i]) or
+                pane.helper_cleaned_awaiting_release != checkpoint.helpers_cleaned[i]):
+            return geometry_failure(st, "split rollback owned cleanup authority changed")
         if pane.pane.cols != rect.cols or pane.pane.rows != rect.rows:
             return geometry_failure(st, "split rollback pane dimensions changed")
         i = i + 1
@@ -87,7 +97,8 @@ pub fn split_checkpoint_restore(st: ServiceState, checkpoint: SplitCheckpoint) -
     val added = st.get_pane(added_idx)
     if added.focus:
         return geometry_failure(st, "split rollback added pane has independent focus")
-    if added.terminal_ref != nil or added.child_pid > 0 or added.pty_fd >= 0:
+    if (added.owned_terminal_transfer != nil or added.helper_cleaned_awaiting_release or
+            added.terminal_ref != nil or added.child_pid > 0 or added.pty_fd >= 0):
         return geometry_failure(st, "split rollback new pane has a child")
     var indices: [int] = []
     for rect in checkpoint.previous:
