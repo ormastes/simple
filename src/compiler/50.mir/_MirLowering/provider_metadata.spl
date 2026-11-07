@@ -963,6 +963,8 @@ impl MirLowering:
         self.register_trait_impls_of(module.name, module.symbols, module.impls, {}, true, visible_scalar_traits)
         val use_cached = providers.len() > 0
         val trait_providers = if providers.len() > 0: providers else: self.trait_impl_provider_modules
+        if trait_providers.len() > 0:
+            self.trait_impl_provider_index_builds = self.trait_impl_provider_index_builds + 1
         var provider_i = 0
         while provider_i < trait_providers.len():
             val provider_module: HirModule = trait_providers[provider_i]
@@ -1034,6 +1036,8 @@ impl MirLowering:
                     self.trait_impl_owners[trait_key] = owners
                 for method_name in impl_def.methods.keys():
                     val method_id: SymbolId = impl_def.methods[method_name]
+                    if not is_local:
+                        self.trait_impl_provider_relocations = self.trait_impl_provider_relocations + 1
                     val target = if is_local: method_id else: self.relocate_provider_callable(method_id, symbols, links)
                     if target.id >= 0:
                         self.trait_impl_methods["{trait_key}::{owner_key}::{method_name}"] = target
@@ -1062,6 +1066,198 @@ impl MirLowering:
                             self.trait_impl_methods[scalar_key] = SymbolId(id: -1)
                         else:
                             self.trait_impl_methods[scalar_key] = candidate
+
+    me build_provider_trait_impl_index_v1(providers: [HirModule]):
+        """Session index of every provider `impl Trait for Type`, built ONCE
+        per provider list (bug
+        mir_in_process_per_consumer_provider_rebuild_quadratic_2026-10-20).
+        Same identities register_trait_impls_of computes for a provider
+        (is_local false), filed in the same provider/impl/method order, but
+        holding provider SymbolIds only: nothing is relocated here."""
+        self.trait_impl_provider_index_builds = self.trait_impl_provider_index_builds + 1
+        var owner_rows: Dict<text, [i64]> = {}
+        var owner_row_provider: [i64] = []
+        var owner_row_owner: [text] = []
+        var method_rows: Dict<text, [i64]> = {}
+        var scalar_rows: Dict<text, [i64]> = {}
+        var row_provider: [i64] = []
+        var row_symbol: [i64] = []
+        var row_name: [text] = []
+        var row_scalar_owner: [text] = []
+        var row_scalar_settled: [bool] = []
+        var provider_i = 0
+        while provider_i < providers.len():
+            val provider_module: HirModule = providers[provider_i]
+            val provider_index = provider_i
+            provider_i = provider_i + 1
+            val module_name = provider_module.name
+            val symbols: SymbolTable = provider_module.symbols
+            val impls: [HirImpl] = provider_module.impls
+            var ii = 0
+            while ii < impls.len():
+                val impl_def: HirImpl = impls[ii]
+                val impl_index = ii
+                ii = ii + 1
+                # Same concrete-slot discipline as register_trait_impls_of.
+                var trait_key = ""
+                var impl_settled = false
+                if impl_def.trait_ != nil:
+                    val impl_trait: HirType = impl_def.trait_
+                    val trait_kind: HirTypeKind = impl_trait.kind
+                    match trait_kind:
+                        case Named(trait_sym, trait_args):
+                            if symbols.symbols.has(trait_sym.id):
+                                # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                                val optional_trait_symbol: HirSymbol? = symbols.get_symbol_raw(trait_sym.id)
+                                if val present_trait_symbol = optional_trait_symbol:
+                                    val trait_symbol: HirSymbol = present_trait_symbol
+                                    if trait_symbol.kind == SymbolKind.Trait:
+                                        trait_key = mir_trait_dispatch_identity(trait_symbol, module_name)
+                                        impl_settled = trait_args.len() == 0 and impl_def.type_params.len() == 0
+                        case _: ()
+                if trait_key == "":
+                    continue
+                var owner_key = "generic:{module_name}#impl{impl_index}"
+                val type_kind: HirTypeKind = impl_def.type_.kind
+                match type_kind:
+                    case Named(type_sym, type_args):
+                        if impl_def.type_params.len() == 0 and type_args.len() == 0 and symbols.symbols.has(type_sym.id):
+                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                            val optional_type_symbol: HirSymbol? = symbols.get_symbol_raw(type_sym.id)
+                            if val present_type_symbol = optional_type_symbol:
+                                val type_symbol: HirSymbol = present_type_symbol
+                                owner_key = mir_trait_dispatch_identity(type_symbol, module_name)
+                    case _: ()
+                val owner_row = owner_row_provider.len()
+                owner_row_provider.push(provider_index)
+                owner_row_owner.push(owner_key)
+                var trait_owner_rows: [i64] = owner_rows.get(trait_key) ?? []
+                trait_owner_rows = trait_owner_rows.push(owner_row)
+                owner_rows[trait_key] = trait_owner_rows
+                var scalar_owner = mir_scalar_trait_owner_key_v1(impl_def.type_.kind)
+                if scalar_owner == "":
+                    match impl_def.type_.kind:
+                        case TypeParam(_, _) | Infer(_, _): scalar_owner = "scalar:generic"
+                        case Named(owner_id, _):
+                            if val owner_symbol = symbols.get_symbol_raw(owner_id.id):
+                                if owner_symbol.kind == SymbolKind.TypeParam:
+                                    scalar_owner = "scalar:generic"
+                        case _: ()
+                for method_name in impl_def.methods.keys():
+                    val method_id: SymbolId = impl_def.methods[method_name]
+                    var method_settled = false
+                    if val method_symbol = symbols.get_symbol_raw(method_id.id):
+                        method_settled = method_symbol.generic_param_count == 0
+                    val method_row = row_provider.len()
+                    row_provider.push(provider_index)
+                    row_symbol.push(method_id.id)
+                    row_name.push(method_name)
+                    row_scalar_owner.push(scalar_owner)
+                    row_scalar_settled.push(impl_settled and method_settled and scalar_owner != "scalar:generic")
+                    val impl_key = "{trait_key}::{owner_key}::{method_name}"
+                    var key_rows: [i64] = method_rows.get(impl_key) ?? []
+                    key_rows = key_rows.push(method_row)
+                    method_rows[impl_key] = key_rows
+                    if scalar_owner != "":
+                        var trait_scalar_rows: [i64] = scalar_rows.get(trait_key) ?? []
+                        trait_scalar_rows = trait_scalar_rows.push(method_row)
+                        scalar_rows[trait_key] = trait_scalar_rows
+        self.provider_trait_owner_rows = owner_rows
+        self.provider_trait_owner_row_provider = owner_row_provider
+        self.provider_trait_owner_row_owner = owner_row_owner
+        self.provider_trait_method_rows = method_rows
+        self.provider_trait_scalar_rows = scalar_rows
+        self.provider_trait_method_row_provider = row_provider
+        self.provider_trait_method_row_symbol = row_symbol
+        self.provider_trait_method_row_name = row_name
+        self.provider_trait_method_row_scalar_owner = row_scalar_owner
+        self.provider_trait_method_row_scalar_settled = row_scalar_settled
+
+    me provider_trait_row_is_consumer_v1(provider_index: i64) -> bool:
+        """register_trait_receiver_impls skipped the provider entry that IS
+        the consumer (its impls are registered as local rows)."""
+        provider_index < 0 or provider_index >= self.provider_session_names.len() or
+            self.provider_session_names[provider_index] == self.provider_method_consumer
+
+    me relocate_provider_trait_method_row_v1(row: i64) -> SymbolId:
+        val provider_index = self.provider_trait_method_row_provider[row]
+        if provider_index >= self.provider_method_modules.len() or provider_index >= self.provider_session_links.len():
+            return SymbolId(id: -1)
+        val provider_module: HirModule = self.provider_method_modules[provider_index]
+        val links: Dict<i64, text> = self.provider_session_links[provider_index]
+        self.trait_impl_provider_relocations = self.trait_impl_provider_relocations + 1
+        self.relocate_provider_callable(SymbolId(id: self.provider_trait_method_row_symbol[row]), provider_module.symbols, links)
+
+    me register_provider_trait_impls_demand_v1(module: HirModule):
+        """Per-consumer half of the provider trait pass under the session
+        index: register this consumer's own impls (local rows), then replay
+        only the provider scalar rows of traits this consumer can see -- the
+        scalar keys are consumer-scoped and are read without a materialize
+        hook. Trait owners and `{trait}::{owner}::{method}` targets come from
+        the index on lookup (trait_impl_owners_materialize_v1 /
+        trait_impl_method_materialize_v1)."""
+        val visible_scalar_traits = mir_visible_scalar_traits_v1(module.symbols, module.name)
+        self.register_trait_impls_of(module.name, module.symbols, module.impls, {}, true, visible_scalar_traits)
+        self.provider_trait_demand_active = true
+        val visible_keys: [text] = visible_scalar_traits.keys()
+        for raw_visible_key in visible_keys:
+            val trait_key: text = raw_visible_key
+            val rows: [i64] = self.provider_trait_scalar_rows.get(trait_key) ?? []
+            for raw_row in rows:
+                val row: i64 = raw_row
+                if self.provider_trait_row_is_consumer_v1(self.provider_trait_method_row_provider[row]):
+                    continue
+                val target = self.relocate_provider_trait_method_row_v1(row)
+                val scalar_owner = self.provider_trait_method_row_scalar_owner[row]
+                val scalar_key = "{scalar_owner}::{self.provider_trait_method_row_name[row]}"
+                val candidate = if self.provider_trait_method_row_scalar_settled[row]: target else: SymbolId(id: -1)
+                # Same admission as register_trait_impls_of's scalar arm.
+                if self.trait_impl_methods.has(scalar_key) and self.trait_impl_methods[scalar_key].id != candidate.id:
+                    self.trait_impl_methods[scalar_key] = SymbolId(id: -1)
+                else:
+                    self.trait_impl_methods[scalar_key] = candidate
+
+    me trait_impl_owners_materialize_v1(trait_key: text):
+        """Merge the provider owners of `trait_key` into trait_impl_owners
+        on first lookup (local owners were registered first)."""
+        if not self.provider_trait_demand_active:
+            return
+        val memo = "trait-owners::{trait_key}"
+        if self.provider_method_materialized.has(memo):
+            return
+        self.provider_method_materialized[memo] = true
+        val rows: [i64] = self.provider_trait_owner_rows.get(trait_key) ?? []
+        if rows.len() == 0:
+            return
+        var owners = self.trait_impl_owners.get(trait_key) ?? []
+        for raw_row in rows:
+            val row: i64 = raw_row
+            if self.provider_trait_row_is_consumer_v1(self.provider_trait_owner_row_provider[row]):
+                continue
+            val owner_key = self.provider_trait_owner_row_owner[row]
+            if not owners.contains(owner_key):
+                owners = owners.push(owner_key)
+        self.trait_impl_owners[trait_key] = owners
+
+    me trait_impl_method_materialize_v1(impl_key: text):
+        """Relocate the provider impl method(s) filed under `impl_key` into
+        this consumer's table on first lookup. Provider rows overwrite a
+        local row and each other in provider order, as the eager pass did;
+        a failed relocation (-1) leaves the previous target."""
+        if not self.provider_trait_demand_active:
+            return
+        val memo = "trait-method::{impl_key}"
+        if self.provider_method_materialized.has(memo):
+            return
+        self.provider_method_materialized[memo] = true
+        val rows: [i64] = self.provider_trait_method_rows.get(impl_key) ?? []
+        for raw_row in rows:
+            val row: i64 = raw_row
+            if self.provider_trait_row_is_consumer_v1(self.provider_trait_method_row_provider[row]):
+                continue
+            val target = self.relocate_provider_trait_method_row_v1(row)
+            if target.id >= 0:
+                self.trait_impl_methods[impl_key] = target
 
     me trait_receiver_identity(receiver: HirExpr, method: text = "") -> text:
         """Canonical trait identity when the receiver's STATIC type is a
@@ -1199,8 +1395,11 @@ impl MirLowering:
 impl MirLowering:
     me ensure_provider_session_v1(providers: [HirModule]):
         """Build the provider session index unless it already describes
-        exactly this provider list (same length, same names in order)."""
-        if self.provider_session_names.len() == providers.len() and self.provider_session_links_ready.len() == providers.len():
+        exactly this immutable ordered-content snapshot. Names and order are
+        diagnostic shape only and never authorize reuse."""
+        val requested_key = self.provider_session_requested_key
+        if requested_key != "" and requested_key == self.provider_session_content_key and
+                self.provider_session_names.len() == providers.len() and self.provider_session_links_ready.len() == providers.len():
             var same = true
             var check_i = 0
             while same and check_i < providers.len():
@@ -1299,6 +1498,7 @@ impl MirLowering:
             links_ready.push(built)
             provider_i = provider_i + 1
         self.provider_session_names = names
+        self.provider_session_content_key = requested_key
         self.provider_session_links = links_by_index
         self.provider_session_links_ready = links_ready
         self.provider_method_row_provider = row_provider
@@ -1306,6 +1506,7 @@ impl MirLowering:
         self.provider_method_row_symbol = row_symbol
         self.provider_method_row_class_symbol = row_class_symbol
         self.build_provider_layout_index_v1(providers)
+        self.build_provider_trait_impl_index_v1(providers)
 
     me build_provider_layout_index_v1(providers: [HirModule]):
         """Session index of every provider struct/class declaration, filed by
