@@ -4562,6 +4562,43 @@ bootstrap_stage3_stage_windows_llvm_import() (
     chmod 400 "$llvm_destination" "$llvm_receipt"
 )
 
+# Check the actual publication filesystem before spending time building Cargo.
+# Keep the final tuple freeze checks: this is capability preflight, not admission.
+bootstrap_stage3_preflight_generation_storage() (
+    [ "$#" -eq 1 ] || return 1
+    mkdir -p -- "$1" || return 1
+    perl - "$1" <<'PERL_GENERATION_STORAGE'
+use strict;
+use warnings;
+use File::Temp qw(tempfile);
+use Fcntl qw(S_IMODE);
+my ($root) = @ARGV;
+my ($fh, $path) = tempfile('.mode-preflight.XXXXXXXX', DIR => $root, UNLINK => 1);
+my $ok = eval {
+    for my $wanted (0500, 0400) {
+        chmod($wanted, $fh) or die "chmod probe: $!\n";
+        my @stat = stat($fh);
+        @stat or die "stat probe: $!\n";
+        my $got = S_IMODE($stat[2]);
+        unless ($got == $wanted) {
+            # Identical to the final tuple-freeze host policy. WSL is Linux.
+            die sprintf("wanted %04o, observed %04o\n", $wanted, $got)
+                unless $^O =~ /^(?:MSWin32|msys|cygwin)$/
+                    && ($got & 0222) == 0;
+        }
+    }
+    1;
+};
+my $error = $@;
+chmod(0600, $fh) or die "restore probe for cleanup: $!\n";
+close($fh) or die "close probe: $!\n";
+unlink($path) or die "remove probe: $!\n";
+die "generation storage cannot preserve immutable file modes at $root: $error" .
+    "Choose a filesystem with supported permissions (for WSL, a POSIX or metadata-enabled mount). No Cargo build was started by this check.\n"
+    unless $ok;
+PERL_GENERATION_STORAGE
+)
+
 bootstrap_stage3_prepare_seed_generation() {
     { [ "$#" -eq 7 ] || [ "$#" -eq 8 ] || [ "$#" -eq 9 ]; } || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
     bootstrap_stage3_generation_source=$1

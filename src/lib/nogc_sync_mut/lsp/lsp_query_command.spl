@@ -2,6 +2,7 @@
 # spaces and shell punctuation remain data; no shell or timeout executable.
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, eprint}
 use std.nogc_sync_mut.io_runtime.{env_get}
+use std.common.string_core.{str_len}
 use std.common.json.value.{json_value_str_array, json_value_serialize}
 
 struct LspQueryCommandV1:
@@ -22,14 +23,19 @@ pub fn lsp_heavy_query_command_v1(args: [text]) -> LspQueryCommandV1:
 pub fn lsp_visibility_query_command_v1(args: [text]) -> LspQueryCommandV1:
     lsp_query_command_v1("src/app/cli/query_visibility.spl", args, 60000)
 
-pub fn lsp_run_query_command_v1(binary: text, command: LspQueryCommandV1) -> (text, i64):
+pub fn lsp_run_query_command_v1(binary: text, command: LspQueryCommandV1, max_output_bytes: i64 = -1) -> (text, i64):
     val audit = env_get("SIMPLE_LSP_DEBUG") != ""
     if audit:
         val arguments = json_value_serialize(json_value_str_array(command.args))
         eprint("[lsp-query] binary={binary} timeout_ms={command.timeout_ms} args={arguments}")
-    # Preserve the previous complete-output contract; the original shell
-    # timeout supplied only the time bound, not a capture truncation limit.
-    val (stdout, stderr, code) = process_run_bounded(binary, command.args, command.timeout_ms, -1)
+    # Defaults preserve existing callers. Finite admission is enforced by
+    # the canonical capture owner before allocating arbitrary child output.
+    val (stdout, stderr, code) = process_run_bounded(binary, command.args, command.timeout_ms, max_output_bytes)
+    # The tuple API has no truncation flag. Fail closed at the exact ceiling
+    # on either stream, even if a prefix happens to be valid JSON.
+    if max_output_bytes >= 0 and (str_len(stdout) >= max_output_bytes or str_len(stderr) >= max_output_bytes):
+        # Reserved wrapper result, distinct from child exit/timeout failures.
+        return ("", -10001)
     if audit: eprint("[lsp-query] exit_status={code}")
     (stdout, code)
 

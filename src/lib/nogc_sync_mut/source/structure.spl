@@ -1,0 +1,143 @@
+# Provider-neutral syntax projection. No source grammar or semantic resolver.
+use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1,
+    SourceOutlineNodeV1, SourceOutlineV1, SourceFoldV1, SourceStructuredViewV1}
+use std.nogc_sync_mut.source.projection.{source_project_ranges_v1}
+
+fn source_sorted_indices_v1(nodes: [SourceOutlineNodeV1]) -> [i64]:
+    # Stable bottom-up merge sort preserves node-array parent identities.
+    var order: [i64] = []
+    for index in 0..nodes.len(): order.push(index)
+    var width = 1
+    while width < order.len():
+        var next: [i64] = []
+        var begin = 0
+        while begin < order.len():
+            val middle = if begin + width < order.len(): begin + width else: order.len()
+            val end = if middle + width < order.len(): middle + width else: order.len()
+            var left = begin
+            var right = middle
+            while left < middle or right < end:
+                if right >= end or (left < middle and nodes[order[left]].header_range.start_byte <= nodes[order[right]].header_range.start_byte):
+                    next.push(order[left])
+                    left = left + 1
+                else:
+                    next.push(order[right])
+                    right = right + 1
+            begin = end
+        order = next
+        width = width * 2
+    order
+
+fn source_node_descends_v1(outline: SourceOutlineV1, child: i64, ancestor: i64) -> bool:
+    var cursor = child
+    var remaining = outline.nodes.len()
+    while cursor >= 0 and cursor < outline.nodes.len() and remaining > 0:
+        if cursor == ancestor: return true
+        cursor = outline.nodes[cursor].parent_index
+        remaining = remaining - 1
+    false
+
+fn source_index_contains_v1(indices: [i64], sought: i64) -> bool:
+    for index in indices:
+        if index == sought: return true
+    false
+
+pub fn source_view_node_expanded_v1(outline: SourceOutlineV1,
+        view: SourceStructuredViewV1, index: i64) -> bool:
+    if index == view.target_index: return true
+    for visible in view.visible_nodes:
+        if outline.nodes[visible].parent_index == index: return true
+    false
+
+pub fn source_outline_target_v1(outline: SourceOutlineV1, target: text) -> Result<i64, text>:
+    if target == "": return Err("focused_target_required")
+    var found = -1
+    var index = 0
+    for node in outline.nodes:
+        if node.qualified_name == target or node.name == target:
+            if found >= 0: return Err("ambiguous_syntax_target")
+            found = index
+        index = index + 1
+    if found < 0: return Err("unresolved_syntax_target")
+    Ok(found)
+
+pub fn source_project_structure_v1(snapshot: SourceSnapshotV1, outline: SourceOutlineV1,
+        mode: text, target: text, depth: i64, start_index: i64,
+        max_nodes: i64, max_bytes: i64) -> Result<SourceStructuredViewV1, text>:
+    if snapshot.snapshot_id != outline.snapshot_id: return Err("stale_outline_snapshot")
+    if mode != "outline" and mode != "focused": return Err("unsupported_structure_mode")
+    if depth < 1 or depth > 2: return Err("outline_depth_must_be_1_or_2")
+    if max_nodes <= 0 or max_nodes > 64 or max_bytes <= 0: return Err("invalid_structure_budget")
+    if outline.nodes.len() > 512: return Err("outline_node_limit_512")
+    var target_index = -1
+    if mode == "focused": target_index = source_outline_target_v1(outline, target)?
+    val order = source_sorted_indices_v1(outline.nodes)
+    var candidates: [i64] = []
+    var import_ranges: [SourceRangeV1] = []
+    for index in order:
+        val node = outline.nodes[index]
+        if node.parent_index < -1 or node.parent_index >= index:
+            return Err("invalid_outline_parent")
+        if node.kind == "import" and index != target_index:
+            import_ranges.push(node.full_range)
+            continue
+        var visible = node.parent_index < 0 or depth == 2
+        if mode == "focused":
+            visible = index == target_index or source_node_descends_v1(outline, target_index, index)
+            if outline.nodes[target_index].parent_index >= 0 and node.parent_index == outline.nodes[target_index].parent_index:
+                visible = true
+            # A fully open target owns its children; do not duplicate ranges.
+            if index != target_index and source_node_descends_v1(outline, index, target_index):
+                visible = false
+        if visible: candidates.push(index)
+    if start_index < 0 or start_index > candidates.len(): return Err("invalid_outline_cursor")
+    if import_ranges.len() > 64: return Err("import_group_requires_bounded_raw_expansion")
+    var selected_nodes: [i64] = []
+    var cursor = start_index
+    while cursor < candidates.len():
+        val index = candidates[cursor]
+        # Every page carries the ancestors of each newly admitted candidate.
+        # Parent indices were validated above to strictly precede children.
+        var trial = selected_nodes
+        var ancestor = index
+        while ancestor >= 0:
+            if not source_index_contains_v1(trial, ancestor): trial.push(ancestor)
+            ancestor = outline.nodes[ancestor].parent_index
+        var used = 0
+        var fits = trial.len() <= max_nodes
+        for admitted in trial:
+            val node = outline.nodes[admitted]
+            val span = if admitted == target_index: node.full_range else: node.header_range
+            if span.end_byte < span.start_byte: return Err("invalid_outline_span")
+            val count = span.end_byte - span.start_byte
+            if count > max_bytes - used:
+                fits = false
+                break
+            used = used + count
+        if not fits:
+            if selected_nodes.len() == 0:
+                if outline.nodes[index].parent_index >= 0: return Err("mandatory_context_exceeds_budget")
+                return Err("syntax_unit_exceeds_budget")
+            break
+        selected_nodes = trial
+        cursor = cursor + 1
+    var ranges: [SourceRangeV1] = []
+    var visible_nodes: [i64] = []
+    var folds: [SourceFoldV1] = []
+    if import_ranges.len() > 0: folds.push(SourceFoldV1("imports", -1, import_ranges))
+    for index in order:
+        if not source_index_contains_v1(selected_nodes, index): continue
+        val node = outline.nodes[index]
+        ranges.push(if index == target_index: node.full_range else: node.header_range)
+        visible_nodes.push(index)
+        var has_visible_child = false
+        for child in selected_nodes:
+            if outline.nodes[child].parent_index == index: has_visible_child = true
+        # An opened container cannot simultaneously claim its whole body is
+        # folded. Descendant folds and the omission ledger describe its gaps.
+        if index != target_index and not has_visible_child and node.body_range.end_byte > node.body_range.start_byte:
+            folds.push(SourceFoldV1(node.qualified_name, index, [node.body_range]))
+    var projection = source_project_ranges_v1(snapshot, ranges, max_bytes)?
+    projection.evidence_kind = "syntax_candidate"
+    val next_index = if cursor < candidates.len(): cursor else: -1
+    Ok(SourceStructuredViewV1(mode, projection, visible_nodes, folds, next_index, target_index))

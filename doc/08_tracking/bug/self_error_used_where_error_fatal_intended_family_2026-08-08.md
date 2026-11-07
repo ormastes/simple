@@ -466,3 +466,32 @@ Status: **source repair implemented; executable verification pending**.
 The SSpec, compiler/core/MCP checks and native smokes are unrun pending a
 qualified self-hosted producer. No seed test is substituted, and the broader
 diagnostic family remains open.
+
+## GPU dispatch-scoped repair — 2026-11-07
+
+Base release05a4aa7ea1d; closed PR7316 head272348b96515 is the historical
+failed candidate, not an accepted fix. Its fatal diagnostic was applied before
+intrinsic selection, rejecting atomic pointers and non-index data. The release
+owner also evaluated a nonliteral first atomic/data argument in that dimension
+probe and again in its ordinary argument path. Both defects share that misplaced
+probe; changing only severity is insufficient.
+
+`lower_gpu_intrinsic_call` now selects exactly gpu_global_id, gpu_local_id,
+gpu_block_id, gpu_block_dim and gpu_grid_dim before inspecting the dimension.
+Nonconstant dimensions are evaluated once for recovery and emit error_fatal at
+the source span; default0 and literal dimensions retain their existing behavior.
+CAS and ordinary atomic/data operations retain their existing argument owners,
+so pointer/data expressions are evaluated once in source order. No new GPU
+backend implementation or device-runtime behavior is claimed.
+
+The regression spec preserves the original real parameter, literal/default and
+call-valued dimension controls. New controls bind actual pointer/data parameters
+for CAS and all eight ordinary atomics, and inspect named effect-call order and
+result operand identities for CAS, atomic_add and warp_shuffle. These are actual
+MIR owner calls and emitted instruction assertions, not source-presence tests.
+
+Budget: prior six family cycles remain recorded. User “retry about12hrs” explicitly
+allows three additional meaningful cycles7–9 until2026-11-07 18:56UTC. This is
+cycle7. Independent source review is required before commit/landing. SSpec and
+compiler/core/MCP/native verification remain NOT_RUN pending an admitted runtime
+and root build slot; source landing is not verification PASS or full closure.

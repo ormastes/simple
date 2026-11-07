@@ -5,7 +5,8 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.common.library_mode_policy_v1.{library_mode_policy_v1}
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.driver.driver_hir_cache.{
-    hir_cache_key, hir_cache_header, hir_cache_enabled, hir_cache_store_in_owned_scope,
+    hir_cache_key, hir_cache_header, hir_cache_enabled, hir_cache_store_encoded_in_owned_scope,
+    HirEncodedBodyV1, hir_encoded_body_v1,
     hir_cache_load_in_owned_scope, hir_cache_last_warnings,
     hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1
 }
@@ -112,23 +113,40 @@ fn hir_body_archive_content_key_v1(input_key: text, body_digest: text, warnings_
 fn hir_body_archive_store_in_owned_scope_v1(
     input: HirBodyArchiveInputV1, module: HirModule, warnings: [text]
 ) -> Result<HirBodyArchiveV1, text>:
+    if transient_array_scope_state_v1() != 1:
+        return Err("body archive borrowed scope must be active and unpaused")
+    if module.name != input.module_name or module.path != input.source_path:
+        return Err("body archive module identity mismatch")
+    hir_body_archive_store_encoded_in_owned_scope_v1(input,
+        hir_encoded_body_v1(module), warnings)
+
+# Encode-once archive publication consumes one sealed snapshot. There is no
+# independently mutable HirModule parameter that could share its name/path
+# while differing from these bytes.
+fn hir_body_archive_store_encoded_in_owned_scope_v1(
+    input: HirBodyArchiveInputV1, encoded: HirEncodedBodyV1, warnings: [text]
+) -> Result<HirBodyArchiveV1, text>:
     # The caller owns an ACTIVE scope and has initialized the cache identity
     # before opening it. This helper acquires/releases/promotes no lease roots.
     # Its complete result is scratch until the caller pauses and promotes it.
     if transient_array_scope_state_v1() != 1:
         return Err("body archive borrowed scope must be active and unpaused")
-    if module.name != input.module_name or module.path != input.source_path:
+    if encoded.module_name != input.module_name or encoded.module_path != input.source_path:
         return Err("body archive module identity mismatch")
     # File-backed admission and its hashes are scratch too: a no-GC caller
     # must not accumulate one whole authority receipt per completed module.
     val input_key = hir_body_archive_input_key_v1(input)
     val identity_valid = input_key != ""
     val source_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry, input.library_mode, input.native_target)
-    val blob = if identity_valid: hir_module_encode(module) else: ""
-    val body_digest = sha256_text(blob)
+    # One immutable snapshot serves both the body digest and cache publication.
+    var blob = encoded.blob
+    var body_digest = sha256_text("")
+    if identity_valid and blob != "":
+        body_digest = encoded.digest
     val warnings_digest = hir_body_archive_warnings_digest_v1(warnings)
     val key = hir_body_archive_content_key_v1(input_key, body_digest, warnings_digest)
-    val stored = blob != "" and hir_cache_store_in_owned_scope(key, module, warnings, "", input.library_mode)
+    val stored = blob != "" and hir_cache_store_encoded_in_owned_scope(
+        key, encoded, warnings, "", input.library_mode)
     if not identity_valid:
         return Err("body archive identity unavailable")
     if not stored:
@@ -233,5 +251,6 @@ fn hir_body_archive_typecheck_lease_v1(
 export HirBodyArchiveInputV1, HirBodyArchiveV1, HirBodyTypecheckLeaseReceiptV1
 export hir_body_archive_input_key_v1, hir_body_archive_matches_v1
 export hir_body_archive_content_key_v1, hir_body_archive_warnings_digest_v1
-export hir_body_archive_store_v1, hir_body_archive_store_in_owned_scope_v1, hir_body_archive_typecheck_lease_v1
+export hir_body_archive_store_v1, hir_body_archive_store_in_owned_scope_v1
+export hir_body_archive_store_encoded_in_owned_scope_v1, hir_body_archive_typecheck_lease_v1
 export hir_body_archive_load_in_owned_scope_v1

@@ -4,7 +4,7 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_digest_allowed_v1, hir_cache_policy_closure_digest_v1}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.{
     HirBodyArchiveInputV1, HirBodyArchiveV1,
-    hir_body_archive_store_in_owned_scope_v1, hir_body_archive_matches_v1}
+    hir_body_archive_store_encoded_in_owned_scope_v1, hir_body_archive_matches_v1}
 use compiler.driver.cache.driver_hir_archive_authority_v1.{
     DriverHirRuntimeStdArchiveSelectionV1,
     driver_hir_archive_input_from_runtime_std_selection_v1}
@@ -27,8 +27,8 @@ use compiler.common.driver_core_types.{CompileMode}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
-    cold_hir_typed_receipts_from_lowered_sources_v1,
-    cold_hir_source_mismatch_evidence_v1, cold_hir_receipt_capture_scope_v1
+    cold_hir_typed_receipts_from_reader_owned_lowered_sources_v1,
+    cold_hir_source_mismatch_evidence_v1
 }
 use compiler.driver.smf.runtime_std_hir_emission_types_v1.{
     RuntimeStdHirModuleEmissionV1
@@ -43,7 +43,7 @@ use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_hir_schedule_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
-use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_queue_v1, native_mir_shard_record_hir_compile_errors_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_queue_v1, native_mir_shard_record_hir_compile_errors_v1, native_mir_shard_spec_v1}
 use compiler.driver.driver_hir_abi_interface.{driver_hir_abi_interface_digest_v1,
     driver_hir_abi_interface_digest_in_owned_scope_v1}
 use compiler.hir.hir_lowering.items.{
@@ -66,7 +66,7 @@ use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_pa
 use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name, bootstrap_entry_source_index}
 use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
 use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress, driver_phase_trace_enabled}
-use compiler.driver.driver_mem_snapshot.{mem_snapshot_begin, mem_snapshot_finish, mem_snapshot_finish_with_outcome, mem_snapshot_abort}
+use compiler.driver.driver_mem_snapshot.{mem_snapshot_begin, mem_snapshot_finish, mem_snapshot_finish_with_outcome, mem_snapshot_abort, mem_snapshot_owner_v1}
 use compiler.driver.driver_hir_pipeline_support.{
     driver_stage3_surface_identity_matches,
     driver_stage3_surface_identity_matches_receipt,
@@ -107,7 +107,8 @@ use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1, hi
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary, hir_shard_deps_wanted_v1, hir_shard_publish_records_v1, hir_shard_dep_source_indices_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_load_allowed_v1}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
-use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
+use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_encoded_in_owned_scope, hir_cache_clear_last_warnings}
+use compiler.driver.driver_hir_cache.{HirEncodedBodyV1, hir_encoded_body_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_misses, hir_cache_adoption_receipt_v1}
 use compiler.driver.driver_hir_worker_surface_v1.{driver_hir_worker_skeleton_selected_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_module_encode_retained_v1}
@@ -403,17 +404,6 @@ impl CompilerDriver:
         if source_root == "" or inventory_binding.snapshot_manifest_digest == "" or inventory_binding.source_inventory_digest == "":
             self.ctx.add_error("cold HIR receipt authority incomplete")
             return false
-        # After the authority-completeness checks so a misconfigured unit child
-        # still errors. A per-file unit child holds HIR for its picked batch only; walking
-        # the whole closure here failed on the first unlowered row (Stage 3,
-        # cold-hir-lowered-module-missing:app.cli.bootstrap_main).
-        val capture_scope = cold_hir_receipt_capture_scope_v1(
-            full_inventory_cold, native_file_worker_unit_active_v1())
-        if capture_scope == "skip":
-            return true
-        if capture_scope != "capture":
-            self.ctx.add_error("cold HIR receipt capture refused: {capture_scope}")
-            return false
         val inventory_cache_root = compile_source_inventory_snapshot_cache_root_v1(
             sosix_cwd(), source_root,
             sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "")
@@ -464,9 +454,9 @@ impl CompilerDriver:
                     self.ctx.add_error(
                         "cold HIR inventory generation mismatch: raw='{bounded_generation_text}' raw_len={inventory_generation_text.len()} admitted={inventory.generation} admitted_digest={admitted.digest}")
                     return false
-                match cold_hir_typed_receipts_from_lowered_sources_v1(
+                match cold_hir_typed_receipts_from_reader_owned_lowered_sources_v1(
                         source_root, inventory_binding.source_inventory_digest,
-                        inventory,
+                        inventory_cache_root,
                         snapshot_inventory, inventory_binding.snapshot_manifest_digest,
                         self.ctx.source_paths_owner,
                         self.ctx.source_identities_owner,
@@ -859,6 +849,13 @@ impl CompilerDriver:
                 source.module_name, module, self.ctx.assurance_policy.strictness)
             for message in representation_receipt.warnings: warnings.push(message)
             for message in representation_receipt.errors: errors.push(message)
+        # One complete-body encode per registered module, shared by the parser
+        # transaction store and the body archive below (both run in this same
+        # owned scope, on the same unchanged module). Before, each publication
+        # re-encoded: 3 encodes per module
+        # (stage2_hir_registration_reencode_timeout_2026-10-16). Scratch of this
+        # scope; never retained past the transaction.
+        var registration_body: HirEncodedBodyV1? = nil
         if errors.len() == 0 and infrastructure_error == "":
             if not cached and (env_get("SIMPLE_HIR_CODEC_ROUNDTRIP")) == "1":
                 val round_trip = hir_codec_roundtrip_selfcheck(module)
@@ -885,8 +882,11 @@ impl CompilerDriver:
                     # classify a missing binding using another module's reason.
                     infrastructure_error = "HIR shard parser binding unavailable for {source.path}"
                 else:
-                    stored = hir_cache_store_in_owned_scope(
-                        transaction_cache_key, module, warnings, parser_record, self.ctx.options.library_mode)
+                    registration_body = Some(hir_encoded_body_v1(module))
+                    if val body = registration_body:
+                        stored = hir_cache_store_encoded_in_owned_scope(
+                            transaction_cache_key, body, warnings, parser_record,
+                            self.ctx.options.library_mode)
                     if not stored:
                         if hir_cache_last_refusal_is_io_v1():
                             infrastructure_error = "HIR shard cache publication failed for {source.path}"
@@ -904,7 +904,10 @@ impl CompilerDriver:
                 # and the ordered journal; they never rename this full body.
                 var produced_input = input
                 produced_input.module_name = module.name
-                val archived = hir_body_archive_store_in_owned_scope_v1(produced_input, module, warnings)
+                val archived = if val body = registration_body:
+                    hir_body_archive_store_encoded_in_owned_scope_v1(produced_input, body, warnings)
+                else:
+                    Err("HIR shard archive encoded snapshot unavailable")
                 if archived.is_err():
                     if hir_cache_last_refusal_is_io_v1():
                         infrastructure_error = "HIR shard archive publication: {archived.unwrap_err()}"
@@ -1063,7 +1066,10 @@ impl CompilerDriver:
         # streaming surface owner. Shard children only fill the HIR cache and
         # may share the parent's configured path; they must not open its
         # O_EXCL evidence descriptor or publish an incomplete terminal row.
-        if not hir_shard_mode:
+        # MIR shard children (SIMPLE_MIR_SHARD) re-run this phase too and
+        # follow the same rule; the final link worker owns the sink.
+        val mir_shard_child: bool = native_mir_shard_spec_v1() != ""
+        if mem_snapshot_owner_v1(hir_shard_mode, mir_shard_child):
             if mem_snapshot_begin() < 0:
                 self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
                 return false
@@ -1857,7 +1863,9 @@ impl CompilerDriver:
         # failed here, blocked the ledger, and the next claim reported "HIR
         # shard ledger claim failed" (bug
         # stage3_hir_shard_workers_collide_on_mem_snapshot_file_2026_10_19).
-        if not hir_shard_mode:
+        # MIR shard children collided the same way (owner=1/2 BLOCKED).
+        val mir_shard_child: bool = native_mir_shard_spec_v1() != ""
+        if mem_snapshot_owner_v1(hir_shard_mode, mir_shard_child):
             if mem_snapshot_begin() < 0:
                 hir_shard_guard_block("durable memory snapshot initialization failed")
                 self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")

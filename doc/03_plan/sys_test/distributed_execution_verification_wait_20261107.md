@@ -553,3 +553,49 @@ recorded the run. `run-command.sdn` preserves this original invocation after
 the review requested it; no rerun was used to produce that record. The exact
 wall-clock start timestamp was not captured. Elapsed time is recorded, and this
 limitation remains explicit rather than inferring a start time from file dates.
+
+## Bridge compatibility preflight — 2026-11-07
+
+The next bootstrap transition was checked against release source
+`68a6f89671421a65a1b99faba1b76cba592850eb` before execution. **The previously
+reviewed four-call secure-memory overlay is insufficient**, including for the
+previous planned source: `text.byte_len()` is a separate required capability.
+This is a source-bound preflight finding, not a newly observed runtime failure.
+No bridge, provider preparation or additional probe ran. The passing fill-span
+probe and native pipe-registry result were not repeated or invalidated.
+
+Astra and Sol matched the producer admission manifest to the exact historical
+`method_calls_literals.spl` at Git revision
+`55a6d938c2a9ffb050d0f368a54f05e0d00760c1`, SHA-256
+`862ad8392087143da163478797776eee4a2ca8b78674669f0709fd746abcd86e`. That source
+recognizes `len`, `length` and `is_empty`, but not `byte_len`; its unresolved
+method path is fatal. General declaration-based resolution cannot supply a
+missing library method. The binary's two unrelated helper-symbol occurrences
+of the substring are not evidence of a callable builtin.
+
+The required closure is concrete: `bootstrap_main.spl:31` imports
+`native_build_main.spl`, whose pinned lines 539, 583 and 585 call `.byte_len()`.
+The common string owner adds further callers and has no library method
+definition. The refreshed compiler contains the new lowering to
+`rt_string_len`, but the historical producer that must compile it does not.
+The secure-memory overlay and Linux driver sources are otherwise unchanged.
+
+The committed preflight receipt is
+[bridge_compatibility_preflight_20261107.sdn](../../../.spipe/simple_orchestrator/bridge_compatibility_preflight_20261107.sdn).
+It pins the producer, source manifest, exact source hashes and required call
+sites. Referenced local source copies/manifests are retained evidence, not
+uploaded CI artifacts. The historical compiler remains historically admitted;
+this does not establish compatibility with current source.
+
+The next viable prerequisite is a receipt-bound producer supporting the needed
+method, or a separately reviewed source-compatible intermediate generation.
+Do not run the four-call-only plan, replace `.byte_len()` with `.len()` despite
+their different semantics, weaken secure wiping, use the Rust seed for product
+qualification, or reset exhausted retry budgets. Any future intermediate must
+compile and run its own Hello, then build pristine current source and its full
+CLI/test runner before system SSpec admission. No such new plan or build is
+authorized by this report. CPU affinity remains shared `0-4`, five cores total.
+
+Overall status remains **AWAITING_VERIFICATION**. This update prevents an
+unsupported bootstrap attempt; it does not complete the orchestrator, admit
+the drafts, or certify source, compiler, platform or runtime gates.

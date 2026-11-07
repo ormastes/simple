@@ -1537,6 +1537,16 @@ impl BuildCache:
         """Persist cache to disk."""
         build_cache_persist(self)
 
+    me save_entries() -> bool:
+        """Persist the entry rows only, without republishing the
+        reverse-reference receipt. That receipt is rebuilt from the whole
+        program's facts, so republishing it on every per-module or per-batch
+        codegen save made staged codegen quadratic in program size. Readers
+        fail closed on a receipt whose generation does not match the entries
+        (stale-generation), so a deferred receipt only widens invalidation.
+        The build's final save() publishes it."""
+        build_cache_persist(self, false)
+
     me update_entry(source: text, fingerprint: FileFingerprint,
                     dependencies: [text], outputs: [text],
                     module_witness: text = ""):
@@ -2078,7 +2088,7 @@ pub fn build_cache_entry_is_valid(cache: BuildCache, source: text) -> bool:
         return false
     false
 
-pub fn build_cache_persist(cache: BuildCache) -> bool:
+pub fn build_cache_persist(cache: BuildCache, publish_receipt: bool = true) -> bool:
     """Persist cache to disk.
 
     The serialization (every entry's row, the joined text, the
@@ -2091,15 +2101,15 @@ pub fn build_cache_persist(cache: BuildCache) -> bool:
     Nothing here writes a persistent object. Inside a caller's scope the save
     runs unscoped, because transient scopes do not nest."""
     if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
-        return build_cache_persist_unscoped_v1(cache)
-    val persisted = build_cache_persist_unscoped_v1(cache)
+        return build_cache_persist_unscoped_v1(cache, publish_receipt)
+    val persisted = build_cache_persist_unscoped_v1(cache, publish_receipt)
     # The save is already on disk; a scope-end failure only means its scratch
     # was not released, so report it without failing the save.
     if not transient_scope_end():
         eprint("[build-cache] WARNING persist scratch scope end failed: {cache.cache_path}")
     persisted
 
-fn build_cache_persist_unscoped_v1(cache: BuildCache) -> bool:
+fn build_cache_persist_unscoped_v1(cache: BuildCache, publish_receipt: bool) -> bool:
     val dir = incremental_parent_dir(cache.cache_path)
     if dir != "":
         incremental_mkdir_p(dir)
@@ -2124,6 +2134,8 @@ fn build_cache_persist_unscoped_v1(cache: BuildCache) -> bool:
     lines = lines.push("]")
     if not incremental_file_write_text(cache.cache_path, lines.join("\n")):
         return false
+    if not publish_receipt:
+        return true
     val receipt = incremental_reverse_reference_generation_v1(cache)
     reverse_reference_publish_generation_v1(cache.cache_path, receipt)
 

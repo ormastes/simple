@@ -11,7 +11,7 @@ not generated execution evidence. All focused cases remain UNEXECUTED.
 | Rejects Unicode output above the byte budget before parsing JSON | A multibyte JSON value exceeding 65536 bytes returns the exact limit error |
 | Roundtrips canonical policy bytes and binds ordered storage options | Canonical SDN roundtrip and semantic/order digest changes |
 | Refuses unknown, noncanonical, oversized, and deeply nested policy data | Strict schema and bounded parsing before interpretation |
-| Rejects unsupported modes, paths, and option aliases before native observation | Explicit mode selection, absolute scoped paths, root-directory executable refusal through validation and production construction, duplicate option keys |
+| Rejects unsupported modes, paths, and option aliases before native observation | Explicit mode selection, absolute scoped paths, rejection of `/podman` through policy and production constructor before observation, valid `/usr/bin/podman` control, duplicate option keys |
 | Rejects setuid, setgid, writable, and nonexecutable metadata | Live-used metadata predicate checks each permission bit and UID ownership |
 | Routes exact scoped argv and explicit empty storage options | Independent complete argv, local mode, roots/driver/options, literal values |
 | Observes exact local rootless UID, roots, driver, version, and binary digest | Typed observed fields and refusal of mismatched scope |

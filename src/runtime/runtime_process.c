@@ -43,6 +43,25 @@
 #include <wchar.h>
 #include <time.h>
 #include "runtime_process_utf8_private.h"
+
+/* Ref V1 narrows inputs before reserving a process slot. Legacy PID callers
+ * retain their existing argument policy. cmd_len is explicit: never strlen an
+ * untrusted command before checking embedded NUL and its declared length. */
+#define PIPED_REF_MAX_ARGS_V1 64
+static bool piped_ref_spawn_input_valid_v1(const char* cmd, int64_t cmd_len, SplArray* args) {
+    if (!cmd || cmd_len <= 0 || (uint64_t)cmd_len > SIZE_MAX - 1 ||
+        memchr(cmd, '\0', (size_t)cmd_len) || cmd[cmd_len] != '\0') return false;
+    int64_t count = args ? rt_array_len(args) : 0;
+    if (count < 0 || count > PIPED_REF_MAX_ARGS_V1) return false;
+    for (int64_t i = 0; i < count; i++) {
+        int64_t value = rt_array_get(args, i);
+        int64_t length = rt_string_len(value);
+        const uint8_t* data = rt_string_data(value);
+        if (length < 0 || !data || (uint64_t)length > SIZE_MAX ||
+            memchr(data, '\0', (size_t)length)) return false;
+    }
+    return true;
+}
 #if defined(__APPLE__)
 #include <libproc.h>
 #include <mach-o/dyld.h>
@@ -865,7 +884,7 @@ static void win_piped_free(struct WinPipedSlot* slot) {
 
 static struct WinPipedSlot* win_piped_reserve_spawn(void) {
     AcquireSRWLockExclusive(&win_piped_lock);
-    struct WinPipedSlot* slot = win_piped_generation == UINT64_MAX ? NULL : win_piped_alloc();
+    struct WinPipedSlot* slot = win_piped_generation >= INT64_MAX ? NULL : win_piped_alloc();
     if (slot) { slot->closing = true; slot->generation = ++win_piped_generation; }
     ReleaseSRWLockExclusive(&win_piped_lock);
     return slot;
@@ -1051,14 +1070,13 @@ bool rt_process_write_stdin(int64_t pid, const char* data) {
     return true;
 }
 
-static int64_t win_core_rt_process_write_stdin_some(
-        int64_t pid, const char* data, int64_t data_len,
+static int64_t win_core_rt_process_write_stdin_some_slot(
+        struct WinPipedSlot* slot, const char* data, int64_t data_len,
         int64_t offset, int64_t max_bytes) {
-    if (pid <= 0 || pid > UINT32_MAX || !data || data_len < 0 ||
+    if (!data || data_len < 0 ||
         offset < 0 || offset > data_len || max_bytes <= 0) {
         return -1;
     }
-    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
     if (!slot || slot->closing || slot->retiring || !slot->stdin_write || !slot->stdin_event) return -1;
     if (offset == data_len) return 0;
     if (slot->stdin_pending_len > 0) {
@@ -1119,10 +1137,14 @@ static int64_t win_core_rt_process_write_stdin_some(
     slot->stdin_pending_offset = offset;
     return 0;
 }
+static int64_t win_core_rt_process_write_stdin_some(int64_t pid, const char* data,
+        int64_t data_len, int64_t offset, int64_t max_bytes) {
+    if (pid <= 0 || pid > UINT32_MAX) return -1;
+    return win_core_rt_process_write_stdin_some_slot(win_piped_find((DWORD)pid), data, data_len, offset, max_bytes);
+}
 
-static const char* win_core_rt_process_read_stdout(int64_t pid) {
+static const char* win_core_rt_process_read_stdout_slot(struct WinPipedSlot* slot) {
     win_piped_read_buf[0]=0;
-    struct WinPipedSlot* slot=pid>0&&pid<=UINT32_MAX?win_piped_find((DWORD)pid):NULL;
     if(!slot||slot->closing||!slot->stdout_read||slot->stdout_state!=0)return win_piped_read_buf;
     uint8_t raw[PIPED_RAW_CAP];DWORD available=0,count=0;int eof=0;
     if(!PeekNamedPipe(slot->stdout_read,NULL,0,NULL,&available,NULL)) {
@@ -1140,6 +1162,10 @@ static const char* win_core_rt_process_read_stdout(int64_t pid) {
     win_piped_read_buf[written]=0;
     if(eof&&slot->stdout_tail.len==0)slot->stdout_state=1;
     return win_piped_read_buf;
+}
+static const char* win_core_rt_process_read_stdout(int64_t pid) {
+    if (pid <= 0 || pid > UINT32_MAX) { win_piped_read_buf[0] = 0; return win_piped_read_buf; }
+    return win_core_rt_process_read_stdout_slot(win_piped_find((DWORD)pid));
 }
 
 /* Exclusive closing owner: stable slot/OVERLAPPED storage, no registry lock. */
@@ -1166,6 +1192,68 @@ int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
     if (!slot) return -1;
     int64_t result = win_core_rt_process_spawn_piped(slot,cmd,args);
     if (result < 0) win_piped_release_failed_spawn(slot);
+    return result;
+}
+int64_t rt_process_spawn_piped_generation_v1(const char* cmd, int64_t cmd_len, SplArray* args) {
+    if (!piped_ref_spawn_input_valid_v1(cmd, cmd_len, args)) return -1;
+    struct WinPipedSlot* slot = win_piped_reserve_spawn();
+    if (!slot) return -1;
+    uint64_t generation = slot->generation; /* closing reservation: cannot recycle */
+    int64_t pid = win_core_rt_process_spawn_piped(slot, cmd, args);
+    if (pid < 0) { win_piped_release_failed_spawn(slot); return -1; }
+    return (int64_t)generation;
+}
+int64_t rt_process_piped_pid_for_generation_v1(int64_t generation) {
+    if (generation <= 0) return -2;
+    AcquireSRWLockExclusive(&win_piped_lock);
+    int64_t pid = -2;
+    for (int i = 0; i < WIN_PIPED_MAX; i++) {
+        struct WinPipedSlot* slot = &win_piped_slots[i];
+        if (slot->generation == (uint64_t)generation && slot->pid && !slot->closing) {
+            pid = (int64_t)slot->pid; break;
+        }
+    }
+    ReleaseSRWLockExclusive(&win_piped_lock);
+    return pid;
+}
+/* Internal lookup: caller holds the registry lock through its actual action. */
+static struct WinPipedSlot* win_piped_ref_v1(int64_t pid, int64_t generation) {
+    if (pid <= 0 || pid > UINT32_MAX || generation <= 0) return NULL;
+    for (int i = 0; i < WIN_PIPED_MAX; i++) {
+        struct WinPipedSlot* slot = &win_piped_slots[i];
+        if (slot->pid == (DWORD)pid && slot->generation == (uint64_t)generation) return slot;
+    }
+    return NULL;
+}
+int64_t rt_process_write_stdin_some_ref_v1(int64_t pid, int64_t generation,
+        const char* data, int64_t data_len, int64_t offset, int64_t max_bytes) {
+    AcquireSRWLockExclusive(&win_piped_lock);
+    struct WinPipedSlot* slot = win_piped_ref_v1(pid, generation);
+    int64_t result = !slot || slot->closing ? -2 :
+        win_core_rt_process_write_stdin_some_slot(slot, data, data_len, offset, max_bytes);
+    ReleaseSRWLockExclusive(&win_piped_lock);
+    return result;
+}
+const char* rt_process_read_stdout_ref_v1(int64_t pid, int64_t generation) {
+    AcquireSRWLockExclusive(&win_piped_lock);
+    struct WinPipedSlot* slot = win_piped_ref_v1(pid, generation);
+    win_piped_read_buf[0] = 0;
+    if (slot && !slot->closing) win_core_rt_process_read_stdout_slot(slot);
+    ReleaseSRWLockExclusive(&win_piped_lock);
+    return win_piped_read_buf;
+}
+int64_t rt_process_validate_piped_ref_v1(int64_t pid, int64_t generation) {
+    AcquireSRWLockExclusive(&win_piped_lock);
+    struct WinPipedSlot* slot = win_piped_ref_v1(pid, generation);
+    int64_t result = !slot || slot->closing ? -2 : 0;
+    ReleaseSRWLockExclusive(&win_piped_lock);
+    return result;
+}
+int64_t rt_process_stdout_state_ref_v1(int64_t pid, int64_t generation) {
+    AcquireSRWLockExclusive(&win_piped_lock);
+    struct WinPipedSlot* slot = win_piped_ref_v1(pid, generation);
+    int64_t result = !slot || slot->closing ? -2 : slot->stdout_state;
+    ReleaseSRWLockExclusive(&win_piped_lock);
     return result;
 }
 int64_t rt_process_write_stdin_some(int64_t pid,const char* data,int64_t data_len,int64_t offset,int64_t max_bytes) {
@@ -1228,17 +1316,20 @@ bool rt_editor_wait_simple_dap_stopped(int64_t pid) {
     return false;
 }
 
-bool rt_process_is_alive(int64_t pid) {
-    if (pid <= 0 || pid > UINT32_MAX) return false;
+static int64_t win_piped_alive_checked_v1(int64_t pid, int64_t generation) {
+    if (pid <= 0 || pid > UINT32_MAX) return -2;
     AcquireSRWLockExclusive(&win_piped_lock);
-    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
-    if (!slot || slot->closing || slot->retiring || !slot->process) {
-        ReleaseSRWLockExclusive(&win_piped_lock); return false;
+    struct WinPipedSlot* slot = generation ? win_piped_ref_v1(pid, generation) : win_piped_find((DWORD)pid);
+    if (!slot || slot->closing || (generation && slot->generation != (uint64_t)generation)) {
+        ReleaseSRWLockExclusive(&win_piped_lock); return -2;
     }
+    if (slot->retiring) { ReleaseSRWLockExclusive(&win_piped_lock); return 0; }
+    if (!slot->process) { ReleaseSRWLockExclusive(&win_piped_lock); return -1; }
     DWORD result = WaitForSingleObject(slot->process, 0);
     if (result != WAIT_OBJECT_0) {
-        ReleaseSRWLockExclusive(&win_piped_lock); return result == WAIT_TIMEOUT;
+        ReleaseSRWLockExclusive(&win_piped_lock); return result == WAIT_TIMEOUT ? 1 : -1;
     }
+    uint64_t claimed_generation = slot->generation;
     slot->retiring = true;
     ReleaseSRWLockExclusive(&win_piped_lock);
     win_piped_cancel_pending(slot);
@@ -1246,26 +1337,42 @@ bool rt_process_is_alive(int64_t pid) {
     win_close_handle(&slot->stdin_event);
     win_close_handle(&slot->job);
     AcquireSRWLockExclusive(&win_piped_lock);
-    slot->retiring = false;
+    bool same = slot->generation == claimed_generation && slot->pid == (DWORD)pid;
+    if (same) slot->retiring = false;
     ReleaseSRWLockExclusive(&win_piped_lock);
-    return false;
+    return same ? 0 : -2;
 }
-bool rt_process_close_piped(int64_t pid) {
-    if (pid <= 0 || pid > UINT32_MAX) return false;
+bool rt_process_is_alive(int64_t pid) { return win_piped_alive_checked_v1(pid, 0) > 0; }
+int64_t rt_process_is_piped_alive_ref_v1(int64_t pid, int64_t generation) {
+    if (generation <= 0) return -2;
+    return win_piped_alive_checked_v1(pid, generation);
+}
+static int64_t win_piped_close_checked_v1(int64_t pid, int64_t generation) {
+    if (pid <= 0 || pid > UINT32_MAX) return -2;
     AcquireSRWLockExclusive(&win_piped_lock);
-    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
-    if (!slot || slot->closing || slot->retiring) {
-        ReleaseSRWLockExclusive(&win_piped_lock); return false;
+    struct WinPipedSlot* slot = generation ? win_piped_ref_v1(pid, generation) : win_piped_find((DWORD)pid);
+    if (!slot || slot->closing || (generation && slot->generation != (uint64_t)generation)) {
+        ReleaseSRWLockExclusive(&win_piped_lock); return -2;
     }
+    if (slot->retiring) { ReleaseSRWLockExclusive(&win_piped_lock); return -1; }
+    uint64_t claimed_generation = slot->generation;
     slot->closing = true;
     ReleaseSRWLockExclusive(&win_piped_lock);
     bool result = win_core_rt_process_close_piped(slot);
     if (result) win_piped_free(slot);
     AcquireSRWLockExclusive(&win_piped_lock);
-    if (result) memset(slot, 0, sizeof(*slot));
-    else slot->closing = false; /* retained handles permit a later retry */
+    bool same = slot->generation == claimed_generation && slot->pid == (DWORD)pid;
+    if (same) {
+        if (result) memset(slot, 0, sizeof(*slot));
+        else slot->closing = false;
+    }
     ReleaseSRWLockExclusive(&win_piped_lock);
-    return result;
+    return !same ? -2 : (result ? 0 : -1);
+}
+bool rt_process_close_piped(int64_t pid) { return win_piped_close_checked_v1(pid, 0) == 0; }
+int64_t rt_process_close_piped_ref_v1(int64_t pid, int64_t generation) {
+    if (generation <= 0) return -2;
+    return win_piped_close_checked_v1(pid, generation);
 }
 int64_t rt_process_stdout_state(int64_t pid) {
     AcquireSRWLockExclusive(&win_piped_lock);
@@ -1471,7 +1578,7 @@ static struct RtProcSlot* proc_find(pid_t pid) {
 
 static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
     if (pthread_mutex_lock(&s_proc_lock) != 0) return NULL;
-    if (s_proc_generation == UINT64_MAX || (sandboxed_renderer &&
+    if (s_proc_generation >= INT64_MAX || (sandboxed_renderer &&
         s_renderer_slots_active >= RT_RENDERER_PROC_MAX)) {
         (void)pthread_mutex_unlock(&s_proc_lock);
         return NULL;
@@ -2049,9 +2156,9 @@ static bool rt_hal_worker_contain_process_tree(void) {
 
 /* ===== Public API ===== */
 
-static int64_t rt_process_spawn_piped_argv(
+static int64_t proc_spawn_piped_argv_owned_v1(
         const char* cmd, char** argv, bool sandboxed_renderer,
-        int pinned_executable_fd) {
+        int pinned_executable_fd, uint64_t* generation_out) {
     if (!cmd || !*cmd) return -1;
 #ifndef __linux__
     if (sandboxed_renderer) return -1;
@@ -2061,6 +2168,7 @@ static int64_t rt_process_spawn_piped_argv(
 
     struct RtProcSlot* slot = proc_alloc(sandboxed_renderer);
     if (!slot) return -1;
+    uint64_t generation = slot->generation; /* captured while pid == -1 */
 
     /* stdin_pipe[0] = child reads, stdin_pipe[1] = parent writes */
     int stdin_pipe[2];
@@ -2226,9 +2334,15 @@ static int64_t rt_process_spawn_piped_argv(
     slot->stdin_fd = stdin_pipe[1];
     slot->stdout_fd = stdout_pipe[0];
     slot->pid = pid;
+    if (generation_out) *generation_out = generation;
     (void)pthread_mutex_unlock(&s_proc_lock);
 
     return (int64_t)pid;
+}
+
+static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv,
+        bool sandboxed_renderer, int pinned_executable_fd) {
+    return proc_spawn_piped_argv_owned_v1(cmd, argv, sandboxed_renderer, pinned_executable_fd, NULL);
 }
 
 /*
@@ -2248,6 +2362,39 @@ int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
     int64_t pid = rt_process_spawn_piped_argv(cmd, argv, false, -1);
     free(argv);
     return pid;
+}
+
+int64_t rt_process_spawn_piped_generation_v1(const char* cmd, int64_t cmd_len, SplArray* args) {
+    if (!piped_ref_spawn_input_valid_v1(cmd, cmd_len, args)) return -1;
+    int64_t count = args ? rt_array_len(args) : 0;
+    char* argv[PIPED_REF_MAX_ARGS_V1 + 2];
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < count; i++) argv[i+1] = (char*)rt_string_data(rt_array_get(args, i));
+    argv[count+1] = NULL;
+    uint64_t generation = 0;
+    if (proc_spawn_piped_argv_owned_v1(cmd, argv, false, -1, &generation) <= 0) return -1;
+    return (int64_t)generation;
+}
+int64_t rt_process_piped_pid_for_generation_v1(int64_t generation) {
+    if (generation <= 0) return -2;
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return -1;
+    int64_t pid = -2;
+    for (int i = 0; i < RT_PROC_MAX; i++) {
+        if (s_procs[i].generation == (uint64_t)generation && s_procs[i].pid > 0 && !s_procs[i].closing) {
+            pid = s_procs[i].pid; break;
+        }
+    }
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return pid;
+}
+/* Caller holds s_proc_lock until its read/write/state operation finishes. */
+static struct RtProcSlot* proc_ref_v1(int64_t pid, int64_t generation) {
+    if (pid <= 0 || pid > INT_MAX || generation <= 0) return NULL;
+    for (int i = 0; i < RT_PROC_MAX; i++) {
+        struct RtProcSlot* slot = &s_procs[i];
+        if (slot->pid == (pid_t)pid && slot->generation == (uint64_t)generation) return slot;
+    }
+    return NULL;
 }
 
 int64_t rt_browser_renderer_spawn_sandboxed(
@@ -2458,14 +2605,13 @@ bool rt_process_write_stdin(int64_t pid, const char* data) {
     return true;
 }
 
-static int64_t posix_core_rt_process_write_stdin_some(
-        int64_t pid, const char* data, int64_t data_len,
+static int64_t posix_core_rt_process_write_stdin_some_slot(
+        struct RtProcSlot* slot, const char* data, int64_t data_len,
         int64_t offset, int64_t max_bytes) {
-    if (pid <= 0 || !data || data_len < 0 || offset < 0 ||
+    if (!data || data_len < 0 || offset < 0 ||
         offset > data_len || max_bytes <= 0) {
         return -1;
     }
-    struct RtProcSlot* slot = proc_find((pid_t)pid);
     if (!slot || slot->closing || slot->stdin_fd < 0) return -1;
     if (offset == data_len) return 0;
     int64_t remaining = data_len - offset;
@@ -2475,6 +2621,11 @@ static int64_t posix_core_rt_process_write_stdin_some(
     size_t request = (size_t)request64;
     return (int64_t)proc_write_some_no_sigpipe(
         slot->stdin_fd, data + offset, request);
+}
+static int64_t posix_core_rt_process_write_stdin_some(int64_t pid, const char* data,
+        int64_t data_len, int64_t offset, int64_t max_bytes) {
+    if (pid <= 0) return -1;
+    return posix_core_rt_process_write_stdin_some_slot(proc_find((pid_t)pid), data, data_len, offset, max_bytes);
 }
 int64_t rt_process_write_stdin_some(int64_t pid,const char* data,int64_t data_len,int64_t offset,int64_t max_bytes) {
     if (pthread_mutex_lock(&s_proc_lock)!=0) return -1;
@@ -2488,10 +2639,8 @@ int64_t rt_process_write_stdin_some(int64_t pid,const char* data,int64_t data_le
  * Returns available data (may be partial), or "" if nothing ready.
  * The returned pointer is valid until the next call.
  */
-const char* rt_process_read_stdout(int64_t pid) {
+static const char* posix_core_rt_process_read_stdout_slot(struct RtProcSlot* slot) {
     s_read_buf[0]=0;
-    if(pid<=0||pthread_mutex_lock(&s_proc_lock)!=0)return s_read_buf;
-    struct RtProcSlot* slot=proc_find((pid_t)pid);
     if(slot&&!slot->closing&&slot->stdout_fd>=0&&slot->stdout_state==0) {
         uint8_t raw[PIPED_RAW_CAP];ssize_t count=read(slot->stdout_fd,raw,sizeof(raw));int eof=count==0;
         if(count<0) {
@@ -2502,7 +2651,49 @@ const char* rt_process_read_stdout(int64_t pid) {
         if(!piped_utf8_frame(&slot->stdout_tail,raw,(size_t)count,eof,(uint8_t*)s_read_buf,PIPED_TEXT_CAP,&written))slot->stdout_state=-1;
         else {s_read_buf[written]=0;if(eof&&slot->stdout_tail.len==0)slot->stdout_state=1;}
     }
-    (void)pthread_mutex_unlock(&s_proc_lock);return s_read_buf;
+    return s_read_buf;
+}
+static const char* posix_core_rt_process_read_stdout(int64_t pid) {
+    return posix_core_rt_process_read_stdout_slot(proc_find((pid_t)pid));
+}
+
+const char* rt_process_read_stdout(int64_t pid) {
+    s_read_buf[0] = 0;
+    if (pid <= 0 || pthread_mutex_lock(&s_proc_lock) != 0) return s_read_buf;
+    posix_core_rt_process_read_stdout(pid);
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return s_read_buf;
+}
+const char* rt_process_read_stdout_ref_v1(int64_t pid, int64_t generation) {
+    s_read_buf[0] = 0;
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return s_read_buf;
+    struct RtProcSlot* slot = proc_ref_v1(pid, generation);
+    if (slot && !slot->closing) posix_core_rt_process_read_stdout_slot(slot);
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return s_read_buf;
+}
+int64_t rt_process_validate_piped_ref_v1(int64_t pid, int64_t generation) {
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return -1;
+    struct RtProcSlot* slot = proc_ref_v1(pid, generation);
+    int64_t result = !slot || slot->closing ? -2 : 0;
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return result;
+}
+int64_t rt_process_stdout_state_ref_v1(int64_t pid, int64_t generation) {
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return -1;
+    struct RtProcSlot* slot = proc_ref_v1(pid, generation);
+    int64_t result = !slot || slot->closing ? -2 : slot->stdout_state;
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return result;
+}
+int64_t rt_process_write_stdin_some_ref_v1(int64_t pid, int64_t generation,
+        const char* data, int64_t data_len, int64_t offset, int64_t max_bytes) {
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return -1;
+    struct RtProcSlot* slot = proc_ref_v1(pid, generation);
+    int64_t result = !slot || slot->closing ? -2 :
+        posix_core_rt_process_write_stdin_some_slot(slot, data, data_len, offset, max_bytes);
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return result;
 }
 
 bool rt_process_is_alive(int64_t pid) {
@@ -2534,6 +2725,17 @@ bool rt_process_is_alive(int64_t pid) {
         }
         return alive;
     }
+}
+
+/* Registry generation is not a kernel child incarnation. Other canonical
+ * reapers can retire the leader without updating this slot. Do not wait/reap
+ * or signal a potentially reused PID from a Ref liveness query. */
+int64_t rt_process_is_piped_alive_ref_v1(int64_t pid, int64_t generation) {
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return -1;
+    struct RtProcSlot* slot = proc_ref_v1(pid, generation);
+    int64_t result = !slot || slot->closing ? -2 : -3;
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return result;
 }
 
 int64_t rt_process_stdout_state(int64_t pid) {
@@ -2600,6 +2802,18 @@ bool rt_process_close_piped(int64_t pid) {
     if (pthread_mutex_lock(&s_proc_lock) != 0) return false;
     if (result) proc_free_locked(slot);
     else slot->closing = false; /* preserve descriptors/reaped state for retry */
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return result;
+}
+
+/* Without an exact kernel group owner, a PID/PGID must not be signalled by
+ * a generation reference. Even a live registry match is not group authority.
+ * Retain all descriptors and slot metadata for draining/explicit future owner
+ * integration; bounded capacity is RT_PROC_MAX, never report invented cleanup. */
+int64_t rt_process_close_piped_ref_v1(int64_t pid, int64_t generation) {
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return -1;
+    struct RtProcSlot* slot = proc_ref_v1(pid, generation);
+    int64_t result = !slot || slot->closing ? -2 : -3;
     (void)pthread_mutex_unlock(&s_proc_lock);
     return result;
 }
