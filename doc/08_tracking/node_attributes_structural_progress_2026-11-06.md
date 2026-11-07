@@ -134,3 +134,11 @@ route (`SIMPLE_FILE_WORKERS=0`) and a positive 2 GiB reserve, retaining the RSS
 guard and normal admission checks. This is the final planned automatic reserve
 adjustment. See [the MIR campaign](mir_codegen_repair_campaign_2026-11-07.md)
 for retained measurements, added source candidates and unresolved failures.
+
+The preflight timeout-forwarding fix has since landed through PR #7377.
+Attempt 11, pinned to `08944a34d899a5beea2940b6a9688d08252e51bb`, passed
+preflight and entered Stage 2 compilation with fresh materialization receipts.
+The feature branch has been reconciled with release commit
+`fe91477a710ada22f40249fb99b2c92ced7c92bd`, preserving newer implementations
+and avoiding duplicate trait/diagnostic owners. Compiler tests and HIR
+codec/hash regeneration still require the admitted self-hosted runner.

@@ -26,7 +26,7 @@ part of the repair.
 
 ## Execution boundary
 
-The separate frozen bootstrap remains at
+The separate frozen bootstrap initially used
 `6e03930143983a5c9861321f67aff300b07f16ed`. Attempt 6 linked a candidate but failed
 frontend sanity because 9,121 MiB headroom was below the default 24,576 MiB
 reserve. It is rejected, not an admitted feature-test runner. Attempt 7 reuses
@@ -61,6 +61,19 @@ compile: it timed out on output ownership while attempt 8 was still cleaning
 up. After both wrappers terminated, attempt 10 started with the same intended
 policy. No further automatic reserve reduction is planned.
 
+Attempt 10 stopped at preflight Git-state binding. An isolated consumer timed
+out at its normal outer limit, then completed in 14m43s with its existing
+20-minute ceiling. The configured budget was lost at the hermetic environment
+boundary. PR #7377 landed the forwarding fix on `release/1.0.0` as
+`07ed63594330bdb6ac5260318017636618cbe587`, with five executable routing cases
+and applicable CI gates passing.
+
+The isolated bootstrap now pins `08944a34d899a5beea2940b6a9688d08252e51bb`.
+Attempt 11 retains the 2 GiB reserve, one worker and `SIMPLE_FILE_WORKERS=0`,
+uses the existing 1,200,000 ms Git-state ceiling, and generated fresh
+revision-bound materialization receipts. It passed preflight and entered
+Stage 2 compilation. This is not yet self-hosted CLI admission.
+
 ## Broader ledger census and additional candidates
 
 A read-only census of ten-column `bugs_active`/`bugs` rows selected MIR,
@@ -80,7 +93,8 @@ Additional work:
   narrowing Let cannot mask the regression. Execution remains pending.
 - Optional trait recovery now ignores only top-level Error/Infer placeholders;
   Any, concrete declarations and nested unknown optionals retain authority.
-  Ten controlled metadata assertions are authored, not executed.
+  Eleven controlled metadata cases are authored, not executed. The follow-up
+  extends the release's canonical helper rather than adding a second resolver.
 - The optional-Bool if-val defect remains open. Its ten-check native fixture
   covers None, false/true payloads, explicit Bool presence predicates, elif,
   and bounded while bindings. A structural candidate carries parser provenance
@@ -88,11 +102,24 @@ Additional work:
   and three transform scenarios are authored but unexecuted. Generated codec
   and hash outputs still require the admitted self-hosted generator; the source
   candidate is not ready to merge without regeneration and verification.
-- Cross-module always-inline text-extern ABI expansion remains open; the
-  source workaround is not an inliner repair.
-- SVM-G float compound Add/Sub/Mul/Div has a source candidate. Admission is
-  limited to float literals, checked float locals and recursive float
-  arithmetic; mixed operands, comparison results and uncertain expression
-  forms are rejected. Its suite has 23 authored examples, including reference
-  VM value assertions and refusal controls; none were executed in this session.
-  The umbrella report remains open because integer printing is still deferred.
+- The environment-text ABI failure was re-scoped upstream to LLVM's bare
+  `env_get` alias, and a source repair landed there. The native fixture now
+  exercises that imported name and does not require nonexistent cross-module
+  body inlining. Source-matched native replay remains pending.
+- Release already implements SVM-G integer printing, floating compound
+  arithmetic and signed shifts. The integrated follow-up preserves these and
+  fixes result classification, rejects mixed numeric binary operands at their
+  common lowering boundary, and emits checked Float-typed integer constants
+  as float words. Checked helper results remain supported. The suite has 53
+  authored examples, including 12 additions over the release baseline; the
+  new cases remain unexecuted.
+
+## Release integration
+
+The branch was rebased onto `fe91477a710ada22f40249fb99b2c92ced7c92bd`.
+Newer release trait-field, unwrap, link-diagnostic and SVM-G implementations
+were retained; competing copies were removed. Current release bug-ledger
+state was preserved instead of replaying stale ownership/status records.
+The Boolean candidate requires v17/canonical-v7 because release already
+uses v16/v6 for local-annotation provenance. Regeneration must use the
+integrated generator, including its newer depth and ordering checks.
