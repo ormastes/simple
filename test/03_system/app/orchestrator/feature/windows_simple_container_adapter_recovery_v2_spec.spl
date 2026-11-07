@@ -1,6 +1,7 @@
-# @req REQ-WDP-007 REQ-WDP-010
+# @req REQ-WDP-007 REQ-WDP-010 REQ-WDP-011
 # Explicit scripted actual owner/common API regression. AUTHORED_NOT_RUN.
 use std.spec.*
+use std.common.contracts.container.control_deadline_v1.container_control_deadline_v1
 use std.nogc_async_mut.container.api_v2.*
 use std.nogc_async_mut.container.service_v2.*
 use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.{WindowsSimpleContainerAdapterV2, WindowsServiceInventorySampleV2}
@@ -12,6 +13,8 @@ describe "Windows common Container API uncertain-create recovery":
         step("Start an actual scripted Windows service owner in quarantine, with no caller readiness boolean")
         val request = windows_adapter_request_fixture_v2()
         val deadline = windows_adapter_deadline_fixture_v2()
+        val control = container_control_deadline_v1(request.plan.request_digest, request.plan.operation_id,
+            ["stop", "destroy"], 4000).unwrap()
         var owner = windows_adapter_owner_fixture_v2(windows_adapter_recovery_lifecycle_script_v2(),
             [WindowsServiceInventorySampleV2(entries: [], error: ""), WindowsServiceInventorySampleV2(entries: [], error: "")])
         val closed = simple_container_apply_v2(owner, "prepare", request, deadline)
@@ -54,6 +57,12 @@ describe "Windows common Container API uncertain-create recovery":
             expect(blocked.operation.reason).to_equal("windows-container-candidate-recovery-only")
             owner = blocked.owner
             expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(6)
+        for action in ["stop", "destroy"]:
+            val blocked_control = simple_container_control_v2(owner, action, request, control)
+            expect(blocked_control.operation.status).to_equal("blocked")
+            expect(blocked_control.operation.reason).to_equal("windows-container-candidate-recovery-only")
+            owner = blocked_control.owner
+            expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(6)
         val blocked_read = simple_container_read_v2(owner, "logs", request)
         expect(blocked_read.operation.reason).to_equal("windows-container-candidate-recovery-only")
         owner = blocked_read.owner
@@ -75,11 +84,11 @@ describe "Windows common Container API uncertain-create recovery":
         expect(started.operation.state.phase).to_equal("running")
         owner = started.owner
         expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(14)
-        val stopped = simple_container_apply_v2(owner, "stop", request, deadline)
+        val stopped = simple_container_control_v2(owner, "stop", request, control)
         expect(stopped.operation.status).to_equal("ok")
         expect(stopped.operation.state.phase).to_equal("exited")
         owner = stopped.owner
-        val destroyed = simple_container_apply_v2(owner, "destroy", request, deadline)
+        val destroyed = simple_container_control_v2(owner, "destroy", request, control)
         expect(destroyed.operation.status).to_equal("ok")
         owner = destroyed.owner
         expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(24)

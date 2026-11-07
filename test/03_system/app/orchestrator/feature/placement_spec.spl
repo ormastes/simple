@@ -28,6 +28,22 @@ fn placement_gpu_reservation(devices: [text], state: HostReservationStateV1) -> 
         prepare_deadline_ms: 100, state: state)
 
 describe "native host placement proposals":
+    it "places Windows requests only on the explicit Windows Docker runtime class":
+        step("Keep Windows Docker eligibility separate from Linux Podman hosts")
+        var request = placement_request()
+        request.execution_os = "windows"
+        request.runtime_class = "docker-process"
+        val linux = placement_host("linux", [], 4000, 8000)
+        var windows = placement_host("windows", [], 4000, 8000)
+        windows.execution_os = "windows"
+        windows.runtime_class = "docker-process"
+        val plan = plan_host_placement_v1(request, [linux, windows]).unwrap()
+        expect(plan.offers[plan.selected_index].physical_host_id).to_equal("windows")
+        expect(plan.rejected.len()).to_equal(1)
+        val refused = plan_host_placement_v1(request, [linux]).unwrap()
+        expect(refused.selected_index).to_equal(-1)
+        expect(refused.offers.len()).to_equal(0)
+
     it "preserves GPU hosts for CPU work and publishes effective caps":
         step("Prefer a feasible CPU host and inspect reserved-equivalent caps")
         val plan = plan_host_placement_v1(placement_request(), [placement_host("gpu", ["gpu-0"], 8000, 24000), placement_host("cpu", [], 4000, 8000)]).unwrap()

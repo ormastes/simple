@@ -5,6 +5,7 @@
 # reopening cannot import copied RuntimeIntentV1 as cleanup authorization.
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2,
     ContainerExecutionRequestV2, ContainerHostObservationV2, ContainerRequestProjectionV2, ContainerActionProjectionV2, ContainerMountProjectionV2, ContainerServiceScopeBasisV2, ContainerServiceInventoryEntryV2, container_scope_fence_id_v2}
+use std.common.contracts.container.control_deadline_v1.ContainerControlDeadlineV1
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.container.service_v2.{ContainerServiceAdmissionV2, container_service_admission_valid_v2, container_service_inventory_digest_v2}
 use std.common.crypto.sha256.sha256_text
@@ -508,6 +509,28 @@ impl WindowsSimpleContainerAdapterV2:
                         command: result.command, state: result.state, exit_code: result.exit_code,
                         stdout: result.stdout, stderr: result.stderr, reason: reason)
                 case Ok(_): ()
+        result
+
+    # Explicit fresh control authority; legacy retained apply stop/destroy is
+    # separate and never manufactures a grant from an expired launch context.
+    pub me fn control(action: text, request: ContainerExecutionRequestV2,
+            context: ContainerControlDeadlineV1) -> RuntimeOperationV1:
+        if action != "stop" and action != "destroy":
+            return rejected(action, "windows-container-control-action-unsupported", RUNTIME_STATUS_REJECTED)
+        val decoded = match self._decode(request):
+            case Ok(value): value
+            case Err(reason): return rejected(action, reason, RUNTIME_STATUS_REJECTED)
+        val index = match self._owned(request):
+            case Ok(value): value
+            case Err(reason): return rejected(action, reason)
+        match self._fresh():
+            case Err(reason): return rejected(action, reason)
+            case Ok(_): ()
+        val result = self.provider.control(decoded, action, context)
+        if result.status == RUNTIME_STATUS_OK and action == "destroy":
+            var authority = self.authority[index]
+            authority.active = false
+            self.authority[index] = authority
         result
 
     pub me fn recover(request: ContainerExecutionRequestV2, intent: RuntimeIntentV1) -> RuntimeOperationV1:

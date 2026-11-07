@@ -3,6 +3,7 @@
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerActionProjectionV2, ContainerMountProjectionV2,
     ContainerExecutionRequestV2, ContainerRequestProjectionV2, ContainerHostObservationV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.container.control_deadline_v1.ContainerControlDeadlineV1
 use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RuntimeIntentV1, RuntimeIdentityV1,
     RUNTIME_STATUS_REJECTED, RUNTIME_PHASE_CREATED, RUNTIME_PHASE_RUNNING,
     RUNTIME_PHASE_EXITED, RUNTIME_PHASE_STOPPED,
@@ -233,6 +234,23 @@ impl LinuxSimpleContainerAdapterV2:
         if action == "start": return self.provider.start(decoded)
         if action == "stop": return self.provider.stop(decoded)
         self.provider.destroy(decoded, false)
+
+    pub me control(action: text, request: ContainerExecutionRequestV2,
+            deadline: ContainerControlDeadlineV1) -> RuntimeOperationV1:
+        if action != "stop" and action != "destroy":
+            return _linux_container_adapter_refused_v2(action, "container-adapter-control-action-unsupported")
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+        if not self.provider.engine_policy.?:
+            return _linux_container_adapter_refused_v2(action, "container-adapter-control-managed-policy-required")
+        val valid = self.provider.validate(checked.0)
+        if not valid.accepted: return _linux_container_adapter_refused_v2(action, valid.reason)
+        match self._set_duration_v2(checked.0):
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+            case Ok(_): pass
+        if action == "stop": return self.provider.stop(checked.0, Some(deadline))
+        self.provider.destroy(checked.0, false, Some(deadline))
 
     pub fn intent(request: ContainerExecutionRequestV2) -> Result<RuntimeIntentV1, text>:
         val checked = self._checked_request_v2(request)?

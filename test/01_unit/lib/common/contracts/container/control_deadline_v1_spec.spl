@@ -1,0 +1,53 @@
+# @req CONTAINER-CONTROL-DEADLINE-01 CONTAINER-CONTROL-DEADLINE-02
+# NOT_RUN. Pure contract checks; no native control action or authorization claim.
+use std.common.contracts.container.control_deadline_v1.*
+
+describe "Typed container stop/destroy admission deadline":
+    it "binds only the original workload operation, semantic request and explicit control actions":
+        val value = container_control_deadline_v1("a".repeat(64), "original-workload", ["stop", "destroy"], 200).unwrap()
+        expect(value.operation_id).to_equal("original-workload")
+        expect(value.actions).to_equal(["stop", "destroy"])
+        expect(container_control_remaining_ms_v1(value, "a".repeat(64), "original-workload", "stop", 100).unwrap()).to_equal(100)
+        expect(container_control_remaining_ms_v1(value, "a".repeat(64), "original-workload", "destroy", 199).unwrap()).to_equal(1)
+
+    it "rejects unsupported or ambiguous actions and empty or excessive action sets":
+        expect(container_control_deadline_v1("a".repeat(64), "workload", [], 200).unwrap_err()).to_equal("container-control-actions-invalid")
+        expect(container_control_deadline_v1("a".repeat(64), "workload", ["stop", "destroy", "stop"], 200).unwrap_err()).to_equal("container-control-actions-invalid")
+        expect(container_control_deadline_v1("a".repeat(64), "workload", ["stop", "stop"], 200).unwrap_err()).to_equal("container-control-action-duplicate")
+        for action in ["create", "start", "exec", "attach", "inspect", "wait"]:
+            expect(container_control_deadline_v1("a".repeat(64), "workload", [action], 200).unwrap_err()).to_equal("container-control-action-unsupported")
+
+    it "rejects invalid request identity, operation identity and nonpositive expiry":
+        for digest in ["", "a".repeat(63), "A".repeat(64), "g".repeat(64)]:
+            expect(container_control_deadline_v1(digest, "workload", ["stop"], 200).unwrap_err()).to_equal("container-control-request-digest-invalid")
+        for operation_id in ["", "separate/cleanup-id"]:
+            expect(container_control_deadline_v1("a".repeat(64), operation_id, ["stop"], 200).unwrap_err()).to_equal("container-control-operation-id-invalid")
+        for expiry in [0, -1]:
+            expect(container_control_deadline_v1("a".repeat(64), "workload", ["stop"], expiry).unwrap_err()).to_equal("container-control-expiry-invalid")
+
+    it "refuses changed request, separate cleanup operation and ungranted control action":
+        val value = container_control_deadline_v1("a".repeat(64), "original-workload", ["stop"], 200).unwrap()
+        expect(container_control_remaining_ms_v1(value, "b".repeat(64), "original-workload", "stop", 100).unwrap_err()).to_equal("container-control-request-mismatch")
+        expect(container_control_remaining_ms_v1(value, "a".repeat(64), "separate-cleanup", "stop", 100).unwrap_err()).to_equal("container-control-operation-mismatch")
+        expect(container_control_remaining_ms_v1(value, "a".repeat(64), "original-workload", "destroy", 100).unwrap_err()).to_equal("container-control-action-not-authorized")
+
+    it "requires a positive actual clock and refuses the exact expiry boundary":
+        val value = container_control_deadline_v1("a".repeat(64), "workload", ["destroy"], 200).unwrap()
+        for clock in [0, -1]:
+            expect(container_control_remaining_ms_v1(value, "a".repeat(64), "workload", "destroy", clock).unwrap_err()).to_equal("container-control-clock-unavailable")
+        for clock in [200, 201]:
+            expect(container_control_remaining_ms_v1(value, "a".repeat(64), "workload", "destroy", clock).unwrap_err()).to_equal("container-control-deadline-expired")
+
+    it "revalidates public values rather than trusting a forged constructor bypass":
+        val forged = ContainerControlDeadlineV1(request_digest: "a".repeat(64), operation_id: "workload",
+            actions: ["create"], expires_at_unix_ms: 200)
+        expect(container_control_remaining_ms_v1(forged, "a".repeat(64), "workload", "create", 100).unwrap_err()).to_equal("container-control-action-unsupported")
+        var mutated = container_control_deadline_v1("a".repeat(64), "workload", ["destroy"], 200).unwrap()
+        mutated.actions = []
+        expect(container_control_remaining_ms_v1(mutated, "a".repeat(64), "workload", "destroy", 100).unwrap_err()).to_equal("container-control-actions-invalid")
+
+    it "computes a bounded remaining admission window at the signed integer limit":
+        val value = container_control_deadline_v1("a".repeat(64), "workload", ["stop"], 9223372036854775807).unwrap()
+        expect(container_control_remaining_ms_v1(value, "a".repeat(64), "workload", "stop", 1).unwrap()).to_equal(9223372036854775806)
+        expect(container_control_remaining_ms_v1(value, "a".repeat(64), "workload", "stop", 9223372036854775806).unwrap()).to_equal(1)
+        expect(container_control_remaining_ms_v1(value, "a".repeat(64), "workload", "stop", 9223372036854775807).unwrap_err()).to_equal("container-control-deadline-expired")

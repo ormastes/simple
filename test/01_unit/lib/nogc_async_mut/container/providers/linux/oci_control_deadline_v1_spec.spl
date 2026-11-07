@@ -1,0 +1,114 @@
+# Authored/unexecuted: actual common dispatch over managed scripted provider.
+use std.spec.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.contracts.container.control_deadline_v1.*
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.LinuxSimpleContainerAdapterV2
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+
+fn _control_query_fixture_v1(action: text) -> ScriptedCommandResultV1:
+    val args = if action == "stop": ["stop", "--time", "10", "b".repeat(64)] else: ["rm", "b".repeat(64)]
+    linux_container_script_result_fixture_v2(RuntimeCommandV1(operation: action, program: "podman", args: args), "")
+
+fn _control_created_fixture_v1(after: [ScriptedCommandResultV1],
+        clock: [i64]) -> (LinuxSimpleContainerAdapterV2, SimpleContainerOwnerV2, ContainerExecutionRequestV2):
+    val leaf = linux_container_leaf_fixture_v2()
+    val request = linux_container_request_fixture_v2(leaf)
+    val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+    val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+    var scripts = [linux_container_script_result_fixture_v2(create, "b".repeat(64))]
+    for result in after: scripts.push(result)
+    val adapter = linux_container_adapter_fixture_v2(scripts, clock)
+    val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+    val launch = container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap()
+    val created = simple_container_apply_v2(owner, "create", request, launch)
+    assert(created.operation.status == RUNTIME_STATUS_OK)
+    (adapter, created.owner, request)
+
+describe "explicit control deadline at final cleanup admission":
+    it "consumes exact stop and destroy argv with independent entry and final clock checks":
+        val fixture = _control_created_fixture_v1([_control_query_fixture_v1("stop"), _control_query_fixture_v1("destroy")], [1, 2, 3, 4, 5])
+        val deadline = container_control_deadline_v1(fixture.2.plan.request_digest, "create-api", ["stop", "destroy"], 10).unwrap()
+        val stopped = simple_container_control_v2(fixture.1, "stop", fixture.2, deadline)
+        expect(stopped.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(stopped.operation.command.program).to_equal("/usr/bin/podman")
+        expect(stopped.operation.command.args).to_equal(["--remote=false", "--root", "/home/test/storage", "--runroot", "/run/user/1000/storage",
+            "--storage-driver", "overlay", "--storage-opt=", "stop", "--time", "10", "b".repeat(64)])
+        val destroyed = simple_container_control_v2(stopped.owner, "destroy", fixture.2, deadline)
+        expect(destroyed.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(destroyed.operation.command.args).to_equal(["--remote=false", "--root", "/home/test/storage", "--runroot", "/run/user/1000/storage",
+            "--storage-driver", "overlay", "--storage-opt=", "rm", "b".repeat(64)])
+        expect(fixture.0.provider.scripted_cursor).to_equal(3)
+        expect(fixture.0.provider.scripted_effect_clock_cursor).to_equal(5)
+        expect(fixture.0.provider.timeout_ms).to_equal(3000)
+
+    it "refuses expiry crossing observation before the queued cleanup command is consumed":
+        for action in ["stop", "destroy"]:
+            val fixture = _control_created_fixture_v1([_control_query_fixture_v1(action)], [1, 9, 10])
+            val deadline = container_control_deadline_v1(fixture.2.plan.request_digest, "create-api", [action], 10).unwrap()
+            val refused = simple_container_control_v2(fixture.1, action, fixture.2, deadline)
+            expect(refused.operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+            expect(fixture.0.provider.scripted_cursor).to_equal(1)
+            expect(fixture.0.provider.executor_call_count()).to_equal(2)
+            expect(simple_container_intent_v2(refused.owner, fixture.2).unwrap().phase).to_equal(RUNTIME_PHASE_CREATED)
+
+    it "refuses wrong action digest operation and unknown common control before executor entry":
+        for field in ["action", "digest", "operation", "unknown"]:
+            val fixture = _control_created_fixture_v1([_control_query_fixture_v1("stop")], [1, 2])
+            var digest = fixture.2.plan.request_digest
+            var operation = "create-api"
+            var actions = ["stop"]
+            if field == "digest": digest = "c".repeat(64)
+            if field == "operation": operation = "foreign"
+            if field == "action": actions = ["destroy"]
+            val deadline = container_control_deadline_v1(digest, operation, actions, 10).unwrap()
+            val action = if field == "unknown": "create" else: "stop"
+            expect(simple_container_control_v2(fixture.1, action, fixture.2, deadline).operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+            expect(fixture.0.provider.executor_call_count()).to_equal(1)
+            expect(fixture.0.provider.scripted_cursor).to_equal(1)
+
+    it "fails closed on entry final and exhausted clocks without cleanup consumption":
+        for samples in [[1, 0], [1, -1], [1, 2, 0], [1, 2, -1], [1, 2]]:
+            val fixture = _control_created_fixture_v1([_control_query_fixture_v1("stop")], samples)
+            val deadline = container_control_deadline_v1(fixture.2.plan.request_digest, "create-api", ["stop"], 10).unwrap()
+            expect(simple_container_control_v2(fixture.1, "stop", fixture.2, deadline).operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+            expect(fixture.0.provider.scripted_cursor).to_equal(1)
+
+    it "validates a fresh context before idempotent cached stop success":
+        val fixture = _control_created_fixture_v1([_control_query_fixture_v1("stop")], [1, 2, 3, 4, 10])
+        val valid = container_control_deadline_v1(fixture.2.plan.request_digest, "create-api", ["stop"], 10).unwrap()
+        val stopped = simple_container_control_v2(fixture.1, "stop", fixture.2, valid)
+        expect(stopped.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val wrong = container_control_deadline_v1("c".repeat(64), "create-api", ["stop"], 10).unwrap()
+        expect(simple_container_control_v2(stopped.owner, "stop", fixture.2, wrong).operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(simple_container_control_v2(stopped.owner, "stop", fixture.2, valid).operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(fixture.0.provider.scripted_cursor).to_equal(2)
+        expect(fixture.0.provider.executor_call_count()).to_equal(2)
+
+    it "keeps legacy cleanup independent of an expired retained launch context":
+        val fixture = _control_created_fixture_v1([_control_query_fixture_v1("stop"), _control_query_fixture_v1("destroy")], [1])
+        val expired = container_effect_deadline_v1(fixture.2.plan.request_digest, "create-api", ["create"], 1).unwrap()
+        val set = fixture.0.provider.set_effect_deadline_v1(expired).unwrap()
+        val stopped = simple_container_apply_v2(fixture.1, "stop", fixture.2, expired)
+        expect(stopped.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val destroyed = simple_container_apply_v2(stopped.owner, "destroy", fixture.2, expired)
+        expect(destroyed.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(fixture.0.provider.scripted_cursor).to_equal(3)
+        expect(fixture.0.provider.scripted_effect_clock_cursor).to_equal(1)
+
+    it "refuses current policy drift and unmanaged control without consuming cleanup argv":
+        for kind in ["drift", "unmanaged"]:
+            val fixture = _control_created_fixture_v1([_control_query_fixture_v1("stop")], [1, 2, 3])
+            if kind == "drift":
+                var changed = linux_container_engine_fixture_v2()
+                changed.identity_digest = "c".repeat(64)
+                fixture.0.provider.scripted_engine_observation = Some(changed)
+            else: fixture.0.provider.engine_policy = nil
+            val deadline = container_control_deadline_v1(fixture.2.plan.request_digest, "create-api", ["stop"], 10).unwrap()
+            expect(simple_container_control_v2(fixture.1, "stop", fixture.2, deadline).operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+            expect(fixture.0.provider.scripted_cursor).to_equal(1)
+            expect(fixture.0.provider.scripted_effect_clock_cursor).to_equal(if kind == "drift": 2 else: 1)

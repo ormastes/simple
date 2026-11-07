@@ -26,3 +26,8 @@ Container API, persistent service continuity and protected workspace execution.
 Ordinary-client delegation, end-to-end controller Windows dispatch, installation,
 broad network policy and live qualification remain verification gates. A Docker
 pipe grants broad engine authority and does not satisfy `REQ-WPC-004` alone.
+
+**REQ-WDP-011:** Fresh stop/destroy control has its own request-local authority
+and final native admission check. An expired launch grant neither authorizes
+cleanup nor ends the workload. Evidence: managed provider clock/identity
+negatives and actual common control facade assertions, all NOT_RUN.

@@ -1,5 +1,16 @@
 # Group stream CPU profile V3 manual
 
+Planning capability follow-up: `linux_process_stream_template_admit_v3` in
+`std.nogc_sync_mut.io.linux_process_owner` validates the canonical V3 template
+and invokes the same native target check as launch admission. It creates no
+ticket, claim, reservation or helper and accepts zero planning expiry without
+fabricating a grant. Success is a current observation, not readiness or future
+launch authority. The actual launch path still validates a positive deadline.
+Two added cases in `piped_process_profile_v3_spec.spl` reject missing V3 policy
+and exercise native refusal of a non-cgroup target with zero planning expiry.
+Both follow-up cases are NOT_RUN; the prior native evidence did not test this
+new Simple wrapper. There is no new native ABI or duplicate provider.
+
 Status: native typed-policy/readback-parser contract PASS only; 9 SSpec cases
 NOT_RUN / AWAITING_VERIFICATION. Source review is not execution evidence.
 

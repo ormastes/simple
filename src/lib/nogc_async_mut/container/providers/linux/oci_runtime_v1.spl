@@ -13,6 +13,8 @@ use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{linux_oci_eng
 use std.nogc_async_mut.container.providers.linux.engine_observer_v1.linux_oci_engine_observe_v1
 use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1,
     container_effect_deadline_v1, container_effect_remaining_ms_v1}
+use std.common.contracts.container.control_deadline_v1.{ContainerControlDeadlineV1,
+    container_control_remaining_ms_v1}
 use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.common.contracts.container.command_v1.oci_command_parts_v1
 use std.common.contracts.container.execution_options_v1.oci_execution_options_v1
@@ -239,6 +241,12 @@ impl LinuxOciRuntimeProviderV1:
         val digest = linux_oci_request_digest_v1(request)?
         val now = self._effect_clock_unix_ms_v1()
         container_effect_remaining_ms_v1(deadline, digest, request.operation_id, action, now)
+
+    fn _check_control_deadline_v1(request: LinuxOciRequestV1, action: text,
+            context: ContainerControlDeadlineV1) -> Result<i64, text>:
+        val digest = linux_oci_request_digest_v1(request)?
+        val now = self._effect_clock_unix_ms_v1()
+        container_control_remaining_ms_v1(context, digest, request.operation_id, action, now)
 
     pub fn retained_engine_observation_v1() -> Result<LinuxOciEngineObservationV1, text>:
         match self.engine_baseline:
@@ -902,7 +910,11 @@ impl LinuxOciRuntimeProviderV1:
             command: self._receipt_command_v1(command.1), state: current, exit_code: current.exit_code,
             stdout: run.stdout, stderr: run.stderr, reason: "observed")
 
-    me stop(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+    me stop(request: LinuxOciRequestV1, control: ContainerControlDeadlineV1? = nil) -> RuntimeOperationV1:
+        if control.?:
+            match self._check_control_deadline_v1(request, "stop", control.unwrap()):
+                case Err(reason): return self._rejected("stop", reason, runtime_command_empty())
+                case Ok(_): pass
         val current_result = self._current_for(request, "stop")
         if current_result.status != RUNTIME_STATUS_OK:
             return current_result
@@ -922,7 +934,7 @@ impl LinuxOciRuntimeProviderV1:
             return self._rejected("stop", command.0, runtime_command_empty())
         if not self.live_enabled:
             return self._blocked("stop", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
-        val run = self._execute(command.1, request)
+        val run = self._execute(command.1, request, control)
         if not run.matched:
             return self._rejected_with_output("stop", current, command.1,
                 self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
@@ -938,7 +950,12 @@ impl LinuxOciRuntimeProviderV1:
                 "intent-journal-update-failed", run.stdout, run.stderr, run.exit_code)
         self._ok("stop", stopped, command.1, "stopped")
 
-    me destroy(request: LinuxOciRequestV1, force: bool = false) -> RuntimeOperationV1:
+    me destroy(request: LinuxOciRequestV1, force: bool = false,
+            control: ContainerControlDeadlineV1? = nil) -> RuntimeOperationV1:
+        if control.?:
+            match self._check_control_deadline_v1(request, "destroy", control.unwrap()):
+                case Err(reason): return self._rejected("destroy", reason, runtime_command_empty())
+                case Ok(_): pass
         val valid = self.validate(request)
         if not valid.accepted:
             return self._rejected("destroy", valid.reason, runtime_command_empty())
@@ -990,7 +1007,7 @@ impl LinuxOciRuntimeProviderV1:
             return self._rejected("destroy", command.0, runtime_command_empty())
         if not self.live_enabled:
             return self._blocked("destroy", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
-        val run = self._execute(command.1, request)
+        val run = self._execute(command.1, request, control)
         if not run.matched:
             return self._rejected_with_output("destroy", current, command.1,
                 self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
@@ -1554,7 +1571,8 @@ impl LinuxOciRuntimeProviderV1:
                 program: policy.executable_path, args: arguments)
             case Err(_): runtime_command_empty()
 
-    fn _execute(command: RuntimeCommandV1, request: LinuxOciRequestV1) -> RuntimeExecResultV1:
+    fn _execute(command: RuntimeCommandV1, request: LinuxOciRequestV1,
+            control: ContainerControlDeadlineV1? = nil) -> RuntimeExecResultV1:
         self.executor_calls = self.executor_calls + 1
         var routed = command
         if self.engine_policy.?:
@@ -1573,6 +1591,10 @@ impl LinuxOciRuntimeProviderV1:
             (command.operation == "create" or command.operation == "start")
         if managed_launch:
             match self.check_launch_deadline_v1(request, command.operation):
+                case Err(reason): return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
+                case Ok(_): pass
+        if control.?:
+            match self._check_control_deadline_v1(request, command.operation, control.unwrap()):
                 case Err(reason): return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
                 case Ok(_): pass
         if self.scripted:
@@ -1599,12 +1621,13 @@ impl LinuxOciRuntimeProviderV1:
         if not self.live_enabled:
             return RuntimeExecResultV1(stdout: "", stderr: OCI_REASON_PROVIDER_UNAVAILABLE,
                 exit_code: -1, matched: false)
-        if managed_launch:
+        if managed_launch or control.?:
             # The captured-process owner repeats the native clock check after
             # acquiring its governor slot and immediately before child exec.
             # The leaf check alone cannot cover that intervening wait/setup.
+            val expiry = if control.?: control.unwrap().expires_at_unix_ms else: self.effect_deadline.unwrap().expires_at_unix_ms
             val admitted = process_run_bounded_admitted_v1(routed.program, routed.args,
-                self.timeout_ms, OCI_MAX_OUTPUT_BYTES, self.effect_deadline.unwrap().expires_at_unix_ms)
+                self.timeout_ms, OCI_MAX_OUTPUT_BYTES, expiry)
             match admitted:
                 case Err(reason):
                     return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)

@@ -57,3 +57,8 @@ The adapter also refuses admission based only on factory inventory. A successful
 explicit startup refresh is required before acknowledgment; a failed refresh
 invalidates that readiness and any prior cached digest. The host remains
 responsible for holding the real journal writer across refresh and handoff.
+
+The explicit common control facade also rejects recovery-only candidates before
+any native command. After exact recovery, the positive stop/destroy sequence uses
+a separate typed control deadline; it does not manufacture authority from the
+launch context. These assertions remain AUTHORED_NOT_RUN.

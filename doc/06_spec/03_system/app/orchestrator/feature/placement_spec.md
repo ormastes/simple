@@ -43,3 +43,12 @@ handwritten from two new executable examples, not generated execution evidence.
 These tests exercise pure placement and host-ledger admission, not physical
 device assignment or provider execution. No runtime/docgen was run; all later
 builds and tests retain the shared five-CPU maximum.
+
+## Explicit Windows eligibility — authored, not run
+
+The added scenario `Keep Windows Docker eligibility separate from Linux Podman
+hosts` submits a Windows/docker-process request to one Linux Podman and one
+Windows Docker inventory row. It selects exactly the Windows host, rejects the
+Linux row, and returns no offer when only that Linux row is available. This
+tests the existing placement proposal's exact OS/runtime-class eligibility;
+neither inventory row is native capability evidence.

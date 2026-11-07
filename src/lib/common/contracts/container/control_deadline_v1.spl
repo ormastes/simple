@@ -1,0 +1,39 @@
+# Stop/destroy admission data, constructed only after the trusted consumer
+# verifies fresh cleanup grant+approval. It is not a signature verifier.
+# Expiry never kills/stops/destroys anything or frees a reservation.
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+
+pub struct ContainerControlDeadlineV1:
+    request_digest: text
+    operation_id: text
+    actions: [text]
+    expires_at_unix_ms: i64
+
+pub fn container_control_deadline_v1(request_digest: text, operation_id: text,
+        actions: [text], expires_at_unix_ms: i64) -> Result<ContainerControlDeadlineV1, text>:
+    if not builder_digest_valid_v1(request_digest): return Err("container-control-request-digest-invalid")
+    if not builder_identifier_valid_v1(operation_id): return Err("container-control-operation-id-invalid")
+    if expires_at_unix_ms <= 0: return Err("container-control-expiry-invalid")
+    if actions.len() == 0 or actions.len() > 2: return Err("container-control-actions-invalid")
+    var seen: [text] = []
+    for action in actions:
+        if action != "stop" and action != "destroy": return Err("container-control-action-unsupported")
+        if seen.contains(action): return Err("container-control-action-duplicate")
+        seen.push(action)
+    Ok(ContainerControlDeadlineV1(request_digest: request_digest, operation_id: operation_id,
+        actions: actions, expires_at_unix_ms: expires_at_unix_ms))
+
+pub fn container_control_remaining_ms_v1(value: ContainerControlDeadlineV1,
+        request_digest: text, operation_id: text, action: text, now_unix_ms: i64) -> Result<i64, text>:
+    # Public struct values may have bypassed the constructor. Revalidate them
+    # at the final native boundary against actual request/action/clock facts.
+    val validated = container_control_deadline_v1(value.request_digest, value.operation_id,
+        value.actions, value.expires_at_unix_ms)?
+    if value.request_digest != request_digest: return Err("container-control-request-mismatch")
+    if value.operation_id != operation_id: return Err("container-control-operation-mismatch")
+    if not value.actions.contains(action): return Err("container-control-action-not-authorized")
+    if now_unix_ms <= 0: return Err("container-control-clock-unavailable")
+    if now_unix_ms >= value.expires_at_unix_ms: return Err("container-control-deadline-expired")
+    # Positive operands and expiry>now bound subtraction. This admission window
+    # is not a process lifetime timeout or an instruction to kill on expiry.
+    Ok(value.expires_at_unix_ms - now_unix_ms)
