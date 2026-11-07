@@ -8,9 +8,11 @@ use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{host_capacity_owner_
 use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
 use std.common.contracts.container.execution_evidence_v2.container_runtime_observation_digest_v2
 use std.common.crypto.sha256.sha256_text
-use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists, file_remove, file_fsync}
 use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
-use std.nogc_sync_mut.io_runtime.dir_remove
+use std.nogc_sync_mut.io_runtime.{dir_remove, dir_create}
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
 
 describe "Original host terminal wait retained by the shared host owner":
     it "collects one actual common read and preserves the complete wait result and charge":
@@ -74,19 +76,31 @@ describe "Original host terminal wait retained by the shared host owner":
             expect(host_available_capacity_v1(result.local.capacity.ledger).unwrap().cpu_millis).to_equal(1000)
             expect(file_exists(local.capacity.journal.root + "/host-terminal-waits-v2/" +
                 sha256_text("operation_1") + ".sdn")).to_equal(false)
+            val retry = host_terminal_wait_v2(result.local, "operation_1")
+            expect(retry.error).to_equal("host-terminal-wait-collection-incomplete-recovery-required")
+            expect(host_terminal_wait_consumed_fixture_v2(retry.local.container)).to_equal(6)
             expect(host_capacity_owner_close_v1(result.local.capacity).unwrap()).to_equal(true)
             expect(dir_remove(local.root, true)).to_equal(true)
 
-    it "retains a successfully observed terminal owner and charge when publication fails":
+    it "preserves a qualified pending fact and current owner when private staging fails":
         val local = host_terminal_wait_fixture_v2()
-        expect(file_atomic_write_mode(local.capacity.journal.root + "/host-terminal-waits-v2", "obstructing file\n", 0o600)).to_equal(true)
+        val directory = local.capacity.journal.root + "/host-terminal-waits-v2"
+        expect(dir_create(directory, true)).to_equal(true)
+        val obstruction = directory + "/" + sha256_text("operation_1") + ".write"
+        expect(file_atomic_write_mode(obstruction, "preexisting write owner\n", 0o600)).to_equal(true)
         val result = host_terminal_wait_v2(local, "operation_1")
-        expect(result.error).to_equal("host-terminal-wait-directory-unsafe")
-        expect(result.receipt.?).to_equal(false)
+        expect(result.error != "").to_equal(true)
+        expect(result.receipt.?).to_equal(true)
+        expect(result.receipt.unwrap().wait.state.exit_code).to_equal(17)
         expect(host_terminal_wait_consumed_fixture_v2(result.local.container)).to_equal(6)
         expect(host_terminal_wait_phase_fixture_v2(result.local.container)).to_equal("exited")
         expect(result.local.capacity.journal.sequence).to_equal(local.capacity.journal.sequence)
         expect(host_available_capacity_v1(result.local.capacity.ledger).unwrap().cpu_millis).to_equal(1000)
+        expect(file_exists(directory + "/" + sha256_text("operation_1") + ".sdn")).to_equal(false)
+        expect(file_read_regular_no_follow_bounded(obstruction, 1024).unwrap()).to_equal("preexisting write owner\n")
+        val retry = host_terminal_wait_v2(result.local, "operation_1")
+        expect(retry.error).to_equal("host-terminal-wait-collection-incomplete-recovery-required")
+        expect(host_terminal_wait_consumed_fixture_v2(retry.local.container)).to_equal(6)
         expect(host_capacity_owner_close_v1(result.local.capacity).unwrap()).to_equal(true)
         expect(dir_remove(local.root, true)).to_equal(true)
 
@@ -137,4 +151,57 @@ describe "Original host terminal wait retained by the shared host owner":
             expect(host_terminal_wait_consumed_fixture_v2(result.local.container)).to_equal(6)
             expect(file_read_regular_no_follow_bounded(path, 8388608).unwrap()).to_equal(encoded)
         expect(host_capacity_owner_close_v1(first.local.capacity).unwrap()).to_equal(true)
+        expect(dir_remove(local.root, true)).to_equal(true)
+
+    it "does not re-wait or invent a timestamp after an interrupted collection claim":
+        val local = host_terminal_wait_fixture_v2()
+        val directory = local.capacity.journal.root + "/host-terminal-waits-v2"
+        expect(dir_create(directory, true)).to_equal(true)
+        expect(file_atomic_write_mode(directory + "/" + sha256_text("operation_1") + ".claim",
+            "interrupted collection intent\n", 0o600)).to_equal(true)
+        val result = host_terminal_wait_v2(local, "operation_1")
+        expect(result.error).to_equal("host-terminal-wait-collection-incomplete-recovery-required")
+        expect(result.receipt.?).to_equal(false)
+        expect(host_terminal_wait_consumed_fixture_v2(result.local.container)).to_equal(3)
+        expect(host_available_capacity_v1(result.local.capacity.ledger).unwrap().cpu_millis).to_equal(1000)
+        expect(host_capacity_owner_close_v1(result.local.capacity).unwrap()).to_equal(true)
+        expect(dir_remove(local.root, true)).to_equal(true)
+
+    it "promotes the complete original stage after reopen without another native query":
+        val local = host_terminal_wait_fixture_v2()
+        val first = host_terminal_wait_v2(local, "operation_1")
+        expect(first.error).to_equal("")
+        val original = first.receipt.unwrap()
+        val encoded = host_terminal_wait_receipt_encode_v2(original).unwrap()
+        val prefix = local.capacity.journal.root + "/host-terminal-waits-v2/" + sha256_text("operation_1")
+        # Actual previously collected bytes model the interrupted publication
+        # boundary; no invented native observation or new timestamp is used.
+        expect(file_atomic_write_mode(prefix + ".stage.sdn", encoded, 0o600)).to_equal(true)
+        expect(file_fsync(prefix + ".stage.sdn")).to_equal(true)
+        expect(file_remove(prefix + ".sdn")).to_equal(true)
+        expect(host_capacity_owner_close_v1(first.local.capacity).unwrap()).to_equal(true)
+        var reopened = host_terminal_wait_unavailable_fixture_v2(first.local)
+        reopened.capacity = host_capacity_owner_open_v1(local.capacity.journal.root,
+            first.local.capacity.ledger.capacity, "f".repeat(64), 50, true).unwrap()
+        val resumed = host_terminal_wait_v2(reopened, "operation_1")
+        expect(resumed.error).to_equal("")
+        expect(resumed.receipt.unwrap().observed_unix_ms).to_equal(original.observed_unix_ms)
+        expect(file_read_regular_no_follow_bounded(prefix + ".sdn", 8388608).unwrap()).to_equal(encoded)
+        expect(host_terminal_wait_consumed_fixture_v2(resumed.local.container)).to_equal(0)
+        expect(host_available_capacity_v1(resumed.local.capacity.ledger).unwrap().cpu_millis).to_equal(1000)
+        expect(host_capacity_owner_close_v1(resumed.local.capacity).unwrap()).to_equal(true)
+        expect(dir_remove(local.root, true)).to_equal(true)
+
+    it "rejects permissive retained-file mode without repairing it or issuing a query":
+        val local = host_terminal_wait_fixture_v2()
+        val first = host_terminal_wait_v2(local, "operation_1")
+        expect(first.error).to_equal("")
+        val path = local.capacity.journal.root + "/host-terminal-waits-v2/" + sha256_text("operation_1") + ".sdn"
+        expect(file_set_mode(path, 0o644)).to_equal(true)
+        val result = host_terminal_wait_v2(first.local, "operation_1")
+        expect(result.error).to_equal("host-terminal-wait-private-owner-invalid")
+        expect(result.receipt.?).to_equal(false)
+        expect(file_mode_bits(path) & 0o777).to_equal(0o644)
+        expect(host_terminal_wait_consumed_fixture_v2(result.local.container)).to_equal(6)
+        expect(host_capacity_owner_close_v1(result.local.capacity).unwrap()).to_equal(true)
         expect(dir_remove(local.root, true)).to_equal(true)
