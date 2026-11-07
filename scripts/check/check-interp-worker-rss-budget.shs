@@ -7,7 +7,8 @@
 #
 # `bin/simple run src/app/cli/native_build_worker.spl` with NO arguments loads
 # the compiler's whole import closure under the seed interpreter, compiles
-# nothing, and exits non-zero. Its peak RSS is the per-invocation floor every
+# nothing, and exits 1 with the internal-entrypoint diagnostic. The probe pins
+# SIMPLE_NATIVE_BUILD_WORKER=0 to avoid inherited internal-worker authority. Its peak RSS is the per-invocation floor every
 # concurrent native-build pays before it looks at a line of user code
 # (doc/08_tracking/bug/native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18.md:
 # 2.37 GB on Linux 2026-08-18, 1.99 GB on Windows 2026-11-07). This gate pins
@@ -23,7 +24,7 @@
 #   ERROR — nothing was checked (<reason>)                            exit 2
 # A peak below FLOOR_KIB is ERROR, not PASS: a worker that never loaded the
 # closure (missing sources, wrong cwd, stub binary) proves nothing. A run
-# that produced no peak line is ERROR. A missing binary is ERROR.
+# that produced no peak line, an unexpected exit, or no worker terminal is ERROR. A missing binary is ERROR.
 #
 # Default budget 2,560,000 KiB (~2.44 GiB) = 1.28x the 1,993,300 KiB measured
 # on Windows 2026-11-07 (bootstrap-profile seed from release/1.0.0 tip
@@ -61,21 +62,43 @@ judge() {
 }
 
 # ---------------------------------------------------------------------------
-# measure_peak <bin>
-#   Echoes the peak KiB measure-peak-rss.shs reported, or nothing. The
-#   worker's own exit status is irrelevant here (it exits 1 with no args).
+# measure_peak <bin> [measurement-wrapper-for-selftest]
+#   Admit only the no-argument worker's expected entrypoint refusal (exit 1).
+#   The optional wrapper is internal test injection, never a CLI/env override.
 # ---------------------------------------------------------------------------
 measure_peak() {
     m_bin=$1
-    m_out=$(mktemp)
-    SIMPLE_EXECUTION_MODE=interpret \
-        sh scripts/perf/measure-peak-rss.shs --label interp-worker -- "$m_bin" run "$WORKER_ENTRY" >"$m_out" 2>&1
-    # NOTE: status into a variable on the next line. Never `| tail`.
+    m_wrapper=${2:-scripts/perf/measure-peak-rss.shs}
+    m_out=$(mktemp) || return 2
+    SIMPLE_EXECUTION_MODE=interpret SIMPLE_NATIVE_BUILD_WORKER=0 \
+        sh "$m_wrapper" --label interp-worker -- "$m_bin" run "$WORKER_ENTRY" >"$m_out" 2>&1
     m_rc=$?
-    m_peak=$(grep -a '^peak-rss: ' "$m_out" | tail -n 1 | sed -n 's/.*peak_kib=\([0-9][0-9]*\).*/\1/p')
+    m_lines=$(grep -ac '^peak-rss: ' "$m_out")
+    m_last=$(tail -n 1 "$m_out" | tr -d '\r')
+    m_peak=$(printf '%s\n' "$m_last" | sed -n 's/^peak-rss: label=interp-worker wall_ms=[0-9][0-9]* peak_kib=\([0-9][0-9]*\) exit=[0-9][0-9]* method=[a-z-][a-z-]*$/\1/p')
+    m_exit=$(printf '%s\n' "$m_last" | sed -n 's/.* exit=\([0-9][0-9]*\) method=.*/\1/p')
+    m_terminal=$(sed '$d' "$m_out" | tr -d '\r' | sed '/^[[:space:]]*$/d' | tail -n 1)
+    m_expected='error: native_build_worker.spl is an internal entrypoint'
+    m_count=$(tr -d '\r' < "$m_out" | grep -Fxc "$m_expected")
+    echo "interp-worker-completion: wrapper_exit=$m_rc measurement_exit=${m_exit:-missing} terminal_count=$m_count peak_kib=${m_peak:-missing}" >&2
+    if [ "$m_rc" -ne 1 ] || [ "$m_exit" != 1 ] || [ "$m_lines" -ne 1 ] ||
+            [ -z "$m_peak" ] || [ "$m_count" -ne 1 ] || [ "$m_terminal" != "$m_expected" ]; then
+        echo "interp-worker-completion: unexpected worker/wrapper termination; measurement rejected" >&2
+        rm -f "$m_out"
+        return 2
+    fi
     rm -f "$m_out"
-    : "$m_rc"
     echo "$m_peak"
+}
+
+check_worker() {
+    cw_peak=$(measure_peak "$1" "${3:-scripts/perf/measure-peak-rss.shs}")
+    cw_rc=$?
+    if [ "$cw_rc" -ne 0 ]; then
+        echo "ERROR — nothing was checked (worker completion evidence was not admitted)"
+        return 2
+    fi
+    judge "$cw_peak" "$2"
 }
 
 # ---------------------------------------------------------------------------
@@ -101,19 +124,44 @@ selftest() {
     # 5. below the floor (closure never loaded) -> ERROR, never PASS
     st_v=$(judge 20000 2560000); st_rc=$?
     case "$st_v" in ERROR*) ;; *) echo "selftest: FAILED — sub-floor peak was not ERROR ($st_v)"; st_fail=1 ;; esac
-    # 6. a stub binary that exits at once measures a tiny peak -> ERROR end to end
-    st_dir=$(mktemp -d)
-    printf '#!/bin/sh\nexit 1\n' >"$st_dir/simple"
-    chmod +x "$st_dir/simple"
-    st_peak=$(measure_peak "$st_dir/simple")
-    st_v=$(judge "$st_peak" 2560000); st_rc=$?
-    case "$st_v" in ERROR*) ;; *) echo "selftest: FAILED — stub binary was not ERROR ($st_v, peak=$st_peak)"; st_fail=1 ;; esac
+    # Deterministic wrapper receipts drive the same measurement+judgment
+    # path as production. These are gate controls, NOT measured worker RSS.
+    st_dir=$(mktemp -d) || exit 2
+    st_case=0
+    for st_mode in valid signal missing wrong_exit mismatch duplicate trailing; do
+        st_case=$((st_case + 1))
+        st_wrapper_rc=1; st_child_rc=1; st_marker=1
+        case "$st_mode" in
+            signal) st_wrapper_rc=139; st_child_rc=139 ;;
+            missing) st_marker=0 ;;
+            wrong_exit) st_wrapper_rc=0; st_child_rc=0 ;;
+            mismatch) st_wrapper_rc=2 ;;
+        esac
+        {
+            echo '#!/bin/sh'
+            if [ "$st_marker" -eq 1 ]; then
+                echo "echo 'error: native_build_worker.spl is an internal entrypoint'"
+            fi
+            if [ "$st_mode" = duplicate ]; then
+                echo "echo 'error: native_build_worker.spl is an internal entrypoint'"
+            fi
+            if [ "$st_mode" = trailing ]; then echo "echo 'fatal: aborted after worker diagnostic'"; fi
+            echo "echo 'peak-rss: label=interp-worker wall_ms=1 peak_kib=500000 exit=$st_child_rc method=fixture'"
+            echo "exit $st_wrapper_rc"
+        } > "$st_dir/wrapper"
+        st_v=$(check_worker unused-selftest-bin 2560000 "$st_dir/wrapper"); st_rc=$?
+        if [ "$st_mode" = valid ]; then
+            case "$st_rc:$st_v" in '0:PASS'*) ;; *) st_fail=1; echo "selftest: FAILED — valid synthetic completion rejected" ;; esac
+        else
+            case "$st_rc:$st_v" in '2:ERROR'*) ;; *) st_fail=1; echo "selftest: FAILED — $st_mode synthetic completion accepted" ;; esac
+        fi
+    done
     rm -rf "$st_dir"
     if [ "$st_fail" -ne 0 ]; then
         echo "ERROR — nothing was checked (selftest failed)"
         exit 2
     fi
-    echo "selftest: 6 fixture(s) passed"
+    echo "selftest: 12 fixture(s) passed (synthetic gate controls, no worker measured)"
 }
 
 # ---------------------------------------------------------------------------
@@ -135,7 +183,7 @@ cd "$(dirname "$0")/../.." || { echo "ERROR — nothing was checked (cannot cd t
 
 selftest
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 6 fixture(s) checked, selftest only, no worker measured"
+    echo "PASS — 12 fixture(s) checked, selftest only, no worker measured"
     exit 0
 fi
 
@@ -148,7 +196,6 @@ if [ ! -x "$SIMPLE_BIN" ]; then
     exit 2
 fi
 
-PEAK=$(measure_peak "$SIMPLE_BIN")
-echo "interp-worker-rss: bin=$SIMPLE_BIN entry=$WORKER_ENTRY peak_kib=${PEAK:-none} budget_kib=$BUDGET_KIB"
-judge "$PEAK" "$BUDGET_KIB"
+echo "interp-worker-rss: bin=$SIMPLE_BIN entry=$WORKER_ENTRY budget_kib=$BUDGET_KIB"
+check_worker "$SIMPLE_BIN" "$BUDGET_KIB"
 exit $?
