@@ -41,6 +41,21 @@ fn context_at(now_ns: i64) -> DebugAuthorizationContextV1:
     DebugAuthorizationContextV1(now_ns: now_ns, environment: "development", privilege: "debug")
 
 describe "DebugServiceV1 temporal policy":
+    it "preserves caller timestamps on unknown and closed session denials":
+        var service = DebugServiceV1.create()
+        val missing = DebugSessionId(value: "debug-missing")
+        val missing_context = service.authorize_with_context(missing, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.missing", context_at(42))
+        expect(missing_context.allowed).to_equal(false)
+        expect(missing_context.captured_at_ns).to_equal(42)
+        val missing_timed = service.authorize_at(missing, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.missing.timed", 43)
+        expect(missing_timed.allowed).to_equal(false)
+        expect(missing_timed.captured_at_ns).to_equal(43)
+        val session = service.open_session("build-closed", debug_policy_development_v1()).unwrap()
+        service.close_session(session).unwrap()
+        val closed = service.authorize_at(session, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.closed", 44)
+        expect(closed.allowed).to_equal(false)
+        expect(closed.captured_at_ns).to_equal(44)
+
     it "should preserve caller time and expire TTL without overflowing":
         # @req REQ-008
         step("Open a session at t=0 under a 1 ms TTL policy")
