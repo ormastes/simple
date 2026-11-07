@@ -1,0 +1,84 @@
+#!/bin/sh
+# Focused recursion regression: exact signal order plus a real owned tree.
+# No process groups or unrelated processes are signalled.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+runner=${1:-"$root/scripts/check/run-gate-tier.shs"}
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/gate-tree-cleanup.XXXXXX")
+owned_root=
+cleanup() {
+    for pidfile in "$scratch"/*.pid; do
+        [ -s "$pidfile" ] || continue
+        pid=$(cat "$pidfile")
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        kill -KILL "$pid" 2>/dev/null || :
+    done
+    [ -z "$owned_root" ] || wait "$owned_root" 2>/dev/null || :
+    # Retain the unique fixture directory for diagnosis; never recursively
+    # delete a computed path from this cross-platform cleanup trap.
+    printf 'gate tree cleanup evidence: %s\n' "$scratch" >&2
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+# Source only the production cleanup functions, never the runner main loop.
+sed '/^ROOT=/,$d' "$runner" > "$scratch/functions.sh"
+. "$scratch/functions.sh"
+failures=0
+(
+    kill() { printf '%s %s\n' "$1" "$2"; }
+    pairs='11 10
+12 11
+13 10'
+    _kt_walk 10 TERM "$pairs"
+    _ct_walk 10 "$pairs"
+) > "$scratch/signals"
+printf '%s\n' '-TERM 12' '-TERM 11' '-TERM 13' '-TERM 10' \
+    '-CONT 12' '-CONT 11' '-CONT 13' '-CONT 10' > "$scratch/expected"
+if cmp -s "$scratch/signals" "$scratch/expected"; then
+    echo 'PASS: TERM and CONT preserve ancestors and sibling traversal'
+else
+    echo 'FAIL: recursive signal order lost an ancestor or sibling'
+    cat "$scratch/signals"
+    failures=$((failures + 1))
+fi
+cat > "$scratch/owned.sh" <<'SH'
+#!/bin/sh
+echo $$ > "$1/$2.pid"
+case "$2" in
+    root) sh "$0" "$1" child & ;;
+    child) sh "$0" "$1" leaf & ;;
+    leaf) sleep 30 & echo $! > "$1/sleeper.pid" ;;
+esac
+wait
+# Keep intermediate parents alive if only their child was signalled. This
+# prevents normal wait completion from hiding a missed ancestor signal.
+kill -STOP $$
+SH
+sh "$scratch/owned.sh" "$scratch" root &
+owned_root=$!
+attempt=0
+while [ ! -s "$scratch/sleeper.pid" ] && [ "$attempt" -lt 100 ]; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+[ -s "$scratch/sleeper.pid" ] || { echo 'FAIL: owned tree did not start'; exit 1; }
+child=$(cat "$scratch/child.pid")
+leaf=$(cat "$scratch/leaf.pid")
+sleeper=$(cat "$scratch/sleeper.pid")
+pairs=$(printf '%s %s\n' "$child" "$owned_root" "$leaf" "$child" "$sleeper" "$leaf")
+_kt_walk "$owned_root" KILL "$pairs" || :
+# Bounded observation, including the parent that the old recursion omitted.
+attempt=0
+while kill -0 "$owned_root" 2>/dev/null && [ "$attempt" -lt 30 ]; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+if kill -0 "$owned_root" 2>/dev/null; then
+    echo 'FAIL: cleanup left the owned parent alive'
+    failures=$((failures + 1))
+else
+    wait "$owned_root" 2>/dev/null || :
+    owned_root=
+    echo 'PASS: recursive KILL retired the real owned parent'
+fi
+[ "$failures" -eq 0 ]
