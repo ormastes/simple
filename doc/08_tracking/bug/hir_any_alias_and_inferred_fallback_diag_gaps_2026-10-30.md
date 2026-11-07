@@ -125,3 +125,18 @@ resolves. This does not change the exact annotation-provenance gate. A
 source-produced nominal-owner fixture deliberately removes only the callable
 signature to exercise that phase contract; this mutation control is not a
 claim that the natural pipeline currently performs such removal.
+
+
+### Astra follow-up: independent retained-metadata prevention controls
+
+Replaced the overlapping resolved-owner fixture with independent binding-only,
+initializer-only, and both-unresolved cases. All start from real parsed omitted
+return imports, assert exact symbol/provenance/signature identity, and inspect
+the stored rewritten carriers. The ordinary provider/facade source reproduction
+remains unchanged. No production policy changed. Authored manual:
+`doc/06_spec/01_unit/compiler/lint/frontend_diag/inferred_type_fallback_use_spec.md`.
+
+Runtime and mutation execution remain NOT_RUN. The ordinary `simple check`
+path lacks the frozen import surfaces needed to reproduce this cross-module
+condition; external full-driver reproduction remains OPEN rather than treating
+a missing warning on that different route as success.

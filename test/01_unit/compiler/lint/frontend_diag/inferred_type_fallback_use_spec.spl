@@ -26,6 +26,7 @@ use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirBlock, HirStmt, HirStmtKind, HirExprKind}
 use compiler.hir.binding_annotation_provenance.{hir_local_annotation_state, hir_local_annotation_copy}
 use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, hir_frontend_findings_with_code, HirFrontendFinding}
 use compiler.tools.lint._LintMain.config_and_model.{build_default_levels}
@@ -87,6 +88,106 @@ fn imported_node_return_has_layout(hir: HirModule) -> bool:
                     case _: return false
             case _: return false
     false
+
+# Phase-contract controls: parsed source owns identities and annotation receipts;
+# the omitted return naturally supplies a missing imported signature.
+# Only the two retained type carriers are changed below.
+fn isolate_return_metadata(block: HirBlock, target: SymbolId, concrete: HirType, binding_known: bool, initializer_known: bool) -> (HirBlock, i64):
+    var rewritten = block
+    var statements: [HirStmt] = []
+    var selected = 0
+    for original in block.stmts:
+        var statement = original
+        match original.kind:
+            case HirStmtKind.Let(symbol, _, init):
+                if symbol.id == target.id:
+                    val unresolved = HirType(kind: HirTypeKind.Error, span: init.span)
+                    val binding_type = if binding_known: concrete else: unresolved
+                    var initializer = init
+                    initializer.has_type_ = initializer_known or not binding_known
+                    initializer.type_ = if initializer_known: concrete else: unresolved
+                    statement.kind = HirStmtKind.Let(symbol, binding_type, initializer)
+                    selected = selected + 1
+            case HirStmtKind.Block(nested):
+                val (updated, count) = isolate_return_metadata(nested, target, concrete, binding_known, initializer_known)
+                statement.kind = HirStmtKind.Block(updated)
+                selected = selected + count
+            case _: ()
+        statements.push(statement)
+    rewritten.stmts = statements
+    (rewritten, selected)
+
+fn check_isolated_return_metadata(binding_known: bool, initializer_known: bool):
+    val source = "use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n"
+    var hir = lower_consumer_with_api(source, api_src.replace("-> Node:", ":"))
+    var target = SymbolId(id: -1)
+    var callee = SymbolId(id: -1)
+    var concrete: HirType? = nil
+    var targets = 0
+    var callees = 0
+    for entry in hir.symbols.symbols.values():
+        if entry.name == "src":
+            target = entry.id
+            targets = targets + 1
+        if entry.name == "node_get":
+            callee = entry.id
+            concrete = Some(HirType(kind: HirTypeKind.Int(64, true), span: entry.span))
+            callees = callees + 1
+            expect(entry.kind == SymbolKind.Function).to_equal(true)
+            expect(entry.generic_param_count).to_equal(0)
+            expect(entry.defining_module ?? "").to_equal("lib.api")
+            expect(entry.type_.?).to_equal(false)
+    expect(targets).to_equal(1)
+    expect(callees).to_equal(1)
+    expect(hir_local_annotation_state(hir, target)).to_equal(0)
+    expect(hir.symbols.get_symbol(callee).unwrap().type_.?).to_equal(false)
+    var replaced = 0
+    for key in hir.functions.keys():
+        var function = hir.functions[key]
+        if function.name != "f": continue
+        val (body, count) = isolate_return_metadata(function.body, target, concrete.unwrap(), binding_known, initializer_known)
+        function.body = body
+        hir.functions[key] = function
+        replaced = replaced + count
+    expect(replaced).to_equal(1)
+    # Read the stored module back, so assertions cover the value-semantics writes.
+    for function in hir.functions.values():
+        if function.name != "f": continue
+        check_return_metadata_carriers(function.body, target, binding_known, initializer_known, callee)
+    val findings = infer_findings(hir, "W-HIR-INFER-001")
+    val expected = if binding_known or initializer_known: 0 else: 1
+    expect(findings.len()).to_equal(expected)
+    for finding in findings:
+        expect(finding.message).to_contain("callee `node_get` has no available imported return signature")
+        expect(finding.message).to_contain("type of `src` could not be determined at its declaration")
+        expect(finding.function_name).to_equal("f")
+        expect(finding.line).to_equal(4)
+
+fn check_return_metadata_carriers(block: HirBlock, target: SymbolId, binding_known: bool, initializer_known: bool, callee: SymbolId):
+    for statement in block.stmts:
+        match statement.kind:
+            case HirStmtKind.Let(symbol, binding_type, init):
+                if symbol.id != target.id: continue
+                match binding_type.kind:
+                    case HirTypeKind.Int(64, true): expect(binding_known).to_equal(true)
+                    case HirTypeKind.Error: expect(binding_known).to_equal(false)
+                    case _: fail("unexpected isolated binding type")
+                expect(init.has_type_).to_equal(initializer_known or not binding_known)
+                match init.type_.kind:
+                    case HirTypeKind.Int(64, true): expect(initializer_known).to_equal(true)
+                    case HirTypeKind.Error: expect(initializer_known).to_equal(false)
+                    case _: fail("unexpected isolated initializer type")
+                match init.kind:
+                    case HirExprKind.Call(callee_expr, _, _):
+                        match callee_expr.kind:
+                            case HirExprKind.Var(symbol): expect(symbol.id).to_equal(callee.id)
+                            case HirExprKind.NamedVar(symbol, name):
+                                expect(symbol.id).to_equal(callee.id)
+                                expect(name).to_equal("node_get")
+                            case _: fail("isolated initializer must retain its imported callee")
+                    case _: fail("isolated initializer must remain a call")
+            case HirStmtKind.Block(nested): check_return_metadata_carriers(nested, target, binding_known, initializer_known, callee)
+            case _: ()
 
 describe "Canonical return-layout and annotation provenance controls":
     it "retains the exact third-module return layout without a direct type import":
@@ -192,23 +293,14 @@ describe "W-HIR-INFER-001 for an unavailable imported return signature":
                 expect(finding.function_name).to_equal("f")
                 expect(finding.family).to_equal("inferred_type_fallback_use")
 
-    it "retains a resolved inferred owner when the imported signature is absent":
-        val source = "use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n"
-        var hir = lower_consumer(source)
-        expect(imported_node_return_has_layout(hir)).to_equal(true)
-        # Model a later phase retaining resolved expression/binding metadata
-        # while the imported callable signature is unavailable.
-        var removed = false
-        for entry in hir.symbols.symbols.values():
-            if entry.name == "node_get":
-                var symbol = entry
-                symbol.type_ = nil
-                hir.symbols.symbols[symbol.id.id] = symbol
-                removed = true
-            if entry.name == "src":
-                expect(hir_local_annotation_state(hir, entry.id)).to_equal(0)
-        expect(removed).to_equal(true)
-        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+    it "suppresses a missing signature warning using only resolved binding metadata":
+        check_isolated_return_metadata(true, false)
+
+    it "suppresses a missing signature warning using only resolved initializer metadata":
+        check_isolated_return_metadata(false, true)
+
+    it "reports a missing signature when both retained metadata carriers are unresolved":
+        check_isolated_return_metadata(false, false)
 
     it "does not classify a deliberately deferred generic imported signature":
         val provider = "pub fn node_get<T>(value: T) -> T:\n    value\n"
