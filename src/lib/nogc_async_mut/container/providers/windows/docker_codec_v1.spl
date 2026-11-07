@@ -18,14 +18,15 @@ fn text_array(values: [text]) -> SdnValue:
 pub fn windows_docker_request_encode_v1(policy: WindowsDockerPolicyV1,
         request: WindowsDockerRequestV1) -> Result<text, text>:
     val digest = windows_docker_request_digest_v1(policy, request)?
-    val fields: Dict<text, SdnValue> = {
-        "version": SdnValue.Int(1), "kind": SdnValue.String("windows-docker-request"),
+    var fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(if request.working_directory == "": 1 else: 2), "kind": SdnValue.String("windows-docker-request"),
         "podUid": SdnValue.String(request.pod_uid), "attempt": SdnValue.Int(request.attempt),
         "operationId": SdnValue.String(request.operation_id), "image": SdnValue.String(request.image),
         "command": text_array(request.command), "args": text_array(request.args),
         "cpuCount": SdnValue.Int(request.cpu_count), "memoryLimitBytes": SdnValue.Int(request.memory_limit_bytes),
         "network": SdnValue.String(request.network), "requestDigest": SdnValue.String(digest)
     }
+    if request.working_directory != "": fields["workingDirectory"] = SdnValue.String(request.working_directory)
     val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
     if source.len() > WINDOWS_DOCKER_REQUEST_MAX_BYTES_V1: return Err("docker-request-record-byte-limit")
     Ok(source)
@@ -60,16 +61,23 @@ fn decode_fields(policy: WindowsDockerPolicyV1,
     val spans = parsed.1
     val fields = as_dict(parsed.0, "", spans)?
     only_known(fields, ["version", "kind", "podUid", "attempt", "operationId", "image", "command",
-        "args", "cpuCount", "memoryLimitBytes", "network", "requestDigest"], "", spans)?
-    if field_integer(fields, "version", spans)? != 1:
+        "args", "cpuCount", "memoryLimitBytes", "network", "requestDigest", "workingDirectory"], "", spans)?
+    val version = field_integer(fields, "version", spans)?
+    if version != 1 and version != 2:
         return Err(reject("version", "version", "unsupported request version", spans))
+    var working_directory = ""
+    if version == 2:
+        working_directory = field_text(fields, "workingDirectory", spans)?
+        if working_directory == "": return Err(reject("request", "workingDirectory", "explicit directory required", spans))
+    elif fields.has("workingDirectory"):
+        return Err(reject("version", "workingDirectory", "directory requires version two", spans))
     if field_text(fields, "kind", spans)? != "windows-docker-request":
         return Err(reject("kind", "kind", "wrong request kind", spans))
     val request = WindowsDockerRequestV1(pod_uid: field_text(fields, "podUid", spans)?,
         attempt: field_integer(fields, "attempt", spans)?, operation_id: field_text(fields, "operationId", spans)?,
         image: field_text(fields, "image", spans)?, command: field_array(fields, "command", spans)?,
         args: field_array(fields, "args", spans)?, cpu_count: field_integer(fields, "cpuCount", spans)?,
-        memory_limit_bytes: field_integer(fields, "memoryLimitBytes", spans)?, network: field_text(fields, "network", spans)?)
+        memory_limit_bytes: field_integer(fields, "memoryLimitBytes", spans)?, network: field_text(fields, "network", spans)?, working_directory: working_directory)
     val digest = match windows_docker_request_digest_v1(policy, request):
         case Ok(value): value
         case Err(reason): return Err(reject("request", "", reason, spans))

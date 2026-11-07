@@ -75,7 +75,7 @@ fn runtime_provider(script: [WindowsDockerScriptedResultV1]) -> WindowsDockerRun
 
 fn retained_intent() -> RuntimeIntentV1:
     RuntimeIntentV1(pod_uid: "workload-a", attempt: 2, provider_generation: 4,
-        operation_id: "operation-a", engine: "windows-docker-process-v1", native_id: runtime_id(),
+        operation_id: "operation-a", engine: "docker", native_id: runtime_id(),
         node_boot_id: "boot-a", phase: "created")
 
 describe "Windows Docker engine admission":
@@ -84,6 +84,8 @@ describe "Windows Docker engine admission":
         var provider = runtime_provider([engine_response()])
         val probe = provider.probe()
         expect(probe.healthy).to_equal(true)
+        expect(probe.engine).to_equal("docker")
+        expect(probe.provider).to_equal("windows-docker-process-v1")
         expect(probe.launch_capable).to_equal(false)
         expect(probe.reason).to_equal("scripted-contract-only-not-live-qualified")
 
@@ -335,3 +337,52 @@ describe "Independent Windows native absence evidence":
             val recovered = provider.recover(runtime_request(), retained_intent())
             expect(provider.absence(runtime_request(), recovered.state.identity).is_err()).to_equal(true)
             expect(provider.consumed_script_count()).to_equal(5)
+
+
+describe "Windows actual wait evidence after fast exit":
+    it "retains a real wait command even when inspection already sees the terminal state":
+        val script = [engine_response(), image_response(), inspect_response("exited", 17), engine_response(), inspect_response("exited", 17),
+            response("wait", ["wait", runtime_id()], "17\n"), engine_response(), inspect_response("exited", 17)]
+        var provider = runtime_provider(script)
+        expect(provider.recover(runtime_request(), retained_intent()).status).to_equal("ok")
+        val waited = provider.wait(runtime_request())
+        expect(waited.status).to_equal("ok")
+        expect(waited.command.operation).to_equal("wait")
+        expect(waited.command.program).to_equal(runtime_policy().docker_executable)
+        expect(waited.stdout).to_equal("17\n")
+        expect(waited.state.exit_code).to_equal(17)
+        expect(waited.state.identity.engine).to_equal("docker")
+        expect(provider.consumed_script_count()).to_equal(8)
+
+
+describe "Actual Windows working-directory observation":
+    it "requires Docker to report the explicit directory before committing creation":
+        step("Bind workdir in the request, native argv and actual inspection")
+        val policy = runtime_policy()
+        var request = runtime_request()
+        request.working_directory = "C:\\work"
+        val digest = windows_docker_request_digest_v1(policy, request).unwrap()
+        val old_digest = windows_docker_request_digest_v1(policy, runtime_request()).unwrap()
+        val command = windows_docker_create_command_v1(policy, request).unwrap()
+        val created = WindowsDockerScriptedResultV1(operation: "create", program: command.program,
+            args: command.args, stdout: runtime_id(), stderr: "", exit_code: 0)
+        for actual in ["C:\\work", "C:\\wrong"]:
+            val original = observation("created").trim()
+            val output = original.replace(old_digest, digest) + "|" + actual + "\n"
+            val inspected = response("inspect", ["container", "inspect", "--format",
+                WINDOWS_DOCKER_INSPECT_FORMAT_V1 + "|{{{{.Config.WorkingDir}}}}", runtime_id()], output)
+            var provider = WindowsDockerRuntimeProviderV1.scripted(policy,
+                [engine_response(), image_response(), engine_response(), image_response(), created, engine_response(), inspected])
+            val deadline = container_effect_deadline_v1(digest, request.operation_id, ["create"], 2000).unwrap()
+            expect(provider.set_launch_deadline_v1(deadline).unwrap()).to_equal(true)
+            expect(provider.set_scripted_admission_clock_v1(1000).unwrap()).to_equal(true)
+            expect(provider.prepare_pod(request).status).to_equal("ok")
+            val result = provider.create(request)
+            if actual == request.working_directory:
+                expect(result.status).to_equal("ok")
+                expect(result.state.phase).to_equal("created")
+            else:
+                expect(result.status).to_equal("blocked")
+                expect(result.reason).to_equal("docker-inspect-working-directory-mismatch")
+                expect(result.state.phase).to_equal("prepared")
+            expect(provider.consumed_script_count()).to_equal(7)

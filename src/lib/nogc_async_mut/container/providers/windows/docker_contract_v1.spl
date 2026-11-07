@@ -4,7 +4,9 @@
 use std.common.crypto.sha256.sha256_text
 use std.common.contracts.container.runtime_v1.RuntimeCommandV1
 
+# Provider/ownership label ID is separate from the native engine name.
 pub const WINDOWS_DOCKER_ENGINE_V1 = "windows-docker-process-v1"
+pub const WINDOWS_DOCKER_NATIVE_ENGINE_V1 = "docker"
 pub const WINDOWS_DOCKER_MAX_RECORDS_V1: i64 = 64
 pub const WINDOWS_DOCKER_MAX_SCRIPT_V1: i64 = 256
 pub const WINDOWS_DOCKER_MAX_SCRIPT_BYTES_V1: i64 = 4194304
@@ -38,6 +40,7 @@ pub struct WindowsDockerRequestV1:
     cpu_count: i64
     memory_limit_bytes: i64
     network: text
+    working_directory: text = ""
 
 pub struct WindowsDockerScriptedResultV1:
     operation: text
@@ -67,7 +70,7 @@ fn safe_field(value: text) -> bool:
         not value.contains("\n") and not value.contains("\r") and not value.contains("\0")
 
 fn absolute_windows_path(value: text) -> bool:
-    if value.len() < 4 or not safe_field(value): return false
+    if value.len() < 3 or not safe_field(value): return false
     val drive = value.byte_at(0)
     ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)) and
         value.byte_at(1) == 58 and value.byte_at(2) == 92 and
@@ -119,6 +122,8 @@ pub fn windows_docker_request_reason_v1(policy: WindowsDockerPolicyV1,
             request.memory_limit_bytes < 16777216 or request.memory_limit_bytes > 1099511627776:
         return "docker-resource-limit-invalid"
     if request.network != "none": return "docker-network-none-required"
+    if request.working_directory != "" and not absolute_windows_path(request.working_directory):
+        return "docker-working-directory-invalid"
     ""
 
 # Canonical SDN hashes every scalar separately and encodes array boundaries;
@@ -129,13 +134,16 @@ pub fn windows_docker_request_digest_v1(policy: WindowsDockerPolicyV1,
         request: WindowsDockerRequestV1) -> Result<text, text>:
     val reason = windows_docker_request_reason_v1(policy, request)
     if reason != "": return Err(reason)
-    val fields = [policy.docker_executable, policy.endpoint, policy.engine_id, policy.node_boot_id,
+    var fields = [policy.docker_executable, policy.endpoint, policy.engine_id, policy.node_boot_id,
         policy.provider_generation.to_text(), policy.expected_kernel_version, policy.image_os_version,
         policy.expected_image_id, policy.timeout_ms.to_text(), policy.max_output_bytes.to_text(),
         policy.system_root, policy.temp_directory, request.pod_uid, request.attempt.to_text(),
         request.image, request.cpu_count.to_text(),
         request.memory_limit_bytes.to_text(), request.network, "process", "ContainerUser"]
     var body = "version: 1\nkind: windows-docker-request\nfields:\n"
+    if request.working_directory != "":
+        fields.push(request.working_directory)
+        body = "version: 2\nkind: windows-docker-request\nfields:\n"
     for field in fields: body = body + "    - \"" + sha256_text(field) + "\"\n"
     body = body + "commandCount: " + request.command.len().to_text() + "\ncommand:\n"
     for value in request.command: body = body + "    - \"" + sha256_text(value) + "\"\n"
@@ -169,6 +177,7 @@ pub fn windows_docker_create_command_v1(policy: WindowsDockerPolicyV1,
         "simple.boot=" + policy.node_boot_id, "simple.generation=" + policy.provider_generation.to_text(),
         "simple.request=" + digest]
     for label in labels: args = args + ["--label", label]
+    if request.working_directory != "": args = args + ["--workdir", request.working_directory]
     args = args + ["--entrypoint", request.command[0], request.image]
     var index = 1
     while index < request.command.len():

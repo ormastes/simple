@@ -57,3 +57,20 @@ slot waiting; it is not a hard response deadline.
 The persistent service-incarnation owner is implemented by the shared host lane;
 this source retains a fail-closed activation gate until that owner is supplied.
 All native Windows and common-API lifecycle qualification is still NOT_RUN.
+
+## Explicit execution projection amendment
+
+The Simple Container action projection exposes the actual entrypoint plus typed
+arguments and an explicitly requested absolute working directory. A missing
+directory remains supported by the historical version-one lifecycle but cannot
+produce a resolved action projection. Version two adds `workingDirectory`, binds
+it in the semantic digest, emits Docker `--workdir`, and checks the actual
+`Config.WorkingDir` before accepting creation. No image default is guessed. The
+mount projection is empty because this provider has no workspace mount effect.
+
+The common runtime identity uses native engine `docker`; the ownership/provider
+label remains `windows-docker-process-v1`. A terminal inspection does not replace
+the actual Docker wait command needed for an execution receipt.
+
+These amendments and their executable assertions remain NOT_RUN: no qualifying
+Windows Docker host or available admitted Simple compiler run was supplied.

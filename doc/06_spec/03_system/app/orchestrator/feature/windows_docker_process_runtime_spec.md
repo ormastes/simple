@@ -39,3 +39,8 @@ preserve the separately authorized operation timeout. Independent absence scenar
 query the exact retained ID even when the cache says exited; only successful empty
 native output yields a receipt. Present IDs and failed queries yield no absence.
 The provider re-observes its engine around that query and records a trusted sample.
+
+The explicit-directory scenario compares Docker's actual Config.WorkingDir with
+the bound request before creation is committed. A mismatched directory preserves
+uncertainty and returns blocked. Fast terminal wait still issues a native wait
+query so the receipt retains actual command/output rather than a cache-only pass.

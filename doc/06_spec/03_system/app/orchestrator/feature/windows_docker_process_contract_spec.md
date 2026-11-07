@@ -27,3 +27,12 @@ The SDN scenarios additionally round-trip quoted/newline/empty arguments, reject
 duplicate/unknown/missing/typed fields, reject modified digests and schema versions,
 require canonical serialization, and refuse a record bound to another engine policy.
 Policy is trusted local input and never decoded from request payload bytes.
+
+An explicit working directory is an additive version-two request. Version one
+keeps the image default and its previous canonical shape. Version two binds the
+selected absolute path in the semantic digest and actual `--workdir` argv; relative
+paths are refused. Action projection refuses the unresolved version-one default.
+
+Additional negatives reject a directory in a version-one record, a version-two
+record without its directory, and directory tampering without a matching digest.
+An explicit drive root is a valid absolute working directory.

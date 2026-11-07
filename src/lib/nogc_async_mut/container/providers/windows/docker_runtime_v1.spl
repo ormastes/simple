@@ -7,7 +7,7 @@
 pub use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
     WindowsDockerPolicyV1, WindowsDockerRequestV1, WindowsDockerScriptedResultV1}
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
-    WINDOWS_DOCKER_ENGINE_V1, WINDOWS_DOCKER_MAX_RECORDS_V1, WINDOWS_DOCKER_MAX_SCRIPT_V1,
+    WINDOWS_DOCKER_ENGINE_V1, WINDOWS_DOCKER_NATIVE_ENGINE_V1, WINDOWS_DOCKER_MAX_RECORDS_V1, WINDOWS_DOCKER_MAX_SCRIPT_V1,
     WINDOWS_DOCKER_MAX_SCRIPT_BYTES_V1, WINDOWS_DOCKER_INFO_FORMAT_V1,
     WINDOWS_DOCKER_IMAGE_FORMAT_V1, WINDOWS_DOCKER_INSPECT_FORMAT_V1,
     windows_docker_request_reason_v1, windows_docker_policy_reason_v1,
@@ -205,14 +205,15 @@ impl WindowsDockerRuntimeProviderV1:
     fn _identity(request: WindowsDockerRequestV1, native_id: text) -> RuntimeIdentityV1:
         RuntimeIdentityV1(pod_uid: request.pod_uid, attempt: request.attempt,
             provider_generation: self.policy.provider_generation, operation_id: request.operation_id,
-            engine: WINDOWS_DOCKER_ENGINE_V1, native_id: native_id, node_boot_id: self.policy.node_boot_id)
+            engine: WINDOWS_DOCKER_NATIVE_ENGINE_V1, native_id: native_id, node_boot_id: self.policy.node_boot_id)
 
     me fn _observe(request: WindowsDockerRequestV1, native_id: text) -> Result<RuntimeStateV1, text>:
         if not windows_docker_id_v1(native_id): return Err("docker-exact-native-id-required")
         val digest = windows_docker_request_digest_v1(self.policy, request)?
-        val format = match self.managed_scope:
+        var format = match self.managed_scope:
             case Some(_): WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2
             case nil: WINDOWS_DOCKER_INSPECT_FORMAT_V1
+        if request.working_directory != "": format = format + "|{{{{.Config.WorkingDir}}}}"
         val command = windows_docker_command_v1(self.policy, "inspect",
             ["container", "inspect", "--format", format, native_id])
         val run = self._execute(command)?
@@ -228,12 +229,16 @@ impl WindowsDockerRuntimeProviderV1:
                 expected[12] = scope.boot_id
                 val scoped = windows_docker_scope_values_v2(scope)?
                 count = 23
-                if fields.len() != count: return Err("docker-inspect-field-count")
+                if fields.len() < count: return Err("docker-inspect-field-count")
                 var field = 0
                 while field < scoped.len():
                     if fields[17 + field] != scoped[field]: return Err("docker-inspect-managed-scope-mismatch")
                     field = field + 1
             case nil: ()
+        if request.working_directory != "":
+            if fields.len() != count + 1: return Err("docker-inspect-field-count")
+            if fields[count] != request.working_directory: return Err("docker-inspect-working-directory-mismatch")
+            count = count + 1
         if fields.len() != count: return Err("docker-inspect-field-count")
         var index = 0
         while index < expected.len():
@@ -270,9 +275,9 @@ impl WindowsDockerRuntimeProviderV1:
         val observed = self._engine()
         match observed:
             case Err(reason): return runtime_probe_unavailable(WINDOWS_DOCKER_ENGINE_V1,
-                WINDOWS_DOCKER_ENGINE_V1, reason)
+                WINDOWS_DOCKER_NATIVE_ENGINE_V1, reason)
             case Ok(_): ()
-        RuntimeProbeV1(provider: WINDOWS_DOCKER_ENGINE_V1, engine: WINDOWS_DOCKER_ENGINE_V1,
+        RuntimeProbeV1(provider: WINDOWS_DOCKER_ENGINE_V1, engine: WINDOWS_DOCKER_NATIVE_ENGINE_V1,
             engine_present: true, healthy: true, launch_capable: false,
             privilege: RUNTIME_PRIVILEGE_UNKNOWN,
             reason: if self.scripted_mode: "scripted-contract-only-not-live-qualified" else: "engine-observed-request-admission-required")
@@ -356,14 +361,14 @@ impl WindowsDockerRuntimeProviderV1:
         if native_id == "": native_id = self.records[index].candidate_id
         Ok(RuntimeIntentV1(pod_uid: request.pod_uid, attempt: request.attempt,
             provider_generation: self.policy.provider_generation, operation_id: request.operation_id,
-            engine: WINDOWS_DOCKER_ENGINE_V1, native_id: native_id, node_boot_id: self.policy.node_boot_id,
+            engine: WINDOWS_DOCKER_NATIVE_ENGINE_V1, native_id: native_id, node_boot_id: self.policy.node_boot_id,
             phase: if state.identity.native_id == "" and native_id != "": "unknown" else: state.phase))
 
     pub me fn recover(request: WindowsDockerRequestV1, intent: RuntimeIntentV1) -> RuntimeOperationV1:
         val reason = windows_docker_request_reason_v1(self.policy, request)
         if reason != "": return self._failure(request, "recover", reason)
         if intent.pod_uid != request.pod_uid or intent.attempt != request.attempt or
-                intent.operation_id != request.operation_id or intent.engine != WINDOWS_DOCKER_ENGINE_V1 or
+                intent.operation_id != request.operation_id or intent.engine != WINDOWS_DOCKER_NATIVE_ENGINE_V1 or
                 intent.provider_generation != self.policy.provider_generation or intent.node_boot_id != self.policy.node_boot_id or
                 not windows_docker_id_v1(intent.native_id): return self._failure(request, "recover", "docker-recovery-intent-mismatch")
         if intent.phase != "created" and intent.phase != "running" and intent.phase != "exited" and
@@ -468,7 +473,7 @@ impl WindowsDockerRuntimeProviderV1:
             case Err(error): return self._failure(request, operation, error)
         if operation == "start" and before.phase == "running":
             return self._success(request, operation, runtime_command_empty(), before)
-        if (operation == "stop" or operation == "wait") and before.phase == "exited":
+        if operation == "stop" and before.phase == "exited":
             return self._success(request, operation, runtime_command_empty(), before)
         if operation == "start" and before.phase != "created": return self._failure(request, operation, "docker-start-phase-invalid")
         if operation == "destroy" and before.phase == "running" and not force:

@@ -187,7 +187,7 @@ describe "Windows canonical SDN request records":
     it "rejects digest tampering, wrong schema and noncanonical serialization":
         val source = windows_docker_request_encode_v1(contract_policy(), contract_request()).unwrap()
         expect(codec_error(source.replace("cpuCount: 2", "cpuCount: 3"))).to_contain("digest:requestDigest")
-        expect(codec_error(source.replace("version: 1", "version: 2"))).to_contain("version:version")
+        expect(codec_error(source.replace("version: 1", "version: 3"))).to_contain("version:version")
         expect(codec_error(source.replace("windows-docker-request", "linux-request"))).to_contain("kind:kind")
         expect(codec_error(source + "\n")).to_equal("docker-request-record-not-canonical")
         expect(codec_error("")).to_equal("docker-request-record-byte-limit")
@@ -199,3 +199,35 @@ describe "Windows canonical SDN request records":
         match windows_docker_request_decode_v1(policy, source):
             case Ok(_): fail("record from another engine policy accepted")
             case Err(reason): expect(reason).to_contain("digest:requestDigest")
+
+
+describe "Explicit Windows working directory":
+    it "preserves default version one and binds an explicitly selected directory in version two":
+        val policy = contract_policy()
+        var request = contract_request()
+        val original = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(original.contains("version: 1")).to_equal(true)
+        expect(original.contains("workingDirectory")).to_equal(false)
+        val first_digest = contract_digest(policy, request)
+        request.working_directory = "C:\\work"
+        val explicit = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(explicit.contains("version: 2")).to_equal(true)
+        expect(windows_docker_request_decode_v1(policy, explicit).unwrap().working_directory).to_equal("C:\\work")
+        expect(contract_digest(policy, request) == first_digest).to_equal(false)
+        val command = windows_docker_create_command_v1(policy, request).unwrap()
+        expect(command.args.contains("--workdir")).to_equal(true)
+        expect(command.args.contains("C:\\work")).to_equal(true)
+        request.working_directory = "C:\\"
+        expect(windows_docker_request_reason_v1(policy, request)).to_equal("")
+        request.working_directory = "relative"
+        expect(windows_docker_request_reason_v1(policy, request)).to_equal("docker-working-directory-invalid")
+
+    it "rejects directory fields outside their explicit version and refuses missing version-two directories":
+        val policy = contract_policy()
+        var request = contract_request()
+        val original = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(codec_error(original.replace("version: 1", "version: 2"))).to_contain("workingDirectory")
+        request.working_directory = "C:\\work"
+        val explicit = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(codec_error(explicit.replace("version: 2", "version: 1"))).to_contain("version:workingDirectory")
+        expect(codec_error(explicit.replace("C:\\\\work", "C:\\\\else"))).to_contain("digest:requestDigest")
