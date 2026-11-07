@@ -2674,13 +2674,9 @@ static SplArray* posix_process_run_capture_admission_v1(const char* cmd, uint64_
     argv[argc + 1] = NULL;
 
     int admission_pipe[2] = {-1, -1};
-#if defined(__linux__)
-    int isolated_capture = 1;
-#else
     /* Preserve every preexisting ordinary text/raw/unbounded expiry0 route.
      * Only new structured/admitted capture requires the stronger FD owner. */
     int isolated_capture = flags != NULL || expires_at_unix_ms > 0;
-#endif
     int64_t child_pid = isolated_capture
         ? simple_fork_child_setup_capture_v2(expires_at_unix_ms, admission_pipe)
         : rt_fork_child_setup();
