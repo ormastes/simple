@@ -1,0 +1,43 @@
+# Authored/unexecuted. The platform owner supplies the real clock sample.
+use std.spec.*
+use std.common.contracts.container.effect_deadline_v1.*
+
+fn deadline_fixture_v1() -> ContainerEffectDeadlineV1:
+    match container_effect_deadline_v1("a".repeat(64), "create-1", ["create", "start"], 2000):
+        case Ok(value): value
+        case Err(reason): fail(reason)
+
+describe "Container launch admission deadline":
+    it "binds semantic request operation and an explicit launch action":
+        val value = deadline_fixture_v1()
+        expect(container_effect_remaining_ms_v1(value, "a".repeat(64), "create-1", "create", 1999)).to_equal(Ok(1))
+        expect(container_effect_remaining_ms_v1(value, "a".repeat(64), "create-1", "start", 1000)).to_equal(Ok(1000))
+        expect(container_effect_remaining_ms_v1(value, "b".repeat(64), "create-1", "create", 1000)).to_equal(Err("container-effect-request-mismatch"))
+        expect(container_effect_remaining_ms_v1(value, "a".repeat(64), "create-2", "create", 1000)).to_equal(Err("container-effect-operation-mismatch"))
+        expect(container_effect_remaining_ms_v1(value, "a".repeat(64), "create-1", "attach", 1000)).to_equal(Err("container-effect-action-not-authorized"))
+
+    it "rejects exact expiry past expiry and failed clock samples":
+        val value = deadline_fixture_v1()
+        for now in [2000, 2001, 9223372036854775807]:
+            expect(container_effect_remaining_ms_v1(value, "a".repeat(64), "create-1", "create", now)).to_equal(Err("container-effect-deadline-expired"))
+        expect(container_effect_remaining_ms_v1(value, "a".repeat(64), "create-1", "create", -1)).to_equal(Err("container-effect-clock-unavailable"))
+
+    it "does not turn a launch grant into lifecycle or read authority":
+        for action in ["stop", "destroy", "inspect", "recover", "logs", "wait", "unknown"]:
+            expect(container_effect_deadline_v1("a".repeat(64), "create-1", [action], 2000)).to_equal(Err("container-effect-action-unsupported"))
+        expect(container_effect_deadline_v1("a".repeat(64), "create-1", [], 2000)).to_equal(Err("container-effect-actions-invalid"))
+        expect(container_effect_deadline_v1("a".repeat(64), "create-1", ["create", "create"], 2000)).to_equal(Err("container-effect-action-duplicate"))
+
+    it "revalidates manually constructed contexts and rejects invalid identity":
+        var value = deadline_fixture_v1()
+        value.actions = ["destroy"]
+        expect(container_effect_remaining_ms_v1(value, "a".repeat(64), "create-1", "destroy", 1000)).to_equal(Err("container-effect-action-unsupported"))
+        expect(container_effect_deadline_v1("not-a-digest", "create-1", ["create"], 2000)).to_equal(Err("container-effect-request-digest-invalid"))
+        expect(container_effect_deadline_v1("a".repeat(64), "", ["create"], 2000)).to_equal(Err("container-effect-operation-id-invalid"))
+        expect(container_effect_deadline_v1("a".repeat(64), "create-1", ["create"], 0)).to_equal(Err("container-effect-expiry-invalid"))
+
+    it "keeps the maximum valid launch window within signed integer bounds":
+        val value = match container_effect_deadline_v1("a".repeat(64), "attach-1", ["attach"], 9223372036854775807):
+            case Ok(found): found
+            case Err(reason): fail(reason)
+        expect(container_effect_remaining_ms_v1(value, "a".repeat(64), "attach-1", "attach", 0)).to_equal(Ok(9223372036854775807))
