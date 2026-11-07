@@ -1,0 +1,166 @@
+# Resolve a mutable value path once. Array ancestors detach before returning a
+# nested value node; reference-class nodes deliberately retain their identity.
+use compiler.core.ast.expr_get
+use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_INDEX, EXPR_IDENT, expr_owner_int}
+use compiler.core.interpreter.eval.{eval_expr, eval_had_error, eval_set_error, eval_current_decl_id}
+use compiler.core.interpreter.eval_calls.{interp_struct_is_value_type, val_copy_if_value_struct}
+use compiler.core.interpreter.eval_access.eval_resolve_special_field_read
+use compiler.core.interpreter.env.{env_assign, env_has_frame, env_set_local}
+use compiler.core.interpreter.resolve.resolve_is_fast_local
+use compiler.core.interpreter.value.*
+
+class InterpreterValuePlace:
+    root: i64
+    value: i64
+    root_name: text
+    root_slot: i64
+    kinds: [i64]
+    fields: [text]
+    keys: [i64]
+
+    me append_field(name: text):
+        if not val_is_struct(self.value):
+            eval_set_error("invalid mutable field path")
+            return
+        self.value = val_struct_get_field(self.value, name)
+        if self.value < 0:
+            eval_set_error("missing field in value path: " + name)
+            return
+        self.kinds.push(0)
+        self.fields.push(name)
+        self.keys.push(-1)
+
+    me append_index(key: i64):
+        var child: i64 = -1
+        if val_is_array(self.value) and val_is_int(key):
+            child = val_array_at(self.value, val_get_int(key))
+        elif val_is_struct(self.value):
+            child = val_struct_get_field(self.value, val_to_text(key))
+            # Read semantics match eval_index_expr: absent struct/dictionary
+            # keys yield nil. A mut place is validated later on writeback.
+            if child < 0: child = val_make_nil()
+        elif val_is_text(self.value) and val_is_int(key):
+            val text_value = val_get_text(self.value)
+            val index = val_get_int(key)
+            if index >= 0 and index < text_value.len():
+                child = val_make_text(text_value[index])
+        if child < 0:
+            eval_set_error("invalid index in value path")
+            return
+        self.value = child
+        self.kinds.push(1)
+        self.fields.push("")
+        self.keys.push(key)
+
+    fn resolve_prefix(count: i64) -> i64:
+        var current = self.root
+        var step: i64 = 0
+        while step < count:
+            if self.kinds[step] == 0:
+                if not val_is_struct(current):
+                    eval_set_error("invalid mutable field owner")
+                    return -1
+                current = val_struct_get_field(current, self.fields[step])
+            elif val_is_array(current) and val_is_int(self.keys[step]):
+                val index = val_get_int(self.keys[step])
+                var child = val_array_at(current, index)
+                if child < 0:
+                    eval_set_error("array index out of bounds in mutable path")
+                    return -1
+                val value_struct = val_is_struct(child) and interp_struct_is_value_type(child)
+                if val_is_array(child) or value_struct:
+                    if not val_array_ensure_unique(current):
+                        eval_set_error("invalid mutable array owner")
+                        return -1
+                    child = val_array_at(current, index)
+                    if value_struct and not val_array_element_owned(current, index):
+                        child = val_copy_if_value_struct(child)
+                        val _ = val_array_set(current, index, child)
+                current = child
+            elif val_is_struct(current):
+                current = val_struct_get_field(current, val_to_text(self.keys[step]))
+            else:
+                eval_set_error("invalid mutable index owner")
+                return -1
+            if current < 0:
+                eval_set_error("missing value in mutable path")
+                return -1
+            step = step + 1
+        current
+
+    fn mutable_value() -> i64:
+        self.resolve_prefix(self.kinds.len())
+
+    fn overlaps(other: InterpreterValuePlace) -> bool:
+        if self.root != other.root: return false
+        var step: i64 = 0
+        while step < self.kinds.len() and step < other.kinds.len():
+            if self.kinds[step] != other.kinds[step]: return false
+            if self.kinds[step] == 0:
+                if self.fields[step] != other.fields[step]: return false
+            elif val_to_text(self.keys[step]) != val_to_text(other.keys[step]):
+                return false
+            step = step + 1
+        true
+
+    fn store(incoming: i64):
+        val snapshot = val_copy_if_value_struct(incoming)
+        if self.kinds.len() == 0:
+            if self.root_name == "":
+                eval_set_error("mut argument has no writable binding")
+                return
+            if not env_assign(self.root_name, snapshot):
+                eval_set_error("mut argument binding no longer exists")
+                return
+            var slot = self.root_slot
+            if slot < 0 and eval_current_decl_id >= 0:
+                slot = resolve_is_fast_local(eval_current_decl_id, self.root_name)
+            if slot >= 0 and env_has_frame(): env_set_local(slot, snapshot)
+            return
+        val last = self.kinds.len() - 1
+        val owner = self.resolve_prefix(last)
+        if eval_had_error: return
+        if self.kinds[last] == 0 and val_is_struct(owner):
+            val index = val_struct_find_field_idx(owner, self.fields[last])
+            if index >= 0:
+                val_struct_set_field_idx(owner, index, snapshot)
+                return
+        elif val_is_array(owner) and val_is_int(self.keys[last]):
+            if val_array_set(owner, val_get_int(self.keys[last]), snapshot): return
+        elif val_is_struct(owner) and val_get_struct_name(owner) == "__dict":
+            val_struct_upsert_field(owner, val_to_text(self.keys[last]), snapshot)
+            return
+        eval_set_error("invalid mut argument writeback path")
+
+fn eval_prepare_value_place(eid: i64) -> InterpreterValuePlace:
+    val node = expr_get(eid)
+    if node.tag == EXPR_FIELD_ACCESS:
+        # Namespace/enum/static precedence is independent of a same-named
+        # environment binding. Special forms execute once and are value roots.
+        val special = eval_resolve_special_field_read(eid)
+        if special != -2: return eval_value_place_from_value(eid, special)
+    if node.tag == EXPR_FIELD_ACCESS or node.tag == EXPR_INDEX:
+        val place = eval_prepare_value_place(node.left)
+        if eval_had_error: return place
+        if node.tag == EXPR_FIELD_ACCESS:
+            place.append_field(node.s_val)
+        else:
+            val key = eval_expr(node.right)
+            if not eval_had_error: place.append_index(key)
+        return place
+    eval_value_place_from_value(eid, eval_expr(eid))
+
+fn eval_value_place_from_value(eid: i64, incoming: i64) -> InterpreterValuePlace:
+    val node = expr_get(eid)
+    var value = incoming
+    val name = if node.tag == EXPR_IDENT: node.s_val else: ""
+    if name == "" and not eval_had_error:
+        value = val_copy_if_value_struct(value)
+    InterpreterValuePlace(root: value, value: value, root_name: name,
+        root_slot: if name == "": -1 else: expr_owner_int(eid),
+        kinds: [], fields: [], keys: [])
+
+fn eval_mutable_value_place(eid: i64) -> i64:
+    val place = eval_prepare_value_place(eid)
+    if eval_had_error: return -1
+    place.mutable_value()
