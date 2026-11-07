@@ -15,19 +15,26 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 thread_local! {
-    static METHOD_INDEX_CLASS: RefCell<HashMap<String, HashMap<String, usize>>> =
+    /// Keyed by the DEFINITION's identity (its address), not the bare class
+    /// name: same-named classes from different modules are different
+    /// definitions with different method layouts, and a name-keyed cache
+    /// would miss (and rebuild a HashMap) on every call that alternates
+    /// between them. The per-entry name check below still guards address
+    /// reuse after a definition is dropped.
+    static METHOD_INDEX_CLASS: RefCell<HashMap<usize, HashMap<String, usize>>> =
         RefCell::new(HashMap::new());
     static METHOD_INDEX_IMPL: RefCell<HashMap<String, HashMap<String, usize>>> =
         RefCell::new(HashMap::new());
 }
 
-pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_name: &str) -> Option<usize> {
+pub fn lookup_class_method_index(class_def: &ClassDef, _class_name: &str, method_name: &str) -> Option<usize> {
     crate::perf_counters::bump(&crate::perf_counters::MECALL_METHOD_LOOKUPS, 1);
+    let def_key = class_def as *const ClassDef as usize;
     METHOD_INDEX_CLASS.with(|cache| {
         // Fast path: probe with &str — avoids String allocation when entry exists (common case)
         {
             let cache_ref = cache.borrow();
-            if let Some(class_cache) = cache_ref.get(class_name) {
+            if let Some(class_cache) = cache_ref.get(&def_key) {
                 if let Some(idx) = class_cache.get(method_name).copied() {
                     if class_def
                         .methods
@@ -48,7 +55,7 @@ pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_
             .map(|(i, method)| (method.name.clone(), i))
             .collect();
         let result = class_cache.get(method_name).copied();
-        cache_mut.insert(class_name.to_string(), class_cache);
+        cache_mut.insert(def_key, class_cache);
         result
     })
 }
