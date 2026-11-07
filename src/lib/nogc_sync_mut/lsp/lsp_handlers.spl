@@ -663,6 +663,13 @@ fn lsp_handle_outgoing_calls(id: text, body: text) -> text:
 
 # --- Inlay Hints (heavy — calls query engine) ---
 
+# A failed query is not an empty semantic result. Keep the canonical JSON-RPC
+# internal-error envelope and distinguish the bounded-process timeout status.
+fn lsp_heavy_query_failure(id: text, exit_code: i64) -> text:
+    if exit_code == 124:
+        return make_error(id, ERROR_INTERNAL_ERROR(), "LSP query timed out")
+    make_error(id, ERROR_INTERNAL_ERROR(), "LSP query failed (exit {exit_code})")
+
 fn lsp_handle_inlay_hint(id: text, body: text) -> text:
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
@@ -672,7 +679,12 @@ fn lsp_handle_inlay_hint(id: text, body: text) -> text:
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
-    if exit_code != 0 or out.trim() == "":
+    lsp_inlay_hint_query_response(id, out, exit_code)
+
+pub fn lsp_inlay_hint_query_response(id: text, out: text, exit_code: i64) -> text:
+    if exit_code != 0:
+        return lsp_heavy_query_failure(id, exit_code)
+    if out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
     var hints: [text] = []
@@ -741,7 +753,12 @@ fn lsp_handle_code_action(id: text, body: text) -> text:
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
-    if exit_code != 0 or out.trim() == "":
+    lsp_code_action_query_response(id, uri, out, exit_code)
+
+pub fn lsp_code_action_query_response(id: text, uri: text, out: text, exit_code: i64) -> text:
+    if exit_code != 0:
+        return lsp_heavy_query_failure(id, exit_code)
+    if out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
     make_json_result(id=id, result=lsp_code_actions_from_query_output(out, uri))
 
