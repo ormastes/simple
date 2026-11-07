@@ -57,7 +57,9 @@ impl<'a> MirLowerer<'a> {
                 let Some((_, decl_ty)) = decl_fields.get(i) else {
                     continue;
                 };
-                let boxed = self.box_scalar_for_tagged_slot(*decl_ty, field.ty, field_regs[i])?;
+                // `P(v: 3)` with `v: f64` stores a float constant.
+                let raw = self.float_slot_from_int_literal(*decl_ty, field, field_regs[i])?;
+                let boxed = self.box_scalar_for_tagged_slot(*decl_ty, field.ty, raw)?;
                 field_regs[i] = boxed;
             }
         }

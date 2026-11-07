@@ -341,6 +341,12 @@ impl<'a> MirLowerer<'a> {
             let Some(arg_expr) = args.get(i) else {
                 continue;
             };
+            // `takef(3)` / `takef(-3)` into `x: f64` passes a float constant.
+            let float_reg = self.float_slot_from_int_literal(param_ty, arg_expr, *arg_reg)?;
+            if float_reg != *arg_reg {
+                *arg_reg = float_reg;
+                continue;
+            }
             // `Any?` params are tagged-value slots too -- see
             // `slot_holds_tagged_value`.
             if self.slot_holds_tagged_value(param_ty) {
