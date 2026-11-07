@@ -35,6 +35,9 @@ performs the native wait. The host reads its actual Unix clock after that wait.
 
 Before the actual wait, the same owner exclusively creates and synchronizes an
 immutable collection claim bound to the exact execution/op/provider/native ID.
+The claim is a canonical SDN dictionary with version/kind, plan digest,
+operation digest, provider digest and full native ID; loading compares exact
+expected bytes and introduces no second parser.
 If a crash leaves that claim without a valid complete stage, collection reports
 recovery-required and never re-waits or invents a fresh original timestamp.
 A qualified in-process observation survives publication failure as

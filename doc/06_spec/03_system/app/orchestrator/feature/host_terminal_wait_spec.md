@@ -13,7 +13,7 @@ and engine policy; the collector itself uses only the shared read API.
 
 | Scenario | Intended assertion |
 | --- | --- |
-| Actual shared read | Resolver consumes its recover/inspect results and common wait consumes exactly one wait result. Full command/raw output, CLI zero and workload 17 are retained with actual host time. Journal sequence and held capacity remain unchanged. |
+| Actual shared read | Resolver consumes its recover/inspect results and common wait consumes exactly one wait result. Full command/raw output, CLI zero and workload 17 are retained with actual host time. The persisted collection claim parses as canonical SDN and binds exact plan/op/provider/native ID. Journal sequence and held capacity remain unchanged. |
 | Original repeat/reopen | Repeated collection preserves exact canonical bytes and time. The actual host journal closes/reopens; replay succeeds with no native queries even when the fixture owner is marked destroyed and has no scripted commands. This marker is fixture data, not real cleanup/absence. |
 | Native refusal | Failed CLI or malformed wait output returns the updated consumed common owner, no receipt, unchanged journal sequence and retained capacity charge. Its immutable collection claim prevents another wait on retry. |
 | Pending observation | An actual private `.write` collision causes publication failure after a qualified wait; the returned owner remains exited with held charge and `Some(receipt)` plus an error. Final publication is absent and retry cannot invent a new wait/time. |

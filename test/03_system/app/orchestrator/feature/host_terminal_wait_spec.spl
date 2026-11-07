@@ -1,13 +1,18 @@
 # @req HOST-WAIT-01 HOST-WAIT-02 HOST-WAIT-03
 # NOT_RUN. Real shared API/journal/file retention with scripted native commands.
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, fail}
 use test.fixtures.orchestration.host_terminal_wait_fixture_v2.*
 use std.nogc_sync_mut.orchestration.host_terminal_wait_v2.*
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{host_capacity_owner_close_v1,
     host_capacity_owner_open_v1}
 use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
 use std.common.contracts.container.execution_evidence_v2.container_runtime_observation_digest_v2
+use std.common.contracts.container.execution_v2.container_execution_plan_digest_v2
 use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists, file_remove, file_fsync}
 use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
 use std.nogc_sync_mut.io_runtime.{dir_remove, dir_create}
@@ -36,6 +41,20 @@ describe "Original host terminal wait retained by the shared host owner":
         val saved = file_read_regular_no_follow_bounded(local.capacity.journal.root +
             "/host-terminal-waits-v2/" + sha256_text("operation_1") + ".sdn", 8388608).unwrap()
         expect(saved).to_equal(host_terminal_wait_receipt_encode_v2(receipt).unwrap())
+        val claim = file_read_regular_no_follow_bounded(local.capacity.journal.root +
+            "/host-terminal-waits-v2/" + sha256_text("operation_1") + ".claim", 1024).unwrap()
+        val parsed = sdn_parse_strict_v1(claim, SdnStrictLimitsV1(max_source_bytes: 1024,
+            max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8)).unwrap()
+        expect(sdn_encode_canonical(parsed.value) + "\n").to_equal(claim)
+        match parsed.value:
+            case SdnValue.Dict(fields):
+                expect(fields["version"]).to_equal(SdnValue.Int(2))
+                expect(fields["kind"]).to_equal(SdnValue.String("host-terminal-wait-collection"))
+                expect(fields["planDigest"]).to_equal(SdnValue.String(container_execution_plan_digest_v2(receipt.execution).unwrap()))
+                expect(fields["operationDigest"]).to_equal(SdnValue.String(receipt.operation_digest))
+                expect(fields["providerIdentityDigest"]).to_equal(SdnValue.String(receipt.provider_identity_digest))
+                expect(fields["nativeId"]).to_equal(SdnValue.String(receipt.wait.state.identity.native_id))
+            case _: fail("retained collection claim is not a canonical SDN dictionary")
         expect(host_capacity_owner_close_v1(result.local.capacity).unwrap()).to_equal(true)
         expect(dir_remove(local.root, true)).to_equal(true)
 
