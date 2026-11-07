@@ -96,8 +96,11 @@ The focused fallback barrier remains a mitigation, not full lifecycle closure.
 
 ## Continuation constraints
 
-- Keep PR #7356 draft until required actual runtime checks pass. Source review
-  and authored manuals are not substitute execution evidence.
+- On 2026-11-07 the user explicitly instructed landing after being informed
+  that PR #7356 was draft and required runtime verification remained incomplete.
+  Integrate the reviewed source fixes with these open checks retained; this is
+  not release qualification or closure of every HIR bug. Source review and
+  authored manuals are not substitute execution evidence.
 - Preserve other sessions' work and active bootstrap directories. Revalidate
   exact candidate/source/runtime/tool identities before any new execution.
 - Preserve the first failed replay and all three probe envelopes. At most three
