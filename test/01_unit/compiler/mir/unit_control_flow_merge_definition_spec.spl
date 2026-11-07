@@ -1,0 +1,140 @@
+# @req REQ-SSPEC-COMPILER
+# Production MIR invariant regression. Authored/unrun; not native admission.
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.Span
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+# Model the valid post-attribution Unit expectation explicitly so an absent
+# frontend type annotation cannot make this regression pass vacuously.
+fn payloadless_tail(block: HirBlock, mark_never: bool) -> HirBlock:
+    var result = block
+    if not result.has:
+        return result
+    var value: HirExpr = result.value
+    match value.kind:
+        case HirExprKind.Block(inner):
+            value.kind = HirExprKind.Block(payloadless_tail(inner, mark_never))
+        case HirExprKind.If(_, _, _) | HirExprKind.IfChain(_, _) | HirExprKind.MatchCase(_, _):
+            value.has_type_ = true
+            val payloadless_kind = if mark_never: HirTypeKind.Never else: HirTypeKind.Unit
+            value.type_ = HirType(kind: payloadless_kind, span: value.span)
+        case _: ()
+    result.value = value
+    result
+
+struct UnitMergeAudit:
+    functions: i64
+    units: i64
+    illegal_constants: i64
+    integer_value_functions: i64
+
+fn audit(source: text, payloadless_mode: i64) -> UnitMergeAudit:
+    val parsed = parse_full_frontend(source, "unit_merge.spl", "unit_merge", Logger(level: 0))
+    var lowering = HirLowering.with_filename("unit_merge.spl")
+    var hir = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    if payloadless_mode > 0:
+        var index = 0
+        while index < hir.functions.len():
+            var function = hir.functions[index]
+            if function.name.ends_with("unit_if") or function.name.ends_with("unit_chain") or function.name.ends_with("unit_dense") or function.name.ends_with("unit_sparse") or function.name.ends_with("unit_guarded") or function.name.ends_with("unit_enum"):
+                function.body = payloadless_tail(function.body, payloadless_mode == 2)
+                hir.functions[index] = function
+            index = index + 1
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    expect(mir_lowering.errors.len()).to_equal(0)
+    var units = 0
+    var illegal = 0
+    var integer_values = 0
+    for raw_function in mir.functions.values():
+        val function: MirFunction = raw_function
+        var unit_ids: Dict<i64, bool> = {}
+        for raw_local in function.locals:
+            val local: MirLocal = raw_local
+            if local.type_.kind == MirTypeKind.Unit or local.type_.kind == MirTypeKind.Never:
+                unit_ids[local.id.id] = true
+                units = units + 1
+        if function.signature.return_type.kind == MirTypeKind.I64:
+            integer_values = integer_values + 1
+        for raw_block in function.blocks:
+            val block: MirBlock = raw_block
+            for raw_inst in block.instructions:
+                val inst: MirInst = raw_inst
+                match inst.kind:
+                    case MirInstKind.Const(destination, MirConstValue.Int(_), _):
+                        if unit_ids.has(destination.id):
+                            illegal = illegal + 1
+                    case _: ()
+    UnitMergeAudit(functions: mir.functions.len(), units: units, illegal_constants: illegal, integer_value_functions: integer_values)
+
+val SOURCE = """
+fn unit_if(flag: bool) -> ():
+    if flag:
+        return
+    else:
+        return
+fn unit_chain(code: i64):
+    if code == 0:
+        return
+    elif code == 1:
+        return
+    else:
+        return
+fn unit_dense(code: i64) -> ():
+    match code:
+        case 0: return
+        case 1: return
+        case 2: return
+        case 3: return
+        case _: return
+fn unit_sparse(code: i64):
+    match code:
+        case 1: return
+        case 100: return
+        case _: return
+fn unit_guarded(code: i64, flag: bool) -> ():
+    match code:
+        case 1 if flag: return
+        case _: return
+fn unit_enum(value: text?):
+    match value:
+        case Some(_): return
+        case None: return
+fn value_if(flag: bool) -> i64:
+    if flag: 11 else: 22
+fn value_chain(code: i64) -> i64:
+    if code == 0: 11
+    elif code == 1: 22
+    else: 33
+fn value_match(code: i64) -> i64:
+    match code:
+        case 1: 11
+        case _: 22
+"""
+
+describe "Unit/Never control-flow merge results have no integer payload":
+    it "keeps explicitly attributed Unit if/if-chain/match results free of integer definitions":
+        val result = audit(SOURCE, 1)
+        expect(result.functions).to_equal(9)
+        expect(result.units > 0).to_equal(true)
+        expect(result.illegal_constants).to_equal(0)
+        expect(result.integer_value_functions).to_equal(3)
+    it "preserves normal inferred lowering and real integer value branches":
+        val result = audit(SOURCE, 0)
+        expect(result.functions).to_equal(9)
+        expect(result.illegal_constants).to_equal(0)
+        expect(result.integer_value_functions).to_equal(3)
+    it "keeps Never-attributed all-return merge results free of integer definitions":
+        val result = audit(SOURCE, 2)
+        expect(result.functions).to_equal(9)
+        expect(result.units > 0).to_equal(true)
+        expect(result.illegal_constants).to_equal(0)
+        expect(result.integer_value_functions).to_equal(3)
