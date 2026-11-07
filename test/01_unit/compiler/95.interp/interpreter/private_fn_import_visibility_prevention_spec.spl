@@ -1,0 +1,80 @@
+# Prevention for interp_private_names_leak_across_modules_2026-11-05: the legal forms stay legal.
+# A bare `fn` is private to its file. A braced `use m.{name}` that names a
+# private fn of `m` from a file in a DIFFERENT directory is a hard error; a
+# `pub fn`, an `export`ed fn and a same-directory sibling stay legal.
+# Needs the fixed seed: SIMPLE_BINARY=<seed built from this tree>.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, mkdir_p}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn fixture_root(tag: text) -> text:
+    val root = get_temp_dir().replace("\\", "/") + "/priv_vis_" + tag
+    val _ = mkdir_p(root + "/app/sub")
+    root
+
+fn run_main(root: text, main_src: text) -> (text, text, i64):
+    val _m = write_file(root + "/app/main.spl", main_src)
+    process_run_timeout(binary(), [root + "/app/main.spl"], 300000)
+
+describe "private fn import visibility (legal forms)":
+    it "allows the pub fn of the same module":
+        val root = fixture_root("pub")
+        val _a = write_file(root + "/app/sub/lib_mod.spl", "fn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n")
+        val (out, err, rc) = run_main(root, "use app.sub.lib_mod.{{open_api}}\nprint open_api()\n")
+        expect(rc).to_equal(0)
+        expect(out.contains("42")).to_equal(true)
+    it "allows an exported bare fn":
+        val root = fixture_root("export")
+        val _a = write_file(root + "/app/sub/lib_mod.spl", "fn helper() -> i64:\n    7\nexport helper\n")
+        val (out, err, rc) = run_main(root, "use app.sub.lib_mod.{{helper}}\nprint helper()\n")
+        expect(rc).to_equal(0)
+        expect(out.contains("7")).to_equal(true)
+    it "keeps same-directory sibling access":
+        val root = fixture_root("sibling")
+        val _a = write_file(root + "/app/lib_mod.spl", "fn sib() -> i64:\n    9\n")
+        val (out, err, rc) = run_main(root, "use app.lib_mod.{{sib}}\nprint sib()\n")
+        expect(rc).to_equal(0)
+        expect(out.contains("9")).to_equal(true)
+
+describe "baseline ratchet":
+    it "a baselined private import only warns":
+        val root = fixture_root("baselined")
+        val _g = mkdir_p(root + "/.git")
+        val _b1 = mkdir_p(root + "/scripts/check")
+        val _b2 = write_file(root + "/scripts/check/private_import_baseline.txt", "app/sub/lib_mod.spl|secret_helper\n")
+        val _a = write_file(root + "/app/sub/lib_mod.spl", "fn secret_helper() -> i64:\n    42\n")
+        val (out, err, rc) = run_main(root, "use app.sub.lib_mod.{{secret_helper}}\nprint secret_helper()\n")
+        expect(rc).to_equal(0)
+        expect(out.contains("42")).to_equal(true)
+        expect(err.contains("visibility-warning")).to_equal(true)
+    it "a private import missing from the baseline errors":
+        val root = fixture_root("unlisted")
+        val _g = mkdir_p(root + "/.git")
+        val _b1 = mkdir_p(root + "/scripts/check")
+        val _b2 = write_file(root + "/scripts/check/private_import_baseline.txt", "app/sub/other.spl|secret_helper\n")
+        val _a = write_file(root + "/app/sub/lib_mod.spl", "fn secret_helper() -> i64:\n    42\n")
+        val (out, err, rc) = run_main(root, "use app.sub.lib_mod.{{secret_helper}}\nprint secret_helper()\n")
+        expect(rc != 0).to_equal(true)
+        expect((out + err).contains("private fn `secret_helper`")).to_equal(true)
+    it "a nested baseline copy cannot whitelist a pair":
+        val root = fixture_root("nested")
+        val _g = mkdir_p(root + "/.git")
+        val _b1 = mkdir_p(root + "/app/scripts/check")
+        val _b2 = write_file(root + "/app/scripts/check/private_import_baseline.txt", "app/sub/lib_mod.spl|secret_helper\n")
+        val _a = write_file(root + "/app/sub/lib_mod.spl", "fn secret_helper() -> i64:\n    42\n")
+        val (out, err, rc) = run_main(root, "use app.sub.lib_mod.{{secret_helper}}\nprint secret_helper()\n")
+        expect(rc != 0).to_equal(true)
+    it "the stale-entry gate selftest passes":
+        val (out, err, rc) = process_run_timeout("sh", ["scripts/check/check-private-import-baseline.shs", "--selftest"], 120000)
+        expect(rc).to_equal(0)
+        expect(out.contains("PASS")).to_equal(true)
+    it "the committed baseline has no stale entries":
+        val (out, err, rc) = process_run_timeout("sh", ["scripts/check/check-private-import-baseline.shs", "--base", "HEAD"], 300000)
+        expect(rc).to_equal(0)
+        expect(out.contains("0 stale")).to_equal(true)

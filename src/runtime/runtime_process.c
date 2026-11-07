@@ -2190,8 +2190,14 @@ int64_t rt_browser_renderer_spawn_sandboxed(
 #endif
 }
 
+/* Peak RSS (KiB) of the child reaped by the latest rt_process_wait (wait4
+ * ru_maxrss), and whether that reap is newer than the latest run_capture. */
+static _Thread_local int64_t posix_wait_peak_rss_kib = -1;
+static _Thread_local int posix_wait_peak_is_latest = 0;
+
 static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
                                            int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes) {
+    posix_wait_peak_is_latest = 0;
     if (raw_bytes && (timeout_ms < 0 || max_output_bytes < 0 || max_output_bytes > 16777216))
         return process_capture_result("", 0, "", 0, -1, 0, timeout_ms, 1, 0);
     if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1) {
@@ -2275,6 +2281,7 @@ int64_t rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args
  * run_bounded call: wait4() ru_maxrss captured in runtime_fork.c. -1 = not
  * measured (0 is never a real peak). Shared fork-parent state, not per thread. */
 int64_t rt_process_last_child_peak_rss_kib(void) {
+    if (posix_wait_peak_is_latest) return posix_wait_peak_rss_kib;
     int64_t bytes = rt_fork_parent_peak_rss_bytes();
     return bytes > 0 ? bytes / 1024 : -1;
 }
@@ -3487,6 +3494,13 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     }
     DWORD exit_code = 0;
     bool completed = result == WAIT_OBJECT_0 && GetExitCodeProcess(process, &exit_code);
+    /* Handle still open: record the child's own peak working set (R5). */
+    win_last_child_peak_rss_kib = -1;
+    PROCESS_MEMORY_COUNTERS child_counters = {0};
+    child_counters.cb = (DWORD)sizeof(child_counters);
+    if (completed && K32GetProcessMemoryInfo(process, &child_counters, child_counters.cb)) {
+        win_last_child_peak_rss_kib = (int64_t)(child_counters.PeakWorkingSetSize / 1024);
+    }
     AcquireSRWLockExclusive(&rt_mcp_children_lock);
     struct RtMcpChild** link = &rt_mcp_children;
     while (*link && *link != child) link = &(*link)->next;
@@ -3497,13 +3511,31 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     return completed ? (int64_t)(int32_t)exit_code : -1;
 }
 #else
+#include <sys/resource.h>
+/* waitpid twin that keeps the reaped child's rusage, so
+ * rt_process_last_child_peak_rss_kib can report it (supervised builder R5). */
+static pid_t posix_wait_record_peak(pid_t pid, int* status, int options) {
+    struct rusage usage;
+    memset(&usage, 0, sizeof(usage));
+    pid_t r = wait4(pid, status, options, &usage);
+    if (r > 0) {
+        int64_t kib = (int64_t)usage.ru_maxrss;
+#if defined(__APPLE__)
+        kib /= 1024; /* bytes on Darwin */
+#endif
+        posix_wait_peak_rss_kib = kib > 0 ? kib : -1;
+        posix_wait_peak_is_latest = 1;
+    }
+    return r;
+}
+
 int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     if (pid <= 0) return -1;
     if (timeout_ms <= 0) {
         int status = 0;
         pid_t waited;
         do {
-            waited = waitpid((pid_t)pid, &status, 0);
+            waited = posix_wait_record_peak((pid_t)pid, &status, 0);
         } while (waited < 0 && errno == EINTR);
         if (waited < 0) return -1;
         if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
@@ -3520,7 +3552,7 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     int64_t waited_ms = 0;
     for (;;) {
         int status = 0;
-        pid_t r = waitpid((pid_t)pid, &status, WNOHANG);
+        pid_t r = posix_wait_record_peak((pid_t)pid, &status, WNOHANG);
         if (r < 0 && errno == EINTR) continue;
         if (r < 0) {
             /* A failed wait is NOT a signal death, and collapsing it to -1 made

@@ -27,3 +27,6 @@ Every unknown root is named in diagnostics. Consequence: Nominal-typed exports
 are denied until nominal members are projected. Still deferred: AC-EAPI-005
 generated-surface recheck, E4 parity, routes-not-collected paths (allowed with
 reason; owner question whether an active denying profile should refuse them).
+
+## 2026-11-07 temporary warn-only default
+Owner decision: SIMPLE_EXTREME_PUBLIC_API unset => warn-only at every profile (never denies; cached SMF/no-op admission not refused; one summary warning per module, SIMPLE_EXTREME_PUBLIC_API_VERBOSE=1 for details). =1 keeps profile dispositions; =0 is the explicit off switch. Default flips to deny at robust once E3 stdlib migration lands.

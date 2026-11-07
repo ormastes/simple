@@ -72,3 +72,15 @@ artifact was used. The duplicate plain-path fixture was removed; the remaining
 single fixture path includes both a space and an apostrophe. The POSIX test is
 skipped on Windows and verifies the fixture reached `sleep` before testing
 termination.
+
+## 2026-11-07 — native spawn probe: no crash reproduced
+
+The self-hosted Stage 2 (`/private/tmp/s3-par/stage2/simple`, sha256 prefix
+`d05b5bcf561e6fee`, cranelift, core-c-bootstrap runtime, source `80fbc6a5860`)
+native-built a probe that calls `process_spawn_async` 50 times with three argv
+elements, then once with `sh scripts/resource/kill_simple_monitor.shs --help`.
+All 51 calls returned a positive PID, with no SIGSEGV and exit 0. This covers
+the posix_spawnp runtime path. It does not cover the original crash shape:
+the full test-runner `ensure_kill_monitor_running` running with live runner
+threads, which needs a full-CLI binary. Status stays open, and the original
+crash has still not been reproduced.

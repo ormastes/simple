@@ -637,8 +637,10 @@ fn cl_translate_instruction(
         case BinOp(dest, op, left, right):
             val a = cl_translate_operand(ctx, cl_module, left, value_map, slot_map, func)
             val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
-            val raw_result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
-            val result = cl_canonicalize_unsigned_narrow(ctx, raw_result, local_type(dest.id, func))
+            val dest_type = local_type(dest.id, func)
+            val raw_result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func, dest_type)
+            val signed_result = cl_canonicalize_signed_narrow(ctx, raw_result, dest_type)
+            val result = cl_canonicalize_unsigned_narrow(ctx, signed_result, dest_type)
             value_map[dest.id] = result
             if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
@@ -647,7 +649,7 @@ fn cl_translate_instruction(
         case CheckedBinOp(dest, op, left, right):
             val a = cl_translate_operand(ctx, cl_module, left, value_map, slot_map, func)
             val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
-            val result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
+            val result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func, local_type(dest.id, func))
             value_map[dest.id] = result
             store_local_result(ctx, dest, result, slot_map, func)
 
@@ -1206,14 +1208,8 @@ fn load_local(
 fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type_: MirType) -> i64:
     # EXPLICIT returns: mixed-return/tail rule (see cl_translate_operand).
     match value:
-        case Int(v):
-            # A float-typed Int const (e.g. an int literal widened to f64) is
-            # an f32const/f64const of the same numeric value: Cranelift's
-            # `iconst` only admits I8..I64 and its verifier hits
-            # `unreachable!()` (iconst_bounds) for an F32/F64 controlling type.
-            if cl_const_is_float(type_):
-                return cranelift_fconst(ctx, mir_type_to_cl(type_), v as f64)
-            return cranelift_iconst(ctx, const_int_cl_type(type_), v)
+        case Int(_):
+            return cl_emit_scalar_const_plan(ctx, cl_scalar_const_plan(value, type_), type_)
         case FloatLexeme(v):
             return cranelift_fconst(ctx, mir_type_to_cl(type_), float_literal_scalar(v))
         case Float(v):
@@ -1262,9 +1258,7 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
         case Zero:
             # `x!` / `x.unwrap()` on an `f64?` emits Zero typed F64 on the nil
             # (panic) arm; a float zero must be fconst, never iconst.f64.
-            if cl_const_is_float(type_):
-                return cranelift_fconst(ctx, mir_type_to_cl(type_), 0.0)
-            return cranelift_iconst(ctx, mir_type_to_cl(type_), 0)
+            return cl_emit_scalar_const_plan(ctx, cl_scalar_const_plan(value, type_), type_)
         case _:
             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
 
@@ -1272,7 +1266,7 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
 # Binary Operation Translation
 # ============================================================================
 
-fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, right_value: i64, left_operand: MirOperand, right_operand: MirOperand, func: MirFunction) -> i64:
+fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, right_value: i64, left_operand: MirOperand, right_operand: MirOperand, func: MirFunction, result_type: MirType) -> i64:
     val left_type = operand_type(left_operand, func)
     val right_type = operand_type(right_operand, func)
     val left_is_float = type_is_float(left_type)
@@ -1280,14 +1274,14 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, r
     val is_float = left_is_float or right_is_float
     var a = left_value
     var b = right_value
+    var float_type = left_type
     # MIR retains each operand's numeric type. Cranelift requires equal SSA
     # types, so promote before choosing the floating instruction. In particular,
     # both 5 / 2.0 and 5.0 / 2 must divide as floats rather than emit an invalid
     # sdiv(i64, f64) or fdiv(f64, i64). Reuse cast signedness and width handling.
     match op:
-        case Add | Sub | Mul | Div | Eq | Ne | Lt | Le | Gt | Ge:
+        case Add | Sub | Mul | Div | Rem | Pow | Eq | Ne | Lt | Le | Gt | Ge:
             if is_float:
-                var float_type = left_type
                 if not left_is_float:
                     float_type = right_type
                 elif right_is_float and right_type.size_bytes() > left_type.size_bytes():
@@ -1307,7 +1301,17 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, r
         case Div:
             if is_float: cranelift_fdiv(ctx, a, b) elif is_unsigned: cranelift_udiv(ctx, a, b) else: cranelift_sdiv(ctx, a, b)
         case Rem:
-            if is_unsigned: cranelift_urem(ctx, a, b) else: cranelift_srem(ctx, a, b)
+            if is_float:
+                cl_translate_float_binary_import(ctx, cl_module, "fmod", a, b, float_type)
+            elif is_unsigned:
+                cranelift_urem(ctx, a, b)
+            else:
+                cranelift_srem(ctx, a, b)
+        case Pow:
+            if is_float:
+                cl_translate_float_binary_import(ctx, cl_module, "rt_math_pow", a, b, float_type)
+            else:
+                cl_translate_integer_power(ctx, a, b, operand_is_unsigned(right_operand, func))
         case BitAnd:
             cranelift_band(ctx, a, b)
         case BitOr:
@@ -1315,9 +1319,11 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, r
         case BitXor:
             cranelift_bxor(ctx, a, b)
         case Shl:
-            cranelift_ishl(ctx, a, b)
+            val count = cl_mask_shift_count(ctx, b, result_type)
+            cranelift_ishl(ctx, a, count)
         case Shr:
-            if left_is_unsigned: cranelift_ushr(ctx, a, b) else: cranelift_sshr(ctx, a, b)
+            val count = cl_mask_shift_count(ctx, b, result_type)
+            if left_is_unsigned: cranelift_ushr(ctx, a, count) else: cranelift_sshr(ctx, a, count)
         # NOTE: the cranelift_icmp/cranelift_fcmp FFI wrappers already return
         # i64 results (verified empirically: wrapping them in uextend.i64
         # fails verification with "arg 0 with type i64 failed to satisfy type
@@ -1351,8 +1357,76 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, r
         case BroadcastPow:
             translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_broadcast_pow", [a, b])
         case _:
-            # Pow and unsupported future ops still use the scalar fallback.
-            cranelift_iadd(ctx, a, b)
+            panic("Unsupported Cranelift binary operation")
+
+fn cl_mask_shift_count(ctx: i64, count: i64, result_type: MirType) -> i64:
+    # SSA uses I64 even for narrow destinations, so the hardware's implicit
+    # 63 mask is insufficient. Match the declared result width, as LLVM does.
+    val mask = match result_type.kind:
+        case I8 | U8: 7
+        case I16 | U16: 15
+        case I32 | U32 | Char: 31
+        case _: 63
+    cranelift_band(ctx, count, cranelift_iconst(ctx, CL_TYPE_I64, mask))
+
+fn cl_translate_integer_power(ctx: i64, base: i64, exponent: i64, unsigned_exponent: bool) -> i64:
+    # Emit wrapping I64 multiplication, avoiding the signed C intrinsic's
+    # overflow and signed-exponent ABI. Unsigned exponents consume all 64 bits.
+    val zero = cranelift_iconst(ctx, CL_TYPE_I64, 0)
+    val one = cranelift_iconst(ctx, CL_TYPE_I64, 1)
+    val base_addr = cranelift_stack_addr(ctx, cranelift_stack_slot(ctx, 8, 8), 0)
+    val exponent_addr = cranelift_stack_addr(ctx, cranelift_stack_slot(ctx, 8, 8), 0)
+    val result_addr = cranelift_stack_addr(ctx, cranelift_stack_slot(ctx, 8, 8), 0)
+    cranelift_store(ctx, base, base_addr, 0)
+    cranelift_store(ctx, exponent, exponent_addr, 0)
+    cranelift_store(ctx, one, result_addr, 0)
+    val header = cranelift_create_block(ctx)
+    val body = cranelift_create_block(ctx)
+    val multiply = cranelift_create_block(ctx)
+    val advance = cranelift_create_block(ctx)
+    val done = cranelift_create_block(ctx)
+    if not unsigned_exponent:
+        val negative = cranelift_create_block(ctx)
+        val is_negative = cranelift_icmp(ctx, CL_CMP_SLT, exponent, zero)
+        cranelift_brif(ctx, is_negative, negative, header)
+        cranelift_switch_to_block(ctx, negative)
+        cranelift_store(ctx, zero, result_addr, 0)
+        cranelift_jump(ctx, done)
+    else:
+        cranelift_jump(ctx, header)
+    cranelift_switch_to_block(ctx, header)
+    val remaining = cranelift_load(ctx, CL_TYPE_I64, exponent_addr, 0)
+    val has_bits = cranelift_icmp(ctx, CL_CMP_NE, remaining, zero)
+    cranelift_brif(ctx, has_bits, body, done)
+    cranelift_switch_to_block(ctx, body)
+    val factor = cranelift_load(ctx, CL_TYPE_I64, base_addr, 0)
+    val odd = cranelift_band(ctx, remaining, one)
+    cranelift_brif(ctx, odd, multiply, advance)
+    cranelift_switch_to_block(ctx, multiply)
+    val accumulated = cranelift_load(ctx, CL_TYPE_I64, result_addr, 0)
+    cranelift_store(ctx, cranelift_imul(ctx, accumulated, factor), result_addr, 0)
+    cranelift_jump(ctx, advance)
+    cranelift_switch_to_block(ctx, advance)
+    cranelift_store(ctx, cranelift_imul(ctx, factor, factor), base_addr, 0)
+    cranelift_store(ctx, cranelift_ushr(ctx, remaining, one), exponent_addr, 0)
+    cranelift_jump(ctx, header)
+    cranelift_switch_to_block(ctx, done)
+    cranelift_load(ctx, CL_TYPE_I64, result_addr, 0)
+
+fn cl_translate_float_binary_import(ctx: i64, cl_module: i64, name: text, left: i64, right: i64, float_type: MirType) -> i64:
+    # Existing runtime/platform math providers use the F64 ABI. Promote F32
+    # arguments before the call and demote its result back to the MIR width.
+    val narrow = float_type.size_bytes() == 4
+    val a = if narrow: cranelift_fpromote(ctx, CL_TYPE_F64, left) else: left
+    val b = if narrow: cranelift_fpromote(ctx, CL_TYPE_F64, right) else: right
+    val sig = cranelift_new_signature(CL_CC_PLATFORM)
+    cranelift_sig_add_param(sig, CL_TYPE_F64)
+    cranelift_sig_add_param(sig, CL_TYPE_F64)
+    cranelift_sig_set_return(sig, CL_TYPE_F64)
+    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT)
+    val func_ref = cranelift_import_function(ctx, handle)
+    val result = cranelift_call(ctx, func_ref, [a, b])
+    if narrow: cranelift_fdemote(ctx, CL_TYPE_F32, result) else: result
 
 # ============================================================================
 # Unary Operation Translation
@@ -1383,11 +1457,7 @@ fn cl_translate_unaryop(ctx: i64, op: MirUnaryOp, a: i64, operand: MirOperand, f
                 val zero = cranelift_iconst(ctx, CL_TYPE_I64, 0)
                 val negated = cranelift_isub(ctx, zero, a)
                 val neg_type = operand_type(operand, func)
-                match neg_type.kind:
-                    case I8 | I16 | I32:
-                        val narrow_cl = cl_cast_narrow_int_type(neg_type)
-                        cranelift_sextend(ctx, CL_TYPE_I64, cranelift_ireduce(ctx, narrow_cl, negated))
-                    case _: negated
+                cl_canonicalize_signed_narrow(ctx, negated, neg_type)
         case Not:
             # i64 mask, not i8: bool values (cmp results, bool locals, consts)
             # are uniformly i64 in this backend (see mir_type_to_cl).
@@ -1443,24 +1513,43 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand
         val len_val = cranelift_load(ctx, CL_TYPE_I64, src_val, 8)
         val boxed = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_new", [ptr_val, len_val])
         val parsed = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_to_int_lenient", [boxed])
-        # Bool-aware width: Bool targets are i64 in this backend (mir_type_to_cl),
-        # so an ireduce to the same-width i64 would fail verification.
-        val narrow_cl = cl_cast_narrow_int_type(target)
-        if narrow_cl != 0:
-            # Narrow for wrap semantics, then extend straight back to I64:
-            # no sub-64 SSA value may escape on this uniformly-i64 lane.
-            val narrowed = cranelift_ireduce(ctx, narrow_cl, parsed)
-            val zero_extend_back = match target.kind:
-                case U8 | U16 | U32 | Bool | Char: true
-                case _: false
-            if zero_extend_back:
-                return cranelift_uextend(ctx, CL_TYPE_I64, narrowed)
-            return cranelift_sextend(ctx, CL_TYPE_I64, narrowed)
-        return parsed
+        return cl_normalize_cast_integer(ctx, parsed, target)
 
     if is_src_float and not is_dst_float:
-        # Float to int
-        cranelift_fcvt_to_sint(ctx, to_cl, src_val)
+        # The pinned x64 provider lowers float conversions only to I32/I64.
+        # Convert small targets through I32, then check their truncated
+        # integer against the normalized destination before returning I64.
+        # fcvt itself retains the NaN/infinity and I32/I64 overflow traps.
+        val narrow_cl = cl_cast_narrow_int_type(target)
+        val small_target = narrow_cl == CL_TYPE_I8 or narrow_cl == CL_TYPE_I16
+        val integer_cl = if narrow_cl == 0:
+            CL_TYPE_I64
+        elif small_target:
+            CL_TYPE_I32
+        else:
+            narrow_cl
+        val converted = if cl_cast_zero_extends(target):
+            cranelift_fcvt_to_uint(ctx, integer_cl, src_val)
+        else:
+            cranelift_fcvt_to_sint(ctx, integer_cl, src_val)
+        val extended = if narrow_cl == 0:
+            converted
+        elif cl_cast_zero_extends(target):
+            cranelift_uextend(ctx, CL_TYPE_I64, converted)
+        else:
+            cranelift_sextend(ctx, CL_TYPE_I64, converted)
+        if small_target:
+            val normalized = cl_normalize_cast_integer(ctx, extended, target)
+            val in_range = cranelift_icmp(ctx, CL_CMP_EQ, extended, normalized)
+            val valid_block = cranelift_create_block(ctx)
+            val overflow_block = cranelift_create_block(ctx)
+            cranelift_brif(ctx, in_range, valid_block, overflow_block)
+            cranelift_switch_to_block(ctx, overflow_block)
+            cranelift_trap(ctx, 2)
+            cranelift_switch_to_block(ctx, valid_block)
+            normalized
+        else:
+            extended
     elif not is_src_float and is_dst_float:
         # Int to float
         match src_type.kind:
@@ -1476,30 +1565,28 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand
         else:
             src_val
     else:
-        # Int to int. Bool-aware widths: Bool values are materialized as i64
-        # (see mir_type_to_cl), so a Bool<->i64 cast is a same-width no-op —
-        # the 1-byte MIR storage width would emit an invalid same-width
-        # uextend/sextend/ireduce.
-        val src_size = cl_cast_int_width_bytes(src_type)
-        val dst_size = cl_cast_int_width_bytes(target)
-        val narrow_cl = cl_cast_narrow_int_type(target)
-        if dst_size > src_size or narrow_cl == 0:
-            # Widening is a no-op on this uniformly-i64 lane: every int SSA
-            # value is already a canonically-extended I64 (I64-uniform loads,
-            # I64 consts, runtime-widened cmp results), so uextend/sextend
-            # here would be an invalid same-width widen (verifier reject).
-            src_val
-        elif dst_size < src_size:
-            # Narrow for wrap semantics, then extend straight back to I64:
-            # no sub-64 SSA value may escape on this uniformly-i64 lane
-            # (probe_enum6: a typed narrow fed i16 into an i64-signature call).
-            val reduced = cranelift_ireduce(ctx, narrow_cl, src_val)
-            val zero_extend_back = match target.kind:
-                case U8 | U16 | U32 | Bool | Char: true
-                case _: false
-            if zero_extend_back: cranelift_uextend(ctx, CL_TYPE_I64, reduced) else: cranelift_sextend(ctx, CL_TYPE_I64, reduced)
-        else:
-            src_val
+        # Normalize by destination, even for equal/wider MIR widths:
+        # u8(255) as i8 must sign-extend -1, and i8(-1) as u16 must
+        # zero-extend 65535. Only 64-bit destinations are already canonical.
+        cl_normalize_cast_integer(ctx, src_val, target)
+
+fn cl_cast_zero_extends(target: MirType) -> bool:
+    match target.kind:
+        case U8 | U16 | U32 | U64 | Bool | Char: true
+        case _: false
+
+fn cl_normalize_cast_integer(ctx: i64, value: i64, target: MirType) -> i64:
+    """Normalize an I64 input to the target integer's canonical I64 value.
+    Bool stays I64 and Char reduces to I32; no same-width reduce is emitted.
+    Float conversion results must first be extended to I64 before use here."""
+    val narrow_cl = cl_cast_narrow_int_type(target)
+    if narrow_cl == 0:
+        return value
+    val reduced = cranelift_ireduce(ctx, narrow_cl, value)
+    if cl_cast_zero_extends(target):
+        cranelift_uextend(ctx, CL_TYPE_I64, reduced)
+    else:
+        cranelift_sextend(ctx, CL_TYPE_I64, reduced)
 
 # ============================================================================
 # Function Call Translation
@@ -1878,13 +1965,47 @@ fn const_int_cl_type(ty: MirType) -> i64:
     """Int consts emit as I64 regardless of declared width: the lane is
     uniformly i64 and sub-64 iconst types leaked i16 args into i64-signature
     calls (probe_enum6 verifier reject). Never a float type: `iconst` is integer-only (float consts go through
-    cl_const_is_float -> cranelift_fconst)."""
+    cl_scalar_const_plan)."""
     CL_TYPE_I64
 
 fn cl_const_is_float(ty: MirType) -> bool:
     match ty.kind:
         case F32 | F64: true
         case _: false
+
+pub fn cl_scalar_const_plan(value: MirConstValue, type_: MirType) -> (text, i64, i64):
+    """Instruction selection for an Int/Zero MIR const: (opcode, cl type, operand).
+
+    - "iconst"         integer-typed: iconst.<cl type> operand.
+    - "fconst_zero"    float-typed Zero: fconst.<cl type> 0.0.
+    - "iconst_bitcast" float-typed Int(v): v is a BIT PATTERN (a raw word such
+      as the nil sentinel 3), never a number -- numeric float constants are
+      MirConstValue.Float. Emit iconst.<cl type> of the bits, then bitcast to
+      the float type. A numeric `v as f64` here turned sentinel 3 into 3.0
+      (bits 0x4008...), which rt_is_none no longer recognises. Cranelift's
+      iconst only admits I8..I64 (verifier iconst_bounds unreachable!() on
+      F32/F64), hence the integer carrier."""
+    match value:
+        case Int(v):
+            match type_.kind:
+                case F64: return ("iconst_bitcast", CL_TYPE_I64, v)
+                case F32: return ("iconst_bitcast", CL_TYPE_I32, v & 4294967295)
+                case _: return ("iconst", const_int_cl_type(type_), v)
+        case Zero:
+            if cl_const_is_float(type_):
+                return ("fconst_zero", mir_type_to_cl(type_), 0)
+            return ("iconst", mir_type_to_cl(type_), 0)
+        case _:
+            return ("iconst", CL_TYPE_I64, 0)
+
+fn cl_emit_scalar_const_plan(ctx: i64, plan: (text, i64, i64), type_: MirType) -> i64:
+    val (opcode, cl_type, operand) = plan
+    if opcode == "fconst_zero":
+        return cranelift_fconst(ctx, cl_type, 0.0)
+    val word = cranelift_iconst(ctx, cl_type, operand)
+    if opcode == "iconst_bitcast":
+        return cranelift_bitcast(ctx, mir_type_to_cl(type_), word)
+    word
 
 fn type_is_aggregate(ty: MirType) -> bool:
     match ty.kind:
@@ -1928,10 +2049,25 @@ fn type_is_text(ty: MirType) -> bool:
 # Exports
 # ============================================================================
 
+fn cl_canonicalize_signed_narrow(ctx: i64, value: i64, dest_type: MirType) -> i64:
+    """Restore a signed narrow result's sign-extended I64 representation.
+
+    Ordinary BinOp arithmetic executes in I64, but its declared I8/I16/I32
+    result wraps at that width before a widening cast can expose it. Reuse
+    the unary-negation rule; do not narrow floats, pointers or Bool values.
+    CheckedBinOp has a separate overflow contract and does not use this path.
+    """
+    match dest_type.kind:
+        case I8 | I16 | I32:
+            val narrow_cl = cl_cast_narrow_int_type(dest_type)
+            val reduced = cranelift_ireduce(ctx, narrow_cl, value)
+            return cranelift_sextend(ctx, CL_TYPE_I64, reduced)
+        case _: return value
+
 fn cl_canonicalize_unsigned_narrow(ctx: i64, value: i64, dest_type: MirType) -> i64:
     """Re-establish the canonical zero-extended I64 form of a U8/U16/U32 result.
 
-    The lane keeps every int SSA value as I64 and treats widening casts as
+    The lane keeps every int SSA value as I64 and treats casts to I64 as
     no-ops (see cl_translate_cast), so an Add/Sub/Mul/Shl/Neg/BitNot result
     typed U32 can carry bits above its width (`~x`, `a - b` wrap, `a << 8`),
     which a later `.to_i64()` then exposes as a value off by 2^32 (bug

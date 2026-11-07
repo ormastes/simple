@@ -1351,13 +1351,16 @@ pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
         None => 0,
     };
 
+    // Reaping goes through child_peak_rss::reap so the supervised builder can
+    // read this child's own peak RSS via rt_process_last_child_peak_rss_kib.
+    simple_runtime::child_peak_rss::reset();
     if timeout_ms > 0 {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
         loop {
             let poll = {
                 let mut processes = SPAWNED_PROCESSES.lock().unwrap();
                 match processes.get_mut(&pid) {
-                    Some(child) => child.try_wait(),
+                    Some(child) => simple_runtime::child_peak_rss::reap(child, true),
                     None => return Ok(Value::Int(-1)),
                 }
             };
@@ -1378,9 +1381,9 @@ pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
 
     let mut processes = SPAWNED_PROCESSES.lock().unwrap();
     match processes.remove(&pid) {
-        Some(mut child) => match child.wait() {
-            Ok(status) => Ok(Value::Int(wait_status_to_code(status))),
-            Err(_) => Ok(Value::Int(-1)),
+        Some(mut child) => match simple_runtime::child_peak_rss::reap(&mut child, false) {
+            Ok(Some(status)) => Ok(Value::Int(wait_status_to_code(status))),
+            _ => Ok(Value::Int(-1)),
         },
         None => {
             // Process not found in our map - may have already been waited on

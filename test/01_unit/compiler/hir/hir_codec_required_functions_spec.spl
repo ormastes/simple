@@ -12,7 +12,8 @@ use compiler.hir.hir_codec.{hir_codec_header, hir_canonical_codec_header,
     hir_module_decode_stable, hir_module_decode_bounded, HirDecodeLimits,
     HirDecodeError}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
-use compiler.hir.generated.hir_codec.{hc_enc_hir_function}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_function, hc_enc_hir_module, hc_dec_hir_module}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
 
 fn required_function_module() -> HirModule:
     val parsed = parse_full_frontend("fn answer() -> i64:\n    41\n",
@@ -36,7 +37,7 @@ fn required_function_body(module: HirModule):
 
 fn required_entry_wire(header: text, key_present: bool, value_present: bool) -> text:
     # Explicit HirModule schema: two names; empty imports/exports/domains;
-    # absent optional wire symbol table; ONE function entry; 16 empty tails.
+    # absent optional wire symbol table; ONE function entry; 23 explicit tails.
     # The function payload itself comes from the real generated encoder.
     var body = "required\nrequired.spl\n0\n0\n0\n0\n1\n"
     body = body + (if key_present: "1\n0\n" else: "0\n")
@@ -49,20 +50,68 @@ fn required_entry_wire(header: text, key_present: bool, value_present: bool) -> 
         body = body + "1\n" + writer.finish()
     else:
         body = body + "0\n"
-    var tail = 0
-    while tail < 16:
-        body = body + "0\n"
-        tail = tail + 1
+    body = body + "0\n"  # gpu_function_targets
+    body = body + "0\n"  # gpu_function_backend_orders
+    body = body + "0\n"  # classes
+    body = body + "0\n"  # structs
+    body = body + "0\n"  # enums
+    body = body + "0\n"  # bitfields
+    body = body + "0\n"  # traits
+    body = body + "0\n"  # impls
+    body = body + "0\n"  # constants
+    body = body + "0\n"  # static_asserts
+    body = body + "0\n"  # aop_advices
+    body = body + "0\n"  # di_bindings
+    body = body + "0\n"  # arch_rules
+    body = body + "0\n"  # mock_decls
+    body = body + "0\n"  # types
+    body = body + "0\n"  # extend_enums
+    body = body + "0\n"  # representation_declarations
+    body = body + "0\n"  # nogc_strict (false)
+    body = body + "0\n"  # nogc_param_effects_checked (false)
+    body = body + "0\n"  # nogc_param_effect_symbol_ids
+    body = body + "0\n"  # nogc_param_effects
+    body = body + "0\n"  # attr_sites
+    body = body + "0\n"  # local_annotation_provenance
     header + "\n" + body
 
+# Generated-core qualification only: independent bounded attempts. These do not
+# reproduce the public admission owner's combined decode/reencode allocation ledger.
+fn required_generated_encode(module: HirModule) -> text:
+    var writer = HirCodecWriter.create_canonical_bounded(4 * 1024 * 1024,
+        16 * 1024 * 1024, 1000000)
+    hc_enc_hir_module(writer, module)
+    expect(writer.ok).to_equal(true)
+    val blob = writer.finish_with_header(hir_canonical_codec_header())
+    expect(writer.ok).to_equal(true)
+    blob
+
+fn required_generated_decode(blob: text) -> HirModule:
+    val limits = HirDecodeLimits.standard()
+    var reader = FlatPoolReader.new_bounded(blob, limits.max_input_bytes,
+        limits.max_allocation_bytes, limits.max_nodes, limits.max_depth, limits.max_work_units)
+    expect(reader.ok).to_equal(true)
+    expect(reader.next()).to_equal(hir_canonical_codec_header())
+    val module = hc_dec_hir_module(reader)
+    expect(reader.ok).to_equal(true)
+    expect(reader.pos).to_equal(reader.lines.len() - 1)
+    expect(reader.lines[reader.pos]).to_equal("")
+    module
+
 fn required_entry_bounded_refuses(blob: text):
-    val decoded = hir_module_decode_bounded(blob, HirDecodeLimits.standard())
-    match decoded:
-        case Err(error):
-            match error:
-                case HirDecodeError.Malformed(detail):
-                    expect(detail).to_equal("missing_required_hir_module_function_entry")
-                case _: assert(false)
+    val limits = HirDecodeLimits.standard()
+    var reader = FlatPoolReader.new_bounded(blob, limits.max_input_bytes,
+        limits.max_allocation_bytes, limits.max_nodes, limits.max_depth, limits.max_work_units)
+    expect(reader.next()).to_equal(hir_canonical_codec_header())
+    val module = hc_dec_hir_module(reader)
+    expect(reader.ok).to_equal(false)
+    expect(reader.failure_kind).to_equal("malformed")
+    expect(reader.failure_detail).to_equal("missing_required_hir_module_function_entry")
+
+fn required_public_unavailable(result: Result<HirModule, HirDecodeError>):
+    match result:
+        case Err(HirDecodeError.Unavailable(detail)):
+            expect(detail).to_equal("canonical_codec_generator_stale")
         case _: assert(false)
 
 describe "HIR module function entries are required":
@@ -75,22 +124,28 @@ describe "HIR module function entries are required":
         required_function_body(decoded.unwrap())
         expect(hir_module_encode(decoded.unwrap())).to_equal(encoded)
 
-    it "preserves a real function through canonical encoding and bounded decoding":
-        val encoded = hir_module_encode_canonical(required_function_module())
-        expect(encoded.is_ok()).to_equal(true)
-        val decoded = hir_module_decode_bounded(encoded.unwrap(), HirDecodeLimits.standard())
-        expect(decoded.is_ok()).to_equal(true)
-        required_function_body(decoded.unwrap())
-        expect(hir_module_encode_canonical(decoded.unwrap()).unwrap()).to_equal(encoded.unwrap())
+    it "preserves a real function through generated bounded codec primitives":
+        val encoded = required_generated_encode(required_function_module())
+        val decoded = required_generated_decode(encoded)
+        required_function_body(decoded)
+        expect(required_generated_encode(decoded)).to_equal(encoded)
+
+    it "keeps public canonical admission unavailable independently of core controls":
+        val module = required_function_module()
+        match hir_module_encode_canonical(module):
+            case Err(HirDecodeError.Unavailable(detail)):
+                expect(detail).to_equal("canonical_codec_generator_stale")
+            case _: assert(false)
+        required_public_unavailable(hir_module_decode_bounded(
+            required_generated_encode(module), HirDecodeLimits.standard()))
 
     it "accepts the explicit wire fixture when both entry members are present":
         val decoded = hir_module_decode(required_entry_wire(hir_codec_header(), true, true))
         expect(decoded != nil).to_equal(true)
         required_function_body(decoded.unwrap())
-        val bounded = hir_module_decode_bounded(
-            required_entry_wire(hir_canonical_codec_header(), true, true), HirDecodeLimits.standard())
-        expect(bounded.is_ok()).to_equal(true)
-        required_function_body(bounded.unwrap())
+        val bounded = required_generated_decode(
+            required_entry_wire(hir_canonical_codec_header(), true, true))
+        required_function_body(bounded)
 
     it "rejects a present key with absent function instead of making a stable nil entry":
         val blob = required_entry_wire(hir_codec_header(), true, false)
@@ -102,7 +157,7 @@ describe "HIR module function entries are required":
         expect(hir_module_decode(blob)).to_equal(nil)
         expect(hir_module_decode_stable(blob)).to_equal(nil)
 
-    it "rejects absent values and keys through the canonical bounded owner":
+    it "rejects absent values and keys through the generated bounded decoder":
         required_entry_bounded_refuses(required_entry_wire(hir_canonical_codec_header(), true, false))
         required_entry_bounded_refuses(required_entry_wire(hir_canonical_codec_header(), false, true))
 

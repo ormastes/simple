@@ -1,0 +1,53 @@
+# Stage2 slim verification owns SCV admission and the already admitted seed
+# delegation route only. It is not the full CLI or an in-process interpreter.
+use std.nogc_sync_mut.sffi.cli_args.{cli_get_args}
+use app.compiler_entrypoint.admission.{compiler_entrypoint_admit_v1}
+use app.io.cli_ops.{_cli_driver_binary, _cli_eprint}
+use app.io.process_ops.{process_run_inherit}
+
+fn verification_arg_is(value: text, expected: text) -> bool:
+    value.len() == expected.len() and value.starts_with(expected)
+
+fn main() -> i64:
+    # This is a native command entry: retain `run <spec>` instead of treating
+    # the spec as this entry's own source path, as script argv helpers do.
+    val raw_args = cli_get_args()
+    var args: [text] = []
+    var index = 1
+    while index < raw_args.len():
+        args.push(raw_args[index])
+        index = index + 1
+
+    val is_check_help = (args.len() == 2 and
+        verification_arg_is(args[0], "check") and
+        verification_arg_is(args[1], "--help"))
+    val is_run = args.len() >= 2 and verification_arg_is(args[0], "run")
+    if not is_check_help and not is_run:
+        _cli_eprint("Stage2 slim verification supports check --help and run <source> [args]")
+        return 2
+
+    # SCV priming deliberately disables delegation: admission must happen in
+    # this compiled artifact, including the check --help cold/warm probes.
+    val admission = compiler_entrypoint_admit_v1(["src"])
+    if not admission.valid:
+        _cli_eprint("SCV-E-ADMISSION: {admission.reason}")
+        return 1
+    if is_check_help:
+        return 0
+
+    # The phase verifier validates the frozen authority against its capsule
+    # and seed stamp, then enables this route for exactly its three spec rows.
+    # Reuse the production explicit-driver and self-exec guards; no ambient
+    # bin/simple, installed seed, or in-process fallback is an authority here.
+    val driver = _cli_driver_binary()
+    if driver.len() == 0:
+        _cli_eprint("Stage2 slim verification requires the admitted test delegate")
+        return 1
+    var child_args: [text] = []
+    index = 1
+    while index < args.len():
+        child_args.push(args[index])
+        index = index + 1
+    # Match cli_run_file's delegate argv and preserve execution-mode env,
+    # stdout/stderr and the real child exit status for JSON test evidence.
+    process_run_inherit(driver, child_args)

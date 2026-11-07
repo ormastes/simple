@@ -1,0 +1,32 @@
+# Repro/prevention for text_layout_noto_sans_sc_variable_blank_raster_2026_11_05.
+# Staging a Han glyph with the bundled NotoSansSC[wght] face at 16px must leave
+# non-zero alpha in the atlas cells its quads reference. The shaped path
+# rasterizes by glyph INDEX (rt_font_glyph_bitmap_index); the interpreter had no
+# bridge for it, so the extern was refused and the atlas stayed all zero.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+use std.nogc_sync_mut.text_layout.font_types.{font_render_config_default_for_size}
+
+val NOTO = "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf"
+
+describe "NotoSansSC atlas ink":
+    it "leaves non-zero alpha under the quad of a staged Han glyph at 16px":
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_runtime_ttf(NOTO)).to_equal(true)
+        val staged = renderer.stage_text_configured("中", 0xFF000000u32, font_render_config_default_for_size(16))
+        expect(staged >= 0).to_equal(true)
+        expect(renderer.receipt_staged_atlas_has_alpha()).to_equal(true)
+        val batch = renderer.staged_batch()
+        expect(batch.quads.len() > 0).to_equal(true)
+        var ink = 0
+        val q = batch.quads[0]
+        var row = 0
+        while row < q.height:
+            var col = 0
+            while col < q.width:
+                val px = batch.atlas_pixels[(q.atlas_y + row) * batch.atlas_width + q.atlas_x + col]
+                if ((px >> 24) & 0xFFu32) > 0u32:
+                    ink = ink + 1
+                col = col + 1
+            row = row + 1
+        expect(ink > 0).to_equal(true)

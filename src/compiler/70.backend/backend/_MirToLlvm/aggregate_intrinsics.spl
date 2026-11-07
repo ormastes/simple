@@ -78,6 +78,21 @@ fn llvm_c_abi_clobbers(arch: text) -> [text]:
 # ============================================================================
 
 impl MirToLlvm:
+    me llvm_gep_element_type(base: MirOperand, base_value: text) -> text:
+        val declared = self.gep_element_type_for_value(base_value)
+        if declared != "":
+            return declared
+        match base.kind:
+            case MirOperandKind.Const(_, type_):
+                val element = self.llvm_pointer_element_type(type_)
+                if element != "":
+                    return element
+            case _: ()
+        val allocated = self.alloca_elem_type_for_value(base_value)
+        if allocated != "":
+            return allocated
+        self.valid_llvm_type(self.get_operand_type(base))
+
     me llvm_gep_impl(dest: LocalId, base: MirOperand, indices: [MirOperand]):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
@@ -95,9 +110,14 @@ impl MirToLlvm:
             # `cache[program]` in the full-CLI tool build (2026-10-15).
             val raw_idx = self.translate_operand(idx)
             index_vals = index_vals.push(self.value_as_type(raw_idx, self.get_operand_type(idx), nit))
-        val base_ty = self.valid_llvm_type(self.get_operand_type(base))
+        val base_ty = self.llvm_gep_element_type(base, base_val)
         self.mark_ptr_local(dest_id)
         self.builder.emit_gep(dest_name, base_ty, base_ptr, index_vals)
+        # A single index advances within the same element type. Synthetic
+        # GEP destinations can lack a MirLocal entry; retain their stride.
+        # Multiple indices may select a different aggregate leaf instead.
+        if indices.len() == 1:
+            self.remember_gep_element_type(dest_name, base_ty)
 
     me llvm_emit_aggregate_impl(dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
         """Real aggregate emission. Named so the trait cannot shadow it."""
@@ -426,6 +446,7 @@ impl MirToLlvm:
 
     me llvm_cast_impl(dest: LocalId, operand: MirOperand, target: MirType):
         val dest_id = self.local_id_value(dest)
+        self.remember_gep_pointer_type(dest_id, target)
         val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
         val src_ty = self.valid_llvm_type(self.get_operand_type(operand))
@@ -463,6 +484,7 @@ impl MirToLlvm:
 
     me llvm_bitcast_impl(dest: LocalId, operand: MirOperand, target: MirType):
         val dest_id = self.local_id_value(dest)
+        self.remember_gep_pointer_type(dest_id, target)
         val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
         val src_ty = self.valid_llvm_type(self.get_operand_type(operand))

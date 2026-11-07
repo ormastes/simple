@@ -44,6 +44,7 @@ struct Lowered:
     fatal_count: i64
     callees: [text]
     indirect_calls: i64
+    trait_objects: i64
 
 fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
     var errors: [text] = []
@@ -54,10 +55,22 @@ fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
         errors = errors.push(e.message)
     var callees: [text] = []
     var indirect_calls = 0
+    # Trait-object constructions in user functions: each `(data, table)`
+    # vtable aggregate carries the concrete copy thunk as its first slot.
+    var trait_objects = 0
     for function in mir.functions.values():
+        val is_thunk = function.name.starts_with("__simple_trait")
         for block in function.blocks:
             for instruction in block.instructions:
                 match instruction.kind:
+                    case MirInstKind.Aggregate(_, _, operands):
+                        if not is_thunk:
+                            for operand in operands:
+                                match operand.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str(slot), _):
+                                        if slot.starts_with("__simple_trait_copy_"):
+                                            trait_objects = trait_objects + 1
+                                    case _: pass
                     case MirInstKind.Call(_, callee, _):
                         match callee.kind:
                             case MirOperandKind.Const(MirConstValue.Str(name), _):
@@ -66,7 +79,7 @@ fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
                     case MirInstKind.CallIndirect(_, _, _, _):
                         indirect_calls = indirect_calls + 1
                     case _: pass
-    Lowered(errors: errors, fatal_count: fatal_count, callees: callees, indirect_calls: indirect_calls)
+    Lowered(errors: errors, fatal_count: fatal_count, callees: callees, indirect_calls: indirect_calls, trait_objects: trait_objects)
 
 fn lower_source(src: text, closure_complete: bool) -> Lowered:
     val parsed = parse_full_frontend(src, "trait_recv.spl", "trait_recv", Logger(level: 0))
@@ -225,3 +238,62 @@ describe "trait-object values that are already trait-typed":
         # calls and an `unresolved method call` runtime fallback). The one
         # rt_panic left is the `!` nil trap, not a dispatch fallback.
         expect(lowered.indirect_calls).to_equal(1)
+
+# Storing `Some(<concrete>)` into a `Trait?` slot: the payload must be
+# converted to the trait object (vtable) before it is wrapped in the
+# Optional. Before the fix the Optional branch searched for an impl of the
+# trait for the Option handle itself and failed with an EMPTY concrete
+# owner ("missing native trait implementation: Parser for ").
+val SOME_TRAIT_SRC = "trait Parser:\n    fn parse(n: i64) -> i64\n\nclass CountingParser:\n    n: i64\n\nimpl Parser for CountingParser:\n    fn parse(k: i64) -> i64:\n        self.n + k\n\n"
+
+describe "Some(<concrete>) into an Optional trait slot":
+    it "converts the payload for a local assignment":
+        val lowered = lower_source(SOME_TRAIT_SRC + "fn local_slot() -> i64:\n    var p: Parser? = nil\n    p = Some(CountingParser(n: 0))\n    if p != nil: return 1\n    0\n\nfn main() -> i64:\n    0\n", true)
+        expect(count_matching(lowered.errors, "missing native trait implementation")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.trait_objects).to_equal(1)
+
+    it "converts the payload for a field store":
+        val lowered = lower_source(SOME_TRAIT_SRC + "class Holder:\n    slot: Parser?\n    me fill() -> i64:\n        self.slot = Some(CountingParser(n: 1))\n        0\n\nfn main() -> i64:\n    0\n", true)
+        expect(count_matching(lowered.errors, "missing native trait implementation")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.trait_objects).to_equal(1)
+
+    it "converts the payload for a call argument":
+        val lowered = lower_source(SOME_TRAIT_SRC + "fn take(p: Parser?) -> i64:\n    if p != nil: return 1\n    0\n\nfn pass_arg() -> i64:\n    take(Some(CountingParser(n: 2)))\n\nfn main() -> i64:\n    0\n", true)
+        expect(count_matching(lowered.errors, "missing native trait implementation")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.trait_objects).to_equal(1)
+
+    it "converts the payload for a return value":
+        val lowered = lower_source(SOME_TRAIT_SRC + "fn make() -> Parser?:\n    return Some(CountingParser(n: 3))\n\nfn main() -> i64:\n    0\n", true)
+        expect(count_matching(lowered.errors, "missing native trait implementation")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.trait_objects).to_equal(1)
+
+    it "moves an already trait-typed Some payload without a new trait object":
+        val lowered = lower_source(SOME_TRAIT_SRC + "class Holder:\n    slot: Parser?\n    me keep(p: Parser) -> i64:\n        self.slot = Some(p)\n        0\n\nfn main() -> i64:\n    0\n", true)
+        expect(count_matching(lowered.errors, "missing native trait implementation")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.trait_objects).to_equal(0)
+
+    # `Some(c)` with `c` an UNANNOTATED local bound to a concrete class: the
+    # payload carries no HIR type and is not a constructor call, so it must be
+    # typed from the local the same way the direct `self.slot = c` form is.
+    it "converts an unannotated concrete local payload for a field store":
+        val lowered = lower_source(SOME_TRAIT_SRC + "class Holder:\n    slot: Parser?\n    me fill() -> i64:\n        val c = CountingParser(n: 1)\n        self.slot = Some(c)\n        0\n\nfn main() -> i64:\n    0\n", true)
+        expect(count_matching(lowered.errors, "missing native trait implementation")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.trait_objects).to_equal(1)
+
+    it "converts an unannotated concrete local payload for a local assignment":
+        val lowered = lower_source(SOME_TRAIT_SRC + "fn local_slot() -> i64:\n    val c = CountingParser(n: 4)\n    var p: Parser? = nil\n    p = Some(c)\n    if p != nil: return 1\n    0\n\nfn main() -> i64:\n    0\n", true)
+        expect(count_matching(lowered.errors, "missing native trait implementation")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.trait_objects).to_equal(1)
+
+    it "matches the direct concrete local field store":
+        val lowered = lower_source(SOME_TRAIT_SRC + "class Holder:\n    slot: Parser?\n    me fill() -> i64:\n        val c = CountingParser(n: 1)\n        self.slot = c\n        0\n\nfn main() -> i64:\n    0\n", true)
+        expect(count_matching(lowered.errors, "missing native trait implementation")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.trait_objects).to_equal(1)

@@ -19696,6 +19696,16 @@ static int ws_compat_setsockopt(SOCKET s, int level, int name, const void* value
         DWORD ms = (DWORD)tv->tv_sec * 1000u + (DWORD)((tv->tv_usec + 999) / 1000);
         return setsockopt(s, level, name, (const char*)&ms, (int)sizeof(ms));
     }
+    /* On a Winsock STREAM socket SO_REUSEADDR also lets a second socket bind a
+     * port another socket is actively listening on. The BSD meaning callers
+     * want (rebind over TIME_WAIT) is already Windows' default, so drop it.
+     * Not SO_EXCLUSIVEADDRUSE: that refuses a quick restart on the same port.
+     * Datagram sockets keep it: multicast receivers share a port through it. */
+    if (level == SOL_SOCKET && name == SO_REUSEADDR) {
+        int type = 0;
+        int type_len = (int)sizeof(type);
+        if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char*)&type, &type_len) == 0 && type == SOCK_STREAM) return 0;
+    }
     return setsockopt(s, level, name, (const char*)value, length);
 }
 
@@ -19731,9 +19741,16 @@ static int ws_compat_fcntl(SOCKET s, int command, int argument) {
 #define MSG_NOSIGNAL 0
 #endif /* _WIN32 */
 
+/* Socket address operands arrive in BOTH text conventions: a tagged
+ * RtCoreString (seed, interpreter, and the compiler's boxed-text externs such
+ * as rt_io_tcp_bind) or the bare char* the compiler's default extern text
+ * bridge produces (rt_interp_cstr unwrap). Measured on the Windows Stage 2
+ * build of avx_server_loadgen: rt_io_tcp_connect received the raw buffer, the
+ * tagged-only decode returned NULL, and every connect failed in 0 us before a
+ * socket existed. rt_interp_cstr is the runtime's existing tagged-or-raw
+ * autodetector (NULL for nil and low words). */
 static const char* rt_extract_cstr(int64_t text_val) {
-    RtCoreString* s = rt_core_as_string(text_val);
-    return s ? s->data : NULL;
+    return rt_interp_cstr(text_val);
 }
 
 static int rt_parse_addr_port(const char* addr_str, struct sockaddr_in* sa) {

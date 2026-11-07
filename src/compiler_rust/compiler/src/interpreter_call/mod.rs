@@ -1,6 +1,6 @@
 // Call expression evaluation (main dispatcher)
 
-mod bdd;
+pub(crate) mod bdd;
 mod block_execution;
 mod builtins;
 mod core;

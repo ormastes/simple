@@ -57,6 +57,40 @@ val LEDGER: text = "spec/nvme/coverage.sdn"
 fn lit(s: text) -> text:
     "\"" + sdn_escape(s) + "\""
 
+# The runner's default per-file budget, and the measured honest cost of one
+# bound evidence program (each is a minutes-long in-tree firmware run). A file
+# that binds N programs declares N * EVIDENCE_PROGRAM_SECS via the runner's
+# `# @timeout_secs` header directive instead of being killed with no verdict.
+# Coverage is never unbound to fit the budget.
+val DEFAULT_FILE_BUDGET_SECS: i64 = 900
+val EVIDENCE_PROGRAM_SECS: i64 = 400
+# The bring-up file runs three stage programs (see gen_bringup).
+val BRINGUP_PROGRAMS: i64 = 3
+
+"""Per-file timeout (seconds) a feature with `bound_programs` covered cells needs."""
+pub fn spec_timeout_secs_for(bound_programs: i64) -> i64:
+    val need = bound_programs * EVIDENCE_PROGRAM_SECS
+    if need > DEFAULT_FILE_BUDGET_SECS:
+        return need
+    DEFAULT_FILE_BUDGET_SECS
+
+"""The `# @timeout_secs` header line for a file binding `bound_programs`, or "" when the default budget suffices."""
+pub fn timeout_header_line(bound_programs: i64) -> text:
+    val secs = spec_timeout_secs_for(bound_programs)
+    if secs > DEFAULT_FILE_BUDGET_SECS:
+        return "# @timeout_secs " + "{secs}" + "\n"
+    ""
+
+fn bound_program_count(feature_id: text) -> i64:
+    val obs = obligation_list()
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < obs.len():
+        if is_bound(binding_for(feature_id, obs[i])):
+            n = n + 1
+        i = i + 1
+    n
+
 fn obligation_sentence(ob: text) -> text:
     if ob == OB_POSITIVE:
         return "issue the well-formed command and observe the spec-shaped completion and state effect"
@@ -82,6 +116,7 @@ fn gen_one(f: NvmeFeature, clause_count: i64) -> GenFile:
     s = s + "# Purpose and audience: executable specification evidence for the owning engineering team.\n"
     s = s + "# @req REQ-SSPEC-SYSTEM\n"
     s = s + "# @tag: system, nvme, generated, mandatory-feature\n"
+    s = s + timeout_header_line(bound_program_count(f.id))
     s = s + "\n\"\"\"\n"
     s = s + "Mandatory NVMe feature: " + f.title + " (class " + "{f.class_num}" + ").\n\n"
     s = s + "One block per test obligation. Evidence level available today:\n" + grade + "\n\n"
@@ -169,6 +204,7 @@ fn gen_bringup() -> GenFile:
     s = s + "# Purpose and audience: executable specification evidence for the owning engineering team.\n"
     s = s + "# @req REQ-SSPEC-SYSTEM\n"
     s = s + "# @tag: system, nvme, generated, bring-up, controller-initialization\n"
+    s = s + timeout_header_line(BRINGUP_PROGRAMS)
     s = s + "\n\"\"\"\n"
     s = s + "NVMe controller INITIALISATION, end to end, over the host-equivalent path.\n\n"
     s = s + "The sequence a real host performs, in order:\n"
@@ -271,4 +307,4 @@ fn generate(res: ScanResult) -> GenResult:
     st.files = st.files + 1
     GenResult(files: out, stats: st)
 
-export GenFile, GenStats, GenResult, generate, gen_one, gen_bringup, stage_block, GEN_DIR, LEDGER
+export spec_timeout_secs_for, timeout_header_line, DEFAULT_FILE_BUDGET_SECS, GenFile, GenStats, GenResult, generate, gen_one, gen_bringup, stage_block, GEN_DIR, LEDGER

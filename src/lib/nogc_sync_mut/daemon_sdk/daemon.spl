@@ -7,13 +7,14 @@
 use std.daemon_sdk.types.{
     DaemonConfig, DaemonState, DaemonRequest, DaemonResponse,
     daemon_state_new, daemon_response_new,
-    DAEMON_IDLE, DAEMON_POLLING, DAEMON_PROCESSING, DAEMON_SHUTTING_DOWN
+    DAEMON_IDLE, DAEMON_POLLING, DAEMON_PROCESSING, DAEMON_SHUTTING_DOWN,
+    DAEMON_PUBLICATION_BLOCKED, DAEMON_ACKNOWLEDGEMENT_BLOCKED
 }
 use std.daemon_sdk.lock.{
     try_acquire_daemon_lock, release_daemon_lock
 }
 use std.daemon_sdk.protocol.{
-    read_daemon_requests, write_daemon_response, clear_processed_requests,
+    read_daemon_requests, write_daemon_response, acknowledge_processed_requests,
     clear_old_responses
 }
 
@@ -64,21 +65,35 @@ impl DaemonRunner:
         while i < requests.len() and count < self.config.max_concurrent:
             val req = requests[i]
             val resp = handler(req)
-            write_daemon_response(resp, self.config.response_dir)
+            if resp.request_id != req.id or not write_daemon_response(resp, self.config.response_dir):
+                # V1 has no durable execution ledger: retain the unacknowledged
+                # request and stop rather than re-run its handler next poll.
+                # Recovery requires the domain owner; a restart is not proof
+                # that the effect did not happen. Remote work uses V2 operations.
+                self.state.errors_count = self.state.errors_count + 1
+                self.state.status = DAEMON_PUBLICATION_BLOCKED
+                self.running = false
+                break
             processed_ids.push(req.id)
             count = count + 1
             i = i + 1
 
-        clear_processed_requests(self.config.request_dir, processed_ids)
+        if not acknowledge_processed_requests(self.config.request_dir, processed_ids):
+            self.state.errors_count = self.state.errors_count + 1
+            self.state.status = DAEMON_ACKNOWLEDGEMENT_BLOCKED
+            self.running = false
         self.state.items_processed = self.state.items_processed + count
         self.state.cycle_count = self.state.cycle_count + 1
-        self.state.status = DAEMON_IDLE
+        if self.running:
+            self.state.status = DAEMON_IDLE
 
     # --- Main loop: poll + sleep + periodic cleanup ---
 
     me run_loop(handler: fn(DaemonRequest) -> DaemonResponse):
         while self.running:
             self.run_poll_cycle(handler)
+            if not self.running:
+                break
             # Periodic response cleanup every 100 cycles
             if self.state.cycle_count % 100 == 0:
                 val max_age_ms = self.config.request_timeout_ms * 10

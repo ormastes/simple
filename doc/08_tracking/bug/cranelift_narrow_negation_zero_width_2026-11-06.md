@@ -39,3 +39,36 @@ session, not landed); this change is self-contained and does not depend on it.
 `cranelift_signed_narrow_binop_no_wrap_2026-11-06` (P3, open): the BinOp call site canonicalizes
 only unsigned narrow results, so a signed i32 `add`/`sub`/`mul` overflow is not sign-wrapped.
 After this fix `-x` wraps at the declared width while `0 - x` does not. Not a bootstrap blocker.
+
+## Signed BinOp candidate (2026-11-07)
+
+`cranelift_signed_narrow_binop_no_wrap_2026-11-06` now has a source candidate;
+native qualification remains pending. The ordinary `BinOp` arm previously
+applied only `cl_canonicalize_unsigned_narrow` after its I64 arithmetic. Signed
+I8/I16/I32 results therefore retained overflow bits, exposed by widening casts
+that are no-ops in this backend.
+
+The candidate extracts the existing signed unary-negation normalization into
+`cl_canonicalize_signed_narrow` and also applies it to ordinary BinOp results:
+reduce to the declared width, then sign-extend to I64. Unsigned normalization
+is unchanged. Exact signed narrow destination matching leaves float, pointer,
+Bool and 64-bit destinations unchanged. `CheckedBinOp` is separate and unchanged;
+this candidate does not claim checked-overflow support.
+
+New fixture `test/fixtures/compiler/cranelift_narrow_binop/wrap_signed.spl`
+contains 15 authored checks: add/sub/mul overflow for all three signed widths,
+minimum negation via subtraction, nonoverflow negative arithmetic, unsigned
+wrap/sign distinction, floating arithmetic and a wide-integer control.
+Each arithmetic helper widens the expression directly with `.to_i64()`.
+An annotated narrow `let` is deliberately absent: `mir_lowering_stmts.spl`
+emits an additional narrowing cast for that form, potentially masking the
+missing BinOp normalization. The existing CRC32 unsigned-width regression
+likewise observes arithmetic results through widening, not a narrowing let.
+No compiler build or runtime test was run for this candidate.
+
+Required qualification: a self-hosted producer containing the candidate must
+native-build the fixture with `--backend=cranelift`, execute the emitted binary,
+and observe exit 0 plus `PASS signed narrow binop checks=15`. Replay the existing
+`cranelift_narrow_negation/negate_narrow.spl` fixture because unary normalization
+now shares the helper. Preserve producer identity, compile log and executable
+output. Source inspection and whitespace checks alone are not a runtime PASS.

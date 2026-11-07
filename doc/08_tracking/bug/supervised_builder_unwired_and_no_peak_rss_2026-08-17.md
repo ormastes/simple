@@ -149,3 +149,30 @@ child's `ru_maxrss` needs a new `rt_process_*` primitive in the C/Rust runtime,
 which cannot be picked up without a bootstrap. Deliberately not attempted.
 Gaps 1, 3 and 4 are unchanged, and the "do not wire `spawn_fn` to a full
 rebuild" warning above still applies.
+
+## Gap 2 closed in source (2026-11-07, work/mem-supervised-peak-rss)
+
+Root cause of the constant 0: the 2026-11-03 extern only recorded a peak inside
+`process_run_bounded`/`run_timeout`. The supervisor reaps with the async
+`rt_process_wait(pid, 1)`, which used `try_wait`/`waitpid` and kept no rusage,
+and `build_supervised()` passed a literal `0` at all three record sites.
+
+Fix:
+- `rt_process_wait` now reaps through `child_peak_rss::reap` (Rust runtime
+  `env_process.rs` + interpreter `system.rs`, reset at entry) and through
+  `wait4` / `K32GetProcessMemoryInfo` in the C runtime (`runtime_process.c`;
+  POSIX keeps a "latest reap" flag so a later `run_bounded` still reports its own child).
+- `parallel.spl` reads `rt_process_last_child_peak_rss_kib()` immediately after
+  the reaping wait and records it (budget-killed units: 0, they are reaped inside
+  `rt_process_kill`, which measures nothing).
+- `BuildOutcomeSet.peak_rss_kb_of(path)` (-1 = no record).
+
+Spec: `test/01_unit/compiler/driver/supervised_build_peak_rss_spec.spl` (200 MB unit
+in [180, 400) MB, light unit in (0, 150) MB). Measured on the deployed seed
+(`bin/simple.exe`, 40739328 B, 2026-11-04): RED, fat unit reads 0 — the deployed seed
+predates the runtime half. Tagged `@tag:in-development` until the seed is redeployed;
+neighbour specs `supervised_build_survives_worker_death_spec` (4/4) and
+`supervised_build_outcome_class_guard_spec` (5/5) stay green with the Simple half.
+C half: `clang -fsyntax-only` clean for x86_64-w64-mingw32 (llvm-mingw) and
+x86_64-linux-musl. Rust half: not compiled in this lane (host disk at 100%, no
+cargo build possible) — the redeploy verifies it. Gaps 1, 3, 4 unchanged.

@@ -1,0 +1,101 @@
+# @req REQ-MIR-COMPOUND-OPERATOR-001
+# UNEXECUTED: compiler runtime qualification awaits the bootstrap lane.
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# HIR producer contract: the parser's AssignOp currently exposes only the
+# five arithmetic variants. This does not claim source <<= or >>= support.
+use std.spec.{describe, it, expect, fail}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_operators.{HirAssignOp}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn expect_compound_assignment(op: HirAssignOp, expected: MirBinOp):
+    val span = Span.empty()
+    val type_ = HirType(kind: HirTypeKind.Int(64, true), span: span)
+    var symbols = SymbolTable.new()
+    val symbol = symbols.define("current", SymbolKind.Variable, Some(type_), span,
+        Visibility.Private, true, nil)
+    var lowering = MirLowering.new(symbols)
+    var builder = lowering.builder
+    builder.begin_simple_function("compound_assignment", "i64")
+    val current = builder.emit_const_int(8)
+    lowering.builder = builder
+    lowering.bind_local(symbol.id, current)
+    val target = HirExpr(kind: HirExprKind.Var(symbol), has_type_: true,
+        type_: type_, span: span)
+    val rhs = HirExpr(kind: HirExprKind.IntLit(2, nil), has_type_: true,
+        type_: type_, span: span)
+    # Exercise actual assignment lowering and its shared read-modify-write
+    # path, rather than calling the operator-map helper directly.
+    lowering.lower_stmt(HirStmt(kind: HirStmtKind.Assign(target, Some(op), rhs), span: span))
+    expect(lowering.errors.len()).to_equal(0)
+    builder = lowering.builder
+    builder.terminate_return(Some(mir_operand_copy(current)))
+    val function = builder.end_function()
+    var operations = 0
+    var writebacks = 0
+    var rhs_id = -1
+    var result_id = -1
+    for block in function.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Const(dest, MirConstValue.Int(value), _):
+                    if value == 2:
+                        rhs_id = dest.id
+                case MirInstKind.BinOp(dest, actual, left, right):
+                    operations = operations + 1
+                    expect(actual).to_equal(expected)
+                    match left.kind:
+                        case MirOperandKind.Copy(local): expect(local.id).to_equal(current.id)
+                        case _: fail("compound assignment must read its current local")
+                    match right.kind:
+                        case MirOperandKind.Copy(local):
+                            expect(rhs_id).to_be_greater_than(-1)
+                            expect(local.id).to_equal(rhs_id)
+                        case _: fail("compound assignment must read the lowered RHS")
+                    result_id = dest.id
+                case MirInstKind.Copy(dest, source):
+                    if dest.id == current.id:
+                        writebacks = writebacks + 1
+                        expect(result_id).to_be_greater_than(-1)
+                        match source.kind:
+                            case MirOperandKind.Copy(local): expect(local.id).to_equal(result_id)
+                            case _: fail("compound assignment must store its computed result")
+                case _: ()
+    expect(operations).to_equal(1)
+    expect(writebacks).to_equal(1)
+
+describe "HIR compound assignment preserves the operation and write-back":
+    it "lowers left shift instead of addition":
+        expect_compound_assignment(HirAssignOp.Shl, MirBinOp.Shl)
+
+    it "lowers right shift instead of addition":
+        expect_compound_assignment(HirAssignOp.Shr, MirBinOp.Shr)
+
+    it "lowers bitwise AND instead of addition":
+        expect_compound_assignment(HirAssignOp.BitAnd, MirBinOp.BitAnd)
+
+    it "lowers bitwise OR instead of addition":
+        expect_compound_assignment(HirAssignOp.BitOr, MirBinOp.BitOr)
+
+    it "lowers bitwise XOR instead of addition":
+        expect_compound_assignment(HirAssignOp.BitXor, MirBinOp.BitXor)
+
+    it "preserves arithmetic addition":
+        expect_compound_assignment(HirAssignOp.Add, MirBinOp.Add)
+
+    it "preserves arithmetic subtraction":
+        expect_compound_assignment(HirAssignOp.Sub, MirBinOp.Sub)
+
+    it "preserves arithmetic multiplication":
+        expect_compound_assignment(HirAssignOp.Mul, MirBinOp.Mul)
+
+    it "preserves arithmetic division":
+        expect_compound_assignment(HirAssignOp.Div, MirBinOp.Div)
+
+    it "preserves arithmetic remainder":
+        expect_compound_assignment(HirAssignOp.Mod, MirBinOp.Rem)

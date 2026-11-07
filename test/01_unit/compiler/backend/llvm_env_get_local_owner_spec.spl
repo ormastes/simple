@@ -1,0 +1,80 @@
+# Authored regression; execution requires a rebuilt admitted pure-Simple runtime.
+use std.spec.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn owner_function(id: i64, name: text, params: [MirType], locals: [MirLocal], instructions: [MirInst], result: MirOperand) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: id), name: name,
+        signature: MirSignature(params: params, return_type: MirType.i64(), is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: instructions,
+            terminator: MirTerminator.Ret(Some(result)))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {}, layout_phase: nil,
+        is_kernel: false, gpu_target: "", gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+
+fn owner_int(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
+
+fn owner_module(local_definition: bool, caller_name: text, callee_name: text) -> MirModule:
+    val result = LocalId(id: 0)
+    val callee_signature = MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)
+    val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(callee_name),
+        MirType(kind: MirTypeKind.FuncPtr(callee_signature))))
+    val call = MirInst(kind: MirInstKind.Call(Some(result), callee, [owner_int(7)]), span: nil)
+    val temp = MirLocal(id: result, name: Some("result"), type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)
+    val caller = owner_function(2, caller_name, [], [temp], [call], mir_operand_copy(result))
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[caller.symbol] = caller
+    if local_definition:
+        val arg = MirLocal(id: result, name: Some("key"), type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false)
+        val local = owner_function(1, "env_get", [MirType.i64()], [arg], [], owner_int(42))
+        functions[local.symbol] = local
+    MirModule(name: "test.env_owner", functions: functions, statics: {}, constants: {}, types: {})
+
+fn owner_calls(output: text, callee: text) -> i64:
+    var count = 0
+    for line in output.split("\n"):
+        if line.contains("call ") and line.contains("@{callee}("):
+            count = count + 1
+    count
+
+describe "LLVM env_get source definition ownership":
+    it "preserves a local integer signature with either emission order and entry policy":
+        step("Translate both emission orders and bootstrap modes without relying on emitted definitions or ambient env")
+        for caller in ["aaa_caller", "zzz_caller"]:
+            for entry in [true, false]:
+                for bootstrap in [false, true]:
+                    var translator = MirToLlvm.create("test.env_owner", CodegenTarget.X86_64, nil)
+                    translator.set_group_bootstrap_mode(bootstrap)
+                    val output = translator.translate_module_with_entry(
+                        owner_module(true, caller, "env_get"), entry)
+                    val symbol = if entry: "env_get" else: "test.env_owner.env_get"
+                    expect(output).to_contain("define i64 @{symbol}(i64")
+                    expect(output).to_contain("call i64 @{symbol}(i64 7)")
+                    expect(owner_calls(output, symbol)).to_equal(1)
+                    expect(owner_calls(output, "rt_env_get_value")).to_equal(0)
+                    expect(owner_calls(output, "rt_env_get")).to_equal(0)
+
+    it "keeps the nonlocal one-word alias on the boxed runtime owner":
+        step("A bare imported alias has no MIR body and must still use rt_env_get_value")
+        val output = MirToLlvm.create("test.env_owner", CodegenTarget.X86_64, nil).translate_module_with_entry(
+            owner_module(false, "aaa_caller", "env_get"), true)
+        expect(owner_calls(output, "rt_env_get_value")).to_equal(1)
+        expect(owner_calls(output, "env_get")).to_equal(0)
+        expect(owner_calls(output, "rt_env_get")).to_equal(0)
+
+    it "preserves an explicit runtime call even beside a local alias collision":
+        step("Local env_get ownership must not intercept explicit rt_env_get calls")
+        val output = MirToLlvm.create("test.env_owner", CodegenTarget.X86_64, nil).translate_module_with_entry(
+            owner_module(true, "aaa_caller", "rt_env_get"), true)
+        expect(owner_calls(output, "rt_env_get_value")).to_equal(1)
+        expect(owner_calls(output, "env_get")).to_equal(0)

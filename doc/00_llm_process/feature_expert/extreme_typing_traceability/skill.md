@@ -108,3 +108,5 @@ Open architecture options do not reopen the selected language policy.
 Consume the exact feature/layer receipt before source work. New source routes,
 manuals and implementation claims require revalidation; this expert note does
 not activate proposed CLI commands or broaden operational skills.
+
+TEMPORARY (2026-11-07): flag unset = warn-only at every profile (per-module summary warning, SIMPLE_EXTREME_PUBLIC_API_VERBOSE=1 for details, never denies, cached admission not refused); =1 = profile dispositions (deny at robust); =0 = off. Default flips to deny at robust once E3 stdlib migration lands.

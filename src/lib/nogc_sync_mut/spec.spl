@@ -35,6 +35,13 @@ use std.nogc_sync_mut.spec.trace_events.{emit_trace_case_event}
 # Global Test State
 # ================================================================
 
+# Cumulative example counters live in the runtime (interpreter bridge
+# interpreter_call/bdd.rs, native runtime.c). describe/it intrinsics feed them
+# directly; this file's own runner feeds them through rt_bdd_record_result.
+extern fn rt_bdd_executed_total() -> i64
+extern fn rt_bdd_failed_total() -> i64
+extern fn rt_bdd_record_result(passed: i64)
+
 var current_suite = ""
 var current_context = ""
 var suite_stack: [text] = []
@@ -424,6 +431,7 @@ fn _execute_it(name: text, block: fn()) -> text:
     elif current_test_errors.len() == 0:
         passed = passed + 1
         test_passed = passed
+        rt_bdd_record_result(1)
         # Persist before any later nested call can restore the caller's global
         # snapshot and stale the local tally under interpreter writeback.
         _write_test_result_evidence(passed, failed)
@@ -437,6 +445,7 @@ fn _execute_it(name: text, block: fn()) -> text:
             test_pending = pending_before
         failed = failed + 1
         test_failed = failed
+        rt_bdd_record_result(0)
         # The error formatting below performs nested calls (join/push).  In
         # pure interpreter mode those calls may restore the pre-call global
         # snapshot, so serialize the authoritative local counters first.
@@ -558,6 +567,7 @@ fn _active_assurance_profile() -> text:
 # `it(name, block)`) with no enclosing `_execute_it` to fold into.
 fn _reject_skip(name: text, message: text):
     test_failed = test_failed + 1
+    rt_bdd_record_result(0)
     print "    it {name} ... FAILED (skip rejected under critical: {message})"
     test_errors.push("{current_suite} > {name}: {message}")
     _write_test_result_evidence(test_passed, test_failed)
@@ -733,6 +743,7 @@ pub fn skip_context(reason: text):
         if _aggregate_active():
             _aggregate_errors.push("skip_context rejected outside a case")
         test_failed = test_failed + 1
+        rt_bdd_record_result(0)
         print "  context skipped: FAILED (skip rejected under critical: {validation.message})"
         test_errors.push("{current_suite}: {validation.message}")
         _write_test_result_evidence(test_passed, test_failed)
@@ -1712,18 +1723,20 @@ pub fn assert_contains(text_value: text, substring: text):
 # ================================================================
 
 pub fn print_summary():
-    val total = test_passed + test_failed + test_pending + test_skipped
+    val executed = rt_bdd_executed_total()
+    val failed_total = rt_bdd_failed_total()
+    val total = executed + test_pending + test_skipped
     print ""
     print "Test Summary:"
     print "  Total:   {total}"
-    print "  Passed:  {test_passed}"
-    print "  Failed:  {test_failed}"
+    print "  Passed:  {executed - failed_total}"
+    print "  Failed:  {failed_total}"
     if test_pending > 0:
         print "  Pending: {test_pending}"
     if test_skipped > 0:
         print "  Skipped: {test_skipped}"
 
-    if test_failed > 0:
+    if failed_total > 0:
         print ""
         print "Failures:"
         var idx = 1
@@ -1732,7 +1745,7 @@ pub fn print_summary():
             idx = idx + 1
 
 pub fn get_exit_code() -> i64:
-    if test_failed > 0:
+    if rt_bdd_failed_total() > 0:
         return 1
     return 0
 
@@ -1740,7 +1753,7 @@ pub fn get_test_count() -> i64:
     test_passed + test_failed + test_pending + test_skipped
 
 pub fn get_executed_test_count() -> i64:
-    test_passed + test_failed
+    rt_bdd_executed_total()
 
 pub fn get_expectation_count() -> i64:
     _expectations_evaluated

@@ -1,0 +1,120 @@
+# @req REQ-SSPEC-UNIT
+# Raw pointer indexing must scale by the MIR pointee, despite opaque LLVM ptr.
+use std.spec.{describe, it, expect}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn gep_width_index(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
+
+fn gep_width_body(base_type: MirType, alias: bool = false, move_alias: bool = false, erased_zero: bool = false) -> MirBody:
+    var instructions: [MirInst] = []
+    if erased_zero:
+        instructions.push(MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Zero, MirType.i64()), span: nil))
+    var source = LocalId(id: 1)
+    if alias:
+        source = LocalId(id: 3)
+        if move_alias:
+            instructions.push(MirInst(kind: MirInstKind.Move(source, LocalId(id: 1)), span: nil))
+        else:
+            instructions.push(MirInst(kind: MirInstKind.Copy(source, LocalId(id: 1)), span: nil))
+    instructions.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 2),
+        MirOperand(kind: MirOperandKind.Copy(source)), [gep_width_index(1)]), span: nil))
+    MirBody(name: "gep_width", blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"),
+        instructions: instructions, terminator: MirTerminator.Ret(nil))],
+        locals: [MirLocal(id: LocalId(id: 1), name: Some("base"), type_: base_type,
+            kind: if erased_zero: LocalKind.Temp else: LocalKind.Arg(0), is_ghost: false),
+            MirLocal(id: LocalId(id: 2), name: Some("element"), type_: base_type,
+                kind: LocalKind.Temp, is_ghost: false)],
+        arg_count: if erased_zero: 0 else: 1, return_ty: MirType.unit())
+
+fn gep_width_ir(base_type: MirType, alias: bool = false, move_alias: bool = false) -> text:
+    var translator = MirToLlvm.create("test.gep_width", CodegenTarget.X86_64, nil)
+    translator.translate_function("gep_width", gep_width_body(base_type, alias, move_alias), Span.empty())
+    expect(translator.codegen_errors.len()).to_equal(0)
+    translator.builder.build()
+
+describe "LLVM raw pointer GEP element widths":
+    it "uses byte rather than pointer stride for a u8 parameter at index one":
+        val ir = gep_width_ir(MirType.ptr(MirType(kind: MirTypeKind.U8), true))
+        expect(ir).to_contain("%l2 = getelementptr i8, ptr %l1, i64 1")
+        expect(ir.contains("%l2 = getelementptr ptr,")).to_equal(false)
+
+    it "preserves u16 i32 f32 i64 and f64 element widths":
+        val types = [MirType(kind: MirTypeKind.U16), MirType(kind: MirTypeKind.I32),
+            MirType(kind: MirTypeKind.F32), MirType.i64(), MirType(kind: MirTypeKind.F64)]
+        val widths = ["i16", "i32", "float", "i64", "double"]
+        var index = 0
+        while index < types.len():
+            val ir = gep_width_ir(MirType.ptr(types[index], false))
+            expect(ir).to_contain("%l2 = getelementptr {widths[index]}, ptr %l1, i64 1")
+            index = index + 1
+
+    it "keeps pointer sized stride for pointers to pointers":
+        val ir = gep_width_ir(MirType.ptr(MirType.ptr(MirType(kind: MirTypeKind.U8), false), false))
+        expect(ir).to_contain("%l2 = getelementptr ptr, ptr %l1, i64 1")
+
+    it "uses the referenced element width for references":
+        val ir = gep_width_ir(MirType(kind: MirTypeKind.Ref(MirType(kind: MirTypeKind.U16), false)))
+        expect(ir).to_contain("%l2 = getelementptr i16, ptr %l1, i64 1")
+
+    it "preserves pointee width across synthetic copy and move locals":
+        val pointer = MirType.ptr(MirType(kind: MirTypeKind.U8), false)
+        expect(gep_width_ir(pointer, true, false)).to_contain("%l2 = getelementptr i8, ptr %l3, i64 1")
+        expect(gep_width_ir(pointer, true, true)).to_contain("%l2 = getelementptr i8, ptr %l3, i64 1")
+
+    it "recovers typed constant pointer width":
+        var translator = MirToLlvm.create("test.gep_constant", CodegenTarget.X86_64, nil)
+        val base = MirOperand(kind: MirOperandKind.Const(MirConstValue.Zero,
+            MirType.ptr(MirType(kind: MirTypeKind.U8), false)))
+        translator.translate_gep(LocalId(id: 2), base, [gep_width_index(1)])
+        expect(translator.builder.build()).to_contain("%l2 = getelementptr i8,")
+        translator.translate_const(LocalId(id: 3), MirConstValue.Zero,
+            MirType.ptr(MirType(kind: MirTypeKind.U16), false))
+        translator.translate_gep(LocalId(id: 4), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))), [gep_width_index(1)])
+        expect(translator.builder.build()).to_contain("%l4 = getelementptr i16, ptr %l3, i64 1")
+
+    it "records pointer casts and bitcasts even without a MirLocal entry":
+        var translator = MirToLlvm.create("test.gep_cast", CodegenTarget.X86_64, nil)
+        translator.translate_cast(LocalId(id: 1), gep_width_index(4096),
+            MirType.ptr(MirType(kind: MirTypeKind.U8), false))
+        translator.translate_gep(LocalId(id: 2), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), [gep_width_index(1)])
+        translator.translate_bitcast(LocalId(id: 3), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+            MirType.ptr(MirType(kind: MirTypeKind.U16), false))
+        translator.translate_gep(LocalId(id: 4), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))), [gep_width_index(1)])
+        val ir = translator.builder.build()
+        expect(ir).to_contain("%l2 = getelementptr i8, ptr %l1, i64 1")
+        expect(ir).to_contain("%l4 = getelementptr i16, ptr %l3, i64 1")
+
+    it "keeps declared pointer width when a zero constant erases its MIR type":
+        var translator = MirToLlvm.create("test.gep_erased_zero", CodegenTarget.X86_64, nil)
+        val pointer = MirType.ptr(MirType(kind: MirTypeKind.U8), false)
+        translator.translate_function("gep_width", gep_width_body(pointer, false, false, true), Span.empty())
+        expect(translator.builder.build()).to_contain("%l2 = getelementptr i8, ptr %l1, i64 1")
+
+    it "uses a synthetic allocation's actual element type":
+        var translator = MirToLlvm.create("test.gep_alloc", CodegenTarget.X86_64, nil)
+        translator.translate_alloc(LocalId(id: 1), MirType(kind: MirTypeKind.U16))
+        translator.translate_gep(LocalId(id: 2), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), [gep_width_index(1)])
+        expect(translator.builder.build()).to_contain("%l2 = getelementptr i16, ptr %l1, i64 1")
+
+    it "preserves byte stride across chained synthetic address calculations":
+        var translator = MirToLlvm.create("test.gep_chain", CodegenTarget.X86_64, nil)
+        translator.translate_const(LocalId(id: 1), MirConstValue.Zero,
+            MirType.ptr(MirType(kind: MirTypeKind.U8), false))
+        translator.translate_gep(LocalId(id: 2), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), [gep_width_index(1)])
+        translator.translate_gep(LocalId(id: 3), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))), [gep_width_index(1)])
+        val ir = translator.builder.build()
+        expect(ir).to_contain("%l2 = getelementptr i8, ptr %l1, i64 1")
+        expect(ir).to_contain("%l3 = getelementptr i8, ptr %l2, i64 1")
+
+    it "clears pointee facts between functions and preserves unknown-base fallback":
+        var translator = MirToLlvm.create("test.gep_reset", CodegenTarget.X86_64, nil)
+        translator.translate_function("gep_width", gep_width_body(MirType.ptr(MirType(kind: MirTypeKind.U8), false)), Span.empty())
+        translator.begin_function_translation("next")
+        expect(translator.gep_element_type_for_value("%l1")).to_equal("")
+        translator.translate_gep(LocalId(id: 4), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), [gep_width_index(1)])
+        expect(translator.builder.build()).to_contain("%l4 = getelementptr i64, ptr")

@@ -188,3 +188,7 @@ Consequences:
   the `disc=1337030607` garbage point at native miscompile of the recovery
   inputs), not in the lowering logic as interpreted. Needs a stage3 producer
   and the `test/fixtures/compiler/native_entry_own_class_methods/` run. OPEN.
+
+## Reopened 2026-11-07
+
+PR #7408 changed these rows on seed-only evidence, which is insufficient. Stage3 (native) still fails: on s3_fable54m, s3_fable56 and s3_fable57s the 12-line fixture C:/dev/p3new/s3sanity/root/test/s3sanity/vb_mm1.spl (struct + impl method + one call) fails during HIR lowering with `[simple-runtime][error] rejected invalid array handle before dereference` followed by `unresolved method call: get route=runtime-fallback key=test.s3sanity.vb_mm1.Custom::get struct_method_syms=yes record_instance_method=n/a lookup_method_in_type=no receiver_has_type=false`. The same file without the call passes; fixture test/fixtures/compiler/native_entry_own_class_methods has the same shape. Status: OPEN, root-cause lane in progress.

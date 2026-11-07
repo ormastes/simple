@@ -73,3 +73,8 @@ being read and makes every resolution hypothesis moot.
 Re-verify this symptom only with a binary built from the tree under test, or after checking
 `strings -a <binary> | grep -c <other-worktree>`.
 
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Repro spec test/01_unit/lib/gpu_import_path_parity_spec.spl (@tag:host-cuda): package vs direct import device-count parity. Vacuous (0==0) on GPU-less Windows; verify on a CUDA host.

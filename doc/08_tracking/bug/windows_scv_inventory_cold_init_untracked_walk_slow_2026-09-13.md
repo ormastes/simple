@@ -139,3 +139,6 @@ Restore a tight subprocess bound once the untracked walk itself is removed
 from the hot path (item 1-3 above; not addressed by this change).
 
 **Revalidated 2026-11-02: still plausible because OPEN (partial fix landed — see "2026-09-14 update" below; the; no merged fix commit with a passing regression is cited in this doc.**
+
+## Round 15 measurement (2026-11-07, Windows seed, fresh worktree, 45,320 .spl/.sdn sources)
+Whole cold init through `compiler_inventory_refresh_v1(cold_init=true)`: roots `src` 64 s / ~340 MB peak WS; roots `src,test,examples/10_tooling` 80 s / ~460 MB peak WS. Per-file event ~1 ms. The >3.8 GB / 5 min CPU figure in coverage_test_flag_times_out_and_mcdc_no_probes_windows does NOT reproduce at the inventory phase on this tree (streaming landed); remaining coverage cost is elsewhere (instrumented wrapper build). Pinned by test/01_unit/app/compiler_entrypoint/inventory_cold_init_streaming_prevention_spec.spl.

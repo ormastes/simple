@@ -482,6 +482,9 @@ pub(crate) fn exec_node(
                     }
                 };
 
+                if let Some(message) = crate::impl_duplicate_check::let_literal_mismatch(let_stmt) {
+                    return Err(CompileError::semantic(message));
+                }
                 // Validate and constrain value based on type annotation
                 let value = match type_annotation {
                     // `bool` locals take `.?` presence (see `coerce_to_declared_type`).

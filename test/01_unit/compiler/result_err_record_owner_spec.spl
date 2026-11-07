@@ -17,7 +17,7 @@ use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLowering.function_lowering.*
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
-use compiler.mir._MirLoweringExpr.asm_and_targets.*
+use compiler.mir._MirLowering.asm_and_targets.*
 use compiler.mir.mir_lowering_stmts.*
 
 class ErrOwnerLowered:
@@ -40,50 +40,50 @@ fn err_owner_lower_source(consumer_source: text, conflict_mode: i64 = 0) -> ErrO
     modules["app.probe.records"] = records_ast
     modules["app.probe.provider"] = provider_ast
     val files = [SourceFile(path: "app/probe/records.spl", content: err_records_source, module_name: "app.probe.records"), SourceFile(path: "app/probe/provider.spl", content: err_provider_source, module_name: "app.probe.provider")]
-    val surfaces_option = module_surfaces_from_modules(modules, files)
-    if val surfaces = surfaces_option:
-        var records_lowering = hirlowering_for_module("app/probe/records.spl", surfaces)
-        var provider_lowering = hirlowering_for_module("app/probe/provider.spl", surfaces)
-        var consumer_lowering = hirlowering_for_module("app/probe/main.spl", surfaces)
-        val records = records_lowering.lower_module(records_ast)
-        val provider = provider_lowering.lower_module(provider_ast)
-        val consumer = consumer_lowering.lower_module(consumer_ast)
-        expect(records_lowering.errors.len()).to_equal(0)
-        expect(provider_lowering.errors.len()).to_equal(0)
-        expect(consumer_lowering.errors.len()).to_equal(0)
-        var lowering = MirLowering.new(consumer.symbols)
-        # The local homonym is observed first; a unique bare-name guess cannot
-        # authorize the provider's second text field.
-        var prescan_mods: Dict<text, HirModule> = {}
-        prescan_mods["consumer"] = consumer
-        prescan_mods["provider"] = provider
-        prescan_mods["records"] = records
-        lowering.prescan_module_struct_names(prescan_mods, "consumer")
-        lowering.prescan_module_struct_names(prescan_mods, "provider")
-        lowering.prescan_module_struct_names(prescan_mods, "records")
-        if conflict_mode != 0:
-            # Same qualified identity, field names, offsets and widths; only
-            # message's semantic type differs. The common physical digest
-            # deliberately remains unchanged.
-            val changed_source = err_records_source.replace("message: text", "message: i64")
-            val duplicate_ast = parse_full_frontend(changed_source, "app/probe/records.spl", "app.probe.records", log)
-            var duplicate_lowering = hirlowering_for_module("app/probe/records.spl", surfaces)
-            val duplicate = duplicate_lowering.lower_module(duplicate_ast)
-            expect(duplicate_lowering.errors.len()).to_equal(0)
-            val original_digest = lowering.composite_layout_digests["app.probe.records::IoError"]
-            if conflict_mode == 1:
-                var dup_mods: Dict<text, HirModule> = {}
-                dup_mods["duplicate"] = duplicate
-                lowering.prescan_module_struct_names(dup_mods, "duplicate")
-            else:
-                for class_def in duplicate.classes.values():
-                    if class_def.name == "IoError":
-                        lowering.register_composite_field_metadata("app.probe.records.IoError", class_def.fields, duplicate.symbols, true)
-            expect(lowering.composite_layout_digests["app.probe.records::IoError"]).to_equal(original_digest)
-            expect(lowering.composite_layout_owner_counts["app.probe.records::IoError"]).to_equal(1)
-        val mir = lowering.lower_module(consumer, [consumer, provider, records])
-        return ErrOwnerLowered(lowering: lowering, mir: mir)
-    fail("module surface construction failed")
+    match module_surfaces_from_modules(modules, files):
+        case Err(reason): fail("module surface construction failed: {reason}")
+        case Ok(surfaces):
+            var records_lowering = hirlowering_for_module("app/probe/records.spl", surfaces)
+            var provider_lowering = hirlowering_for_module("app/probe/provider.spl", surfaces)
+            var consumer_lowering = hirlowering_for_module("app/probe/main.spl", surfaces)
+            val records = records_lowering.lower_module(records_ast)
+            val provider = provider_lowering.lower_module(provider_ast)
+            val consumer = consumer_lowering.lower_module(consumer_ast)
+            expect(records_lowering.errors.len()).to_equal(0)
+            expect(provider_lowering.errors.len()).to_equal(0)
+            expect(consumer_lowering.errors.len()).to_equal(0)
+            var lowering = MirLowering.new(consumer.symbols)
+            # The local homonym is observed first; a unique bare-name guess cannot
+            # authorize the provider's second text field.
+            var prescan_mods: Dict<text, HirModule> = {}
+            prescan_mods["consumer"] = consumer
+            prescan_mods["provider"] = provider
+            prescan_mods["records"] = records
+            lowering.prescan_module_struct_names(prescan_mods, "consumer")
+            lowering.prescan_module_struct_names(prescan_mods, "provider")
+            lowering.prescan_module_struct_names(prescan_mods, "records")
+            if conflict_mode != 0:
+                # Same qualified identity, field names, offsets and widths; only
+                # message's semantic type differs. The common physical digest
+                # deliberately remains unchanged.
+                val changed_source = err_records_source.replace("message: text", "message: i64")
+                val duplicate_ast = parse_full_frontend(changed_source, "app/probe/records.spl", "app.probe.records", log)
+                var duplicate_lowering = hirlowering_for_module("app/probe/records.spl", surfaces)
+                val duplicate = duplicate_lowering.lower_module(duplicate_ast)
+                expect(duplicate_lowering.errors.len()).to_equal(0)
+                val original_digest = lowering.composite_layout_digests["app.probe.records::IoError"]
+                if conflict_mode == 1:
+                    var dup_mods: Dict<text, HirModule> = {}
+                    dup_mods["duplicate"] = duplicate
+                    lowering.prescan_module_struct_names(dup_mods, "duplicate")
+                else:
+                    for class_def in duplicate.classes.values():
+                        if class_def.name == "IoError":
+                            lowering.register_composite_field_metadata("app.probe.records.IoError", class_def.fields, duplicate.symbols, true)
+                expect(lowering.composite_layout_digests["app.probe.records::IoError"]).to_equal(original_digest)
+                expect(lowering.composite_layout_owner_counts["app.probe.records::IoError"]).to_equal(1)
+            val mir = lowering.lower_module(consumer, [consumer, provider, records])
+            return ErrOwnerLowered(lowering: lowering, mir: mir)
 
 fn err_owner_text_field_count(mir: MirModule, name: text, index: i64) -> i64:
     var count = 0
