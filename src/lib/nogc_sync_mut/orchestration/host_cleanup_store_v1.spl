@@ -1,0 +1,104 @@
+# Private immutable evidence publication. Linux exact descriptor owner/mode
+# checks; Windows ACL-backed publication is unsupported, never chmod emulated.
+use std.nogc_sync_mut.io.retained_file.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace, file_remove, directory_fsync, file_exists}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, base_encoding_bytes_to_text}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+
+fn cleanup_read_descriptor_v1(file: RetainedFile, maximum: i64) -> Result<text, text>:
+    val metadata = file.security_metadata_v1()?
+    if metadata.owner_uid != metadata.effective_uid or (metadata.mode & 0o7777u32) != 0o600u32:
+        return Err("host-cleanup-file-not-private")
+    if file.size > maximum as u64: return Err("host-cleanup-source-size")
+    var bytes: [u8] = []
+    var offset = 0u64
+    while offset < file.size:
+        val remaining = file.size - offset
+        val count = if remaining > 1048576u64: 1048576 else: remaining as i64
+        val chunk = retained_file_read_at(file, offset, count)?
+        if chunk.len() == 0: return Err("host-cleanup-file-truncated")
+        bytes = bytes + chunk
+        offset = offset + chunk.len() as u64
+    # Requires admitted readonly Linux fsync dependency 10408c1baea223fefd777587dff4a002b0f53e05.
+    if not retained_file_sync(file): return Err("host-cleanup-file-sync-failed")
+    val unchanged = retained_file_identity_unchanged(file)?
+    if not unchanged: return Err("host-cleanup-file-changed")
+    val text_value = base_encoding_bytes_to_text(bytes)
+    if base_encoding_text_to_bytes(text_value) != bytes: return Err("host-cleanup-file-utf8")
+    Ok(text_value)
+
+pub fn host_cleanup_private_read_v1(directory: text, name: text, maximum: i64) -> Result<text, text>:
+    @when(os="linux"):
+    val supported = true
+    @else:
+    val supported = false
+    @end
+    if not supported: return Err("host-cleanup-private-store-host-unsupported")
+    if maximum <= 0 or maximum > 8388608: return Err("host-cleanup-source-size")
+    var parent = retained_directory_open_trusted_v1(directory)?
+    val opened = parent.open_file(name, maximum as u64)
+    val parent_closed = parent.close()
+    if opened.is_err(): return Err(opened.unwrap_err())
+    var file = opened.unwrap()
+    val read = cleanup_read_descriptor_v1(file, maximum)
+    val closed = file.close()
+    if not closed or not parent_closed: return Err("host-cleanup-file-close-failed")
+    read
+
+fn cleanup_write_stage_v1(path: text, bytes: text) -> Result<bool, text>:
+    val source = base_encoding_text_to_bytes(bytes)
+    var file = retained_file_open(path, source.len() as u64, true)?
+    var offset = 0
+    var reason = ""
+    while offset < source.len() and reason == "":
+        val end = if source.len() - offset > 1048576: offset + 1048576 else: source.len()
+        val written = file.write(source[offset:end])
+        if written.is_err(): reason = written.unwrap_err()
+        elif not written.unwrap(): reason = "host-cleanup-stage-write-failed"
+        offset = end
+    val synced = if reason == "": retained_file_sync(file) else: false
+    val closed = file.close()
+    if reason != "": return Err(reason)
+    if not synced or not closed: return Err("host-cleanup-stage-sync-close-failed")
+    Ok(true)
+
+# Supplied root belongs to the trusted journal owner. Stage has a random private
+# name; only complete synced bytes are published without replacing any final.
+pub fn host_cleanup_publish_v1(root: text, directory_name: text, operation_id: text, bytes: text) -> Result<text, text>:
+    @when(os="linux"):
+    val supported = true
+    @else:
+    val supported = false
+    @end
+    if not supported: return Err("host-cleanup-private-store-host-unsupported")
+    if not ["host-cleanup-intents-v1", "host-cleanup-receipts-v1"].contains(directory_name): return Err("host-cleanup-store-kind")
+    if not builder_identifier_valid_v1(operation_id) or str_len(bytes) == 0 or str_len(bytes) > 2097152: return Err("host-cleanup-store-size")
+    # Retained trusted traversal checks existing parent identity/ownership; no
+    # attempt repairs the mode/owner of an unknown existing file or symlink.
+    var parent = retained_directory_open_trusted_v1(root)?
+    if not parent.close(): return Err("host-cleanup-parent-close-failed")
+    val directory = root + "/" + directory_name
+    if not file_exists(directory) and not dir_create(directory, true): return Err("host-cleanup-directory")
+    var target_parent = retained_directory_open_trusted_v1(directory)?
+    if not target_parent.close(): return Err("host-cleanup-parent-close-failed")
+    val stage = secure_temp_dir(root, "host-cleanup-stage-")?
+    val stage_path = stage + "/proof.sdn"
+    val written = cleanup_write_stage_v1(stage_path, bytes)
+    if written.is_err(): return Err(written.unwrap_err())
+    val staged = host_cleanup_private_read_v1(stage, "proof.sdn", 2097152)
+    if staged.is_err(): return Err(staged.unwrap_err())
+    if staged.unwrap() != bytes: return Err("host-cleanup-stage-readback-failed")
+    val name = sha256_text(operation_id) + ".sdn"
+    val published = file_publish_noreplace(stage_path, directory + "/" + name)
+    # Unlink only this invocation's exact stage, never the retained final.
+    val unlinked = if file_exists(stage_path): file_remove(stage_path) else: true
+    val removed = dir_remove(stage, false)
+    if published.is_err(): return Err(published.unwrap_err())
+    if not unlinked or not removed: return Err("host-cleanup-stage-cleanup-failed")
+    val final_bytes = host_cleanup_private_read_v1(directory, name, 2097152)?
+    if final_bytes != bytes: return Err("host-cleanup-proof-conflict")
+    if not directory_fsync(directory) or not directory_fsync(root): return Err("host-cleanup-sync-failed")
+    Ok(sha256_text(bytes))

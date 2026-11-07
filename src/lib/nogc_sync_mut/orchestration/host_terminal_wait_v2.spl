@@ -1,0 +1,235 @@
+# One actual common-API wait under the SAME protected host journal writer.
+# Original bytes/time win; pending observation is never durable success.
+use std.nogc_sync_mut.orchestration.host_local_root_v1.{HostLocalRootV1, host_local_context_v1}
+use std.nogc_sync_mut.orchestration.host_local_command_v1.{host_local_retained_execution_v2, host_local_resolve_execution_v2}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.HostExecutionObservationV2
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, container_scope_fence_id_v2,
+    container_execution_plan_digest_v2}
+use std.common.contracts.container.execution_evidence_v2.container_runtime_observation_digest_v2
+export use std.common.contracts.orchestration.host_terminal_wait_receipt_v2.{HostTerminalWaitReceiptV2,
+    HOST_TERMINAL_WAIT_MAX_BYTES_V2, host_terminal_wait_receipt_encode_v2,
+    host_terminal_wait_receipt_decode_v2, host_terminal_wait_receipt_validate_v2}
+use std.nogc_async_mut.container.api_v2.simple_container_read_v2
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.text_bytes.text_to_utf8_bytes
+use std.nogc_sync_mut.io.external_text_io.io_legacy_utf8
+use std.nogc_sync_mut.io.file_ops.{file_exists, directory_fsync, file_publish_noreplace}
+use std.nogc_sync_mut.io.retained_file.{RetainedFile, retained_file_open, retained_file_sync,
+    retained_file_read_at, retained_file_identity_unchanged, retained_directory_open_trusted_v1}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.sffi.platform.platform_name_raw
+
+pub struct HostTerminalWaitTurnV2:
+    local: HostLocalRootV1
+    receipt: Option<HostTerminalWaitReceiptV2>
+    error: text
+
+fn host_terminal_wait_linux_v2() -> Result<bool, text>:
+    # Existing exact-descriptor uid/mode proof is Linux-only. POSIX chmod/stat
+    # never substitutes for Windows ACL/owner admission.
+    if platform_name_raw().lower() != "linux": return Err("host-terminal-wait-private-owner-unsupported")
+    Ok(true)
+
+fn host_terminal_wait_binding_v2(local: HostLocalRootV1, execution: ContainerExecutionRequestV2,
+        observed: HostExecutionObservationV2, value: HostTerminalWaitReceiptV2) -> Result<bool, text>:
+    if execution.plan.backend != "linux-podman": return Err("host-terminal-wait-private-owner-unsupported")
+    if observed.provider_identity_digest != local.binding.provider_identity_digest:
+        return Err("host-terminal-wait-retained-binding-mismatch")
+    if observed.runtime.node_boot_id != container_scope_fence_id_v2(local.scope)?:
+        return Err("host-terminal-wait-runtime-identity-mismatch")
+    host_terminal_wait_receipt_validate_v2(value, execution.plan, observed.runtime,
+        observed.operation_digest, local.binding.provider_identity_digest, observed.observed_unix_ms)
+
+fn host_terminal_wait_directory_v2(local: HostLocalRootV1) -> text:
+    local.capacity.journal.root + "/host-terminal-waits-v2"
+
+fn host_terminal_wait_leaf_v2(operation_id: text, suffix: text) -> Result<text, text>:
+    if not builder_identifier_valid_v1(operation_id): return Err("host-terminal-wait-operation-invalid")
+    Ok(sha256_text(operation_id) + suffix)
+
+fn host_terminal_wait_read_owner_v2(file: RetainedFile) -> Result<text, text>:
+    val metadata = file.security_metadata_v1()?
+    # 4095=07777,384=0600: reject foreign ownership and permissive/special bits;
+    # inspect this exact retained descriptor rather than repairing a pathname.
+    if metadata.owner_uid != metadata.effective_uid or (metadata.mode & 4095u32) != 384u32:
+        return Err("host-terminal-wait-private-owner-invalid")
+    var content: [u8] = []
+    var offset: u64 = 0
+    while offset < file.size:
+        var count = (file.size - offset) as i64
+        if count > 1048576: count = 1048576
+        val chunk = retained_file_read_at(file, offset, count)?
+        if chunk.len() != count: return Err("host-terminal-wait-short-read")
+        content = content + chunk
+        offset = offset + count as u64
+    if not retained_file_sync(file): return Err("host-terminal-wait-file-sync-failed")
+    val _unchanged = retained_file_identity_unchanged(file)?
+    io_legacy_utf8(content)
+
+fn host_terminal_wait_private_read_v2(local: HostLocalRootV1, operation_id: text,
+        suffix: text) -> Result<text, text>:
+    val _supported = host_terminal_wait_linux_v2()?
+    val name = host_terminal_wait_leaf_v2(operation_id, suffix)?
+    var directory = retained_directory_open_trusted_v1(host_terminal_wait_directory_v2(local))?
+    val opened = directory.open_file(name, HOST_TERMINAL_WAIT_MAX_BYTES_V2 as u64)
+    val directory_closed = directory.close()
+    if opened.is_err(): return Err(opened.unwrap_err())
+    var file = opened.unwrap()
+    if not directory_closed:
+        val _closed = file.close()
+        return Err("host-terminal-wait-directory-close-failed")
+    val read = host_terminal_wait_read_owner_v2(file)
+    val closed = file.close()
+    if not closed: return Err("host-terminal-wait-file-close-failed")
+    read
+
+fn host_terminal_wait_write_owner_v2(file: RetainedFile, source: text) -> Result<bool, text>:
+    val bytes = text_to_utf8_bytes(source)
+    var offset = 0
+    var output = file
+    while offset < bytes.len():
+        var end = offset + 1048576
+        if end > bytes.len(): end = bytes.len()
+        val _written = output.write(bytes[offset:end])?
+        offset = end
+    if not retained_file_sync(output): return Err("host-terminal-wait-file-sync-failed")
+    Ok(true)
+
+fn host_terminal_wait_private_create_v2(path: text, source: text) -> Result<bool, text>:
+    var file = retained_file_open(path, HOST_TERMINAL_WAIT_MAX_BYTES_V2 as u64, true)?
+    val written = host_terminal_wait_write_owner_v2(file, source)
+    val closed = file.close()
+    if not closed: return Err("host-terminal-wait-file-close-failed")
+    written
+
+fn host_terminal_wait_prepare_directory_v2(local: HostLocalRootV1) -> Result<bool, text>:
+    val _supported = host_terminal_wait_linux_v2()?
+    var root = retained_directory_open_trusted_v1(local.capacity.journal.root)?
+    if not root.close(): return Err("host-terminal-wait-directory-close-failed")
+    val path = host_terminal_wait_directory_v2(local)
+    if not file_exists(path) and not dir_create(path, true): return Err("host-terminal-wait-directory-unavailable")
+    var directory = retained_directory_open_trusted_v1(path)?
+    if not directory.close(): return Err("host-terminal-wait-directory-close-failed")
+    Ok(true)
+
+fn host_terminal_wait_claim_v2(execution: ContainerExecutionRequestV2,
+        observed: HostExecutionObservationV2) -> Result<text, text>:
+    val plan_digest = container_execution_plan_digest_v2(execution.plan)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "kind": SdnValue.String("host-terminal-wait-collection"), "planDigest": SdnValue.String(plan_digest),
+        "operationDigest": SdnValue.String(observed.operation_digest),
+        "providerIdentityDigest": SdnValue.String(observed.provider_identity_digest),
+        "nativeId": SdnValue.String(observed.runtime.native_id)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn host_terminal_wait_sync_directory_v2(local: HostLocalRootV1) -> Result<bool, text>:
+    if (not directory_fsync(host_terminal_wait_directory_v2(local)) or
+            not directory_fsync(local.capacity.journal.root)):
+        return Err("host-terminal-wait-sync-failed")
+    Ok(true)
+
+fn host_terminal_wait_load_v2(local: HostLocalRootV1, operation_id: text,
+        suffix: text) -> Result<HostTerminalWaitReceiptV2, text>:
+    val value = host_terminal_wait_receipt_decode_v2(host_terminal_wait_private_read_v2(local, operation_id, suffix)?)?
+    val retained = host_local_retained_execution_v2(local, operation_id)?
+    val _bound = host_terminal_wait_binding_v2(local, retained.execution, retained.observation, value)?
+    if (host_terminal_wait_private_read_v2(local, operation_id, ".claim")? !=
+            host_terminal_wait_claim_v2(retained.execution, retained.observation)?):
+        return Err("host-terminal-wait-collection-claim-mismatch")
+    Ok(value)
+
+# No native query or chmod/repair, including after destruction. The caller
+# consumes an already-durable fact; incomplete collection is never renewed.
+fn host_terminal_wait_retained_v2(local: HostLocalRootV1,
+        operation_id: text) -> Result<HostTerminalWaitReceiptV2, text>:
+    val value = host_terminal_wait_load_v2(local, operation_id, ".sdn")?
+    val _synced = host_terminal_wait_sync_directory_v2(local)?
+    Ok(value)
+
+fn host_terminal_wait_publish_stage_v2(local: HostLocalRootV1,
+        value: HostTerminalWaitReceiptV2) -> Result<bool, text>:
+    val directory = host_terminal_wait_directory_v2(local)
+    val operation_id = value.execution.operation_id
+    val stage = directory + "/" + host_terminal_wait_leaf_v2(operation_id, ".stage.sdn")?
+    val destination = directory + "/" + host_terminal_wait_leaf_v2(operation_id, ".sdn")?
+    if not file_publish_noreplace(stage, destination)?: return Err("host-terminal-wait-publication-conflict")
+    val retained = host_terminal_wait_retained_v2(local, operation_id)?
+    if host_terminal_wait_receipt_encode_v2(retained)? != host_terminal_wait_receipt_encode_v2(value)?:
+        return Err("host-terminal-wait-readback-mismatch")
+    Ok(true)
+
+fn host_terminal_wait_store_v2(local: HostLocalRootV1, value: HostTerminalWaitReceiptV2) -> Result<bool, text>:
+    val source = host_terminal_wait_receipt_encode_v2(value)?
+    val directory = host_terminal_wait_directory_v2(local)
+    val operation_id = value.execution.operation_id
+    val write = directory + "/" + host_terminal_wait_leaf_v2(operation_id, ".write")?
+    val stage = directory + "/" + host_terminal_wait_leaf_v2(operation_id, ".stage.sdn")?
+    # A failed partial private write remains quarantined behind the immutable
+    # collection claim. It never occupies or overwrites the final receipt slot.
+    val _written = host_terminal_wait_private_create_v2(write, source)?
+    if host_terminal_wait_private_read_v2(local, operation_id, ".write")? != source:
+        return Err("host-terminal-wait-stage-readback-mismatch")
+    if not file_publish_noreplace(write, stage)?: return Err("host-terminal-wait-stage-conflict")
+    val _synced = host_terminal_wait_sync_directory_v2(local)?
+    host_terminal_wait_publish_stage_v2(local, value)
+
+fn host_terminal_wait_v2(local: HostLocalRootV1, operation_id: text) -> HostTerminalWaitTurnV2:
+    val name = host_terminal_wait_leaf_v2(operation_id, ".sdn")
+    if name.is_err(): return HostTerminalWaitTurnV2(local, nil, name.unwrap_err())
+    val prepared = host_terminal_wait_prepare_directory_v2(local)
+    if prepared.is_err(): return HostTerminalWaitTurnV2(local, nil, prepared.unwrap_err())
+    val directory = host_terminal_wait_directory_v2(local)
+    if file_exists(directory + "/" + name.unwrap()):
+        val retained = host_terminal_wait_retained_v2(local, operation_id)
+        if retained.is_err(): return HostTerminalWaitTurnV2(local, nil, retained.unwrap_err())
+        return HostTerminalWaitTurnV2(local, Some(retained.unwrap()), "")
+    if file_exists(directory + "/" + sha256_text(operation_id) + ".stage.sdn"):
+        val staged = host_terminal_wait_load_v2(local, operation_id, ".stage.sdn")
+        if staged.is_err(): return HostTerminalWaitTurnV2(local, nil, staged.unwrap_err())
+        val value = staged.unwrap()
+        val published = host_terminal_wait_publish_stage_v2(local, value)
+        if published.is_err(): return HostTerminalWaitTurnV2(local, Some(value), published.unwrap_err())
+        return HostTerminalWaitTurnV2(local, Some(value), "")
+    if file_exists(directory + "/" + sha256_text(operation_id) + ".claim"):
+        return HostTerminalWaitTurnV2(local, nil, "host-terminal-wait-collection-incomplete-recovery-required")
+    val resolved = host_local_resolve_execution_v2(local, operation_id)
+    var current = resolved.local
+    if resolved.error != "": return HostTerminalWaitTurnV2(current, nil, resolved.error)
+    val execution = match resolved.execution:
+        case Some(value): value
+        case nil: return HostTerminalWaitTurnV2(current, nil, "host-terminal-wait-execution-unavailable")
+    val observed = match resolved.observation:
+        case Some(value): value
+        case nil: return HostTerminalWaitTurnV2(current, nil, "host-terminal-wait-identity-unavailable")
+    val claim = host_terminal_wait_claim_v2(execution, observed)
+    if claim.is_err(): return HostTerminalWaitTurnV2(current, nil, claim.unwrap_err())
+    val path = directory + "/" + sha256_text(operation_id) + ".claim"
+    val claimed = host_terminal_wait_private_create_v2(path, claim.unwrap())
+    if claimed.is_err(): return HostTerminalWaitTurnV2(current, nil, claimed.unwrap_err())
+    val confirmed = host_terminal_wait_private_read_v2(current, operation_id, ".claim")
+    if confirmed.is_err(): return HostTerminalWaitTurnV2(current, nil, confirmed.unwrap_err())
+    if confirmed.unwrap() != claim.unwrap(): return HostTerminalWaitTurnV2(current, nil, "host-terminal-wait-collection-claim-mismatch")
+    val synced = host_terminal_wait_sync_directory_v2(current)
+    if synced.is_err(): return HostTerminalWaitTurnV2(current, nil, synced.unwrap_err())
+    val turn = simple_container_read_v2(current.container, "wait", execution)
+    current.container = turn.owner
+    if turn.operation.status != "ok":
+        return HostTerminalWaitTurnV2(current, nil, "host-terminal-wait-runtime-unknown:" + turn.operation.reason)
+    val context = host_local_context_v1(current.policy)
+    if context.grant_clock <= 0 or context.monotonic_ms < observed.observed_monotonic_ms:
+        return HostTerminalWaitTurnV2(current, nil, "host-terminal-wait-clock-invalid")
+    val digest = container_runtime_observation_digest_v2(turn.operation)
+    if digest.is_err(): return HostTerminalWaitTurnV2(current, nil, digest.unwrap_err())
+    val receipt = HostTerminalWaitReceiptV2(execution: execution.plan, operation_digest: observed.operation_digest,
+        provider_identity_digest: current.binding.provider_identity_digest, observed_unix_ms: context.grant_clock,
+        observation_digest: digest.unwrap(), wait: turn.operation)
+    val bound = host_terminal_wait_binding_v2(current, execution, observed, receipt)
+    if bound.is_err(): return HostTerminalWaitTurnV2(current, nil, bound.unwrap_err())
+    val stored = host_terminal_wait_store_v2(current, receipt)
+    if stored.is_err(): return HostTerminalWaitTurnV2(current, Some(receipt), stored.unwrap_err())
+    HostTerminalWaitTurnV2(current, Some(receipt), "")
+
+export HostTerminalWaitTurnV2, host_terminal_wait_v2, host_terminal_wait_retained_v2

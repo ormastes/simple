@@ -1,0 +1,148 @@
+# NOT_RUN. Real signed helper admission and journal/file owners. Synthetic
+# native claim/request metadata is never presented as successful cleanup proof.
+use std.spec.{describe, it, expect}
+use test.fixtures.orchestration.host_helper_settlement_fixture_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_stream_owner_v1.HostHelperStreamRetainedV1
+use std.nogc_sync_mut.orchestration.host_helper_settlement_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_settlement_receipt_v1.host_helper_settlement_evidence_v1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_close_v1}
+use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_record_outcome_v2
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessRefV1}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_read_regular_no_follow_bounded, file_remove}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1, snapshot_symlink_match_nofollow_v1}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
+
+fn settlement_spec_finish_v1(fixture: HostHelperSettlementFixtureV1, owner: HostCapacityOwnerV1):
+    assert(host_capacity_owner_close_v1(owner).unwrap())
+    assert(dir_remove(fixture.fixture.root, true))
+
+fn settlement_spec_retained_v1(fixture: HostHelperSettlementFixtureV1,
+        spawn: PipedProcessOwnedSpawnV2) -> HostHelperStreamRetainedV1:
+    HostHelperStreamRetainedV1(helper: fixture.helper, output_plan: fixture.output_plan, spawn: spawn)
+
+describe "One-use host helper stream settlement":
+    it "roundtrips full consumed planning metadata and rejects noncanonical or altered binding":
+        val fixture = host_helper_settlement_fixture_v1()
+        val source = host_helper_stream_consumed_encode_v1(fixture.consumed).unwrap()
+        val decoded = host_helper_stream_consumed_decode_v1(source).unwrap()
+        expect(host_helper_stream_consumed_encode_v1(decoded).unwrap()).to_equal(source)
+        assert(host_helper_stream_consumed_decode_v1(" " + source).is_err())
+        var changed = decoded
+        changed.output_plan.request_digest = "0".repeat(64)
+        assert(host_helper_stream_consumed_encode_v1(changed).is_err())
+        changed = decoded
+        changed.packet_digest = "0".repeat(64)
+        assert(host_helper_stream_validate_record_v1(fixture.fixture.root, fixture.helper.operation, changed).is_err())
+        settlement_spec_finish_v1(fixture, fixture.owner)
+
+    it "consumes exactly once even for identical durable bytes and rejects partial records":
+        val fixture = host_helper_settlement_fixture_v1()
+        val root = fixture.fixture.root
+        val source = host_helper_stream_consumed_encode_v1(fixture.consumed).unwrap()
+        host_helper_stream_publish_v1(root, fixture.helper.operation.id, "consumed", source, true).unwrap()
+        expect(host_helper_stream_context_v1(root, fixture.helper.operation).unwrap().consumed.prepared_receipt_digest).to_equal(fixture.helper.receipt.receipt_digest)
+        assert(host_helper_stream_publish_v1(root, fixture.helper.operation.id, "consumed", source, true).is_err())
+        expect(file_read_regular_no_follow_bounded(host_helper_stream_path_v1(root, fixture.helper.operation.id, "consumed"), 8388608).unwrap()).to_equal(source)
+        val partial_id = "partial-helper"
+        assert(dir_create(root + "/host-helper-stream-consumed", true))
+        assert(file_create_exclusive(host_helper_stream_path_v1(root, partial_id, "consumed"), "partial"))
+        assert(host_helper_stream_publish_v1(root, partial_id, "consumed", source, true).is_err())
+        settlement_spec_finish_v1(fixture, fixture.owner)
+
+    it "retains rejected native outcomes and the helper charge without an absence ACK":
+        val fixture = host_helper_settlement_fixture_v1()
+        host_helper_stream_publish_v1(fixture.fixture.root, fixture.helper.operation.id, "consumed",
+            host_helper_stream_consumed_encode_v1(fixture.consumed).unwrap(), true).unwrap()
+        val retained = settlement_spec_retained_v1(fixture, PipedProcessOwnedSpawnV2.Rejected("no-native-owner"))
+        val before = host_available_capacity_v1(fixture.owner.ledger).unwrap()
+        val result = host_helper_settle_output_v1(fixture.owner, retained)
+        expect(result.error).to_equal("helper-stream-rejected-needs-explicit-absence-reconciliation")
+        assert(result.retained.?)
+        assert(not result.ack.?)
+        assert(not result.settled)
+        expect(host_available_capacity_v1(result.owner.ledger).unwrap().cpu_millis).to_equal(before.cpu_millis)
+        expect(result.owner.journal.sequence).to_equal(fixture.owner.journal.sequence)
+        settlement_spec_finish_v1(fixture, result.owner)
+
+    it "missing actual terminal proof preserves the full native owner and publishes no settlement":
+        val fixture = host_helper_settlement_fixture_v1()
+        val native = host_helper_settlement_metadata_v1(fixture)
+        val retained = settlement_spec_retained_v1(fixture, PipedProcessOwnedSpawnV2.CleanupRequired(native, nil, "metadata-only"))
+        val result = host_helper_settle_output_v1(fixture.owner, retained)
+        assert(result.retained.?)
+        assert(not result.ack.?)
+        assert(not result.settled)
+        assert(result.error != "")
+        assert(not file_exists(host_helper_stream_path_v1(fixture.fixture.root, fixture.helper.operation.id, "settlement")))
+        assert(host_helper_settlement_evidence_v1(fixture.fixture.root, fixture.helper.operation).is_err())
+        expect(result.owner.journal.sequence).to_equal(fixture.owner.journal.sequence)
+        expect(host_available_capacity_v1(result.owner.ledger).unwrap().cpu_millis).to_equal(host_available_capacity_v1(fixture.owner.ledger).unwrap().cpu_millis)
+        settlement_spec_finish_v1(fixture, result.owner)
+
+    it "rejects reference metadata substitution before any native cleanup":
+        val fixture = host_helper_settlement_fixture_v1()
+        val native = host_helper_settlement_metadata_v1(fixture)
+        val reference = PipedProcessRefV1(pid: 123, generation: native.launch.transport_generation + 1,
+            group_root: native.launch.root, group_identity: native.identity_digest)
+        val result = host_helper_settle_output_v1(fixture.owner,
+            settlement_spec_retained_v1(fixture, PipedProcessOwnedSpawnV2.Ready(native, reference)))
+        expect(result.error).to_equal("helper-stream-reference-metadata-mismatch")
+        assert(result.retained.?)
+        assert(not result.ack.?)
+        settlement_spec_finish_v1(fixture, result.owner)
+
+    it "blocks malformed and dangling native archives instead of recovering over them":
+        for mode in ["malformed", "dangling"]:
+            val fixture = host_helper_settlement_fixture_v1()
+            val _native = host_helper_settlement_metadata_v1(fixture, false)
+            val directory = fixture.fixture.root + "/host-helper-stream-native"
+            assert(dir_create(directory, true))
+            val path = host_helper_stream_path_v1(fixture.fixture.root, fixture.helper.operation.id, "native")
+            if mode == "malformed": assert(file_create_exclusive(path, "partial"))
+            else:
+                # Native snapshot owner requires a confined existing regular
+                # target (kind 1) and exact relative raw link text at creation.
+                val target = directory + "/target"
+                assert(file_create_exclusive(target, "fixture-target"))
+                assert(snapshot_symlink_create_nofollow_v1(fixture.fixture.root, path, "target", 1))
+                assert(snapshot_symlink_match_nofollow_v1(fixture.fixture.root, path, "target", 1))
+                assert(file_remove(target))
+            val result = host_helper_recover_output_v1(fixture.owner, fixture.helper.operation.id)
+            assert(not result.recovered.?)
+            assert(result.recovery_required)
+            assert(result.error != "")
+            if mode == "malformed": expect(file_read_regular_no_follow_bounded(path, 64).unwrap()).to_equal("partial")
+            else:
+                assert(not file_exists(path)) # follows the now-missing target
+                assert(not file_create_exclusive(path, "must-not-replace-link"))
+            settlement_spec_finish_v1(fixture, result.owner)
+
+    it "checks the current writer before any live native-archive repair":
+        val fixture = host_helper_settlement_fixture_v1()
+        val native = host_helper_settlement_metadata_v1(fixture, false)
+        # Journal mutation only to create a stale writer fixture. This digest is
+        # NOT native cleanup evidence and must never cause capacity release.
+        val changed = daemon_operation_record_outcome_v2(fixture.owner.journal, fixture.helper.operation, "completed", "e".repeat(64)).unwrap()
+        val result = host_helper_settle_output_v1(fixture.owner,
+            settlement_spec_retained_v1(fixture, PipedProcessOwnedSpawnV2.CleanupRequired(native, nil, "no-proof")))
+        assert(result.error != "")
+        assert(result.retained.?)
+        assert(not result.ack.?)
+        assert(not file_exists(host_helper_stream_path_v1(fixture.fixture.root, fixture.helper.operation.id, "native")))
+        settlement_spec_finish_v1(fixture, HostCapacityOwnerV1(journal: changed, ledger: fixture.owner.ledger))
+
+    it "recovers metadata only and rejects same-ID operation substitution":
+        val fixture = host_helper_settlement_fixture_v1()
+        val _native = host_helper_settlement_metadata_v1(fixture, false)
+        val turn = host_helper_recover_output_v1(fixture.owner, fixture.helper.operation.id)
+        assert(turn.recovered.?)
+        var recovered = turn.recovered.unwrap()
+        recovered.operation.memory_bytes = recovered.operation.memory_bytes + 1
+        val result = host_helper_settle_recovered_output_v1(turn.owner, recovered)
+        expect(result.error).to_equal("helper-stream-recovery-operation-mismatch")
+        assert(result.retained.?)
+        assert(not result.ack.?)
+        assert(not result.settled)
+        settlement_spec_finish_v1(fixture, result.owner)

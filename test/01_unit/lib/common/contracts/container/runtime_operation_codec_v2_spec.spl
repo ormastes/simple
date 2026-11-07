@@ -1,0 +1,114 @@
+# Source-authored; NOT_RUN. Full observation transport, no provider authority.
+use std.spec.{describe, it, expect, fail}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeCommandV1,
+    RuntimeStateV1, RuntimeOperationV1, runtime_operation_empty}
+use std.common.contracts.container.runtime_operation_codec_v2.*
+use std.common.contracts.container.execution_evidence_v2.container_runtime_observation_digest_v2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn operation_codec_fixture_v2() -> RuntimeOperationV1:
+    RuntimeOperationV1(status: "ok", operation: "wait",
+        command: RuntimeCommandV1(operation: "wait", program: "/trusted/podman",
+            args: ["--root", "/private/engine", "wait", "1".repeat(64), "literal café\n|value"]),
+        state: RuntimeStateV1(phase: "exited", identity: RuntimeIdentityV1(pod_uid: "workload",
+            attempt: 3, provider_generation: 7, operation_id: "operation_1", engine: "podman",
+            native_id: "1".repeat(64), node_boot_id: "2".repeat(64)), exit_code: 17, reason: "exited"),
+        exit_code: 0, stdout: "17\n", stderr: "diagnostic café\n", reason: "actual wait fixture")
+
+fn operation_codec_fields_v2(source: text) -> Dict<text, SdnValue>:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+        max_depth: 4, max_nodes: 8400, max_rows: 0, max_cells: 0, max_columns: 32)).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(fields): fields
+        case _:
+            fail("operation fixture did not encode a dictionary")
+            {}
+
+fn operation_codec_field_mutation_v2(source: text, key: text, value: SdnValue) -> text:
+    var fields = operation_codec_fields_v2(source)
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "full canonical RuntimeOperation V2 transport":
+    it "preserves all runtime command state identity output and distinct exit fields":
+        val value = operation_codec_fixture_v2()
+        val source = container_runtime_operation_encode_v2(value).unwrap()
+        val decoded = container_runtime_operation_decode_v2(source).unwrap()
+        expect(decoded.status).to_equal(value.status)
+        expect(decoded.operation).to_equal(value.operation)
+        expect(decoded.command.operation).to_equal(value.command.operation)
+        expect(decoded.command.program).to_equal(value.command.program)
+        expect(decoded.command.args).to_equal(value.command.args)
+        expect(decoded.state.phase).to_equal(value.state.phase)
+        expect(decoded.state.identity).to_equal(value.state.identity)
+        expect(decoded.state.reason).to_equal(value.state.reason)
+        expect(decoded.state.exit_code).to_equal(17)
+        expect(decoded.exit_code).to_equal(0)
+        expect(decoded.stdout).to_equal(value.stdout)
+        expect(decoded.stderr).to_equal(value.stderr)
+        expect(decoded.reason).to_equal(value.reason)
+        expect(container_runtime_operation_encode_v2(decoded).unwrap()).to_equal(source)
+        expect(container_runtime_observation_digest_v2(decoded).unwrap())
+            .to_equal(container_runtime_observation_digest_v2(value).unwrap())
+
+    it "transports a rejected empty observation without manufacturing terminal evidence":
+        val value = runtime_operation_empty()
+        val decoded = container_runtime_operation_decode_v2(container_runtime_operation_encode_v2(value).unwrap()).unwrap()
+        expect(decoded.status).to_equal("rejected")
+        expect(decoded.state.phase).to_equal("unknown")
+        expect(decoded.state.identity.native_id).to_equal("")
+        expect(decoded.exit_code).to_equal(-1)
+        expect(container_runtime_observation_digest_v2(decoded).is_err()).to_equal(true)
+
+    it "rejects unknown missing duplicate and incorrectly typed root fields":
+        val source = container_runtime_operation_encode_v2(operation_codec_fixture_v2()).unwrap()
+        expect(container_runtime_operation_decode_v2(operation_codec_field_mutation_v2(source,
+            "authenticated", SdnValue.Bool(true))).is_err()).to_equal(true)
+        var missing: Dict<text, SdnValue> = {}
+        val fields = operation_codec_fields_v2(source)
+        for key in fields.keys():
+            if key != "stdout": missing[key] = fields[key]
+        expect(container_runtime_operation_decode_v2(sdn_encode_canonical(SdnValue.Dict(missing)) + "\n").is_err()).to_equal(true)
+        expect(container_runtime_operation_decode_v2(operation_codec_field_mutation_v2(source,
+            "exitCode", SdnValue.String("0"))).is_err()).to_equal(true)
+        expect(container_runtime_operation_decode_v2(source.substring(0, source.len() - 2) + ", version: 2}\n").is_err()).to_equal(true)
+
+    it "rejects nested command identity and argument schema violations":
+        val source = container_runtime_operation_encode_v2(operation_codec_fixture_v2()).unwrap()
+        expect(container_runtime_operation_decode_v2(operation_codec_field_mutation_v2(source,
+            "command", SdnValue.String("wait"))).is_err()).to_equal(true)
+        val bad_command: Dict<text, SdnValue> = {"operation": SdnValue.String("wait"),
+            "program": SdnValue.String("podman"), "args": SdnValue.Array([SdnValue.Int(1)])}
+        expect(container_runtime_operation_decode_v2(operation_codec_field_mutation_v2(source,
+            "command", SdnValue.Dict(bad_command))).is_err()).to_equal(true)
+        val state = operation_codec_fields_v2(source)["state"]
+        var state_fields = match state:
+            case SdnValue.Dict(fields): fields
+            case _: fail("state fixture was not a dictionary")
+        var identity_fields = match state_fields["identity"]:
+            case SdnValue.Dict(fields): fields
+            case _: fail("identity fixture was not a dictionary")
+        identity_fields["pid"] = SdnValue.Int(123)
+        state_fields["identity"] = SdnValue.Dict(identity_fields)
+        expect(container_runtime_operation_decode_v2(operation_codec_field_mutation_v2(source,
+            "state", SdnValue.Dict(state_fields))).is_err()).to_equal(true)
+
+    it "enforces version exact canonical framing source size and argument bounds":
+        val value = operation_codec_fixture_v2()
+        val source = container_runtime_operation_encode_v2(value).unwrap()
+        expect(container_runtime_operation_decode_v2(operation_codec_field_mutation_v2(source,
+            "version", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(container_runtime_operation_decode_v2(source + "\n").is_err()).to_equal(true)
+        expect(container_runtime_operation_decode_v2(source.substring(0, source.len() - 1)).is_err()).to_equal(true)
+        expect(container_runtime_operation_decode_v2("x".repeat(2097153)).is_err()).to_equal(true)
+        var large = value
+        large.stdout = "x".repeat(2097153)
+        expect(container_runtime_operation_encode_v2(large)).to_equal(Err("runtime-operation-source-size"))
+        large = value
+        var command = large.command
+        command.args = [for i in 0..4097: "argument"]
+        large.command = command
+        expect(container_runtime_operation_encode_v2(large)).to_equal(Err("runtime-operation-argument-count"))

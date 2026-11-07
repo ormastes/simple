@@ -2,6 +2,7 @@
 # No provider launch or remote endpoint. Callers supply authenticated grants and
 # trusted capacity/continuity; schemas and digests do not authenticate callers.
 use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_helper_plan_v1.*
 use std.common.contracts.orchestration.host_reservation_codec_v1.*
 use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2,
     distributed_grant_authorize_v2}
@@ -14,6 +15,8 @@ use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded, file_exists}
 use std.nogc_sync_mut.io_runtime.dir_create
 use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.host_cleanup_evidence_v1.host_cleanup_evidence_v1
+use std.nogc_sync_mut.orchestration.host_helper_settlement_receipt_v1.host_helper_settlement_evidence_v1
 
 pub struct HostCapacityOwnerV1:
     journal: DistributedOperationJournalV2
@@ -74,10 +77,14 @@ fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity:
             return Err("retained-reservation-host-fence-mismatch")
         var row = intent.reservation
         val abort_outcome = host_capacity_abort_outcome_v1(intent, operation, helper)?
-        if quarantine_previous:
+        val completion = if state.state == "completed": host_capacity_completion_evidence_v1(journal.root, operation)
+            else: Err("host-settlement-not-completed")
+        if completion.is_ok() and state.outcome_digest == sha256_text(completion.unwrap()):
+            row.state = HostReservationStateV1.Released
+        elif quarantine_previous:
             # Startup under a fresh service incarnation never makes old
             # preparation deadlines, cancellation or native absence assumptions.
-            # All retained resources remain charged until explicit reconciliation.
+            # Unproved retained resources remain charged until explicit reconciliation.
             row.state = HostReservationStateV1.Uncertain
         elif state.state == "cancelled" and state.outcome_digest == sha256_text(abort_outcome) and continuity_proven:
             row.state = HostReservationStateV1.Released
@@ -90,7 +97,7 @@ fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity:
         continuity_proven: continuity_proven, reservations: rows)
     if quarantine_previous:
         # Historical releases can legitimately sum above today's capacity.
-        # Keep every row charged/uncertain, but allow the recovery owner to open
+        # Keep unproved rows charged/uncertain, but allow the recovery owner to open
         # and prove no-effect releases. This temporary shape-only projection is
         # never returned and grants no availability or admission.
         var shape_rows: [HostReservationV1] = []
@@ -343,3 +350,69 @@ fn host_capacity_owner_release_prepared_v1(owner: HostCapacityOwnerV1,
 
 pub fn host_capacity_owner_close_v1(owner: HostCapacityOwnerV1) -> Result<bool, text>:
     distributed_operation_journal_close_v2(owner.journal)
+
+# Evidence-specific static dispatch, never a caller digest or release boolean.
+pub fn host_capacity_completion_evidence_v1(root: text, operation: OperationEnvelopeV2) -> Result<text, text>:
+    if operation.operation == "host_reservation_v1": return host_cleanup_evidence_v1(root, operation)
+    if operation.operation == "host_helper_reservation_v1": return host_helper_settlement_evidence_v1(root, operation)
+    Err("host-settlement-original-action")
+
+pub struct HostCapacitySettlementTurnV1:
+    owner: HostCapacityOwnerV1
+    settled: bool
+    error: text
+
+# Preserve the appended journal owner even if later ledger validation fails. This is
+# the same workload/helper ledger, not an auxiliary release journal.
+pub fn host_capacity_owner_settle_v1(owner: HostCapacityOwnerV1,
+        original_operation: OperationEnvelopeV2) -> HostCapacitySettlementTurnV1:
+    val retained = daemon_operation_exact_v2(owner.journal, original_operation)
+    if retained.is_err(): return HostCapacitySettlementTurnV1(owner, false, retained.unwrap_err())
+    val state = retained.unwrap()
+    if original_operation.operation == "host_reservation_v1":
+        val helpers = host_capacity_owner_parent_helpers_settled_v1(owner, original_operation.id)
+        if helpers.is_err(): return HostCapacitySettlementTurnV1(owner, false, helpers.unwrap_err())
+    val evidence = host_capacity_completion_evidence_v1(owner.journal.root, original_operation)
+    if evidence.is_err(): return HostCapacitySettlementTurnV1(owner, false, evidence.unwrap_err())
+    val digest = sha256_text(evidence.unwrap())
+    if not ["executing", "outcome-unknown", "completed"].contains(state.state):
+        return HostCapacitySettlementTurnV1(owner, false, "host-settlement-execution-required")
+    if state.state == "completed" and state.outcome_digest != digest:
+        return HostCapacitySettlementTurnV1(owner, false, "host-settlement-outcome-conflict")
+    var current = owner
+    if state.state != "completed":
+        val committed = daemon_operation_record_outcome_v2(current.journal, original_operation, "completed", digest)
+        if committed.is_err(): return HostCapacitySettlementTurnV1(current, false, committed.unwrap_err())
+        current.journal = committed.unwrap()
+    # Only this exact validated row changes. Revalidating every multi-MiB
+    # historical proof per settlement would amplify IO quadratically. Full
+    # persisted evidence dispatch remains mandatory on startup/reopen.
+    var found = false
+    for index in 0..current.ledger.reservations.len():
+        var row = current.ledger.reservations[index]
+        if row.operation_id == original_operation.id:
+            if row.payload_digest != original_operation.payload_digest:
+                return HostCapacitySettlementTurnV1(current, false, "host-settlement-row-mismatch")
+            row.state = HostReservationStateV1.Released
+            current.ledger.reservations[index] = row
+            found = true
+    if not found: return HostCapacitySettlementTurnV1(current, false, "host-settlement-row-missing")
+    current.ledger.revision = current.journal.sequence + 1
+    val checked = host_available_capacity_v1(current.ledger)
+    if checked.is_err(): return HostCapacitySettlementTurnV1(current, false, checked.unwrap_err())
+    HostCapacitySettlementTurnV1(current, true, "")
+
+# Every nonreleased helper must have unambiguous retained provenance. A workload
+# object absence proof says nothing about helper process groups or output copies.
+pub fn host_capacity_owner_parent_helpers_settled_v1(owner: HostCapacityOwnerV1, parent_operation_id: text) -> Result<bool, text>:
+    for row in owner.ledger.reservations:
+        if row.state == HostReservationStateV1.Released or row.operation_id == parent_operation_id: continue
+        if not owner.journal.operations.contains_key(row.operation_id): return Err("host-cleanup-helper-provenance")
+        val state = owner.journal.operations[row.operation_id]
+        val operation = distributed_decode_operation_v2(state.envelope)?
+        if operation.operation == "host_helper_reservation_v1":
+            val intent = host_reservation_decode_intent_v1(file_read_regular_no_follow_bounded(owner.journal.root + "/reservation-payloads/" + operation.payload_digest + ".sdn", 65536)?)?
+            val plan = host_helper_plan_decode_v1(file_read_regular_no_follow_bounded(owner.journal.root + "/host-helper-plans/" + intent.plan_digest + ".sdn", 16384)?)?
+            if host_helper_plan_digest_v1(plan)? != intent.plan_digest or plan.operation_id != operation.id: return Err("host-cleanup-helper-provenance")
+            if plan.parent_operation_id == parent_operation_id: return Err("host-cleanup-helper-unsettled")
+    Ok(true)
