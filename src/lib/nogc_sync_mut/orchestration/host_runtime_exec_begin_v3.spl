@@ -10,6 +10,7 @@ use std.nogc_sync_mut.orchestration.host_exec_control_installation_owner_v3.host
 use std.nogc_sync_mut.orchestration.host_enrollment_v1.host_enrollment_payload_digest_v1
 use std.nogc_sync_mut.orchestration.host_cleanup_store_v1.host_cleanup_private_read_v1
 use std.nogc_sync_mut.orchestration.host_exec_private_publication_v3.host_exec_private_publish_v3
+use std.nogc_sync_mut.orchestration.host_runtime_exec_cancellation_interlock_v3.host_runtime_exec_cancellation_clear_v3
 use std.common.contracts.orchestration.host_runtime_exec_v3.*
 use std.common.contracts.orchestration.host_runtime_exec_delegation_v3.*
 use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
@@ -122,6 +123,8 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
         if archived.unwrap() != source: return exec_begin_failed_v3(current, true, "host-exec-begin-original-packet-mismatch")
     elif prior.unwrap_err() != "OPERATION_NOT_FOUND":
         return exec_begin_failed_v3(current, true, prior.unwrap_err())
+    val cancellation_clear = host_runtime_exec_cancellation_clear_v3(current.capacity.journal, packet.operation)
+    if cancellation_clear.is_err(): return exec_begin_failed_v3(current, true, cancellation_clear.unwrap_err())
     if file_exists(root + "/host-runtime-exec-delegations/" + name):
         return exec_begin_failed_v3(current, true, "host-exec-begin-delegation-already-recorded")
     val historical = host_runtime_exec_parent_projection_v3(current.capacity.journal, current.capacity.ledger.capacity, packet)
@@ -195,6 +198,10 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
     val before_begin = refresh()
     val begin_authority = host_runtime_exec_verify_v3(policy, packet, before_admit, before_begin)
     if begin_authority.is_err(): return exec_begin_failed_v3(current, true, begin_authority.unwrap_err())
+    # Recheck after all resolver/probe/archive/fresh-authority work, immediately
+    # before the sole writer commits Host BEGIN. No receipt label is a lease.
+    val before_begin_clear = host_runtime_exec_cancellation_clear_v3(current.capacity.journal, packet.operation)
+    if before_begin_clear.is_err(): return exec_begin_failed_v3(current, true, before_begin_clear.unwrap_err())
     val begun = daemon_operation_begin_v2(current.capacity.journal, packet.operation)
     if begun.is_err(): return exec_begin_failed_v3(current, true, begun.unwrap_err())
     current.capacity.journal = begun.unwrap()
