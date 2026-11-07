@@ -65,3 +65,54 @@ request identities without relaxing expected successful acknowledgement.
 Evidence: `/home/yoon/dev/simple-daemon-exact-lock-owner-20261107/build/daemon-hash-audit-20261107/`
 contains `hash-arguments.gdb` and `hash-arguments.log`. This diagnostic is not
 admitted-toolchain qualification and does not resolve the open bug.
+
+
+## Canonical interpolation producer repair candidate, 2026-11-07
+
+Source audit at base `5854838c6124cfa9deb6c0d985814dd9db8bfe0e` identifies
+`MirLowering.lower_string_interpolation` as a raw text producer: it unwraps
+all operands with `bootstrap_coerce_to_raw_str` and concatenates with
+`rt_strcat`, returning the raw pointer as language text. This explains how
+computed request identities can reach the strict hash decoder as raw pointers
+while decoded file text is tagged. Native confirmation of the patched producer
+is still required; the existing trace alone does not prove all producers.
+
+The candidate changes only the interpolation producer. Literal segments use
+`rt_string_new` with a raw byte pointer and explicit byte count; rendered
+operands retain their existing scalar dispatch through `coerce_concat_operand`.
+`rt_strcat_tagged` preserves operand lengths and returns owned tagged text.
+The MIR local is recorded as tagged. Runtime decoders, provider hash algorithms,
+SDK path selection, and raw-pointer APIs remain unchanged.
+
+Regression: `test/fixtures/compiler/native_interpolation_text_hash_boundary_main.spl`.
+It checks a computed identity, struct/array storage, file serialization and
+substring decoding against a nonzero known hash and every expected byte. It
+also checks embedded NUL in both literal segments and interpolation operands,
+Unicode bytes, and integer/bool/float formatting. Run the native executable in
+a private working directory because it writes one temporary SDN file.
+
+Validation so far: `git diff --check` PASS. No compiler build or executable
+regression was run: the root owns native build slots. This is a source repair
+candidate, not an admitted verification PASS or a claim that the daemon fixture
+now succeeds. The cause repair budget is not reset by this isolated worktree.
+
+Affected real compiler pipeline regression
+`test/01_unit/compiler/backend/numeric_interpolation_abi_spec.spl` now follows
+renderer SSA words through the ABI `inttoptr` into tagged concat and checks
+counted constructor length SSA for NUL/Unicode prefixes. The old assertion of
+raw concat was intentionally updated to the repaired representation contract.
+Its companion manual was updated without fabricating execution evidence.
+The native probe also covers Unicode in a literal segment, independently of
+Unicode supplied as an interpolation operand. These executable checks remain
+pending native-slot/toolchain validation.
+
+Static pre-commit gates: direct-env-runtime-guard `--working` and `--staged`
+PASS; existing numeric scalar ABI shell contract PASS; staged whitespace check
+PASS; executable spec files under `doc/06_spec` count `0`. No executable compiler
+pipeline or native probe PASS is claimed by these static checks.
+
+Astra review tightened the constructor-length regression: Unicode/NUL checks
+now extract their respective named LLVM function bodies before tracing length
+SSA. Numeric segments in other functions cannot satisfy these byte-count
+assertions. Missing or unterminated definitions fail instead of supplying a
+fallback body. Executable validation remains pending; this is a test repair.

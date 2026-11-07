@@ -1,0 +1,162 @@
+# Native-pool placement proposals, not reservations or execution authority.
+# The controller supplies authenticated, policy-filtered capability snapshots.
+# Build/test parents retain DAG readiness. Hosts recheck every proposed fence.
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.profile_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.{HostReservationIntentV1,
+    host_reservation_bind_intent_v1}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+
+pub struct PlacementRequestV1:
+    pool_id: text
+    execution_os: text
+    architecture: text
+    runtime_class: text
+    profile: ResourceProfileV1
+    gpu_mode: text
+    allow_preferred: bool
+
+pub struct PlacementHostV1:
+    pool_id: text
+    service_scope_id: text
+    execution_os: text
+    architecture: text
+    runtime_class: text
+    authorized: bool
+    healthy: bool
+    draining: bool
+    limits_enforced: bool
+    gpu_devices: [text]
+    ledger: HostCapacityLedgerV1
+
+pub struct PlacementOfferV1:
+    physical_host_id: text
+    service_scope_id: text
+    fence: HostLedgerFenceV1
+    allocation: ProfileAllocationProposalV1
+    exclusive_devices: [text]
+    scarce_gpu_penalty: bool
+    unused_cpu_millis: i64
+    unused_memory_bytes: i64
+
+pub struct PlacementRejectionV1:
+    physical_host_id: text
+    reason: text
+
+pub struct PlacementPlanV1:
+    offers: [PlacementOfferV1]
+    rejected: [PlacementRejectionV1]
+    selected_index: i64
+
+pub struct PlacementAttemptIdentityV1:
+    reservation_id: text
+    operation_id: text
+    assignment_generation: i64
+    nonce: text
+    plan_digest: text
+    prepare_deadline_ms: i64
+
+# One mapping from the selected offer to the existing journal payload. This
+# does not persist an assignment or authorize execution. The deadline belongs
+# to the host's monotonic clock domain, never the controller's wall clock.
+pub fn placement_reservation_intent_v1(plan: PlacementPlanV1,
+        attempt: PlacementAttemptIdentityV1) -> Result<HostReservationIntentV1, text>:
+    if plan.selected_index < 0: return Err("placement-queued")
+    if plan.selected_index >= plan.offers.len(): return Err("invalid-selected-offer")
+    val offer = plan.offers[plan.selected_index]
+    val allocation = offer.allocation
+    if allocation.requires_gpu_resolution: return Err("unresolved-device-claim")
+    if allocation.cpu_cap_millis != allocation.cpu_millis or allocation.memory_cap_bytes != allocation.memory_bytes:
+        return Err("allocation-cap-mismatch")
+    val row = HostReservationV1(id: attempt.reservation_id, operation_id: attempt.operation_id,
+        payload_digest: "0".repeat(64), service_scope_id: offer.service_scope_id,
+        assignment_generation: attempt.assignment_generation, nonce: attempt.nonce,
+        cpu_millis: allocation.cpu_millis, memory_bytes: allocation.memory_bytes,
+        exclusive_devices: offer.exclusive_devices, prepare_deadline_ms: attempt.prepare_deadline_ms,
+        state: HostReservationStateV1.Prepared)
+    host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: offer.physical_host_id,
+        fence: offer.fence, plan_digest: attempt.plan_digest, reservation: row))
+
+fn placement_offer_v1(request: PlacementRequestV1, host: PlacementHostV1) -> Result<PlacementOfferV1, text>:
+    if not builder_identifier_valid_v1(host.service_scope_id): return Err("invalid-service-scope")
+    if not host.authorized: return Err("host-not-authorized")
+    if host.pool_id != request.pool_id: return Err("host-pool-mismatch")
+    if not host.healthy: return Err("host-unhealthy")
+    if host.draining: return Err("host-draining")
+    if host.execution_os != request.execution_os: return Err("execution-os-mismatch")
+    if host.architecture != request.architecture: return Err("architecture-mismatch")
+    if host.runtime_class != request.runtime_class: return Err("runtime-class-mismatch")
+    if not host.limits_enforced: return Err("resource-enforcement-unavailable")
+    if not host.ledger.continuity_proven: return Err("host-reconciliation-required")
+    val available = host_available_capacity_v1(host.ledger)?
+    if host.gpu_devices.len() > 256: return Err("gpu-inventory-bound")
+    var seen: {text: bool} = {}
+    var selected_gpu = ""
+    for device in host.gpu_devices:
+        if not builder_identifier_valid_v1(device) or seen.contains_key(device) or
+                not host.ledger.capacity.exclusive_devices.contains(device):
+            return Err("invalid-gpu-inventory")
+        seen[device] = true
+        if available.exclusive_devices.contains(device) and (selected_gpu == "" or device < selected_gpu):
+            selected_gpu = device
+    var devices: [text] = []
+    if request.gpu_mode == "whole-exclusive":
+        if selected_gpu == "": return Err("exclusive-gpu-unavailable")
+        devices.push(selected_gpu)
+    var allocation = propose_profile_allocation(request.profile, available.cpu_millis,
+        available.memory_bytes, request.allow_preferred)?
+    allocation.requires_gpu_resolution = false
+    val capacity = host.ledger.capacity
+    val fence = HostLedgerFenceV1(authority_id: capacity.authority_id, boot_id: capacity.boot_id,
+        provider_generation: capacity.provider_generation, revision: host.ledger.revision)
+    Ok(PlacementOfferV1(physical_host_id: capacity.physical_host_id,
+        service_scope_id: host.service_scope_id, fence: fence, allocation: allocation,
+        exclusive_devices: devices,
+        scarce_gpu_penalty: request.profile.preserve_scarce_gpu_hosts and request.gpu_mode == "none" and host.gpu_devices.len() > 0,
+        unused_cpu_millis: available.cpu_millis - allocation.cpu_millis,
+        unused_memory_bytes: available.memory_bytes - allocation.memory_bytes))
+
+# Lexicographic scoring avoids adding incomparable CPU and byte quantities or
+# overflowing weighted sums. All score components remain visible in the offer.
+fn placement_offer_before_v1(left: PlacementOfferV1, right: PlacementOfferV1) -> bool:
+    if left.scarce_gpu_penalty != right.scarce_gpu_penalty: return not left.scarce_gpu_penalty
+    if left.allocation.below_recommendation != right.allocation.below_recommendation:
+        return not left.allocation.below_recommendation
+    if left.unused_cpu_millis != right.unused_cpu_millis: return left.unused_cpu_millis < right.unused_cpu_millis
+    if left.unused_memory_bytes != right.unused_memory_bytes: return left.unused_memory_bytes < right.unused_memory_bytes
+    left.physical_host_id < right.physical_host_id
+
+# Bounded one-workload proposal. An empty feasible set queues the workload:
+# selected_index is -1 and every refused host has an explicit reason.
+# This first native lane requires one inventory row per physical capacity
+# authority. Delegated multi-scope budgets and shared/partition GPUs need their
+# own qualified inventory contracts; duplicate physical hosts fail closed.
+pub fn plan_host_placement_v1(request: PlacementRequestV1, hosts: [PlacementHostV1]) -> Result<PlacementPlanV1, text>:
+    if hosts.len() > 4096: return Err("host-inventory-bound")
+    if not builder_identifier_valid_v1(request.pool_id) or
+            not builder_identifier_valid_v1(request.execution_os) or
+            not builder_identifier_valid_v1(request.architecture) or
+            not builder_identifier_valid_v1(request.runtime_class):
+        return Err("invalid-placement-request")
+    if not resource_amount_range_valid(request.profile.cpu) or not resource_amount_range_valid(request.profile.memory):
+        return Err("invalid-resource-range")
+    if request.gpu_mode != "none" and request.gpu_mode != "whole-exclusive": return Err("unsupported-gpu-mode")
+    if request.profile.gpu_required and request.gpu_mode == "none": return Err("required-gpu-claim-missing")
+    var seen_hosts: {text: bool} = {}
+    var offers: [PlacementOfferV1] = []
+    var rejected: [PlacementRejectionV1] = []
+    var selected: i64 = -1
+    for host in hosts:
+        val id = host.ledger.capacity.physical_host_id
+        if not builder_identifier_valid_v1(id): return Err("invalid-physical-host-id")
+        if seen_hosts.contains_key(id): return Err("duplicate-physical-host")
+        seen_hosts[id] = true
+        match placement_offer_v1(request, host):
+            case Ok(offer):
+                if selected < 0:
+                    selected = offers.len()
+                elif placement_offer_before_v1(offer, offers[selected]):
+                    selected = offers.len()
+                offers.push(offer)
+            case Err(reason): rejected.push(PlacementRejectionV1(physical_host_id: id, reason: reason))
+    Ok(PlacementPlanV1(offers: offers, rejected: rejected, selected_index: selected))

@@ -5692,6 +5692,58 @@ int64_t spl_ordered_key_cmp(int64_t left, int64_t right) {
     return a < b ? -1 : (a > b ? 1 : 0);
 }
 
+/* `.hash()` on an erased generic value (`key.hash()` with `key: K`, e.g.
+ * Map.hash_key). Erased bodies carry no trait dictionary, so 50.mir lowers
+ * the call here. Keys equal under rt_native_eq hash equally:
+ *   - text: FNV-1a over the bytes (= rt_hash_text = std.hash Hash for text)
+ *   - integer words and wide/unsigned boxes: the value (= Hash for i64)
+ *   - registered boxed floats: IEEE bits, with both zeros hashing to 0
+ * Any other registered handle (array, tuple, dict, enum, struct allocation)
+ * has no address-free hash at this boundary; abort instead of hashing its
+ * address. A non-heap word (raw integer, bool, inline float) is equal under
+ * rt_native_eq only to the identical word, so hashing its value is
+ * consistent. Hash values for floats/bools need not match std.hash's typed
+ * impls: only agreement with erased equality is promised. */
+static void spl_erased_key_hash_refuse(const char* what, unsigned kind) {
+    fprintf(stderr, "spl_erased_key_hash: key type has no supported native hash (%s %u)\n",
+        what, kind);
+    abort();
+}
+
+int64_t spl_erased_key_hash(int64_t value) {
+    uintptr_t raw = (uintptr_t)value;
+    uintptr_t candidate = (raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP
+        ? raw & ~RT_VALUE_TAG_MASK : raw;
+    int registered_leaf = 0;
+    if (candidate >= 4096 &&
+            rt_core_is_registered_immortal_ptr((void*)candidate)) {
+        uint32_t kind = rt_core_registered_object_kind((void*)candidate);
+        if (kind != RT_VALUE_HEAP_STRING && kind != RT_VALUE_HEAP_FLOAT &&
+                kind != RT_VALUE_HEAP_INT && kind != RT_VALUE_HEAP_UINT)
+            spl_erased_key_hash_refuse("heap kind", (unsigned)kind);
+        registered_leaf = 1;
+    }
+    /* Records live in the struct allocation registry, not the immortal one. */
+    if (rt_struct_receiver_valid(value, 0, 1))
+        spl_erased_key_hash_refuse("struct allocation", 0);
+    if (rt_core_as_string(value)) return rt_hash_text(value);
+    RtCoreFloat* boxed_float = rt_core_as_heap_float(value);
+    if (boxed_float) {
+        double d = boxed_float->value;
+        if (d == 0.0) return 0;
+        uint64_t bits;
+        memcpy(&bits, &d, sizeof(bits));
+        return (int64_t)bits;
+    }
+    RtCoreUInt* boxed_uint = rt_core_as_heap_uint(value);
+    if (boxed_uint) return (int64_t)boxed_uint->value;
+    if (rt_core_as_heap_int(value)) return rt_core_numeric_arg(value);
+    /* A registered leaf the decoders above did not accept (an untagged
+     * string pointer, say) would otherwise hash its address. */
+    if (registered_leaf) spl_erased_key_hash_refuse("undecoded registered leaf", 0);
+    return rt_core_numeric_arg(value);
+}
+
 /* Shared telemetry uses this runtime owner for text, builders, and nil. */
 #include "runtime_collection_capture_impl.h"
 

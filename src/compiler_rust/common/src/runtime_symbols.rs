@@ -2556,6 +2556,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "spl_fonts_call_init_path",
     "spl_fonts_call_layout_text",
     "spl_ordered_key_cmp",
+    "spl_erased_key_hash",
     "spl_collection_capture_begin",
     "spl_collection_capture_note_size",
     "spl_collection_capture_note_lookup",

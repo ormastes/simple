@@ -4,6 +4,7 @@
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host}
 use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native, process_capture_unbounded_native}
+use std.nogc_sync_mut.sffi.process_environment_capture.{process_environment_capture_native_v1, process_environment_spawn_native_v1}
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
 use std.common.process.observation_v1.{
     ProcessObservationProviderV1, ObservedProcessStartStatusV1,
@@ -1574,6 +1575,54 @@ pub fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_
     val (stdout, stderr, exit_code) = _process_run_bounded_raw(resolved_cmd, args, timeout_ms, max_output_bytes)
     proc_slot_release()
     (stdout, stderr, exit_code)
+
+pub fn process_environment_key_valid_v1(key: text) -> bool:
+    if key.len() <= 0 or key.contains("\u{0}"): return false
+    if key.starts_with("="):
+        if key.len() != 3 or key.byte_at(2) != 58: return false
+        val drive = key.byte_at(1)
+        return (drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)
+    not key.contains("=")
+
+# Exact copied child environment; no global environment mutation or shell.
+# Native C ordinary capture lifecycle only, not an observation-V4 capability.
+# command is a directly executable pinned path; only host_path_native applies.
+# Unlike process_run_bounded this API does not perform command lookup/routing.
+pub fn process_run_bounded_environment_v1(command: text, args: [text], environment: [(text, text)], timeout_ms: i64, max_output_bytes: i64) -> Result<ProcessResult, text>:
+    if not host_is_windows_host(): return Err("explicit child environment capture is not implemented for this host")
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return Err("child environment capture requires the matching native C provider")
+    if command == "" or command.contains("\u{0}") or timeout_ms <= 0 or max_output_bytes <= 0 or max_output_bytes > 16777216:
+        return Err("child environment capture bounds/command invalid")
+    var flattened: [text] = []
+    var total = 0
+    if environment.len() > 65536: return Err("child environment entry bound exceeded")
+    for (key, value) in environment:
+        if not process_environment_key_valid_v1(key) or value.contains("\u{0}"): return Err("child environment contains an invalid name/value")
+        total = total + key.len() + value.len()
+        if total > 4194304: return Err("child environment byte bound exceeded")
+        flattened = flattened.push(key + "=" + value)
+    proc_slot_acquire()
+    val outcome = process_environment_capture_native_v1(host_path_native(command), args, flattened, 1, timeout_ms, max_output_bytes)
+    proc_slot_release()
+    val result = outcome?
+    val flags = result.3
+    if flags >= 8: return Err("native child environment capture failed: " + result.1)
+    val timeout = flags % 2 == 1
+    val output_limited = flags % 8 >= 2
+    val limit = if timeout: "timeout" else: if output_limited: "output" else: ""
+    Ok(ProcessResult(stdout: result.0, stderr: result.1, exit_code: result.2, limit_exceeded: timeout or output_limited, limit_type: limit))
+
+pub fn process_spawn_environment_overlay_native_v1(command: text, args: [text], environment: [text]) -> i64:
+    if not host_is_windows_host(): return -95
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return -95
+    # Match _process_spawn_async_raw: retain the existing shebang/POSIX-tool
+    # routing policy; ordinary async does not call _resolve_process_cmd.
+    val (resolved_command, resolved_arguments) = _resolve_posix_tool(command, args)
+    process_environment_spawn_native_v1(host_path_native(resolved_command), resolved_arguments, environment, 0)
 
 pub fn process_run_bounded_native(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
     """Native tuple compatibility entry with positive timeout/capture limits.

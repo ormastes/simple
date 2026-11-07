@@ -28,7 +28,7 @@
 #     receipt never implies an unprivileged container where none exists.
 
 use app.io.mod.{process_run_timeout, file_read, host_os}
-use std.common.contracts.orchestration.resource_v1.{RejectionV1, PodSpecV1}
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, PodSpecV1, ContainerV1}
 use std.common.contracts.orchestration.ci_v1.{JobV1, PipelineV1, OrderedJobV1,
     expand_pipeline, RUN_POLICY_ALWAYS}
 use std.common.contracts.container.runtime_v1.{RuntimeOperationV1,
@@ -319,6 +319,19 @@ fn canonical_runtime_token(value: text) -> text:
     if out == "": "run"
     else: out
 
+# Pure request construction shared by the live runner and command-contract specs.
+# The caller has already selected a container after single-container admission.
+pub fn ci_container_request_v1(name: text, container: ContainerV1,
+        run_id: text) -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "run-" + canonical_runtime_token(run_id) +
+        "-" + canonical_runtime_token(name),
+        attempt: 1, operation_id: "", image: container.image, bundle_path: "",
+        command: container.command, args: container.args, timeout_ms: DEFAULT_JOB_TIMEOUT_MS,
+        cpu_limit_millis: container.resources.cpu_limit_millis,
+        memory_limit_bytes: container.resources.memory_limit_bytes, pid_limit: 256,
+        network_policy: "bridge", filesystem_policy: "read-only",
+        replace_entrypoint: container.command.len() > 0)
+
 # Real native-container execution is wired through LinuxOciRuntimeProviderV1. The
 # caller has already completed the positive host probe; any provider failure
 # remains a receipt failure/block and is never downgraded to native-process.
@@ -338,13 +351,7 @@ fn run_container_job(name: text, spec: PodSpecV1, boot: text,
             state: runtime_state_empty(), exit_code: -1, stdout: "", stderr: "",
             reason: provider_probe.reason)
         return finalized_container_operation_receipt(name, spec, unavailable, boot, 0, journal_root)
-    val request = LinuxOciRequestV1(pod_uid: "run-" + canonical_runtime_token(run_id) +
-        "-" + canonical_runtime_token(name),
-        attempt: 1, operation_id: "", image: c.image, bundle_path: "",
-        command: c.command, args: c.args, timeout_ms: DEFAULT_JOB_TIMEOUT_MS,
-        cpu_limit_millis: c.resources.cpu_limit_millis,
-        memory_limit_bytes: c.resources.memory_limit_bytes, pid_limit: 256,
-        network_policy: "bridge", filesystem_policy: "read-only")
+    val request = ci_container_request_v1(name, c, run_id)
     val prepared = provider.prepare_pod(request)
     if prepared.status != RUNTIME_STATUS_OK:
         return finalized_container_operation_receipt(name, spec, prepared, boot, 0, journal_root)

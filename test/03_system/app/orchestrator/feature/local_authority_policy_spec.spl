@@ -1,0 +1,137 @@
+# @req HOST-LOCAL-POLICY-01 HOST-LOCAL-POLICY-02
+# Local administrator policy decoding and protected filesystem publication.
+# NOT_RUN: source-only change; no admitted runtime qualification is claimed.
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_remove, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.package_sffi.create_symlink
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn local_policy_key_fixture_v1() -> Dict<text, SdnValue>:
+    {"identity": SdnValue.String("issuer"), "role": SdnValue.String("grant-issuer"),
+        "revision": SdnValue.Int(1), "publicKeyHex": SdnValue.String("ab".repeat(32)),
+        "principal": SdnValue.String("user"), "project": SdnValue.String("project"),
+        "hostId": SdnValue.String("host"), "operations": SdnValue.Array([SdnValue.String("host_execute_v1")]),
+        "maximumMemoryBytes": SdnValue.Int(8000), "maximumDurationMs": SdnValue.Int(500),
+        "policyRevision": SdnValue.Int(1), "revocationEpoch": SdnValue.Int(0),
+        "expiresAt": SdnValue.Int(900), "revoked": SdnValue.Bool(false)}
+
+fn local_policy_fixture_v1() -> Dict<text, SdnValue>:
+    {"version": SdnValue.Int(1), "generation": SdnValue.Int(2), "policyRevision": SdnValue.Int(1),
+        "revocationEpoch": SdnValue.Int(0), "sessionGeneration": SdnValue.Int(3),
+        "keys": SdnValue.Array([SdnValue.Dict(local_policy_key_fixture_v1())])}
+
+fn local_policy_bytes_v1(fields: Dict<text, SdnValue>) -> text:
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn local_policy_expect_error_v1(fields: Dict<text, SdnValue>, reason: text):
+    val result = local_authority_policy_decode_v1(local_policy_bytes_v1(fields))
+    assert(result.is_err())
+    expect(result.unwrap_err()).to_equal(reason)
+
+describe "Pinned local public authority policy":
+    it "decodes canonical public metadata through the existing authority validator":
+        val bytes = local_policy_bytes_v1(local_policy_fixture_v1())
+        val policy = local_authority_policy_decode_v1(bytes).unwrap()
+        expect(policy.session_generation).to_equal(3)
+        expect(policy.source_digest).to_equal(sha256_text(bytes))
+        expect(policy.snapshot.generation).to_equal(2)
+        expect(policy.snapshot.keys["grant-issuer/issuer"].public_key.len()).to_equal(32)
+        expect(policy.snapshot.keys["grant-issuer/issuer"].public_key[0] as i64).to_equal(171)
+
+    it "rejects malformed and noncanonical source and unrecognized fields":
+        assert(local_authority_policy_decode_v1("keys: [").is_err())
+        expect(local_authority_policy_decode_v1("😀".repeat(300000)).unwrap_err()).to_equal("local-policy-source-size")
+        val bytes = local_policy_bytes_v1(local_policy_fixture_v1())
+        expect(local_authority_policy_decode_v1(bytes + "\n").unwrap_err()).to_equal("local-policy-noncanonical")
+        var unknown = local_policy_fixture_v1()
+        unknown["continuityProven"] = SdnValue.Bool(true)
+        local_policy_expect_error_v1(unknown, "local-policy-unknown-field:continuityProven")
+        var private_key = local_policy_key_fixture_v1()
+        private_key["privateKeyHex"] = SdnValue.String("ab".repeat(32))
+        var private_policy = local_policy_fixture_v1()
+        private_policy["keys"] = SdnValue.Array([SdnValue.Dict(private_key)])
+        local_policy_expect_error_v1(private_policy, "local-policy-unknown-field:privateKeyHex")
+
+    it "rejects invalid roles, public key encodings, duplicates and key policy mismatches":
+        var policy = local_policy_fixture_v1()
+        var key = local_policy_key_fixture_v1()
+        key["role"] = SdnValue.String("remote-admin")
+        policy["keys"] = SdnValue.Array([SdnValue.Dict(key)])
+        local_policy_expect_error_v1(policy, "AUTHORITY_KEY_ROLE_INVALID")
+        key = local_policy_key_fixture_v1()
+        key["publicKeyHex"] = SdnValue.String("ab".repeat(31))
+        policy["keys"] = SdnValue.Array([SdnValue.Dict(key)])
+        local_policy_expect_error_v1(policy, "local-policy-public-key-hex-invalid")
+        key["publicKeyHex"] = SdnValue.String("ab".repeat(524288))
+        policy["keys"] = SdnValue.Array([SdnValue.Dict(key)])
+        local_policy_expect_error_v1(policy, "local-policy-source-size")
+        key["publicKeyHex"] = SdnValue.String("ab".repeat(2048))
+        policy["keys"] = SdnValue.Array([SdnValue.Dict(key)])
+        local_policy_expect_error_v1(policy, "local-policy-public-key-hex-invalid")
+        key["publicKeyHex"] = SdnValue.String("gg".repeat(32))
+        policy["keys"] = SdnValue.Array([SdnValue.Dict(key)])
+        local_policy_expect_error_v1(policy, "local-policy-public-key-hex-invalid")
+        key["publicKeyHex"] = SdnValue.String("AB".repeat(32))
+        policy["keys"] = SdnValue.Array([SdnValue.Dict(key)])
+        local_policy_expect_error_v1(policy, "local-policy-public-key-hex-invalid")
+        key = local_policy_key_fixture_v1()
+        policy["keys"] = SdnValue.Array([SdnValue.Dict(key), SdnValue.Dict(key)])
+        local_policy_expect_error_v1(policy, "AUTHORITY_KEY_DUPLICATE")
+        key["policyRevision"] = SdnValue.Int(2)
+        policy["keys"] = SdnValue.Array([SdnValue.Dict(key)])
+        local_policy_expect_error_v1(policy, "AUTHORITY_KEY_POLICY_MISMATCH")
+        policy = local_policy_fixture_v1()
+        policy["sessionGeneration"] = SdnValue.Int(0)
+        local_policy_expect_error_v1(policy, "local-policy-session-generation-invalid")
+        policy["sessionGeneration"] = SdnValue.String("3")
+        local_policy_expect_error_v1(policy, "local-policy-integer-required:sessionGeneration")
+
+    it "checks a real protected root and pinned bytes before decoding tampered content":
+        val root = secure_temp_dir("/tmp", "local-authority-policy-spec").unwrap()
+        val path = root + "/authority-policy.sdn"
+        val bytes = local_policy_bytes_v1(local_policy_fixture_v1())
+        val pin = sha256_text(bytes)
+        assert(file_atomic_write_mode(path, bytes, 0o600))
+        expect(local_authority_policy_load_v1(root, pin).unwrap().source_digest).to_equal(pin)
+        expect(local_authority_policy_load_v1(root, "0".repeat(64)).unwrap_err()).to_equal("local-policy-digest-mismatch")
+        assert(file_atomic_write_mode(path, "keys: [", 0o600))
+        expect(local_authority_policy_load_v1(root, pin).unwrap_err()).to_equal("local-policy-digest-mismatch")
+        assert(file_atomic_write_mode(path, bytes, 0o644))
+        expect(local_authority_policy_load_v1(root, pin).unwrap_err()).to_equal("local-policy-file-not-private")
+        assert(file_atomic_write_mode(path, bytes, 0o600))
+        assert(file_set_mode(root, 0o755))
+        expect(local_authority_policy_load_v1(root, pin).unwrap_err()).to_equal("local-policy-root-not-private")
+        assert(file_set_mode(root, 0o700))
+        expect(local_authority_policy_load_v1(root + "/../x", pin).unwrap_err()).to_equal("local-policy-root-invalid")
+        expect(local_authority_policy_load_v1("relative-root", pin).unwrap_err()).to_equal("local-policy-root-invalid")
+        expect(local_authority_policy_load_v1(root, "invalid").unwrap_err()).to_equal("local-policy-pin-invalid")
+        expect(local_authority_policy_load_v1(root, "a".repeat(1048576)).unwrap_err()).to_equal("local-policy-pin-invalid")
+        expect(local_authority_policy_load_v1("/" + "a".repeat(4096), pin).unwrap_err()).to_equal("local-policy-root-invalid")
+        expect(local_authority_policy_load_v1("/" + "😀".repeat(1024), pin).unwrap_err()).to_equal("local-policy-root-invalid")
+        expect(local_authority_policy_load_v1(root + "\n", pin).unwrap_err()).to_equal("local-policy-root-invalid")
+        expect(local_authority_policy_load_v1(root + "\r", pin).unwrap_err()).to_equal("local-policy-root-invalid")
+        dir_remove(root, true)
+
+    it "refuses actual symlink roots and policy leaves without following their targets":
+        val parent = secure_temp_dir("/tmp", "local-authority-policy-links").unwrap()
+        val root = secure_temp_dir(parent, "policy-root").unwrap()
+        val bytes = local_policy_bytes_v1(local_policy_fixture_v1())
+        val pin = sha256_text(bytes)
+        val outside_policy = parent + "/outside-policy.sdn"
+        assert(file_atomic_write_mode(outside_policy, bytes, 0o600))
+        val root_link = parent + "/root-link"
+        assert(create_symlink(root, root_link))
+        expect(local_authority_policy_load_v1(root_link, pin).unwrap_err()).to_equal("local-policy-root-not-real")
+        val leaf_link = root + "/authority-policy.sdn"
+        assert(create_symlink(outside_policy, leaf_link))
+        expect(local_authority_policy_load_v1(root, pin).unwrap_err()).to_equal("local-policy-file-not-regular")
+        expect(file_read_regular_no_follow_bounded(outside_policy, 1048576).unwrap()).to_equal(bytes)
+        # Unlink only our two links before recursively removing our secure tree.
+        assert(file_remove(leaf_link))
+        assert(file_remove(root_link))
+        dir_remove(parent, true)

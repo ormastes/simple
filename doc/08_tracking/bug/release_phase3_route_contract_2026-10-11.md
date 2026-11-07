@@ -21,3 +21,16 @@ The independent source review covered 14 workflow/sanity/bootstrap/document path
 Evidence: `reviews/remote-13ca-after-26b7/workflow-release-independent-review.md` and `independent-18-path-review.md` in the retained phase3-whole-20261011-c06 evidence root. Existing issue search found #1603 about whole-trunk gate ranges and hook skew; that is distinct from this alias/ancestry contract. No main source/index/ref or allocated probe was changed.
 
 **Revalidated 2026-11-02: still plausible because OPEN; candidate HOLD; authorized branch/ancestry policy unresolved; no merged fix commit with a passing regression is cited in this doc.**
+
+## Source correction 2026-11-07 — verification pending
+
+The manifest `release_ref` now names `release/1.0.0`, matching the branch
+spelling derived by `candidate.yml`. This corrects the stale alias only.
+JSON parsing and explicit `release_ref` equality check validate that edit.
+The convergence jq validator checks other manifest fields; it does not prove
+top-level release-ref equality, current ancestry, or provider admission.
+
+Status remains **fix-implemented-verification-pending**, with candidate HOLD.
+Closure still requires the normal exact-ref/head/provider receipts, protected
+admission and qualification stated above. No such receipt is added by this
+metadata change; the previous proposed closure is withdrawn.
