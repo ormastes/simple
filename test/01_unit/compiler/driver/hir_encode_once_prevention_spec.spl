@@ -1,0 +1,145 @@
+# Prevention: stage2_hir_registration_reencode_timeout_2026-10-16.
+#
+# Pins the general shape, not just the reported archive case: one complete-body
+# encode per registered module across EVERY publication that shares an owned
+# scope (parser transaction store + body archive), the receipt's bytes equal a
+# fresh encode, the archive seals the digest of exactly those bytes, a receipt
+# minted for another module or with altered bytes is invalidated (re-encoded),
+# the MIR projection does not re-serialize bytes its caller hands it, and the
+# driver keeps threading the one receipt through both shard publications.
+
+use std.spec.*
+use std.io.{file_read}
+use app.io.env_ops.{env_get, env_set}
+use test.fixtures.compiler.hir_encode_once.hir_encode_once_v1.{hir_encode_once_module_v1,
+    hir_encode_once_archive_input_v1}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_calls}
+use compiler.mir.hir_declaration_summary_v1.{mir_hir_project_module_in_owned_scope_v1}
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_store_in_owned_scope,
+    hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings,
+    HirEncodedBodyV1, hir_encoded_body_v1, hir_encoded_body_for_v1}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{hir_body_archive_store_in_owned_scope_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+val PIPELINE = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+val SHARD_EXPORT = "src/compiler/80.driver/driver_mir_shard_export_v1.spl"
+
+# Scalar verdict of one shard-shaped registration: transaction store + body
+# archive sharing one receipt, exactly as driver_hir_pipeline_lowering does.
+# Returns "<encodes>|<both stored>|<receipt == fresh encode>|<archive digest == sha256(receipt)>".
+fn registration_verdict_v1(root: text, with_cfg: bool) -> text:
+    val module = hir_encode_once_module_v1(root, with_cfg)
+    val input = hir_encode_once_archive_input_v1(root, module)
+    # Reference bytes, encoded outside the measured window.
+    val fresh = hir_module_encode(module)
+    if not transient_scope_begin():
+        panic("encode-once prevention spec requires a real scratch scope")
+    val before = hir_module_encode_calls()
+    val body: HirEncodedBodyV1? = Some(hir_encoded_body_v1(module))
+    val stored = hir_cache_store_in_owned_scope("encode-once-txn-{with_cfg}", module, ["w"], "", "", body)
+    val archived = hir_body_archive_store_in_owned_scope_v1(input, module, ["w"], body)
+    val encodes = hir_module_encode_calls() - before
+    val receipt = hir_encoded_body_for_v1(body, module)
+    val same_bytes = receipt.blob != "" and receipt.blob == fresh
+    val sealed = archived.is_ok() and archived.unwrap().body_digest == sha256_text(receipt.blob)
+    val both_stored = stored and archived.is_ok()
+    val _owner = hir_cache_promote_diagnostic_owner_v1()
+    hir_cache_clear_last_warnings()
+    if not transient_scope_end():
+        panic("encode-once prevention spec could not end scratch scope")
+    "{encodes}|{both_stored}|{same_bytes}|{sealed}"
+
+# Returns "<encodes>|<identity follows module>|<bytes == fresh encode>".
+fn invalidation_verdict_v1(root: text, stale: HirEncodedBodyV1, module: HirModule) -> text:
+    val fresh = hir_module_encode(module)
+    val before = hir_module_encode_calls()
+    val got = hir_encoded_body_for_v1(Some(stale), module)
+    val encodes = hir_module_encode_calls() - before
+    "{encodes}|{got.module_path == module.path and got.module_name == module.name}|{got.blob == fresh}"
+
+fn projection_module_v1() -> HirModule:
+    val source = "fn main() -> i64:\n    7\n"
+    val ast = parse_full_frontend(source, "encode_once_projection.spl", "encode_once_projection", Logger(level: 0))
+    var frontend = HirLowering.with_filename("encode_once_projection.spl")
+    frontend.lower_module(ast)
+
+# Returns "<encodes with caller bytes>|<same declaration digest as self-encode>".
+fn projection_verdict_v1() -> text:
+    val module = projection_module_v1()
+    val context = hir_owned_artifact_context_v1()
+    val body = hir_module_encode(module)
+    val digest = sha256_text(body)
+    val authority = sha256_text("encode-once-projection-NOT-final-admission-v1\n" + body)
+    if not transient_scope_begin():
+        panic("encode-once projection check requires a real scratch scope")
+    val before = hir_module_encode_calls()
+    val reused = mir_hir_project_module_in_owned_scope_v1(context, module, authority, digest, digest, nil, body)
+    val encodes = hir_module_encode_calls() - before
+    val own = mir_hir_project_module_in_owned_scope_v1(context, module, authority, digest, digest)
+    val same = reused.is_ok() and own.is_ok() and
+        reused.unwrap().declaration_digest == own.unwrap().declaration_digest
+    if not transient_scope_end():
+        panic("encode-once projection check could not end scratch scope")
+    "{encodes}|{same}"
+
+describe "HIR encode-once prevention":
+    it "encodes each registered module once across both shard publications, byte-identical":
+        val root = "build/hir_encode_once_prevention_{rt_getpid()}"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val saved_scope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        val saved_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        val saved_cache = env_get("SIMPLE_HIR_CACHE") ?? ""
+        val saved_check = env_get("SIMPLE_HIR_CACHE_SELFCHECK") ?? ""
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "encode-once-prevention-spec")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", root + "/hir")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE", "1")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE_SELFCHECK", "0")).to_be(true)
+        expect(hir_cache_enabled()).to_equal(true)
+
+        # Two module shapes (with and without a function CFG payload).
+        expect(registration_verdict_v1(root, false)).to_equal("1|true|true|true")
+        expect(registration_verdict_v1(root, true)).to_equal("1|true|true|true")
+
+        val _scope = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", saved_scope)
+        val _dir = env_set("SIMPLE_HIR_CACHE_DIR", saved_dir)
+        val _cache = env_set("SIMPLE_HIR_CACHE", saved_cache)
+        val _check = env_set("SIMPLE_HIR_CACHE_SELFCHECK", saved_check)
+        val _gone = rt_dir_remove_all(root)
+
+    it "invalidates a receipt minted for another module or whose bytes changed":
+        val root = "build/hir_encode_once_invalidation_{rt_getpid()}"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val a = hir_encode_once_module_v1(root, false)
+        val b = hir_encode_once_module_v1(root, true)
+        val for_a = hir_encoded_body_v1(a)
+        # A matching, intact receipt is reused without encoding.
+        expect(invalidation_verdict_v1(root, for_a, a)).to_equal("0|true|true")
+        # Another module's receipt (different path) is never reused.
+        expect(invalidation_verdict_v1(root, for_a, b)).to_equal("1|true|true")
+        # Same identity, bytes no longer matching the sealed digest: re-encode.
+        val tampered = HirEncodedBodyV1(module_name: a.name, module_path: a.path,
+            blob: for_a.blob + "x", digest: for_a.digest)
+        expect(invalidation_verdict_v1(root, tampered, a)).to_equal("1|true|true")
+        val _gone = rt_dir_remove_all(root)
+
+    it "lets the MIR projection reuse the caller's complete bytes without re-encoding":
+        expect(projection_verdict_v1()).to_equal("0|true")
+
+    it "keeps one receipt threaded through both shard publications and the shard export":
+        val pipeline = file_read(PIPELINE)
+        expect(pipeline).to_contain("registration_body = Some(hir_encoded_body_v1(module))")
+        expect(pipeline).to_contain("parser_record, self.ctx.options.library_mode,\n                        registration_body)")
+        expect(pipeline).to_contain("hir_body_archive_store_in_owned_scope_v1(produced_input, module, warnings,\n                    registration_body)")
+        val export_source = file_read(SHARD_EXPORT)
+        expect(export_source).to_contain("sha256_text(complete), nil, complete)")
