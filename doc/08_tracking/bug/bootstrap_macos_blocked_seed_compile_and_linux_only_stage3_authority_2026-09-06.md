@@ -897,3 +897,28 @@ Not part of this gap: the path-shape validators (`expr ... '/proc/...'`) in
 sanity, command-snapshot and manifest-write already reject unmatched shapes.
 `/proc/meminfo`, `/proc/loadavg` and the PSS reads are memory and load metrics,
 not identity checks. The `self-test.shs:606-640` fixtures run on Linux only.
+
+## Capsule port scoping 2026-11-07: the requested fd-number handoff covers only part of it
+
+Requested change: replace the `/proc/<pid>/fd/N` handoff in
+`scripts/check/lib/bootstrap-stage3-shared-runner.pl` with an inherited fd
+number plus a dev+inode identity check. Sorting the runner's procfd
+dependencies into classes shows that this change covers only classes A and F:
+
+| class | runner sites | portable? |
+|---|---|---|
+| A. descriptor handoff to consumers | `:1158`, `:1175`, `:1505`, `:1509` | yes: fd number plus `fd_stamp`, checked by `fd_matches_path` |
+| B. owner identity `proc_start_ticks` | `:1096`, `:1170`, `:1402-1414` (dies with no procfs) | needs a non-procfs start-time source (`ps -o lstart` / sysctl KERN_PROC) |
+| C. openat-style traversal through `/proc/self/fd/N/<part>` | `:115-139`, `:184-301`, `:338-342`, `:418`, `:451`; coordinator `:90` | **no**: core Perl has no `openat` or `O_PATH`, and this is the TOCTOU-free directory walk |
+| D. exec authority (`payload_exec`/`runner_exec` must be procfd) | `:826-827` | **no**: Darwin has no `fexecve` or exec-by-fd |
+| E. reserved-fd probes | `:1713-1797` | partly: `/dev/fd/N` works for existence checks but not for stat identity |
+| F. consumer path-shape validators | sanity, command-snapshot, manifest-write, authority (`:411`, `:491`, `:4225`, `:4416`) | yes: add an fd-number form alongside the procfd form |
+
+If only A, B, E and F were ported, the runner would still die at the C/D
+sites on Darwin. Changing C/D to path-based walks or exec would remove the
+TOCTOU guarantee, which the rule against capability-removing workarounds
+forbids. A faithful port needs native helpers first: an
+`openat`/`fstatat` walker and an exec-by-held-fd strategy (a Simple/C SFFI
+helper or a small pinned C tool). That is a design and implementation task in
+its own right. Until it lands, the capsule lane still fails closed on macOS
+and BSD, which is the safe failure mode. This bug stays open.
