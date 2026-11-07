@@ -114,7 +114,7 @@ pub(crate) fn instantiate_class(
         diagram_sffi::trace_method(class_name, "new");
     }
 
-    let class_def = crate::interpreter::resolve_class(classes, class_name).ok_or_else(|| {
+    let class_def = crate::interpreter::resolve_class_in_scope(classes, class_name)?.ok_or_else(|| {
         let available_classes: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
         let suggestion = if !available_classes.is_empty() {
             typo::suggest_name(class_name, available_classes.clone())

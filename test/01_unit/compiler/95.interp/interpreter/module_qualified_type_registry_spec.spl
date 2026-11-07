@@ -1,0 +1,46 @@
+# Bug: engine_specs_spec_runner_interpreter_divergence_2026-09-16 (shape 3) and
+#      cuda_jit_hello_lane_lower_module_missing_import_2026-08-25 (symptom 2)
+#
+# Seed interpreter: the class/struct/enum/static-method registry was keyed by
+# BARE type name, so when two loaded modules both define `Vec3` the one
+# registered LAST won for every module -- `node3d.spl`'s imported
+# `math3d.Vec3.one()` resolved to `physics/config.spl`'s `Vec3` (only
+# `zero()`): "unknown static method one on class Vec3"; and a field read on
+# a same-named class landed on the other definition: "PhysicsConfig3D has no
+# field backend". Fix: the per-module registry (MODULE_CLASSES_CACHE) is no
+# longer clobbered by bare name, and every bare-name class lookup resolves
+# through the USING module's own definitions and imports first
+# (`resolve_class_in_scope`, src/compiler_rust/compiler/src/module_cache.rs).
+# Expected to FAIL on a seed without that fix.
+use std.spec
+use test.helpers.modqual.use_a.{a_vec_zero_sum, a_vec_unit_sum, a_vec_literal_sum, a_config_backend, a_config_label, a_mode}
+use test.helpers.modqual.use_b.{b_vec_one_sum, b_vec_unit_sum, b_vec_literal_sum, b_config_mode, b_config_label, b_mode}
+
+describe "same-named types in two modules resolve per importing module":
+    it "static method only module A's Vec3 defines (zero) is found from A":
+        expect(a_vec_zero_sum()).to_equal(0.0)
+
+    it "static method only module B's Vec3 defines (one) is found from B":
+        expect(b_vec_one_sum()).to_equal(2.0)
+
+    it "same-named static method returns each module's own result":
+        expect(a_vec_unit_sum()).to_equal(3.0)
+        expect(b_vec_unit_sum()).to_equal(2.0)
+
+    it "struct literal binds module A's 3-field Vec3":
+        expect(a_vec_literal_sum(1.0, 2.0, 3.0)).to_equal(6.0)
+
+    it "struct literal binds module B's 2-field Vec3":
+        expect(b_vec_literal_sum(1.5, 2.5)).to_equal(4.0)
+
+    it "field read on module A's Config sees backend":
+        expect(a_config_backend()).to_equal("cpu")
+        expect(a_config_label("gpu")).to_equal("A:gpu")
+
+    it "field read on module B's Config sees mode":
+        expect(b_config_mode()).to_equal(7)
+        expect(b_config_label(3)).to_equal("B:3")
+
+    it "enum variants resolve per module":
+        expect(a_mode()).to_equal("a-fast")
+        expect(b_mode()).to_equal("b-loud")

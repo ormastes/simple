@@ -1,0 +1,99 @@
+# Prevention guard for the module-qualified type registry
+# (module_qualified_type_registry_spec.spl is the reported case). Covers the
+# general shapes a bare-name class registry can get wrong, so the class of
+# bug cannot come back under a different surface:
+#   - class with inline statics vs struct + impl, same name, two modules
+#   - an instance crossing into a module (the entry) that imports NEITHER
+#     definition: dispatch follows the instance's own field set
+#   - the entry's own class vs an imported same-named class
+#   - enum variants per module
+#   - a bare name that is genuinely ambiguous is REFUSED (`simple test` of
+#     test/fixtures/modqual/ambiguous_entry.spl) while an explicit import of
+#     one definition resolves (explicit_entry.spl). Set SIMPLE_BIN to the
+#     binary under test (default bin/simple).
+use std.spec
+use std.io.{process_run, env_get}
+use test.helpers.modqual.use_a.{a_vec_make, a_config_make, a_config_backend, a_vec_zero_sum, a_mode}
+use test.helpers.modqual.use_b.{b_vec_make, b_config_make, b_config_mode, b_vec_one_sum, b_mode}
+
+# Entry-declared class with the SAME name as both fixtures' `Config`.
+class Config:
+    backend: text
+    extra: int
+
+    fn label() -> text:
+        "entry:" + self.backend + ":" + self.extra.to_string()
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn run_entry(path: text) -> text:
+    val (stdout, stderr, _code) = process_run(simple_binary(), ["test", path])
+    stdout + stderr
+
+describe "module-qualified type registry: general shapes":
+    it "instance dispatch follows the instance's own fields across modules":
+        # Called from the entry, which imports neither Vec3.
+        val a = a_vec_make(1.0, 2.0, 3.0)
+        val b = b_vec_make(1.0, 2.0)
+        expect(a.sum()).to_equal(6.0)
+        expect(b.sum()).to_equal(3.0)
+        expect(a.z).to_equal(3.0)
+
+    it "instance method on same-named Config picks each instance's own class":
+        expect(a_config_make("gpu").label()).to_equal("A:gpu")
+        expect(b_config_make(5).label()).to_equal("B:5")
+
+    it "entry-declared class wins for the entry, imports keep theirs":
+        val mine = Config(backend: "here", extra: 2)
+        expect(mine.label()).to_equal("entry:here:2")
+        expect(mine.backend).to_equal("here")
+        expect(a_config_backend()).to_equal("cpu")
+        expect(b_config_mode()).to_equal(7)
+
+    it "statics unique to one module stay reachable from its importer":
+        expect(a_vec_zero_sum()).to_equal(0.0)
+        expect(b_vec_one_sum()).to_equal(2.0)
+
+    it "enum variants resolve per module":
+        expect(a_mode()).to_equal("a-fast")
+        expect(b_mode()).to_equal("b-loud")
+
+    it "a bare name with two owned definitions and no import is refused":
+        val out = run_entry("test/fixtures/modqual/ambiguous_entry.spl")
+        expect(out).to_contain("ambiguous type `Vec3`")
+        expect(out.contains("SUM=")).to_equal(false)
+
+    it "an explicit import of one definition resolves the bare name":
+        val out = run_entry("test/fixtures/modqual/explicit_entry.spl")
+        expect(out).to_contain("SUM=3")
+
+use test.helpers.modqual.use_glob_a.{glob_a_vec_unit_sum, glob_a_config_backend}
+use test.helpers.modqual.use_alias_b.{alias_b_vec_unit_sum, alias_b_config_mode}
+use test.helpers.modqual.use_facade_a.{facade_a_vec_unit_sum, facade_a_config_backend}
+use test.helpers.modqual.use_nested.{nested_vec_unit_sum, nested_vec_zero_sum}
+use test.helpers.modqual.use_generic.{generic_a_total, generic_b_total}
+
+describe "module-qualified type registry: each resolution step":
+    it "whole-surface import (use m.*) binds module A's types":
+        expect(glob_a_vec_unit_sum()).to_equal(3.0)
+        expect(glob_a_config_backend()).to_equal("cpu")
+
+    it "aliased import (use m.{A as B}) binds module B's types under the alias":
+        expect(alias_b_vec_unit_sum()).to_equal(2.0)
+        expect(alias_b_config_mode()).to_equal(7)
+
+    it "re-export facade (export use) reaches module A's definition":
+        expect(facade_a_vec_unit_sum()).to_equal(3.0)
+        expect(facade_a_config_backend()).to_equal("cpu")
+
+    it "nested imports (three hops) reach module A's definition":
+        expect(nested_vec_unit_sum()).to_equal(3.0)
+        expect(nested_vec_zero_sum()).to_equal(0.0)
+
+    it "generic types with a colliding name resolve per owner":
+        expect(generic_a_total(1.5, 2.5)).to_equal(4.0)
+        expect(generic_b_total(5.0)).to_equal(5.0)

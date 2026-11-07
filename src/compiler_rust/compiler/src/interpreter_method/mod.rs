@@ -2126,7 +2126,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
                 .iter()
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .collect::<Result<Vec<_>, _>>()?;
-            if let Some(class_def) = classes.get(module_name.as_str()).cloned() {
+            if let Some(class_def) = crate::interpreter::resolve_class_in_scope(classes, module_name.as_str())? {
                 if let Some(func) = select_named_static_overload(class_def.methods.iter(), "new", &evaluated_args) {
                     let result =
                         exec_function_with_values(&func, &evaluated_args, env, functions, classes, enums, impl_methods)?;

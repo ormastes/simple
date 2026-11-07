@@ -727,8 +727,10 @@ pub(crate) fn call_method_on_value(
 
         // Custom class methods - enable method chaining on user-defined classes
         Value::Object { class, fields } => {
-            // Search for method in class definition
-            if let Some(class_def) = _classes.get(class).cloned() {
+            // Search for method in class definition. The instance carries only
+            // its bare class name; when same-named classes are loaded, the
+            // definition whose fields are exactly this instance's fields wins.
+            if let Some(class_def) = crate::interpreter::resolve_class_for_instance(_classes, class, fields) {
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
                     // Call method with self context
                     return exec_function_with_values_and_self(
@@ -1033,7 +1035,7 @@ fn find_method_and_exec(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     // Check class methods
-    if let Some(class_def) = crate::interpreter::resolve_class(classes, class) {
+    if let Some(class_def) = crate::interpreter::resolve_class_for_receiver(classes, class, fields) {
         if let Some(func) = class_def.methods.iter().find(|m| m.name == method_name) {
             return Ok(Some(exec_function(
                 func,

@@ -222,7 +222,7 @@ pub(super) fn eval_call_expr(
                 // of deep-copying the dict on every call (value semantics are
                 // kept: a second owner still forces the copy-on-write clone).
                 let owned_call = match env.get(var_name) {
-                    Some(Value::Object { class, .. }) => resolve_object_method(classes, impl_methods, class, method),
+                    Some(Value::Object { class, fields }) => resolve_object_method(classes, impl_methods, class, fields, method),
                     _ => None,
                 };
                 if let Some(resolved) = owned_call {
@@ -344,8 +344,8 @@ pub(super) fn eval_call_expr(
                         Some(Value::Object {
                             fields: parent_fields, ..
                         }) => match parent_fields.get(field) {
-                            Some(Value::Object { class: field_class, .. }) => {
-                                resolve_object_method(classes, impl_methods, field_class, method)
+                            Some(Value::Object { class: field_class, fields: field_fields }) => {
+                                resolve_object_method(classes, impl_methods, field_class, field_fields, method)
                             }
                             _ => None,
                         },
@@ -844,7 +844,8 @@ pub(super) fn eval_call_expr(
                 }
                 Value::Constructor { ref class_name } => {
                     // Look up static method on class - check both class_def.methods and impl_methods
-                    if let Some(class_def) = classes.get(class_name).cloned() {
+                    // (module-qualified: the class this source module declares or imports).
+                    if let Some(class_def) = crate::interpreter::resolve_class_in_scope(classes, class_name)? {
                         // First check methods defined in class body
                         if let Some(method) = class_def.methods.iter().find(|m| &m.name == field) {
                             // Warn if using deprecated .new() pattern

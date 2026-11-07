@@ -237,7 +237,7 @@ pub fn handle_constructor_methods(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
-    if let Some(class_def) = classes.get(class_name).cloned() {
+    if let Some(class_def) = crate::interpreter::resolve_class_in_scope(classes, class_name)? {
         let evaluated_args: Vec<(Option<String>, Value)> = args
             .iter()
             .map(|arg| {
@@ -259,15 +259,21 @@ pub fn handle_constructor_methods(
                     .map(|m| m.as_ref()),
             );
         }
+        // On an equal score the EARLIER candidate wins: the resolved class's
+        // own methods come first, the bare-name `impl_methods` table (which
+        // merges every loaded module's `impl Name:` blocks) only after. A
+        // same-named static from another module's same-named class used to
+        // win the tie because `max_by_key` keeps the last maximum.
         let scored_method = candidates
             .iter()
             .copied()
-            .filter_map(|candidate| {
+            .enumerate()
+            .filter_map(|(idx, candidate)| {
                 constructor_overload_score(candidate, &positional_values, &class_def.generic_params)
-                    .map(|score| (score, candidate))
+                    .map(|score| (score, std::cmp::Reverse(idx), candidate))
             })
-            .max_by_key(|(score, _)| *score)
-            .map(|(_, candidate)| candidate);
+            .max_by_key(|(score, order, _)| (*score, *order))
+            .map(|(_, _, candidate)| candidate);
         let arity_matches: Vec<&FunctionDef> = candidates
             .iter()
             .copied()

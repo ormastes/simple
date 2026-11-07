@@ -103,6 +103,7 @@ pub(crate) fn owner_bindings(owner: &str) -> Option<Arc<ModuleBindings>> {
 }
 
 pub(crate) fn record_owner_binding(importer: Arc<str>, local_name: String, binding: (Arc<str>, String)) {
+    crate::interpreter::bump_registry_generation();
     MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
         let mut by_owner = cell.borrow_mut();
         let bindings = by_owner.entry(importer).or_default();
@@ -116,6 +117,7 @@ pub(crate) fn record_owner_binding(importer: Arc<str>, local_name: String, bindi
 /// table is snapshotted NOW, so later lazy lookups answer exactly what the
 /// per-name copy would have recorded at this point.
 pub(crate) fn record_owner_binding_layer(importer: Arc<str>, source_owner: Arc<str>, names: Arc<crate::value::ModuleTable>) {
+    crate::interpreter::bump_registry_generation();
     let source = owner_bindings(&source_owner);
     MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
         let mut by_owner = cell.borrow_mut();

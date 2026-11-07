@@ -801,7 +801,7 @@ pub(crate) fn try_place_mutation_in_place(
         // after argument evaluation and must still hold an object of the same
         // class — so this one keeps its `clone()`. The resolution rides along so
         // the executor does not probe the method table a second time.
-        Some(Value::Object { class, .. }) => match resolve_object_method(classes, impl_methods, class, method) {
+        Some(Value::Object { class, fields }) => match resolve_object_method(classes, impl_methods, class, fields, method) {
             Some(resolved) => PlaceMutation::Object(class.clone(), resolved),
             None => return Ok(None),
         },
@@ -1233,7 +1233,7 @@ fn handle_method_call_with_self_update_inner(
             // non-self reference-typed argument such as `buf`. See
             // doc/08_tracking/bug/bytebuffer_struct_param_mutation_not_persisted_2026-09-01.md.
             if let Value::Object { class, fields } = &inner_result {
-                if let Some(resolved) = resolve_object_method(classes, impl_methods, class, method) {
+                if let Some(resolved) = resolve_object_method(classes, impl_methods, class, fields, method) {
                     let eval_args = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                     // The chain threads one mutable identity only when the
                     // inner `me` returned its own self (same field storage) and
@@ -1391,8 +1391,8 @@ fn handle_method_call_with_self_update_inner(
                     Some(Value::Object {
                         fields: parent_fields, ..
                     }) => match parent_fields.get(field) {
-                        Some(Value::Object { class: field_class, .. }) => {
-                            resolve_object_method(classes, impl_methods, field_class, method)
+                        Some(Value::Object { class: field_class, fields: field_fields }) => {
+                            resolve_object_method(classes, impl_methods, field_class, field_fields, method)
                         }
                         _ => None,
                     },
@@ -1668,7 +1668,7 @@ fn handle_method_call_with_self_update_inner(
             // The outer `Option` is "the receiver is an Object" (which selects
             // this arm at all); the inner one is "its class defines `method`".
             let receiver_method = match env.get(obj_name) {
-                Some(Value::Object { class, .. }) => Some(resolve_object_method(classes, impl_methods, class, method)),
+                Some(Value::Object { class, fields }) => Some(resolve_object_method(classes, impl_methods, class, fields, method)),
                 _ => None,
             };
             if let Some(resolved) = receiver_method {
