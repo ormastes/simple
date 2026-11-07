@@ -1,4 +1,4 @@
-use simple_parser::{Parser, ast::{AssignOp, BinOp, Expr, FunctionDef, MatchStmt, Node, Pattern}};
+use simple_parser::{Parser, ast::{AssignOp, BinOp, Expr, FunctionDef, FStringPart, MatchStmt, Node, Pattern}};
 
 fn require(ok: bool, message: &str) -> Result<(), String> {
     if ok { Ok(()) } else { Err(message.to_owned()) }
@@ -40,7 +40,13 @@ fn literal_arrows() -> Result<(), String> {
     require(matches!(&stmt.arms[1].pattern, Pattern::Literal(value) if matches!(value.as_ref(), Expr::Integer(1))), "literal one pattern changed")?;
     require(matches!(&stmt.arms[2].pattern, Pattern::Wildcard), "wildcard pattern changed")?;
     for (arm, expected) in stmt.arms.iter().zip(["zero", "one", "other"]) {
-        require(matches!(&arm.body.statements[0], Node::Expression(Expr::String(value)) if value == expected), "literal arrow body changed")?;
+        let exact_text = match &arm.body.statements[0] {
+            Node::Expression(Expr::String(value)) => value == expected,
+            Node::Expression(Expr::FString { parts, .. }) =>
+                matches!(&parts[..], [FStringPart::Literal(value)] if value == expected),
+            _ => false,
+        };
+        require(exact_text, "literal arrow body changed")?;
     }
     Ok(())
 }
@@ -48,7 +54,20 @@ fn guarded_arrows() -> Result<(), String> {
     let stmt = match_body(include_str!("fixtures/match_arrow_arms/guarded_arrows.spl"), 2)?;
     require(matches!(&stmt.arms[0].pattern, Pattern::Identifier(name) if name == "n"), "guard subject binding changed")?;
     require(matches!(&stmt.arms[0].guard, Some(Expr::Binary { op: BinOp::Lt, .. })), "guard comparison missing")?;
-    require(matches!(&stmt.arms[1].pattern, Pattern::Wildcard) && stmt.arms[1].guard.is_none(), "fallback guard/pattern changed")
+    require(matches!(&stmt.arms[1].pattern, Pattern::Wildcard) && stmt.arms[1].guard.is_none(), "fallback guard/pattern changed")?;
+    for source in [
+        "fn guarded(v):\n    match v:\n        | n if (n->ready()) -> n->finish()\n        | _ -> v\n",
+        "fn guarded(v):\n    match v:\n        case n if n->ready(): n->finish()\n        case _: v\n",
+    ] {
+        let update = match_body(source, 2)?;
+        require(matches!(&update.arms[0].guard, Some(Expr::FunctionalUpdate { target, method, args })
+            if matches!(target.as_ref(), Expr::Identifier(name) if name == "n") && method == "ready" && args.is_empty()),
+            "nested or case-colon guard functional update changed")?;
+        require(matches!(&update.arms[0].body.statements[..], [Node::Expression(Expr::FunctionalUpdate { target, method, args })]
+            if matches!(target.as_ref(), Expr::Identifier(name) if name == "n") && method == "finish" && args.is_empty()),
+            "arm body functional update changed")?;
+    }
+    Ok(())
 }
 fn qualified_arrows() -> Result<(), String> {
     let stmt = match_body(include_str!("fixtures/match_arrow_arms/qualified_arrows.spl"), 2)?;
