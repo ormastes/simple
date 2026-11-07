@@ -1,0 +1,13 @@
+# Signed containment installation
+
+STATUS: source authored; runtime qualification NOT_RUN.
+
+The administrator signs a distinct host_containment_install_v1 operation. Its full canonical intent binds the enrolled root digest, complete Container scope, unchanged CLI/provider baseline, exact raw canonical containment policy bytes and their SHA-256, and the separate expected observed containment identity. Configuration installation does not observe or establish runtime readiness. Common Container API owns actual policy decoding, native observation and exact expected identity matching; Host imports no provider types.
+
+A fixed internal ExecControlV3 / ContainmentV1 adapter decodes the original packet through its exact public domain codec. It supplies the single existing live transaction: archive original signed packet, admit, BEGIN, publish exact intent artifact, record completed outcome hash, publish immutable current-scope reference. Each step preserves latest owner/revision and exact retained staging evidence on failure. Completed exact historical artifact may repair only its scope reference after original approval expiry. Changed proof bytes and competing same-domain same-scope operations refuse. Both domains may coexist; no archive, artifact, outcome or reference is interchangeable. No second WAL, reservation or debit exists.
+
+Historical projection is a separate cycle-free module using the exact signed packet, original operation, enrollment-derived capacity authority and artifact/outcome hash. It permits structurally valid old scope history, while live loading requires the actual current root/scope/provider/public policy. Only the loader's actual completed row and protected artifact establish installed configuration. Caller-created structs, arbitrary bytes and native snapshots confer no authority.
+
+The finite host-containment-install route reads a bounded nofollow packet, uses the owned root and current SDK authority, then returns installed=true and containmentReady=false only after protected publication and load. Owned close cleanup/state remains in every finite reply. Linux private file owner is the initial supported boundary. Windows remains unsupported until the actual native-private read and publication owner is integrated; no POSIX chmod/ACL approximation is accepted.
+
+The existing exec-control public fields, canonical request/intent/reference bytes, paths, outcome hashes, replay rules and error strings are preserved. Existing authored exec tests provide compatibility coverage; new containment cases repeat transaction faults with distinct domain and observed-pin substitutions. No tests or builds have run, and no power-loss/native containment qualification is claimed.
