@@ -24,52 +24,96 @@ set -u
 BASELINE_REL="scripts/check/private_import_baseline.txt"
 
 stale_scan() (
-    # Read omitted sparse files from the index without changing the checkout.
-    # Missing ordinary tracked files remain real deletions and must fail.
-    snapshot=$(mktemp -d) || return 2
-    trap 'rm -rf "$snapshot"' EXIT INT TERM HUP
-    scan_root=$1
-    git -C "$scan_root" ls-files -t > "$snapshot/index" || return 2
-    awk -F'|' 'FILENAME == ARGV[1] { if (substr($0, 1, 2) == "S ") sparse[substr($0, 3)] = 1; next }
-        ($1 in sparse) && !seen[$1]++ { print $1 }' \
-        "$snapshot/index" "$scan_root/$BASELINE_REL" > "$snapshot/names" || return 2
-    while IFS= read -r path; do
-        # Index fallback is only for absent sparse files. A present directory,
-        # unreadable file or dangling symlink must not revive indexed content.
-        if [ ! -e "$scan_root/$path" ] && [ ! -L "$scan_root/$path" ]; then
-            printf '%s\0' "$path"
+    scan_root=$(cd "$1" && pwd -P) || return 2
+    scan_tmp_parent=$(cd "${TMPDIR:-/tmp}" && pwd -P) || return 2
+    scan_tmp=$(mktemp -d "$scan_tmp_parent/private-import-sources.XXXXXX") || return 2
+    case $scan_tmp in "$scan_tmp_parent"/private-import-sources.*) ;; *) return 2 ;; esac
+    trap 'rm -rf "$scan_tmp"' EXIT INT TERM HUP
+    git -C "$scan_root" ls-files -t --stage -z > "$scan_tmp/index.raw" || return 2
+    # -z has no record newlines: any LF here belongs to a filename. The
+    # line-based baseline cannot represent it; reject before NUL conversion
+    # can turn that filename into forged index metadata for another path.
+    index_newlines=$(LC_ALL=C wc -l < "$scan_tmp/index.raw") || return 2
+    [ "$index_newlines" -eq 0 ] || { echo 'private-import index filename contains newline' >&2; return 2; }
+    tr '\000' '\n' < "$scan_tmp/index.raw" > "$scan_tmp/index.lines" || return 2
+    awk -F'|' '!seen[$1]++ { print $1 }' "$scan_root/$BASELINE_REL" > "$scan_tmp/paths" || return 2
+    # Join baseline paths to index metadata once, not once per sparse file.
+    awk 'FILENAME==ARGV[1] { order[++n]=$0; wanted[$0]=1; next }
+        { t=index($0,"\t"); path=substr($0,t+1); if (t && path in wanted) meta[path]=substr($0,1,t-1) }
+        END { if (n<1) exit 2; for (j=1;j<=n;j++) { path=order[j]; split(meta[path],a," "); printf "%s|%s|%s|%s|%s\n",path,a[1],a[2],a[3],a[4] } }
+    ' "$scan_tmp/paths" "$scan_tmp/index.lines" > "$scan_tmp/plan" || return 2
+    expected_paths=$(awk 'END { print NR }' "$scan_tmp/paths") || return 2
+    [ "$expected_paths" -gt 0 ] || return 2
+    printf '' > "$scan_tmp/sources" || return 2
+    printf '' > "$scan_tmp/requests" || return 2
+    printf '' > "$scan_tmp/expected" || return 2
+    printf '' > "$scan_tmp/materialized-paths" || return 2
+    mkdir "$scan_tmp/tree" || return 2
+    while IFS='|' read -r source_path source_tag source_mode source_oid source_stage || [ -n "$source_path" ]; do
+        case $source_path in ''|/*|*\\*|?:*|..|../*|*/../*|*/..) echo 'private-import source path escapes root' >&2; return 2 ;; esac
+        if [ -e "$scan_root/$source_path" ] || [ -L "$scan_root/$source_path" ]; then
+            [ -f "$scan_root/$source_path" ] && [ -r "$scan_root/$source_path" ] || return 2
+            source_real=$(realpath "$scan_root/$source_path") || return 2
+            case $source_real in "$scan_root"/*) ;; *) echo 'private-import source symlink escapes root' >&2; return 2 ;; esac
+            printf '%s|%s\n' "$source_path" "$scan_root/$source_path" >> "$scan_tmp/sources" || return 2
+            continue
         fi
-    done < "$snapshot/names" > "$snapshot/paths"
-    git -C "$scan_root" checkout-index --ignore-skip-worktree-bits \
-        --prefix="$snapshot/source/" -z --stdin < "$snapshot/paths" || return 2
-    (cd "$scan_root" && awk -v snapshot="$snapshot/source/" -F'|' '
-        function load(f,   line, n, rest, got) {
-            delete priv; delete expo
-            got = (getline line < f)
-            if (got < 0) {
-                close(f)
-                f = snapshot f
-                got = (getline line < f)
-            }
-            if (got < 0) { missing = 1; close(f); return }
-            missing = 0
-            do {
-                if (match(line, /^fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
-                    n = substr(line, RSTART, RLENGTH); sub(/^fn[ \t]+/, "", n); priv[n] = 1
-                } else if (match(line, /^export[ \t]+/) && line !~ /^export[ \t]+use[ \t]/) {
-                    rest = substr(line, RLENGTH + 1); gsub(/[,]/, " ", rest)
-                    split(rest, parts, /[ \t]+/)
-                    for (i in parts) if (parts[i] != "") expo[parts[i]] = 1
-                }
-            } while ((getline line < f) > 0)
-            close(f)
+        case $source_tag in
+            S)
+                # Only stage0 regular blobs can be extracted into the private
+                # prefix. Never materialize a symlink or an unmerged entry.
+                [ -n "$source_oid" ] && [ "$source_stage" = 0 ] || return 2
+                case $source_mode in 100644|100755) ;; *) echo 'private-import sparse source is not a regular blob' >&2; return 2 ;; esac
+                printf '%s\000' "$source_path" >> "$scan_tmp/requests" || return 2
+                printf '%s|%s\n' "$source_path" "$source_oid" >> "$scan_tmp/expected" || return 2
+                printf '%s\n' "$source_path" >> "$scan_tmp/materialized-paths" || return 2
+                printf '%s|%s\n' "$source_path" "$scan_tmp/tree/$source_path" >> "$scan_tmp/sources" || return 2
+                ;;
+            *) printf '%s|\n' "$source_path" >> "$scan_tmp/sources" || return 2 ;;
+        esac
+    done < "$scan_tmp/plan" || return 2
+    if [ -s "$scan_tmp/requests" ]; then
+        # No -u: checkout-index must not update the live index/stat cache.
+        # Filters/attributes may transform extracted bytes, so verify raw blob
+        # identity afterward rather than trusting core.autocrlf=false alone.
+        git -C "$scan_root" -c core.autocrlf=false checkout-index --ignore-skip-worktree-bits --prefix="$scan_tmp/tree/" -z --stdin < "$scan_tmp/requests" || return 2
+        while IFS= read -r source_path || [ -n "$source_path" ]; do
+            [ -f "$scan_tmp/tree/$source_path" ] && [ ! -L "$scan_tmp/tree/$source_path" ] || return 2
+        done < "$scan_tmp/materialized-paths" || return 2
+        source_gitdir=$(git -C "$scan_root" rev-parse --absolute-git-dir) || return 2
+        git -C "$scan_tmp/tree" --git-dir="$source_gitdir" hash-object --no-filters --stdin-paths < "$scan_tmp/materialized-paths" > "$scan_tmp/actual-hashes" || return 2
+        awk -F'|' 'FILENAME==ARGV[1] { expected[++n]=$2; next } { ++i; if ($0!=expected[i]) bad=1 } END { if (n<1 || bad || i!=n) exit 1 }' "$scan_tmp/expected" "$scan_tmp/actual-hashes" || {
+            echo 'private-import extracted bytes differ from indexed blob (checkout filter/attribute transformation)' >&2; return 2;
         }
-        {
-            f = $1; name = $2
-            if (f != cur) { cur = f; load(f) }
-            if (missing || !(name in priv) || (name in expo)) print $0
-        }' "$BASELINE_REL")
+    fi
+    scan_source_declarations "$scan_tmp/sources" "$scan_root/$BASELINE_REL" "$expected_paths"
 )
+
+scan_source_declarations() {
+    [ -s "$1" ] && [ "$3" -gt 0 ] || return 2
+    awk -F'|' -v expected_paths="$3" '
+        FILENAME==ARGV[1] { if (NF!=2 || ($1 in source)) map_error=1; source[$1]=$2; mapped++; next }
+        function load(f,   line,n,rest,status) {
+            delete priv; delete expo; missing=0
+            if (source[f]=="") { missing=1; return }
+            status=(getline line < source[f])
+            if (status<0) { read_error=1; close(source[f]); return }
+            while (status>0) {
+                if (match(line,/^fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                    n=substr(line,RSTART,RLENGTH); sub(/^fn[ \t]+/,"",n); priv[n]=1
+                } else if (match(line,/^export[ \t]+/) && line !~ /^export[ \t]+use[ \t]/) {
+                    rest=substr(line,RLENGTH+1); gsub(/[,]/," ",rest); split(rest,parts,/[ \t]+/)
+                    for (i in parts) if (parts[i]!="") expo[parts[i]]=1
+                }
+                status=(getline line < source[f])
+            }
+            if (status<0) read_error=1
+            close(source[f])
+        }
+        { f=$1; name=$2; if (f!=cur) { cur=f; load(f) }; if (missing || !(name in priv) || (name in expo)) print $0 }
+        END { if (read_error || map_error || mapped!=expected_paths) exit 2 }
+    ' "$1" "$2"
+}
 
 # prints added lines (current minus base); returns 3 when base has no baseline.
 added_scan() (
@@ -218,8 +262,130 @@ selftest() {
     [ "$rc" -eq 0 ] || { echo "ERROR - selftest: confirmed introducing change failed ($out)"; return 2; }
     : > "$d/$BASELINE_REL"
     scan "$d" "$b" >/dev/null; [ $? -eq 2 ] || { echo "ERROR - selftest: empty baseline must ERROR"; return 2; }
+    sparse_extra_controls || return 2
+    shell_index_controls || return 2
+    shell_failure_controls || return 2
     return 0
 }
+
+sparse_extra_controls() (
+    extra_tmp=$(cd "${TMPDIR:-/tmp}" && pwd -P) || return 2
+    extra_dir=$(mktemp -d "$extra_tmp/private-import-new.XXXXXX") || return 2
+    case $extra_dir in "$extra_tmp"/private-import-new.*) ;; *) return 2 ;; esac
+    trap 'rm -rf "$extra_dir"' EXIT INT TERM HUP
+    mkdir -p "$extra_dir/scripts/check" "$extra_dir/lib"
+    printf 'fn live() -> i64:\n    1\n' > "$extra_dir/lib/m.spl"
+    printf 'lib/m.spl|live\n' > "$extra_dir/$BASELINE_REL"
+    (cd "$extra_dir" && git init -q && git config core.autocrlf false && git config user.email t@t && git config user.name t && git add -A && git commit -qm base) || return 2
+    extra_base=$(git -C "$extra_dir" rev-parse HEAD) || return 2
+    extra_expect_scan() {
+        extra_expected_status=$1; extra_marker=$2
+        extra_output=$(scan "$extra_dir" "$extra_base" 2>&1); extra_status=$?
+        [ "$extra_status" -eq "$extra_expected_status" ] || { echo "ERROR - new control: expected $extra_expected_status, got $extra_status ($extra_output)"; return 2; }
+        case $extra_output in *"$extra_marker"*) ;; *) echo "ERROR - new control: missing marker $extra_marker ($extra_output)"; return 2 ;; esac
+    }
+    git -C "$extra_dir" sparse-checkout init --cone && git -C "$extra_dir" sparse-checkout set scripts/check || return 2
+    # Indexed-but-uncommitted public promotion must beat HEAD's private fn.
+    extra_blob=$(printf 'pub fn live() -> i64:\n    1\n' | git -C "$extra_dir" hash-object -w --stdin) || return 2
+    git -C "$extra_dir" update-index --cacheinfo "100644,$extra_blob,lib/m.spl" || return 2
+    git -C "$extra_dir" update-index --skip-worktree lib/m.spl || return 2
+    extra_expect_scan 1 'lib/m.spl|live' || return 2
+    # Real Git index read failure, not a success-shaped mocked subprocess.
+    cp "$extra_dir/.git/index" "$extra_dir/index.good" || return 2
+    printf 'not an index\n' > "$extra_dir/.git/index"
+    extra_expect_scan 2 'source scan failed' || return 2
+    cp "$extra_dir/index.good" "$extra_dir/.git/index" || return 2
+    git -C "$extra_dir" sparse-checkout disable || return 2
+    git -C "$extra_dir" checkout HEAD -- lib/m.spl || return 2
+    # A real tracked deletion in a full checkout cannot use indexed fallback.
+    rm "$extra_dir/lib/m.spl" || return 2
+    extra_expect_scan 1 'lib/m.spl|live' || return 2
+    # A directory in place of source causes a source-read failure, exit2.
+    mkdir "$extra_dir/lib/m.spl" || return 2
+    extra_expect_scan 2 'source scan failed' || return 2
+    rmdir "$extra_dir/lib/m.spl" || return 2
+    # U+2028 is data inside a physical source record, not a second fn line.
+    printf '# comment\342\200\250fn live() -> i64:\n    1\n' > "$extra_dir/lib/m.spl"
+    extra_expect_scan 1 'lib/m.spl|live' || return 2
+    printf 'fn live() -> i64:\n    1\n' > "$extra_dir/lib/m.spl"
+    printf 'lib/m.spl|live\342\200\250other\n' > "$extra_dir/$BASELINE_REL"
+    extra_unicode_expected=$(printf 'lib/m.spl|live\342\200\250other')
+    extra_unicode_actual=$(stale_scan "$extra_dir"); extra_status=$?
+    [ "$extra_status" -eq 0 ] && [ "$extra_unicode_actual" = "$extra_unicode_expected" ] || { echo 'ERROR - new control: U+2028 split a baseline record'; return 2; }
+    echo 'PASS - six sparse/index/read/newline controls'
+)
+
+
+shell_index_controls() (
+    shell_tmp=$(cd "${TMPDIR:-/tmp}" && pwd -P) || return 2
+    shell_dir=$(mktemp -d "$shell_tmp/private-import-shell.XXXXXX") || return 2
+    case $shell_dir in "$shell_tmp"/private-import-shell.*) ;; *) return 2 ;; esac
+    trap 'rm -rf "$shell_dir"' EXIT INT TERM HUP
+    mkdir -p "$shell_dir/scripts/check" "$shell_dir/lib"
+    printf 'fn live() -> i64:\n    1\n' > "$shell_dir/lib/m.spl"
+    printf 'lib/m.spl|live\n' > "$shell_dir/$BASELINE_REL"
+    (cd "$shell_dir" && git init -q && git config core.autocrlf false && git config user.email t@t && git config user.name t && git add -A && git commit -qm base) || return 2
+    git -C "$shell_dir" sparse-checkout init --cone && git -C "$shell_dir" sparse-checkout set scripts/check || return 2
+    [ ! -e "$shell_dir/lib/m.spl" ] || return 2
+    shell_before=$(git hash-object --no-filters "$shell_dir/.git/index") || return 2
+    shell_output=$(stale_scan "$shell_dir"); shell_status=$?
+    [ "$shell_status" -eq 0 ] && [ -z "$shell_output" ] || return 2
+    [ "$(git hash-object --no-filters "$shell_dir/.git/index")" = "$shell_before" ] && [ ! -e "$shell_dir/lib/m.spl" ] || return 2
+    # Explicit attributes override autocrlf=false: transformed extraction must
+    # fail raw identity verification rather than hiding source declarations.
+    printf 'lib/m.spl text eol=crlf\n' > "$shell_dir/.gitattributes"
+    git -C "$shell_dir" add .gitattributes || return 2
+    shell_output=$(stale_scan "$shell_dir" 2>&1); shell_status=$?
+    [ "$shell_status" -eq 2 ] || return 2
+    case $shell_output in *'differ from indexed blob'*) ;; *) return 2 ;; esac
+    git -C "$shell_dir" reset -q HEAD -- .gitattributes && rm "$shell_dir/.gitattributes" || return 2
+    # A sparse index symlink cannot escape the extraction prefix.
+    shell_link=$(printf '../outside.spl' | git -C "$shell_dir" hash-object -w --stdin) || return 2
+    git -C "$shell_dir" update-index --cacheinfo "120000,$shell_link,lib/m.spl" && git -C "$shell_dir" update-index --skip-worktree lib/m.spl || return 2
+    shell_output=$(stale_scan "$shell_dir" 2>&1); shell_status=$?
+    [ "$shell_status" -eq 2 ] || return 2
+    case $shell_output in *'not a regular blob'*) ;; *) return 2 ;; esac
+    echo 'PASS - shell raw-index/attribute/symlink/no-mutation controls'
+)
+
+
+shell_failure_controls() (
+    failure_tmp=$(cd "${TMPDIR:-/tmp}" && pwd -P) || return 2
+    failure_dir=$(mktemp -d "$failure_tmp/private-import-failure.XXXXXX") || return 2
+    case $failure_dir in "$failure_tmp"/private-import-failure.*) ;; *) return 2 ;; esac
+    trap 'rm -rf "$failure_dir"' EXIT INT TERM HUP
+    mkdir -p "$failure_dir/scripts/check" "$failure_dir/lib" || return 2
+    printf 'fn live() -> i64:\n    1\n' > "$failure_dir/lib/m.spl" || return 2
+    printf 'lib/m.spl|live\n' > "$failure_dir/$BASELINE_REL" || return 2
+    (cd "$failure_dir" && git init -q && git config core.autocrlf false && git config user.email t@t && git config user.name t && git add -A && git commit -qm base) || return 2
+    failure_output=$(stale_scan "$failure_dir"); failure_status=$?
+    [ "$failure_status" -eq 0 ] && [ -z "$failure_output" ] || return 2
+    # Force a real redirection failure at the production sources initializer.
+    # The wrapper still creates a real private mktemp directory; no Git or
+    # scanner output is mocked into a success result.
+    (
+        mktemp() {
+            failure_created=$(command mktemp "$@") || return 2
+            mkdir "$failure_created/sources" || return 2
+            printf '%s\n' "$failure_created"
+        }
+        failure_output=$(stale_scan "$failure_dir" 2>&1); failure_status=$?
+        [ "$failure_status" -eq 2 ] || { echo 'ERROR - source-map write failure did not return ERROR2'; return 2; }
+    ) || return 2
+    : > "$failure_dir/empty-map" || return 2
+    failure_output=$(scan_source_declarations "$failure_dir/empty-map" "$failure_dir/$BASELINE_REL" 1); failure_status=$?
+    [ "$failure_status" -eq 2 ] || { echo 'ERROR - empty first mapping became PASS'; return 2; }
+    # A newline-bearing index path must not forge another S metadata record.
+    # Insert the actual Git index entry without needing OS filename support.
+    failure_blob=$(printf 'unrelated\n' | git -C "$failure_dir" hash-object -w --stdin) || return 2
+    failure_name=$(printf 'lib/newline\nS 100644 forged 0\tlib/m.spl')
+    git -C "$failure_dir" -c core.protectNTFS=false update-index --add --cacheinfo "100644,$failure_blob,$failure_name" || return 2
+    failure_output=$(stale_scan "$failure_dir" 2>&1); failure_status=$?
+    [ "$failure_status" -eq 2 ] || { echo 'ERROR - newline index path was accepted'; return 2; }
+    case $failure_output in *'filename contains newline'*) ;; *) return 2 ;; esac
+    echo 'PASS - real write-failure/empty-map/newline-index controls'
+)
+
 
 main_root=.
 main_base=${PRIVATE_IMPORT_BASE:-}
