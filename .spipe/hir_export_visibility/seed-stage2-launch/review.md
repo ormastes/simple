@@ -1,0 +1,11 @@
+# Disabled seed→Stage2 exception launcher
+
+Source b2a63d246dfe59cb9dce758ddcb99ef8a4b2dacf is frozen in this dedicated worktree. No root-enable.sdn or consumed latch exists. Explicit exhausted-budget exception is still required. launch.sh binds source, scripts, host config and its own SHA through the future enable marker; it enforces CPUs0–4, serial1,48GiB observed process-tree cap,12h outer wall cap and32GiB fresh disk minimum (above canonical20GiB). Minimum is conservative headroom, not guaranteed full-matrix fit; canonical disk guard is startup-only.
+
+All writable build state stays in this worktree: build/seed-stage2-exception/{output,cargo-cache,tmp,native,frontend,hir,user-storage,worktree-storage}; canonical Rust publication is src/compiler_rust/target/{bootstrap.generations,bootstrap.current.env,bootstrap}, initially absent. This is a NEW private worktree path, not the shared main target. Canonical env-isolated Cargo builds receive private HOME/config/temp/target via bootstrap-authority-wiring; centralized CARGO_HOME, CARGO_TARGET_DIR, XDG and compiler caches derive from the explicitly private storage roots. Rustup toolchain and LLVM are existing read-only tool authorities. No retained seed/runtime is copied or replaced.
+
+Full bootstrap is deliberate: the existing seed is stale, so the canonical owner rebuilds current Rust/runtime before producing/admitting pure Stage2 and its required phase-bound fullCLI/test-runner matrix. stop-after-stage2 excludes later Stage3/deploy; no incompatible full-cli flag and no manual tests/chained commands. Guard terminal success remains root-review-required, not automatic feature or overall PASS. Failed launch has no retry path.
+
+Build inputs src/examples/scripts symlinks strictly resolve inside this full checkout. Ten preexisting dangling convenience/documentation links outside these build roots are listed in source-inputs.sdn; none was repaired or hidden. All three TRACE32 source alias targets are present.
+
+Prepared command argv.txt omits the environment assignments for readability; launch.sh is the exact complete command and environment authority. Source-only syntax validation does not invoke the script, compiler or tests.
