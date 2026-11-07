@@ -1,0 +1,82 @@
+# Data-only retained-request tests, authored UNEXECUTED.
+use std.spec.*
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.common.contracts.container.execution_options_v1.OciEnvironmentEntryV1
+
+fn _codec_request() -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "codec-1", attempt: 1, operation_id: "create-codec",
+        image: "example/compiler@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        bundle_path: "", command: ["/agent", "literal ; $(task)"], args: ["a b", ""],
+        timeout_ms: 5000, cpu_limit_millis: 1000, memory_limit_bytes: 268435456,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only")
+
+describe "OCI retained request data codec":
+    it "roundtrips canonical data and stable digest without authorizing execution":
+        val original = _codec_request()
+        val body = match linux_oci_retained_request_encode_v1(original):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val decoded = match linux_oci_retained_request_decode_v1(body):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(decoded.command).to_equal(original.command)
+        expect(decoded.args).to_equal(original.args)
+        expect(decoded.operation_id).to_equal(original.operation_id)
+        expect(decoded.replace_entrypoint).to_equal(false)
+        expect(decoded.terminal_mode).to_equal("none")
+        expect(linux_oci_request_digest_v1(decoded)).to_equal(linux_oci_request_digest_v1(original))
+        expect(linux_oci_retained_request_encode_v1(decoded)).to_equal(Ok(body))
+
+    it "rejects payload tampering unknown fields and noncanonical retained bytes":
+        val body = match linux_oci_retained_request_encode_v1(_codec_request()):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        for changed in [body.replace("literal ; $(task)", "different"),
+                body + "unexpected: true\n", body + "\n"]:
+            match linux_oci_retained_request_decode_v1(changed):
+                case Err(reason): expect(reason.len()).to_be_greater_than(0)
+                case Ok(_): fail("tampered or noncanonical data must reject")
+
+    it "hashes vector boundaries and every new mode while separating operation identity":
+        var original = _codec_request()
+        original.command = ["ab", "c"]
+        val first = linux_oci_request_digest_v1(original)
+        var changed = original
+        changed.command = ["a", "bc"]
+        expect(linux_oci_request_digest_v1(changed) == first).to_equal(false)
+        changed = original
+        changed.operation_id = "reopened-operation"
+        expect(linux_oci_request_digest_v1(changed)).to_equal(first)
+        changed = original
+        changed.replace_entrypoint = true
+        expect(linux_oci_request_digest_v1(changed) == first).to_equal(false)
+        changed = original
+        changed.environment = [OciEnvironmentEntryV1(name: "MODE", value: "literal")]
+        expect(linux_oci_request_digest_v1(changed) == first).to_equal(false)
+        changed = original
+        changed.working_directory = "/work"
+        expect(linux_oci_request_digest_v1(changed) == first).to_equal(false)
+        changed = original
+        changed.terminal_mode = "stdin"
+        expect(linux_oci_request_digest_v1(changed) == first).to_equal(false)
+
+    it "decodes new schema fields as data while provider and builder reject their effects":
+        val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_ENGINE_PODMAN,
+            "/unused/codec", "boot-1", 7, false)
+        for mode in ["entrypoint", "environment", "workdir", "terminal"]:
+            var request = _codec_request()
+            if mode == "entrypoint": request.replace_entrypoint = true
+            if mode == "environment": request.environment = [OciEnvironmentEntryV1(name: "MODE", value: "x")]
+            if mode == "workdir": request.working_directory = "/work"
+            if mode == "terminal": request.terminal_mode = "stdin"
+            val body = match linux_oci_retained_request_encode_v1(request):
+                case Ok(value): value
+                case Err(reason): fail(reason)
+            val decoded = match linux_oci_retained_request_decode_v1(body):
+                case Ok(value): value
+                case Err(reason): fail(reason)
+            expect(provider.validate(decoded).accepted).to_equal(false)
+            expect(build_create_command(OCI_ENGINE_PODMAN, "/unused/codec",
+                decoded, "create-codec", 7, "boot-1").0).to_equal(provider.validate(decoded).reason)
