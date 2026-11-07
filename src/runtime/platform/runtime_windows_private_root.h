@@ -500,6 +500,37 @@ int64_t rt_windows_private_read_file_close_v2(int64_t token) {
     AcquireSRWLockExclusive(&wp_lock_v1);WpEntryV1 *entry=wp_find_v1(token,4);
     int ok=entry && wp_cleanup_v1(entry);ReleaseSRWLockExclusive(&wp_lock_v1);return ok;
 }
+static int wp_volume_guid_v2(HANDLE handle,wchar_t volume[64]) {
+    wchar_t path[32900];
+    DWORD length=GetFinalPathNameByHandleW(handle,path,32900,FILE_NAME_NORMALIZED|VOLUME_NAME_GUID);
+    if (!length || length>=32900 || wcsncmp(path,L"\\\\?\\Volume{",11)) return 0;
+    wchar_t* end=wcschr(path,L'}');
+    if (!end || end[1]!=L'\\') return 0;
+    size_t count=(size_t)(end-path)+1;if (count>=64) return 0;
+    memcpy(volume,path,count*sizeof(wchar_t));volume[count]=0;return 1;
+}
+/* Generic retained-directory identity only; never a deployment/exec role. A
+ * failed security temporary release stays on the root being validated. */
+int64_t rt_windows_private_roots_same_directory_v2(int64_t writer,int64_t reader) {
+    AcquireSRWLockExclusive(&wp_lock_v1);
+    WpEntryV1 *mutable_root=wp_find_v1(writer,1),*read_root=wp_find_v1(reader,3);
+    int64_t result=-1;FILE_ID_INFO first,second;wchar_t first_volume[64],second_volume[64];
+    if (!mutable_root || !read_root) goto done;
+    wp_active_v1=mutable_root;
+    if (!wp_root_valid_v1(mutable_root) || !GetFileInformationByHandleEx(
+        ((WpRootV1*)mutable_root->owner)->directory,FileIdInfo,&first,sizeof(first)) ||
+        !wp_volume_guid_v2(((WpRootV1*)mutable_root->owner)->directory,first_volume)) goto done;
+    wp_active_v1=read_root;
+    if (!wp_root_valid_v1(read_root) || !GetFileInformationByHandleEx(
+        ((WpRootV1*)read_root->owner)->directory,FileIdInfo,&second,sizeof(second)) ||
+        !wp_volume_guid_v2(((WpRootV1*)read_root->owner)->directory,second_volume)) goto done;
+    int compared=CompareStringOrdinal(first_volume,-1,second_volume,-1,TRUE);
+    if (!compared) goto done;
+    result=compared==CSTR_EQUAL &&
+        !memcmp(&first,&second,sizeof(first));
+done:
+    wp_active_v1=NULL;ReleaseSRWLockExclusive(&wp_lock_v1);return result;
+}
 static int wp_content_v2(HANDLE handle,uint8_t* expected,int64_t length,int compare) {
     LARGE_INTEGER zero;zero.QuadPart=0;
     if (!SetFilePointerEx(handle,zero,NULL,FILE_BEGIN)) return 0;
@@ -563,9 +594,6 @@ done:
 int64_t rt_windows_private_root_open_v1(int64_t path) {(void)path;return -1;}
 int64_t rt_windows_private_directory_v1(int64_t root,int64_t name,int64_t create) {(void)root;(void)name;(void)create;return -1;}
 int64_t rt_windows_private_file_v1(int64_t root,int64_t name,int64_t create,int64_t maximum) {(void)root;(void)name;(void)create;(void)maximum;return -1;}
-int64_t rt_windows_private_file_read_v1(int64_t token,int64_t offset,int64_t buffer,int64_t length) {
-    return wp_file_read_profile_v2(token,offset,buffer,length,2);
-}
 int64_t rt_windows_private_publish_v1(int64_t root,int64_t file,int64_t name) {(void)root;(void)file;(void)name;return -1;}
 int64_t rt_windows_private_check_v1(int64_t file,int64_t maximum) {(void)file;(void)maximum;return 0;}
 int64_t rt_windows_private_root_close_v1(int64_t root) {(void)root;return 0;}
@@ -584,6 +612,7 @@ int64_t rt_windows_private_read_file_size_v2(int64_t file) {(void)file;return -1
 int64_t rt_windows_private_read_file_read_v2(int64_t file,int64_t offset,int64_t buffer,int64_t length) {(void)file;(void)offset;(void)buffer;(void)length;return -1;}
 int64_t rt_windows_private_read_root_close_v2(int64_t root) {(void)root;return 0;}
 int64_t rt_windows_private_read_file_close_v2(int64_t file) {(void)file;return 0;}
+int64_t rt_windows_private_roots_same_directory_v2(int64_t writer,int64_t reader) {(void)writer;(void)reader;return -1;}
 int64_t rt_windows_private_publish_shared_read_v2(int64_t root,int64_t stage,int64_t name,int64_t output) {
     (void)root;(void)stage;(void)name;if (output) {int64_t* out=(int64_t*)(intptr_t)output;out[0]=out[1]=out[2]=0;}return -1;
 }

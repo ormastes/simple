@@ -5,6 +5,9 @@
 #if !defined(_WIN32)
 int main(void) {return 77;}
 #else
+#if defined(NDEBUG)
+#error "This new capability fixture requires active assertions; NDEBUG cannot qualify it"
+#endif
 #if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
 #undef _WIN32_WINNT
 #define _WIN32_WINNT 0x0602
@@ -20,6 +23,22 @@ static HANDLE targeted_stage;
 static int close_fault;
 static wchar_t swap_final[32768],swap_backup[32768];
 static PSECURITY_DESCRIPTOR replacement_security;
+static HANDLE identity_query_target;
+static HLOCAL retained_query_memory;
+static int fail_query_free;
+static DWORD WINAPI shared_read_test_security(HANDLE handle,SE_OBJECT_TYPE type,SECURITY_INFORMATION info,
+        PSID* owner,PSID* group,PACL* dacl,PACL* sacl,PSECURITY_DESCRIPTOR* descriptor) {
+    DWORD error=GetSecurityInfo(handle,type,info,owner,group,dacl,sacl,descriptor);
+    if (error==ERROR_SUCCESS && handle==identity_query_target && fail_query_free && descriptor)
+        retained_query_memory=*descriptor;
+    return error;
+}
+static HLOCAL WINAPI shared_read_test_free(HLOCAL memory) {
+    if (fail_query_free && memory==retained_query_memory) {
+        fail_query_free=0;SetLastError(ERROR_ACCESS_DENIED);return memory;
+    }
+    return LocalFree(memory);
+}
 static BOOL WINAPI shared_read_test_close(HANDLE handle) {
     if (handle==targeted_stage && close_fault==1) {
         close_fault=0;SetLastError(ERROR_ACCESS_DENIED);return FALSE;
@@ -38,8 +57,12 @@ static BOOL WINAPI shared_read_test_close(HANDLE handle) {
     return ok;
 }
 #define CloseHandle shared_read_test_close
+#define GetSecurityInfo shared_read_test_security
+#define LocalFree shared_read_test_free
 #include "../platform/runtime_windows_private_root.h"
 #undef CloseHandle
+#undef GetSecurityInfo
+#undef LocalFree
 
 static int64_t create_stage(int64_t root,const wchar_t* name,const char* bytes) {
     int64_t stage=rt_windows_private_file_v1(root,(int64_t)(intptr_t)name,1,128);
@@ -62,6 +85,16 @@ int main(void) {
     int64_t second_root=rt_windows_private_read_root_open_v2((int64_t)(intptr_t)root_path);
     assert(writer>0 && first_root>0 && second_root>0);
     assert(rt_windows_private_read_root_ready_v2(first_root) && rt_windows_private_read_root_ready_v2(second_root));
+    assert(rt_windows_private_roots_same_directory_v2(writer,first_root)==1);
+    assert(rt_windows_private_roots_same_directory_v2(first_root,second_root)==-1);
+    assert(rt_windows_private_roots_same_directory_v2(writer,writer)==-1);
+    int64_t other_writer=rt_windows_private_directory_v1(writer,(int64_t)(intptr_t)L"identity-other",1);
+    int64_t other_reader=rt_windows_private_read_directory_v2(first_root,(int64_t)(intptr_t)L"identity-other");
+    assert(other_writer>0 && other_reader>0);
+    assert(rt_windows_private_roots_same_directory_v2(writer,other_reader)==0);
+    assert(rt_windows_private_roots_same_directory_v2(other_writer,other_reader)==1);
+    assert(rt_windows_private_read_root_close_v2(other_reader));
+    assert(rt_windows_private_root_close_v1(other_writer));
     assert(rt_windows_private_file_v1(first_root,(int64_t)(intptr_t)L"cast-must-not-create",1,128)==-1);
     int64_t retained[9],reopened[9];wchar_t final[64];
     for (int index=0;index<9;index++) {
@@ -78,6 +111,7 @@ int main(void) {
         assert(rt_windows_private_publish_v1(writer,retained[index],(int64_t)(intptr_t)L"must-not-move")==-1);
         DWORD written=0;
         assert(!WriteFile((HANDLE)wp_find_v1(retained[index],4)->owner,"x",1,&written,NULL));
+        assert(GetLastError()==ERROR_ACCESS_DENIED);
         reopened[index]=rt_windows_private_read_file_open_v2(second_root,(int64_t)(intptr_t)final,128);
         assert(reopened[index]>0);exact_read(retained[index],bytes);exact_read(reopened[index],bytes);
     }
@@ -110,7 +144,21 @@ int main(void) {
         assert(rt_windows_private_read_file_close_v2(reopened[index]));
         assert(rt_windows_private_read_file_close_v2(retained[index]));
     }
-    assert(rt_windows_private_read_root_close_v2(second_root));
+    /* A real failed descriptor release must remain on the root whose
+     * validation queried it, never on its comparison partner. */
+    identity_query_target=((WpRootV1*)wp_find_v1(writer,1)->owner)->directory;
+    retained_query_memory=NULL;fail_query_free=1;
+    assert(rt_windows_private_roots_same_directory_v2(writer,second_root)==-1);
+    assert(retained_query_memory && wp_find_v1(writer,1)->pending_memory[0]==retained_query_memory);
+    assert(!wp_find_v1(second_root,3)->pending_memory[0]);
+    assert(rt_windows_private_root_close_v1(writer));
+    writer=rt_windows_private_root_open_v1((int64_t)(intptr_t)root_path);assert(writer>0);
+    identity_query_target=((WpRootV1*)wp_find_v1(second_root,3)->owner)->directory;
+    retained_query_memory=NULL;fail_query_free=1;
+    assert(rt_windows_private_roots_same_directory_v2(writer,second_root)==-1);
+    assert(retained_query_memory && wp_find_v1(second_root,3)->pending_memory[0]==retained_query_memory);
+    assert(!wp_find_v1(writer,1)->pending_memory[0]);
+    assert(rt_windows_private_read_root_close_v2(second_root));identity_query_target=NULL;
     assert(rt_windows_private_read_root_close_v2(first_root));
     assert(rt_windows_private_root_close_v1(writer));return 0;
 }

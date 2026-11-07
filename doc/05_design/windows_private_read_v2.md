@@ -27,6 +27,16 @@ file opens cannot coexist. The no-reparse walk, fixed-volume admission,
 protected DACL, owner/SID policy, identity and bounded ancestry checks remain
 the existing security boundary. Read roots never create a child.
 
+`windows_private_roots_same_directory_v2(writer, reader)` compares actual
+retained V1-writer and V2-reader roots under the registry lock. Exact kinds,
+generations and current ancestry/security must validate. The provider queries
+both real volume GUIDs through bounded `GetFinalPathNameByHandleW` and compares
+them together with `FileIdInfo` volume serial and 128-bit file ID. This avoids
+equating cloned volumes by serial alone. A real mismatch returns `Ok(false)`;
+query/validation failures return an error with both caller-owned roots retained.
+Temporary release failures attach to the exact root whose validation queried
+them. No identity metadata or additional role authority is exported.
+
 ## Sealed-stage handoff
 
 `windows_private_publish_shared_read_v2(root: WindowsPrivateRootV1,
@@ -72,9 +82,15 @@ refusal, verifies collision preservation, injects a failed RW close, and
 performs a real final-name replacement during close/reopen to require identity
 rejection with cleanup retained. Its test-only wrappers do not alter production
 behavior or fabricate successful kernel operations.
+The fixture refuses compilation with NDEBUG so its actual operations/checks
+cannot disappear in a release build. It also covers matched/distinct root
+identity, kind refusal and real failed security-descriptor release attribution.
 
 The Simple integration spec requires a separately installed root containing
 `artifact.sdn` with bytes `private artifact\n`. It exercises simultaneous typed
 readers, forged V1 mutation refusal and missing-child refusal. Missing fixtures
 fail explicitly. Actual host deployment consumer migration and worker readiness
 require their own reviewed integration and Windows evidence.
+The Simple scenarios retain every acquired root/file, including partial error
+owners, in module-level canonical slots before assertions. Only confirmed close
+clears a slot; failed close remains reachable without invoking stale copies.
