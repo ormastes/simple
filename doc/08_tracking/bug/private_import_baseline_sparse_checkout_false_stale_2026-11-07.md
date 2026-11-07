@@ -32,3 +32,13 @@ The separate printf/head publisher remains unchanged and may still emit a
 broken-pipe diagnostic for a large genuinely stale list. This repair changes
 no SDK/LSP/compiler source, permits no new private imports, adds no baseline
 exemptions, and does not authorize merging over a genuine required-gate failure.
+
+The first corrected CI scan exposed a separate base-handoff defect: the pinned
+base manifest invoked this gate without --base, while the workflow fetched
+commits by SHA and created no origin/release/1.0.0 ref. Explicit --base now wins;
+otherwise the actual workflow BASE_SHA is accepted only as a fetched valid
+commit. No implicit HEAD substitution is used. Future manifest commands pass
+the runner's {base} explicitly. Unknown commits, missing objects and read errors
+remain ERROR; introducing-change skip requires a real commit with confirmed
+absence of the baseline path. Focused base-provenance and actual depth2/no-ref
+controls passed without replaying prior green source controls.

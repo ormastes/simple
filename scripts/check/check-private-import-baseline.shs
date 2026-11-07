@@ -12,7 +12,8 @@
 #
 #   sh scripts/check/check-private-import-baseline.shs [--root DIR] [--base REV] [--selftest]
 #
-# --base defaults to the merge-base of HEAD with origin/release/1.0.0; when the
+# Explicit --base wins, then the fetched CI BASE_SHA commit, then the merge-base
+# of HEAD with origin/release/1.0.0. When the
 # base revision has no baseline file (the introducing change) the ratchet check
 # is skipped and says so.
 #
@@ -99,17 +100,41 @@ except (OSError, ValueError) as error:
 PY
 }
 
-# prints added lines (current minus base); returns 3 when base has no baseline.
+# An explicit CLI base wins over the workflow's actual event base. Do not
+# substitute HEAD when a sparse SHA-only CI checkout lacks a remote branch ref.
+resolve_scan_base() {
+    resolve_root=$1; resolve_explicit=$2
+    if [ -n "$resolve_explicit" ]; then
+        printf '%s' "$resolve_explicit"; return 0
+    fi
+    [ -n "${BASE_SHA:-}" ] || return 0
+    case $BASE_SHA in *[!0-9a-fA-F]*) echo 'invalid CI BASE_SHA' >&2; return 2 ;; esac
+    [ "${#BASE_SHA}" -eq 40 ] || { echo 'invalid CI BASE_SHA length' >&2; return 2; }
+    git -C "$resolve_root" rev-parse --verify "$BASE_SHA^{commit}" >/dev/null 2>&1 || {
+        echo 'CI BASE_SHA commit is unavailable' >&2; return 2;
+    }
+    printf '%s' "$BASE_SHA"
+}
+
+# Prints added lines; returns3 only for confirmed absence at a valid commit.
+# Unknown commits, unavailable objects and read/sort errors return4.
 added_scan() {
     ascan_root=$1; abase=$2
+    abase_commit=$(git -C "$ascan_root" rev-parse --verify "$abase^{commit}" 2>/dev/null) || return 4
+    abase_entry=$(git -C "$ascan_root" ls-tree "$abase_commit" -- "$BASELINE_REL" 2>/dev/null) || return 4
+    [ -n "$abase_entry" ] || return 3
+    case $abase_entry in *' blob '*) ;; *) return 4 ;; esac
     tmp_base=$(mktemp) || return 4
-    if ! git -C "$ascan_root" show "$abase:$BASELINE_REL" > "$tmp_base" 2>/dev/null; then
-        rm -f "$tmp_base"; return 3
+    if ! git -C "$ascan_root" show "$abase_commit:$BASELINE_REL" > "$tmp_base" 2>/dev/null; then
+        rm -f "$tmp_base"; return 4
     fi
-    LC_ALL=C sort -u "$tmp_base" > "$tmp_base.s"
-    LC_ALL=C sort -u "$ascan_root/$BASELINE_REL" > "$tmp_base.c"
-    LC_ALL=C comm -13 "$tmp_base.s" "$tmp_base.c"
+    if ! LC_ALL=C sort -u "$tmp_base" > "$tmp_base.s" ||
+       ! LC_ALL=C sort -u "$ascan_root/$BASELINE_REL" > "$tmp_base.c"; then
+        rm -f "$tmp_base" "$tmp_base.s" "$tmp_base.c"; return 4
+    fi
+    LC_ALL=C comm -13 "$tmp_base.s" "$tmp_base.c"; added_status=$?
     rm -f "$tmp_base" "$tmp_base.s" "$tmp_base.c"
+    [ "$added_status" -eq 0 ] || return 4
     return 0
 }
 
@@ -188,6 +213,7 @@ selftest() {
     : > "$d/$BASELINE_REL"
     scan "$d" "$b" >/dev/null; [ $? -eq 2 ] || { echo "ERROR - selftest: empty baseline must ERROR"; return 2; }
     sparse_extra_controls || return 2
+    base_provenance_controls || return 2
     return 0
 }
 
@@ -241,6 +267,74 @@ sparse_extra_controls() (
     echo 'PASS - six new sparse/index/read/newline controls'
 )
 
+
+# First-run changed-base criteria, independently callable without replaying
+# the original private/export and sparse-source controls.
+shallow_base_control() {
+    shallow_fixture=$1; shallow_event_base=$2
+    git -c core.autocrlf=false clone -q --no-local --depth=2 "$shallow_fixture" "$shallow_fixture/shallow" || return 2
+    [ "$(git -C "$shallow_fixture/shallow" rev-parse --is-shallow-repository)" = true ] || return 2
+    git -C "$shallow_fixture/shallow" rev-parse --verify refs/remotes/origin/release/1.0.0 >/dev/null 2>&1 && return 2
+    shallow_selected=$(BASE_SHA=$shallow_event_base resolve_scan_base "$shallow_fixture/shallow" '') || return 2
+    [ "$shallow_selected" = "$shallow_event_base" ] || return 2
+    shallow_output=$(scan "$shallow_fixture/shallow" "$shallow_selected" 2>&1); shallow_status=$?
+    [ "$shallow_status" -eq 1 ] || return 2
+    case $shallow_output in *gained*extra*) ;; *) return 2 ;; esac
+}
+
+base_provenance_controls() (
+    base_tmp=$(cd "${TMPDIR:-/tmp}" && pwd -P) || return 2
+    base_dir=$(mktemp -d "$base_tmp/private-import-base.XXXXXX") || return 2
+    case $base_dir in "$base_tmp"/private-import-base.*) ;; *) return 2 ;; esac
+    trap 'rm -rf "$base_dir"' EXIT INT TERM HUP
+    mkdir -p "$base_dir/scripts/check" "$base_dir/lib"
+    (cd "$base_dir" && git init -q && git config core.autocrlf false && git config user.email t@t && git config user.name t && printf 'fixture\n' > README && git add README && git commit -qm before-baseline) || return 2
+    before_baseline=$(git -C "$base_dir" rev-parse HEAD) || return 2
+    printf 'fn live() -> i64:\n    1\n' > "$base_dir/lib/m.spl"
+    printf 'lib/m.spl|live\n' > "$base_dir/$BASELINE_REL"
+    git -C "$base_dir" add -A && git -C "$base_dir" commit -qm base || return 2
+    event_base=$(git -C "$base_dir" rev-parse HEAD) || return 2
+    printf 'fn extra() -> i64:\n    2\n' >> "$base_dir/lib/m.spl"
+    printf 'lib/m.spl|extra\n' >> "$base_dir/$BASELINE_REL"
+    git -C "$base_dir" add -A && git -C "$base_dir" commit -qm head || return 2
+    event_head=$(git -C "$base_dir" rev-parse HEAD) || return 2
+    shallow_base_control "$base_dir" "$event_base" || return 2
+    git -C "$base_dir" rev-parse --verify refs/remotes/origin/release/1.0.0 >/dev/null 2>&1 && return 2
+    BASE_SHA=$event_base; export BASE_SHA
+    selected=$(resolve_scan_base "$base_dir" '') || return 2
+    [ "$selected" = "$event_base" ] || return 2
+    output=$(scan "$base_dir" "$selected" 2>&1); status=$?
+    [ "$status" -eq 1 ] || { echo "ERROR - event base must detect gained entry ($output)"; return 2; }
+    case $output in *gained*extra*) ;; *) return 2 ;; esac
+    # Explicit CLI precedence is intentional; no implicit HEAD fallback exists.
+    BASE_SHA=HEAD
+    selected=$(resolve_scan_base "$base_dir" "$event_head") || return 2
+    [ "$selected" = "$event_head" ] || return 2
+    selected=$(resolve_scan_base "$base_dir" '' 2>/dev/null); status=$?
+    [ "$status" -eq 2 ] || return 2
+    BASE_SHA=ffffffffffffffffffffffffffffffffffffffff
+    selected=$(resolve_scan_base "$base_dir" '' 2>/dev/null); status=$?
+    [ "$status" -eq 2 ] || return 2
+    added_scan "$base_dir" "$BASE_SHA" >/dev/null; status=$?
+    [ "$status" -eq 4 ] || return 2
+    # Only a real old commit with no baseline may use introducing-change skip.
+    added_scan "$base_dir" "$before_baseline" >/dev/null; status=$?
+    [ "$status" -eq 3 ] || return 2
+    # Valid commit + baseline entry + unreadable blob is ERROR, never absence.
+    GIT_INDEX_FILE="$base_dir/broken.index" git -C "$base_dir" read-tree "$event_base" || return 2
+    GIT_INDEX_FILE="$base_dir/broken.index" git -C "$base_dir" update-index --cacheinfo "100644,1111111111111111111111111111111111111111,$BASELINE_REL" || return 2
+    broken_tree=$(GIT_INDEX_FILE="$base_dir/broken.index" git -C "$base_dir" write-tree --missing-ok) || return 2
+    broken_commit=$(printf 'missing baseline blob\n' | git -C "$base_dir" commit-tree "$broken_tree" -p "$event_base") || return 2
+    added_scan "$base_dir" "$broken_commit" >/dev/null; status=$?
+    [ "$status" -eq 4 ] || return 2
+    unset BASE_SHA
+    selected=$(resolve_scan_base "$base_dir" '') || return 2
+    [ -z "$selected" ] || return 2
+    output=$(scan "$base_dir" "$selected" 2>&1); status=$?
+    [ "$status" -eq 2 ] || return 2
+    echo 'PASS - changed base provenance controls (real no-origin Git fixture)'
+)
+
 main_root=.
 main_base=
 mode=scan
@@ -253,6 +347,11 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+if [ "$mode" = scan ]; then
+    selected_base=$(resolve_scan_base "$main_root" "$main_base"); resolve_status=$?
+    [ "$resolve_status" -eq 0 ] || { echo "ERROR - nothing was checked (base provenance failed)"; exit 2; }
+    main_base=$selected_base
+fi
 ( selftest ) || exit 2
 [ "$mode" = selftest ] && { echo "PASS - selftest fixtures ok"; exit 0; }
 scan "$main_root" "$main_base"
