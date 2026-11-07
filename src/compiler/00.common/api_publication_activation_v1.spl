@@ -1,21 +1,35 @@
-# Activation of the named rule `extreme_public_api`. Explicit for now: the
-# stdlib is not yet migrated, so an always-on robust denial would reject every
-# robust build. Activation order is migration policy, not a rule exception
-# (REQ-EAPI-003 dispositions are unchanged once active). Tier-0 safe: no
+# Activation of the named rule `extreme_public_api`.
+# TEMPORARY (2026-11-07, owner decision): with SIMPLE_EXTREME_PUBLIC_API unset
+# the rule runs warn-only at every profile (never denies, cached admission is
+# not refused). SIMPLE_EXTREME_PUBLIC_API=1 applies the REQ-EAPI-003
+# profile dispositions (deny at robust); =0 turns the rule off. The default
+# flips to deny at robust once the E3 stdlib migration lands. Tier-0 safe: no
 # driver imports, so cached/no-op admission paths may consult it.
 use compiler.common.api_publication_decision_v1.{ApiPublicationDispositionV1,
     api_publication_disposition_v1}
 use compiler.common.assurance.policy.{policy_from_env_value}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 
+# Active at every setting except the explicit off switch "0".
 pub fn extreme_public_api_active_v1() -> bool:
-    (env_get("SIMPLE_EXTREME_PUBLIC_API") ?? "") == "1"
+    (env_get("SIMPLE_EXTREME_PUBLIC_API") ?? "") != "0"
+
+# True for the temporary default: flag unset (or anything but "0"/"1").
+pub fn extreme_public_api_warn_only_v1() -> bool:
+    val flag = env_get("SIMPLE_EXTREME_PUBLIC_API") ?? ""
+    flag != "0" and flag != "1"
+
+# SIMPLE_EXTREME_PUBLIC_API_VERBOSE=1 lists every warn-only diagnostic instead
+# of one summary warning per module.
+pub fn extreme_public_api_verbose_v1() -> bool:
+    (env_get("SIMPLE_EXTREME_PUBLIC_API_VERBOSE") ?? "") == "1"
 
 # Cached SMF and native no-op admission run before any fact exists. When the
-# rule is active at a denying profile they are refused rather than silently
-# bypassed; the full compile then evaluates the guard on fresh facts.
+# rule is explicitly enabled (=1) at a denying profile they are refused rather
+# than silently bypassed; the full compile then evaluates the guard on fresh
+# facts. The warn-only default never refuses.
 pub fn extreme_public_api_denies_cached_admission_v1() -> bool:
-    if not extreme_public_api_active_v1(): return false
+    if not extreme_public_api_active_v1() or extreme_public_api_warn_only_v1(): return false
     val policy = policy_from_env_value(env_get("SIMPLE_SAFETY_PROFILE") ?? "")
     match api_publication_disposition_v1(policy.strictness.name()):
         case ApiPublicationDispositionV1.Deny: true
