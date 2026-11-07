@@ -335,3 +335,18 @@ Remaining 4 failures are separate defects, not this bug:
   whose non-optional return contract forbids nil.
 - `selects the VHDL root only from explicit compile inputs` — source-text
   assertion against the AOT output registration facade (spec drift).
+
+## Re-verification 2026-11-07 (release/1.0.0 @ 0e56cc6bade)
+
+Re-run on current release with the Rust seed
+(`/home/yoon/dev/seed-try-target/release/simple`, sha256 `87693d9e927f9bd5...`):
+
+```
+SPEC FILE VERDICT: test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl outcome=ERROR declared>=23 executed=23 passed=19 failed=4 skipped=0 dropped=0
+```
+
+No `cannot cast dict to i64`, no `found no @hardware entry`, no
+`nil.has_vhdl_metadata`: this bug (cast defect + follow-on) stays fixed. The
+4 failures are exactly the 4 separate defects listed above (`MirStatic`
+`is_rt_struct_alloc_registered` x2, `_sffi_enum_payload` nil contract,
+AOT-facade source-text drift). No code change.
