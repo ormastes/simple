@@ -17,3 +17,5 @@ Manual source mirror: nine authored cases, UNEXECUTED. No native process referen
 | Capability correlation | Changed plan digest, owner scope and provider observation pin refuse before native capability admission. |
 
 Pending native evidence: real Host-admitted open, exact owned Ready/CleanupRequired transfer, adoption rollback, close/reap retention, duplicate durable claim refusal and actual output capture. Unit source does not qualify these outcomes.
+
+The common-open regression also carries the original reservation intent. It rejects an internally consistent operation/receipt for the old plan attached to a changed helper plan, and independently rejects changed intent payload, scope and resource demand before another executor call. The positive structural fixture rebinds the intent and receipt using their canonical codecs; it is not a newly authenticated lease. Operation payload hashes the reservation intent, while `intent.plan_digest` hashes the helper plan.

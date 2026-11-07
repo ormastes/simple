@@ -4,7 +4,9 @@ use std.common.contracts.container.execution_v2.*
 use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.orchestration.host_helper_plan_v1.{HostHelperPlanV1, host_helper_plan_bytes_v1}
-use std.common.contracts.orchestration.host_reservation_codec_v1.{HostPreparedReservationReceiptV1, host_reservation_receipt_integrity_v1}
+use std.common.contracts.orchestration.host_reservation_codec_v1.{HostReservationIntentV1,
+    HostPreparedReservationReceiptV1, host_helper_reservation_match_operation_v1,
+    host_helper_reservation_match_receipt_v1}
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessBrokerBudgetV3, GroupProcessStreamProfileV3, group_process_cpu_quota_v3, group_process_stream_profile_validate_v3}
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_template_digest_v3, group_process_stream_template_encode_v3, group_process_stream_template_decode_v3}
@@ -55,6 +57,7 @@ pub struct ContainerOutputPlanV2:
 
 pub struct ContainerHelperAdmissionV2:
     plan: HostHelperPlanV1
+    intent: HostReservationIntentV1
     operation: OperationEnvelopeV2
     receipt: HostPreparedReservationReceiptV1
     deadline: ContainerEffectDeadlineV1
@@ -201,7 +204,20 @@ pub fn container_output_admission_validate_v2(plan: ContainerOutputPlanV2,
             helper.operation.host_id != scope.physical_host_id or
             helper.operation.id != plan.identity.operation_id:
         return Err("container-output-admission-operation-mismatch")
-    val receipt_integrity = host_reservation_receipt_integrity_v1(helper.receipt, helper.operation)?
+    # The signed operation binds the reservation intent; its plan_digest in
+    # turn binds the helper plan. These are distinct hash domains.
+    if helper.intent.plan_digest != sha256_text(encoded_plan):
+        return Err("container-output-admission-intent-plan-mismatch")
+    if (helper.intent.physical_host_id != scope.physical_host_id or
+            helper.intent.reservation.service_scope_id != scope.service_scope_id or
+            helper.intent.fence.boot_id != container_scope_fence_id_v2(scope)? or
+            helper.intent.fence.provider_generation != scope.provider_generation):
+        return Err("container-output-admission-intent-scope-mismatch")
+    if (helper.intent.reservation.cpu_millis != helper.cpu_millis or
+            helper.intent.reservation.memory_bytes != helper.memory_bytes):
+        return Err("container-output-admission-intent-resource-mismatch")
+    val intent_binding = host_helper_reservation_match_operation_v1(helper.intent, helper.operation)?
+    val receipt_integrity = host_helper_reservation_match_receipt_v1(helper.receipt, helper.intent, helper.operation)?
     for identity in [helper.grant_id, helper.issuer_id, helper.approver_id]:
         if not builder_identifier_valid_v1(identity): return Err("container-output-admission-principal-invalid")
     Ok(true)
