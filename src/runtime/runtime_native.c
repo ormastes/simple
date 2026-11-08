@@ -20870,7 +20870,12 @@ static int simple_startup_load_aspect_spec(const char *spec) {
 }
 
 int __simple_startup_before_main(int argc, char **argv) {
-    char *spec = rt_env_owned(SIMPLE_STARTUP_ASPECT_ENV);
+    char *spec = NULL;
+    if (rt_env_snapshot(SIMPLE_STARTUP_ASPECT_ENV, &spec) != 0) {
+        fprintf(stderr, "simple runtime: unable to read %s.\n",
+                SIMPLE_STARTUP_ASPECT_ENV);
+        return 1;
+    }
     const char *option = "--startup-extension";
     size_t option_len = strlen(option);
     int i;
