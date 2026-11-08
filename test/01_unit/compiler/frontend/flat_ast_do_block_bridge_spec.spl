@@ -1,5 +1,5 @@
 """
-Purpose: preserve do/ce block statements and tail values through the real flat bridge.
+Purpose: preserve do-block statements and tail values through the real flat bridge.
 Run: bin/simple test test/01_unit/compiler/frontend/flat_ast_do_block_bridge_spec.spl
 The raw-node cases isolate tag44 conversion; parsed cases also cover the actual parser route.
 Execution evidence is required before this spec can qualify a compiler producer.
@@ -8,10 +8,14 @@ Execution evidence is required before this spec can qualify a compiler producer.
 # @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
 
 use std.spec.*
-use compiler.core.ast.{ast_reset, expr_int_lit, expr_block, expr_do_block, stmt_expr_stmt}
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{expr_int_lit, expr_bool_lit, expr_block, expr_do_block, expr_if_expr, expr_lambda}
+use compiler.core.ast_stmt.{stmt_expr_stmt}
 use compiler.core.parser.{parser_has_errors, parser_set_had_error}
 use compiler.frontend.flat_ast_bridge.{convert_flat_expr, parse_and_build_module}
 use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.*
+use compiler.hir.hir.*
 
 fn cdb_block(expr: Expr) -> Block:
     match expr.kind:
@@ -31,6 +35,7 @@ fn cdb_reset():
     parser_set_had_error(false)
 
 fn cdb_parsed_body(source: text) -> Block:
+    cdb_reset()
     val parsed = parse_and_build_module(source, "do_block_bridge.spl")
     expect(parser_has_errors()).to_equal(false)
     val function = parsed.functions["sample"]
@@ -83,13 +88,58 @@ describe "flat bridge preserves do block bodies":
         expect(cdb_int(body.stmts[1])).to_equal(19)
         expect(parser_has_errors()).to_equal(false)
 
-    it "bridges parsed do and ce bodies with the same ordered statements":
-        step("Exercise both production parser branches that emit EXPR_DO_BLOCK")
-        val do_body = cdb_parsed_body("fn sample():\n    do:\n        7\n        43\n")
-        expect(do_body.stmts.len()).to_equal(2)
-        expect(cdb_int(do_body.stmts[0])).to_equal(7)
-        expect(cdb_int(do_body.stmts[1])).to_equal(43)
-        val ce_body = cdb_parsed_body("fn sample():\n    ce builder:\n        13\n        47\n")
-        expect(ce_body.stmts.len()).to_equal(2)
-        expect(cdb_int(ce_body.stmts[0])).to_equal(13)
-        expect(cdb_int(ce_body.stmts[1])).to_equal(47)
+    it "bridges parsed do bodies with ordered statements":
+        step("Exercise the production parser branch that emits EXPR_DO_BLOCK")
+        val body = cdb_parsed_body("fn sample():\n    do:\n        7\n        43\n")
+        expect(body.stmts.len()).to_equal(2)
+        expect(cdb_int(body.stmts[0])).to_equal(7)
+        expect(cdb_int(body.stmts[1])).to_equal(43)
+
+    it "preserves do blocks in both expression-if branches":
+        step("Exercise the helper directly from EXPR_IF with nonempty then and else blocks")
+        cdb_reset()
+        val yes = expr_do_block([stmt_expr_stmt(expr_int_lit(17, 0), 0)], 0)
+        val no = expr_do_block([stmt_expr_stmt(expr_int_lit(31, 0), 0)], 0)
+        val tree = convert_flat_expr(expr_if_expr(expr_bool_lit(1, 0), yes, no, 0))
+        match tree.kind:
+            case ExprKind.IfChain(arms, otherwise):
+                expect(arms.len()).to_equal(1)
+                expect(arms[0].then_.stmts.len()).to_equal(1)
+                expect(cdb_int(arms[0].then_.stmts[0])).to_equal(17)
+                val else_body = otherwise ?? panic("lost do-block else branch")
+                expect(else_body.stmts.len()).to_equal(1)
+                expect(cdb_int(else_body.stmts[0])).to_equal(31)
+            case _: fail("expression-if lost its branch structure")
+        expect(parser_has_errors()).to_equal(false)
+
+    it "preserves do block bodies reached through lambda conversion":
+        step("Exercise the EXPR_LAMBDA fallback into the shared do-block converter")
+        cdb_reset()
+        val body = expr_do_block([stmt_expr_stmt(expr_int_lit(53, 0), 0)], 0)
+        match convert_flat_expr(expr_lambda([], [body], 0)).kind:
+            case ExprKind.Lambda(params, converted):
+                expect(params.len()).to_equal(0)
+                val block = cdb_block(converted)
+                expect(block.stmts.len()).to_equal(1)
+                expect(cdb_int(block.stmts[0])).to_equal(53)
+            case _: fail("lambda expression was discarded")
+        expect(parser_has_errors()).to_equal(false)
+
+    it "extracts the final do expression as the real HIR block value":
+        step("Lower a typed function so the actual HIR tail extraction runs")
+        cdb_reset()
+        val parsed = parse_and_build_module("fn sample() -> i64:\n    do:\n        7\n        43\n", "do_block_tail.spl")
+        expect(parser_has_errors()).to_equal(false)
+        var lowering = HirLowering.with_filename("do_block_tail.spl")
+        lowering.use_explicit_semantic_policy()
+        lowering.declare_module_symbols(parsed)
+        val function = lowering.lower_function(parsed.functions["sample"])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(function.body.has).to_equal(true)
+        match function.body.value.kind:
+            case HirExprKind.Block(block):
+                expect(block.has).to_equal(true)
+                match block.value.kind:
+                    case HirExprKind.IntLit(value, _): expect(value).to_equal(43)
+                    case _: fail("do-block tail did not become its HIR value")
+            case _: fail("function tail lost its do block")

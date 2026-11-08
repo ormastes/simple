@@ -3,22 +3,27 @@
 Executable source: `test/01_unit/compiler/frontend/flat_ast_do_block_bridge_spec.spl`.
 Requirement: REQ-COMPILER-FRONTEND-001.
 
-The flat parser emits EXPR_DO_BLOCK for both `do:` and `ce NAME:`. Its STMTS
-must become an ExprKind.Block with the same ordered statements and final
-expression. The bridge and shared branch helper both recognize this tag.
+The flat parser emits EXPR_DO_BLOCK for `do:`. Its STMTS become an ExprKind.Block
+with the same ordered statements. Only ordinary EXPR_BLOCK reads a separate LEFT
+tail. `ce NAME:` remains a loud unsupported parser error because its builder
+identity has no preserved representation; this patch does not accept a plain
+block as computation-builder execution.
 
-| Scenario | Real assertion |
+| Scenario | Authored real assertion |
 | --- | --- |
 | Empty do block | Block with zero statements and no parser error |
-| Single expression | Integer 37 remains the sole statement |
-| Nested block | Outer 11 remains first; inner block retains 29 |
-| Ordinary block compatibility | Separate LEFT tail 19 follows statement 5 |
-| Parsed do/ce | Actual parser produces ordered [7,43] and [13,47] bodies |
+| Single expression | Integer37 remains the sole statement |
+| Nested block | Outer11 remains first; inner block retains29 |
+| Ordinary compatibility | Separate LEFT tail19 follows statement5 |
+| Parsed do | Real parser retains ordered [7,43] |
+| Expression-if callers | Both branches retain [17] and [31] |
+| Lambda caller | Do body retains53 |
+| HIR tail extraction | Typed function's nested HirBlock has value43 |
 
-Run `bin/simple test test/01_unit/compiler/frontend/flat_ast_do_block_bridge_spec.spl`.
+The existing unsupported-expression spec now uses a genuinely unknown tag9999,
+checks explicit `ce builder` rejection, and protects supported calls.
 
-Execution status: **NOT RUN**. This manual describes authored assertions;
-it is not runtime qualification or evidence of a passing compiler producer.
-The combined bug `parser_nested_block_do_import_typed_var_gaps_2026_11_07`
-also records dynamic-array no-initializer policy and lexical-import behavior,
-which remain outside this narrow do-block conversion repair.
+Run the two specs with an admitted self-hosted runner. Execution: **NOT RUN**.
+This manual describes authored assertions, not evidence of runtime qualification.
+The combined bug also records dynamic-array no-initializer policy and lexical
+import behavior; both remain outside this narrow conversion repair.

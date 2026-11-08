@@ -1,37 +1,44 @@
 """
-# Unsupported flat EXPR kinds must be reported loudly, never silently NilLit'd
-
-Lane C2 (flat-AST bridge transition census), extending
-`doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md`.
-
-`convert_flat_expr` has 48 of 57 `EXPR_*` tags handled. `EXPR_DO_BLOCK` (44) is
-one of the remainder and is produced from ordinary source by
-`_ParserPrimary/primary_expr.spl`; the bug record leaves it deliberately
-unfixed (the target `ExprKind` mapping is a semantic decision, not a mechanical
-one), so its honest state in
-`spec/compiler_schema/transitions/flat_expr_to_ast_expr.sdn` is
-`Unsupported`. What must hold is that it is loud rather than silent.
+Unsupported flat EXPR kinds must be reported loudly rather than silently NilLit'd.
+Do blocks now have a real Block mapping. Unknown tags remain loud, and ce
+builder expressions stay rejected until their builder identity can be lowered.
+Execution status for this update: NOT RUN.
 """
-
-use std.spec
+use std.spec.*
 use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
-use compiler.core.parser.{parser_get_errors}
+use compiler.frontend.flat_ast_bridge.{convert_flat_expr}
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{expr_alloc}
+use compiler.core.parser.{parser_get_errors, parser_has_errors, parser_set_had_error}
 
-fn bridge_expr_diag(src: text, name: text) -> bool:
-    val parsed = parse_full_frontend(src, "testdata/" + name + ".spl", name, Logger(level: 0))
-    val errs = parser_get_errors()
-    var found = false
-    var i = 0
-    while i < errs.len():
-        if errs[i].contains("flat AST bridge: unhandled expr node kind"):
-            found = true
-        i = i + 1
-    found
+fn bridge_expr_has_diag(fragment: text) -> bool:
+    val errors = parser_get_errors()
+    for message in errors:
+        if message.contains(fragment): return true
+    false
 
-describe "unsupported flat expr kinds raise a loud bridge diagnostic":
-    it "reports a `do:` block expression (EXPR_DO_BLOCK, tag 44)":
-        assert_true(bridge_expr_diag("fn boot() -> i64:\n    do:\n        1\n", "fixture_expr_do_block"))
+describe "unsupported flat expr kinds raise a loud diagnostic":
+    it "rejects a truly unknown expression tag through the production bridge":
+        step("Keep the generic unsupported-node guard discriminating after tag44 admission")
+        ast_reset()
+        parser_set_had_error(false)
+        val tree = convert_flat_expr(expr_alloc(9999, 0))
+        expect(parser_has_errors()).to_equal(true)
+        expect(bridge_expr_has_diag("flat AST bridge: unhandled expr node kind")).to_equal(true)
 
-    it "does NOT fire on an ordinary call expression -- control, so the spec is not vacuous":
-        assert_false(bridge_expr_diag("fn identity(w: i64) -> i64:\n    w\n\nfn boot(w: i64):\n    identity(w)\n", "fixture_expr_control"))
+    it "keeps ce builder expressions loud instead of dropping builder identity":
+        step("Parse the actual ce owner route and require its unsupported diagnostic")
+        ast_reset()
+        parser_set_had_error(false)
+        val parsed = parse_full_frontend("fn boot() -> i64:\n    ce builder:\n        1\n", "ce_unsupported.spl", "ce_unsupported", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(true)
+        expect(bridge_expr_has_diag("ce builder expression is not supported by the flat AST route: builder")).to_equal(true)
+
+    it "does not fire on an ordinary call expression":
+        step("Keep a supported control independent of earlier diagnostic state")
+        ast_reset()
+        parser_set_had_error(false)
+        val parsed = parse_full_frontend("fn identity(w: i64) -> i64:\n    w\n\nfn boot(w: i64):\n    identity(w)\n", "ordinary_call.spl", "ordinary_call", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(false)
+        expect(bridge_expr_has_diag("flat AST bridge: unhandled expr node kind")).to_equal(false)
