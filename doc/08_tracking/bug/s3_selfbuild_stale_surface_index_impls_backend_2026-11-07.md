@@ -28,3 +28,25 @@ The diagnostic is `hir_stale_surface_index_message` in `src/compiler/20.hir/hir_
 
 ## Workaround
 Build leaf 63 with the frozen stage2 (`fable_leaf63b.ps1`).
+
+## Fix (2026-11-08) — fix-implemented, verification pending
+
+Root cause: `ensure_impl_index` memoized impl positions under the key
+`{generation} {physical_index}` only. In the stage-3 self-build the same key
+was later presented with a surface whose `impls` array had a different length
+(live_len 0/1 vs memo positions 2/3) — either released transient rows or a
+different surface array instance — so the memo applied positions to an array
+it was never built over.
+
+Fix: the key now also carries `imported_mod.impls.len()`
+(`module_reexport_materialization.spl`), so a shrunk/replaced array misses the
+memo and is re-indexed against its live rows; a stale position is unreachable.
+The IMPLIDX-GUARD diagnostic stays as defense in depth.
+
+Specs: `test/01_unit/compiler/hir/impl_index_staleness_guard_spec.spl` —
+before 4/6 (shrunk + emptied surface repros failed), after 6/6.
+
+Unverified: native s3 self-build. If the surface rows are genuinely lost
+(live_len=0 where impls must exist), methods will now be absent rather than
+fatal; that would indicate the ModuleSurface impl arrays are not promoted out
+of the transient scope and needs a follow-up.
