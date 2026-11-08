@@ -5294,6 +5294,9 @@ public static class Stage3MaterializedConsumer {
     // its previous per-list ceiling and handle-retention bound.
     const int MaxUntracked = 100000;
     const int MaxOutput = 16 * 1024 * 1024;
+    // Full tracked-tree inventories exceed 16 MiB on the real checkout. Keep
+    // their separate finite bound; ordinary commands and stderr stay at 16 MiB.
+    const int MaxTreeOutput = 64 * 1024 * 1024;
     // The tracked HEAD diff is hashed, never parsed, and on a dirty tree with
     // rebuilt binaries it far exceeds any memory buffer (a full-index binary
     // diff of a ~100 MB seed is ~130 MB). Stream it through the hasher; this
@@ -5334,16 +5337,40 @@ public static class Stage3MaterializedConsumer {
         b.Append('\\', slash * 2); return b.Append('"').ToString();
     }
     static byte[] ReadBound(Stream stream) {
+        return ReadBound(stream, MaxOutput);
+    }
+    static byte[] ReadBound(Stream stream, int maxOutput) {
         using (var mem = new MemoryStream()) {
             byte[] buffer = new byte[65536]; int n;
             while ((n = stream.Read(buffer, 0, buffer.Length)) != 0) {
-                if (mem.Length + n > MaxOutput) throw new IOException("bound.command-output");
+                if (mem.Length + n > maxOutput) throw new IOException("bound.command-output max=" + maxOutput);
                 mem.Write(buffer, 0, n);
             }
             return mem.ToArray();
         }
     }
     static byte[] Command(string root, string tool, byte[] input, params string[] args) {
+        return CommandBound(root, tool, input, MaxOutput, args);
+    }
+    static void CheckCommandIo(System.Threading.Tasks.Task stdout, System.Threading.Tasks.Task stderr, System.Threading.Tasks.Task stdin) {
+        var tasks = new System.Threading.Tasks.Task[] {stdout, stderr, stdin};
+        var names = new string[] {"stdout", "stderr", "stdin"};
+        for (int n = 0; n < tasks.Length; n++) {
+            if (tasks[n].IsFaulted) {
+                var cause = tasks[n].Exception.GetBaseException();
+                throw new IOException("command." + names[n] + ":" + cause.Message, cause);
+            }
+        }
+    }
+    static void FinishCommandIo(System.Threading.Tasks.Task stdout, System.Threading.Tasks.Task stderr, System.Threading.Tasks.Task stdin) {
+        try {
+            if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] {stdout, stderr, stdin}, Math.Max(1, MaxMillis - (int)Clock.ElapsedMilliseconds))) throw new IOException("bound.command");
+        } catch (AggregateException) {
+            CheckCommandIo(stdout, stderr, stdin);
+            throw;
+        }
+    }
+    static byte[] CommandBound(string root, string tool, byte[] input, int maxOutput, params string[] args) {
         Tick(); var start = new System.Diagnostics.ProcessStartInfo(tool);
         start.WorkingDirectory = root; start.UseShellExecute = false; start.CreateNoWindow = true;
         start.RedirectStandardOutput = true; start.RedirectStandardError = true; start.RedirectStandardInput = true;
@@ -5355,19 +5382,25 @@ public static class Stage3MaterializedConsumer {
         using (var process = System.Diagnostics.Process.Start(start)) {
             ActiveChild = process;
             try {
-                var stdout = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardOutput.BaseStream));
+                var stdout = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardOutput.BaseStream, maxOutput));
                 var stderr = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardError.BaseStream));
                 var stdin = System.Threading.Tasks.Task.Factory.StartNew(() => { if (input != null) process.StandardInput.BaseStream.Write(input, 0, input.Length); process.StandardInput.Close(); });
-                while (!process.WaitForExit(20)) { Tick(); if (stdout.IsFaulted || stderr.IsFaulted || stdin.IsFaulted) throw new IOException("command.io"); }
-                if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] {stdout, stderr, stdin}, Math.Max(1, MaxMillis - (int)Clock.ElapsedMilliseconds))) throw new IOException("bound.command");
+                while (!process.WaitForExit(20)) { Tick(); CheckCommandIo(stdout, stderr, stdin); }
+                FinishCommandIo(stdout, stderr, stdin);
                 if (process.ExitCode != 0) throw new IOException("command.failed:" + process.ExitCode);
                 return stdout.Result;
             } finally { if (!process.HasExited) process.Kill(); ActiveChild = null; }
         }
     }
     static byte[] Git(string root, params string[] args) {
+        return GitBound(root, MaxOutput, args);
+    }
+    static byte[] GitTree(string root, params string[] args) {
+        return GitBound(root, MaxTreeOutput, args);
+    }
+    static byte[] GitBound(string root, int maxOutput, params string[] args) {
         var all = new List<string>(new string[] {"-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"});
-        all.AddRange(args); return Command(root, Environment.GetEnvironmentVariable("STAGE3_GIT"), null, all.ToArray());
+        all.AddRange(args); return CommandBound(root, Environment.GetEnvironmentVariable("STAGE3_GIT"), null, maxOutput, all.ToArray());
     }
     // The tracked HEAD diff can exceed any memory buffer on a dirty tree
     // (rebuilt seed binaries produce 100+ MB full-index binary diffs); only
@@ -5400,8 +5433,8 @@ public static class Stage3MaterializedConsumer {
                 });
                 var stderr = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardError.BaseStream));
                 var stdin = System.Threading.Tasks.Task.Factory.StartNew(() => { process.StandardInput.Close(); });
-                while (!process.WaitForExit(20)) { Tick(); if (stdout.IsFaulted || stderr.IsFaulted || stdin.IsFaulted) throw new IOException("command.io"); }
-                if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] {stdout, stderr, stdin}, Math.Max(1, MaxMillis - (int)Clock.ElapsedMilliseconds))) throw new IOException("bound.command");
+                while (!process.WaitForExit(20)) { Tick(); CheckCommandIo(stdout, stderr, stdin); }
+                FinishCommandIo(stdout, stderr, stdin);
                 if (process.ExitCode != 0) throw new IOException("command.failed:" + process.ExitCode);
                 return stdout.Result;
             } finally { if (!process.HasExited) process.Kill(); ActiveChild = null; }
@@ -5457,7 +5490,7 @@ public static class Stage3MaterializedConsumer {
         // -r recurses so links at every depth are seen; without it only root
         // children are listed and the receipt row count check below can never
         // match a real checkout (all 66 materialized links live below root).
-        foreach (string row in Nul(Git(root, "ls-tree", "-rz", "-r", "--full-tree", head))) {
+        foreach (string row in Nul(GitTree(root, "ls-tree", "-rz", "-r", "--full-tree", head))) {
             if (++entries > MaxEntries) throw new IOException("bound.entries count=" + entries + " max=" + MaxEntries);
             int tab = row.IndexOf('\t'); if (tab < 0) throw new IOException("git.tree-format");
             string path = row.Substring(tab + 1); CheckPath(path);
