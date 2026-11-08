@@ -14,6 +14,9 @@ extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 @unsafe(reason: "raw transient-tracking runtime note ABI", capabilities: [ffi, raw_ptr])
 extern fn rt_simple_core_transient_note(ptr: i64, kind: i64) -> i64
+extern fn rt_atomic_int_new(initial: i64) -> i64
+extern fn rt_atomic_int_load(handle: i64) -> i64
+extern fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new_value: i64) -> i8
 
 @always_inline
 fn _sffi_core_enum_calloc(count: i64, size: i64) -> i64:
@@ -78,7 +81,77 @@ fn enum_ptr(value: i64) -> i64:
         current = _sffi_core_enum_load_i64(current, 24)
     return 0
 
+# Payload-less variants (Option.None, unit variants: payload is the nil
+# special 3, the integer 0, true 11 or false 19) are process-lifetime
+# singletons that no transient scope or session heap ever owns, mirroring
+# enum_new_unit_singleton in runtime_native.c (C static of the same name; bug
+# option_struct_none_box_freed_by_transient_scope_2026_11_09): a None
+# allocated inside a scope and returned past its end must not dangle.
+# Singleton nodes are 40 bytes: the 32-byte enum header plus a link at offset
+# 32 for this list; they are also members of enum_registry_head so enum_ptr
+# validates them like any other enum.
+# Handle of the rt_atomic_int cell that holds the list head (0 until created).
+var enum_unit_singleton_head: i64 = 0
+
+fn enum_payload_is_unit(payload: i64) -> bool:
+    return payload == 3 or payload == 0 or payload == 11 or payload == 19
+
+# Walk the prepend-only singleton list from `from` up to (not including)
+# `stop`; 0 when no node carries the key. Mirrors enum_unit_singleton_find.
+fn enum_unit_singleton_find(from: i64, stop: i64, enum_id: i32, discriminant: i32, payload: i64) -> i64:
+    var current = from
+    while current > 0 and current != stop:
+        if load_u32_le(current, 4) == enum_id and load_u32_le(current, 8) == discriminant and _sffi_core_enum_load_i64(current, 16) == payload:
+            return current | 1
+        current = _sffi_core_enum_load_i64(current, 32)
+    return 0
+
+# The list head lives in an rt_atomic_int cell (core_atomic.spl) so publish
+# is a real compare-exchange, the twin of the C atomic_compare_exchange on
+# rt_enum_unit_singletons. The cell is created once, before the first unit
+# variant is built (process start, single-threaded), and never freed.
+fn enum_unit_singleton_head_cell() -> i64:
+    if enum_unit_singleton_head == 0:
+        enum_unit_singleton_head = rt_atomic_int_new(0)
+    return enum_unit_singleton_head
+
+fn enum_unit_singleton_head_load() -> i64:
+    return rt_atomic_int_load(enum_unit_singleton_head_cell())
+
+# Publish `node` as the new list head iff the head is still `expected`.
+fn enum_unit_singleton_publish(expected: i64, node: i64) -> bool:
+    return rt_atomic_int_compare_exchange(enum_unit_singleton_head_cell(), expected, node) != 0
+
+fn enum_new_unit_singleton(enum_id: i32, discriminant: i32, payload: i64) -> i64:
+    var head = enum_unit_singleton_head_load()
+    val existing = enum_unit_singleton_find(head, 0, enum_id, discriminant, payload)
+    if existing != 0:
+        return existing
+    val value = _sffi_core_enum_calloc(1, 40)
+    if value < 1:
+        return 3
+    _sffi_core_enum_store_u8(value, 0, 4)
+    store_u32_le(value, 4, enum_id)
+    store_u32_le(value, 8, discriminant)
+    _sffi_core_enum_store_i64(value, 16, payload)
+    _sffi_core_enum_store_i64(value, 24, enum_registry_head)
+    enum_registry_head = value
+    while true:
+        _sffi_core_enum_store_i64(value, 32, head)
+        if enum_unit_singleton_publish(head, value):
+            return value | 1
+        # Lost the publish race: only nodes prepended since `head` are new.
+        val raced = enum_unit_singleton_find(enum_unit_singleton_head_load(), head, enum_id, discriminant, payload)
+        if raced != 0:
+            enum_unregister(value)
+            _sffi_core_enum_free(value)
+            return raced
+        head = enum_unit_singleton_head_load()
+    return 3
+
 pub fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64:
+    if enum_payload_is_unit(payload):
+        return enum_new_unit_singleton(enum_id, discriminant, payload)
     val value = _sffi_core_enum_calloc(1, 32)
     if value < 1:
         return 3
