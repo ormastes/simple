@@ -3,105 +3,130 @@
 ## Purpose and audience
 
 Temporal-policy and evidence-admission contract for the central debug
-service: caller-supplied time must be preserved (no wall-clock reads), TTL
-expiry must deny authorization without overflowing, a rolling one-minute
-rate window must throttle repeat operations, expired probes must be rejected
-and then hidden, and stale or explicitly unredacted evidence must be denied
-with timed receipts. Written for the debug-service owner; the shipped half
-of the policy surface is `std.common.debug.service_v1` /
-`contracts_v1`, and the drafted richer temporal API is documented below.
+service: caller-supplied time is preserved on receipts (no wall-clock reads),
+TTL expiry denies authorization without overflowing, a rolling one-minute
+rate window throttles repeat operations, expired probes are rejected and then
+hidden, and stale or explicitly unredacted evidence is denied with timed
+receipts. Written for the debug-service owner; the surface under test is
+`DebugServiceV1` in `std.common.debug.service_v1` and the policy fields in
+`contracts_v1`.
 
 ## Operator workflow
 
-Run one spec: `./src/compiler_rust/target/bootstrap/simple run
-test/01_unit/lib/common/debug/debug_service_policy_v1_spec.spl`. The shipped
-policy functions are exercised through real calls
-(`debug_policy_development_v1`, `debug_policy_observe_only_v1`). The drafted
-temporal API the original scenarios were written against
-(`DebugServiceV1.create`, `open_session_at`, `authorize_with_context`,
-`ttl_ms`, `rate_limit_per_minute`, `apply_probe_with_context`,
-`export_evidence_with_context`, `DebugEvidenceArtifactV1`) exists nowhere in
-`src/` (grep-verified 2026-09-06), so those scenarios are absence tripwires
-against the real `src/lib/common/debug/service_v1.spl` source text.
+Run one spec: `bin/simple test test/01_unit/lib/common/debug/debug_service_policy_v1_spec.spl`.
 
 ## Compatibility and limitations
 
-The service_v1 module currently carries no timestamps, TTL, rate window,
-probe registry or evidence export; it owns session/authorization
-bookkeeping only (see its header comment). The tripwires fail closed in both
-directions: if the drafted temporal surface appears in service_v1.spl or
-contracts_v1.spl, or if `SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1` claims it
-landed, the scenario aborts and demands a rewrite against the real API.
+These scenarios were absence tripwires while the temporal API was only
+drafted; they now run against the shipped `DebugServiceV1`.
 
 ## Verification guidance and troubleshooting
 
-A failure quoting service_v1.spl means the drafted temporal API landed in
-the shipped module: port each scenario onto it and delete the tripwire
-helper. A failure naming the env flag means
-`SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1` was set without landing the API;
-unset it or implement the temporal policy. Failures on the shipped policy
-assertions (policy names or observe-only denials) are genuine product
-regressions in `std.common.debug.service_v1`.
+Any failure is a genuine regression in `std.common.debug.service_v1`.
 """
-# Lifecycle: doc/01_research/app/tools/simple_unified_debugging_evidence_2026-08-14.md ;
-# doc/03_plan/agent_tasks/simple_unified_debugging_evidence.md ;
-# doc/04_architecture/simple_unified_debugging_evidence.md ;
-# doc/05_design/simple_unified_debugging_evidence.md
 # @manual_section: debug-service-temporal-policy
 
 use std.spec.*
-use std.common.debug.service_v1.{debug_policy_development_v1, debug_policy_observe_only_v1}
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugCapabilityV1, DebugVerificationV1, DebugPerturbationV1, DebugTargetNodeV1,
+    DebugProbeKindV1, DebugRootOperationV1, DebugEvidenceArtifactV1,
+    DebugAuthorizationContextV1, DebugSessionId,
+}
+use std.common.debug.service_v1.{
+    DebugServiceV1, debug_policy_development_v1, debug_policy_observe_only_v1,
+}
 
-extern fn rt_file_read_text(path: text) -> text?
-use std.io_runtime.{env_get}
-
-# Fail-closed tripwire: true only while the drafted temporal API is still
-# absent from the shipped debug modules AND unclaimed. Aborts the scenario
-# the moment the source contract or the env claim changes, so this spec can
-# never pass silently against a tree where the temporal policy landed.
-fn temporal_policy_still_absent() -> bool:
-    val service_source = rt_file_read_text("src/lib/common/debug/service_v1.spl") ?? ""
-    val contracts_source = rt_file_read_text("src/lib/common/debug/contracts_v1.spl") ?? ""
-    val keeps_temporal_api_out = not service_source.contains("open_session_at") and not service_source.contains("ttl_ms") and not service_source.contains("rate_limit_per_minute") and not service_source.contains("class DebugServiceV1") and not contracts_source.contains("DebugEvidenceArtifactV1") and not contracts_source.contains("DebugAuthorizationContextV1")
-    if not keeps_temporal_api_out:
-        fail("debug service policy: the drafted temporal API now appears in the shipped debug modules - port these scenarios onto it and delete the tripwire helper")
-    if env_get("SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED") == "1":
-        fail("debug service policy: SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1 claims the temporal policy landed but the shipped modules still lack it - implement it or unset the flag")
-    true
+fn context_at(now_ns: i64) -> DebugAuthorizationContextV1:
+    DebugAuthorizationContextV1(now_ns: now_ns, environment: "development", privilege: "debug")
 
 describe "DebugServiceV1 temporal policy":
-    # NOTE: defect record 2026-09-06 - the drafted temporal API (DebugServiceV1
-    # class, open_session_at, ttl_ms, rate_limit_per_minute, timed receipts)
-    # exists nowhere in src/, so the original bodies never loaded. Scenarios
-    # keep their names and intent, anchor one real shipped-policy assertion
-    # each, and tripwire the drafted surface for the port.
+    it "preserves caller timestamps on unknown and closed session denials":
+        var service = DebugServiceV1.create()
+        val missing = DebugSessionId(value: "debug-missing")
+        val missing_context = service.authorize_with_context(missing, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.missing", context_at(42))
+        expect(missing_context.allowed).to_equal(false)
+        expect(missing_context.captured_at_ns).to_equal(42)
+        val missing_timed = service.authorize_at(missing, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.missing.timed", 43)
+        expect(missing_timed.allowed).to_equal(false)
+        expect(missing_timed.captured_at_ns).to_equal(43)
+        val session = service.open_session("build-closed", debug_policy_development_v1()).unwrap()
+        service.close_session(session).unwrap()
+        val closed = service.authorize_at(session, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.closed", 44)
+        expect(closed.allowed).to_equal(false)
+        expect(closed.captured_at_ns).to_equal(44)
+
     it "should preserve caller time and expire TTL without overflowing":
         # @req REQ-008
-        # @capture(statistics): shipped policy identity plus drafted-TTL tripwire verdict
-        step("Read the shipped development policy the temporal layer must extend")
-        val shipped_policy = debug_policy_development_v1()
-        expect(shipped_policy.name).to_equal("development")  # oracle: service_v1.spl names its permissive policy "development" and every temporal extension must keep that identity
-        step("Probe the shipped modules for the drafted caller-time TTL surface")
-        expect(temporal_policy_still_absent()).to_be(true)  # oracle: TTL expiry and caller-time preservation live only in the drafted API, so its absence from the shipped source is the verifiable contract
+        step("Open a session at t=0 under a 1 ms TTL policy")
+        expect(debug_policy_development_v1().name).to_equal("development")
+        var policy = debug_policy_development_v1()
+        policy.ttl_ms = 1
+        var service = DebugServiceV1.create()
+        val session = service.open_session_at("build-ttl", policy, 0).unwrap()
+        val early = service.authorize_at(session, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.early", 500000)
+        expect(early.allowed).to_equal(true)
+        expect(early.captured_at_ns).to_equal(500000)
+        step("Authorize after the TTL, including a near-i64-max clock")
+        val late = service.authorize_at(session, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.late", 2000000)
+        expect(late.allowed).to_equal(false)
+        expect(late.reason).to_equal("debug session policy expired")
+        val huge = service.authorize_at(session, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.huge", 9000000000000000000)
+        expect(huge.allowed).to_equal(false)
 
     it "should enforce a rolling-minute rate window":
         # @req REQ-009
-        # @capture(statistics): shipped observe-only policy anchor plus rate-window tripwire verdict
-        step("Read the shipped observe-only policy that shares the rate plumbing")
-        val observe_policy = debug_policy_observe_only_v1()
-        expect(observe_policy.name).to_equal("observe-only")  # oracle: service_v1.spl names the deny-Control/Domain policy "observe-only"; a rolling rate window must slot next to this policy family
-        step("Probe the shipped modules for the drafted rolling rate window")
-        expect(temporal_policy_still_absent()).to_be(true)  # oracle: rate_limit_per_minute and its rolling window are drafted-only fields, so their absence from the shipped source is the checkable state
+        step("Allow two actions per minute, deny the third, allow again after the window")
+        expect(debug_policy_observe_only_v1().name).to_equal("observe-only")
+        var policy = debug_policy_development_v1()
+        policy.rate_limit_per_minute = 2
+        var service = DebugServiceV1.create()
+        val session = service.open_session("build-rate", policy).unwrap()
+        val sec = 1000000000
+        expect(service.authorize_at(session, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "a", 1 * sec).allowed).to_equal(true)
+        expect(service.authorize_at(session, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "b", 2 * sec).allowed).to_equal(true)
+        val throttled = service.authorize_at(session, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "c", 3 * sec)
+        expect(throttled.allowed).to_equal(false)
+        expect(throttled.reason).to_equal("debug session rate limit exceeded")
+        expect(service.authorize_at(session, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "d", 70 * sec).allowed).to_equal(true)
 
 describe "DebugServiceV1 temporal probe and evidence lifecycle":
     it "should reject already-expired probes and hide probes after expiry":
         # @req REQ-010
-        # @capture(statistics): drafted probe-registry tripwire verdict
-        step("Probe the shipped modules for the drafted probe registry")
-        expect(temporal_policy_still_absent()).to_be(true)  # oracle: apply_probe_with_context and probe expiry receipts are drafted-only API, so absence from the shipped source is the live assertion
+        step("Apply a probe that expires at t=100 ns, then read it at t=200 ns")
+        var service = DebugServiceV1.create()
+        val session = service.open_session("build-probe-ttl", debug_policy_development_v1()).unwrap()
+        service.add_target(
+            session,
+            DebugTargetNodeV1("t0", "", "process", "target zero"),
+            DebugCapabilityV1("t0", CapLevel.Native, DebugVerificationV1.LiveVerified, DebugPerturbationV1.Cooperative, "reachable"),
+        ).unwrap()
+        match service.apply_probe_with_context(session, DebugProbeKindV1.Stop, "t0", "main.spl:1", DebugPerturbationV1.Stopping, 50, context_at(50)):
+            case Ok(_): fail("probe expiring at the current time must be rejected")
+            case Err(reason): expect(reason).to_equal("debug probe expiry must be in the future")
+        val probe = service.apply_probe_with_context(session, DebugProbeKindV1.Stop, "t0", "main.spl:1", DebugPerturbationV1.Stopping, 100, context_at(10)).unwrap()
+        expect(service.probes_for_at(session, 50).len()).to_equal(1)
+        expect(service.probes_for_at(session, 200).len()).to_equal(0)
+        val expired = service.receipts_for(session).filter(\r: r.action == "probe.expire")
+        expect(expired.len()).to_equal(1)
+        expect(probe.session_id).to_equal(session.value)
 
     it "should deny stale or explicitly unredacted evidence with timed receipts":
         # @req REQ-011
-        # @capture(statistics): drafted evidence-admission tripwire verdict
-        step("Probe the shipped modules for the drafted evidence admission API")
-        expect(temporal_policy_still_absent()).to_be(true)  # oracle: DebugEvidenceArtifactV1 and export_evidence_with_context are drafted-only, so their absence from contracts_v1.spl is the checkable state
+        step("Export stale evidence under a 1 ms retention policy")
+        var policy = debug_policy_development_v1()
+        policy.retention_ms = 1
+        var service = DebugServiceV1.create()
+        val session = service.open_session("build-evidence-ttl", policy).unwrap()
+        val artifact = DebugEvidenceArtifactV1("raw/core", "application/x-core", "sha256:abc", true, "restricted")
+        match service.export_evidence_with_context(session, 0, [artifact], context_at(5000000)):
+            case Ok(_): fail("stale evidence must be denied")
+            case Err(reason): expect(reason).to_equal("evidence exceeds retention policy")
+        step("Export explicitly unredacted evidence under a redacting policy")
+        val raw = DebugEvidenceArtifactV1("raw/core", "application/x-core", "sha256:abc", true, "unredacted")
+        match service.export_evidence_with_context(session, 4999999, [raw], context_at(5000000)):
+            case Ok(_): fail("unredacted evidence must be denied")
+            case Err(reason): expect(reason).to_equal("unredacted evidence denied by policy")
+        val denied = service.receipts_for(session).filter(\r: r.action == "evidence.export" and not r.allowed)
+        expect(denied.len()).to_equal(2)
+        expect(denied[0].captured_at_ns).to_equal(5000000)
