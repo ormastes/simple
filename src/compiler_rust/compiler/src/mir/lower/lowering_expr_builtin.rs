@@ -579,6 +579,12 @@ impl<'a> MirLowerer<'a> {
             let arg = &args[0];
             let arg_reg = self.lower_expr(arg)?;
 
+            // Flat struct/class values have no runtime type header; render
+            // them field by field (see emit_struct_to_string).
+            if let Some(rendered) = self.emit_struct_to_string(arg_reg, arg.ty)? {
+                return Ok(rendered);
+            }
+
             // U64 and I64 must both bypass BoxInt: it packs the payload as
             // `(value << 3) | TAG_INT`, so only a signed 61-bit magnitude
             // survives (i64::MAX -> -1, 2^62 -> 0). Same reasoning as the
@@ -727,6 +733,10 @@ impl<'a> MirLowerer<'a> {
             let mut boxed_arg_regs = Vec::new();
             for arg in args {
                 let arg_reg = self.lower_expr(arg)?;
+                if let Some(rendered) = self.emit_struct_to_string(arg_reg, arg.ty)? {
+                    boxed_arg_regs.push(rendered);
+                    continue;
+                }
                 // BoxInt/BoxFloat pack a value into the 61-bit tagged-int
                 // RuntimeValue payload (`(value << 3) | TAG_INT`); any i64/u64
                 // magnitude outside that range silently loses its top bits
