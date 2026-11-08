@@ -1133,7 +1133,17 @@ pub(super) fn generate_stub_object_with_policy(
     // to that authoritative link; it still rejects every live missing symbol.
     // Non-strict links keep this preflight because their platform flags may
     // deliberately tolerate unresolved symbols.
-    let strict_final_link = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
+    //
+    // The same deferral applies whenever the platform link itself rejects
+    // undefined symbols. On windows-gnu `unresolved_symbol_flags` carries no
+    // `--unresolved-symbols=ignore-all`, so ld.lld fails the link on every
+    // live undefined `rt_*` and nothing can reach a NULL GOT slot; the names
+    // this preflight would reject are the dead-code references COFF resolves
+    // before section GC (the 112 `rt_*` of stage2 on windows-gnu, 2026-11-08),
+    // which the linker's GC-parity retry stubs loudly. Failing here instead
+    // forced SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1 on the whole lane (WA-s2n7).
+    let strict_final_link = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1")
+        || !plat_config.tolerates_unresolved_symbols();
     if !undefined_runtime.is_empty() && !stub_missing_runtime && !strict_final_link {
         let names = undefined_runtime.join(", ");
         if std::env::var(ALLOW_UNRESOLVED_RUNTIME_ENV).as_deref() == Ok("1") {
@@ -1800,22 +1810,85 @@ pub(crate) fn coff_gc_parity_stub_source(names: &[String]) -> Result<String, Str
     Ok(source)
 }
 
-/// Compile the trap stubs with clang-cl (MSVC ABI). Fails fast if clang-cl is
-/// not installed.
-pub(crate) fn compile_coff_gc_parity_stubs(temp_dir: &Path, names: &[String]) -> Result<PathBuf, String> {
+/// Which COFF toolchain the final link belongs to. The parity stub object must
+/// be produced by the SAME toolchain: a clang-cl object carries
+/// `/DEFAULTLIB:libcmt`/`oldnames` directives and `__security_check_cookie`
+/// references that an llvm-mingw (gnu) link cannot satisfy, and a mingw object
+/// would drag mingw CRT symbols into an MSVC link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CoffStubToolchain {
+    /// clang-cl + lld-link (MSVC ABI, `/link` option group).
+    Msvc,
+    /// clang + ld.lld `-m i386pep` (llvm-mingw UCRT; never GCC).
+    Gnu,
+}
+
+/// Compiler program and arguments that turn `stub_c` into `stub_o` for the
+/// given toolchain. Pure, so the gnu/msvc spelling is unit-testable without a
+/// compiler on the host.
+pub(crate) fn gc_parity_stub_compile_command(
+    toolchain: CoffStubToolchain,
+    gnu_cc: &str,
+    stub_c: &Path,
+    stub_o: &Path,
+) -> (String, Vec<String>) {
+    match toolchain {
+        CoffStubToolchain::Msvc => (
+            "clang-cl".to_string(),
+            vec![
+                "/nologo".to_string(),
+                "/c".to_string(),
+                "/O1".to_string(),
+                "/Gy".to_string(),
+                format!("/Fo{}", stub_o.display()),
+                stub_c.display().to_string(),
+            ],
+        ),
+        CoffStubToolchain::Gnu => {
+            let mut args = vec![
+                "-c".to_string(),
+                "-O1".to_string(),
+                // One section per stub (clang-cl `/Gy` equivalent) so a gnu
+                // `--gc-sections` link drops stubs nothing references.
+                "-ffunction-sections".to_string(),
+                "-fdata-sections".to_string(),
+                // No stack cookie / unwind tables: the stub only traps.
+                "-fno-stack-protector".to_string(),
+                "-fno-asynchronous-unwind-tables".to_string(),
+            ];
+            let target = simple_common::target::Target::parse("x86_64-pc-windows-gnu")
+                .unwrap_or_else(|_| effective_target());
+            if let Some(flag) = windows_gnu_target_flag(target, gnu_cc) {
+                args.push(flag.to_string());
+            }
+            args.push("-o".to_string());
+            args.push(stub_o.display().to_string());
+            args.push(stub_c.display().to_string());
+            (gnu_cc.to_string(), args)
+        }
+    }
+}
+
+/// Compile the trap stubs with the toolchain of the final link (clang-cl for
+/// MSVC, the gnu `clang` for llvm-mingw). Fails fast if that compiler is not
+/// installed.
+pub(crate) fn compile_coff_gc_parity_stubs(
+    temp_dir: &Path,
+    names: &[String],
+    toolchain: CoffStubToolchain,
+) -> Result<PathBuf, String> {
     let source = coff_gc_parity_stub_source(names)?;
     let stub_c = temp_dir.join("_gc_parity_stubs.c");
-    let stub_o = temp_dir.join("_gc_parity_stubs.obj");
+    let stub_o = temp_dir.join(match toolchain {
+        CoffStubToolchain::Msvc => "_gc_parity_stubs.obj",
+        CoffStubToolchain::Gnu => "_gc_parity_stubs.o",
+    });
     std::fs::write(&stub_c, source).map_err(|e| format!("write {}: {e}", stub_c.display()))?;
-    let cc = "clang-cl";
-    simple_common::platform::cc_detect::require_compiler(cc)?;
-    let output = std::process::Command::new(cc)
-        .arg("/nologo")
-        .arg("/c")
-        .arg("/O1")
-        .arg("/Gy")
-        .arg(format!("/Fo{}", stub_o.display()))
-        .arg(&stub_c)
+    let gnu_cc = target_c_compiler(effective_target());
+    let (cc, args) = gc_parity_stub_compile_command(toolchain, &gnu_cc, &stub_c, &stub_o);
+    simple_common::platform::cc_detect::require_compiler(&cc)?;
+    let output = std::process::Command::new(&cc)
+        .args(&args)
         .output()
         .map_err(|e| format!("compile GC-parity stubs ({cc}): {e}"))?;
     if !output.status.success() {
@@ -1840,6 +1913,36 @@ mod coff_gc_parity_tests {
             lld_link_undefined_symbols(log),
             vec!["DocBlock::Heading".to_string(), "rt_cuda_malloc".to_string()]
         );
+    }
+
+    #[test]
+    fn parses_ld_lld_mingw_undefined_symbols() {
+        // llvm-mingw's ld.lld (`-m i386pep`) spells the diagnostic with its own
+        // program name; the gnu lane's parity retry reads the same list.
+        let log = "ld.lld: error: undefined symbol: rt_layout_add\n>>> referenced by aot-1.o\n\
+                   ld.lld: error: undefined symbol: rt_hlt\n\
+                   ld.lld: error: undefined symbol: rt_layout_add\n\
+                   clang: error: linker command failed with exit code 1 (use -v to see invocation)\n";
+        assert_eq!(lld_link_undefined_symbols(log), vec!["rt_hlt".to_string(), "rt_layout_add".to_string()]);
+    }
+
+    #[test]
+    fn gnu_parity_stubs_compile_with_gnu_clang_not_clang_cl() {
+        let c = Path::new("t/_gc_parity_stubs.c");
+        let o = Path::new("t/_gc_parity_stubs.o");
+        let (cc, args) = gc_parity_stub_compile_command(CoffStubToolchain::Gnu, "C:/llvm-mingw/bin/clang.exe", c, o);
+        assert_eq!(cc, "C:/llvm-mingw/bin/clang.exe");
+        assert!(args.iter().any(|a| a == "--target=x86_64-w64-windows-gnu"), "{args:?}");
+        assert!(args.iter().any(|a| a == "-ffunction-sections"), "{args:?}");
+        assert!(args.iter().any(|a| a == "-fno-stack-protector"), "{args:?}");
+        // No CL-style switches reach the gnu driver: those were the WA-s2n9/9b
+        // `/Zl` `/GS-` patches on a clang-cl object.
+        assert!(args.iter().all(|a| !a.starts_with('/')), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("clang-cl")));
+
+        let (cc, args) = gc_parity_stub_compile_command(CoffStubToolchain::Msvc, "clang", c, o);
+        assert_eq!(cc, "clang-cl");
+        assert!(args.iter().any(|a| a == "/Gy"), "{args:?}");
     }
 
     #[test]
