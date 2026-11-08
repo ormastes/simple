@@ -2562,13 +2562,23 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
-                let text_byte_len = super::resolved_text_runtime_method(func_name) == Some("rt_string_len");
+                // A BARE `byte_len` (no `str.`/`text.` owner) is still the text
+                // byte-length builtin: no user `fn byte_len` exists, and Cranelift
+                // (codegen/instr/calls.rs) already maps the bare leaf to
+                // `rt_string_len`. Without this the leaf fell through to an
+                // undefined `byte_len` extern at the stage2 link
+                // (stage2_byte_len_unresolved_symbol_2026-11-08).
+                let bare_byte_len = method == "byte_len" && !func_name.replace("_dot_", ".").contains('.');
+                let text_byte_len =
+                    bare_byte_len || super::resolved_text_runtime_method(func_name) == Some("rt_string_len");
                 if text_byte_len {
                     if !args.is_empty() {
                         return Err(CompileError::semantic("text.byte_len expects no arguments"));
                     }
                     if vreg_types.get(receiver).is_some_and(|ty| {
-                        *ty != crate::hir::TypeId::STRING && *ty != crate::hir::TypeId::ANY
+                        *ty != crate::hir::TypeId::STRING
+                            && *ty != crate::hir::TypeId::ANY
+                            && *ty != crate::hir::TypeId::UNKNOWN
                     }) {
                         return Err(CompileError::semantic("text.byte_len requires a text receiver"));
                     }
@@ -4242,6 +4252,38 @@ mod tests {
             let ir = byte_len_dispatch_ir(inst, crate::hir::TypeId::STRING).unwrap();
             assert!(ir.contains("call i64 @rt_string_len(i64 "), "{owner}: {ir}");
             assert!(ir.contains("declare i64 @rt_string_len(i64)"), "{owner}: {ir}");
+        }
+    }
+
+    /// stage2 link `Unresolved symbol preview: byte_len`: MIR hands the LLVM
+    /// backend a BARE `byte_len` (no `str.`/`text.` owner) for a `.byte_len()`
+    /// whose receiver is proven text or erased. `byte_len` is a compiler
+    /// builtin with no user definition anywhere, and Cranelift already maps
+    /// the bare leaf to `rt_string_len`; LLVM must not declare an undefined
+    /// `byte_len` extern instead.
+    #[test]
+    fn bare_byte_len_dispatches_to_text_byte_abi_for_text_and_erased_receivers() {
+        for receiver_type in [crate::hir::TypeId::STRING, crate::hir::TypeId::ANY, crate::hir::TypeId::UNKNOWN] {
+            for inst in [
+                MirInst::Call {
+                    dest: Some(VReg(1)), target: CallTarget::from_name("byte_len"), args: vec![VReg(0)],
+                },
+                MirInst::MethodCallStatic {
+                    dest: Some(VReg(1)), receiver: VReg(0), func_name: "byte_len".to_string(), args: vec![],
+                },
+            ] {
+                let ir = byte_len_dispatch_ir(inst, receiver_type).unwrap();
+                assert!(ir.contains("call i64 @rt_string_len(i64 "), "{receiver_type:?}: {ir}");
+                assert!(ir.contains("declare i64 @rt_string_len(i64)"), "{receiver_type:?}: {ir}");
+                assert!(!ir.contains("@byte_len("), "bare extern leaked: {receiver_type:?}: {ir}");
+            }
+        }
+        // A proven non-text receiver still fails closed instead of guessing.
+        for inst in [
+            MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name("byte_len"), args: vec![VReg(0)] },
+            MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: "byte_len".to_string(), args: vec![] },
+        ] {
+            assert!(byte_len_dispatch_ir(inst, crate::hir::TypeId::I64).is_err(), "bare byte_len on i64 must fail closed");
         }
     }
 

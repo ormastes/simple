@@ -2122,6 +2122,10 @@ impl LlvmBackend {
         // we must map these to rt_* functions. The first arg is the receiver.
         let bare_rt_redirect: Option<&str> = match func_name_raw {
             // String methods (all verified as T symbols in runtime)
+            // Bare `byte_len` is the text byte-length builtin (no user
+            // `fn byte_len` exists; matches Cranelift's bare-leaf mapping).
+            // Guarded below: exactly one text-or-erased receiver.
+            "byte_len" => Some("rt_string_len"),
             "starts_with" => Some("rt_string_starts_with"),
             "ends_with" => Some("rt_string_ends_with"),
             "contains" => Some("rt_contains"),
@@ -2185,7 +2189,9 @@ impl LlvmBackend {
                     return Err(CompileError::semantic("text.byte_len expects one receiver and no arguments"));
                 }
                 if vreg_types.get(&args[0]).is_some_and(|ty| {
-                    *ty != crate::hir::TypeId::STRING && *ty != crate::hir::TypeId::ANY
+                    *ty != crate::hir::TypeId::STRING
+                        && *ty != crate::hir::TypeId::ANY
+                        && *ty != crate::hir::TypeId::UNKNOWN
                 }) {
                     return Err(CompileError::semantic("text.byte_len requires a text receiver"));
                 }
