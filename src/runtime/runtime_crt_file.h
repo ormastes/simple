@@ -26,6 +26,11 @@ static int rt_crt_open(const char* path, int flags, ...) {
 static FILE* rt_crt_fopen(const char* path, const char* mode) {
     return _fsopen(path, mode, _SH_DENYNO);
 }
+static int rt_crt_wopen(const wchar_t* path, int flags, int mode) {
+    int fd = -1;
+    mode &= _S_IREAD | _S_IWRITE;
+    return _wsopen_s(&fd, path, flags, _SH_DENYNO, mode) == 0 ? fd : -1;
+}
 static FILE* rt_crt_wfopen(const wchar_t* path, const wchar_t* mode) {
     return _wfsopen(path, mode, _SH_DENYNO);
 }
@@ -36,6 +41,7 @@ static FILE* rt_crt_wfopen(const wchar_t* path, const wchar_t* mode) {
 #define rt_crt_close _close
 #else
 #define rt_crt_open open
+#define rt_crt_wopen _wopen
 #define rt_crt_fopen fopen
 #define rt_crt_wfopen _wfopen
 #define rt_crt_rmdir rmdir

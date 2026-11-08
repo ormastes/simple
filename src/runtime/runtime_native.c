@@ -874,7 +874,7 @@ int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
     wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
     if (!wide) { errno = ENOMEM; return -1; }
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, wide, wide_len);
-    int fd = _wopen(wide, oflag, _S_IREAD | _S_IWRITE);
+    int fd = rt_crt_wopen(wide, oflag, _S_IREAD | _S_IWRITE);
     free(wide);
     return (int64_t)fd;
 #else
