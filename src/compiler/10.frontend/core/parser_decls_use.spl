@@ -27,7 +27,7 @@ use compiler.frontend.core.parser_expr.{parse_expr}
 use compiler.core.tokens.{TOK_KW_GENERIC, TOK_KW_LIMITS, TOK_KW_CANDIDATES}
 use compiler.core.tokens.{TOK_KW_AS}
 use compiler.core.types.{TYPE_VOID, TYPE_NAMED_BASE, named_type_find, named_type_register, flat_span_new}
-use compiler.core.types.{TYPE_ANY, named_generic_instance_register}
+use compiler.core.types.{TYPE_ANY, named_generic_instance_register, TYPE_BOOL, TYPE_I64, TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32, TYPE_F64}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_parse_type_with_union}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_parse_type}
 use compiler.core.parser.{parser_fixed_array_elem, parser_fixed_array_size}
@@ -36,7 +36,7 @@ use compiler.core.parser.{par_prof_enabled}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_source_slice}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.frontend.core.parser_stmts.{parse_block}
-use compiler.frontend.core.parser_stmts.{fixed_array_no_init_default_expr}
+use compiler.frontend.core.parser_stmts.{fixed_array_no_init_default_expr, var_no_init_default_expr, noinit_robust_mode_v1}
 use compiler.core.ast.{expr_int_lit, expr_nil_lit}
 use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
 use compiler.frontend.core.static_lock_level_metadata.{lock_level_pending_take, lock_level_record}
@@ -454,6 +454,8 @@ fn parse_var_decl() -> i64:
     if type_tag != 0 and not annotation_continuation:
         val at_decl_end = par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON or par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF
         if at_decl_end:
+            if noinit_robust_mode_v1():
+                parser_error("initializer required for module-level var in robust mode")
             if type_tag >= TYPE_NAMED_BASE:
                 # Eligibility precedes allocation: nil may be expression 0.
                 val named_init = expr_nil_lit(0)
@@ -463,6 +465,11 @@ fn parse_var_decl() -> i64:
             if arr_init != 0:
                 val noinit_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
                 return decl_var_binding(name, type_tag, arr_init, noinit_span)
+            if type_tag == TYPE_BOOL or type_tag == TYPE_I64 or type_tag == TYPE_U8 or type_tag == TYPE_U16 or type_tag == TYPE_U32 or type_tag == TYPE_U64 or type_tag == TYPE_I8 or type_tag == TYPE_I16 or type_tag == TYPE_I32 or type_tag == TYPE_F64:
+                val scalar_init = var_no_init_default_expr(type_tag, false, 0, -1)
+                val scalar_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
+                return decl_var_binding(name, type_tag, scalar_init, scalar_span)
+            parser_error("initializer required: this declared type (e.g. fn type, text, Option, dynamic array) has no safe zero value; nil is only allowed in unsafe")
 
     parser_expect(100)
     val init = parse_expr()
