@@ -2411,21 +2411,31 @@ int64_t spl_thread_cpu_count(void) {
  * shared-library closure. */
 extern void worker_loop_entry(int64_t pool_id) __attribute__((weak_import));
 #elif defined(_MSC_VER)
-/* MSVC has no weak symbols and rejects __attribute__ outright, so this
- * declaration had never compiled under cl.exe. /alternatename is the supported
- * equivalent: the linker binds worker_loop_entry to the fallback below ONLY
- * when nothing else defines it, which is exactly the "optional provider"
- * contract the weak declaration expresses. The `if (worker_loop_entry)` guards
- * at the call sites stay correct -- they exist to avoid calling through a null
- * address, and here the address is a do-nothing stub with the same effect as
- * skipping the call. x64 C symbols are undecorated, so the name needs no
- * leading underscore. */
-void worker_loop_entry_default(int64_t pool_id) { (void)pool_id; }
+/* MSVC resolves an absent provider to a non-null fallback. Detect that
+ * fallback explicitly so an interpreter does not spawn a no-op worker.
+ * x64 C symbols are undecorated. */
+/* Keep the fallback distinct from a linked empty worker under /OPT:ICF. */
+static volatile unsigned char worker_loop_entry_fallback_marker;
+void worker_loop_entry_default(int64_t pool_id) {
+    (void)pool_id;
+    (void)worker_loop_entry_fallback_marker;
+}
 #pragma comment(linker, "/alternatename:worker_loop_entry=worker_loop_entry_default")
 extern void worker_loop_entry(int64_t pool_id);
 #else
 extern void worker_loop_entry(int64_t pool_id) __attribute__((weak));
 #endif
+
+static bool worker_loop_entry_available(void) {
+#if defined(_MSC_VER)
+    /* The linker alias is invisible to the optimizer. A volatile load keeps
+     * distinct declarations from being folded into an always-true comparison. */
+    void (*volatile entry)(int64_t) = worker_loop_entry;
+    return entry != worker_loop_entry_default;
+#else
+    return worker_loop_entry != NULL;
+#endif
+}
 
 /* Thread worker wrapper for pthread */
 #ifdef SPL_THREAD_PTHREAD
@@ -2433,7 +2443,7 @@ static void* worker_thread_wrapper(void* arg) {
     int64_t pool_id = (int64_t)(intptr_t)arg;
 
     /* Call Simple worker function if linked */
-    if (worker_loop_entry) {
+    if (worker_loop_entry_available()) {
         worker_loop_entry(pool_id);
     }
 
@@ -2444,7 +2454,7 @@ static DWORD WINAPI worker_thread_wrapper(LPVOID arg) {
     int64_t pool_id = (int64_t)(intptr_t)arg;
 
     /* Call Simple worker function if linked */
-    if (worker_loop_entry) {
+    if (worker_loop_entry_available()) {
         worker_loop_entry(pool_id);
     }
 
@@ -2454,7 +2464,7 @@ static DWORD WINAPI worker_thread_wrapper(LPVOID arg) {
 
 spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id) {
     /* Check if worker function is available (compiled mode only) */
-    if (!worker_loop_entry) {
+    if (!worker_loop_entry_available()) {
         return 0;  /* Not available in interpreter mode */
     }
 
