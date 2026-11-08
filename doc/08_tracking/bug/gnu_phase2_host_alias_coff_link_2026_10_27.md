@@ -306,3 +306,15 @@ allow the full runner native compilation and link to finish. A later optional
 SMF cache step hits the 16 GiB watchdog, leaving the outer build failed (88).
 See `phase2_runner_optional_smf_memory_2026_10_28.md`. No canonical admission,
 fullCLI verification, canonical BugDB write, or release readiness is claimed.
+
+## Status 2026-11-08: fix-implemented-verification-pending
+
+Root cause: the GNU runtime-owner projection ceded COFF definitions but kept the
+old ar symbol index, which still advertised removed symbols and pulled members
+with missing bodies. Fix 79261e409e9 (on release/1.0.0) rebuilds the index with
+`llvm-ar rDs` from the selected Clang install and binds index mode + archiver
+hash into the cache identity. Regression/prevention spec
+`test/01_unit/compiler/backend/gnu_runtime_owner_index_rebuild_spec.spl`: 4/4 on
+current source, 0/4 against the pre-fix source. Remaining verification: native
+GNU Phase2 link + Hello run with a redeployed producer. The E-MONO-032 runner
+failure described above is a separate defect, not this bug.
