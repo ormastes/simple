@@ -4,7 +4,14 @@
 #include <windows.h>
 #include "runtime_memtrack.h"
 #include "runtime_memory_guard.h"
+static int fail_widen_allocation;
+static void* fixture_path_malloc(size_t size) {
+    if (fail_widen_allocation) { fail_widen_allocation = 0; return NULL; }
+    return malloc(size);
+}
+#define malloc fixture_path_malloc
 #include "platform/runtime_win_long_path.h"
+#undef malloc
 #include "runtime_payload_text.h"
 
 int g_memtrack_enabled = 1;
@@ -66,12 +73,14 @@ int main(void) {
     assert(!rt_win_fopen_read_shared("missing-msvc-crt-fixture.tmp"));
     /* Invalid UTF-8 forces the CRT fallback; the missing file must fail. */
     assert(!rt_win_fopen_read_shared("missing-\xff-msvc-crt-fixture.tmp"));
-    /* The ANSI CRT accepts this name, while UTF-8 widening rejects it.
-     * Preserve the original fallback's sharing with concurrent writers. */
-    const char* fallback_path = "fallback-\xff-msvc-crt-fixture.tmp";
+    /* Allocation failure in widening must retain the original CRT
+     * fallback's sharing with concurrent writers. */
+    const char* fallback_path = "fallback-msvc-crt-fixture.tmp";
     FILE* writer = _fsopen(fallback_path, "wb", _SH_DENYNO);
     assert(writer && fputc('x', writer) == 'x' && fclose(writer) == 0);
+    fail_widen_allocation = 1;
     file = rt_win_fopen_read_shared(fallback_path);
+    assert(!fail_widen_allocation);
     assert(file && fgetc(file) == 'x');
     writer = _fsopen(fallback_path, "rb+", _SH_DENYNO);
     assert(writer && fclose(writer) == 0);
