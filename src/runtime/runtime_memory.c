@@ -11,6 +11,7 @@ const volatile int rt_alloc_observer_memory_owner_v1 = 1;
 
 #include <stdint.h>
 #include <stdlib.h>
+#include "runtime_env_owned.h"
 #include <string.h>
 #include <limits.h>
 
@@ -295,8 +296,7 @@ static size_t rt_mem_quarantine_write = 0;
 static int rt_mem_harden_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
-        const char* v = getenv("SIMPLE_MEM_HARDEN");
-        cached = (v != NULL && v[0] == '1' && v[1] == '\0') ? 1 : 0;
+        cached = rt_env_flag_is("SIMPLE_MEM_HARDEN", '1');
     }
     return cached;
 }

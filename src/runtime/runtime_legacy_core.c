@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include "runtime_env_owned.h"
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -778,9 +779,12 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
         int64_t names, int64_t symbols, int64_t functions, int64_t constants,
         int64_t enums, int64_t structs, int64_t classes) {
     char run[128], e[64], p[4096], sp[4096], line[9216];
-    const char* run_id = getenv("SIMPLE_EVIDENCE_RUN_ID");
-    if (!run_id || !*run_id) run_id = "none";
-    if (rt_mem_snapshot_token(run, sizeof(run), run_id, (int64_t)strlen(run_id)) < 0 ||
+    char* run_owned = NULL;
+    if (rt_env_snapshot("SIMPLE_EVIDENCE_RUN_ID", &run_owned) != 0) return 0;
+    const char* run_id = run_owned && *run_owned ? run_owned : "none";
+    int run_ok = rt_mem_snapshot_token(run, sizeof(run), run_id, (int64_t)strlen(run_id));
+    free(run_owned);
+    if (run_ok < 0 ||
         rt_mem_snapshot_token(e, sizeof(e), event, event_len) < 0 ||
         rt_mem_snapshot_token(p, sizeof(p), phase, phase_len) < 0 ||
         rt_mem_snapshot_token(sp, sizeof(sp), path, path_len) < 0) return 0;
@@ -872,10 +876,30 @@ char* rt_getcwd(void) {
     return spl_str_new(buf);
 }
 
+/* BEGIN borrowed-env-compat: the public ABI returns CRT-owned storage.
+ * getenv_s/_dupenv_s require caller-owned storage and change pointer lifetime.
+ * Keep the CRT's locking and lazy narrow-environment initialization here. */
+#if defined(_MSC_VER)
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#else
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+#endif
 const char* spl_env_get(const char* key) {
     const char* value = key ? getenv(key) : NULL;
     return value ? value : "";
 }
+#if defined(_MSC_VER)
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#else
+#pragma warning(pop)
+#endif
+#endif
+/* END borrowed-env-compat */
 
 void rt_sleep_ms_native(int64_t ms) {
     if (ms <= 0) return;

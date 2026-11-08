@@ -34,6 +34,7 @@
 #include "runtime_simd_dispatch.h"
 #include "simple_vector_kernel_abi_v1.h"
 #include <stdlib.h>
+#include "runtime_env_owned.h"
 #include <stdio.h>
 #include <ctype.h>
 #include <string.h>
@@ -503,9 +504,7 @@ static int text_provider_self_test(void) {
 }
 
 /* Cold, once, from simd_text_init. Publishes g_text_* before the table. */
-static void simd_text_provider_admit(void) {
-    const char* path = getenv("SIMPLE_VECTOR_PROVIDER_PATH");
-    const char* pin = getenv("SIMPLE_VECTOR_PROVIDER_SHA256");
+static void simd_text_provider_admit_values(const char* path, const char* pin) {
     char exe_dir[4096] = {0};
     const int have_exe_dir = text_exe_dir(exe_dir, sizeof(exe_dir));
     if (path && !strcmp(path, "off")) { g_text_status = SIMD_TEXT_PROVIDER_NOT_CONFIGURED; return; }
@@ -568,12 +567,30 @@ static void simd_text_provider_admit(void) {
     g_text_status = SIMD_TEXT_PROVIDER_ADMITTED;
 }
 
+static void simd_text_provider_admit(void) {
+    char* path = NULL;
+    char* pin = NULL;
+    if (rt_env_snapshot("SIMPLE_VECTOR_PROVIDER_PATH", &path) != 0 ||
+            rt_env_snapshot("SIMPLE_VECTOR_PROVIDER_SHA256", &pin) != 0) {
+        g_text_status = SIMD_TEXT_PROVIDER_LOAD_FAILED;
+    } else {
+        simd_text_provider_admit_values(path, pin);
+    }
+    free(pin);
+    free(path);
+}
+
 #else
 /* No dynamic loader on this target: the scalar baseline is the route. */
 static void simd_text_provider_admit(void) {
-    const char* path = getenv("SIMPLE_VECTOR_PROVIDER_PATH");
+    char* path = NULL;
+    if (rt_env_snapshot("SIMPLE_VECTOR_PROVIDER_PATH", &path) != 0) {
+        g_text_status = SIMD_TEXT_PROVIDER_LOAD_FAILED;
+        return;
+    }
     g_text_status = (path && *path && strcmp(path, "off")) ? SIMD_TEXT_PROVIDER_LOAD_FAILED
                                                             : SIMD_TEXT_PROVIDER_NOT_CONFIGURED;
+    free(path);
 }
 #endif /* SIMD_TEXT_DYNLOAD */
 
@@ -747,9 +764,9 @@ static int g_slice_audit_seen[8];
 
 int64_t rt_text_slice_audit_level(void) {
     if (g_slice_audit_level < 0) {
-        const char* raw = getenv("SIMPLE_UTF8_SLICE_AUDIT");
-        if (raw && raw[0] == '1' && raw[1] == '\0') g_slice_audit_level = 1;
-        else if (raw && raw[0] == '2' && raw[1] == '\0') g_slice_audit_level = 2;
+        char flag = rt_env_flag_value("SIMPLE_UTF8_SLICE_AUDIT");
+        if (flag == '1') g_slice_audit_level = 1;
+        else if (flag == '2') g_slice_audit_level = 2;
         else g_slice_audit_level = 0;
     }
     return g_slice_audit_level;
