@@ -1,0 +1,158 @@
+# Actual read-only installed-service observation. No exec or launch admission.
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEngineObservationV1,
+    linux_oci_engine_info_observation_v1, linux_oci_engine_observation_match_v1}
+use std.nogc_async_mut.container.providers.linux.engine_observer_v1.linux_oci_engine_observe_v1
+use std.nogc_async_mut.container.providers.linux.engine_exec_http_v3.{linux_engine_info_http_request_v3,
+    linux_engine_info_http_decode_v3}
+use std.nogc_sync_mut.io.local_ipc_v1.{LocalUnixConnectionV1, LocalUnixPeerV1,
+    local_unix_connect_v1, local_unix_read_v1, local_unix_write_some_v1, local_unix_close_v1}
+use std.nogc_sync_mut.io.time_ops.{time_sample_monotonic_nanos_or_failure, time_sample_unix_micros_or_failure}
+use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+val INSTALLED_PROBE_WIRE_LIMIT_V3: i64 = 2113536
+
+pub struct LinuxOciInstalledObservationV3:
+    policy_digest: text
+    cli: LinuxOciEngineObservationV1
+    peer: LocalUnixPeerV1
+    api_version: text
+    identity_digest: text
+    observed_unix_ms: i64
+    query_digest: text
+    evidence_digest: text
+
+pub struct LinuxOciInstalledProbeTurnV3:
+    connection: LocalUnixConnectionV1?
+    observation: LinuxOciInstalledObservationV3?
+    error: text
+
+pub fn linux_oci_installed_deadline_v3(now_ms: i64, timeout_ms: i64) -> Result<i64, text>:
+    if now_ms <= 0: return Err("installed-probe-clock-unavailable")
+    if timeout_ms <= 0 or timeout_ms > 30000: return Err("installed-probe-timeout-invalid")
+    if now_ms > 9223372036854775807 - timeout_ms: return Err("installed-probe-deadline-overflow")
+    Ok(now_ms + timeout_ms)
+
+fn installed_monotonic_ms_v3() -> i64:
+    val nanos = time_sample_monotonic_nanos_or_failure()
+    if nanos <= 0: return -1
+    nanos / 1000000
+
+pub fn linux_oci_installed_deadline_live_v3(deadline: i64, now: i64) -> bool:
+    now > 0 and now < deadline
+
+fn installed_deadline_live_v3(deadline: i64) -> bool:
+    linux_oci_installed_deadline_live_v3(deadline, installed_monotonic_ms_v3())
+
+pub fn linux_oci_installed_probe_close_v3(connection: LocalUnixConnectionV1) -> LinuxOciInstalledProbeTurnV3:
+    val closed = local_unix_close_v1(connection)
+    var error = closed.error
+    if error == "" and (not closed.closed or closed.owner.?): error = "installed-probe-close-unconfirmed"
+    LinuxOciInstalledProbeTurnV3(connection: closed.owner, observation: nil, error: error)
+
+fn installed_probe_failed_v3(connection: LocalUnixConnectionV1?, reason: text) -> LinuxOciInstalledProbeTurnV3:
+    if not connection.?: return LinuxOciInstalledProbeTurnV3(connection: nil, observation: nil, error: reason)
+    val closed = linux_oci_installed_probe_close_v3(connection.unwrap())
+    val error = if closed.error == "": reason else: reason + "; " + closed.error
+    LinuxOciInstalledProbeTurnV3(connection: closed.connection, observation: nil, error: error)
+
+fn installed_bytes_digest_v3(bytes: [u8]) -> Result<text, text>:
+    if bytes.len() > INSTALLED_PROBE_WIRE_LIMIT_V3: return Err("installed-probe-wire-bound")
+    val stream = sha256_stream_v1_new()
+    if not stream.update(bytes): return Err("installed-probe-digest-unavailable")
+    match stream.finish_hex():
+        case Some(value): Ok(value)
+        case None: Err("installed-probe-digest-unavailable")
+
+# Pure correlation is not an observed owner or factory capability. Production
+# calls this only after actual CLI+peer+EOF evidence and confirmed socket close.
+pub fn linux_oci_installed_correlate_v3(policy: LinuxOciInstalledPolicyV3,
+        cli: LinuxOciEngineObservationV1, peer: LocalUnixPeerV1,
+        wire: [u8], observed_unix_ms: i64) -> Result<LinuxOciInstalledObservationV3, text>:
+    val policy_digest = linux_oci_installed_policy_digest_v3(policy)?
+    val matched = linux_oci_engine_observation_match_v1(policy.cli_policy, cli)?
+    if (peer.uid != policy.expected_service_uid or peer.gid < 0 or peer.gid > 4294967294 or
+            peer.pid <= 0 or peer.pid > 2147483647 or peer.socket_device < 0 or peer.socket_inode <= 0 or
+            peer.socket_device > 1152921504606846975 or peer.socket_inode > 1152921504606846975):
+        return Err("installed-probe-peer-mismatch")
+    if observed_unix_ms <= 0: return Err("installed-probe-observation-clock-unavailable")
+    val response = linux_engine_info_http_decode_v3(wire)?
+    if cli.engine_version != policy.api_version: return Err("installed-probe-cli-version-mismatch")
+    val service = linux_oci_engine_info_observation_v1(policy.cli_policy, response.body, cli.executable_digest, peer.uid)?
+    if (service.engine_version != response.api_version or service.identity_digest != cli.identity_digest):
+        return Err("installed-probe-service-cli-identity-mismatch")
+    val identity_fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-oci-installed-identity-v3"),
+        "policyDigest": SdnValue.String(policy_digest), "cliIdentity": SdnValue.String(cli.identity_digest),
+        "peerUid": SdnValue.Int(peer.uid), "peerGid": SdnValue.Int(peer.gid), "peerPid": SdnValue.Int(peer.pid),
+        "socketDevice": SdnValue.Int(peer.socket_device), "socketInode": SdnValue.Int(peer.socket_inode),
+        "apiVersion": SdnValue.String(response.api_version)}
+    val identity_digest = sha256_text(sdn_encode_canonical(SdnValue.Dict(identity_fields)))
+    val query_fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-oci-installed-info-query-v3"),
+        "policyDigest": SdnValue.String(policy_digest), "installedIdentity": SdnValue.String(identity_digest),
+        "wireDigest": SdnValue.String(installed_bytes_digest_v3(linux_engine_info_http_request_v3())?)}
+    val query_digest = sha256_text(sdn_encode_canonical(SdnValue.Dict(query_fields)))
+    val evidence_fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-oci-installed-info-evidence-v3"),
+        "queryDigest": SdnValue.String(query_digest), "responseWireDigest": SdnValue.String(installed_bytes_digest_v3(wire)?),
+        "observedUnixMs": SdnValue.Int(observed_unix_ms)}
+    Ok(LinuxOciInstalledObservationV3(policy_digest: policy_digest, cli: cli, peer: peer,
+        api_version: response.api_version, identity_digest: identity_digest, observed_unix_ms: observed_unix_ms,
+        query_digest: query_digest, evidence_digest: sha256_text(sdn_encode_canonical(SdnValue.Dict(evidence_fields)))))
+
+pub fn linux_oci_installed_probe_v3(policy: LinuxOciInstalledPolicyV3, timeout_ms: i64) -> LinuxOciInstalledProbeTurnV3:
+    val policy_error = linux_oci_installed_policy_error_v3(policy)
+    if policy_error != "": return installed_probe_failed_v3(nil, policy_error)
+    val deadline = match linux_oci_installed_deadline_v3(installed_monotonic_ms_v3(), timeout_ms):
+        case Ok(value): value
+        case Err(reason): return installed_probe_failed_v3(nil, reason)
+    val cli = match linux_oci_engine_observe_v1(policy.cli_policy, timeout_ms):
+        case Ok(value): value
+        case Err(reason): return installed_probe_failed_v3(nil, reason)
+    if not installed_deadline_live_v3(deadline): return installed_probe_failed_v3(nil, "installed-probe-deadline-expired")
+    val connected = local_unix_connect_v1(policy.socket_path, policy.expected_service_uid, deadline)
+    if connected.error != "": return installed_probe_failed_v3(connected.owner, connected.error)
+    if not connected.owner.? or not connected.peer.?:
+        return installed_probe_failed_v3(connected.owner, "installed-probe-connect-unconfirmed")
+    var connection = connected.owner.unwrap()
+    val peer = connected.peer.unwrap()
+    val request = linux_engine_info_http_request_v3()
+    var offset = 0
+    while offset < request.len():
+        if not installed_deadline_live_v3(deadline):
+            return installed_probe_failed_v3(Some(connection), "installed-probe-deadline-expired")
+        val maximum = if request.len() - offset < 65536: request.len() - offset else: 65536
+        val written = local_unix_write_some_v1(connection, request, offset, maximum, deadline)
+        connection = written.owner
+        if written.error != "": return installed_probe_failed_v3(Some(connection), written.error)
+        if written.accepted_bytes <= 0 or written.accepted_bytes > maximum:
+            return installed_probe_failed_v3(Some(connection), "installed-probe-write-no-progress")
+        offset = offset + written.accepted_bytes
+    var wire: [u8] = []
+    while true:
+        if not installed_deadline_live_v3(deadline):
+            return installed_probe_failed_v3(Some(connection), "installed-probe-deadline-expired")
+        # One extra byte distinguishes exact cap+EOF from silent truncation.
+        val remaining = INSTALLED_PROBE_WIRE_LIMIT_V3 + 1 - wire.len()
+        val maximum = if remaining < 65536: remaining else: 65536
+        val read = local_unix_read_v1(connection, maximum, deadline)
+        connection = read.owner
+        if read.error != "": return installed_probe_failed_v3(Some(connection), read.error)
+        if read.bytes.len() > maximum: return installed_probe_failed_v3(Some(connection), "installed-probe-read-contract")
+        for byte in read.bytes: wire.push(byte)
+        if wire.len() > INSTALLED_PROBE_WIRE_LIMIT_V3:
+            return installed_probe_failed_v3(Some(connection), "installed-probe-wire-bound")
+        if read.eof: break
+        if read.bytes.len() == 0: return installed_probe_failed_v3(Some(connection), "installed-probe-read-no-progress")
+    val closed = linux_oci_installed_probe_close_v3(connection)
+    if closed.error != "" or closed.connection.?: return closed
+    if not installed_deadline_live_v3(deadline):
+        return installed_probe_failed_v3(nil, "installed-probe-deadline-expired")
+    val micros = time_sample_unix_micros_or_failure()
+    if micros <= 0: return installed_probe_failed_v3(nil, "installed-probe-observation-clock-unavailable")
+    match linux_oci_installed_correlate_v3(policy, cli, peer, wire, micros / 1000):
+        case Ok(observation):
+            if not installed_deadline_live_v3(deadline):
+                return installed_probe_failed_v3(nil, "installed-probe-deadline-expired")
+            LinuxOciInstalledProbeTurnV3(connection: nil, observation: Some(observation), error: "")
+        case Err(reason): installed_probe_failed_v3(nil, reason)

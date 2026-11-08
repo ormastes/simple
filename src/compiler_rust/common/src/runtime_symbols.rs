@@ -962,6 +962,13 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_observation_v4_pin_cwd_value",
     "rt_process_observation_v4_cwd_digest_value",
     "rt_process_observation_v4_close_cwd_value",
+    "rt_process_observation_v4_reserved_matches_value",
+    "rt_process_observation_v4_reserve_value",
+    "rt_process_observation_v4_reserved_state_value",
+    "rt_process_observation_v4_reserved_start_pinned_value",
+    "rt_process_observation_v4_reserved_observe_value",
+    "rt_process_observation_v4_reserved_ack_value",
+    "rt_process_observation_v4_reserved_confirm_release_value",
     "rt_process_observation_v4_start_value",
     "rt_process_observation_v4_start_pinned_value",
     "rt_process_observation_v4_poll_value",
@@ -1219,6 +1226,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_hash_sha256",
     "rt_file_lock",
     "rt_file_unlock",
+    "rt_file_lock_owned_acquire_v2",
+    "rt_file_lock_owned_state_v2",
+    "rt_file_lock_owned_release_v2",
     "rt_file_rename",
     "rt_file_read_lines",
     "rt_file_append_text",
@@ -1244,6 +1254,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simple_sandbox_section_start",
     "rt_simple_sandbox_section_end",
     "rt_bytes_to_text",
+    "rt_tls_wire_from_bytes",
     "rt_char_from_code",
     "rt_text_to_bytes",
     "rt_file_write_bytes",
@@ -1336,6 +1347,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // File locking
     "rt_file_lock",
     "rt_file_unlock",
+    "rt_file_lock_owned_acquire_v2",
+    "rt_file_lock_owned_state_v2",
+    "rt_file_lock_owned_release_v2",
     // System info
     "rt_getpid",
     "rt_process_exists",
@@ -2859,6 +2873,18 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_value_println"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"SCOPE_LEVELS_dot_has"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"stdin_read_char"));
+    }
+
+    #[test]
+    fn tls_wire_provider_is_registered_exactly_once() {
+        assert_eq!(
+            RUNTIME_SYMBOL_NAMES
+                .iter()
+                .filter(|&&name| name == "rt_tls_wire_from_bytes")
+                .count(),
+            1
+        );
+        assert_eq!(symbol_tier_of("rt_tls_wire_from_bytes"), RuntimeSymbolTier::Core);
     }
 
     #[test]

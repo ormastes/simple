@@ -1,0 +1,54 @@
+# @req HOST-LOCAL-07 HOST-HELPER-03
+# NOT_RUN. Actual common owner/journal and explicitly scripted native inspection.
+use test.fixtures.orchestration.host_local_resolver_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_local_command_v1.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_v1
+use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+describe "Retained host execution resolution preserves the current Container owner":
+    it "resolves the protected request and returns updated owners across repeated exact inspection":
+        val local = host_local_resolver_fixture_v2("resolver-success")
+        expect(host_local_resolver_consumed_fixture_v2(local.container)).to_equal(3)
+        val first = host_local_resolve_execution_v2(local, "operation_1")
+        expect(first.error).to_equal("")
+        expect(first.execution.unwrap().plan.operation_id).to_equal("operation_1")
+        expect(first.observation.unwrap().runtime.native_id).to_equal("1".repeat(64))
+        expect(host_local_resolver_consumed_fixture_v2(first.local.container)).to_equal(5)
+        val repeated = host_local_resolve_execution_v2(first.local, "operation_1")
+        expect(repeated.error).to_equal("")
+        expect(host_local_resolver_consumed_fixture_v2(repeated.local.container)).to_equal(7)
+        expect(repeated.observation.unwrap().runtime.node_boot_id).to_equal(container_scope_fence_id_v2(local.scope).unwrap())
+        expect(repeated.local.capacity.journal.sequence).to_equal(local.capacity.journal.sequence)
+        expect(host_available_capacity_v1(repeated.local.capacity.ledger).unwrap().cpu_millis).to_equal(1000)
+        assert(host_capacity_owner_close_v1(repeated.local.capacity).unwrap())
+        dir_remove(local.root, true)
+
+    it "returns the actual updated common owner and retained charge after recovery or inspect failure":
+        for mode in ["resolver-recover-failed", "resolver-inspect-failed"]:
+            val local = host_local_resolver_fixture_v2(mode)
+            val result = host_local_resolve_execution_v2(local, "operation_1")
+            assert(result.error != "")
+            assert(result.execution.?)
+            assert(not result.observation.?)
+            expect(host_local_resolver_consumed_fixture_v2(result.local.container)).to_equal(
+                if mode == "resolver-recover-failed": 4 else: 5)
+            expect(result.local.capacity.journal.sequence).to_equal(local.capacity.journal.sequence)
+            expect(host_available_capacity_v1(result.local.capacity.ledger).unwrap().cpu_millis).to_equal(1000)
+            assert(host_capacity_owner_close_v1(result.local.capacity).unwrap())
+            dir_remove(local.root, true)
+
+    it "refuses corrupt protected packet data before another native query":
+        val local = host_local_resolver_fixture_v2("resolver-success")
+        val path = local.capacity.journal.root + "/host-execute-packets/" + sha256_text("operation_1") + ".sdn"
+        assert(file_atomic_write_mode(path, "corrupt retained packet\n", 0o600))
+        val result = host_local_resolve_execution_v2(local, "operation_1")
+        assert(result.error != "")
+        assert(not result.execution.?)
+        expect(host_local_resolver_consumed_fixture_v2(result.local.container)).to_equal(3)
+        expect(result.local.capacity.journal.sequence).to_equal(local.capacity.journal.sequence)
+        assert(host_capacity_owner_close_v1(result.local.capacity).unwrap())
+        dir_remove(local.root, true)

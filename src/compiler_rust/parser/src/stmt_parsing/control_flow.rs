@@ -918,6 +918,11 @@ impl<'a> Parser<'a> {
 
             if self.check(&TokenKind::Dedent) {
                 self.advance();
+            } else if !equal_column && self.at_enclosing_list_terminator() {
+                // A same-line list closer ends this physically indented arm
+                // block before the lexer emits its Dedent. Do not pop for the
+                // equal-column continuation shape, which consumed no Indent.
+                self.lexer.pop_indent();
             }
 
             let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
@@ -1108,6 +1113,13 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
+        let enclosing_column = self.match_arm_column.replace(self.current.span.column);
+        let result = self.parse_match_arm_body();
+        self.match_arm_column = enclosing_column;
+        result
+    }
+
+    fn parse_match_arm_body(&mut self) -> Result<MatchArm, ParseError> {
         let start_span = self.current.span;
 
         // Support both syntaxes:
@@ -1131,7 +1143,15 @@ impl<'a> Parser<'a> {
 
         let guard = if self.check(&TokenKind::If) {
             self.advance();
-            Some(self.parse_expression()?)
+            // Traditional case-colon guards retain their functional-update
+            // grammar. Only pipe arms require an unparenthesized arrow delimiter.
+            let enclosing_depth = self.match_guard_arrow_depth;
+            if is_pipe_syntax {
+                self.match_guard_arrow_depth = Some(self.parse_recursion_depth + 1);
+            }
+            let result = self.parse_expression();
+            self.match_guard_arrow_depth = enclosing_depth;
+            Some(result?)
         } else {
             None
         };

@@ -1,0 +1,140 @@
+# Facts from the configured owner. Adoption, bytes, cleanup and host settlement
+# remain separate. No result from this module grants input or workload control.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct SmuxRuntimeBindingReplyV3:
+    binding_uid: text
+    service_incarnation: text
+    binding_digest: text
+    workload_operation_id: text
+    helper_operation_id: text
+    request_digest: text
+    status: text
+    code: text
+    committed: bool
+    stream_owned: bool
+    cleanup_retained: bool
+    host_release_pending: bool
+    helper_grant_id: text = ""
+    helper_issuer_id: text = ""
+    helper_approver_id: text = ""
+
+fn binding_reply_digest_v3(value: text) -> bool:
+    value.len() == 64 and builder_digest_valid_v1(value)
+
+fn binding_reply_valid_v3(reply: SmuxRuntimeBindingReplyV3) -> bool:
+    if reply.service_incarnation.len() != 32: return false
+    for ch in reply.service_incarnation.chars():
+        if not "0123456789abcdef".contains(ch): return false
+    if not ["planned", "helper-prepared", "adopted-opening", "cleanup-required", "helper-cleaned-awaiting-release",
+            "released", "unconfirmed", "rejected", "not-found"].contains(reply.status): return false
+    if reply.code == "" or reply.code.bytes().len() > 256: return false
+    for ch in reply.code.chars():
+        if ch.ord() < 32 or ch.ord() == 127: return false
+    if reply.binding_uid == "":
+        if reply.status != "rejected": return false
+    elif not builder_identifier_valid_v1(reply.binding_uid): return false
+    for identity in [reply.workload_operation_id, reply.helper_operation_id]:
+        if identity != "" and not builder_identifier_valid_v1(identity): return false
+    for digest in [reply.binding_digest, reply.request_digest]:
+        if digest != "" and not binding_reply_digest_v3(digest): return false
+    val correlated = (reply.workload_operation_id != "" and reply.helper_operation_id != "" and
+        reply.workload_operation_id != reply.helper_operation_id and binding_reply_digest_v3(reply.binding_digest) and
+        binding_reply_digest_v3(reply.request_digest))
+    val granted = (builder_identifier_valid_v1(reply.helper_grant_id) and
+        builder_identifier_valid_v1(reply.helper_issuer_id) and builder_identifier_valid_v1(reply.helper_approver_id))
+    if (reply.helper_grant_id != "" or reply.helper_issuer_id != "" or reply.helper_approver_id != "") and not granted:
+        return false
+    if reply.stream_owned and (not reply.cleanup_retained or not reply.host_release_pending): return false
+    if reply.stream_owned and (not granted or not correlated or not reply.committed): return false
+    if reply.cleanup_retained and not reply.host_release_pending: return false
+    if reply.status == "planned":
+        if (not correlated or reply.committed or reply.stream_owned or reply.cleanup_retained or
+                reply.host_release_pending or granted): return false
+    elif reply.status == "helper-prepared":
+        if (not correlated or reply.committed or reply.stream_owned or reply.cleanup_retained or
+                not reply.host_release_pending or granted): return false
+    elif reply.status == "adopted-opening":
+        if (not correlated or not granted or not reply.committed or not reply.stream_owned or
+                not reply.cleanup_retained or not reply.host_release_pending): return false
+    elif reply.status == "cleanup-required":
+        if not correlated or not reply.cleanup_retained or not reply.host_release_pending: return false
+    elif reply.status == "helper-cleaned-awaiting-release":
+        if (not correlated or not granted or reply.stream_owned or not reply.cleanup_retained or
+                not reply.host_release_pending): return false
+    elif reply.status == "released":
+        if (not granted or not correlated or not reply.committed or reply.stream_owned or
+                reply.cleanup_retained or reply.host_release_pending): return false
+    elif reply.status == "rejected" or reply.status == "not-found":
+        if reply.committed or reply.stream_owned or reply.cleanup_retained or reply.host_release_pending: return false
+    true
+
+pub fn smux_runtime_binding_reply_encode_v3(reply: SmuxRuntimeBindingReplyV3) -> Result<text, text>:
+    if not binding_reply_valid_v3(reply): return Err("runtime-binding-reply-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String("smux-runtime-binding-state"),
+        "bindingUid": SdnValue.String(reply.binding_uid), "serviceIncarnation": SdnValue.String(reply.service_incarnation),
+        "bindingDigest": SdnValue.String(reply.binding_digest), "workloadOperationId": SdnValue.String(reply.workload_operation_id),
+        "helperOperationId": SdnValue.String(reply.helper_operation_id), "requestDigest": SdnValue.String(reply.request_digest),
+        "status": SdnValue.String(reply.status), "code": SdnValue.String(reply.code),
+        "committed": SdnValue.Bool(reply.committed), "streamOwned": SdnValue.Bool(reply.stream_owned),
+        "cleanupRetained": SdnValue.Bool(reply.cleanup_retained), "hostReleasePending": SdnValue.Bool(reply.host_release_pending),
+        "helperGrantId": SdnValue.String(reply.helper_grant_id), "helperIssuerId": SdnValue.String(reply.helper_issuer_id),
+        "helperApproverId": SdnValue.String(reply.helper_approver_id), "outputMode": SdnValue.String("output-follow"),
+        "inputSupported": SdnValue.Bool(false), "geometrySupported": SdnValue.Bool(false),
+        "interactive": SdnValue.Bool(false), "completionObserved": SdnValue.Bool(false)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields))
+    if source.bytes().len() > 4096: return Err("runtime-binding-reply-size")
+    Ok(source)
+
+fn binding_reply_text_v3(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("runtime-binding-reply-field-type")
+
+fn binding_reply_bool_v3(fields: Dict<text, SdnValue>, name: text) -> Result<bool, text>:
+    match fields[name]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("runtime-binding-reply-field-type")
+
+pub fn smux_runtime_binding_reply_decode_v3(source: text) -> Result<SmuxRuntimeBindingReplyV3, text>:
+    if source.bytes().len() == 0 or source.bytes().len() > 4097: return Err("runtime-binding-reply-size")
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4097,
+        max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 32))
+    if parsed.is_err(): return Err("runtime-binding-reply-malformed")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("runtime-binding-reply-object")
+    val names = ["version", "kind", "bindingUid", "serviceIncarnation", "bindingDigest", "workloadOperationId",
+        "helperOperationId", "requestDigest", "status", "code", "committed", "streamOwned", "cleanupRetained",
+        "hostReleasePending", "helperGrantId", "helperIssuerId", "helperApproverId", "outputMode",
+        "inputSupported", "geometrySupported", "interactive", "completionObserved"]
+    if fields.len() != names.len(): return Err("runtime-binding-reply-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("runtime-binding-reply-fields")
+    if (fields["version"] != SdnValue.Int(3) or
+            binding_reply_text_v3(fields, "kind")? != "smux-runtime-binding-state" or
+            binding_reply_text_v3(fields, "outputMode")? != "output-follow"):
+        return Err("runtime-binding-reply-version")
+    for name in ["inputSupported", "geometrySupported", "interactive", "completionObserved"]:
+        if binding_reply_bool_v3(fields, name)?: return Err("runtime-binding-reply-unsupported-claim")
+    val reply = SmuxRuntimeBindingReplyV3(binding_uid: binding_reply_text_v3(fields, "bindingUid")?,
+        service_incarnation: binding_reply_text_v3(fields, "serviceIncarnation")?,
+        binding_digest: binding_reply_text_v3(fields, "bindingDigest")?,
+        workload_operation_id: binding_reply_text_v3(fields, "workloadOperationId")?,
+        helper_operation_id: binding_reply_text_v3(fields, "helperOperationId")?,
+        request_digest: binding_reply_text_v3(fields, "requestDigest")?,
+        status: binding_reply_text_v3(fields, "status")?, code: binding_reply_text_v3(fields, "code")?,
+        committed: binding_reply_bool_v3(fields, "committed")?, stream_owned: binding_reply_bool_v3(fields, "streamOwned")?,
+        cleanup_retained: binding_reply_bool_v3(fields, "cleanupRetained")?,
+        host_release_pending: binding_reply_bool_v3(fields, "hostReleasePending")?,
+        helper_grant_id: binding_reply_text_v3(fields, "helperGrantId")?,
+        helper_issuer_id: binding_reply_text_v3(fields, "helperIssuerId")?,
+        helper_approver_id: binding_reply_text_v3(fields, "helperApproverId")?)
+    val encoded = smux_runtime_binding_reply_encode_v3(reply)?
+    if source != encoded and source != encoded + "\n": return Err("runtime-binding-reply-noncanonical")
+    Ok(reply)

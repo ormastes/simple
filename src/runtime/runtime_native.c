@@ -42,6 +42,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include "runtime_startup_args.h"
 #include "runtime_utf8_lossy_private.h"
 #include "platform/runtime_windows_private_atomic.h"
+#include "platform/runtime_windows_pty_owner_thread_private.h"
 #include "simple_gui_html_provider_abi_v1.h"
 #include "simple_gui_event_provider_abi_v1.h"
 
@@ -56,6 +57,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include <string.h>
 #include <limits.h>
 #include <errno.h>
+#include "platform/runtime_windows_private_root.h"
 #include <math.h>
 #include <signal.h>
 #include <time.h>
@@ -1592,6 +1594,10 @@ static int rt_core_dict_has(RtCoreDict* d, int64_t key);
 static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed);
 
 static _Atomic size_t rt_core_heap_registry_count = 0;
+/* Successful heap-object registrations since process start. Unlike the live
+ * registry count, releases never decrement this counter; duplicate registrations
+ * and registry rehashing do not increment it. Mirrors Rust total_allocs. */
+static _Atomic int64_t rt_core_heap_total_allocs = 0;
 
 /* Aux-byte accounting: container BACKING buffers (RtCoreArray.data,
  * RtCoreDict.entries) live in allocations separate from the object header,
@@ -1712,12 +1718,16 @@ static uint32_t rt_core_registered_object_kind(void* ptr) {
     return *(uint8_t*)ptr;
 }
 
+static int core_allocation_uses_session_v1(void) {
+    return rt_core_session_heap_live_id &&
+        (rt_core_session_alloc_depth > 0 || !rt_core_transient_array_scope_active ||
+         rt_core_transient_array_scope_paused);
+}
+
 static uint32_t rt_core_transient_scope_for_new_object(void) {
     /* A live session owns what a paused/absent module scope would have left
      * permanent, and everything inside rt_session_alloc_begin/end (I3). */
-    if (rt_core_session_heap_live_id &&
-        (rt_core_session_alloc_depth > 0 || !rt_core_transient_array_scope_active ||
-         rt_core_transient_array_scope_paused)) {
+    if (core_allocation_uses_session_v1()) {
         return rt_core_session_heap_live_id;
     }
     return rt_core_transient_array_scope_active && !rt_core_transient_array_scope_paused
@@ -1880,6 +1890,7 @@ static int rt_core_register_mutex(RtCoreMutex* mutex) {
     }
     rt_core_mutex_registry[rt_core_mutex_registry_len++] = mutex;
     atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
     atomic_flag_clear_explicit(&rt_core_mutex_registry_lock, memory_order_release);
     return 1;
 }
@@ -1945,6 +1956,12 @@ static int rt_core_is_registered_enum(RtCoreEnum* e) {
     return rt_core_is_registered_immortal_ptr(e);
 }
 
+/* Monotonic successful heap-object allocation registrations, not live count,
+ * raw allocator calls, or a modeled collection-operation count. */
+int64_t rt_heap_alloc_count(void) {
+    return atomic_load_explicit(&rt_core_heap_total_allocs, memory_order_relaxed);
+}
+
 int64_t rt_heap_registry_count(void) {
     return (int64_t)atomic_load_explicit(&rt_core_heap_registry_count, memory_order_relaxed);
 }
@@ -1968,6 +1985,23 @@ int64_t rt_transient_array_scope_state_v1(void) {
             atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
                 (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
     return rt_core_transient_array_scope_paused ? 2 : 1;
+}
+
+/* Identity of this thread's actual live scope, not a borrowed lease. Pause
+ * preserves it; end retires it; begin's existing nonwrapping counter never
+ * reissues an identity. An inactive/foreign context observes zero. */
+int64_t rt_transient_array_scope_identity_v1(void) {
+    if (!rt_core_transient_array_scope_active ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
+    return (int64_t)rt_core_transient_array_scope_id;
+}
+
+/* Signed domain separates process(0), module(+id), and session(-id). This
+ * observes the allocator's selection, including explicit session override. */
+int64_t rt_allocation_owner_identity_v1(void) {
+    const uint32_t owner = rt_core_transient_scope_for_new_object();
+    return core_allocation_uses_session_v1() ? -(int64_t)owner : (int64_t)owner;
 }
 
 int8_t rt_transient_array_scope_begin(void) {
@@ -2499,6 +2533,7 @@ static int rt_core_register_immortal_ptr(void* ptr) {
         /* Inherited address: present, or re-registered after its erase. */
         if (core_immortal_erased_drop((uintptr_t)ptr)) {
             atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
         }
         rt_core_immortal_registry_release();
         return 1;
@@ -2524,6 +2559,7 @@ static int rt_core_register_immortal_ptr(void* ptr) {
     int inserted = rt_core_immortal_registry_insert_raw((uintptr_t)ptr);
     if (inserted) {
         atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
     }
     rt_core_immortal_registry_release();
     return 1;
@@ -4753,6 +4789,46 @@ int64_t rt_string_char_at(int64_t string, int64_t index) {
     return rt_string_new((const uint8_t*)s->data + index, 1);
 }
 
+/* One checked allocation owner for infallible tagged text concatenation.
+ * Fault injection is compiled only into the focused native selfcheck. */
+#ifdef RT_STRING_CONCAT_TESTING
+static int rt_concat_test_fault_v1;
+#endif
+static int64_t rt_core_concat_bytes_v1(const uint8_t* left, uint64_t left_len,
+                                      const uint8_t* right, uint64_t right_len) {
+    if (left_len > UINT64_MAX - right_len)
+        spl_panic("text concat: length overflow");
+    const uint64_t length = left_len + right_len;
+    if (length > SIZE_MAX - sizeof(RtCoreString) - 1)
+        spl_panic("text concat: allocation size overflow");
+    RtCoreString* out = NULL;
+#ifdef RT_STRING_CONCAT_TESTING
+    if (rt_concat_test_fault_v1 == 1) rt_concat_test_fault_v1 = 0;
+    else
+#endif
+    out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)length + 1);
+    if (!out) spl_panic("text concat: allocation failed");
+    out->kind = RT_VALUE_HEAP_STRING;
+    out->reserved = 0;
+    out->len = length;
+    if (left_len) memcpy(out->data, left, (size_t)left_len);
+    if (right_len) memcpy(out->data + (size_t)left_len, right, (size_t)right_len);
+    out->data[(size_t)length] = '\0';
+    int registered;
+#ifdef RT_STRING_CONCAT_TESTING
+    if (rt_concat_test_fault_v1 == 2) {
+        rt_concat_test_fault_v1 = 0;
+        registered = 0;
+    } else
+#endif
+    registered = rt_core_register_string(out);
+    if (!registered) {
+        free(out);
+        spl_panic("text concat: registration failed");
+    }
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+}
+
 int64_t rt_string_concat(int64_t left, int64_t right) {
     RtCoreString* a = rt_core_as_string(left);
     RtCoreString* b = rt_core_as_string(right);
@@ -4766,33 +4842,9 @@ int64_t rt_string_concat(int64_t left, int64_t right) {
         right_text = rt_to_string(right);
         b = rt_core_as_string(right_text);
     }
-    if (!a || !b) return rt_core_nil();
-
-    /* a->len + b->len can wrap uint64_t for adversarial/corrupt inputs. A
-     * wrapped small `len` still succeeds malloc (so the `!out` check below
-     * never fires) but the memcpy calls below still copy the ORIGINAL
-     * un-wrapped a->len/b->len bytes, writing far past the undersized
-     * allocation and corrupting whatever heap object follows it. Reject
-     * loudly via the file's established unrecoverable-error convention
-     * (spl_panic, see rt_panic/panic above) instead of truncating or
-     * returning a plausible-looking nil. */
-    if (a->len > UINT64_MAX - b->len) {
-        spl_panic("rt_string_concat: length overflow");
-    }
-    uint64_t len = a->len + b->len;
-    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)len + 1);
-    if (!out) return rt_core_nil();
-    out->kind = RT_VALUE_HEAP_STRING;
-    out->reserved = 0;
-    out->len = len;
-    if (a->len > 0) memcpy(out->data, a->data, (size_t)a->len);
-    if (b->len > 0) memcpy(out->data + a->len, b->data, (size_t)b->len);
-    out->data[len] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    if (!a || !b) spl_panic("text concat: conversion failed");
+    return rt_core_concat_bytes_v1((const uint8_t*)a->data, a->len,
+                                   (const uint8_t*)b->data, b->len);
 }
 
 /// Runtime dispatch for `any + any`: if either operand is a heap string, perform
@@ -5568,15 +5620,24 @@ int64_t rt_native_neq(int64_t left, int64_t right) {
  * `"foo" < "bar"` native said true, oracle interpreter said false --
  * whichever literal happened to be malloc'd/placed at the lower address
  * "won", entirely unrelated to alphabetical order). Same tagged-or-raw
- * normalization as rt_text_eq_any, then a real byte-wise strcmp. Returns a
+ * normalization as rt_text_eq_any, then length-aware byte comparison. Returns a
  * strcmp-style signed result (the caller compares this against 0 with the
  * requested predicate). */
 int64_t rt_text_cmp_any(int64_t left, int64_t right) {
-    const char* a = rt_interp_cstr(left);
-    const char* b = rt_interp_cstr(right);
+    RtCoreString* left_string = rt_core_as_string(left);
+    RtCoreString* right_string = rt_core_as_string(right);
+    const char* a = left_string ? left_string->data : rt_interp_cstr(left);
+    const char* b = right_string ? right_string->data : rt_interp_cstr(right);
     if (!a) a = "";
     if (!b) b = "";
-    return (int64_t)strcmp(a, b);
+    uint64_t a_len = left_string ? left_string->len : strlen(a);
+    uint64_t b_len = right_string ? right_string->len : strlen(b);
+    if (a_len > SIZE_MAX || b_len > SIZE_MAX)
+        spl_panic("text compare: size overflow");
+    size_t common = (size_t)(a_len < b_len ? a_len : b_len);
+    int prefix = common ? memcmp(a, b, common) : 0;
+    if (prefix) return prefix;
+    return a_len < b_len ? -1 : (a_len > b_len ? 1 : 0);
 }
 
 /* 2026-08-01: ordering counterpart of rt_native_eq, for `<` `<=` `>` `>=`
@@ -8933,23 +8994,10 @@ int64_t rt_strcat_tagged(int64_t a, int64_t b) {
     const char* right = right_string ? (const char*)right_string->data : rt_interp_cstr(b);
     /* Tagged text is length-delimited and may contain NUL bytes. Raw C-string
      * operands retain the existing pointer/low-value fallback semantics. */
-    size_t left_len = left_string ? (size_t)left_string->len : (left ? strlen(left) : 0);
-    size_t right_len = right_string ? (size_t)right_string->len : (right ? strlen(right) : 0);
-    size_t total = left_len + right_len;
-
-    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + total + 1);
-    if (!out) return rt_core_nil();
-    out->kind = RT_VALUE_HEAP_STRING;
-    out->reserved = 0;
-    out->len = (uint64_t)total;
-    if (left_len > 0) memcpy(out->data, left, left_len);
-    if (right_len > 0) memcpy(out->data + left_len, right, right_len);
-    out->data[total] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    uint64_t left_len = left_string ? left_string->len : (left ? strlen(left) : 0);
+    uint64_t right_len = right_string ? right_string->len : (right ? strlen(right) : 0);
+    return rt_core_concat_bytes_v1((const uint8_t*)left, left_len,
+                                   (const uint8_t*)right, right_len);
 }
 
 char* rt_substr(const char* s, int64_t start, int64_t len) {
@@ -10520,6 +10568,23 @@ int64_t rt_bytes_to_text(int64_t bytes_value) {
     if (!narrowed) return rt_string_new(NULL, 0);
     int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
     int64_t result = copied > 0 ? spl_text_from_utf8_lossy(narrowed, (size_t)copied) : rt_string_new(NULL, 0);
+    free(narrowed);
+    return result;
+}
+
+/* TLS wire carrier: counted bytes, deliberately without UTF-8 repair. */
+int64_t rt_tls_wire_from_bytes(int64_t bytes_value) {
+    RtCoreArray* array = rt_core_as_array(bytes_value);
+    if (!array || !array->data || array->len <= 0) return rt_string_new(NULL, 0);
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
+    }
+    int64_t length = rt_array_bytes_validate(bytes_value);
+    if (length <= 0) return rt_string_new(NULL, 0);
+    uint8_t* narrowed = (uint8_t*)rt_observed_malloc_v1((size_t)length);
+    if (!narrowed) return rt_string_new(NULL, 0);
+    int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
+    int64_t result = copied > 0 ? rt_string_new(narrowed, (uint64_t)copied) : rt_string_new(NULL, 0);
     free(narrowed);
     return result;
 }
@@ -14036,6 +14101,8 @@ bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
     return madvise((void*)(intptr_t)addr, (size_t)size, native_advice) == 0;
 #endif
 }
+
+#include "runtime_file_lock_owned_v2.c"
 
 /* ---- file_ops.rs: rt_file_lock / rt_file_unlock -------------------------- */
 
@@ -20894,6 +20961,13 @@ void rt_trap_unimplemented(const char *symbol) {
  * plus the legacy untagged id 0 used by pure-Simple MIR); older hashed
  * Result values are still matched by Ok/Err name hash. */
 int64_t rt_unwrap_or_trap(int64_t value) {
+    /* Flat nil is absent, just like boxed Option.None. Check before the
+     * non-enum passthrough so false, zero and present Char stay unchanged. */
+    if (value == rt_core_nil()) {
+        fprintf(stderr, "simple runtime: .unwrap() called on None\n");
+        fflush(stderr);
+        abort();
+    }
     int64_t enum_id = rt_enum_id(value);
     int64_t discriminant;
     if (enum_id < 0) return value;
@@ -21603,3 +21677,6 @@ int64_t rt_collection_set(int64_t receiver, int64_t key, int64_t value) {
  * bundle_* ABI that used to live here was removed 2026-10-19. */
 #define SIMPLE_RUNTIME_HOSTED_SAFE_ARTIFACT_OWNER_V1 1
 #include "runtime_hosted_safe_artifact_v1.c"
+
+/* Single hosted owner for read-back workspace storage capabilities. */
+#include "runtime_workspace_storage_v1.c"

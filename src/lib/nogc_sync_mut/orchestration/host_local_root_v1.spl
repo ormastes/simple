@@ -1,0 +1,284 @@
+# Local administrator boundary. The caller selects an installed trusted machine
+# parent/root; path modes do not authenticate an arbitrary caller-owned tree.
+# Native machine/boot and provider observations are acquired here, never supplied
+# by a workload packet. V1 refuses reboot/provider drift rather than adopting it.
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.*
+use std.nogc_sync_mut.orchestration.host_enrollment_claim_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.common.contracts.orchestration.host_config_v1.{HostConfigV1, decode_host_config}
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_observe_v2, simple_container_open_v2}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_create_exclusive, directory_fsync}
+use std.nogc_sync_mut.sffi.fs.file_sync
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_unix_micros, sosix_time_now_monotonic_ms}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalOpenCleanupV2
+
+pub struct HostLocalRootV1:
+    root: text
+    binding: HostEnrollmentBindingV1
+    config: HostConfigV1
+    policy: LocalAuthorityPolicyV1
+    scope: ContainerHostScopeV2
+    container: SimpleContainerOwnerV2
+    capacity: HostCapacityOwnerV1
+
+pub struct HostLocalRuntimeV1:
+    root: text
+    binding: HostEnrollmentBindingV1
+    config: HostConfigV1
+    policy: LocalAuthorityPolicyV1
+    scope: ContainerHostScopeV2
+    container: SimpleContainerOwnerV2
+
+pub fn host_local_context_v1(policy: LocalAuthorityPolicyV1) -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: sosix_time_now_unix_micros() / 1000,
+        monotonic_ms: sosix_time_now_monotonic_ms(), policy_revision: policy.snapshot.policy_revision,
+        revocation_epoch: policy.snapshot.revocation_epoch, session_generation: policy.session_generation)
+
+# Callback signature is fixed by the existing reservation owner. Failed policy
+# refresh becomes an invalid/regressed context, never a cached permissive one.
+pub fn host_local_refresh_context_v1(root: text,
+        binding: HostEnrollmentBindingV1) -> HostReservationAuthorizationContextV1:
+    val parent = local_authority_policy_load_v1(binding.machine_parent, binding.policy_digest)
+    val policy = local_authority_policy_load_v1(root, binding.policy_digest)
+    if parent.is_err() or policy.is_err():
+        return HostReservationAuthorizationContextV1(grant_clock: -1, monotonic_ms: -1,
+            policy_revision: -1, revocation_epoch: -1, session_generation: -1)
+    host_local_context_v1(policy.unwrap())
+
+fn host_local_fields_v1(bytes: text) -> Result<Dict<text, SdnValue>, text>:
+    if str_len(bytes) == 0 or str_len(bytes) > 1048576: return Err("host-local-object-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 3,
+        max_nodes: 128, max_rows: 0, max_cells: 0, max_columns: 32)
+    val document = match sdn_parse_strict_v1(bytes, limits):
+        case Ok(value): value
+        case Err(issue): return Err("host-local-object-syntax:" + issue.code)
+    if sdn_encode_canonical(document.value) + "\n" != bytes: return Err("host-local-object-noncanonical")
+    match document.value:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("host-local-object-required")
+
+fn host_local_text_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    if not fields.contains_key(name): return Err("host-local-object-missing:" + name)
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-local-object-type:" + name)
+
+pub fn host_local_binding_decode_v1(bytes: text) -> Result<HostEnrollmentBindingV1, text>:
+    val fields = host_local_fields_v1(bytes)?
+    val binding = HostEnrollmentBindingV1(config_digest: host_local_text_v1(fields, "configDigest")?,
+        policy_digest: host_local_text_v1(fields, "policyDigest")?,
+        native_machine_id: host_local_text_v1(fields, "nativeMachineId")?,
+        native_boot_id: host_local_text_v1(fields, "nativeBootId")?,
+        provider_identity_digest: host_local_text_v1(fields, "providerIdentityDigest")?,
+        machine_parent: host_local_text_v1(fields, "machineParent")?)
+    if host_enrollment_payload_bytes_v1(binding)? != bytes: return Err("host-local-binding-mismatch")
+    Ok(binding)
+
+pub fn host_local_backend_v1(config: HostConfigV1) -> Result<text, text>:
+    if config.runtime_class_ref == "podman-rootless": return Ok("linux-podman")
+    if config.runtime_class_ref == "windows-docker-process": return Ok("windows-docker-process")
+    Err("host-local-runtime-class-unsupported")
+
+fn host_local_config_v1(bytes: text) -> Result<HostConfigV1, text>:
+    val config = match decode_host_config(bytes):
+        case Ok(value): value
+        case Err(issue): return Err("host-local-config-invalid:" + issue.kind)
+    if config.journal_root != "journal": return Err("host-claim-journal-child-required")
+    if config.exclusive_device_ids.len() != 0: return Err("host-claim-cpu-only")
+    Ok(config)
+
+# Read-only enrollment preflight. Its output is unsigned data for an issuer to
+# approve; it creates no claim and grants no runtime permission.
+pub fn host_local_enrollment_observe_v1(parent: text, configuration_bytes: text,
+        engine_policy_bytes: text) -> Result<HostEnrollmentBindingV1, text>:
+    val config = host_local_config_v1(configuration_bytes)?
+    val policy_bytes = file_read_regular_no_follow_bounded(parent + "/authority-policy.sdn", 1048576)?
+    val policy_digest = sha256_text(policy_bytes)
+    val policy = local_authority_policy_load_v1(parent, policy_digest)?
+    val backend = host_local_backend_v1(config)?
+    val observation = simple_container_observe_v2(backend, engine_policy_bytes)?
+    if observation.backend != backend: return Err("host-local-observation-backend-mismatch")
+    if observation.continuity_assurance != "native-boot-incarnation-v1" or observation.native_boot_id == "":
+        return Err("host-local-boot-assurance-requires-persistent-quarantine")
+    val binding = HostEnrollmentBindingV1(config_digest: sha256_text(configuration_bytes),
+        policy_digest: policy_digest, native_machine_id: observation.native_machine_id,
+        native_boot_id: observation.native_boot_id,
+        provider_identity_digest: observation.provider_identity_digest, machine_parent: parent)
+    val checked = host_enrollment_payload_bytes_v1(binding)?
+    Ok(binding)
+
+fn host_local_publish_new_v1(root: text, name: text, bytes: text) -> Result<bool, text>:
+    val path = root + "/" + name
+    if not file_create_exclusive(path, bytes): return Err("host-local-object-already-present-or-unavailable")
+    if not file_set_mode(path, 0o600): return Err("host-local-object-mode-failed")
+    if file_read_regular_no_follow_bounded(path, 1048576)? != bytes: return Err("host-local-object-readback-mismatch")
+    if not file_sync(path) or not directory_fsync(root): return Err("host-local-object-sync-failed")
+    Ok(true)
+
+# Credential is signed over the actual fresh observation, not over client
+# supplied native values. Any failure after claim retains the claimed child.
+pub fn host_local_initialize_v1(parent: text, configuration_bytes: text,
+        engine_policy_bytes: text, credential_bytes: text) -> Result<HostEnrollmentClaimV1, text>:
+    val binding = host_local_enrollment_observe_v1(parent, configuration_bytes, engine_policy_bytes)?
+    val credential = host_enrollment_credential_decode_v1(credential_bytes)?
+    val claim = host_enrollment_claim_v1(binding, credential, configuration_bytes)?
+    host_local_publish_runtime_v1(claim, engine_policy_bytes)
+
+# Internal post-claim publication port; only initialization supplies a freshly
+# authorized claim. It neither observes nor authorizes a caller-supplied root.
+fn host_local_publish_runtime_v1(claim: HostEnrollmentClaimV1,
+        engine_policy_bytes: text) -> Result<HostEnrollmentClaimV1, text>:
+    # The shared Container observer decoded/validated these exact protected
+    # policy bytes. Preserve them without a host-owned backend schema.
+    val stored = host_local_publish_new_v1(claim.root, "container-policy.sdn", engine_policy_bytes)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-local-runtime"),
+        "root": SdnValue.String(claim.root), "bindingDigest": SdnValue.String(claim.binding_digest),
+        "claimDigest": SdnValue.String(claim.claim_digest), "containerPolicyDigest": SdnValue.String(sha256_text(engine_policy_bytes)),
+        "providerGeneration": SdnValue.Int(1)}
+    val ready = host_local_publish_new_v1(claim.root, "runtime-ready.sdn", sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")?
+    Ok(claim)
+
+pub fn host_local_runtime_open_v1(root: text, timeout_ms: i64) -> Result<HostLocalRuntimeV1, text>:
+    # This finite native-boot root uses POSIX private-policy prerequisites.
+    # Windows persistent service roots require their native ACL capability;
+    # later backend support must never silently admit this filesystem path.
+    @when(os="linux"):
+    val supported = true
+    @else:
+    val supported = false
+    @end
+    if not supported: return Err("host-local-native-runtime-host-unsupported")
+    if timeout_ms <= 0: return Err("host-local-timeout-invalid")
+    val binding_bytes = file_read_regular_no_follow_bounded(root + "/enrollment-binding.sdn", 1048576)?
+    val binding = host_local_binding_decode_v1(binding_bytes)?
+    # Validate the installed root's private nofollow ancestry before trusting
+    # its policy, manifest or any journal path beneath it.
+    val policy = local_authority_policy_load_v1(root, binding.policy_digest)?
+    if not root.starts_with(binding.machine_parent + "/host-root-"):
+        return Err("host-local-root-parent-mismatch")
+    if root.split("/").len() != binding.machine_parent.split("/").len() + 1:
+        return Err("host-local-root-direct-child-required")
+    val parent_policy = local_authority_policy_load_v1(binding.machine_parent, binding.policy_digest)?
+    val config_bytes = file_read_regular_no_follow_bounded(root + "/host-config.sdn", 1048576)?
+    if sha256_text(config_bytes) != binding.config_digest: return Err("host-local-config-digest-mismatch")
+    val config = host_local_config_v1(config_bytes)?
+    val manifest = host_local_fields_v1(file_read_regular_no_follow_bounded(root + "/host-root.sdn", 1048576)?)?
+    val ready = host_local_fields_v1(file_read_regular_no_follow_bounded(root + "/runtime-ready.sdn", 1048576)?)?
+    val claim_path = binding.machine_parent + "/host-claim-" + sha256_text(binding.native_machine_id) + ".sdn"
+    val claim_bytes = file_read_regular_no_follow_bounded(claim_path, 1048576)?
+    val claim = host_local_fields_v1(claim_bytes)?
+    val binding_digest = sha256_text(binding_bytes)
+    val credential = host_enrollment_credential_decode_v1(file_read_regular_no_follow_bounded(
+        root + "/enrollment-credential.sdn", 1048576)?)?
+    # Historical admission facts are retained exactly. Expired enrollment is
+    # not reused as execution authority; each workload supplies fresh proofs.
+    if (credential.operation.operation != "host_enroll_v1" or credential.operation.payload_digest != binding_digest or
+            credential.operation.host_id != config.physical_host_id or
+            credential.operation.environment_digest != binding.provider_identity_digest or
+            credential.operation.memory_bytes != config.memory_ceiling_bytes or credential.signed.issuer_id != config.controller_ref):
+        return Err("host-local-enrollment-credential-mismatch")
+    if (host_local_text_v1(ready, "kind")? != "host-local-runtime" or
+            host_local_text_v1(ready, "root")? != root or host_local_text_v1(ready, "bindingDigest")? != binding_digest or
+            host_local_text_v1(ready, "claimDigest")? != sha256_text(claim_bytes)):
+        return Err("host-local-runtime-record-mismatch")
+    if (not ready.contains_key("providerGeneration") or ready["providerGeneration"] != SdnValue.Int(1) or
+            not ready.contains_key("version") or ready["version"] != SdnValue.Int(2)):
+        return Err("host-local-runtime-version")
+    if (not manifest.contains_key("version") or manifest["version"] != SdnValue.Int(1) or
+            not claim.contains_key("version") or claim["version"] != SdnValue.Int(1)):
+        return Err("host-local-enrollment-version")
+    if (host_local_text_v1(manifest, "kind")? != "host-enrollment-root" or
+            host_local_text_v1(claim, "kind")? != "host-enrollment-claim" or
+            host_local_text_v1(manifest, "operationId")? != credential.operation.id or
+            host_local_text_v1(claim, "operationId")? != credential.operation.id or
+            host_local_text_v1(claim, "nativeMachineId")? != binding.native_machine_id or
+            host_local_text_v1(manifest, "configDigest")? != binding.config_digest or
+            host_local_text_v1(manifest, "policyDigest")? != binding.policy_digest or
+            host_local_text_v1(manifest, "nativeBootId")? != binding.native_boot_id or
+            host_local_text_v1(manifest, "providerIdentityDigest")? != binding.provider_identity_digest):
+        return Err("host-local-enrollment-scope-mismatch")
+    if (host_local_text_v1(manifest, "root")? != root or host_local_text_v1(manifest, "claimPath")? != claim_path or
+            host_local_text_v1(manifest, "bindingDigest")? != binding_digest or
+            host_local_text_v1(claim, "state")? != "enrolled" or host_local_text_v1(claim, "root")? != root or
+            host_local_text_v1(claim, "bindingDigest")? != binding_digest or
+            host_local_text_v1(claim, "nonce")? != host_local_text_v1(manifest, "nonce")?):
+        return Err("host-local-enrollment-record-mismatch")
+    val engine_bytes = file_read_regular_no_follow_bounded(root + "/container-policy.sdn", 1048576)?
+    if sha256_text(engine_bytes) != host_local_text_v1(ready, "containerPolicyDigest")?:
+        return Err("host-local-engine-policy-changed")
+    val backend = host_local_backend_v1(config)?
+    val observed = simple_container_observe_v2(backend, engine_bytes)?
+    if observed.continuity_assurance != "native-boot-incarnation-v1" or observed.native_boot_id == "":
+        return Err("host-local-boot-assurance-requires-persistent-quarantine")
+    if (observed.backend != backend or observed.native_machine_id != binding.native_machine_id or
+            observed.native_boot_id != binding.native_boot_id): return Err("host-local-native-continuity-lost")
+    if observed.provider_identity_digest != binding.provider_identity_digest: return Err("host-local-provider-continuity-lost")
+    val scope = ContainerHostScopeV2(physical_host_id: config.physical_host_id, service_scope_id: config.service_scope_id,
+        boot_id: binding.native_boot_id, provider_generation: 1, native_machine_id: binding.native_machine_id,
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: binding.native_boot_id)
+    val container = simple_container_open_v2(backend, engine_bytes, root + "/provider", scope,
+        binding.provider_identity_digest, timeout_ms)?
+    val context = host_local_context_v1(policy)
+    if context.grant_clock <= 0 or context.monotonic_ms < 0: return Err("host-local-clock-invalid")
+    Ok(HostLocalRuntimeV1(root: root, binding: binding, config: config, policy: policy, scope: scope, container: container))
+
+pub fn host_local_root_open_v1(root: text, timeout_ms: i64) -> Result<HostLocalRootV1, text>:
+    val local = host_local_runtime_open_v1(root, timeout_ms)?
+    val config = local.config
+    val binding = local.binding
+    val binding_digest = host_enrollment_payload_digest_v1(binding)?
+    val nonce = sosix_random_hex(32) ?? ""
+    if str_len(nonce) != 64: return Err("host-local-entropy-unavailable")
+    val capacity = HostCapacityV1(physical_host_id: config.physical_host_id,
+        authority_id: "host-" + binding_digest, boot_id: container_scope_fence_id_v2(local.scope)?, provider_generation: 1,
+        cpu_millis: config.cpu_ceiling_millis, memory_bytes: config.memory_ceiling_bytes,
+        exclusive_devices: config.exclusive_device_ids)
+    # Continuity is established above by actual observations and the exact
+    # exclusive enrollment claim. No request/config boolean can enable it.
+    val owner = host_capacity_owner_open_v1(root + "/journal", capacity, nonce, config.maximum_journal_events, true)?
+    Ok(HostLocalRootV1(root: root, binding: binding, config: config, policy: local.policy,
+        scope: local.scope, container: local.container, capacity: owner))
+
+# Managed finite/persistent callers retain canonical cleanup ownership. No root
+# or ledger is fabricated for a failed replay/projection or failed close.
+
+pub enum HostLocalRootOpenV2:
+    Ready(HostLocalRootV1)
+    Rejected(text)
+    CleanupRequired(DistributedOperationJournalOpenCleanupV2, text)
+
+pub fn host_local_root_open_owned_v2(root: text, timeout_ms: i64) -> HostLocalRootOpenV2:
+    val checked = host_local_runtime_open_v1(root, timeout_ms)
+    if checked.is_err(): return HostLocalRootOpenV2.Rejected(checked.unwrap_err())
+    val local = checked.unwrap()
+    val config = local.config
+    val binding = local.binding
+    val binding_digest = host_enrollment_payload_digest_v1(binding)
+    if binding_digest.is_err(): return HostLocalRootOpenV2.Rejected(binding_digest.unwrap_err())
+    val fence = container_scope_fence_id_v2(local.scope)
+    if fence.is_err(): return HostLocalRootOpenV2.Rejected(fence.unwrap_err())
+    val nonce = sosix_random_hex(32) ?? ""
+    if str_len(nonce) != 64: return HostLocalRootOpenV2.Rejected("host-local-entropy-unavailable")
+    val capacity = HostCapacityV1(physical_host_id: config.physical_host_id,
+        authority_id: "host-" + binding_digest.unwrap(), boot_id: fence.unwrap(), provider_generation: 1,
+        cpu_millis: config.cpu_ceiling_millis, memory_bytes: config.memory_ceiling_bytes,
+        exclusive_devices: config.exclusive_device_ids)
+    match host_capacity_owner_open_owned_v2(root + "/journal", capacity, nonce, config.maximum_journal_events, true):
+        case HostCapacityOpenV2.Ready(owner):
+            HostLocalRootOpenV2.Ready(HostLocalRootV1(root: root, binding: binding, config: config, policy: local.policy,
+                scope: local.scope, container: local.container, capacity: owner))
+        case HostCapacityOpenV2.Rejected(error): HostLocalRootOpenV2.Rejected(error)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, error): HostLocalRootOpenV2.CleanupRequired(cleanup, error)

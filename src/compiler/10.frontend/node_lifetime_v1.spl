@@ -7,7 +7,7 @@ use compiler.frontend.core._AstExpr.nodes.{
 }
 use compiler.core.ast.{EXPR_BINARY, expr_get_span, expr_set_span,
     expr_get_int, expr_get_left, expr_get_right}
-use compiler.frontend.node_lifetime_topology_v1.{node_lifetime_child_edge_error_v1}
+use compiler.frontend.node_lifetime_dag_v1.{node_lifetime_dag_error_v1}
 
 const NODE_LIFETIME_EXPR_OWNER_V1: text = "compiler.ast.expr/v1"
 
@@ -46,6 +46,12 @@ pub fn node_lifetime_expr_key_v1(handle: AstExprHandleV1) -> Result<text, text>:
     match node_lifetime_validate_expr_v1(handle):
         case Err(reason): Err(reason)
         case Ok(index): Ok("{handle.owner}:{handle.incarnation}:{index}")
+
+pub fn node_lifetime_validate_dag_v1(handle: AstExprHandleV1) -> Result<i64, text>:
+    val index = node_lifetime_validate_expr_v1(handle)?
+    val error = node_lifetime_dag_error_v1(index)
+    if error != "": return Err(error)
+    Ok(index)
 
 pub fn node_lifetime_binary_span_v1(handle: AstExprHandleV1) -> Result<i64, text>:
     match node_lifetime_validate_binary_v1(handle):
@@ -94,8 +100,13 @@ fn node_lifetime_binary_set_child_v1(handle: AstExprHandleV1,
         case Ok(_): ()
     val parent = parent_result.unwrap()
     val child_index = child_result.unwrap()
-    val topology_error = node_lifetime_child_edge_error_v1(parent, child_index)
-    if topology_error != "": return Err(topology_error)
+    val admission_error = node_lifetime_dag_error_v1(child_index, 1000000, parent)
+    if admission_error != "": return Err(admission_error)
+    # The unchanged edge must also remain a valid DAG and cannot already reach
+    # its parent. The replaced edge may itself be the legacy defect being fixed.
+    val other = if left: expr_get_right(parent) else: expr_get_left(parent)
+    val other_admission_error = node_lifetime_dag_error_v1(other, 1000000, parent)
+    if other_admission_error != "": return Err(other_admission_error)
     if left:
         expr_owner_left_set(parent, child_index)
         expr_i64_set(parent, "LEFT", child_index)

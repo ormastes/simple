@@ -1,0 +1,191 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# @tag: unit, compiler, mir
+"""
+# MIR: the provider trait-impl walk stays once per closure (prevention)
+
+Guards the class behind
+doc/08_tracking/bug/mir_in_process_per_consumer_provider_rebuild_quadratic_2026-10-20.md:
+a per-module prologue that re-walks the whole provider closure. Pins the
+general shape (index builds == 1 for any consumer count N and provider count
+P), that demand relocation is bounded by the consumers' own dispatch, and
+that the demand lane emits the same MIR as the eager A/B lane
+(`SIMPLE_MIR_EAGER_TRAIT_IMPLS=1`, which walks once per consumer).
+"""
+
+use std.spec
+use std.io_runtime.{env_get, env_set}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+
+val store_src = "pub trait Store:\n    fn list(n: i64) -> i64\n"
+
+fn impl_src(i: i64) -> text:
+    "use lib.store.\{Store\}\n\npub struct Mem{i}:\n    base: i64\n\nimpl Store for Mem{i}:\n    fn list(n: i64) -> i64:\n        self.base + n + {i}\n"
+
+# Every consumer dispatches through the trait (vtable) and calls one
+# implementor directly.
+fn consumer_src() -> text:
+    "use lib.store.\{Store\}\nuse lib.impl0.\{Mem0\}\n\nfn invoke(callback: fn(Store) -> i64, s: Store) -> i64:\n    callback(s)\n\nfn via_param(s: Store) -> i64:\n    s.list(2)\n\nfn via_lift(s: Store) -> i64:\n    invoke(\\item: item.list(3), s)\n\nfn direct(n: i64) -> i64:\n    val m = Mem0(base: n)\n    m.list(1)\n"
+
+struct ClosureRun:
+    errors: i64
+    index_builds: i64
+    relocations: i64
+    callees: [text]
+    indirect_calls: i64
+    lifted_functions: [text]
+    lifted_indirect_calls: i64
+
+fn collect_calls(mir: MirModule, callees: [text], indirect: i64,
+        lifted_functions: [text], lifted_indirect: i64) -> ClosureRun:
+    var names = callees
+    var indirect_calls = indirect
+    var lifted_names = lifted_functions
+    var lifted_indirect_calls = lifted_indirect
+    for function in mir.functions.values():
+        val lifted = function.name.contains("__lambda_lift_")
+        if lifted:
+            lifted_names = lifted_names.push(function.name)
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                names = names.push(name)
+                            case _: pass
+                    case MirInstKind.CallIndirect(_, _, _, _):
+                        indirect_calls = indirect_calls + 1
+                        if lifted:
+                            lifted_indirect_calls = lifted_indirect_calls + 1
+                    case _: pass
+    ClosureRun(errors: 0, index_builds: 0, relocations: 0, callees: names,
+        indirect_calls: indirect_calls, lifted_functions: lifted_names,
+        lifted_indirect_calls: lifted_indirect_calls)
+
+fn lower_closure(provider_count: i64, consumer_count: i64, eager: bool, reverse_impls: bool = false) -> ClosureRun:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+    modules["lib.store"] = parse_full_frontend(store_src, "lib/store.spl", "lib.store", log)
+    sources.push(SourceFile(path: "lib/store.spl", content: store_src, module_name: "lib.store"))
+    var i = 0
+    while i < provider_count:
+        val src = impl_src(i)
+        modules["lib.impl{i}"] = parse_full_frontend(src, "lib/impl{i}.spl", "lib.impl{i}", log)
+        sources.push(SourceFile(path: "lib/impl{i}.spl", content: src, module_name: "lib.impl{i}"))
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var consumers: [HirModule] = []
+    var c = 0
+    while c < consumer_count:
+        var consumer_lowering = hirlowering_for_module("app/c{c}.spl", surfaces)
+        consumers.push(consumer_lowering.lower_module(parse_full_frontend(consumer_src(), "app/c{c}.spl", "app.c{c}", log)))
+        c = c + 1
+    # The driver feed is the whole closure, consumers included.
+    var providers: [HirModule] = []
+    var store_lowering = hirlowering_for_module("lib/store.spl", surfaces)
+    providers.push(store_lowering.lower_module(modules["lib.store"]))
+    i = 0
+    while i < provider_count:
+        val provider_i = if reverse_impls: provider_count - i - 1 else: i
+        var impl_lowering = hirlowering_for_module("lib/impl{provider_i}.spl", surfaces)
+        providers.push(impl_lowering.lower_module(modules["lib.impl{provider_i}"]))
+        i = i + 1
+    for raw_consumer in consumers:
+        val feed_consumer: HirModule = raw_consumer
+        providers.push(feed_consumer)
+    val old_eager = env_get("SIMPLE_MIR_EAGER_TRAIT_IMPLS")
+    env_set("SIMPLE_MIR_EAGER_TRAIT_IMPLS", if eager: "1" else: "")
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    val first: HirModule = consumers[0]
+    var lowering = MirLowering.new_for_target(first.symbols, target)
+    lowering.provider_session_requested_key = mir_provider_session_content_key_v1(providers)
+    lowering.trait_impl_closure_complete = true
+    var failed = 0
+    var calls = ClosureRun(errors: 0, index_builds: 0, relocations: 0, callees: [],
+        indirect_calls: 0, lifted_functions: [], lifted_indirect_calls: 0)
+    c = 0
+    while c < consumer_count:
+        val consumer: HirModule = consumers[c]
+        val mir = lowering.lower_module_transient_scoped(consumer, providers, c == 0)
+        if mir.is_err():
+            failed = failed + 1
+        else:
+            calls = collect_calls(mir.unwrap(), calls.callees, calls.indirect_calls,
+                calls.lifted_functions, calls.lifted_indirect_calls)
+        c = c + 1
+    env_set("SIMPLE_MIR_EAGER_TRAIT_IMPLS", old_eager)
+    ClosureRun(errors: lowering.errors.len() + failed,
+        index_builds: lowering.trait_impl_provider_index_builds,
+        relocations: lowering.trait_impl_provider_relocations,
+        callees: calls.callees, indirect_calls: calls.indirect_calls,
+        lifted_functions: calls.lifted_functions,
+        lifted_indirect_calls: calls.lifted_indirect_calls)
+
+fn count_matching(names: [text], needle: text) -> i64:
+    var n = 0
+    for name in names:
+        if name.contains(needle):
+            n = n + 1
+    n
+
+describe "MIR provider trait-impl walk stays once per closure":
+    it "builds the provider trait index once whatever N and P are":
+        val small = lower_closure(2, 2, false)
+        val large = lower_closure(4, 3, false)
+        expect(small.errors).to_equal(0)
+        expect(large.errors).to_equal(0)
+        expect(small.index_builds).to_equal(1)
+        expect(large.index_builds).to_equal(1)
+        # Dispatch goes through the native vtable: no provider impl method
+        # is relocated for the trait pass at all.
+        expect(large.relocations).to_equal(0)
+
+    it "emits the same MIR calls as the eager A/B lane, which walks per consumer":
+        val demand = lower_closure(3, 2, false)
+        val eager = lower_closure(3, 2, true)
+        expect(demand.errors).to_equal(0)
+        expect(eager.errors).to_equal(0)
+        expect(eager.index_builds).to_be_greater_than(demand.index_builds)
+        expect(demand.indirect_calls).to_equal(eager.indirect_calls)
+        expect(count_matching(demand.callees, "Mem0.list")).to_equal(count_matching(eager.callees, "Mem0.list"))
+        expect(count_matching(demand.callees, "Mem0.list")).to_be_greater_than(0)
+        expect(demand.callees.len()).to_equal(eager.callees.len())
+        expect(demand.lifted_functions.len()).to_equal(2)
+        expect(demand.lifted_indirect_calls).to_equal(4)
+        expect(eager.lifted_indirect_calls).to_equal(4)
+
+    it "preserves eager equivalence for either ordering of multiple providers":
+        val demand_forward = lower_closure(3, 1, false, false)
+        val eager_forward = lower_closure(3, 1, true, false)
+        val demand_reverse = lower_closure(3, 1, false, true)
+        val eager_reverse = lower_closure(3, 1, true, true)
+        expect(demand_forward.errors).to_equal(0)
+        expect(eager_forward.errors).to_equal(0)
+        expect(demand_reverse.errors).to_equal(0)
+        expect(eager_reverse.errors).to_equal(0)
+        expect(demand_forward.indirect_calls).to_equal(eager_forward.indirect_calls)
+        expect(demand_reverse.indirect_calls).to_equal(eager_reverse.indirect_calls)
+        expect(demand_forward.callees.len()).to_equal(eager_forward.callees.len())
+        expect(demand_reverse.callees.len()).to_equal(eager_reverse.callees.len())
+        expect(count_matching(demand_forward.callees, "Mem0.list")).to_equal(1)
+        expect(count_matching(eager_forward.callees, "Mem0.list")).to_equal(1)
+        expect(count_matching(demand_reverse.callees, "Mem0.list")).to_equal(1)
+        expect(count_matching(eager_reverse.callees, "Mem0.list")).to_equal(1)
+        expect(count_matching(demand_forward.callees, "Mem1.list")).to_equal(0)
+        expect(count_matching(demand_forward.callees, "Mem2.list")).to_equal(0)
+        expect(count_matching(demand_reverse.callees, "Mem1.list")).to_equal(0)
+        expect(count_matching(demand_reverse.callees, "Mem2.list")).to_equal(0)
+        expect(demand_forward.indirect_calls).to_equal(4)
+        expect(eager_forward.indirect_calls).to_equal(4)
+        expect(demand_reverse.indirect_calls).to_equal(4)
+        expect(eager_reverse.indirect_calls).to_equal(4)

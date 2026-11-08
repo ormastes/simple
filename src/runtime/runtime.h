@@ -294,6 +294,10 @@ void     rt_dir_list_free(const char** entries, int64_t count);
  * correct shape; this declaration was the stale one. */
 int64_t  rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
 bool     rt_file_unlock(int64_t handle);
+/* Opaque generation capability. All return/status words are signed i64. */
+int64_t rt_file_lock_owned_acquire_v2(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
+int64_t rt_file_lock_owned_state_v2(int64_t token);
+int64_t rt_file_lock_owned_release_v2(int64_t token);
 
 /* ===== Offset-based File I/O ===== */
 
@@ -484,12 +488,17 @@ void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);
 void     rt_exit(int64_t code);
 void     rt_cli_exit(int64_t code);
+int64_t  rt_heap_alloc_count(void);       /* total successful heap registrations */
 int64_t  rt_heap_registry_count(void);
 int64_t  rt_heap_aux_live_bytes(void);      /* array+dict backing-buffer bytes */
 int64_t  rt_heap_array_capacity_bytes(void); /* array element-buffer capacity bytes */
 int8_t rt_transient_array_scope_begin(void);
 /* Read current scope:0 inactive,1 active/unpaused,2 active/paused. No lease. */
 int64_t rt_transient_array_scope_state_v1(void);
+/* Current owner's non-reused positive scope identity, or 0 inactive/foreign. */
+int64_t rt_transient_array_scope_identity_v1(void);
+/* 0 process, +u32 transient scope, -u32 session; observes actual allocation. */
+int64_t rt_allocation_owner_identity_v1(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
 /* Graph-operation success for a supported root in an active paused scope,
@@ -1277,6 +1286,9 @@ typedef struct RtOwnedProcessObservationV1 {
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1419. NOT a bare SplArray*. */
+/* Existing Windows PTY/Job registry is confined to one pinned native thread.
+ * A successful guard grants no process launch or cross-thread transfer. */
+int64_t   rt_windows_pty_owner_thread_guard_v1(void);
 int64_t   rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
@@ -1320,6 +1332,18 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
  * Descriptors above stderr are closed; this API has no extra-fd handoff.
  * Other platforms retain their existing descriptor inheritance policy. */
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
+/* Admission-bounded synchronous capture. mode1=exact Windows child env;
+ * mode2=trusted inherited env (never an implicit empty Linux environment).
+ * Borrowed per-thread four-word receipt; flags extend the ordinary capture
+ * bits with32=confirmed expiry before workload entry,64=other confirmed
+ * pre-entry provider rejection. Postfork uncertainty carries neither bit. */
+int64_t* rt_process_run_bounded_admitted_tuple_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,SplArray* environment,int64_t mode,int64_t timeout_ms,
+    int64_t max_output_bytes,int64_t expires_at_unix_ms);
+/* Ordinary bounded inherited-environment capture with authoritative limit
+ * flags. No deadline policy and no ProcessOwnedV4 lifetime assertion. */
+int64_t* rt_process_run_bounded_observed_tuple_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,int64_t timeout_ms,int64_t max_output_bytes);
 #ifdef _WIN32
 /* Core-C PID/handle ownership shared with rt_process_wait. */
 int64_t  rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count);
@@ -1442,6 +1466,27 @@ int64_t   rt_process_observation_v4_pin_cwd_value(const char* path_data,
                                                    uint64_t path_len);
 SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle);
 int       rt_process_observation_v4_close_cwd_value(int64_t handle);
+/* Reservation V4: scalar authority precedes child launch. NULL observations
+ * are errors with authority retained; explicit confirm releases a terminal slot. */
+int64_t rt_process_observation_v4_reserve_value(void);
+int64_t rt_process_observation_v4_reserved_matches_value(int64_t token,
+    int64_t rh, int64_t rl, int64_t th, int64_t tl);
+int64_t rt_process_observation_v4_reserved_state_value(int64_t token);
+int64_t rt_process_observation_v4_reserved_start_pinned_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding);
+/* Additive submission-deadline admission. The same V4 reservation owns every
+ * outcome; expired/unknown pre-create attempts are consumed, never replayed. */
+int64_t rt_process_observation_v5_reserved_start_admitted_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding,
+    int64_t expires_at_unix_ms);
+/* Additive Linux-only scalar launch progression; no V4 pending receipt. */
+int64_t rt_process_observation_v6_reserved_start_deferred_admitted_value(int64_t,int64_t,int64_t,SplArray*,int64_t);
+int64_t rt_process_observation_v6_reserved_poll_launch_value(int64_t,int64_t);
+
+SplArray* rt_process_observation_v4_reserved_observe_value(
+    int64_t token, int64_t wait_ns, int64_t retire);
+SplArray* rt_process_observation_v4_reserved_ack_value(int64_t token, SplArray* digest);
+int64_t rt_process_observation_v4_reserved_confirm_release_value(int64_t token);
 SplArray* rt_process_observation_v4_start_value(SplArray* binding);
 SplArray* rt_process_observation_v4_start_pinned_value(
               int64_t executable_handle, int64_t cwd_handle,
@@ -1470,6 +1515,28 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
  * cgroup memory.current while live and zero after the tree is reaped.
  * Unsupported hosts fail closed. */
 #ifdef __linux__
+/* Counted-byte group-stream profile; unsupported providers return explicit errors. */
+/* V3 numeric profile is exactly twelve tagged i64 words, as documented in
+ * piped_group_cpu_profile_v3.md. No new ABI alters a V2 entry point. */
+int64_t rt_linux_group_stream_admit_profiled_v3(const char*,int64_t,const char*,int64_t,const char*,int64_t,SplArray*);
+int64_t rt_linux_group_stream_verify_broker_profiled_v3(const char*,int64_t,const char*,int64_t,const char*,int64_t,SplArray*);
+SplArray* rt_linux_group_parent_acquire_profiled_at_v3(const char*,uint64_t,const char*,uint64_t,const char*,uint64_t);
+SplArray* rt_linux_group_launch_stream_broker_profiled_v3(const char*,int64_t,const char*,int64_t,
+    SplArray*,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,
+    const char*,int64_t,const char*,int64_t,SplArray*);
+SplArray* rt_linux_group_start_stream_profiled_v3(const char*,int64_t,const char*,int64_t,
+    SplArray*,SplArray*,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t,int64_t,
+    const char*,int64_t,const char*,int64_t,SplArray*);
+int64_t rt_linux_group_stream_admit_v2(const char*,int64_t);
+SplArray* rt_linux_group_launch_stream_broker_v2(const char*,int64_t,const char*,int64_t,
+    SplArray*,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t);
+SplArray* rt_linux_group_start_stream_v2(const char*,int64_t,const char*,int64_t,
+    SplArray*,SplArray*,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t,int64_t);
+SplArray* rt_linux_group_collected_stream_v2(int64_t);
+int64_t rt_linux_group_stream_no_child_scope_v2(const char*,int64_t,const char*,int64_t);
+int64_t rt_linux_group_stream_collect_no_child_v2(const char*,int64_t,const char*,int64_t);
+int64_t rt_linux_group_stream_recover_lease_v2(const char*,int64_t,const char*,int64_t);
+int64_t rt_linux_group_stream_release_inherited_v2(void);
 SplArray* rt_linux_group_launch_broker_v1(const char* program,
     uint64_t program_len, const char* digest, uint64_t digest_len,
     SplArray* args);
@@ -1490,6 +1557,53 @@ SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_l
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
+/* Additive v1 receipt [version=1, state=-1/0/1, actual_exit_code, native_error].
+ * Query only before close; success requires drained stdout and observed/reaped
+ * leader status. No status is fabricated from ECHILD or close success. */
+SplArray*   rt_process_piped_exit_status_value(int64_t pid);
+/* Ref V1: generation comes from the actual reserved spawn slot, never PID adoption.
+ * Scalar actions return -2 stale/invalid, -1 runtime failure; close 0 success,
+ * alive 0 stopped/1 running, write >=0 accepted. stdout state 0 deferred/1 EOF.
+ * Valid POSIX Ref liveness/close return -3 unsupported: no reap/signal/free.
+ * Reads use the same thread-local buffer and UTF-8 framing as legacy PID reads. */
+/* Group-stream V2 tickets and binding-aware stream actions. No language FD or
+ * pointer lease crosses this ABI. POSIX proof retirement uses the pinned root. */
+int64_t rt_process_stream_reserve_v2(void);
+int64_t rt_process_stream_bind_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stream_abandon_unlaunched_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stream_pid_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stream_retire_v2(int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t);
+const char* rt_process_read_stdout_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stdout_state_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_validate_piped_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
+/* Linux same-slot input revision barrier. NULL retains possible write outcome;
+ * all arrays are preallocated before effects. State is exactly268words. */
+SplArray* rt_process_input_enable_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes);
+SplArray* rt_process_input_install_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes,const char* target,int64_t target_bytes,const char* nonce,int64_t nonce_bytes,int64_t revision,int64_t expires_monotonic_ns);
+SplArray* rt_process_input_revoke_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes,const char* target,int64_t target_bytes,const char* nonce,int64_t nonce_bytes,int64_t revision);
+SplArray* rt_process_input_state_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes);
+SplArray* rt_process_input_write_some_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes,const char* target,int64_t target_bytes,const char* nonce,int64_t nonce_bytes,int64_t revision,int64_t attempt_sequence,const char* data,int64_t data_bytes,int64_t offset,int64_t maximum);
+int64_t rt_process_write_stdin_some_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t);
+/* Native-private explicit owned descriptor transfer, never a language API. */
+int rt_process_stream_claim_launch_v2(int64_t,const char*,int64_t,const char*,int64_t,int*,int*,int*);
+int rt_process_stream_launch_not_started_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int rt_process_stream_publish_broker_v2(int64_t,const char*,int64_t,const char*,int64_t,int64_t);
+int64_t rt_process_spawn_piped_generation_v1(const char* cmd, int64_t cmd_len, SplArray* args);
+int64_t rt_process_piped_pid_for_generation_v1(int64_t generation);
+const char* rt_process_read_stdout_ref_v1(int64_t pid, int64_t generation);
+int64_t rt_process_stdout_state_ref_v1(int64_t pid, int64_t generation);
+/* Validation observes registry ownership only, never kernel liveness or I/O. */
+int64_t rt_process_validate_piped_ref_v1(int64_t pid, int64_t generation);
+/* Descriptor-only endpoint: no PID, process liveness, or cleanup authority. */
+int64_t rt_process_validate_byte_endpoint_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+int64_t rt_process_byte_endpoint_state_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+SplArray* rt_process_read_byte_endpoint_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+SplArray* rt_process_close_byte_endpoint_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+int64_t rt_process_write_stdin_some_ref_v1(int64_t pid, int64_t generation,
+    const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
+int64_t rt_process_is_piped_alive_ref_v1(int64_t pid, int64_t generation);
+int64_t rt_process_close_piped_ref_v1(int64_t pid, int64_t generation);
+
 int64_t     rt_process_pin_executable(const char* canonical_path);
 /* Separately named opaque owner for consumers that cannot safely retain a raw
  * descriptor.  It is acquired only through rt_process_acquire_pinned_executable. */
@@ -1889,6 +2003,30 @@ bool        rt_socket_set_nonblocking(int64_t fd, bool enabled);
 int64_t     rt_socket_nonblock_prepare(int64_t fd, int64_t mode);
 int64_t     rt_socket_nonblock_commit(int64_t fd, int64_t flags);
 int64_t     rt_socket_nonblock_mask(void);
+/* Local Unix byte owner. All receipts are reserved before descriptor effects;
+ * read result [status,eof,count,padded byte capacity], connect has 7 words. */
+SplArray* rt_local_unix_connect_v1(const char*,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_read_v1(int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_write_some_v1(int64_t,SplArray*,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_write_some_admitted_v1(int64_t,SplArray*,int64_t,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_close_v1(int64_t);
+/* Listener roles and zero-wait byte operations use the same local registry. */
+SplArray* rt_local_unix_listen_v1(const char*,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_accept_v1(int64_t,int64_t);
+SplArray* rt_local_unix_poll_v1(int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_read_now_v1(int64_t,int64_t);
+SplArray* rt_local_unix_write_some_now_v1(int64_t,SplArray*,int64_t,int64_t);
+SplArray* rt_local_unix_listener_close_v1(int64_t);
+SplArray* rt_local_unix_peer_v1(int64_t);
+SplArray* rt_local_unix_shutdown_write_v1(int64_t);
+SplArray* rt_local_unix_claim_request_v1(int64_t,const char*,int64_t);
+SplArray* rt_local_unix_stage_stdout_v1(int64_t,int64_t,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t);
+SplArray* rt_local_unix_read_handoff_now_v1(int64_t,int64_t);
+SplArray* rt_local_unix_adopt_byte_endpoint_v1(int64_t,const char*,int64_t);
+SplArray* rt_local_unix_handoff_state_v1(int64_t);
+
+
+
 
 /* ===== Raw 32-bit framebuffer operations ===== */
 
@@ -2307,6 +2445,10 @@ int64_t  rt_select_query(int64_t handle, int64_t k);
 void     rt_rank_select_free(int64_t handle);
 
 /* ===== Reserved-Field Cache Helpers ===== */
+
+/* Workspace storage ABI: tagged text, scalar leases, no cleanup side effects. */
+#include "runtime_workspace_storage_v1.h"
+#include "runtime_retained_private_credential_v1.h"
 
 /* Forward decl: RtCoreString is defined in runtime_native.c */
 struct RtCoreString;

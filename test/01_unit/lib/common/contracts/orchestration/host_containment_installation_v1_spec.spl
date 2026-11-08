@@ -1,0 +1,91 @@
+# @req HOST-CONTAINMENT-INSTALL-01
+# NOT_RUN: pure codec only. Canonical proof wires are opaque here, not verified
+# authentication or native policy readiness; actual owner verifies signatures.
+use std.common.contracts.orchestration.host_exec_control_installation_v3.host_exec_control_installation_request_decode_v3
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.orchestration.host_containment_installation_v1.*
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
+
+fn containment_codec_fixture_v1() -> HostContainmentInstallationRequestV1:
+    val base = verification_fixture()
+    val fields: Dict<text, SdnValue> = {"fixtureOnly": SdnValue.Bool(true)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    val scope = ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "user_1", boot_id: "boot-1",
+        provider_generation: 7, native_machine_id: "machine-1", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-1")
+    val intent = HostContainmentInstallationIntentV1(operation_id: "installation-1", enrollment_binding_digest: "b".repeat(64),
+        scope: scope, provider_identity_digest: "a".repeat(64), containment_policy_bytes: bytes, containment_policy_digest: sha256_text(bytes), containment_identity_digest: "c".repeat(64))
+    var operation = base.request
+    operation.id = intent.operation_id
+    operation.operation = "host_containment_install_v1"
+    operation.payload_digest = host_containment_installation_intent_digest_v1(intent).unwrap()
+    HostContainmentInstallationRequestV1(intent, operation, base.signed, base.approval)
+
+describe "Pure containment installation intent and request":
+    it "roundtrips exact raw canonical policy and full opaque signed request bytes":
+        step("roundtrips exact raw canonical policy and full opaque signed request bytes")
+        val request = containment_codec_fixture_v1()
+        val intent_bytes = host_containment_installation_intent_encode_v1(request.intent).unwrap()
+        expect(host_containment_installation_intent_digest_v1(request.intent).unwrap()).to_equal(sha256_text(intent_bytes))
+        expect(host_containment_installation_intent_encode_v1(host_containment_installation_intent_decode_v1(intent_bytes).unwrap()).unwrap()).to_equal(intent_bytes)
+        val bytes = host_containment_installation_request_encode_v1(request).unwrap()
+        val decoded = host_containment_installation_request_decode_v1(bytes).unwrap()
+        expect(decoded.intent.containment_policy_bytes).to_equal(request.intent.containment_policy_bytes)
+        expect(host_containment_installation_request_encode_v1(decoded).unwrap()).to_equal(bytes)
+
+    it "validates standalone shared envelope shape and exact original operation correlation":
+        step("validates standalone shared envelope shape and exact original operation correlation")
+        val request = containment_codec_fixture_v1()
+        assert(host_containment_installation_match_operation_v1(request.intent, request.operation).unwrap())
+        for mode in ["memory", "duration", "id", "action", "host", "environment", "payload"]:
+            var operation = request.operation
+            if mode == "memory": operation.memory_bytes = 0
+            elif mode == "duration": operation.duration_ms = 0
+            elif mode == "id": operation.id = "invalid id"
+            elif mode == "action": operation.operation = "host_execute_v1"
+            elif mode == "host": operation.host_id = "worker_2"
+            elif mode == "environment": operation.environment_digest = "e".repeat(64)
+            else: operation.payload_digest = "e".repeat(64)
+            assert(host_containment_installation_match_operation_v1(request.intent, operation).is_err())
+
+    it "rejects nonobject noncanonical wronghash unknown missing and oversized inputs":
+        step("rejects nonobject noncanonical wronghash unknown missing and oversized inputs")
+        val request = containment_codec_fixture_v1()
+        var intent = request.intent
+        intent.containment_policy_digest = "e".repeat(64)
+        expect(host_containment_installation_intent_encode_v1(intent).unwrap_err()).to_equal("host-containment-install-policy-digest-mismatch")
+        expect(host_containment_installation_policy_v1("[1, 2]\n").unwrap_err()).to_equal("host-containment-install-policy-object-required")
+        expect(host_containment_installation_policy_v1(request.intent.containment_policy_bytes + "\n").unwrap_err()).to_equal("host-containment-install-policy-noncanonical")
+        val bytes = host_containment_installation_intent_encode_v1(request.intent).unwrap()
+        expect(host_containment_installation_intent_decode_v1(bytes.replace("{", "{unknown: 1, ")).unwrap_err()).to_equal("host-containment-install-unknown-field:unknown")
+        val field = ", enrollmentBindingDigest: " + sdn_encode_canonical(SdnValue.String(request.intent.enrollment_binding_digest))
+        assert(bytes.contains(field))
+        expect(host_containment_installation_intent_decode_v1(bytes.replace(field, "")).unwrap_err()).to_equal("host-containment-install-missing-field:enrollmentBindingDigest")
+        expect(host_containment_installation_policy_v1("😀".repeat(262145)).unwrap_err()).to_equal("host-containment-install-policy-size")
+        expect(host_containment_installation_request_decode_v1("😀".repeat(1048577)).unwrap_err()).to_equal("host-containment-install-source-size")
+
+    it "validates historical scope structurally without claiming current epoch or authentication":
+        step("validates historical scope structurally without claiming current epoch or authentication")
+        val request = containment_codec_fixture_v1()
+        var historical = request.intent
+        historical.scope.boot_id = "older-native-boot"
+        historical.scope.continuity_id = "older-native-boot"
+        var operation = request.operation
+        operation.payload_digest = host_containment_installation_intent_digest_v1(historical).unwrap()
+        assert(host_containment_installation_match_operation_v1(historical, operation).unwrap())
+        expect(host_containment_installation_intent_decode_v1(host_containment_installation_intent_encode_v1(historical).unwrap()).unwrap().scope.boot_id).to_equal("older-native-boot")
+
+    it "binds containment identity independently and refuses exec-control domain substitution":
+        step("binds containment identity independently and refuses exec-control domain substitution")
+        val request = containment_codec_fixture_v1()
+        var changed = request.intent
+        changed.containment_identity_digest = "d".repeat(64)
+        assert(host_containment_installation_intent_digest_v1(changed).unwrap() != request.operation.payload_digest)
+        assert(host_containment_installation_match_operation_v1(changed, request.operation).is_err())
+        changed.containment_identity_digest = "D".repeat(64)
+        assert(host_containment_installation_intent_encode_v1(changed).is_err())
+        val bytes = host_containment_installation_request_encode_v1(request).unwrap()
+        assert(host_exec_control_installation_request_decode_v3(bytes).is_err())

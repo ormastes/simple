@@ -9,3 +9,7 @@ The six scenarios call the same pure query-output conversion used by `lsp_handle
 Execution status: **UNRUN**. This is an authored manual, not generated execution evidence. The available `bin/simple.exe` is a Rust bootstrap seed, and no admitted self-hosted `bin/release` runtime was identified. Source review and `git diff --check` do not establish runtime correctness. Core/compiler/library/MCP checks and native smoke gates remain pending a qualified self-hosted producer.
 
 The fixture deliberately avoids launching an external query process; it verifies the protocol conversion owner. It does not establish that every CLI code-action producer emits valid JSON, nor that a real LSP client applies the resulting edit.
+
+## Revision-bound compatibility update
+
+The compatibility converter remains callable through its public lsp_code_actions_convert_output API. Malformed or partial edits now assert an explicit disabled reason and isPreferred=false instead of silently dropping an edit. Source-only update; execution/docgen NOT_RUN. The separate live revision-aware route refuses missing source stamps and supplies captured document versions.

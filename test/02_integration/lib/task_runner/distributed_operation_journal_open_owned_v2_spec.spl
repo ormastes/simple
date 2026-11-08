@@ -1,0 +1,79 @@
+# Authored against real IO/WAL API. NOT_RUN under the shared runtime cycle cap.
+use std.spec.{describe, it, expect, fail}
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.io.file_lock_owned_v2.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove, file_delete}
+
+fn owned_journal_ready_v2(root: text, nonce: text) -> Result<DistributedOperationJournalV2, text>:
+    match distributed_operation_journal_open_owned_v2(root, "a".repeat(64), nonce, 32):
+        case DistributedOperationJournalOpenV2.Ready(owner): return Ok(owner)
+        case DistributedOperationJournalOpenV2.Rejected(error): return Err(error)
+        case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, error):
+            val released = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(released.error).to_equal("")
+            return Err(error)
+    Err("owned journal did not open")
+
+describe "owner-bearing operation journal startup":
+    it "retains exact writer ownership and rejects stale cleanup after reopen":
+        val root = secure_temp_dir("build", "operation-open-owned").unwrap()
+        val owner = owned_journal_ready_v2(root, "b".repeat(64)).unwrap()
+        expect(owner.parent_lock).to_equal(-1)
+        expect(owner.owned_lock.is_some()).to_equal(true)
+        expect(file_lock_owner_live_v2(owner.owned_lock.unwrap())).to_equal(true)
+        match distributed_operation_journal_open_owned_v2(root, "a".repeat(64), "c".repeat(64), 32):
+            case DistributedOperationJournalOpenV2.Rejected(error): expect(error).to_equal("FILE_LOCK_ACQUISITION_REJECTED")
+            case _:
+                fail("second writer acquired a held native lock")
+        # Legacy Result close refuses this owner before touching lease/lock.
+        expect(distributed_operation_journal_close_v2(owner).is_err()).to_equal(true)
+        expect(file_lock_owner_live_v2(owner.owned_lock.unwrap())).to_equal(true)
+        val closed = distributed_operation_journal_close_owned_v2(owner)
+        expect(closed.closed).to_equal(true)
+        expect(closed.error).to_equal("")
+        expect(closed.state).to_equal(FileLockReleaseStateV2.Released)
+        val replacement = owned_journal_ready_v2(root, "d".repeat(64)).unwrap()
+        val stale = distributed_operation_journal_close_owned_v2(owner)
+        expect(stale.closed).to_equal(false)
+        expect(stale.state).to_equal(FileLockReleaseStateV2.Stale)
+        expect(file_lock_owner_live_v2(replacement.owned_lock.unwrap())).to_equal(true)
+        expect(distributed_operation_journal_lookup_v2(replacement, "missing").is_err()).to_equal(true)
+        expect(distributed_operation_journal_close_owned_v2(replacement).error).to_equal("")
+        dir_remove(root, true)
+
+    it "releases the actual acquired owner after corrupt WAL replay rejects startup":
+        val root = secure_temp_dir("build", "operation-open-corrupt").unwrap()
+        dir_create(root + "/database-wal", true)
+        expect(file_atomic_write(root + "/database-wal/CURRENT", "broken\n")).to_equal(true)
+        match distributed_operation_journal_open_owned_v2(root, "a".repeat(64), "b".repeat(64), 32):
+            case DistributedOperationJournalOpenV2.Rejected(error): expect(error).to_equal("invalid WAL CURRENT")
+            case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, error):
+                val released = distributed_operation_journal_open_cleanup_v2(cleanup)
+                expect(released.error).to_equal("")
+                fail("unexpected native cleanup failure in ordinary replay test")
+            case _:
+                fail("corrupt WAL accepted")
+        expect(file_delete(root + "/database-wal/CURRENT")).to_equal(true)
+        val replacement = owned_journal_ready_v2(root, "c".repeat(64)).unwrap()
+        expect(distributed_operation_journal_close_owned_v2(replacement).error).to_equal("")
+        dir_remove(root, true)
+
+    it "retains cleanup on exact lease mismatch without deleting replacement bytes":
+        val root = secure_temp_dir("build", "operation-open-lease").unwrap()
+        val owner = owned_journal_ready_v2(root, "b".repeat(64)).unwrap()
+        val replacement = "DISTRIBUTED-OPERATION-LEASE-V2\n" + "c".repeat(64) + "\n" + "a".repeat(64) + "\n"
+        expect(file_atomic_write(root + "/parent.lease", replacement)).to_equal(true)
+        val blocked = distributed_operation_journal_close_owned_v2(owner)
+        expect(blocked.closed).to_equal(false)
+        expect(blocked.cleanup.is_some()).to_equal(true)
+        expect(blocked.state).to_equal(FileLockReleaseStateV2.Retained)
+        expect(blocked.error).to_equal("OPERATION_JOURNAL_LEASE_STALE")
+        expect(file_lock_owner_live_v2(owner.owned_lock.unwrap())).to_equal(true)
+        # Repair only the exact fixture bytes; no production recovery bypass.
+        val original = "DISTRIBUTED-OPERATION-LEASE-V2\n" + "b".repeat(64) + "\n" + "a".repeat(64) + "\n"
+        expect(file_atomic_write(root + "/parent.lease", original)).to_equal(true)
+        val closed = distributed_operation_journal_open_cleanup_v2(blocked.cleanup.unwrap())
+        expect(closed.closed).to_equal(true)
+        expect(closed.error).to_equal("")
+        dir_remove(root, true)

@@ -1,0 +1,44 @@
+# Actual owned journal/private policy + native SDK listeners. Existing root/
+# Container observations are explicit scripted fixture facts, not native boot.
+use test.fixtures.orchestration.host_exec_control_installation_fixture_v3.host_installation_fixture_v3
+use std.nogc_sync_mut.orchestration.host_service_gateway_v2.HostServiceGatewayV2
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceDomainV2
+use std.nogc_sync_mut.orchestration.host_service_peer_policy_v2.*
+use std.nogc_sync_mut.orchestration.host_service_runtime_v2.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_service_v2.*
+use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostRuntimeFixtureV2:
+    gateway: HostServiceGatewayV2
+    config: HostServiceRuntimeConfigV2
+    root: text
+    auxiliary_root: text
+
+pub fn host_runtime_fixture_v2() -> HostRuntimeFixtureV2:
+    val base = host_installation_fixture_v3()
+    var parent = retained_directory_open_trusted_v1(base.local.root).unwrap()
+    var file = parent.open_file("authority-policy.sdn", 1048576u64).unwrap()
+    val euid = file.security_metadata_v1().unwrap().effective_uid as i64
+    assert(file.close())
+    assert(parent.close())
+    val client = if euid == 1001: 1002 else: 1001
+    val policy = HostServicePeerPolicyV2(rules: [HostServicePeerRuleV2(client, "user_1", "project_1",
+        base.local.config.service_scope_id, ["host-status", "host-prepare"])])
+    val bytes = host_service_peer_policy_encode_v2(policy).unwrap()
+    assert(file_atomic_write_mode(base.local.root + "/" + HOST_SERVICE_PEER_POLICY_FILE_V2, bytes, 0o600))
+    val peers = host_service_peer_policy_load_v2(base.local.root, sha256_text(bytes)).unwrap()
+    val config = HostServiceRuntimeConfigV2(base.local.root, sha256_text(bytes), client,
+        base.local.root + "/work.sock", base.local.root + "/control.sock", 2, 1, 1000)
+    HostRuntimeFixtureV2(HostServiceGatewayV2(HostServiceDomainV2(base.local), peers), config, base.local.root, base.auxiliary_root)
+
+pub fn host_runtime_transport_fixture_v2(fixture: HostRuntimeFixtureV2, work_path: text = "") -> HostServiceRuntimeV2:
+    val config = fixture.config
+    val transport = LocalGatewayServiceConfigV2(work_path: if work_path == "": config.work_path else: work_path,
+        control_path: config.control_path, service_uid: fixture.gateway.peers.service_uid, client_uid: config.client_uid,
+        work_connections: config.work_connections, control_connections: config.control_connections,
+        request_timeout_ms: config.request_timeout_ms)
+    val service = local_gateway_service_open_v2<HostServiceRuntimeDomainV2>(HostServiceRuntimeDomainV2.Live(fixture.gateway), transport)
+    val phase = if service.phase == 1 and service.error == "": HostServiceRuntimePhaseV2.Live else: HostServiceRuntimePhaseV2.OpenBlocked
+    HostServiceRuntimeV2(HostServiceRuntimePortV2.Transport(service), phase, nil, service.error)

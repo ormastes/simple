@@ -1,0 +1,45 @@
+# One-shot executable finalization only. Persistent callers retain the returned
+# cleanup owners beyond their wire reply and refuse further mutation until the
+# canonical owner confirms release. No native token is serialized here.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_open_cleanup_v2
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn orchestrator_reply_cleanup_v2(reply: OrchestratorValidationReplyV1) -> OrchestratorValidationReplyV1:
+    var current = reply
+    var errors: [text] = []
+    if val cleanup = current.journal_cleanup:
+        val turn = distributed_operation_journal_open_cleanup_v2(cleanup)
+        current.journal_cleanup = turn.cleanup
+        current.cleanup_state = Some(turn.state)
+        if (turn.cleanup.is_some() or not turn.closed or turn.error != "" or
+                turn.state != FileLockReleaseStateV2.Released):
+            errors.push(if turn.error == "": "controller-cleanup-unconfirmed" else: turn.error)
+    if val cleanup = current.host_journal_cleanup:
+        val turn = distributed_operation_journal_open_cleanup_v2(cleanup)
+        current.host_journal_cleanup = turn.cleanup
+        current.host_cleanup_state = Some(turn.state)
+        if (turn.cleanup.is_some() or not turn.closed or turn.error != "" or
+                turn.state != FileLockReleaseStateV2.Released):
+            errors.push(if turn.error == "": "host-cleanup-unconfirmed" else: turn.error)
+    # Consumed errors deliberately have no retryable owner. Their typed state
+    # is still failure, including at the direct host-command reply boundary.
+    if current.journal_cleanup.is_none():
+        if val state = current.cleanup_state:
+            if state != FileLockReleaseStateV2.Released: errors.push("controller-cleanup-state-unconfirmed")
+    if current.host_journal_cleanup.is_none():
+        if val state = current.host_cleanup_state:
+            if state != FileLockReleaseStateV2.Released: errors.push("host-cleanup-state-unconfirmed")
+    # A later successful cleanup does not promote the earlier failed command.
+    if errors.len() > 0:
+        var reasons: [SdnValue] = []
+        for error in errors: reasons.push(SdnValue.String(error))
+        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+            "kind": SdnValue.String("orchestrator-local-cleanup-error"),
+            "reconciliationRequired": SdnValue.Bool(true),
+            "errors": SdnValue.Array(reasons), "response": SdnValue.String(reply.output)}
+        current.output = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+        current.exit_code = 2
+    current

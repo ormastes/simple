@@ -1,0 +1,334 @@
+# Real journal/owned locks; pure continuation data; no fake Unix handles.
+# AUTHORED/UNEXECUTED. This does not qualify Engine/native effects.
+use std.spec.*
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.exec_admission_v3.container_exec_admission_binding_match_v3
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_remove}
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.nogc_sync_mut.io.file_lock_owned_v2.*
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.nogc_sync_mut.io.retained_file.retained_file_open
+use std.nogc_async_mut.container.providers.linux.engine_exec_record_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_exec_owner_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_exec_codec_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_exec_http_v3.*
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use test.fixtures.container.linux_engine_exec_fixture_v3.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.linux_container_engine_fixture_v2
+
+fn _exec_record_v3() -> LinuxEngineExecRecordV3:
+    LinuxEngineExecRecordV3(payload_digest: sha256_text("private payload"), request_digest: "a".repeat(64),
+        intent_digest: "b".repeat(64), control_digest: "f".repeat(64), revision: 1, phase: "prepared",
+        io_armed: false, create_armed: false, start_armed: false, native_exec_id: "", offset: 0)
+
+fn _exec_test_lock_v3(path: text) -> FileLockOwnerV2:
+    match file_lock_open_owned_v2(path + ".lock", 0):
+        case FileLockOpenV2.Ready(owner): owner
+        case FileLockOpenV2.CleanupRequired(owner, reason):
+            val closed = file_lock_release_owned_v2(owner)
+            assert(closed.owner.is_none())
+            fail(reason)
+        case FileLockOpenV2.Rejected(reason): fail(reason)
+
+fn _exec_test_unlock_v3(owner: FileLockOwnerV2):
+    val closed = file_lock_release_owned_v2(owner)
+    expect(closed.closed).to_equal(true)
+    expect(closed.owner.is_none()).to_equal(true)
+    expect(closed.error).to_equal("")
+
+fn _exec_test_remove_v3(root: text, path: text):
+    for suffix in ["", ".payload", ".birth", ".lock", ".session.lock"]: file_remove(path + suffix)
+    assert(dir_remove(root, false))
+
+describe "parent-owned durable Engine exec continuation":
+    it "rejects impossible canonical row states and phase resurrection":
+        val initial = _exec_record_v3()
+        expect(linux_engine_exec_record_decode_v3(linux_engine_exec_record_encode_v3(initial).unwrap()).unwrap()).to_equal(initial)
+        for kind in ["known", "start", "id", "prepared-io", "unknown-id"]:
+            var invalid = initial
+            if kind == "known": invalid.phase = "known-created"
+            if kind == "start": invalid.start_armed = true
+            if kind == "id": invalid.native_exec_id = "c".repeat(64)
+            if kind == "prepared-io": invalid.io_armed = true
+            if kind == "unknown-id":
+                invalid.phase = "unknown-create"
+                invalid.create_armed = true
+                invalid.native_exec_id = "c".repeat(64)
+            expect(linux_engine_exec_record_encode_v3(invalid).is_err()).to_equal(true)
+        var unknown = initial
+        unknown.phase = "unknown-create"
+        unknown.create_armed = true
+        var reset = initial
+        reset.revision = 2
+        reset.create_armed = true
+        reset.phase = "creating"
+        expect(linux_engine_exec_record_transition_v3(unknown, reset).is_err()).to_equal(true)
+
+    it "uses real immutable publication and CAS without overwriting changed payload or stale rows":
+        val root = secure_temp_dir("/tmp", "engine-exec-wal").unwrap()
+        val path = root + "/row"
+        val lock = _exec_test_lock_v3(path)
+        val initial = _exec_record_v3()
+        expect(linux_engine_exec_payload_store_v3(root, path + ".payload", "private payload").is_ok()).to_equal(true)
+        var payload_owner = retained_file_open(path + ".payload", 1024u64).unwrap()
+        val metadata = payload_owner.security_metadata_v1().unwrap()
+        expect(metadata.mode & 511u32).to_equal(384u32)
+        expect(metadata.owner_uid).to_equal(metadata.effective_uid)
+        expect(payload_owner.close()).to_equal(true)
+        expect(linux_engine_exec_payload_store_v3(root, path + ".payload", "different").is_err()).to_equal(true)
+        expect(linux_engine_exec_record_store_v3(root, path, nil, initial).is_ok()).to_equal(true)
+        var next = initial
+        next.revision = 2
+        next.phase = "probing"
+        next.io_armed = true
+        expect(linux_engine_exec_record_store_v3(root, path, Some(initial), next).is_ok()).to_equal(true)
+        expect(linux_engine_exec_record_store_v3(root, path, Some(initial), next).unwrap_err()).to_equal("engine-exec-record-stale-revision")
+        expect(linux_engine_exec_record_read_v3(path).unwrap()).to_equal(next)
+        _exec_test_unlock_v3(lock)
+        _exec_test_remove_v3(root, path)
+
+    it "recovers only a canonical protected birth from the create-to-known crash window":
+        val root = secure_temp_dir("/tmp", "engine-exec-birth").unwrap()
+        val path = root + "/row"
+        val lock = _exec_test_lock_v3(path)
+        val request = linux_engine_exec_request_fixture_v3()
+        val policy_digest = linux_oci_installed_policy_digest_v3(linux_engine_exec_policy_fixture_v3()).unwrap()
+        var row = _exec_record_v3()
+        row.request_digest = container_exec_request_digest_v3(request).unwrap()
+        expect(linux_engine_exec_record_store_v3(root, path, nil, row).is_ok()).to_equal(true)
+        var probing = row
+        probing.revision = 2
+        probing.phase = "probing"
+        expect(linux_engine_exec_record_store_v3(root, path, Some(row), probing).is_ok()).to_equal(true)
+        var creating = probing
+        creating.revision = 3
+        creating.phase = "creating"
+        creating.create_armed = true
+        creating.io_armed = true
+        expect(linux_engine_exec_record_store_v3(root, path, Some(probing), creating).is_ok()).to_equal(true)
+        val query = linux_engine_exec_query_digest_v3(linux_engine_exec_create_request_v3(request).unwrap(), policy_digest).unwrap()
+        val birth = ContainerExecBirthReceiptV3(request_digest: creating.request_digest, parent_runtime: request.parent_runtime,
+            native_exec_id: "c".repeat(64), provider_identity_digest: creating.control_digest, created_unix_ms: 100,
+            query_digest: query, evidence_digest: "e".repeat(64), proof_kind: "exact-native-exec-birth-v3")
+        expect(linux_engine_exec_payload_store_v3(root, path + ".birth", container_exec_birth_encode_v3(birth).unwrap()).is_ok()).to_equal(true)
+        val repaired = linux_engine_exec_recover_birth_v3(root, path, creating, request, policy_digest).unwrap()
+        expect(repaired.native_exec_id).to_equal("c".repeat(64))
+        expect(repaired.phase).to_equal("known-created")
+        expect(repaired.io_armed).to_equal(false)
+        expect(linux_engine_exec_record_read_v3(path).unwrap()).to_equal(repaired)
+        expect(linux_engine_exec_recover_birth_v3(root, path, creating, request, policy_digest).is_err()).to_equal(true)
+        _exec_test_unlock_v3(lock)
+        _exec_test_remove_v3(root, path)
+
+    it "leaves unknown create untouched when the protected birth has a mismatched query":
+        val root = secure_temp_dir("/tmp", "engine-exec-bad-birth").unwrap()
+        val path = root + "/row"
+        val lock = _exec_test_lock_v3(path)
+        val request = linux_engine_exec_request_fixture_v3()
+        var row = _exec_record_v3()
+        row.request_digest = container_exec_request_digest_v3(request).unwrap()
+        expect(linux_engine_exec_record_store_v3(root, path, nil, row).is_ok()).to_equal(true)
+        var probing = row
+        probing.revision = 2
+        probing.phase = "probing"
+        expect(linux_engine_exec_record_store_v3(root, path, Some(row), probing).is_ok()).to_equal(true)
+        var creating = probing
+        creating.revision = 3
+        creating.phase = "creating"
+        creating.create_armed = true
+        expect(linux_engine_exec_record_store_v3(root, path, Some(probing), creating).is_ok()).to_equal(true)
+        row = creating
+        row.revision = 4
+        row.phase = "unknown-create"
+        expect(linux_engine_exec_record_store_v3(root, path, Some(creating), row).is_ok()).to_equal(true)
+        val birth = ContainerExecBirthReceiptV3(request_digest: row.request_digest, parent_runtime: request.parent_runtime,
+            native_exec_id: "c".repeat(64), provider_identity_digest: row.control_digest, created_unix_ms: 100,
+            query_digest: "a".repeat(64), evidence_digest: "e".repeat(64), proof_kind: "exact-native-exec-birth-v3")
+        expect(linux_engine_exec_payload_store_v3(root, path + ".birth", container_exec_birth_encode_v3(birth).unwrap()).is_ok()).to_equal(true)
+        expect(linux_engine_exec_recover_birth_v3(root, path, row, request,
+            linux_oci_installed_policy_digest_v3(linux_engine_exec_policy_fixture_v3()).unwrap()).is_err()).to_equal(true)
+        expect(linux_engine_exec_record_read_v3(path).unwrap()).to_equal(row)
+        _exec_test_unlock_v3(lock)
+        _exec_test_remove_v3(root, path)
+
+    it "blocks stale actual owner send and close continuations before any Unix executor entry":
+        for stage in ["write", "cleanup"]:
+            val root = secure_temp_dir("/tmp", "engine-exec-stale").unwrap()
+            val path = root + "/row"
+            val lock = _exec_test_lock_v3(path)
+            val original = _exec_record_v3()
+            expect(linux_engine_exec_record_store_v3(root, path, nil, original).is_ok()).to_equal(true)
+            var newer = original
+            newer.revision = 2
+            newer.phase = "probing"
+            expect(linux_engine_exec_record_store_v3(root, path, Some(original), newer).is_ok()).to_equal(true)
+            _exec_test_unlock_v3(lock)
+            val session = _exec_test_lock_v3(path + ".session")
+            # No Unix token is invented. A stale-CAS regression would reach a
+            # missing connection or executor attempt and fail this test.
+            var owner = LinuxOciEngineExecOwnerV3(root: root, path: path, payload: "private payload", row: original,
+                policy: linux_engine_exec_policy_fixture_v3(), admission: linux_engine_exec_admission_fixture_v3(),
+                cli: linux_container_engine_fixture_v2(), action: "create",
+                whole_deadline: time_sample_monotonic_nanos_or_failure() / 1000000 + 10000,
+                stage: stage, outgoing: [1u8], session_lock: Some(session), row_attached: true)
+            val refused = owner.step(5)
+            expect(refused.error).to_equal("engine-exec-record-stale-revision")
+            expect(refused.phase).to_equal("stale-view")
+            expect(owner.executor_calls).to_equal(0)
+            expect(owner.connection).to_equal(nil)
+            expect(owner.session_lock).to_equal(Some(session))
+            expect(file_lock_owner_state_v2(session)).to_equal("held")
+            expect(linux_engine_exec_record_read_v3(path).unwrap()).to_equal(newer)
+            _exec_test_unlock_v3(session)
+            _exec_test_remove_v3(root, path)
+
+    it "qualifies only exact before or attempted publication images for cleanup recovery":
+        val before = _exec_record_v3()
+        var attempted = before
+        attempted.phase = "probing"
+        attempted.revision = 2
+        attempted.io_armed = true
+        expect(linux_engine_exec_cleanup_record_v3(before, Some(attempted), before).is_ok()).to_equal(true)
+        expect(linux_engine_exec_cleanup_record_v3(before, Some(attempted), attempted).is_ok()).to_equal(true)
+        var foreign = attempted
+        foreign.revision = 3
+        expect(linux_engine_exec_cleanup_record_v3(before, Some(attempted), foreign).is_err()).to_equal(true)
+        expect(linux_engine_exec_cleanup_record_v3(before, nil, attempted).is_err()).to_equal(true)
+
+    it "uses actual owner readback and directory barrier after uncertain state publication":
+        val root = secure_temp_dir("/tmp", "engine-exec-publication").unwrap()
+        val path = root + "/row"
+        val lock = _exec_test_lock_v3(path)
+        val before = _exec_record_v3()
+        expect(linux_engine_exec_record_store_v3(root, path, nil, before).is_ok()).to_equal(true)
+        var attempted = before
+        attempted.phase = "probing"
+        attempted.revision = 2
+        attempted.io_armed = true
+        expect(linux_engine_exec_record_store_v3(root, path, Some(before), attempted).is_ok()).to_equal(true)
+        _exec_test_unlock_v3(lock)
+        val session = _exec_test_lock_v3(path + ".session")
+        # Explicit uncertain-publication state, with no fabricated Unix token.
+        # The real continuation must qualify/readback/barrier, not adopt latest.
+        var owner = LinuxOciEngineExecOwnerV3(root: root, path: path, payload: "private payload", row: before,
+            policy: linux_engine_exec_policy_fixture_v3(), admission: linux_engine_exec_admission_fixture_v3(),
+            cli: linux_container_engine_fixture_v2(), action: "create",
+            whole_deadline: time_sample_monotonic_nanos_or_failure() / 1000000 + 10000,
+            attempted_row: Some(attempted), stage: "failed", error: "publication-uncertain",
+            session_lock: Some(session), row_attached: true)
+        val retained = owner.step(5)
+        expect(retained.owner.?).to_equal(true)
+        expect(retained.birth).to_equal(nil)
+        expect(owner.row).to_equal(attempted)
+        expect(owner.attempted_row).to_equal(nil)
+        expect(owner.lock_cleanup).to_equal(nil)
+        expect(owner.session_lock).to_equal(nil)
+        expect(owner.executor_calls).to_equal(0)
+        _exec_test_remove_v3(root, path)
+
+    it "advances full accepted writes to reads and never treats connect timeout as pending":
+        expect(linux_engine_exec_write_progress_v3(2, 3, 5, 3).unwrap()).to_equal((5, "read"))
+        expect(linux_engine_exec_write_progress_v3(2, 1, 5, 3).unwrap()).to_equal((3, "write"))
+        expect(linux_engine_exec_write_progress_v3(5, 0, 5, 0).is_err()).to_equal(true)
+        expect(linux_engine_exec_step_pending_v3("write", "local_unix_timeout", 10, 10, 20)).to_equal(true)
+        expect(linux_engine_exec_step_pending_v3("connect", "local_unix_timeout", 10, 10, 20)).to_equal(false)
+        expect(linux_engine_exec_step_pending_v3("read", "local_unix_timeout", 20, 10, 20)).to_equal(false)
+        expect(linux_engine_exec_step_deadline_v3(10, 100, 25).unwrap()).to_equal(35)
+        expect(linux_engine_exec_step_deadline_v3(10, 100, 26).is_err()).to_equal(true)
+
+    it "rejects unsupported begin actions before native CLI or WAL effects":
+        val turn = LinuxOciEngineExecOwnerV3.begin("/not-opened", linux_engine_exec_parent_fixture_v3(),
+            linux_engine_exec_installation_fixture_v3(), linux_engine_exec_admission_fixture_v3(),
+            linux_engine_exec_observation_fixture_v3(), "delete")
+        expect(turn.owner).to_equal(nil)
+        expect(turn.error).to_equal("engine-exec-action")
+
+    it "finishes local cleanup with no connection and blocks all later sends without touching a journal":
+        var owner = LinuxOciEngineExecOwnerV3(root: "/not-opened", path: "/not-opened/row", payload: "private payload",
+            row: _exec_record_v3(), policy: linux_engine_exec_policy_fixture_v3(),
+            admission: linux_engine_exec_admission_fixture_v3(), cli: linux_container_engine_fixture_v2(),
+            action: "create", whole_deadline: 1)
+        val closed = owner.cleanup()
+        expect(closed.phase).to_equal("cleanup-complete")
+        expect(closed.cleanup_complete).to_equal(true)
+        expect(closed.birth).to_equal(nil)
+        expect(owner.cleanup_requested).to_equal(true)
+        expect(owner.step(5).phase).to_equal("cleanup-complete")
+        expect(owner.executor_calls).to_equal(0)
+        expect(owner.row).to_equal(_exec_record_v3())
+
+    it "never performs cleanup IO from a stale view or exposes verify inspection as start evidence":
+        var owner = LinuxOciEngineExecOwnerV3(root: "/not-opened", path: "/not-opened/row", payload: "private payload",
+            row: _exec_record_v3(), policy: linux_engine_exec_policy_fixture_v3(),
+            admission: linux_engine_exec_admission_fixture_v3(), cli: linux_container_engine_fixture_v2(),
+            action: "start", whole_deadline: 1, stale_view: true, error: "engine-exec-record-stale-revision")
+        expect(owner.cleanup().phase).to_equal("stale-view")
+        expect(owner.cleanup().cleanup_complete).to_equal(false)
+        expect(owner.executor_calls).to_equal(0)
+        owner.stale_view = false
+        owner.cleanup_requested = false
+        owner.error = ""
+        owner.stage = "done"
+        owner.inspection = Some(LinuxEngineExecInspectV3(native_exec_id: "c".repeat(64), parent_native_id: "b".repeat(64),
+            running: false, exit_code: 0, pid: 0, can_remove: false))
+        expect(owner.step(5).inspection).to_equal(nil)
+        expect(owner.executor_calls).to_equal(0)
+
+    it "keeps read-only inspect separate from mutation observation and launch expiry":
+        var admission = linux_engine_exec_admission_fixture_v3()
+        admission.deadline.expires_at_unix_ms = 1
+        expect(container_exec_admission_binding_match_v3(admission, admission.request,
+            admission.provider_identity_digest).is_ok()).to_equal(true)
+        val mutation = LinuxOciEngineExecOwnerV3.begin("/not-opened", linux_engine_exec_parent_fixture_v3(),
+            linux_engine_exec_installation_fixture_v3(), admission, linux_engine_exec_observation_fixture_v3(), "inspect")
+        expect(mutation.error).to_equal("engine-exec-action")
+        var wrong_parent = linux_engine_exec_parent_fixture_v3()
+        wrong_parent.plan.request_digest = "c".repeat(64)
+        val inspection = LinuxOciEngineExecOwnerV3.inspect("/not-opened", wrong_parent,
+            linux_engine_exec_installation_fixture_v3(), admission)
+        expect(inspection.owner).to_equal(nil)
+        expect(inspection.error).to_equal("engine-exec-original-parent-mismatch")
+
+    it "holds a real lifetime claim across continuations and reacquires only after exact release":
+        val root = secure_temp_dir("/tmp", "engine-exec-session").unwrap()
+        val path = root + "/row"
+        val first = _exec_test_lock_v3(path + ".session")
+        match file_lock_open_owned_v2(path + ".session.lock", 0):
+            case FileLockOpenV2.Rejected(_): pass
+            case FileLockOpenV2.Ready(unexpected):
+                _exec_test_unlock_v3(unexpected)
+                fail("second lifetime claim must not be admitted")
+            case FileLockOpenV2.CleanupRequired(unexpected, _):
+                _exec_test_unlock_v3(unexpected)
+                fail("contended claim must not create a second cleanup owner")
+        _exec_test_unlock_v3(first)
+        val second = _exec_test_lock_v3(path + ".session")
+        val stale_release = file_lock_release_owned_v2(first)
+        expect(stale_release.state).to_equal(FileLockReleaseStateV2.Stale)
+        expect(file_lock_owner_state_v2(second)).to_equal("held")
+        var stale = LinuxOciEngineExecOwnerV3(root: root, path: path, payload: "private payload", row: _exec_record_v3(),
+            policy: linux_engine_exec_policy_fixture_v3(), admission: linux_engine_exec_admission_fixture_v3(),
+            cli: linux_container_engine_fixture_v2(), action: "create", whole_deadline: 1,
+            session_lock: Some(second), stale_view: true, row_attached: true)
+        val refused = stale.cleanup()
+        expect(refused.cleanup_complete).to_equal(false)
+        expect(stale.session_lock).to_equal(Some(second))
+        expect(stale.executor_calls).to_equal(0)
+        expect(file_lock_owner_state_v2(second)).to_equal("held")
+        _exec_test_unlock_v3(second)
+        _exec_test_remove_v3(root, path)
+
+    it "never declares local cleanup complete while an attempted durability image remains":
+        var attempted = _exec_record_v3()
+        attempted.phase = "probing"
+        attempted.revision = 2
+        attempted.io_armed = true
+        var owner = LinuxOciEngineExecOwnerV3(root: "/not-opened", path: "/not-opened/row", payload: "private payload",
+            row: _exec_record_v3(), policy: linux_engine_exec_policy_fixture_v3(), admission: linux_engine_exec_admission_fixture_v3(),
+            cli: linux_container_engine_fixture_v2(), action: "create", whole_deadline: 1, attempted_row: Some(attempted))
+        val retained = owner.cleanup()
+        expect(retained.cleanup_complete).to_equal(false)
+        expect(retained.birth).to_equal(nil)
+        expect(owner.attempted_row.?).to_equal(true)
+        expect(owner.executor_calls).to_equal(0)

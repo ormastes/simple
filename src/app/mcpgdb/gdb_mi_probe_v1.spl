@@ -1,0 +1,58 @@
+# One bounded diagnostic owner; no inferior, attach or persistent session.
+use app.io.mod.{process_spawn_piped, process_write_stdin, process_read_stdout_result, process_piped_exit_status_v1, process_close_piped, thread_native_sleep_ms}
+use app.mcpgdb.native_runners_v1.{mcpgdb_bundle_path_v1, mcpgdb_bundle_validate_v1}
+use app.mcpgdb.json_helpers.{LB, RB, jp, js}
+
+pub fn mcpgdb_gdb_mi_probe_v1() -> Result<text, text>:
+    val binary = mcpgdb_bundle_path_v1("gdb")?
+    val pid = process_spawn_piped(binary, ["--quiet", "--nx", "--interpreter=mi2"])
+    if pid <= 0: return Err("GDB MI process provider failed to spawn")
+    val input = "1-interpreter-exec console \"show version\"\n2-interpreter-exec console \"show configuration\"\n3-gdb-exit\n"
+    if not process_write_stdin(pid, input):
+        val closed = process_close_piped(pid)
+        return Err("GDB MI stdin delivery failed; cleanup=" + str(closed))
+    var output = ""
+    var eof = false
+    var stopped = false
+    var exit_code = -1
+    var failed = ""
+    var tick = 0
+    while tick < 200:
+        if not eof:
+            match process_read_stdout_result(pid):
+                Ok(chunk):
+                    if chunk != nil:
+                        val value = chunk ?? ""
+                        if output.len() + value.len() > 1048576:
+                            failed = "GDB MI output limit exceeded"
+                        else:
+                            output = output + value
+                Err(reason):
+                    if reason == "process_stdout_eof": eof = true
+                    else: failed = reason
+        if failed != "": break
+        if eof:
+            match process_piped_exit_status_v1(pid):
+                Ok(code):
+                    if code != nil:
+                        exit_code = code ?? -1
+                        stopped = true
+                Err(reason): failed = reason
+        if failed != "" or stopped: break
+        thread_native_sleep_ms(25)
+        tick = tick + 1
+    # Query actual exit before close: close may terminate and is not exit proof.
+    val closed = process_close_piped(pid)
+    if not closed: return Err("GDB MI process cleanup failed")
+    if failed != "": return Err(failed)
+    if not eof or not stopped: return Err("GDB MI drain/exit deadline expired; owned process closed")
+    if exit_code != 0: return Err("GDB MI process exited nonzero: " + str(exit_code))
+    mcpgdb_bundle_validate_v1(true)?
+    if not output.contains("1^done") or not output.contains("2^done") or not output.contains("3^exit"):
+        return Err("GDB MI tokenized command/exit receipts missing: " + output)
+    if not output.contains("GNU gdb") and not output.contains("GNU GDB"):
+        return Err("GDB MI version output missing")
+    Ok(LB() + jp("status", js("ok")) + "," + jp("transport", js("gdb-mi2"))
+        + "," + jp("scope", js("version-and-configuration; no inferior or attach"))
+        + "," + jp("stdout_eof", "true") + "," + jp("process_exit_code", str(exit_code))
+        + "," + jp("cleanup", js("owned-process-closed")) + "," + jp("output", js(output)) + RB())

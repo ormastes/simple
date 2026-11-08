@@ -1,0 +1,258 @@
+# Windows Docker process-only bridge. These values grant no runtime authority.
+# Qualification: source-only NOT_RUN. The administrator selects an exact
+# host/image version pair; matching observations do not prove compatibility.
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.runtime_v1.RuntimeCommandV1
+
+# Provider/ownership label ID is separate from the native engine name.
+pub const WINDOWS_DOCKER_ENGINE_V1 = "windows-docker-process-v1"
+pub const WINDOWS_DOCKER_NATIVE_ENGINE_V1 = "docker"
+pub const WINDOWS_DOCKER_MAX_RECORDS_V1: i64 = 64
+pub const WINDOWS_DOCKER_MAX_SCRIPT_V1: i64 = 256
+pub const WINDOWS_DOCKER_MAX_SCRIPT_BYTES_V1: i64 = 4194304
+# Simple escapes each literal brace; Docker receives double Go-template braces.
+pub const WINDOWS_DOCKER_INFO_FORMAT_V1 = "{{{{.OSType}}}}|{{{{.ID}}}}|{{{{.KernelVersion}}}}"
+pub const WINDOWS_DOCKER_IMAGE_FORMAT_V1 = "{{{{.Os}}}}|{{{{.Id}}}}|{{{{.OsVersion}}}}\n{{{{range .RepoDigests}}}}{{{{println .}}}}{{{{end}}}}"
+pub const WINDOWS_DOCKER_INSPECT_FORMAT_V1 = "{{{{.Id}}}}|{{{{.Image}}}}|{{{{.Config.Image}}}}|{{{{.HostConfig.Isolation}}}}|{{{{.Config.User}}}}|{{{{.HostConfig.NetworkMode}}}}|{{{{.HostConfig.CpuCount}}}}|{{{{.HostConfig.Memory}}}}|{{{{index .Config.Labels \"simple.provider\"}}}}|{{{{index .Config.Labels \"simple.pod\"}}}}|{{{{index .Config.Labels \"simple.attempt\"}}}}|{{{{index .Config.Labels \"simple.operation\"}}}}|{{{{index .Config.Labels \"simple.boot\"}}}}|{{{{index .Config.Labels \"simple.generation\"}}}}|{{{{index .Config.Labels \"simple.request\"}}}}|{{{{.State.Status}}}}|{{{{.State.ExitCode}}}}"
+
+pub const WINDOWS_DOCKER_MOUNTS_FORMAT_V3 = "|{{{{len .Mounts}}}}|{{{{range .Mounts}}}}{{{{.Type}}}}|{{{{.Source}}}}|{{{{.Destination}}}}|{{{{.RW}}}}{{{{end}}}}"
+
+pub const WINDOWS_DOCKER_TERMINAL_FORMAT_V4 = "|{{{{.Config.Tty}}}}|{{{{.Config.OpenStdin}}}}|{{{{.Config.StdinOnce}}}}|{{{{.Config.AttachStdin}}}}"
+
+pub struct WindowsDockerPolicyV1:
+    docker_executable: text
+    endpoint: text
+    engine_id: text
+    node_boot_id: text
+    provider_generation: i64
+    expected_kernel_version: text
+    image_os_version: text
+    expected_image_id: text
+    timeout_ms: i64
+    max_output_bytes: i64
+    system_root: text
+    temp_directory: text
+    workspace_root: text = ""
+
+pub struct WindowsDockerMountV1:
+    host_root: text
+    guest_root: text
+    read_only: bool
+
+pub struct WindowsDockerRequestV1:
+    pod_uid: text
+    attempt: i64
+    operation_id: text
+    image: text
+    # command[0] replaces ENTRYPOINT; its tail plus args replace CMD.
+    command: [text]
+    args: [text]
+    cpu_count: i64
+    memory_limit_bytes: i64
+    network: text
+    working_directory: text = ""
+    mounts: [WindowsDockerMountV1] = []
+    terminal_tty: bool = false
+    stdin_open: bool = false
+
+pub struct WindowsDockerScriptedResultV1:
+    operation: text
+    program: text
+    args: [text]
+    stdout: text
+    stderr: text
+    exit_code: i64
+    limit_exceeded: bool = false
+
+pub fn windows_docker_token_v1(value: text) -> bool:
+    if value == "" or value.len() > 128: return false
+    for ch in value.chars():
+        if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or ch == "-" or ch == "_" or ch == "." or ch == ":"):
+            return false
+    true
+
+pub fn windows_docker_id_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for ch in value.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")): return false
+    true
+
+fn safe_field(value: text) -> bool:
+    value != "" and value.len() <= 512 and not value.contains("|") and
+        not value.contains("\n") and not value.contains("\r") and not value.contains("\0")
+
+fn absolute_windows_path(value: text) -> bool:
+    if value.len() < 3 or not safe_field(value): return false
+    val drive = value.byte_at(0)
+    ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)) and
+        value.byte_at(1) == 58 and value.byte_at(2) == 92 and
+        not value.contains("..") and not value.contains("\"") and not value.contains("/")
+
+# Restricted canonical drive paths for one literal --mount CSV value. No
+# separators/options can escape their field, and Win32 alias syntax is refused.
+pub fn windows_docker_mount_path_v1(value: text) -> bool:
+    if value.len() < 3 or value.len() > 512: return false
+    val drive = value.char_code_at(0)
+    if not ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)): return false
+    if value.byte_at(1) != 58 or value.byte_at(2) != 92: return false
+    for character in value.substring(2, value.len()).chars():
+        val scalar = character.char_code_at(0)
+        if scalar < 32 or (scalar >= 127 and scalar <= 159): return false
+        if scalar == 34 or scalar == 39 or scalar == 44 or scalar == 61 or scalar == 124 or scalar == 58 or scalar == 47 or scalar == 42 or scalar == 63: return false
+    if value.contains(".."): return false
+    if value.len() == 3: return true
+    for component in value.substring(3, value.len()).split("\\"):
+        if component == "" or component == "." or component.ends_with(".") or component.ends_with(" "): return false
+    true
+
+pub fn windows_docker_policy_reason_v1(policy: WindowsDockerPolicyV1) -> text:
+    if not absolute_windows_path(policy.docker_executable) or
+            not policy.docker_executable.ends_with("\\docker.exe"):
+        return "docker-absolute-executable-required"
+    if policy.endpoint != "npipe:////./pipe/docker_engine": return "docker-local-pipe-required"
+    if not windows_docker_token_v1(policy.engine_id) or not windows_docker_token_v1(policy.node_boot_id) or
+            policy.provider_generation <= 0: return "docker-policy-identity-invalid"
+    if not safe_field(policy.expected_kernel_version) or not safe_field(policy.image_os_version):
+        return "docker-host-image-version-pair-required"
+    if not policy.expected_image_id.starts_with("sha256:") or policy.expected_image_id.len() != 71:
+        return "docker-image-id-invalid"
+    if not windows_docker_id_v1(policy.expected_image_id.substring(7, 71)):
+        return "docker-image-id-invalid"
+    if policy.timeout_ms <= 0 or policy.timeout_ms > 300000 or
+            policy.max_output_bytes < 4096 or policy.max_output_bytes > 1048576:
+        return "docker-execution-bounds-invalid"
+    if policy.workspace_root != "" and (policy.workspace_root.len() <= 3 or not windows_docker_mount_path_v1(policy.workspace_root)):
+        return "docker-policy-workspace-root-invalid"
+    if not absolute_windows_path(policy.system_root) or not absolute_windows_path(policy.temp_directory):
+        return "docker-child-environment-invalid"
+    ""
+
+pub fn windows_docker_request_reason_v1(policy: WindowsDockerPolicyV1,
+        request: WindowsDockerRequestV1) -> text:
+    val reason = windows_docker_policy_reason_v1(policy)
+    if reason != "": return reason
+    if not windows_docker_token_v1(request.pod_uid) or not windows_docker_token_v1(request.operation_id) or
+            request.attempt <= 0: return "docker-request-identity-invalid"
+    if request.image.len() > 584: return "docker-image-reference-invalid"
+    val parts = request.image.split("@sha256:")
+    if parts.len() != 2 or parts[0] == "" or parts[0].len() > 512 or
+            not windows_docker_id_v1(parts[1]): return "docker-full-image-digest-required"
+    for ch in parts[0].chars():
+        if not ((ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or
+                ch == "." or ch == "/" or ch == ":" or ch == "_" or ch == "-"):
+            return "docker-image-reference-invalid"
+    if parts[0].starts_with("-"): return "docker-image-reference-invalid"
+    if request.command.len() < 1 or request.command.len() > 64 or request.args.len() > 128:
+        return "docker-command-count-invalid"
+    var size = 0
+    for value in request.command + request.args:
+        if value.contains("\0") or value.len() > 8192: return "docker-argument-invalid"
+        size = size + value.len()
+    if request.command[0] == "" or size > 65536: return "docker-command-size-invalid"
+    if request.cpu_count <= 0 or request.cpu_count > 256 or
+            request.memory_limit_bytes < 16777216 or request.memory_limit_bytes > 1099511627776:
+        return "docker-resource-limit-invalid"
+    if request.network != "none": return "docker-network-none-required"
+    if request.mounts.len() > 1: return "docker-workspace-mount-count-invalid"
+    if request.mounts.len() == 1:
+        val mount = request.mounts[0]
+        if policy.workspace_root == "": return "docker-policy-workspace-root-required"
+        val host_prefix = if policy.workspace_root.ends_with("\\"): policy.workspace_root else: policy.workspace_root + "\\"
+        if mount.host_root == policy.workspace_root or not mount.host_root.starts_with(host_prefix):
+            return "docker-workspace-host-outside-protected-root"
+        if not windows_docker_mount_path_v1(mount.host_root) or not windows_docker_mount_path_v1(mount.guest_root):
+            return "docker-workspace-mount-path-invalid"
+        if not windows_docker_mount_path_v1(request.working_directory): return "docker-workspace-directory-required"
+        val prefix = if mount.guest_root.ends_with("\\"): mount.guest_root else: mount.guest_root + "\\"
+        if request.working_directory != mount.guest_root and not request.working_directory.starts_with(prefix):
+            return "docker-workspace-directory-outside-mount"
+    if request.mounts.len() == 0 and request.working_directory != "" and not absolute_windows_path(request.working_directory):
+        return "docker-working-directory-invalid"
+    ""
+
+# Canonical SDN hashes every scalar separately and encodes array boundaries;
+# arbitrary command text cannot alias another payload. No supplied digest exists.
+# Operation identity is bound separately by an exact ownership label and intent;
+# it does not change this semantic digest or the unique pod-attempt name.
+pub fn windows_docker_request_digest_v1(policy: WindowsDockerPolicyV1,
+        request: WindowsDockerRequestV1) -> Result<text, text>:
+    val reason = windows_docker_request_reason_v1(policy, request)
+    if reason != "": return Err(reason)
+    var fields = [policy.docker_executable, policy.endpoint, policy.engine_id, policy.node_boot_id,
+        policy.provider_generation.to_text(), policy.expected_kernel_version, policy.image_os_version,
+        policy.expected_image_id, policy.timeout_ms.to_text(), policy.max_output_bytes.to_text(),
+        policy.system_root, policy.temp_directory, request.pod_uid, request.attempt.to_text(),
+        request.image, request.cpu_count.to_text(),
+        request.memory_limit_bytes.to_text(), request.network, "process", "ContainerUser"]
+    var body = "version: 1\nkind: windows-docker-request\nfields:\n"
+    if request.working_directory != "":
+        fields.push(request.working_directory)
+        body = "version: 2\nkind: windows-docker-request\nfields:\n"
+    if request.mounts.len() > 0:
+        fields.push(policy.workspace_root)
+        body = "version: 3\nkind: windows-docker-request\nfields:\n"
+    if request.terminal_tty or request.stdin_open:
+        fields.push(if request.terminal_tty: "true" else: "false")
+        fields.push(if request.stdin_open: "true" else: "false")
+        body = "version: 4\nkind: windows-docker-request\nfields:\n"
+    for field in fields: body = body + "    - \"" + sha256_text(field) + "\"\n"
+    body = body + "commandCount: " + request.command.len().to_text() + "\ncommand:\n"
+    for value in request.command: body = body + "    - \"" + sha256_text(value) + "\"\n"
+    body = body + "argumentCount: " + request.args.len().to_text() + "\narguments:\n"
+    for value in request.args: body = body + "    - \"" + sha256_text(value) + "\"\n"
+    if request.mounts.len() > 0:
+        body = body + "mountCount: " + request.mounts.len().to_text() + "\nmounts:\n"
+        for mount in request.mounts:
+            for scalar in [mount.host_root, mount.guest_root, if mount.read_only: "true" else: "false"]:
+                body = body + "    - \"" + sha256_text(scalar) + "\"\n"
+    Ok(sha256_text(body))
+
+pub fn windows_docker_name_v1(policy: WindowsDockerPolicyV1,
+        request: WindowsDockerRequestV1) -> text:
+    # Deterministic across a controller restart. Docker's unique name reserve
+    # prevents a second create from duplicating an ambiguous first create.
+    val logical = [request.pod_uid, request.attempt.to_text(),
+        policy.engine_id, policy.node_boot_id, policy.provider_generation.to_text()]
+    var body = "windows-docker-name-v1\n"
+    for value in logical: body = body + sha256_text(value) + "\n"
+    "simple-wpc-" + sha256_text(body)
+
+pub fn windows_docker_command_v1(policy: WindowsDockerPolicyV1,
+        operation: text, args: [text]) -> RuntimeCommandV1:
+    RuntimeCommandV1(operation: operation, program: policy.docker_executable,
+        args: ["--host", policy.endpoint] + args)
+
+pub fn windows_docker_create_command_v1(policy: WindowsDockerPolicyV1,
+        request: WindowsDockerRequestV1) -> Result<RuntimeCommandV1, text>:
+    val digest = windows_docker_request_digest_v1(policy, request)?
+    var args = ["create", "--isolation=process", "--user", "ContainerUser", "--network", "none",
+        "--cpu-count", request.cpu_count.to_text(), "--memory", request.memory_limit_bytes.to_text(),
+        "--name", windows_docker_name_v1(policy, request)]
+    val labels = ["simple.provider=" + WINDOWS_DOCKER_ENGINE_V1, "simple.pod=" + request.pod_uid,
+        "simple.attempt=" + request.attempt.to_text(), "simple.operation=" + request.operation_id,
+        "simple.boot=" + policy.node_boot_id, "simple.generation=" + policy.provider_generation.to_text(),
+        "simple.request=" + digest]
+    for label in labels: args = args + ["--label", label]
+    if request.working_directory != "": args = args + ["--workdir", request.working_directory]
+    if request.terminal_tty: args = args + ["--tty"]
+    if request.stdin_open: args = args + ["--interactive"]
+    for mount in request.mounts:
+        var specification = "type=bind,source=" + mount.host_root + ",target=" + mount.guest_root
+        if mount.read_only: specification = specification + ",readonly"
+        args = args + ["--mount", specification]
+    args = args + ["--entrypoint", request.command[0], request.image]
+    var index = 1
+    while index < request.command.len():
+        args.push(request.command[index])
+        index = index + 1
+    args = args + request.args
+    Ok(windows_docker_command_v1(policy, "create", args))
+
+pub fn windows_docker_args_equal_v1(left: [text], right: [text]) -> bool:
+    if left.len() != right.len(): return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true

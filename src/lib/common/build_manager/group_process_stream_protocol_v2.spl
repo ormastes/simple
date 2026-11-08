@@ -1,0 +1,328 @@
+# Explicit live-stream broker profile. V1 wire/argv/cwd restrictions are unchanged.
+use std.common.build_manager.group_process_protocol.{GroupProcessInputV1}
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.build_manager.memory_policy.{builder_memory_policy_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{str_len}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessStreamProfileV3,
+    group_process_stream_profile_validate_v3, group_process_stream_profile_encode_v3,
+    group_process_stream_profile_decode_v3, group_process_profile_number_v3,
+    group_process_stream_path_absolute_v3}
+
+val GROUP_PROCESS_STREAM_MAX_ARGS_V2: i64 = 64
+val GROUP_PROCESS_STREAM_MAX_WIRE_BYTES_V2: i64 = 16777216
+val GROUP_PROCESS_STREAM_INTEGER_MAX_V2: i64 = 9223372036854775807
+
+struct GroupProcessStreamRequestV2:
+    program: text
+    producer_digest: text
+    args: [text]
+    environment: [text]
+    directory: text
+    inputs: [GroupProcessInputV1]
+    timeout_ms: i64
+    broker_program: text
+    broker_digest: text
+    child_argv_digest: text
+    launch_deadline_unix_ms: i64
+
+struct GroupProcessStreamLaunchV2:
+    root: text
+    worker_id: text
+    generation: i64
+    snapshot_digest: text
+    cache_identity: text
+    memory_limit_bytes: i64
+    request: GroupProcessStreamRequestV2
+    delegated_cgroup_path: text
+    memory_policy: text = "enforce"
+    transport_generation: i64 = 0
+    profile_v3: GroupProcessStreamProfileV3? = nil
+
+# Shape only: no normalization, filesystem access, host selection or admission.
+fn group_process_stream_absolute_v2(path: text) -> bool:
+    str_len(path) <= 1048576 and group_process_stream_path_absolute_v3(path)
+
+fn group_process_child_argv_digest_v2(program: text, args: [text]) -> text:
+    if not group_process_stream_absolute_v2(program) or args.len() > GROUP_PROCESS_STREAM_MAX_ARGS_V2: return ""
+    var fields: [text] = [builder_wire_line_v1("SIMPLE-GROUP-STREAM-ARGV-2"),
+        builder_wire_line_v1(program), builder_wire_line_v1("{args.len()}")]
+    var argument_bytes: i64 = str_len(program)
+    for arg in args:
+        if arg.contains("\0"): return ""
+        argument_bytes = argument_bytes + str_len(arg)
+        if argument_bytes > 1048576: return ""
+        fields.push(builder_wire_line_v1(arg))
+    sha256_text(fields.join(""))
+
+fn group_process_stream_launch_validate_core_v3(value: GroupProcessStreamLaunchV2, profiled: bool,
+        template: bool = false) -> text:
+    if profiled:
+        if value.profile_v3 == nil: return "stream V3 resource profile required"
+        if value.memory_policy != "enforce": return "V3 helper profile requires enforced memory"
+        val profile = value.profile_v3.unwrap()
+        val invalid = group_process_stream_profile_validate_v3(profile)
+        if invalid != "": return invalid
+        if not group_process_stream_absolute_v2(profile.broker.cgroup_path): return "invalid broker budget absolute path"
+    elif value.profile_v3 != nil:
+        return "legacy stream V2 rejects resource profile"
+    val request = value.request
+    if not builder_memory_policy_valid_v1(value.memory_policy): return "invalid stream memory policy"
+    if not builder_identifier_valid_v1(value.worker_id) or value.generation < 1 or value.generation > 1000000000:
+        return "invalid stream worker/generation"
+    for path in [value.root, request.program, request.directory, request.broker_program]:
+        if not group_process_stream_absolute_v2(path): return "invalid stream absolute path"
+    if value.delegated_cgroup_path != "" and not group_process_stream_absolute_v2(value.delegated_cgroup_path):
+        return "invalid stream delegated path shape"
+    for digest in [value.snapshot_digest, value.cache_identity, request.producer_digest,
+            request.broker_digest, request.child_argv_digest]:
+        if not builder_digest_valid_v1(digest): return "invalid stream digest"
+    if value.memory_limit_bytes < 1 or value.memory_limit_bytes > 1125899906842624:
+        return "invalid stream memory limit"
+    if request.timeout_ms < 0 or request.timeout_ms > 86400000: return "invalid stream lifetime bound"
+    if template:
+        if not profiled or request.launch_deadline_unix_ms != 0 or value.transport_generation != 0:
+            return "invalid normalized stream template"
+    elif request.launch_deadline_unix_ms <= 0:
+        return "invalid stream launch deadline"
+    if value.transport_generation < 0: return "invalid stream transport generation"
+    val argv_digest = group_process_child_argv_digest_v2(request.program, request.args)
+    if argv_digest == "" or argv_digest != request.child_argv_digest: return "stream child argv digest mismatch"
+    if request.environment.len() > 4096 or request.inputs.len() > 100000:
+        return "stream request inventory exceeds bound"
+    for assignment in request.environment:
+        val length = str_len(assignment)
+        if length < 3 or length > 65535 or assignment.contains("\0") or
+                not assignment.contains("=") or assignment.starts_with("="):
+            return "invalid stream environment"
+    for input in request.inputs:
+        if not group_process_stream_absolute_v2(input.path) or not builder_digest_valid_v1(input.digest):
+            return "invalid stream input"
+    ""
+
+# Match the existing scalar codec's byte ceilings before escaping allocates.
+fn group_process_stream_field_bytes_v2(field: text) -> i64:
+    val length = str_len(field)
+    if length > 65536 or field.contains("\0"): return -1
+    var encoded: i64 = 1 # final LF
+    for i in 0..length:
+        val byte = field.byte_at(i)
+        encoded = encoded + (if byte == 37 or byte == 9 or byte == 13 or byte == 10: 3 else: 1)
+    if encoded > 196609: return -1
+    encoded
+
+fn group_process_stream_budget_v2(used: i64, field: text) -> i64:
+    val size = group_process_stream_field_bytes_v2(field)
+    if size < 0 or used > GROUP_PROCESS_STREAM_MAX_WIRE_BYTES_V2 - size: return -1
+    used + size
+
+fn group_process_stream_launch_encode_core_v3(value: GroupProcessStreamLaunchV2, profiled: bool,
+        template: bool = false) -> text:
+    if group_process_stream_launch_validate_core_v3(value, profiled, template) != "": return ""
+    val request = value.request
+    var fields: [text] = []
+    var used: i64 = 0
+    val header = if template: "SIMPLE-GROUP-STREAM-TEMPLATE-3" else:
+        if profiled: "SIMPLE-GROUP-STREAM-3" else: "SIMPLE-GROUP-STREAM-2"
+    for field in [header, value.memory_policy, value.root, value.worker_id,
+            "{value.generation}", value.snapshot_digest, value.cache_identity, "{value.memory_limit_bytes}",
+            value.delegated_cgroup_path, "{value.transport_generation}", request.program,
+            request.producer_digest, request.directory, "{request.timeout_ms}",
+            "{request.launch_deadline_unix_ms}", request.broker_program, request.broker_digest,
+            request.child_argv_digest, "{request.args.len()}"]:
+        used = group_process_stream_budget_v2(used, field)
+        if used < 0: return ""
+        fields.push(builder_wire_line_v1(field))
+    for arg in request.args:
+        used = group_process_stream_budget_v2(used, arg)
+        if used < 0: return ""
+        fields.push(builder_wire_line_v1(arg))
+    used = group_process_stream_budget_v2(used, "{request.environment.len()}")
+    if used < 0: return ""
+    fields.push(builder_wire_line_v1("{request.environment.len()}"))
+    for assignment in request.environment:
+        used = group_process_stream_budget_v2(used, assignment)
+        if used < 0: return ""
+        fields.push(builder_wire_line_v1(assignment))
+    used = group_process_stream_budget_v2(used, "{request.inputs.len()}")
+    if used < 0: return ""
+    fields.push(builder_wire_line_v1("{request.inputs.len()}"))
+    for input in request.inputs:
+        used = group_process_stream_budget_v2(used, input.path)
+        if used < 0: return ""
+        used = group_process_stream_budget_v2(used, input.digest)
+        if used < 0: return ""
+        fields.push(builder_wire_line_v1(input.path))
+        fields.push(builder_wire_line_v1(input.digest))
+    if profiled:
+        val profile = group_process_stream_profile_encode_v3(value.profile_v3.unwrap())
+        used = group_process_stream_budget_v2(used, profile)
+        if used < 0: return ""
+        fields.push(builder_wire_line_v1(profile))
+    val payload = fields.join("")
+    if str_len(payload) > GROUP_PROCESS_STREAM_MAX_WIRE_BYTES_V2: return ""
+    payload
+
+# The V1 reader's integer surface intentionally caps digits at17. Keep it
+# unchanged; transport generations/deadlines in this profile require full i64.
+fn group_process_stream_number_v2(field: text, limit: i64) -> Result<i64, text>:
+    group_process_profile_number_v3(field, limit)
+
+fn group_process_stream_launch_decode_core_v3(payload: text, profiled: bool,
+        template: bool = false) -> Result<GroupProcessStreamLaunchV2, text>:
+    if str_len(payload) > GROUP_PROCESS_STREAM_MAX_WIRE_BYTES_V2: return Err("stream wire exceeds bound")
+    var reader = BuilderWireReaderV1.create(payload)
+    val expected = if template: "SIMPLE-GROUP-STREAM-TEMPLATE-3" else:
+        if profiled: "SIMPLE-GROUP-STREAM-3" else: "SIMPLE-GROUP-STREAM-2"
+    if reader.scalar() != expected: return Err("invalid group stream header")
+    val policy = reader.scalar()
+    val root = reader.scalar()
+    val worker = reader.scalar()
+    val generation = group_process_stream_number_v2(reader.scalar(), 1000000000)?
+    val snapshot = reader.scalar()
+    val cache = reader.scalar()
+    val memory = group_process_stream_number_v2(reader.scalar(), 1125899906842624)?
+    val delegated = reader.scalar()
+    val transport = group_process_stream_number_v2(reader.scalar(), GROUP_PROCESS_STREAM_INTEGER_MAX_V2)?
+    val program = reader.scalar()
+    val producer = reader.scalar()
+    val directory = reader.scalar()
+    val timeout = group_process_stream_number_v2(reader.scalar(), 86400000)?
+    val deadline = group_process_stream_number_v2(reader.scalar(), GROUP_PROCESS_STREAM_INTEGER_MAX_V2)?
+    val broker = reader.scalar()
+    val broker_digest = reader.scalar()
+    val argv_digest = reader.scalar()
+    val argc = group_process_stream_number_v2(reader.scalar(), GROUP_PROCESS_STREAM_MAX_ARGS_V2)?
+    var args: [text] = []
+    for i in 0..argc: args.push(reader.scalar())
+    val envc = group_process_stream_number_v2(reader.scalar(), 4096)?
+    var environment: [text] = []
+    for i in 0..envc: environment.push(reader.scalar())
+    val input_count = group_process_stream_number_v2(reader.scalar(), 100000)?
+    var inputs: [GroupProcessInputV1] = []
+    for i in 0..input_count:
+        val path = reader.scalar()
+        inputs.push(GroupProcessInputV1(path: path, digest: reader.scalar()))
+    var profile: GroupProcessStreamProfileV3? = nil
+    if profiled:
+        profile = Some(group_process_stream_profile_decode_v3(reader.scalar())?)
+    val wire_error = reader.complete_error()
+    if wire_error != "": return Err(wire_error)
+    val request = GroupProcessStreamRequestV2(program: program, producer_digest: producer,
+        args: args, environment: environment, directory: directory, inputs: inputs,
+        timeout_ms: timeout, broker_program: broker, broker_digest: broker_digest,
+        child_argv_digest: argv_digest, launch_deadline_unix_ms: deadline)
+    val launch = GroupProcessStreamLaunchV2(root: root, worker_id: worker, generation: generation,
+        snapshot_digest: snapshot, cache_identity: cache, memory_limit_bytes: memory,
+        request: request, delegated_cgroup_path: delegated, memory_policy: policy,
+        transport_generation: transport, profile_v3: profile)
+    if group_process_stream_launch_encode_core_v3(launch, profiled, template) != payload:
+        return Err("noncanonical/invalid group stream request")
+    Ok(launch)
+
+# Strict legacy entrypoints preserve exact V2 wire/default behavior.
+fn group_process_stream_launch_validate_v2(value: GroupProcessStreamLaunchV2) -> text:
+    group_process_stream_launch_validate_core_v3(value, false)
+fn group_process_stream_launch_encode_v2(value: GroupProcessStreamLaunchV2) -> text:
+    group_process_stream_launch_encode_core_v3(value, false)
+fn group_process_stream_launch_decode_v2(payload: text) -> Result<GroupProcessStreamLaunchV2, text>:
+    group_process_stream_launch_decode_core_v3(payload, false)
+
+fn group_process_stream_launch_validate_v3(value: GroupProcessStreamLaunchV2) -> text:
+    group_process_stream_launch_validate_core_v3(value, true)
+fn group_process_stream_launch_encode_v3(value: GroupProcessStreamLaunchV2) -> text:
+    group_process_stream_launch_encode_core_v3(value, true)
+fn group_process_stream_launch_decode_v3(payload: text) -> Result<GroupProcessStreamLaunchV2, text>:
+    group_process_stream_launch_decode_core_v3(payload, true)
+
+fn group_process_stream_launch_validate_profiled_v3(value: GroupProcessStreamLaunchV2) -> text:
+    group_process_stream_launch_validate_core_v3(value, value.profile_v3 != nil)
+fn group_process_stream_launch_encode_profiled_v3(value: GroupProcessStreamLaunchV2) -> text:
+    group_process_stream_launch_encode_core_v3(value, value.profile_v3 != nil)
+fn group_process_stream_launch_decode_profiled_v3(payload: text) -> Result<GroupProcessStreamLaunchV2, text>:
+    if payload.starts_with("SIMPLE-GROUP-STREAM-3\n"):
+        return group_process_stream_launch_decode_core_v3(payload, true)
+    group_process_stream_launch_decode_core_v3(payload, false)
+
+fn group_process_stream_identity_profiled_v3(value: GroupProcessStreamLaunchV2) -> text:
+    val payload = group_process_stream_launch_encode_profiled_v3(value)
+    if payload == "": return ""
+    sha256_text(payload)
+
+fn group_process_stream_apply_profile_v3(value: GroupProcessStreamLaunchV2,
+        profile: GroupProcessStreamProfileV3) -> Result<GroupProcessStreamLaunchV2, text>:
+    if value.transport_generation != 0 or value.profile_v3 != nil:
+        return Err("stream transport/profile already assigned")
+    var updated = value
+    updated.profile_v3 = Some(profile)
+    if updated.request.launch_deadline_unix_ms == 0:
+        val _template = group_process_stream_template_encode_v3(updated)?
+        return Ok(updated)
+    val invalid = group_process_stream_launch_validate_v3(updated)
+    if invalid != "": return Err(invalid)
+    if group_process_stream_launch_encode_v3(updated) == "": return Err("stream profiled wire exceeds bound")
+    Ok(updated)
+
+fn group_process_stream_identity_v2(value: GroupProcessStreamLaunchV2) -> text:
+    val payload = group_process_stream_launch_encode_v2(value)
+    if payload == "": return ""
+    sha256_text(payload)
+
+export GroupProcessStreamRequestV2, GroupProcessStreamLaunchV2
+export group_process_child_argv_digest_v2, group_process_stream_launch_validate_v2
+export group_process_stream_launch_encode_v2, group_process_stream_launch_decode_v2
+export group_process_stream_identity_v2
+
+fn group_process_stream_ready_encode_v2(identity: text, transport_generation: i64,
+        child_argv_digest: text) -> text:
+    if not builder_digest_valid_v1(identity) or not builder_digest_valid_v1(child_argv_digest) or transport_generation <= 0:
+        return ""
+    builder_wire_line_v1("SIMPLE-GROUP-STREAM-READY-2") + builder_wire_line_v1(identity) +
+        builder_wire_line_v1("{transport_generation}") + builder_wire_line_v1(child_argv_digest)
+
+export group_process_stream_ready_encode_v2
+
+fn group_process_stream_unlaunched_encode_v2(identity: text, transport_generation: i64,
+        child_argv_digest: text) -> text:
+    if not builder_digest_valid_v1(identity) or not builder_digest_valid_v1(child_argv_digest) or transport_generation <= 0:
+        return ""
+    builder_wire_line_v1("SIMPLE-GROUP-STREAM-UNLAUNCHED-2") + builder_wire_line_v1(identity) +
+        builder_wire_line_v1("{transport_generation}") + builder_wire_line_v1(child_argv_digest)
+
+export group_process_stream_unlaunched_encode_v2
+
+export group_process_stream_launch_validate_v3, group_process_stream_launch_encode_v3
+export group_process_stream_launch_decode_v3, group_process_stream_launch_validate_profiled_v3
+export group_process_stream_launch_encode_profiled_v3, group_process_stream_launch_decode_profiled_v3
+export group_process_stream_identity_profiled_v3, group_process_stream_apply_profile_v3
+
+# Planning domain normalizes only fields filled by the trusted admission owner.
+# This is never a launch record: actual validators require positive expiry.
+fn group_process_stream_template_encode_v3(value: GroupProcessStreamLaunchV2) -> Result<text, text>:
+    if value.profile_v3 == nil: return Err("stream template requires V3 resource profile")
+    if value.transport_generation < 0 or value.request.launch_deadline_unix_ms < 0:
+        return Err("negative stream template dynamic field")
+    var normalized = value
+    normalized.transport_generation = 0
+    var request = normalized.request
+    request.launch_deadline_unix_ms = 0
+    normalized.request = request
+    val invalid = group_process_stream_launch_validate_core_v3(normalized, true, true)
+    if invalid != "": return Err(invalid)
+    val payload = group_process_stream_launch_encode_core_v3(normalized, true, true)
+    if payload == "": return Err("stream template exceeds canonical wire bound")
+    Ok(payload)
+
+fn group_process_stream_template_digest_v3(value: GroupProcessStreamLaunchV2) -> Result<text, text>:
+    val payload = group_process_stream_template_encode_v3(value)?
+    Ok(sha256_text(payload))
+
+# Restores planning metadata only. Shared strict parsing requires both dynamic
+# fields to be zero and rejects trailing/noncanonical bytes. Launch entrypoints
+# continue rejecting this domain and require a verified positive deadline.
+fn group_process_stream_template_decode_v3(payload: text) -> Result<GroupProcessStreamLaunchV2, text>:
+    group_process_stream_launch_decode_core_v3(payload, true, true)
+
+export group_process_stream_template_encode_v3, group_process_stream_template_digest_v3
+export group_process_stream_template_decode_v3

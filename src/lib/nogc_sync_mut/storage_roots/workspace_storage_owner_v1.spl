@@ -1,0 +1,104 @@
+# Canonical no-GC synchronous native storage owner. No ledger or deletion API.
+use std.common.contracts.storage.workspace_storage_v1.{WorkspaceStorageRequestV1,
+    WorkspaceStorageReceiptV1, workspace_storage_request_valid_v1, workspace_storage_binding_v1}
+use std.common.string_core.{str_len, string_to_int}
+
+@unsafe(reason: "native verified workspace quota/volume handle admission", capabilities: [ffi])
+extern fn rt_workspace_storage_open_v1(kind: text, parent: text, leaf: text, pool: text,
+    workspace: text, quota: i64, hard_bytes: i64, policy: text) -> i64
+@unsafe(reason: "recover exact retained native cleanup authority; lease is not readiness", capabilities: [ffi])
+extern fn rt_workspace_storage_recover_v1(kind: text, parent: text, leaf: text, pool: text,
+    workspace: text, quota: i64, hard_bytes: i64, policy: text) -> i64
+@unsafe(reason: "copy actual native workspace identity and enforcement snapshot", capabilities: [ffi])
+extern fn rt_workspace_storage_observe_v1(token: i64) -> text
+@unsafe(reason: "verify exact disappearance and native release condition; never deletes data", capabilities: [ffi])
+extern fn rt_workspace_storage_release_if_absent_v1(token: i64) -> i64
+@unsafe(reason: "forget only retained native released receipt after host journal commit", capabilities: [ffi])
+extern fn rt_workspace_storage_forget_released_v1(token: i64) -> i64
+
+pub struct WorkspaceStorageLeaseV1:
+    token: i64
+    request: WorkspaceStorageRequestV1
+
+# Private fixed native record, not the build-manager escaped wire protocol.
+# Validate canonical decimal before using the existing integer conversion owner.
+fn workspace_storage_number_v1(value: text) -> Result<i64, text>:
+    if str_len(value) == 0 or str_len(value) > 16 or (str_len(value) > 1 and value.starts_with("0")):
+        return Err("storage-native-receipt-integer")
+    for i in 0..str_len(value):
+        val c = value.byte_at(i) as i64
+        if c < 48 or c > 57: return Err("storage-native-receipt-integer")
+    val number = string_to_int(value)
+    if number < 0 or number > 1125899906842624: return Err("storage-native-receipt-integer")
+    Ok(number)
+
+pub fn workspace_storage_decode_receipt_v1(request: WorkspaceStorageRequestV1,
+        payload: text) -> Result<WorkspaceStorageReceiptV1, text>:
+    val binding = workspace_storage_binding_v1(request)?
+    if str_len(payload) > 1023 or not payload.ends_with("\n") or payload.contains("\r") or
+            payload.contains("\t") or payload.contains("\u{0}"):
+        return Err("storage-native-receipt-malformed")
+    val fields = payload.split("\n")
+    if fields.len() != 11 or fields[10] != "": return Err("storage-native-receipt-malformed")
+    if fields[0] != "workspace-storage-native-v1": return Err("storage-native-receipt-schema")
+    val kind = fields[1]
+    val pool = fields[2]
+    val workspace = fields[3]
+    val quota = workspace_storage_number_v1(fields[4])?
+    val hard = workspace_storage_number_v1(fields[5])?
+    val used = workspace_storage_number_v1(fields[6])?
+    var inodes: i64 = -1
+    if kind == "windows-dedicated-volume-v1":
+        if fields[7] != "-1": return Err("storage-native-inode-usage-unsupported")
+    else:
+        inodes = workspace_storage_number_v1(fields[7])?
+    val policy = fields[8]
+    val state = fields[9]
+    if kind != request.kind or pool != request.expected_pool_id or
+            workspace != request.expected_workspace_id or quota != request.quota_id or
+            hard != request.hard_bytes or policy != request.policy_digest:
+        return Err("storage-native-receipt-binding-mismatch")
+    if state != "retained" and state != "released": return Err("storage-native-receipt-state")
+    if state == "released" and (kind != "linux-xfs-project-v1" or used != 0 or inodes != 0):
+        return Err("storage-native-release-not-proven")
+    Ok(WorkspaceStorageReceiptV1(kind: kind, pool_id: pool, workspace_id: workspace,
+        quota_id: quota, hard_bytes: hard, used_bytes: used, used_inodes: inodes,
+        policy_digest: policy, binding_digest: binding, state: state))
+
+pub fn workspace_storage_observe_v1(lease: WorkspaceStorageLeaseV1) -> Result<WorkspaceStorageReceiptV1, text>:
+    if lease.token <= 0: return Err("invalid-workspace-storage-lease")
+    val payload = unsafe(capabilities: [ffi]): rt_workspace_storage_observe_v1(lease.token)
+    workspace_storage_decode_receipt_v1(lease.request, payload)
+
+pub fn workspace_storage_admit_v1(request: WorkspaceStorageRequestV1) -> Result<WorkspaceStorageLeaseV1, text>:
+    if not workspace_storage_request_valid_v1(request): return Err("invalid-workspace-storage-request")
+    val token = unsafe(capabilities: [ffi]):
+        rt_workspace_storage_open_v1(request.kind, request.protected_parent, request.leaf_name,
+            request.expected_pool_id, request.expected_workspace_id, request.quota_id,
+            request.hard_bytes, request.policy_digest)
+    if token <= 0: return Err("workspace-storage-native-admission-refused:{token}")
+    # Return ownership before any further allocation/receipt decoding. Failed
+    # observation must leave this lease available for reconciliation.
+    Ok(WorkspaceStorageLeaseV1(token: token, request: request))
+
+# Recovery while the configured workspace still exists repeats real admission.
+# Missing workspace after process restart is conservative pending authority;
+# no copied receipt is used to fabricate a released native token.
+pub fn workspace_storage_recover_v1(request: WorkspaceStorageRequestV1) -> Result<WorkspaceStorageLeaseV1, text>:
+    if not workspace_storage_request_valid_v1(request): return Err("invalid-workspace-storage-request")
+    val token = unsafe(capabilities: [ffi]):
+        rt_workspace_storage_recover_v1(request.kind, request.protected_parent, request.leaf_name,
+            request.expected_pool_id, request.expected_workspace_id, request.quota_id,
+            request.hard_bytes, request.policy_digest)
+    if token <= 0: return Err("workspace-storage-native-recovery-pending:{token}")
+    Ok(WorkspaceStorageLeaseV1(token: token, request: request))
+
+pub fn workspace_storage_release_if_absent_v1(lease: WorkspaceStorageLeaseV1) -> Result<WorkspaceStorageReceiptV1, text>:
+    val result = unsafe(capabilities: [ffi]): rt_workspace_storage_release_if_absent_v1(lease.token)
+    if result != 0: return Err("workspace-storage-release-remains-unproven:{result}")
+    workspace_storage_observe_v1(lease)
+
+pub fn workspace_storage_forget_released_v1(lease: WorkspaceStorageLeaseV1) -> Result<(), text>:
+    val result = unsafe(capabilities: [ffi]): rt_workspace_storage_forget_released_v1(lease.token)
+    if result != 0: return Err("workspace-storage-native-release-not-retained:{result}")
+    Ok(())

@@ -1,0 +1,53 @@
+# Resolve authority only from the live adopted pane and its retained binding.
+# This function never reads output and never opens a second native transport.
+use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingOwnerV3, smux_runtime_binding_index_v3}
+use os.apps.smux.api.{smux_owner_snapshot, smux_configuration_revision, smux_window_closing, smux_client_lease_snapshot}
+use os.apps.smux.client_leases.ClientLease
+use os.apps.smux.runtime_binding_target_v3.smux_runtime_target_v3
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1, session_runtime_control_target_validate_v1}
+use std.sosix.process.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2,
+    sosix_process_piped_owned_transfer_equal_v2, sosix_process_validate_piped_owned_transfer_v2}
+
+pub struct SmuxRuntimeControlResolvedV1:
+    target: SessionRuntimeControlTargetV1
+    attachment: ClientLease
+
+pub fn smux_runtime_control_target_v1(owner: SmuxRuntimeBindingOwnerV3, uid: text,
+        client_id: text, attachment_token: text) -> Result<SmuxRuntimeControlResolvedV1, text>:
+    val index = smux_runtime_binding_index_v3(owner, uid)
+    if index < 0: return Err("runtime-control-binding-unavailable")
+    val entry = owner.entries[index]
+    if (not entry.adopted or entry.native_cleaned or entry.retained == nil or
+            entry.recovered != nil or entry.settlement_ack != nil):
+        return Err("runtime-control-binding-not-adopted")
+    val request = entry.request
+    val attachment = smux_client_lease_snapshot(request.session_id, client_id, attachment_token)?
+    val snapshot = smux_owner_snapshot()
+    val current = smux_runtime_target_v3(snapshot, smux_configuration_revision(),
+        smux_window_closing(request.session_id, request.window_id), owner.service_incarnation,
+        request.session_id, request.window_id, request.pane_id)?
+    if (current.epoch != request.expected_epoch or current.epoch > 9223372036854775807 or
+            current.child_incarnation > 9223372036854775807):
+        return Err("runtime-control-target-incarnation")
+    val pane = snapshot.get_pane(snapshot.find_pane_idx(request.pane_id))
+    if (pane.owned_terminal_transfer == nil or pane.helper_cleaned_awaiting_release or
+            pane.terminal_eof or pane.terminal_read_error != ""):
+        return Err("runtime-control-stream-unavailable")
+    val original = match entry.retained.unwrap().spawn:
+        case PipedProcessOwnedSpawnV2.Ready(native_owner, reference):
+            PipedProcessOwnedTransferV2(native_owner, reference)
+        case _: return Err("runtime-control-stream-not-transferred")
+    if not sosix_process_piped_owned_transfer_equal_v2(original, pane.owned_terminal_transfer.unwrap()):
+        return Err("runtime-control-stream-replaced")
+    sosix_process_validate_piped_owned_transfer_v2(pane.owned_terminal_transfer.unwrap())?
+    # The current output adapter follows the primary container process only.
+    # Exec controls require a separate actual retained exec birth consumer.
+    val target = SessionRuntimeControlTargetV1(scope: owner.local.scope, runtime: entry.plan.runtime,
+        workload_request_digest: entry.plan.workload.request_digest, binding_uid: uid,
+        binding_digest: entry.plan.identity.binding_digest, service_incarnation: owner.service_incarnation,
+        session_id: request.session_id, window_id: request.window_id, pane_id: request.pane_id,
+        service_epoch: current.epoch as i64, child_incarnation: current.child_incarnation as i64,
+        client_id: attachment.client_id, attachment_generation: attachment.generation,
+        execution_kind: "primary", native_exec_id: "", exec_request_digest: "")
+    session_runtime_control_target_validate_v1(target)?
+    Ok(SmuxRuntimeControlResolvedV1(target, attachment))

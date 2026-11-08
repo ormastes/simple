@@ -1,0 +1,91 @@
+# Incremental bounded frame owner. feed receives at most one bounded native
+# read, never performs IO and never invokes a domain callback. Retain this owner
+# on rejection; a rejected or completed frame cannot consume another frame.
+use std.common.text_bytes.{text_byte_buffer, bytes_to_text, utf8_bytes_valid}
+use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.*
+
+pub class LocalGatewayFrameReaderV1:
+    response: bool
+    phase: i64
+    prefix: [u8]
+    header_bytes: [u8]
+    payload: [u8]
+    lengths: LocalGatewayFrameLengthsV1?
+    header: LocalGatewayHeaderV1?
+    error: text
+
+impl LocalGatewayFrameReaderV1:
+    pub fn read_limit(self) -> i64:
+        if self.phase == 0: return 16 - self.prefix.len()
+        if self.lengths == nil: return 0
+        val lengths = self.lengths.unwrap()
+        if self.phase == 1: return lengths.header_bytes - self.header_bytes.len()
+        if self.phase == 2:
+            val remaining = lengths.payload_bytes - self.payload.len()
+            if remaining > 65536: return 65536
+            return remaining
+        0
+
+    pub fn complete(self) -> bool: self.phase == 3
+
+    me reject(reason: text) -> Result<(), text>:
+        self.phase = 4
+        self.error = reason
+        Err(reason)
+
+    pub me fn feed(self, chunk: [u8]) -> Result<(), text>:
+        val limit = self.read_limit()
+        if self.phase >= 3: return Err("gateway-frame-consumed")
+        if chunk.len() == 0 or chunk.len() > limit: return self.reject("gateway-frame-chunk")
+        if self.phase == 0:
+            val expected = self.prefix.len() + chunk.len()
+            for byte in chunk: self.prefix.push(byte)
+            if self.prefix.len() != expected: return self.reject("gateway-frame-allocation")
+            if self.prefix.len() < 16: return Ok(())
+            val lengths = match local_gateway_prefix_decode_v1(self.prefix, self.response):
+                case Ok(value): value
+                case Err(reason): return self.reject(reason)
+            self.lengths = Some(lengths)
+            self.header_bytes = match text_byte_buffer(lengths.header_bytes):
+                case Ok(value): value
+                case Err(_): return self.reject("gateway-frame-allocation")
+            self.phase = 1
+            return Ok(())
+        if self.phase == 1:
+            val expected = self.header_bytes.len() + chunk.len()
+            for byte in chunk: self.header_bytes.push(byte)
+            if self.header_bytes.len() != expected: return self.reject("gateway-frame-allocation")
+            val lengths = self.lengths.unwrap()
+            if self.header_bytes.len() < lengths.header_bytes: return Ok(())
+            if not utf8_bytes_valid(self.header_bytes): return self.reject("gateway-header-utf8")
+            val header = match local_gateway_header_decode_v1(bytes_to_text(self.header_bytes), self.response):
+                case Ok(value): value
+                case Err(reason): return self.reject(reason)
+            if header.payload_bytes != lengths.payload_bytes: return self.reject("gateway-frame-count-mismatch")
+            self.header = Some(header)
+            if lengths.payload_bytes == 0:
+                self.phase = 3
+                return Ok(())
+            self.payload = match text_byte_buffer(lengths.payload_bytes):
+                case Ok(value): value
+                case Err(_): return self.reject("gateway-frame-allocation")
+            self.phase = 2
+            return Ok(())
+        val expected = self.payload.len() + chunk.len()
+        for byte in chunk: self.payload.push(byte)
+        if self.payload.len() != expected: return self.reject("gateway-frame-allocation")
+        if self.payload.len() == self.lengths.unwrap().payload_bytes:
+            if not utf8_bytes_valid(self.payload): return self.reject("gateway-payload-utf8")
+            self.phase = 3
+        Ok(())
+
+    pub me fn end_of_stream(self) -> Result<(), text>:
+        if self.phase == 3: return Ok(())
+        self.reject("gateway-frame-truncated")
+
+pub fn local_gateway_frame_reader_v1(response: bool) -> Result<LocalGatewayFrameReaderV1, text>:
+    val prefix = match text_byte_buffer(16):
+        case Ok(value): value
+        case Err(_): return Err("gateway-frame-allocation")
+    Ok(LocalGatewayFrameReaderV1(response: response, phase: 0, prefix: prefix,
+        header_bytes: [], payload: [], lengths: nil, header: nil, error: ""))

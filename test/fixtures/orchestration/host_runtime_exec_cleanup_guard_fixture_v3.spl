@@ -1,0 +1,167 @@
+# Actual same-WAL/signatures/private files; native observations/commands are
+# explicitly scripted. No child process or positive teardown proof is created.
+use std.spec.{expect, fail}
+use test.fixtures.orchestration.host_runtime_exec_begin_fixture_v3.*
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.host_execution_clock_v2
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
+use std.nogc_sync_mut.orchestration.host_runtime_exec_begin_v3.host_runtime_exec_verify_v3
+use std.nogc_sync_mut.orchestration.host_exec_private_publication_v3.host_exec_private_publish_v3
+use std.nogc_sync_mut.orchestration.host_local_root_v1.{HostLocalRootV1, host_local_context_v1}
+use std.nogc_sync_mut.orchestration.host_local_command_v1.HostRetainedExecutionV2
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.host_authorized_execution_check_v2
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.host_execution_intent_store_v1
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.{HostExecutionObservationV2, host_execution_observation_store_v2}
+use test.fixtures.orchestration.host_exec_control_installation_fixture_v3.host_installation_fixture_v3
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2, distributed_grant_digest_v2}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v2, daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_recover_execution_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.host_terminal_wait_v2.host_terminal_wait_v2
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_apply_v2, simple_container_read_v2, simple_container_intent_v2, simple_container_project_v2}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{ScriptedCommandResultV1, build_wait_command, build_destroy_command}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_route_v1
+
+pub fn child_guard_fixture_v3() -> ExecBeginFixtureV3:
+    exec_begin_fixture_v3("resolver-success", ["host_exec_control_install_v3", "host_execute_v1", "host_runtime_exec_v3", "host_cleanup_v1"],
+        Some(9223372036854775807))
+
+pub fn child_guard_record_v3(fixture: ExecBeginFixtureV3, state: text) -> HostLocalRootV1:
+    var local = fixture.local
+    val packet = fixture.packet
+    val policy = local.policy
+    val clock = host_execution_clock_v2()
+    val guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+        val verified = host_runtime_exec_verify_v3(policy, packet, clock, clock)?
+        Ok(clock)
+    val retained = host_exec_private_publish_v3(local.capacity.journal.root, "host-runtime-exec-requests",
+        sha256_text(packet.operation.id) + ".sdn", host_runtime_exec_request_encode_v3(packet).unwrap(), guard)
+    expect(retained.error).to_equal("")
+    expect(retained.published_new).to_equal(true)
+    local.capacity.journal = daemon_operation_admit_v2(local.capacity.journal, packet.operation).unwrap().journal
+    if state != "admitted":
+        local.capacity.journal = daemon_operation_begin_v2(local.capacity.journal, packet.operation).unwrap()
+        if state == "outcome-unknown":
+            local.capacity.journal = distributed_operation_journal_recover_execution_v2(local.capacity.journal, packet.operation.id).unwrap()
+        elif state != "executing":
+            # Deliberately only a real journal terminal label, NOT qualified
+            # native termination/no-effect evidence. The guard must refuse it.
+            local.capacity.journal = daemon_operation_record_outcome_v2(local.capacity.journal, packet.operation, state, "f".repeat(64)).unwrap()
+    local.capacity.ledger.revision = local.capacity.journal.sequence + 1
+    local
+
+pub struct ChildGuardCleanupFixtureV3:
+    local: HostLocalRootV1
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+    context: HostReservationAuthorizationContextV1
+
+# Actual common WAIT/cleanup consumer paths, with native commands explicitly
+# scripted. Initial public keys have a long TEST-only expiry before root binding
+# and WAL creation; no policy/authority alias is rewritten after admission.
+pub fn child_guard_cleanup_fixture_v3(local: HostLocalRootV1) -> ChildGuardCleanupFixtureV3:
+    var current = local
+    match current.container:
+        case SimpleContainerOwnerV2.Linux(scope, original):
+            var adapter = original
+            var provider = adapter.provider
+            expect(provider.scripted_cursor).to_equal(3)
+            val policy = provider.engine_policy.unwrap()
+            val command = build_wait_command(provider.engine, provider.state_dir, "1".repeat(64)).1
+            val wait = ScriptedCommandResultV1(operation: "wait", program: policy.executable_path,
+                args: linux_oci_engine_route_v1(policy, command.args).unwrap(), stdout: "0\n", stderr: "", exit_code: 0)
+            provider.scripted_results = provider.scripted_results[0:5].push(wait)
+            adapter.provider = provider
+            current.container = SimpleContainerOwnerV2.Linux(scope, adapter)
+        case _: fail("child cleanup fixture needs its existing actual Linux scripted adapter")
+    val waited = host_terminal_wait_v2(current, "operation_1")
+    expect(waited.error).to_equal("")
+    assert(waited.receipt.?)
+    current = waited.local
+    val context = host_local_context_v1(current.policy)
+    val keys = verification_fixture()
+    var cleanup = keys.request
+    # Same original reservation envelope/id/payload; cleanup only changes action.
+    val parent = current.capacity.journal.operations["operation_1"]
+    cleanup = distributed_decode_operation_v2(parent.envelope).unwrap()
+    cleanup.operation = "host_cleanup_v1"
+    var signed = keys.signed
+    signed.grant.operations = ["host_cleanup_v1"]
+    signed.grant.environment_digest = current.binding.provider_identity_digest
+    signed.grant.expires_at = context.grant_clock + 60000
+    signed.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = keys.approval
+    approval.expires_at = signed.grant.expires_at
+    approval.grant_digest = distributed_grant_digest_v2(signed.grant).unwrap()
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(cleanup).unwrap())
+    approval.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    match current.container:
+        case SimpleContainerOwnerV2.Linux(scope, original):
+            var adapter = original
+            var provider = adapter.provider
+            expect(provider.scripted_cursor).to_equal(6)
+            val policy = provider.engine_policy.unwrap()
+            var terminal = provider.scripted_results[2]
+            terminal.stdout = terminal.stdout.replace("|running", "|exited")
+            val command = build_destroy_command(provider.engine, provider.state_dir, "1".repeat(64), false).1
+            val destroyed = ScriptedCommandResultV1(operation: "destroy", program: policy.executable_path,
+                args: linux_oci_engine_route_v1(policy, command.args).unwrap(), stdout: "", stderr: "", exit_code: 0)
+            val absent = ScriptedCommandResultV1(operation: "absence", program: policy.executable_path,
+                args: linux_oci_engine_route_v1(policy, ["container", "exists", "1".repeat(64)]).unwrap(), stdout: "", stderr: "", exit_code: 1)
+            provider.scripted_results = provider.scripted_results.push(terminal).push(terminal).push(destroyed).push(absent)
+            assert(provider.set_scripted_effect_clock_v1([context.grant_clock + 1000, context.grant_clock + 1001]).is_ok())
+            adapter.provider = provider
+            current.container = SimpleContainerOwnerV2.Linux(scope, adapter)
+        case _: fail("child cleanup fixture needs existing Linux adapter")
+    ChildGuardCleanupFixtureV3(current, signed, approval, context)
+
+# Deliberate protocol-ordering fault, never a positive native attestation: use
+# actual scripted common create/start/inspect but omit the Host parent BEGIN.
+# This reproduces dangerous admitted/cancelled metadata release assumptions
+# with real shared-contract/native-fact records and no forged Released flag.
+pub fn child_guard_admitted_parent_fault_v3() -> ExecBeginFixtureV3:
+    val base = host_installation_fixture_v3("resolver-success", ["host_exec_control_install_v3", "host_execute_v1", "host_runtime_exec_v3", "host_cleanup_v1"],
+        key_expires_at: Some(9223372036854775807))
+    var local = base.local
+    val envelope = base.parent
+    val packet = host_execute_request_encode_v2(envelope).unwrap()
+    assert(host_authorized_execution_check_v2(local.capacity, local.container, packet, local.policy,
+        local.binding.provider_identity_digest, local.scope.service_scope_id, base.context).unwrap())
+    val directory = local.capacity.journal.root + "/host-execute-packets"
+    assert(dir_create(directory, true))
+    assert(file_atomic_write_mode(directory + "/" + sha256_text(envelope.operation.id) + ".sdn", packet, 0o600))
+    val execution = envelope.execution
+    val deadline = container_effect_deadline_v1(execution.plan.request_digest, envelope.operation.id, ["create", "start"], 190).unwrap()
+    val created = simple_container_apply_v2(local.container, "create", execution, deadline)
+    local.container = created.owner
+    expect(created.operation.status).to_equal("ok")
+    val intent = simple_container_intent_v2(local.container, execution).unwrap()
+    assert(host_execution_intent_store_v1(local.capacity.journal.root, intent).is_ok())
+    val started = simple_container_apply_v2(local.container, "start", execution, deadline)
+    local.container = started.owner
+    expect(started.operation.status).to_equal("ok")
+    val inspected = simple_container_read_v2(local.container, "inspect", execution)
+    local.container = inspected.owner
+    expect(inspected.operation.status).to_equal("ok")
+    val observation = HostExecutionObservationV2(scope: local.scope, operation_id: envelope.operation.id,
+        operation_digest: sha256_text(distributed_encode_operation_v2(envelope.operation).unwrap()),
+        plan_digest: envelope.intent.plan_digest, request_digest: execution.plan.request_digest,
+        grant_id: envelope.signed.grant.id, principal: envelope.signed.grant.principal,
+        issuer_id: envelope.signed.issuer_id, approver_id: envelope.approval.approver_id,
+        provider_identity_digest: local.binding.provider_identity_digest, observed_unix_ms: 100, observed_monotonic_ms: 10,
+        phase: inspected.operation.state.phase, create_status: created.operation.status, start_status: started.operation.status,
+        inspect_status: inspected.operation.status, reason: "explicit fixture parent BEGIN omission", runtime: inspected.operation.state.identity)
+    assert(host_execution_observation_store_v2(local.capacity.journal.root, observation).is_ok())
+    val projected = simple_container_project_v2(local.container, execution).unwrap()
+    val parent = HostRetainedExecutionV2(envelope.operation, envelope.intent, execution, projected, observation)
+    val child = exec_begin_packet_fixture_v3(local, parent)
+    expect(local.capacity.journal.operations[envelope.operation.id].state).to_equal("admitted")
+    ExecBeginFixtureV3(local, child, base.auxiliary_root)

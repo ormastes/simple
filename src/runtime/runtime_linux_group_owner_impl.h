@@ -39,6 +39,8 @@ extern char **environ;
 
 typedef struct {
     int active, collected, parent_fd, group_fd, pidfd;
+    int stream_mode, stream_start_error, no_child_scope;
+    char stream_root[4096],stream_identity[65];
     pid_t pid;
     char name[80];
     int64_t started_ms, timeout_ms, peak, current;
@@ -487,6 +489,19 @@ static int rt_lg_memory_delegated(int parent) {
     errno = ENOTSUP; return 0;
 }
 
+/* V3 requires CPU delegation without changing the host parent's controllers. */
+static int rt_lg_cpu_delegated_v3(int parent) {
+    char text[4096];
+    if (!rt_lg_read_at(parent,"cgroup.subtree_control",text,sizeof(text))) return 0;
+    const char *at=text;
+    while (*at) {
+        at+=strspn(at," \t\r\n"); size_t n=strcspn(at," \t\r\n");
+        if(n==3&&!memcmp(at,"cpu",3))return 1;
+        at+=n;
+    }
+    errno=ENOTSUP; return 0;
+}
+
 static int rt_lg_delegation_fd(void) {
     struct stat status, named;
     if (!rt_lg_delegation.active) { errno = ENOENT; return -1; }
@@ -504,7 +519,7 @@ static int rt_lg_delegation_fd(void) {
 /* Shared fresh-child transaction. root_fd is either the legacy literal
  * cgroup2 mount root or the verified explicit delegated directory. */
 static SplArray *rt_lg_parent_acquire_root(int root, const char *attempt,
-        const char identity[65]) {
+        const char identity[65], int cpu_required) {
     int64_t answer[4] = {EINVAL, 0, 0, 0};
     char name[80];
     int parent = -1, created = 0;
@@ -516,7 +531,7 @@ static SplArray *rt_lg_parent_acquire_root(int root, const char *attempt,
         (unsigned long)fs.f_type != CGROUP2_SUPER_MAGIC) {
         answer[0] = ENOTSUP; goto done;
     }
-    if (!rt_lg_memory_delegated(root)) { answer[0] = errno ? errno : ENOTSUP; goto done; }
+    if (!rt_lg_memory_delegated(root) || (cpu_required && !rt_lg_cpu_delegated_v3(root))) { answer[0] = errno ? errno : ENOTSUP; goto done; }
     snprintf(name, sizeof(name), "simple-parent-%s", identity);
     if (mkdirat(root, name, 0700)) { answer[0] = errno; goto done; }
     created = 1;
@@ -532,8 +547,8 @@ static SplArray *rt_lg_parent_acquire_root(int root, const char *attempt,
         answer[0] = ESTALE; goto done;
     }
     if (!rt_lg_populated(parent, &populated) || populated ||
-        !rt_lg_write_at(parent, "cgroup.subtree_control", "+memory") ||
-        !rt_lg_memory_delegated(parent)) {
+        !rt_lg_write_at(parent, "cgroup.subtree_control", cpu_required ? "+memory +cpu" : "+memory") ||
+        !rt_lg_memory_delegated(parent) || (cpu_required && !rt_lg_cpu_delegated_v3(parent))) {
         answer[0] = errno ? errno : ENOTSUP; goto done;
     }
     rt_lg_delegation.active = 1;
@@ -595,14 +610,14 @@ SplArray *rt_linux_group_parent_acquire_v1(const char *attempt_data, uint64_t at
         int next = openat(root, components[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         int saved = errno; close(root); root = next; errno = saved;
     }
-    return rt_lg_parent_acquire_root(root, attempt, identity);
+    return rt_lg_parent_acquire_root(root, attempt, identity, 0);
 }
 
 /* V2 proves an explicit current/immediate-parent mapping before any child
  * mkdir. The parent's existing controller set is observed only, never changed. */
-SplArray *rt_linux_group_parent_acquire_at_v2(const char *path_data, uint64_t path_len,
+static SplArray *rt_lg_parent_acquire_at_mode_v3(const char *path_data, uint64_t path_len,
         const char *attempt_data, uint64_t attempt_len,
-        const char *identity_data, uint64_t identity_len) {
+        const char *identity_data, uint64_t identity_len, int cpu_required) {
     int64_t failure[4] = {EINVAL, 0, 0, 0};
     char path[4096], attempt[4096], identity[65], mount_path[4096], current_path[4096];
     int root = -1, current = -1;
@@ -668,7 +683,7 @@ SplArray *rt_linux_group_parent_acquire_at_v2(const char *path_data, uint64_t pa
     close(named_root); close(named_current); close(named_mount);
     if (!revalidated) { failure[0] = ESTALE; goto reject; }
     if (current >= 0) close(current);
-    return rt_lg_parent_acquire_root(root, attempt, identity);
+    return rt_lg_parent_acquire_root(root, attempt, identity, cpu_required);
 reject:
     if (current >= 0) close(current);
     if (root >= 0) close(root);
@@ -716,7 +731,23 @@ static int rt_lg_capacity_capability(int parent) {
 #endif
 }
 
+SplArray *rt_linux_group_parent_acquire_at_v2(const char *path,uint64_t path_len,
+        const char *attempt,uint64_t attempt_len,const char *identity,uint64_t identity_len) {
+    return rt_lg_parent_acquire_at_mode_v3(path,path_len,attempt,attempt_len,identity,identity_len,0);
+}
+SplArray *rt_linux_group_parent_acquire_profiled_at_v3(const char *path,uint64_t path_len,
+        const char *attempt,uint64_t attempt_len,const char *identity,uint64_t identity_len) {
+    return rt_lg_parent_acquire_at_mode_v3(path,path_len,attempt,attempt_len,identity,identity_len,1);
+}
+
 static int rt_lg_poll(RtLinuxGroup *owner) {
+    /* A scope acquired without cloning a child is not a reaped child tree. */
+    if(owner->no_child_scope)return EPROTO;
+    if(owner->active&&owner->group_fd<0&&owner->parent_fd>=0) {
+        owner->group_fd=openat(owner->parent_fd,owner->name,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+        if(owner->group_fd<0)return errno?errno:EIO;
+    }
+
     if (!owner->active || owner->collected) return EINVAL;
     int64_t now = rt_lg_now_ms();
     if (now < 0) return EIO;
@@ -763,12 +794,144 @@ static SplArray *rt_lg_observation(int error) {
 
 /* Double-fork leaves the broker independent of manager death. The exact
  * executable inode is opened, hashed, and execveat'd through the same fd. */
-SplArray *rt_linux_group_launch_broker_v1(const char *program_data, uint64_t program_len, const char *digest_data, uint64_t digest_len, SplArray *args) {
+static int64_t rt_lg_unix_ms_v2(void) {
+    struct timespec now;
+    if(clock_gettime(CLOCK_REALTIME,&now)!=0||now.tv_sec<0||now.tv_nsec<0||now.tv_nsec>=1000000000L||
+       (uint64_t)now.tv_sec>((uint64_t)INT64_MAX-999U)/1000U)return -1;
+    return (int64_t)now.tv_sec*1000+now.tv_nsec/1000000;
+}
+static int rt_lg_deadline_live_v2(int64_t deadline) {
+    int64_t now=rt_lg_unix_ms_v2();
+    if(deadline<=0||now<0||now>=deadline){errno=now<0?EIO:ETIMEDOUT;return 0;}
+    return 1;
+}
+/* Deliberately invalid arguments probe kernel/LSM syscall availability without
+ * spawning a child or closing any descriptor. Per-launch failures still retain
+ * the real lease; this admission is not a promise about future permissions. */
+static int rt_lg_stream_kernel_available_v2(void) {
+#if defined(SYS_clone3) && defined(SYS_close_range) && defined(SYS_execveat)
+    errno=0;
+    long clone_status=syscall(SYS_clone3,NULL,0);
+    if(clone_status!=-1||(errno!=EINVAL&&errno!=EFAULT)){errno=ENOTSUP;return 0;}
+    errno=0;
+    long close_status=syscall(SYS_close_range,~0U,0U,0U);
+    if(close_status!=-1||errno!=EINVAL){errno=ENOTSUP;return 0;}
+    return 1;
+#else
+    errno=ENOTSUP;return 0;
+#endif
+}
+int64_t rt_linux_group_stream_admit_v2(const char* path,int64_t length) {
+    char delegated[4096];
+    if(!rt_lg_stream_kernel_available_v2())return errno?errno:ENOTSUP;
+    if(!rt_lg_copy_text(path,(uint64_t)length,delegated,sizeof(delegated))||delegated[0]!='/')return EINVAL;
+    int fd=open(delegated,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+    if(fd<0)return errno?errno:EIO;
+    int ok=rt_lg_capacity_capability(fd);int error=ok?0:(errno?errno:ENOTSUP);
+    close(fd);return error;
+}
+/* Exactly twelve tagged integers; no coercion from text/bool/pointers. */
+typedef struct RtGroupStreamProfileV3 { int64_t v[12]; char broker[4096], policy[65]; } RtGroupStreamProfileV3;
+static int rt_lg_profile_parse_v3(const char* broker,int64_t broker_len,
+        const char* policy,int64_t policy_len,SplArray* words,RtGroupStreamProfileV3* out) {
+    if(!words||rt_array_len(words)!=12||!rt_lg_copy_text(broker,(uint64_t)broker_len,out->broker,sizeof(out->broker))||
+       !rt_lg_canonical_path(out->broker)||!rt_lg_hex_digest(policy,(uint64_t)policy_len,out->policy))return 0;
+    for(int i=0;i<12;i++) { int64_t value=rt_array_get(words,i);
+        if(!rt_value_is_int(value))return 0;out->v[i]=rt_value_as_int(value); }
+    int64_t *v=out->v, multiplier=v[0]<10?1000:100, period=v[0]<10?1000000:100000;
+    if(v[0]<=0||v[0]>INT64_MAX/multiplier||v[1]!=v[0]*multiplier||v[2]!=period||
+       v[3]<0||v[4]<=0||v[5]<=0||v[6]<1000||v[7]<1000||v[7]>1000000||v[8]<=0||
+       v[9]<=0||v[10]<=0||v[9]>v[10]||(v[11]!=0&&v[11]!=1))return 0;
+    /* ceil(quota*1000/period) without overflowing quota*1000. */
+    int64_t whole=v[6]/v[7], rest=v[6]%v[7];
+    if(whole>INT64_MAX/1000)return 0;
+    int64_t base=whole*1000, fraction=(rest*1000+v[7]-1)/v[7];
+    return base<=INT64_MAX-fraction&&base+fraction<=v[8];
+}
+static int rt_lg_cpu_readback_v3(int fd,int64_t quota,int64_t period) {
+    char text[128],extra;long long q=0,p=0;
+    return rt_lg_read_at(fd,"cpu.max",text,sizeof(text))&&
+        sscanf(text,"%lld %lld %c",&q,&p,&extra)==2&&q==quota&&p==period;
+}
+/* Returns a retained target descriptor. Current membership is additionally
+ * required in the broker, never for the caller service's target admission. */
+static int rt_lg_profile_scope_v3(const char* delegated,int64_t length,
+        const RtGroupStreamProfileV3* profile,int current) {
+    char path[4096],mount[4096],membership[4096];int root=-1,scope=-1,parent=-1;struct stat rs,ss,ps;
+    struct statfs fs;int64_t memory=0;char text[128];
+    if(!rt_lg_copy_text(delegated,(uint64_t)length,path,sizeof(path))||!rt_lg_canonical_path(path))goto bad;
+    root=rt_lg_open_absolute_dir(path);scope=rt_lg_open_absolute_dir(profile->broker);
+    if(root<0||scope<0||fstatfs(root,&fs)||(unsigned long)fs.f_type!=CGROUP2_SUPER_MAGIC||
+       fstatfs(scope,&fs)||(unsigned long)fs.f_type!=CGROUP2_SUPER_MAGIC||
+       fstat(root,&rs)||fstat(scope,&ss)||ss.st_dev!=(dev_t)profile->v[3]||ss.st_ino!=(ino_t)profile->v[4]||
+       !rt_lg_memory_delegated(root)||!rt_lg_cpu_delegated_v3(root))goto bad;
+    parent=openat(scope,"..",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+    if(parent<0||fstat(parent,&ps)||ps.st_dev!=rs.st_dev||ps.st_ino!=rs.st_ino||
+       (ss.st_dev==rs.st_dev&&ss.st_ino==rs.st_ino)||
+       !rt_lg_cpu_readback_v3(scope,profile->v[6],profile->v[7])||
+       !rt_lg_read_at(scope,"memory.max",text,sizeof(text))||!rt_lg_number(text,&memory)||memory!=profile->v[9])goto bad;
+    if(current) {
+        if(!rt_lg_current_mapping(mount,sizeof(mount),membership,sizeof(membership))||strcmp(membership,profile->broker))goto bad;
+        int actual=rt_lg_open_absolute_dir(membership);struct stat observed;
+        int ok=actual>=0&&fstat(actual,&observed)==0&&observed.st_dev==ss.st_dev&&observed.st_ino==ss.st_ino;
+        if(actual>=0)close(actual);if(!ok)goto bad;
+    }
+    close(root);close(parent);return scope;
+bad:
+    {int error=errno?errno:EACCES;if(root>=0)close(root);if(scope>=0)close(scope);if(parent>=0)close(parent);errno=error;return -1;}
+}
+int64_t rt_linux_group_stream_admit_profiled_v3(const char* delegated,int64_t length,
+        const char* broker,int64_t broker_len,const char* policy,int64_t policy_len,SplArray* words) {
+    RtGroupStreamProfileV3 profile;
+    if(!rt_lg_profile_parse_v3(broker,broker_len,policy,policy_len,words,&profile))return EINVAL;
+    if(!rt_lg_stream_kernel_available_v2())return errno?errno:ENOTSUP;
+    int fd=rt_lg_profile_scope_v3(delegated,length,&profile,0);
+    if(fd<0)return errno?errno:EACCES;close(fd);return 0;
+}
+int64_t rt_linux_group_stream_verify_broker_profiled_v3(const char* delegated,int64_t length,
+        const char* broker,int64_t broker_len,const char* policy,int64_t policy_len,SplArray* words) {
+    RtGroupStreamProfileV3 profile;
+    if(!rt_lg_profile_parse_v3(broker,broker_len,policy,policy_len,words,&profile))return EINVAL;
+    int fd=rt_lg_profile_scope_v3(delegated,length,&profile,1);
+    if(fd<0)return errno?errno:EACCES;close(fd);return 0;
+}
+/* Explicit admin-trust mode observes and hashes the original no-follow image.
+ * It does not promise immutability after observation or pin interpreter/DSOs. */
+static int rt_lg_admin_image_v3(const char* path,const char* digest) {
+    int fd=open(path,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);struct stat before,after;
+    if(fd<0)return -1;
+    if(fstat(fd,&before)||!S_ISREG(before.st_mode)||!(before.st_mode&0111)||before.st_size<=0||
+       before.st_size>536870912||!rt_lg_digest_fd(fd,digest)||fstat(fd,&after)||
+       before.st_dev!=after.st_dev||before.st_ino!=after.st_ino||before.st_size!=after.st_size||
+       before.st_mtim.tv_sec!=after.st_mtim.tv_sec||before.st_mtim.tv_nsec!=after.st_mtim.tv_nsec||
+       before.st_ctim.tv_sec!=after.st_ctim.tv_sec||before.st_ctim.tv_nsec!=after.st_ctim.tv_nsec||lseek(fd,0,SEEK_SET)<0) {
+        int error=errno?errno:ESTALE;close(fd);errno=error;return -1;
+    }
+    return fd;
+}
+
+static int rt_lg_stream_request_pinned_v2(int root,const char* identity) {
+    int claim=openat(root,"broker.claim",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    int request=openat(root,"broker.request.sdn",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    struct stat cs,rs;char bytes[65];int valid=0;
+    if(claim>=0&&request>=0&&fstat(claim,&cs)==0&&fstat(request,&rs)==0&&
+       S_ISREG(cs.st_mode)&&S_ISREG(rs.st_mode)&&cs.st_uid==geteuid()&&rs.st_uid==geteuid()&&
+       !(cs.st_mode&0022)&&!(rs.st_mode&0022)&&cs.st_size==64&&rs.st_size>0&&rs.st_size<=16777216&&
+       read(claim,bytes,sizeof(bytes))==64&&memcmp(bytes,identity,64)==0&&rt_lg_digest_fd(request,identity))valid=1;
+    if(claim>=0)close(claim);
+    if(request>=0)close(request);
+    return valid;
+}
+static SplArray *rt_lg_launch_broker_mode_v2(const char *program_data, uint64_t program_len,
+        const char *digest_data,uint64_t digest_len,SplArray *args,int64_t stream_generation,
+        const char* stream_root,int64_t root_len,const char* stream_identity,int64_t identity_len,
+        int64_t launch_deadline, int broker_scope, const RtGroupStreamProfileV3* profile) {
     int64_t answer[2] = {0, EINVAL};
     char program[4096], expected[65];
     int64_t argc = 0; int copy_error = 0;
     char **argv = NULL;
     int image = -1, pipefd[2] = {-1, -1};
+    int stream_in=-1,stream_out=-1,stream_directory=-1;
     if (!rt_lg_copy_text(program_data, program_len, program, sizeof(program)) ||
         !rt_lg_hex_digest(digest_data, digest_len, expected) ||
         program[0] != '/') goto done;
@@ -783,7 +946,46 @@ SplArray *rt_linux_group_launch_broker_v1(const char *program_data, uint64_t pro
         fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) < 0) {
         answer[1] = errno ? errno : EIO; goto done;
     }
-    pid_t intermediate = fork();
+    if(stream_generation>0) {
+        if(!rt_lg_deadline_live_v2(launch_deadline)){answer[1]=errno;goto done;}
+        int error=rt_process_stream_claim_launch_v2(stream_generation,stream_root,root_len,
+            stream_identity,identity_len,&stream_in,&stream_out,&stream_directory);
+        if(error){answer[1]=error;goto done;}
+        if(!rt_lg_stream_request_pinned_v2(stream_directory,stream_identity)) {
+            answer[1]=ESTALE;
+            (void)rt_process_stream_launch_not_started_v2(stream_generation,stream_root,root_len,stream_identity,identity_len);
+            goto done;
+        }
+        int moved=fcntl(image,F_DUPFD_CLOEXEC,6);
+        if(moved<0){answer[1]=errno;
+            (void)rt_process_stream_launch_not_started_v2(stream_generation,stream_root,root_len,stream_identity,identity_len);goto done;}
+        close(image);image=moved;
+        if(!rt_lg_deadline_live_v2(launch_deadline)){answer[1]=errno;
+            (void)rt_process_stream_launch_not_started_v2(stream_generation,stream_root,root_len,stream_identity,identity_len);goto done;}
+    }
+    /* Recheck the retained target immediately before the first clone. The
+     * profile wrapper already checked its identity and sibling relationship. */
+    if(broker_scope>=0) {
+        struct statfs fs;char cap[128];int64_t memory=0;
+        if(!profile||fstatfs(broker_scope,&fs)||(unsigned long)fs.f_type!=CGROUP2_SUPER_MAGIC||
+           !rt_lg_cpu_readback_v3(broker_scope,profile->v[6],profile->v[7])||
+           !rt_lg_read_at(broker_scope,"memory.max",cap,sizeof(cap))||!rt_lg_number(cap,&memory)||memory!=profile->v[9]) {
+            answer[1]=errno?errno:ESTALE;
+            if(stream_generation>0)(void)rt_process_stream_launch_not_started_v2(stream_generation,
+                stream_root,root_len,stream_identity,identity_len);
+            goto done;
+        }
+    }
+    pid_t intermediate;
+    if(broker_scope>=0) {
+#if defined(SYS_clone3) && defined(CLONE_INTO_CGROUP)
+        struct clone_args placement={0};placement.flags=CLONE_INTO_CGROUP;
+        placement.cgroup=(uint64_t)broker_scope;placement.exit_signal=SIGCHLD;
+        intermediate=(pid_t)syscall(SYS_clone3,&placement,sizeof(placement));
+#else
+        errno=ENOTSUP;intermediate=-1;
+#endif
+    } else intermediate=fork();
     if (intermediate == 0) {
         close(pipefd[0]);
         pid_t broker = fork();
@@ -794,8 +996,11 @@ SplArray *rt_linux_group_launch_broker_v1(const char *program_data, uint64_t pro
             if (null_fd < 0 || dup2(null_fd, 0) < 0 || dup2(null_fd, 1) < 0 ||
                 dup2(null_fd, 2) < 0 || image < 3) _exit(126);
             if (image != 3 && dup2(image, 3) < 0) _exit(126);
-            if (fcntl(3, F_SETFD, FD_CLOEXEC) < 0 ||
-                syscall(SYS_close_range, 4U, ~0U, 0U) != 0) _exit(126);
+            if(fcntl(3,F_SETFD,FD_CLOEXEC)<0)_exit(126);
+            if(stream_generation>0) {
+                if(dup2(stream_in,4)<0||dup2(stream_out,5)<0||
+                   syscall(SYS_close_range,6U,~0U,0U)!=0||!rt_lg_deadline_live_v2(launch_deadline))_exit(126);
+            } else if(syscall(SYS_close_range,4U,~0U,0U)!=0)_exit(126);
             syscall(SYS_execveat, 3, "", argv, environ, AT_EMPTY_PATH);
             _exit(127);
         }
@@ -803,7 +1008,10 @@ SplArray *rt_linux_group_launch_broker_v1(const char *program_data, uint64_t pro
             _exit(125);
         _exit(0);
     }
-    if (intermediate < 0) { answer[1] = errno; goto done; }
+    if (intermediate < 0) { answer[1] = errno;
+        if(stream_generation>0)(void)rt_process_stream_launch_not_started_v2(stream_generation,
+            stream_root,root_len,stream_identity,identity_len);
+        goto done; }
     close(pipefd[1]); pipefd[1] = -1;
     pid_t broker = 0;
     ssize_t bytes = read(pipefd[0], &broker, sizeof(broker));
@@ -814,10 +1022,15 @@ SplArray *rt_linux_group_launch_broker_v1(const char *program_data, uint64_t pro
         answer[1] = ECHILD; goto done;
     }
     answer[0] = broker; answer[1] = 0;
+    if(stream_generation>0)answer[1]=rt_process_stream_publish_broker_v2(stream_generation,
+        stream_root,root_len,stream_identity,identity_len,broker);
 #else
     answer[1] = ENOTSUP;
 #endif
 done:
+    if(stream_in>=0)close(stream_in);
+    if(stream_out>=0)close(stream_out);
+    if(stream_directory>=0)close(stream_directory);
     if (pipefd[0] >= 0) close(pipefd[0]);
     if (pipefd[1] >= 0) close(pipefd[1]);
     if (image >= 0) close(image);
@@ -825,31 +1038,87 @@ done:
     return owned_adapter_values(answer, 2);
 }
 
-SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len, const char *digest_data, uint64_t digest_len, SplArray *args, SplArray *environment, const char *directory_data, uint64_t directory_len, const char *root_data, uint64_t root_len, const char *identity_data, uint64_t identity_len, int64_t memory_limit, int64_t timeout_ms, const char *stdout_data, uint64_t stdout_len, const char *stderr_data, uint64_t stderr_len) {
+SplArray *rt_linux_group_launch_broker_v1(const char* program,uint64_t program_len,
+        const char* digest,uint64_t digest_len,SplArray* args) {
+    return rt_lg_launch_broker_mode_v2(program,program_len,digest,digest_len,args,0,NULL,0,NULL,0,0,-1,NULL);
+}
+SplArray *rt_linux_group_launch_stream_broker_v2(const char* program,int64_t program_len,
+        const char* digest,int64_t digest_len,SplArray* args,int64_t generation,
+        const char* root,int64_t root_len,const char* identity,int64_t identity_len,
+        const char* delegated,int64_t delegated_len,int64_t deadline) {
+    int64_t error=rt_lg_deadline_live_v2(deadline)?rt_linux_group_stream_admit_v2(delegated,delegated_len):errno;
+    if(error||generation<=0){int64_t result[2]={0,error?error:EINVAL};return owned_adapter_values(result,2);}
+    return rt_lg_launch_broker_mode_v2(program,(uint64_t)program_len,digest,(uint64_t)digest_len,
+        args,generation,root,root_len,identity,identity_len,deadline,-1,NULL);
+}
+
+SplArray *rt_linux_group_launch_stream_broker_profiled_v3(const char* program,int64_t program_len,
+        const char* digest,int64_t digest_len,SplArray* args,int64_t generation,
+        const char* root,int64_t root_len,const char* identity,int64_t identity_len,
+        const char* delegated,int64_t delegated_len,int64_t deadline,
+        const char* broker,int64_t broker_len,const char* policy,int64_t policy_len,SplArray* words) {
+    RtGroupStreamProfileV3 profile;int64_t failure[2]={0,EINVAL};
+    if(generation<=0||!rt_lg_profile_parse_v3(broker,broker_len,policy,policy_len,words,&profile))
+        return owned_adapter_values(failure,2);
+    if(!rt_lg_deadline_live_v2(deadline)||!rt_lg_stream_kernel_available_v2()) {
+        failure[1]=errno?errno:ENOTSUP;return owned_adapter_values(failure,2);
+    }
+    int scope=rt_lg_profile_scope_v3(delegated,delegated_len,&profile,0);
+    if(scope<0){failure[1]=errno?errno:EACCES;return owned_adapter_values(failure,2);}
+    /* Exact verified cgroup descriptor stays open through CLONE_INTO_CGROUP. */
+    SplArray* result=rt_lg_launch_broker_mode_v2(program,(uint64_t)program_len,digest,(uint64_t)digest_len,
+        args,generation,root,root_len,identity,identity_len,deadline,scope,&profile);
+    close(scope);return result;
+}
+
+static void rt_lg_stream_exec_failed_v2(int fd,int error) {
+    int value=error>0?error:EIO;ssize_t count;
+    do count=write(fd,&value,sizeof(value));while(count<0&&errno==EINTR);
+    (void)count;_exit(126);
+}
+static void rt_lg_retain_unlaunched_scope_v2(int parent_fd,int group_fd,const char* name,
+        const char* root,const char* identity,int64_t started_ms) {
+    rt_linux_group=(RtLinuxGroup){.active=1,.parent_fd=parent_fd,.group_fd=group_fd,
+        .pidfd=-1,.pid=0,.leader_reaped=0,.no_child_scope=1,.stream_mode=1,
+        .started_ms=started_ms<0?0:started_ms,.timeout_ms=0};
+    memcpy(rt_linux_group.name,name,strlen(name)+1);
+    memcpy(rt_linux_group.stream_root,root,strlen(root)+1);
+    memcpy(rt_linux_group.stream_identity,identity,65);
+}
+static SplArray *rt_lg_start_mode_v2(const char *program_data,uint64_t program_len,
+        const char *digest_data,uint64_t digest_len,SplArray *args,SplArray *environment,
+        const char *directory_data,uint64_t directory_len,const char *root_data,uint64_t root_len,
+        const char *identity_data,uint64_t identity_len,int64_t memory_limit,int64_t timeout_ms,
+        const char *stdout_data,uint64_t stdout_len,const char *stderr_data,uint64_t stderr_len,
+        int stream,int64_t launch_deadline,const RtGroupStreamProfileV3* profile) {
     int64_t answer[2] = {0, EINVAL};
+    /* Reserve the complete language receipt before any admission/fork effect. */
+    SplArray* projected=stream?rt_array_new(2):NULL;
+    if(stream&&!projected)return NULL;
     char program[4096], directory[4096], root[4096], stdout_path[4096], stderr_path[4096];
     char expected[65], identity[65], memory_text[64], verify[128];
     int64_t readback = 0, started_ms = -1;
     char **argv = NULL, **envp = NULL;
     int64_t argc = 0; int copy_error = 0;
     int parent_fd = -1, group_fd = -1, exec_fd = -1, cwd_fd = -1, out_fd = -1, err_fd = -1;
-    int created = 0, pidfd = -1;
+    int created = 0, pidfd = -1, in_fd=-1,exec_report[2]={-1,-1};
     pid_t pid = -1;
     if (rt_linux_group.active || memory_limit < 0 || memory_limit > 1125899906842624LL ||
         timeout_ms < 0 || timeout_ms > 604800000 ||
         !rt_lg_copy_text(program_data, program_len, program, sizeof(program)) ||
         !rt_lg_copy_text(directory_data, directory_len, directory, sizeof(directory)) ||
         !rt_lg_copy_text(root_data, root_len, root, sizeof(root)) ||
-        !rt_lg_copy_text(stdout_data, stdout_len, stdout_path, sizeof(stdout_path)) ||
-        !rt_lg_copy_text(stderr_data, stderr_len, stderr_path, sizeof(stderr_path)) ||
+        (!stream && !rt_lg_copy_text(stdout_data, stdout_len, stdout_path, sizeof(stdout_path))) ||
+        (!stream && !rt_lg_copy_text(stderr_data, stderr_len, stderr_path, sizeof(stderr_path))) ||
         !rt_lg_hex_digest(digest_data, digest_len, expected) ||
         !rt_lg_hex_digest(identity_data, identity_len, identity) ||
         program[0] != '/' || directory[0] != '/' || root[0] != '/' ||
-        stdout_path[0] != '/' || stderr_path[0] != '/') goto done;
+        (!stream && (stdout_path[0] != '/' || stderr_path[0] != '/'))) goto done;
+    if(stream&&!rt_lg_deadline_live_v2(launch_deadline)){answer[1]=errno;goto done;}
     argv = owned_adapter_copy_argv(program_data, program_len, args, &argc, &copy_error);
     envp = rt_lg_copy_environment(environment);
     if (!argv || !envp) { answer[1] = copy_error ? copy_error : ENOMEM; goto done; }
-    exec_fd = rt_lg_pin_image(program, expected);
+    exec_fd = profile&&profile->v[11]==1 ? rt_lg_admin_image_v3(program,expected) : rt_lg_pin_image(program, expected);
     cwd_fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (exec_fd < 0 || cwd_fd < 0) {
         answer[1] = errno ? errno : ESTALE; goto done;
@@ -861,6 +1130,24 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     if (parent_fd < 0) { answer[1] = errno ? errno : ENOTSUP; goto done; }
     if (!rt_lg_memory_delegated(parent_fd)) {
         answer[1] = errno ? errno : ENOTSUP; goto done;
+    }
+    if(profile) {
+        char mount[4096],membership[4096],text[128];struct stat expected_root,actual_parent,scope_stat,current_stat;
+        int scope=rt_lg_open_absolute_dir(profile->broker),scope_parent=-1,current=-1;
+        int64_t observed_memory=0;
+        if(scope>=0)scope_parent=openat(scope,"..",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+        int valid=rt_lg_delegation.active&&memory_limit>0&&rt_lg_cpu_delegated_v3(parent_fd)&&
+            scope>=0&&scope_parent>=0&&fstat(scope,&scope_stat)==0&&
+            scope_stat.st_dev==(dev_t)profile->v[3]&&scope_stat.st_ino==(ino_t)profile->v[4]&&
+            fstat(rt_lg_delegation.root_fd,&expected_root)==0&&fstat(scope_parent,&actual_parent)==0&&
+            expected_root.st_dev==actual_parent.st_dev&&expected_root.st_ino==actual_parent.st_ino&&
+            rt_lg_current_mapping(mount,sizeof(mount),membership,sizeof(membership))&&!strcmp(membership,profile->broker)&&
+            (current=rt_lg_open_absolute_dir(membership))>=0&&fstat(current,&current_stat)==0&&
+            current_stat.st_dev==scope_stat.st_dev&&current_stat.st_ino==scope_stat.st_ino&&
+            rt_lg_cpu_readback_v3(scope,profile->v[6],profile->v[7])&&
+            rt_lg_read_at(scope,"memory.max",text,sizeof(text))&&rt_lg_number(text,&observed_memory)&&observed_memory==profile->v[9];
+        if(scope>=0)close(scope);if(scope_parent>=0)close(scope_parent);if(current>=0)close(current);
+        if(!valid){answer[1]=errno?errno:EACCES;goto done;}
     }
     char name[80]; snprintf(name, sizeof(name), "simple-native-%s", identity);
     if (mkdirat(parent_fd, name, 0700) != 0) { answer[1] = errno; goto done; }
@@ -883,14 +1170,39 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
         !rt_lg_read_at(group_fd, "memory.peak", verify, sizeof(verify))) {
         answer[1] = errno ? errno : ENOTSUP; goto done;
     }
-    out_fd = open(stdout_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    err_fd = open(stderr_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if(profile) {
+        char cpu_text[96];snprintf(cpu_text,sizeof(cpu_text),"%lld %lld",(long long)profile->v[1],(long long)profile->v[2]);
+        if(!rt_lg_write_at(group_fd,"cpu.max",cpu_text)||!rt_lg_cpu_readback_v3(group_fd,profile->v[1],profile->v[2])) {
+            answer[1]=errno?errno:ENOTSUP;goto done;
+        }
+    }
+    if(stream) {
+        struct stat input_stat,output_stat;
+        int input_flags=fcntl(4,F_GETFL),output_flags=fcntl(5,F_GETFL);
+        if(input_flags<0||output_flags<0||fstat(4,&input_stat)||fstat(5,&output_stat)||
+           !S_ISFIFO(input_stat.st_mode)||!S_ISFIFO(output_stat.st_mode)||
+           (input_flags&O_ACCMODE)!=O_RDONLY||(output_flags&O_ACCMODE)!=O_WRONLY){answer[1]=EINVAL;goto done;}
+        in_fd=fcntl(4,F_DUPFD_CLOEXEC,7);out_fd=fcntl(5,F_DUPFD_CLOEXEC,7);err_fd=fcntl(5,F_DUPFD_CLOEXEC,7);
+        int moved=fcntl(exec_fd,F_DUPFD_CLOEXEC,7);
+        if(in_fd<0||out_fd<0||err_fd<0||moved<0){if(moved>=0)close(moved);answer[1]=errno?errno:EIO;goto done;}
+        close(exec_fd);exec_fd=moved;
+        int report[2];
+        if(pipe(report)!=0){answer[1]=errno;goto done;}
+        exec_report[0]=fcntl(report[0],F_DUPFD_CLOEXEC,7);
+        exec_report[1]=fcntl(report[1],F_DUPFD_CLOEXEC,7);
+        close(report[0]);close(report[1]);
+        if(exec_report[0]<0||exec_report[1]<0){answer[1]=errno;goto done;}
+    } else {
+        out_fd = open(stdout_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        err_fd = open(stderr_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    }
     if (out_fd < 0 || err_fd < 0) { answer[1] = errno; goto done; }
     /* Finish fallible admission before clone: a clock failure must never
      * launch a child and then discard its cleanup authority. */
     started_ms = rt_lg_now_ms();
     if (started_ms < 0) { answer[1] = EIO; goto done; }
 #if defined(SYS_clone3) && defined(SYS_execveat) && defined(SYS_close_range)
+    if(stream&&!rt_lg_deadline_live_v2(launch_deadline)){answer[1]=errno;goto done;}
     struct clone_args clone = {0};
     clone.flags = CLONE_PIDFD | CLONE_INTO_CGROUP;
     clone.pidfd = (uint64_t)(uintptr_t)&pidfd;
@@ -898,6 +1210,19 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     clone.exit_signal = SIGCHLD;
     pid = (pid_t)syscall(SYS_clone3, &clone, sizeof(clone));
     if (pid == 0) {
+        if(stream) {
+            close(exec_report[0]);
+            if(dup2(exec_report[1],6)<0)rt_lg_stream_exec_failed_v2(exec_report[1],errno);
+            if(fcntl(6,F_SETFD,FD_CLOEXEC)<0)rt_lg_stream_exec_failed_v2(6,errno);
+            if(fchdir(cwd_fd)||dup2(in_fd,0)<0||dup2(out_fd,1)<0||dup2(err_fd,2)<0||
+               dup2(exec_fd,3)<0||fcntl(3,F_SETFD,FD_CLOEXEC)<0)
+                rt_lg_stream_exec_failed_v2(6,errno);
+            if(syscall(SYS_close_range,4U,5U,0U)!=0||syscall(SYS_close_range,7U,~0U,0U)!=0)
+                rt_lg_stream_exec_failed_v2(6,errno);
+            if(!rt_lg_deadline_live_v2(launch_deadline))rt_lg_stream_exec_failed_v2(6,errno);
+            syscall(SYS_execveat,3,"",argv,envp,AT_EMPTY_PATH);
+            rt_lg_stream_exec_failed_v2(6,errno);
+        }
         int input_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (input_fd < 0 || dup2(input_fd, STDIN_FILENO) < 0) _exit(126);
         if (fchdir(cwd_fd) || dup2(out_fd, STDOUT_FILENO) < 0 ||
@@ -920,9 +1245,36 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
         .group_fd=group_fd, .pidfd=pidfd, .pid=pid,
         .started_ms=started_ms, .timeout_ms=timeout_ms};
     memcpy(rt_linux_group.name, name, strlen(name) + 1);
+    if(stream){rt_linux_group.stream_mode=1;
+        memcpy(rt_linux_group.stream_root,root,strlen(root)+1);
+        memcpy(rt_linux_group.stream_identity,identity,65);}
     answer[0] = 1; answer[1] = 0;
     parent_fd = group_fd = pidfd = -1; created = 0;
+    if(stream) {
+        /* The active cgroup/pidfd lease is installed BEFORE exec confirmation.
+         * An error receipt still carries token1 and must be drained/collected. */
+        close(4);close(5);close(exec_report[1]);exec_report[1]=-1;
+        struct pollfd ready={exec_report[0],POLLIN|POLLHUP,0};
+        int observed=poll(&ready,1,5000);
+        int exec_error=0;ssize_t count=observed>0?read(exec_report[0],&exec_error,sizeof(exec_error)):-1;
+        if(observed<=0||count<0)answer[1]=observed==0?ETIMEDOUT:(errno?errno:EIO);
+        else if(count!=0)answer[1]=count==sizeof(exec_error)&&exec_error>0?exec_error:EPROTO;
+    }
 done:
+    if(stream&&created&&parent_fd>=0) {
+        /* If rollback fails after creating a scope, keep the real FD owner and
+         * return its token even though no child cloned. Never label this a
+         * no-effect rejection or lose cleanup authority on permission failure. */
+        if(unlinkat(parent_fd,name,AT_REMOVEDIR)!=0) {
+            rt_lg_retain_unlaunched_scope_v2(parent_fd,group_fd,name,root,identity,started_ms);
+            answer[0]=1;if(!answer[1])answer[1]=errno?errno:EIO;
+            parent_fd=group_fd=-1;
+        }
+        created=0;
+    }
+    if(in_fd>=0)close(in_fd);
+    if(exec_report[0]>=0)close(exec_report[0]);
+    if(exec_report[1]>=0)close(exec_report[1]);
     if (out_fd >= 0) close(out_fd);
     if (err_fd >= 0) close(err_fd);
     if (exec_fd >= 0) close(exec_fd);
@@ -932,7 +1284,42 @@ done:
     if (parent_fd >= 0) close(parent_fd);
     owned_adapter_free_argv(argv, argc);
     rt_lg_free_strings(envp);
+    if(stream) {
+        if(answer[0]>0)rt_linux_group.stream_start_error=(int)answer[1];
+        if(!owned_adapter_fill_reserved_values(projected,answer,2)){rt_array_free(projected);return NULL;}
+        return projected;
+    }
     return owned_adapter_values(answer, 2);
+}
+
+SplArray *rt_linux_group_start_v1(const char* program,uint64_t program_len,const char* digest,
+        uint64_t digest_len,SplArray* args,SplArray* environment,const char* directory,uint64_t directory_len,
+        const char* root,uint64_t root_len,const char* identity,uint64_t identity_len,int64_t memory,
+        int64_t timeout,const char* output,uint64_t output_len,const char* error,uint64_t error_len) {
+    return rt_lg_start_mode_v2(program,program_len,digest,digest_len,args,environment,directory,directory_len,
+        root,root_len,identity,identity_len,memory,timeout,output,output_len,error,error_len,0,0,NULL);
+}
+SplArray *rt_linux_group_start_stream_v2(const char* program,int64_t program_len,const char* digest,
+        int64_t digest_len,SplArray* args,SplArray* environment,const char* directory,int64_t directory_len,
+        const char* root,int64_t root_len,const char* identity,int64_t identity_len,int64_t memory,
+        int64_t timeout,int64_t deadline) {
+    return rt_lg_start_mode_v2(program,(uint64_t)program_len,digest,(uint64_t)digest_len,args,environment,
+        directory,(uint64_t)directory_len,root,(uint64_t)root_len,identity,(uint64_t)identity_len,
+        memory,timeout,NULL,0,NULL,0,1,deadline,NULL);
+}
+
+SplArray *rt_linux_group_start_stream_profiled_v3(const char* program,int64_t program_len,const char* digest,
+        int64_t digest_len,SplArray* args,SplArray* environment,const char* directory,int64_t directory_len,
+        const char* root,int64_t root_len,const char* identity,int64_t identity_len,int64_t memory,
+        int64_t timeout,int64_t deadline,const char* broker,int64_t broker_len,
+        const char* policy,int64_t policy_len,SplArray* words) {
+    RtGroupStreamProfileV3 profile;
+    if(!rt_lg_profile_parse_v3(broker,broker_len,policy,policy_len,words,&profile)) {
+        int64_t failure[2]={0,EINVAL};return owned_adapter_values(failure,2);
+    }
+    return rt_lg_start_mode_v2(program,(uint64_t)program_len,digest,(uint64_t)digest_len,args,environment,
+        directory,(uint64_t)directory_len,root,(uint64_t)root_len,identity,(uint64_t)identity_len,
+        memory,timeout,NULL,0,NULL,0,1,deadline,&profile);
 }
 
 SplArray *rt_linux_group_poll_v1(int64_t token) {
@@ -960,6 +1347,60 @@ SplArray *rt_linux_group_collect_v1(int64_t token) {
     close(rt_linux_group.parent_fd);
     rt_linux_group.collected = 1;
     return rt_lg_observation(0);
+}
+
+/* Projection only: retain actual collected evidence after destructive cleanup.
+ * No poll, wait, cgroup or file operation is performed by this query. */
+int64_t rt_linux_group_stream_recover_lease_v2(const char* root_data,int64_t root_len,
+        const char* identity_data,int64_t identity_len) {
+    char root[4096],identity[65];
+    if(!rt_lg_copy_text(root_data,(uint64_t)root_len,root,sizeof(root))||
+       !rt_lg_hex_digest(identity_data,(uint64_t)identity_len,identity))return -2;
+    if(!rt_linux_group.active)return 0;
+    if(!rt_linux_group.stream_mode||strcmp(rt_linux_group.stream_root,root)||
+       strcmp(rt_linux_group.stream_identity,identity))return -2;
+    return 1;
+}
+/* Classification is a projection of actual retained native scope state.
+ * A no-child scope can never be used as a reaped-leader observation. */
+int64_t rt_linux_group_stream_no_child_scope_v2(const char* root,int64_t root_len,
+        const char* identity,int64_t identity_len) {
+    int64_t matched=rt_linux_group_stream_recover_lease_v2(root,root_len,identity,identity_len);
+    if(matched<=0)return -2;
+    if(!rt_linux_group.no_child_scope)return 0;
+    return rt_linux_group.collected?2:1;
+}
+int64_t rt_linux_group_stream_collect_no_child_v2(const char* root,int64_t root_len,
+        const char* identity,int64_t identity_len) {
+    int64_t kind=rt_linux_group_stream_no_child_scope_v2(root,root_len,identity,identity_len);
+    if(kind==2)return 0; /* retained actual no-child cleanup, not a second collect */
+    if(kind!=1)return ESTALE;
+    RtLinuxGroup* owner=&rt_linux_group;
+    if(owner->group_fd<0) {
+        owner->group_fd=openat(owner->parent_fd,owner->name,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+        if(owner->group_fd<0)return errno?errno:EIO;
+    }
+    int populated=1;
+    if(!rt_lg_populated(owner->group_fd,&populated))return errno?errno:EIO;
+    if(populated) {
+        if(!rt_lg_kill(owner))return errno?errno:EIO;
+        return EBUSY; /* wait for actual cgroup.events empty on a later turn */
+    }
+    if(unlinkat(owner->parent_fd,owner->name,AT_REMOVEDIR)!=0)return errno?errno:EIO;
+    close(owner->group_fd);close(owner->parent_fd);
+    owner->group_fd=owner->parent_fd=-1;owner->collected=1;owner->tree_empty=1;
+    /* leader_reaped remains false: no child ever existed in this owner. */
+    return 0;
+}
+SplArray *rt_linux_group_collected_stream_v2(int64_t token) {
+    return rt_lg_observation(token==1&&rt_linux_group.active&&rt_linux_group.collected&&
+        !rt_linux_group.no_child_scope?0:EINVAL);
+}
+int64_t rt_linux_group_stream_release_inherited_v2(void) {
+    if(rt_linux_group.active&&!rt_linux_group.collected)return EBUSY;
+    if(close(4)!=0&&errno!=EBADF)return errno;
+    if(close(5)!=0&&errno!=EBADF)return errno;
+    return 0;
 }
 
 SplArray *rt_linux_group_available_capacity_v1(const char *path_data, uint64_t path_len) {

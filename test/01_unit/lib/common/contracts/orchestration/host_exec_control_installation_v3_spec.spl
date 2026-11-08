@@ -1,0 +1,78 @@
+# @req HOST-EXEC-CONTROL-INSTALL-01
+# NOT_RUN: pure codec only. Canonical proof wires are opaque here, not verified
+# authentication or native policy readiness; actual owner verifies signatures.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
+
+fn installation_codec_fixture_v3() -> HostExecControlInstallationRequestV3:
+    val base = verification_fixture()
+    val fields: Dict<text, SdnValue> = {"fixtureOnly": SdnValue.Bool(true)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    val scope = ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "user_1", boot_id: "boot-1",
+        provider_generation: 7, native_machine_id: "machine-1", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-1")
+    val intent = HostExecControlInstallationIntentV3(operation_id: "installation-1", enrollment_binding_digest: "b".repeat(64),
+        scope: scope, provider_identity_digest: "a".repeat(64), control_policy_bytes: bytes, control_policy_digest: sha256_text(bytes))
+    var operation = base.request
+    operation.id = intent.operation_id
+    operation.operation = "host_exec_control_install_v3"
+    operation.payload_digest = host_exec_control_installation_intent_digest_v3(intent).unwrap()
+    HostExecControlInstallationRequestV3(intent, operation, base.signed, base.approval)
+
+describe "Pure exec-control installation intent and request":
+    it "roundtrips exact raw canonical policy and full opaque signed request bytes":
+        step("roundtrips exact raw canonical policy and full opaque signed request bytes")
+        val request = installation_codec_fixture_v3()
+        val intent_bytes = host_exec_control_installation_intent_encode_v3(request.intent).unwrap()
+        expect(host_exec_control_installation_intent_digest_v3(request.intent).unwrap()).to_equal(sha256_text(intent_bytes))
+        expect(host_exec_control_installation_intent_encode_v3(host_exec_control_installation_intent_decode_v3(intent_bytes).unwrap()).unwrap()).to_equal(intent_bytes)
+        val bytes = host_exec_control_installation_request_encode_v3(request).unwrap()
+        val decoded = host_exec_control_installation_request_decode_v3(bytes).unwrap()
+        expect(decoded.intent.control_policy_bytes).to_equal(request.intent.control_policy_bytes)
+        expect(host_exec_control_installation_request_encode_v3(decoded).unwrap()).to_equal(bytes)
+
+    it "validates standalone shared envelope shape and exact original operation correlation":
+        step("validates standalone shared envelope shape and exact original operation correlation")
+        val request = installation_codec_fixture_v3()
+        assert(host_exec_control_installation_match_operation_v3(request.intent, request.operation).unwrap())
+        for mode in ["memory", "duration", "id", "action", "host", "environment", "payload"]:
+            var operation = request.operation
+            if mode == "memory": operation.memory_bytes = 0
+            elif mode == "duration": operation.duration_ms = 0
+            elif mode == "id": operation.id = "invalid id"
+            elif mode == "action": operation.operation = "host_execute_v1"
+            elif mode == "host": operation.host_id = "worker_2"
+            elif mode == "environment": operation.environment_digest = "e".repeat(64)
+            else: operation.payload_digest = "e".repeat(64)
+            assert(host_exec_control_installation_match_operation_v3(request.intent, operation).is_err())
+
+    it "rejects nonobject noncanonical wronghash unknown missing and oversized inputs":
+        step("rejects nonobject noncanonical wronghash unknown missing and oversized inputs")
+        val request = installation_codec_fixture_v3()
+        var intent = request.intent
+        intent.control_policy_digest = "e".repeat(64)
+        expect(host_exec_control_installation_intent_encode_v3(intent).unwrap_err()).to_equal("host-exec-install-policy-digest-mismatch")
+        expect(host_exec_control_installation_policy_v3("[1, 2]\n").unwrap_err()).to_equal("host-exec-install-policy-object-required")
+        expect(host_exec_control_installation_policy_v3(request.intent.control_policy_bytes + "\n").unwrap_err()).to_equal("host-exec-install-policy-noncanonical")
+        val bytes = host_exec_control_installation_intent_encode_v3(request.intent).unwrap()
+        expect(host_exec_control_installation_intent_decode_v3(bytes.replace("{", "{unknown: 1, ")).unwrap_err()).to_equal("host-exec-install-unknown-field:unknown")
+        val field = ", enrollmentBindingDigest: " + sdn_encode_canonical(SdnValue.String(request.intent.enrollment_binding_digest))
+        assert(bytes.contains(field))
+        expect(host_exec_control_installation_intent_decode_v3(bytes.replace(field, "")).unwrap_err()).to_equal("host-exec-install-missing-field:enrollmentBindingDigest")
+        expect(host_exec_control_installation_policy_v3("😀".repeat(262145)).unwrap_err()).to_equal("host-exec-install-policy-size")
+        expect(host_exec_control_installation_request_decode_v3("😀".repeat(1048577)).unwrap_err()).to_equal("host-exec-install-source-size")
+
+    it "validates historical scope structurally without claiming current epoch or authentication":
+        step("validates historical scope structurally without claiming current epoch or authentication")
+        val request = installation_codec_fixture_v3()
+        var historical = request.intent
+        historical.scope.boot_id = "older-native-boot"
+        historical.scope.continuity_id = "older-native-boot"
+        var operation = request.operation
+        operation.payload_digest = host_exec_control_installation_intent_digest_v3(historical).unwrap()
+        assert(host_exec_control_installation_match_operation_v3(historical, operation).unwrap())
+        expect(host_exec_control_installation_intent_decode_v3(host_exec_control_installation_intent_encode_v3(historical).unwrap()).unwrap().scope.boot_id).to_equal("older-native-boot")

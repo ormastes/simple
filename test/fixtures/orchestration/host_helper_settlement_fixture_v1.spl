@@ -1,0 +1,109 @@
+# Real signed helper admission/journal fixture. The output plan is immutable
+# synthetic planning data; no native process or successful cleanup is simulated.
+use test.fixtures.orchestration.host_helper_fixture_v1.*
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_encode_v1, host_helper_execution_proof_load_v1}
+use std.common.contracts.orchestration.host_capacity_v1.HostLedgerFenceV1
+use std.common.contracts.container.stream_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.group_process_stream_profile_v3.*
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostHelperSettlementFixtureV1:
+    fixture: HostHelperFixtureV1
+    owner: HostCapacityOwnerV1
+    helper: HostHelperLeaseV1
+    output_plan: ContainerOutputPlanV2
+    consumed: HostHelperStreamConsumedV1
+
+pub fn host_helper_settlement_plan_v1(fixture: HostHelperFixtureV1) -> ContainerOutputPlanV2:
+    val helper = fixture.request.plan
+    val scope = fixture.scope
+    val workload = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "parent-workload", attempt: 1,
+        operation_id: helper.parent_operation_id, request_digest: "a".repeat(64), physical_host_id: scope.physical_host_id,
+        service_scope_id: scope.service_scope_id, boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: workload.workload_uid, attempt: 1, operation_id: workload.operation_id,
+        provider_generation: scope.provider_generation, engine: "podman", native_id: "b".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val identity = ContainerOutputIdentityV2(operation_id: helper.operation_id, parent_operation_id: helper.parent_operation_id,
+        parent_operation_digest: helper.parent_operation_digest, parent_assignment_digest: helper.parent_assignment_digest,
+        parent_budget_digest: helper.parent_budget_digest, binding_digest: "f".repeat(64))
+    val args = ["attach", "--no-stdin", "--sig-proxy=false", runtime.native_id]
+    val request = GroupProcessStreamRequestV2(program: "/fixture/not-executed", producer_digest: "1".repeat(64), args: args,
+        environment: [], directory: "/tmp", inputs: [], timeout_ms: 200, broker_program: "/fixture/broker-not-executed",
+        broker_digest: "2".repeat(64), child_argv_digest: group_process_child_argv_digest_v2("/fixture/not-executed", args),
+        launch_deadline_unix_ms: 0)
+    val budget = GroupProcessBrokerBudgetV3(cgroup_path: "/fixture/broker", device: 1, inode: 2, generation: 3,
+        policy_digest: "3".repeat(64), cpu_quota_us: 10000, cpu_period_us: 100000, reserved_cpu_millis: 100,
+        memory_limit_bytes: 16777216, reserved_memory_bytes: 16777216)
+    val profile = GroupProcessStreamProfileV3(helper_cpu: group_process_cpu_quota_v3(500).unwrap(), broker: budget,
+        child_image_mode: "trusted-local-admin-image-fd-v1")
+    val launch = GroupProcessStreamLaunchV2(root: fixture.root + "/native", worker_id: helper.operation_id,
+        generation: scope.provider_generation, snapshot_digest: "4".repeat(64), cache_identity: "5".repeat(64),
+        memory_limit_bytes: 256, request: request, delegated_cgroup_path: "/fixture", memory_policy: "enforce",
+        transport_generation: 0, profile_v3: Some(profile))
+    var result = ContainerOutputPlanV2(mode: "output-follow", workload: workload, runtime: runtime, identity: identity,
+        resources: ContainerOutputResourcesV2(cpu_millis: 500, memory_bytes: 256), provider_identity_digest: "6".repeat(64),
+        policy_digest: "7".repeat(64), launch_template: launch, request_digest: "")
+    result.request_digest = container_output_plan_digest_v2(result).unwrap()
+    result
+
+pub fn host_helper_settlement_fixture_v1() -> HostHelperSettlementFixtureV1:
+    var fixture = host_helper_fixture_v1()
+    val parent = fixture.request.parent_binding
+    var grant = verification_fixture().signed.grant
+    grant.operations = ["host_reservation_v1", "host_execute_v1"]
+    grant.host_id = parent.host_operation.host_id
+    grant.principal = parent.host_operation.principal
+    grant.project = parent.host_operation.project
+    grant.environment_digest = parent.host_operation.environment_digest
+    val receipt = host_capacity_owner_prepared_receipt_v1(fixture.owner, parent.host_intent,
+        parent.host_operation, grant, host_helper_clock_v1()).unwrap()
+    val cap = fixture.owner.ledger.capacity
+    val fence = HostLedgerFenceV1(authority_id: cap.authority_id, boot_id: cap.boot_id,
+        provider_generation: cap.provider_generation, revision: fixture.owner.ledger.revision)
+    val executing = host_capacity_owner_begin_v1(fixture.owner, parent.host_intent, parent.host_operation,
+        receipt, fence, grant, host_helper_clock_v1()).unwrap()
+    fixture.request.plan.helper_kind = "attach-broker"
+    val plan = host_helper_settlement_plan_v1(fixture)
+    fixture.request.plan.request_digest = plan.request_digest
+    fixture = host_helper_sibling_fixture_v1(fixture, executing, fixture.request.operation.id)
+    val prepared = host_helper_prepare_v1(fixture.owner, fixture.request, fixture.policy, fixture.scope,
+        host_helper_clock_v1(), host_helper_clock_v1)
+    assert(prepared.error == "", prepared.error)
+    val begun = host_helper_begin_v1(prepared.owner, fixture.request, prepared.receipt.unwrap(),
+        fixture.execution_signed, fixture.execution_approval, fixture.policy, fixture.scope,
+        host_helper_clock_v1(), host_helper_clock_v1)
+    assert(begun.error == "", begun.error)
+    val helper = begun.lease.unwrap()
+    val record = HostHelperStreamConsumedV1(operation_id: helper.operation.id,
+        operation_digest: sha256_text(distributed_encode_operation_v2(helper.operation).unwrap()),
+        packet_digest: sha256_text(host_helper_request_encode_v1(fixture.request).unwrap()),
+        execution_proof_digest: sha256_text(host_helper_execution_proof_load_v1(fixture.root, helper.operation.id).unwrap()),
+        prepared_receipt_digest: helper.receipt.receipt_digest, deadline_unix_ms: helper.deadline.expires_at_unix_ms,
+        output_plan: plan)
+    HostHelperSettlementFixtureV1(fixture: fixture, owner: begun.owner, helper: helper, output_plan: plan, consumed: record)
+
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_prepare_v2}
+use std.nogc_sync_mut.orchestration.host_helper_settlement_receipt_v1.host_helper_stream_native_store_v1
+use std.nogc_sync_mut.io_runtime.dir_create
+
+# Claim/request files are planning metadata ONLY, never terminal/process proof.
+pub fn host_helper_settlement_metadata_v1(fixture: HostHelperSettlementFixtureV1,
+        archive: bool = true) -> GroupProcessStreamOwnerV2:
+    host_helper_stream_publish_v1(fixture.fixture.root, fixture.helper.operation.id, "consumed",
+        host_helper_stream_consumed_encode_v1(fixture.consumed).unwrap(), true).unwrap()
+    var launch = fixture.output_plan.launch_template
+    launch.transport_generation = 11
+    launch.request.launch_deadline_unix_ms = fixture.helper.deadline.expires_at_unix_ms
+    assert(dir_create(launch.root, true))
+    val native = group_process_stream_prepare_v2(launch).unwrap()
+    if archive: host_helper_stream_native_store_v1(fixture.fixture.root, fixture.helper.operation, native).unwrap()
+    native

@@ -616,6 +616,15 @@ impl MirLowering:
                 case _: return false
         false
 
+    # A control-flow merge with Unit/Never has no runtime payload. Keep the
+    # real local type; never manufacture an integer definition for that slot.
+    # This is deliberately separate from local_is_unit's other consumers.
+    fn merge_result_is_payloadless(local: LocalId) -> bool:
+        val type_ = self.local_mir_type_of(local) ?? MirType.i64()
+        match type_.kind:
+            case MirTypeKind.Unit | MirTypeKind.Never: true
+            case _: false
+
     fn local_is_unit(local: LocalId) -> bool:
         """True when a lowered local's registered MIR type is Unit -- e.g. the
         placeholder result of a void statement like `print "x"` used as a
@@ -4207,7 +4216,7 @@ impl MirLowering:
         # if no arm defined result, the returned LocalId would be read while
         # undefined downstream (NULL llvm::Value* -> ICmp SIGSEGV in llvm-lib).
         # Define it in the merge block so every returned id has a def.
-        if not result_defined:
+        if not result_defined and not self.merge_result_is_payloadless(result):
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
             self.builder.set_local_type(result, inferred_ty)
@@ -4244,7 +4253,14 @@ impl MirLowering:
 
         var b = self.builder
         val merge_block = b.new_block(Some("if_chain_merge"))
-        val chain_has_else = else_.?
+        # A real bool, never `else_.?`: `.?` yields the `HirBlock?` itself, so
+        # `chain_has_else and expected_type == nil` below read the absent
+        # Option's raw nil-sentinel word as true on the native lane and put a
+        # `Const 0` into this no-else chain's Unit result -- every else-less
+        # `if` failed codegen with E-BACKEND-LLVM-CONST-TYPE "integer
+        # constant cannot define void"
+        # (native_const_type_void_checked_join_host_facade_2026-11-07).
+        val chain_has_else: bool = else_ != nil
         val result_type = if chain_has_else: self.match_result_mir_type(expected_type) else: MirType.unit()
         val result = b.new_temp(result_type)
         # bug=mir_lower_child_tasks_append_access_violation_2026-10-19: same as
@@ -4383,7 +4399,7 @@ impl MirLowering:
         if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
             return result
         self.builder.switch_to_block(merge_block)
-        if not result_defined:
+        if not result_defined and not self.merge_result_is_payloadless(result):
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known and chain_has_else:
             self.builder.set_local_type(result, inferred_ty)
@@ -5138,15 +5154,16 @@ impl MirLowering:
         self.builder = b_cond
 
         # Element: x = rt_array_get(arr, i)
-        # A `[u8]` element reads through rt_bytes_u8_at, the accessor the
-        # index read `arr[i]` uses (expr_dispatch.spl typed_u8_runtime_read):
-        # rt_array_get hands back the RAW byte of a packed array, so the
-        # decode below turned 56 into 7.
-        val for_typed_u8 = match element_type.kind:
-            case MirTypeKind.U8: true
-            case _: false
+        # Typed unsigned arrays use the same checked providers as `arr[i]`.
+        # Providers normalize boxed and packed layouts to raw element bits;
+        # generic tagged decode below must not shift packed bytes or words.
+        val for_raw_unsigned_getter = match element_type.kind:
+            case MirTypeKind.U8: "rt_bytes_u8_at"
+            case MirTypeKind.U32: "rt_typed_words_u32_at"
+            case MirTypeKind.U64: "rt_typed_words_u64_at"
+            case _: ""
         val get_func = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str(if for_typed_u8: "rt_bytes_u8_at" else: "rt_array_get"),
+            MirConstValue.Str(if for_raw_unsigned_getter != "": for_raw_unsigned_getter else: "rt_array_get"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
         ))
         var b_get = self.builder
@@ -5193,10 +5210,10 @@ impl MirLowering:
         if for_has_real_struct_name:
             self.mark_runtime_value_local(elem_local.id)
         var decoded_elem = elem_local
-        if for_typed_u8:
-            var b_byte = self.builder
-            decoded_elem = b_byte.emit_cast(mir_operand_copy(elem_local), element_type)
-            self.builder = b_byte
+        if for_raw_unsigned_getter != "":
+            var b_unsigned = self.builder
+            decoded_elem = b_unsigned.emit_cast(mir_operand_copy(elem_local), element_type)
+            self.builder = b_unsigned
         elif erased_element_hir != nil and not for_has_real_struct_name:
             # Erased `[T]` element: tagged word, no decode (see the
             # erased_element_hir declaration above).

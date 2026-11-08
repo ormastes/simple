@@ -1,0 +1,63 @@
+# Real flat parser -> rich HIR default transport; no manual AST/HIR overlay.
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.core.ast.{DECL_ENUM, decl_get_tag, decl_get_name, decl_get_param_defaults, decl_get_field_defaults}
+use compiler.frontend.core._Ast.module_state.{module_get_decls}
+use compiler.frontend.core.ast_traversal.{flat_decl_child_exprs}
+
+fn require(condition: bool, message: text):
+    if not condition: panic(message)
+
+fn main():
+    val source = "enum Payload:\n    First(required: text, value: i64 = 0)\n    Plain(i64)\n    Second(required: text, value: i64 = 9)\n    Unit = 17\n"
+    val parsed = parse_full_frontend(source, "enum_defaults.spl", "enum_defaults", Logger(level: 0))
+    var traversal_checked = false
+    for declaration in module_get_decls():
+        if decl_get_tag(declaration) != DECL_ENUM or decl_get_name(declaration) != "Payload": continue
+        val defaults = decl_get_param_defaults(declaration)
+        require(defaults.len() == 5, "flat payload defaults are not parallel to all payload fields")
+        require(defaults[0] == -1 and defaults[2] == -1 and defaults[3] == -1, "absent/positional defaults lost their sentinel")
+        require(defaults[1] >= 0 and defaults[4] >= 0 and defaults[1] != defaults[4], "named defaults lost their distinct expression owners")
+        val discriminants = decl_get_field_defaults(declaration)
+        require(discriminants.len() == 4 and discriminants[3] >= 0, "explicit discriminant lost")
+        val children = flat_decl_child_exprs(declaration)
+        require(children == [discriminants[3], defaults[1], defaults[4]], "traversal omitted defaults, included absent slots, or confused discriminants")
+        traversal_checked = true
+    require(traversal_checked, "flat parser declaration traversal control was not reached")
+    var lowering = HirLowering.with_filename("enum_defaults.spl")
+    val module = lowering.lower_module(parsed)
+    require(lowering.errors.len() == 0, "enum default source failed HIR lowering")
+    var checked = 0
+    for raw_enum in module.enums.values():
+        val enum_def: HirEnum = raw_enum
+        if enum_def.name != "Payload": continue
+        for raw_variant in enum_def.variants:
+            val variant: HirVariant = raw_variant
+            if variant.name == "First" or variant.name == "Second":
+                match variant.kind:
+                    case HirVariantKind.Struct(fields):
+                        require(fields.len() == 2, "named payload arity changed")
+                        require(fields[0].name == "required" and not fields[0].has_default, "absent default became present")
+                        require(fields[1].name == "value" and fields[1].has_default, "named default was dropped")
+                        val expected = if variant.name == "First": 0 else: 9
+                        match fields[1].default.kind:
+                            case HirExprKind.IntLit(value, _): require(value == expected, "flat default offset/value changed")
+                            case _: panic("literal default did not reach HIR")
+                    case _: panic("named payload lost structural fields")
+                checked = checked + 1
+            elif variant.name == "Plain":
+                match variant.kind:
+                    case HirVariantKind.Tuple(types): require(types.len() == 1, "positional payload changed")
+                    case _: panic("positional payload became named")
+                checked = checked + 1
+            elif variant.name == "Unit":
+                require(variant.has_discriminant, "discriminant was confused with a field default")
+                match variant.discriminant.kind:
+                    case HirExprKind.IntLit(value, _): require(value == 17, "discriminant changed")
+                    case _: panic("explicit discriminant expression changed")
+                checked = checked + 1
+    require(checked == 4, "real enum default controls were not reached")
+    print "PASS: parsed enum defaults preserve flags, offsets, zero and discriminants"

@@ -1,0 +1,61 @@
+use std.common.string_core.{str_len}
+# Disk-backed query admission. The editor owns document contents and apply.
+# This adapter never writes editor buffers or files.
+use std.common.json.value.{json_parse_value_strict, json_value_field}
+use std.nogc_sync_mut.lsp.server.{DocumentInfo}
+use std.nogc_sync_mut.lsp.lsp_json.{make_json_result, make_error}
+use std.nogc_sync_mut.lsp.lsp_file_uri.{lsp_file_uri_to_path, lsp_query_file_argument_v1}
+use std.nogc_sync_mut.lsp.lsp_code_action.{LspCodeActionRevision, lsp_code_action_request, lsp_code_action_query_args, lsp_code_actions_convert_with_revisions}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_snapshot, lsp_document_snapshot_matches, lsp_read_analyzed_source}
+use std.nogc_sync_mut.lsp.lsp_query_command.{lsp_heavy_query_command_v1, lsp_run_query_command_v1}
+
+pub fn lsp_code_action_output_error(output: text) -> text:
+    # Child logs/malformed rows are analyzer failure, never empty success.
+    if str_len(output) > 4194304:
+        return "codeAction analyzer exceeded the 4 MiB result budget"
+    match json_parse_value_strict(output.trim()):
+        case Ok(Array(actions)):
+            if actions.len() > 128:
+                return "codeAction analyzer exceeded the 128-action result budget"
+            for action in actions:
+                match json_value_field(action, "title"):
+                    case Str(title) if title.trim() != "": pass
+                    case _: return "codeAction analyzer returned a malformed action row"
+        case _: return "codeAction analyzer returned an invalid action array"
+    ""
+
+pub fn lsp_code_action_response(id: text, body: text, binary: text) -> text:
+    val request = lsp_code_action_request(body)
+    if request == nil: return make_error(id, -32602, "codeAction requires a valid URI and range")
+    val actual = request.unwrap()
+    val path = lsp_file_uri_to_path(actual.uri)
+    if not actual.uri.starts_with("file://") or path == "": return make_error(id, -32602, "codeAction requires a file URI")
+    val snapshot = lsp_document_snapshot(actual.uri)
+    if snapshot == nil:
+        return make_error(id, -32803, "codeAction requires an open editor document revision")
+    val captured = snapshot.unwrap()
+    val before = lsp_read_analyzed_source(path)
+    if before.is_err(): return make_error(id, -32803, "codeAction could not read the analyzed source")
+    if before.unwrap() != captured.content:
+        return make_error(id, -32801, "Editor overlay differs from disk; immutable overlay query support is unavailable. No disk fix was substituted")
+    val producer_path = lsp_query_file_argument_v1(path)
+    val arguments = lsp_code_action_query_args(producer_path, actual.line)
+    val command = lsp_heavy_query_command_v1(arguments)
+    val (output, exit_code) = lsp_run_query_command_v1(binary, command, 4194304)
+    if exit_code != 0 or output.trim() == "":
+        return make_error(id, -32803, "codeAction analysis failed; no repair is verified")
+    lsp_code_action_complete_v1(id, captured, path, producer_path, output)
+
+# Production child-success boundary; callers must pass the captured owner
+# snapshot and the exact source spelling submitted to the query child.
+pub fn lsp_code_action_complete_v1(id: text, captured: DocumentInfo,
+        path: text, producer_path: text, output: text) -> text:
+    val output_error = lsp_code_action_output_error(output)
+    if output_error != "": return make_error(id, -32803, output_error)
+    val after = lsp_read_analyzed_source(path)
+    if after.is_err(): return make_error(id, -32801, "Analyzed source became unavailable")
+    if after.unwrap() != captured.content or not lsp_document_snapshot_matches(captured):
+        return make_error(id, -32801, "Source changed during analysis; request fresh code actions")
+    val revision = LspCodeActionRevision(uri: captured.uri, source_path: producer_path, version: captured.version, source: captured.content)
+    val actions = lsp_code_actions_convert_with_revisions(output, captured.uri, [revision])
+    make_json_result(id, actions)

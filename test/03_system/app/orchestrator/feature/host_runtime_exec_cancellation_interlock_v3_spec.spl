@@ -1,0 +1,115 @@
+# @req HOST-EXEC-NO-BEGIN-CANCEL-01
+# NOT_RUN: real SDK-signed fixture, actual owned journal/private filesystem.
+# Prior parent Container facts are scripted; no live exec/provider qualification.
+use std.spec.{describe, it, expect, step}
+use test.fixtures.orchestration.host_runtime_exec_begin_fixture_v3.*
+use test.fixtures.orchestration.host_runtime_exec_cleanup_guard_fixture_v3.{child_guard_fixture_v3, child_guard_record_v3}
+use test.fixtures.orchestration.host_exec_control_installation_fixture_v3.host_installation_cursor_v3
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.host_execution_clock_v2
+use std.nogc_sync_mut.orchestration.host_runtime_exec_cancellation_interlock_v3.host_runtime_exec_cancellation_clear_v3
+use std.nogc_sync_mut.orchestration.host_runtime_exec_begin_v3.host_runtime_exec_begin_v3
+use std.common.contracts.orchestration.host_runtime_exec_v3.host_runtime_exec_request_encode_v3
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace, file_remove}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.package_sffi.create_symlink
+
+fn cancellation_directory_v3(root: text) -> text:
+    root + "/host-runtime-exec-no-begin-cancellations"
+
+fn cancellation_leaf_v3(root: text, child_id: text) -> text:
+    cancellation_directory_v3(root) + "/" + sha256_text(child_id) + ".sdn"
+
+describe "Fixed cancellation final blocks child Host BEGIN":
+    it "proves missing namespace and leaf clear without accepting a random private stage":
+        step("proves missing namespace and leaf clear without accepting a random private stage")
+        val fixture = child_guard_fixture_v3()
+        val local = child_guard_record_v3(fixture, "admitted")
+        val journal = local.capacity.journal
+        assert(host_runtime_exec_cancellation_clear_v3(journal, fixture.packet.operation).unwrap())
+        assert(dir_create(cancellation_directory_v3(journal.root), true))
+        assert(host_runtime_exec_cancellation_clear_v3(journal, fixture.packet.operation).unwrap())
+        val stage = secure_temp_dir(journal.root, "host-exec-stage-").unwrap()
+        assert(file_atomic_write_mode(stage + "/record.sdn", "{orphan: true}\n", 0o600))
+        assert(host_runtime_exec_cancellation_clear_v3(journal, fixture.packet.operation).unwrap())
+        expect(local.capacity.journal.sequence).to_equal(journal.sequence)
+        exec_begin_fixture_close_v3(fixture, local)
+
+    it "blocks every present final including malformed empty directory and dangling symlink":
+        step("blocks every present final including malformed empty directory and dangling symlink")
+        for mode in ["record", "malformed", "empty", "directory", "dangling"]:
+            val fixture = child_guard_fixture_v3()
+            val local = child_guard_record_v3(fixture, "admitted")
+            val root = local.capacity.journal.root
+            assert(dir_create(cancellation_directory_v3(root), true))
+            val leaf = cancellation_leaf_v3(root, fixture.packet.operation.id)
+            if mode == "directory": assert(dir_create(leaf, false))
+            elif mode == "dangling": assert(create_symlink(root + "/missing-cancellation-target", leaf))
+            else:
+                val bytes = if mode == "record": "{pending: true}\n" elif mode == "empty": "" else: "broken"
+                assert(file_atomic_write_mode(leaf, bytes, 0o600))
+            expect(host_runtime_exec_cancellation_clear_v3(local.capacity.journal, fixture.packet.operation).unwrap_err()).to_equal("host-exec-begin-cancellation-pending")
+            if mode == "dangling": assert(file_remove(leaf))
+            exec_begin_fixture_close_v3(fixture, local)
+
+    it "refuses non-directory and dangling namespace errors instead of treating them absent":
+        step("refuses non-directory and dangling namespace errors instead of treating them absent")
+        for mode in ["file", "dangling"]:
+            val fixture = child_guard_fixture_v3()
+            val local = child_guard_record_v3(fixture, "admitted")
+            val directory = cancellation_directory_v3(local.capacity.journal.root)
+            if mode == "file": assert(file_atomic_write_mode(directory, "not a directory", 0o600))
+            else: assert(create_symlink(local.capacity.journal.root + "/missing-directory", directory))
+            assert(host_runtime_exec_cancellation_clear_v3(local.capacity.journal, fixture.packet.operation).is_err())
+            if mode == "dangling": assert(file_remove(directory))
+            exec_begin_fixture_close_v3(fixture, local)
+
+    it "requires exact current owner and original admitted child rather than a cancelled label":
+        step("requires exact current owner and original admitted child rather than a cancelled label")
+        for state in ["admitted", "executing", "outcome-unknown", "cancelled"]:
+            val fixture = child_guard_fixture_v3()
+            val local = child_guard_record_v3(fixture, state)
+            assert(host_runtime_exec_cancellation_clear_v3(fixture.local.capacity.journal, fixture.packet.operation).is_err())
+            var changed = fixture.packet.operation
+            changed.memory_bytes = changed.memory_bytes + 1
+            expect(host_runtime_exec_cancellation_clear_v3(local.capacity.journal, changed).unwrap_err()).to_equal("host-exec-cancel-interlock-operation-mismatch")
+            if state == "admitted": assert(host_runtime_exec_cancellation_clear_v3(local.capacity.journal, fixture.packet.operation).unwrap())
+            else: expect(host_runtime_exec_cancellation_clear_v3(local.capacity.journal, fixture.packet.operation).unwrap_err()).to_equal("host-exec-cancel-interlock-admitted-required")
+            exec_begin_fixture_close_v3(fixture, local)
+
+    it "refuses actual admitted public BEGIN retry before resolver or provider calls when final exists":
+        step("refuses actual admitted public BEGIN retry before resolver or provider calls when final exists")
+        val fixture = child_guard_fixture_v3()
+        val local = child_guard_record_v3(fixture, "admitted")
+        val root = local.capacity.journal.root
+        assert(dir_create(cancellation_directory_v3(root), true))
+        val stage = secure_temp_dir(root, "host-exec-stage-").unwrap()
+        val record = stage + "/record.sdn"
+        assert(file_atomic_write_mode(record, "{pending: true}\n", 0o600))
+        assert(file_publish_noreplace(record, cancellation_leaf_v3(root, fixture.packet.operation.id)).unwrap())
+        val sequence = local.capacity.journal.sequence
+        val cursor = host_installation_cursor_v3(local)
+        val turn = host_runtime_exec_begin_v3(local, host_runtime_exec_request_encode_v3(fixture.packet).unwrap(),
+            host_execution_clock_v2(), host_execution_clock_v2)
+        expect(turn.error).to_equal("host-exec-begin-cancellation-pending")
+        expect(turn.recovery_required).to_equal(true)
+        assert(turn.lease.is_none())
+        assert(turn.control_cleanup.is_none())
+        expect(turn.local.capacity.journal.sequence).to_equal(sequence)
+        expect(turn.local.capacity.journal.operations[fixture.packet.operation.id].state).to_equal("admitted")
+        expect(host_installation_cursor_v3(turn.local)).to_equal(cursor)
+        exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "rechecks a newly published final against the same admitted writer without releasing parent charge":
+        step("rechecks a newly published final against the same admitted writer without releasing parent charge")
+        val fixture = child_guard_fixture_v3()
+        val local = child_guard_record_v3(fixture, "admitted")
+        val journal = local.capacity.journal
+        assert(host_runtime_exec_cancellation_clear_v3(journal, fixture.packet.operation).unwrap())
+        assert(dir_create(cancellation_directory_v3(journal.root), true))
+        assert(file_atomic_write_mode(cancellation_leaf_v3(journal.root, fixture.packet.operation.id), "{pending: true}\n", 0o600))
+        expect(host_runtime_exec_cancellation_clear_v3(journal, fixture.packet.operation).unwrap_err()).to_equal("host-exec-begin-cancellation-pending")
+        expect(local.capacity.ledger.reservations).to_equal(fixture.local.capacity.ledger.reservations)
+        expect(local.capacity.journal.sequence).to_equal(journal.sequence)
+        exec_begin_fixture_close_v3(fixture, local)

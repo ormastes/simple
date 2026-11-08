@@ -1,0 +1,84 @@
+# Observes a trusted-admin mutable path. The retained hash handle is NOT the
+# executed handle: replacement after observation remains an explicit TOCTOU.
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_sync_mut.sffi.fs.file_canonicalize
+use std.nogc_sync_mut.io.retained_file.{RetainedFile, retained_file_open,
+    retained_file_read_at, retained_file_identity_unchanged, retained_directory_open_trusted_v1}
+use std.common.crypto.sha256.sha256_stream_v1_new
+use std.nogc_sync_mut.io.process_ops.{ProcessResult, process_run_bounded_observed_v1}
+
+pub const LINUX_OCI_ENGINE_EXECUTABLE_MAX_BYTES_V1: u64 = 67108864u64
+
+fn _engine_canonical_path_v1(path: text) -> bool:
+    match file_canonicalize(path):
+        case Some(actual): actual == path
+        case nil: false
+
+fn _engine_hash_owner_v1(file: RetainedFile, uid: i64) -> Result<text, text>:
+    val metadata = file.security_metadata_v1()?
+    val metadata_error = linux_oci_engine_executable_metadata_error_v1(metadata.owner_uid as i64,
+        metadata.effective_uid as i64, metadata.mode as i64, uid)
+    if metadata_error != "": return Err(metadata_error)
+    if file.size < 4u64: return Err("engine-executable-not-elf")
+    if retained_file_read_at(file, 0u64, 4)? != [127u8, 69u8, 76u8, 70u8]:
+        return Err("engine-executable-not-elf")
+    val stream = sha256_stream_v1_new()
+    var offset = 0u64
+    while offset < file.size:
+        val remaining = file.size - offset
+        val count = if remaining > 1048576u64: 1048576 else: remaining as i64
+        val bytes = retained_file_read_at(file, offset, count)?
+        if bytes.len() != count or not stream.update(bytes): return Err("engine-executable-hash-read-failed")
+        offset = offset + (count as u64)
+    val unchanged = retained_file_identity_unchanged(file)?
+    if not unchanged: return Err("engine-executable-changed")
+    match stream.finish_hex():
+        case Some(digest): Ok(digest)
+        case nil: Err("engine-executable-hash-failed")
+
+pub fn linux_oci_engine_executable_digest_v1(policy: LinuxOciEnginePolicyV1) -> Result<text, text>:
+    val error = linux_oci_engine_policy_error_v1(policy)
+    if error != "": return Err(error)
+    if not _engine_canonical_path_v1(policy.executable_path) or
+            not _engine_canonical_path_v1(policy.expected_graph_root) or
+            not _engine_canonical_path_v1(policy.expected_run_root):
+        return Err("engine-policy-path-not-canonical")
+    # Existing owner validates every parent component's uid/mode. It does not
+    # protect against a trusted administrator renaming the tree afterward.
+    val pieces = policy.executable_path.split("/")
+    var parent = ""
+    var index = 1
+    while index < pieces.len() - 1:
+        parent = parent + "/" + pieces[index]
+        index = index + 1
+    if parent == "": parent = "/"
+    val directory = retained_directory_open_trusted_v1(parent)?
+    val file = match retained_file_open(policy.executable_path, LINUX_OCI_ENGINE_EXECUTABLE_MAX_BYTES_V1):
+        case Ok(owner): owner
+        case Err(reason):
+            directory.close()
+            return Err(reason)
+    val result = _engine_hash_owner_v1(file, policy.expected_uid)
+    val file_closed = file.close()
+    val directory_closed = directory.close()
+    if not file_closed or not directory_closed: return Err("engine-observation-owner-close-failed")
+    result
+
+pub fn linux_oci_engine_capture_observation_v1(policy: LinuxOciEnginePolicyV1,
+        result: ProcessResult, executable_digest: text) -> Result<LinuxOciEngineObservationV1, text>:
+    if result.limit_exceeded or result.limit_type != "": return Err("engine-info-output-or-time-limit")
+    if result.exit_code != 0: return Err("engine-info-observation-failed")
+    if (result.stdout.len() > LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1 or
+            result.stderr.len() > LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1):
+        return Err("engine-info-output-limit")
+    linux_oci_engine_info_observation_v1(policy, result.stdout, executable_digest, policy.expected_uid)
+
+pub fn linux_oci_engine_observe_v1(policy: LinuxOciEnginePolicyV1,
+        timeout_ms: i64) -> Result<LinuxOciEngineObservationV1, text>:
+    if timeout_ms <= 0 or timeout_ms > 30000: return Err("engine-observation-timeout-invalid")
+    val digest = linux_oci_engine_executable_digest_v1(policy)?
+    val arguments = linux_oci_engine_route_v1(policy, ["info", "--format", "json"])?
+    val result = process_run_bounded_observed_v1(policy.executable_path, arguments,
+        timeout_ms, LINUX_OCI_ENGINE_INFO_MAX_BYTES_V1)?
+    # The retained metadata above positively checked this process's native euid.
+    linux_oci_engine_capture_observation_v1(policy, result, digest)

@@ -1,0 +1,78 @@
+# Correlated controller/host facts, not completion authority. The consumer also
+# decodes the nested host observation and checks its complete runtime scope.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct ControllerExecutionReplyV2:
+    controller_id: text
+    request_uid: text
+    controller_operation_id: text
+    host_operation_id: text
+    assignment_digest: text
+    plan_digest: text
+    request_digest: text
+    status: text
+    host_response: text
+    observation_digest: text
+
+pub fn controller_execution_reply_encode_v2(reply: ControllerExecutionReplyV2) -> Result<text, text>:
+    for identity in [reply.controller_id, reply.request_uid, reply.controller_operation_id, reply.host_operation_id]:
+        if not builder_identifier_valid_v1(identity): return Err("controller-execution-reply-identity")
+    for digest in [reply.assignment_digest, reply.plan_digest, reply.request_digest, reply.observation_digest]:
+        if not builder_digest_valid_v1(digest): return Err("controller-execution-reply-digest")
+    if reply.status != "host-prepared" and reply.status != "runtime-observed": return Err("controller-execution-reply-status")
+    if str_len(reply.host_response) == 0 or str_len(reply.host_response) > 131072:
+        return Err("controller-execution-reply-host-size")
+    if sha256_text(reply.host_response) != reply.observation_digest: return Err("controller-execution-reply-observation-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("orchestrator-local-execution"),
+        "target": SdnValue.String("local-inprocess"), "controllerId": SdnValue.String(reply.controller_id),
+        "requestUid": SdnValue.String(reply.request_uid), "controllerOperationId": SdnValue.String(reply.controller_operation_id),
+        "hostOperationId": SdnValue.String(reply.host_operation_id), "assignmentDigest": SdnValue.String(reply.assignment_digest),
+        "planDigest": SdnValue.String(reply.plan_digest), "requestDigest": SdnValue.String(reply.request_digest),
+        "status": SdnValue.String(reply.status), "hostResponse": SdnValue.String(reply.host_response),
+        "observationDigest": SdnValue.String(reply.observation_digest), "completionObserved": SdnValue.Bool(false)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 262144: return Err("controller-execution-reply-size")
+    Ok(source)
+
+pub fn controller_execution_reply_decode_v2(source: text) -> Result<ControllerExecutionReplyV2, text>:
+    if str_len(source) == 0 or str_len(source) > 262144: return Err("controller-execution-reply-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 262144,
+            max_depth: 2, max_nodes: 40, max_rows: 0, max_cells: 0, max_columns: 20)):
+        case Ok(value): value
+        case Err(issue): return Err("controller-execution-reply-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("controller-execution-reply-object")
+    val names = ["version", "kind", "target", "controllerId", "requestUid", "controllerOperationId", "hostOperationId",
+        "assignmentDigest", "planDigest", "requestDigest", "status", "hostResponse", "observationDigest", "completionObserved"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("controller-execution-reply-unknown:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("controller-execution-reply-missing:" + key)
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 2: return Err("controller-execution-reply-version")
+        case _: return Err("controller-execution-reply-version")
+    match fields["completionObserved"]:
+        case SdnValue.Bool(value):
+            if value: return Err("controller-execution-reply-completion-unsupported")
+        case _: return Err("controller-execution-reply-completion-type")
+    var values: [text] = []
+    for key in ["kind", "target", "controllerId", "requestUid", "controllerOperationId", "hostOperationId",
+            "assignmentDigest", "planDigest", "requestDigest", "status", "hostResponse", "observationDigest"]:
+        match fields[key]:
+            case SdnValue.String(value): values.push(value)
+            case _: return Err("controller-execution-reply-text:" + key)
+    if values[0] != "orchestrator-local-execution" or values[1] != "local-inprocess":
+        return Err("controller-execution-reply-route")
+    val reply = ControllerExecutionReplyV2(controller_id: values[2], request_uid: values[3],
+        controller_operation_id: values[4], host_operation_id: values[5], assignment_digest: values[6],
+        plan_digest: values[7], request_digest: values[8], status: values[9], host_response: values[10], observation_digest: values[11])
+    if controller_execution_reply_encode_v2(reply)? != source: return Err("controller-execution-reply-noncanonical")
+    Ok(reply)

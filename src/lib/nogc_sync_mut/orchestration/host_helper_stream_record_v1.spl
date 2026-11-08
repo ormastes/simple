@@ -1,0 +1,139 @@
+# Protected journal metadata only. No live helper lease or raw handle decoder.
+use std.common.contracts.container.stream_v2.{ContainerOutputPlanV2, ContainerHelperAdmissionV2, container_output_plan_encode_v2, container_output_plan_decode_v2, container_output_plan_digest_v2, container_output_admission_validate_v2}
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_helper_reservation_receipt_v1}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1, HostHelperExecutionProofV1, host_helper_request_load_v1, host_helper_request_encode_v1, host_helper_execution_proof_load_v1, host_helper_execution_proof_load_typed_v1}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+
+pub struct HostHelperStreamConsumedV1:
+    operation_id: text
+    operation_digest: text
+    packet_digest: text
+    execution_proof_digest: text
+    prepared_receipt_digest: text
+    deadline_unix_ms: i64
+    output_plan: ContainerOutputPlanV2
+
+pub struct HostHelperStreamContextV1:
+    consumed: HostHelperStreamConsumedV1
+    request: HostHelperRequestV1
+    proof: HostHelperExecutionProofV1
+    admission: ContainerHelperAdmissionV2
+
+pub fn host_helper_stream_path_v1(root: text, operation_id: text, category: text) -> text:
+    root + "/host-helper-stream-" + category + "/" + sha256_text(operation_id) + ".sdn"
+
+pub fn host_helper_stream_fields_v1(source: text, kind: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if str_len(source) < 1 or str_len(source) > 8388608: return Err("helper-stream-record-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 8388608, max_depth: 2, max_nodes: 48,
+        max_rows: 0, max_cells: 0, max_columns: 20)
+    val document = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("helper-stream-record-syntax:" + issue.code)
+    val fields = match document.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("helper-stream-record-object")
+    for name in names:
+        if not fields.contains_key(name): return Err("helper-stream-record-missing:" + name)
+    for name in fields.keys():
+        if not names.contains(name): return Err("helper-stream-record-unknown:" + name)
+    if fields["version"] != SdnValue.Int(1) or fields["kind"] != SdnValue.String(kind):
+        return Err("helper-stream-record-version")
+    if sdn_encode_canonical(SdnValue.Dict(fields)) + "\n" != source:
+        return Err("helper-stream-record-noncanonical")
+    Ok(fields)
+
+pub fn host_helper_stream_text_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("helper-stream-record-text:" + name)
+
+pub fn host_helper_stream_consumed_encode_v1(record: HostHelperStreamConsumedV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(record.operation_id) or record.deadline_unix_ms <= 0:
+        return Err("helper-stream-consumed-identity")
+    for digest in [record.operation_digest, record.packet_digest, record.execution_proof_digest, record.prepared_receipt_digest]:
+        if not builder_digest_valid_v1(digest): return Err("helper-stream-consumed-digest")
+    val plan_digest = container_output_plan_digest_v2(record.output_plan)?
+    if record.output_plan.request_digest != plan_digest: return Err("helper-stream-outer-plan-digest")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-helper-stream-consumed"),
+        "operationId": SdnValue.String(record.operation_id), "operationDigest": SdnValue.String(record.operation_digest),
+        "packetDigest": SdnValue.String(record.packet_digest), "executionProofDigest": SdnValue.String(record.execution_proof_digest),
+        "preparedReceiptDigest": SdnValue.String(record.prepared_receipt_digest), "deadlineUnixMs": SdnValue.Int(record.deadline_unix_ms),
+        "outputPlan": SdnValue.String(container_output_plan_encode_v2(record.output_plan)?)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 8388608: return Err("helper-stream-consumed-size")
+    Ok(source)
+
+pub fn host_helper_stream_consumed_decode_v1(source: text) -> Result<HostHelperStreamConsumedV1, text>:
+    val fields = host_helper_stream_fields_v1(source, "host-helper-stream-consumed", ["version", "kind", "operationId",
+        "operationDigest", "packetDigest", "executionProofDigest", "preparedReceiptDigest", "deadlineUnixMs", "outputPlan"])?
+    val deadline = match fields["deadlineUnixMs"]:
+        case SdnValue.Int(value): value
+        case _: return Err("helper-stream-deadline-type")
+    val record = HostHelperStreamConsumedV1(operation_id: host_helper_stream_text_v1(fields, "operationId")?,
+        operation_digest: host_helper_stream_text_v1(fields, "operationDigest")?, packet_digest: host_helper_stream_text_v1(fields, "packetDigest")?,
+        execution_proof_digest: host_helper_stream_text_v1(fields, "executionProofDigest")?,
+        prepared_receipt_digest: host_helper_stream_text_v1(fields, "preparedReceiptDigest")?, deadline_unix_ms: deadline,
+        output_plan: container_output_plan_decode_v2(host_helper_stream_text_v1(fields, "outputPlan")?)?)
+    if host_helper_stream_consumed_encode_v1(record)? != source: return Err("helper-stream-consumed-canonical")
+    Ok(record)
+
+# Exclusive publication NEVER treats an identical existing consumption as new.
+# A failed partial create/sync still blocks launch and requires recovery.
+pub fn host_helper_stream_publish_v1(root: text, operation_id: text, category: text,
+        source: text, consume: bool) -> Result<(), text>:
+    val directory = root + "/host-helper-stream-" + category
+    if not dir_create(directory, true): return Err("helper-stream-record-directory")
+    if not file_set_mode(directory, 448): return Err("helper-stream-record-permissions")
+    val path = host_helper_stream_path_v1(root, operation_id, category)
+    if file_exists(path):
+        if consume: return Err("helper-stream-already-consumed-recovery-required")
+        if file_read_regular_no_follow_bounded(path, 8388608)? != source:
+            return Err("helper-stream-record-retained-mismatch")
+    elif not file_create_exclusive(path, source): return Err("helper-stream-record-create-uncertain")
+    if not file_set_mode(path, 384): return Err("helper-stream-record-permissions")
+    if file_read_regular_no_follow_bounded(path, 8388608)? != source: return Err("helper-stream-record-readback")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root):
+        return Err("helper-stream-record-sync")
+    Ok(())
+
+pub fn host_helper_stream_context_v1(root: text, operation: OperationEnvelopeV2) -> Result<HostHelperStreamContextV1, text>:
+    val source = file_read_regular_no_follow_bounded(host_helper_stream_path_v1(root, operation.id, "consumed"), 8388608)?
+    host_helper_stream_validate_record_v1(root, operation, host_helper_stream_consumed_decode_v1(source)?)
+
+pub fn host_helper_stream_validate_record_v1(root: text, operation: OperationEnvelopeV2,
+        consumed: HostHelperStreamConsumedV1) -> Result<HostHelperStreamContextV1, text>:
+    if consumed.operation_id != operation.id or consumed.operation_digest != sha256_text(distributed_encode_operation_v2(operation)?):
+        return Err("helper-stream-original-operation-mismatch")
+    val request = host_helper_request_load_v1(root, operation.id)?
+    if distributed_encode_operation_v2(request.operation)? != distributed_encode_operation_v2(operation)?:
+        return Err("helper-stream-retained-operation-mismatch")
+    if sha256_text(host_helper_request_encode_v1(request)?) != consumed.packet_digest:
+        return Err("helper-stream-retained-request-mismatch")
+    val proof_bytes = host_helper_execution_proof_load_v1(root, operation.id)?
+    if sha256_text(proof_bytes) != consumed.execution_proof_digest: return Err("helper-stream-execution-proof-mismatch")
+    val proof = host_helper_execution_proof_load_typed_v1(root, operation.id)?
+    val receipt = host_helper_reservation_receipt_v1(request.intent, request.operation)?
+    if receipt.receipt_digest != consumed.prepared_receipt_digest: return Err("helper-stream-prepared-receipt-mismatch")
+    var expiry = proof.signed.grant.expires_at
+    for bound in [proof.approval.expires_at, request.budget_proof.signed.grant.expires_at, request.budget_proof.approval.expires_at]:
+        if bound < expiry: expiry = bound
+    if expiry != consumed.deadline_unix_ms: return Err("helper-stream-retained-deadline-mismatch")
+    val deadline = container_effect_deadline_v1(request.plan.request_digest, operation.id, ["attach"], expiry)?
+    val admission = ContainerHelperAdmissionV2(intent: request.intent, plan: request.plan, operation: request.operation, receipt: receipt,
+        deadline: deadline, grant_id: proof.signed.grant.id, issuer_id: proof.signed.issuer_id,
+        approver_id: proof.approval.approver_id, cpu_millis: request.intent.reservation.cpu_millis,
+        memory_bytes: request.intent.reservation.memory_bytes)
+    val matching = container_output_admission_validate_v2(consumed.output_plan, admission)?
+    Ok(HostHelperStreamContextV1(consumed: consumed, request: request, proof: proof, admission: admission))

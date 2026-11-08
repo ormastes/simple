@@ -36,7 +36,8 @@ use std.scv.store.{
 use std.scv.compile_source_inventory.{
     CompileSourceInventoryEntryV1, compile_source_inventory_read_current_v1,
     compile_source_inventory_plain_checkout_v1,
-    compile_source_inventory_snapshot_cache_root_v1
+    compile_source_inventory_snapshot_cache_root_v1,
+    compile_source_inventory_digest_valid_v1, compile_source_inventory_identity_cmp_v1
 }
 
 extern fn rt_getpid() -> i64
@@ -232,9 +233,13 @@ fn scv_compile_snapshot_open_unscoped_v1(
     if lines.len() != 6 or not lines[5].starts_with("count="):
         return scv_compile_snapshot_invalid_v1("snapshot-open-provenance-invalid")
     val inventory_count = lines[5].substring(6).to_i64() ?? -1
-    if inventory_count < 0 or provenance != scv_compile_snapshot_provenance_v1(
-            revision_id, commit_id, tree_id, inventory_digest,
-            inventory_count):
+    val expected_provenance = scv_compile_snapshot_provenance_for_revision_v1(
+        revision_id, commit_id, tree_id, inventory_digest, inventory_count)
+    val provenance_matches = if scv_compile_snapshot_is_bundle_v2(revision_id):
+        scv_compile_snapshot_metadata_matches_v2(provenance, expected_provenance)
+    else:
+        provenance == expected_provenance
+    if inventory_count < 0 or not provenance_matches:
         return scv_compile_snapshot_invalid_v1("snapshot-open-provenance-mismatch")
     val inventory = scv_compile_snapshot_read_text_v1(
         canonical_snapshot + "/SCV_COMPILE_INVENTORY")
@@ -257,9 +262,14 @@ fn scv_compile_snapshot_open_unscoped_v1(
         canonical_root, canonical_snapshot, revision_id)
     if cache_root == "":
         return scv_compile_snapshot_invalid_v1("snapshot-open-owner-invalid")
-    val receipt_path = "{cache_root}/receipts/{revision_id}.receipt"
-    if scv_compile_snapshot_read_text_v1(receipt_path) !=
-            scv_compile_snapshot_receipt_v1(provenance, revision_id):
+    val receipt_path = scv_compile_snapshot_receipt_path_v1(cache_root, canonical_snapshot, revision_id)
+    val receipt = scv_compile_snapshot_read_text_v1(receipt_path)
+    val expected_receipt = scv_compile_snapshot_receipt_v1(provenance, revision_id)
+    val receipt_matches = if scv_compile_snapshot_is_bundle_v2(revision_id):
+        scv_compile_snapshot_metadata_matches_v2(receipt, expected_receipt)
+    else:
+        receipt == expected_receipt
+    if not receipt_matches:
         return scv_compile_snapshot_invalid_v1("snapshot-open-receipt-mismatch")
     ScvCompileSnapshotV1(
         valid: true,
@@ -474,7 +484,7 @@ fn scv_compile_snapshot_reuse_marks_v1(
 fn scv_compile_snapshot_reuse_candidate_v1(
     canonical_root: text, cache_root: text, name: text, planned_rows: [text]
 ) -> ScvCompileSnapshotReuseV1:
-    if not name.starts_with("scv-revision-v1-"):
+    if not scv_compile_snapshot_revision_supported_v1(name):
         return scv_compile_snapshot_reuse_none_v1()
     val snapshot_root = "{cache_root}/snapshots/{name}"
     val lines = scv_compile_snapshot_read_text_v1(
@@ -590,9 +600,113 @@ fn scv_compile_snapshot_acquire_v1(
 ) -> ScvCompileSnapshotV1:
     scv_compile_snapshot_acquire_cost_v1(root, cache_root, source_roots, nil)
 
+# Internal transaction phases, also exercised directly by deterministic unit
+# interleavings. No caller-supplied authority/verified flag is accepted. The
+# normal acquire path still materializes and verifies every selected source.
+fn scv_compile_snapshot_bundle_stage_owned_v2(root: text, cache_root: text, staging: text) -> bool:
+    if root == "" or cache_root == "" or staging == "": return false
+    val base = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(root)))
+    val cache = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(cache_root)))
+    val stage = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(staging)))
+    if base == "" or cache == "" or stage == "": return false
+    val cache_rel = scv_rel_path(base, cache)
+    if cache_rel != "build/scv" and cache_rel != ".simple/scv": return false
+    val prefix = cache + "/snapshots/"
+    if not stage.starts_with(prefix + ".tmp.{rt_getpid()}."): return false
+    val leaf = stage.substring(prefix.len())
+    not leaf.contains("/") and not leaf.contains("\\") and dir_exists(stage)
+
+fn scv_compile_snapshot_bundle_identity_reason_v2(
+    revision: text, commit: text, tree: text, digest: text, inventory: text
+) -> text:
+    if not compile_source_inventory_digest_valid_v1(digest): return "snapshot-bundle-digest-invalid"
+    if inventory == "" or sha256_text(inventory) != digest: return "snapshot-bundle-inventory-mismatch"
+    val rows = inventory.split("\n")
+    var previous = ""
+    for row in rows:
+        val fields = row.split("|")
+        if fields.len() != 3: return "snapshot-bundle-row-invalid"
+        if (not scv_worktree_path_safe(fields[0]) or
+                not fields[1].starts_with("sha256_") or
+                not compile_source_inventory_digest_valid_v1(fields[1].substring(7))):
+            return "snapshot-bundle-row-invalid"
+        val size = fields[2].to_i64() ?? -1
+        if size < 0: return "snapshot-bundle-row-invalid"
+        if compile_source_inventory_identity_cmp_v1(previous, fields[0]) >= 0:
+            return "snapshot-bundle-order-invalid"
+        previous = fields[0]
+    if (tree != "scv-tree-v1-" + digest or
+            not scv_compile_snapshot_is_bundle_v2(revision) or
+            revision != scv_compile_snapshot_revision_id_v2(tree, digest) or
+            commit != "scv-compile-v1-" + sha256_text("simple/scv-compile-commit/v1|{tree}|{rows.len()}")):
+        return "snapshot-bundle-identity-invalid"
+    ""
+
+fn scv_compile_snapshot_prepare_bundle_v2(
+    root: text, cache_root: text, staging: text, revision: text,
+    commit: text, tree: text, inventory: text
+) -> text:
+    if not scv_compile_snapshot_bundle_stage_owned_v2(root, cache_root, staging):
+        return "snapshot-bundle-stage-not-owned"
+    val digest = sha256_text(inventory)
+    val invalid = scv_compile_snapshot_bundle_identity_reason_v2(revision, commit, tree, digest, inventory)
+    if invalid != "": return invalid
+    val provenance = scv_compile_snapshot_provenance_v2(revision, commit, tree, digest, inventory.split("\n").len())
+    val receipt = scv_compile_snapshot_receipt_v1(provenance, revision)
+    if not scv_write_text(staging + "/SCV_COMPILE_INVENTORY", inventory): return "snapshot-inventory-write-failed"
+    if not scv_write_text(staging + "/SCV_COMPILE_SNAPSHOT", provenance): return "snapshot-provenance-write-failed"
+    if not file_create_excl(staging + "/SCV_COMPILE_RECEIPT", receipt): return "snapshot-bundle-receipt-write-failed"
+    if (not scv_compile_snapshot_metadata_matches_v2(scv_compile_snapshot_read_text_v1(staging + "/SCV_COMPILE_INVENTORY"), inventory) or
+            not scv_compile_snapshot_metadata_matches_v2(scv_compile_snapshot_read_text_v1(staging + "/SCV_COMPILE_SNAPSHOT"), provenance) or
+            not scv_compile_snapshot_metadata_matches_v2(scv_compile_snapshot_read_text_v1(staging + "/SCV_COMPILE_RECEIPT"), receipt)):
+        return "snapshot-bundle-prepare-readback-mismatch"
+    ""
+
+fn scv_compile_snapshot_publish_prepared_bundle_v2(
+    root: text, cache_root: text, staging: text, revision: text,
+    commit: text, tree: text, digest: text
+) -> ScvCompileSnapshotV1:
+    if not scv_compile_snapshot_bundle_stage_owned_v2(root, cache_root, staging):
+        return scv_compile_snapshot_invalid_v1("snapshot-bundle-stage-not-owned")
+    val inventory = scv_compile_snapshot_read_text_v1(staging + "/SCV_COMPILE_INVENTORY")
+    val invalid = scv_compile_snapshot_bundle_identity_reason_v2(revision, commit, tree, digest, inventory)
+    if invalid != "": return scv_compile_snapshot_invalid_v1(invalid)
+    val provenance = scv_compile_snapshot_provenance_v2(revision, commit, tree, digest, inventory.split("\n").len())
+    if (not scv_compile_snapshot_metadata_matches_v2(scv_compile_snapshot_read_text_v1(staging + "/SCV_COMPILE_SNAPSHOT"), provenance) or
+            not scv_compile_snapshot_metadata_matches_v2(scv_compile_snapshot_read_text_v1(staging + "/SCV_COMPILE_RECEIPT"),
+                scv_compile_snapshot_receipt_v1(provenance, revision))):
+        return scv_compile_snapshot_invalid_v1("snapshot-bundle-stage-metadata-invalid")
+    val destination = cache_root + "/snapshots/" + revision
+    if not dir_exists(destination):
+        # Both directories are nonempty. Same-filesystem rename cannot replace
+        # a nonempty winner; a losing caller validates that complete winner.
+        val _renamed = file_rename(staging, destination)
+    val admitted = scv_compile_snapshot_open_v1(root, destination, revision, commit, tree, digest)
+    # Never touch the final destination, even when a conflicting winner fails
+    # validation. Only this PID's still-private staging can be discarded.
+    if dir_exists(staging): dir_remove(staging, true)
+    admitted
+
 fn scv_compile_snapshot_acquire_cost_v1(
     root: text, cache_root: text, source_roots: [text], cost: ScvCompileCostV1?
 ) -> ScvCompileSnapshotV1:
+    scv_compile_snapshot_acquire_layout_cost_v1(root, cache_root, source_roots, cost, 1)
+
+fn scv_compile_snapshot_acquire_v2(
+    root: text, cache_root: text, source_roots: [text]
+) -> ScvCompileSnapshotV1:
+    scv_compile_snapshot_acquire_cost_v2(root, cache_root, source_roots, nil)
+
+fn scv_compile_snapshot_acquire_cost_v2(
+    root: text, cache_root: text, source_roots: [text], cost: ScvCompileCostV1?
+) -> ScvCompileSnapshotV1:
+    scv_compile_snapshot_acquire_layout_cost_v1(root, cache_root, source_roots, cost, 2)
+
+fn scv_compile_snapshot_acquire_layout_cost_v1(
+    root: text, cache_root: text, source_roots: [text], cost: ScvCompileCostV1?, layout: i64
+) -> ScvCompileSnapshotV1:
+    if layout != 1 and layout != 2:
+        return scv_compile_snapshot_invalid_v1("snapshot-layout-unsupported")
     if root == "" or cache_root == "" or source_roots.len() == 0:
         return scv_compile_snapshot_invalid_v1("snapshot-input-invalid")
     val canonical_root = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(root)))
@@ -626,8 +740,10 @@ fn scv_compile_snapshot_acquire_cost_v1(
             "{planned.source_identity}|sha256_{planned.content_digest}|{planned.byte_count}")
     val planned_inventory_digest = sha256_text(planned_rows.join("\n"))
     val planned_tree_id = "scv-tree-v1-" + planned_inventory_digest
-    val planned_revision_id = scv_compile_snapshot_revision_id_v1(
-        planned_tree_id, planned_inventory_digest)
+    val planned_revision_id = if layout == 2:
+        scv_compile_snapshot_revision_id_v2(planned_tree_id, planned_inventory_digest)
+    else:
+        scv_compile_snapshot_revision_id_v1(planned_tree_id, planned_inventory_digest)
     val planned_destination = "{owned_cache_root}/snapshots/{planned_revision_id}"
     # dir_exists, not file_exists: the runtime's file_exists is false for a
     # directory on Windows, so neither this reuse nor the publish branch below
@@ -642,10 +758,9 @@ fn scv_compile_snapshot_acquire_cost_v1(
         if reused.valid:
             scv_compile_snapshot_touch_v1(owned_cache_root, planned_revision_id)
             return reused
-        # Content-addressed and failing its own validation (e.g. written with
-        # CRLF by an older runtime): it can never become valid, and keeping it
-        # would wedge every later publish on snapshot-destination-conflict.
-        dir_remove(planned_destination, true)
+        # Missing/partial legacy receipts can be an in-flight publisher, and
+        # invalid v2 metadata is corruption, not deletion authority either.
+        return scv_compile_snapshot_invalid_v1("snapshot-existing-invalid:" + reused.reason)
     val staging_parent = "{owned_cache_root}/snapshots"
     if not dir_create(staging_parent, true):
         return scv_compile_snapshot_invalid_v1("snapshot-staging-create-failed")
@@ -683,10 +798,49 @@ fn scv_compile_snapshot_acquire_cost_v1(
     val tree_id = "scv-tree-v1-" + inventory_digest
     val commit_id = "scv-compile-v1-" + sha256_text(
         "simple/scv-compile-commit/v1|{tree_id}|{inventory_rows.len()}")
-    val revision_id = scv_compile_snapshot_revision_id_v1(
-        tree_id, inventory_digest)
-    val provenance = scv_compile_snapshot_provenance_v1(
+    val revision_id = if layout == 2:
+        scv_compile_snapshot_revision_id_v2(tree_id, inventory_digest)
+    else:
+        scv_compile_snapshot_revision_id_v1(tree_id, inventory_digest)
+    val provenance = scv_compile_snapshot_provenance_for_revision_v1(
         revision_id, commit_id, tree_id, inventory_digest, inventory_rows.len())
+    var admitted = scv_compile_snapshot_invalid_v1("snapshot-unpublished")
+    if layout == 2:
+        val prepared = scv_compile_snapshot_prepare_bundle_v2(canonical_root,
+            owned_cache_root, staging, revision_id, commit_id, tree_id, inventory)
+        if prepared != "":
+            dir_remove(staging, true)
+            return scv_compile_snapshot_invalid_v1(prepared)
+        admitted = scv_compile_snapshot_publish_prepared_bundle_v2(canonical_root,
+            owned_cache_root, staging, revision_id, commit_id, tree_id, inventory_digest)
+    else:
+        admitted = scv_compile_snapshot_publish_legacy_stage_v1(canonical_root,
+            owned_cache_root, staging, revision_id, commit_id, tree_id,
+            inventory_digest, inventory, provenance)
+    if not admitted.valid:
+        return admitted
+    scv_compile_snapshot_touch_v1(owned_cache_root, revision_id)
+    if layout == 2:
+        # A new-format constructor must not evict immutable legacy history.
+        scv_compile_snapshot_retain_newest_v2(owned_cache_root, revision_id,
+            scv_compile_snapshot_max_keep_v1(), scv_compile_snapshot_min_age_v1())
+    else:
+        scv_compile_snapshot_retain_newest_v1(owned_cache_root, revision_id,
+            scv_compile_snapshot_max_keep_v1(), scv_compile_snapshot_min_age_v1())
+    ScvCompileSnapshotV1(
+        valid: true, reason: if source_drifted: "ok-source-drifted" else: "ok",
+        revision_id: admitted.revision_id, commit_id: admitted.commit_id,
+        tree_id: admitted.tree_id, inventory_digest: admitted.inventory_digest,
+        inventory_count: admitted.inventory_count, snapshot_root: admitted.snapshot_root,
+        provenance_path: admitted.provenance_path, receipt_path: admitted.receipt_path,
+        source_drifted: source_drifted)
+
+# Legacy API preserves its v1 wire identity. New canonical admission uses v2.
+fn scv_compile_snapshot_publish_legacy_stage_v1(
+    canonical_root: text, owned_cache_root: text, staging: text,
+    revision_id: text, commit_id: text, tree_id: text, inventory_digest: text,
+    inventory: text, provenance: text
+) -> ScvCompileSnapshotV1:
     if not scv_write_text("{staging}/SCV_COMPILE_INVENTORY", inventory):
         dir_remove(staging, true)
         return scv_compile_snapshot_invalid_v1("snapshot-inventory-write-failed")
@@ -724,25 +878,7 @@ fn scv_compile_snapshot_acquire_cost_v1(
         inventory_digest)
     if not admitted.valid:
         return admitted
-    # Bound the store: every distinct source tree publishes a full copy
-    # (~170 MB on Windows), and nothing else evicted them (1.2 GB measured in
-    # one worktree, 2026-10-26).
-    scv_compile_snapshot_touch_v1(owned_cache_root, revision_id)
-    scv_compile_snapshot_retain_newest_v1(owned_cache_root, revision_id,
-        scv_compile_snapshot_max_keep_v1(), scv_compile_snapshot_min_age_v1())
-    ScvCompileSnapshotV1(
-        valid: true,
-        reason: if source_drifted: "ok-source-drifted" else: "ok",
-        revision_id: admitted.revision_id,
-        commit_id: admitted.commit_id,
-        tree_id: admitted.tree_id,
-        inventory_digest: admitted.inventory_digest,
-        inventory_count: admitted.inventory_count,
-        snapshot_root: admitted.snapshot_root,
-        provenance_path: admitted.provenance_path,
-        receipt_path: admitted.receipt_path,
-        source_drifted: source_drifted
-    )
+    admitted
 
 export ScvCompileSnapshotV1
 export scv_compile_snapshot_revision_id_v1
@@ -751,6 +887,7 @@ export scv_compile_snapshot_receipt_v1
 export scv_compile_snapshot_open_v1
 export scv_compile_snapshot_acquire_v1
 export scv_compile_snapshot_acquire_cost_v1
+export scv_compile_snapshot_acquire_v2, scv_compile_snapshot_acquire_cost_v2
 export scv_compile_snapshot_source_candidate_for_v1
 export scv_compile_snapshot_recover_v1
 export scv_compile_snapshot_gc_v1
@@ -759,3 +896,6 @@ export scv_compile_snapshot_retain_newest_v1
 export scv_compile_snapshot_cleanup_v1
 export scv_compile_snapshot_reuse_marks_v1
 export scv_compile_snapshot_reuse_source_v1
+
+# Actual transaction phases shared with deterministic admission regressions.
+export scv_compile_snapshot_prepare_bundle_v2, scv_compile_snapshot_publish_prepared_bundle_v2

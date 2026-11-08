@@ -1,0 +1,40 @@
+# Only the local host owner or receiving parent reads these private staging roots.
+# Bound each binary read and retain the exact bytes whose digests are verified.
+use app.buildrunner.remote_evidence_v1.*
+use std.common.build_manager.contracts.{BuildTaskV1, BuildResultV1,
+    builder_validate_result_v1, builder_relative_path_valid_v1}
+use app.io.file_ops.{file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes}
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+
+fn remote_capture_path_v1(root: text, relative: text) -> Result<text, text>:
+    if not builder_relative_path_valid_v1(relative) or not dir_is_real_no_follow(root):
+        return Err("REMOTE_CAPTURE_PATH_UNSAFE")
+    val parts = relative.split("/")
+    var parent = root
+    for index in 0..parts.len() - 1:
+        parent = parent + "/" + parts[index]
+        if not dir_is_real_no_follow(parent): return Err("REMOTE_CAPTURE_PARENT_UNSAFE")
+    Ok(root + "/" + relative)
+
+fn remote_evidence_capture_v1(task: BuildTaskV1, result: BuildResultV1,
+        policy: RemoteEvidencePolicyV1, root: text) -> Result<RemoteEvidenceBytesV1, text>:
+    val _policy = remote_policy_bind_v1(task, policy)?
+    val invalid = builder_validate_result_v1(task, result)
+    if invalid != "": return Err(invalid)
+    var remaining = policy.maximum_bytes
+    val process = file_read_regular_no_follow_bounded(remote_capture_path_v1(root, "compiler.process")?, 2048)?
+    if process.byte_len() > remaining: return Err("REMOTE_EVIDENCE_EXCEEDS_BOUND")
+    remaining = remaining - process.byte_len()
+    val stdout = file_read_regular_no_follow_bounded_bytes(remote_capture_path_v1(root, "stdout.log")?, remaining)?
+    remaining = remaining - stdout.len()
+    val stderr = file_read_regular_no_follow_bounded_bytes(remote_capture_path_v1(root, "stderr.log")?, remaining)?
+    remaining = remaining - stderr.len()
+    var outputs: [RemoteOutputBytesV1] = []
+    for item in result.outputs:
+        val content = file_read_regular_no_follow_bounded_bytes(
+            remote_capture_path_v1(root, "work/" + item.path)?, remaining)?
+        remaining = remaining - content.len()
+        outputs = outputs.push(RemoteOutputBytesV1(item.path, content))
+    Ok(RemoteEvidenceBytesV1(process, stdout, stderr, outputs))
+
+export remote_capture_path_v1, remote_evidence_capture_v1

@@ -1,0 +1,206 @@
+# Container completions authenticate measured container evidence; they contain
+# neither a process PID nor a native tree-reap claim. Parent collection must hash
+# the canonical V2 measurements frame (execution, actual engine-selected user,
+# nonce-bound workspace probe) into execution_digest and independently enforce
+# the container lifecycle/cleanup and immutable workspace contracts.
+use std.common.build_manager.contracts.{BuildTaskV1, builder_identifier_valid_v1,
+    builder_digest_valid_v1, builder_task_identity_v1, builder_validate_task_v1}
+use std.common.build_manager.codec.{builder_wire_line_v1, BuilderWireReaderV1,
+    builder_encode_task_v1}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2,
+    DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2,
+    distributed_grant_digest_v2}
+use app.llm_caret.workbench.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_authority_key_check_v2, distributed_verify_grant_approval_v2,
+    distributed_signature_bytes_v2}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_verify
+
+pub val REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V2: i64 = 16384
+pub val REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V2: i64 = 9999999999999999
+
+struct RemoteContainerCompletionV2:
+    version: i64
+    task_identity: text
+    host_id: text
+    assignment_digest: text
+    controller_epoch: i64
+    operation_id: text
+    request_digest: text
+    grant_digest: text
+    result_digest: text
+    execution_digest: text
+    stdout_digest: text
+    stderr_digest: text
+    output_inventory_digest: text
+    tests_digest: text
+    signer_id: text
+    key_revision: i64
+    completed_at: i64
+    signature: [u8]
+
+# Construct only from the protected assignment and independently collected
+# result/evidence/log/output/test bytes, never by copying arriving claims.
+struct RemoteContainerBindingV2:
+    task_identity: text
+    host_id: text
+    assignment_digest: text
+    controller_epoch: i64
+    operation_id: text
+    result_digest: text
+    execution_digest: text
+    stdout_digest: text
+    stderr_digest: text
+    output_inventory_digest: text
+    tests_digest: text
+
+fn remote_container_completion_metadata_error_v2(value: RemoteContainerCompletionV2) -> text:
+    if value.version != 2: return "CONTAINER_COMPLETION_VERSION_UNSUPPORTED"
+    for identity in [value.host_id, value.operation_id, value.signer_id]:
+        if not builder_identifier_valid_v1(identity): return "CONTAINER_COMPLETION_IDENTITY_INVALID"
+    for digest in [value.task_identity, value.assignment_digest, value.request_digest,
+            value.grant_digest, value.result_digest, value.execution_digest, value.stdout_digest,
+            value.stderr_digest, value.output_inventory_digest, value.tests_digest]:
+        if not builder_digest_valid_v1(digest): return "CONTAINER_COMPLETION_DIGEST_INVALID"
+    if value.controller_epoch < 1 or value.controller_epoch > REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V2 or
+            value.key_revision < 1 or value.key_revision > REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V2 or
+            value.completed_at < 0 or value.completed_at > REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V2:
+        return "CONTAINER_COMPLETION_INTEGER_INVALID"
+    ""
+
+fn remote_container_completion_signature_text_v2(value: RemoteContainerCompletionV2) -> Result<text, text>:
+    val invalid = remote_container_completion_metadata_error_v2(value)
+    if invalid != "": return Err(invalid)
+    var wire = ""
+    for field in ["SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V2", str(value.version),
+            value.task_identity, value.host_id, value.assignment_digest, str(value.controller_epoch),
+            value.operation_id, value.request_digest, value.grant_digest, value.result_digest,
+            value.execution_digest, value.stdout_digest, value.stderr_digest,
+            value.output_inventory_digest, value.tests_digest, value.signer_id,
+            str(value.key_revision), str(value.completed_at)]:
+        wire = wire + builder_wire_line_v1(field)
+    if wire.byte_len() > REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V2:
+        return Err("CONTAINER_COMPLETION_WIRE_TOO_LARGE")
+    Ok(wire)
+
+fn remote_container_completion_signature_message_v2(value: RemoteContainerCompletionV2) -> Result<[u8], text>:
+    Ok(distributed_signature_bytes_v2(remote_container_completion_signature_text_v2(value)?))
+
+fn remote_container_completion_signature_hex_v2(signature: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var hex = ""
+    for byte in signature:
+        val number = byte as i64
+        hex = hex + digits.substring(number / 16, number / 16 + 1) +
+            digits.substring(number % 16, number % 16 + 1)
+    hex
+
+fn remote_container_completion_hex_digit_v2(value: text) -> i64:
+    val digits = "0123456789abcdef"
+    for index in 0..16:
+        if value == digits.substring(index, index + 1): return index
+    -1
+
+fn remote_container_completion_encode_v2(value: RemoteContainerCompletionV2) -> Result<text, text>:
+    val message = remote_container_completion_signature_text_v2(value)?
+    if value.signature.len() != 64: return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+    val wire = builder_wire_line_v1("SIMPLE_REMOTE_CONTAINER_COMPLETION_ENVELOPE_V2") +
+        message + builder_wire_line_v1(remote_container_completion_signature_hex_v2(value.signature))
+    if wire.byte_len() > REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V2:
+        return Err("CONTAINER_COMPLETION_WIRE_TOO_LARGE")
+    Ok(wire)
+
+fn remote_container_completion_decode_v2(wire: text) -> Result<RemoteContainerCompletionV2, text>:
+    if wire.byte_len() > REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V2:
+        return Err("CONTAINER_COMPLETION_WIRE_TOO_LARGE")
+    if not wire.ends_with("\n"): return Err("CONTAINER_COMPLETION_WIRE_INVALID")
+    var reader = BuilderWireReaderV1.create(wire)
+    if reader.scalar() != "SIMPLE_REMOTE_CONTAINER_COMPLETION_ENVELOPE_V2" or
+            reader.scalar() != "SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V2":
+        return Err("CONTAINER_COMPLETION_WIRE_VERSION_INVALID")
+    val version = reader.number(REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V2, false)
+    val task_identity = reader.scalar()
+    val host_id = reader.scalar()
+    val assignment_digest = reader.scalar()
+    val controller_epoch = reader.number(REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V2, false)
+    val operation_id = reader.scalar()
+    val request_digest = reader.scalar()
+    val grant_digest = reader.scalar()
+    val result_digest = reader.scalar()
+    val execution_digest = reader.scalar()
+    val stdout_digest = reader.scalar()
+    val stderr_digest = reader.scalar()
+    val output_inventory_digest = reader.scalar()
+    val tests_digest = reader.scalar()
+    val signer_id = reader.scalar()
+    val key_revision = reader.number(REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V2, false)
+    val completed_at = reader.number(REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V2, false)
+    val signature_hex = reader.scalar()
+    if reader.complete_error() != "": return Err("CONTAINER_COMPLETION_WIRE_INVALID")
+    if signature_hex.byte_len() != 128: return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+    var signature: [u8] = []
+    for index in 0..64:
+        val high = remote_container_completion_hex_digit_v2(signature_hex.substring(index * 2, index * 2 + 1))
+        val low = remote_container_completion_hex_digit_v2(signature_hex.substring(index * 2 + 1, index * 2 + 2))
+        if high < 0 or low < 0: return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+        signature = signature.push((high * 16 + low) as u8)
+    val value = RemoteContainerCompletionV2(version, task_identity, host_id, assignment_digest,
+        controller_epoch, operation_id, request_digest, grant_digest, result_digest, execution_digest,
+        stdout_digest, stderr_digest, output_inventory_digest, tests_digest,
+        signer_id, key_revision, completed_at, signature)
+    val canonical = remote_container_completion_encode_v2(value)?
+    if canonical != wire:
+        return Err("CONTAINER_COMPLETION_WIRE_NONCANONICAL")
+    Ok(value)
+
+fn remote_container_verify_completion_v2(value: RemoteContainerCompletionV2,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        issuer: DistributedAuthorityKeyV2, approver: DistributedAuthorityKeyV2,
+        host_key: DistributedAuthorityKeyV2, request: OperationEnvelopeV2,
+        task: BuildTaskV1, expected: RemoteContainerBindingV2, now: i64,
+        policy_revision: i64, revocation_epoch: i64,
+        session_generation: i64) -> Result<RemoteContainerCompletionV2, text>:
+    val invalid = remote_container_completion_metadata_error_v2(value)
+    if invalid != "": return Err(invalid)
+    if value.signature.len() != 64: return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+    val grant = distributed_verify_grant_approval_v2(signed, approval, issuer, approver,
+        request, now, policy_revision, revocation_epoch, session_generation)?
+    val host_error = distributed_authority_key_check_v2(host_key, "execution-host",
+        value.signer_id, value.key_revision, grant, now, policy_revision, revocation_epoch)
+    if host_error != "": return Err(host_error)
+    if host_key.public_key == issuer.public_key or host_key.public_key == approver.public_key:
+        return Err("CONTAINER_COMPLETION_ROLES_NOT_SEPARATE")
+    if request.operation != "build" and request.operation != "test":
+        return Err("CONTAINER_COMPLETION_OPERATION_DENIED")
+    if builder_validate_task_v1(task) != "": return Err("CONTAINER_COMPLETION_TASK_INVALID")
+    if request.payload_digest != sha256_text(builder_encode_task_v1(task)) or
+            value.task_identity != builder_task_identity_v1(task) or value.task_identity != expected.task_identity:
+        return Err("CONTAINER_COMPLETION_TASK_MISMATCH")
+    if task.timeout_ms != request.duration_ms or task.memory_limit_bytes != request.memory_bytes or
+            task.memory_policy != "enforce": return Err("CONTAINER_COMPLETION_RESOURCE_MISMATCH")
+    if value.host_id != request.host_id or value.host_id != expected.host_id:
+        return Err("CONTAINER_COMPLETION_HOST_MISMATCH")
+    if value.operation_id != request.id or value.operation_id != expected.operation_id:
+        return Err("CONTAINER_COMPLETION_OPERATION_MISMATCH")
+    if value.assignment_digest != expected.assignment_digest or value.controller_epoch != expected.controller_epoch:
+        return Err("CONTAINER_COMPLETION_ASSIGNMENT_STALE")
+    val request_wire = distributed_encode_operation_v2(request)?
+    val grant_digest = distributed_grant_digest_v2(grant)?
+    if value.request_digest != sha256_text(request_wire) or value.grant_digest != grant_digest:
+        return Err("CONTAINER_COMPLETION_AUTHORIZATION_MISMATCH")
+    if value.completed_at > now or value.completed_at >= grant.expires_at:
+        return Err("CONTAINER_COMPLETION_TIME_INVALID")
+    if value.result_digest != expected.result_digest or value.execution_digest != expected.execution_digest or
+            value.stdout_digest != expected.stdout_digest or value.stderr_digest != expected.stderr_digest or
+            value.output_inventory_digest != expected.output_inventory_digest or value.tests_digest != expected.tests_digest:
+        return Err("CONTAINER_COMPLETION_OBSERVATION_MISMATCH")
+    val message = remote_container_completion_signature_message_v2(value)?
+    if not pure_ed25519_verify(host_key.public_key, message, value.signature):
+        return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+    Ok(value)
+
+export RemoteContainerCompletionV2, RemoteContainerBindingV2
+export remote_container_completion_encode_v2, remote_container_completion_decode_v2
+export remote_container_completion_signature_message_v2, remote_container_verify_completion_v2

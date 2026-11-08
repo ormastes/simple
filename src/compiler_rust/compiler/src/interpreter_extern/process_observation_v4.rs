@@ -239,3 +239,9 @@ pub fn ack_collect(args: &[Value]) -> Result<Value, CompileError> {
     })??;
     take(rv, NAME)
 }
+
+// Reserved lifecycle is admitted only through the native provider in E3.
+// Do not imply interpreter support through a marker or partial codec.
+pub fn reservation_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("reserved process observation V4 requires the admitted native provider"))
+}

@@ -1,0 +1,115 @@
+use std.spec.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.contracts.container.execution_evidence_v2.*
+use std.common.json.value.json_value_escape_string
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.execution_user_v2.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+
+fn _user_identity_v2() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "workload-1", attempt: 1, provider_generation: 7,
+        operation_id: "create-api", engine: "podman", native_id: "b".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap())
+
+fn _user_json_v2(user: text) -> text:
+    val expected = _user_identity_v2()
+    "{\"id\":\"" + expected.native_id + "\",\"pod_uid\":\"workload-1\",\"attempt\":\"1\",\"node_boot_id\":\"" + expected.node_boot_id + "\",\"provider_generation\":\"7\",\"operation_id\":\"create-api\",\"user\":\"" + json_value_escape_string(user) + "\"}"
+
+fn _user_query_v2() -> RuntimeCommandV1:
+    # Independent expected literal argv, never the production builder.
+    RuntimeCommandV1(operation: "execution-user", program: "podman", args: ["container", "inspect", "--format",
+        "{\"id\":{{json .Id}},\"pod_uid\":{{json (index .Config.Labels \"io.simpleorch.pod_uid\")}},\"attempt\":{{json (index .Config.Labels \"io.simpleorch.attempt\")}},\"node_boot_id\":{{json (index .Config.Labels \"io.simpleorch.node_boot_id\")}},\"provider_generation\":{{json (index .Config.Labels \"io.simpleorch.provider_generation\")}},\"operation_id\":{{json (index .Config.Labels \"io.simpleorch.operation_id\")}},\"user\":{{json .Config.User}}}", "b".repeat(64)])
+
+describe "fresh exact configured container execution user":
+    it "constructs the exact bounded inspect query and refuses unsafe IDs":
+        expect(build_execution_user_command_v2("podman", "b".repeat(64)).unwrap()).to_equal(_user_query_v2())
+        for native in ["--all", "name", "bbbb"]:
+            expect(build_execution_user_command_v2("podman", native).is_err()).to_equal(true)
+
+    it "parses numeric and named configured values without claiming an effective UID":
+        for user in ["1000", "builder", "builder:staff", "name{with}quote\"slash\\"]:
+            expect(linux_oci_execution_user_parse_v2(_user_json_v2(user), _user_identity_v2()).unwrap()).to_equal(user)
+
+    it "rejects empty control nested duplicate trailing unknown and mistyped observations":
+        for raw in [_user_json_v2(""), _user_json_v2("a\nb"), _user_json_v2("a\0b"),
+                _user_json_v2("a".repeat(129)), _user_json_v2("1000") + "{}",
+                "{\"user\":{\"nested\":{}}}", "{\"user\":\"a\",\"user\":\"b\"}",
+                "{\"id\":123}", "[]", _user_json_v2("1000").replace("\"user\":", "\"unknown\":")]:
+            expect(linux_oci_execution_user_parse_v2(raw, _user_identity_v2()).is_err()).to_equal(true)
+        var wrong = _user_identity_v2()
+        wrong.operation_id = "foreign"
+        expect(linux_oci_execution_user_parse_v2(_user_json_v2("1000"), wrong).is_err()).to_equal(true)
+
+    it "produces fresh common API receipts for actual numeric and named Config User strings":
+        for user in ["1000", "builder"]:
+            val leaf = linux_container_leaf_fixture_v2()
+            val request = linux_container_request_fixture_v2(leaf)
+            val identity = _user_identity_v2()
+            val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, identity.node_boot_id).1
+            val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, identity.native_id),
+                linux_container_script_result_fixture_v2(_user_query_v2(), _user_json_v2(user))], [1, 2])
+            val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+            val deadline = container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap()
+            val created = simple_container_apply_v2(owner, "create", request, deadline)
+            expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+            val turn = simple_container_execution_user_v2(created.owner, request, identity)
+            expect(turn.error).to_equal("")
+            val receipt = turn.receipt.unwrap()
+            expect(receipt.selected_user).to_equal(user)
+            expect(receipt.proof_kind).to_equal("exact-native-execution-user-v1")
+            expect(receipt.observed_unix_ms).to_equal(2)
+            expect(receipt.request_digest).to_equal(request.plan.request_digest)
+            expect(receipt.provider_identity_digest).to_equal(linux_container_engine_fixture_v2().identity_digest)
+            expect(container_execution_user_receipt_decode_v2(container_execution_user_receipt_encode_v2(receipt).unwrap()).is_ok()).to_equal(true)
+            expect(adapter.provider.scripted_cursor).to_equal(2)
+            expect(adapter.provider.executor_call_count()).to_equal(2)
+
+    it "rejects changed request scope operation and native identity before another executor attempt":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val identity = _user_identity_v2()
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, identity.node_boot_id).1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, identity.native_id)], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap()
+        val created = simple_container_apply_v2(owner, "create", request, deadline)
+        for native in ["--all", "name", "bbbb", "c".repeat(64)]:
+            var wrong = identity
+            wrong.native_id = native
+            expect(simple_container_execution_user_v2(created.owner, request, wrong).receipt).to_equal(nil)
+        var wrong_op = identity
+        wrong_op.operation_id = "foreign"
+        expect(simple_container_execution_user_v2(created.owner, request, wrong_op).receipt).to_equal(nil)
+        var changed = request
+        changed.plan.request_digest = "c".repeat(64)
+        expect(simple_container_execution_user_v2(created.owner, changed, identity).receipt).to_equal(nil)
+        changed = request
+        changed.plan.service_scope_id = "foreign"
+        expect(simple_container_execution_user_v2(created.owner, changed, identity).receipt).to_equal(nil)
+        expect(adapter.provider.executor_call_count()).to_equal(1)
+
+    it "never qualifies empty saturated failing or mismatched inspect output":
+        for kind in ["empty", "limited", "exit", "identity", "policy"]:
+            val leaf = linux_container_leaf_fixture_v2()
+            val request = linux_container_request_fixture_v2(leaf)
+            val identity = _user_identity_v2()
+            val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, identity.node_boot_id).1
+            var query = linux_container_script_result_fixture_v2(_user_query_v2(), _user_json_v2("1000"))
+            if kind == "empty": query.stdout = _user_json_v2("")
+            if kind == "limited": query.output_limited = true
+            if kind == "exit": query.exit_code = 125
+            if kind == "identity": query.stdout = query.stdout.replace("create-api", "foreign")
+            val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, identity.native_id), query], [1, 2])
+            val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+            val deadline = container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap()
+            val created = simple_container_apply_v2(owner, "create", request, deadline)
+            if kind == "policy":
+                var changed = linux_container_engine_fixture_v2()
+                changed.identity_digest = "c".repeat(64)
+                adapter.provider.scripted_engine_observation = Some(changed)
+            expect(simple_container_execution_user_v2(created.owner, request, identity).receipt).to_equal(nil)
+            expect(adapter.provider.scripted_cursor).to_equal(if kind == "policy": 1 else: 2)

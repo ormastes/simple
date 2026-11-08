@@ -1,0 +1,165 @@
+# @req HOST-ENROLLMENT-03 HOST-ENROLLMENT-04
+# NOT_RUN. Real signed filesystem effects; synthetic caller-native observations.
+use test.fixtures.orchestration.host_enrollment_claim_fixture_v1.*
+use std.nogc_sync_mut.orchestration.host_enrollment_claim_v1.*
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.*
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists, file_create_exclusive}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow, dir_exists}
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.nogc_sync_mut.sffi.fs.{file_atomic_write_mode, file_list_dir}
+
+fn host_claim_path_v1(fixture: HostClaimFixtureV1) -> text:
+    fixture.parent + "/host-claim-" + sha256_text(fixture.enrollment.binding.native_machine_id) + ".sdn"
+
+fn host_claim_disk_fields_v1(path: text) -> Dict<text, SdnValue>:
+    val bytes = file_read_regular_no_follow_bounded(path, 1048576).unwrap()
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1()).unwrap()
+    assert(sdn_encode_canonical(parsed.value) + "\n" == bytes)
+    match parsed.value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("persisted claim/manifest is not a dictionary")
+
+fn host_claim_spec_field_v1(fixture: HostClaimFixtureV1, field: text, value: SdnValue) -> HostClaimFixtureV1:
+    val parsed = sdn_parse_strict_v1(fixture.configuration_bytes, SdnStrictLimitsV1()).unwrap()
+    var fields = match parsed.value:
+        case SdnValue.Dict(items): items
+        case _: fail("fixture configuration is not a dictionary")
+    var spec = match fields["spec"]:
+        case SdnValue.Dict(items): items
+        case _: fail("fixture spec is not a dictionary")
+    spec[field] = value
+    fields["spec"] = SdnValue.Dict(spec)
+    host_claim_rebind_v1(fixture, sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+describe "Finite signed host filesystem claim":
+    it "retains a real signed claim and exact private root objects before returning facts":
+        val fixture = host_claim_fixture_v1()
+        val result = host_enrollment_claim_with_clock_v1(fixture.enrollment.binding, fixture.enrollment.credential,
+            fixture.configuration_bytes, host_claim_clock_v1).unwrap()
+        expect(result.claim_path).to_equal(host_claim_path_v1(fixture))
+        expect(result.operation_id).to_equal(fixture.enrollment.credential.operation.id)
+        expect(result.binding_digest).to_equal(host_enrollment_payload_digest_v1(fixture.enrollment.binding).unwrap())
+        assert(result.root.starts_with(fixture.parent + "/host-root-"))
+        assert(dir_is_real_no_follow(result.root))
+        expect(file_mode_bits(result.root)).to_equal(0o700)
+        val claim_bytes = file_read_regular_no_follow_bounded(result.claim_path, 1048576).unwrap()
+        expect(sha256_text(claim_bytes)).to_equal(result.claim_digest)
+        val claim = host_claim_disk_fields_v1(result.claim_path)
+        expect(claim["state"]).to_equal(SdnValue.String("enrolled"))
+        expect(claim["root"]).to_equal(SdnValue.String(result.root))
+        val manifest = host_claim_disk_fields_v1(result.root + "/host-root.sdn")
+        expect(manifest["nonce"]).to_equal(claim["nonce"])
+        expect(manifest["claimPath"]).to_equal(SdnValue.String(result.claim_path))
+        expect(manifest["bindingDigest"]).to_equal(SdnValue.String(result.binding_digest))
+        expect(file_read_regular_no_follow_bounded(result.root + "/host-config.sdn", 1048576).unwrap()).to_equal(fixture.configuration_bytes)
+        expect(sha256_text(file_read_regular_no_follow_bounded(result.root + "/authority-policy.sdn", 1048576).unwrap())).to_equal(fixture.enrollment.binding.policy_digest)
+        expect(file_read_regular_no_follow_bounded(result.root + "/enrollment-credential.sdn", 1048576).unwrap()).to_equal(host_enrollment_credential_encode_v1(fixture.enrollment.credential).unwrap())
+        expect(file_read_regular_no_follow_bounded(result.root + "/enrollment-binding.sdn", 1048576).unwrap()).to_equal(host_enrollment_payload_bytes_v1(fixture.enrollment.binding).unwrap())
+        for name in ["host-config.sdn", "authority-policy.sdn", "enrollment-credential.sdn", "enrollment-binding.sdn", "host-root.sdn"]:
+            expect(file_mode_bits(result.root + "/" + name)).to_equal(0o600)
+        expect(file_mode_bits(result.claim_path)).to_equal(0o600)
+        assert(not dir_exists(result.root + "/journal"))
+        # The same native machine cannot allocate another authority root, even
+        # under a freshly signed configuration alias or repeated credential.
+        expect(host_enrollment_claim_with_clock_v1(fixture.enrollment.binding, fixture.enrollment.credential,
+            fixture.configuration_bytes, host_claim_clock_v1).unwrap_err()).to_equal("host-claim-already-present-or-unavailable")
+        val alias = host_claim_native_alias_v1(fixture)
+        expect(alias.enrollment.credential.operation.host_id).to_equal("worker_2")
+        expect(alias.enrollment.binding.native_machine_id).to_equal(fixture.enrollment.binding.native_machine_id)
+        # A core-valid second physicalHostId must still collide on native ID;
+        # a mistaken logical-host slot key would permit a second root here.
+        expect(host_enrollment_authorize_v1(alias.enrollment.binding, alias.enrollment.credential,
+            alias.enrollment.policy, "worker_2", 512, alias.enrollment.context).unwrap().host_id).to_equal("worker_2")
+        expect(host_enrollment_claim_with_clock_v1(alias.enrollment.binding, alias.enrollment.credential,
+            alias.configuration_bytes, host_claim_clock_v1).unwrap_err()).to_equal("host-claim-already-present-or-unavailable")
+        expect(file_read_regular_no_follow_bounded(result.claim_path, 1048576).unwrap()).to_equal(claim_bytes)
+        assert(dir_is_real_no_follow(result.root))
+        expect(file_read_regular_no_follow_bounded(result.root + "/host-config.sdn", 1048576).unwrap()).to_equal(fixture.configuration_bytes)
+        expect(sha256_text(file_read_regular_no_follow_bounded(result.root + "/authority-policy.sdn", 1048576).unwrap())).to_equal(fixture.enrollment.binding.policy_digest)
+        dir_remove(fixture.parent, true)
+
+    it "rejects wrong signatures and expired clocks before even creating the parent lock":
+        var fixture = host_claim_fixture_v1()
+        fixture.enrollment.credential.approval.signature[0] = ((fixture.enrollment.credential.approval.signature[0] as i64 + 1) % 256) as u8
+        expect(host_enrollment_claim_with_clock_v1(fixture.enrollment.binding, fixture.enrollment.credential,
+            fixture.configuration_bytes, host_claim_clock_v1).unwrap_err()).to_equal("APPROVAL_SIGNATURE_INVALID")
+        assert(not file_exists(host_claim_path_v1(fixture)))
+        assert(not file_exists(fixture.parent + "/.host-enrollment.lock"))
+        dir_remove(fixture.parent, true)
+        val expired = host_claim_fixture_v1()
+        expect(host_enrollment_claim_with_clock_v1(expired.enrollment.binding, expired.enrollment.credential,
+            expired.configuration_bytes, host_claim_expired_clock_v1).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+        assert(not file_exists(host_claim_path_v1(expired)))
+        assert(not file_exists(expired.parent + "/.host-enrollment.lock"))
+        dir_remove(expired.parent, true)
+
+    it "rechecks exact approval expiry at exclusive publication after prior valid clocks":
+        val fixture = host_claim_fixture_v1()
+        val clock_path = fixture.parent + "/test-clock.sdn"
+        assert(file_atomic_write_mode(clock_path, "100", 0o600))
+        val advancing_clock = fn() -> i64:
+            val current = file_read_regular_no_follow_bounded(clock_path, 32).unwrap()
+            if current == "100":
+                assert(file_atomic_write_mode(clock_path, "150", 0o600))
+                return 100
+            if current == "150":
+                assert(file_atomic_write_mode(clock_path, "190", 0o600))
+                return 150
+            assert(current == "190")
+            190
+        expect(host_enrollment_claim_with_clock_v1(fixture.enrollment.binding, fixture.enrollment.credential,
+            fixture.configuration_bytes, advancing_clock).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+        expect(file_read_regular_no_follow_bounded(clock_path, 32).unwrap()).to_equal("190")
+        assert(not file_exists(host_claim_path_v1(fixture)))
+        val entries = file_list_dir(fixture.parent).unwrap()
+        for entry in entries:
+            assert(not entry.contains("host-root-"))
+        # The coordinator lock may remain; it grants no enrollment by itself.
+        dir_remove(fixture.parent, true)
+
+    it "retains a preexisting pending or unknown claim byte for byte without adoption":
+        val fixture = host_claim_fixture_v1()
+        val path = host_claim_path_v1(fixture)
+        val pending_fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-enrollment-claim"),
+            "state": SdnValue.String("creating"), "root": SdnValue.String(""), "nonce": SdnValue.String("pending-nonce"),
+            "operationId": SdnValue.String(fixture.enrollment.credential.operation.id),
+            "bindingDigest": SdnValue.String(host_enrollment_payload_digest_v1(fixture.enrollment.binding).unwrap())}
+        val pending = sdn_encode_canonical(SdnValue.Dict(pending_fields)) + "\n"
+        assert(file_create_exclusive(path, pending))
+        expect(host_enrollment_claim_with_clock_v1(fixture.enrollment.binding, fixture.enrollment.credential,
+            fixture.configuration_bytes, host_claim_clock_v1).unwrap_err()).to_equal("host-claim-already-present-or-unavailable")
+        expect(file_read_regular_no_follow_bounded(path, 1048576).unwrap()).to_equal(pending)
+        dir_remove(fixture.parent, true)
+        val unknown_fixture = host_claim_fixture_v1()
+        val unknown_path = host_claim_path_v1(unknown_fixture)
+        val unknown = "unknown interrupted claim evidence\n"
+        assert(file_create_exclusive(unknown_path, unknown))
+        expect(host_enrollment_claim_with_clock_v1(unknown_fixture.enrollment.binding, unknown_fixture.enrollment.credential,
+            unknown_fixture.configuration_bytes, host_claim_clock_v1).unwrap_err()).to_equal("host-claim-already-present-or-unavailable")
+        expect(file_read_regular_no_follow_bounded(unknown_path, 1048576).unwrap()).to_equal(unknown)
+        dir_remove(unknown_fixture.parent, true)
+
+    it "refuses signed configurations that escape the child journal or name another controller":
+        val fixture = host_claim_fixture_v1()
+        val escaped = host_claim_spec_field_v1(fixture, "journalRoot", SdnValue.String("/var/lib/escape"))
+        expect(host_enrollment_claim_with_clock_v1(escaped.enrollment.binding, escaped.enrollment.credential,
+            escaped.configuration_bytes, host_claim_clock_v1).unwrap_err()).to_equal("host-claim-journal-child-required")
+        val other = host_claim_spec_field_v1(fixture, "controllerRef", SdnValue.String("other-controller"))
+        expect(host_enrollment_claim_with_clock_v1(other.enrollment.binding, other.enrollment.credential,
+            other.configuration_bytes, host_claim_clock_v1).unwrap_err()).to_equal("host-claim-controller-mismatch")
+        val budget: Dict<text, SdnValue> = {"cpu": SdnValue.String("1000m"), "memory": SdnValue.String("512"),
+            "exclusiveDeviceIds": SdnValue.Array([SdnValue.String("gpu0")])}
+        val device = host_claim_spec_field_v1(fixture, "budget", SdnValue.Dict(budget))
+        expect(host_enrollment_claim_with_clock_v1(device.enrollment.binding, device.enrollment.credential,
+            device.configuration_bytes, host_claim_clock_v1).unwrap_err()).to_equal("host-claim-cpu-only")
+        expect(host_enrollment_claim_with_clock_v1(fixture.enrollment.binding, fixture.enrollment.credential,
+            fixture.configuration_bytes + "\n", host_claim_clock_v1).unwrap_err()).to_equal("host-claim-config-digest-mismatch")
+        assert(not file_exists(host_claim_path_v1(fixture)))
+        assert(not file_exists(fixture.parent + "/.host-enrollment.lock"))
+        dir_remove(fixture.parent, true)

@@ -1,0 +1,165 @@
+import hashlib
+import json
+import os
+from pathlib import Path
+import resource
+import signal
+import subprocess
+import time
+from datetime import datetime, timezone
+
+ROOT = Path.cwd()
+OUT = ROOT / "build/local-gateway-receiver-native-20261107"
+EXPECTED = "82fa38100ad088c53e564906428789239fe9a285"
+COMPILER = Path("/home/yoon/dev/llvm/install/bin/clang-23")
+COMPILER_EXPECTED = "1bf921c690cf90567781f2b2fa5802585dd89775f7743a15d25fd672064d124c"
+RSS_CAP = 512 * 1024 * 1024
+DISK_CAP = 128 * 1024 * 1024
+
+def stamp():
+    return datetime.now(timezone.utc).isoformat()
+
+def sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+def value(v):
+    if isinstance(v, bool): return "true" if v else "false"
+    if v is None: return "null"
+    if isinstance(v, (int, float)): return str(v)
+    if isinstance(v, list): return "[\n" + ",\n".join(value(x) for x in v) + "\n]"
+    if isinstance(v, dict): return "{\n" + ",\n".join(k + ": " + value(x) for k, x in v.items()) + "\n}"
+    return json.dumps(str(v), ensure_ascii=False)
+
+def save(name, record):
+    (OUT / name).write_text(value(record) + "\n")
+
+def git(*args):
+    return subprocess.check_output(["git", *args], cwd=ROOT).decode().strip()
+
+def inputs():
+    paths = subprocess.check_output(["git", "ls-files", "-z", "src/runtime"], cwd=ROOT).decode().split("\0")
+    excluded = {"src/runtime/miniaudio.h", "src/runtime/stb_image.h", "src/runtime/stb_truetype.h"}
+    result = []
+    for path in sorted(paths):
+        if path and path.endswith((".c", ".h")) and "/vendor/" not in path and path not in excluded:
+            result.append({"path": path, "sha256": sha(ROOT / path)})
+    return result
+
+def limits():
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024 * 1024, 64 * 1024 * 1024))
+    resource.setrlimit(resource.RLIMIT_AS, (2 * 1024 * 1024 * 1024, 2 * 1024 * 1024 * 1024))
+
+initial_fixture_dirs = set(Path("/tmp").glob("simple-unix-scm-v1-*"))
+
+def allocated():
+    total = 0
+    roots = [OUT] + list(set(Path("/tmp").glob("simple-unix-scm-v1-*")) - initial_fixture_dirs)
+    for root in roots:
+        for directory, _, files in os.walk(root):
+            for path in [Path(directory)] + [Path(directory) / name for name in files]:
+                try: total += path.stat(follow_symlinks=False).st_blocks * 512
+                except FileNotFoundError: pass
+    return total
+
+def group_rss(group):
+    total = 0
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit(): continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            if int(fields[2]) != group: continue
+            for row in (entry / "status").read_text().splitlines():
+                if row.startswith("VmRSS:"): total += int(row.split()[1]) * 1024
+        except (FileNotFoundError, ProcessLookupError, PermissionError): pass
+    return total
+
+def phase(name, command, timeout):
+    environment = dict(os.environ)
+    environment["TMPDIR"] = str(OUT / "tmp")
+    started = stamp()
+    with open(OUT / (name + ".stdout.txt"), "wb") as stdout, open(OUT / (name + ".stderr.txt"), "wb") as stderr:
+        process = subprocess.Popen(command, cwd=ROOT, env=environment, stdout=stdout, stderr=stderr,
+                                   start_new_session=True, preexec_fn=limits)
+        record = {"phase": name, "started": started, "pid": process.pid, "processGroup": process.pid,
+                  "argv": command, "cpuAffinity": "0-4", "tmpdir": environment["TMPDIR"]}
+        save("live.sdn", record)
+        print("START " + name + " pid=" + str(process.pid) + " pgid=" + str(process.pid), flush=True)
+        begin = time.monotonic()
+        peak_rss = 0
+        peak_disk = 0
+        reason = ""
+        while process.poll() is None:
+            peak_rss = max(peak_rss, group_rss(process.pid))
+            peak_disk = max(peak_disk, allocated())
+            if time.monotonic() - begin > timeout: reason = "timeout"
+            if peak_rss > RSS_CAP: reason = "aggregate-rss-cap"
+            if peak_disk > DISK_CAP: reason = "artifact-cap"
+            if reason:
+                try: os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError: pass
+                try: process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    try: os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
+                    process.wait()
+                break
+            time.sleep(0.02)
+        code = process.wait()
+        # Cleanup only this admitted process group; no unrelated process IDs.
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        record.update({"finished": stamp(), "exitCode": code, "limitFailure": reason,
+                       "elapsedSeconds": round(time.monotonic() - begin, 6),
+                       "peakAggregateRssBytes": peak_rss, "peakAllocatedBytes": max(peak_disk, allocated())})
+    record["stdoutSha256"] = sha(OUT / (name + ".stdout.txt"))
+    record["stderrSha256"] = sha(OUT / (name + ".stderr.txt"))
+    save(name + "-result.sdn", record)
+    print("END " + name + " exit=" + str(code) + " limit=" + (reason or "none"), flush=True)
+    return record
+
+assert git("rev-parse", "HEAD") == EXPECTED
+assert not git("status", "--porcelain", "--", "src/runtime")
+assert not (OUT / "inputs-before.sdn").exists(), "No retry or overwrite of earlier attempt"
+(OUT / "tmp").mkdir()
+before = inputs()
+assert sha(COMPILER) == COMPILER_EXPECTED
+save("inputs-before.sdn", {"sourceCommit": EXPECTED, "trackedRuntimeClean": True,
+     "compiler": str(COMPILER), "compilerSha256": COMPILER_EXPECTED,
+     "linker": str(Path("/usr/bin/ld.bfd").resolve()), "linkerSha256": sha("/usr/bin/ld.bfd"),
+     "inputCount": len(before), "inputs": before})
+sources = ["test/local_unix_scm_receive_v1_selfcheck.c", "runtime_native.c", "runtime_process.c",
+           "runtime_legacy_core.c", "runtime_memory.c", "runtime_simd_dispatch.c", "runtime_simd_utf8.c",
+           "runtime_process_owned.c", "runtime_process_tree.c", "runtime_memtrack.c", "runtime_fork.c",
+           "runtime_timestamp.c", "runtime_thread.c"]
+command = ["taskset", "-c", "0-4", str(COMPILER), "-fuse-ld=bfd", "-O0", "-g0",
+           "-ffunction-sections", "-fdata-sections", "-std=gnu11", "-pthread",
+           "-DSIMPLE_CORE_C_STANDALONE=1", "-DSIMPLE_RUNTIME_MEMORY_OWNER=1",
+           "-DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1", "-DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1",
+           "-I", "src/runtime", "-I", "src/runtime/platform"]
+command += ["src/runtime/" + source for source in sources]
+command += ["-Wl,--gc-sections", "-lm", "-ldl", "-o", str(OUT / "receiver-contract")]
+save("command.sdn", {"compile": command, "run": ["taskset", "-c", "0-4", str(OUT / "receiver-contract")],
+     "compileSeconds": 120, "runSeconds": 15, "rssCapBytes": RSS_CAP, "artifactCapBytes": DISK_CAP,
+     "addressSpaceCapBytes": 2147483648, "fileCapBytes": 67108864, "coreCapBytes": 0})
+compiled = phase("compile", command, 120)
+ran = None
+if compiled["exitCode"] == 0 and not compiled["limitFailure"]:
+    ran = phase("run", ["taskset", "-c", "0-4", str(OUT / "receiver-contract")], 15)
+after = inputs()
+clean = git("rev-parse", "HEAD") == EXPECTED and not git("status", "--porcelain", "--", "src/runtime")
+save("inputs-after.sdn", {"sourceCommit": git("rev-parse", "HEAD"), "trackedRuntimeClean": clean,
+     "inputCount": len(after), "inputs": after, "matchesBefore": before == after})
+summary = {"sourceCommit": EXPECTED, "compileExit": compiled["exitCode"],
+           "runExit": None if ran is None else ran["exitCode"], "runAttempted": ran is not None,
+           "sourcesUnchanged": clean and before == after, "inputCount": len(before),
+           "finalAllocatedBytes": allocated(), "supervisorSha256": sha(__file__),
+           "leftoverFixtureDirectories": sorted(str(x) for x in set(Path("/tmp").glob("simple-unix-scm-v1-*")) - initial_fixture_dirs),
+           "scope": "Native receiver/byte owner mechanism only; full sender/distinctUID/Simple ABI/application policy NOT_RUN"}
+if (OUT / "receiver-contract").exists(): summary["binarySha256"] = sha(OUT / "receiver-contract")
+save("summary.sdn", summary)
+print("SUMMARY " + value(summary).replace("\n", " "), flush=True)

@@ -324,6 +324,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_match_arm_expr(&mut self) -> Result<MatchArm, ParseError> {
+        let enclosing_column = self.match_arm_column.replace(self.current.span.column);
+        let result = self.parse_match_arm_expr_body();
+        self.match_arm_column = enclosing_column;
+        result
+    }
+
+    fn parse_match_arm_expr_body(&mut self) -> Result<MatchArm, ParseError> {
         use crate::token::Span;
         let start_span = self.current.span;
 
@@ -340,7 +347,15 @@ impl<'a> Parser<'a> {
         let pattern = self.parse_pattern()?;
         let guard = if self.check(&TokenKind::If) {
             self.advance();
-            Some(self.parse_expression()?)
+            // Traditional case-colon guards retain their functional-update
+            // grammar. Only pipe arms require an unparenthesized arrow delimiter.
+            let enclosing_depth = self.match_guard_arrow_depth;
+            if is_pipe_syntax {
+                self.match_guard_arrow_depth = Some(self.parse_recursion_depth + 1);
+            }
+            let result = self.parse_expression();
+            self.match_guard_arrow_depth = enclosing_depth;
+            Some(result?)
         } else {
             None
         };

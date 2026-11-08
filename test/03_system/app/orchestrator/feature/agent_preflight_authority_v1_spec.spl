@@ -1,0 +1,117 @@
+# @req ORCH-02 HOST-02
+# Actual Ed25519 SDK verification; synthetic time is internal unit boundary only.
+# Execution NOT_RUN. Public malformed-entry tests invoke no engine simulation.
+use test.fixtures.orchestrator_acceptance.controller_container_authority_v2.*
+use std.common.contracts.orchestration.agent_preflight_binding_v1.*
+use std.common.contracts.orchestration.agent_preflight_dispatch_v1.*
+use std.nogc_sync_mut.orchestration.agent_preflight_authority_v1.controller_preflight_authorize_v1
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.ControllerDispatchContextV1
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write, file_exists}
+use std.nogc_sync_mut.io_runtime.dir_remove
+use app.orchestrator.command.orchestrator_command_v1
+
+struct PreflightActualAuthorityFixtureV1:
+    packet: AgentPreflightDispatchV1
+    context: ControllerDispatchContextV1
+
+fn preflight_signing_seed_v1(offset: i64) -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..32: bytes.push((offset + index) as u8)
+    bytes
+
+fn preflight_actual_authority_v1() -> PreflightActualAuthorityFixtureV1:
+    val actual = controller_container_authority_fixture_v2("linux-podman")
+    val dispatch = actual.packet
+    val binding = AgentPreflightBindingV1(controller_id: dispatch.binding.controller_id, session_uid: "session",
+        source_digest: "a".repeat(64), catalog_digest: "b".repeat(64), task_digest: "c".repeat(64),
+        image_digest: "d".repeat(64), probe_producer_digest: "e".repeat(64), nonce: "f".repeat(64),
+        preflight: dispatch.execution.plan, agent_provider: "codex", executable_path: "/usr/bin/codex",
+        execution_os: "linux", architecture: "x86_64", selected_user: "1000:1000")
+    var packet = AgentPreflightDispatchV1(binding: binding, dispatch: dispatch,
+        signed: dispatch.assignment_signed, approval: dispatch.assignment_approval)
+    val operation = agent_preflight_authorization_operation_v1(packet).unwrap()
+    packet.signed.grant.id = "expected-preflight-grant"
+    packet.signed.grant.operations = [operation.operation]
+    packet.signed.signature = pure_ed25519_sign_from_seed_v1(preflight_signing_seed_v1(1),
+        distributed_grant_signature_message_v2(packet.signed).unwrap()).signature
+    packet.approval.grant_digest = distributed_grant_digest_v2(packet.signed.grant).unwrap()
+    packet.approval.request_digest = sha256_text(distributed_encode_operation_v2(operation).unwrap())
+    packet.approval.signature = pure_ed25519_sign_from_seed_v1(preflight_signing_seed_v1(65),
+        distributed_approval_signature_message_v2(packet.approval).unwrap()).signature
+    var context = actual.context
+    for id in ["grant-issuer/controller-issuer", "human-approver/controller-approver"]:
+        var key = context.policy.snapshot.keys[id]
+        key.operations = key.operations + ["agent_preflight_authorize_v1"]
+        context.policy.snapshot.keys[id] = key
+    PreflightActualAuthorityFixtureV1(packet: packet, context: context)
+
+describe "actual preflight expected association authorization":
+    it "verifies separately signed new action using actual SDK issuer and human approval":
+        step("verifies separately signed new action using actual SDK issuer and human approval")
+        val fixture = preflight_actual_authority_v1()
+        val grant = controller_preflight_authorize_v1(fixture.context, fixture.packet, 100).unwrap()
+        expect(grant.id).to_equal("expected-preflight-grant")
+        expect(grant.operations).to_equal(["agent_preflight_authorize_v1"])
+        expect(fixture.packet.signed.signature.len()).to_equal(64)
+        expect(fixture.packet.approval.signature.len()).to_equal(64)
+
+    it "refuses assignment action replay and each independently forged proof":
+        step("refuses assignment action replay and each independently forged proof")
+        val fixture = preflight_actual_authority_v1()
+        var changed = fixture.packet
+        changed.signed = changed.dispatch.assignment_signed
+        changed.approval = changed.dispatch.assignment_approval
+        expect(controller_preflight_authorize_v1(fixture.context, changed, 100).is_err()).to_equal(true)
+        changed = fixture.packet
+        changed.signed.signature = controller_container_forge_v2(changed.signed.signature)
+        expect(controller_preflight_authorize_v1(fixture.context, changed, 100).is_err()).to_equal(true)
+        changed = fixture.packet
+        changed.approval.signature = controller_container_forge_v2(changed.approval.signature)
+        expect(controller_preflight_authorize_v1(fixture.context, changed, 100).is_err()).to_equal(true)
+
+    it "refuses changed expected image or task under otherwise valid signed action":
+        step("refuses changed expected image or task under otherwise valid signed action")
+        val fixture = preflight_actual_authority_v1()
+        var changed = fixture.packet
+        changed.binding.image_digest = "1".repeat(64)
+        expect(controller_preflight_authorize_v1(fixture.context, changed, 100).is_err()).to_equal(true)
+        changed = fixture.packet
+        changed.binding.task_digest = "2".repeat(64)
+        expect(controller_preflight_authorize_v1(fixture.context, changed, 100).is_err()).to_equal(true)
+
+    it "denies expired revoked and incorrectly scoped authority contexts":
+        step("denies expired revoked and incorrectly scoped authority contexts")
+        val fixture = preflight_actual_authority_v1()
+        expect(controller_preflight_authorize_v1(fixture.context, fixture.packet, 1100).is_err()).to_equal(true)
+        var context = fixture.context
+        var key = context.policy.snapshot.keys["grant-issuer/controller-issuer"]
+        key.revoked = true
+        context.policy.snapshot.keys["grant-issuer/controller-issuer"] = key
+        expect(controller_preflight_authorize_v1(context, fixture.packet, 100).is_err()).to_equal(true)
+        context = fixture.context
+        context.config.controller_id = "other-controller"
+        expect(controller_preflight_authorize_v1(context, fixture.packet, 100).is_err()).to_equal(true)
+        context = fixture.context
+        context.config.controller_epoch = context.config.controller_epoch + 1
+        expect(controller_preflight_authorize_v1(context, fixture.packet, 100).is_err()).to_equal(true)
+        expect(controller_preflight_authorize_v1(fixture.context, fixture.packet, 0).is_err()).to_equal(true)
+
+    it "refuses malformed packets and extra public command arguments without acquiring a journal":
+        step("refuses malformed packets and extra public command arguments without acquiring a journal")
+        val root = secure_temp_dir("/tmp", "preflight-command-").unwrap()
+        val packet_path = root + "/malformed.sdn"
+        expect(file_atomic_write(packet_path, "malformed preflight packet")).to_equal(true)
+        for action in ["preflight-dispatch", "preflight-resume"]:
+            val malformed = orchestrator_command_v1([action, root, "controller", "session", packet_path])
+            expect(malformed.exit_code == 0).to_equal(false)
+            expect(malformed.output).to_contain("agent-preflight-dispatch")
+            val extra = orchestrator_command_v1([action, root, "controller", "session", packet_path, "extra"])
+            expect(extra.exit_code == 0).to_equal(false)
+            expect(extra.output).to_contain("invalid-execution-command-arguments")
+        expect(orchestrator_command_v1(["inspect-preflight", root, "controller", "session", "extra"]).exit_code == 0).to_equal(false)
+        expect(file_exists(root + "/journal")).to_equal(false)
+        expect(dir_remove(root, true)).to_equal(true)

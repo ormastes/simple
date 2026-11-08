@@ -1,0 +1,88 @@
+# Actual signed executor/journal/wait collector; ONLY native commands/metadata
+# use the explicitly named Linux scripted adapter. Not native qualification.
+use test.fixtures.orchestration.host_terminal_wait_fixture_v2.*
+use test.fixtures.orchestration.host_enrollment_claim_fixture_v1.host_claim_key_fields_v1
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_terminal_wait_v2.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.*
+use std.nogc_sync_mut.orchestration.host_local_command_v1.host_local_retained_execution_v2
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.*
+use std.common.contracts.distributed_authority_v2.*
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.*
+use std.common.contracts.distributed_control_codec_v2.*
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{ScriptedCommandResultV1, build_destroy_command}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_route_v1
+
+pub struct HostCleanupFixtureV1:
+    local: HostLocalRootV1
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+    context: HostReservationAuthorizationContextV1
+
+pub fn host_cleanup_fixture_v1(mode: text = "success") -> HostCleanupFixtureV1:
+    val collected = host_terminal_wait_v2(host_terminal_wait_fixture_v2("success", 0), "operation_1")
+    expect(collected.error).to_equal("")
+    assert(collected.receipt.?)
+    var local = collected.local
+    val now = host_local_context_v1(local.policy)
+    val base = verification_fixture()
+    var issuer = base.issuer
+    var approver = base.approver
+    issuer.operations = ["host_cleanup_v1"]
+    approver.operations = ["host_cleanup_v1"]
+    issuer.expires_at = if mode == "key-expired": now.grant_clock - 1 else: now.grant_clock + 60000
+    approver.expires_at = now.grant_clock + 60000
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "generation": SdnValue.Int(7),
+        "policyRevision": SdnValue.Int(4), "revocationEpoch": SdnValue.Int(2), "sessionGeneration": SdnValue.Int(3),
+        "keys": SdnValue.Array([host_claim_key_fields_v1(issuer), host_claim_key_fields_v1(approver)])}
+    val policy_bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    assert(file_atomic_write_mode(local.root + "/authority-policy.sdn", policy_bytes, 0o600))
+    local.binding.policy_digest = sha256_text(policy_bytes)
+    local.policy = local_authority_policy_load_v1(local.root, local.binding.policy_digest).unwrap()
+    val retained = host_local_retained_execution_v2(local, "operation_1").unwrap()
+    var cleanup = retained.operation
+    cleanup.operation = "host_cleanup_v1"
+    var signed = base.signed
+    signed.grant.operations = ["host_cleanup_v1"]
+    signed.grant.environment_digest = local.binding.provider_identity_digest
+    signed.grant.expires_at = now.grant_clock + 30000
+    signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = base.approval
+    approval.expires_at = signed.grant.expires_at
+    approval.grant_digest = sha256_text(distributed_encode_grant_v2(signed.grant).unwrap())
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(cleanup).unwrap())
+    approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    match local.container:
+        case SimpleContainerOwnerV2.Linux(scope, original):
+            var adapter = original
+            var provider = adapter.provider
+            expect(provider.scripted_cursor).to_equal(6)
+            val policy = provider.engine_policy.unwrap()
+            var terminal = provider.scripted_results[2]
+            terminal.stdout = terminal.stdout.replace("|running", "|exited")
+            val command = build_destroy_command(provider.engine, provider.state_dir, "1".repeat(64), false).1
+            val destroy = ScriptedCommandResultV1(operation: "destroy", program: policy.executable_path,
+                args: linux_oci_engine_route_v1(policy, command.args).unwrap(), stdout: "", stderr: "",
+                exit_code: if mode == "lost-destroy-result": 125 else: 0)
+            val absence = ScriptedCommandResultV1(operation: "absence", program: policy.executable_path,
+                args: linux_oci_engine_route_v1(policy, ["container", "exists", "1".repeat(64)]).unwrap(), stdout: "", stderr: "",
+                exit_code: if mode == "absence-unknown": 125 else: 1)
+            provider.scripted_results = provider.scripted_results.push(terminal).push(terminal).push(destroy).push(absence)
+            assert(provider.set_scripted_effect_clock_v1([now.grant_clock + 1000, now.grant_clock + 1001]).is_ok())
+            adapter.provider = provider
+            local.container = SimpleContainerOwnerV2.Linux(scope, adapter)
+        case _: fail("cleanup fixture requires explicit Linux scripted adapter")
+    HostCleanupFixtureV1(local, signed, approval, now)
+
+pub fn host_cleanup_assert_charged_v1(local: HostLocalRootV1):
+    val available = std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1(local.capacity.ledger).unwrap()
+    expect(available.cpu_millis).to_equal(1000)
+    expect(available.memory_bytes).to_equal(1536)
+    expect(local.capacity.journal.operations["operation_1"].state).to_equal("executing")

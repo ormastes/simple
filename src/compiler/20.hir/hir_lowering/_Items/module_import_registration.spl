@@ -22,7 +22,7 @@ use compiler.hir.hir_lowering.type_aliases.*
 use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_type, hir_dependency_type_name}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
-use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup, module_surface_name_position}
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup, module_surface_name_position, ModuleSurfaceEnum, ModuleSurfaceTrait}
 use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_container, hir_compilation_declares_nominal}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_frozen_alignment}
 use compiler.hir.hir_lowering.expressions.*
@@ -685,6 +685,7 @@ impl HirLowering:
             # qualified identity or dependency closure. Package prebinding can
             # create the short symbol before an explicit/re-export import.
             self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
+            self.register_nominal_type_template(imported_type, composite.type_params, imported_mod.module_name)
             # bug=module_static_unresolved_initializer_2026-10-24: the import
             # surface carries the declaration's type parameters, so an
             # imported non-generic record settles `var g = Imported(...)` /
@@ -803,9 +804,14 @@ impl HirLowering:
                 val retained_id = self.imported_enum_symbol_ids[local_name]
                 self.symbols.bind_local_type_if_free(local_name, SymbolId(id: retained_id))
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            val enum_template: ModuleSurfaceEnum = imported_mod.enum_values[enum_position]
+            self.register_nominal_type_template(imported_type, enum_template.type_params, imported_mod.module_name)
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
                 self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
+            if not self.materialize_imported_owner_parameter_dependencies(
+                    imported_mod, imported_mod_name, enum_template.type_params, import_span, materialize_enum):
+                return
             # Directory-sibling prebinding can create the enum symbol before
             # an explicit import reaches this branch.  Methods are a separate
             # idempotent surface and must be registered on both paths; keeping
@@ -830,12 +836,17 @@ impl HirLowering:
             val existing_trait_symbol_id = self.import_binding_or_invalid(local_name)
             val already_bound = existing_trait_symbol_id.is_valid()
             val imported_trait = self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            val trait_template: ModuleSurfaceTrait = imported_mod.trait_values[trait_position]
+            self.register_nominal_type_template(imported_trait, trait_template.type_params, imported_mod.module_name)
             if not already_bound:
                 # Preserve the physical declaration name in the symbol while
                 # retaining local_name as its lookup key. Payload-closure
                 # collision identity must compare terminal items, not aliases.
                 self.symbols.rename_symbol(imported_trait, imported_name)
                 self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_trait)
+            if not self.materialize_imported_owner_parameter_dependencies(
+                    imported_mod, imported_mod_name, trait_template.type_params, import_span, materialize_enum):
+                return
             if not self.imported_traits.contains_key(local_name):
                 self.imported_traits[local_name] = hir_surface_trait_to_trait(
                     imported_mod.trait_values[trait_position], local_name)

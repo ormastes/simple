@@ -7,9 +7,21 @@ use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_write_u32, vo
 use std.nogc_sync_mut.io.windows_pty_codec.{windows_pty_size_valid_v1, windows_pty_coord_v1, windows_pty_decode_v1}
 use std.common.base_encoding.utilities.{text_to_bytes_linear}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetExitCodeProcess}
-use std.sys.pty_launch.{PtyLaunchV1}
-use std.nogc_sync_mut.io.windows_pty_launch_config.{WindowsPtyLaunchPreparedV1, windows_pty_launch_prepare_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{BCryptDestroyHash, BCryptCloseAlgorithmProvider}
+use std.sys.pty_launch.{PtyLaunchV1, PtyLaunchModeV1}
+use std.nogc_sync_mut.io.windows_pty_launch_config.{WindowsPtyLaunchPreparedV1, windows_pty_launch_prepare_v1, windows_pty_launch_command_checked_v1}
 use std.nogc_sync_mut.io.windows_pty_launch_abi.{FreeEnvironmentStringsW}
+use std.common.process.windows_job_stream_v2.{WindowsManagedStreamLeaseV2, WindowsManagedOwnerVersionV2,
+    WindowsManagedStreamRequestV2, WindowsManagedStreamAdmissionV2, WindowsManagedStreamHostV2,
+    WindowsManagedStreamPollV2, WindowsManagedStreamReadV2, windows_managed_stream_request_reason_v2,
+    windows_managed_cpu_quantum_v2, windows_managed_cpu_rate_v2,
+    windows_managed_host_profile_matches_v2,
+    windows_managed_owner_commit_v2, windows_managed_owner_cleanup_retry_v2}
+use std.nogc_sync_mut.io.windows_job_stream_abi_v2.{GetActiveProcessorGroupCount, GetActiveProcessorCount,
+    GetCurrentProcess, IsProcessInJob, SetHandleInformation, rt_windows_pty_owner_thread_guard_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, BCryptOpenAlgorithmProvider,
+    BCryptCreateHash, BCryptHashData, BCryptFinishHash}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 
 struct WindowsPtyStateV1:
     heap: i64
@@ -34,14 +46,45 @@ struct WindowsPtyStateV1:
     tail: [u8] = []
     temporaries: [i64] = []
     environment_snapshot: i64 = 0
+    managed: bool = false
+    managed_generation: i64 = 0
+    managed_revision: i64 = 0
+    managed_pins: [i64] = []
+    managed_started: bool = false
+    managed_assigned: bool = false
+    managed_create_attempted: bool = false
+    managed_deadline: u64 = 0
+    managed_cancelled: bool = false
+    managed_timed_out: bool = false
+    managed_output_end: bool = false
+    managed_exit_code: i64 = -1
+    managed_attributes: i64 = 0
+    managed_hash: i64 = 0
+    managed_algorithm: i64 = 0
+    managed_host_groups: i64 = 0
+    managed_host_processors: i64 = 0
+    managed_host_quantum: i64 = 0
+    managed_host_nested: bool = false
+    managed_profile_drift: bool = false
 
 var _windows_pty_slots_v1: [WindowsPtyStateV1] = []
 var _windows_pty_quarantine_v1: [i64] = []
 var _windows_pty_active_v1: i64 = 0
 var _windows_pty_cleanup_failed_v1: bool = false
+var _windows_managed_host_baseline_v2: WindowsManagedStreamHostV2? = nil
+var _windows_managed_host_drift_v2: bool = false
+
+# This guard executes before any public legacy/managed entry reads registry
+# state. Native SRW publication pins a real thread HANDLE, not a reusable ID.
+fn _windows_pty_owner_entry_result_v2() -> Result<bool, text>:
+    val status = unsafe(capabilities: [ffi]): rt_windows_pty_owner_thread_guard_v1()
+    if status == 1: return Ok(true)
+    if status == -1: return Err("Windows IO owner belongs to another thread")
+    if status == -2: return Err("Windows IO owner thread exited; implicit rebind refused")
+    Err("Windows IO owner thread binding unavailable or poisoned; native ownership retained")
 
 fn _windows_pty_live_v1(handle: i32) -> bool:
-    handle >= 0 and (handle as i64) < _windows_pty_slots_v1.len() and not _windows_pty_slots_v1[handle as i64].closing and not _windows_pty_slots_v1[handle as i64].closed
+    handle >= 0 and (handle as i64) < _windows_pty_slots_v1.len() and not _windows_pty_slots_v1[handle as i64].managed and not _windows_pty_slots_v1[handle as i64].closing and not _windows_pty_slots_v1[handle as i64].closed
 
 # arena offsets: console-out0, pipe-out8/16, available24, read-count32,
 # write-count40, attribute-size48, OVERLAPPED64..95 (hEvent at88), input128..4223,
@@ -91,6 +134,9 @@ fn _windows_pty_free_v1(heap: i64, address: i64) -> i64:
 @unsafe(reason: "releases launch temporaries while retaining every failed native release", capabilities: [ffi, raw_ptr])
 fn _windows_pty_launch_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
     var next = state
+    if next.managed_attributes != 0:
+        DeleteProcThreadAttributeList(next.managed_attributes)
+        next.managed_attributes = 0
     if next.environment_snapshot != 0:
         if FreeEnvironmentStringsW(next.environment_snapshot) != 0:
             next.environment_snapshot = 0
@@ -110,6 +156,18 @@ fn _windows_pty_launch_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1
 fn _windows_pty_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
     var next = state
     if state.pending: return next
+    if next.managed_hash != 0:
+        if BCryptDestroyHash(next.managed_hash) == 0: next.managed_hash = 0
+        else:
+            next.release_failed = true
+            next.failed = true
+            return next
+    if next.managed_algorithm != 0:
+        if BCryptCloseAlgorithmProvider(next.managed_algorithm, 0u32) == 0: next.managed_algorithm = 0
+        else:
+            next.release_failed = true
+            next.failed = true
+            return next
     next.output = _windows_pty_close_handle_v1(next.output)
     # A failed output close must never enter a potentially blocking HPCON close.
     if next.output == 0 and next.console != 0:
@@ -122,11 +180,16 @@ fn _windows_pty_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
     next.thread = _windows_pty_close_handle_v1(next.thread)
     next.process = _windows_pty_close_handle_v1(next.process)
     next.job = _windows_pty_close_handle_v1(next.job)
+    var retained_pins: [i64] = []
+    for pin in next.managed_pins:
+        val remaining = _windows_pty_close_handle_v1(pin)
+        if remaining != 0: retained_pins.push(remaining)
+    next.managed_pins = retained_pins
     next = _windows_pty_launch_release_v1(next)
     val handles_released = next.input_server == 0 and next.input == 0 and next.output_server == 0 and next.output == 0 and next.event == 0 and next.thread == 0 and next.process == 0 and next.job == 0 and next.console == 0
-    if handles_released and next.temporaries.len() == 0 and next.environment_snapshot == 0:
+    if handles_released and next.managed_pins.len() == 0 and next.temporaries.len() == 0 and next.environment_snapshot == 0:
         next.arena = _windows_pty_free_v1(next.heap, next.arena)
-    next.closed = handles_released and next.temporaries.len() == 0 and next.environment_snapshot == 0 and next.arena == 0
+    next.closed = handles_released and next.managed_pins.len() == 0 and next.temporaries.len() == 0 and next.environment_snapshot == 0 and next.arena == 0
     if not next.closed:
         next.failed = true
         next.release_failed = true
@@ -151,14 +214,17 @@ fn _windows_pty_reap_v1():
 
 # A negative count is a retained cleanup failure, never a clean-drain receipt.
 pub fn windows_pty_cleanup_pending_v1() -> i64:
+    if _windows_pty_owner_entry_result_v2().is_err(): return -1
     _windows_pty_reap_v1()
     if _windows_pty_cleanup_failed_v1: return -1
     _windows_pty_quarantine_v1.len()
 
 pub fn windows_pty_cleanup_proof_v1(handle: i32) -> bool:
+    if _windows_pty_owner_entry_result_v2().is_err(): return false
     _windows_pty_reap_v1()
     if handle < 0 or (handle as i64) >= _windows_pty_slots_v1.len(): return false
     val state = _windows_pty_slots_v1[handle as i64]
+    if state.managed: return false
     _windows_pty_cleanup_complete_v1(state)
 
 # Historical spawn/I/O failure is separate from terminal resource discharge.
@@ -183,6 +249,7 @@ fn _windows_pty_open_failed_v1(state: WindowsPtyStateV1) -> i32:
 
 @unsafe(reason: "creates private noninherited ConPTY pipes and retains exact Win64 storage", capabilities: [ffi, raw_ptr])
 pub fn windows_pty_open_v1(rows: i32, cols: i32) -> i32:
+    if _windows_pty_owner_entry_result_v2().is_err(): return -1
     _windows_pty_reap_v1()
     if not windows_pty_size_valid_v1(rows, cols) or _windows_pty_slots_v1.len() >= 100000 or _windows_pty_active_v1 >= 1024:
         return -1
@@ -229,6 +296,7 @@ pub fn windows_pty_open_v1(rows: i32, cols: i32) -> i32:
 
 @unsafe(reason: "starts a suspended child attached only to the retained HPCON and owned JobObject", capabilities: [ffi, raw_ptr])
 pub fn windows_pty_spawn_v1(handle: i32, command: text) -> i64:
+    if _windows_pty_owner_entry_result_v2().is_err(): return -1
     _windows_pty_reap_v1()
     if not _windows_pty_live_v1(handle) or command == "" or command.len() > 32766 or command.contains("\0"): return -1
     var state = _windows_pty_slots_v1[handle as i64]
@@ -240,6 +308,7 @@ pub fn windows_pty_spawn_v1(handle: i32, command: text) -> i64:
     _windows_pty_spawn_prepared_v1(handle, WindowsPtyLaunchPreparedV1(command: argv, allocations: [argv]), false)
 
 pub fn windows_pty_spawn_configured_v1(handle: i32, launch: PtyLaunchV1) -> Result<i64, text>:
+    val owner_thread = _windows_pty_owner_entry_result_v2()?
     _windows_pty_reap_v1()
     if not _windows_pty_live_v1(handle): return Err("invalid or closed Windows PTY handle")
     var state = _windows_pty_slots_v1[handle as i64]
@@ -347,6 +416,7 @@ fn _windows_pty_spawn_prepared_v1(handle: i32, prepared: WindowsPtyLaunchPrepare
 # Zero is backpressure. Negative is a permanent error. No caller memory is lent.
 @unsafe(reason: "submits at most one bounded retained overlapped write, never waits", capabilities: [ffi, raw_ptr])
 pub fn windows_pty_write_some_bytes_v1(handle: i32, data: [u8]) -> i64:
+    if _windows_pty_owner_entry_result_v2().is_err(): return -1
     _windows_pty_reap_v1()
     if not _windows_pty_live_v1(handle): return -1
     var state = _windows_pty_complete_v1(_windows_pty_slots_v1[handle as i64])
@@ -380,6 +450,7 @@ pub fn windows_pty_write_some_bytes_v1(handle: i32, data: [u8]) -> i64:
     count
 
 pub fn windows_pty_write_some_v1(handle: i32, data: text) -> i64:
+    if _windows_pty_owner_entry_result_v2().is_err(): return -1
     windows_pty_write_some_bytes_v1(handle, text_to_bytes_linear(data))
 
 # Compatibility only: false may follow partial delivery. Never blindly retry
@@ -387,6 +458,7 @@ pub fn windows_pty_write_some_v1(handle: i32, data: text) -> i64:
 # Bound both the copied request (1MiB) and the full-delivery attempt (2sec).
 @unsafe(reason: "finite polling of owned asynchronous writes without blocking pipe IO", capabilities: [ffi])
 pub fn windows_pty_write_v1(handle: i32, data: text) -> bool:
+    if _windows_pty_owner_entry_result_v2().is_err(): return false
     if data.len() > 1048576 or not _windows_pty_live_v1(handle): return false
     val bytes = text_to_bytes_linear(data)
     val deadline = GetTickCount64() + 2000u64
@@ -407,6 +479,7 @@ pub fn windows_pty_write_v1(handle: i32, data: text) -> bool:
     false
 
 pub fn windows_pty_input_pending_v1(handle: i32) -> Result<bool, text>:
+    val owner_thread = _windows_pty_owner_entry_result_v2()?
     _windows_pty_reap_v1()
     if not _windows_pty_live_v1(handle): return Err("invalid or closed Windows PTY handle")
     val state = _windows_pty_complete_v1(_windows_pty_slots_v1[handle as i64])
@@ -416,6 +489,7 @@ pub fn windows_pty_input_pending_v1(handle: i32) -> Result<bool, text>:
 
 @unsafe(reason: "reads only peeked bytes from the exclusively owned output pipe", capabilities: [ffi, raw_ptr])
 pub fn windows_pty_read_v1(handle: i32, timeout_ms: i32) -> text:
+    if _windows_pty_owner_entry_result_v2().is_err(): return ""
     _windows_pty_reap_v1()
     if not _windows_pty_live_v1(handle) or timeout_ms < 0 or timeout_ms > 60000: return ""
     var state = _windows_pty_slots_v1[handle as i64]
@@ -452,6 +526,7 @@ pub fn windows_pty_read_v1(handle: i32, timeout_ms: i32) -> text:
 
 @unsafe(reason: "queries the retained process handle without PID reopening", capabilities: [ffi])
 pub fn windows_pty_is_running_v1(handle: i32) -> bool:
+    if _windows_pty_owner_entry_result_v2().is_err(): return false
     _windows_pty_reap_v1()
     if not _windows_pty_live_v1(handle): return false
     val state = _windows_pty_slots_v1[handle as i64]
@@ -459,6 +534,7 @@ pub fn windows_pty_is_running_v1(handle: i32) -> bool:
 
 @unsafe(reason: "reads the exact retained leader exit status only after signaled wait", capabilities: [ffi, raw_ptr])
 pub fn windows_pty_exit_code_v1(handle: i32) -> Result<i64, text>:
+    val owner_thread = _windows_pty_owner_entry_result_v2()?
     _windows_pty_reap_v1()
     if not _windows_pty_live_v1(handle): return Err("invalid or closed Windows PTY handle")
     val state = _windows_pty_slots_v1[handle as i64]
@@ -472,15 +548,18 @@ pub fn windows_pty_exit_code_v1(handle: i32) -> Result<i64, text>:
 
 @unsafe(reason: "resizes only the retained HPCON with a validated packed COORD", capabilities: [ffi])
 pub fn windows_pty_resize_v1(handle: i32, rows: i32, cols: i32) -> bool:
+    if _windows_pty_owner_entry_result_v2().is_err(): return false
     _windows_pty_reap_v1()
     if not _windows_pty_live_v1(handle) or not windows_pty_size_valid_v1(rows, cols): return false
     ResizePseudoConsole(_windows_pty_slots_v1[handle as i64].console, windows_pty_coord_v1(rows, cols)) >= 0
 
 @unsafe(reason: "invalidates aliases, breaks output before HPCON release, retains cancelled pending buffers", capabilities: [ffi, raw_ptr])
 pub fn windows_pty_close_v1(handle: i32) -> bool:
+    if _windows_pty_owner_entry_result_v2().is_err(): return false
     _windows_pty_reap_v1()
     if handle < 0 or (handle as i64) >= _windows_pty_slots_v1.len(): return false
     var state = _windows_pty_slots_v1[handle as i64]
+    if state.managed: return false
     if state.closed: return _windows_pty_cleanup_complete_v1(state)
     if state.closing: return false
     state.closing = true
@@ -508,3 +587,597 @@ pub fn windows_pty_close_v1(handle: i32) -> bool:
         else: _windows_pty_quarantine_v1 = _windows_pty_quarantine_v1.push(handle as i64)
     _windows_pty_slots_v1[handle as i64] = state
     _windows_pty_cleanup_complete_v1(state)
+
+# IO-owner-private ports for the managed RAW sibling. They lend a state copy
+# only within the single-threaded owner turn; all resources remain in this
+# SAME nonreused registry, and generation checks precede every load/store.
+fn _windows_pty_managed_capacity_v2() -> bool:
+    _windows_pty_slots_v1.len() < 100000 and _windows_pty_active_v1 < 1024
+
+@unsafe(reason: "reserves bounded RAW ownership without creating a pseudoconsole or child", capabilities: [ffi, raw_ptr])
+fn _windows_pty_managed_reserve_v2() -> Result<WindowsManagedStreamLeaseV2, text>:
+    if not _windows_pty_managed_capacity_v2(): return Err("Windows managed owner capacity exhausted")
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows managed process heap unavailable")
+    val arena = HeapAlloc(heap, 8u32, 16384u64)
+    if arena == 0: return Err("Windows managed arena allocation failed")
+    val index = _windows_pty_slots_v1.len()
+    val state = WindowsPtyStateV1(heap: heap, arena: arena, managed: true, managed_generation: index + 1)
+    _windows_pty_slots_v1 = _windows_pty_slots_v1.push(state)
+    _windows_pty_active_v1 = _windows_pty_active_v1 + 1
+    Ok(WindowsManagedStreamLeaseV2(slot: index as i32, generation: index + 1))
+
+fn _windows_pty_managed_load_v2(lease: WindowsManagedStreamLeaseV2) -> Result<WindowsPtyStateV1, text>:
+    if lease.slot < 0 or (lease.slot as i64) >= _windows_pty_slots_v1.len(): return Err("Windows managed lease slot invalid")
+    val state = _windows_pty_slots_v1[lease.slot as i64]
+    if not state.managed or state.managed_generation != lease.generation:
+        return Err("Windows managed lease generation invalid")
+    Ok(state)
+
+fn _windows_pty_managed_version_v2(state: WindowsPtyStateV1) -> WindowsManagedOwnerVersionV2:
+    WindowsManagedOwnerVersionV2(generation: state.managed_generation, revision: state.managed_revision,
+        closed: state.closed, create_attempted: state.managed_create_attempted,
+        terminal_observed: state.terminal_observed, leader_handle_present: state.process != 0)
+
+fn _windows_pty_managed_store_v2(lease: WindowsManagedStreamLeaseV2,
+        state: WindowsPtyStateV1) -> Result<WindowsPtyStateV1, text>:
+    val previous = _windows_pty_managed_load_v2(lease)?
+    if not state.managed: return Err("Windows managed state kind differs")
+    val revision = windows_managed_owner_commit_v2(_windows_pty_managed_version_v2(previous), _windows_pty_managed_version_v2(state))?
+    var committed = state
+    committed.managed_revision = revision
+    _windows_pty_slots_v1[lease.slot as i64] = committed
+    Ok(committed)
+
+fn _windows_pty_managed_retain_observation_v2(heap: i64, arena: i64):
+    _windows_pty_cleanup_failed_v1 = true
+    val state = WindowsPtyStateV1(heap: heap, arena: arena, release_failed: true)
+    val _retained = _windows_pty_open_failed_v1(state)
+
+fn _windows_pty_managed_complete_v2(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
+    _windows_pty_complete_v1(state)
+
+fn _windows_pty_managed_release_v2(lease: WindowsManagedStreamLeaseV2) -> Result<bool, text>:
+    var state = _windows_pty_managed_load_v2(lease)?
+    if state.closed: return Ok(true)
+    # Validate revision space before releasing any native resource. The private
+    # owner turn is serial; no exported state port can interleave a replacement.
+    val writable = windows_managed_owner_commit_v2(_windows_pty_managed_version_v2(state), _windows_pty_managed_version_v2(state))?
+    if not windows_managed_owner_cleanup_retry_v2(_windows_pty_managed_version_v2(state)):
+        return Err("Windows attempted child identity remains unknown")
+    if state.pending or not _windows_pty_terminal_v1(state): return Err("Windows managed job or IO is not terminal")
+    state.terminal_observed = true
+    state.closing = true
+    state = _windows_pty_release_v1(state)
+    val committed = _windows_pty_managed_store_v2(lease, state)?
+    if committed.closed: _windows_pty_active_v1 = _windows_pty_active_v1 - 1
+    if not committed.closed: return Err("Windows managed cleanup retained failed native release")
+    Ok(true)
+
+
+# Managed RAW capsule: explicit ownership/security exception to the800-line
+# guideline. Private native state and commit ports must never cross this file.
+# Managed owners retain every opened handle, including mismatches, until
+# their own checked cleanup. This does not alter the legacy V1 close policy.
+struct WindowsProducerPinRetainedV2:
+    file: i64 = 0
+    digest_matches: bool = false
+    hash: i64 = 0
+    algorithm: i64 = 0
+    allocations: [i64] = []
+    release_failed: bool = false
+    reason: text = ""
+
+const WINDOWS_MANAGED_PRODUCER_MAX_HASH_BYTES_V2: i64 = 268435456
+
+fn _windows_managed_hash_deadline_v2(expires_at_unix_ms: i64) -> bool:
+    val sampled = time_sample_unix_micros_or_failure()
+    sampled > 0 and expires_at_unix_ms > 0 and sampled / 1000 < expires_at_unix_ms
+
+@unsafe(reason: "lends exact pinned executable identity with explicit retained mismatch ownership", capabilities: [ffi, raw_ptr])
+fn _windows_process_pin_retained_v2(heap: i64, path: text, digest: text,
+        expires_at_unix_ms: i64) -> WindowsProducerPinRetainedV2:
+    if digest.len() != 64: return WindowsProducerPinRetainedV2()
+    var retained = WindowsProducerPinRetainedV2()
+    if not _windows_managed_hash_deadline_v2(expires_at_unix_ms):
+        retained.reason = "Windows managed producer pin expired or clock unavailable"
+        return retained
+    val wide = _windows_process_wide_v1(heap, path)
+    if wide == 0:
+        retained.reason = "Windows managed producer path allocation failed"
+        return retained
+    # Do not use the V1 file helper: it discards a failed HeapFree(wide).
+    retained.file = CreateFileW(wide, 2147483648u32, 1u32, 0, 3u32, 2097280u32, 0)
+    if retained.file == -1: retained.file = 0
+    if HeapFree(heap, 0u32, wide) == 0:
+        retained.allocations = retained.allocations.push(wide)
+        retained.release_failed = true
+        retained.reason = "Windows managed producer path release failed; allocation retained"
+        return retained
+    if retained.file == 0:
+        retained.reason = "Windows managed producer file open failed"
+        return retained
+    _windows_process_hash_retained_v2(heap, retained.file, digest, expires_at_unix_ms)
+
+# V1 returns only text and cannot transfer failed cleanup ownership. Keep its
+# historical call sequence intact; V2 carries the complete native ledger.
+@unsafe(reason: "retains every CNG handle and failed heap release for the managed owner", capabilities: [ffi, raw_ptr])
+fn _windows_process_hash_retained_v2(heap: i64, file: i64, expected: text,
+        expires_at_unix_ms: i64) -> WindowsProducerPinRetainedV2:
+    var retained = WindowsProducerPinRetainedV2(file: file)
+    val metadata = HeapAlloc(heap, 8u32, 8u64)
+    val algorithm_slot = HeapAlloc(heap, 8u32, 8u64)
+    val hash_slot = HeapAlloc(heap, 8u32, 8u64)
+    val count_slot = HeapAlloc(heap, 8u32, 8u64)
+    val buffer = HeapAlloc(heap, 8u32, 65536u64)
+    val digest_buffer = HeapAlloc(heap, 8u32, 32u64)
+    val algorithm_name = _windows_process_wide_v1(heap, "SHA256")
+    val allocations = [metadata, algorithm_slot, hash_slot, count_slot, buffer, digest_buffer, algorithm_name]
+    var valid = true
+    for address in allocations:
+        if address == 0: valid = false
+    if valid:
+        if GetFileInformationByHandleEx(file, 9, metadata, 8u32) == 0 or (volatile_read_u32(metadata) & 1040) != 0:
+            valid = false
+    if valid:
+        val opened = BCryptOpenAlgorithmProvider(algorithm_slot, algorithm_name, 0, 0u32)
+        retained.algorithm = volatile_read_u64(algorithm_slot)
+        if opened != 0 or retained.algorithm == 0: valid = false
+    if valid:
+        val created = BCryptCreateHash(retained.algorithm, hash_slot, 0, 0u32, 0, 0u32, 0u32)
+        retained.hash = volatile_read_u64(hash_slot)
+        if created != 0 or retained.hash == 0: valid = false
+    var total: i64 = 0
+    while valid:
+        if not _windows_managed_hash_deadline_v2(expires_at_unix_ms):
+            retained.reason = "Windows managed producer hash expired or clock unavailable"
+            valid = false
+            break
+        val remaining = WINDOWS_MANAGED_PRODUCER_MAX_HASH_BYTES_V2 - total + 1
+        val capacity = if remaining < 65536: remaining else: 65536
+        if ReadFile(file, buffer, capacity as u32, count_slot, 0) == 0:
+            valid = false
+            break
+        val count = volatile_read_u32(count_slot)
+        total = total + (count as i64)
+        if total > WINDOWS_MANAGED_PRODUCER_MAX_HASH_BYTES_V2:
+            retained.reason = "Windows managed producer hash exceeds 256MiB bound"
+            valid = false
+            break
+        if not _windows_managed_hash_deadline_v2(expires_at_unix_ms):
+            retained.reason = "Windows managed producer hash expired or clock unavailable"
+            valid = false
+            break
+        if count == 0: break
+        if count > capacity or BCryptHashData(retained.hash, buffer, count as u32, 0u32) != 0:
+            valid = false
+            break
+    var digest = ""
+    if valid:
+        if BCryptFinishHash(retained.hash, digest_buffer, 32u32, 0u32) != 0:
+            valid = false
+        else:
+            val hex = "0123456789abcdef"
+            for index in 0..32:
+                val byte = volatile_read_u8(digest_buffer + index)
+                val high = byte / 16
+                val low = byte % 16
+                digest = digest + hex[high:high + 1] + hex[low:low + 1]
+    if retained.hash != 0:
+        if BCryptDestroyHash(retained.hash) == 0: retained.hash = 0
+        else: retained.release_failed = true
+    # Preserve provider and all launch buffers while any hash still owns them.
+    if retained.hash == 0 and retained.algorithm != 0:
+        if BCryptCloseAlgorithmProvider(retained.algorithm, 0u32) == 0: retained.algorithm = 0
+        else: retained.release_failed = true
+    for address in allocations:
+        if address != 0:
+            if retained.hash != 0 or retained.algorithm != 0:
+                retained.allocations = retained.allocations.push(address)
+            elif HeapFree(heap, 0u32, address) == 0:
+                retained.allocations = retained.allocations.push(address)
+                retained.release_failed = true
+    retained.digest_matches = (valid and digest == expected and retained.hash == 0 and
+        retained.algorithm == 0 and retained.allocations.len() == 0 and not retained.release_failed)
+    retained
+
+
+@unsafe(reason: "actual topology and unnested process status into one caller-owned bounded arena", capabilities: [ffi, raw_ptr])
+fn windows_managed_stream_host_at_v2(arena: i64) -> Result<WindowsManagedStreamHostV2, text>:
+    val groups = GetActiveProcessorGroupCount() as i64
+    val processors = GetActiveProcessorCount(65535u16) as i64
+    volatile_write_u32(arena, 0)
+    if IsProcessInJob(GetCurrentProcess(), 0, arena) == 0: return Err("Windows process nesting observation failed")
+    val member = volatile_read_u32(arena)
+    if member != 0u32 and member != 1u32: return Err("Windows process nesting observation invalid")
+    val quantum = windows_managed_cpu_quantum_v2(groups, processors, member != 0u32)?
+    Ok(WindowsManagedStreamHostV2(processor_groups: groups, logical_processors: processors,
+        process_in_job: member != 0u32, cpu_quantum_millis: quantum))
+
+@unsafe(reason: "bounded topology query; failed temporary release remains with existing PTY quarantine owner", capabilities: [ffi, raw_ptr])
+pub fn windows_managed_stream_host_observe_v2() -> Result<WindowsManagedStreamHostV2, text>:
+    val owner_thread = _windows_pty_owner_entry_result_v2()?
+    if _windows_managed_host_drift_v2: return Err("Windows managed CPU profile drift requires deployment requalification")
+    if not _windows_pty_managed_capacity_v2(): return Err("Windows native observation owner capacity exhausted")
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows native observation heap unavailable")
+    val arena = HeapAlloc(heap, 8u32, 8u64)
+    if arena == 0: return Err("Windows native observation allocation failed")
+    val result = windows_managed_stream_host_at_v2(arena)
+    if HeapFree(heap, 0u32, arena) == 0:
+        _windows_pty_managed_retain_observation_v2(heap, arena)
+        return Err("Windows native observation release failed; owner retained allocation")
+    if result.is_err():
+        if _windows_managed_host_baseline_v2.?: _windows_managed_host_drift_v2 = true
+        return result
+    val observed = result.unwrap()
+    if _windows_managed_host_baseline_v2.?:
+        if not windows_managed_host_profile_matches_v2(_windows_managed_host_baseline_v2.unwrap(), observed):
+            _windows_managed_host_drift_v2 = true
+            return Err("Windows managed CPU profile drift requires deployment requalification")
+    else:
+        _windows_managed_host_baseline_v2 = Some(observed)
+    Ok(observed)
+
+fn windows_managed_stream_launch_check_v2(request: WindowsManagedStreamRequestV2,
+        expected: WindowsManagedStreamHostV2, arena: i64) -> Result<bool, text>:
+    val observed = match windows_managed_stream_host_at_v2(arena):
+        case Ok(value): value
+        case Err(reason):
+            _windows_managed_host_drift_v2 = true
+            return Err(reason)
+    if not windows_managed_host_profile_matches_v2(expected, observed):
+        _windows_managed_host_drift_v2 = true
+        return Err("Windows managed stream host topology or nesting drifted")
+    val sampled = time_sample_unix_micros_or_failure()
+    if sampled <= 0: return Err("Windows launch clock unavailable")
+    if sampled / 1000 >= request.launch_expires_at_unix_ms: return Err("Windows managed stream launch expired")
+    Ok(true)
+
+@unsafe(reason: "hard Job CPU and aggregate memory configured and independently read back before child admission", capabilities: [ffi, raw_ptr])
+fn windows_managed_stream_job_policy_v2(state: WindowsPtyStateV1,
+        request: WindowsManagedStreamRequestV2, host: WindowsManagedStreamHostV2) -> Result<bool, text>:
+    val rate = windows_managed_cpu_rate_v2(request.cpu_millis, host)?
+    val limits = state.arena + 12504
+    volatile_write_u32(limits + 16, 8704)
+    volatile_write_u64(limits + 120, request.memory_bytes)
+    if SetInformationJobObject(state.job, 9, limits, 144u32) == 0: return Err("Windows Job memory admission failed")
+    if QueryInformationJobObject(state.job, 9, limits, 144u32, 0) == 0: return Err("Windows Job memory readback failed")
+    if volatile_read_u32(limits + 16) != 8704u32 or volatile_read_u64(limits + 120) != request.memory_bytes as u64:
+        return Err("Windows Job memory or kill-on-close readback differs")
+    val cpu = state.arena + 12968
+    volatile_write_u32(cpu, 5)
+    volatile_write_u32(cpu + 4, rate)
+    if SetInformationJobObject(state.job, 15, cpu, 8u32) == 0: return Err("Windows Job CPU hard cap admission failed")
+    if QueryInformationJobObject(state.job, 15, cpu, 8u32, 0) == 0: return Err("Windows Job CPU hard cap readback failed")
+    if volatile_read_u32(cpu) != 5u32 or volatile_read_u32(cpu + 4) != rate as u32:
+        return Err("Windows Job CPU hard cap readback differs")
+    Ok(true)
+
+fn _windows_managed_failed_v2(lease: WindowsManagedStreamLeaseV2, state: WindowsPtyStateV1, reason: text) -> WindowsManagedStreamAdmissionV2:
+    var retained = state
+    retained.failed = true
+    val stored = _windows_pty_managed_store_v2(lease, retained)
+    WindowsManagedStreamAdmissionV2.CleanupRequired(lease,
+        if stored.is_ok(): reason else: reason + "; retained state commit refused")
+
+@unsafe(reason: "exact clean UTF16 environment and typed argv storage remain in the existing owner arena ledger", capabilities: [ffi, raw_ptr])
+fn _windows_managed_prepare_v2(state: WindowsPtyStateV1, request: WindowsManagedStreamRequestV2) -> (WindowsPtyStateV1, WindowsPtyLaunchPreparedV1):
+    var next = state
+    var prepared = WindowsPtyLaunchPreparedV1()
+    val command = windows_pty_launch_command_checked_v1(PtyLaunchModeV1.Exec(request.program, request.args))
+    if command.is_err():
+        prepared.error = command.unwrap_err()
+        return (next, prepared)
+    var ordered = request.environment
+    var index = 1
+    while index < ordered.len():
+        var before = index
+        while before > 0 and ordered[before].to_upper() < ordered[before - 1].to_upper():
+            val previous = ordered[before - 1]
+            ordered[before - 1] = ordered[before]
+            ordered[before] = previous
+            before = before - 1
+        index = index + 1
+    var environment = ""
+    for assignment in ordered: environment = environment + assignment + "\0"
+    if environment == "": environment = "\0"
+    prepared.application = _windows_process_wide_v1(next.heap, request.program)
+    prepared.command = _windows_process_wide_v1(next.heap, command.unwrap())
+    prepared.directory = _windows_process_wide_v1(next.heap, request.directory)
+    prepared.environment = _windows_process_wide_v1(next.heap, environment)
+    next.temporaries = next.temporaries + [prepared.application, prepared.command, prepared.directory, prepared.environment]
+    if prepared.application == 0 or prepared.command == 0 or prepared.directory == 0 or prepared.environment == 0:
+        prepared.error = "Windows managed exact launch storage failed"
+    (next, prepared)
+
+@unsafe(reason: "creates only private RAW byte pipe endpoints with an exact child handle list", capabilities: [ffi, raw_ptr])
+fn _windows_managed_raw_pipes_v2(state: WindowsPtyStateV1, lease: WindowsManagedStreamLeaseV2) -> (WindowsPtyStateV1, text):
+    var next = state
+    val name_text = "\\\\.\\pipe\\simple-managed-raw-" + str(GetCurrentProcessId()) + "-" + str(lease.slot) + "-" + str(lease.generation)
+    val name = _windows_process_wide_v1(next.heap, name_text)
+    next.temporaries = next.temporaries.push(name)
+    if name == 0: return (next, "Windows managed pipe name allocation failed")
+    # FIRST_PIPE_INSTANCE + REJECT_REMOTE_CLIENTS; parent write client is overlapped.
+    next.input_server = CreateNamedPipeW(name, 524289u32, 8u32, 1u32, 4096u32, 4096u32, 0u32, 0)
+    if next.input_server == -1: next.input_server = 0
+    if next.input_server == 0: return (next, "Windows managed input pipe creation failed")
+    next.input = CreateFileW(name, 1073741824u32, 0u32, 0, 3u32, 1073741824u32, 0)
+    if next.input == -1: next.input = 0
+    if next.input == 0: return (next, "Windows managed input client creation failed")
+    if ConnectNamedPipe(next.input_server, 0) == 0 and GetLastError() != 535u32:
+        return (next, "Windows managed input pipe connection failed")
+    val output_created = CreatePipe(next.arena + 8, next.arena + 16, 0, 65536u32)
+    next.output = volatile_read_u64(next.arena + 8)
+    next.output_server = volatile_read_u64(next.arena + 16)
+    if next.output == -1: next.output = 0
+    if next.output_server == -1: next.output_server = 0
+    if output_created == 0: return (next, "Windows managed output pipe creation failed")
+    next.event = CreateEventW(0, 1, 0, 0)
+    if next.event == 0: return (next, "Windows managed input event creation failed")
+    volatile_write_u64(next.arena + 88, next.event)
+    if SetHandleInformation(next.input_server, 1u32, 1u32) == 0 or SetHandleInformation(next.output_server, 1u32, 1u32) == 0:
+        return (next, "Windows managed child endpoint inheritance failed")
+    (next, "")
+
+@unsafe(reason: "retains Job, file pins, launch allocations and attempted child identity in one existing PTY slot", capabilities: [ffi, raw_ptr])
+pub fn windows_managed_stream_admit_v2(request: WindowsManagedStreamRequestV2) -> WindowsManagedStreamAdmissionV2:
+    val owner_thread = _windows_pty_owner_entry_result_v2()
+    if owner_thread.is_err(): return WindowsManagedStreamAdmissionV2.Rejected(owner_thread.unwrap_err())
+    val host = match windows_managed_stream_host_observe_v2():
+        case Ok(value): value
+        case Err(reason): return WindowsManagedStreamAdmissionV2.Rejected(reason)
+    val reason = windows_managed_stream_request_reason_v2(request, host)
+    if reason != "": return WindowsManagedStreamAdmissionV2.Rejected(reason)
+    val lease = match _windows_pty_managed_reserve_v2():
+        case Ok(value): value
+        case Err(reason): return WindowsManagedStreamAdmissionV2.Rejected(reason)
+    var state = match _windows_pty_managed_load_v2(lease):
+        case Ok(value): value
+        case Err(reason): return WindowsManagedStreamAdmissionV2.CleanupRequired(lease, reason)
+    state.managed_host_groups = host.processor_groups
+    state.managed_host_processors = host.logical_processors
+    state.managed_host_quantum = host.cpu_quantum_millis
+    state.managed_host_nested = host.process_in_job
+    val pin = _windows_process_pin_retained_v2(state.heap, request.program, request.producer_digest,
+        request.launch_expires_at_unix_ms)
+    if pin.file != 0: state.managed_pins = state.managed_pins.push(pin.file)
+    state.managed_hash = pin.hash
+    state.managed_algorithm = pin.algorithm
+    state.temporaries = state.temporaries + pin.allocations
+    state.release_failed = pin.release_failed
+    if not pin.digest_matches:
+        return _windows_managed_failed_v2(lease, state, "Windows managed producer pin/digest or retained hash cleanup failed: " + pin.reason)
+    val launch = _windows_managed_prepare_v2(state, request)
+    state = launch.0
+    val prepared = launch.1
+    if prepared.error != "": return _windows_managed_failed_v2(lease, state, prepared.error)
+    val pipes = _windows_managed_raw_pipes_v2(state, lease)
+    state = pipes.0
+    if pipes.1 != "": return _windows_managed_failed_v2(lease, state, pipes.1)
+    state.job = CreateJobObjectW(0, 0)
+    if state.job == 0: return _windows_managed_failed_v2(lease, state, "Windows managed Job creation failed")
+    val policy = windows_managed_stream_job_policy_v2(state, request, host)
+    if policy.is_err(): return _windows_managed_failed_v2(lease, state, policy.unwrap_err())
+    val startup = state.arena + 12704
+    val process_info = state.arena + 12816
+    val allowed = state.arena + 12984
+    val _sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, state.arena + 48)
+    val size = volatile_read_u64(state.arena + 48)
+    if size <= 0 or size > 1048576: return _windows_managed_failed_v2(lease, state, "Windows managed attribute size invalid")
+    val attributes = HeapAlloc(state.heap, 8u32, size)
+    state.temporaries = state.temporaries.push(attributes)
+    if attributes == 0: return _windows_managed_failed_v2(lease, state, "Windows managed attribute allocation failed")
+    if InitializeProcThreadAttributeList(attributes, 1u32, 0u32, state.arena + 48) == 0:
+        return _windows_managed_failed_v2(lease, state, "Windows managed attribute initialization failed")
+    # Retain initialized attribute identity until checked collect, including failures.
+    state.managed_attributes = attributes
+    volatile_write_u64(allowed, state.input_server)
+    volatile_write_u64(allowed + 8, state.output_server)
+    if UpdateProcThreadAttribute(attributes, 0u32, 131074u64, allowed, 16u64, 0, 0) == 0:
+        return _windows_managed_failed_v2(lease, state, "Windows managed HANDLE_LIST admission failed")
+    volatile_write_u32(startup, 112)
+    volatile_write_u32(startup + 60, 256)
+    volatile_write_u64(startup + 80, state.input_server)
+    volatile_write_u64(startup + 88, state.output_server)
+    volatile_write_u64(startup + 96, state.output_server)
+    volatile_write_u64(startup + 104, attributes)
+    val before_create = windows_managed_stream_launch_check_v2(request, host, state.arena + 13024)
+    if before_create.is_err(): return _windows_managed_failed_v2(lease, state, before_create.unwrap_err())
+    state.managed_create_attempted = true
+    # Suspended + UNICODE_ENVIRONMENT + EXTENDED_STARTUPINFO + NO_WINDOW.
+    val created = CreateProcessW(prepared.application, prepared.command, 0, 0, 1,
+        134743044u32, prepared.environment, prepared.directory, startup, process_info)
+    state.process = volatile_read_u64(process_info)
+    state.thread = volatile_read_u64(process_info + 8)
+    state.pid = volatile_read_u32(process_info + 16)
+    if created == 0: return _windows_managed_failed_v2(lease, state, "Windows managed CreateProcess attempted; cleanup authority retained")
+    if state.process == 0 or state.thread == 0: return _windows_managed_failed_v2(lease, state, "Windows managed attempted child handles incomplete")
+    if AssignProcessToJobObject(state.job, state.process) == 0:
+        return _windows_managed_failed_v2(lease, state, "Windows managed suspended Job assignment failed")
+    state.managed_assigned = true
+    # Close parent copies of child-only endpoints before resume/EOF observation.
+    if CloseHandle(state.input_server) == 0: return _windows_managed_failed_v2(lease, state, "Windows managed parent input endpoint release failed")
+    state.input_server = 0
+    if CloseHandle(state.output_server) == 0: return _windows_managed_failed_v2(lease, state, "Windows managed parent output endpoint release failed")
+    state.output_server = 0
+    val before_resume = windows_managed_stream_launch_check_v2(request, host, state.arena + 13024)
+    if before_resume.is_err(): return _windows_managed_failed_v2(lease, state, before_resume.unwrap_err())
+    if ResumeThread(state.thread) == 4294967295u32:
+        return _windows_managed_failed_v2(lease, state, "Windows managed resume outcome failed or uncertain")
+    state.managed_started = true
+    state.managed_deadline = GetTickCount64() + (request.timeout_ms as u64)
+    val stored = _windows_pty_managed_store_v2(lease, state)
+    if stored.is_err(): return WindowsManagedStreamAdmissionV2.CleanupRequired(lease, stored.unwrap_err())
+    WindowsManagedStreamAdmissionV2.Started(lease)
+
+fn _windows_managed_receipt_v2(state: WindowsPtyStateV1, leader: bool, empty: bool) -> WindowsManagedStreamPollV2:
+    WindowsManagedStreamPollV2(leader_reaped: leader, job_empty: empty, pending_io: state.pending,
+        closed: state.closed, exit_code: state.managed_exit_code,
+        timed_out: state.managed_timed_out, cancelled: state.managed_cancelled)
+
+@unsafe(reason: "retained handles prove leader exit and exact Job active-member emptiness", capabilities: [ffi, raw_ptr])
+pub fn windows_managed_stream_poll_v2(lease: WindowsManagedStreamLeaseV2) -> Result<WindowsManagedStreamPollV2, text>:
+    val owner_thread = _windows_pty_owner_entry_result_v2()?
+    var state = _windows_pty_managed_load_v2(lease)?
+    if state.closed: return Ok(_windows_managed_receipt_v2(state, state.terminal_observed, state.terminal_observed))
+    if state.managed_create_attempted and state.process == 0 and not state.terminal_observed:
+        return Err("Windows attempted child identity unknown; ownership retained")
+    state = _windows_pty_managed_complete_v2(state)
+    state = _windows_pty_managed_store_v2(lease, state)?
+    if state.managed_started and not state.managed_cancelled and not state.terminal_observed:
+        val expected = WindowsManagedStreamHostV2(processor_groups: state.managed_host_groups,
+            logical_processors: state.managed_host_processors, process_in_job: state.managed_host_nested,
+            cpu_quantum_millis: state.managed_host_quantum)
+        val current = windows_managed_stream_host_at_v2(state.arena + 13024)
+        var drift = _windows_managed_host_drift_v2
+        match current:
+            case Err(_): drift = true
+            case Ok(observed):
+                if not windows_managed_host_profile_matches_v2(expected, observed): drift = true
+        if drift:
+            _windows_managed_host_drift_v2 = true
+            state.managed_profile_drift = true
+            state.failed = true
+            state.closing = true
+            state = _windows_pty_managed_store_v2(lease, state)?
+            if TerminateJobObject(state.job, 125u32) == 0:
+                return Err("Windows changed CPU profile; Job cancellation failed and ownership remains charged")
+            state.managed_cancelled = true
+            state = _windows_pty_managed_store_v2(lease, state)?
+    if (state.managed_started and not state.terminal_observed and not state.managed_cancelled and state.managed_deadline != 0u64 and
+            GetTickCount64() >= state.managed_deadline):
+        if TerminateJobObject(state.job, 124u32) == 0: return Err("Windows managed lifetime cancellation failed")
+        state.managed_timed_out = true
+        state.managed_cancelled = true
+        state.closing = true
+    var leader = state.terminal_observed or not state.managed_create_attempted
+    if state.process != 0:
+        val observed = WaitForSingleObject(state.process, 0u32)
+        if observed != 0u32 and observed != 258u32: return Err("Windows managed leader observation failed")
+        leader = observed == 0u32
+        if leader:
+            if GetExitCodeProcess(state.process, state.arena + 12960) == 0: return Err("Windows managed exit status unavailable")
+            state.managed_exit_code = volatile_read_u32(state.arena + 12960)
+    var empty = state.terminal_observed or (not state.managed_create_attempted and state.job == 0)
+    if state.job != 0:
+        if QueryInformationJobObject(state.job, 1, state.arena + 12904, 48u32, 0) == 0:
+            return Err("Windows managed Job membership unavailable")
+        empty = volatile_read_u32(state.arena + 12944) == 0u32
+    state = _windows_pty_managed_store_v2(lease, state)?
+    Ok(_windows_managed_receipt_v2(state, leader, empty))
+
+@unsafe(reason: "reads only peeked bounded bytes without decoding or unbounded waits", capabilities: [ffi, raw_ptr])
+pub fn windows_managed_stream_read_bytes_v2(lease: WindowsManagedStreamLeaseV2, max_bytes: i64) -> WindowsManagedStreamReadV2:
+    val owner_thread = _windows_pty_owner_entry_result_v2()
+    if owner_thread.is_err(): return WindowsManagedStreamReadV2.Failed(owner_thread.unwrap_err())
+    if max_bytes <= 0 or max_bytes > 8192: return WindowsManagedStreamReadV2.Failed("Windows managed read bound invalid")
+    var state = match _windows_pty_managed_load_v2(lease):
+        case Ok(value): value
+        case Err(reason): return WindowsManagedStreamReadV2.Failed(reason)
+    if state.managed_output_end: return WindowsManagedStreamReadV2.End
+    if state.closed or not state.managed_started or state.output == 0:
+        return WindowsManagedStreamReadV2.Failed("Windows managed output is unavailable")
+    if PeekNamedPipe(state.output, 0, 0u32, 0, state.arena + 24, 0) == 0:
+        val error = GetLastError()
+        if error == 109u32 or error == 233u32:
+            state.managed_output_end = true
+            val stored = _windows_pty_managed_store_v2(lease, state)
+            if stored.is_err(): return WindowsManagedStreamReadV2.Failed(stored.unwrap_err())
+            return WindowsManagedStreamReadV2.End
+        return WindowsManagedStreamReadV2.Failed("Windows managed output peek failed")
+    val available = volatile_read_u32(state.arena + 24) as i64
+    if available == 0: return WindowsManagedStreamReadV2.Pending
+    val count = if available < max_bytes: available else: max_bytes
+    if ReadFile(state.output, state.arena + 4224, count as u32, state.arena + 32, 0) == 0:
+        return WindowsManagedStreamReadV2.Failed("Windows managed output read failed")
+    val received = volatile_read_u32(state.arena + 32) as i64
+    if received <= 0 or received > count: return WindowsManagedStreamReadV2.Failed("Windows managed output count invalid")
+    var bytes: [u8] = [0u8; received]
+    for index in 0..received: bytes[index] = volatile_read_u8(state.arena + 4224 + index) as u8
+    WindowsManagedStreamReadV2.Data(bytes)
+
+@unsafe(reason: "submits one bounded input prefix into retained OVERLAPPED storage; zero is backpressure", capabilities: [ffi, raw_ptr])
+pub fn windows_managed_stream_write_some_bytes_v2(lease: WindowsManagedStreamLeaseV2, data: [u8]) -> Result<i64, text>:
+    val owner_thread = _windows_pty_owner_entry_result_v2()?
+    # Refresh topology/lifetime before accepting bytes. A detected drift closes
+    # admission/input and requests cancellation, never silently changes affinity.
+    val observed = windows_managed_stream_poll_v2(lease)?
+    var state = _windows_pty_managed_load_v2(lease)?
+    if state.closed or state.closing or state.failed or not state.managed_started:
+        return Err("Windows managed input is unavailable")
+    state = _windows_pty_managed_complete_v2(state)
+    state = _windows_pty_managed_store_v2(lease, state)?
+    if state.failed: return Err("Windows managed previous input failed; do not replay")
+    if state.pending or data.len() == 0: return Ok(0)
+    val count = if data.len() > 4096: 4096 else: data.len()
+    for index in 0..count: volatile_write_u8(state.arena + 128 + index, data[index] as i64)
+    for index in 0..3: volatile_write_u64(state.arena + 64 + index * 8, 0)
+    volatile_write_u32(state.arena + 40, 0)
+    if ResetEvent(state.event) == 0:
+        state.failed = true
+        val retained = _windows_pty_managed_store_v2(lease, state)?
+        return Err("Windows managed input event reset failed")
+    val submitted = WriteFile(state.input, state.arena + 128, count as u32, state.arena + 40, state.arena + 64)
+    if submitted != 0:
+        val written = volatile_read_u32(state.arena + 40) as i64
+        if written <= 0 or written > count:
+            state.failed = true
+            val retained = _windows_pty_managed_store_v2(lease, state)?
+            return Err("Windows managed synchronous input receipt invalid; do not replay")
+        return Ok(written)
+    if GetLastError() != 997u32:
+        state.failed = true
+        val retained = _windows_pty_managed_store_v2(lease, state)?
+        return Err("Windows managed input submission failed; do not replay")
+    state.pending = true
+    state.pending_size = count
+    val stored = _windows_pty_managed_store_v2(lease, state)?
+    Ok(count)
+
+pub fn windows_managed_stream_input_pending_v2(lease: WindowsManagedStreamLeaseV2) -> Result<bool, text>:
+    val owner_thread = _windows_pty_owner_entry_result_v2()?
+    var state = _windows_pty_managed_load_v2(lease)?
+    if state.closed: return Ok(false)
+    state = _windows_pty_managed_complete_v2(state)
+    val stored = _windows_pty_managed_store_v2(lease, state)?
+    if state.failed: return Err("Windows managed input completion failed or ambiguous")
+    Ok(state.pending)
+
+@unsafe(reason: "requests tree and IO cancellation without confusing the request with terminal cleanup", capabilities: [ffi, raw_ptr])
+pub fn windows_managed_stream_cancel_v2(lease: WindowsManagedStreamLeaseV2) -> Result<bool, text>:
+    val owner_thread = _windows_pty_owner_entry_result_v2()?
+    var state = _windows_pty_managed_load_v2(lease)?
+    if state.closed: return Ok(true)
+    state.closing = true
+    state = _windows_pty_managed_store_v2(lease, state)?
+    if state.job != 0 and TerminateJobObject(state.job, 125u32) == 0: return Err("Windows managed Job cancellation failed")
+    if state.process != 0 and not state.managed_assigned and WaitForSingleObject(state.process, 0u32) == 258u32:
+        if TerminateProcess(state.process, 125u32) == 0: return Err("Windows managed unassigned child cancellation failed")
+    if state.pending:
+        val requested = CancelIoEx(state.input, state.arena + 64)
+        if requested == 0 and GetLastError() != 1168u32: return Err("Windows managed pending IO cancellation failed")
+        state = _windows_pty_managed_complete_v2(state)
+    state.managed_cancelled = true
+    val stored = _windows_pty_managed_store_v2(lease, state)?
+    if state.managed_create_attempted and state.process == 0 and not state.terminal_observed:
+        return Err("Windows attempted child identity unknown; cancellation cannot prove cleanup")
+    Ok(true)
+
+pub fn windows_managed_stream_collect_v2(lease: WindowsManagedStreamLeaseV2) -> Result<WindowsManagedStreamPollV2, text>:
+    val owner_thread = _windows_pty_owner_entry_result_v2()?
+    val observed = windows_managed_stream_poll_v2(lease)?
+    if not observed.leader_reaped or not observed.job_empty or observed.pending_io:
+        return Err("Windows managed Job or IO remains nonterminal")
+    val state = _windows_pty_managed_load_v2(lease)?
+    if state.managed_started and not state.managed_output_end and not state.managed_cancelled:
+        return Err("Windows managed output must be drained or explicitly cancelled before collect")
+    if not state.closed:
+        val released = _windows_pty_managed_release_v2(lease)?
+    val final_state = _windows_pty_managed_load_v2(lease)?
+    if final_state.release_failed: return Err("Windows managed owner retains historical native release failure")
+    Ok(_windows_managed_receipt_v2(final_state, true, true))
+
+pub fn windows_managed_stream_resize_v2(lease: WindowsManagedStreamLeaseV2, rows: i32, cols: i32) -> Result<bool, text>:
+    val owner_thread = _windows_pty_owner_entry_result_v2()?
+    Err("RAW managed streams have no terminal to resize")

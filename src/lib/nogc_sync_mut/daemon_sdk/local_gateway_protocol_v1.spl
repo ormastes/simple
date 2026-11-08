@@ -1,0 +1,126 @@
+# Bounded gateway framing metadata. Kernel peer identity and live descriptor
+# authority never come from this decoder. Payload is separate raw UTF-8.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.string_core.str_len
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct LocalGatewayHeaderV1:
+    response: bool
+    request_id: text
+    action: text
+    operation_id: text
+    exit_code: i64
+    payload_bytes: i64
+    handoff_metadata: text
+
+pub struct LocalGatewayFrameLengthsV1:
+    header_bytes: i64
+    payload_bytes: i64
+
+pub fn local_gateway_header_validate_v1(value: LocalGatewayHeaderV1) -> Result<(), text>:
+    if not builder_digest_valid_v1(value.request_id): return Err("gateway-request-id")
+    val maximum = if value.response: 8388608 else: 2097152
+    if value.payload_bytes < 0 or value.payload_bytes > maximum: return Err("gateway-payload-size")
+    if value.response:
+        if value.action != "" or value.operation_id != "": return Err("gateway-response-fields")
+        if str_len(value.handoff_metadata) > 4096: return Err("gateway-handoff-size")
+        if not utf8_bytes_valid(text_to_utf8_bytes(value.handoff_metadata)): return Err("gateway-handoff-utf8")
+    else:
+        if (str_len(value.action) > 64 or not builder_identifier_valid_v1(value.action) or
+                str_len(value.operation_id) > 128): return Err("gateway-request-fields")
+        if value.operation_id != "" and not builder_identifier_valid_v1(value.operation_id):
+            return Err("gateway-operation-id")
+        if value.exit_code != 0 or value.handoff_metadata != "": return Err("gateway-request-fields")
+    Ok(())
+
+pub fn local_gateway_header_encode_v1(value: LocalGatewayHeaderV1) -> Result<text, text>:
+    local_gateway_header_validate_v1(value)?
+    var fields = {"kind": SdnValue.String(if value.response: "local-gateway-response" else: "local-gateway-request"),
+        "version": SdnValue.Int(1), "requestId": SdnValue.String(value.request_id),
+        "payloadBytes": SdnValue.Int(value.payload_bytes)}
+    if value.response:
+        fields["exitCode"] = SdnValue.Int(value.exit_code)
+        fields["handoffMetadata"] = SdnValue.String(value.handoff_metadata)
+    else:
+        fields["action"] = SdnValue.String(value.action)
+        fields["operationId"] = SdnValue.String(value.operation_id)
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 8192: return Err("gateway-header-size")
+    Ok(source)
+
+fn gateway_header_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("gateway-header-text:" + key)
+
+fn gateway_header_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("gateway-header-integer:" + key)
+
+pub fn local_gateway_header_decode_v1(source: text, response: bool) -> Result<LocalGatewayHeaderV1, text>:
+    if str_len(source) < 1 or str_len(source) > 8192: return Err("gateway-header-size")
+    if not utf8_bytes_valid(text_to_utf8_bytes(source)): return Err("gateway-header-utf8")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 8192,
+            max_depth: 2, max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 6)):
+        case Ok(value): value
+        case Err(_): return Err("gateway-header-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("gateway-header-object")
+    val names = if response:
+        ["kind", "version", "requestId", "payloadBytes", "exitCode", "handoffMetadata"]
+    else:
+        ["kind", "version", "requestId", "payloadBytes", "action", "operationId"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("gateway-header-unknown:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("gateway-header-missing:" + key)
+    val kind = if response: "local-gateway-response" else: "local-gateway-request"
+    if gateway_header_text_v1(fields, "kind")? != kind or gateway_header_int_v1(fields, "version")? != 1:
+        return Err("gateway-header-version-kind")
+    var value = LocalGatewayHeaderV1(response: response,
+        request_id: gateway_header_text_v1(fields, "requestId")?, action: "", operation_id: "",
+        exit_code: 0, payload_bytes: gateway_header_int_v1(fields, "payloadBytes")?, handoff_metadata: "")
+    if response:
+        value.exit_code = gateway_header_int_v1(fields, "exitCode")?
+        value.handoff_metadata = gateway_header_text_v1(fields, "handoffMetadata")?
+    else:
+        value.action = gateway_header_text_v1(fields, "action")?
+        value.operation_id = gateway_header_text_v1(fields, "operationId")?
+    if local_gateway_header_encode_v1(value)? != source: return Err("gateway-header-noncanonical")
+    Ok(value)
+
+# Fixed 16-byte prefix: LGW1, unsigned LE32 header count, unsigned LE64 payload
+# count. Reject high bytes before arithmetic; never allocate from unchecked size.
+pub fn local_gateway_prefix_decode_v1(bytes: [u8], response: bool) -> Result<LocalGatewayFrameLengthsV1, text>:
+    if bytes.len() != 16: return Err("gateway-prefix-size")
+    if bytes[0] != 76 or bytes[1] != 71 or bytes[2] != 87 or bytes[3] != 49:
+        return Err("gateway-prefix-magic")
+    if bytes[6] != 0 or bytes[7] != 0: return Err("gateway-header-size")
+    for index in 11..16:
+        if bytes[index] != 0: return Err("gateway-payload-size")
+    val header_bytes = (bytes[4] as i64) + (bytes[5] as i64) * 256
+    val payload_bytes = (bytes[8] as i64) + (bytes[9] as i64) * 256 + (bytes[10] as i64) * 65536
+    val maximum = if response: 8388608 else: 2097152
+    if header_bytes < 1 or header_bytes > 8192: return Err("gateway-header-size")
+    if payload_bytes > maximum: return Err("gateway-payload-size")
+    Ok(LocalGatewayFrameLengthsV1(header_bytes: header_bytes, payload_bytes: payload_bytes))
+
+pub fn local_gateway_prefix_encode_v1(value: LocalGatewayHeaderV1) -> Result<[u8], text>:
+    val header = local_gateway_header_encode_v1(value)?
+    val header_bytes = str_len(header)
+    val payload_bytes = value.payload_bytes
+    Ok([76, 71, 87, 49, (header_bytes % 256) as u8, (header_bytes / 256) as u8, 0, 0,
+        (payload_bytes % 256) as u8, ((payload_bytes / 256) % 256) as u8,
+        ((payload_bytes / 65536) % 256) as u8, 0, 0, 0, 0, 0])
+
+pub fn local_gateway_payload_decode_v1(value: LocalGatewayHeaderV1, bytes: [u8]) -> Result<text, text>:
+    local_gateway_header_validate_v1(value)?
+    if bytes.len() != value.payload_bytes: return Err("gateway-payload-count")
+    if not utf8_bytes_valid(bytes): return Err("gateway-payload-utf8")
+    Ok(bytes_to_text(bytes))

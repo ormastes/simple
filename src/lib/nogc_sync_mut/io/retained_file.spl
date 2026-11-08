@@ -4,6 +4,7 @@
 # finish. Unsupported host owners fail closed, never fall back to path reads.
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64, volatile_write_u8, volatile_write_u16}
 use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+pub use std.nogc_sync_mut.io.retained_private_credential_types_v1.*
 @when(os="windows"):
 use std.nogc_sync_mut.io.retained_file_abi.*
 @else:
@@ -597,13 +598,19 @@ fn retained_file_read_at(file: RetainedFile, offset: u64, maximum: i64) -> Resul
     retained_file_identity_unchanged(file)?
     Ok(bytes)
 
-@unsafe(reason: "flushes exact owned output descriptor before close", capabilities: [ffi])
+@unsafe(reason: "flushes exact owned descriptor before close; Linux permits readonly fsync", capabilities: [ffi])
 fn retained_file_sync(file: RetainedFile) -> bool:
-    if file.closed or not file.writable: return false
+    if file.closed: return false
     @when(os="windows"):
+    if not file.writable: return false
     FlushFileBuffers(file.handle) != 0
     @else:
+    @when(os="linux"):
     fsync(file.handle as i32) == 0
+    @else:
+    if not file.writable: return false
+    fsync(file.handle as i32) == 0
+    @end
     @end
 
 export RetainedFile, RetainedFileSecurityMetadataV1, retained_file_open
@@ -611,3 +618,82 @@ export RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1
 export retained_file_unchanged, retained_file_sync
 export retained_file_read_at, retained_file_identity_unchanged
 export retained_directory_is_real_no_follow
+
+# Credential lifecycle is native-authoritative even when this value is copied.
+@unsafe(reason: "queries opaque native credential token, never a descriptor", capabilities: [ffi])
+pub fn retained_private_credential_state_v1(owner: RetainedPrivateCredentialV1) -> RetainedPrivateCredentialStateTurnV1:
+    val code = rt_retained_private_credential_state_v1(owner.token)
+    val error = if code < 0: code else: rt_retained_private_credential_error_v1(owner.token)
+    RetainedPrivateCredentialStateTurnV1(owner: owner, state: retained_private_credential_phase_v1(code),
+        error: if code == 0: "private-credential-native-failure" else: retained_private_credential_error_name_v1(error))
+
+@unsafe(reason: "passes bounded owned path buffer to native acquiring owner", capabilities: [ffi, raw_ptr])
+pub fn retained_private_credential_open_v1(path: text) -> RetainedPrivateCredentialOpenTurnV1:
+    if path.byte_len() < 2 or path.byte_len() > 4095:
+        return RetainedPrivateCredentialOpenTurnV1(owner: nil, state: "unavailable", error: "private-credential-invalid-argument")
+    val ptr = _retained_path(path)
+    if ptr == 0: return RetainedPrivateCredentialOpenTurnV1(owner: nil, state: "unavailable", error: "private-credential-path-encoding")
+    val token = rt_retained_private_credential_open_v1(ptr, path.byte_len())
+    _retained_free(ptr)
+    if token <= 0:
+        return RetainedPrivateCredentialOpenTurnV1(owner: nil, state: "unavailable",
+            error: if token == 0: "private-credential-native-failure" else: retained_private_credential_error_name_v1(token))
+    val owner = RetainedPrivateCredentialV1(token: token)
+    val observed = retained_private_credential_state_v1(owner)
+    RetainedPrivateCredentialOpenTurnV1(owner: owner, state: observed.state, error: observed.error)
+
+@unsafe(reason: "copies bounded private bytes from native owner into temporary buffer", capabilities: [ffi, raw_ptr])
+pub fn retained_private_credential_read_v1(owner: RetainedPrivateCredentialV1) -> RetainedPrivateCredentialReadTurnV1:
+    val ptr = _retained_alloc(512u64)
+    if ptr == 0:
+        val observed = retained_private_credential_state_v1(owner)
+        return RetainedPrivateCredentialReadTurnV1(owner: owner, state: observed.state, bytes: [], error: "private-credential-memory")
+    val count = rt_retained_private_credential_read_v1(owner.token, ptr, 512)
+    var bytes: [u8] = []
+    if count > 0 and count <= 512:
+        for index in 0..count: bytes.push(volatile_read_u8(ptr + index) as u8)
+    _retained_free(ptr)
+    val observed = retained_private_credential_state_v1(owner)
+    if count <= 0 or count > 512:
+        return RetainedPrivateCredentialReadTurnV1(owner: owner, state: observed.state, bytes: [],
+            error: if count == 0: "private-credential-native-failure" else: retained_private_credential_error_name_v1(count))
+    if observed.state != "open" and observed.state != "published":
+        return RetainedPrivateCredentialReadTurnV1(owner: owner, state: observed.state, bytes: [], error: "private-credential-state-changed")
+    RetainedPrivateCredentialReadTurnV1(owner: owner, state: observed.state, bytes: bytes, error: "")
+
+fn _retained_private_mutation_v1(owner: RetainedPrivateCredentialV1, code: i64,
+        expected: text, closing: bool) -> RetainedPrivateCredentialMutationTurnV1:
+    val observed = retained_private_credential_state_v1(owner)
+    val completed = code == 0 and observed.state == expected
+    var error = retained_private_credential_error_name_v1(code)
+    if code == 0 and not completed: error = "private-credential-state-changed"
+    # Consumption derives ONLY from this close operation's locked native
+    # result. Later state/error observations can never upgrade an operation.
+    RetainedPrivateCredentialMutationTurnV1(owner: owner, state: observed.state, error: error,
+        completed: completed, consumed: closing and (code == 0 or code == -14))
+
+@unsafe(reason: "bounded buffers publish once with native anchored kernel no-replace", capabilities: [ffi, raw_ptr])
+pub fn retained_private_credential_publish_v1(owner: RetainedPrivateCredentialV1,
+        initial: [u8], ready: [u8]) -> RetainedPrivateCredentialMutationTurnV1:
+    if initial.len() < 1 or initial.len() > 512 or ready.len() < 1 or ready.len() > 512:
+        val rejected = rt_retained_private_credential_publish_v1(owner.token, 0, 0, 0, 0)
+        return _retained_private_mutation_v1(owner, rejected, "published", false)
+    val ptr = _retained_alloc(1024u64)
+    if ptr == 0:
+        val _rejected = rt_retained_private_credential_publish_v1(owner.token, 0, 0, 0, 0)
+        val observed = retained_private_credential_state_v1(owner)
+        return RetainedPrivateCredentialMutationTurnV1(owner: owner, state: observed.state,
+            error: "private-credential-memory", completed: false, consumed: false)
+    for index in 0..initial.len(): volatile_write_u8(ptr + index, initial[index] as u64)
+    for index in 0..ready.len(): volatile_write_u8(ptr + 512 + index, ready[index] as u64)
+    val code = rt_retained_private_credential_publish_v1(owner.token, ptr, initial.len(), ptr + 512, ready.len())
+    _retained_free(ptr)
+    _retained_private_mutation_v1(owner, code, "published", false)
+
+@unsafe(reason: "consumes authoritative native fd slots once, retaining uncertain token status", capabilities: [ffi])
+pub fn retained_private_credential_close_v1(owner: RetainedPrivateCredentialV1) -> RetainedPrivateCredentialMutationTurnV1:
+    val code = rt_retained_private_credential_close_v1(owner.token)
+    _retained_private_mutation_v1(owner, code, "closed", true)
+
+export retained_private_credential_open_v1, retained_private_credential_state_v1, retained_private_credential_read_v1
+export retained_private_credential_publish_v1, retained_private_credential_close_v1

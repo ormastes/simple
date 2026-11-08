@@ -1,0 +1,114 @@
+# In-process TUI driver (Agent F, typed-UI-interface wave 2).
+#
+# Drives an existing UITree/UIState app loop in-process:
+#   - snapshot(): the shared access snapshot (same lane sgtti uses)
+#   - resolve(): STRICT exactly-one-or-error via find_widget_strict (never
+#     first-match — Agent D's resolver semantics; ambiguity is an error)
+#   - press()/type_text(): feed UIEvent into common.ui.event.process_event,
+#     the same dispatch the real TUI backend (src/app/ui.tui/backend.spl) uses
+#   - capture(): interpret renderer ANSI output into a TerminalFrame
+#
+# Renderer reuse, not reimplementation: the existing TUI renderer is
+# app-layer (`app.ui.render.tui_widgets.render_tui_tree` painting a Screen
+# whose `render()` returns ANSI text). Library code must not import app
+# modules, so this driver does NOT call the renderer itself — app-level glue
+# passes `screen.render()` output to `capture()`, which interprets it via
+# `terminal_frame_feed`. `capture_snapshot_text()` provides the
+# renderer-free fallback projection (one line per visible node) for specs
+# with no app renderer in scope.
+#
+# Limitations (v1, stated): no PTY adapter (in-process only), no OSC/scroll
+# regions/IME in the frame interpreter, snapshot-text projection is a flat
+# per-node listing (no box layout).
+# Arch: doc/04_architecture/ui/testing/typed_ui_interface_arch.md §ActionPlan/drivers
+
+use common.ui.widget.{UITree, UIState, UIEvent, WidgetFindStrictResult}
+use common.ui.event.{process_event}
+use common.ui.access.{ui_access_snapshot_from_state}
+use common.ui.access_types.{UiAccessSnapshot}
+use common.spec.terminal_frame.{
+    TerminalFrame, terminal_frame_new, terminal_frame_feed
+}
+
+pub struct TuiDriver:
+    state: UIState
+    frame: TerminalFrame
+    steps: i64
+
+    static fn new(tree: UITree) -> TuiDriver:
+        TuiDriver(state: UIState.new(tree), frame: terminal_frame_new(80, 24), steps: 0)
+
+    static fn with_viewport(tree: UITree, width: i64, height: i64) -> TuiDriver:
+        TuiDriver(state: UIState.new(tree), frame: terminal_frame_new(width, height), steps: 0)
+
+    # -- observation --------------------------------------------------------
+
+    fn snapshot() -> UiAccessSnapshot:
+        ui_access_snapshot_from_state(self.state, [])
+
+    # Strict exactly-one-or-error resolution over the live tree. Never
+    # first-match: duplicates surface as an ambiguity error with candidates.
+    fn resolve(widget_id: text) -> WidgetFindStrictResult:
+        self.state.tree.find_widget_strict(widget_id)
+
+    fn focused_id() -> text:
+        self.state.focused_id
+
+    # -- input --------------------------------------------------------------
+
+    fn dispatch(event: UIEvent) -> TuiDriver:
+        var d = self
+        d.state = process_event(d.state, event)
+        d.steps = d.steps + 1
+        d
+
+    fn press(key: text) -> TuiDriver:
+        self.dispatch(UIEvent.KeyPress(key: key))
+
+    # Types into a strictly-resolved target: focuses it, then commits the
+    # value through the InputChange dispatch path. Returns unchanged driver
+    # with the resolution error preserved in `last_error` when the target
+    # does not resolve to exactly one widget.
+    fn type_text(widget_id: text, content: text) -> (TuiDriver, text):
+        val found = self.resolve(widget_id)
+        if not found.found:
+            return (self, found.error)
+        var d = self.dispatch(UIEvent.FocusEvent(target_id: found.node_id, kind: "focus"))
+        d = d.dispatch(UIEvent.InputChange(target_id: found.node_id, value: content))
+        (d, "")
+
+    # Fires a widget's action after strict resolution (buttons etc.).
+    fn activate(widget_id: text, action_name: text) -> (TuiDriver, text):
+        val found = self.resolve(widget_id)
+        if not found.found:
+            return (self, found.error)
+        val d = self.dispatch(UIEvent.Action(name: action_name))
+        (d, "")
+
+    # -- render capture ------------------------------------------------------
+
+    # Interpret a chunk of renderer ANSI output (e.g. Screen.render()) into
+    # the driver's terminal frame.
+    fn capture(ansi_output: text) -> TuiDriver:
+        var d = self
+        d.frame = terminal_frame_feed(d.frame, ansi_output)
+        d
+
+    # Renderer-free capture: project the access snapshot into plain lines
+    # (one per visible node: focus marker, kind, id, accessible text) and
+    # feed them through the frame. Deterministic and layout-free by design.
+    fn capture_snapshot_text() -> TuiDriver:
+        var d = self
+        val snap = d.snapshot()
+        var out = "\u{001b}[2J\u{001b}[H"
+        for node in snap.nodes:
+            if node.visible:
+                var marker = " "
+                if node.focused:
+                    marker = "*"
+                out = out + marker + node.kind + " " + node.widget_id
+                if node.text_value != "":
+                    out = out + ": " + node.text_value
+                out = out + "\r\n"
+        d.frame = terminal_frame_feed(d.frame, out)
+        d

@@ -24,3 +24,31 @@ No result here implies a callable controller service, host mutation, authenticat
 receipt provenance, provider execution or TaskRunner parent acceptance. These are
 necessary dependencies for the actual signed dispatch composition. Runtime and
 manual-generation checks remain pending an admitted runner and authorized build.
+
+## Authored GPU admission coverage — 2026-11-07
+
+Status remains **NOT_RUN / AWAITING_VERIFICATION**. This appended manual is
+handwritten from two new executable examples, not generated execution evidence.
+
+12. Across three inventory permutations and Prepared/Executing/Uncertain
+    reservation states, `gpu-0` remains busy and exactly `gpu-1` is selected.
+    The canonical reservation intent names that one device and independently
+    expects 2000 millicores and 4000 memory bytes. Applying the existing pure
+    host preparation transition leaves exactly `gpu-2` available. These are
+    literal expected identities, not comparisons only against the computed offer.
+13. Fully busy inventory queues for all three active states. An explicitly
+    Released reservation permits selection again, with exactly `gpu-0` chosen
+    regardless of its position after `gpu-1` in the inventory.
+
+These tests exercise pure placement and host-ledger admission, not physical
+device assignment or provider execution. No runtime/docgen was run; all later
+builds and tests retain the shared five-CPU maximum.
+
+## Explicit Windows eligibility — authored, not run
+
+The added scenario `Keep Windows Docker eligibility separate from Linux Podman
+hosts` submits a Windows/docker-process request to one Linux Podman and one
+Windows Docker inventory row. It selects exactly the Windows host, rejects the
+Linux row, and returns no offer when only that Linux row is available. This
+tests the existing placement proposal's exact OS/runtime-class eligibility;
+neither inventory row is native capability evidence.

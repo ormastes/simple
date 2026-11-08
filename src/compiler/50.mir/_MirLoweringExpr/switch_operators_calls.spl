@@ -904,6 +904,14 @@ impl MirLowering:
         -> x, any non-handle word -> itself (so a raw word that reached an
         Optional local through a path that does not box yet is left intact).
         doc/08_tracking/bug/optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md"""
+        self.option_scalar_payload_via(local, "rt_unwrap_or_self")
+
+    me option_scalar_payload_via(local: LocalId, unwrap_symbol: text) -> LocalId:
+        """option_scalar_payload_of with an explicit unwrap symbol. Declared
+        integer sinks pass rt_unwrap_or_trap, so a None reaching a
+        non-optional slot aborts instead of reading as its payload word 3.
+        Eq paths and other None-tolerant reads keep rt_unwrap_or_self.
+        doc/08_tracking/bug/native_option_int_sink_miss_and_payload_three_2026-11-07.md"""
         var inner_type: HirType? = nil
         match self.find_local_hir_type(local.id):
             case Some(found):
@@ -919,7 +927,7 @@ impl MirLowering:
             return local
         var b = self.builder
         val unwrap_fn = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_unwrap_or_self"),
+            MirConstValue.Str(unwrap_symbol),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         val unwrapped = b.emit_call(unwrap_fn, [mir_operand_copy(local)], MirType.i64())
@@ -956,12 +964,12 @@ impl MirLowering:
         array get/at/first/last producer. Other Optional(Any) producers
         (`any?` params, tagged raw-probe dict reads) carry a TAGGED payload;
         for those this returns the tagged word instead of the handle --
-        still wrong, no longer a pointer. A MISS (None, payload 3) also
-        yields 3 here, as rt_unwrap_or_self does for typed `[i64].get`.
-        Both are tracked in
+        still wrong, no longer a pointer. A None reaching the sink traps
+        (rt_unwrap_or_trap) instead of reading as its payload word 3.
+        Tracked in
         doc/08_tracking/bug/native_option_int_sink_miss_and_payload_three_2026-11-07.md
         doc/08_tracking/bug/native_list_any_get_i64_sink_returns_option_handle_2026-11-07.md"""
-        val scalar_payload = self.option_scalar_payload_of(local)
+        val scalar_payload = self.option_scalar_payload_via(local, "rt_unwrap_or_trap")
         if scalar_payload.id != local.id:
             return scalar_payload
         match sink_type.kind:
@@ -982,7 +990,7 @@ impl MirLowering:
             return local
         var b = self.builder
         val unwrap_fn = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_unwrap_or_self"),
+            MirConstValue.Str("rt_unwrap_or_trap"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         val unwrapped = b.emit_call(unwrap_fn, [mir_operand_copy(local)], MirType.i64())
@@ -1821,7 +1829,7 @@ impl MirLowering:
         # statement as the arm's last expression) leaves `result` undefined
         # on that path -- a NULL llvm::Value* read downstream (ICmp/binop
         # SIGSEGV in llvm-lib). Define it here if no arm ever did.
-        if not result_defined:
+        if not result_defined and not self.merge_result_is_payloadless(result):
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
             self.builder.set_local_type(result, inferred_ty)
@@ -1959,7 +1967,7 @@ impl MirLowering:
         # falls through to merge without producing a value leaves `result`
         # undefined on that path -- a NULL llvm::Value* read downstream
         # (ICmp/binop SIGSEGV in llvm-lib). Define it here if no arm ever did.
-        if not result_defined:
+        if not result_defined and not self.merge_result_is_payloadless(result):
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
             self.builder.set_local_type(result, inferred_ty)
@@ -3866,7 +3874,7 @@ impl MirLowering:
         b_tail.terminate_goto(merge_block)
         b_tail.switch_to_block(merge_block)
         self.builder = b_tail
-        if not result_defined:
+        if not result_defined and not self.merge_result_is_payloadless(result):
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
             self.builder.set_local_type(result, inferred_ty)
@@ -5566,7 +5574,7 @@ impl MirLowering:
             self.builder.emit(MirInst(kind: MirInstKind.ResultMatchSemantic(
                 scrut_local, result, result_ok_arm, result_err_arm,
                 merge_block, result_ok_payload, result_err_payload), span: nil))
-        if not result_defined:
+        if not result_defined and not self.merge_result_is_payloadless(result):
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
             self.builder.set_local_type(result, inferred_ty)
@@ -6299,6 +6307,7 @@ impl MirLowering:
                                                 kind: HirTypeKind.Optional(inner_type), span: args[0].span
                                             ), 2, 0)
                                         case _: ()
+                                    self.remember_some_record_payload_owner(tagged.id, inner_type)
                             case _: ()
             elif enum_name != "Result":
                 # Avoid both Option<SymbolId> and Option<HirSymbol> transport on
@@ -8311,6 +8320,8 @@ impl MirLowering:
                 # parent re-materialization is idempotent). Without the
                 # parent's ambiguity table it must not start recording one.
                 lw.provider_session_names = self.provider_session_names
+                lw.provider_session_content_key = self.provider_session_content_key
+                lw.provider_session_requested_key = self.provider_session_requested_key
                 lw.provider_session_links = self.provider_session_links
                 lw.provider_session_links_ready = self.provider_session_links_ready
                 lw.provider_method_row_keys = self.provider_method_row_keys
@@ -8323,6 +8334,20 @@ impl MirLowering:
                 lw.provider_method_consumer = self.provider_method_consumer
                 lw.provider_methods_eager = self.provider_methods_eager
                 lw.provider_method_record_ambiguity = self.declaration_repository != nil and self.provider_method_record_ambiguity
+                # Provider trait-impl rows are materialized on lookup as well
+                # (trait_impl_owners/methods_materialize_v1); the lift reads
+                # the same session index. Re-materializing is idempotent.
+                lw.provider_trait_owner_rows = self.provider_trait_owner_rows
+                lw.provider_trait_owner_row_provider = self.provider_trait_owner_row_provider
+                lw.provider_trait_owner_row_owner = self.provider_trait_owner_row_owner
+                lw.provider_trait_method_rows = self.provider_trait_method_rows
+                lw.provider_trait_scalar_rows = self.provider_trait_scalar_rows
+                lw.provider_trait_method_row_provider = self.provider_trait_method_row_provider
+                lw.provider_trait_method_row_symbol = self.provider_trait_method_row_symbol
+                lw.provider_trait_method_row_name = self.provider_trait_method_row_name
+                lw.provider_trait_method_row_scalar_owner = self.provider_trait_method_row_scalar_owner
+                lw.provider_trait_method_row_scalar_settled = self.provider_trait_method_row_scalar_settled
+                lw.provider_trait_demand_active = self.provider_trait_demand_active
                 # Provider layout rows are registered on demand too. The lifted
                 # body demands only leaves this module has not registered yet
                 # (a snapshot of the parent's set), writing the shared layout

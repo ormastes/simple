@@ -1,0 +1,240 @@
+# @req HOST-RECONCILIATION-01 HOST-RECONCILIATION-02 HOST-RECONCILIATION-03
+# NOT_RUN: actual journal + actual Windows scripted adapter/common wrapper.
+use test.fixtures.orchestration.host_service_reconciliation_fixture_v2.*
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.{windows_adapter_consumed_fixture_v2, windows_adapter_request_fixture_v2, windows_adapter_deadline_fixture_v2, windows_adapter_admission_fixture_v2}
+use std.nogc_sync_mut.orchestration.host_service_reconciliation_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.service_v2.*
+use std.nogc_async_mut.container.api_v2.simple_container_apply_v2
+use std.nogc_async_mut.container.service_v2.{simple_container_inventory_service_v2, simple_container_complete_quarantine_v2}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_create_exclusive, file_remove}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn reconciliation_receipt_fields_v2(path: text) -> Dict<text, SdnValue>:
+    val bytes = file_read_regular_no_follow_bounded(path, 4194304).unwrap()
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 4194304)).unwrap()
+    expect(sdn_encode_canonical(parsed.value) + "\n").to_equal(bytes)
+    match parsed.value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("reconciliation receipt is not an object")
+
+fn reconciliation_classification_v2(path: text, operation_id: text) -> text:
+    val fields = reconciliation_receipt_fields_v2(path)
+    val rows = match fields["reservations"]:
+        case SdnValue.Array(values): values
+        case _: fail("reconciliation classifications are not an array")
+    for row in rows:
+        val values = match row:
+            case SdnValue.Dict(items): items
+            case _: fail("reconciliation classification is not an object")
+        if values["operationId"] == SdnValue.String(operation_id):
+            match values["state"]:
+                case SdnValue.String(state): return state
+                case _: fail("reconciliation classification state is not text")
+    fail("required reconciliation classification missing")
+
+describe "Actual host service startup reconciliation with explicitly scripted Windows inventory":
+    it "refuses unsafe existing receipt permissions and preserves partial private stages during retry":
+        val fixture = host_reconciliation_fixture_v2("empty")
+        val directory = fixture.root + "/service-reconciliations"
+        assert(dir_create(directory, true))
+        val orphan = directory + "/.reconciliation-stage-interrupted"
+        assert(dir_create(orphan, true))
+        assert(file_create_exclusive(orphan + "/receipt.sdn", "partial staging bytes"))
+        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-service-reconciliation"),
+            "scope": SdnValue.String(container_host_scope_bytes_v2(fixture.scope).unwrap()),
+            "inventoryDigest": SdnValue.String(container_service_inventory_digest_v2("windows-docker-process", fixture.scope, []).unwrap()),
+            "journalAuthorityDigest": SdnValue.String(fixture.owner.journal.authority_digest),
+            "journalCommitDigest": SdnValue.String(fixture.owner.journal.revision),
+            "journalSequence": SdnValue.Int(fixture.owner.journal.sequence),
+            "durabilityProfile": SdnValue.String("process-crash-v1"), "reservations": SdnValue.Array([])}
+        val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+        val path = directory + "/" + sha256_text(bytes) + ".sdn"
+        assert(file_create_exclusive(path, bytes))
+        assert(file_set_mode(path, 0o644))
+        val refused = host_service_reconcile_v2(fixture.owner, host_reconciliation_retry_container_v2())
+        expect(refused.error).to_equal("host-service-receipt-mode-failed")
+        assert(not refused.admission.?)
+        host_reconciliation_assert_quarantined_v2(refused.container)
+        expect(file_mode_bits(path)).to_equal(0o644)
+        # Explicit local-admin repair of the fixture permission; production
+        # does not silently chmod an existing destination or delete evidence.
+        assert(file_set_mode(path, 0o600))
+        val retried = host_service_reconcile_v2(refused.owner, refused.container)
+        expect(retried.error).to_equal("")
+        expect(retried.receipt_path).to_equal(path)
+        expect(file_read_regular_no_follow_bounded(path, 4194304).unwrap()).to_equal(bytes)
+        expect(file_read_regular_no_follow_bounded(orphan + "/receipt.sdn", 4096).unwrap()).to_equal("partial staging bytes")
+        assert(host_capacity_owner_close_v1(retried.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "retries publication after cancellation advanced the journal without a scope-only receipt collision":
+        val fixture = host_reconciliation_fixture_v2("admitted")
+        val directory = fixture.root + "/service-reconciliations"
+        assert(file_create_exclusive(directory, "publication obstruction\n"))
+        val failed = host_service_reconcile_v2(fixture.owner, host_reconciliation_retry_container_v2())
+        assert(failed.error != "")
+        assert(not failed.admission.?)
+        assert(not failed.owner.ledger.continuity_proven)
+        assert(failed.owner.journal.sequence > fixture.owner.journal.sequence)
+        expect(distributed_operation_journal_lookup_v2(failed.owner.journal, fixture.entry.runtime.operation_id).unwrap().state).to_equal("cancelled")
+        host_reconciliation_assert_quarantined_v2(failed.container)
+        assert(file_remove(directory))
+        val recovered = host_service_reconcile_v2(failed.owner, failed.container)
+        expect(recovered.error).to_equal("")
+        assert(recovered.admission.?)
+        expect(recovered.owner.journal.sequence).to_equal(failed.owner.journal.sequence)
+        val bytes = file_read_regular_no_follow_bounded(recovered.receipt_path, 4194304).unwrap()
+        expect(recovered.receipt_path).to_equal(directory + "/" + sha256_text(bytes) + ".sdn")
+        val fields = reconciliation_receipt_fields_v2(recovered.receipt_path)
+        expect(fields["journalCommitDigest"]).to_equal(SdnValue.String(recovered.owner.journal.revision))
+        expect(recovered.admission.unwrap().host_journal_commit_digest).to_equal(recovered.owner.journal.revision)
+        expect(recovered.admission.unwrap().inventory_digest).to_equal(container_service_inventory_digest_v2("windows-docker-process", fixture.scope, []).unwrap())
+        expect(host_available_capacity_v1(recovered.owner.ledger).unwrap().cpu_millis).to_equal(4000)
+        assert(host_capacity_owner_close_v1(recovered.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "requires actual post-writer refresh and durable receipt before empty quarantine becomes ready":
+        val fixture = host_reconciliation_fixture_v2("empty")
+        val container = host_reconciliation_container_v2([])
+        host_reconciliation_assert_quarantined_v2(container)
+        val turn = host_service_reconcile_v2(fixture.owner, container)
+        expect(turn.error).to_equal("")
+        assert(turn.admission.?)
+        assert(turn.owner.ledger.continuity_proven)
+        host_reconciliation_assert_admitted_v2(turn.container)
+        expect(windows_adapter_consumed_fixture_v2(turn.container)).to_equal(0)
+        expect(host_available_capacity_v1(turn.owner.ledger).unwrap().cpu_millis).to_equal(4000)
+        val receipt = reconciliation_receipt_fields_v2(turn.receipt_path)
+        expect(receipt["durabilityProfile"]).to_equal(SdnValue.String("process-crash-v1"))
+        expect(receipt["journalSequence"]).to_equal(SdnValue.Int(turn.owner.journal.sequence))
+        expect(receipt["journalCommitDigest"]).to_equal(SdnValue.String(turn.owner.journal.revision))
+        expect(file_mode_bits(turn.receipt_path)).to_equal(0o600)
+        expect(turn.admission.unwrap().inventory_digest).to_equal(container_service_inventory_digest_v2("windows-docker-process", fixture.scope, []).unwrap())
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "releases proven no-effect admitted rows and overcapacity released history only through real reconciliation":
+        for history in ["admitted", "released-history"]:
+            val fixture = host_reconciliation_fixture_v2(history)
+            if history == "released-history":
+                expect(fixture.owner.ledger.reservations.len()).to_equal(3)
+                # Three historical2000cpu/512MiB releases sum above4000cpu/1GiB.
+                # Quarantine open must still return a nonadmitting recovery owner.
+                expect(host_available_capacity_v1(fixture.owner.ledger).unwrap_err()).to_equal("capacity-exceeded")
+            val original = fixture.owner
+            val turn = host_service_reconcile_v2(original, host_reconciliation_container_v2([]))
+            expect(turn.error).to_equal("")
+            assert(turn.admission.?)
+            assert(turn.owner.ledger.continuity_proven)
+            expect(host_available_capacity_v1(turn.owner.ledger).unwrap().cpu_millis).to_equal(4000)
+            expect(host_available_capacity_v1(turn.owner.ledger).unwrap().memory_bytes).to_equal(1073741824)
+            for row in turn.owner.ledger.reservations:
+                expect(row.state).to_equal(HostReservationStateV1.Released)
+                expect(distributed_operation_journal_lookup_v2(turn.owner.journal, row.operation_id).unwrap().state).to_equal("cancelled")
+                expect(reconciliation_classification_v2(turn.receipt_path, row.operation_id)).to_equal("released-no-effect")
+            if history == "admitted":
+                # Cancellation changed CURRENT. An actual stale writer copy must
+                # fail before another inventory query/admission can occur.
+                val stale_reason = distributed_operation_journal_lookup_v2(original.journal, "").unwrap_err()
+                val stale = host_service_reconcile_v2(original, turn.container)
+                expect(stale.error).to_equal(stale_reason)
+                assert(not stale.admission.?)
+            assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+            dir_remove(fixture.root, true)
+
+    it "keeps absent executing-to-unknown rows charged and refuses unknown overcapacity admission":
+        for history in ["executing", "unknown-over-capacity"]:
+            val fixture = host_reconciliation_fixture_v2(history)
+            expect(distributed_operation_journal_lookup_v2(fixture.owner.journal, fixture.entry.runtime.operation_id).unwrap().state).to_equal("outcome-unknown")
+            val turn = host_service_reconcile_v2(fixture.owner, host_reconciliation_container_v2([]))
+            expect(turn.owner.ledger.reservations[0].state).to_equal(HostReservationStateV1.Uncertain)
+            expect(distributed_operation_journal_lookup_v2(turn.owner.journal, fixture.entry.runtime.operation_id).unwrap().state).to_equal("outcome-unknown")
+            if history == "executing":
+                expect(turn.error).to_equal("")
+                assert(turn.admission.?)
+                expect(host_available_capacity_v1(turn.owner.ledger).unwrap().cpu_millis).to_equal(2000)
+                expect(reconciliation_classification_v2(turn.receipt_path, fixture.entry.runtime.operation_id)).to_equal("charged-uncertain")
+            else:
+                expect(turn.error).to_equal("capacity-exceeded")
+                assert(not turn.admission.?)
+                assert(not turn.owner.ledger.continuity_proven)
+                expect(turn.receipt_path).to_equal("")
+                host_reconciliation_assert_quarantined_v2(turn.container)
+                val blocked = simple_container_apply_v2(turn.container, "create", windows_adapter_request_fixture_v2(), windows_adapter_deadline_fixture_v2())
+                expect(blocked.operation.reason).to_equal("windows-container-startup-quarantine-pending")
+                expect(windows_adapter_consumed_fixture_v2(blocked.owner)).to_equal(0)
+            assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+            dir_remove(fixture.root, true)
+
+    it "accounts exact retained old inventory without adopting its incarnation or freeing its charge":
+        val fixture = host_reconciliation_fixture_v2("executing")
+        assert(fixture.entry.scope.continuity_id != fixture.scope.continuity_id)
+        val turn = host_service_reconcile_v2(fixture.owner, host_reconciliation_container_v2([fixture.entry]))
+        expect(turn.error).to_equal("")
+        assert(turn.admission.?)
+        host_reconciliation_assert_admitted_v2(turn.container)
+        expect(host_available_capacity_v1(turn.owner.ledger).unwrap().cpu_millis).to_equal(2000)
+        expect(host_available_capacity_v1(turn.owner.ledger).unwrap().memory_bytes).to_equal(536870912)
+        expect(turn.owner.ledger.reservations[0].state).to_equal(HostReservationStateV1.Uncertain)
+        expect(reconciliation_classification_v2(turn.receipt_path, fixture.entry.runtime.operation_id)).to_equal("charged-uncertain")
+        expect(windows_adapter_consumed_fixture_v2(turn.container)).to_equal(0)
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "refuses unaccounted inventory, native effects without begin, and retained digest or charge mismatches":
+        for mode in ["unaccounted", "without-begin", "digest-mismatch", "charge-mismatch"]:
+            val fixture = host_reconciliation_fixture_v2(if mode == "unaccounted": "empty" elif mode == "without-begin": "admitted" else: "executing")
+            var entry = fixture.entry
+            if mode == "digest-mismatch": entry.request_digest = "b".repeat(64)
+            if mode == "charge-mismatch": entry.cpu_millis = entry.cpu_millis + 1
+            val container = if mode == "unaccounted": host_reconciliation_changed_inventory_v2([entry])
+                else: host_reconciliation_container_v2([entry])
+            val turn = host_service_reconcile_v2(fixture.owner, container)
+            val expected = if mode == "unaccounted": "OPERATION_NOT_FOUND"
+                elif mode == "without-begin": "host-service-native-effect-without-execution-intent"
+                elif mode == "digest-mismatch": "host-service-inventory-retained-request-mismatch"
+                else: "host-service-inventory-charge-mismatch"
+            expect(turn.error).to_equal(expected)
+            assert(not turn.admission.?)
+            assert(not turn.owner.ledger.continuity_proven)
+            expect(turn.receipt_path).to_equal("")
+            host_reconciliation_assert_quarantined_v2(turn.container)
+            expect(windows_adapter_consumed_fixture_v2(turn.container)).to_equal(0)
+            assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+            dir_remove(fixture.root, true)
+
+    it "ignores the factory snapshot and invalidates a previously refreshed ACK after mandatory refresh fails":
+        val fixture = host_reconciliation_fixture_v2("empty")
+        val container = host_reconciliation_container_v2([], "fixture-native-inventory-failed")
+        val initial_ack = windows_adapter_admission_fixture_v2([])
+        val premature = simple_container_complete_quarantine_v2(container, initial_ack)
+        expect(premature.error).to_equal("windows-container-startup-inventory-refresh-required")
+        assert(not premature.admitted)
+        val earlier = simple_container_inventory_service_v2(premature.owner)
+        expect(earlier.error).to_equal("")
+        expect(earlier.inventory.unwrap().len()).to_equal(0)
+        val stale_ack = ContainerServiceAdmissionV2(scope_fence_id: container_scope_fence_id_v2(fixture.scope).unwrap(),
+            inventory_digest: earlier.inventory_digest, host_journal_commit_digest: fixture.owner.journal.revision,
+            host_journal_revision: fixture.owner.journal.sequence, durability_profile: "process-crash-v1")
+        val turn = host_service_reconcile_v2(fixture.owner, earlier.owner)
+        expect(turn.error).to_equal("host-service-inventory-unavailable:fixture-native-inventory-failed")
+        assert(not turn.admission.?)
+        assert(not turn.owner.ledger.continuity_proven)
+        val rejected = simple_container_complete_quarantine_v2(turn.container, stale_ack)
+        expect(rejected.error).to_equal("windows-container-startup-inventory-refresh-required")
+        assert(not rejected.admitted)
+        host_reconciliation_assert_quarantined_v2(rejected.owner)
+        expect(windows_adapter_consumed_fixture_v2(rejected.owner)).to_equal(0)
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+        dir_remove(fixture.root, true)

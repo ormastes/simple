@@ -1,0 +1,128 @@
+# Canonical request data. Authentication and retained issuance are separate.
+use std.common.contracts.mux.session_runtime_control_v1.SessionRuntimeControlKindV1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use os.apps.smux.client_leases.client_lease_token_valid
+use std.common.contracts.mux.request_validation_v1.mux_validate_name_v1
+use std.common.base_encoding.base64.{base64url_encode, base64url_decode_strict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+
+pub struct SmuxRuntimeControlRequestV1:
+    action: text
+    binding_uid: text
+    control_kind: SessionRuntimeControlKindV1
+    client_id: text
+    attachment_token: text
+    expected_revision: i64
+    nonce: text
+    payload: text
+    columns: i64
+    rows: i64
+    expected_target_digest: text = ""
+
+pub fn smux_runtime_control_kind_text_v1(kind: SessionRuntimeControlKindV1) -> text:
+    match kind:
+        case SessionRuntimeControlKindV1.Input: "input"
+        case SessionRuntimeControlKindV1.Geometry: "geometry"
+
+pub fn smux_runtime_control_request_validate_v1(request: SmuxRuntimeControlRequestV1) -> Result<(), text>:
+    if not ["resolve", "issue", "inspect", "revoke", "input", "resize"].contains(request.action):
+        return Err("runtime-control-action")
+    if not builder_identifier_valid_v1(request.binding_uid) or request.expected_revision < 0:
+        return Err("runtime-control-request-identity")
+    if request.action == "issue" or request.action == "resolve":
+        if request.expected_revision == 9223372036854775807: return Err("runtime-control-revision-exhausted")
+        if mux_validate_name_v1(request.client_id).is_err() or not client_lease_token_valid(request.attachment_token):
+            return Err("runtime-control-attachment")
+    elif request.client_id != "" or request.attachment_token != "":
+        return Err("runtime-control-unexpected-attachment")
+    if request.action == "issue":
+        if request.expected_target_digest.len() != 64 or not builder_digest_valid_v1(request.expected_target_digest):
+            return Err("runtime-control-expected-target")
+    elif request.expected_target_digest != "": return Err("runtime-control-unexpected-target")
+    if request.action == "input" or request.action == "resize":
+        if request.nonce.len() != 64 or not builder_digest_valid_v1(request.nonce) or request.expected_revision < 1:
+            return Err("runtime-control-capability-shape")
+    elif request.nonce != "": return Err("runtime-control-unexpected-nonce")
+    if (request.action == "inspect" or request.action == "resolve") and request.expected_revision != 0:
+        return Err("runtime-control-inspect-revision")
+    if request.action == "input":
+        if (request.control_kind != SessionRuntimeControlKindV1.Input or request.payload.bytes().len() == 0 or
+                request.payload.bytes().len() > 1024): return Err("runtime-control-input-bound")
+    elif request.payload != "": return Err("runtime-control-unexpected-payload")
+    if request.action == "resize":
+        if (request.control_kind != SessionRuntimeControlKindV1.Geometry or request.columns < 1 or request.columns > 512 or
+                request.rows < 1 or request.rows > 256 or request.columns * request.rows > 60000):
+            return Err("runtime-control-geometry-bound")
+    elif request.columns != 0 or request.rows != 0: return Err("runtime-control-unexpected-geometry")
+    Ok(())
+
+pub fn smux_runtime_control_request_encode_v1(request: SmuxRuntimeControlRequestV1) -> Result<text, text>:
+    smux_runtime_control_request_validate_v1(request)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("smux-runtime-control-request"),
+        "action": SdnValue.String(request.action), "bindingUid": SdnValue.String(request.binding_uid),
+        "controlKind": SdnValue.String(smux_runtime_control_kind_text_v1(request.control_kind)),
+        "clientId": SdnValue.String(request.client_id), "attachmentToken": SdnValue.String(request.attachment_token),
+        "expectedRevision": SdnValue.Int(request.expected_revision), "nonce": SdnValue.String(request.nonce),
+        "payload": SdnValue.String(request.payload), "columns": SdnValue.Int(request.columns), "rows": SdnValue.Int(request.rows),
+        "expectedTargetDigest": SdnValue.String(request.expected_target_digest)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields))
+    if bytes.bytes().len() > 2048: return Err("runtime-control-request-bound")
+    Ok(bytes)
+
+pub fn smux_runtime_control_field_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("runtime-control-text")
+
+pub fn smux_runtime_control_field_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("runtime-control-integer")
+
+pub fn smux_runtime_control_fields_v1(bytes: text, keys: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if bytes.bytes().len() == 0 or bytes.bytes().len() > 2048: return Err("runtime-control-wire-bound")
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 2048,
+        max_depth: 2, max_nodes: 80, max_rows: 0, max_cells: 0, max_columns: 24))
+    if parsed.is_err(): return Err("runtime-control-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("runtime-control-object")
+    if fields.len() != keys.len(): return Err("runtime-control-fields")
+    for key in keys:
+        if not fields.contains_key(key): return Err("runtime-control-fields")
+    if smux_runtime_control_field_int_v1(fields, "version")? != 1: return Err("runtime-control-version")
+    if bytes != sdn_encode_canonical(SdnValue.Dict(fields)): return Err("runtime-control-noncanonical")
+    Ok(fields)
+
+pub fn smux_runtime_control_request_decode_v1(bytes: text) -> Result<SmuxRuntimeControlRequestV1, text>:
+    val fields = smux_runtime_control_fields_v1(bytes, ["version", "kind", "action", "bindingUid", "controlKind", "clientId",
+        "attachmentToken", "expectedRevision", "nonce", "payload", "columns", "rows", "expectedTargetDigest"])?
+    if smux_runtime_control_field_text_v1(fields, "kind")? != "smux-runtime-control-request": return Err("runtime-control-kind")
+    val control_kind = match smux_runtime_control_field_text_v1(fields, "controlKind")?:
+        case "input": SessionRuntimeControlKindV1.Input
+        case "geometry": SessionRuntimeControlKindV1.Geometry
+        case _: return Err("runtime-control-right")
+    val request = SmuxRuntimeControlRequestV1(action: smux_runtime_control_field_text_v1(fields, "action")?,
+        binding_uid: smux_runtime_control_field_text_v1(fields, "bindingUid")?, control_kind: control_kind,
+        client_id: smux_runtime_control_field_text_v1(fields, "clientId")?, attachment_token: smux_runtime_control_field_text_v1(fields, "attachmentToken")?,
+        expected_revision: smux_runtime_control_field_int_v1(fields, "expectedRevision")?, nonce: smux_runtime_control_field_text_v1(fields, "nonce")?,
+        payload: smux_runtime_control_field_text_v1(fields, "payload")?, columns: smux_runtime_control_field_int_v1(fields, "columns")?,
+        rows: smux_runtime_control_field_int_v1(fields, "rows")?, expected_target_digest: smux_runtime_control_field_text_v1(fields, "expectedTargetDigest")?)
+    smux_runtime_control_request_validate_v1(request)?
+    Ok(request)
+
+pub fn smux_runtime_control_request_token_v1(request: SmuxRuntimeControlRequestV1) -> Result<text, text>:
+    Ok(base64url_encode(smux_runtime_control_request_encode_v1(request)?))
+
+pub fn smux_runtime_control_request_from_token_v1(token: text) -> Result<SmuxRuntimeControlRequestV1, text>:
+    if token.bytes().len() == 0 or token.bytes().len() > 2731: return Err("runtime-control-token-bound")
+    val bytes = base64url_decode_strict(token)?
+    if base64url_encode(bytes) != token: return Err("runtime-control-token-noncanonical")
+    smux_runtime_control_request_decode_v1(bytes)
+
+pub fn smux_runtime_control_request_digest_v1(request: SmuxRuntimeControlRequestV1) -> Result<text, text>:
+    Ok(sha256_text(smux_runtime_control_request_encode_v1(request)?))

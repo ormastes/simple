@@ -9,9 +9,74 @@
 //! - Relative: Compute relative path
 //! - Separator: Get platform-specific path separator
 
-use crate::value::collections::rt_string_new;
+use crate::value::collections::{rt_string_new, RuntimeString};
+use crate::value::heap::{with_typed_ptr, HeapObjectType};
 use crate::value::RuntimeValue;
 use std::path::Path;
+
+// Copy the selected counted-byte suffix while the managed string is guarded.
+// No pointer into the input survives this function or crosses result allocation.
+fn copy_path_component(path: RuntimeValue, extension: bool) -> Option<Vec<u8>> {
+    with_typed_ptr::<RuntimeString, _>(path, HeapObjectType::String, |ptr| unsafe {
+        let len = usize::try_from((*ptr).len).ok()?;
+        if len > isize::MAX as usize {
+            return None;
+        }
+        let bytes = (*ptr).as_bytes();
+        std::str::from_utf8(bytes).ok()?;
+        let mut end = len;
+        while end > 0 && bytes[end - 1] == b'/' {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && bytes[start - 1] != b'/' {
+            start -= 1;
+        }
+        if extension {
+            let basename_start = start;
+            let mut dot = end;
+            while dot > basename_start && bytes[dot - 1] != b'.' {
+                dot -= 1;
+            }
+            start = if dot == basename_start
+                || (dot == basename_start + 1 && bytes[basename_start] == b'.')
+            {
+                end
+            } else {
+                dot
+            };
+        }
+        let mut owned = Vec::new();
+        owned.try_reserve_exact(end - start).ok()?;
+        owned.extend_from_slice(&bytes[start..end]);
+        Some(owned)
+    })?
+}
+
+fn managed_path_component(path: RuntimeValue, extension: bool) -> RuntimeValue {
+    match copy_path_component(path, extension) {
+        Some(bytes) => rt_string_new(bytes.as_ptr(), bytes.len() as u64),
+        None => rt_string_new(b"".as_ptr(), 0),
+    }
+}
+
+/// Return the final counted path component, trimming trailing forward slashes.
+/// Backslashes and embedded NUL bytes are ordinary bytes on every platform.
+#[no_mangle]
+pub extern "C" fn rt_path_filename(path: RuntimeValue) -> RuntimeValue {
+    managed_path_component(path, false)
+}
+
+/// Return the final component's extension without its dot, or empty text.
+/// A leading dot alone does not begin an extension; only '/' separates paths.
+#[no_mangle]
+pub extern "C" fn rt_path_extension(path: RuntimeValue) -> RuntimeValue {
+    managed_path_component(path, true)
+}
+
+#[cfg(test)]
+#[path = "path_component_tests.rs"]
+mod path_component_tests;
 
 /// Helper function for path operations that return strings
 /// Handles null checks, UTF-8 conversion, and result wrapping

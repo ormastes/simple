@@ -1,0 +1,143 @@
+# AWAITING_VERIFICATION. In-memory projection tests; no durable WAL or runtime proof.
+use std.spec.{describe, it, expect}
+use std.database.pure_sql.PureDatabase
+use std.database.sql.types.DbValue
+use std.common.task_runner.execution_identity_v2.*
+use std.common.task_runner.index.{task_runner_index_apply_v1, task_runner_storage_escape_v1,
+    task_runner_attempt_encode_v1, task_runner_index_history_v1}
+use std.common.task_runner.index_v2.*
+use test.fixtures.task_runner.execution_identity_v2.{native_attempt_fixture_v2,
+    container_attempt_fixture_v2, container_execution_fixture_v2}
+
+fn index_database_fixture_v2() -> PureDatabase:
+    var db = PureDatabase.memory_deferred().unwrap()
+    val _created = db.exec_sql("CREATE TABLE task_history (identity TEXT PRIMARY KEY, projection TEXT)").unwrap()
+    db
+
+fn index_native_record_v2(sequence: i64, status: text = "passed") -> TaskRunnerAttemptRecordV2:
+    TaskRunnerAttemptRecordV2.Native(native_attempt_fixture_v2("group_" + str(sequence), 1, status))
+
+fn index_mixed_record_v2(sequence: i64) -> TaskRunnerAttemptRecordV2:
+    if sequence % 2 == 0:
+        return TaskRunnerAttemptRecordV2.Container(container_attempt_fixture_v2(
+            container_execution_fixture_v2(), "group_" + str(sequence)))
+    index_native_record_v2(sequence)
+
+describe "existing task_history mixed identity projection V2":
+    it "reads legacy V1 rows from the same existing table":
+        var db = index_database_fixture_v2()
+        db = task_runner_index_apply_v1(db, 1, native_attempt_fixture_v2()).unwrap()
+        val history = task_runner_index_history_v2(db, "1".repeat(64)).unwrap()
+        expect(history.len()).to_equal(1)
+        expect(task_runner_record_identity_v2(history[0])).to_equal("1".repeat(64))
+        expect(task_runner_record_status_v2(history[0])).to_equal("passed")
+
+    it "sorts newest-to-oldest replay and retains only the newest eight":
+        var db = index_database_fixture_v2()
+        for reverse in 0..12:
+            val sequence = 12 - reverse
+            db = task_runner_index_apply_v2(db, sequence, index_native_record_v2(sequence)).unwrap()
+        val history = task_runner_index_history_v2(db, "1".repeat(64)).unwrap()
+        expect(history.len()).to_equal(8)
+        for i in 0..8:
+            expect(task_runner_record_group_v2(history[i])).to_equal("group_" + str(i + 5))
+
+    it "retains the earliest confirmed crash plus newest seven in either replay order":
+        for descending in [false, true]:
+            var db = index_database_fixture_v2()
+            for i in 0..12:
+                val sequence = if descending: 12 - i else: i + 1
+                val status = if sequence == 1 or sequence == 3: "crashed" else: "passed"
+                db = task_runner_index_apply_v2(db, sequence, index_native_record_v2(sequence, status)).unwrap()
+            val history = task_runner_index_history_v2(db, "1".repeat(64)).unwrap()
+            expect(history.len()).to_equal(8)
+            expect(task_runner_record_group_v2(history[0])).to_equal("group_1")
+            expect(task_runner_record_status_v2(history[0])).to_equal("crashed")
+            for i in 1..8:
+                expect(task_runner_record_group_v2(history[i])).to_equal("group_" + str(i + 5))
+
+    it "rejects duplicate sequence and run-group attempt before mutation":
+        var db = index_database_fixture_v2()
+        db = task_runner_index_apply_v2(db, 1, index_native_record_v2(1)).unwrap()
+        expect(task_runner_index_apply_v2(db, 1, index_native_record_v2(2)).is_err()).to_equal(true)
+        expect(task_runner_index_apply_v2(db, 2, index_native_record_v2(1)).is_err()).to_equal(true)
+        expect(task_runner_index_apply_v2(db, 0, index_native_record_v2(2)).is_err()).to_equal(true)
+        expect(task_runner_index_history_v2(db, "1".repeat(64)).unwrap().len()).to_equal(1)
+
+    it "prepares the exact bounded projection without mutating existing history":
+        var db = index_database_fixture_v2()
+        db = task_runner_index_apply_v2(db, 1, index_native_record_v2(1)).unwrap()
+        val projection = task_runner_index_prepare_v2(db, 2, index_native_record_v2(2)).unwrap()
+        expect(task_runner_index_history_v2(db, "1".repeat(64)).unwrap().len()).to_equal(1)
+        db = task_runner_index_apply_v2(db, 2, index_native_record_v2(2)).unwrap()
+        val stored = db.get("task_history", "identity", DbValue.Text("1".repeat(64))).unwrap().unwrap()
+        expect(stored.get_text("projection") ?? "").to_equal(projection)
+        expect(task_runner_index_history_v2(db, "1".repeat(64)).unwrap().len()).to_equal(2)
+        expect(task_runner_index_prepare_v2(db, 2, index_native_record_v2(3)).is_err()).to_equal(true)
+        expect(task_runner_index_history_v2(db, "1".repeat(64)).unwrap().len()).to_equal(2)
+
+    it "rejects an oversized existing projection before preparing a WAL candidate":
+        var db = index_database_fixture_v2()
+        val _inserted = db.put("task_history", [DbValue.Text("1".repeat(64)),
+            DbValue.Text("x".repeat(131073))]).unwrap()
+        expect(task_runner_index_prepare_v2(db, 1, index_native_record_v2(1)))
+            .to_equal(Err("task projection exceeds bound"))
+        val stored = db.get("task_history", "identity", DbValue.Text("1".repeat(64))).unwrap().unwrap()
+        expect((stored.get_text("projection") ?? "").len()).to_equal(131073)
+
+    it "rejects malformed or wrong-identity existing projections":
+        var db = index_database_fixture_v2()
+        val wrong = "1\t" + task_runner_storage_escape_v1(
+            task_runner_attempt_encode_v1(native_attempt_fixture_v2()).unwrap()) + "\n"
+        val _inserted = db.put("task_history", [DbValue.Text("6".repeat(64)), DbValue.Text(wrong)]).unwrap()
+        expect(task_runner_index_history_v2(db, "6".repeat(64)).is_err()).to_equal(true)
+        expect(task_runner_index_history_v2(db, "invalid").is_err()).to_equal(true)
+
+    it "replays newest-to-oldest mixed variants in the same bounded V1 table":
+        var db = index_database_fixture_v2()
+        for reverse in 0..12:
+            val sequence = 12 - reverse
+            db = task_runner_index_apply_v2(db, sequence, index_mixed_record_v2(sequence)).unwrap()
+        val history = task_runner_index_history_v2(db, "1".repeat(64)).unwrap()
+        expect(history.len()).to_equal(8)
+        for i in 0..8:
+            val sequence = i + 5
+            expect(task_runner_record_group_v2(history[i])).to_equal("group_" + str(sequence))
+            match history[i]:
+                Native(_): expect(sequence % 2).to_equal(1)
+                Container(row):
+                    expect(sequence % 2).to_equal(0)
+                    expect(row.execution.runtime.native_id).to_equal("b".repeat(64))
+        expect(task_runner_index_history_v1(db, "1".repeat(64)).is_err()).to_equal(true)
+
+    it "retains the earliest native crash when mixed replay arrives newest-first":
+        var db = index_database_fixture_v2()
+        for reverse in 0..12:
+            val sequence = 12 - reverse
+            val row = if sequence == 1: index_native_record_v2(1, "crashed") else: index_mixed_record_v2(sequence)
+            db = task_runner_index_apply_v2(db, sequence, row).unwrap()
+        val history = task_runner_index_history_v2(db, "1".repeat(64)).unwrap()
+        expect(history.len()).to_equal(8)
+        expect(task_runner_record_group_v2(history[0])).to_equal("group_1")
+        expect(task_runner_record_status_v2(history[0])).to_equal("crashed")
+        for i in 1..8:
+            expect(task_runner_record_group_v2(history[i])).to_equal("group_" + str(i + 5))
+
+    it "rejects duplicate group-attempt across native and container variants":
+        var db = index_database_fixture_v2()
+        db = task_runner_index_apply_v2(db, 1, index_native_record_v2(1)).unwrap()
+        val row = TaskRunnerAttemptRecordV2.Container(container_attempt_fixture_v2(
+            container_execution_fixture_v2(), "group_1"))
+        expect(task_runner_index_prepare_v2(db, 2, row)).to_equal(Err("duplicate attempt in run group"))
+        expect(task_runner_index_history_v2(db, "1".repeat(64)).unwrap().len()).to_equal(1)
+
+    it "rejects expanded container lines before preparing any WAL publication":
+        var db = index_database_fixture_v2()
+        db = task_runner_index_apply_v2(db, 1, index_native_record_v2(1)).unwrap()
+        # Legal metadata length alone is insufficient: nested projection
+        # escaping must also fit the new per-container outer line bound.
+        val row = TaskRunnerAttemptRecordV2.Container(container_attempt_fixture_v2(
+            container_execution_fixture_v2(), "%".repeat(4090) + "2"))
+        expect(task_runner_record_encode_v2(row)).to_equal(Err("container attempt exceeds projection row bound"))
+        expect(task_runner_index_prepare_v2(db, 2, row)).to_equal(Err("container attempt exceeds projection row bound"))
+        expect(task_runner_index_history_v2(db, "1".repeat(64)).unwrap().len()).to_equal(1)

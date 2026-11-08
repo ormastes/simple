@@ -1,6 +1,81 @@
 use super::*;
 
 #[test]
+fn effective_owner_matches_real_allocations_across_session_override() {
+    assert_eq!(rt_allocation_owner_identity_v1(), 0);
+    let session_id = rt_session_heap_begin();
+    assert_ne!(session_id, 0);
+    assert_eq!(rt_allocation_owner_identity_v1(), -i64::from(session_id));
+    assert!(rt_transient_array_scope_begin());
+    let module_id = rt_transient_array_scope_identity_v1();
+    assert!(module_id > 0);
+    let module_array = rt_array_new(0);
+    assert_eq!(rt_allocation_owner_identity_v1(), module_id);
+    TRANSIENT_HEAP_SCOPE.with(|scope| {
+        assert!(scope.borrow().as_ref().unwrap().objects.contains(&module_array));
+    });
+    assert!(rt_session_alloc_begin());
+    assert_eq!(rt_transient_array_scope_identity_v1(), module_id);
+    assert_eq!(rt_transient_array_scope_state_v1(), 1);
+    assert_eq!(rt_allocation_owner_identity_v1(), -i64::from(session_id));
+    let session_array = rt_array_new(0);
+    SESSION_HEAP.with(|session| {
+        assert!(session.borrow().as_ref().unwrap().owned.contains(&(session_array.as_heap_ptr() as usize)));
+    });
+    assert!(rt_session_alloc_end());
+    assert_eq!(rt_allocation_owner_identity_v1(), module_id);
+    let younger = rt_array_new(0);
+    TRANSIENT_HEAP_SCOPE.with(|scope| {
+        assert!(scope.borrow().as_ref().unwrap().objects.contains(&younger));
+    });
+    assert!(rt_transient_array_scope_pause());
+    assert_eq!(rt_transient_array_scope_identity_v1(), module_id);
+    assert_eq!(rt_allocation_owner_identity_v1(), -i64::from(session_id));
+    assert!(rt_transient_array_scope_end());
+    assert_eq!(rt_allocation_owner_identity_v1(), -i64::from(session_id));
+    assert!(rt_session_heap_end(session_id));
+    assert_eq!(rt_allocation_owner_identity_v1(), 0);
+}
+
+#[test]
+fn identity_tracks_real_scope_and_never_reuses_retired_id() {
+    assert_eq!(rt_transient_array_scope_identity_v1(), 0);
+    assert!(rt_transient_array_scope_begin());
+    let first = rt_transient_array_scope_identity_v1();
+    assert!(first > 0);
+    assert!(!rt_transient_array_scope_begin());
+    assert_eq!(rt_transient_array_scope_identity_v1(), first);
+    let other = std::thread::spawn(|| {
+        assert_eq!(rt_transient_array_scope_identity_v1(), 0);
+        assert!(rt_transient_array_scope_begin());
+        let id = rt_transient_array_scope_identity_v1();
+        assert!(id > 0);
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(rt_transient_array_scope_identity_v1(), 0);
+        id
+    }).join().unwrap();
+    assert_ne!(other, first);
+    assert_eq!(rt_transient_array_scope_identity_v1(), first);
+    assert!(rt_transient_array_scope_pause());
+    assert_eq!(rt_transient_array_scope_identity_v1(), first);
+    assert!(!rt_transient_array_scope_begin());
+    assert!(rt_transient_array_scope_end());
+    assert_eq!(rt_transient_array_scope_identity_v1(), 0);
+    assert!(rt_transient_array_scope_begin());
+    assert!(rt_transient_array_scope_identity_v1() > first);
+    assert!(rt_transient_array_scope_end());
+}
+
+#[test]
+fn identity_exhaustion_retires_without_wrapping() {
+    let counter = std::sync::atomic::AtomicU32::new(u32::MAX - 1);
+    assert_eq!(next_transient_scope_identity(&counter), Some(u32::MAX - 1));
+    assert_eq!(next_transient_scope_identity(&counter), Some(u32::MAX));
+    assert_eq!(next_transient_scope_identity(&counter), None);
+    assert_eq!(next_transient_scope_identity(&counter), None);
+}
+
+#[test]
 fn state_query_tracks_actual_lifecycle_without_mutation() {
     assert_eq!(rt_transient_array_scope_state_v1(), 0);
     assert!(!rt_transient_array_scope_pause());

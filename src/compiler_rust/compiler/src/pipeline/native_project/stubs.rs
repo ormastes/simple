@@ -986,6 +986,21 @@ pub(crate) fn generate_stub_object_with_system_libs(
     imports: &ModuleImports,
     system_libs: &[PathBuf],
 ) -> Result<PathBuf, String> {
+    generate_stub_object_with_policy(temp_dir, object_paths, main_o, selected_runtime_libs,
+        imports, system_libs, false)
+}
+
+/// Typed provider selection may require strict resolution independently of the
+/// ambient legacy fallback policy. Default callers retain their existing policy.
+pub(super) fn generate_stub_object_with_policy(
+    temp_dir: &std::path::Path,
+    object_paths: &[PathBuf],
+    main_o: &std::path::Path,
+    selected_runtime_libs: &[&std::path::Path],
+    imports: &ModuleImports,
+    system_libs: &[PathBuf],
+    require_real_providers: bool,
+) -> Result<PathBuf, String> {
     use std::collections::{HashSet, BTreeSet};
 
     let mut defined = HashSet::new();
@@ -1198,7 +1213,8 @@ or set {}=1 to bypass at your own risk.",
         .collect();
 
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
-    let strict_no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
+    let strict_no_stub_fallback = require_real_providers
+        || std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
     let is_freestanding = effective_target().os == simple_common::target::TargetOS::None;
     if !is_bootstrap && !strict_no_stub_fallback && !is_freestanding && !internal_missing.is_empty() {
         // FAIL CLOSED. These are Simple-level symbols (including `extern fn`

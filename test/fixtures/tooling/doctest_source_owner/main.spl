@@ -1,0 +1,34 @@
+# Real native regression against the production compatibility API.
+# Every case runs independently; no copied extractor or always-green placeholder.
+use app.test_runner_new.doctest_runner.{extract_doctests}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_remove}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all}
+
+fn probe_source(name: text, content: text, count: i64, code: text, should_fail: bool) -> bool:
+    val path = ".simple/test-fixtures/doctest-native-{name}-{time_now_unix_micros()}.spl"
+    if not file_write(path, content):
+        print "ERROR {name}: fixture write failed"
+        return false
+    val blocks = extract_doctests(path)
+    val removed = file_remove(path)
+    var correct = removed and blocks.len() == count
+    if correct and count == 1:
+        correct = blocks[0].code == code and blocks[0].line_number == 1 and blocks[0].expected_output == "" and blocks[0].should_fail == should_fail
+    val state = if correct: "PASS" else: "FAIL"
+    print "{state} {name}: actual_blocks={blocks.len()} expected_blocks={count}"
+    correct
+
+fn main() -> i64:
+    dir_create_all(".simple/test-fixtures")
+    var failed = 0
+    if not probe_source("hash-indent", "# ```simple\n# fn answer():\n#     42\n# print answer()\n# ```\n", 1, "fn answer():\n    42\nprint answer()", false):
+        failed = failed + 1
+    if not probe_source("double-hash-modifier", "## ```spl:should_fail\n## assert false\n## ```\n", 1, "assert false", true):
+        failed = failed + 1
+    if not probe_source("slash", "/// ```simple\n/// print 7\n/// ```\n", 1, "print 7", false):
+        failed = failed + 1
+    if not probe_source("unclosed-negative", "# ```simple\n# print 7\n", 0, "", false):
+        failed = failed + 1
+    print "doctest compatibility regression: 4 cases, {failed} failed"
+    if failed == 0: 0 else: 1

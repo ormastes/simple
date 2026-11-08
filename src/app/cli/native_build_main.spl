@@ -1,3 +1,6 @@
+use app.io.time_ops.{sleep_ms}
+use app.cli.worker_hir_profile_v1.{WorkerHirProfileV1, worker_hir_profile_admit_v1, worker_hir_profile_for_owner_v1}
+use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, worker_hir_owner_start_v1, worker_hir_owner_retain_failure_v1}
 use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1}
 # Lightweight entrypoint for `simple native-build`.
 
@@ -21,8 +24,7 @@ use app.io._CliCompile.native_build_closure_request_admit.{native_build_closure_
 use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
-use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1,
-    native_build_snapshot_drop_missing_default_roots_v1}
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_selected_snapshot_source_roots_v1}
 use app.bug.workaround_store.{refresh_workarounds}
 # Unambiguous, non-builtin stderr write for the worker-failure relay path
 # (eprint_bounded / native_build_print_failure_hints / the `code != 0` branch
@@ -1009,16 +1011,23 @@ fn shard_ledger_queue_dir(args: [text], prefix: text, label: text) -> text:
     dir
 
 fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64) -> i64:
+    native_build_hir_ledger_run_v1(args, count, simple_bin, timeout_ms).code
+
+# The same coordinator entry is used by production and native integration specs.
+# It returns the actual ledger/retirement verdict, not a test-only success flag.
+pub fn native_build_hir_ledger_run_v1(args: [text], count: i64, simple_bin: text,
+        timeout_ms: i64) -> LedgerShardRunV1:
     var base = ["run", "src/app/cli/native_build_worker.spl"]
     for arg in args:
         base = base.push(arg)
     val queue_dir = hir_shard_queue_dir(args)
     if queue_dir == "":
         eprint "[hir-shard] BLOCKED: cannot establish invocation ledger"
-        return 1
+        return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
+            blocked_reason: "cannot establish HIR ledger", all_stopped: true)
     run_ledger_shards("hir-shard", "--hir-shard", "SIMPLE_HIR_SHARD_QUEUE",
         "SIMPLE_HIR_SHARD_OWNER", base, queue_dir, args, count, count,
-        simple_bin, timeout_ms).code
+        simple_bin, timeout_ms)
 
 # Shared worker-pool driver for the HIR and MIR shard ledgers
 # (driver_hir_recovery.spl). Spawns `count` owners at most `parallel` at a
@@ -1033,7 +1042,7 @@ const SHARD_POOL_POLL_MS: i64 = 200
 # One pool run's verdict. total_claims sums every owner's claim count; -1 when
 # any count was unreadable. all_stopped is false when a worker could not be
 # reaped. blocked_reason is the ledger's BLOCKED record ("" when not blocked).
-struct LedgerShardRunV1:
+pub struct LedgerShardRunV1:
     code: i64
     failed_modules: i64
     total_claims: i64
@@ -1054,6 +1063,31 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     if not env_set(queue_env, queue_dir):
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
             blocked_reason: "worker queue environment could not be installed", all_stopped: true)
+    var hir_profiles: [WorkerHirProfileV1] = []
+    var hir_pool_cleanup_deadline: i64 = 0
+    if label == "hir-shard":
+        if base.len() < 3 or base[0] != "run" or base[1] != "src/app/cli/native_build_worker.spl":
+            env_set(queue_env, old_queue)
+            return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
+                blocked_reason: "HIR profile requires the canonical internal worker route", all_stopped: true)
+        if count <= 0 or count > 128 or parallel <= 0 or parallel > 128:
+            env_set(queue_env, old_queue)
+            return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
+                blocked_reason: "HIR profile worker count exceeds 128-owner bound", all_stopped: true)
+        val selection = native_build_entry_and_sources_v1(args)
+        if selection.is_empty():
+            env_set(queue_env, old_queue)
+            return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
+                blocked_reason: "HIR profile has no explicit entry", all_stopped: true)
+        val budget_ms = if timeout_ms > 0: timeout_ms else: 3600000
+        val deadline = time_now_monotonic_ms() + budget_ms
+        match worker_hir_profile_admit_v1(base[2:], selection[0], selection[1:], deadline):
+            case Ok(profile): hir_profiles = [profile]
+            case Err(reason):
+                env_set(queue_env, old_queue)
+                eprint("[hir-shard] profile admission rejected: " + reason)
+                return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
+                    blocked_reason: reason, all_stopped: true)
     val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
     val window_size = if parallel > 0: parallel else: count
     # Measured commit admission (shard_mem_clamp.spl). The estimate starts at
@@ -1098,6 +1132,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         # Replacements still wait for the next generation, as before.
         var next_pending: i64 = 0
         var pids: [i64] = []
+        var hir_owners: [WorkerHirOwnerV1] = []
         var owners: [text] = []
         var indices: [i64] = []
         var started_ms: [i64] = []
@@ -1117,7 +1152,14 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 val _dataset_cap = env_set("SIMPLE_GLOBAL_DATASET_MAX_BYTES", "{est_kib * 1024}")
                 var shard_args = base
                 shard_args = shard_args.push("{flag}={index}/{count}")
-                pids = pids.push(if owner_installed: process_spawn_async(simple_bin, shard_args) else: -1)
+                if label == "hir-shard":
+                    val profile = worker_hir_profile_for_owner_v1(hir_profiles[0], owner, est_kib * 1024)
+                    val hir_owner = worker_hir_owner_start_v1(profile, simple_bin, "{index}/{count}")
+                    hir_owners.push(hir_owner)
+                    # Occupancy marker only: HIR never passes it to PID APIs.
+                    pids.push(1)
+                else:
+                    pids = pids.push(if owner_installed: process_spawn_async(simple_bin, shard_args) else: -1)
                 owners = owners.push(owner)
                 indices = indices.push(index)
                 started_ms = started_ms.push(time_now_monotonic_ms())
@@ -1132,7 +1174,23 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             var code: i64 = -1
             i = 0
             while reap_at < 0 and i < pids.len():
-                if pids[i] <= 0:
+                if label == "hir-shard":
+                    var hir_owner = hir_owners[i]
+                    if hir_shard_recovery_blocked(queue_dir) and hir_pool_cleanup_deadline == 0:
+                        hir_pool_cleanup_deadline = time_now_monotonic_ms() + 5000
+                    if hir_pool_cleanup_deadline > 0 and (hir_owner.cleanup_deadline_ms == 0 or
+                            hir_owner.cleanup_deadline_ms > hir_pool_cleanup_deadline):
+                        hir_owner.cleanup_deadline_ms = hir_pool_cleanup_deadline
+                    hir_owner.tick(hir_shard_recovery_blocked(queue_dir))
+                    if hir_owner.cancelled and not hir_owner.done:
+                        if hir_pool_cleanup_deadline == 0:
+                            hir_pool_cleanup_deadline = hir_owner.cleanup_deadline_ms
+                        val _blocked = hir_shard_recovery_block(queue_dir, "HIR worker retirement began: " + hir_owner.reason)
+                    hir_owners[i] = hir_owner
+                    if hir_owner.done:
+                        reap_at = i
+                        code = hir_owner.code
+                elif pids[i] <= 0:
                     reap_at = i
                 else:
                     val polled = native_build_normalize_exit_code(process_wait(pids[i], SHARD_POOL_POLL_MS))
@@ -1141,11 +1199,20 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                         code = polled
                 i = i + 1
             if reap_at < 0:
+                if label == "hir-shard": sleep_ms(10)
                 continue
+            var hir_stopped = false
+            if label == "hir-shard":
+                hir_stopped = hir_owners[reap_at].stopped
+                if not hir_stopped:
+                    worker_hir_owner_retain_failure_v1(hir_owners[reap_at])
+                    all_stopped = false
+                    val _blocked = hir_shard_recovery_block(queue_dir, hir_owners[reap_at].reason)
             val pid = pids[reap_at]
             val owner = owners[reap_at]
             val reaped_index = indices[reap_at]
             var kept_pids: [i64] = []
+            var kept_hir: [WorkerHirOwnerV1] = []
             var kept_owners: [text] = []
             var kept_indices: [i64] = []
             var kept_started: [i64] = []
@@ -1153,18 +1220,20 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             while i < pids.len():
                 if i != reap_at:
                     kept_pids = kept_pids.push(pids[i])
+                    if label == "hir-shard": kept_hir.push(hir_owners[i])
                     kept_owners = kept_owners.push(owners[i])
                     kept_indices = kept_indices.push(indices[i])
                     kept_started = kept_started.push(started_ms[i])
                 i = i + 1
             pids = kept_pids
+            hir_owners = kept_hir
             owners = kept_owners
             indices = kept_indices
             started_ms = kept_started
             # -1 is a wait error, not proof of exit. Even a false liveness
             # probe also means invalid handle; require a real reap result.
-            var owner_stopped = pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
-            if not owner_stopped and pid > 0:
+            var owner_stopped = if label == "hir-shard": hir_stopped else: pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
+            if label != "hir-shard" and not owner_stopped and pid > 0:
                 val _killed = process_kill(pid)
                 val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
                 owner_stopped = reaped != -2 and reaped != -1 and not process_is_running(pid)
@@ -1189,9 +1258,35 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             else:
                 done = done + 1
             if fail_fast and failed_workers > 0:
+                # Start cancellation for every retained owner before waiting;
+                # no per-owner restart of the overall retirement budget.
+                if label == "hir-shard":
+                    if hir_pool_cleanup_deadline == 0:
+                        hir_pool_cleanup_deadline = time_now_monotonic_ms() + 5000
+                    var retirement_pending = true
+                    while retirement_pending:
+                        retirement_pending = false
+                        var cancel_index = 0
+                        while cancel_index < hir_owners.len():
+                            var cancelling = hir_owners[cancel_index]
+                            if cancelling.cleanup_deadline_ms == 0 or cancelling.cleanup_deadline_ms > hir_pool_cleanup_deadline:
+                                cancelling.cleanup_deadline_ms = hir_pool_cleanup_deadline
+                            cancelling.tick(true)
+                            if not cancelling.done: retirement_pending = true
+                            hir_owners[cancel_index] = cancelling
+                            cancel_index = cancel_index + 1
+                        if retirement_pending: sleep_ms(10)
                 var remaining = 0
                 while remaining < pids.len():
-                    if pids[remaining] > 0:
+                    if label == "hir-shard":
+                        val hir_owner = hir_owners[remaining]
+                        if hir_owner.stopped:
+                            val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
+                        else:
+                            worker_hir_owner_retain_failure_v1(hir_owner)
+                            all_stopped = false
+                            val _blocked = hir_shard_recovery_block(queue_dir, hir_owner.reason)
+                    elif pids[remaining] > 0:
                         val _killed = process_kill(pids[remaining])
                         val reaped = native_build_normalize_exit_code(process_wait(pids[remaining], 5000))
                         if reaped != -2 and reaped != -1 and not process_is_running(pids[remaining]):
@@ -2506,14 +2601,7 @@ pub fn native_build_authority_source_roots_v1(args: [text], root: text) -> [text
     val absolute = compile_source_inventory_plain_checkout_v1(path_absolute(entry))
     if not absolute.starts_with(root + "/"): return []
     val relative = absolute.substring(root.len() + 1)
-    var roots = native_build_snapshot_source_roots_v1(relative, sources)
-    if roots.len() == 0: return []
-    # Default roots (no explicit --source) that this checkout lacks are skipped
-    # with a warning; explicit roots are kept so an empty one stays an error.
-    if sources.len() == 0:
-        roots = native_build_snapshot_drop_missing_default_roots_v1(root, roots)
-    if not roots.contains(relative): roots.push(relative)
-    roots
+    native_build_selected_snapshot_source_roots_v1(root, relative, sources)
 
 # Local mirror of compile_targets.spl's `cli_native_build_is_entry_arg`
 # (`arg == "--entry" or arg.starts_with("--entry=")`) -- not imported

@@ -5,11 +5,40 @@ use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_operators.{HirBinOp}
 use compiler.hir.hir_codec.{hir_fn_scalars_at_v1, hir_fn_scalars_at_key_v1,
-    hir_module_function_keys_in_v1, hir_fn_scalars_with_keys_in_v1}
+    hir_module_function_keys_in_v1, hir_fn_scalars_with_keys_in_v1,
+    hir_module_encode}
 use compiler.hir.return_type_interface_v1.{rti_rows_from_hir_v1}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
+
+# Hash one provider in a disposable ownership scope. Only its digest escapes;
+# the potentially large codec body and encoder scratch are reclaimed.
+fn mir_provider_module_content_digest_v1(provider: HirModule) -> text:
+    if not transient_array_scope_begin_v1(): return ""
+    val body = hir_module_encode(provider)
+    val digest = if body == "": "" else: sha256_text(body)
+    if not transient_array_scope_pause_v1():
+        val _ended_pause = transient_array_scope_end_v1()
+        return ""
+    if not transient_heap_promote_v1(digest):
+        val _ended_promote = transient_array_scope_end_v1()
+        return ""
+    if not transient_array_scope_end_v1(): return ""
+    digest
+
+# Seal the exact ordered provider graph once at closure-session setup. The
+# returned key is immutable authority for provider-index reuse; callers retain
+# no encoded bodies. A codec refusal returns "", which makes reuse fail closed.
+fn mir_provider_session_content_key_v1(providers: [HirModule]) -> text:
+    var framed = "mir-provider-session-content-v1\n"
+    for raw_provider in providers:
+        val provider: HirModule = raw_provider
+        val digest = mir_provider_module_content_digest_v1(provider)
+        if digest == "": return ""
+        framed = framed + "{provider.name.len()}:{provider.name}" +
+            "{provider.path.len()}:{provider.path}{digest.len()}:{digest}"
+    sha256_text(framed)
 use compiler.mir._MirLowering.declaration_providers_v1.*
 use compiler.mir._MirLowering.exact_extern_provenance.*
 use compiler.mir._MirLowering.provider_globals.*
@@ -682,6 +711,7 @@ impl MirLowering:
             struct_field_array_elem_type: {},
             struct_value_syms: {},
             optional_record_owners: {},
+            optional_record_literal_owners: {},
             result_err_record_owners: {},
             result_err_layout_types: {},
             struct_method_syms: {},
@@ -2594,6 +2624,7 @@ impl MirLowering:
         # were just retired above. The provider session index itself stays.
         self.provider_method_modules = []
         self.provider_method_materialized = {}
+        self.provider_trait_demand_active = false
         self.provider_layout_demand_end_v1()
         # Same for the trait-implementor feed: the driver's whole-closure HIR
         # array, persistent and never written by lowering. As an owner root
@@ -2763,6 +2794,7 @@ impl MirLowering:
         self.provider_method_modules = []
         self.provider_method_consumer = module.name
         self.provider_method_materialized = {}
+        self.provider_trait_demand_active = false
         # Layout demand likewise starts only at this module's provider pass.
         self.provider_layout_demand_end_v1()
         self.current_module_id = mir_layout_canonical_module_name(module.name)
@@ -2976,6 +3008,18 @@ impl MirLowering:
             (not self.ambient_bootstrap_enabled() or not is_entry_module) and
             self.declaration_repository == nil and
             (mir_lower_env_get("SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS") ?? "") != "1"
+        # Provider trait-impl rows follow the same split (bug
+        # mir_in_process_per_consumer_provider_rebuild_quadratic_2026-10-20):
+        # the session index (build_provider_trait_impl_index_v1) walks the
+        # closure's impl tables once; a consumer relocates a provider impl
+        # method only when it dispatches through that key. The eager
+        # per-consumer walk relocated every closure impl method into every
+        # consumer table (N x P). Same lanes as layout demand;
+        # SIMPLE_MIR_EAGER_TRAIT_IMPLS=1 restores the eager walk (A/B).
+        val trait_demand = lazy_provider_methods and
+            (not self.ambient_bootstrap_enabled() or not is_entry_module) and
+            self.declaration_repository == nil and
+            (mir_lower_env_get("SIMPLE_MIR_EAGER_TRAIT_IMPLS") ?? "") != "1"
         # Index-aligned with `providers` and reused by
         # register_trait_receiver_impls. The local arrays only hold references
         # to session tables (or this consumer's own fallback tables).
@@ -3082,6 +3126,8 @@ impl MirLowering:
             self.declaration_field_default_owners = {}
             self.register_declaration_provider_layouts_v1(module)
             self.register_declaration_trait_receiver_impls_v1(module)
+        elif trait_demand:
+            self.register_provider_trait_impls_demand_v1(module)
         else:
             self.register_trait_receiver_impls(module, providers,
                 provider_links_by_index, provider_links_ready)

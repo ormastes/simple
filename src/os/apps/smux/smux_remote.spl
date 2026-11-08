@@ -205,17 +205,11 @@ pub fn smux_remote_dispatch(line: text) -> text:
     if verb == "kill-window":
         if parts.len() != 3:
             return "smux: kill-window requires session and window id"
-        val killed = smux_kill_window(sid, parts[2])
-        if killed.is_err():
-            return "smux: kill-window failed: " + killed.unwrap_err()
-        return "smux: killed window " + parts[2] + " from " + sid
+        return smux_remote_window_kill_reply_v1(sid, parts[2], smux_kill_window(sid, parts[2]))
     if verb == "kill-session":
         if parts.len() != 2:
             return "smux: kill-session requires one target"
-        val killed = smux_kill_session(sid)
-        if killed.is_err():
-            return "smux: kill failed: " + killed.unwrap_err()
-        return "smux: killed session " + sid
+        return smux_remote_session_kill_reply_v1(sid, smux_kill_session(sid))
     if verb == "send-pane":
         if parts.len() < 5:
             return "smux: send-pane requires session window pane command"
@@ -466,6 +460,18 @@ fn _zoom_reply_ok(reply: text) -> bool:
 
 # Keep command status consistent for all request clients. A transport success
 # is not a command success (unknown ids, capacity and shell failures are errors).
+pub fn smux_remote_session_kill_reply_v1(session_id: text, result: Result<bool, text>) -> text:
+    match result:
+        case Err(reason): "smux: kill failed: " + reason
+        case Ok(false): "smux: session cleanup pending " + session_id
+        case Ok(true): "smux: killed session " + session_id
+
+pub fn smux_remote_window_kill_reply_v1(session_id: text, window_id: text, result: Result<bool, text>) -> text:
+    match result:
+        case Err(reason): "smux: kill-window failed: " + reason
+        case Ok(false): "smux: window cleanup pending " + window_id + " from " + session_id
+        case Ok(true): "smux: killed window " + window_id + " from " + session_id
+
 pub fn smux_remote_reply_ok(reply: text) -> bool:
     if reply.starts_with("smux: created session ") or reply.starts_with("smux: created window "):
         return not reply.contains("(no shell:")

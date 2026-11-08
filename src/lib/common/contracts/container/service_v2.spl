@@ -1,0 +1,63 @@
+# Persistent-service quarantine correlation. No wire decoder: an admission is
+# created by the trusted host owner after its actual retained startup receipt.
+use std.common.contracts.container.execution_v2.*
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct ContainerServiceAdmissionV2:
+    scope_fence_id: text
+    inventory_digest: text
+    host_journal_commit_digest: text
+    host_journal_revision: i64
+    durability_profile: text
+
+pub fn container_service_admission_valid_v2(value: ContainerServiceAdmissionV2) -> Result<bool, text>:
+    if value.durability_profile != "process-crash-v1" or value.host_journal_revision < 0 or
+            not builder_digest_valid_v1(value.scope_fence_id) or not builder_digest_valid_v1(value.inventory_digest):
+        return Err("container-service-admission-invalid")
+    if value.host_journal_revision == 0:
+        if value.host_journal_commit_digest != "": return Err("container-service-empty-journal-mismatch")
+    elif not builder_digest_valid_v1(value.host_journal_commit_digest):
+        return Err("container-service-journal-commit-invalid")
+    Ok(true)
+
+# The digest includes the new owner scope and every actual old-scope row. An
+# empty array is meaningful only when supplied by a successful complete native
+# inventory, never as a substitute for query failure or unsupported inspection.
+pub fn container_service_inventory_digest_v2(backend: text, scope: ContainerHostScopeV2,
+        entries: [ContainerServiceInventoryEntryV2]) -> Result<text, text>:
+    if backend != "windows-docker-process" or scope.continuity_mode != "service-incarnation-v1":
+        return Err("container-service-backend-mode-unsupported")
+    if entries.len() > 4096: return Err("container-service-inventory-too-large")
+    val scope_bytes = container_host_scope_bytes_v2(scope)?
+    var native_ids: [text] = []
+    var operations: [text] = []
+    var records: [SdnValue] = []
+    for entry in entries:
+        val identity = entry.runtime
+        val old_scope = container_host_scope_bytes_v2(entry.scope)?
+        if entry.scope.physical_host_id != scope.physical_host_id or entry.scope.native_machine_id != scope.native_machine_id or
+                entry.scope.service_scope_id != scope.service_scope_id or entry.scope.continuity_mode != "service-incarnation-v1" or
+                identity.engine != "docker" or identity.provider_generation != entry.scope.provider_generation or
+                identity.node_boot_id != container_scope_fence_id_v2(entry.scope)? or identity.attempt <= 0 or
+                not builder_digest_valid_v1(identity.native_id) or not builder_digest_valid_v1(entry.request_digest) or
+                entry.cpu_millis <= 0 or entry.memory_bytes <= 0:
+            return Err("container-service-inventory-entry-invalid")
+        # The old retained plan validates UID/operation syntax at reconciliation;
+        # here reject ambiguity before any partial host transition is permitted.
+        if not builder_identifier_valid_v1(identity.pod_uid) or not builder_identifier_valid_v1(identity.operation_id) or native_ids.contains(identity.native_id) or
+                operations.contains(identity.operation_id): return Err("container-service-inventory-ambiguous")
+        native_ids.push(identity.native_id)
+        operations.push(identity.operation_id)
+        val fields: Dict<text, SdnValue> = {"scope": SdnValue.String(old_scope),
+            "podUid": SdnValue.String(identity.pod_uid), "attempt": SdnValue.Int(identity.attempt),
+            "operationId": SdnValue.String(identity.operation_id), "engine": SdnValue.String(identity.engine),
+            "nativeId": SdnValue.String(identity.native_id), "scopeFence": SdnValue.String(identity.node_boot_id),
+            "requestDigest": SdnValue.String(entry.request_digest), "cpuMillis": SdnValue.Int(entry.cpu_millis),
+            "memoryBytes": SdnValue.Int(entry.memory_bytes)}
+        records.push(SdnValue.Dict(fields))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("container-service-inventory"),
+        "backend": SdnValue.String(backend), "currentScope": SdnValue.String(scope_bytes), "entries": SdnValue.Array(records)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))

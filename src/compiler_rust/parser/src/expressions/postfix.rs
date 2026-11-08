@@ -567,6 +567,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 TokenKind::Arrow => {
+                    // A pipe guard's top-level arrow separates the body. Nested
+                    // expressions still permit parenthesized functional updates.
+                    if self.match_guard_arrow_depth == Some(self.parse_recursion_depth) {
+                        break;
+                    }
                     // Functional update operator: obj->method(args)
                     // Desugars to: obj = obj.method(args)
                     self.advance();

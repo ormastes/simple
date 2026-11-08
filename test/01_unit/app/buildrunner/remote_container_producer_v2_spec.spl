@@ -1,0 +1,95 @@
+# Pure argument contracts; no producer/compiler/container execution is claimed.
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, builder_validate_task_v1}
+use std.common.crypto.sha256.sha256_text
+use app.buildrunner.remote_container_producer_v2.remote_container_build_args_v2
+
+fn producer_grammar_task_v2(backend: text = "llvm") -> BuildTaskV1:
+    val task = BuildTaskV1(id: "producer_task", attempt: 1, phase: "native",
+        producer_digest: sha256_text("dedicated producer fixture"), source_digest: sha256_text("source fixture"),
+        toolchain_digest: sha256_text("toolchain fixture"), dependencies: [], program: "tools/producer",
+        args: ["native-build", "--source", "src", "--entry", "src/main.spl", "--output", "artifact/program",
+            "--backend", backend, "--entry-closure"],
+        inputs: [BuildInputV1("src/main.spl", sha256_text("fn main(): 0\n")),
+            BuildInputV1("src/lib/helper.spl", sha256_text("fn helper(): 0\n")),
+            BuildInputV1("lib/extra.spl", sha256_text("fn extra(): 0\n")),
+            BuildInputV1("tools/simple", sha256_text("compiler fixture")),
+            BuildInputV1("tools/runtime/runtime.a", sha256_text("runtime fixture")),
+            BuildInputV1("remote-workspace/producer_task.nonce", sha256_text("a".repeat(64) + "\n"))],
+        outputs: ["artifact/program", "remote-workspace/producer_task.probe.sdn"],
+        cache_key: sha256_text("producer cache fixture"), timeout_ms: 1000,
+        memory_limit_bytes: 1048576, links: [], memory_policy: "enforce")
+    expect(builder_validate_task_v1(task)).to_equal("")
+    task
+
+fn producer_grammar_error_v2(args: [text]) -> text:
+    var task = producer_grammar_task_v2()
+    task.args = args
+    # Negative grammar cases still use a structurally valid BuildTask.
+    expect(builder_validate_task_v1(task)).to_equal("")
+    match remote_container_build_args_v2(task):
+        Ok(_): ""
+        Err(reason): reason
+
+describe "bounded container producer native-build grammar V2":
+    it "requires explicit pinned source entry output backend and entry closure":
+        for backend in ["llvm", "llvm-lib", "cranelift"]:
+            expect(remote_container_build_args_v2(producer_grammar_task_v2(backend))).to_equal(Ok(true))
+
+    it "accepts reordered explicit flags multiple pinned roots and optional strip":
+        val args = ["native-build", "--entry", "src/main.spl", "--backend", "llvm", "--strip",
+            "--source", "src", "--source", "lib", "--entry-closure", "--output", "artifact/program"]
+        expect(producer_grammar_error_v2(args)).to_equal("")
+
+    it "rejects another command positional shorthand and a missing flag value":
+        for args in [[], ["compile", "src/main.spl"], ["native-build"], ["native-build", "src/main.spl"],
+                ["native-build", "--source"]]:
+            expect(producer_grammar_error_v2(args) == "").to_equal(false)
+
+    it "rejects unknown cache seed compiler runtime and joined-value switches":
+        val original = producer_grammar_task_v2().args
+        for flag in ["--cache-dir", "--cache", "--reuse", "--incremental", "--resume", "--seed",
+                "--compiler", "--rust-seed", "--bootstrap", "--runtime-path", "--runtime-bundle",
+                "--allow-stub-fallback", "--source=src", "--backend=llvm", "--output=artifact/program"]:
+            var args = original
+            args = args.push(flag)
+            args = args.push("external-choice")
+            expect(producer_grammar_error_v2(args)).to_equal("REMOTE_CONTAINER_BUILD_ARGUMENT_UNSUPPORTED")
+
+    it "rejects each incomplete explicit closure instead of discovering defaults":
+        val incomplete = [
+            ["native-build", "--entry", "src/main.spl", "--output", "artifact/program", "--backend", "llvm", "--entry-closure"],
+            ["native-build", "--source", "src", "--output", "artifact/program", "--backend", "llvm", "--entry-closure"],
+            ["native-build", "--source", "src", "--entry", "src/main.spl", "--backend", "llvm", "--entry-closure"],
+            ["native-build", "--source", "src", "--entry", "src/main.spl", "--output", "artifact/program", "--entry-closure"],
+            ["native-build", "--source", "src", "--entry", "src/main.spl", "--output", "artifact/program", "--backend", "llvm"]]
+        for args in incomplete:
+            expect(producer_grammar_error_v2(args)).to_equal("REMOTE_CONTAINER_BUILD_EXPLICIT_CLOSURE_REQUIRED")
+
+    it "requires a supported unique backend and unique pinned entry and output":
+        val original = producer_grammar_task_v2().args
+        expect(producer_grammar_error_v2(["native-build", "--backend", "auto"]))
+            .to_equal("REMOTE_CONTAINER_BUILD_BACKEND_REQUIRED")
+        expect(producer_grammar_error_v2(original + ["--backend", "llvm"]))
+            .to_equal("REMOTE_CONTAINER_BUILD_BACKEND_REQUIRED")
+        expect(producer_grammar_error_v2(original + ["--entry", "src/main.spl"]))
+            .to_equal("REMOTE_CONTAINER_BUILD_ENTRY_DUPLICATE")
+        expect(producer_grammar_error_v2(original + ["--output", "artifact/program"]))
+            .to_equal("REMOTE_CONTAINER_BUILD_OUTPUT_DIFFERS")
+
+    it "rejects absolute traversal wildcard and nonportable paths before looking up pins":
+        for path in ["/outside", "../outside", "src/../outside", "C:/outside", "src\\outside",
+                "src//main.spl", ".", "src/*", "src/main\nspl"]:
+            for flag in ["--source", "--entry", "--output"]:
+                expect(producer_grammar_error_v2(["native-build", flag, path]))
+                    .to_equal("REMOTE_CONTAINER_BUILD_PATH_UNSAFE")
+
+    it "requires exact entry and root boundary pins and declared output membership":
+        expect(producer_grammar_error_v2(["native-build", "--entry", "src/unpinned.spl"]))
+            .to_equal("REMOTE_CONTAINER_BUILD_SOURCE_NOT_PINNED")
+        expect(producer_grammar_error_v2(["native-build", "--source", "s"]))
+            .to_equal("REMOTE_CONTAINER_BUILD_SOURCE_NOT_PINNED")
+        expect(producer_grammar_error_v2(["native-build", "--source", "src/main.spl"]))
+            .to_equal("REMOTE_CONTAINER_BUILD_SOURCE_NOT_PINNED")
+        expect(producer_grammar_error_v2(["native-build", "--output", "artifact/undeclared"]))
+            .to_equal("REMOTE_CONTAINER_BUILD_OUTPUT_DIFFERS")

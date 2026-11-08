@@ -1,0 +1,85 @@
+# Host-private original creation identity, not a second provider journal.
+# Recovery must independently observe this exact identity. Never overwrite it
+# with a later phase or interpret a failed operation as native absence.
+# In Container API V2 node_boot_id is an internal scope hash, not native boot
+# attestation. Trusted scope truth is retained separately by ObservationV2.
+use std.common.contracts.container.runtime_v1.RuntimeIntentV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+
+pub fn host_execution_intent_encode_v1(value: RuntimeIntentV1) -> Result<text, text>:
+    if (not builder_identifier_valid_v1(value.operation_id) or not builder_identifier_valid_v1(value.node_boot_id) or
+            value.attempt <= 0 or value.provider_generation <= 0 or str_len(value.pod_uid) == 0 or str_len(value.pod_uid) > 128 or
+            value.pod_uid.contains("\0") or value.pod_uid.contains("\n") or value.pod_uid.contains("\r")):
+        return Err("host-execution-intent-identity-invalid")
+    if not ["podman", "docker"].contains(value.engine) or str_len(value.native_id) != 64 or not builder_digest_valid_v1(value.native_id):
+        return Err("host-execution-intent-native-identity-invalid")
+    if value.phase != "created": return Err("host-execution-intent-creation-required")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-execution-intent"),
+        "podUid": SdnValue.String(value.pod_uid), "attempt": SdnValue.Int(value.attempt),
+        "providerGeneration": SdnValue.Int(value.provider_generation), "operationId": SdnValue.String(value.operation_id),
+        "engine": SdnValue.String(value.engine), "nativeId": SdnValue.String(value.native_id),
+        "nodeBootId": SdnValue.String(value.node_boot_id), "phase": SdnValue.String(value.phase)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn host_intent_text_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-execution-intent-type:" + name)
+
+fn host_intent_int_v1(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-execution-intent-type:" + name)
+
+pub fn host_execution_intent_decode_v1(source: text) -> Result<RuntimeIntentV1, text>:
+    if str_len(source) == 0 or str_len(source) > 16384: return Err("host-execution-intent-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 16384, max_depth: 2, max_nodes: 32,
+        max_rows: 0, max_cells: 0, max_columns: 16)
+    val document = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("host-execution-intent-syntax:" + issue.code)
+    val fields = match document.value:
+        case SdnValue.Dict(items): items
+        case _: return Err("host-execution-intent-object-required")
+    val names = ["version", "kind", "podUid", "attempt", "providerGeneration", "operationId", "engine", "nativeId", "nodeBootId", "phase"]
+    for name in fields.keys():
+        if not names.contains(name): return Err("host-execution-intent-unknown-field:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("host-execution-intent-missing-field:" + name)
+    if host_intent_int_v1(fields, "version")? != 1 or host_intent_text_v1(fields, "kind")? != "host-execution-intent":
+        return Err("host-execution-intent-version")
+    val value = RuntimeIntentV1(pod_uid: host_intent_text_v1(fields, "podUid")?, attempt: host_intent_int_v1(fields, "attempt")?,
+        provider_generation: host_intent_int_v1(fields, "providerGeneration")?, operation_id: host_intent_text_v1(fields, "operationId")?,
+        engine: host_intent_text_v1(fields, "engine")?, native_id: host_intent_text_v1(fields, "nativeId")?,
+        node_boot_id: host_intent_text_v1(fields, "nodeBootId")?, phase: host_intent_text_v1(fields, "phase")?)
+    if host_execution_intent_encode_v1(value)? != source: return Err("host-execution-intent-noncanonical")
+    Ok(value)
+
+pub fn host_execution_intent_load_v1(root: text, operation_id: text) -> Result<RuntimeIntentV1, text>:
+    if not builder_identifier_valid_v1(operation_id): return Err("host-execution-intent-operation-invalid")
+    val value = host_execution_intent_decode_v1(file_read_regular_no_follow_bounded(
+        root + "/host-execution-intents/" + sha256_text(operation_id) + ".sdn", 16384)?)?
+    if value.operation_id != operation_id: return Err("host-execution-intent-operation-mismatch")
+    Ok(value)
+
+pub fn host_execution_intent_store_v1(root: text, value: RuntimeIntentV1) -> Result<text, text>:
+    val bytes = host_execution_intent_encode_v1(value)?
+    val directory = root + "/host-execution-intents"
+    if not file_exists(directory) and not dir_create(directory, true): return Err("host-execution-intent-directory-unavailable")
+    val path = directory + "/" + sha256_text(value.operation_id) + ".sdn"
+    if file_exists(path):
+        if file_read_regular_no_follow_bounded(path, 16384)? != bytes: return Err("host-execution-intent-retained-mismatch")
+    elif not file_atomic_write_mode(path, bytes, 0o600): return Err("host-execution-intent-publication-failed")
+    if host_execution_intent_encode_v1(host_execution_intent_load_v1(root, value.operation_id)?)? != bytes:
+        return Err("host-execution-intent-readback-mismatch")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root): return Err("host-execution-intent-sync-failed")
+    Ok(path)

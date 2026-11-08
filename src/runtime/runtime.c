@@ -34,6 +34,7 @@
 #endif
 
 #define SPL_LEGACY_VALUE_RUNTIME 1
+#define SIMPLE_RETAINED_PRIVATE_CREDENTIAL_IMPLEMENTATION
 #include "runtime.h"
 #include "runtime_nonnull.h"
 #if defined(__APPLE__)
@@ -4285,4 +4286,5 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
     if (!data) return rt_string_new(NULL, 0);
     return spl_text_from_utf8_lossy(data, (size_t)len);
 }
+
 #endif

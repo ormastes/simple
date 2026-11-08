@@ -1,0 +1,178 @@
+# Actual common API, explicit managed scripted engine. UNEXECUTED.
+use std.spec.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+
+fn _recovery_deadline_v2(request: ContainerExecutionRequestV2) -> ContainerEffectDeadlineV1:
+    container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create"], 100).unwrap()
+
+describe "immutable creation identity across recovery phase changes":
+    it "repeats original created receipt recovery and fresh inspect after running and exited observations":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val inspect = build_inspect_command("podman", "/unused/api", native).1
+        val prefix = "workload-1|1|" + fence + "|7|create-api|" + native + "|"
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, native),
+            linux_container_script_result_fixture_v2(inspect, prefix + "running"),
+            linux_container_script_result_fixture_v2(inspect, prefix + "running"),
+            linux_container_script_result_fixture_v2(inspect, prefix + "exited"),
+            linux_container_script_result_fixture_v2(inspect, prefix + "exited"),
+            linux_container_script_result_fixture_v2(inspect, prefix + "exited")], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val created = simple_container_apply_v2(owner, "create", request, _recovery_deadline_v2(request))
+        val original = simple_container_intent_v2(created.owner, request).unwrap()
+        expect(original.phase).to_equal(RUNTIME_PHASE_CREATED)
+        val first = simple_container_recover_v2(created.owner, request, original)
+        expect(first.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(first.operation.state.phase).to_equal(RUNTIME_PHASE_RUNNING)
+        val observed = simple_container_read_v2(first.owner, "inspect", request)
+        expect(observed.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(observed.operation.state.identity).to_equal(created.operation.state.identity)
+        val second = simple_container_recover_v2(observed.owner, request, original)
+        expect(second.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(second.operation.state.phase).to_equal(RUNTIME_PHASE_EXITED)
+        val current = simple_container_intent_v2(second.owner, request).unwrap()
+        expect(current.phase).to_equal(RUNTIME_PHASE_EXITED)
+        val third = simple_container_recover_v2(second.owner, request, current)
+        expect(third.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(third.operation.state.identity).to_equal(created.operation.state.identity)
+        val fourth = simple_container_recover_v2(third.owner, request, original)
+        expect(fourth.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(fourth.operation.state.phase).to_equal(RUNTIME_PHASE_EXITED)
+        expect(adapter.provider.executor_call_count()).to_equal(6)
+        expect(adapter.provider.scripted_cursor).to_equal(6)
+
+    it "rejects changed immutable identity unsafe phases and mismatched V2 payload before native query":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, "b".repeat(64))], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val created = simple_container_apply_v2(owner, "create", request, _recovery_deadline_v2(request))
+        val original = simple_container_intent_v2(created.owner, request).unwrap()
+        for field in ["pod", "attempt", "operation", "engine", "native", "short", "boot", "generation", "prepared", "unknown", "destroyed"]:
+            var wrong = original
+            if field == "pod": wrong.pod_uid = "foreign"
+            if field == "attempt": wrong.attempt = 2
+            if field == "operation": wrong.operation_id = "foreign"
+            if field == "engine": wrong.engine = "docker"
+            if field == "native": wrong.native_id = "c".repeat(64)
+            if field == "short": wrong.native_id = "--all"
+            if field == "boot": wrong.node_boot_id = "c".repeat(64)
+            if field == "generation": wrong.provider_generation = 8
+            if field == "prepared": wrong.phase = RUNTIME_PHASE_PREPARED
+            if field == "unknown": wrong.phase = RUNTIME_PHASE_UNKNOWN
+            if field == "destroyed": wrong.phase = RUNTIME_PHASE_DESTROYED
+            expect(simple_container_recover_v2(created.owner, request, wrong).operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        var changed_leaf = leaf
+        changed_leaf.args = ["different"]
+        val changed_request = linux_container_request_fixture_v2(changed_leaf)
+        expect(simple_container_recover_v2(created.owner, changed_request, original).operation.reason).to_equal("intent-request-mismatch")
+        # A cached V2 record that no longer binds this request must not fall
+        # back to the older cached identity, even when phase matches exactly.
+        for key in adapter.provider.request_bindings.keys():
+            var corrupt = adapter.provider.request_bindings[key]
+            corrupt.request_digest = "c".repeat(64)
+            adapter.provider.request_bindings[key] = corrupt
+        expect(simple_container_recover_v2(created.owner, request, original).operation.reason).to_equal("intent-request-mismatch")
+        expect(adapter.provider.executor_call_count()).to_equal(1)
+        expect(adapter.provider.scripted_cursor).to_equal(1)
+
+    it "rejects created receipt adoption of a destroyed tombstone and reconciles only the matching tombstone without a query":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val destroy = build_destroy_command("podman", "/unused/api", native, false).1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, native),
+            linux_container_script_result_fixture_v2(destroy, "")], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val created = simple_container_apply_v2(owner, "create", request, _recovery_deadline_v2(request))
+        val original = simple_container_intent_v2(created.owner, request).unwrap()
+        val destroyed = simple_container_apply_v2(created.owner, "destroy", request, _recovery_deadline_v2(request))
+        expect(destroyed.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(simple_container_recover_v2(destroyed.owner, request, original).operation.reason).to_equal("container-adapter-recovery-phase-mismatch")
+        val tombstone = simple_container_intent_v2(destroyed.owner, request).unwrap()
+        val reconciled = simple_container_recover_v2(destroyed.owner, request, tombstone)
+        expect(reconciled.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(reconciled.operation.state.phase).to_equal(RUNTIME_PHASE_DESTROYED)
+        expect(reconciled.operation.command.args.len()).to_equal(0)
+        expect(adapter.provider.executor_call_count()).to_equal(2)
+        expect(simple_container_absence_v2(reconciled.owner, request, created.operation.state.identity).receipt).to_equal(nil)
+        expect(adapter.provider.scripted_cursor).to_equal(2)
+
+    it "preserves exact legacy phase reconciliation without granting V2 created receipt relaxation":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val inspect = build_inspect_command("podman", "/unused/api", native).1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(inspect,
+            "workload-1|1|" + fence + "|7|create-api|" + native + "|running")], [])
+        val legacy = RuntimeIntentV1(pod_uid: "workload-1", attempt: 1, provider_generation: 7,
+            operation_id: "create-api", engine: "podman", native_id: native, node_boot_id: fence, phase: RUNTIME_PHASE_RUNNING)
+        adapter.provider.intents.push(legacy)
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        var original = legacy
+        original.phase = RUNTIME_PHASE_CREATED
+        expect(simple_container_recover_v2(owner, request, original).operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(adapter.provider.executor_call_count()).to_equal(0)
+        val recovered = simple_container_recover_v2(owner, request, legacy)
+        expect(recovered.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(recovered.operation.state.phase).to_equal(RUNTIME_PHASE_RUNNING)
+        expect(adapter.provider.executor_call_count()).to_equal(1)
+
+    it "preserves exact prepared uncertain-create reconciliation with an initially empty native ID":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val inspect = build_inspect_command("podman", "/unused/api", "simpleorch-workload-1-1").1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(inspect,
+            "workload-1|1|" + fence + "|7|create-api|" + native + "|running")], [])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val prepared = simple_container_apply_v2(owner, "prepare", request, _recovery_deadline_v2(request))
+        expect(prepared.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val retained = simple_container_intent_v2(prepared.owner, request).unwrap()
+        expect(retained.phase).to_equal(RUNTIME_PHASE_PREPARED)
+        expect(retained.native_id).to_equal("")
+        val recovered = simple_container_recover_v2(prepared.owner, request, retained)
+        expect(recovered.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(recovered.operation.state.identity.native_id).to_equal(native)
+        expect(recovered.operation.state.phase).to_equal(RUNTIME_PHASE_RUNNING)
+        expect(adapter.provider.scripted_cursor).to_equal(1)
+
+    it "accepts original created and current stopped receipts against qualified stopped retention":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, fence).1
+        val inspect = build_inspect_command("podman", "/unused/api", native).1
+        val stopped = "workload-1|1|" + fence + "|7|create-api|" + native + "|stopped"
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, native),
+            linux_container_script_result_fixture_v2(inspect, stopped),
+            linux_container_script_result_fixture_v2(inspect, stopped),
+            linux_container_script_result_fixture_v2(inspect, stopped)], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val created = simple_container_apply_v2(owner, "create", request, _recovery_deadline_v2(request))
+        val original = simple_container_intent_v2(created.owner, request).unwrap()
+        val first = simple_container_recover_v2(created.owner, request, original)
+        expect(first.operation.state.phase).to_equal(RUNTIME_PHASE_STOPPED)
+        val second = simple_container_recover_v2(first.owner, request, original)
+        expect(second.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val current = simple_container_intent_v2(second.owner, request).unwrap()
+        val third = simple_container_recover_v2(second.owner, request, current)
+        expect(third.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(third.operation.state.phase).to_equal(RUNTIME_PHASE_STOPPED)
+        expect(adapter.provider.scripted_cursor).to_equal(4)

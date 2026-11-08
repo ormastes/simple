@@ -1,0 +1,125 @@
+# Container completion carries actual runtime/absence identity. It never invents
+# a PID, process generation, native tree-reap flag or compiler.process record.
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, RemoteOutputBytesV1,
+    remote_policy_bind_v1, remote_outputs_freeze_v1}
+use app.buildrunner.remote_container_authority_v2.RemoteContainerCompletionV2
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2,
+    container_execution_request_encode_v2, container_execution_plan_bytes_v2, container_host_scope_bytes_v2}
+use std.common.contracts.container.execution_evidence_v2.{ContainerExecutionEvidenceV2,
+    ContainerExecutionUserReceiptV2, container_execution_evidence_encode_v2, container_execution_user_receipt_encode_v2}
+use app.buildrunner.remote_container_workspace_probe_v2.remote_container_workspace_receipt_validate_v2
+use std.common.build_manager.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1,
+    builder_validate_result_v1, builder_digest_valid_v1}
+use std.common.build_manager.codec.{builder_encode_result_v1, builder_wire_line_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+struct RemoteContainerBytesV2:
+    execution: ContainerExecutionEvidenceV2
+    stdout: [u8]
+    stderr: [u8]
+    outputs: [RemoteOutputBytesV1]
+    selected_user: ContainerExecutionUserReceiptV2
+    workspace_probe: text
+
+struct RemoteContainerBundleV2:
+    result: BuildResultV1
+    evidence: RemoteContainerBytesV2
+    completion: RemoteContainerCompletionV2
+
+struct RemoteContainerFrozenV2:
+    bytes: RemoteContainerBytesV2
+    observed: [BuildInputV1]
+    result_digest: text
+    execution_digest: text
+    stdout_digest: text
+    stderr_digest: text
+    output_inventory_digest: text
+    tests_digest: text
+
+fn remote_container_execution_digest_v2(execution: ContainerExecutionEvidenceV2,
+        selected_user: ContainerExecutionUserReceiptV2, workspace_probe: text) -> Result<text, text>:
+    val binding = "SIMPLE-REMOTE-CONTAINER-MEASUREMENTS-2\n" +
+        builder_wire_line_v1(container_execution_evidence_encode_v2(execution)?) +
+        builder_wire_line_v1(container_execution_user_receipt_encode_v2(selected_user)?) + builder_wire_line_v1(workspace_probe)
+    Ok(sha256_text(binding))
+
+fn remote_container_request_bind_v2(task: BuildTaskV1, policy: RemoteEvidencePolicyV1,
+        request: ContainerExecutionRequestV2, provider_identity_digest: text) -> Result<bool, text>:
+    val _policy = remote_policy_bind_v1(task, policy)?
+    val payload = container_execution_request_encode_v2(request)?
+    var found = false
+    var provider_pinned = false
+    if not builder_digest_valid_v1(provider_identity_digest): return Err("REMOTE_CONTAINER_PROVIDER_INVALID")
+    for input in task.inputs:
+        if input.path == "remote-container/" + task.id + ".sdn" and input.digest == sha256_text(payload):
+            found = true
+        if input.path == "remote-container-provider/" + task.id + ".sdn" and
+                input.digest == sha256_text(provider_identity_digest + "\n"):
+            provider_pinned = true
+    if not found: return Err("REMOTE_CONTAINER_REQUEST_NOT_PINNED")
+    if not provider_pinned: return Err("REMOTE_CONTAINER_PROVIDER_NOT_PINNED")
+    var nonce_pinned = false
+    for input in task.inputs:
+        if input.path == "remote-workspace/" + task.id + ".nonce": nonce_pinned = true
+    if not nonce_pinned or not task.outputs.contains("remote-workspace/" + task.id + ".probe.sdn"):
+        return Err("REMOTE_CONTAINER_WORKSPACE_CONTRACT_REQUIRED")
+    if request.plan.workload_uid != task.id or request.plan.attempt != task.attempt or
+            request.plan.operation_id != policy.operation_id or request.plan.physical_host_id != policy.host_id:
+        return Err("REMOTE_CONTAINER_PLAN_DIFFERS")
+    Ok(true)
+
+fn remote_container_evidence_freeze_v2(task: BuildTaskV1, result: BuildResultV1,
+        policy: RemoteEvidencePolicyV1, request: ContainerExecutionRequestV2,
+        provider_identity_digest: text, bytes: RemoteContainerBytesV2) -> Result<RemoteContainerFrozenV2, text>:
+    val _bound = remote_container_request_bind_v2(task, policy, request, provider_identity_digest)?
+    val invalid = builder_validate_result_v1(task, result)
+    if invalid != "": return Err(invalid)
+    val execution_payload = container_execution_evidence_encode_v2(bytes.execution)?
+    val user_payload = container_execution_user_receipt_encode_v2(bytes.selected_user)?
+    if bytes.execution.provider_identity_digest != provider_identity_digest:
+        return Err("REMOTE_CONTAINER_PROVIDER_CHANGED")
+    if container_execution_plan_bytes_v2(bytes.execution.execution)? !=
+            container_execution_plan_bytes_v2(request.plan)?:
+        return Err("REMOTE_CONTAINER_EXECUTION_PLAN_DIFFERS")
+    if result.exit_code != bytes.execution.exit_code:
+        return Err("REMOTE_CONTAINER_EXIT_DIFFERS")
+    val user = bytes.selected_user
+    val runtime = bytes.execution.runtime
+    if user.backend != request.plan.backend or user.request_digest != request.plan.request_digest or
+            user.provider_identity_digest != provider_identity_digest or
+            container_host_scope_bytes_v2(user.scope)? != container_host_scope_bytes_v2(bytes.execution.absence.scope)? or
+            user.identity.pod_uid != runtime.pod_uid or user.identity.attempt != runtime.attempt or
+            user.identity.provider_generation != runtime.provider_generation or user.identity.operation_id != runtime.operation_id or
+            user.identity.engine != runtime.engine or user.identity.native_id != runtime.native_id or
+            user.identity.node_boot_id != runtime.node_boot_id or
+            user.observed_unix_ms > bytes.execution.absence.observed_unix_ms:
+        return Err("REMOTE_CONTAINER_SELECTED_USER_DIFFERS")
+    if bytes.workspace_probe.byte_len() > 1024: return Err("REMOTE_CONTAINER_WORKSPACE_PROBE_INVALID")
+    val probe_fields = bytes.workspace_probe.split("\n")
+    if probe_fields.len() != 5: return Err("REMOTE_CONTAINER_WORKSPACE_PROBE_INVALID")
+    val _probe = remote_container_workspace_receipt_validate_v2(task, probe_fields[2], bytes.workspace_probe)?
+    # An exit code is not a signal/timeout observation. This version only records
+    # actual success or ordinary failure after independently observed absence.
+    val expected_status = if bytes.execution.exit_code == 0: "OK" else: "ERROR"
+    if result.status != expected_status: return Err("REMOTE_CONTAINER_OUTCOME_UNPROVEN")
+    var remaining = policy.maximum_bytes
+    for count in [execution_payload.byte_len(), user_payload.byte_len(), bytes.workspace_probe.byte_len(),
+            bytes.stdout.len(), bytes.stderr.len()]:
+        if count > remaining: return Err("REMOTE_EVIDENCE_EXCEEDS_BOUND")
+        remaining = remaining - count
+    val outputs = remote_outputs_freeze_v1(task, result, policy, bytes.outputs, remaining)?
+    if result.status == "OK":
+        var matching_probe = false
+        for output in bytes.outputs:
+            if output.path == "remote-workspace/" + task.id + ".probe.sdn" and
+                    sha256_u8_hex(output.content) == sha256_text(bytes.workspace_probe): matching_probe = true
+        if not matching_probe: return Err("REMOTE_CONTAINER_WORKSPACE_OUTPUT_DIFFERS")
+    Ok(RemoteContainerFrozenV2(bytes, outputs.observed,
+        sha256_text(builder_encode_result_v1(result)),
+        remote_container_execution_digest_v2(bytes.execution, bytes.selected_user, bytes.workspace_probe)?,
+        sha256_u8_hex(bytes.stdout), sha256_u8_hex(bytes.stderr),
+        outputs.output_inventory_digest, outputs.tests_digest))
+
+export RemoteContainerBytesV2, RemoteContainerBundleV2, RemoteContainerFrozenV2
+export remote_container_request_bind_v2, remote_container_evidence_freeze_v2
+export remote_container_execution_digest_v2

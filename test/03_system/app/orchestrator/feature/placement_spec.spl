@@ -21,7 +21,29 @@ fn placement_host(id: text, devices: [text], cpu: i64, memory: i64) -> Placement
         draining: false, limits_enforced: true, gpu_devices: devices,
         ledger: HostCapacityLedgerV1(capacity: capacity, revision: 1, continuity_proven: true, reservations: []))
 
+fn placement_gpu_reservation(devices: [text], state: HostReservationStateV1) -> HostReservationV1:
+    HostReservationV1(id: "existing", operation_id: "existing-op", payload_digest: "9".repeat(64),
+        service_scope_id: "user", assignment_generation: 1, nonce: "existing-nonce",
+        cpu_millis: 1000, memory_bytes: 1000, exclusive_devices: devices,
+        prepare_deadline_ms: 100, state: state)
+
 describe "native host placement proposals":
+    it "places Windows requests only on the explicit Windows Docker runtime class":
+        step("Keep Windows Docker eligibility separate from Linux Podman hosts")
+        var request = placement_request()
+        request.execution_os = "windows"
+        request.runtime_class = "docker-process"
+        val linux = placement_host("linux", [], 4000, 8000)
+        var windows = placement_host("windows", [], 4000, 8000)
+        windows.execution_os = "windows"
+        windows.runtime_class = "docker-process"
+        val plan = plan_host_placement_v1(request, [linux, windows]).unwrap()
+        expect(plan.offers[plan.selected_index].physical_host_id).to_equal("windows")
+        expect(plan.rejected.len()).to_equal(1)
+        val refused = plan_host_placement_v1(request, [linux]).unwrap()
+        expect(refused.selected_index).to_equal(-1)
+        expect(refused.offers.len()).to_equal(0)
+
     it "preserves GPU hosts for CPU work and publishes effective caps":
         step("Prefer a feasible CPU host and inspect reserved-equivalent caps")
         val plan = plan_host_placement_v1(placement_request(), [placement_host("gpu", ["gpu-0"], 8000, 24000), placement_host("cpu", [], 4000, 8000)]).unwrap()
@@ -140,3 +162,52 @@ describe "native host placement proposals":
         offer.allocation.cpu_cap_millis = 4000
         val uncapped = PlacementPlanV1(offers: [offer], rejected: [], selected_index: 0)
         expect(placement_reservation_intent_v1(uncapped, identity).unwrap_err()).to_equal("allocation-cap-mismatch")
+
+    it "reserves exactly one available GPU across inventory permutations and active states":
+        step("Keep a busy first GPU charged and choose the same free GPU for each ordering")
+        var request = placement_request()
+        request.profile.gpu_required = true
+        request.gpu_mode = "whole-exclusive"
+        val identity = PlacementAttemptIdentityV1(reservation_id: "new", operation_id: "new-op",
+            assignment_generation: 2, nonce: "new-nonce", plan_digest: "1".repeat(64), prepare_deadline_ms: 100)
+        for state in [HostReservationStateV1.Prepared, HostReservationStateV1.Executing, HostReservationStateV1.Uncertain]:
+            for devices in [["gpu-2", "gpu-0", "gpu-1"], ["gpu-1", "gpu-2", "gpu-0"], ["gpu-0", "gpu-1", "gpu-2"]]:
+                var host = placement_host("gpu-host", devices, 8000, 24000)
+                host.ledger.reservations = [placement_gpu_reservation(["gpu-0"], state)]
+                val plan = plan_host_placement_v1(request, [host]).unwrap()
+                expect(plan.selected_index).to_equal(0)
+                expect(plan.offers.len()).to_equal(1)
+                expect(plan.offers[0].exclusive_devices.len()).to_equal(1)
+                expect(plan.offers[0].exclusive_devices[0]).to_equal("gpu-1")
+                expect(plan.offers[0].allocation.requires_gpu_resolution).to_equal(false)
+                val intent = placement_reservation_intent_v1(plan, identity).unwrap()
+                expect(intent.reservation.exclusive_devices.len()).to_equal(1)
+                expect(intent.reservation.exclusive_devices[0]).to_equal("gpu-1")
+                expect(intent.reservation.cpu_millis).to_equal(2000)
+                expect(intent.reservation.memory_bytes).to_equal(4000)
+                val prepared = host_prepare_reservation_v1(host.ledger, intent.fence, intent.reservation, 1).unwrap()
+                expect(prepared.reservations.len()).to_equal(2)
+                expect(prepared.reservations[1].exclusive_devices.len()).to_equal(1)
+                expect(prepared.reservations[1].exclusive_devices[0]).to_equal("gpu-1")
+                val remaining = host_available_capacity_v1(prepared).unwrap()
+                expect(remaining.exclusive_devices.len()).to_equal(1)
+                expect(remaining.exclusive_devices[0]).to_equal("gpu-2")
+
+    it "queues when every GPU is busy and reuses only an explicitly released device":
+        step("Keep prepared executing and uncertain claims exclusive until their state is Released")
+        var request = placement_request()
+        request.profile.gpu_required = true
+        request.gpu_mode = "whole-exclusive"
+        for state in [HostReservationStateV1.Prepared, HostReservationStateV1.Executing, HostReservationStateV1.Uncertain]:
+            var host = placement_host("gpu-host", ["gpu-1", "gpu-0"], 8000, 24000)
+            host.ledger.reservations = [placement_gpu_reservation(["gpu-0", "gpu-1"], state)]
+            val blocked = plan_host_placement_v1(request, [host]).unwrap()
+            expect(blocked.selected_index).to_equal(-1)
+            expect(blocked.offers.len()).to_equal(0)
+            expect(blocked.rejected[0].reason).to_equal("exclusive-gpu-unavailable")
+        var released = placement_host("gpu-host", ["gpu-1", "gpu-0"], 8000, 24000)
+        released.ledger.reservations = [placement_gpu_reservation(["gpu-0", "gpu-1"], HostReservationStateV1.Released)]
+        val available = plan_host_placement_v1(request, [released]).unwrap()
+        expect(available.selected_index).to_equal(0)
+        expect(available.offers[0].exclusive_devices.len()).to_equal(1)
+        expect(available.offers[0].exclusive_devices[0]).to_equal("gpu-0")

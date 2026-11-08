@@ -1,0 +1,77 @@
+# Same-process access observation before the producer starts compiler/tests.
+# This proves an access cycle for the calling process in its actual workspace;
+# it does not identify a user, inspect ACLs or attest a container/provider.
+use std.common.build_manager.contracts.{BuildTaskV1, builder_validate_task_v1,
+    builder_task_identity_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use app.bootstrap_builder.worker.builder_worker_verify_inputs_v1
+use app.io.file_ops.{path_absolute, file_create_exclusive,
+    file_read_regular_no_follow_bounded, file_remove}
+
+fn remote_container_workspace_nonce_error_v2(task: BuildTaskV1, nonce: text) -> text:
+    val invalid = builder_validate_task_v1(task)
+    if invalid != "": return invalid
+    if not builder_digest_valid_v1(nonce): return "REMOTE_WORKSPACE_NONCE_INVALID"
+    val path = "remote-workspace/" + task.id + ".nonce"
+    for input in task.inputs:
+        if input.path == path:
+            if input.digest != sha256_text(nonce + "\n"): return "REMOTE_WORKSPACE_NONCE_PIN_DIFFERS"
+            return ""
+    "REMOTE_WORKSPACE_NONCE_NOT_PINNED"
+
+fn remote_container_workspace_receipt_validate_v2(task: BuildTaskV1, nonce: text,
+        payload: text) -> Result<bool, text>:
+    val invalid = remote_container_workspace_nonce_error_v2(task, nonce)
+    if invalid != "": return Err(invalid)
+    val expected = "SIMPLE-REMOTE-CONTAINER-WORKSPACE-PROBE-2\n" +
+        builder_task_identity_v1(task) + "\n" + nonce + "\nwrite-read-delete\n"
+    if payload.byte_len() > 256 or payload != expected: return Err("REMOTE_WORKSPACE_RECEIPT_DIFFERS")
+    Ok(true)
+
+# Caller serializes this preflight before any workload starts. A failed create
+# never grants cleanup ownership over an existing path. A changed/unreadable
+# marker is left for the outer workspace owner; it cannot yield a receipt.
+fn remote_container_workspace_probe_cycle_v2(path: text, marker: text) -> Result<bool, text>:
+    if not file_create_exclusive(path, marker): return Err("REMOTE_WORKSPACE_EXCLUSIVE_CREATE_FAILED")
+    val readback = match file_read_regular_no_follow_bounded(path, 256):
+        Ok(value): value
+        Err(_): return Err("REMOTE_WORKSPACE_PROBE_READ_FAILED")
+    if readback != marker: return Err("REMOTE_WORKSPACE_PROBE_MARKER_DIFFERS")
+    if not file_remove(path): return Err("REMOTE_WORKSPACE_PROBE_REMOVE_FAILED")
+    Ok(true)
+
+fn remote_container_workspace_probe_v2(task: BuildTaskV1, attempt_root: text) -> Result<text, text>:
+    if attempt_root == "" or attempt_root.contains("\0"): return Err("REMOTE_WORKSPACE_ROOT_INVALID")
+    val invalid = builder_validate_task_v1(task)
+    if invalid != "": return Err(invalid)
+    val work = path_absolute(attempt_root + "/work")
+    if path_absolute(".") != work: return Err("REMOTE_WORKSPACE_CWD_DIFFERS")
+    # Input/producer hashes and no-follow parent checks precede probe effects.
+    val inputs_error = builder_worker_verify_inputs_v1(task, attempt_root)
+    if inputs_error != "": return Err(inputs_error)
+    val nonce_payload = file_read_regular_no_follow_bounded(
+        work + "/remote-workspace/" + task.id + ".nonce", 65)?
+    if nonce_payload.byte_len() != 65 or not nonce_payload.ends_with("\n"):
+        return Err("REMOTE_WORKSPACE_NONCE_INVALID")
+    # Admit ASCII before slicing by character index: a 65-byte non-ASCII
+    # payload may contain fewer than 64 characters and must fail safely.
+    for i in 0..64:
+        val code = nonce_payload.byte_at(i) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return Err("REMOTE_WORKSPACE_NONCE_INVALID")
+    val nonce = nonce_payload.substring(0, 64)
+    # Recheck the digest over the exact read bytes, not an earlier pathname hash.
+    val nonce_error = remote_container_workspace_nonce_error_v2(task, nonce)
+    if nonce_error != "": return Err(nonce_error)
+    val identity = builder_task_identity_v1(task)
+    val probe_path = work + "/.simple-container-access-" + nonce
+    val marker = "SIMPLE-REMOTE-CONTAINER-WORKSPACE-ACCESS-2\n" + identity + "\n" + nonce + "\n"
+    val _first = remote_container_workspace_probe_cycle_v2(probe_path, marker)?
+    # A second exclusive create proves removal/absence positively at the
+    # ownership boundary. No ambiguous exists()==false observation is used.
+    val _second = remote_container_workspace_probe_cycle_v2(probe_path, marker)?
+    val receipt = "SIMPLE-REMOTE-CONTAINER-WORKSPACE-PROBE-2\n" + identity + "\n" + nonce + "\nwrite-read-delete\n"
+    val _checked = remote_container_workspace_receipt_validate_v2(task, nonce, receipt)?
+    Ok(receipt)
+
+export remote_container_workspace_probe_v2, remote_container_workspace_receipt_validate_v2

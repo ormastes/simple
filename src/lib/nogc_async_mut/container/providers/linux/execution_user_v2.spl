@@ -1,0 +1,62 @@
+# Configured container user metadata, never an effective-UID measurement.
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeIdentityV1}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_keys, json_value_as_text, json_value_get, json_value_type}
+
+pub fn build_execution_user_command_v2(engine: text, native_id: text) -> Result<RuntimeCommandV1, text>:
+    if engine != "podman": return Err("execution-user-managed-podman-required")
+    if not builder_digest_valid_v1(native_id): return Err("execution-user-full-native-id-required")
+    val format = "{\"id\":{{json .Id}},\"pod_uid\":{{json (index .Config.Labels \"io.simpleorch.pod_uid\")}},\"attempt\":{{json (index .Config.Labels \"io.simpleorch.attempt\")}},\"node_boot_id\":{{json (index .Config.Labels \"io.simpleorch.node_boot_id\")}},\"provider_generation\":{{json (index .Config.Labels \"io.simpleorch.provider_generation\")}},\"operation_id\":{{json (index .Config.Labels \"io.simpleorch.operation_id\")}},\"user\":{{json .Config.User}}}"
+    Ok(RuntimeCommandV1(operation: "execution-user", program: engine,
+        args: ["container", "inspect", "--format", format, native_id]))
+
+pub fn linux_oci_flat_inspect_json_v2(raw: text) -> Result<JsonValue, text>:
+    if raw.byte_len() > 16384: return Err("execution-user-output-bound")
+    # Reject nested JSON before the recursive parser. Quoted braces remain data.
+    var quoted = false
+    var escaped = false
+    var depth = 0
+    var index = 0
+    while index < raw.byte_len():
+        val byte = raw.byte_at(index)
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        else:
+            if byte == 34: quoted = true
+            elif byte == 123:
+                depth = depth + 1
+                if depth > 1: return Err("execution-user-json-nested")
+            elif byte == 125: depth = depth - 1
+            elif byte == 91 or byte == 93: return Err("execution-user-json-array")
+        index = index + 1
+    val value = json_parse_value_strict(raw)?
+    if json_value_type(value) != "object": return Err("execution-user-json-object-required")
+    Ok(value)
+
+pub fn linux_oci_execution_user_parse_v2(raw: text, expected: RuntimeIdentityV1) -> Result<text, text>:
+    val value = linux_oci_flat_inspect_json_v2(raw)?
+    val keys = json_value_keys(value)
+    if keys.len() != 7: return Err("execution-user-json-fields")
+    var fields: [text] = []
+    for key in ["id", "pod_uid", "attempt", "node_boot_id", "provider_generation", "operation_id", "user"]:
+        val member = match json_value_get(value, key):
+            case Some(found): found
+            case None: return Err("execution-user-json-fields")
+        val text_value = match json_value_as_text(member):
+            case Some(found): found
+            case None: return Err("execution-user-json-string-required")
+        fields.push(text_value)
+    if fields[0] != expected.native_id or fields[1] != expected.pod_uid or
+            fields[2] != expected.attempt.to_text() or fields[3] != expected.node_boot_id or
+            fields[4] != expected.provider_generation.to_text() or fields[5] != expected.operation_id:
+        return Err("execution-user-observed-identity-mismatch")
+    if fields[6] == "": return Err("execution-user-unresolved")
+    if fields[6].byte_len() > 128: return Err("execution-user-invalid")
+    var index = 0
+    while index < fields[6].byte_len():
+        val byte = fields[6].byte_at(index)
+        if byte < 32 or byte == 127: return Err("execution-user-invalid")
+        index = index + 1
+    Ok(fields[6])

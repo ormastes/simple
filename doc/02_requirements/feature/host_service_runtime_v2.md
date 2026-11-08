@@ -1,0 +1,6 @@
+# Host metadata listener runtime requirements
+
+- HOST-SERVICE-RUNTIME-01: Compose the actual installed peer-policy gateway with one SDK service owner; select only an explicit installed client UID and observed service EUID. Preserve pre-Ready cleanup and partial listeners without fabricated domain/Ready status. Live traffic uses existing classifier/callback and no new provider effect route.
+- HOST-SERVICE-RUNTIME-02: Trusted stop releases the canonical Host writer before transport. Every non-success retains exact cleanup state and removes stale WAL from callbacks; only authenticated mapped status remains on fully open transport. Retry exact retained cleanup only, never consumed/unknown/stale raw descriptors. Preserve transport errors even when physical handles are consumed.
+
+Verification: six authored actual private-file/owned-WAL/native-listener source scenarios and exact-step manual. STATUS NOT_RUN. Production native enrollment/root open, kernel peers, response-send/native close fault injection, fresh-service reconciliation, Windows support and provider readiness remain unqualified separate capabilities. A single parent must replace returned runtime; value copies are not independent owners.

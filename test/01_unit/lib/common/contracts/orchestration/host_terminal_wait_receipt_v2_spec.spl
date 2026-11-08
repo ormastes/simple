@@ -1,0 +1,89 @@
+# NOT_RUN. Synthetic pure observations test integrity/qualification, not origin.
+use std.spec.{describe, it, expect}
+use std.common.contracts.orchestration.host_terminal_wait_receipt_v2.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionPlanV2,
+    container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1}
+use std.common.contracts.container.execution_evidence_v2.container_runtime_observation_digest_v2
+
+fn terminal_receipt_fixture_v2() -> HostTerminalWaitReceiptV2:
+    val scope = ContainerHostScopeV2(physical_host_id: "host_a", service_scope_id: "service_a", boot_id: "boot_a",
+        provider_generation: 7, native_machine_id: "machine_a", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_a")
+    val execution = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "workload", attempt: 3,
+        operation_id: "operation_1", request_digest: "a".repeat(64), physical_host_id: scope.physical_host_id,
+        service_scope_id: scope.service_scope_id, boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    val identity = RuntimeIdentityV1(pod_uid: "workload", attempt: 3, provider_generation: 7,
+        operation_id: "operation_1", engine: "podman", native_id: "1".repeat(64), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val wait = RuntimeOperationV1(status: "ok", operation: "wait",
+        command: RuntimeCommandV1(operation: "wait", program: "/trusted/podman", args: ["wait", identity.native_id]),
+        state: RuntimeStateV1(phase: "exited", identity: identity, exit_code: 17, reason: "exited"),
+        exit_code: 0, stdout: "17\n", stderr: "", reason: "exited")
+    HostTerminalWaitReceiptV2(execution: execution, operation_digest: "2".repeat(64),
+        provider_identity_digest: "3".repeat(64), observed_unix_ms: 100,
+        observation_digest: container_runtime_observation_digest_v2(wait).unwrap(), wait: wait)
+
+fn terminal_receipt_qualified_v2(value: HostTerminalWaitReceiptV2,
+        expected: HostTerminalWaitReceiptV2) -> Result<bool, text>:
+    host_terminal_wait_receipt_validate_v2(value, expected.execution, expected.wait.state.identity,
+        expected.operation_digest, expected.provider_identity_digest, expected.observed_unix_ms)
+
+describe "pure shared terminal wait receipt qualification V2":
+    it "roundtrips full wait bytes and qualifies nonzero workload exit without calling it success":
+        val value = terminal_receipt_fixture_v2()
+        val source = host_terminal_wait_receipt_encode_v2(value).unwrap()
+        val decoded = host_terminal_wait_receipt_decode_v2(source).unwrap()
+        expect(host_terminal_wait_receipt_encode_v2(decoded).unwrap()).to_equal(source)
+        expect(terminal_receipt_qualified_v2(decoded, value)).to_equal(Ok(true))
+        expect(decoded.wait.state.exit_code).to_equal(17)
+        expect(decoded.wait.exit_code).to_equal(0)
+
+    it "rejects inspect start nonterminal command failure and unknown workload exit as wait authority":
+        val original = terminal_receipt_fixture_v2()
+        for mode in ["inspect", "start", "running", "command-failed", "unknown-exit"]:
+            var changed = original
+            var wait = changed.wait
+            if mode == "inspect" or mode == "start": wait.operation = mode
+            elif mode == "running":
+                var state = wait.state
+                state.phase = "running"
+                wait.state = state
+            elif mode == "command-failed": wait.exit_code = 1
+            else:
+                var state = wait.state
+                state.exit_code = -1
+                wait.state = state
+            changed.wait = wait
+            changed.observation_digest = container_runtime_observation_digest_v2(wait).unwrap()
+            expect(terminal_receipt_qualified_v2(changed, original))
+                .to_equal(Err("host-terminal-wait-terminal-observation-required"))
+
+    it "rejects altered observation digest, clock, backend engine and scope":
+        val original = terminal_receipt_fixture_v2()
+        var digest = original
+        digest.observation_digest = "4".repeat(64)
+        expect(host_terminal_wait_receipt_encode_v2(digest)).to_equal(Err("host-terminal-wait-observation-digest-mismatch"))
+        var clock = original
+        clock.observed_unix_ms = 99
+        expect(terminal_receipt_qualified_v2(clock, original)).to_equal(Err("host-terminal-wait-clock-regressed"))
+        var changed = original
+        var plan = changed.execution
+        plan.backend = "windows-docker-process"
+        changed.execution = plan
+        expect(host_terminal_wait_receipt_validate_v2(changed, plan, original.wait.state.identity,
+            original.operation_digest, original.provider_identity_digest, 100))
+            .to_equal(Err("host-terminal-wait-backend-mismatch"))
+        plan = original.execution
+        plan.service_scope_id = "another_scope"
+        changed.execution = plan
+        expect(terminal_receipt_qualified_v2(changed, original)).to_equal(Err("host-terminal-wait-retained-binding-mismatch"))
+
+    it "requires exact canonical framing bounded source and unchanged observation correlation":
+        val original = terminal_receipt_fixture_v2()
+        val source = host_terminal_wait_receipt_encode_v2(original).unwrap()
+        expect(host_terminal_wait_receipt_decode_v2(source + "\n").is_err()).to_equal(true)
+        expect(host_terminal_wait_receipt_decode_v2(source.substring(0, source.len() - 1)).is_err()).to_equal(true)
+        expect(host_terminal_wait_receipt_decode_v2("x".repeat(8388609)).is_err()).to_equal(true)
+        var operation = original
+        operation.operation_digest = "5".repeat(64)
+        expect(terminal_receipt_qualified_v2(operation, original)).to_equal(Err("host-terminal-wait-retained-binding-mismatch"))

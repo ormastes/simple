@@ -2,18 +2,24 @@
 # These are handler/contract tests, not a real MCP process lifecycle receipt.
 use std.spec.step
 use app.mcp.main_dispatch.{dispatch_tool}
-use app.mcp.main_lazy_source_tools.{source_relative_path_valid_v1, source_projection_payload_v1, source_bounded_response_v1}
+use app.mcp.main_lazy_source_tools.{source_relative_path_valid_v1, source_projection_payload_v1, source_bounded_response_v1, source_rpc_id_valid_v1}
 use std.common.source.contracts.{SourceSnapshotV1}
 use std.nogc_sync_mut.source.projection.{source_project_raw_v1}
-use std.common.json.value.{json_parse_value_strict, json_value_field, json_value_text_or, json_value_items}
+use std.common.string_core.{str_len}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items}
 
 describe "source_open public routing and truthful capabilities":
-    it "does not silently substitute raw text for requested outline":
-        step("request the default outline through the dispatcher")
-        val response = dispatch_tool("1", "source_open", "{\"path\":\"missing.spl\"}")
-        expect(response).to_contain("outline_provider_unavailable")
-        expect(response).to_contain("unsupported")
-        expect(response).to_contain("\"isError\":true")
+    it "returns a native folded default through the registered dispatcher":
+        step("open real Simple source through source_open")
+        val response = dispatch_tool("1", "source_open", "{\"path\":\"test/fixture/source_view/outline.spl\"}")
+        val payload = mcp_source_payload(response)
+        expect(json_value_text_or(json_value_field(payload, "mode"), "")).to_equal("outline")
+        expect(json_value_text_or(json_value_field(payload, "provider_level"), "")).to_equal("L1")
+        val segments = json_value_items(json_value_field(payload, "segments"))
+        expect(segments.len()).to_equal(2)
+        expect(json_value_text_or(json_value_field(segments[0], "name"), "")).to_equal("Counter")
+        expect(json_value_text_or(json_value_field(segments[0], "source_text"), "")).to_equal("class Counter:\n")
+        expect(response.contains("fn second(): 22")).to_equal(false)
 
     it "denies traversal absolute paths and control characters":
         step("validate the workspace-relative path contract")
@@ -74,3 +80,123 @@ describe "source_open public routing and truthful capabilities":
         var names: [text] = []
         for index in 0..171: names.push("한")
         expect(source_relative_path_valid_v1(names.join(""))).to_equal(false)
+
+fn mcp_source_repeat(piece: text, count: i64) -> text:
+    var parts: [text] = []
+    for index in 0..count: parts.push(piece)
+    parts.join("")
+
+fn mcp_source_expect_invalid_id(response: text):
+    expect(str_len(response)).to_be_less_than(1024)
+    val wire = json_parse_value_strict(response).unwrap()
+    expect(json_value_field(wire, "id")).to_equal(JsonValue.Null)
+    val error = json_value_field(wire, "error")
+    expect(json_value_field(error, "code")).to_equal(JsonValue.Int(-32600))
+    expect(json_value_text_or(json_value_field(error, "message"), "")).to_equal("Invalid or oversized source request id")
+
+describe "source_open serialized ID admission":
+    it "accepts exactly 128 serialized bytes and refuses the adjacent byte":
+        step("exercise exact ID byte admission through the registered route")
+        val accepted = "\"" + mcp_source_repeat("a", 126) + "\""
+        val rejected = "\"" + mcp_source_repeat("a", 127) + "\""
+        expect(str_len(accepted)).to_equal(128)
+        expect(str_len(rejected)).to_equal(129)
+        expect(source_rpc_id_valid_v1(accepted)).to_equal(true)
+        expect(source_rpc_id_valid_v1(rejected)).to_equal(false)
+        val response = dispatch_tool(accepted, "source_open", "{\"mode\":\"invalid\"}")
+        val wire = json_parse_value_strict(response).unwrap()
+        expect(json_value_field(wire, "id")).to_equal(JsonValue.Str(mcp_source_repeat("a", 126)))
+        expect(response).to_contain("unsupported_source_mode")
+        mcp_source_expect_invalid_id(dispatch_tool(rejected, "source_open", "{}"))
+        mcp_source_expect_invalid_id(source_bounded_response_v1(rejected, "small"))
+
+    it "bounds multibyte oversized IDs before payload and body error handling":
+        step("reject large UTF8 IDs without echoing their bytes")
+        val id = "\"" + mcp_source_repeat("한", 6000) + "\""
+        expect(str_len(id)).to_equal(18002)
+        val success = source_bounded_response_v1(id, "small")
+        val fallback = source_bounded_response_v1(id, mcp_source_repeat("x", 17000))
+        val error = dispatch_tool(id, "source_open", "{")
+        val body_limit = dispatch_tool(id, "source_open", mcp_source_repeat("x", 4097))
+        for response in [success, fallback, error, body_limit]:
+            mcp_source_expect_invalid_id(response)
+            expect(response.contains("한")).to_equal(false)
+
+    it "rejects non-scalar and malformed IDs at both public seams":
+        step("exercise canonical invalid request envelopes")
+        for id in ["true", "false", "[]", "{}", "", "{", "1 2", "\"unterminated"]:
+            expect(source_rpc_id_valid_v1(id)).to_equal(false)
+            mcp_source_expect_invalid_id(dispatch_tool(id, "source_open", "{}"))
+            mcp_source_expect_invalid_id(source_bounded_response_v1(id, "small"))
+
+    it "preserves scalar IDs and bounds successful fallback and request error envelopes":
+        step("retain canonical supported IDs in actual envelopes")
+        for id in ["null", "\"request\"", "42", "1.5"]:
+            expect(source_rpc_id_valid_v1(id)).to_equal(true)
+            val expected = json_parse_value_strict(id).unwrap()
+            val success = source_bounded_response_v1(id, "small")
+            val fallback = source_bounded_response_v1(id, mcp_source_repeat("x", 17000))
+            val error = dispatch_tool(id, "source_open", "{")
+            val body_limit = dispatch_tool(id, "source_open", mcp_source_repeat("x", 4097))
+            for response in [success, fallback, error, body_limit]:
+                expect(str_len(response)).to_be_less_than(16385)
+                val wire = json_parse_value_strict(response).unwrap()
+                expect(json_value_field(wire, "id")).to_equal(expected)
+            val successful = json_value_field(json_parse_value_strict(success).unwrap(), "result")
+            expect(json_value_field(successful, "isError")).to_equal(JsonValue.Bool(false))
+            for response in [fallback, error, body_limit]:
+                val result = json_value_field(json_parse_value_strict(response).unwrap(), "result")
+                expect(json_value_field(result, "isError")).to_equal(JsonValue.Bool(true))
+            val fallback_result = json_value_field(json_parse_value_strict(fallback).unwrap(), "result")
+            val fallback_content = json_value_items(json_value_field(fallback_result, "content"))
+            val fallback_payload = json_parse_value_strict(json_value_text_or(json_value_field(fallback_content[0], "text"), "")).unwrap()
+            expect(json_value_text_or(json_value_field(fallback_payload, "status"), "")).to_equal("error")
+            expect(json_value_text_or(json_value_field(fallback_payload, "completeness"), "")).to_equal("not_evaluated")
+            expect(json_value_text_or(json_value_field(fallback_payload, "reason"), "")).to_equal("serialized_response_exceeds_budget; reduce max_bytes or max_nodes")
+            expect(error).to_contain("invalid_json_arguments")
+            expect(body_limit).to_contain("request_too_large")
+
+fn mcp_source_payload(response: text) -> JsonValue:
+    expect(str_len(response)).to_be_less_than(16385)
+    val wire = json_parse_value_strict(response).unwrap()
+    val result = json_value_field(wire, "result")
+    expect(json_value_field(result, "isError")).to_equal(JsonValue.Bool(false))
+    val content = json_value_items(json_value_field(result, "content"))
+    json_parse_value_strict(json_value_text_or(json_value_field(content[0], "text"), "")).unwrap()
+
+describe "source_open focused and paginated native routing":
+    it "expands the selected method with enclosing context":
+        step("focus a real method through the registered route")
+        val response = dispatch_tool("11", "source_open", "{\"path\":\"test/fixture/source_view/outline.spl\",\"mode\":\"focused\",\"target\":\"Counter.second\"}")
+        val payload = mcp_source_payload(response)
+        val segments = json_value_items(json_value_field(payload, "segments"))
+        expect(segments.len()).to_equal(3)
+        expect(json_value_text_or(json_value_field(segments[0], "name"), "")).to_equal("Counter")
+        expect(json_value_text_or(json_value_field(segments[2], "source_text"), "")).to_equal("    fn second(): 22")
+        expect(json_value_field(segments[2], "expanded")).to_equal(JsonValue.Bool(true))
+        expect(response).to_contain("authenticated_agent_session_binding_unavailable")
+        expect(response.contains("essential_help")).to_equal(false)
+
+    it "carries parent headers on continuation and refuses insufficient context budget":
+        step("continue a depth-two page with charged parent context")
+        val request = "{\"path\":\"test/fixture/source_view/outline.spl\",\"depth\":2,\"max_nodes\":2}"
+        val first = mcp_source_payload(dispatch_tool("7", "source_open", request))
+        val cursor = json_value_text_or(json_value_field(first, "next_cursor"), "")
+        val snapshot = json_value_text_or(json_value_field(first, "snapshot_id"), "")
+        val next_request = request.replace("}", ",\"cursor\":\"" + cursor + "\",\"snapshot_id\":\"" + snapshot + "\"}")
+        val next = mcp_source_payload(dispatch_tool("8", "source_open", next_request))
+        val segments = json_value_items(json_value_field(next, "segments"))
+        expect(segments.len()).to_equal(2)
+        expect(json_value_text_or(json_value_field(segments[0], "name"), "")).to_equal("Counter")
+        expect(json_value_text_or(json_value_field(segments[1], "name"), "")).to_equal("Counter.second")
+        expect(json_value_text_or(json_value_field(next, "next_cursor"), "") == cursor).to_equal(false)
+        val changed = dispatch_tool("9", "source_open", next_request.replace("\"max_nodes\":2", "\"max_nodes\":1"))
+        expect(changed).to_contain("source_cursor_query_changed")
+        val tight_request = request.replace("\"max_nodes\":2", "\"max_nodes\":1")
+        val tight_first = mcp_source_payload(dispatch_tool("10", "source_open", tight_request))
+        val tight_cursor = json_value_text_or(json_value_field(tight_first, "next_cursor"), "")
+        val tight_next = tight_request.replace("}", ",\"cursor\":\"" + tight_cursor + "\",\"snapshot_id\":\"" + snapshot + "\"}")
+        val budget = dispatch_tool("12", "source_open", tight_next)
+        expect(budget).to_contain("mandatory_context_exceeds_budget")
+        val wire = json_parse_value_strict(budget).unwrap()
+        expect(json_value_field(json_value_field(wire, "result"), "isError")).to_equal(JsonValue.Bool(true))

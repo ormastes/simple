@@ -1,0 +1,41 @@
+# Domain adapter over the single same-WAL installation transaction.
+# Configuration installation is not native containment/readiness observation.
+use std.common.contracts.orchestration.host_containment_installation_v1.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.host_policy_installation_data_v1.{HostPolicyInstallationKindV1, host_policy_installation_error_v1}
+use std.nogc_sync_mut.orchestration.host_policy_installation_owner_v1.*
+
+pub struct HostContainmentInstalledV1:
+    intent: HostContainmentInstallationIntentV1
+    canonical_policy_bytes: text
+    artifact_digest: text
+    request: HostContainmentInstallationRequestV1
+
+pub struct HostContainmentInstallationTurnV1:
+    local: HostLocalRootV1
+    installation: Option<HostContainmentInstalledV1>
+    recovery_required: bool
+    error: text
+
+pub fn host_containment_installation_load_v1(local: HostLocalRootV1) -> Result<HostContainmentInstalledV1, text>:
+    val result = host_policy_installation_load_v1(HostPolicyInstallationKindV1.ContainmentV1, local)
+    if result.is_err(): return Err(host_policy_installation_error_v1(HostPolicyInstallationKindV1.ContainmentV1, result.unwrap_err()))
+    val installed = result.unwrap()
+    val request = host_containment_installation_request_decode_v1(installed.request.original_bytes)?
+    Ok(HostContainmentInstalledV1(request.intent, request.intent.containment_policy_bytes, installed.artifact_digest, request))
+
+pub fn host_containment_installation_install_v1(local: HostLocalRootV1, packet: text,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> HostContainmentInstallationTurnV1:
+    val turn = host_policy_installation_install_v1(HostPolicyInstallationKindV1.ContainmentV1, local, packet, context, refresh)
+    if turn.error != "": return HostContainmentInstallationTurnV1(turn.local, nil, turn.recovery_required,
+        host_policy_installation_error_v1(HostPolicyInstallationKindV1.ContainmentV1, turn.error))
+    val installed = match turn.installation:
+        case Some(value): value
+        case nil: return HostContainmentInstallationTurnV1(turn.local, nil, true, "host-containment-install-result-required")
+    val decoded = host_containment_installation_request_decode_v1(installed.request.original_bytes)
+    if decoded.is_err(): return HostContainmentInstallationTurnV1(turn.local, nil, true, decoded.unwrap_err())
+    val request = decoded.unwrap()
+    HostContainmentInstallationTurnV1(turn.local, Some(HostContainmentInstalledV1(request.intent,
+        request.intent.containment_policy_bytes, installed.artifact_digest, request)), turn.recovery_required, "")

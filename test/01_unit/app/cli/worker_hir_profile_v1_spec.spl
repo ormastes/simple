@@ -1,0 +1,66 @@
+# NOT_RUN: policy regressions; these do not qualify a native launch provider.
+use std.spec.{describe, it, expect}
+use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1,
+    worker_hir_environment_key_admitted_v1, worker_hir_child_validate_v1}
+use app.cli.worker_hir_owner_v1.{worker_hir_cleanup_deadline_v1,
+    worker_hir_remaining_budget_v1, worker_hir_environment_sort_v1}
+use std.common.process.observation_v4.{ProcessObservationEnvironmentV4}
+
+describe "worker HIR profile admission":
+    it "admits explicit HIR consumer arguments":
+        expect(worker_hir_argument_error_v1(["--entry-closure", "--entry", "src/main.spl",
+            "--source", "src", "--output", "build/result", "--backend=llvm"])).to_equal("")
+
+    it "rejects directory fallback without a frozen closure":
+        expect(worker_hir_argument_error_v1(["--entry", "src/main.spl"])).to_contain("frozen")
+
+    it "rejects mixed MIR parse and file-unit routes":
+        for mode in ["--mir-shard=0/1", "--parse-shard=0/1", "--file-worker-unit", "--mode=jit"]:
+            expect(worker_hir_argument_error_v1(["--entry-closure", mode]) == "").to_equal(false)
+
+    it "rejects plugin and unrecognized future options":
+        for mode in ["--plugin=anything", "--frontend-offload=worker", "--future-route"]:
+            expect(worker_hir_argument_error_v1(["--entry-closure", mode]) == "").to_equal(false)
+
+    it "does not admit incomplete value options":
+        expect(worker_hir_argument_error_v1(["--entry-closure", "--source"])).to_contain("missing")
+        expect(worker_hir_argument_error_v1(["--entry-closure", "--source="])).to_contain("empty")
+
+    it "admits canonical source authority and rejects loader injection":
+        expect(worker_hir_environment_key_admitted_v1("SIMPLE_SCV_INVENTORY_DIGEST")).to_equal(true)
+        for name in ["DYLD_INSERT_LIBRARIES", "LD_PRELOAD", "LD_LIBRARY_PATH",
+                "SIMPLE_NATIVE_GROUP_MANIFEST", "SIMPLE_FILE_WORKER_UNIT", "SIMPLE_PLUGIN", "FUTURE_ROUTE"]:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(false)
+
+    it "rejects invalid shard ordinals before source admission":
+        for shard in ["--hir-shard=-1/1", "--hir-shard=1/1", "--hir-shard=0/129", "--hir-shard=bad"]:
+            expect(worker_hir_child_validate_v1(["--entry", "src/main.spl", shard]).is_err()).to_equal(true)
+
+    it "rejects duplicate shard selectors before source admission":
+        expect(worker_hir_child_validate_v1(["--entry", "src/main.spl",
+            "--hir-shard=0/1", "--hir-shard=0/1"]).is_err()).to_equal(true)
+
+    it "does not renew retirement budget after refused acknowledgements":
+        val first = worker_hir_cleanup_deadline_v1(0, 100)
+        expect(first).to_equal(5100)
+        expect(worker_hir_cleanup_deadline_v1(first, 4000)).to_equal(first)
+        expect(worker_hir_cleanup_deadline_v1(first, 6000)).to_equal(first)
+
+    it "rejects unavailable or overflowing clock observations":
+        expect(worker_hir_cleanup_deadline_v1(0, 0)).to_equal(-1)
+        expect(worker_hir_cleanup_deadline_v1(0, -1)).to_equal(-1)
+        expect(worker_hir_cleanup_deadline_v1(0, 9223372036854775807)).to_equal(-1)
+        expect(worker_hir_remaining_budget_v1(100, 0)).to_equal(-1)
+        expect(worker_hir_remaining_budget_v1(100, 100)).to_equal(-1)
+        expect(worker_hir_remaining_budget_v1(200, 100)).to_equal(100)
+
+    it "canonicalizes the exact copied environment before V4 encoding":
+        val captured = [ProcessObservationEnvironmentV4(key: "SIMPLE_HIR_SHARD_OWNER", value: "0/1@0"),
+            ProcessObservationEnvironmentV4(key: "HOME", value: "/fixture"),
+            ProcessObservationEnvironmentV4(key: "PATH", value: "/bin")]
+        val ordered = worker_hir_environment_sort_v1(captured)
+        expect(ordered[0].key).to_equal("HOME")
+        expect(ordered[1].key).to_equal("PATH")
+        expect(ordered[2].key).to_equal("SIMPLE_HIR_SHARD_OWNER")
+        expect(ordered[2].value).to_equal("0/1@0")
+        expect(captured[0].key).to_equal("SIMPLE_HIR_SHARD_OWNER")

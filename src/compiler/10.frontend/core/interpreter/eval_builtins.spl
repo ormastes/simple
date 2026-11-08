@@ -14,6 +14,8 @@
 use compiler.core.ast.{decl_get, decl_get_field_types, decl_get_fields, expr_get, module_get_decls}
 use compiler.core.interpreter.eval.{EVAL_DECL_LAZY_VAL, eval_current_decl_id, eval_error_msg, eval_expr, eval_had_error}
 use compiler.core.interpreter.eval.{eval_set_error}
+use compiler.core.interpreter.eval_calls.val_copy_if_value_struct
+use compiler.core.interpreter.value_places.eval_prepare_value_place
 use compiler.core.interpreter.eval_decls.{eval_decl}
 use compiler.core.interpreter.eval_tables.{decl_owner_file_set, enum_table_lookup, ft_keys, func_register_return_type, func_table_lookup}
 use compiler.core.interpreter.eval_tables.{func_table_register, must_use_is_registered, struct_table_get_module, struct_table_lookup, struct_table_register}
@@ -21,6 +23,8 @@ use compiler.core.parser.{parse_module_file}
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.core.interpreter.value.*
 use compiler.core.interpreter.module_loader_core.*
+
+use std.nogc_sync_mut.sffi.host.{heap_alloc_count, heap_array_capacity_bytes}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_file_exists(path: text) -> bool
@@ -73,6 +77,20 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
     # Fast reject: most user functions don't start with these chars
     if first != "p" and first != "_" and first != "i" and first != "t" and first != "l" and first != "@" and first != "s" and first != "a" and first != "r":
         return -2
+
+    # Process-local collection evidence uses the actual selected runtime owner.
+    # These reads must not become a modeled count or an unknown-extern zero.
+    if name == "rt_heap_alloc_count":
+        if arg_eids.len() != 0:
+            eval_set_error("rt_heap_alloc_count expects zero arguments")
+            return -1
+        return val_make_int(heap_alloc_count())
+
+    if name == "rt_heap_array_capacity_bytes":
+        if arg_eids.len() != 0:
+            eval_set_error("rt_heap_array_capacity_bytes expects zero arguments")
+            return -1
+        return val_make_int(heap_array_capacity_bytes())
 
     if name == "rt_env_get":
         if arg_eids.len() == 0:
@@ -636,14 +654,22 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
         # @traits("set_member", obj, "fieldName", value) — set struct field by name
         if tr_query == "set_member":
             if arg_eids.len() >= 4:
-                val tr_sm_obj = eval_expr(arg_eids[1])
+                val tr_sm_place = eval_prepare_value_place(arg_eids[1])
                 if eval_had_error: return -1
                 val tr_sm_field_val = eval_expr(arg_eids[2])
                 if eval_had_error: return -1
                 val tr_sm_new_val = eval_expr(arg_eids[3])
                 if eval_had_error: return -1
+                val tr_sm_snapshot = val_copy_if_value_struct(tr_sm_new_val)
                 val tr_sm_field = val_to_text(tr_sm_field_val)
-                val_struct_set_field(tr_sm_obj, tr_sm_field, tr_sm_new_val)
+                # Later field/value expressions may share an ancestor. Resolve
+                # uniqueness after all callbacks, using the frozen receiver.
+                val tr_sm_obj = tr_sm_place.mutable_value()
+                if eval_had_error: return -1
+                if not val_is_struct(tr_sm_obj):
+                    eval_set_error("set_member requires a struct or class receiver")
+                    return -1
+                val_struct_set_field(tr_sm_obj, tr_sm_field, tr_sm_snapshot)
                 return val_make_nil()
             return val_make_nil()
 

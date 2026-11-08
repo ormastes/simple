@@ -1,0 +1,116 @@
+# Pure parsing and real scripted pre-native branches only. No fake native token.
+use std.spec.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.user_mapping_v3.*
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.user_mapping_v3.simple_container_user_mapping_v3
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+
+fn _mapping_request_v3() -> LinuxOciRequestV1:
+    var request = linux_container_leaf_fixture_v2()
+    request.user_uid = 1000
+    request.user_gid = 1001
+    request.user_namespace_mode = "keep-id"
+    request
+
+fn _mapping_identity_v3() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "workload-1", attempt: 1, provider_generation: 7, operation_id: "create-api",
+        engine: "podman", native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap())
+
+fn _mapping_json_v3() -> text:
+    val identity = _mapping_identity_v3()
+    "{\"id\":\"" + identity.native_id + "\",\"pod_uid\":\"workload-1\",\"attempt\":\"1\",\"node_boot_id\":\"" + identity.node_boot_id + "\",\"provider_generation\":\"7\",\"operation_id\":\"create-api\",\"user\":\"1000:1001\",\"pid\":1234,\"cgroup\":\"/user.slice/libpod-" + identity.native_id + ".scope\",\"status\":\"running\"}"
+
+describe "qualified primary process mapping producer":
+    it "parses exact running primary PID cgroup and explicit numeric Config User":
+        val parsed = linux_oci_mapping_inspect_v3(_mapping_json_v3(), _mapping_identity_v3(), _mapping_request_v3()).unwrap()
+        expect(parsed.pid).to_equal(1234)
+        expect(parsed.cgroup_path).to_equal("/user.slice/libpod-" + "b".repeat(64) + ".scope")
+        expect(parsed.configured_user).to_equal("1000:1001")
+        expect(linux_oci_mapping_command_v3("--all").is_err()).to_equal(true)
+
+    it "rejects delimiter tricks unknown nested duplicate and mistyped JSON before native observation":
+        val raw = _mapping_json_v3()
+        for changed in [raw + "{}", raw.replace("\"pid\":1234", "\"pid\":1234.0"),
+                raw.replace("\"pid\":1234", "\"pid\":\"1234\""), raw.replace("\"pid\":1234", "\"pid\":0"),
+                raw.replace("\"pid\":1234", "\"pid\":1234,\"pid\":1234"),
+                raw.replace("\"user\":\"1000:1001\"", "\"user\":{}"), raw.replace("\"user\":", "\"unknown\":"),
+                raw.replace("1000:1001", "builder"), raw.replace("running", "exited"), raw.replace("create-api", "foreign")]:
+            expect(linux_oci_mapping_inspect_v3(changed, _mapping_identity_v3(), _mapping_request_v3()).is_err()).to_equal(true)
+
+    it "requires canonical exact libpod native ID path components rather than substring names":
+        val raw = _mapping_json_v3()
+        val original = "/user.slice/libpod-" + "b".repeat(64) + ".scope"
+        for path in ["", "/", "/user.slice/../libpod-" + "b".repeat(64),
+                "/user.slice//libpod-" + "b".repeat(64), "/user.slice/libpod-" + "b".repeat(63) + ".scope",
+                "/user.slice/prefix-libpod-" + "b".repeat(64) + ".scope"]:
+            expect(linux_oci_mapping_inspect_v3(raw.replace(original, path), _mapping_identity_v3(), _mapping_request_v3()).is_err()).to_equal(true)
+
+    it "binds pre-query evidence request runtime selection and provider pin into native correlation":
+        val identity = _mapping_identity_v3()
+        val request = _mapping_request_v3()
+        val command = linux_oci_mapping_command_v3(identity.native_id).unwrap()
+        val operation = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "user-mapping", command: command,
+            state: RuntimeStateV1(phase: RUNTIME_PHASE_UNKNOWN, identity: identity, exit_code: -1, reason: "observed"),
+            exit_code: 0, stdout: _mapping_json_v3(), stderr: "", reason: "user-mapping-before")
+        val binding = linux_oci_mapping_binding_v3(request, identity, "a".repeat(64), operation).unwrap()
+        var changed = request
+        changed.user_gid = 1002
+        expect(linux_oci_mapping_binding_v3(changed, identity, "a".repeat(64), operation).unwrap() == binding).to_equal(false)
+        expect(linux_oci_mapping_binding_v3(request, identity, "c".repeat(64), operation).unwrap() == binding).to_equal(false)
+
+    it "uses actual common create and pre-query but refuses native authority from scripted observations":
+        val leaf = _mapping_request_v3()
+        val request = linux_container_request_fixture_v2(leaf)
+        val identity = _mapping_identity_v3()
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, identity.node_boot_id).1
+        # Independent literal template, not the production command builder.
+        val query = RuntimeCommandV1(operation: "user-mapping", program: "podman", args: ["container", "inspect", "--format",
+            "{\"id\":{{json .Id}},\"pod_uid\":{{json (index .Config.Labels \"io.simpleorch.pod_uid\")}},\"attempt\":{{json (index .Config.Labels \"io.simpleorch.attempt\")}},\"node_boot_id\":{{json (index .Config.Labels \"io.simpleorch.node_boot_id\")}},\"provider_generation\":{{json (index .Config.Labels \"io.simpleorch.provider_generation\")}},\"operation_id\":{{json (index .Config.Labels \"io.simpleorch.operation_id\")}},\"user\":{{json .Config.User}},\"pid\":{{json .State.Pid}},\"cgroup\":{{json .State.CgroupPath}},\"status\":{{json .State.Status}}}", identity.native_id])
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, identity.native_id),
+            linux_container_script_result_fixture_v2(query, _mapping_json_v3())], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap()
+        val created = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val observed = simple_container_user_mapping_v3(created.owner, request, identity)
+        expect(observed.mapping).to_equal(nil)
+        expect(observed.error).to_equal("user-mapping-scripted-native-observation-forbidden")
+        expect(simple_container_project_v2(observed.owner, request).unwrap().request_digest).to_equal(request.plan.request_digest)
+        expect(adapter.provider.scripted_cursor).to_equal(2)
+
+    it "rejects changed common request scope digest payload and runtime identity before another query":
+        val leaf = _mapping_request_v3()
+        val request = linux_container_request_fixture_v2(leaf)
+        val identity = _mapping_identity_v3()
+        val create = build_create_command("podman", "/unused/api", leaf, "create-api", 7, identity.node_boot_id).1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, identity.native_id)], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap()
+        val created = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+        for field in ["scope", "digest", "payload", "native", "operation", "fence", "generation", "engine"]:
+            var changed = request
+            var expected = identity
+            if field == "scope": changed.plan.service_scope_id = "foreign"
+            if field == "digest": changed.plan.request_digest = "c".repeat(64)
+            if field == "payload":
+                var other_leaf = leaf
+                other_leaf.user_uid = 1002
+                changed = linux_container_request_fixture_v2(other_leaf)
+            if field == "native": expected.native_id = "c".repeat(64)
+            if field == "operation": expected.operation_id = "foreign"
+            if field == "fence": expected.node_boot_id = "c".repeat(64)
+            if field == "generation": expected.provider_generation = 8
+            if field == "engine": expected.engine = "docker"
+            val refused = simple_container_user_mapping_v3(created.owner, changed, expected)
+            expect(refused.mapping).to_equal(nil)
+            expect(refused.error.len()).to_be_greater_than(0)
+            expect(simple_container_project_v2(refused.owner, request).unwrap().request_digest).to_equal(request.plan.request_digest)
+            expect(adapter.provider.executor_call_count()).to_equal(1)
+            expect(adapter.provider.scripted_cursor).to_equal(1)

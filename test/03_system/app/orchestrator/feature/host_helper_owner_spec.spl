@@ -1,0 +1,252 @@
+# @req HOST-HELPER-01 HOST-HELPER-02 HOST-HELPER-03
+# NOT_RUN. Real signatures and physical ledger; no native helper effects.
+use test.fixtures.orchestration.host_helper_fixture_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_encode_v1, host_helper_request_decode_v1, host_helper_request_store_v1, host_helper_request_load_v1, host_helper_execution_proof_store_v1, host_helper_execution_proof_load_v1, host_helper_execution_proof_load_typed_v1, host_helper_execution_proof_decode_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.common.contracts.orchestration.host_helper_plan_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_receipt_integrity_v1, host_reservation_encode_intent_v1, host_helper_reservation_match_operation_v1, host_helper_reservation_match_receipt_v1}
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_encode_signed_approval_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists, file_remove}
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn helper_test_prepare_v1(fixture: HostHelperFixtureV1) -> HostHelperPrepareTurnV1:
+    val packet = host_helper_request_encode_v1(fixture.request).unwrap()
+    val decoded = host_helper_request_decode_v1(packet).unwrap()
+    host_helper_prepare_v1(fixture.owner, decoded, fixture.policy, fixture.scope,
+        host_helper_clock_v1(), host_helper_clock_v1)
+
+fn helper_test_fields_v1(bytes: text) -> Dict<text, SdnValue>:
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1()).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("helper test request/index is not an object")
+
+describe "Signed parent-budget helper ownership":
+    it "retains the committed owner and proof without a lease when refreshed authority expires":
+        for mode in ["before-begin", "after-begin"]:
+            val fixture = host_helper_fixture_v1()
+            val prepared = helper_test_prepare_v1(fixture)
+            expect(prepared.error).to_equal("")
+            val clock_path = fixture.root + "/helper-refresh-stage"
+            assert(file_atomic_write_mode(clock_path, "fresh", 0o600))
+            val refresh = fn() -> HostReservationAuthorizationContextV1:
+                val stage = file_read_regular_no_follow_bounded(clock_path, 64).unwrap()
+                val next = if stage == "fresh": "commit" elif stage == "commit": "launch" else: "done"
+                assert(file_atomic_write_mode(clock_path, next, 0o600))
+                var context = host_helper_clock_v1()
+                context.monotonic_ms = 11
+                if (mode == "before-begin" and stage == "commit") or (mode == "after-begin" and stage == "launch"):
+                    context.grant_clock = 191
+                    context.monotonic_ms = 12
+                context
+            val result = host_helper_begin_v1(prepared.owner, fixture.request, prepared.receipt.unwrap(),
+                fixture.execution_signed, fixture.execution_approval, fixture.policy, fixture.scope,
+                host_helper_clock_v1(), refresh)
+            expect(result.error).to_equal("APPROVAL_EXPIRED")
+            assert(not result.lease.?)
+            assert(result.recovery_required)
+            val state = distributed_operation_journal_lookup_v2(result.owner.journal, fixture.request.operation.id).unwrap()
+            expect(state.state).to_equal(if mode == "after-begin": "executing" else: "admitted")
+            expect(result.owner.journal.sequence).to_equal(prepared.owner.journal.sequence + (if mode == "after-begin": 1 else: 0))
+            expect(host_available_capacity_v1(result.owner.ledger).unwrap().cpu_millis).to_equal(2500)
+            val proof = host_helper_execution_proof_load_v1(fixture.root, fixture.request.operation.id).unwrap()
+            expect(helper_test_fields_v1(proof)["signedGrant"]).to_equal(SdnValue.String(distributed_encode_signed_grant_v2(fixture.execution_signed).unwrap()))
+            if mode == "after-begin":
+                val replay = host_helper_begin_v1(result.owner, fixture.request, prepared.receipt.unwrap(),
+                    fixture.execution_signed, fixture.execution_approval, fixture.policy, fixture.scope,
+                    host_helper_clock_v1(), host_helper_clock_v1)
+                expect(replay.error).to_equal("helper-execution-reconciliation-required")
+                assert(not replay.lease.?)
+                expect(replay.owner.journal.sequence).to_equal(result.owner.journal.sequence)
+                expect(host_available_capacity_v1(replay.owner.ledger).unwrap().cpu_millis).to_equal(2500)
+            assert(host_capacity_owner_close_v1(result.owner).unwrap())
+            dir_remove(fixture.root, true)
+
+    it "verifies real controller budget and helper publishers, then returns one same-process execution lease":
+        val fixture = host_helper_fixture_v1()
+        val prepared = helper_test_prepare_v1(fixture)
+        expect(prepared.error).to_equal("")
+        val receipt = prepared.receipt.unwrap()
+        assert(host_reservation_receipt_integrity_v1(receipt, fixture.request.operation).unwrap())
+        var changed_receipt = receipt
+        changed_receipt.prepared_revision = receipt.prepared_revision + 1
+        expect(host_reservation_receipt_integrity_v1(changed_receipt, fixture.request.operation).unwrap_err()).to_equal("reservation-receipt-mismatch")
+        changed_receipt = receipt
+        changed_receipt.envelope_digest = "0".repeat(64)
+        assert(host_reservation_receipt_integrity_v1(changed_receipt, fixture.request.operation).is_err())
+        expect(receipt.envelope_digest).to_equal(sha256_text(distributed_encode_operation_v2(fixture.request.operation).unwrap()))
+        expect(host_available_capacity_v1(prepared.owner.ledger).unwrap().cpu_millis).to_equal(2500)
+        val loaded = host_helper_request_load_v1(fixture.root, fixture.request.operation.id).unwrap()
+        expect(host_helper_request_encode_v1(loaded).unwrap()).to_equal(host_helper_request_encode_v1(fixture.request).unwrap())
+        expect(loaded.parent_binding.host_operation.payload_digest).to_equal(fixture.request.parent_binding.host_operation.payload_digest)
+        val denied = host_helper_begin_v1(prepared.owner, loaded, receipt, fixture.request.signed, fixture.request.approval,
+            fixture.policy, fixture.scope, host_helper_clock_v1(), host_helper_clock_v1)
+        expect(denied.error).to_equal("OPERATION_DENIED")
+        assert(not denied.lease.?)
+        expect(distributed_operation_journal_lookup_v2(denied.owner.journal, fixture.request.operation.id).unwrap().state).to_equal("admitted")
+        val executing = host_helper_begin_v1(denied.owner, loaded, receipt, fixture.execution_signed, fixture.execution_approval,
+            fixture.policy, fixture.scope, host_helper_clock_v1(), host_helper_clock_v1)
+        expect(executing.error).to_equal("")
+        val lease = executing.lease.unwrap()
+        expect(host_reservation_encode_intent_v1(lease.intent).unwrap()).to_equal(host_reservation_encode_intent_v1(loaded.intent).unwrap())
+        expect(lease.intent.plan_digest).to_equal(host_helper_plan_digest_v1(lease.plan).unwrap())
+        assert(host_helper_reservation_match_operation_v1(lease.intent, lease.operation).unwrap())
+        assert(host_helper_reservation_match_receipt_v1(lease.receipt, lease.intent, lease.operation).unwrap())
+        expect(lease.operation.operation).to_equal("host_helper_reservation_v1")
+        expect(lease.deadline.operation_id).to_equal(fixture.request.operation.id)
+        expect(lease.deadline.request_digest).to_equal(fixture.request.plan.request_digest)
+        expect(lease.deadline.actions).to_equal(["exec"])
+        expect(lease.deadline.expires_at_unix_ms).to_equal(190)
+        expect(distributed_operation_journal_lookup_v2(executing.owner.journal, fixture.request.operation.id).unwrap().state).to_equal("executing")
+        expect(lease.grant_id).to_equal("helper_execution_grant")
+        assert(lease.grant_id != fixture.request.signed.grant.id)
+        val proof_bytes = host_helper_execution_proof_load_v1(fixture.root, fixture.request.operation.id).unwrap()
+        val typed = host_helper_execution_proof_load_typed_v1(fixture.root, fixture.request.operation.id).unwrap()
+        expect(typed.signed.grant.id).to_equal(lease.grant_id)
+        expect(typed.approval.approver_id).to_equal(lease.approver_id)
+        expect(typed.request_digest).to_equal(sha256_text(host_helper_request_encode_v1(fixture.request).unwrap()))
+        assert(host_helper_execution_proof_decode_v1(fixture.request, proof_bytes + "\n").is_err())
+        val proof = helper_test_fields_v1(proof_bytes)
+        expect(proof["requestDigest"]).to_equal(SdnValue.String(sha256_text(host_helper_request_encode_v1(fixture.request).unwrap())))
+        expect(proof["operationDigest"]).to_equal(SdnValue.String(sha256_text(distributed_encode_operation_v2(fixture.request.operation).unwrap())))
+        expect(proof["signedGrant"]).to_equal(SdnValue.String(distributed_encode_signed_grant_v2(fixture.execution_signed).unwrap()))
+        expect(proof["signedApproval"]).to_equal(SdnValue.String(distributed_encode_signed_approval_v2(fixture.execution_approval).unwrap()))
+        expect(file_mode_bits(fixture.root + "/host-helper-execution-proofs/" + sha256_text(fixture.request.operation.id) + ".sdn")).to_equal(0o600)
+        val alternate = host_helper_alternate_execution_fixture_v1(fixture)
+        var execution_operation = fixture.request.operation
+        execution_operation.operation = "host_helper_execute_v1"
+        expect(distributed_verify_grant_approval_from_snapshot_v2(fixture.policy.snapshot, alternate.execution_signed, alternate.execution_approval,
+            execution_operation, 100, 7, 4, 2, 3).unwrap().id).to_equal("helper_execution_grant_alternate")
+        expect(host_helper_execution_proof_store_v1(fixture.root, fixture.request, alternate.execution_signed,
+            alternate.execution_approval).unwrap_err()).to_equal("helper-request-retained-mismatch")
+        expect(host_helper_execution_proof_load_v1(fixture.root, fixture.request.operation.id).unwrap()).to_equal(proof_bytes)
+        assert(host_capacity_owner_close_v1(executing.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "rejects executing and reopened unknown helper replay before reading missing helper objects or issuing another lease":
+        val fixture = host_helper_fixture_v1()
+        val prepared = helper_test_prepare_v1(fixture)
+        val receipt = prepared.receipt.unwrap()
+        val executing = host_helper_begin_v1(prepared.owner, fixture.request, receipt, fixture.execution_signed,
+            fixture.execution_approval, fixture.policy, fixture.scope, host_helper_clock_v1(), host_helper_clock_v1)
+        expect(executing.error).to_equal("")
+        assert(executing.lease.?)
+        assert(file_remove(fixture.root + "/host-helper-plans/" + host_helper_plan_digest_v1(fixture.request.plan).unwrap() + ".sdn"))
+        val replay = host_helper_begin_v1(executing.owner, fixture.request, receipt, fixture.execution_signed,
+            fixture.execution_approval, fixture.policy, fixture.scope, host_helper_clock_v1(), host_helper_clock_v1)
+        expect(replay.error).to_equal("helper-execution-reconciliation-required")
+        assert(not replay.lease.?)
+        expect(replay.owner.journal.sequence).to_equal(executing.owner.journal.sequence)
+        expect(host_available_capacity_v1(replay.owner.ledger).unwrap().cpu_millis).to_equal(2500)
+        assert(host_capacity_owner_close_v1(replay.owner).unwrap())
+        val recovered = host_capacity_owner_open_v1(fixture.root, replay.owner.ledger.capacity, "e".repeat(64), 100, true).unwrap()
+        expect(distributed_operation_journal_lookup_v2(recovered.journal, fixture.request.operation.id).unwrap().state).to_equal("outcome-unknown")
+        val unknown = host_helper_begin_v1(recovered, fixture.request, receipt, fixture.execution_signed,
+            fixture.execution_approval, fixture.policy, fixture.scope, host_helper_clock_v1(), host_helper_clock_v1)
+        expect(unknown.error).to_equal("helper-execution-reconciliation-required")
+        assert(not unknown.lease.?)
+        assert(host_capacity_owner_expire_prepared_v1(unknown.owner, fixture.request.operation.id, 1000).is_err())
+        expect(host_available_capacity_v1(unknown.owner.ledger).unwrap().cpu_millis).to_equal(2500)
+        assert(host_capacity_owner_close_v1(unknown.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "aggregates retained parent and every sibling even when a controller renews the same signed budget":
+        val fixture = host_helper_fixture_v1()
+        val first = helper_test_prepare_v1(fixture)
+        expect(first.error).to_equal("")
+        val second_fixture = host_helper_sibling_fixture_v1(fixture, first.owner, "helper_2")
+        val second = helper_test_prepare_v1(second_fixture)
+        expect(second.error).to_equal("")
+        expect(host_available_capacity_v1(second.owner.ledger).unwrap().cpu_millis).to_equal(2000)
+        val third_fixture = host_helper_renew_budget_fixture_v1(host_helper_sibling_fixture_v1(fixture, second.owner, "helper_3"))
+        val proof = third_fixture.request.budget_proof
+        expect(distributed_verify_grant_approval_from_snapshot_v2(third_fixture.policy.snapshot, proof.signed, proof.approval,
+            proof.operation, 100, 7, 4, 2, 3).unwrap().id).to_equal("budget_renewed_grant")
+        expect(distributed_verify_grant_approval_from_snapshot_v2(third_fixture.policy.snapshot, third_fixture.request.signed,
+            third_fixture.request.approval, third_fixture.request.operation, 100, 7, 4, 2, 3).unwrap().id).to_equal("helper_prepare_grant")
+        val exhausted = helper_test_prepare_v1(third_fixture)
+        expect(exhausted.error).to_equal("helper-parent-budget-exhausted")
+        assert(not exhausted.receipt.?)
+        expect(exhausted.owner.journal.sequence).to_equal(second.owner.journal.sequence)
+        expect(distributed_operation_journal_lookup_v2(exhausted.owner.journal, "helper_3").unwrap_err()).to_equal("OPERATION_NOT_FOUND")
+        assert(not file_exists(fixture.root + "/host-helper-requests/" + sha256_text("helper_3") + ".sdn"))
+        expect(host_available_capacity_v1(exhausted.owner.ledger).unwrap().cpu_millis).to_equal(2000)
+        assert(host_capacity_owner_close_v1(exhausted.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "rejects helper lifetime beyond the signed budget and corrupt budget or helper signatures before helper admission":
+        val fixture = host_helper_fixture_v1()
+        val long = host_helper_sibling_fixture_v1(fixture, fixture.owner, "helper_long", 401)
+        expect(distributed_verify_grant_approval_from_snapshot_v2(long.policy.snapshot, long.request.signed, long.request.approval,
+            long.request.operation, 100, 7, 4, 2, 3).unwrap().id).to_equal("helper_prepare_grant")
+        val duration = helper_test_prepare_v1(long)
+        expect(duration.error).to_equal("helper-duration-outside-parent-budget")
+        assert(not duration.receipt.?)
+        var bad_budget = fixture
+        bad_budget.request.budget_proof.signed.signature[0] = ((bad_budget.request.budget_proof.signed.signature[0] as i64 + 1) % 256) as u8
+        val budget = helper_test_prepare_v1(bad_budget)
+        expect(budget.error).to_equal("ISSUER_SIGNATURE_INVALID")
+        var bad_helper = host_helper_fixture_v1()
+        bad_helper.request.approval.signature[0] = ((bad_helper.request.approval.signature[0] as i64 + 1) % 256) as u8
+        val helper = helper_test_prepare_v1(bad_helper)
+        expect(helper.error).to_equal("APPROVAL_SIGNATURE_INVALID")
+        assert(not file_exists(fixture.root + "/host-helper-requests"))
+        assert(not file_exists(bad_helper.root + "/host-helper-requests"))
+        expect(fixture.owner.journal.sequence).to_equal(1)
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+        assert(host_capacity_owner_close_v1(bad_helper.owner).unwrap())
+        dir_remove(fixture.root, true)
+        dir_remove(bad_helper.root, true)
+
+    it "pins immutable canonical request bytes and rejects packet tampering or operation-index substitution":
+        val fixture = host_helper_fixture_v1()
+        val path = host_helper_request_store_v1(fixture.root, fixture.request).unwrap()
+        val bytes = host_helper_request_encode_v1(fixture.request).unwrap()
+        val reference = file_read_regular_no_follow_bounded(path, 4096).unwrap()
+        expect(file_mode_bits(path)).to_equal(0o600)
+        val packet_path = fixture.root + "/host-helper-request-packets/" + sha256_text(bytes) + ".sdn"
+        expect(file_mode_bits(packet_path)).to_equal(0o600)
+        var changed = fixture.request
+        changed.approval.signature[0] = ((changed.approval.signature[0] as i64 + 1) % 256) as u8
+        val conflicting_digest = sha256_text(host_helper_request_encode_v1(changed).unwrap())
+        expect(host_helper_request_store_v1(fixture.root, changed).unwrap_err()).to_equal("helper-request-retained-mismatch")
+        assert(not file_exists(fixture.root + "/host-helper-request-packets/" + conflicting_digest + ".sdn"))
+        expect(file_read_regular_no_follow_bounded(path, 4096).unwrap()).to_equal(reference)
+        var index = helper_test_fields_v1(reference)
+        index["operationId"] = SdnValue.String("other_helper")
+        val wrong_index = fixture.root + "/host-helper-requests/" + sha256_text("other_helper") + ".sdn"
+        assert(file_atomic_write_mode(wrong_index, sdn_encode_canonical(SdnValue.Dict(index)) + "\n", 0o600))
+        expect(host_helper_request_load_v1(fixture.root, "other_helper").unwrap_err()).to_equal("helper-request-operation-mismatch")
+        assert(file_atomic_write_mode(packet_path, bytes + "tampered", 0o600))
+        expect(host_helper_request_load_v1(fixture.root, fixture.request.operation.id).unwrap_err()).to_equal("helper-request-packet-digest-mismatch")
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+        dir_remove(fixture.root, true)
+
+    it "restores parent binding through the existing reference decoder and refuses lease fields or noncanonical source":
+        val fixture = host_helper_fixture_v1()
+        val bytes = host_helper_request_encode_v1(fixture.request).unwrap()
+        expect(host_helper_request_encode_v1(host_helper_request_decode_v1(bytes).unwrap()).unwrap()).to_equal(bytes)
+        expect(host_helper_request_decode_v1(bytes + "\n").unwrap_err()).to_equal("helper-request-noncanonical")
+        expect(host_helper_request_decode_v1("😀".repeat(600000)).unwrap_err()).to_equal("helper-request-size")
+        var fields = helper_test_fields_v1(bytes)
+        fields["lease"] = SdnValue.Bool(true)
+        expect(host_helper_request_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").unwrap_err()).to_equal("helper-request-unknown-field:lease")
+        fields = helper_test_fields_v1(bytes)
+        var parent = fixture.request.parent_binding.host_operation
+        parent.id = "substituted_parent"
+        fields["parentHostOperation"] = SdnValue.String(distributed_encode_operation_v2(parent).unwrap())
+        expect(host_helper_request_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").unwrap_err()).to_equal("assignment-object-digest-mismatch")
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+        dir_remove(fixture.root, true)

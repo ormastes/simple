@@ -15,11 +15,13 @@
 static int foreign_scope_ok;
 
 static void query_foreign_scope(void) {
-    foreign_scope_ok = rt_transient_array_scope_state_v1() == 0 &&
+    foreign_scope_ok = rt_transient_array_scope_identity_v1() == 0 &&
+        rt_transient_array_scope_state_v1() == 0 &&
         rt_transient_array_scope_begin() == 0 &&
         rt_transient_array_scope_pause() == 0 &&
         rt_transient_array_scope_end() == 0 &&
-        rt_transient_array_scope_state_v1() == 0;
+        rt_transient_array_scope_state_v1() == 0 &&
+        rt_transient_array_scope_identity_v1() == 0;
 }
 
 #if defined(_WIN32)
@@ -52,10 +54,13 @@ static int run_foreign_thread(void) {
 #endif
 
 int main(void) {
+    if (rt_transient_array_scope_identity_v1() != 0) return 19;
     if (rt_transient_array_scope_state_v1() != 0) return 1;
     if (rt_transient_array_scope_pause() != 0 || rt_transient_array_scope_end() != 0) return 2;
     if (rt_transient_array_scope_state_v1() != 0) return 3;
     if (rt_transient_array_scope_begin() != 1) return 4;
+    int64_t first = rt_transient_array_scope_identity_v1();
+    if (first <= 0) return 20;
     if (rt_transient_array_scope_state_v1() != 1 || rt_transient_array_scope_state_v1() != 1) return 5;
     if (rt_transient_array_scope_begin() != 0) return 6;
     if (rt_transient_array_scope_state_v1() != 1) return 7;
@@ -63,6 +68,7 @@ int main(void) {
     if (!run_foreign_thread()) return 8;
 #endif
     if (rt_transient_array_scope_state_v1() != 1) return 9;
+    if (rt_transient_array_scope_identity_v1() != first) return 21;
     if (rt_transient_array_scope_pause() != 1) return 10;
     if (rt_transient_array_scope_state_v1() != 2) return 11;
     if (rt_transient_array_scope_begin() != 0) return 12;
@@ -71,10 +77,14 @@ int main(void) {
     if (!run_foreign_thread()) return 14;
 #endif
     if (rt_transient_array_scope_state_v1() != 2) return 15;
+    if (rt_transient_array_scope_identity_v1() != first) return 22;
     if (rt_transient_array_scope_end() != 1) return 16;
     if (rt_transient_array_scope_state_v1() != 0 || rt_transient_array_scope_end() != 0 ||
         rt_transient_array_scope_state_v1() != 0) return 17;
-    if (rt_transient_array_scope_begin() != 1 || rt_transient_array_scope_state_v1() != 1 ||
-        rt_transient_array_scope_end() != 1 || rt_transient_array_scope_state_v1() != 0) return 18;
+    if (rt_transient_array_scope_identity_v1() != 0) return 23;
+    if (rt_transient_array_scope_begin() != 1 || rt_transient_array_scope_state_v1() != 1) return 18;
+    if (rt_transient_array_scope_identity_v1() <= first) return 24;
+    if (rt_transient_array_scope_end() != 1 || rt_transient_array_scope_state_v1() != 0 ||
+        rt_transient_array_scope_identity_v1() != 0) return 25;
     return 0;
 }

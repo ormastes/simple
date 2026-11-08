@@ -1,0 +1,111 @@
+# Real journal publication with exact scripted engine effects. Authored only;
+# no native engine, policy observation, or runtime qualification is claimed.
+use std.spec.*
+use test.fixtures.orchestration.oci_binding_admission_fixture.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.{
+    linux_container_policy_fixture_v2, linux_container_engine_fixture_v2,
+    linux_container_script_result_fixture_v2}
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.linux_oci_request_digest_v1
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.bound_intent_v2.*
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.io_runtime.dir_remove_all
+
+fn _recovered_managed_provider_v1(directory: text, results: [ScriptedCommandResultV1],
+        clock: [i64]) -> LinuxOciRuntimeProviderV1:
+    # Explicit synthetic observation, actual canonical filesystem writer.
+    val provider = LinuxOciRuntimeProviderV1.scripted("linux", "podman", directory,
+        "boot-1", 7, results, persist_scripted_journal: true)
+    val observed = linux_container_engine_fixture_v2()
+    provider.engine_policy = Some(linux_container_policy_fixture_v2())
+    provider.engine_baseline = Some(observed)
+    provider.scripted_engine_observation = Some(observed)
+    assert(provider.set_scripted_effect_clock_v1(clock).is_ok())
+    val request = oci_binding_request_v1()
+    val digest = linux_oci_request_digest_v1(request).unwrap()
+    val deadline = container_effect_deadline_v1(digest, request.operation_id, ["create"], 100).unwrap()
+    assert(provider.set_effect_deadline_v1(deadline).is_ok())
+    provider
+
+fn _recovered_record_v1(native: text) -> text:
+    "bound-1|1|boot-1|7|create-bound|" + native + "|created"
+
+describe "Persist inspected recovered OCI identity before exposing success":
+    it "persists a managed V2 identity after malformed create output and reopens it for exact absence":
+        val directory = oci_binding_dir_v1()
+        val path = directory + "/runtime-intent-bound-1-1-7"
+        val request = oci_binding_request_v1()
+        val native = "a".repeat(64)
+        val create = build_create_command("podman", directory, request, "create-bound", 7, "boot-1").1
+        val inspect = build_inspect_command("podman", directory, "simpleorch-bound-1-1").1
+        val provider = _recovered_managed_provider_v1(directory, [
+            linux_container_script_result_fixture_v2(create, native + "\nextra-output"),
+            linux_container_script_result_fixture_v2(inspect, _recovered_record_v1(native))], [1])
+        val recovered = provider.create(request)
+        expect(recovered.status).to_equal(RUNTIME_STATUS_OK)
+        expect(recovered.state.identity.native_id).to_equal(native)
+        val bytes = oci_binding_read_v1(path)
+        val retained = runtime_bound_intent_decode_v2(bytes).unwrap()
+        expect(retained.identity.native_id).to_equal(native)
+        expect(retained.identity.operation_id).to_equal("create-bound")
+        expect(retained.identity.phase).to_equal(RUNTIME_PHASE_CREATED)
+        expect(retained.request_digest).to_equal(linux_oci_request_digest_v1(request).unwrap())
+        expect(provider.scripted_cursor).to_equal(2)
+        val query = RuntimeCommandV1(operation: "absence", program: "podman", args: ["container", "exists", native])
+        var absence_result = linux_container_script_result_fixture_v2(query, "")
+        absence_result.exit_code = 1
+        val reopened = _recovered_managed_provider_v1(directory, [absence_result], [2])
+        expect(reopened.retained_intent_v1(request).unwrap().native_id).to_equal(native)
+        val absent = reopened.observe_absence_v2(request, recovered.state.identity).unwrap()
+        expect(absent.operation.exit_code).to_equal(1)
+        expect(absent.operation.command.args).to_equal(["--remote=false", "--root", "/home/test/storage",
+            "--runroot", "/run/user/1000/storage", "--storage-driver", "overlay", "--storage-opt=",
+            "container", "exists", native])
+        expect(reopened.scripted_cursor).to_equal(1)
+        expect(oci_binding_read_v1(path)).to_equal(bytes)
+        expect(dir_remove_all(directory)).to_equal(true)
+
+    it "refuses conflicting publication multiple identities and changed payload without overwriting authority":
+        val directory = oci_binding_dir_v1()
+        val path = directory + "/runtime-intent-bound-1-1-7"
+        val request = oci_binding_request_v1()
+        val native = "a".repeat(64)
+        val foreign_native = "b".repeat(64)
+        val create = build_create_command("podman", directory, request, "create-bound", 7, "boot-1").1
+        val inspect = build_inspect_command("podman", directory, native).1
+        val provider = _recovered_managed_provider_v1(directory, [
+            linux_container_script_result_fixture_v2(create, native),
+            linux_container_script_result_fixture_v2(inspect, _recovered_record_v1(native))], [1])
+        expect(provider.create(request).status).to_equal(RUNTIME_STATUS_OK)
+        val original_bytes = oci_binding_read_v1(path)
+        var conflicting = runtime_bound_intent_decode_v2(original_bytes).unwrap()
+        conflicting.identity.native_id = foreign_native
+        val conflicting_bytes = runtime_bound_intent_encode_v2(conflicting).unwrap()
+        expect(file_atomic_write_mode(path, conflicting_bytes, 0o600)).to_equal(true)
+        val refused = provider.recover(request)
+        expect(refused.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(refused.reason.len()).to_be_greater_than(0)
+        expect(provider.state_for(request).identity.native_id).to_equal(native)
+        expect(oci_binding_read_v1(path)).to_equal(conflicting_bytes)
+        # An earlier immutable-identity guard may reject before inspection;
+        # otherwise publication must refuse. Neither route qualifies success.
+        expect([1, 2].contains(provider.scripted_cursor)).to_equal(true)
+        expect(file_atomic_write_mode(path, original_bytes, 0o600)).to_equal(true)
+        for output in [_recovered_record_v1(foreign_native),
+                _recovered_record_v1(native) + "\n" + _recovered_record_v1(foreign_native),
+                _recovered_record_v1(native).replace("create-bound", "foreign-operation")]:
+            val reopened = _recovered_managed_provider_v1(directory,
+                [linux_container_script_result_fixture_v2(inspect, output)], [2])
+            expect(reopened.recover(request).status).to_equal(RUNTIME_STATUS_REJECTED)
+            expect(reopened.scripted_cursor).to_equal(1)
+            expect(oci_binding_read_v1(path)).to_equal(original_bytes)
+        var changed = request
+        changed.args = ["changed-payload"]
+        val mismatched = _recovered_managed_provider_v1(directory,
+            [linux_container_script_result_fixture_v2(inspect, _recovered_record_v1(native))], [2])
+        expect(mismatched.recover(changed).reason).to_equal("intent-request-mismatch")
+        expect(mismatched.executor_call_count()).to_equal(0)
+        expect(oci_binding_read_v1(path)).to_equal(original_bytes)
+        expect(dir_remove_all(directory)).to_equal(true)

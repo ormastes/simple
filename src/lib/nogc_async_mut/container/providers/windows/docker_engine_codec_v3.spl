@@ -1,0 +1,603 @@
+# Narrow, pure Docker Engine 1.48 interoperability codec. Internal records use
+# SDN; JSON here is the explicit Docker wire protocol. No I/O or authority.
+# SOURCE-ONLY NOT_RUN: transport, admission, birth persistence and Windows user
+# token behavior require the actual owner. This codec never creates/retries execs.
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get,
+    json_value_serialize, json_value_object_from, json_value_str_array}
+use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid}
+use std.common.net.http_core.{body_decision, header_field_name_is_token, hex_chunk_size}
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerPolicyV1, WindowsDockerRequestV1,
+    WINDOWS_DOCKER_ENGINE_V1, windows_docker_id_v1, windows_docker_token_v1, windows_docker_mount_path_v1,
+    windows_docker_policy_reason_v1, windows_docker_request_digest_v1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.nogc_async_mut.container.providers.windows.docker_scope_v2.windows_docker_scope_values_v2
+
+pub const WINDOWS_ENGINE_API_V3 = "1.48"
+pub const WINDOWS_ENGINE_HEADER_MAX_V3: i64 = 16384
+pub const WINDOWS_ENGINE_CONTROL_MAX_V3: i64 = 262144
+pub const WINDOWS_ENGINE_FRAME_MAX_V3: i64 = 1048576
+pub const WINDOWS_ENGINE_REQUEST_MAX_V3: i64 = 65536
+
+pub struct WindowsEngineExecRequestV3:
+    container_id: text
+    argv: [text]
+    environment: [(text, text)]
+    working_directory: text
+    tty: bool
+    stdin_requested: bool = false
+
+pub struct WindowsEngineHttpRequestV3:
+    operation: text
+    method: text
+    target: text
+    headers: [(text, text)]
+    body: [u8]
+    hijack: bool
+    tty: bool
+
+pub struct WindowsEngineHttpResponseV3:
+    status: i64
+    headers: [(text, text)]
+    body: [u8]
+    leftover: [u8]
+    stream_mode: text
+
+pub enum WindowsEngineHttpParseV3:
+    NeedMore
+    Complete(response: WindowsEngineHttpResponseV3)
+
+pub struct WindowsEngineInfoV3:
+    engine_id: text
+    kernel_version: text
+    os_type: text
+
+pub struct WindowsEngineContainerV3:
+    container_id: text
+    configured_user: text
+    tty: bool
+    running: bool
+
+pub struct WindowsEngineContainerBindingV3:
+    engine: WindowsEngineInfoV3
+    container: WindowsEngineContainerV3
+    scope_fence_id: text
+    request_digest: text
+
+pub struct WindowsEngineExecObservationV3:
+    exec_id: text
+    container_id: text
+    argv: [text]
+    tty: bool
+    running: bool
+    exit_code: i64?
+    # ProcessConfig metadata only, never an observed Windows access token.
+    observed_user: text?
+    observed_privileged: bool?
+
+pub struct WindowsEngineMuxStateV3:
+    tty: bool
+    header: [u8]
+    stream_tag: i64
+    payload_remaining: i64
+    closed: bool
+
+pub struct WindowsEngineStreamChunkV3:
+    stream: text
+    native_tag: i64
+    bytes: [u8]
+
+pub struct WindowsEngineStreamTurnV3:
+    state: WindowsEngineMuxStateV3
+    chunks: [WindowsEngineStreamChunkV3]
+
+fn engine_bytes_v3(value: text) -> Result<[u8], text>:
+    match boxed_text_bytes_checked(value):
+        case Ok(bytes):
+            if not utf8_bytes_valid(bytes): return Err("docker-engine-text-not-utf8")
+            Ok(bytes)
+        case Err(_): Err("docker-engine-text-extraction-failed")
+
+fn engine_slice_v3(bytes: [u8], start: i64, end: i64) -> [u8]:
+    var result: [u8] = []
+    for index in start..end: result.push(bytes[index])
+    result
+
+fn engine_ascii_v3(bytes: [u8]) -> Result<text, text>:
+    for byte in bytes:
+        if byte > 127u8: return Err("docker-engine-nonascii-protocol")
+    val result = bytes_to_text(bytes)
+    if result.byte_len() != bytes.len(): return Err("docker-engine-byte-conversion-failed")
+    Ok(result)
+
+fn engine_version_v3(version: text) -> Result<text, text>:
+    if version != WINDOWS_ENGINE_API_V3: return Err("docker-engine-api-version-not-admitted")
+    Ok("/v" + version)
+
+fn engine_id_v3(id: text) -> Result<text, text>:
+    if not windows_docker_id_v1(id): return Err("docker-engine-full-native-id-required")
+    Ok(id)
+
+# Pure validation, not a claim that these bytes have entered a container.
+pub fn windows_engine_exec_request_valid_v3(request: WindowsEngineExecRequestV3) -> Result<bool, text>:
+    val id = engine_id_v3(request.container_id)?
+    if request.argv.len() == 0 or request.argv.len() > 128: return Err("docker-engine-argv-count")
+    if request.argv[0].len() <= 3 or not windows_docker_mount_path_v1(request.argv[0]) or not windows_docker_mount_path_v1(request.working_directory):
+        return Err("docker-engine-absolute-program-directory-required")
+    var total: i64 = 0
+    for argument in request.argv:
+        val bytes = engine_bytes_v3(argument)?
+        if bytes.len() > 8192 or argument.contains("\0"): return Err("docker-engine-argument-bound")
+        total = total + bytes.len()
+    if total > 49152 or request.environment.len() > 64: return Err("docker-engine-request-bound")
+    var names: [text] = []
+    for (name, value) in request.environment:
+        if name == "" or name.len() > 128: return Err("docker-engine-environment-name")
+        for index in 0..name.len():
+            val code = name.byte_at(index)
+            if not ((code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95 or
+                    (index > 0 and code >= 48 and code <= 57)): return Err("docker-engine-environment-name")
+        if names.contains(name.lower()): return Err("docker-engine-environment-duplicate")
+        names.push(name.lower())
+        val bytes = engine_bytes_v3(value)?
+        if bytes.len() > 8192 or value.contains("\0"): return Err("docker-engine-environment-value")
+        total = total + name.len() + bytes.len() + 1
+    if total > 57344: return Err("docker-engine-request-bound")
+    Ok(true)
+
+fn engine_request_v3(operation: text, method: text, target: text, json: JsonValue?, hijack: bool, tty: bool) -> Result<WindowsEngineHttpRequestV3, text>:
+    var body: [u8] = []
+    if val value = json: body = engine_bytes_v3(json_value_serialize(value))?
+    if body.len() > WINDOWS_ENGINE_REQUEST_MAX_V3: return Err("docker-engine-json-request-bound")
+    var headers: [(text, text)] = [("Host", "docker"), ("Content-Length", body.len().to_text())]
+    if json != nil: headers.push(("Content-Type", "application/json"))
+    if hijack:
+        headers = headers + [("Connection", "Upgrade"), ("Upgrade", "tcp")]
+    else:
+        headers.push(("Connection", "close"))
+    Ok(WindowsEngineHttpRequestV3(operation: operation, method: method, target: target,
+        headers: headers, body: body, hijack: hijack, tty: tty))
+
+pub fn windows_engine_info_v3(version: text) -> Result<WindowsEngineHttpRequestV3, text>:
+    engine_request_v3("info", "GET", engine_version_v3(version)? + "/info", nil, false, false)
+
+pub fn windows_engine_container_inspect_v3(version: text, id: text) -> Result<WindowsEngineHttpRequestV3, text>:
+    engine_request_v3("container-inspect", "GET", engine_version_v3(version)? + "/containers/" + engine_id_v3(id)? + "/json", nil, false, false)
+
+pub fn windows_engine_attach_v3(version: text, id: text, tty: bool, stdin: bool) -> Result<WindowsEngineHttpRequestV3, text>:
+    val target = engine_version_v3(version)? + "/containers/" + engine_id_v3(id)? +
+        "/attach?logs=0&stream=1&stdin=" + (if stdin: "1" else: "0") + "&stdout=1&stderr=1"
+    engine_request_v3("attach", "POST", target, nil, true, tty)
+
+pub fn windows_engine_exec_create_v3(version: text, request: WindowsEngineExecRequestV3) -> Result<WindowsEngineHttpRequestV3, text>:
+    val valid = windows_engine_exec_request_valid_v3(request)?
+    var environment: [text] = []
+    for (name, value) in request.environment: environment.push(name + "=" + value)
+    val value = json_value_object_from([("Cmd", json_value_str_array(request.argv)),
+        ("User", JsonValue.Str("ContainerUser")), ("Privileged", JsonValue.Bool(false)),
+        ("Tty", JsonValue.Bool(request.tty)), ("AttachStdin", JsonValue.Bool(request.stdin_requested)),
+        ("AttachStdout", JsonValue.Bool(true)), ("AttachStderr", JsonValue.Bool(true)),
+        ("WorkingDir", JsonValue.Str(request.working_directory)), ("Env", json_value_str_array(environment))])
+    engine_request_v3("exec-create", "POST", engine_version_v3(version)? + "/containers/" + request.container_id + "/exec", Some(value), false, request.tty)
+
+pub fn windows_engine_exec_start_v3(version: text, id: text, tty: bool) -> Result<WindowsEngineHttpRequestV3, text>:
+    val value = json_value_object_from([("Detach", JsonValue.Bool(false)), ("Tty", JsonValue.Bool(tty))])
+    engine_request_v3("exec-start", "POST", engine_version_v3(version)? + "/exec/" + engine_id_v3(id)? + "/start", Some(value), true, tty)
+
+pub fn windows_engine_exec_inspect_v3(version: text, id: text) -> Result<WindowsEngineHttpRequestV3, text>:
+    engine_request_v3("exec-inspect", "GET", engine_version_v3(version)? + "/exec/" + engine_id_v3(id)? + "/json", nil, false, false)
+
+fn engine_resize_v3(version: text, id: text, rows: i64, columns: i64, tty: bool, container: bool) -> Result<WindowsEngineHttpRequestV3, text>:
+    if not tty or rows <= 0 or columns <= 0 or rows > 32767 or columns > 32767: return Err("docker-engine-resize-bounds-tty")
+    val prefix = if container: "/containers/" else: "/exec/"
+    val operation = if container: "container-resize" else: "exec-resize"
+    engine_request_v3(operation, "POST", engine_version_v3(version)? + prefix + engine_id_v3(id)? +
+        "/resize?h=" + rows.to_text() + "&w=" + columns.to_text(), nil, false, true)
+
+pub fn windows_engine_exec_resize_v3(version: text, id: text, rows: i64, columns: i64, tty: bool) -> Result<WindowsEngineHttpRequestV3, text>:
+    engine_resize_v3(version, id, rows, columns, tty, false)
+
+pub fn windows_engine_container_resize_v3(version: text, id: text, rows: i64, columns: i64, tty: bool) -> Result<WindowsEngineHttpRequestV3, text>:
+    engine_resize_v3(version, id, rows, columns, tty, true)
+
+# The shared JSON reader replaces lone UTF16 surrogates. Identity/argv wire
+# comparisons require lossless decoding, so reject those before shared parsing.
+fn engine_unicode_escapes_v3(bytes: [u8]) -> Result<bool, text>:
+    var offset = 0
+    var quoted = false
+    while offset < bytes.len():
+        val byte = bytes[offset]
+        if byte == 34u8:
+            quoted = not quoted
+        elif quoted and byte == 92u8:
+            if offset + 1 >= bytes.len(): return Err("docker-engine-json-escape")
+            if bytes[offset + 1] == 117u8:
+                if offset + 5 >= bytes.len(): return Err("docker-engine-json-unicode-escape")
+                val scalar = hex_chunk_size(engine_ascii_v3(engine_slice_v3(bytes, offset + 2, offset + 6))?) as i64
+                if scalar < 0: return Err("docker-engine-json-unicode-escape")
+                if scalar >= 55296 and scalar <= 56319:
+                    if offset + 11 >= bytes.len() or bytes[offset + 6] != 92u8 or bytes[offset + 7] != 117u8:
+                        return Err("docker-engine-json-unpaired-surrogate")
+                    val low = hex_chunk_size(engine_ascii_v3(engine_slice_v3(bytes, offset + 8, offset + 12))?) as i64
+                    if low < 56320 or low > 57343: return Err("docker-engine-json-unpaired-surrogate")
+                    offset = offset + 6
+                elif scalar >= 56320 and scalar <= 57343:
+                    return Err("docker-engine-json-unpaired-surrogate")
+                offset = offset + 4
+            offset = offset + 1
+        offset = offset + 1
+    Ok(true)
+
+# All JSON readers reject decoded duplicate keys through the shared typed parser.
+# A lexical depth/token preflight bounds its recursive descent and key searches.
+fn engine_json_v3(body: [u8]) -> Result<JsonValue, text>:
+    if body.len() == 0 or body.len() > WINDOWS_ENGINE_CONTROL_MAX_V3 or not utf8_bytes_valid(body):
+        return Err("docker-engine-json-body-bound-utf8")
+    var depth = 0
+    var tokens = 0
+    var quoted = false
+    var escaped = false
+    for byte in body:
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92u8: escaped = true
+            elif byte == 34u8: quoted = false
+        elif byte == 34u8:
+            quoted = true
+            tokens = tokens + 1
+        elif byte == 123u8 or byte == 91u8:
+            depth = depth + 1
+            tokens = tokens + 1
+            if depth > 32: return Err("docker-engine-json-depth")
+        elif byte == 125u8 or byte == 93u8:
+            depth = depth - 1
+            if depth < 0: return Err("docker-engine-json-depth")
+        elif byte == 44u8: tokens = tokens + 1
+        if tokens > 8192: return Err("docker-engine-json-token-bound")
+    if quoted or depth != 0: return Err("docker-engine-json-incomplete")
+    val unicode_valid = engine_unicode_escapes_v3(body)?
+    val source = bytes_to_text(body)
+    if source.byte_len() != body.len(): return Err("docker-engine-json-byte-conversion")
+    json_parse_value_strict(source)
+
+fn engine_field_v3(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(field): Ok(field)
+        case nil: Err("docker-engine-json-missing:" + key)
+
+fn engine_text_v3(value: JsonValue, key: text) -> Result<text, text>:
+    match engine_field_v3(value, key)?:
+        case JsonValue.Str(content): Ok(content)
+        case _: Err("docker-engine-json-text:" + key)
+
+fn engine_bool_v3(value: JsonValue, key: text) -> Result<bool, text>:
+    match engine_field_v3(value, key)?:
+        case JsonValue.Bool(content): Ok(content)
+        case _: Err("docker-engine-json-bool:" + key)
+
+pub fn windows_engine_info_decode_v3(body: [u8]) -> Result<WindowsEngineInfoV3, text>:
+    val value = engine_json_v3(body)?
+    val id = engine_text_v3(value, "ID")?
+    val kernel = engine_text_v3(value, "KernelVersion")?
+    val os = engine_text_v3(value, "OSType")?
+    if os != "windows" or not windows_docker_token_v1(id) or kernel == "" or kernel.len() > 512 or
+            kernel.contains("\0") or kernel.contains("\r") or kernel.contains("\n"): return Err("docker-engine-info-identity")
+    Ok(WindowsEngineInfoV3(engine_id: id, kernel_version: kernel, os_type: os))
+
+fn engine_container_value_v3(value: JsonValue, expected_id: text, expected_tty: bool) -> Result<WindowsEngineContainerV3, text>:
+    val id = engine_id_v3(expected_id)?
+    if engine_text_v3(value, "Id")? != id: return Err("docker-engine-container-id-mismatch")
+    val config = engine_field_v3(value, "Config")?
+    val user = engine_text_v3(config, "User")?
+    val tty = engine_bool_v3(config, "Tty")?
+    if user != "ContainerUser" or tty != expected_tty: return Err("docker-engine-container-user-tty-mismatch")
+    val running = engine_bool_v3(engine_field_v3(value, "State")?, "Running")?
+    Ok(WindowsEngineContainerV3(container_id: id, configured_user: user, tty: tty, running: running))
+
+pub fn windows_engine_container_decode_v3(body: [u8], expected_id: text, expected_tty: bool) -> Result<WindowsEngineContainerV3, text>:
+    engine_container_value_v3(engine_json_v3(body)?, expected_id, expected_tty)
+
+fn engine_integer_v3(value: JsonValue, key: text) -> Result<i64, text>:
+    match engine_field_v3(value, key)?:
+        case JsonValue.Int(integer): Ok(integer)
+        case _: Err("docker-engine-json-integer:" + key)
+
+fn engine_argv_equal_v3(value: JsonValue, expected: [text]) -> bool:
+    match value:
+        case JsonValue.Null: expected.len() == 0
+        case JsonValue.Array(items):
+            if items.len() != expected.len(): return false
+            for index in 0..items.len():
+                match items[index]:
+                    case JsonValue.Str(argument):
+                        if argument != expected[index]: return false
+                    case _: return false
+            true
+        case _: false
+
+# The broker must call this against its installed policy and retained CREATE
+# request/scope, independently of a caller's selected CID or exec DTO. Primary
+# TTY/stdin must match the typed v4 CREATE request; exec TTY is independent.
+pub fn windows_engine_container_binding_decode_v3(engine_body: [u8], container_body: [u8], expected_id: text,
+        policy: WindowsDockerPolicyV1, request: WindowsDockerRequestV1, scope: ContainerHostScopeV2,
+        expected_container_tty: bool) -> Result<WindowsEngineContainerBindingV3, text>:
+    if expected_container_tty != request.terminal_tty:
+        return Err("docker-engine-retained-container-tty-mismatch")
+    val invalid_policy = windows_docker_policy_reason_v1(policy)
+    if invalid_policy != "": return Err(invalid_policy)
+    val fence = container_scope_fence_id_v2(scope)?
+    if policy.node_boot_id != fence or policy.provider_generation != scope.provider_generation:
+        return Err("docker-engine-installed-policy-scope-mismatch")
+    val digest = windows_docker_request_digest_v1(policy, request)?
+    val engine = windows_engine_info_decode_v3(engine_body)?
+    if engine.engine_id != policy.engine_id or engine.kernel_version != policy.expected_kernel_version:
+        return Err("docker-engine-installed-engine-mismatch")
+    val value = engine_json_v3(container_body)?
+    val container = engine_container_value_v3(value, expected_id, expected_container_tty)?
+    val config = engine_field_v3(value, "Config")?
+    val host = engine_field_v3(value, "HostConfig")?
+    if engine_text_v3(value, "Image")? != policy.expected_image_id or
+            engine_text_v3(config, "Image")? != request.image or engine_text_v3(host, "Isolation")? != "process" or
+            engine_text_v3(host, "NetworkMode")? != "none" or engine_bool_v3(host, "Privileged")? or
+            engine_integer_v3(host, "CpuCount")? != request.cpu_count or
+            engine_integer_v3(host, "Memory")? != request.memory_limit_bytes:
+        return Err("docker-engine-container-runtime-policy-mismatch")
+    if engine_bool_v3(config, "OpenStdin")? != request.stdin_open or
+            engine_bool_v3(config, "StdinOnce")? != request.stdin_open or
+            engine_bool_v3(config, "AttachStdin")? != request.stdin_open:
+        return Err("docker-engine-container-stdin-binding-mismatch")
+    if engine_text_v3(config, "WorkingDir")? != request.working_directory:
+        return Err("docker-engine-container-working-directory-mismatch")
+    val arguments = [for index in 1..request.command.len(): request.command[index]] + request.args
+    if not engine_argv_equal_v3(engine_field_v3(config, "Entrypoint")?, [request.command[0]]) or
+            not engine_argv_equal_v3(engine_field_v3(config, "Cmd")?, arguments):
+        return Err("docker-engine-container-command-mismatch")
+    val labels = engine_field_v3(config, "Labels")?
+    val names = ["simple.provider", "simple.pod", "simple.attempt", "simple.operation", "simple.boot", "simple.generation", "simple.request",
+        "simple.physical-host", "simple.service-scope", "simple.service-incarnation", "simple.continuity-mode", "simple.native-machine", "simple.fence"]
+    val expected = [WINDOWS_DOCKER_ENGINE_V1, request.pod_uid, request.attempt.to_text(), request.operation_id,
+        scope.boot_id, scope.provider_generation.to_text(), digest] + windows_docker_scope_values_v2(scope)?
+    for index in 0..names.len():
+        if engine_text_v3(labels, names[index])? != expected[index]: return Err("docker-engine-container-scope-label-mismatch")
+    val mounts = match engine_field_v3(value, "Mounts")?:
+        case JsonValue.Array(items): items
+        case _: return Err("docker-engine-container-mounts-type")
+    if mounts.len() != request.mounts.len(): return Err("docker-engine-container-mount-count")
+    for index in 0..mounts.len():
+        val actual = mounts[index]
+        val retained = request.mounts[index]
+        if engine_text_v3(actual, "Type")? != "bind" or engine_text_v3(actual, "Source")? != retained.host_root or
+                engine_text_v3(actual, "Destination")? != retained.guest_root or engine_bool_v3(actual, "RW")? == retained.read_only:
+            return Err("docker-engine-container-mount-binding-mismatch")
+    Ok(WindowsEngineContainerBindingV3(engine: engine, container: container, scope_fence_id: fence, request_digest: digest))
+
+pub fn windows_engine_exec_create_decode_v3(body: [u8]) -> Result<text, text>:
+    engine_id_v3(engine_text_v3(engine_json_v3(body)?, "Id")?)
+
+pub fn windows_engine_exec_inspect_decode_v3(body: [u8], expected_exec_id: text,
+        request: WindowsEngineExecRequestV3) -> Result<WindowsEngineExecObservationV3, text>:
+    val valid = windows_engine_exec_request_valid_v3(request)?
+    val id = engine_id_v3(expected_exec_id)?
+    val value = engine_json_v3(body)?
+    if engine_text_v3(value, "ID")? != id or engine_text_v3(value, "ContainerID")? != request.container_id:
+        return Err("docker-engine-exec-identity-mismatch")
+    val process = engine_field_v3(value, "ProcessConfig")?
+    val tty = engine_bool_v3(process, "tty")?
+    if tty != request.tty or engine_text_v3(process, "entrypoint")? != request.argv[0]:
+        return Err("docker-engine-exec-argv-tty-mismatch")
+    val arguments = match engine_field_v3(process, "arguments")?:
+        case JsonValue.Array(items): items
+        case _: return Err("docker-engine-exec-arguments-type")
+    if arguments.len() != request.argv.len() - 1: return Err("docker-engine-exec-argv-mismatch")
+    for index in 0..arguments.len():
+        match arguments[index]:
+            case JsonValue.Str(argument):
+                if argument != request.argv[index + 1]: return Err("docker-engine-exec-argv-mismatch")
+            case _: return Err("docker-engine-exec-argument-type")
+    var observed_user: text? = nil
+    if val user_field = json_value_get(process, "user"):
+        match user_field:
+            case JsonValue.Str(user):
+                if user != "" and user != "ContainerUser": return Err("docker-engine-exec-user-mismatch")
+                if user != "": observed_user = Some(user)
+            case _: return Err("docker-engine-exec-user-type")
+    var observed_privileged: bool? = nil
+    if val privilege = json_value_get(process, "privileged"):
+        match privilege:
+            case JsonValue.Bool(privileged):
+                if privileged: return Err("docker-engine-exec-privileged")
+                observed_privileged = Some(false)
+            case _: return Err("docker-engine-exec-privileged-type")
+    if engine_bool_v3(value, "OpenStdin")? != request.stdin_requested or not engine_bool_v3(value, "OpenStdout")? or not engine_bool_v3(value, "OpenStderr")?:
+        return Err("docker-engine-exec-stream-attachment-mismatch")
+    val running = engine_bool_v3(value, "Running")?
+    var exit_code: i64? = nil
+    match engine_field_v3(value, "ExitCode")?:
+        case JsonValue.Null: ()
+        case JsonValue.Int(code):
+            if code < 0 or code > 4294967295: return Err("docker-engine-exec-exit-code-bound")
+            if not running: exit_code = Some(code)
+        case _: return Err("docker-engine-exec-exit-code-type")
+    Ok(WindowsEngineExecObservationV3(exec_id: id, container_id: request.container_id,
+        argv: request.argv, tty: tty, running: running, exit_code: exit_code,
+        observed_user: observed_user, observed_privileged: observed_privileged))
+
+fn engine_crlf_v3(bytes: [u8], start: i64) -> i64:
+    var index = start
+    while index + 1 < bytes.len():
+        if bytes[index] == 13u8 and bytes[index + 1] == 10u8: return index
+        index = index + 1
+    -1
+
+fn engine_header_v3(headers: [(text, text)], name: text) -> text:
+    for (key, value) in headers:
+        if key == name: return value
+    ""
+
+# Reuse the shared CL/TE decision and hex parser, with a bounded byte-preserving
+# Docker chunk scanner. No text conversion crosses binary/UTF8 chunk boundaries.
+fn engine_chunked_v3(bytes: [u8], start: i64) -> Result<(bool, [u8], i64), text>:
+    var offset = start
+    var body: [u8] = []
+    var chunks = 0
+    while true:
+        val end = engine_crlf_v3(bytes, offset)
+        if end < 0:
+            if bytes.len() - offset > 6: return Err("docker-engine-chunk-size-bound")
+            return Ok((false, [], 0))
+        if end == offset or end - offset > 6: return Err("docker-engine-chunk-size-bound")
+        val size = hex_chunk_size(engine_ascii_v3(engine_slice_v3(bytes, offset, end))?) as i64
+        if size < 0 or size > WINDOWS_ENGINE_CONTROL_MAX_V3 - body.len(): return Err("docker-engine-chunk-body-bound")
+        offset = end + 2
+        chunks = chunks + 1
+        if chunks > 1024: return Err("docker-engine-chunk-count-bound")
+        if size == 0:
+            if bytes.len() < offset + 2: return Ok((false, [], 0))
+            # Private Engine control responses have no accepted trailer fields.
+            if bytes[offset] != 13u8 or bytes[offset + 1] != 10u8: return Err("docker-engine-trailers-unsupported")
+            return Ok((true, body, offset + 2))
+        if bytes.len() < offset + size + 2: return Ok((false, [], 0))
+        for index in offset..(offset + size): body.push(bytes[index])
+        offset = offset + size
+        if bytes[offset] != 13u8 or bytes[offset + 1] != 10u8: return Err("docker-engine-chunk-terminator")
+        offset = offset + 2
+
+pub fn windows_engine_http_parse_v3(bytes: [u8], operation: text, tty: bool) -> Result<WindowsEngineHttpParseV3, text>:
+    val hijack = operation == "attach" or operation == "exec-start"
+    val resize = operation == "exec-resize" or operation == "container-resize"
+    if not hijack and not resize and not ["info", "container-inspect", "exec-create", "exec-inspect"].contains(operation):
+        return Err("docker-engine-http-operation")
+    if bytes.len() > WINDOWS_ENGINE_HEADER_MAX_V3 + WINDOWS_ENGINE_CONTROL_MAX_V3 + WINDOWS_ENGINE_FRAME_MAX_V3:
+        return Err("docker-engine-http-buffer-bound")
+    var marker: i64 = -1
+    var index: i64 = 0
+    while index + 3 < bytes.len() and index < WINDOWS_ENGINE_HEADER_MAX_V3:
+        if bytes[index] == 13u8 and bytes[index + 1] == 10u8 and bytes[index + 2] == 13u8 and bytes[index + 3] == 10u8:
+            marker = index
+            break
+        index = index + 1
+    if marker < 0:
+        if bytes.len() >= WINDOWS_ENGINE_HEADER_MAX_V3: return Err("docker-engine-http-header-bound")
+        return Ok(WindowsEngineHttpParseV3.NeedMore)
+    if marker + 4 > WINDOWS_ENGINE_HEADER_MAX_V3: return Err("docker-engine-http-header-bound")
+    val source = engine_ascii_v3(engine_slice_v3(bytes, 0, marker))?
+    val lines = source.split("\r\n")
+    if lines.len() == 0 or lines.len() > 65: return Err("docker-engine-http-header-count")
+    val status_line = lines[0]
+    if status_line.len() < 12 or not status_line.starts_with("HTTP/1.1 ") or
+            (status_line.len() > 12 and status_line.byte_at(12) != 32): return Err("docker-engine-http-status-line")
+    for byte in engine_bytes_v3(status_line)?:
+        if byte < 32u8 or byte > 126u8: return Err("docker-engine-http-status-line")
+    val status_text = status_line.substring(9, 12)
+    for byte in engine_bytes_v3(status_text)?:
+        if byte < 48u8 or byte > 57u8: return Err("docker-engine-http-status-line")
+    val status = status_text.to_i64() ?? -1
+    var headers: [(text, text)] = []
+    for line_index in 1..lines.len():
+        val line = lines[line_index]
+        if line.len() > 4096: return Err("docker-engine-http-header-line-bound")
+        val colon = line.index_of(":")
+        if colon <= 0: return Err("docker-engine-http-header-malformed")
+        val name = line.substring(0, colon)
+        if not header_field_name_is_token(name): return Err("docker-engine-http-header-name")
+        var value = line.substring(colon + 1, line.len())
+        for byte in engine_bytes_v3(value)?:
+            if (byte < 32u8 and byte != 9u8) or byte == 127u8: return Err("docker-engine-http-header-control")
+        value = value.trim()
+        val key = name.lower()
+        for (previous, _content) in headers:
+            if previous == key: return Err("docker-engine-http-duplicate-header")
+        headers.push((key, value))
+    val length_field = engine_header_v3(headers, "content-length")
+    if length_field.len() > 6: return Err("docker-engine-http-length-bound")
+    val decision = body_decision(headers, WINDOWS_ENGINE_CONTROL_MAX_V3 as i32, true)
+    if decision.0 != "": return Err("docker-engine-http-framing:" + decision.0)
+    val body_start = marker + 4
+    val media = engine_header_v3(headers, "content-type").lower()
+    if hijack:
+        if status != 101 and status != 200: return Err("docker-engine-http-stream-status")
+        if engine_header_v3(headers, "content-length") != "" or engine_header_v3(headers, "transfer-encoding") != "":
+            return Err("docker-engine-http-stream-framing")
+        if status == 101:
+            if engine_header_v3(headers, "connection").lower() != "upgrade" or engine_header_v3(headers, "upgrade").lower() != "tcp":
+                return Err("docker-engine-http-upgrade-mismatch")
+        elif engine_header_v3(headers, "upgrade") != "" or engine_header_v3(headers, "connection").lower() == "upgrade":
+            return Err("docker-engine-http-unexpected-upgrade")
+        val expected_media = if tty: "application/vnd.docker.raw-stream" else: "application/vnd.docker.multiplexed-stream"
+        if media != expected_media: return Err("docker-engine-http-stream-content-type")
+        if bytes.len() - body_start > WINDOWS_ENGINE_FRAME_MAX_V3: return Err("docker-engine-stream-leftover-bound")
+        return Ok(WindowsEngineHttpParseV3.Complete(WindowsEngineHttpResponseV3(status: status, headers: headers,
+            body: [], leftover: engine_slice_v3(bytes, body_start, bytes.len()), stream_mode: if tty: "raw" else: "multiplexed")))
+    val expected_status = if operation == "exec-create": 201 else: 200
+    if status != expected_status: return Err("docker-engine-http-control-status")
+    if not resize and media != "application/json": return Err("docker-engine-http-json-content-type")
+    if resize and media != "" and media != "text/plain" and media != "text/plain; charset=utf-8":
+        return Err("docker-engine-http-resize-content-type")
+    var body: [u8] = []
+    var consumed = body_start
+    if decision.2:
+        val chunked = engine_chunked_v3(bytes, body_start)?
+        if not chunked.0: return Ok(WindowsEngineHttpParseV3.NeedMore)
+        body = chunked.1
+        consumed = chunked.2
+    else:
+        if engine_header_v3(headers, "content-length") == "" and not resize: return Err("docker-engine-http-length-required")
+        val length = decision.1 as i64
+        if bytes.len() < body_start + length: return Ok(WindowsEngineHttpParseV3.NeedMore)
+        body = engine_slice_v3(bytes, body_start, body_start + length)
+        consumed = body_start + length
+    if resize and body.len() != 0: return Err("docker-engine-http-resize-body")
+    if bytes.len() - consumed > WINDOWS_ENGINE_FRAME_MAX_V3: return Err("docker-engine-http-leftover-bound")
+    Ok(WindowsEngineHttpParseV3.Complete(WindowsEngineHttpResponseV3(status: status, headers: headers,
+        body: body, leftover: engine_slice_v3(bytes, consumed, bytes.len()), stream_mode: "")))
+
+pub fn windows_engine_mux_open_v3(tty: bool) -> WindowsEngineMuxStateV3:
+    WindowsEngineMuxStateV3(tty: tty, header: [], stream_tag: 0, payload_remaining: 0, closed: false)
+
+# Docker stdin is unframed; only server output uses these eight-byte headers.
+# Each returned segment retains its output tag and exact bytes. No text decode.
+pub fn windows_engine_mux_feed_v3(state: WindowsEngineMuxStateV3, bytes: [u8], eof: bool) -> Result<WindowsEngineStreamTurnV3, text>:
+    if state.closed or bytes.len() > WINDOWS_ENGINE_FRAME_MAX_V3: return Err("docker-engine-stream-closed-bound")
+    if state.header.len() > 7 or state.payload_remaining < 0 or state.payload_remaining > WINDOWS_ENGINE_FRAME_MAX_V3:
+        return Err("docker-engine-stream-state-invalid")
+    if state.payload_remaining == 0 and state.stream_tag != 0: return Err("docker-engine-stream-state-invalid")
+    var current = state
+    var chunks: [WindowsEngineStreamChunkV3] = []
+    if state.tty:
+        if state.header.len() != 0 or state.payload_remaining != 0 or state.stream_tag != 0: return Err("docker-engine-stream-state-invalid")
+        if bytes.len() > 0: chunks.push(WindowsEngineStreamChunkV3(stream: "tty", native_tag: -1, bytes: bytes))
+    else:
+        if current.payload_remaining > 0 and (current.header.len() != 0 or (current.stream_tag < 0 or current.stream_tag > 2)):
+            return Err("docker-engine-stream-state-invalid")
+        var offset = 0
+        var frames = 0
+        while offset < bytes.len():
+            if current.payload_remaining == 0:
+                while current.header.len() < 8 and offset < bytes.len():
+                    current.header.push(bytes[offset])
+                    offset = offset + 1
+                if current.header.len() < 8: break
+                val header = current.header
+                if header[0] > 2u8 or header[1] != 0u8 or header[2] != 0u8 or header[3] != 0u8:
+                    return Err("docker-engine-mux-header-tag-reserved")
+                val size = (header[4] as i64) * 16777216 + (header[5] as i64) * 65536 + (header[6] as i64) * 256 + header[7] as i64
+                if size > WINDOWS_ENGINE_FRAME_MAX_V3: return Err("docker-engine-mux-frame-bound")
+                current.header = []
+                current.stream_tag = header[0] as i64
+                current.payload_remaining = size
+                frames = frames + 1
+                if frames > 1024: return Err("docker-engine-mux-frame-count")
+                if size == 0:
+                    current.stream_tag = 0
+                    continue
+            if offset == bytes.len(): break
+            val remaining_input = bytes.len() - offset
+            val size = if remaining_input < current.payload_remaining: remaining_input else: current.payload_remaining
+            chunks.push(WindowsEngineStreamChunkV3(stream: if current.stream_tag == 2: "stderr" else: "stdout",
+                native_tag: current.stream_tag, bytes: engine_slice_v3(bytes, offset, offset + size)))
+            current.payload_remaining = current.payload_remaining - size
+            offset = offset + size
+            if current.payload_remaining == 0: current.stream_tag = 0
+    if eof:
+        if current.header.len() != 0 or current.payload_remaining != 0: return Err("docker-engine-mux-truncated-eof")
+        current.closed = true
+    Ok(WindowsEngineStreamTurnV3(state: current, chunks: chunks))

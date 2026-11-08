@@ -1,0 +1,110 @@
+# Immutable textual request bytes only. No root, grant, command or observation
+# is accepted here; the configured owner resolves every retained reference.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.contracts.mux.request_validation_v1.mux_validate_name_v1
+use std.common.contracts.mux.wire_primitives_v1.{mux_wire_encode_u64_v1, mux_wire_decode_u64_v1}
+use std.common.base_encoding.base64.{base64url_encode, base64url_decode_strict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+
+pub struct SmuxRuntimeBindRequestV3:
+    binding_uid: text
+    workload_operation_id: text
+    helper_operation_id: text
+    parent_budget_digest: text
+    service_incarnation: text
+    session_id: text
+    window_id: text
+    pane_id: text
+    expected_epoch: u64
+    expected_revision: u64
+    expected_child_incarnation: u64
+
+pub fn smux_runtime_bind_request_validate_v3(request: SmuxRuntimeBindRequestV3) -> Result<(), text>:
+    for identity in [request.binding_uid, request.workload_operation_id,
+            request.helper_operation_id]:
+        if not builder_identifier_valid_v1(identity): return Err("runtime-bind-request-identity")
+    if request.service_incarnation.len() != 32: return Err("runtime-bind-request-service-incarnation")
+    for ch in request.service_incarnation.chars():
+        if not "0123456789abcdef".contains(ch): return Err("runtime-bind-request-service-incarnation")
+    if request.workload_operation_id == request.helper_operation_id: return Err("runtime-bind-request-operation-alias")
+    if (request.parent_budget_digest.len() != 64 or
+            not builder_digest_valid_v1(request.parent_budget_digest)): return Err("runtime-bind-request-budget-digest")
+    for identity in [request.session_id, request.window_id, request.pane_id]:
+        if mux_validate_name_v1(identity).is_err(): return Err("runtime-bind-request-target")
+    if request.expected_epoch == 0 or request.expected_revision == 0: return Err("runtime-bind-request-revision")
+    Ok(())
+
+fn runtime_bind_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("runtime-bind-request-text")
+
+fn runtime_bind_u64_v3(value: SdnValue) -> Result<u64, text>:
+    val decoded = mux_wire_decode_u64_v1(value)
+    if decoded.is_err(): return Err("runtime-bind-request-u64")
+    Ok(decoded.unwrap())
+
+pub fn smux_runtime_bind_request_encode_v3(request: SmuxRuntimeBindRequestV3) -> Result<text, text>:
+    smux_runtime_bind_request_validate_v3(request)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String("smux-runtime-binding-request"),
+        "bindingUid": SdnValue.String(request.binding_uid),
+        "workloadOperationId": SdnValue.String(request.workload_operation_id),
+        "helperOperationId": SdnValue.String(request.helper_operation_id),
+        "parentBudgetDigest": SdnValue.String(request.parent_budget_digest),
+        "serviceIncarnation": SdnValue.String(request.service_incarnation),
+        "sessionId": SdnValue.String(request.session_id), "windowId": SdnValue.String(request.window_id),
+        "paneId": SdnValue.String(request.pane_id), "expectedEpoch": mux_wire_encode_u64_v1(request.expected_epoch),
+        "expectedRevision": mux_wire_encode_u64_v1(request.expected_revision),
+        "expectedChildIncarnation": mux_wire_encode_u64_v1(request.expected_child_incarnation)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields))
+    if bytes.bytes().len() > 2048: return Err("runtime-bind-request-size")
+    Ok(bytes)
+
+pub fn smux_runtime_bind_request_decode_v3(bytes: text) -> Result<SmuxRuntimeBindRequestV3, text>:
+    if bytes.bytes().len() == 0 or bytes.bytes().len() > 2048: return Err("runtime-bind-request-size")
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 2048,
+        max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16))
+    if parsed.is_err(): return Err("runtime-bind-request-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("runtime-bind-request-object")
+    val keys = ["version", "kind", "bindingUid", "workloadOperationId", "helperOperationId", "parentBudgetDigest",
+        "serviceIncarnation", "sessionId", "windowId", "paneId", "expectedEpoch", "expectedRevision", "expectedChildIncarnation"]
+    if fields.len() != keys.len(): return Err("runtime-bind-request-fields")
+    for key in keys:
+        if not fields.contains_key(key): return Err("runtime-bind-request-fields")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 3: return Err("runtime-bind-request-version")
+        case _: return Err("runtime-bind-request-version")
+    if runtime_bind_text_v3(fields, "kind")? != "smux-runtime-binding-request": return Err("runtime-bind-request-kind")
+    val request = SmuxRuntimeBindRequestV3(binding_uid: runtime_bind_text_v3(fields, "bindingUid")?,
+        workload_operation_id: runtime_bind_text_v3(fields, "workloadOperationId")?,
+        helper_operation_id: runtime_bind_text_v3(fields, "helperOperationId")?,
+        parent_budget_digest: runtime_bind_text_v3(fields, "parentBudgetDigest")?,
+        service_incarnation: runtime_bind_text_v3(fields, "serviceIncarnation")?,
+        session_id: runtime_bind_text_v3(fields, "sessionId")?, window_id: runtime_bind_text_v3(fields, "windowId")?,
+        pane_id: runtime_bind_text_v3(fields, "paneId")?, expected_epoch: runtime_bind_u64_v3(fields["expectedEpoch"])?,
+        expected_revision: runtime_bind_u64_v3(fields["expectedRevision"])?,
+        expected_child_incarnation: runtime_bind_u64_v3(fields["expectedChildIncarnation"])?)
+    if smux_runtime_bind_request_encode_v3(request)? != bytes: return Err("runtime-bind-request-noncanonical")
+    Ok(request)
+
+pub fn smux_runtime_bind_request_token_v3(request: SmuxRuntimeBindRequestV3) -> Result<text, text>:
+    Ok(base64url_encode(smux_runtime_bind_request_encode_v3(request)?))
+
+pub fn smux_runtime_bind_request_digest_v3(request: SmuxRuntimeBindRequestV3) -> Result<text, text>:
+    Ok(sha256_text(smux_runtime_bind_request_encode_v3(request)?))
+
+pub fn smux_runtime_bind_request_from_token_v3(token: text) -> Result<SmuxRuntimeBindRequestV3, text>:
+    if token.bytes().len() == 0 or token.bytes().len() > 2731: return Err("runtime-bind-request-token-size")
+    val decoded = base64url_decode_strict(token)
+    if decoded.is_err(): return Err("runtime-bind-request-base64")
+    val bytes = decoded.unwrap()
+    if base64url_encode(bytes) != token: return Err("runtime-bind-request-base64-noncanonical")
+    smux_runtime_bind_request_decode_v3(bytes)

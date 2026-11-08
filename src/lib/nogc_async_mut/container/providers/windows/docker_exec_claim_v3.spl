@@ -1,0 +1,359 @@
+# Provider-private one-shot exec records through the lower installed-state port.
+# Only the Host factory above verified deployment + completed installation mints
+# live access. This persistence owner is NOT an Engine effect grant or supervisor.
+# SOURCE-ONLY NOT_RUN; process-crash durability only. Broker must retain its
+# actual host-verified lease and recheck expiry at each native Engine write.
+use std.common.contracts.container.exec_state_access_v3.{ContainerExecStateAccessV3,
+    ContainerExecStateBindingV3, ContainerExecStateRecordKindV3,
+    container_exec_state_binding_bytes_v3, container_exec_state_binding_match_v3,
+    container_exec_state_record_bytes_validate_v3}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.common.contracts.container.exec_v3.{ContainerExecRequestV3, container_exec_request_encode_v3,
+    container_exec_request_digest_v3, container_exec_birth_decode_v3}
+use std.common.contracts.container.exec_admission_v3.{ContainerExecAdmissionV3, container_exec_admission_match_v3}
+use std.common.contracts.container.execution_v2.container_execution_plan_bytes_v2
+use std.common.contracts.container.windows_stream_v3.{WindowsContainerStreamPlanV3, WindowsExecBirthMappingV3,
+    windows_container_stream_plan_digest_v3, windows_container_stream_intent_bytes_v3,
+    windows_exec_birth_mapping_bytes_v3, windows_exec_birth_matches_v3}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.{WindowsEngineHttpRequestV3, windows_engine_exec_start_v3, WINDOWS_ENGINE_REQUEST_MAX_V3}
+
+pub const WINDOWS_DOCKER_EXEC_CLAIM_MAX_V3: i64 = 4194304
+
+pub enum WindowsDockerExecClaimPhaseV3:
+    Planned
+    CreateReserved
+    CreatedExec
+    StartReserved
+    UnknownCreate
+    UnknownStart
+    Closed
+
+pub enum WindowsDockerExecClaimOutcomeV3:
+    Ready(owner: WindowsDockerExecClaimV3)
+    CleanupRequired(owner: WindowsDockerExecClaimV3, reason: text)
+    Rejected(reason: text)
+
+# This digest describes exact query bytes/ordered headers, never permission.
+pub fn windows_docker_exec_query_digest_v3(request: WindowsEngineHttpRequestV3) -> Result<text, text>:
+    if request.body.len() > WINDOWS_ENGINE_REQUEST_MAX_V3 or request.headers.len() > 64:
+        return Err("windows-exec-query-bound")
+    if request.operation != "exec-create" and request.operation != "exec-start": return Err("windows-exec-query-operation")
+    var headers: [SdnValue] = []
+    var header_bytes = 0
+    for (name, value) in request.headers:
+        if name.contains("\r") or name.contains("\n") or name.contains("\0") or value.contains("\r") or value.contains("\n") or value.contains("\0"):
+            return Err("windows-exec-query-header")
+        header_bytes = header_bytes + name.byte_len() + value.byte_len()
+        if header_bytes > 16384: return Err("windows-exec-query-bound")
+        headers.push(SdnValue.Array([SdnValue.String(name), SdnValue.String(value)]))
+    val body_digest = sha256_u8_hex(request.body)
+    if not builder_digest_valid_v1(body_digest): return Err("windows-exec-query-body-digest")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-docker-exec-query-v3"),
+        "operation": SdnValue.String(request.operation), "method": SdnValue.String(request.method),
+        "target": SdnValue.String(request.target), "headers": SdnValue.Array(headers),
+        "bodyDigest": SdnValue.String(body_digest), "bodyBytes": SdnValue.Int(request.body.len()),
+        "hijack": SdnValue.Bool(request.hijack), "tty": SdnValue.Bool(request.tty)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+fn claim_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("windows-exec-claim-field-missing:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("windows-exec-claim-field-type:" + key)
+
+fn claim_fields_v3(source: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() == 0 or source.byte_len() > WINDOWS_DOCKER_EXEC_CLAIM_MAX_V3: return Err("windows-exec-claim-record-bound")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: WINDOWS_DOCKER_EXEC_CLAIM_MAX_V3,
+            max_depth: 4, max_nodes: 256, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value
+        case Err(_): return Err("windows-exec-claim-record-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("windows-exec-claim-record-object")
+    for key in fields.keys():
+        if not names.contains(key): return Err("windows-exec-claim-field-unknown:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("windows-exec-claim-field-missing:" + key)
+    Ok(fields)
+
+fn claim_exec_v3(plan: WindowsContainerStreamPlanV3) -> Result<ContainerExecRequestV3, text>:
+    match plan.intent.exec_request:
+        case Some(request): Ok(request)
+        case None: Err("windows-exec-claim-exec-request-required")
+
+# Full request is encoded ONCE; intent has its digest, not a second env payload.
+pub fn windows_docker_exec_claim_template_v3(plan: WindowsContainerStreamPlanV3, create_query_digest: text) -> Result<text, text>:
+    val digest = windows_container_stream_plan_digest_v3(plan)?
+    if plan.request_digest != digest or plan.intent.operation_kind != "exec" or not builder_digest_valid_v1(create_query_digest):
+        return Err("windows-exec-claim-template-binding")
+    val request = claim_exec_v3(plan)?
+    val identity = plan.identity
+    val helper: Dict<text, SdnValue> = {"operationId": SdnValue.String(identity.operation_id),
+        "parentOperationId": SdnValue.String(identity.parent_operation_id), "parentOperationDigest": SdnValue.String(identity.parent_operation_digest),
+        "parentAssignmentDigest": SdnValue.String(identity.parent_assignment_digest), "parentBudgetDigest": SdnValue.String(identity.parent_budget_digest),
+        "bindingDigest": SdnValue.String(identity.binding_digest)}
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-docker-exec-claim-template-v3"),
+        "streamTemplateDigest": SdnValue.String(digest), "execRequestDigest": SdnValue.String(container_exec_request_digest_v3(request)?),
+        "execRequest": SdnValue.String(container_exec_request_encode_v3(request)?),
+        "workload": SdnValue.String(container_execution_plan_bytes_v2(plan.workload)?),
+        "nativeParentId": SdnValue.String(plan.runtime.native_id), "scopeFence": SdnValue.String(plan.runtime.node_boot_id),
+        "providerIdentityDigest": SdnValue.String(plan.provider_identity_digest), "policyDigest": SdnValue.String(plan.policy_digest),
+        "execControlIdentityDigest": SdnValue.String(plan.exec_control_identity_digest),
+        "brokerTemplateDigest": SdnValue.String(plan.broker_template_digest), "helperIdentity": SdnValue.Dict(helper),
+        "cpuMillis": SdnValue.Int(plan.resources.cpu_millis), "memoryBytes": SdnValue.Int(plan.resources.memory_bytes),
+        "intent": SdnValue.String(windows_container_stream_intent_bytes_v3(plan.intent)?), "createQueryDigest": SdnValue.String(create_query_digest)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.byte_len() > WINDOWS_DOCKER_EXEC_CLAIM_MAX_V3 / 4: return Err("windows-exec-claim-template-bound")
+    Ok(source)
+
+pub class WindowsDockerExecClaimV3:
+    access: ContainerExecStateAccessV3
+    binding: ContainerExecStateBindingV3
+    binding_bytes: text
+    access_closed: bool
+    plan: WindowsContainerStreamPlanV3
+    create_query_digest: text
+    template: text
+    phase: WindowsDockerExecClaimPhaseV3
+    verified_birth: WindowsExecBirthMappingV3?
+    pending_birth: WindowsExecBirthMappingV3?
+
+impl WindowsDockerExecClaimV3:
+    # Ownership is retained even on validation failure. The access factory, not
+    # this data matcher, authenticates the installed role. No root/path input.
+    pub static fn from_installed_access_v3(access: ContainerExecStateAccessV3,
+            plan: WindowsContainerStreamPlanV3, create_query_digest: text,
+            admission: ContainerExecAdmissionV3, installation_artifact_digest: text,
+            deployment_claim_digest: text) -> WindowsDockerExecClaimOutcomeV3:
+        val binding = access.binding()
+        var owner = WindowsDockerExecClaimV3(access: access, binding: binding,
+            binding_bytes: "", access_closed: false, plan: plan,
+            create_query_digest: create_query_digest, template: "",
+            phase: WindowsDockerExecClaimPhaseV3.UnknownCreate, verified_birth: None, pending_birth: None)
+        owner.binding_bytes = match container_exec_state_binding_bytes_v3(binding):
+            case Ok(value): value
+            case Err(reason): return owner._failure(reason)
+        match container_exec_state_binding_match_v3(binding, admission,
+                installation_artifact_digest, deployment_claim_digest):
+            case Err(reason): return owner._failure(reason)
+            case Ok(_): ()
+        owner.template = match windows_docker_exec_claim_template_v3(plan, create_query_digest):
+            case Ok(value): value
+            case Err(reason): return owner._failure(reason)
+        owner.phase = WindowsDockerExecClaimPhaseV3.Planned
+        owner.reserve_create_v3(admission)
+
+    pub fn phase_v3() -> WindowsDockerExecClaimPhaseV3: self.phase
+    pub fn birth_v3() -> WindowsExecBirthMappingV3?: self.verified_birth
+    # Failed persistence retains the observed candidate as diagnostic data only.
+    pub fn pending_birth_v3() -> WindowsExecBirthMappingV3?: self.pending_birth
+    pub fn has_owned_access_v3() -> bool: not self.access_closed
+
+    me fn _failure(reason: text) -> WindowsDockerExecClaimOutcomeV3:
+        WindowsDockerExecClaimOutcomeV3.CleanupRequired(self, reason)
+
+    fn _access_current() -> Result<bool, text>:
+        if self.access_closed: return Err("windows-exec-claim-closed")
+        if container_exec_state_binding_bytes_v3(self.access.binding())? != self.binding_bytes:
+            return Err("windows-exec-claim-installed-binding-changed")
+        Ok(true)
+
+    fn _kind(kind: text) -> Result<ContainerExecStateRecordKindV3, text>:
+        match kind:
+            case "create": Ok(ContainerExecStateRecordKindV3.Create)
+            case "birth": Ok(ContainerExecStateRecordKindV3.Birth)
+            case "start": Ok(ContainerExecStateRecordKindV3.Start)
+            case _: Err("windows-exec-claim-record-kind")
+
+    me fn _read(kind: text) -> Result<[u8], text>:
+        val current = self._access_current()?
+        val source = self.access.read_record(self._kind(kind)?)?
+        val valid = container_exec_state_record_bytes_validate_v3(source)?
+        val still_current = self._access_current()?
+        match boxed_text_bytes_checked(source):
+            case Ok(value): Ok(value)
+            case Err(_): Err("windows-exec-claim-record-extraction")
+
+    # The actual access owner owns atomic CREATE_NEW + nonreplacing publication.
+    # A published result never suffices without exact readback from that owner.
+    # Errors retain the complete access, whose implementation retains native IO.
+    me fn _publish(kind: text, source: text) -> Result<(bool, [u8]), text>:
+        val current = self._access_current()?
+        val bounded = container_exec_state_record_bytes_validate_v3(source)?
+        val bytes = match boxed_text_bytes_checked(source):
+            case Ok(value): value
+            case Err(_): return Err("windows-exec-claim-record-extraction")
+        val published = self.access.publish_record_no_replace(self._kind(kind)?, source)
+        if published.error != "": return Err(published.error)
+        val still_current = self._access_current()?
+        if val existing = published.existing_bytes:
+            if existing != source: return Err("windows-exec-claim-collision-mismatch")
+        val actual = self._read(kind)?
+        if actual != bytes: return Err("windows-exec-claim-published-readback-mismatch")
+        Ok((published.published_new, actual))
+
+    fn _record(kind: text, mapping: WindowsExecBirthMappingV3? = None) -> Result<text, text>:
+        var fields: Dict<text, SdnValue> = {"kind": SdnValue.String(kind), "template": SdnValue.String(self.template),
+            "installedStateBinding": SdnValue.String(self.binding_bytes)}
+        if val birth = mapping:
+            fields["mapping"] = SdnValue.String(windows_exec_birth_mapping_bytes_v3(birth)?)
+        val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+        if source.byte_len() > WINDOWS_DOCKER_EXEC_CLAIM_MAX_V3: return Err("windows-exec-claim-record-bound")
+        Ok(source)
+
+    fn _decode_birth(bytes: [u8]) -> Result<WindowsExecBirthMappingV3, text>:
+        if not utf8_bytes_valid(bytes): return Err("windows-exec-claim-birth-utf8")
+        val source = bytes_to_text(bytes)
+        if source.byte_len() != bytes.len(): return Err("windows-exec-claim-birth-byte-conversion")
+        val fields = claim_fields_v3(source, ["kind", "template", "mapping", "installedStateBinding"])?
+        if claim_text_v3(fields, "kind")? != "windows-docker-exec-birth-record-v3" or claim_text_v3(fields, "template")? != self.template or
+                claim_text_v3(fields, "installedStateBinding")? != self.binding_bytes:
+            return Err("windows-exec-claim-birth-record-binding")
+        val mapping_source = claim_text_v3(fields, "mapping")?
+        val mapping_fields = claim_fields_v3(mapping_source, ["kind", "birth", "streamTemplateDigest", "userAssurance"])?
+        if claim_text_v3(mapping_fields, "kind")? != "windows-exec-birth-mapping-v3": return Err("windows-exec-claim-mapping-kind")
+        val mapping = WindowsExecBirthMappingV3(birth: container_exec_birth_decode_v3(claim_text_v3(mapping_fields, "birth")?)?,
+            stream_template_digest: claim_text_v3(mapping_fields, "streamTemplateDigest")?, user_assurance: claim_text_v3(mapping_fields, "userAssurance")?)
+        val matched = windows_exec_birth_matches_v3(self.plan, mapping)?
+        if mapping.birth.query_digest != self.create_query_digest or windows_exec_birth_mapping_bytes_v3(mapping)? != mapping_source or
+                self._record("windows-docker-exec-birth-record-v3", Some(mapping))? != source:
+            return Err("windows-exec-claim-birth-noncanonical-or-query")
+        Ok(mapping)
+
+    fn _start_record(mapping: WindowsExecBirthMappingV3) -> Result<text, text>:
+        val query = windows_engine_exec_start_v3("1.48", mapping.birth.native_exec_id, self.plan.intent.tty)?
+        val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-docker-exec-start-reserved-v3"),
+            "installedStateBinding": SdnValue.String(self.binding_bytes),
+            "template": SdnValue.String(self.template), "mapping": SdnValue.String(windows_exec_birth_mapping_bytes_v3(mapping)?),
+            "startQueryDigest": SdnValue.String(windows_docker_exec_query_digest_v3(query)?)}
+        val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+        if source.byte_len() > WINDOWS_DOCKER_EXEC_CLAIM_MAX_V3: return Err("windows-exec-claim-record-bound")
+        Ok(source)
+
+    fn _admit(admission: ContainerExecAdmissionV3) -> Result<bool, text>:
+        val current = self._access_current()?
+        val bound = container_exec_state_binding_match_v3(self.binding, admission,
+            self.binding.installation_artifact_digest, self.binding.deployment_claim_digest)?
+        if admission.parent_operation_digest != self.plan.identity.parent_operation_digest or
+                admission.parent_assignment_digest != self.plan.identity.parent_assignment_digest:
+            return Err("windows-exec-claim-parent-admission-mismatch")
+        if admission.intent.parent_provider_identity_digest != self.plan.provider_identity_digest or
+                admission.intent.exec_control_identity_digest != self.plan.exec_control_identity_digest:
+            return Err("windows-exec-claim-provider-domain-mismatch")
+        val sampled = time_sample_unix_micros_or_failure()
+        if sampled <= 0: return Err("windows-exec-claim-admission-clock")
+        val matched = container_exec_admission_match_v3(admission, claim_exec_v3(self.plan)?, self.plan.exec_control_identity_digest, sampled / 1000)?
+        Ok(true)
+
+    # Reopening an existing marker can only yield a known old birth or unknown
+    # state. It can never authorize another Engine create with a new exec ID.
+    pub me fn reserve_create_v3(admission: ContainerExecAdmissionV3) -> WindowsDockerExecClaimOutcomeV3:
+        if self.access_closed: return WindowsDockerExecClaimOutcomeV3.Rejected("windows-exec-claim-closed")
+        if self.phase != WindowsDockerExecClaimPhaseV3.Planned:
+            if self.phase == WindowsDockerExecClaimPhaseV3.CreateReserved: self.phase = WindowsDockerExecClaimPhaseV3.UnknownCreate
+            if self.phase == WindowsDockerExecClaimPhaseV3.StartReserved: self.phase = WindowsDockerExecClaimPhaseV3.UnknownStart
+            return self._failure("windows-exec-claim-create-already-reserved")
+        match self._admit(admission):
+            case Err(reason): return self._failure(reason)
+            case Ok(_): ()
+        val record = match self._record("windows-docker-exec-create-reserved-v3"):
+            case Ok(value): value
+            case Err(reason): return self._failure(reason)
+        self.phase = WindowsDockerExecClaimPhaseV3.UnknownCreate
+        val published = match self._publish("create", record):
+            case Ok(value): value
+            case Err(reason): return self._failure(reason)
+        if published.0:
+            self.phase = WindowsDockerExecClaimPhaseV3.CreateReserved
+            return WindowsDockerExecClaimOutcomeV3.Ready(self)
+        val bytes = match self._read("birth"):
+            case Ok(value): value
+            case Err(reason): return self._failure(reason)
+        val birth = match self._decode_birth(bytes):
+            case Ok(value): value
+            case Err(reason): return self._failure(reason)
+        self.verified_birth = Some(birth)
+        self.phase = WindowsDockerExecClaimPhaseV3.CreatedExec
+        match self._read("start"):
+            case Ok(actual):
+                self.phase = WindowsDockerExecClaimPhaseV3.UnknownStart
+                val expected = match self._start_record(birth):
+                    case Ok(value): value
+                    case Err(reason): return self._failure(reason)
+                val encoded = match boxed_text_bytes_checked(expected):
+                    case Ok(value): value
+                    case Err(_): return self._failure("windows-exec-claim-record-extraction")
+                if actual != encoded: return self._failure("windows-exec-claim-start-collision-mismatch")
+            case Err(reason):
+                # No typed absence is available from this lower read port.
+                # A reopened birth with an unreadable start stays unknown;
+                # only the original uninterrupted birth owner may first start.
+                self.phase = WindowsDockerExecClaimPhaseV3.UnknownStart
+                return self._failure(reason)
+        WindowsDockerExecClaimOutcomeV3.Ready(self)
+
+    # Broker-private: mapping must come from the actual Engine create response.
+    # The typed value alone is not evidence. Readback becomes the retained value.
+    pub me fn persist_actual_birth_v3(mapping: WindowsExecBirthMappingV3) -> WindowsDockerExecClaimOutcomeV3:
+        if self.access_closed: return WindowsDockerExecClaimOutcomeV3.Rejected("windows-exec-claim-closed")
+        if self.phase != WindowsDockerExecClaimPhaseV3.CreateReserved: return self._failure("windows-exec-claim-local-create-required")
+        self.pending_birth = Some(mapping)
+        self.phase = WindowsDockerExecClaimPhaseV3.UnknownCreate
+        match windows_exec_birth_matches_v3(self.plan, mapping):
+            case Err(reason): return self._failure(reason)
+            case Ok(_): ()
+        if mapping.birth.query_digest != self.create_query_digest: return self._failure("windows-exec-claim-create-query-mismatch")
+        val record = match self._record("windows-docker-exec-birth-record-v3", Some(mapping)):
+            case Ok(value): value
+            case Err(reason): return self._failure(reason)
+        self.phase = WindowsDockerExecClaimPhaseV3.UnknownCreate
+        val bytes = match self._publish("birth", record):
+            case Err(reason): return self._failure(reason)
+            case Ok(value): value.1
+        self.verified_birth = match self._decode_birth(bytes):
+            case Ok(value): Some(value)
+            case Err(reason): return self._failure(reason)
+        self.pending_birth = None
+        self.phase = WindowsDockerExecClaimPhaseV3.CreatedExec
+        WindowsDockerExecClaimOutcomeV3.Ready(self)
+
+    pub me fn reserve_start_v3(admission: ContainerExecAdmissionV3) -> WindowsDockerExecClaimOutcomeV3:
+        if self.access_closed: return WindowsDockerExecClaimOutcomeV3.Rejected("windows-exec-claim-closed")
+        if self.phase != WindowsDockerExecClaimPhaseV3.CreatedExec:
+            if self.phase == WindowsDockerExecClaimPhaseV3.StartReserved: self.phase = WindowsDockerExecClaimPhaseV3.UnknownStart
+            return self._failure("windows-exec-claim-start-not-renewable")
+        # Expiry/mismatch BEFORE publication leaves birth-only CreatedExec, so a
+        # fresh same-exec carrier may be supplied later. No marker was written.
+        match self._admit(admission):
+            case Err(reason): return self._failure(reason)
+            case Ok(_): ()
+        val birth = match self.verified_birth:
+            case Some(value): value
+            case None: return self._failure("windows-exec-claim-verified-birth-required")
+        val record = match self._start_record(birth):
+            case Ok(value): value
+            case Err(reason): return self._failure(reason)
+        self.phase = WindowsDockerExecClaimPhaseV3.UnknownStart
+        match self._publish("start", record):
+            case Err(reason): return self._failure(reason)
+            case Ok(value):
+                if value.0: self.phase = WindowsDockerExecClaimPhaseV3.StartReserved
+        WindowsDockerExecClaimOutcomeV3.Ready(self)
+
+    # Native failures remain inside the retained access owner. Closing records
+    # proves neither exec exit nor container absence; no deletion is performed.
+    pub me fn close_v3() -> WindowsDockerExecClaimOutcomeV3:
+        if self.access_closed: return WindowsDockerExecClaimOutcomeV3.Ready(self)
+        val result = self.access.close()
+        if not result.closed or result.cleanup_pending or result.error != "":
+            return self._failure(if result.error != "": result.error else: "windows-exec-claim-access-close-retained")
+        self.access_closed = true
+        self.phase = WindowsDockerExecClaimPhaseV3.Closed
+        WindowsDockerExecClaimOutcomeV3.Ready(self)

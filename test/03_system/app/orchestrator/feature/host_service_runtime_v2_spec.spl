@@ -1,0 +1,141 @@
+# @req HOST-SERVICE-RUNTIME-01 HOST-SERVICE-RUNTIME-02
+# NOT_RUN. Real owned WAL/private policy/native listener calls; explicit SDK
+# frame fixtures do not claim kernel-peer authentication or native root boot.
+use std.spec.{describe, it, expect, step, fail}
+use test.fixtures.orchestration.host_service_runtime_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_service_runtime_v2.*
+use std.nogc_sync_mut.orchestration.host_service_gateway_v2.host_service_gateway_map_peer_v2
+use std.nogc_sync_mut.daemon_sdk.local_gateway_service_v2.LocalGatewayDispatchClassV2
+use std.nogc_sync_mut.daemon_sdk.local_gateway_v1.LocalGatewayRequestV1
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, secure_temp_dir}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+
+fn runtime_frame_v2(uid: i64, action: text = "host-status", operation: text = "", payload: text = "") -> LocalGatewayRequestV1:
+    LocalGatewayRequestV1(action, operation, payload, uid, "request-1")
+
+fn runtime_dispose_v2(fixture: HostRuntimeFixtureV2, turn: HostServiceRuntimeTurnV2):
+    expect(turn.closed).to_equal(true)
+    expect(turn.runtime.phase).to_equal(HostServiceRuntimePhaseV2.Closed)
+    expect(turn.runtime.journal_cleanup.unwrap().state).to_equal(FileLockReleaseStateV2.Released)
+    assert(turn.runtime.journal_cleanup.unwrap().cleanup.is_none())
+    assert(dir_remove(fixture.root, true))
+    assert(dir_remove(fixture.auxiliary_root, true))
+
+describe "Host metadata listener runtime and writer-first stop":
+    it "retains actual listener owner and closes the same journal before transport":
+        step("retains actual listener owner and closes the same journal before transport")
+        val fixture = host_runtime_fixture_v2()
+        val runtime = host_runtime_transport_fixture_v2(fixture)
+        expect(runtime.phase).to_equal(HostServiceRuntimePhaseV2.Live)
+        val stopped = host_service_runtime_stop_v2(runtime)
+        expect(stopped.error).to_equal("")
+        match stopped.runtime.port:
+            case HostServiceRuntimePortV2.Transport(service):
+                expect(service.phase).to_equal(3)
+                match service.owner:
+                    case HostServiceRuntimeDomainV2.Closed(_): ()
+                    case _: fail("closed transport must contain no live Host domain")
+            case _: fail("actual transport owner must be retained")
+        assert(distributed_operation_journal_lookup_v2(fixture.gateway.domain.local.capacity.journal, "").is_err())
+        runtime_dispose_v2(fixture, stopped)
+
+    it "keeps real lease mismatch cleanup-only and retries the exact carrier before listener stop":
+        step("keeps real lease mismatch cleanup-only and retries the exact carrier before listener stop")
+        val fixture = host_runtime_fixture_v2()
+        val runtime = host_runtime_transport_fixture_v2(fixture)
+        expect(runtime.phase).to_equal(HostServiceRuntimePhaseV2.Live)
+        val lease_path = fixture.gateway.domain.local.capacity.journal.root + "/parent.lease"
+        val original = file_read_regular_no_follow_bounded(lease_path, 512).unwrap()
+        # Actual administrator-corruption seam; no fake native close result.
+        assert(file_atomic_write_mode(lease_path, "changed-lease", 0o600))
+        val stopped = host_service_runtime_stop_v2(runtime)
+        expect(stopped.closed).to_equal(false)
+        expect(stopped.runtime.phase).to_equal(HostServiceRuntimePhaseV2.JournalCleanup)
+        val pending = stopped.runtime.journal_cleanup.unwrap()
+        expect(pending.state).to_equal(FileLockReleaseStateV2.Retained)
+        expect(pending.error).to_equal("OPERATION_JOURNAL_LEASE_STALE")
+        assert(pending.cleanup.is_some())
+        match stopped.runtime.port:
+            case HostServiceRuntimePortV2.Transport(service):
+                expect(service.phase).to_equal(1)
+                match service.owner:
+                    case HostServiceRuntimeDomainV2.CleanupOnly(status):
+                        expect(host_service_runtime_classify_v2(service.owner, runtime_frame_v2(fixture.config.client_uid)).unwrap()).to_equal(LocalGatewayDispatchClassV2.ControlRead)
+                        val response = host_service_runtime_callback_v2(service.owner, runtime_frame_v2(fixture.config.client_uid))
+                        expect(response.response.exit_code).to_equal(2)
+                        expect(response.response.payload).to_contain("OPERATION_JOURNAL_LEASE_STALE")
+                        assert(host_service_runtime_classify_v2(service.owner, runtime_frame_v2(fixture.gateway.peers.service_uid)).is_err())
+                        expect(host_service_runtime_classify_v2(service.owner, runtime_frame_v2(fixture.config.client_uid, "host-prepare", "op-1", "opaque")).unwrap_err()).to_equal("host-runtime-cleanup-only")
+                    case _: fail("failed writer close must discard live domain from callback state")
+            case _: fail("listeners must remain owned after failed writer close")
+        assert(file_atomic_write_mode(lease_path, original, 0o600))
+        val retried = host_service_runtime_retry_cleanup_v2(stopped.runtime)
+        expect(retried.error).to_equal("")
+        runtime_dispose_v2(fixture, retried)
+
+    it "retains partial open as blocked and reports its original error after actual cleanup":
+        step("retains partial open as blocked and reports its original error after actual cleanup")
+        val fixture = host_runtime_fixture_v2()
+        val obstruction = fixture.root + "/occupied.sock"
+        assert(file_atomic_write_mode(obstruction, "owned obstruction", 0o600))
+        val runtime = host_runtime_transport_fixture_v2(fixture, obstruction)
+        expect(runtime.phase).to_equal(HostServiceRuntimePhaseV2.OpenBlocked)
+        assert(runtime.error != "")
+        val untouched = host_service_runtime_turn_v2(runtime)
+        expect(untouched.handled_control).to_equal(0)
+        expect(untouched.handled_work).to_equal(0)
+        val stopped = host_service_runtime_stop_v2(untouched.runtime)
+        expect(stopped.error).to_equal(runtime.error)
+        expect(stopped.closed).to_equal(true)
+        val again = host_service_runtime_stop_v2(stopped.runtime)
+        expect(again.error).to_equal(runtime.error)
+        runtime_dispose_v2(fixture, again)
+
+    it "keeps partial transport locally recoverable on actual journal close failure without promoting phase4":
+        step("keeps partial transport locally recoverable on actual journal close failure without promoting phase4")
+        val fixture = host_runtime_fixture_v2()
+        val obstruction = fixture.root + "/occupied.sock"
+        assert(file_atomic_write_mode(obstruction, "owned obstruction", 0o600))
+        val runtime = host_runtime_transport_fixture_v2(fixture, obstruction)
+        val lease_path = fixture.gateway.domain.local.capacity.journal.root + "/parent.lease"
+        val original = file_read_regular_no_follow_bounded(lease_path, 512).unwrap()
+        assert(file_atomic_write_mode(lease_path, "changed-lease", 0o600))
+        val stopped = host_service_runtime_stop_v2(runtime)
+        expect(stopped.closed).to_equal(false)
+        val polled = host_service_runtime_turn_v2(stopped.runtime)
+        expect(polled.handled_control).to_equal(0)
+        expect(polled.handled_work).to_equal(0)
+        match polled.runtime.port:
+            case HostServiceRuntimePortV2.Transport(service): expect(service.phase).to_equal(4)
+            case _: fail("partial transport owner must remain exact")
+        assert(file_atomic_write_mode(lease_path, original, 0o600))
+        val retried = host_service_runtime_retry_cleanup_v2(polled.runtime)
+        assert(retried.error != "")
+        runtime_dispose_v2(fixture, retried)
+
+    it "preserves installed mapper error order without a live domain argument":
+        step("preserves installed mapper error order without a live domain argument")
+        val fixture = host_runtime_fixture_v2()
+        val gateway = fixture.gateway
+        val root = fixture.root
+        val scope = gateway.domain.local.scope.service_scope_id
+        val malformed = runtime_frame_v2(fixture.config.client_uid, "host-status", "unexpected", "unexpected")
+        expect(host_service_gateway_map_peer_v2(gateway.peers, root + "-wrong", scope, scope, malformed).unwrap_err()).to_equal("host-service-peer-root-mismatch")
+        expect(host_service_gateway_map_peer_v2(gateway.peers, root, scope, "wrong-scope", malformed).unwrap_err()).to_equal("host-service-peer-scope-mismatch")
+        expect(host_service_gateway_map_peer_v2(gateway.peers, root, scope, scope, malformed).unwrap_err()).to_equal("host-service-status-fields")
+        val runtime = HostServiceRuntimeV2(HostServiceRuntimePortV2.DomainOnly(gateway), HostServiceRuntimePhaseV2.OpenBlocked, nil, "configured client refused")
+        val stopped = host_service_runtime_stop_v2(runtime)
+        expect(stopped.error).to_equal("configured client refused")
+        runtime_dispose_v2(fixture, stopped)
+
+    it "rejects actual missing pinned policy before acquiring a domain or transport":
+        step("rejects actual missing pinned policy before acquiring a domain or transport")
+        val root = secure_temp_dir("/tmp", "host-runtime-rejected-").unwrap()
+        val config = HostServiceRuntimeConfigV2(root, "a".repeat(64), 1001, root + "/work.sock", root + "/control.sock", 2, 1, 1000)
+        match host_service_runtime_open_v2(config):
+            case HostServiceRuntimeOpenV2.Rejected(reason): assert(reason != "")
+            case _: fail("missing pinned policy must reject before domain/listen")
+        assert(dir_remove(root, true))

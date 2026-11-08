@@ -54,3 +54,50 @@ Resolution: the access violation is not root-caused or patched here. Design todo
 children (default `SIMPLE_PARSE_SHARDING` to off, then delete `parse_shard_main.spl`, `parse_shard_queue` and the
 spawn path) in favour of the per-file pipeline; the in-process parse fallback is already correct. Keep the
 env-flag workaround until then. No code changed, no seed/stage2 rebuild.
+
+## 2026-11-07: pure c56 GDB-server construction recurrence (cause unproved)
+
+This is new observed evidence for this existing deferred record, not a new
+P1 claim, a repair, or proof that the historical and current faults share a
+cause. The severity and deferred status remain unchanged.
+
+Evidence owner: `build/review/mcpgdb-pure-c56-server-attempt3/TERMINAL-REPORT.md`
+and its hash-bound `shard-evidence-terminal` packet. Actual owner session
+34713 ended with campaign exit 1 and compiler exit 124 at the enforced
+1650-second row deadline. No server PE was produced. Canonical SCV admission
+preceded worker selection at +827881 ms, then four parse shards over 183
+selected paths at +836076 ms. No HIR, codegen, or link completion was observed.
+
+- Shard 0/4, PID 19248, and shard 1/4, PID 12524, each exited
+  -1073741819 (`0xC0000005`); dead-child cleanup reported `kill=false`.
+- Shard 2/4, PID 21852, had an actual owned command line captured while live
+  and remained active until the deadline. Shard 3/4 had no independently
+  recorded terminal parse result before cleanup. Neither has a successful
+  parse receipt in this run.
+- Exactly 96 exclusive claims mapped uniquely to the 183 selected source
+  paths, with zero unmapped markers. The dynamic claim windows were 16;
+  ownership counts were 16/32/16/32. These are ownership boundaries, not
+  parse completion, the last parsed file, or crash attribution.
+- Runtime stderr also reported four rejected invalid-array handles, with
+  value bits `0x0000025248a0e371`, `0x0000023c5b8c1fc1`,
+  `0x00000194d375dab1`, and `0x000001ad15126131`. The wording
+  "probable compiler/FFI ABI mismatch" is the runtime diagnostic, not an
+  established diagnosis. Producing PID, file, and relation to either AV are
+  unproved. No packed-value, `for`, generic-push, boxed-wide, or pending-defers
+  cause is attributed by this observation.
+
+The watchdog reported quiescence, no unexpected remaining PIDs, and peak RSS
+4,153,032 KiB below the 8,000,000 KiB cap. This was not a recorded memory-cap
+termination. Source/tool finalization passed: before and after input manifests
+both had SHA256 `3405972738d6a6c2903873ac069e93eccd618d54d0e748d8d2b5560d06c2bd3a`.
+The report records source b3c8708b, authority 80726, composition 2d1472, registry
+present, and no source drift or fallback. The older record's successful parent
+fallback must not be inherited as a result of this current run.
+
+The actual pure compiler invoked `run src/app/cli/parse_shard_main.spl ...
+--parse-fibers=2/4` as a construction worker. This was not execution of a native
+GDB product. Native server protocol, tools, and deployment remain UNRUN; the
+server and five source-coherent workers remain missing/unqualified. Caches,
+raw stdout/stderr, claims, selection, terminal status, and owned argv are
+retained for focused diagnosis. No additional compiler or test was launched
+for this documentation update.

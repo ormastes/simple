@@ -25,6 +25,7 @@
 typedef struct SplArray SplArray;
 
 extern int64_t rt_bytes_to_text(int64_t bytes_value);
+extern int64_t rt_tls_wire_from_bytes(int64_t bytes_value);
 extern int64_t rt_char_from_code(int64_t code);
 extern SplArray* rt_array_new(int64_t capacity);
 extern int64_t rt_array_push(SplArray* array, int64_t value);
@@ -53,6 +54,28 @@ int main(void) {
     for (size_t i = 0; i < sizeof(raw); i++) rt_array_push(slots, rt_value_int(raw[i]));
     expect_text(rt_bytes_to_text((int64_t)(uintptr_t)slots), "hi\xC3\xA9", 4,
                 "tagged-int slot [u8] narrowed per element");
+
+    {
+        uint8_t all[256];
+        for (size_t i = 0; i < sizeof(all); i++) all[i] = (uint8_t)i;
+        expect_text(rt_tls_wire_from_bytes(
+                        rt_bytes_from_raw((int64_t)(uintptr_t)all, (int64_t)sizeof(all))),
+                    (const char*)all, sizeof(all),
+                    "TLS wire packed [u8] preserves all 256 bytes and NUL");
+        SplArray* all_slots = rt_array_new(256);
+        for (size_t i = 0; i < sizeof(all); i++)
+            rt_array_push(all_slots, rt_value_int(all[i]));
+        expect_text(rt_tls_wire_from_bytes((int64_t)(uintptr_t)all_slots),
+                    (const char*)all, sizeof(all),
+                    "TLS wire boxed [u8] preserves all 256 bytes and NUL");
+    }
+    {
+        const uint8_t mixed[] = {0xC2, 0x80, 0x00, 0xE2, 0x82, 0xAC, 0xFF};
+        expect_text(rt_tls_wire_from_bytes(
+                        rt_bytes_from_raw((int64_t)(uintptr_t)mixed, (int64_t)sizeof(mixed))),
+                    (const char*)mixed, sizeof(mixed),
+                    "TLS wire preserves UTF-8-shaped bytes, NUL, and FF");
+    }
 
     SplArray* bad = rt_array_new(1);
     rt_array_push(bad, rt_value_int(300));

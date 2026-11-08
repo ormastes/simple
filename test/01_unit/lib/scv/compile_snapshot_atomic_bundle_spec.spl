@@ -1,0 +1,189 @@
+# Real-library transaction interleavings, not timed parallel/sleep tests.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_git_event_v1, compile_source_inventory_apply_event_v1, compile_source_inventory_snapshot_cache_root_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_publish_v1, compile_source_inventory_read_current_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_acquire_v1, scv_compile_snapshot_acquire_v2, scv_compile_snapshot_materialize_source_v1, scv_compile_snapshot_open_v1, scv_compile_snapshot_prepare_bundle_v2, scv_compile_snapshot_publish_prepared_bundle_v2}
+use std.scv.compile_snapshot_values_v1.{ScvCompileSnapshotV1, scv_compile_snapshot_revision_id_v2, scv_compile_snapshot_provenance_v2, scv_compile_snapshot_receipt_v1}
+use std.scv.compile_snapshot_retention_v1.{scv_compile_snapshot_retain_newest_v2, scv_compile_snapshot_cleanup_v1}
+use app.io.mod.{dir_create, dir_exists, file_exists}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir_raw}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256, dir_remove}
+
+extern fn rt_getpid() -> i64
+val ATOMIC_CONTENT = "fn sample(): 17\n"
+
+struct AtomicStageV2:
+    root: text
+    cache: text
+    stage: text
+    revision: text
+    commit_id: text
+    tree_id: text
+    digest: text
+
+fn atomic_write(path: text, value: text) -> bool:
+    file_write_bytes(path, text_to_utf8_bytes(value))
+
+fn atomic_root() -> text:
+    expect(dir_create("build/test-artifacts", true)).to_equal(true)
+    val owned = secure_temp_dir_raw("build/test-artifacts", "scv-atomic-bundle-")
+    expect(owned == "").to_equal(false)
+    val root = path_absolute(owned).replace("\\", "/")
+    expect(dir_create(root + "/src", true)).to_equal(true)
+    expect(dir_create(root + "/build/scv/snapshots", true)).to_equal(true)
+    atomic_update_source(root, ATOMIC_CONTENT)
+    root
+
+fn atomic_update_source(root: text, content: text):
+    expect(atomic_write(root + "/src/a.spl", content)).to_equal(true)
+    val cache = root + "/build/scv"
+    val current = compile_source_inventory_read_current_v1(cache)
+    val prior = if current.valid: current.inventory! else: CompileSourceInventoryV1(1, 0, [])
+    val event = compile_source_inventory_git_event_v1("create", "src/a.spl", content)
+    val applied = compile_source_inventory_apply_event_v1(prior, event)
+    expect(applied.valid).to_equal(true)
+    expect(compile_source_inventory_publish_v1(cache, applied.inventory!) == "").to_equal(false)
+
+fn atomic_prepare(root: text, witness: text) -> AtomicStageV2:
+    val cache = root + "/build/scv"
+    val current = compile_source_inventory_read_current_v1(cache)
+    expect(current.valid).to_equal(true)
+    expect(current.inventory!.entries.len()).to_equal(1)
+    val entry = current.inventory!.entries[0]
+    val stage = secure_temp_dir_raw(cache + "/snapshots", ".tmp.{rt_getpid()}.")
+    expect(stage == "").to_equal(false)
+    val materialized = scv_compile_snapshot_materialize_source_v1(root, cache, stage, entry)
+    expect(materialized.reason).to_equal("ok")
+    expect(materialized.source_drifted).to_equal(false)
+    val digest = sha256_text(materialized.row)
+    val tree = "scv-tree-v1-" + digest
+    val commit_id = "scv-compile-v1-" + sha256_text("simple/scv-compile-commit/v1|{tree}|1")
+    val revision = scv_compile_snapshot_revision_id_v2(tree, digest)
+    expect(scv_compile_snapshot_prepare_bundle_v2(root, cache, stage,
+        revision, commit_id, tree, materialized.row)).to_equal("")
+    expect(atomic_write(stage + "/" + witness, witness)).to_equal(true)
+    AtomicStageV2(root, cache, stage, revision, commit_id, tree, digest)
+
+fn atomic_commit(stage: AtomicStageV2) -> ScvCompileSnapshotV1:
+    scv_compile_snapshot_publish_prepared_bundle_v2(stage.root, stage.cache,
+        stage.stage, stage.revision, stage.commit_id, stage.tree_id, stage.digest)
+
+fn atomic_final(stage: AtomicStageV2) -> text:
+    stage.cache + "/snapshots/" + stage.revision
+
+fn atomic_cleanup(root: text):
+    val parent = path_absolute("build/test-artifacts").replace("\\", "/") + "/"
+    expect(root.starts_with(parent)).to_equal(true)
+    expect(dir_remove(root, true)).to_equal(true)
+
+describe "versioned snapshot bundle has one publication commit point":
+    it "lets two prepared publishers succeed without deleting the committed winner":
+        val root = atomic_root()
+        val publisher_a = atomic_prepare(root, "publisher-A-witness")
+        val publisher_b = atomic_prepare(root, "publisher-B-witness")
+        expect(publisher_a.revision).to_equal(publisher_b.revision)
+        val first = atomic_commit(publisher_a)
+        expect(first.valid).to_equal(true)
+        val second = atomic_commit(publisher_b)
+        expect(second.valid).to_equal(true)
+        expect(second.snapshot_root).to_equal(first.snapshot_root)
+        expect(second.receipt_path).to_equal(first.snapshot_root + "/SCV_COMPILE_RECEIPT")
+        expect(file_exists(first.snapshot_root + "/publisher-A-witness")).to_equal(true)
+        expect(file_exists(first.snapshot_root + "/publisher-B-witness")).to_equal(false)
+        expect(dir_exists(publisher_b.stage)).to_equal(false)
+        expect(file_exists(publisher_a.cache + "/receipts/" + publisher_a.revision + ".receipt")).to_equal(false)
+        expect(file_hash_sha256(first.snapshot_root + "/src/a.spl")).to_equal(sha256_text(ATOMIC_CONTENT))
+        atomic_cleanup(root)
+
+    it "allows real acquire between A's directory commit and its outer return":
+        val root = atomic_root()
+        val publisher_a = atomic_prepare(root, "publisher-A-witness")
+        val first = atomic_commit(publisher_a)
+        expect(first.valid).to_equal(true)
+        # A's outer acquire has not touched retention or returned. No global
+        # receipt exists, but all authoritative metadata arrived in the rename.
+        val observer_b = scv_compile_snapshot_acquire_v2(root, publisher_a.cache, [root + "/src"])
+        expect(observer_b.valid).to_equal(true)
+        expect(observer_b.revision_id).to_equal(first.revision_id)
+        expect(file_exists(first.snapshot_root + "/publisher-A-witness")).to_equal(true)
+        expect(file_exists(publisher_a.cache + "/receipts/" + publisher_a.revision + ".receipt")).to_equal(false)
+        atomic_cleanup(root)
+
+    it "never admits a prepared private stage and permits another publisher to finish":
+        val root = atomic_root()
+        val unfinished = atomic_prepare(root, "unfinished-witness")
+        val hidden = scv_compile_snapshot_open_v1(root, unfinished.stage,
+            unfinished.revision, unfinished.commit_id, unfinished.tree_id, unfinished.digest)
+        expect(hidden.valid).to_equal(false)
+        expect(dir_exists(atomic_final(unfinished))).to_equal(false)
+        val other = atomic_prepare(root, "other-witness")
+        expect(atomic_commit(other).valid).to_equal(true)
+        expect(dir_exists(unfinished.stage)).to_equal(true)
+        atomic_cleanup(root)
+
+    it "rejects a partial in-bundle receipt before making a final directory visible":
+        val root = atomic_root()
+        val stage = atomic_prepare(root, "receipt-witness")
+        expect(atomic_write(stage.stage + "/SCV_COMPILE_RECEIPT", "partial")).to_equal(true)
+        val refused = atomic_commit(stage)
+        expect(refused.valid).to_equal(false)
+        expect(refused.reason).to_equal("snapshot-bundle-stage-metadata-invalid")
+        expect(dir_exists(atomic_final(stage))).to_equal(false)
+        expect(file_exists(stage.stage + "/receipt-witness")).to_equal(true)
+        atomic_cleanup(root)
+
+    it "rejects changed staged inventory and leaves a conflicting final directory untouched":
+        val root = atomic_root()
+        val changed = atomic_prepare(root, "changed-witness")
+        expect(atomic_write(changed.stage + "/SCV_COMPILE_INVENTORY", "tampered")).to_equal(true)
+        expect(atomic_commit(changed).valid).to_equal(false)
+        expect(dir_exists(atomic_final(changed))).to_equal(false)
+        val conflict = atomic_prepare(root, "loser-witness")
+        expect(dir_create(atomic_final(conflict), true)).to_equal(true)
+        expect(atomic_write(atomic_final(conflict) + "/conflict-witness", "preserve")).to_equal(true)
+        expect(atomic_commit(conflict).valid).to_equal(false)
+        expect(file_hash_sha256(atomic_final(conflict) + "/conflict-witness")).to_equal(sha256_text("preserve"))
+        atomic_cleanup(root)
+
+    it "retains source-index drift refusal before publishing a new bundle":
+        val root = atomic_root()
+        expect(atomic_write(root + "/src/a.spl", "fn sample(): 23\n")).to_equal(true)
+        val refused = scv_compile_snapshot_acquire_v2(root, root + "/build/scv", [root + "/src"])
+        expect(refused.valid).to_equal(false)
+        expect(refused.reason).to_equal("snapshot-index-drift:src/a.spl")
+        atomic_cleanup(root)
+
+    it "keeps valid v1 history byte-identical while publishing and retaining v2 views":
+        val root = atomic_root()
+        val cache = root + "/build/scv"
+        val legacy = scv_compile_snapshot_acquire_v1(root, cache, [root + "/src"])
+        expect(legacy.valid).to_equal(true)
+        val legacy_provenance_hash = file_hash_sha256(legacy.provenance_path)
+        val legacy_receipt_hash = file_hash_sha256(legacy.receipt_path)
+        val first = scv_compile_snapshot_acquire_v2(root, cache, [root + "/src"])
+        expect(first.valid).to_equal(true)
+        expect(first.revision_id == legacy.revision_id).to_equal(false)
+        atomic_update_source(root, "fn sample(): 23\n")
+        val second = scv_compile_snapshot_acquire_v2(root, cache, [root + "/src"])
+        expect(second.valid).to_equal(true)
+        expect(scv_compile_snapshot_retain_newest_v2(cache, second.revision_id, 1, 0)).to_equal(1)
+        expect(dir_exists(first.snapshot_root)).to_equal(false)
+        expect(file_hash_sha256(legacy.provenance_path)).to_equal(legacy_provenance_hash)
+        expect(file_hash_sha256(legacy.receipt_path)).to_equal(legacy_receipt_hash)
+        expect(scv_compile_snapshot_open_v1(root, legacy.snapshot_root, legacy.revision_id,
+            legacy.commit_id, legacy.tree_id, legacy.inventory_digest).valid).to_equal(true)
+        atomic_cleanup(root)
+
+    it "requires an owned final path and supports checked explicit v2 cleanup":
+        val root = atomic_root()
+        val other = atomic_root()
+        val snapshot = scv_compile_snapshot_acquire_v2(root, root + "/build/scv", [root + "/src"])
+        expect(snapshot.valid).to_equal(true)
+        expect(compile_source_inventory_snapshot_cache_root_v1(other, snapshot.snapshot_root, snapshot.revision_id)).to_equal("")
+        expect(scv_compile_snapshot_cleanup_v1(snapshot)).to_equal(true)
+        expect(dir_exists(snapshot.snapshot_root)).to_equal(false)
+        atomic_cleanup(root)
+        atomic_cleanup(other)

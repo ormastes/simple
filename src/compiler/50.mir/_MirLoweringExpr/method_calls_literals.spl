@@ -294,9 +294,9 @@ impl MirLowering:
         fix, in the same file, had to back out of) -- this does a RUNTIME
         tagged-or-raw check first via rt_interp_cstr (bug #136's
         autodetection: unwraps an already-tagged handle to its real data
-        buffer, or passes an already-raw char* through unchanged), THEN
-        (re)tags that buffer via rt_string_new using rt_string_len on the
-        ORIGINAL value. Tagged text can contain NUL bytes, so strlen of
+        buffer, or passes an already-raw char* through unchanged). Preserve
+        an existing tagged handle; only raw values need rt_string_new using
+        rt_string_len on the ORIGINAL value. Tagged text can contain NUL bytes, so strlen of
         the unwrapped buffer would discard its length and truncate it.
         Safe for both representations. Used to fix `.starts_with()`/
         `.ends_with()`'s RECEIVER (their existing code below only tagged the
@@ -317,6 +317,32 @@ impl MirLowering:
         var ets_raw = value_local
         if val ets_cstr_local = ets_cstr_res:
             ets_raw = ets_cstr_local
+        # The existing runtime decoder returns the input word unchanged for
+        # raw text and a distinct borrowed data pointer for registered tagged
+        # text. Preserve that original handle instead of copying the entire
+        # receiver on every method call. Compare integer words, never contents
+        # or guessed tag bits. Keep the old raw/null fallback below unchanged.
+        val ets_type = MirType(kind: MirTypeKind.Opaque("str"))
+        var b_ets_branch = self.builder
+        val ets_original_word = b_ets_branch.emit_bitcast(mir_operand_copy(value_local), MirType.i64())
+        val ets_data_word = b_ets_branch.emit_bitcast(mir_operand_copy(ets_raw), MirType.i64())
+        val ets_changed = b_ets_branch.emit_binop(MirBinOp.Ne, mir_operand_copy(ets_original_word), mir_operand_copy(ets_data_word), MirType.bool())
+        val ets_nonnull_block = b_ets_branch.new_block(Some("text_decode_nonnull"))
+        val ets_keep_block = b_ets_branch.new_block(Some("text_keep_tagged"))
+        val ets_raw_block = b_ets_branch.new_block(Some("text_box_raw"))
+        val ets_merge_block = b_ets_branch.new_block(Some("text_normalize_merge"))
+        val ets_result = b_ets_branch.new_local(nil, ets_type, LocalKind.Var)
+        b_ets_branch.terminate_if(mir_operand_copy(ets_changed), ets_nonnull_block, ets_raw_block)
+        b_ets_branch.switch_to_block(ets_nonnull_block)
+        val ets_zero = b_ets_branch.emit_const_int(0)
+        val ets_nonnull = b_ets_branch.emit_binop(MirBinOp.Ne, mir_operand_copy(ets_data_word), mir_operand_copy(ets_zero), MirType.bool())
+        b_ets_branch.terminate_if(mir_operand_copy(ets_nonnull), ets_keep_block, ets_raw_block)
+        b_ets_branch.switch_to_block(ets_keep_block)
+        b_ets_branch.emit_copy(ets_result, value_local)
+        b_ets_branch.terminate_goto(ets_merge_block)
+        b_ets_branch.switch_to_block(ets_raw_block)
+        self.builder = b_ets_branch
+
         val ets_len_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_string_len"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
@@ -324,6 +350,7 @@ impl MirLowering:
         var b_ets_len = self.builder
         val ets_len_res = b_ets_len.emit_call(ets_len_op, [mir_operand_copy(value_local)], MirType.i64())
         self.builder = b_ets_len
+        var ets_boxed = ets_raw
         if val ets_len_local = ets_len_res:
             val ets_new_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_string_new"),
@@ -333,8 +360,13 @@ impl MirLowering:
             val ets_new_res = b_ets_new.emit_call(ets_new_op, [mir_operand_copy(ets_raw), mir_operand_copy(ets_len_local)], MirType.i64())
             self.builder = b_ets_new
             if val ets_new_local = ets_new_res:
-                return ets_new_local
-        ets_raw
+                ets_boxed = ets_new_local
+        var b_ets_merge = self.builder
+        b_ets_merge.emit_copy(ets_result, ets_boxed)
+        b_ets_merge.terminate_goto(ets_merge_block)
+        b_ets_merge.switch_to_block(ets_merge_block)
+        self.builder = b_ets_merge
+        ets_result
 
     me lower_text_split_lines(sl_recv_raw: LocalId, receiver_span: Span) -> LocalId:
         """Lower `text.split_lines()` (bug: pure_simple_text_split_lines_missing).
@@ -1644,9 +1676,52 @@ impl MirLowering:
 
         nil
 
+    me array_push_receiver_is_u64_v1(receiver_local: LocalId) -> bool:
+        # Receiver authority must precede inference from the appended value.
+        # An Any/generic array or a user owner must keep its existing route.
+        if not self.local_is_runtime_array(receiver_local):
+            return false
+        if val declared = self.find_local_hir_type(receiver_local.id):
+            match declared.kind:
+                case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                    val declared_element = self.lower_type(element)
+                    match declared_element.kind:
+                        case MirTypeKind.U64: return true
+                        case _: return false
+                case HirTypeKind.Infer(_, _): ()
+                case _: return false
+        if val receiver_type = self.local_mir_type_of(receiver_local):
+            match receiver_type.kind:
+                case MirTypeKind.Array(element, _) | MirTypeKind.Slice(element):
+                    match element.kind:
+                        case MirTypeKind.U64: return true
+                        case _: return false
+                case _: ()
+        false
+
     me lower_unresolved_array_push(push_recv: LocalId, push_value: HirExpr, wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
+        val push_u64_receiver = self.array_push_receiver_is_u64_v1(push_recv)
         val push_val_raw = self.lower_expr(push_value)
         self.note_container_elem_type(push_recv, push_val_raw)
+        if push_u64_receiver:
+            # The canonical typed helper owns the storage layout: raw U64
+            # lanes in packed arrays, boxed RuntimeValues in ordinary arrays.
+            # Generic rt_array_push expects an already boxed slot and cannot
+            # normalize that representation for a packed destination.
+            val push_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_typed_words_u64_push"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.ptr(MirType.i64(), false), MirType.i64()],
+                    return_type: MirType(kind: MirTypeKind.I8),
+                    is_variadic: false
+                )))
+            ))
+            var b_push = self.builder
+            val push_bits = b_push.emit_cast(mir_operand_copy(push_val_raw), MirType.i64())
+            b_push.emit_call(push_op, [mir_operand_copy(push_recv), mir_operand_copy(push_bits)], MirType(kind: MirTypeKind.I8))
+            self.builder = b_push
+            self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
+            return push_recv
         val push_val_tagged = self.box_runtime_value(push_val_raw)
         val push_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_array_push"),
@@ -2758,7 +2833,7 @@ impl MirLowering:
                     case HirTypeKind.Str: declared_text_receiver = true
                     case _: ()
         val primitive_text_method_shape =
-            method == "trim" or method == "strip" or method == "lower" or
+            method == "byte_len" or method == "trim" or method == "strip" or method == "lower" or
             method == "to_lower" or method == "to_upper" or method == "split" or
             method == "rpartition" or method == "slice" or method == "substring" or
             method == "replace" or method == "rfind" or method == "find" or method == "index_of" or
@@ -2805,7 +2880,7 @@ impl MirLowering:
         # `to_f64`/`to_f32` parse text only on a PROVEN text receiver. An
         # erased word reaching them is far more often a raw number, which the
         # numeric conversion arm below owns.
-        val erased_text_shape = primitive_text_method_shape and method != "to_f64" and method != "to_f32"
+        val erased_text_shape = primitive_text_method_shape and method != "byte_len" and method != "to_f64" and method != "to_f32"
         if erased_text_shape and not resolution_is_static_method and not primitive_text_receiver and resolution_is_unresolved and not predicate_has_custom_owner:
             var erased_recv_ty_ok = false
             # `has_type_` is the presence bit; an untyped receiver carries a
@@ -3464,6 +3539,21 @@ impl MirLowering:
                 self.aggregate_literal_operand(args[1].value, value_local, boxed_value)], MirType.i64())
             self.builder = b_set
             return receiver_local
+
+        # byte_len is a TEXT-only byte accessor, never the generic collection
+        # length fallback. Keep nominal/static owners and erased words intact.
+        if method == "byte_len" and args.len() == 0 and text_builtin_resolution_allowed and not resolution_is_static_method and not predicate_has_custom_owner:
+            val text_local = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
+            val byte_len_operand = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_len"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_byte_len = self.builder
+            val byte_length = b_byte_len.emit_call(byte_len_operand, [mir_operand_copy(text_local)], MirType.i64())
+            self.builder = b_byte_len
+            if val length = byte_length:
+                return length
+            return text_local
 
         # Built-in collections implement Len.is_empty() as `self.len() == 0`.
         # The native MIR path already has concrete runtime dispatch for len,
@@ -6051,32 +6141,20 @@ impl MirLowering:
 
     me lower_gpu_intrinsic_call(name: text, args: [HirCallArg]) -> LocalId:
         """Lower GPU intrinsic function call to MIR GPU instruction."""
-        # Resolve dimension argument (default 0)
-        val dim = if args.len() > 0:
-            # Try to extract constant integer from the dimension argument
+        # Only these five operations consume a dimension. Atomic/data operands
+        # belong to their later lowering path and must not be evaluated here.
+        val takes_dimension = match name:
+            case "gpu_global_id" | "gpu_local_id" | "gpu_block_id" | "gpu_block_dim" | "gpu_grid_dim": true
+            case _: false
+        val dim = if takes_dimension and args.len() > 0:
             val dim_expr = args[0].value
             match dim_expr.kind:
-                case IntLit(value, _):
-                    value
+                case IntLit(value, _): value
                 case _:
-                    # SAME FAIL-OPEN CLASS as the unresolved-method const-0
-                    # placeholder further down this file: a value the lowering
-                    # could not determine was replaced by a plausible default
-                    # instead of a diagnostic. Here a NON-CONSTANT dimension
-                    # argument silently became dimension 0, so
-                    # `thread_idx(d)` for a computed `d` read the X index
-                    # whatever `d` was -- wrong data under exit 0.
-                    #
-                    # The intrinsic genuinely requires a compile-time constant
-                    # dimension (it selects which intrinsic to emit), so the
-                    # honest answer is a diagnostic. The `0` is retained only
-                    # as the placeholder the rest of this function needs to
-                    # keep building a well-formed MIR body; the error above
-                    # makes the build fail on every lane that reads it, and
-                    # the print makes it visible on the lanes that do not.
+                    # Preserve one evaluation for diagnostic recovery, then
+                    # prevent the placeholder index from being published.
                     val dim_local = self.lower_expr(dim_expr)
-                    self.error("GPU thread-index dimension must be a compile-time constant", nil)
-                    print "[mir-lower] WARNING: non-constant GPU thread-index dimension lowered to dimension 0 (silent-default risk)"
+                    self.error_fatal("GPU thread-index dimension must be a compile-time constant", Some(dim_expr.span))
                     0
         else:
             0
@@ -6176,6 +6254,7 @@ impl MirLowering:
         miscall the others. All of this requires trait_impl_closure_complete
         (whole-closure lowering); partial demand/incremental lowering cannot
         know the implementor set and is a compile error."""
+        self.trait_impl_owners_materialize_v1(trait_key)
         val owners = self.trait_impl_owners.get(trait_key) ?? []
         # The implementor is chosen below, after the operands are lowered, so
         # no declared parameter list is known here: arguments stay raw.
@@ -6190,6 +6269,7 @@ impl MirLowering:
             self.error_fatal("trait-object call {trait_key}.{method}: a generic implementor (`impl<T> {trait_key} for ...`) is in the build closure; stage2 cannot devirtualize it", Some(receiver.span))
         elif owners.len() == 1:
             val impl_key = "{trait_key}::{owners[0]}::{method}"
+            self.trait_impl_method_materialize_v1(impl_key)
             if self.trait_impl_methods.has(impl_key):
                 val method_id = self.trait_impl_methods[impl_key]
                 val method_operand = self.symbol_to_operand(method_id)

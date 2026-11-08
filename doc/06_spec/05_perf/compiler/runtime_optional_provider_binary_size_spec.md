@@ -8,6 +8,39 @@ to remain within 110% of the same-host Python baseline. Each sample row must
 bind to the hash of its supplied interpreter or Python executable. The
 NoGC hello binary is a separate size-gate input.
 
+## Canonical Stage4 authority — 2026-11-07
+
+Both the producer and checker require these actual authority inputs in addition
+to their existing cohort, workload, observation and matched-link arguments:
+
+```sh
+--stage4-receipt "$STAGE4_COMPILER.provenance.env" \
+--stage4-compiler "$STAGE4_COMPILER" \
+--stage4-source-root "$STAGE4_SOURCE_ROOT"
+```
+
+The adjacent receipt must use `simple-bootstrap-stage4-provenance-v1` and
+`artifact_kind=pure-simple-full-cli`. The existing canonical Stage4 verifier
+checks the compiler, source and deep Stage3 authority. A hand-written
+`stage=4`/`compiler_kind` label, retained-manual/self provenance or Phase2 Hello
+receipt cannot replace it. The compiler is separate from the measured NoGC
+hello and interpreter binaries. The cohort v1 format and numerical limits are
+unchanged.
+
+The updated shell contract fixture passed its bounded final run. It copies the
+unmodified Stage4 verifier and stubs only its deep Stage3 dependency in a
+private copied facade, exercising joins and refusal propagation. Its compiler,
+source and startup data are synthetic; no fixture compiler is executed or
+admitted. Original failures and the three-cycle limit are recorded in
+`doc/08_tracking/bug/bs7_stage4_label_not_canonical_provenance_2026-11-07.md`.
+This result does not execute the SPipe wrapper or qualify a native cohort.
+
+**Still open:** actual startup/RSS acquisition, workload compiler/runtime/build
+bindings, NoGC inventory acquisition and owner-backed no-demand observations.
+The scripts consume supplied evidence; empty traces alone do not prove zero
+loads or effects. No new size/startup/application PASS is claimed. Historical
+measurement and execution notes below retain their original scope.
+
 The NoGC binary must be below 2 MiB. Linux release-small additionally requires
 at most 15 KiB and at most 105% of a same-toolchain C hello with the same
 startup wrapper, required runtime archive, linker options, section GC, and
@@ -64,8 +97,10 @@ invokes the production checker without admission inputs
 and requires a failing exit and the missing-input diagnostic. These examples
 test the checker with a real LLD fixture but synthetic Stage4 and startup
 receipts; they do not measure an admitted Stage4 cohort.
-The shell fixture passed before the final C `puts` source switch; the latest
-source has not completed that fixture under this session's three-cycle cap.
+Historically, the shell fixture passed before the final C `puts` source switch;
+that earlier session did not finish the updated fixture within its three-cycle
+cap. The 2026-11-07 contract-only result above supersedes that fixture status,
+without changing the historical native measurement or SPipe execution status.
 A direct attempt to run
 the SPipe wrapper with the fresh Stage4 compiler stopped during source parse:
 its flat AST bridge rejected declaration nodes within a 40-file source closure

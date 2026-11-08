@@ -1,0 +1,89 @@
+# Protected-host configuration syntax only. No wire endpoint or socket trust
+# is established by decoding; the owned factory must probe the actual service.
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1,
+    linux_oci_engine_policy_error_v1, linux_oci_engine_policy_encode_v1,
+    linux_oci_engine_policy_decode_v1, linux_oci_engine_policy_digest_v1}
+use std.common.string_core.str_len
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct LinuxOciInstalledPolicyV3:
+    cli_policy: LinuxOciEnginePolicyV1
+    socket_path: text
+    expected_service_uid: i64
+    api_version: text
+
+pub fn linux_oci_installed_policy_error_v3(policy: LinuxOciInstalledPolicyV3) -> text:
+    val cli_error = linux_oci_engine_policy_error_v1(policy.cli_policy)
+    if cli_error != "": return cli_error
+    if (policy.expected_service_uid <= 0 or policy.expected_service_uid > 4294967294 or
+            policy.expected_service_uid != policy.cli_policy.expected_uid):
+        return "installed-policy-service-uid-mismatch"
+    if policy.api_version != "5.2.5": return "installed-policy-api-version-unsupported"
+    val path = policy.socket_path
+    if (not path.starts_with("/") or path == "/" or str_len(path) > 4095 or
+            path.ends_with("/") or path.contains("//")):
+        return "installed-policy-socket-path-invalid"
+    for byte in path.bytes():
+        if byte < 32 or byte > 126: return "installed-policy-socket-path-invalid"
+    for component in path.split("/"):
+        if component == "." or component == ".." or str_len(component) > 255:
+            return "installed-policy-socket-path-invalid"
+    val components = path.split("/")
+    if str_len(components[components.len() - 1]) > 107: return "installed-policy-socket-path-invalid"
+    ""
+
+pub fn linux_oci_installed_policy_encode_v3(policy: LinuxOciInstalledPolicyV3) -> Result<text, text>:
+    val error = linux_oci_installed_policy_error_v3(policy)
+    if error != "": return Err(error)
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-oci-installed-policy"), "version": SdnValue.Int(3),
+        "cliPolicy": SdnValue.String(linux_oci_engine_policy_encode_v1(policy.cli_policy)?),
+        "cliPolicyDigest": SdnValue.String(linux_oci_engine_policy_digest_v1(policy.cli_policy)?),
+        "socketPath": SdnValue.String(policy.socket_path), "expectedServiceUid": SdnValue.Int(policy.expected_service_uid),
+        "apiVersion": SdnValue.String(policy.api_version)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 1048576: return Err("installed-policy-source-bound")
+    Ok(source)
+
+fn installed_policy_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("installed-policy-field-type:" + key)
+
+pub fn linux_oci_installed_policy_decode_v3(source: text) -> Result<LinuxOciInstalledPolicyV3, text>:
+    if str_len(source) == 0 or str_len(source) > 1048576: return Err("installed-policy-source-bound")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576,
+            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(_): return Err("installed-policy-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("installed-policy-object-required")
+    val names = ["kind", "version", "cliPolicy", "cliPolicyDigest", "socketPath", "expectedServiceUid", "apiVersion"]
+    if fields.len() != names.len(): return Err("installed-policy-fields")
+    for key in names:
+        if not fields.contains_key(key): return Err("installed-policy-fields")
+    if installed_policy_text_v3(fields, "kind")? != "linux-oci-installed-policy":
+        return Err("installed-policy-kind")
+    match fields["version"]:
+        case SdnValue.Int(3): pass
+        case _: return Err("installed-policy-version")
+    val uid = match fields["expectedServiceUid"]:
+        case SdnValue.Int(value): value
+        case _: return Err("installed-policy-field-type:expectedServiceUid")
+    val cli_source = installed_policy_text_v3(fields, "cliPolicy")?
+    val cli = linux_oci_engine_policy_decode_v1(cli_source)?
+    if linux_oci_engine_policy_encode_v1(cli)? != cli_source: return Err("installed-policy-cli-noncanonical")
+    if linux_oci_engine_policy_digest_v1(cli)? != installed_policy_text_v3(fields, "cliPolicyDigest")?:
+        return Err("installed-policy-cli-digest-mismatch")
+    val policy = LinuxOciInstalledPolicyV3(cli_policy: cli, socket_path: installed_policy_text_v3(fields, "socketPath")?,
+        expected_service_uid: uid, api_version: installed_policy_text_v3(fields, "apiVersion")?)
+    if linux_oci_installed_policy_encode_v3(policy)? != source: return Err("installed-policy-noncanonical")
+    Ok(policy)
+
+pub fn linux_oci_installed_policy_digest_v3(policy: LinuxOciInstalledPolicyV3) -> Result<text, text>:
+    val encoded = linux_oci_installed_policy_encode_v3(policy)?
+    Ok(sha256_text(encoded))

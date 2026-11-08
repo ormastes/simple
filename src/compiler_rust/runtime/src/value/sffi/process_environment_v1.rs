@@ -193,6 +193,33 @@ pub unsafe extern "C" fn rt_process_run_bounded_environment_tuple_v1(ptr:*const 
     #[cfg(not(windows))] {let _=(ptr,len,args,env,mode,timeout,cap);std::ptr::null_mut()}
 }
 
+/// ABI twin for admission-bounded capture. This Rust lane has no pre-exec /
+/// suspended-resume admission handshake, so it must reject before spawning.
+/// Only the admitted core-C owner implements that capability; invoking the
+/// ordinary Rust capture here would silently reintroduce the deadline race.
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_bounded_admitted_tuple_v1(
+    ptr: *const u8, len: u64, args: RuntimeValue, env: RuntimeValue, mode: i64,
+    timeout: i64, cap: i64, expires_at_unix_ms: i64,
+) -> *mut i64 {
+    let _ = (ptr, len, args, env, mode, timeout, cap, expires_at_unix_ms);
+    receipt(b"", b"admitted capture requires native core-C owner", -1, 8 | 64)
+}
+
+/// This lane does not provide the native authoritative capture-limit receipt.
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_bounded_observed_tuple_v1(
+    ptr: *const u8, len: u64, args: RuntimeValue, timeout: i64, cap: i64,
+) -> *mut i64 {
+    let _ = (ptr, len, args, timeout, cap);
+    receipt(b"", b"observed capture requires native core-C owner", -1, 8 | 64)
+}
+
+/// The Rust lane has no shared native PTY owner-thread binding. Refuse; a
+/// thread DWORD or fresh per-call HANDLE cannot authorize the C/Simple owner.
+#[no_mangle]
+pub unsafe extern "C" fn rt_windows_pty_owner_thread_guard_v1() -> i64 { 0 }
+
 /// Uses the same Rust Child registry consumed by wait, kill and liveness.
 #[no_mangle]
 pub unsafe extern "C" fn rt_process_spawn_async_environment_v1(ptr:*const u8,len:u64,args:RuntimeValue,env:RuntimeValue,mode:i64)->i64 {

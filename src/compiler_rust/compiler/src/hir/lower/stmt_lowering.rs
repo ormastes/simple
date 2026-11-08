@@ -479,6 +479,7 @@ impl Lowerer {
                 };
                 let subject = self.lower_subject_for_patterns(condition_expr, [pattern], true, ctx)?;
                 let subject_ty = subject.ty;
+                self.validate_result_presence_binding(subject_ty, pattern, condition)?;
                 let subject_idx = ctx.locals.len();
                 ctx.add_local("$if_let_subject_elif".to_string(), subject_ty, Mutability::Immutable);
                 self.carry_optional_trait_subject(condition_expr, subject_idx, ctx);
@@ -1019,6 +1020,7 @@ impl Lowerer {
                     };
                     let subject_hir = self.lower_subject_for_patterns(condition_expr, if_stmt.let_pattern.iter(), true, ctx)?;
                     let subject_ty = subject_hir.ty;
+                    self.validate_result_presence_binding(subject_ty, pattern, &if_stmt.condition)?;
 
                     // 2. Create temp local for subject value
                     let subject_idx = ctx.locals.len();
@@ -1167,6 +1169,7 @@ impl Lowerer {
                     };
                     let subject_hir = self.lower_subject_for_patterns(condition_expr, while_stmt.let_pattern.iter(), true, ctx)?;
                     let subject_ty = subject_hir.ty;
+                    self.validate_result_presence_binding(subject_ty, pattern, &while_stmt.condition)?;
 
                     let subject_idx = ctx.locals.len();
                     ctx.add_local("$while_let_subject".to_string(), subject_ty, Mutability::Immutable);
@@ -3137,6 +3140,23 @@ impl Lowerer {
     /// `if val x = none_option:` always take the then-branch and bind nil).
     /// Constructor patterns (`Some(x)`, `Ok(v)`, …) still go through the shared
     /// pattern-condition logic (rt_is_some / discriminant checks).
+    pub(crate) fn validate_result_presence_binding(
+        &self,
+        subject_ty: TypeId,
+        pattern: &Pattern,
+        condition: &Expr,
+    ) -> LowerResult<()> {
+        if matches!(pattern, Pattern::Identifier(_) | Pattern::MutIdentifier(_) | Pattern::MoveIdentifier(_))
+            && !matches!(condition, Expr::ExistsCheck(_))
+            && matches!(self.module.types.get(subject_ty), Some(HirType::Enum { name, .. }) if name == "Result")
+        {
+            return Err(LowerError::Unsupported(
+                "cannot bind a Result with bare if val/while val; use match Ok/Err or Result.ok.?".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn if_let_pattern_condition(
         &mut self,
         subject_idx: usize,
@@ -4385,6 +4405,35 @@ mod optional_bool_binding_tests {
     use super::super::lower;
     use crate::hir::types::TypeId;
     use simple_parser::Parser;
+
+    #[test]
+    fn result_presence_binding_requires_an_optional_projection() {
+        for body in [
+            "    if val item = value: return 1\n    0\n",
+            "    while val item = value: return 1\n    0\n",
+            "    if false: return 2\n    elif val item = value: return 1\n    0\n",
+            "    val selected = if val item = value: 1 else: 0\n    selected\n",
+        ] {
+            let source = format!("fn inspect(value: Result<i64, text>) -> i64:\n{body}");
+            let ast = Parser::new(&source).parse().expect("Result binding fixture parses");
+            let error = lower(&ast).expect_err("Result is not an optional binding carrier");
+            assert!(error.to_string().contains("cannot bind a Result"), "{error}");
+        }
+    }
+
+    #[test]
+    fn result_optional_projection_and_explicit_patterns_still_lower() {
+        for source in [
+            "fn inspect(value: Result<i64, text>) -> i64:\n    if val item = value.ok.?: return item\n    0\n",
+            "fn inspect(value: Result<i64, text>) -> i64:\n    if val item = value.?: return 1\n    0\n",
+            "fn inspect(value: Result<i64, text>) -> i64:\n    while val item = value.?: return 1\n    0\n",
+            "fn inspect(value: Result<i64, text>?) -> i64:\n    if val item = value:\n        match item:\n            case Ok(number): return number\n            case Err(_): return 0\n    0\n",
+            "fn inspect(value: Result<i64, text>) -> i64:\n    if val Ok(item) = value: return item\n    0\n",
+        ] {
+            let ast = Parser::new(source).parse().expect("explicit Result fixture parses");
+            lower(&ast).expect("explicit projection or structural pattern remains supported");
+        }
+    }
 
     #[test]
     fn if_val_binds_bool_payload_as_bool_not_optional_presence() {

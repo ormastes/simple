@@ -1,0 +1,274 @@
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, BuildLinkV1,
+    builder_validate_task_v1, builder_digest_valid_v1}
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use app.buildrunner.remote_container_stage_v2.{remote_container_reserve_root_v2,
+    remote_container_reserve_nonce_v2, remote_container_stage_v2}
+use app.io.file_ops.{secure_temp_dir, file_atomic_write_bytes, file_remove,
+    file_read_regular_no_follow_bounded_bytes, file_read_regular_no_follow_bounded, file_hash_sha256}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{file_exists, dir_exists}
+use std.nogc_sync_mut.package_sffi.create_symlink
+use std.env.platform.get_temp_dir
+
+# Source-authored filesystem specs. The producer is binary fixture data, never
+# a runnable compiler, and no container/provider/native execution is attempted.
+struct ContainerStageFixtureV2:
+    root: text
+    source_root: text
+    producer_source: text
+    task: BuildTaskV1
+    producer: [u8]
+    source: [u8]
+    payload: [u8]
+
+fn stage_fixture_v2() -> ContainerStageFixtureV2:
+    val root = secure_temp_dir(get_temp_dir(), "remote-container-stage-spec").unwrap()
+    val source_root = root + "/source"
+    for directory in [source_root + "/src", source_root + "/data", root + "/state"]:
+        expect(dir_create_all(directory)).to_equal(true)
+    val producer: [u8] = [77u8, 90u8, 0u8, 255u8, 10u8]
+    val source = "fn main(): 0\n".bytes()
+    val payload: [u8] = [0u8, 255u8, 128u8, 10u8]
+    val producer_source = root + "/producer-source.bin"
+    expect(file_atomic_write_bytes(producer_source, producer)).to_equal(true)
+    expect(file_atomic_write_bytes(source_root + "/src/main.spl", source)).to_equal(true)
+    expect(file_atomic_write_bytes(source_root + "/data/payload.bin", payload)).to_equal(true)
+    val task = BuildTaskV1(id: "stage_task", attempt: 1, phase: "build",
+        producer_digest: sha256_u8_hex(producer), source_digest: sha256_u8_hex(source),
+        toolchain_digest: sha256_text("fixture toolchain"), dependencies: [],
+        program: "fixture-producer", args: ["native-build", "src/main.spl"],
+        inputs: [BuildInputV1("src/main.spl", sha256_u8_hex(source)),
+            BuildInputV1("data/payload.bin", sha256_u8_hex(payload))],
+        outputs: ["out/nested/program.bin"], cache_key: sha256_text("fixture cache"),
+        timeout_ms: 1000, memory_limit_bytes: 1048576, links: [])
+    expect(builder_validate_task_v1(task)).to_equal("")
+    ContainerStageFixtureV2(root, source_root, producer_source, task, producer, source, payload)
+
+fn stage_reserved_v2(fixture: ContainerStageFixtureV2) -> text:
+    remote_container_reserve_root_v2(fixture.root + "/state").unwrap()
+
+fn stage_budget_v2(fixture: ContainerStageFixtureV2) -> i64:
+    fixture.producer.len() + fixture.source.len() + fixture.payload.len()
+
+fn stage_read_v2(path: text) -> [u8]:
+    file_read_regular_no_follow_bounded_bytes(path, 65536).unwrap()
+
+describe "Remote container byte staging on actual filesystem fixtures V2":
+    it "reserves a cryptographic nonce once and stages its exact declared pin bytes":
+        val fixture = stage_fixture_v2()
+        val owned = stage_reserved_v2(fixture)
+        # This calls the real cryptographic random provider. Unavailable entropy
+        # fails setup; no deterministic substitute or invented passing nonce.
+        val payload = remote_container_reserve_nonce_v2(owned).unwrap()
+        expect(payload.byte_len()).to_equal(65)
+        expect(payload.ends_with("\n")).to_equal(true)
+        expect(builder_digest_valid_v1(payload.substring(0, 64))).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(owned + "/workspace-nonce.claim", 65).unwrap()).to_equal(payload)
+        expect(remote_container_reserve_nonce_v2(owned)).to_equal(Err("REMOTE_CONTAINER_NONCE_ALREADY_CLAIMED"))
+        expect(file_read_regular_no_follow_bounded(owned + "/workspace-nonce.claim", 65).unwrap()).to_equal(payload)
+        expect(dir_create_all(fixture.source_root + "/remote-workspace")).to_equal(true)
+        val nonce_path = "remote-workspace/" + fixture.task.id + ".nonce"
+        expect(file_atomic_write_bytes(fixture.source_root + "/" + nonce_path, payload.bytes())).to_equal(true)
+        val input = BuildInputV1(nonce_path, sha256_text(payload))
+        var task = fixture.task
+        task.inputs = task.inputs.push(input)
+        expect(builder_validate_task_v1(task)).to_equal("")
+        expect(remote_container_stage_v2(task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture) + payload.byte_len())).to_equal(Ok(true))
+        expect(stage_read_v2(owned + "/work/" + nonce_path)).to_equal(payload.bytes())
+        expect(file_hash_sha256(owned + "/work/" + nonce_path).unwrap()).to_equal(input.digest)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "reserves distinct cryptographic nonces in independently owned fresh roots":
+        val fixture = stage_fixture_v2()
+        val first_root = stage_reserved_v2(fixture)
+        val second_root = stage_reserved_v2(fixture)
+        val first = remote_container_reserve_nonce_v2(first_root).unwrap()
+        val second = remote_container_reserve_nonce_v2(second_root).unwrap()
+        expect(first_root == second_root).to_equal(false)
+        expect(first == second).to_equal(false)
+        expect(first.byte_len()).to_equal(65)
+        expect(second.byte_len()).to_equal(65)
+        expect(builder_digest_valid_v1(first.substring(0, 64))).to_equal(true)
+        expect(builder_digest_valid_v1(second.substring(0, 64))).to_equal(true)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "reserves distinct real owner roots before any request is staged":
+        val fixture = stage_fixture_v2()
+        val first = stage_reserved_v2(fixture)
+        val second = stage_reserved_v2(fixture)
+        expect(first == second).to_equal(false)
+        expect(dir_is_real_no_follow(first)).to_equal(true)
+        expect(dir_is_real_no_follow(second)).to_equal(true)
+        expect(file_exists(first + "/stage.claim")).to_equal(false)
+        expect(file_exists(second + "/request.sdn")).to_equal(false)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "stages exact producer and input bytes hashes and canonical manifest at the exact budget":
+        val fixture = stage_fixture_v2()
+        val owned = stage_reserved_v2(fixture)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Ok(true))
+        expect(stage_read_v2(owned + "/producer.exe")).to_equal(fixture.producer)
+        expect(stage_read_v2(owned + "/work/src/main.spl")).to_equal(fixture.source)
+        expect(stage_read_v2(owned + "/work/data/payload.bin")).to_equal(fixture.payload)
+        expect(file_hash_sha256(owned + "/producer.exe").unwrap()).to_equal(fixture.task.producer_digest)
+        expect(file_hash_sha256(owned + "/work/src/main.spl").unwrap()).to_equal(fixture.task.inputs[0].digest)
+        expect(file_hash_sha256(owned + "/work/data/payload.bin").unwrap()).to_equal(fixture.task.inputs[1].digest)
+        expect(file_read_regular_no_follow_bounded(owned + "/request.sdn", 65536).unwrap())
+            .to_equal(builder_encode_task_v1(fixture.task))
+        expect(dir_is_real_no_follow(owned + "/work/out/nested")).to_equal(true)
+        expect(file_exists(owned + "/work/out/nested/program.bin")).to_equal(false)
+        # Subsequent source writes do not alter the copied, admitted buffers.
+        expect(file_atomic_write_bytes(fixture.source_root + "/src/main.spl", "changed later".bytes())).to_equal(true)
+        expect(stage_read_v2(owned + "/work/src/main.spl")).to_equal(fixture.source)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "claims a root exclusively and refuses reuse without overwriting staged bytes":
+        val fixture = stage_fixture_v2()
+        val owned = stage_reserved_v2(fixture)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Ok(true))
+        expect(file_read_regular_no_follow_bounded(owned + "/stage.claim", 128).unwrap())
+            .to_equal("SIMPLE-REMOTE-CONTAINER-STAGE-2\n")
+        expect(file_atomic_write_bytes(fixture.source_root + "/src/main.spl", "changed before replay".bytes())).to_equal(true)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Err("REMOTE_CONTAINER_STAGE_ALREADY_CLAIMED"))
+        expect(stage_read_v2(owned + "/work/src/main.spl")).to_equal(fixture.source)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects changed producer bytes and consumes the failed root claim":
+        val fixture = stage_fixture_v2()
+        val owned = stage_reserved_v2(fixture)
+        expect(file_atomic_write_bytes(fixture.producer_source, [1u8, 2u8, 3u8])).to_equal(true)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Err("REMOTE_CONTAINER_STAGE_PRODUCER_CHANGED"))
+        expect(file_exists(owned + "/request.sdn")).to_equal(false)
+        expect(file_atomic_write_bytes(fixture.producer_source, fixture.producer)).to_equal(true)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Err("REMOTE_CONTAINER_STAGE_ALREADY_CLAIMED"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects changed declared input bytes before manifest publication":
+        val fixture = stage_fixture_v2()
+        val owned = stage_reserved_v2(fixture)
+        expect(file_atomic_write_bytes(fixture.source_root + "/src/main.spl", "fn main(): 1\n".bytes())).to_equal(true)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Err("REMOTE_CONTAINER_STAGE_INPUT_CHANGED"))
+        expect(file_exists(owned + "/request.sdn")).to_equal(false)
+        expect(file_exists(owned + "/work/src/main.spl")).to_equal(false)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "enforces positive bounded cumulative producer and input bytes":
+        val fixture = stage_fixture_v2()
+        val owned = stage_reserved_v2(fixture)
+        for limit in [0, 1073741825]:
+            expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+                owned, limit)).to_equal(Err("REMOTE_CONTAINER_STAGE_BOUND_INVALID"))
+        expect(file_exists(owned + "/stage.claim")).to_equal(false)
+        val short = remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture) - 1)
+        expect(short.is_err()).to_equal(true)
+        expect(stage_read_v2(owned + "/producer.exe")).to_equal(fixture.producer)
+        expect(stage_read_v2(owned + "/work/src/main.spl")).to_equal(fixture.source)
+        expect(file_exists(owned + "/work/data/payload.bin")).to_equal(false)
+        expect(file_exists(owned + "/request.sdn")).to_equal(false)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects producer and input leaf symlinks even when target digests match":
+        val fixture = stage_fixture_v2()
+        val producer_link = fixture.root + "/producer-link"
+        expect(create_symlink(fixture.producer_source, producer_link)).to_equal(true)
+        val producer_root = stage_reserved_v2(fixture)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, producer_link,
+            producer_root, stage_budget_v2(fixture)).is_err()).to_equal(true)
+        expect(file_exists(producer_root + "/request.sdn")).to_equal(false)
+        val target = fixture.root + "/matching-source.spl"
+        expect(file_atomic_write_bytes(target, fixture.source)).to_equal(true)
+        expect(file_remove(fixture.source_root + "/src/main.spl")).to_equal(true)
+        expect(create_symlink(target, fixture.source_root + "/src/main.spl")).to_equal(true)
+        val input_root = stage_reserved_v2(fixture)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            input_root, stage_budget_v2(fixture)).is_err()).to_equal(true)
+        expect(file_exists(input_root + "/request.sdn")).to_equal(false)
+        expect(stage_read_v2(target)).to_equal(fixture.source)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects a symlink source parent or symlink owner root before claiming":
+        val fixture = stage_fixture_v2()
+        val owned = stage_reserved_v2(fixture)
+        val owner_alias = fixture.root + "/owner-alias"
+        expect(create_symlink(owned, owner_alias)).to_equal(true)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owner_alias, stage_budget_v2(fixture))).to_equal(Err("REMOTE_CONTAINER_STAGE_ROOT_UNSAFE"))
+        expect(file_exists(owned + "/stage.claim")).to_equal(false)
+        val outside = fixture.root + "/outside-data"
+        expect(dir_create_all(outside)).to_equal(true)
+        expect(file_atomic_write_bytes(outside + "/payload.bin", fixture.payload)).to_equal(true)
+        expect(dir_remove_all(fixture.source_root + "/data")).to_equal(true)
+        expect(create_symlink(outside, fixture.source_root + "/data")).to_equal(true)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Err("REMOTE_CONTAINER_STAGE_ROOT_UNSAFE"))
+        expect(file_exists(owned + "/stage.claim")).to_equal(false)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects an output parent symlink without creating outside directories":
+        val fixture = stage_fixture_v2()
+        val owned = stage_reserved_v2(fixture)
+        val outside = fixture.root + "/outside-output"
+        expect(dir_create_all(outside)).to_equal(true)
+        expect(file_atomic_write_bytes(outside + "/sentinel.bin", fixture.payload)).to_equal(true)
+        expect(dir_create_all(owned + "/work")).to_equal(true)
+        expect(create_symlink(outside, owned + "/work/out")).to_equal(true)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Err("REMOTE_CONTAINER_STAGE_PARENT_UNSAFE"))
+        expect(stage_read_v2(outside + "/sentinel.bin")).to_equal(fixture.payload)
+        expect(dir_exists(outside + "/nested")).to_equal(false)
+        expect(file_exists(owned + "/request.sdn")).to_equal(false)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects live and dangling output leaf symlinks without touching their targets":
+        val fixture = stage_fixture_v2()
+        val sentinel = fixture.root + "/outside-sentinel.bin"
+        expect(file_atomic_write_bytes(sentinel, fixture.payload)).to_equal(true)
+        for target in [sentinel, fixture.root + "/absent-target.bin"]:
+            val owned = stage_reserved_v2(fixture)
+            expect(dir_create_all(owned + "/work/out/nested")).to_equal(true)
+            expect(create_symlink(target, owned + "/work/out/nested/program.bin")).to_equal(true)
+            expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+                owned, stage_budget_v2(fixture))).to_equal(Err("REMOTE_CONTAINER_STAGE_OUTPUT_ALREADY_EXISTS"))
+            expect(file_exists(owned + "/request.sdn")).to_equal(false)
+        expect(stage_read_v2(sentinel)).to_equal(fixture.payload)
+        expect(file_exists(fixture.root + "/absent-target.bin")).to_equal(false)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects a preexisting regular output without replacing its contents":
+        val fixture = stage_fixture_v2()
+        val owned = stage_reserved_v2(fixture)
+        expect(dir_create_all(owned + "/work/out/nested")).to_equal(true)
+        val output = owned + "/work/out/nested/program.bin"
+        expect(file_atomic_write_bytes(output, fixture.payload)).to_equal(true)
+        expect(remote_container_stage_v2(fixture.task, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Err("REMOTE_CONTAINER_STAGE_OUTPUT_ALREADY_EXISTS"))
+        expect(stage_read_v2(output)).to_equal(fixture.payload)
+        expect(file_exists(owned + "/request.sdn")).to_equal(false)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects output traversal and typed links before making any stage claim":
+        val fixture = stage_fixture_v2()
+        val owned = stage_reserved_v2(fixture)
+        var traversal = fixture.task
+        traversal.outputs = ["../escaped.bin"]
+        expect(remote_container_stage_v2(traversal, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Err("invalid declared output"))
+        expect(file_exists(owned + "/stage.claim")).to_equal(false)
+        var linked = fixture.task
+        linked.links = [BuildLinkV1("file", "src/alias.spl", "main.spl", "src/main.spl", linked.inputs[0].digest)]
+        expect(builder_validate_task_v1(linked)).to_equal("")
+        expect(remote_container_stage_v2(linked, fixture.source_root, fixture.producer_source,
+            owned, stage_budget_v2(fixture))).to_equal(Err("REMOTE_CONTAINER_STAGE_LINKS_UNSUPPORTED"))
+        expect(file_exists(owned + "/stage.claim")).to_equal(false)
+        expect(file_exists(owned + "/escaped.bin")).to_equal(false)
+        expect(dir_remove_all(fixture.root)).to_equal(true)

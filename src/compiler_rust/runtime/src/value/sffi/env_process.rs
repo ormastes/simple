@@ -22,7 +22,7 @@ mod process_bytes_windows;
 
 #[path = "process_environment_v1.rs"]
 mod process_environment_v1;
-pub use process_environment_v1::{rt_process_run_bounded_environment_tuple_v1, rt_process_spawn_async_environment_v1};
+pub use process_environment_v1::{rt_process_run_bounded_environment_tuple_v1, rt_process_run_bounded_admitted_tuple_v1, rt_process_run_bounded_observed_tuple_v1, rt_process_spawn_async_environment_v1, rt_windows_pty_owner_thread_guard_v1};
 
 fn lexer_source_cache() -> &'static RwLock<String> {
     static CACHE: OnceLock<RwLock<String>> = OnceLock::new();

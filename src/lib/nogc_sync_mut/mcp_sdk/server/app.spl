@@ -13,7 +13,7 @@
 
 use std.mcp_sdk.core.json.{LB, RB, jp, js, jo3, escape_json}
 use std.mcp_sdk.core.jsonrpc.{jsonrpc_result, jsonrpc_error, error_code_method_not_found}
-use std.mcp_sdk.core.types.{make_tool_result}
+use std.mcp_sdk.core.types.{make_tool_result, make_tool_error}
 use std.mcp_sdk.server.registry.{registry_register, registry_list_json, registry_call, registry_reset}
 use std.mcp_sdk.server.method_detect.{has_method}
 use std.mcp_sdk.transport.transport.{Transport}
@@ -25,6 +25,10 @@ var APP_SERVER_VERSION = ""
 
 # Cached initialize result (static, no schemas)
 var APP_INIT_CACHE = ""
+
+# Opt-in structured handlers. Legacy text handlers retain their old API/behavior.
+var APP_RESULT_NAMES: [text] = []
+var APP_RESULT_HANDLERS: [fn(text) -> Result<text, text>] = []
 
 # Protocol version used in initialize responses
 fn app_protocol_version() -> text:
@@ -156,6 +160,29 @@ fn mcp_server_tool(
 ):
     registry_register(name, description, schema_builder, handler)
 
+# Register a typed outcome while reusing the existing lazy schema registry.
+# Direct registry_call remains its documented text-only interface; MCP dispatch
+# uses the typed handler exactly once and serializes Err as tools/call isError.
+fn mcp_server_tool_result(
+    name: text,
+    description: text,
+    schema_builder: fn() -> text,
+    handler: fn(text) -> Result<text, text>
+):
+    var names: [text] = []
+    for prior in APP_RESULT_NAMES: names.push(prior)
+    names.push(name)
+    APP_RESULT_NAMES = names
+    var handlers: [fn(text) -> Result<text, text>] = []
+    for prior in APP_RESULT_HANDLERS: handlers.push(prior)
+    handlers.push(handler)
+    APP_RESULT_HANDLERS = handlers
+    registry_register(name, description, schema_builder,
+        fn(args: text) -> text:
+            match handler(args):
+                Ok(value): value
+                Err(reason): reason)
+
 # --- Initialize response builder ---
 
 fn app_build_init_result() -> text:
@@ -208,6 +235,14 @@ fn mcp_server_handle(msg: text) -> text?:
             val a = app_extract_obj(params, "arguments")
             if a != "":
                 args_raw = a
+        var result_index = 0
+        while result_index < APP_RESULT_NAMES.len():
+            if APP_RESULT_NAMES[result_index] == tool_name:
+                val handler = APP_RESULT_HANDLERS[result_index]
+                match handler(args_raw):
+                    Ok(value): return Some(make_tool_result(id, value))
+                    Err(reason): return Some(make_tool_error(id, reason))
+            result_index = result_index + 1
         val handler_result = registry_call(tool_name, args_raw)
         return Some(make_tool_result(id, handler_result))
 
@@ -238,6 +273,8 @@ fn mcp_serve(t: Transport):
 # --- Reset (for test isolation) ---
 
 fn mcp_server_reset():
+    APP_RESULT_NAMES = []
+    APP_RESULT_HANDLERS = []
     APP_SERVER_NAME = ""
     APP_SERVER_VERSION = ""
     APP_INIT_CACHE = ""
@@ -247,6 +284,7 @@ fn mcp_server_reset():
 
 export mcp_server_init
 export mcp_server_tool
+export mcp_server_tool_result
 export mcp_server_handle
 export mcp_serve
 export mcp_server_reset

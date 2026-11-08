@@ -1,0 +1,45 @@
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_selected_snapshot_source_roots_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_request_identity_matches_v1}
+use app.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.dir_ops.{is_dir}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_uncovered_root_v1}
+
+describe "native closure default source identity":
+    it "matches publisher and child default cuts when optional os is absent":
+        val root = env_get("SIMPLE_CLOSURE_ROOT_FIXTURE") ?? ""
+        expect(root.len()).to_be_greater_than(0)
+        expect(is_dir(root + "/src/os")).to_equal(false)
+        val entry = "src/app/fixture.spl"
+        val publisher = native_build_selected_snapshot_source_roots_v1(root, entry, [])
+        val child = native_build_selected_snapshot_source_roots_v1(root, entry, [])
+        expect(publisher.len()).to_equal(5)
+        expect(publisher[0]).to_equal("src/app")
+        expect(publisher[1]).to_equal("src/lib")
+        expect(publisher[2]).to_equal("src/compiler")
+        expect(publisher[3]).to_equal("src/plugins")
+        expect(publisher[4]).to_equal(entry)
+        expect(native_entry_closure_request_identity_matches_v1(root, entry, publisher, "producer-A",
+            root, entry, child, "producer-A")).to_equal(true)
+
+    it "preserves explicitly missing roots for the existing source admission rejection":
+        val root = env_get("SIMPLE_CLOSURE_ROOT_FIXTURE") ?? ""
+        expect(root.len()).to_be_greater_than(0)
+        expect(is_dir(root + "/src/os")).to_equal(false)
+        val explicit = native_build_selected_snapshot_source_roots_v1(root, "src/app/fixture.spl", ["src/os"])
+        expect(explicit.len()).to_equal(2)
+        expect(explicit[0]).to_equal("src/os")
+        expect(explicit[1]).to_equal("src/app/fixture.spl")
+        # Exercise the existing real filesystem admission guard; acquire_v1
+        # turns this nonempty uncovered root into source-inventory-root-empty.
+        expect(compiler_source_authority_uncovered_root_v1(root, explicit, root)).to_equal("src/os")
+
+    it "still rejects changed order, entry, root and producer":
+        val roots = ["src/app", "src/lib", "src/app/fixture.spl"]
+        expect(native_entry_closure_request_identity_matches_v1("owner", "src/app/fixture.spl", roots, "producer-A",
+            "owner", "src/app/fixture.spl", ["src/lib", "src/app", "src/app/fixture.spl"], "producer-A")).to_equal(false)
+        expect(native_entry_closure_request_identity_matches_v1("owner", "src/app/fixture.spl", roots, "producer-A",
+            "owner", "src/app/other.spl", roots, "producer-A")).to_equal(false)
+        expect(native_entry_closure_request_identity_matches_v1("owner", "src/app/fixture.spl", roots, "producer-A",
+            "other-owner", "src/app/fixture.spl", roots, "producer-A")).to_equal(false)
+        expect(native_entry_closure_request_identity_matches_v1("owner", "src/app/fixture.spl", roots, "producer-A",
+            "owner", "src/app/fixture.spl", roots, "producer-B")).to_equal(false)

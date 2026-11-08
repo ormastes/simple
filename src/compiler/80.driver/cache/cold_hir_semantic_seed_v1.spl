@@ -13,14 +13,18 @@ use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pau
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.scv.compile_source_inventory_core.{
     CompileSourceInventoryV1, CompileSourceInventoryEntryV1,
+    CompileSourceInventoryReadV1,
     compile_source_inventory_digest_v1,
     compile_source_inventory_entry_valid_v1,
     compile_source_inventory_path_valid_v1,
     compile_source_inventory_find_v1
 }
 use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_at_pointer_v1}
 use compiler.driver.cache.cold_hir_source_inventory_admission_v1.{
-    cold_hir_source_inventory_admit_v1, cold_hir_source_inventory_row_v1}
+    cold_hir_source_inventory_admit_v1,
+    cold_hir_source_inventory_admit_reader_owned_v1,
+    cold_hir_source_inventory_row_v1}
 
 struct ColdHirSemanticSeedV1:
     module_identity: text
@@ -266,21 +270,51 @@ fn cold_hir_inventory_generation_binding_reason_v1(
         return "cold-hir-inventory-generation-mismatch"
     "ok"
 
-fn cold_hir_typed_receipts_from_lowered_sources_v1(
+# Receipt capture scope for one process. The whole-closure owner binds every
+# admitted closure row ("closure"). A per-file unit child
+# (SIMPLE_FILE_WORKER_UNIT=1) holds HIR only for its picked batch plus that
+# batch's import closure, so it binds exactly the rows it holds
+# ("held-subset"): those receipts are what let compile_to_native record the
+# capsule identity of each object the unit publishes in its MIR-shard ledger,
+# which the link process replays against its own whole-closure receipts.
+# Full inventory needs one receipt per inventory source, which a subset can
+# never satisfy, so a unit child fails closed there.
+fn cold_hir_receipt_capture_scope_v1(
+    full_inventory_cold: bool, file_worker_unit: bool
+) -> text:
+    if not file_worker_unit:
+        return "closure"
+    if full_inventory_cold:
+        return "cold-hir-full-inventory-file-worker-unit"
+    "held-subset"
+
+# held_only (unit-child "held-subset" capture): every closure row is still
+# admitted against the frozen inventory (bytes, digest, snapshot row); only a
+# row whose module this process holds no HIR for is left without a receipt,
+# and an alias row of an unheld physical source may still produce it. A unit
+# that holds no closure row at all has nothing to publish and fails closed.
+fn _cold_hir_typed_receipts_from_lowered_sources_v1(
     source_root: text, expected_source_inventory_digest: text,
-    inventory: CompileSourceInventoryV1,
+    admitted_inventory: CompileSourceInventoryReadV1,
     snapshot_inventory: text, expected_snapshot_inventory_digest: text,
     source_paths: [text], source_digests: [text],
     source_byte_counts: [i64],
-    source_module_names: [text], hir_modules: Dict<text, HirModule>
+    source_module_names: [text], hir_modules: Dict<text, HirModule>,
+    reader_owned: bool, held_only: bool
 ) -> Result<[ColdHirTypedReceiptV1], text>:
     # The structured CURRENT generation and the selected snapshot rows have
     # different canonical encodings. Admit both, then bind every snapshot row
     # to the typed source inventory before using its digest in package receipts.
-    val admission = cold_hir_source_inventory_admit_v1(source_root,
-        expected_source_inventory_digest, inventory, snapshot_inventory,
-        expected_snapshot_inventory_digest, source_paths.len(), source_digests.len(),
-        source_byte_counts.len(), source_module_names.len())?
+    val admission = if reader_owned:
+        cold_hir_source_inventory_admit_reader_owned_v1(source_root,
+            expected_source_inventory_digest, admitted_inventory, snapshot_inventory,
+            expected_snapshot_inventory_digest, source_paths.len(), source_digests.len(),
+            source_byte_counts.len(), source_module_names.len())?
+    else:
+        cold_hir_source_inventory_admit_v1(source_root,
+            expected_source_inventory_digest, admitted_inventory, snapshot_inventory,
+            expected_snapshot_inventory_digest, source_paths.len(), source_digests.len(),
+            source_byte_counts.len(), source_module_names.len())?
     var receipts: [ColdHirTypedReceiptV1] = []
     var receipt_errors: [text] = []
     var produced: Dict<text, bool> = {}
@@ -288,7 +322,7 @@ fn cold_hir_typed_receipts_from_lowered_sources_v1(
     while source_index < source_paths.len():
         val source_digest = source_digests[source_index]
         val source_byte_count = source_byte_counts[source_index]
-        val row = cold_hir_source_inventory_row_v1(admission, inventory, source_index,
+        val row = cold_hir_source_inventory_row_v1(admission, source_index,
             source_paths[source_index], source_digest, source_byte_count,
             source_module_names[source_index])?
         val identity = row.source_identity
@@ -296,7 +330,10 @@ fn cold_hir_typed_receipts_from_lowered_sources_v1(
         if not produced.has(identity):
             val module_name = source_module_names[source_index]
             if not hir_modules.has(module_name):
-                return Err("cold-hir-lowered-module-missing:{module_name}")
+                if not held_only:
+                    return Err("cold-hir-lowered-module-missing:{module_name}")
+                source_index = source_index + 1
+                continue
             match cold_hir_typed_receipt_from_admitted_digest_v1(
                     hir_modules[module_name], module_name, admission.normalized_root, identity,
                     source_digest, source_byte_count, expected_snapshot_inventory_digest, entry):
@@ -315,7 +352,75 @@ fn cold_hir_typed_receipts_from_lowered_sources_v1(
         source_index = source_index + 1
     if receipt_errors.len() > 0:
         return Err(receipt_errors.join("\n"))
+    if held_only and receipts.len() == 0:
+        return Err("cold-hir-file-worker-unit-receipts-empty")
     Ok(receipts)
+
+fn cold_hir_typed_receipts_from_lowered_sources_v1(
+    source_root: text, expected_source_inventory_digest: text,
+    admitted_inventory: CompileSourceInventoryReadV1,
+    snapshot_inventory: text, expected_snapshot_inventory_digest: text,
+    source_paths: [text], source_digests: [text],
+    source_byte_counts: [i64], source_module_names: [text],
+    hir_modules: Dict<text, HirModule>
+) -> Result<[ColdHirTypedReceiptV1], text>:
+    _cold_hir_typed_receipts_from_lowered_sources_v1(source_root,
+        expected_source_inventory_digest, admitted_inventory,
+        snapshot_inventory, expected_snapshot_inventory_digest,
+        source_paths, source_digests, source_byte_counts,
+        source_module_names, hir_modules, false, false)
+
+fn cold_hir_typed_receipts_from_held_sources_v1(
+    source_root: text, expected_source_inventory_digest: text,
+    admitted_inventory: CompileSourceInventoryReadV1,
+    snapshot_inventory: text, expected_snapshot_inventory_digest: text,
+    source_paths: [text], source_digests: [text],
+    source_byte_counts: [i64], source_module_names: [text],
+    hir_modules: Dict<text, HirModule>
+) -> Result<[ColdHirTypedReceiptV1], text>:
+    _cold_hir_typed_receipts_from_lowered_sources_v1(source_root,
+        expected_source_inventory_digest, admitted_inventory,
+        snapshot_inventory, expected_snapshot_inventory_digest,
+        source_paths, source_digests, source_byte_counts,
+        source_module_names, hir_modules, false, true)
+
+pub(up) fn cold_hir_typed_receipts_from_reader_owned_lowered_sources_v1(
+    source_root: text, expected_source_inventory_digest: text,
+    inventory_cache_root: text,
+    snapshot_inventory: text, expected_snapshot_inventory_digest: text,
+    source_paths: [text], source_digests: [text],
+    source_byte_counts: [i64], source_module_names: [text],
+    hir_modules: Dict<text, HirModule>
+) -> Result<[ColdHirTypedReceiptV1], text>:
+    val admitted_inventory = compile_source_inventory_read_at_pointer_v1(
+        inventory_cache_root, expected_source_inventory_digest)
+    if not admitted_inventory.valid:
+        return Err("cold-hir-inventory-admission:{admitted_inventory.reason}")
+    _cold_hir_typed_receipts_from_lowered_sources_v1(source_root,
+        expected_source_inventory_digest, admitted_inventory,
+        snapshot_inventory, expected_snapshot_inventory_digest,
+        source_paths, source_digests, source_byte_counts,
+        source_module_names, hir_modules, true, false)
+
+# Reader-owned unit-child ("held-subset") capture; see
+# _cold_hir_typed_receipts_from_lowered_sources_v1 held_only.
+pub(up) fn cold_hir_typed_receipts_from_reader_owned_held_sources_v1(
+    source_root: text, expected_source_inventory_digest: text,
+    inventory_cache_root: text,
+    snapshot_inventory: text, expected_snapshot_inventory_digest: text,
+    source_paths: [text], source_digests: [text],
+    source_byte_counts: [i64], source_module_names: [text],
+    hir_modules: Dict<text, HirModule>
+) -> Result<[ColdHirTypedReceiptV1], text>:
+    val admitted_inventory = compile_source_inventory_read_at_pointer_v1(
+        inventory_cache_root, expected_source_inventory_digest)
+    if not admitted_inventory.valid:
+        return Err("cold-hir-inventory-admission:{admitted_inventory.reason}")
+    _cold_hir_typed_receipts_from_lowered_sources_v1(source_root,
+        expected_source_inventory_digest, admitted_inventory,
+        snapshot_inventory, expected_snapshot_inventory_digest,
+        source_paths, source_digests, source_byte_counts,
+        source_module_names, hir_modules, true, true)
 
 export ColdHirSemanticSeedV1, ColdHirSemanticInputV1
 export ColdHirTypedReceiptV1, cold_hir_typed_receipt_from_admitted_entry_v1
@@ -323,5 +428,7 @@ export cold_hir_typed_receipt_from_admitted_digest_v1
 export cold_hir_semantic_seed_v1, cold_hir_semantic_seeds_v1
 export cold_hir_semantic_seed_from_admitted_entry_v1
 export cold_hir_typed_receipts_from_lowered_sources_v1
+export cold_hir_typed_receipts_from_held_sources_v1
+export cold_hir_receipt_capture_scope_v1
 export cold_hir_inventory_generation_binding_reason_v1
 export cold_hir_source_mismatch_evidence_v1

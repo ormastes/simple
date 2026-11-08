@@ -1,0 +1,252 @@
+# @req HOST-02 ORCH-02
+# NOT_RUN. Actual temporary files and operation WAL/reopen; native identities
+# and observations are synthetic records, never evidence of an executed process.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.orchestration.host_runtime_exec_projection_v3.host_runtime_exec_child_projection_v3
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.host_execution_intent_store_v1
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.{HostExecutionObservationV2, host_execution_observation_store_v2}
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_encode_intent_v1, host_reservation_bind_intent_v1}
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes_v1
+use std.common.contracts.container.exec_v3.ContainerExecRequestV3
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2, container_execution_plan_digest_v2}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeIntentV1}
+use std.common.contracts.distributed_control_v2.ExecutionGrantV2
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v2, daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.common.crypto.ed25519.{pure_ed25519_sign_from_seed_v1, pure_ed25519_verify}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove, read_file_text_result}
+use test.fixtures.orchestrator_acceptance.controller_container_dispatch_v2.controller_container_wire_fixture_v2
+
+struct ExecProjectionFixtureV3:
+    owner: HostCapacityOwnerV1
+    packet: HostRuntimeExecRequestV3
+
+fn exec_projection_seed_v3(offset: i64) -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..32: bytes.push((offset + index) as u8)
+    bytes
+
+# Re-sign every changed child operation. The independent crypto checks below
+# establish valid FRAME signatures, not trusted current Host authorization.
+fn exec_projection_sign_v3(original: HostRuntimeExecRequestV3) -> HostRuntimeExecRequestV3:
+    var packet = original
+    packet.operation.payload_digest = host_runtime_exec_intent_digest_v3(packet.intent).unwrap()
+    val operation = packet.operation
+    val grant = ExecutionGrantV2(id: "exec-grant", principal: operation.principal, project: operation.project,
+        host_id: operation.host_id, operations: ["host_runtime_exec_v3"], environment_digest: operation.environment_digest,
+        policy_revision: operation.policy_revision, revocation_epoch: operation.revocation_epoch,
+        expires_at: 800, maximum_memory_bytes: 8000, maximum_duration_ms: 1000)
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: "host-issuer", key_revision: 1, signature: [])
+    val issuer = pure_ed25519_sign_from_seed_v1(exec_projection_seed_v3(129), distributed_grant_signature_message_v2(signed).unwrap())
+    signed.signature = issuer.signature
+    var approval = DistributedSignedApprovalV2(approver_id: "host-approver", key_revision: 1,
+        grant_digest: distributed_grant_digest_v2(grant).unwrap(),
+        request_digest: sha256_text(distributed_encode_operation_v2(operation).unwrap()),
+        policy_revision: operation.policy_revision, session_generation: operation.session_generation,
+        expires_at: 700, signature: [])
+    val approver = pure_ed25519_sign_from_seed_v1(exec_projection_seed_v3(193), distributed_approval_signature_message_v2(approval).unwrap())
+    approval.signature = approver.signature
+    assert(pure_ed25519_verify(issuer.public_key, distributed_grant_signature_message_v2(signed).unwrap(), signed.signature))
+    assert(pure_ed25519_verify(approver.public_key, distributed_approval_signature_message_v2(approval).unwrap(), approval.signature))
+    packet.signed = signed
+    packet.approval = approval
+    packet
+
+fn exec_projection_publish_v3(root: text, directory: text, name: text, bytes: text):
+    assert(dir_create(root + "/" + directory, true))
+    assert(file_atomic_write(root + "/" + directory + "/" + name + ".sdn", bytes))
+
+fn exec_projection_fixture_v3(change: text = "") -> ExecProjectionFixtureV3:
+    val frames = controller_container_wire_fixture_v2("linux-podman")
+    val plan = frames.host.execution.plan
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: "workload", attempt: 1, provider_generation: 3,
+        operation_id: "host-operation", engine: "podman", native_id: "b".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val request = ContainerExecRequestV3(parent: plan, parent_runtime: runtime, operation_id: "exec-child",
+        nonce: "c".repeat(64), argv: ["/usr/bin/agent", "--version"], environment: [],
+        working_directory: "/workspace", selected_user: "1000:1000", terminal_mode: "none", stdin_requested: false, timeout_ms: 1000)
+    val intent = HostRuntimeExecIntentV3(request: request,
+        parent_operation_digest: sha256_text(distributed_encode_operation_v2(frames.host.operation).unwrap()),
+        parent_assignment_digest: sha256_text(controller_assignment_bytes_v1(frames.dispatch.binding).unwrap()),
+        parent_controller_operation_digest: sha256_text(distributed_encode_operation_v2(frames.dispatch.operation).unwrap()),
+        parent_provider_identity_digest: "3".repeat(64), exec_control_identity_digest: "4".repeat(64))
+    var operation = frames.host.operation
+    operation.id = "exec-child"
+    operation.operation = "host_runtime_exec_v3"
+    operation.duration_ms = 1000
+    var packet = HostRuntimeExecRequestV3(intent: intent, parent_binding: frames.dispatch.binding,
+        parent_controller_operation: frames.dispatch.operation, operation: operation,
+        signed: frames.host.signed, approval: frames.host.approval)
+    if change == "principal": packet.operation.principal = "other-user"
+    if change == "project": packet.operation.project = "other-project"
+    if change == "environment": packet.operation.environment_digest = "9".repeat(64)
+    if change == "memory": packet.operation.memory_bytes = 4001
+    if change == "duration": packet.operation.duration_ms = 999
+    if change == "native": packet.intent.request.parent_runtime.native_id = "c".repeat(64)
+    if change == "provider": packet.intent.parent_provider_identity_digest = "9".repeat(64)
+    if change == "signed-scope":
+        var foreign_scope = scope
+        foreign_scope.service_scope_id = "other-service"
+        packet.intent.request.parent.service_scope_id = "other-service"
+        packet.intent.request.parent_runtime.node_boot_id = container_scope_fence_id_v2(foreign_scope).unwrap()
+        packet.parent_binding.host_intent.reservation.service_scope_id = "other-service"
+        packet.parent_binding.host_intent.fence.boot_id = container_scope_fence_id_v2(foreign_scope).unwrap()
+        packet.parent_binding.host_intent.plan_digest = container_execution_plan_digest_v2(packet.intent.request.parent).unwrap()
+        packet.parent_binding.host_intent = host_reservation_bind_intent_v1(packet.parent_binding.host_intent).unwrap()
+        packet.parent_binding.host_operation.payload_digest = packet.parent_binding.host_intent.reservation.payload_digest
+        packet.parent_controller_operation.payload_digest = sha256_text(controller_assignment_bytes_v1(packet.parent_binding).unwrap())
+        packet.intent.parent_operation_digest = sha256_text(distributed_encode_operation_v2(packet.parent_binding.host_operation).unwrap())
+        packet.intent.parent_assignment_digest = sha256_text(controller_assignment_bytes_v1(packet.parent_binding).unwrap())
+        packet.intent.parent_controller_operation_digest = sha256_text(distributed_encode_operation_v2(packet.parent_controller_operation).unwrap())
+    packet = exec_projection_sign_v3(packet)
+
+    val root = secure_temp_dir("/tmp", "host-exec-projection").unwrap()
+    val capacity = HostCapacityV1(physical_host_id: "authorized-alias", authority_id: "host-authority",
+        boot_id: container_scope_fence_id_v2(scope).unwrap(), provider_generation: 3,
+        cpu_millis: 6000, memory_bytes: 16000, exclusive_devices: [])
+    var owner = host_capacity_owner_open_v1(root, capacity, "a".repeat(64), 50, true).unwrap()
+    if change != "missing-reservation":
+        exec_projection_publish_v3(root, "reservation-payloads", frames.host.operation.payload_digest,
+            host_reservation_encode_intent_v1(frames.host.intent).unwrap())
+    if change != "orphan":
+        owner.journal = daemon_operation_admit_v2(owner.journal, frames.host.operation).unwrap().journal
+        owner.journal = daemon_operation_begin_v2(owner.journal, frames.host.operation).unwrap()
+    if change != "missing-execution":
+        exec_projection_publish_v3(root, "host-execute-packets", sha256_text("host-operation"), host_execute_request_encode_v2(frames.host).unwrap())
+    if change != "missing-creation":
+        host_execution_intent_store_v1(root, RuntimeIntentV1(pod_uid: runtime.pod_uid, attempt: runtime.attempt,
+            provider_generation: runtime.provider_generation, operation_id: runtime.operation_id,
+            engine: runtime.engine, native_id: runtime.native_id, node_boot_id: runtime.node_boot_id, phase: "created")).unwrap()
+    var observation = HostExecutionObservationV2(scope: scope, operation_id: "host-operation",
+        operation_digest: intent.parent_operation_digest, plan_digest: frames.host.intent.plan_digest,
+        request_digest: plan.request_digest, grant_id: frames.host.signed.grant.id,
+        principal: frames.host.signed.grant.principal, issuer_id: frames.host.signed.issuer_id,
+        approver_id: frames.host.approval.approver_id, provider_identity_digest: "3".repeat(64),
+        observed_unix_ms: 900, observed_monotonic_ms: 100, phase: "running",
+        create_status: "ok", start_status: "ok", inspect_status: "ok", reason: "synthetic-record-only", runtime: runtime)
+    if change == "scope":
+        observation.scope.service_scope_id = "other-service"
+        observation.runtime.node_boot_id = container_scope_fence_id_v2(observation.scope).unwrap()
+    if change != "missing-observation": host_execution_observation_store_v2(root, observation).unwrap()
+    # Archive before admission; no packet path/name comes from untrusted argv.
+    if change != "missing-packet":
+        val bytes = if change == "corrupt-packet": "invalid retained packet" else: host_runtime_exec_request_encode_v3(packet).unwrap()
+        exec_projection_publish_v3(root, "host-runtime-exec-requests", sha256_text("exec-child"), bytes)
+    owner.journal = daemon_operation_admit_v2(owner.journal, packet.operation).unwrap().journal
+    ExecProjectionFixtureV3(owner: owner, packet: packet)
+
+fn exec_projection_reopen_v3(fixture: ExecProjectionFixtureV3) -> Result<HostCapacityOwnerV1, text>:
+    assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+    host_capacity_owner_open_v1(fixture.owner.journal.root, fixture.owner.ledger.capacity, "d".repeat(64), 50, true)
+
+fn exec_projection_rejected_v3(change: text, expected: text):
+    val fixture = exec_projection_fixture_v3(change)
+    val reopened = exec_projection_reopen_v3(fixture)
+    expect(reopened.is_err()).to_equal(true)
+    if expected != "": expect(reopened.unwrap_err()).to_equal(expected)
+    assert(dir_remove(fixture.owner.journal.root, true))
+
+describe "Historical exec child provenance in the real capacity journal":
+    it "reopens without a second charge and retains the uncertain parent":
+        step("Archive a canonical signed child and reopen the actual disk WAL")
+        val fixture = exec_projection_fixture_v3()
+        expect(host_runtime_exec_child_projection_v3(fixture.owner.journal, fixture.owner.ledger.capacity, fixture.packet.operation).unwrap()).to_equal(true)
+        val reopened = exec_projection_reopen_v3(fixture).unwrap()
+        expect(reopened.ledger.reservations.len()).to_equal(1)
+        expect(reopened.ledger.reservations[0].operation_id).to_equal("host-operation")
+        expect(reopened.ledger.reservations[0].state).to_equal(HostReservationStateV1.Uncertain)
+        expect(host_available_capacity_v1(reopened.ledger).unwrap().cpu_millis).to_equal(4000)
+        expect(host_available_capacity_v1(reopened.ledger).unwrap().memory_bytes).to_equal(12000)
+        expect(reopened.journal.operations["host-operation"].state).to_equal("outcome-unknown")
+        expect(reopened.journal.operations["exec-child"].state).to_equal("admitted")
+        assert(host_capacity_owner_close_v1(reopened).unwrap())
+        assert(dir_remove(fixture.owner.journal.root, true))
+
+    it "never releases parent capacity from child success failure or interrupted execution":
+        step("Persist actual child state transitions then reopen each independent journal")
+        for terminal in ["completed", "failed", "cancelled", "executing"]:
+            var fixture = exec_projection_fixture_v3()
+            fixture.owner.journal = daemon_operation_begin_v2(fixture.owner.journal, fixture.packet.operation).unwrap()
+            if terminal != "executing":
+                fixture.owner.journal = daemon_operation_record_outcome_v2(fixture.owner.journal,
+                    fixture.packet.operation, terminal, "f".repeat(64)).unwrap()
+            val reopened = exec_projection_reopen_v3(fixture).unwrap()
+            expect(reopened.ledger.reservations.len()).to_equal(1)
+            expect(host_available_capacity_v1(reopened.ledger).unwrap().cpu_millis).to_equal(4000)
+            expect(host_available_capacity_v1(reopened.ledger).unwrap().memory_bytes).to_equal(12000)
+            expect(reopened.ledger.reservations[0].state).to_equal(HostReservationStateV1.Uncertain)
+            expect(reopened.journal.operations["exec-child"].state).to_equal(if terminal == "executing": "outcome-unknown" else: terminal)
+            assert(host_capacity_owner_close_v1(reopened).unwrap())
+            assert(dir_remove(fixture.owner.journal.root, true))
+
+    it "rejects freshly signed child principal project and environment substitution":
+        step("Use crypto-verified changed frames rather than corrupted signature bytes")
+        for change in ["principal", "project", "environment"]:
+            exec_projection_rejected_v3(change, "exec-projection-parent-subject-mismatch")
+
+    it "rejects a second memory amount and a window longer than the child operation":
+        step("Re-sign exact changed resource bounds and assert their independent errors")
+        exec_projection_rejected_v3("memory", "exec-projection-parent-memory-mismatch")
+        exec_projection_rejected_v3("duration", "exec-projection-control-window-mismatch")
+
+    it "rejects signed runtime provider and retained scope substitutions":
+        step("Keep packets canonical while changing native identity or original observation scope")
+        exec_projection_rejected_v3("native", "exec-projection-parent-creation-mismatch")
+        exec_projection_rejected_v3("provider", "exec-projection-parent-observation-mismatch")
+        exec_projection_rejected_v3("scope", "exec-projection-parent-observation-mismatch")
+        exec_projection_rejected_v3("signed-scope", "exec-projection-parent-envelope-mismatch")
+
+    it "requires an actual parent journal row rather than a supplied binding alone":
+        step("Retain complete signed packet evidence but omit parent WAL admission")
+        exec_projection_rejected_v3("orphan", "OPERATION_NOT_FOUND")
+
+    it "fails reopen on missing or malformed original evidence":
+        step("Independently omit each exact retained record and corrupt canonical packet bytes")
+        for change in ["missing-packet", "corrupt-packet", "missing-reservation", "missing-execution", "missing-creation", "missing-observation"]:
+            exec_projection_rejected_v3(change, "")
+
+    it "keeps unknown actions subject to the original reservation validator":
+        step("Add an actual unknown WAL row rather than relying only on source searches")
+        var fixture = exec_projection_fixture_v3()
+        var unknown = fixture.packet.parent_binding.host_operation
+        unknown.id = "unknown-operation"
+        unknown.operation = "host_runtime_exec_unknown_v3"
+        fixture.owner.journal = daemon_operation_admit_v2(fixture.owner.journal, unknown).unwrap().journal
+        val reopened = exec_projection_reopen_v3(fixture)
+        expect(reopened.unwrap_err()).to_equal("reservation-operation-mismatch")
+        assert(dir_remove(fixture.owner.journal.root, true))
+
+    it "requires actual child journal envelope equality before considering archived evidence":
+        step("Pass a separately signed changed operation against an unchanged retained journal")
+        val fixture = exec_projection_fixture_v3()
+        var changed = fixture.packet
+        changed.operation.principal = "other-user"
+        changed = exec_projection_sign_v3(changed)
+        expect(host_runtime_exec_child_projection_v3(fixture.owner.journal, fixture.owner.ledger.capacity,
+            changed.operation).unwrap_err()).to_equal("exec-projection-child-envelope-mismatch")
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+        assert(dir_remove(fixture.owner.journal.root, true))
+
+    it "does not gain live execution authority or broaden unknown action classification":
+        step("Guard exact classifier wiring and prohibit recursive owners or provider effects")
+        val source = read_file_text_result("src/lib/nogc_sync_mut/orchestration/host_runtime_exec_projection_v3.spl").unwrap()
+        for forbidden in ["use std.nogc_sync_mut.orchestration.host_capacity_owner", "use std.nogc_sync_mut.orchestration.host_local_",
+                "use std.nogc_async_mut.container", "daemon_operation_begin", "process_run", "distributed_verify", "clock_"]:
+            expect(source.contains(forbidden)).to_equal(false)
+        val owner = read_file_text_result("src/lib/nogc_sync_mut/orchestration/host_capacity_owner_v1.spl").unwrap()
+        expect(owner.contains("if operation.operation == \"host_runtime_exec_v3\":")).to_equal(true)
+        expect(owner.contains("host_runtime_exec_child_projection_v3(journal, capacity, operation)?")).to_equal(true)
+        expect(owner.contains("/reservation-payloads/")).to_equal(true)
+        expect(source.contains("/host-execution-inspections-v2/")).to_equal(false)

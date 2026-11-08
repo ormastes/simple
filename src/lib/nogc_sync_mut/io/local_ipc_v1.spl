@@ -1,0 +1,403 @@
+# Canonical owned Unix byte connections. Tokens are process-local capabilities,
+# not raw file descriptors, serialized leases or hostile-same-UID isolation.
+# Origin includes actual process PID and /proc/self/ns/pid device/inode,
+# initially proven by an actual NSFS PID-namespace handle before publication.
+# After first use, fork children must exec before entering this owner: inherited
+# tokens/locks/FDs are rejected before owner gates, never reset or reconstructed.
+# Native absence is checked through the nullable-array ABI before any len/index;
+# foreign-process/OOM absence is reported honestly as receipt unavailable.
+# Established namespace observation failure/mismatch quarantines the process
+# permanently. No fork is supported within an operation; no reset/close proof
+# is fabricated. Already validated in-flight local cleanup/unlock stays exact.
+use std.common.string_core.str_len
+
+pub struct LocalUnixConnectionV1:
+    token: i64
+
+pub struct LocalUnixPeerV1:
+    uid: i64
+    gid: i64
+    pid: i64
+    socket_device: i64
+    socket_inode: i64
+
+pub struct LocalUnixConnectTurnV1:
+    owner: LocalUnixConnectionV1?
+    peer: LocalUnixPeerV1?
+    error: text
+
+pub struct LocalUnixReadTurnV1:
+    owner: LocalUnixConnectionV1
+    bytes: [u8]
+    eof: bool
+    error: text
+
+pub struct LocalUnixWriteTurnV1:
+    owner: LocalUnixConnectionV1
+    accepted_bytes: i64
+    error: text
+
+pub struct LocalUnixCloseTurnV1:
+    owner: LocalUnixConnectionV1?
+    closed: bool
+    error: text
+
+@unsafe(reason: "counted Unix path and absolute monotonic deadline; reserved native owner receipt", capabilities: [ffi])
+extern fn rt_local_unix_connect_v1(path: text, path_bytes: i64, expected_uid: i64, deadline: i64) -> [i64]?
+@unsafe(reason: "generation-checked byte read; reserved receipt preserves consumed bytes even on ancillary rejection", capabilities: [ffi])
+extern fn rt_local_unix_read_v1(token: i64, maximum: i64, deadline: i64) -> [i64]?
+@unsafe(reason: "generation-checked bounded partial byte submission", capabilities: [ffi])
+extern fn rt_local_unix_write_some_v1(token: i64, bytes: [u8], offset: i64, maximum: i64, deadline: i64) -> [i64]?
+@unsafe(reason: "actual Unix-ms admission check immediately before each send", capabilities: [ffi])
+extern fn rt_local_unix_write_some_admitted_v1(token: i64, bytes: [u8], offset: i64, maximum: i64, deadline: i64, expires: i64) -> [i64]?
+@unsafe(reason: "exact token close consumes Linux descriptor even on close error; no raw-fd retry", capabilities: [ffi])
+extern fn rt_local_unix_close_v1(token: i64) -> [i64]?
+
+fn local_unix_status_v1(status: i64) -> text:
+    match status:
+        case 0: ""
+        case 1: "local_unix_timeout"
+        case -1: "local_unix_invalid_argument_or_path_policy"
+        case -2: "local_unix_stale_owner"
+        case -3: "local_unix_io_error"
+        case -4: "local_unix_unsupported"
+        case -5: "local_unix_capacity_exhausted"
+        case -6: "local_unix_allocation_failed"
+        case -7: "local_unix_busy"
+        case -8: "local_unix_admission_expired"
+        case -9: "local_unix_ancillary_rejected"
+        case -10: "local_unix_native_receipt_unavailable"
+        case -11: "local_unix_would_block"
+        case -12: "local_unix_write_side_shutdown"
+        case -13: "local_unix_request_not_ready"
+        case -14: "local_unix_request_already_consumed"
+        case -15: "local_unix_handoff_not_ready"
+        case -16: "local_unix_handoff_already_used"
+        case _: "local_unix_native_receipt_invalid"
+
+# Path identity is anchored through a retained no-follow directory. Peer UID is
+# the actual connected SO_PEERCRED identity, not an assertion in payload bytes.
+pub fn local_unix_connect_v1(path: text, expected_peer_uid: i64,
+        deadline_monotonic_ms: i64) -> LocalUnixConnectTurnV1:
+    if (not path.starts_with("/") or path.contains("\0") or str_len(path) > 4095 or
+            expected_peer_uid < 0 or expected_peer_uid > 4294967295):
+        return LocalUnixConnectTurnV1(nil, nil, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_local_unix_connect_v1(path, str_len(path), expected_peer_uid, deadline_monotonic_ms)
+    if raw == nil: return LocalUnixConnectTurnV1(nil, nil, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 7:
+        return LocalUnixConnectTurnV1(nil, nil, "local_unix_native_receipt_invalid")
+    var retained: LocalUnixConnectionV1? = nil
+    if result[1] > 0: retained = Some(LocalUnixConnectionV1(result[1]))
+    val error = local_unix_status_v1(result[0])
+    if error != "": return LocalUnixConnectTurnV1(retained, nil, error)
+    if (result[1] <= 0 or result[2] != expected_peer_uid or result[3] < 0 or
+            result[4] <= 0 or result[5] < 0 or result[6] < 0):
+        return LocalUnixConnectTurnV1(retained, nil, "local_unix_native_receipt_invalid")
+    LocalUnixConnectTurnV1(retained,
+        Some(LocalUnixPeerV1(result[2], result[3], result[4], result[5], result[6])), "")
+
+# Maximum 65536 bytes per call; keep the same outer absolute deadline across
+# chunks. Timeout/error are distinct from EOF. Ancillary rejection can return
+# consumed payload bytes alongside an error; callers must not replay a request.
+pub fn local_unix_read_v1(owner: LocalUnixConnectionV1, maximum: i64,
+        deadline_monotonic_ms: i64) -> LocalUnixReadTurnV1:
+    if owner.token <= 0 or maximum <= 0 or maximum > 65536:
+        return LocalUnixReadTurnV1(owner, [], false, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_read_v1(owner.token, maximum, deadline_monotonic_ms)
+    local_unix_read_turn_v1(owner, raw, maximum)
+
+fn local_unix_read_turn_v1(owner: LocalUnixConnectionV1, raw: [i64]?, maximum: i64) -> LocalUnixReadTurnV1:
+    if raw == nil: return LocalUnixReadTurnV1(owner, [], false, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() < 3: return LocalUnixReadTurnV1(owner, [], false, "local_unix_native_receipt_invalid")
+    val count = result[2]
+    if (count < 0 or count > maximum or count > result.len() - 3 or
+            (result[1] != 0 and result[1] != 1)):
+        return LocalUnixReadTurnV1(owner, [], false, "local_unix_native_receipt_invalid")
+    var bytes: [u8] = []
+    for i in 0..count:
+        if result[i + 3] < 0 or result[i + 3] > 255:
+            return LocalUnixReadTurnV1(owner, bytes, false, "local_unix_native_receipt_invalid")
+        bytes.push(result[i + 3] as u8)
+    LocalUnixReadTurnV1(owner, bytes, result[1] == 1, local_unix_status_v1(result[0]))
+
+fn local_unix_write_turn_v1(owner: LocalUnixConnectionV1, raw: [i64]?, maximum: i64) -> LocalUnixWriteTurnV1:
+    if raw == nil: return LocalUnixWriteTurnV1(owner, 0, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 2: return LocalUnixWriteTurnV1(owner, 0, "local_unix_native_receipt_invalid")
+    if result[1] < 0 or result[1] > maximum:
+        return LocalUnixWriteTurnV1(owner, 0, "local_unix_native_receipt_invalid")
+    LocalUnixWriteTurnV1(owner, result[1], local_unix_status_v1(result[0]))
+
+pub fn local_unix_write_some_v1(owner: LocalUnixConnectionV1, bytes: [u8], offset: i64,
+        maximum: i64, deadline_monotonic_ms: i64) -> LocalUnixWriteTurnV1:
+    if (owner.token <= 0 or offset < 0 or offset > bytes.len() or maximum <= 0 or
+            maximum > 65536 or maximum > bytes.len() - offset):
+        return LocalUnixWriteTurnV1(owner, 0, "local_unix_invalid_argument_or_path_policy")
+    val result = unsafe(capabilities: [ffi]):
+        rt_local_unix_write_some_v1(owner.token, bytes, offset, maximum, deadline_monotonic_ms)
+    local_unix_write_turn_v1(owner, result, maximum)
+
+# Expiry limits submission only; this does not promise execution before expiry
+# and never revokes an established connection or shortens a workload lifetime.
+pub fn local_unix_write_some_admitted_v1(owner: LocalUnixConnectionV1, bytes: [u8], offset: i64,
+        maximum: i64, deadline_monotonic_ms: i64, expires_at_unix_ms: i64) -> LocalUnixWriteTurnV1:
+    if (owner.token <= 0 or offset < 0 or offset > bytes.len() or maximum <= 0 or
+            maximum > 65536 or maximum > bytes.len() - offset or expires_at_unix_ms <= 0):
+        return LocalUnixWriteTurnV1(owner, 0, "local_unix_invalid_argument_or_path_policy")
+    val result = unsafe(capabilities: [ffi]):
+        rt_local_unix_write_some_admitted_v1(owner.token, bytes, offset, maximum, deadline_monotonic_ms, expires_at_unix_ms)
+    local_unix_write_turn_v1(owner, result, maximum)
+
+pub fn local_unix_close_v1(owner: LocalUnixConnectionV1) -> LocalUnixCloseTurnV1:
+    if owner.token <= 0: return LocalUnixCloseTurnV1(Some(owner), false, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_close_v1(owner.token)
+    if raw == nil: return LocalUnixCloseTurnV1(Some(owner), false, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 2: return LocalUnixCloseTurnV1(Some(owner), false, "local_unix_native_receipt_invalid")
+    if result[1] == 1: return LocalUnixCloseTurnV1(nil, true, local_unix_status_v1(result[0]))
+    if result[1] != 0: return LocalUnixCloseTurnV1(Some(owner), false, "local_unix_native_receipt_invalid")
+    LocalUnixCloseTurnV1(Some(owner), false, local_unix_status_v1(result[0]))
+
+# Listener tokens share the connection registry but native role checks prevent
+# using them as byte connections. Existing socket pathnames are never replaced.
+pub struct LocalUnixListenerV1:
+    token: i64
+
+pub struct LocalUnixListenTurnV1:
+    owner: LocalUnixListenerV1?
+    error: text
+
+pub struct LocalUnixAcceptTurnV1:
+    listener: LocalUnixListenerV1
+    connection: LocalUnixConnectionV1?
+    peer: LocalUnixPeerV1?
+    error: text
+
+pub struct LocalUnixPollTurnV1:
+    owner: LocalUnixConnectionV1
+    readable: bool
+    writable: bool
+    hangup: bool
+    error: text
+
+pub struct LocalUnixListenerCloseTurnV1:
+    owner: LocalUnixListenerV1?
+    closed: bool
+    error: text
+
+pub struct LocalUnixPeerTurnV1:
+    owner: LocalUnixConnectionV1
+    peer: LocalUnixPeerV1?
+    error: text
+
+@unsafe(reason: "protected no-follow parent bind; reserve cleanup owner before bind effects", capabilities: [ffi])
+extern fn rt_local_unix_listen_v1(path: text, path_bytes: i64, uid: i64, backlog: i64) -> [i64]?
+@unsafe(reason: "nonblocking accept with actual distinct-UID SO_PEERCRED before registry install", capabilities: [ffi])
+extern fn rt_local_unix_accept_v1(token: i64, expected_uid: i64) -> [i64]?
+@unsafe(reason: "zero-wait role-checked readiness on canonical registry descriptor", capabilities: [ffi])
+extern fn rt_local_unix_poll_v1(token: i64, read: i64, write: i64) -> [i64]?
+@unsafe(reason: "zero-wait same recvmsg reader; reject and dispose unexpected descriptors", capabilities: [ffi])
+extern fn rt_local_unix_read_now_v1(token: i64, maximum: i64) -> [i64]?
+@unsafe(reason: "zero-wait same partial-write owner, no automatic retry", capabilities: [ffi])
+extern fn rt_local_unix_write_some_now_v1(token: i64, bytes: [u8], offset: i64, maximum: i64) -> [i64]?
+@unsafe(reason: "listener close consumes descriptor once; retained exact-inode pathname cleanup", capabilities: [ffi])
+extern fn rt_local_unix_listener_close_v1(token: i64) -> [i64]?
+@unsafe(reason: "fresh kernel SO_PEERCRED observation under exact token operation lock", capabilities: [ffi])
+extern fn rt_local_unix_peer_v1(token: i64) -> [i64]?
+
+pub fn local_unix_listen_v1(path: text, expected_service_uid: i64, backlog: i64) -> LocalUnixListenTurnV1:
+    if (not path.starts_with("/") or path.contains("\0") or str_len(path) > 4095 or
+            expected_service_uid < 0 or expected_service_uid > 4294967295 or backlog < 1 or backlog > 128):
+        return LocalUnixListenTurnV1(nil, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_listen_v1(path, str_len(path), expected_service_uid, backlog)
+    if raw == nil: return LocalUnixListenTurnV1(nil, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 2: return LocalUnixListenTurnV1(nil, "local_unix_native_receipt_invalid")
+    var owner: LocalUnixListenerV1? = nil
+    if result[1] > 0: owner = Some(LocalUnixListenerV1(result[1]))
+    if result[0] == 0 and result[1] <= 0: return LocalUnixListenTurnV1(owner, "local_unix_native_receipt_invalid")
+    LocalUnixListenTurnV1(owner, local_unix_status_v1(result[0]))
+
+pub fn local_unix_accept_v1(listener: LocalUnixListenerV1, expected_client_uid: i64) -> LocalUnixAcceptTurnV1:
+    if listener.token <= 0 or expected_client_uid < 0 or expected_client_uid > 4294967295:
+        return LocalUnixAcceptTurnV1(listener, nil, nil, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_accept_v1(listener.token, expected_client_uid)
+    if raw == nil: return LocalUnixAcceptTurnV1(listener, nil, nil, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 7: return LocalUnixAcceptTurnV1(listener, nil, nil, "local_unix_native_receipt_invalid")
+    var connection: LocalUnixConnectionV1? = nil
+    if result[1] > 0: connection = Some(LocalUnixConnectionV1(result[1]))
+    if result[0] != 0: return LocalUnixAcceptTurnV1(listener, connection, nil, local_unix_status_v1(result[0]))
+    if (result[1] <= 0 or result[2] != expected_client_uid or result[3] < 0 or
+            result[4] <= 0 or result[5] < 0 or result[6] < 0):
+        return LocalUnixAcceptTurnV1(listener, connection, nil, "local_unix_native_receipt_invalid")
+    LocalUnixAcceptTurnV1(listener, connection,
+        Some(LocalUnixPeerV1(result[2], result[3], result[4], result[5], result[6])), "")
+
+pub fn local_unix_poll_v1(owner: LocalUnixConnectionV1, want_read: bool, want_write: bool) -> LocalUnixPollTurnV1:
+    if owner.token <= 0 or (not want_read and not want_write):
+        return LocalUnixPollTurnV1(owner, false, false, false, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_local_unix_poll_v1(owner.token, if want_read: 1 else: 0, if want_write: 1 else: 0)
+    if raw == nil: return LocalUnixPollTurnV1(owner, false, false, false, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 4: return LocalUnixPollTurnV1(owner, false, false, false, "local_unix_native_receipt_invalid")
+    for i in 1..4:
+        if result[i] != 0 and result[i] != 1:
+            return LocalUnixPollTurnV1(owner, false, false, false, "local_unix_native_receipt_invalid")
+    LocalUnixPollTurnV1(owner, result[1] == 1, result[2] == 1, result[3] == 1, local_unix_status_v1(result[0]))
+
+pub fn local_unix_read_now_v1(owner: LocalUnixConnectionV1, maximum: i64) -> LocalUnixReadTurnV1:
+    if owner.token <= 0 or maximum <= 0 or maximum > 65536:
+        return LocalUnixReadTurnV1(owner, [], false, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_read_now_v1(owner.token, maximum)
+    local_unix_read_turn_v1(owner, raw, maximum)
+
+pub fn local_unix_write_some_now_v1(owner: LocalUnixConnectionV1, bytes: [u8], offset: i64, maximum: i64) -> LocalUnixWriteTurnV1:
+    if (owner.token <= 0 or offset < 0 or offset > bytes.len() or maximum <= 0 or
+            maximum > 65536 or maximum > bytes.len() - offset):
+        return LocalUnixWriteTurnV1(owner, 0, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_write_some_now_v1(owner.token, bytes, offset, maximum)
+    local_unix_write_turn_v1(owner, raw, maximum)
+
+pub fn local_unix_listener_close_v1(listener: LocalUnixListenerV1) -> LocalUnixListenerCloseTurnV1:
+    if listener.token <= 0: return LocalUnixListenerCloseTurnV1(Some(listener), false, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_listener_close_v1(listener.token)
+    if raw == nil: return LocalUnixListenerCloseTurnV1(Some(listener), false, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 2: return LocalUnixListenerCloseTurnV1(Some(listener), false, "local_unix_native_receipt_invalid")
+    if result[1] == 1: return LocalUnixListenerCloseTurnV1(nil, true, local_unix_status_v1(result[0]))
+    if result[1] != 0: return LocalUnixListenerCloseTurnV1(Some(listener), false, "local_unix_native_receipt_invalid")
+    LocalUnixListenerCloseTurnV1(Some(listener), false, local_unix_status_v1(result[0]))
+
+# On a connected client, socket identity names its target; on an accepted
+# connection it names the listener path captured at accept, NOT a client path.
+pub fn local_unix_peer_v1(owner: LocalUnixConnectionV1) -> LocalUnixPeerTurnV1:
+    if owner.token <= 0: return LocalUnixPeerTurnV1(owner, nil, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_peer_v1(owner.token)
+    if raw == nil: return LocalUnixPeerTurnV1(owner, nil, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 6: return LocalUnixPeerTurnV1(owner, nil, "local_unix_native_receipt_invalid")
+    if result[0] != 0: return LocalUnixPeerTurnV1(owner, nil, local_unix_status_v1(result[0]))
+    if result[1] < 0 or result[2] < 0 or result[3] <= 0 or result[4] < 0 or result[5] < 0:
+        return LocalUnixPeerTurnV1(owner, nil, "local_unix_native_receipt_invalid")
+    LocalUnixPeerTurnV1(owner, Some(LocalUnixPeerV1(result[1], result[2], result[3], result[4], result[5])), "")
+
+pub struct LocalUnixWriteShutdownTurnV1:
+    owner: LocalUnixConnectionV1
+    shutdown: bool
+    error: text
+
+@unsafe(reason: "idempotent owned write-half shutdown, no descriptor close or request retry", capabilities: [ffi])
+extern fn rt_local_unix_shutdown_write_v1(token: i64) -> [i64]?
+
+# Only the write half is shut down. The owner and read half remain valid; EOF
+# must be observed by the peer, never inferred from a timeout or byte count.
+pub fn local_unix_shutdown_write_v1(owner: LocalUnixConnectionV1) -> LocalUnixWriteShutdownTurnV1:
+    if owner.token <= 0: return LocalUnixWriteShutdownTurnV1(owner, false, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_shutdown_write_v1(owner.token)
+    if raw == nil: return LocalUnixWriteShutdownTurnV1(owner, false, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 2 or (result[1] != 0 and result[1] != 1):
+        return LocalUnixWriteShutdownTurnV1(owner, false, "local_unix_native_receipt_invalid")
+    LocalUnixWriteShutdownTurnV1(owner, result[1] == 1, local_unix_status_v1(result[0]))
+
+pub struct LocalUnixRequestClaimTurnV1:
+    owner: LocalUnixConnectionV1
+    claimed: bool
+    error: text
+
+@unsafe(reason: "one-use accepted-connection request phase after actual EOF, no callback under lock", capabilities: [ffi])
+extern fn rt_local_unix_claim_request_v1(token: i64, request: text, request_bytes: i64) -> [i64]?
+
+# This consumes a connection dispatch opportunity, not a signed host grant.
+# A copied completed frame cannot obtain a second callback on the same owner.
+pub fn local_unix_claim_request_v1(owner: LocalUnixConnectionV1, request_id: text) -> LocalUnixRequestClaimTurnV1:
+    if owner.token <= 0 or str_len(request_id) != 64:
+        return LocalUnixRequestClaimTurnV1(owner, false, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_claim_request_v1(owner.token, request_id, str_len(request_id))
+    if raw == nil: return LocalUnixRequestClaimTurnV1(owner, false, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 2 or (result[1] != 0 and result[1] != 1):
+        return LocalUnixRequestClaimTurnV1(owner, false, "local_unix_native_receipt_invalid")
+    LocalUnixRequestClaimTurnV1(owner, result[1] == 1, local_unix_status_v1(result[0]))
+
+use std.nogc_sync_mut.io.process_ops.PipedProcessRefV1
+use std.nogc_sync_mut.io.piped_byte_endpoint_v1.PipedByteEndpointV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub struct LocalUnixStageTurnV1:
+    owner: LocalUnixConnectionV1
+    staged: bool
+    error: text
+
+pub struct LocalUnixAdoptTurnV1:
+    owner: LocalUnixConnectionV1
+    endpoint: PipedByteEndpointV1?
+    error: text
+
+pub struct LocalUnixHandoffStateTurnV1:
+    owner: LocalUnixConnectionV1
+    state: i64
+    error: text
+
+@unsafe(reason: "one-use exact stdout move through private canonical pipe bridge before response bytes", capabilities: [ffi])
+extern fn rt_local_unix_stage_stdout_v1(token: i64, pid: i64, generation: i64, root: text, root_bytes: i64,
+    identity: text, identity_bytes: i64, binding: text, binding_bytes: i64) -> [i64]?
+@unsafe(reason: "same recvmsg reader, explicit one-FD receive phase with extra/truncated rights disposal", capabilities: [ffi])
+extern fn rt_local_unix_read_handoff_now_v1(token: i64, maximum: i64) -> [i64]?
+@unsafe(reason: "actual EOF plus retained FD adoption into existing descriptor-only pipe registry", capabilities: [ffi])
+extern fn rt_local_unix_adopt_byte_endpoint_v1(token: i64, binding: text, binding_bytes: i64) -> [i64]?
+@unsafe(reason: "side-effect-free exact-slot transfer phase observation, no descriptor exposure", capabilities: [ffi])
+extern fn rt_local_unix_handoff_state_v1(token: i64) -> [i64]?
+
+# Bindings are metadata correlation, never caller authorization. Host policy and
+# authenticated receipt checks precede this native move. Source stdout moves
+# once; a send failure retains its descriptor with this connection owner.
+pub fn local_unix_stage_stdout_v1(owner: LocalUnixConnectionV1, reference: PipedProcessRefV1,
+        binding_digest: text) -> LocalUnixStageTurnV1:
+    if (owner.token <= 0 or reference.pid <= 0 or reference.generation <= 0 or
+            not builder_digest_valid_v1(binding_digest)):
+        return LocalUnixStageTurnV1(owner, false, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_local_unix_stage_stdout_v1(owner.token, reference.pid, reference.generation,
+            reference.group_root, str_len(reference.group_root), reference.group_identity, str_len(reference.group_identity),
+            binding_digest, str_len(binding_digest))
+    if raw == nil: return LocalUnixStageTurnV1(owner, false, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 2 or (result[1] != 0 and result[1] != 1):
+        return LocalUnixStageTurnV1(owner, false, "local_unix_native_receipt_invalid")
+    LocalUnixStageTurnV1(owner, result[1] == 1, local_unix_status_v1(result[0]))
+
+# Caller must half-close its complete request before receiving a response.
+# The queued FD remains in this owner through actual EOF; no raw FD is exposed.
+pub fn local_unix_read_handoff_now_v1(owner: LocalUnixConnectionV1, maximum: i64) -> LocalUnixReadTurnV1:
+    if owner.token <= 0 or maximum <= 0 or maximum > 65536:
+        return LocalUnixReadTurnV1(owner, [], false, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_read_handoff_now_v1(owner.token, maximum)
+    local_unix_read_turn_v1(owner, raw, maximum)
+
+pub fn local_unix_adopt_byte_endpoint_v1(owner: LocalUnixConnectionV1, binding_digest: text) -> LocalUnixAdoptTurnV1:
+    if owner.token <= 0 or not builder_digest_valid_v1(binding_digest):
+        return LocalUnixAdoptTurnV1(owner, nil, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_adopt_byte_endpoint_v1(owner.token, binding_digest, str_len(binding_digest))
+    if raw == nil: return LocalUnixAdoptTurnV1(owner, nil, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 2: return LocalUnixAdoptTurnV1(owner, nil, "local_unix_native_receipt_invalid")
+    if result[0] != 0: return LocalUnixAdoptTurnV1(owner, nil, local_unix_status_v1(result[0]))
+    if result[1] <= 0: return LocalUnixAdoptTurnV1(owner, nil, "local_unix_native_receipt_invalid")
+    LocalUnixAdoptTurnV1(owner, Some(PipedByteEndpointV1(generation: result[1], binding_digest: binding_digest)), "")
+
+# 0 none, 1 staged, 2 sent, 3 received, 4 adopted. State is not authority to
+# release helper resources or infer success of application metadata validation.
+pub fn local_unix_handoff_state_v1(owner: LocalUnixConnectionV1) -> LocalUnixHandoffStateTurnV1:
+    if owner.token <= 0: return LocalUnixHandoffStateTurnV1(owner, 0, "local_unix_invalid_argument_or_path_policy")
+    val raw = unsafe(capabilities: [ffi]): rt_local_unix_handoff_state_v1(owner.token)
+    if raw == nil: return LocalUnixHandoffStateTurnV1(owner, 0, "local_unix_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 2: return LocalUnixHandoffStateTurnV1(owner, 0, "local_unix_native_receipt_invalid")
+    if result[1] < 0 or result[1] > 4: return LocalUnixHandoffStateTurnV1(owner, 0, "local_unix_native_receipt_invalid")
+    LocalUnixHandoffStateTurnV1(owner, result[1], local_unix_status_v1(result[0]))

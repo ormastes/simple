@@ -1,0 +1,57 @@
+# CLI adaptation only. Domain owners perform all authentication, journaling,
+# provider routing and owner retention; this module never runs an engine.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.controller_dispatch_config_install_v1
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v2.{controller_dispatch_v2, controller_inspect_execution_v2, controller_dispatch_preflight_v1, controller_inspect_preflight_v1}
+use std.nogc_sync_mut.orchestration.host_local_command_v1.host_local_command_v1
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn execution_error_v2(action: text, uid: text, reason: text, uncertain: bool) -> OrchestratorValidationReplyV1:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "kind": SdnValue.String("orchestrator-local-execution-error"), "action": SdnValue.String(action),
+        "requestUid": SdnValue.String(uid), "error": SdnValue.String(reason),
+        "reconciliationRequired": SdnValue.Bool(uncertain)}
+    OrchestratorValidationReplyV1(exit_code: if uncertain: 2 else: 1,
+        output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn orchestrator_execution_command_v2(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() == 0: return execution_error_v2("", "", "execution-command-required", false)
+    val action = args[0]
+    if action.starts_with("host-"):
+        val reply = host_local_command_v1(args)
+        return OrchestratorValidationReplyV1(exit_code: reply.exit_code, output: reply.output,
+            host_journal_cleanup: reply.journal_cleanup, host_cleanup_state: reply.cleanup_state)
+    if action == "dispatch-init":
+        if args.len() != 5: return execution_error_v2(action, "", "usage: dispatch-init <state-root> <controller-id> <config-file> <policy-file>", false)
+        val config = file_read_regular_no_follow_bounded(args[3], 16384)
+        val policy = file_read_regular_no_follow_bounded(args[4], 1048576)
+        if config.is_err() or policy.is_err(): return execution_error_v2(action, "", "dispatch-install-input-unavailable", false)
+        val installed = controller_dispatch_config_install_v1(args[1], args[2], config.unwrap(), policy.unwrap())
+        if installed.is_err(): return execution_error_v2(action, "", installed.unwrap_err(), true)
+        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("orchestrator-dispatch-installation"),
+            "controllerId": SdnValue.String(installed.unwrap().config.controller_id), "target": SdnValue.String("local-inprocess"),
+            "status": SdnValue.String("installed"), "executionAuthorized": SdnValue.Bool(false)}
+        return OrchestratorValidationReplyV1(exit_code: 0, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+    val preflight = action == "preflight-dispatch" or action == "preflight-resume"
+    val expected = if action == "inspect-execution" or action == "inspect-preflight": 4 else: if action == "dispatch" or action == "resume-execution" or preflight: 5 else: 0
+    if expected == 0 or args.len() != expected: return execution_error_v2(action, "", "invalid-execution-command-arguments", false)
+    val uid = args[3]
+    if not builder_identifier_valid_v1(args[2]) or not builder_identifier_valid_v1(uid):
+        return execution_error_v2(action, uid, "execution-identity-invalid", false)
+    val result = if action == "inspect-execution": controller_inspect_execution_v2(args[1], args[2], uid)
+        elif action == "inspect-preflight": controller_inspect_preflight_v1(args[1], args[2], uid)
+        else:
+            val source = file_read_regular_no_follow_bounded(args[4], if preflight: 4194304 else: 2097152)
+            if source.is_err(): return execution_error_v2(action, uid, "execution-request-unavailable", false)
+            if preflight: controller_dispatch_preflight_v1(args[1], args[2], uid, source.unwrap(), action == "preflight-resume")
+            else: controller_dispatch_v2(args[1], args[2], uid, source.unwrap(), action == "resume-execution")
+    var reply = if result.result.is_err(): execution_error_v2(action, uid, result.result.unwrap_err(), true)
+        else: OrchestratorValidationReplyV1(exit_code: 0, output: result.result.unwrap())
+    reply.journal_cleanup = result.journal_cleanup
+    reply.cleanup_state = result.cleanup_state
+    reply.host_journal_cleanup = result.host_journal_cleanup
+    reply.host_cleanup_state = result.host_cleanup_state
+    reply

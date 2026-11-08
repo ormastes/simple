@@ -1,0 +1,209 @@
+# Explicit signed terminal cleanup. No expiry-triggered kill, no direct leaf
+# provider calls, no helper-charge release. Native absence alone is insufficient.
+use std.nogc_sync_mut.orchestration.host_local_root_v1.*
+use std.nogc_sync_mut.orchestration.host_local_command_v1.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_cleanup_receipt_v1.*
+use std.nogc_sync_mut.orchestration.host_cleanup_store_v1.host_cleanup_publish_v1
+use std.nogc_sync_mut.orchestration.host_cleanup_evidence_v1.*
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.host_execution_intent_load_v1
+use std.nogc_sync_mut.orchestration.host_terminal_wait_v2.host_terminal_wait_retained_v2
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.*
+use std.common.contracts.orchestration.host_terminal_wait_receipt_v2.*
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.common.contracts.orchestration.host_helper_plan_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_reservation_decode_intent_v1
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, distributed_grant_authorize_v2}
+use std.common.contracts.distributed_control_codec_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RUNTIME_STATUS_OK
+use std.common.contracts.container.execution_evidence_v2.ContainerAbsenceReceiptV2
+use std.common.contracts.container.control_deadline_v1.container_control_deadline_v1
+use std.nogc_async_mut.container.api_v2.{simple_container_control_v2, simple_container_absence_v2, simple_container_recover_v2, simple_container_backend_v2, simple_container_scope_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded}
+
+pub struct HostCleanupTurnV1:
+    local: HostLocalRootV1
+    receipt: Option<HostCleanupReceiptV1>
+    recovery_required: bool
+    error: text
+
+fn host_cleanup_context_v1(before: HostReservationAuthorizationContextV1,
+        after: HostReservationAuthorizationContextV1, local: HostLocalRootV1) -> Result<bool, text>:
+    if after.grant_clock <= 0 or after.monotonic_ms < 0: return Err("host-cleanup-clock-invalid")
+    if after.grant_clock < before.grant_clock or after.monotonic_ms < before.monotonic_ms: return Err("host-cleanup-clock-regressed")
+    if (after.policy_revision != before.policy_revision or after.revocation_epoch != before.revocation_epoch or
+            after.session_generation != before.session_generation or after.policy_revision != local.policy.snapshot.policy_revision or
+            after.revocation_epoch != local.policy.snapshot.revocation_epoch or after.session_generation != local.policy.session_generation):
+        return Err("host-cleanup-context-changed")
+    Ok(true)
+
+# Receipt publication is NOT settlement. Consumers may clear active workload
+# state only after this canonical journal+evidence check succeeds.
+pub fn host_cleanup_settled_v1(local: HostLocalRootV1, receipt: HostCleanupReceiptV1) -> Result<bool, text>:
+    val retained = host_local_retained_execution_v2(local, receipt.operation_id)?
+    val state = daemon_operation_exact_v2(local.capacity.journal, retained.operation)?
+    val bytes = host_capacity_completion_evidence_owned_v2(local.capacity.journal, local.capacity.ledger.capacity, retained.operation)?
+    if (bytes != host_cleanup_receipt_encode_v1(receipt)? or state.state != "completed" or
+            state.outcome_digest != sha256_text(bytes)): return Err("host-cleanup-not-settled")
+    var released = false
+    for row in local.capacity.ledger.reservations:
+        if row.operation_id == receipt.operation_id:
+            released = row.state == HostReservationStateV1.Released
+    if not released: return Err("host-cleanup-capacity-still-charged")
+    Ok(true)
+
+fn host_cleanup_finish_v1(local: HostLocalRootV1, retained: HostRetainedExecutionV2,
+        wait: HostTerminalWaitReceiptV2, proof: HostCleanupIntentV1,
+        absence: ContainerAbsenceReceiptV2,
+        destroy_status: text) -> HostCleanupTurnV1:
+    var current = local
+    val original_bytes = distributed_encode_operation_v2(retained.operation)
+    if original_bytes.is_err(): return HostCleanupTurnV1(current, nil, true, original_bytes.unwrap_err())
+    val proof_bytes = host_cleanup_intent_encode_v1(proof)
+    if proof_bytes.is_err(): return HostCleanupTurnV1(current, nil, true, proof_bytes.unwrap_err())
+    val receipt = HostCleanupReceiptV1(operation_id: retained.operation.id,
+        operation_digest: sha256_text(original_bytes.unwrap()),
+        request_digest: retained.execution.plan.request_digest, plan_digest: retained.intent.plan_digest,
+        scope: current.scope, runtime: retained.observation.runtime,
+        provider_identity_digest: retained.observation.provider_identity_digest, wait_observation_digest: wait.observation_digest,
+        cleanup_intent_digest: sha256_text(proof_bytes.unwrap()),
+        absence: absence, destroy_status: destroy_status, observed_unix_ms: absence.observed_unix_ms)
+    val matching = host_cleanup_receipt_match_v1(receipt, wait, retained.execution.plan, retained.observation.runtime,
+        receipt.operation_digest, retained.intent.plan_digest, retained.observation.provider_identity_digest, retained.observation.observed_unix_ms)
+    if matching.is_err(): return HostCleanupTurnV1(current, nil, true, matching.unwrap_err())
+    val encoded = host_cleanup_receipt_encode_v1(receipt)
+    if encoded.is_err(): return HostCleanupTurnV1(current, nil, true, encoded.unwrap_err())
+    val published = host_cleanup_publish_v1(current.capacity.journal.root, "host-cleanup-receipts-v1", retained.operation.id, encoded.unwrap())
+    if published.is_err(): return HostCleanupTurnV1(current, nil, true, published.unwrap_err())
+    val settled = host_capacity_owner_settle_v1(current.capacity, retained.operation)
+    current.capacity = settled.owner
+    if not settled.settled or settled.error != "": return HostCleanupTurnV1(current, Some(receipt), true, settled.error)
+    HostCleanupTurnV1(current, Some(receipt), false, "")
+
+pub fn host_cleanup_v1(local: HostLocalRootV1, operation_id: text,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> HostCleanupTurnV1:
+    var current = local
+    val retained_result = host_local_retained_execution_v2(current, operation_id)
+    if retained_result.is_err(): return HostCleanupTurnV1(current, nil, false, retained_result.unwrap_err())
+    val retained = retained_result.unwrap()
+    val helpers = host_capacity_owner_parent_helpers_settled_v1(current.capacity, operation_id)
+    if helpers.is_err(): return HostCleanupTurnV1(current, nil, false, helpers.unwrap_err())
+    if retained.projection.has_devices or retained.projection.has_workspace:
+        return HostCleanupTurnV1(current, nil, false, "host-cleanup-storage-or-devices-unqualified")
+    val container_fence = container_scope_fence_id_v2(simple_container_scope_v2(current.container))
+    val local_fence = container_scope_fence_id_v2(current.scope)
+    if container_fence.is_err() or local_fence.is_err(): return HostCleanupTurnV1(current, nil, false, "host-cleanup-scope-invalid")
+    if (simple_container_backend_v2(current.container) != retained.execution.plan.backend or
+            container_fence.unwrap() != local_fence.unwrap()):
+        return HostCleanupTurnV1(current, nil, false, "host-cleanup-backend-scope-mismatch")
+    val waited = host_terminal_wait_retained_v2(current, operation_id)
+    if waited.is_err(): return HostCleanupTurnV1(current, nil, false, waited.unwrap_err())
+    val wait = waited.unwrap()
+    val state_result = daemon_operation_exact_v2(current.capacity.journal, retained.operation)
+    if state_result.is_err(): return HostCleanupTurnV1(current, nil, false, state_result.unwrap_err())
+    val state = state_result.unwrap()
+    if state.state == "completed":
+        val receipt = host_cleanup_receipt_load_v1(current.capacity.journal.root, operation_id)
+        if receipt.is_err(): return HostCleanupTurnV1(current, nil, true, receipt.unwrap_err())
+        val settled = host_cleanup_settled_v1(current, receipt.unwrap())
+        if settled.is_err(): return HostCleanupTurnV1(current, Some(receipt.unwrap()), true, settled.unwrap_err())
+        return HostCleanupTurnV1(current, Some(receipt.unwrap()), false, "")
+    if not ["executing", "outcome-unknown"].contains(state.state): return HostCleanupTurnV1(current, nil, false, "host-cleanup-execution-required")
+    val retained_receipt_path = current.capacity.journal.root + "/host-cleanup-receipts-v1/" + sha256_text(operation_id) + ".sdn"
+    if file_exists(retained_receipt_path):
+        val evidence = host_cleanup_evidence_v1(current.capacity.journal.root, retained.operation)
+        if evidence.is_err(): return HostCleanupTurnV1(current, nil, true, evidence.unwrap_err())
+        val receipt = host_cleanup_receipt_decode_v1(evidence.unwrap())
+        if receipt.is_err(): return HostCleanupTurnV1(current, nil, true, receipt.unwrap_err())
+        val settlement = host_capacity_owner_settle_v1(current.capacity, retained.operation)
+        current.capacity = settlement.owner
+        return HostCleanupTurnV1(current, Some(receipt.unwrap()), not settlement.settled, settlement.error)
+    val proof_path = current.capacity.journal.root + "/host-cleanup-intents-v1/" + sha256_text(operation_id) + ".sdn"
+    if file_exists(proof_path):
+        # A retained verified intent permits independent read-only reconciliation
+        # after a lost destroy result. Never blindly repeat a destructive command.
+        val proof_result = host_cleanup_intent_load_v1(current.capacity.journal.root, operation_id)
+        if proof_result.is_err(): return HostCleanupTurnV1(current, nil, true, proof_result.unwrap_err())
+        val proof = proof_result.unwrap()
+        val match_proof = host_cleanup_intent_match_v1(proof, retained.operation, retained.execution.plan, retained.observation.runtime, wait.observation_digest)
+        if match_proof.is_err(): return HostCleanupTurnV1(current, nil, true, match_proof.unwrap_err())
+        val creation = host_execution_intent_load_v1(current.capacity.journal.root, operation_id)
+        if creation.is_err(): return HostCleanupTurnV1(current, nil, true, creation.unwrap_err())
+        val recovered = simple_container_recover_v2(current.container, retained.execution, creation.unwrap())
+        current.container = recovered.owner
+        val absent = simple_container_absence_v2(current.container, retained.execution, retained.observation.runtime)
+        current.container = absent.owner
+        if absent.error != "": return HostCleanupTurnV1(current, nil, true, absent.error)
+        match absent.receipt:
+            case Some(value): return host_cleanup_finish_v1(current, retained, wait, proof, value, "unknown")
+            case nil: return HostCleanupTurnV1(current, nil, true, "host-cleanup-positive-absence-required")
+    if not current.capacity.ledger.continuity_proven: return HostCleanupTurnV1(current, nil, false, "host-reconciliation-required")
+    val initial = host_cleanup_context_v1(context, context, current)
+    if initial.is_err(): return HostCleanupTurnV1(current, nil, false, initial.unwrap_err())
+    # Missing object without a prior verified cleanup intent cannot be adopted
+    # as cleanup evidence. Independent recovery+inspect must show exact terminal.
+    val resolved = host_local_resolve_execution_v2(current, operation_id)
+    current = resolved.local
+    if resolved.error != "": return HostCleanupTurnV1(current, nil, false, resolved.error)
+    val inspected = match resolved.observation:
+        case Some(value): value
+        case nil: return HostCleanupTurnV1(current, nil, false, "host-cleanup-inspection-required")
+    if not ["exited", "stopped"].contains(inspected.phase): return HostCleanupTurnV1(current, nil, false, "host-cleanup-current-terminal-required")
+    val policy_result = local_authority_policy_load_v1(current.root, current.binding.policy_digest)
+    if policy_result.is_err(): return HostCleanupTurnV1(current, nil, false, policy_result.unwrap_err())
+    val policy = policy_result.unwrap()
+    val policy_bytes_result = file_read_regular_no_follow_bounded(current.root + "/authority-policy.sdn", 1048576)
+    if policy_bytes_result.is_err(): return HostCleanupTurnV1(current, nil, false, policy_bytes_result.unwrap_err())
+    val policy_bytes = policy_bytes_result.unwrap()
+    if sha256_text(policy_bytes) != policy.source_digest or policy.source_digest != current.policy.source_digest:
+        return HostCleanupTurnV1(current, nil, false, "host-cleanup-policy-changed")
+    var cleanup = retained.operation
+    cleanup.operation = "host_cleanup_v1"
+    val verified = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, signed, approval, cleanup,
+        context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch, context.session_generation)
+    if verified.is_err(): return HostCleanupTurnV1(current, nil, false, verified.unwrap_err())
+    val grant = verified.unwrap()
+    val fresh = refresh()
+    val fresh_context = host_cleanup_context_v1(context, fresh, current)
+    if fresh_context.is_err(): return HostCleanupTurnV1(current, nil, false, fresh_context.unwrap_err())
+    if approval.expires_at <= fresh.grant_clock: return HostCleanupTurnV1(current, nil, false, "APPROVAL_EXPIRED")
+    val authority_error = distributed_grant_authorize_v2(grant, cleanup, fresh.grant_clock, fresh.policy_revision, fresh.revocation_epoch, fresh.session_generation)
+    if authority_error != "": return HostCleanupTurnV1(current, nil, false, authority_error)
+    val proof = HostCleanupIntentV1(operation: retained.operation, execution: retained.execution.plan, signed: signed, approval: approval,
+        policy_bytes: policy_bytes, policy_digest: policy.source_digest, authorized_unix_ms: fresh.grant_clock,
+        monotonic_ms: fresh.monotonic_ms, policy_revision: fresh.policy_revision, revocation_epoch: fresh.revocation_epoch,
+        session_generation: fresh.session_generation, wait_observation_digest: wait.observation_digest, runtime_native_id: retained.observation.runtime.native_id)
+    val encoded = host_cleanup_intent_encode_v1(proof)
+    if encoded.is_err(): return HostCleanupTurnV1(current, nil, false, encoded.unwrap_err())
+    val published = host_cleanup_publish_v1(current.capacity.journal.root, "host-cleanup-intents-v1", operation_id, encoded.unwrap())
+    if published.is_err(): return HostCleanupTurnV1(current, nil, true, published.unwrap_err())
+    val final_context = refresh()
+    val final_fresh = host_cleanup_context_v1(fresh, final_context, current)
+    if final_fresh.is_err(): return HostCleanupTurnV1(current, nil, true, final_fresh.unwrap_err())
+    if approval.expires_at <= final_context.grant_clock: return HostCleanupTurnV1(current, nil, true, "APPROVAL_EXPIRED")
+    val final_error = distributed_grant_authorize_v2(grant, cleanup, final_context.grant_clock, final_context.policy_revision, final_context.revocation_epoch, final_context.session_generation)
+    if final_error != "": return HostCleanupTurnV1(current, nil, true, final_error)
+    # Shared verifier checks BOTH role keys and requires grant.expires_at <=
+    # each key.expires_at (distributed_authority_key_check_v2). Thus this final
+    # native deadline also bounds issuer/approver key validity without lookup.
+    val expiry = if grant.expires_at < approval.expires_at: grant.expires_at else: approval.expires_at
+    val deadline = container_control_deadline_v1(retained.execution.plan.request_digest, operation_id, ["destroy"], expiry)
+    if deadline.is_err(): return HostCleanupTurnV1(current, nil, true, deadline.unwrap_err())
+    val destroyed = simple_container_control_v2(current.container, "destroy", retained.execution, deadline.unwrap())
+    current.container = destroyed.owner
+    # Even a lost/failed CLI result may have destroyed the object. Only an
+    # independent exact absence proof can settle; failed != not-run.
+    val absent = simple_container_absence_v2(current.container, retained.execution, retained.observation.runtime)
+    current.container = absent.owner
+    if absent.error != "": return HostCleanupTurnV1(current, nil, true, absent.error)
+    val status = if destroyed.operation.status == RUNTIME_STATUS_OK: "ok" else: "unknown"
+    match absent.receipt:
+        case Some(value): host_cleanup_finish_v1(current, retained, wait, proof, value, status)
+        case nil: HostCleanupTurnV1(current, nil, true, "host-cleanup-positive-absence-required")

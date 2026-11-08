@@ -1,0 +1,34 @@
+# Nonserialized projection of the host's completed signed installation loader.
+# Matching these bytes proves integrity, not signature verification, completed
+# journal admission or native capability. There is deliberately no decoder.
+use std.common.contracts.orchestration.host_exec_control_installation_v3.{HostExecControlInstallationIntentV3,
+    host_exec_control_installation_intent_digest_v3}
+use std.common.contracts.container.exec_admission_v3.{ContainerExecAdmissionV3,
+    container_exec_admission_binding_match_v3}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+
+pub struct ContainerExecInstalledV3:
+    intent: HostExecControlInstallationIntentV3
+    artifact_digest: text
+
+pub fn container_exec_installed_match_v3(value: ContainerExecInstalledV3,
+        admission: ContainerExecAdmissionV3) -> Result<bool, text>:
+    val bound = container_exec_admission_binding_match_v3(admission, admission.request,
+        admission.provider_identity_digest)?
+    # The canonical installation encoder checks the original policy bytes/hash,
+    # enrollment binding, baseline pin and complete scope before hashing.
+    val digest = host_exec_control_installation_intent_digest_v3(value.intent)?
+    if value.artifact_digest != digest:
+        return Err("container-exec-installed-artifact-mismatch")
+    val parent = admission.intent.request.parent
+    val scope = ContainerHostScopeV2(physical_host_id: parent.physical_host_id,
+        service_scope_id: parent.service_scope_id, boot_id: parent.boot_id,
+        provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
+        continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
+    if container_host_scope_bytes_v2(value.intent.scope)? != container_host_scope_bytes_v2(scope)?:
+        return Err("container-exec-installed-scope-mismatch")
+    if value.intent.provider_identity_digest != admission.intent.parent_provider_identity_digest:
+        return Err("container-exec-installed-parent-provider-mismatch")
+    # The composite control pin is independently observed by the provider.
+    # It must never replace this original parent CLI baseline identity.
+    Ok(true)
