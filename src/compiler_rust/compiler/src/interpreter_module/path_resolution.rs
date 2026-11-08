@@ -374,7 +374,7 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     let result = loop {
         if p_is_dir(&dir.join("src")) || p_is_file(&dir.join("Cargo.toml")) {
-            break Some(dir.clone());
+            break Some(workspace_root_enclosing_src(&dir).unwrap_or(dir));
         }
         if !dir.pop() {
             break None;
@@ -385,6 +385,25 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
         cache.borrow_mut().insert(start.to_path_buf(), result.clone());
     });
     result
+}
+
+/// A `src/`-bearing directory that itself lives under the enclosing
+/// workspace's `src/` tree (e.g. `src/lib/nogc_sync_mut/src/`) is a nested
+/// library package, not a project; its workspace is the project root. Mirrors
+/// `module_resolver::types::workspace_root_enclosing_src` (same bug, HIR lane).
+/// Cargo crates are real projects and are kept.
+/// See doc/08_tracking/bug/lib_entry_file_cannot_resolve_app_prefix_imports_2026-08-17.md
+fn workspace_root_enclosing_src(nearest: &Path) -> Option<PathBuf> {
+    if p_is_file(&nearest.join("Cargo.toml")) {
+        return None;
+    }
+    let boundary = find_workspace_boundary(nearest.parent()?)?;
+    let ws_src = boundary.join("src");
+    if p_is_dir(&ws_src) && nearest.starts_with(&ws_src) {
+        Some(boundary)
+    } else {
+        None
+    }
 }
 
 /// Outermost directory a module search is allowed to climb to.
