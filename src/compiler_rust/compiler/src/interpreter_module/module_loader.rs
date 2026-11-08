@@ -485,17 +485,24 @@ fn provided_names_registry() -> &'static std::sync::Mutex<HashMap<std::path::Pat
     REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-fn private_fns_by_owner() -> &'static std::sync::Mutex<HashMap<Arc<str>, Arc<std::collections::HashSet<String>>>> {
-    static REG: OnceLock<std::sync::Mutex<HashMap<Arc<str>, Arc<std::collections::HashSet<String>>>>> = OnceLock::new();
-    REG.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+thread_local! {
+    /// Private top-level fn names per owning module. Thread-local (same scope as
+    /// `FUNCTION_MODULE_OWNER` / `CURRENT_EXEC_MODULE`, which the call-time gate
+    /// reads alongside it), so the per-call check takes NO lock.
+    static PRIVATE_FNS_BY_OWNER: std::cell::RefCell<HashMap<Arc<str>, Arc<std::collections::HashSet<String>>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn register_private_fns(owner: Arc<str>, names: Arc<std::collections::HashSet<String>>) {
+    PRIVATE_FNS_BY_OWNER.with(|reg| {
+        reg.borrow_mut().insert(owner, names);
+    });
 }
 
 fn record_provided_names(module_path: &Path, provided: ProvidedNames) {
     if let Some(p) = provided.as_ref() {
         if !p.private_fns.is_empty() {
-            if let Ok(mut reg) = private_fns_by_owner().lock() {
-                reg.insert(super::module_cache::module_owner_key(module_path), Arc::new(p.private_fns.clone()));
-            }
+            register_private_fns(super::module_cache::module_owner_key(module_path), Arc::new(p.private_fns.clone()));
         }
     }
     if let Ok(mut registry) = provided_names_registry().lock() {
@@ -2802,11 +2809,7 @@ pub(crate) fn check_private_call_visibility(
     if owner == current || &**current == "<entry>" {
         return Ok(());
     }
-    let is_private = private_fns_by_owner()
-        .lock()
-        .ok()
-        .and_then(|reg| reg.get(owner).map(|s| s.contains(name)))
-        .unwrap_or(false);
+    let is_private = PRIVATE_FNS_BY_OWNER.with(|reg| reg.borrow().get(owner).is_some_and(|s| s.contains(name)));
     if !is_private {
         return Ok(());
     }
@@ -2828,10 +2831,7 @@ mod private_call_visibility_tests {
 
     fn register(owner: &str, name: &str) -> Arc<str> {
         let owner: Arc<str> = Arc::from(owner);
-        private_fns_by_owner()
-            .lock()
-            .unwrap()
-            .insert(owner.clone(), Arc::new([name.to_string()].into_iter().collect()));
+        register_private_fns(owner.clone(), Arc::new([name.to_string()].into_iter().collect()));
         owner
     }
 
