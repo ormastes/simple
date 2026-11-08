@@ -2,7 +2,7 @@
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_support.{MirBinOp, MirOperand, MirOperandKind}
 use compiler.mir.mir_instruction_graph.{MirInst}
-use compiler.mir.mir_types.{MirConstValue, MirTypeKind}
+use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind}
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use std.io_runtime.{env_get_nullable}
 use compiler.semantics.match_exhaustiveness.{match_coverage_profile_is_critical}
@@ -204,6 +204,34 @@ fn hir_expr_static_unsigned(e: HirExpr) -> bool:
             not signed
         case _:
             false
+
+fn mir_narrow_unsigned_integer_common_type(left: MirType, right: MirType) -> MirType?:
+    # Every narrow unsigned value fits in i64, as does every signed integer
+    # type here. Promote without truncating the other operand. U64 is kept
+    # unsigned only when the other operand is proven narrow unsigned too.
+    var left_narrow_unsigned = false
+    var right_narrow_unsigned = false
+    var left_integer = false
+    var right_integer = false
+    match left.kind:
+        case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
+            left_narrow_unsigned = true
+            left_integer = true
+        case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U64:
+            left_integer = true
+        case _: ()
+    match right.kind:
+        case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
+            right_narrow_unsigned = true
+            right_integer = true
+        case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U64:
+            right_integer = true
+        case _: ()
+    if not left_integer or not right_integer: return nil
+    if not left_narrow_unsigned and not right_narrow_unsigned: return nil
+    if left.kind == MirTypeKind.U64 or right.kind == MirTypeKind.U64:
+        return Some(MirType(kind: MirTypeKind.U64))
+    Some(MirType.i64())
 
 fn hir_type_has_unresolved_type_param(ty: HirType) -> bool:
     """True when `ty` still carries a bare, uninstantiated `TypeParam`
@@ -5758,9 +5786,10 @@ impl MirLowering:
                         case _: ()
                 # Same-width unsigned + - * wraps at the operand width.
                 # Preserve that width in MIR before either native backend
-                # widens operands to the destination. Mixed widths, i64
-                # literals and signed arithmetic keep their existing policy.
+                # widens operands to the destination. Other result inference
+                # is retained; mixed integer consumers are promoted below.
                 # Bug: interp_uint_mixed_int_arith_diverges_from_jit_2026-11-06
+                var same_unsigned_arithmetic = false
                 if self.current_gpu_kernel_target == "":
                     match op:
                         case Add | Sub | Mul:
@@ -5768,6 +5797,7 @@ impl MirLowering:
                                 case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
                                     if left_binop_type.kind == right_binop_type.kind:
                                         result_type = left_binop_type
+                                        same_unsigned_arithmetic = true
                                 case _: ()
                         case _: ()
                 var result_f64 = false
@@ -5845,7 +5875,19 @@ impl MirLowering:
                         if right_int_unsigned:
                             right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType(kind: MirTypeKind.U64))
                         right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType.f64())
-                if comparison and left_narrow_int and right_i64:
+                val integer_numeric_op = match op:
+                    case Add | Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | Shl | Shr | Eq | NotEq | Lt | LtEq | Gt | GtEq: true
+                    case _: false
+                val integer_common_type = if integer_numeric_op and not same_unsigned_arithmetic and self.current_gpu_kernel_target == "" and not self.is_runtime_value_local(left_binop.id) and not self.is_runtime_value_local(right_binop.id):
+                    mir_narrow_unsigned_integer_common_type(left_binop_type, right_binop_type)
+                else: nil
+                if val widened_integer_type = integer_common_type:
+                    # Preserve negative signed operands and out-of-range bounds
+                    # in every consumer, including division/remainder and
+                    # comparisons; never truncate the signed peer to u8.
+                    left_binop = b.emit_cast(mir_operand_copy(left_binop), widened_integer_type)
+                    right_binop = b.emit_cast(mir_operand_copy(right_binop), widened_integer_type)
+                elif comparison and left_narrow_int and right_i64:
                     right_binop = b.emit_cast(mir_operand_copy(right_binop), left_binop_type)
                 elif comparison and left_i64 and right_narrow_int:
                     left_binop = b.emit_cast(mir_operand_copy(left_binop), right_binop_type)
