@@ -5,7 +5,12 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
-**Status:** OPEN. Found while re-baselining `test/03_system/**` genuine failures.
+**Status:** CLOSED (2026-11-08 revalidated). The pure-Simple matcher now
+compares with `==` directly (`spec.spl:1451-1459`), and the seed assertion
+operand path converts an existence check to its presence bool instead of
+comparing a nil payload to false (`interpreter_call/bdd.rs:809-834`). Thus the
+reported `expect(d.get("b").?).to_equal(false)` path is covered by current
+source; the mirror `expect(1).to_equal(true)` remains a failure as required.
 
 ## Symptom
 
