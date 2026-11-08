@@ -39,6 +39,7 @@
 # ONLY after reading the diff.
 #
 # Usage:
+#   check-bare-field-references.shs --selftest      shell admission controls only
 #   check-bare-field-references.shs                 static scan + behavioural specs
 #   check-bare-field-references.shs --static-only   static scan only (fast pre-push lane)
 #   check-bare-field-references.shs --generate-baseline
@@ -49,6 +50,113 @@
 #   ERROR -- nothing was checked / control dead   exit 2
 
 set -u
+
+# Accept terminal evidence from exactly the requested single-file run. A clean
+# counter substring alone is insufficient: ERROR and zero-example verdicts also
+# carry failed=0. This helper is shared by real execution and shell selftests.
+bare_field_spec_verdict_ok() {
+    [ "$1" -eq 0 ] || return 1
+    awk -v expected="$3" '
+        /^SPEC FILE VERDICT:/ {
+            verdicts++
+            if ($1 != "SPEC" || $2 != "FILE" || $3 != "VERDICT:" || $4 != expected) bad=1
+            for (i=5; i<=NF; i++) {
+                n=split($i, parts, "=")
+                key=parts[1]; value=parts[2]
+                if (key == "outcome" || key == "executed" || key == "passed" || key == "failed" || key == "dropped") {
+                    if (seen[key]++ || n != 2) bad=1
+                    values[key]=value
+                }
+                if (key == "process_error" || key == "timeout" || key == "unrun" || key == "in_development" || key == "skipped") {
+                    if (n != 2 || value !~ /^[0-9]+$/ || value+0 != 0) bad=1
+                }
+            }
+        }
+        END {
+            if (verdicts != 1 || bad || values["outcome"] != "OK") exit 1
+            split("executed passed failed dropped", keys, " ")
+            for (i=1;i<=4;i++) if (!seen[keys[i]] || values[keys[i]] !~ /^[0-9]+$/) exit 1
+            if (values["executed"]+0 <= 0 || values["passed"]+0 != values["executed"]+0 || values["failed"]+0 != 0 || values["dropped"]+0 != 0) exit 1
+        }
+    ' "$2"
+}
+
+bare_field_unique_specs() {
+    awk 'NF && !seen[$0]++'
+}
+
+# Four static/control checks plus at least two DISTINCT behavioral legs.
+bare_field_check_floor_ok() {
+    [ "$1" -ge 6 ]
+}
+
+bare_field_admission_selftest() {
+    st_dir=$(mktemp -d) || return 2
+    st_failed=0
+    st_count=0
+    st_good='SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=3 executed=3 passed=3 failed=0 skipped=0 dropped=0'
+    # Each row tests the production helper; shell fixtures qualify admission,
+    # not a compiler, product suite, or the remaining bare-field migration.
+    while IFS='|' read -r st_name st_want st_status st_line; do
+        [ -n "$st_name" ] || continue
+        printf '%s\n' "$st_line" > "$st_dir/output"
+        if bare_field_spec_verdict_ok "$st_status" "$st_dir/output" test/example_spec.spl; then st_got=0; else st_got=1; fi
+        st_count=$((st_count + 1))
+        if [ "$st_got" -ne "$st_want" ]; then
+            echo "FAIL — admission fixture $st_name wanted=$st_want got=$st_got"
+            st_failed=$((st_failed + 1))
+        fi
+    done <<EOF
+success|0|0|$st_good
+runner-error|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=3 executed=3 passed=3 failed=0 dropped=0
+zero-examples|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=0 executed=0 passed=0 failed=0 dropped=0
+aggregate-success|0|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=3 executed=3 passed=3 failed=0 in_development=0 dropped=0
+nonzero-exit|1|7|$st_good
+failed-examples|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=3 executed=3 passed=2 failed=1 dropped=0
+dropped-examples|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=4 executed=3 passed=3 failed=0 dropped=1
+wrong-file|1|0|SPEC FILE VERDICT: test/other_spec.spl outcome=OK declared>=3 executed=3 passed=3 failed=0 dropped=0
+duplicate-counter|1|0|$st_good failed=1
+malformed-counter|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK executed=3 passed=3 failed=0oops dropped=0
+mismatched-passed|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK executed=3 passed=2 failed=0 dropped=0
+missing-counter|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK executed=3 passed=3 failed=0
+process-error|1|0|$st_good process_error=1
+no-verdict|1|0|Results: 3 total, 3 passed, 0 failed
+missing-outcome|1|0|SPEC FILE VERDICT: test/example_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
+EOF
+    printf '%s\n%s\n' "$st_good" "$st_good" > "$st_dir/output"
+    st_count=$((st_count + 1))
+    if bare_field_spec_verdict_ok 0 "$st_dir/output" test/example_spec.spl; then
+        echo 'FAIL — duplicate verdicts admitted'
+        st_failed=$((st_failed + 1))
+    fi
+    printf '%s\n' test/a_spec.spl test/a_spec.spl test/b_spec.spl | bare_field_unique_specs > "$st_dir/unique"
+    printf '%s\n' test/a_spec.spl test/b_spec.spl > "$st_dir/expected"
+    st_count=$((st_count + 1))
+    if ! cmp -s "$st_dir/unique" "$st_dir/expected"; then
+        echo 'FAIL — duplicate behavioral legs counted'
+        st_failed=$((st_failed + 1))
+    fi
+    st_count=$((st_count + 2))
+    if bare_field_check_floor_ok 5; then
+        echo 'FAIL — one distinct behavioral leg satisfied the six-check floor'
+        st_failed=$((st_failed + 1))
+    fi
+    if ! bare_field_check_floor_ok 6; then
+        echo 'FAIL — two distinct behavioral legs did not satisfy the six-check floor'
+        st_failed=$((st_failed + 1))
+    fi
+    rm -rf "$st_dir"
+    if [ "$st_failed" -ne 0 ]; then
+        echo "FAIL — $st_count shell admission fixtures checked, $st_failed failed"
+        return 1
+    fi
+    echo "PASS — $st_count shell admission fixtures checked (no compiler or product qualification)"
+}
+
+if [ "${1:-}" = --selftest ]; then
+    bare_field_admission_selftest
+    exit $?
+fi
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT" || { echo "ERROR — nothing was checked: cannot enter repo root"; exit 2; }
@@ -357,39 +465,25 @@ fi
 # `SPEC FILE VERDICT` line within 280s) and so could not be proven green before
 # being wired in. Wiring an unmeasurable spec would make full mode ERROR
 # permanently. Add them once they produce a verdict.
-for spec in \
-    test/01_unit/os/riscv_dual_arch_spec.spl \
-    test/01_unit/os/riscv_dual_arch_spec.spl
-do
+# Keep distinct behavioral legs: repeating a suite must not satisfy the
+# minimum-check admission floor. Only one suite is qualified here today; full
+# mode remains fail-closed until another distinct suite is actually admitted.
+printf '%s\n' test/01_unit/os/riscv_dual_arch_spec.spl | bare_field_unique_specs > "$TMPD/behavioral_specs"
+while IFS= read -r spec; do
     [ -f "$spec" ] || continue
-    # Back-to-back spec runs contend on the shared light test daemon; a stale lock
-    # makes the NEXT spec exit with no verdict line at all. Reset between legs.
-    rm -rf .build/test_daemon_light 2>/dev/null
-    out=$("$SIMPLE" test "$spec" 2>&1)
-    verdict=$(printf '%s' "$out" | grep 'SPEC FILE VERDICT' | tail -1)
-    if [ -z "$verdict" ]; then
-        rm -rf .build/test_daemon_light 2>/dev/null
-        out=$("$SIMPLE" test "$spec" 2>&1)
-        verdict=$(printf '%s' "$out" | grep 'SPEC FILE VERDICT' | tail -1)
-    fi
-    if [ -z "$verdict" ]; then
-        echo "ERROR — nothing was checked: no verdict line from $spec (ran nothing?)"
-        exit 2
-    fi
-    echo "$verdict"
-    if printf '%s' "$out" | grep -q "semantic: variable .* $MARKER"; then
-        printf '%s\n' "$out" | grep "semantic: variable .* $MARKER" | sort -u
-        echo "FAIL — bare field reference still reachable from $spec"
+    # The direct lane avoids shared daemon state. Never remove another
+    # session's daemon directory or retry an unchanged non-verdict.
+    "$SIMPLE" test "$spec" --no-session-daemon --sequential > "$TMPD/spec_output" 2>&1
+    spec_status=$?
+    cat "$TMPD/spec_output"
+    if ! bare_field_spec_verdict_ok "$spec_status" "$TMPD/spec_output" "$spec"; then
+        echo "FAIL — $spec lacks a successful nonempty terminal verdict (process exit $spec_status)"
         exit 1
     fi
-    case "$verdict" in
-        *"failed=0"*) ;;
-        *) echo "FAIL — $spec is not fully green"; exit 1 ;;
-    esac
     checks=$((checks + 1))
-done
+done < "$TMPD/behavioral_specs"
 
-if [ "$checks" -lt 6 ]; then
+if ! bare_field_check_floor_ok "$checks"; then
     echo "ERROR — nothing was checked: only $checks check(s) ran"
     exit 2
 fi
