@@ -97,12 +97,12 @@ operators, and negative wider/signed/nonarithmetic controls. Native regression:
 operation to i64 before returning and checks nine overflow results, a mixed-width control, comparison bounds and
 negative peers, chained wrapping, and implicit return/let/call/field/index/text
 consumers, signed call controls, negative-peer division/remainder and branch
-joins, global stores and unary/match consumers and signed i64 controls and word-range bounds (43 checks). Both are **UNRUN**, because no admitted full test CLI is
+joins, global stores and unary/match consumers and signed i64 controls and word-range bounds (42 checks). Both are **UNRUN**, because no admitted full test CLI is
 available and disk capacity precludes a new build. Existing green evidence is
 not rerun or borrowed as native qualification of this patch.
 
 Required admission: current-source core/compiler/lib/MCP/LSP checks, executable
-MIR spec, LLVM and Cranelift fixture compilation/execution with exact43-check
+MIR spec, LLVM and Cranelift fixture compilation/execution with exact42-check
 stdout, the same fixture through the admitted interpreter with an exact
 result/output differential, and an intentional wrong-expectation negative
 control. Retain source,
@@ -146,4 +146,9 @@ range loops widen proven narrow start/end values (and stepped-range operands)
 without changing narrow loop-carrier policy. The generic bounds-check intrinsic
 now preserves source signedness. Actual MIR match and LLVM bounds-intrinsic
 regressions cover these bypasses; a plain range-bound case is included in the
-43-check native/interpreter fixture. All remain UNRUN.
+42-check native/interpreter fixture. All remain UNRUN.
+
+The positive fixture deliberately excludes implicit integer-to-f64 call
+coercion. Cranelift's existing `cl_call_abi_mismatch` requires matching register
+classes and rejects that raw argument shape unless conversion is explicit.
+This repair does not change the floating call ABI policy.
