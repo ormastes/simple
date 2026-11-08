@@ -2930,6 +2930,7 @@ export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
 export var_no_init_default_expr, fixed_array_no_init_default_expr
 export struct_zero_expr_v1
 export set_noinit_robust_mode_v1, noinit_robust_mode_v1
+export set_noinit_kernel_module_v1
 export parse_if_stmt, parse_for_stmt, parse_while_stmt
 export parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow
 export parse_unsafe_block_expr_if_present
@@ -2946,6 +2947,15 @@ fn set_noinit_robust_mode_v1(on: bool):
 fn noinit_robust_mode_v1() -> bool:
     noinit_robust_mode_state_v1
 
+# Kernel / baremetal / noalloc modules keep the nil (zero BSS) global for a
+# no-initializer named type: a struct-literal initializer could need runtime
+# init or the heap before the allocator exists (src/os/kernel/interrupts/gdt.spl).
+# Gap recorded in noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09.
+var noinit_kernel_module_state_v1: bool = false
+
+fn set_noinit_kernel_module_v1(on: bool):
+    noinit_kernel_module_state_v1 = on
+
 # Zero value of a named struct declared EARLIER in the module: a struct
 # literal whose fields are the field default when present, else the zero of
 # the field type (scalars 0/false/0.0, nested earlier struct recursively,
@@ -2955,6 +2965,8 @@ fn noinit_robust_mode_v1() -> bool:
 fn struct_zero_expr_v1(type_tag: i64, depth: i64) -> i64:
     if type_tag < TYPE_NAMED_BASE:
         return -1
+    if noinit_kernel_module_state_v1:
+        return -2
     val sname = named_type_name(type_tag - TYPE_NAMED_BASE)
     if depth > 8:
         parser_error("no safe zero value for struct {sname}: recursive field nesting; add an explicit initializer")

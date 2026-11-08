@@ -6,7 +6,7 @@ use std.spec
 use compiler.core.parser.{parse_module_silent_checked}
 use compiler.core.ast.{module_decl_count_get, module_decl_at, decl_get_name, decl_get_body}
 use compiler.core.ast_expr.{expr_get_tag, expr_get_args, EXPR_INT_LIT, EXPR_BOOL_LIT, EXPR_STRUCT_LIT, EXPR_ARRAY_LIT, EXPR_NIL_LIT}
-use compiler.frontend.core.parser_stmts.{set_noinit_robust_mode_v1}
+use compiler.frontend.core.parser_stmts.{set_noinit_robust_mode_v1, set_noinit_kernel_module_v1}
 
 fn noinit_body_tag(name: text) -> i64:
     var i = 0
@@ -71,3 +71,15 @@ describe "zero-filled struct array elements do not alias":
         expect(elems.len()).to_equal(3)
         expect(elems[0] != elems[1]).to_equal(true)
         expect(elems[1] != elems[2]).to_equal(true)
+
+describe "module var without initializer in kernel/noalloc modules":
+    it "keeps nil (zero BSS) for a struct var and struct array; board-runnable gdt.spl shape":
+        set_noinit_kernel_module_v1(true)
+        val src = "struct TssEntry:\n    a: i64\nvar tss: TssEntry\nvar tbl: [TssEntry; 2]\n"
+        val failed = parse_module_silent_checked(src, "k1.spl")
+        val tss_tag = noinit_body_tag("tss")
+        val tbl_arg = noinit_body_first_arg_tag("tbl")
+        set_noinit_kernel_module_v1(false)
+        expect(failed).to_equal(false)
+        expect(tss_tag != EXPR_STRUCT_LIT).to_equal(true)
+        expect(tbl_arg != EXPR_STRUCT_LIT).to_equal(true)

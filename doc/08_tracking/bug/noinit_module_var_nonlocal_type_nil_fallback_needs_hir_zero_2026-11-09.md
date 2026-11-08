@@ -15,3 +15,10 @@ synthesize the zero value (recursive field zero, error naming the field when a
 field has no safe zero) for any initializer-less module var, then drop the
 parser nil fallback in `struct_zero_expr_v1` callers (parser_stmts.spl,
 parser_decls_use.spl).
+
+## 2026-11-09 kernel/noalloc gap (PR #7871 review)
+Zero struct-literal init is disabled for sources whose path contains `/os/`, `noalloc` or `baremetal`
+(driver `set_noinit_kernel_module_v1`): those modules keep the nil zero-BSS global, e.g.
+`src/os/kernel/interrupts/gdt.spl` `var tss: TssEntry`. A struct literal there could need runtime
+init/heap before the allocator exists, and no native objdump/boot gate could be run on this host to
+show a static-zero landing. Open: prove static-zero emission (or an HIR zero pass) then lift the gate.

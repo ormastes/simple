@@ -5,6 +5,7 @@ use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
 use super::helpers::{
+    string_cp_len_ref,
     adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, declare_named_bytes,
     get_vreg_or_default, inline_runtime_array_len_value, inline_runtime_len_value,
 };
@@ -85,7 +86,8 @@ fn call_len_method<M: Module>(
         return inline_runtime_array_len_value(builder, receiver, ctx.fam_arrays);
     }
     if func_name == "rt_len" {
-        return inline_runtime_len_value(builder, receiver, ctx.baremetal, ctx.fam_arrays);
+        let cp_len = string_cp_len_ref(ctx, builder);
+        return inline_runtime_len_value(builder, receiver, ctx.baremetal, ctx.fam_arrays, cp_len);
     }
     if let Some(&len_id) = ctx.runtime_funcs.get(func_name) {
         let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);
@@ -390,7 +392,8 @@ pub(crate) fn compile_builtin_method<M: Module>(
             Some(receiver_val)
         }
         ("String", "len") | ("string", "len") | ("String", "length") | ("string", "length") => {
-            Some(call_len_method(ctx, builder, "rt_string_len", receiver_val))
+            // Code points (ADR-005 item 5); `byte_len` is the rt_string_len route.
+            Some(call_len_method(ctx, builder, "rt_string_char_count", receiver_val))
         }
         ("String", "concat") | ("string", "concat") => {
             let arg_val = ctx.get_vreg(&args[0])?;

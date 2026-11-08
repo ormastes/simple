@@ -1483,6 +1483,11 @@ int64_t rt_host_gpu_queue_last_payload_text(void) {
  * session (BSM T1) rather than its module scope: a module-scope end skips it,
  * rt_session_heap_end frees it. Same reserved word, layout unchanged (I6). */
 #define RT_CORE_STRING_FLAG_SESSION 4u
+/* RT_CORE_STRING_FLAG_ASCII: set once a scan proves the bytes are ASCII (heap
+ * text is immutable, so it never goes stale); keeps len()/slice/find on ASCII
+ * text O(1) after the first call (ADR-005 item 5 code-point unit). Twin of the
+ * Rust runtime's RT_STRING_FLAG_ASCII. */
+#define RT_CORE_STRING_FLAG_ASCII 8u
 
 typedef struct RtCoreString {
     uint32_t kind;
@@ -4517,6 +4522,80 @@ int64_t rt_string_len(int64_t string) {
     return (int64_t)strlen((const char*)(uintptr_t)string);
 }
 
+/* ADR-005 item 5: the user-facing text unit is the CODE POINT. rt_string_len
+ * above stays the BYTE primitive (byte_len(), the (data, len) text extern ABI,
+ * every internal caller); rt_string_char_count / rt_len's text arm / rt_slice
+ * / the find family route through these helpers. Twins of the Rust runtime's
+ * text_cp_len_bytes / text_byte_to_cp / text_cp_to_byte (collections.rs).
+ * ASCII fast path: one word-at-a-time high-bit scan, then byte == code point. */
+static uint64_t rt_utf8_width(const char* data, uint64_t i, uint64_t len); /* defined below */
+
+static int spl_text_bytes_ascii(const uint8_t* d, uint64_t len) {
+    uint64_t i = 0;
+    for (; i + 8 <= len; i += 8) {
+        uint64_t w;
+        memcpy(&w, d + i, 8);
+        if (w & 0x8080808080808080ULL) return 0;
+    }
+    for (; i < len; i++) {
+        if (d[i] & 0x80) return 0;
+    }
+    return 1;
+}
+
+static uint64_t spl_text_cp_len_bytes(const uint8_t* d, uint64_t len) {
+    if (spl_text_bytes_ascii(d, len)) return len;
+    uint64_t n = 0;
+    for (uint64_t i = 0; i < len; i++) {
+        if ((d[i] & 0xC0) != 0x80) n++;
+    }
+    return n;
+}
+
+/* Code-point index of byte offset `byte` (a char boundary). */
+static int64_t spl_text_byte_to_cp(const uint8_t* d, uint64_t len, uint64_t byte) {
+    if (byte > len) byte = len;
+    return (int64_t)spl_text_cp_len_bytes(d, byte);
+}
+
+/* Byte offset of code-point index `cp`; `len` past the end. */
+static uint64_t spl_text_cp_to_byte(const uint8_t* d, uint64_t len, uint64_t cp) {
+    if (spl_text_bytes_ascii(d, len)) return cp < len ? cp : len;
+    uint64_t seen = 0;
+    for (uint64_t i = 0; i < len; i++) {
+        if ((d[i] & 0xC0) != 0x80) {
+            if (seen == cp) return i;
+            seen++;
+        }
+    }
+    return len;
+}
+
+/* The `reserved` flag word is shared by every thread holding the string, so
+ * the memo bit is read and set atomically (lockless; a plain `|=` is a
+ * read-modify-write that can drop a bit set concurrently). */
+static int spl_core_string_is_ascii(RtCoreString* s) {
+    if (__atomic_load_n(&s->reserved, __ATOMIC_RELAXED) & RT_CORE_STRING_FLAG_ASCII) return 1;
+    if (!spl_text_bytes_ascii((const uint8_t*)s->data, s->len)) return 0;
+    __atomic_fetch_or(&s->reserved, RT_CORE_STRING_FLAG_ASCII, __ATOMIC_RELAXED);
+    return 1;
+}
+
+static int64_t spl_core_string_cp_len(RtCoreString* s) {
+    if (spl_core_string_is_ascii(s)) return (int64_t)s->len;
+    return (int64_t)spl_text_cp_len_bytes((const uint8_t*)s->data, s->len);
+}
+
+static int64_t spl_core_string_byte_to_cp(RtCoreString* s, uint64_t byte) {
+    if (spl_core_string_is_ascii(s)) return (int64_t)(byte > s->len ? s->len : byte);
+    return spl_text_byte_to_cp((const uint8_t*)s->data, s->len, byte);
+}
+
+static uint64_t spl_core_string_cp_to_byte(RtCoreString* s, uint64_t cp) {
+    if (spl_core_string_is_ascii(s)) return cp < s->len ? cp : s->len;
+    return spl_text_cp_to_byte((const uint8_t*)s->data, s->len, cp);
+}
+
 /* The raw-pointer fallback MUST mirror rt_string_len's, with the identical
  * `>= 0x10000` guard. The compiler lowers a `text` extern argument to the PAIR
  * (rt_string_data(v), rt_string_len(v)) -- see text_extern_abi.spl and the
@@ -4916,7 +4995,9 @@ int64_t rt_tagged_add(int64_t left, int64_t right) {
 
 int64_t rt_len(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (s) return (int64_t)s->len;
+    /* User-facing `.len()` on text counts code points (ADR-005 item 5); the
+     * byte length is rt_string_len / byte_len(). */
+    if (s) return spl_core_string_cp_len(s);
     RtCoreArray* a = rt_core_as_array(value);
     return a ? a->len : 0;
 }
@@ -5846,7 +5927,13 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
 
     RtCoreString* s = rt_core_as_string(value);
     if (!s) return rt_core_nil();
-    int64_t len = (int64_t)s->len;
+    /* Indices are CODE POINTS (ADR-005 item 5), the unit len(), s[i] and
+     * index_of use. ASCII text keeps byte == code point (one word-wise scan),
+     * so the raw copy below is unchanged for it. */
+    const uint8_t* sd = (const uint8_t*)s->data;
+    int ascii = spl_core_string_is_ascii(s);
+    int64_t byte_len = (int64_t)s->len;
+    int64_t len = ascii ? byte_len : (int64_t)spl_text_cp_len_bytes(sd, s->len);
     int64_t begin = start;
     int64_t finish = end;
     int64_t stride = step;
@@ -5857,21 +5944,48 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
     if (begin > len) begin = len;
     if (finish > len) finish = len;
     if (stride != 1) {
+        /* Walk code points from `begin`, taking every `stride`-th one. */
         uint64_t out_len = 0;
-        for (int64_t i = begin; i < finish; i += stride) out_len++;
+        uint64_t cp_count = 0;
+        for (int64_t i = begin; i < finish; i += stride) cp_count++;
+        uint64_t b = ascii ? (uint64_t)begin : spl_text_cp_to_byte(sd, s->len, (uint64_t)begin);
+        uint64_t bend = ascii ? (uint64_t)finish : spl_text_cp_to_byte(sd, s->len, (uint64_t)finish);
+        if (ascii) {
+            out_len = cp_count;
+        } else {
+            uint64_t k = 0;
+            for (uint64_t i = b; i < bend; k++) {
+                uint64_t w = rt_utf8_width(s->data, i, s->len);
+                if (k % (uint64_t)stride == 0) out_len += w;
+                i += w;
+            }
+        }
         RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)out_len + 1);
         if (!out) return rt_core_nil();
         out->kind = RT_VALUE_HEAP_STRING;
         out->reserved = 0;
         out->len = out_len;
         uint64_t out_i = 0;
-        for (int64_t i = begin; i < finish; i += stride) out->data[out_i++] = s->data[i];
+        uint64_t k = 0;
+        for (uint64_t i = b; i < bend; k++) {
+            uint64_t w = ascii ? 1 : rt_utf8_width(s->data, i, s->len);
+            if (k % (uint64_t)stride == 0) {
+                memcpy(out->data + out_i, s->data + i, (size_t)w);
+                out_i += w;
+            }
+            i += w;
+        }
         out->data[out_len] = '\0';
         if (!rt_core_register_string(out)) {
             free(out);
             return rt_core_nil();
         }
         return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    }
+    if (!ascii) {
+        begin = (int64_t)spl_text_cp_to_byte(sd, s->len, (uint64_t)begin);
+        finish = (int64_t)spl_text_cp_to_byte(sd, s->len, (uint64_t)finish);
+        len = byte_len;
     }
     /* UTF-8 slice audit, stage 1 (COUNTING ONLY, default off). This range is
      * copied RAW, so a boundary inside a multi-byte codepoint stores invalid
@@ -5943,8 +6057,11 @@ int64_t rt_string_find(int64_t value, int64_t needle) {
     if (!s || !n) return -1;
     if (n->len == 0) return 0;
     if (n->len > s->len) return -1;
+    /* CODE-POINT index (ADR-005 item 5), so it composes with len()/slice(). */
     for (uint64_t i = 0; i + n->len <= s->len; i++) {
-        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
+        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) {
+            return spl_core_string_byte_to_cp(s, i);
+        }
     }
     return -1;
 }
@@ -5962,10 +6079,13 @@ int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
     /* Negative start clamps to 0 (the two-arg index_of contract; matches the
      * Rust runtime crate and simple_core impls). */
     if (start < 0) start = 0;
-    if (n->len == 0) return start <= (int64_t)s->len ? start : (int64_t)s->len;
-    if (start >= (int64_t)s->len || n->len > s->len) return -1;
-    for (uint64_t i = (uint64_t)start; i + n->len <= s->len; i++) {
-        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
+    /* `start` and the answer are CODE-POINT indices (ADR-005 item 5). */
+    int64_t cp_len = spl_core_string_cp_len(s);
+    if (n->len == 0) return start <= cp_len ? start : cp_len;
+    if (start >= cp_len || n->len > s->len) return -1;
+    uint64_t start_byte = spl_core_string_cp_to_byte(s, (uint64_t)start);
+    for (uint64_t i = start_byte; i + n->len <= s->len; i++) {
+        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return spl_core_string_byte_to_cp(s, i);
     }
     return -1;
 }
@@ -5974,10 +6094,13 @@ int64_t rt_string_rfind(int64_t value, int64_t needle) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* n = rt_core_as_string(needle);
     if (!s || !n) return -1;
-    if (n->len == 0) return (int64_t)s->len;
+    /* CODE-POINT index (ADR-005 item 5), like index_of / find. */
+    if (n->len == 0) return spl_core_string_cp_len(s);
     if (n->len > s->len) return -1;
     for (uint64_t i = s->len - n->len + 1; i-- > 0;) {
-        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
+        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) {
+            return spl_core_string_byte_to_cp(s, i);
+        }
     }
     return -1;
 }
@@ -6589,14 +6712,20 @@ static uint64_t rt_utf8_width(const char* data, uint64_t i, uint64_t len) {
     return 1;
 }
 
-/* char_count: number of UTF-8 codepoints, as opposed to len (bytes).
- * -1 for a non-text receiver, matching rt_string_len / rt_len. */
+/* User-facing text length (ADR-005 item 5): number of UTF-8 code points.
+ * len(), char_count(), the s[i] bound and rt_len's text arm all route here;
+ * rt_string_len stays the BYTE primitive. The receiver fallback MUST mirror
+ * rt_string_len's (identical `>= 0x10000` guard): the pure-Simple MIR lowers
+ * `.len()` on a text local to this symbol and a text LITERAL is a bare
+ * pointer into .rodata, not a heap RtCoreString. -1 for a non-text receiver. */
 int64_t rt_string_char_count(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return -1;
-    int64_t count = 0;
-    for (uint64_t i = 0; i < s->len; i += rt_utf8_width(s->data, i, s->len)) count++;
-    return count;
+    if (s) return spl_core_string_cp_len(s);
+    if (value < 0x10000) return -1;
+    RtCoreString* owner = rt_core_string_from_data_pointer(value);
+    if (owner) return (int64_t)spl_text_cp_len_bytes((const uint8_t*)owner->data, owner->len);
+    const char* raw = (const char*)(uintptr_t)value;
+    return (int64_t)spl_text_cp_len_bytes((const uint8_t*)raw, (uint64_t)strlen(raw));
 }
 
 /* capitalize: uppercase the first character, lowercase the rest (ASCII only). */

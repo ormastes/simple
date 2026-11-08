@@ -3375,6 +3375,555 @@ impl MirLowering:
                 receiver_is_dict = true
                 self.runtime_dict_locals[dict_recv_local.id] = true
 
+        if val dict_hit = self.try_lower_dict_builtin_method_v1(receiver, method, args, receiver_is_dict,
+                dict_recv_local, dict_recv_lowered, is_dict_method_name,
+                prelowered_method_receiver, has_prelowered_method_receiver):
+            return dict_hit
+
+        # byte_len is a TEXT-only byte accessor, never the generic collection
+        # length fallback. Keep nominal/static owners and erased words intact.
+        if method == "byte_len" and args.len() == 0 and text_builtin_resolution_allowed and not resolution_is_static_method and not predicate_has_custom_owner:
+            val text_local = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
+            val byte_len_operand = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_len"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_byte_len = self.builder
+            val byte_length = b_byte_len.emit_call(byte_len_operand, [mir_operand_copy(text_local)], MirType.i64())
+            self.builder = b_byte_len
+            if val length = byte_length:
+                return length
+            return text_local
+
+        # Built-in collections implement Len.is_empty() as `self.len() == 0`.
+        # The native MIR path already has concrete runtime dispatch for len,
+        # but a resolved trait call to is_empty used to bypass that path and
+        # emit the trait declaration symbol directly.  That symbol is not a
+        # linked concrete function for built-in collection receivers.  Keep
+        # this route gated by `len_runtime_symbol_for_hir_type`: user-defined
+        # Len implementations (including explicit is_empty overrides) return
+        # an empty symbol and retain ordinary trait dispatch below.
+        if (method == "len" or method == "length" or method == "is_empty") and args.len() == 0:
+            var len_symbol = ""
+            # Recover the declaration attached to this binding or call result.
+            # Raw receiver.type_ can be absent on native entry lowering; that
+            # absence does not erase a known enum/class method owner.
+            val length_receiver_type = self.enum_match_expr_type(receiver)
+            var len_recovery_allowed = length_receiver_type == nil
+            if val found_receiver_type = length_receiver_type:
+                len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)
+                match found_receiver_type.kind:
+                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _) | HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                        len_recovery_allowed = true
+                    case _: ()
+            var receiver_local: LocalId = 0
+            var receiver_lowered = false
+            # Flat HIR can omit the annotation on `values ?? []`, while MIR
+            # still proves that the resulting local is a built-in collection.
+            # Recover only proven receivers: unknown/custom is_empty methods
+            # must retain normal dispatch, never the generic rt_len fallback.
+            if len_symbol == "" and len_recovery_allowed and method == "is_empty" and resolution_is_unresolved and static_receiver_name == "":
+                if has_prelowered_method_receiver:
+                    receiver_local = prelowered_method_receiver
+                else:
+                    receiver_local = self.lower_expr(receiver)
+                    prelowered_method_receiver = receiver_local
+                    has_prelowered_method_receiver = true
+                receiver_lowered = true
+                if self.local_is_runtime_array(receiver_local):
+                    len_symbol = "rt_len"
+                elif self.local_is_runtime_dict(receiver_local):
+                    len_symbol = "rt_dict_len"
+                elif self.local_is_str(receiver_local):
+                    # User-facing text len counts CODE POINTS (ADR-005 item 5);
+                    # byte_len() above is the rt_string_len route.
+                    len_symbol = "rt_string_char_count"
+            # methods-mir-20261031 shape 3: a `text?` receiver after an
+            # early-return nil guard (`if x == nil: return 0` then `x.len()`)
+            # still carries Optional(Str) -- MIR has no flow narrowing. Take
+            # the Some payload with the same runtime-checked narrowing the
+            # primitive text builtins use (nil aborts loudly, never 0).
+            if len_symbol == "" and resolution_is_unresolved and static_receiver_name == "" and (method == "len" or method == "length" or method == "is_empty"):
+                if val optional_len_type = length_receiver_type:
+                    match optional_len_type.kind:
+                        case HirTypeKind.Optional(_):
+                            if not has_prelowered_method_receiver:
+                                prelowered_method_receiver = self.lower_expr(receiver)
+                                has_prelowered_method_receiver = true
+                            if val collection_receiver = self.optional_collection_receiver_payload_v1(receiver, prelowered_method_receiver):
+                                prelowered_method_receiver = collection_receiver
+                                receiver_local = collection_receiver
+                                receiver_lowered = true
+                                len_symbol = self.len_runtime_symbol_for_hir_type(self.find_local_hir_type(collection_receiver.id))
+                            if val narrowed_len_receiver = self.narrow_optional_text_receiver(receiver, prelowered_method_receiver):
+                                prelowered_method_receiver = narrowed_len_receiver
+                                receiver_local = narrowed_len_receiver
+                                receiver_lowered = true
+                                len_symbol = "rt_string_char_count"
+                        case _: ()
+            # `rt_len` is an intentional recovery path only for unresolved
+            # len/length calls.  An unresolved user-defined `is_empty` must
+            # continue to its normal method-dispatch recovery below; unlike
+            # built-in collection calls it cannot be inferred from a generic
+            # runtime value.
+            if len_symbol == "" and len_recovery_allowed and method != "is_empty":
+                match resolution:
+                    case Unresolved:
+                        # Bug #137/#138 (follow-up): an untyped receiver (no HIR
+                        # type inference ran -- receiver.type_ is nil) leaves
+                        # `resolution` Unresolved both under the bootstrap flat
+                        # HIR path AND on the normal native-build path (the same
+                        # gap: bootstrap_main.spl's `all_args[i]`/`first` locals
+                        # never get a synthesized type). Forcing `rt_array_len`
+                        # was correct only for arrays: on a tagged string it
+                        # calls rt_core_array_ptr on a string handle and
+                        # silently returns 0, so every `first.len() == N` guard
+                        # in bootstrap_main (--version/--help/compile/
+                        # native-build) was dead and never dispatched. rt_len is
+                        # the unified accessor -- it routes a tagged string to
+                        # its length and a (raw or tagged) array ptr to its
+                        # element count -- so one symbol serves both call sites
+                        # correctly, on either path. Previously this was gated
+                        # behind SIMPLE_BOOTSTRAP=1; that env check was only ever
+                        # a proxy for "no type info" and excluded the identical
+                        # normal-path gap, so it now keys directly off
+                        # `resolution == Unresolved` instead.
+                        #
+                        # Dict follow-up: rt_len's runtime fallback (rt_len in
+                        # runtime_native.c) only special-cases tagged strings
+                        # and array pointers -- a dict handle matches neither
+                        # `rt_core_as_string` nor `rt_core_as_array`, so it
+                        # falls through to a hardcoded 0 (`Dict.len()` silently
+                        # returning 0 natively, never loud). There is no HIR
+                        # static type available here to route straight to
+                        # `rt_dict_len` (same root gap as above), but the
+                        # MIR-lowering layer independently tracks dict-ness per
+                        # local in `runtime_dict_locals` (populated at every
+                        # dict-literal/assignment site -- see
+                        # `lower_dict_literal` and mir_lowering_stmts.spl's var
+                        # decl/reassign propagation), keyed off the lowered
+                        # local id rather than the HIR type. Lower the receiver
+                        # now (instead of after this match) so that map can be
+                        # consulted, and prefer the already-linked, already
+                        # backend-declared `rt_dict_len` runtime symbol over
+                        # the generic accessor when it says so.
+                        receiver_local = self.lower_expr(receiver)
+                        receiver_lowered = true
+                        # Bug (native_dict_param_no_dictness): `runtime_dict_locals`
+                        # is only populated at dict-literal/assignment sites
+                        # (lower_dict_lit / mir_lowering_stmts.spl var-decl
+                        # propagation), so a dict-typed FUNCTION PARAMETER's
+                        # local id never lands in this map even though it holds
+                        # a real dict handle -- `fn f(d: Dict<text,i64>):
+                        # d.len()` silently returned 0 natively (rt_len's
+                        # fallback treats an unrecognized handle as neither a
+                        # string nor an array and hardcodes 0). `local_is_runtime_dict`
+                        # (expr_dispatch.spl) already recovers this correctly
+                        # for the `d[k]` Index path by ALSO consulting the
+                        # local's registered MIR type (begin_function/mir_data.spl
+                        # threads the real `Dict(key,value)` type from
+                        # `signature.params` onto every Arg local, so
+                        # `local_mir_type_of` is authoritative for params even
+                        # though runtime_dict_locals isn't) -- reuse the same
+                        # helper here instead of only checking the id-keyed map.
+                        if self.local_is_runtime_dict(receiver_local):
+                            self.runtime_dict_locals[receiver_local.id] = true
+                            len_symbol = "rt_dict_len"
+                        else:
+                            len_symbol = "rt_len"
+                    case _: ()
+            if len_symbol != "":
+                if not receiver_lowered:
+                    receiver_local = self.lower_expr(receiver)
+                # rt_string_char_count distinguishes tagged strings from raw
+                # text at runtime exactly like rt_string_len (same receiver
+                # fallback), but answers in CODE POINTS (ADR-005 item 5); a
+                # text `.len()` is never the byte count. Known arrays retain
+                # rt_len.
+                # Returned arrays can have a declared MIR Array/Slice type
+                # without an id-map entry. Sending their handles to the string
+                # accessor silently returns zero. Consult both type and map,
+                # as indexing and the dict-length path already do.
+                if len_symbol == "rt_len" and not self.local_is_runtime_array(receiver_local):
+                    len_symbol = "rt_string_char_count"
+                val func_operand = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(len_symbol),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_len = self.builder
+                val result = b_len.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
+                self.builder = b_len
+                if val result_local = result:
+                    if method == "is_empty":
+                        var b_empty = self.builder
+                        val empty = b_empty.emit_binop(MirBinOp.Eq, mir_operand_copy(result_local), mir_operand_const_int(0), MirType.bool())
+                        self.builder = b_empty
+                        return empty
+                    return result_local
+                return receiver_local
+
+        if val join_hit = self.try_lower_text_join_v1(receiver, method, args, resolution):
+            return join_hit
+
+        if val starts_hit = self.try_lower_text_starts_with_v1(receiver, method, args, resolution_is_unresolved,
+                predicate_receiver_is_text, predicate_has_custom_owner, prelowered_method_receiver):
+            return starts_hit
+
+        # Bug #138 (follow-up): same untyped-receiver gap as starts_with above,
+        # `.chr()` / `.to_char()` on an integer receiver is a builtin and must
+        # win over an unrelated same-named UFCS free function, matching the
+        # interpreter's primitive dispatch. Untyped native-entry HIR keeps the
+        # unresolved fallback, after giving a custom struct owner precedence.
+        var chr_receiver_is_declared_int = false
+        if val chr_declared_type = receiver.type_:
+            match chr_declared_type.kind:
+                case HirTypeKind.Int(_, _): chr_receiver_is_declared_int = true
+                case _: ()
+        var chr_receiver_is_runtime_int = false
+        var chr_runtime_type = MirType.unit()
+        if has_prelowered_method_receiver:
+            chr_runtime_type = self.local_mir_type_of(prelowered_method_receiver) ?? chr_runtime_type
+        match chr_runtime_type.kind:
+            case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
+                chr_receiver_is_runtime_int = true
+            case _: ()
+        var chr_receiver_is_local_int = false
+        if has_prelowered_method_receiver:
+            chr_receiver_is_local_int = self.local_hir_type_is_int(prelowered_method_receiver)
+        val lower_builtin_chr = chr_method_shape and (
+            chr_primitive_resolution_allowed and not chr_has_custom_owner and
+            (chr_receiver_is_declared_int or chr_receiver_is_runtime_int or chr_receiver_is_local_int)
+        )
+        if lower_builtin_chr:
+            val chr_receiver = if has_prelowered_method_receiver:
+                prelowered_method_receiver
+            else:
+                self.lower_expr(receiver)
+            val chr_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_char_from_code"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_chr = self.builder
+            val chr_res = b_chr.emit_call(chr_op, [mir_operand_copy(chr_receiver)], MirType.i64())
+            self.builder = b_chr
+            if val chr_local = chr_res:
+                val chr_text_type = self.bootstrap_text_type()
+                var b_chr_typed = self.builder
+                val chr_text = b_chr_typed.new_temp(chr_text_type)
+                b_chr_typed.emit_copy(chr_text, chr_local)
+                self.builder = b_chr_typed
+                self.mark_runtime_value_local(chr_text.id)
+                self.remember_local_hir_type(chr_text.id, HirType(kind: HirTypeKind.Str, span: receiver.span), 2, 0)
+                return chr_text
+            return chr_receiver
+
+        if val ends_hit = self.try_lower_text_ends_with_v1(receiver, method, args, resolution_is_unresolved,
+                predicate_receiver_is_text, predicate_has_custom_owner, prelowered_method_receiver):
+            return ends_hit
+
+        # Bug #137/#138 (follow-up): the typed substring/slice special case
+        # below is gated on receiver.type_ == Some(Str), but an untyped
+        # receiver (no HIR type inference ran -- both under the bootstrap flat
+        # HIR path and on the normal native-build path) sets expr type_ to
+        # nil, so `args[i].substring(2)` / `args[i].substring(9)` (the -oFILE
+        # / --output=FILE path parsing in bootstrap_main lines 17,21) never
+        # reached it and fell through to `case Unresolved:` -> const 0 ->
+        # wrong/garbage filename. Handle it type-independently whenever
+        # resolution is Unresolved, mirroring the starts_with fix.
+        #
+        # Representation: the receiver may be a tagged argv element
+        # (rt_string_new-built) OR a genuinely-raw char* (a plain string
+        # literal, e.g. `val s = "hello world"; s.substring(6)` -- text/text3
+        # probe #4), but spl_str_slice/spl_str_len operate on RAW char*.
+        #
+        # BUG (fixed here): this previously coerced via rt_string_data
+        # (tagged -> raw ptr), which requires the receiver to ALREADY be a
+        # tagged handle -- rt_string_data returns NULL for anything else. A
+        # raw literal receiver made this NULL, so spl_str_len(NULL) -> 0 and
+        # spl_str_slice(NULL, start, 0) -> "" (empty string) SILENTLY (no
+        # error, no crash, just a blank result) whenever `start >= end`
+        # (which `start=6, end=0` always is), instead of the correct
+        # substring. Use rt_interp_cstr instead: it does the tagged-or-raw
+        # check at RUNTIME (bug #136's autodetection) -- a tagged handle
+        # unwraps to its buffer, an already-raw char* passes through
+        # unchanged -- so it is correct for both representations. The
+        # raw-char* result matches the non-bootstrap Str-path representation
+        # the downstream -o/--output filename handling expects. Supports both
+        # `.substring(start)` (1 arg; end = spl_str_len) and
+        # `.substring(start, end)` (2 args).
+        # Bug (array.slice/.substring misrouted to string.slice): this erased-
+        # receiver fallback (like the "contains" one further below) assumed
+        # an untyped/unresolved "slice"/"substring" receiver is always a
+        # STRING. `a[1:3]` on a runtime array desugars to
+        # `MethodCall(a, "slice", [1, 3])` (see the _FlatAstBridge EXPR_SLICE
+        # conversion) and ALSO resolves as Unresolved (arrays have no
+        # registered stdlib `slice` symbol), so without a receiver-type guard
+        # it fell into this SAME branch: the array's raw handle got
+        # `rt_interp_cstr`'d and passed to `spl_str_slice` as if it were a
+        # string pointer, treating live array element words as if they were
+        # string byte data -- silently wrong output (or worse, an
+        # out-of-bounds/garbage read) instead of a clean error. Only a proven
+        # runtime array may enter rt_slice; custom/static resolutions remain
+        # owned by their normal method dispatch. Evaluate receiver once even
+        # when it is a call, field or nested slice rather than a variable.
+        if method == "slice" and (args.len() == 1 or args.len() == 2) and
+                resolution_is_unresolved and static_receiver_name == "":
+            if not has_prelowered_method_receiver:
+                prelowered_method_receiver = self.lower_expr(receiver)
+                has_prelowered_method_receiver = true
+            if self.runtime_array_locals.contains(prelowered_method_receiver.id):
+                return self.lower_runtime_array_slice(prelowered_method_receiver, args)
+        if method == "take" and resolution_is_unresolved and static_receiver_name == "":
+            if not has_prelowered_method_receiver:
+                prelowered_method_receiver = self.lower_expr(receiver)
+                has_prelowered_method_receiver = true
+            if self.runtime_array_locals.contains(prelowered_method_receiver.id):
+                return self.lower_runtime_array_take(prelowered_method_receiver, args)
+        var slice_recv_is_array = false
+        if method == "substring" or method == "slice":
+            if val slice_recv_ty = receiver.type_:
+                match slice_recv_ty.kind:
+                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        slice_recv_is_array = true
+                    case _: ()
+            if not slice_recv_is_array:
+                match receiver.kind:
+                    case Var(_) | NamedVar(_, _):
+                        var slice_recv_probe: LocalId = 0
+                        if has_prelowered_method_receiver:
+                            slice_recv_probe = prelowered_method_receiver
+                        else:
+                            slice_recv_probe = self.lower_expr(receiver)
+                        if self.local_is_runtime_array(slice_recv_probe):
+                            slice_recv_is_array = true
+                    case _: ()
+        if (method == "substring" or method == "slice") and (args.len() == 1 or args.len() == 2) and resolution_is_unresolved and not slice_recv_is_array and text_builtin_resolution_allowed and static_receiver_name == "":
+            var sub_recv_tagged: LocalId = 0
+            if has_prelowered_method_receiver:
+                sub_recv_tagged = prelowered_method_receiver
+            else:
+                sub_recv_tagged = self.lower_expr(receiver)
+            val strdata_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_interp_cstr"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+            ))
+            var b_subsd = self.builder
+            val sub_recv_res = b_subsd.emit_call(strdata_op, [mir_operand_copy(sub_recv_tagged)], MirType(kind: MirTypeKind.Opaque("str")))
+            self.builder = b_subsd
+            if val sub_recv_raw = sub_recv_res:
+                var sub_args: [MirOperand] = [mir_operand_copy(sub_recv_raw)]
+                for arg in args:
+                    val sub_arg_local = self.lower_text_index_operand(arg.value)
+                    sub_args = sub_args.push(mir_operand_copy(sub_arg_local))
+                if args.len() == 1:
+                    val sublen_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("spl_str_len"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_sublen = self.builder
+                    val sublen_res = b_sublen.emit_call(sublen_op, [mir_operand_copy(sub_recv_raw)], MirType.i64())
+                    self.builder = b_sublen
+                    if val sublen_local = sublen_res:
+                        sub_args = sub_args.push(mir_operand_copy(sublen_local))
+                val subslice_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("spl_str_slice"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                ))
+                var b_subslice = self.builder
+                val subslice_res = b_subslice.emit_call(subslice_op, sub_args, MirType(kind: MirTypeKind.Opaque("str")))
+                self.builder = b_subslice
+                if val subslice_local = subslice_res:
+                    return subslice_local
+                return sub_recv_raw
+            return sub_recv_tagged
+
+        # methods-mir-20261031 shape 1: `fn f(value): value.substring(0, 1)`
+        # / `value[0:1]` -- an erased (untyped-param) receiver with no text or
+        # array proof. rt_slice is runtime-polymorphic over tagged strings and
+        # array handles (runtime_native.c), so dispatch through it instead of
+        # guessing a representation; any other value yields nil at runtime,
+        # never a const-0 placeholder.
+        if (method == "substring" or method == "slice") and (args.len() == 1 or args.len() == 2) and resolution_is_unresolved and not slice_recv_is_array and text_builtin_resolution_erased_allowed and static_receiver_name == "":
+            var erased_slice_recv: LocalId = 0
+            if has_prelowered_method_receiver:
+                erased_slice_recv = prelowered_method_receiver
+            else:
+                erased_slice_recv = self.lower_expr(receiver)
+            return self.lower_erased_receiver_slice_v1(erased_slice_recv, args)
+
+        if val char_at_hit = self.try_lower_text_char_at_v1(receiver, method, args, resolution_is_unresolved):
+            return char_at_hit
+
+        if val search_hit = self.try_lower_text_search_and_transform_v1(receiver, method, args,
+                resolution_is_unresolved, predicate_receiver_is_text, predicate_has_custom_owner,
+                prelowered_method_receiver, has_prelowered_method_receiver,
+                text_builtin_resolution_allowed, text_builtin_resolution_erased_allowed):
+            return search_hit
+
+        # Bug (pure_simple_text_split_lines_missing, 2026-07-16): `text.split_lines()` / `.lines()`
+        # had no MIR lowering at all (fell to the generic Unresolved loud-fail:
+        # "unresolved method call: split_lines"). Guard against a positively-known
+        # array/slice receiver first -- same rationale as the `contains`/
+        # `substring` guards above: an array also resolves Unresolved for this
+        # (unregistered) method name, and without the guard its raw handle would
+        # get silently treated as a string pointer instead of loud-failing.
+        var split_lines_recv_is_array = false
+        val is_lines_method = method == "split_lines" or method == "lines"
+        if is_lines_method and resolution_is_unresolved:
+            if val slr_ty = receiver.type_:
+                match slr_ty.kind:
+                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        split_lines_recv_is_array = true
+                    case _: ()
+            if not split_lines_recv_is_array:
+                match receiver.kind:
+                    case Var(_) | NamedVar(_, _):
+                        val slr_probe = self.lower_expr(receiver)
+                        if self.local_is_runtime_array(slr_probe):
+                            split_lines_recv_is_array = true
+                    case _: ()
+        if is_lines_method and args.len() == 0 and text_builtin_resolution_allowed and not split_lines_recv_is_array:
+            val lines_receiver = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
+            return self.lower_text_split_lines(lines_receiver, receiver.span)
+
+        if (method == "substring" or method == "slice"):
+            # A binding initialized from a text field can retain an Infer
+            # expression type while its lowered local has concrete text
+            # provenance. Use the same recovered receiver type as owner
+            # dispatch; never treat an unknown or array receiver as text.
+            var slice_receiver_is_text = false
+            if val found_receiver_type = trait_receiver_type:
+                match found_receiver_type.kind:
+                    case HirTypeKind.Str: slice_receiver_is_text = true
+                    case _: ()
+            if not slice_receiver_is_text:
+                if not has_prelowered_method_receiver:
+                    prelowered_method_receiver = self.lower_expr(receiver)
+                    has_prelowered_method_receiver = true
+                slice_receiver_is_text = self.local_is_str(prelowered_method_receiver) or self.local_hir_type_is_str(prelowered_method_receiver)
+            if slice_receiver_is_text:
+                if args.len() == 1 or args.len() == 2:
+                    val receiver_local = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
+                    var arg_operands: [MirOperand] = []
+                    arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
+                    for arg in args:
+                        val arg_local = self.lower_text_index_operand(arg.value)
+                        arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+                    if args.len() == 1:
+                        val len_operand = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("spl_str_len"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                        ))
+                        var b_len = self.builder
+                        val len_result = b_len.emit_call(len_operand, [mir_operand_copy(receiver_local)], MirType.i64())
+                        self.builder = b_len
+                        if val len_local = len_result:
+                            arg_operands = arg_operands.push(mir_operand_copy(len_local))
+                    val slice_operand = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("spl_str_slice"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                    ))
+                    var b_slice = self.builder
+                    val slice_result = b_slice.emit_call(slice_operand, arg_operands, MirType(kind: MirTypeKind.Opaque("str")))
+                    self.builder = b_slice
+                    if val slice_local = slice_result:
+                        return slice_local
+                    return receiver_local
+
+        if self.is_mutating_method(method):
+            if mir_mc_trace_state == 1:
+                eprint("[mir-method-call] writeback-enter method={method}\n")
+            match receiver.kind:
+                case Index(base, index):
+                    wb_base = self.lower_expr(base)
+                    if self.local_is_runtime_dict(wb_base):
+                        # Dict slot receiver (`c["k"].push(x)`): the slot is a
+                        # dict VALUE, not an array element. Load through the
+                        # same rt_dict_get read as `c[k]` (tagged-key
+                        # normalization included, via lower_dict_key) and mark
+                        # the slot for a rt_dict_set store-back. Without this
+                        # the dict handle fell into the raw GEP+load /
+                        # rt_array_set path below, which treats the hash table
+                        # as an element array: the pushed write never reached
+                        # the stored value (mutate_through_index_loses_write,
+                        # dict-value shape).
+                        wb_index = self.lower_dict_key(index)
+                        wb_receiver = self.lower_dict_runtime_get(base, wb_base, wb_index)
+                        wb_kind = 3
+                    elif self.writeback_index_base_is_tuple(wb_base, base):
+                        # Tuple positional-field receiver (`a[0].1.push(x)`:
+                        # `.N` desugars to Index on a Tuple-typed base). Tuple
+                        # storage is a raw rt_alloc field block with no SplArray
+                        # header, so rt_array_get/rt_array_set cannot address
+                        # it -- the same landmine the read path documents. Load
+                        # the field word with plain GEP+load and store it back
+                        # through the same slot (wb_kind 4).
+                        wb_index = self.lower_expr(index)
+                        var wb_b = self.builder
+                        val wb_ptr = wb_b.emit_gep(
+                            mir_operand_copy(wb_base),
+                            [mir_operand_copy(wb_index)],
+                            MirType.ptr(receiver_type, false)
+                        )
+                        wb_receiver = wb_b.emit_load(mir_operand_copy(wb_ptr), receiver_type)
+                        self.builder = wb_b
+                        wb_kind = 4
+                    else:
+                        wb_index = self.lower_expr(index)
+                        if self.local_is_runtime_array(wb_base):
+                            val getter = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("rt_array_get"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                            ))
+                            var wb_b = self.builder
+                            # Statement-shaped: no `if val x = <LocalId?>` transport into the outer var;
+                            # on the native stage-2/3 lane that binding carried the Option box instead of
+                            # the LocalId payload, so grid[1].push(7) faulted (0xC0000005) in mir_lower.
+                            wb_receiver = wb_b.emit_call_value(getter, [mir_operand_copy(wb_base), mir_operand_copy(wb_index)], receiver_type)
+                            self.builder = wb_b
+                            self.mark_runtime_value_local(wb_receiver.id)
+                            self.remember_array_index_projection_provenance(wb_base, wb_receiver)
+                        else:
+                            var wb_b = self.builder
+                            val wb_ptr = wb_b.emit_gep(
+                                mir_operand_copy(wb_base),
+                                [mir_operand_copy(wb_index)],
+                                MirType.ptr(receiver_type, false)
+                            )
+                            wb_receiver = wb_b.emit_load(mir_operand_copy(wb_ptr), receiver_type)
+                            self.builder = wb_b
+                        wb_kind = 1
+                case Field(base, field_name, resolved):
+                    # A `T?` record base reads the record, not its Option box.
+                    wb_base = self.option_record_receiver_payload_v1(base, self.lower_expr(base))
+                    wb_field_idx = self.resolve_field_index(base, wb_base, field_name, resolved)
+                    var wb_b = self.builder
+                    wb_receiver = wb_b.emit_get_field(mir_operand_copy(wb_base), wb_field_idx, receiver_type)
+                    self.builder = wb_b
+                    self.remember_field_projection_provenance(base, wb_base, wb_field_idx, wb_receiver)
+                    wb_kind = 2
+                case _: ()
+        if mir_mc_trace_state == 1:
+            eprint("[mir-method-call] writeback-done method={method} kind={wb_kind}\n")
+
+        return self.lower_method_call_by_resolution_v1(receiver, method, args, resolution,
+            static_receiver_name, resolved_static_receiver_symbol, resolution_is_unresolved,
+            proven_scalar_receiver, trait_receiver_type, declared_text_receiver,
+            predicate_has_custom_owner, chr_has_custom_owner, chr_method_shape,
+            prelowered_method_receiver, has_prelowered_method_receiver,
+            wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+
+    # The helpers below were split out of lower_method_call verbatim (bug
+    # stage2_method_calls_literals_300s_timeout_2026-11-08): per-function
+    # compile cost is superlinear in function size, and the single
+    # 3,396-line method blew the 300s native per-file budget. Each helper
+    # returns nil when its method family does not apply, so the caller
+    # falls through exactly as the inline blocks did.
+
+    me try_lower_dict_builtin_method_v1(receiver: HirExpr, method: text, args: [HirCallArg],
+            receiver_is_dict: bool, dict_recv_local: LocalId, dict_recv_lowered: bool,
+            is_dict_method_name: bool, prelowered_method_receiver: LocalId,
+            has_prelowered_method_receiver: bool) -> LocalId?:
         if receiver_is_dict and method == "items":
             if args.len() != 0:
                 return self.builtin_extra_fail_closed("Dict.items expects no arguments", Some(receiver.span))
@@ -3541,186 +4090,10 @@ impl MirLowering:
                 self.aggregate_literal_operand(args[1].value, value_local, boxed_value)], MirType.i64())
             self.builder = b_set
             return receiver_local
+        nil
 
-        # byte_len is a TEXT-only byte accessor, never the generic collection
-        # length fallback. Keep nominal/static owners and erased words intact.
-        if method == "byte_len" and args.len() == 0 and text_builtin_resolution_allowed and not resolution_is_static_method and not predicate_has_custom_owner:
-            val text_local = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
-            val byte_len_operand = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_string_len"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-            ))
-            var b_byte_len = self.builder
-            val byte_length = b_byte_len.emit_call(byte_len_operand, [mir_operand_copy(text_local)], MirType.i64())
-            self.builder = b_byte_len
-            if val length = byte_length:
-                return length
-            return text_local
-
-        # Built-in collections implement Len.is_empty() as `self.len() == 0`.
-        # The native MIR path already has concrete runtime dispatch for len,
-        # but a resolved trait call to is_empty used to bypass that path and
-        # emit the trait declaration symbol directly.  That symbol is not a
-        # linked concrete function for built-in collection receivers.  Keep
-        # this route gated by `len_runtime_symbol_for_hir_type`: user-defined
-        # Len implementations (including explicit is_empty overrides) return
-        # an empty symbol and retain ordinary trait dispatch below.
-        if (method == "len" or method == "length" or method == "is_empty") and args.len() == 0:
-            var len_symbol = ""
-            # Recover the declaration attached to this binding or call result.
-            # Raw receiver.type_ can be absent on native entry lowering; that
-            # absence does not erase a known enum/class method owner.
-            val length_receiver_type = self.enum_match_expr_type(receiver)
-            var len_recovery_allowed = length_receiver_type == nil
-            if val found_receiver_type = length_receiver_type:
-                len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)
-                match found_receiver_type.kind:
-                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _) | HirTypeKind.Infer(_, _) | HirTypeKind.Error:
-                        len_recovery_allowed = true
-                    case _: ()
-            var receiver_local: LocalId = 0
-            var receiver_lowered = false
-            # Flat HIR can omit the annotation on `values ?? []`, while MIR
-            # still proves that the resulting local is a built-in collection.
-            # Recover only proven receivers: unknown/custom is_empty methods
-            # must retain normal dispatch, never the generic rt_len fallback.
-            if len_symbol == "" and len_recovery_allowed and method == "is_empty" and resolution_is_unresolved and static_receiver_name == "":
-                if has_prelowered_method_receiver:
-                    receiver_local = prelowered_method_receiver
-                else:
-                    receiver_local = self.lower_expr(receiver)
-                    prelowered_method_receiver = receiver_local
-                    has_prelowered_method_receiver = true
-                receiver_lowered = true
-                if self.local_is_runtime_array(receiver_local):
-                    len_symbol = "rt_len"
-                elif self.local_is_runtime_dict(receiver_local):
-                    len_symbol = "rt_dict_len"
-                elif self.local_is_str(receiver_local):
-                    len_symbol = "rt_string_len"
-            # methods-mir-20261031 shape 3: a `text?` receiver after an
-            # early-return nil guard (`if x == nil: return 0` then `x.len()`)
-            # still carries Optional(Str) -- MIR has no flow narrowing. Take
-            # the Some payload with the same runtime-checked narrowing the
-            # primitive text builtins use (nil aborts loudly, never 0).
-            if len_symbol == "" and resolution_is_unresolved and static_receiver_name == "" and (method == "len" or method == "length" or method == "is_empty"):
-                if val optional_len_type = length_receiver_type:
-                    match optional_len_type.kind:
-                        case HirTypeKind.Optional(_):
-                            if not has_prelowered_method_receiver:
-                                prelowered_method_receiver = self.lower_expr(receiver)
-                                has_prelowered_method_receiver = true
-                            if val collection_receiver = self.optional_collection_receiver_payload_v1(receiver, prelowered_method_receiver):
-                                prelowered_method_receiver = collection_receiver
-                                receiver_local = collection_receiver
-                                receiver_lowered = true
-                                len_symbol = self.len_runtime_symbol_for_hir_type(self.find_local_hir_type(collection_receiver.id))
-                            if val narrowed_len_receiver = self.narrow_optional_text_receiver(receiver, prelowered_method_receiver):
-                                prelowered_method_receiver = narrowed_len_receiver
-                                receiver_local = narrowed_len_receiver
-                                receiver_lowered = true
-                                len_symbol = "rt_string_len"
-                        case _: ()
-            # `rt_len` is an intentional recovery path only for unresolved
-            # len/length calls.  An unresolved user-defined `is_empty` must
-            # continue to its normal method-dispatch recovery below; unlike
-            # built-in collection calls it cannot be inferred from a generic
-            # runtime value.
-            if len_symbol == "" and len_recovery_allowed and method != "is_empty":
-                match resolution:
-                    case Unresolved:
-                        # Bug #137/#138 (follow-up): an untyped receiver (no HIR
-                        # type inference ran -- receiver.type_ is nil) leaves
-                        # `resolution` Unresolved both under the bootstrap flat
-                        # HIR path AND on the normal native-build path (the same
-                        # gap: bootstrap_main.spl's `all_args[i]`/`first` locals
-                        # never get a synthesized type). Forcing `rt_array_len`
-                        # was correct only for arrays: on a tagged string it
-                        # calls rt_core_array_ptr on a string handle and
-                        # silently returns 0, so every `first.len() == N` guard
-                        # in bootstrap_main (--version/--help/compile/
-                        # native-build) was dead and never dispatched. rt_len is
-                        # the unified accessor -- it routes a tagged string to
-                        # its length and a (raw or tagged) array ptr to its
-                        # element count -- so one symbol serves both call sites
-                        # correctly, on either path. Previously this was gated
-                        # behind SIMPLE_BOOTSTRAP=1; that env check was only ever
-                        # a proxy for "no type info" and excluded the identical
-                        # normal-path gap, so it now keys directly off
-                        # `resolution == Unresolved` instead.
-                        #
-                        # Dict follow-up: rt_len's runtime fallback (rt_len in
-                        # runtime_native.c) only special-cases tagged strings
-                        # and array pointers -- a dict handle matches neither
-                        # `rt_core_as_string` nor `rt_core_as_array`, so it
-                        # falls through to a hardcoded 0 (`Dict.len()` silently
-                        # returning 0 natively, never loud). There is no HIR
-                        # static type available here to route straight to
-                        # `rt_dict_len` (same root gap as above), but the
-                        # MIR-lowering layer independently tracks dict-ness per
-                        # local in `runtime_dict_locals` (populated at every
-                        # dict-literal/assignment site -- see
-                        # `lower_dict_literal` and mir_lowering_stmts.spl's var
-                        # decl/reassign propagation), keyed off the lowered
-                        # local id rather than the HIR type. Lower the receiver
-                        # now (instead of after this match) so that map can be
-                        # consulted, and prefer the already-linked, already
-                        # backend-declared `rt_dict_len` runtime symbol over
-                        # the generic accessor when it says so.
-                        receiver_local = self.lower_expr(receiver)
-                        receiver_lowered = true
-                        # Bug (native_dict_param_no_dictness): `runtime_dict_locals`
-                        # is only populated at dict-literal/assignment sites
-                        # (lower_dict_lit / mir_lowering_stmts.spl var-decl
-                        # propagation), so a dict-typed FUNCTION PARAMETER's
-                        # local id never lands in this map even though it holds
-                        # a real dict handle -- `fn f(d: Dict<text,i64>):
-                        # d.len()` silently returned 0 natively (rt_len's
-                        # fallback treats an unrecognized handle as neither a
-                        # string nor an array and hardcodes 0). `local_is_runtime_dict`
-                        # (expr_dispatch.spl) already recovers this correctly
-                        # for the `d[k]` Index path by ALSO consulting the
-                        # local's registered MIR type (begin_function/mir_data.spl
-                        # threads the real `Dict(key,value)` type from
-                        # `signature.params` onto every Arg local, so
-                        # `local_mir_type_of` is authoritative for params even
-                        # though runtime_dict_locals isn't) -- reuse the same
-                        # helper here instead of only checking the id-keyed map.
-                        if self.local_is_runtime_dict(receiver_local):
-                            self.runtime_dict_locals[receiver_local.id] = true
-                            len_symbol = "rt_dict_len"
-                        else:
-                            len_symbol = "rt_len"
-                    case _: ()
-            if len_symbol != "":
-                if not receiver_lowered:
-                    receiver_local = self.lower_expr(receiver)
-                # rt_string_len distinguishes tagged strings from raw text at
-                # runtime. Tagged strings use their stored byte length (and
-                # preserve embedded NUL); raw literals fall back to strlen.
-                # Known arrays retain rt_len.
-                # Returned arrays can have a declared MIR Array/Slice type
-                # without an id-map entry. Sending their handles to the string
-                # accessor silently returns zero. Consult both type and map,
-                # as indexing and the dict-length path already do.
-                if len_symbol == "rt_len" and not self.local_is_runtime_array(receiver_local):
-                    len_symbol = "rt_string_len"
-                val func_operand = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str(len_symbol),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                ))
-                var b_len = self.builder
-                val result = b_len.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
-                self.builder = b_len
-                if val result_local = result:
-                    if method == "is_empty":
-                        var b_empty = self.builder
-                        val empty = b_empty.emit_binop(MirBinOp.Eq, mir_operand_copy(result_local), mir_operand_const_int(0), MirType.bool())
-                        self.builder = b_empty
-                        return empty
-                    return result_local
-                return receiver_local
-
+    me try_lower_text_join_v1(receiver: HirExpr, method: text, args: [HirCallArg],
+            resolution: MethodResolution) -> LocalId?:
         # Task #145 (join-family silent-null): `[...].join(sep)` on the
         # bootstrap flat-HIR path resolves to MethodResolution.Unresolved (no
         # method-resolution info at this stage), so it fell through to
@@ -3830,7 +4203,11 @@ impl MirLowering:
                     if val jna_local = jna_res:
                         return jna_local
                     return self.emit_bootstrap_str_const("")
+        nil
 
+    me try_lower_text_starts_with_v1(receiver: HirExpr, method: text, args: [HirCallArg],
+            resolution_is_unresolved: bool, predicate_receiver_is_text: bool,
+            predicate_has_custom_owner: bool, prelowered_method_receiver: LocalId) -> LocalId?:
         # Bug #137 (follow-up): `x.starts_with(literal)` on the bootstrap
         # argv-element path resolves to MethodResolution.Unresolved (the flat
         # bootstrap HIR has no method resolution), so it fell through to the
@@ -3897,55 +4274,11 @@ impl MirLowering:
             if val sw_local = sw_res:
                 return sw_local
             return sw_receiver
+        nil
 
-        # Bug #138 (follow-up): same untyped-receiver gap as starts_with above,
-        # `.chr()` / `.to_char()` on an integer receiver is a builtin and must
-        # win over an unrelated same-named UFCS free function, matching the
-        # interpreter's primitive dispatch. Untyped native-entry HIR keeps the
-        # unresolved fallback, after giving a custom struct owner precedence.
-        var chr_receiver_is_declared_int = false
-        if val chr_declared_type = receiver.type_:
-            match chr_declared_type.kind:
-                case HirTypeKind.Int(_, _): chr_receiver_is_declared_int = true
-                case _: ()
-        var chr_receiver_is_runtime_int = false
-        var chr_runtime_type = MirType.unit()
-        if has_prelowered_method_receiver:
-            chr_runtime_type = self.local_mir_type_of(prelowered_method_receiver) ?? chr_runtime_type
-        match chr_runtime_type.kind:
-            case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
-                chr_receiver_is_runtime_int = true
-            case _: ()
-        var chr_receiver_is_local_int = false
-        if has_prelowered_method_receiver:
-            chr_receiver_is_local_int = self.local_hir_type_is_int(prelowered_method_receiver)
-        val lower_builtin_chr = chr_method_shape and (
-            chr_primitive_resolution_allowed and not chr_has_custom_owner and
-            (chr_receiver_is_declared_int or chr_receiver_is_runtime_int or chr_receiver_is_local_int)
-        )
-        if lower_builtin_chr:
-            val chr_receiver = if has_prelowered_method_receiver:
-                prelowered_method_receiver
-            else:
-                self.lower_expr(receiver)
-            val chr_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_char_from_code"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-            ))
-            var b_chr = self.builder
-            val chr_res = b_chr.emit_call(chr_op, [mir_operand_copy(chr_receiver)], MirType.i64())
-            self.builder = b_chr
-            if val chr_local = chr_res:
-                val chr_text_type = self.bootstrap_text_type()
-                var b_chr_typed = self.builder
-                val chr_text = b_chr_typed.new_temp(chr_text_type)
-                b_chr_typed.emit_copy(chr_text, chr_local)
-                self.builder = b_chr_typed
-                self.mark_runtime_value_local(chr_text.id)
-                self.remember_local_hir_type(chr_text.id, HirType(kind: HirTypeKind.Str, span: receiver.span), 2, 0)
-                return chr_text
-            return chr_receiver
-
+    me try_lower_text_ends_with_v1(receiver: HirExpr, method: text, args: [HirCallArg],
+            resolution_is_unresolved: bool, predicate_receiver_is_text: bool,
+            predicate_has_custom_owner: bool, prelowered_method_receiver: LocalId) -> LocalId?:
         # for `x.ends_with(suffix)`. Mirrors the starts_with fix exactly:
         # rt_string_ends_with(i64 value, i64 suffix) needs both operands
         # tagged, so tag a raw string-literal suffix via rt_string_new first.
@@ -3970,137 +4303,10 @@ impl MirLowering:
             if val ew_local = ew_res:
                 return ew_local
             return ew_receiver
+        nil
 
-        # Bug #137/#138 (follow-up): the typed substring/slice special case
-        # below is gated on receiver.type_ == Some(Str), but an untyped
-        # receiver (no HIR type inference ran -- both under the bootstrap flat
-        # HIR path and on the normal native-build path) sets expr type_ to
-        # nil, so `args[i].substring(2)` / `args[i].substring(9)` (the -oFILE
-        # / --output=FILE path parsing in bootstrap_main lines 17,21) never
-        # reached it and fell through to `case Unresolved:` -> const 0 ->
-        # wrong/garbage filename. Handle it type-independently whenever
-        # resolution is Unresolved, mirroring the starts_with fix.
-        #
-        # Representation: the receiver may be a tagged argv element
-        # (rt_string_new-built) OR a genuinely-raw char* (a plain string
-        # literal, e.g. `val s = "hello world"; s.substring(6)` -- text/text3
-        # probe #4), but spl_str_slice/spl_str_len operate on RAW char*.
-        #
-        # BUG (fixed here): this previously coerced via rt_string_data
-        # (tagged -> raw ptr), which requires the receiver to ALREADY be a
-        # tagged handle -- rt_string_data returns NULL for anything else. A
-        # raw literal receiver made this NULL, so spl_str_len(NULL) -> 0 and
-        # spl_str_slice(NULL, start, 0) -> "" (empty string) SILENTLY (no
-        # error, no crash, just a blank result) whenever `start >= end`
-        # (which `start=6, end=0` always is), instead of the correct
-        # substring. Use rt_interp_cstr instead: it does the tagged-or-raw
-        # check at RUNTIME (bug #136's autodetection) -- a tagged handle
-        # unwraps to its buffer, an already-raw char* passes through
-        # unchanged -- so it is correct for both representations. The
-        # raw-char* result matches the non-bootstrap Str-path representation
-        # the downstream -o/--output filename handling expects. Supports both
-        # `.substring(start)` (1 arg; end = spl_str_len) and
-        # `.substring(start, end)` (2 args).
-        # Bug (array.slice/.substring misrouted to string.slice): this erased-
-        # receiver fallback (like the "contains" one further below) assumed
-        # an untyped/unresolved "slice"/"substring" receiver is always a
-        # STRING. `a[1:3]` on a runtime array desugars to
-        # `MethodCall(a, "slice", [1, 3])` (see the _FlatAstBridge EXPR_SLICE
-        # conversion) and ALSO resolves as Unresolved (arrays have no
-        # registered stdlib `slice` symbol), so without a receiver-type guard
-        # it fell into this SAME branch: the array's raw handle got
-        # `rt_interp_cstr`'d and passed to `spl_str_slice` as if it were a
-        # string pointer, treating live array element words as if they were
-        # string byte data -- silently wrong output (or worse, an
-        # out-of-bounds/garbage read) instead of a clean error. Only a proven
-        # runtime array may enter rt_slice; custom/static resolutions remain
-        # owned by their normal method dispatch. Evaluate receiver once even
-        # when it is a call, field or nested slice rather than a variable.
-        if method == "slice" and (args.len() == 1 or args.len() == 2) and
-                resolution_is_unresolved and static_receiver_name == "":
-            if not has_prelowered_method_receiver:
-                prelowered_method_receiver = self.lower_expr(receiver)
-                has_prelowered_method_receiver = true
-            if self.runtime_array_locals.contains(prelowered_method_receiver.id):
-                return self.lower_runtime_array_slice(prelowered_method_receiver, args)
-        if method == "take" and resolution_is_unresolved and static_receiver_name == "":
-            if not has_prelowered_method_receiver:
-                prelowered_method_receiver = self.lower_expr(receiver)
-                has_prelowered_method_receiver = true
-            if self.runtime_array_locals.contains(prelowered_method_receiver.id):
-                return self.lower_runtime_array_take(prelowered_method_receiver, args)
-        var slice_recv_is_array = false
-        if method == "substring" or method == "slice":
-            if val slice_recv_ty = receiver.type_:
-                match slice_recv_ty.kind:
-                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
-                        slice_recv_is_array = true
-                    case _: ()
-            if not slice_recv_is_array:
-                match receiver.kind:
-                    case Var(_) | NamedVar(_, _):
-                        var slice_recv_probe: LocalId = 0
-                        if has_prelowered_method_receiver:
-                            slice_recv_probe = prelowered_method_receiver
-                        else:
-                            slice_recv_probe = self.lower_expr(receiver)
-                        if self.local_is_runtime_array(slice_recv_probe):
-                            slice_recv_is_array = true
-                    case _: ()
-        if (method == "substring" or method == "slice") and (args.len() == 1 or args.len() == 2) and resolution_is_unresolved and not slice_recv_is_array and text_builtin_resolution_allowed and static_receiver_name == "":
-            var sub_recv_tagged: LocalId = 0
-            if has_prelowered_method_receiver:
-                sub_recv_tagged = prelowered_method_receiver
-            else:
-                sub_recv_tagged = self.lower_expr(receiver)
-            val strdata_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_interp_cstr"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-            ))
-            var b_subsd = self.builder
-            val sub_recv_res = b_subsd.emit_call(strdata_op, [mir_operand_copy(sub_recv_tagged)], MirType(kind: MirTypeKind.Opaque("str")))
-            self.builder = b_subsd
-            if val sub_recv_raw = sub_recv_res:
-                var sub_args: [MirOperand] = [mir_operand_copy(sub_recv_raw)]
-                for arg in args:
-                    val sub_arg_local = self.lower_text_index_operand(arg.value)
-                    sub_args = sub_args.push(mir_operand_copy(sub_arg_local))
-                if args.len() == 1:
-                    val sublen_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("spl_str_len"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                    ))
-                    var b_sublen = self.builder
-                    val sublen_res = b_sublen.emit_call(sublen_op, [mir_operand_copy(sub_recv_raw)], MirType.i64())
-                    self.builder = b_sublen
-                    if val sublen_local = sublen_res:
-                        sub_args = sub_args.push(mir_operand_copy(sublen_local))
-                val subslice_op = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("spl_str_slice"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-                ))
-                var b_subslice = self.builder
-                val subslice_res = b_subslice.emit_call(subslice_op, sub_args, MirType(kind: MirTypeKind.Opaque("str")))
-                self.builder = b_subslice
-                if val subslice_local = subslice_res:
-                    return subslice_local
-                return sub_recv_raw
-            return sub_recv_tagged
-
-        # methods-mir-20261031 shape 1: `fn f(value): value.substring(0, 1)`
-        # / `value[0:1]` -- an erased (untyped-param) receiver with no text or
-        # array proof. rt_slice is runtime-polymorphic over tagged strings and
-        # array handles (runtime_native.c), so dispatch through it instead of
-        # guessing a representation; any other value yields nil at runtime,
-        # never a const-0 placeholder.
-        if (method == "substring" or method == "slice") and (args.len() == 1 or args.len() == 2) and resolution_is_unresolved and not slice_recv_is_array and text_builtin_resolution_erased_allowed and static_receiver_name == "":
-            var erased_slice_recv: LocalId = 0
-            if has_prelowered_method_receiver:
-                erased_slice_recv = prelowered_method_receiver
-            else:
-                erased_slice_recv = self.lower_expr(receiver)
-            return self.lower_erased_receiver_slice_v1(erased_slice_recv, args)
-
+    me try_lower_text_char_at_v1(receiver: HirExpr, method: text, args: [HirCallArg],
+            resolution_is_unresolved: bool) -> LocalId?:
         # `.char_at(index)` (task #178 text3 probe #4): had NO native MIR
         # lowering at all -- unlike substring/slice above, this fell all the
         # way to `case Unresolved:` -> const-0 placeholder -> the existing
@@ -4142,7 +4348,13 @@ impl MirLowering:
                     return ca_slice_local
                 return ca_recv_raw
             return ca_recv_tagged
+        nil
 
+    me try_lower_text_search_and_transform_v1(receiver: HirExpr, method: text, args: [HirCallArg],
+            resolution_is_unresolved: bool, predicate_receiver_is_text: bool,
+            predicate_has_custom_owner: bool, prelowered_method_receiver: LocalId,
+            has_prelowered_method_receiver: bool, text_builtin_resolution_allowed: bool,
+            text_builtin_resolution_erased_allowed: bool) -> LocalId?:
         # Erased-receiver fallbacks for builtin text methods (2026-07-13,
         # whole-compiler redeploy closure): trim/lower/to_lower/split/replace
         # on an untyped receiver never resolve (no HIR type inference under
@@ -4552,153 +4764,19 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] text-special-return method={method} id={ts_local.id}\n")
                 return ts_local
+        nil
 
-        # Bug (pure_simple_text_split_lines_missing, 2026-07-16): `text.split_lines()` / `.lines()`
-        # had no MIR lowering at all (fell to the generic Unresolved loud-fail:
-        # "unresolved method call: split_lines"). Guard against a positively-known
-        # array/slice receiver first -- same rationale as the `contains`/
-        # `substring` guards above: an array also resolves Unresolved for this
-        # (unregistered) method name, and without the guard its raw handle would
-        # get silently treated as a string pointer instead of loud-failing.
-        var split_lines_recv_is_array = false
-        val is_lines_method = method == "split_lines" or method == "lines"
-        if is_lines_method and resolution_is_unresolved:
-            if val slr_ty = receiver.type_:
-                match slr_ty.kind:
-                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
-                        split_lines_recv_is_array = true
-                    case _: ()
-            if not split_lines_recv_is_array:
-                match receiver.kind:
-                    case Var(_) | NamedVar(_, _):
-                        val slr_probe = self.lower_expr(receiver)
-                        if self.local_is_runtime_array(slr_probe):
-                            split_lines_recv_is_array = true
-                    case _: ()
-        if is_lines_method and args.len() == 0 and text_builtin_resolution_allowed and not split_lines_recv_is_array:
-            val lines_receiver = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
-            return self.lower_text_split_lines(lines_receiver, receiver.span)
-
-        if (method == "substring" or method == "slice"):
-            # A binding initialized from a text field can retain an Infer
-            # expression type while its lowered local has concrete text
-            # provenance. Use the same recovered receiver type as owner
-            # dispatch; never treat an unknown or array receiver as text.
-            var slice_receiver_is_text = false
-            if val found_receiver_type = trait_receiver_type:
-                match found_receiver_type.kind:
-                    case HirTypeKind.Str: slice_receiver_is_text = true
-                    case _: ()
-            if not slice_receiver_is_text:
-                if not has_prelowered_method_receiver:
-                    prelowered_method_receiver = self.lower_expr(receiver)
-                    has_prelowered_method_receiver = true
-                slice_receiver_is_text = self.local_is_str(prelowered_method_receiver) or self.local_hir_type_is_str(prelowered_method_receiver)
-            if slice_receiver_is_text:
-                if args.len() == 1 or args.len() == 2:
-                    val receiver_local = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
-                    var arg_operands: [MirOperand] = []
-                    arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
-                    for arg in args:
-                        val arg_local = self.lower_text_index_operand(arg.value)
-                        arg_operands = arg_operands.push(mir_operand_copy(arg_local))
-                    if args.len() == 1:
-                        val len_operand = MirOperand(kind: MirOperandKind.Const(
-                            MirConstValue.Str("spl_str_len"),
-                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                        ))
-                        var b_len = self.builder
-                        val len_result = b_len.emit_call(len_operand, [mir_operand_copy(receiver_local)], MirType.i64())
-                        self.builder = b_len
-                        if val len_local = len_result:
-                            arg_operands = arg_operands.push(mir_operand_copy(len_local))
-                    val slice_operand = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("spl_str_slice"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-                    ))
-                    var b_slice = self.builder
-                    val slice_result = b_slice.emit_call(slice_operand, arg_operands, MirType(kind: MirTypeKind.Opaque("str")))
-                    self.builder = b_slice
-                    if val slice_local = slice_result:
-                        return slice_local
-                    return receiver_local
-
-        if self.is_mutating_method(method):
-            if mir_mc_trace_state == 1:
-                eprint("[mir-method-call] writeback-enter method={method}\n")
-            match receiver.kind:
-                case Index(base, index):
-                    wb_base = self.lower_expr(base)
-                    if self.local_is_runtime_dict(wb_base):
-                        # Dict slot receiver (`c["k"].push(x)`): the slot is a
-                        # dict VALUE, not an array element. Load through the
-                        # same rt_dict_get read as `c[k]` (tagged-key
-                        # normalization included, via lower_dict_key) and mark
-                        # the slot for a rt_dict_set store-back. Without this
-                        # the dict handle fell into the raw GEP+load /
-                        # rt_array_set path below, which treats the hash table
-                        # as an element array: the pushed write never reached
-                        # the stored value (mutate_through_index_loses_write,
-                        # dict-value shape).
-                        wb_index = self.lower_dict_key(index)
-                        wb_receiver = self.lower_dict_runtime_get(base, wb_base, wb_index)
-                        wb_kind = 3
-                    elif self.writeback_index_base_is_tuple(wb_base, base):
-                        # Tuple positional-field receiver (`a[0].1.push(x)`:
-                        # `.N` desugars to Index on a Tuple-typed base). Tuple
-                        # storage is a raw rt_alloc field block with no SplArray
-                        # header, so rt_array_get/rt_array_set cannot address
-                        # it -- the same landmine the read path documents. Load
-                        # the field word with plain GEP+load and store it back
-                        # through the same slot (wb_kind 4).
-                        wb_index = self.lower_expr(index)
-                        var wb_b = self.builder
-                        val wb_ptr = wb_b.emit_gep(
-                            mir_operand_copy(wb_base),
-                            [mir_operand_copy(wb_index)],
-                            MirType.ptr(receiver_type, false)
-                        )
-                        wb_receiver = wb_b.emit_load(mir_operand_copy(wb_ptr), receiver_type)
-                        self.builder = wb_b
-                        wb_kind = 4
-                    else:
-                        wb_index = self.lower_expr(index)
-                        if self.local_is_runtime_array(wb_base):
-                            val getter = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str("rt_array_get"),
-                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
-                            ))
-                            var wb_b = self.builder
-                            # Statement-shaped: no `if val x = <LocalId?>` transport into the outer var;
-                            # on the native stage-2/3 lane that binding carried the Option box instead of
-                            # the LocalId payload, so grid[1].push(7) faulted (0xC0000005) in mir_lower.
-                            wb_receiver = wb_b.emit_call_value(getter, [mir_operand_copy(wb_base), mir_operand_copy(wb_index)], receiver_type)
-                            self.builder = wb_b
-                            self.mark_runtime_value_local(wb_receiver.id)
-                            self.remember_array_index_projection_provenance(wb_base, wb_receiver)
-                        else:
-                            var wb_b = self.builder
-                            val wb_ptr = wb_b.emit_gep(
-                                mir_operand_copy(wb_base),
-                                [mir_operand_copy(wb_index)],
-                                MirType.ptr(receiver_type, false)
-                            )
-                            wb_receiver = wb_b.emit_load(mir_operand_copy(wb_ptr), receiver_type)
-                            self.builder = wb_b
-                        wb_kind = 1
-                case Field(base, field_name, resolved):
-                    # A `T?` record base reads the record, not its Option box.
-                    wb_base = self.option_record_receiver_payload_v1(base, self.lower_expr(base))
-                    wb_field_idx = self.resolve_field_index(base, wb_base, field_name, resolved)
-                    var wb_b = self.builder
-                    wb_receiver = wb_b.emit_get_field(mir_operand_copy(wb_base), wb_field_idx, receiver_type)
-                    self.builder = wb_b
-                    self.remember_field_projection_provenance(base, wb_base, wb_field_idx, wb_receiver)
-                    wb_kind = 2
-                case _: ()
-        if mir_mc_trace_state == 1:
-            eprint("[mir-method-call] writeback-done method={method} kind={wb_kind}\n")
-
+    me lower_method_call_by_resolution_v1(receiver: HirExpr, method: text, args: [HirCallArg],
+            resolution: MethodResolution, static_receiver_name: text,
+            resolved_static_receiver_symbol: i64, resolution_is_unresolved: bool,
+            proven_scalar_receiver: bool, trait_receiver_type: HirType?,
+            declared_text_receiver: bool, predicate_has_custom_owner: bool,
+            chr_has_custom_owner: bool, chr_method_shape: bool,
+            prelowered_receiver_in: LocalId, has_prelowered_receiver_in: bool,
+            wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64,
+            wb_receiver: LocalId) -> LocalId:
+        var prelowered_method_receiver = prelowered_receiver_in
+        var has_prelowered_method_receiver = has_prelowered_receiver_in
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] resolution-enter method={method} unresolved={resolution_is_unresolved}\n")
         match resolution:
@@ -6017,7 +6095,7 @@ impl MirLowering:
             val concrete_type: HirType = present_type
             match concrete_type.kind:
                 case HirTypeKind.Str:
-                    "rt_string_len"
+                    "rt_string_char_count"
                 case Array(_, _):
                     "rt_array_len"
                 case Slice(_):
