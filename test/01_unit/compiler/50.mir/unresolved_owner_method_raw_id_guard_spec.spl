@@ -1,0 +1,45 @@
+# Purpose and audience: compiler engineers owning native MIR method dispatch.
+# @req REQ-SSPEC-COMPILER
+"""
+# Unresolved-owner method recovery carries a raw symbol id
+
+Regression guard for native_method_call_hir_lowering_invalid_array_handle_2026-11-07.
+
+On the frozen-stage2-built stage3 compiler, `custom.get()` on a same-module struct failed with `unresolved method call: get route=runtime-fallback`, even though `struct_method_syms` held the key with id 7 (`struct_method_sym_id=7`). The recovered id was wrapped in a `SymbolId?` and tested `!= nil`. The frozen stage2 miscompiles that struct-Option shape (stage2_if_val_struct_option_binding_as_int_wide_2026-11-03), so the valid id was dropped.
+
+The recovery now carries the raw `i64` through to `>= 0`. This guard keeps the Option form from coming back in that region.
+
+Native repro fixtures: test/fixtures/compiler/native_unresolved_owner_method/.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+
+val source_path = "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl"
+
+fn recovery_region() -> text:
+    val src = file_read_text(source_path)
+    val start = src.index_of("unresolved-owner-get method=")
+    val stop = src.index_of("unresolved-owner-done method=")
+    if start < 0 or stop <= start:
+        return ""
+    src[start:stop]
+
+describe "unresolved-owner method recovery":
+    it "finds the recovery region":
+        expect(recovery_region().len() > 0).to_equal(true)
+
+    it "carries the resolved method as a raw i64 id":
+        val region = recovery_region()
+        expect(region.contains("var final_method_raw: i64 = resolved_instance_method_raw")).to_equal(true)
+        expect(region.contains("if final_method_raw >= 0:")).to_equal(true)
+
+    it "does not wrap the recovered id in a SymbolId? before dispatch":
+        val region = recovery_region()
+        expect(region.contains("var unresolved_method_id: SymbolId? = nil")).to_equal(false)
+        expect(region.contains("unresolved_method_id_resolved")).to_equal(false)
+        expect(region.contains("var final_unresolved_method_id")).to_equal(false)
