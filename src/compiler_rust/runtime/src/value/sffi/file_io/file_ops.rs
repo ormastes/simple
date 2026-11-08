@@ -2380,6 +2380,23 @@ pub extern "C" fn rt_tls_wire_from_bytes(bytes: RuntimeValue) -> RuntimeValue {
     rt_string_new(out.as_ptr(), out.len() as u64)
 }
 
+/// Managed text-to-byte-array facade over the existing conversion owner.
+#[no_mangle]
+pub extern "C" fn rt_string_to_byte_array(text: RuntimeValue) -> RuntimeValue {
+    rt_text_to_bytes(text)
+}
+
+/// Non-optional text facade: invalid byte arrays retain the empty-text fallback.
+#[no_mangle]
+pub extern "C" fn rt_string_from_byte_array(bytes: RuntimeValue) -> RuntimeValue {
+    let text = rt_bytes_to_text(bytes);
+    if text.is_nil() {
+        rt_string_new(std::ptr::null(), 0)
+    } else {
+        text
+    }
+}
+
 /// Write raw bytes to file
 /// Takes an array of integers (0-255)
 #[no_mangle]
@@ -3735,6 +3752,68 @@ mod byte_text_utf8_invariant_tests {
         assert_raw(rt_tls_wire_from_bytes(boxed(&all)), &all);
         let mixed = [0xc2, 0x80, 0, 0xe2, 0x82, 0xac, 0xff];
         assert_raw(rt_tls_wire_from_bytes(unsafe { bytes_to_runtime_array(&mixed) }), &mixed);
+    }
+
+    #[test]
+    fn text_byte_facade_roundtrip_copies_utf8_and_embedded_nul() {
+        use crate::value::collections::{rt_array_free, rt_string_free};
+        for expected in ["", "ASCII", "A\0B", "한글😀e\u{301}"] {
+            let input = rt_string_new(expected.as_ptr(), expected.len() as u64);
+            let bytes = rt_string_to_byte_array(input);
+            rt_string_free(input);
+            assert_eq!(crate::value::collections::rt_array_len(bytes), expected.len() as i64);
+            for (index, byte) in expected.bytes().enumerate() {
+                assert_eq!(crate::value::collections::rt_array_get(bytes, index as i64),
+                           RuntimeValue::from_int(i64::from(byte)));
+            }
+            let output = rt_string_from_byte_array(bytes);
+            rt_array_free(bytes);
+            assert_decoded(output, expected);
+            rt_string_free(output);
+        }
+    }
+
+    #[test]
+    fn text_byte_facade_packed_boxed_and_lossy_copy_contract() {
+        use crate::value::collections::{rt_array_free, rt_string_free};
+        for (input, expected) in [(&b"A\0B"[..], "A\0B"),
+                                  (&[0, 0xff, 0xe2, 0x82][..], "\0\u{fffd}\u{fffd}"),
+                                  (&b""[..], "")] {
+            for array in [unsafe { bytes_to_runtime_array(input) }, boxed(input)] {
+                let text = rt_string_from_byte_array(array);
+                rt_array_free(array);
+                assert_decoded(text, expected);
+                rt_string_free(text);
+            }
+        }
+    }
+
+    #[test]
+    fn text_byte_facade_invalid_inputs_retain_empty_fallback_and_helper_nil() {
+        use crate::value::collections::{rt_array_free, rt_string_free};
+        for input in [RuntimeValue::NIL, RuntimeValue::from_int(7)] {
+            let bytes = rt_string_to_byte_array(input);
+            assert!(!bytes.is_nil());
+            assert_eq!(crate::value::collections::rt_array_len(bytes), 0);
+            rt_array_free(bytes);
+        }
+        for receiver in [RuntimeValue::NIL, RuntimeValue::from_int(0), RuntimeValue::from_bool(false)] {
+            assert!(rt_bytes_to_text(receiver).is_nil());
+            let text = rt_string_from_byte_array(receiver);
+            assert_decoded(text, "");
+            rt_string_free(text);
+        }
+        for invalid in [RuntimeValue::from_int(-1), RuntimeValue::from_int(256),
+                        RuntimeValue::from_bool(true), RuntimeValue::NIL] {
+            let array = rt_array_new(2);
+            assert!(rt_array_push(array, RuntimeValue::from_int(65)));
+            assert!(rt_array_push(array, invalid));
+            assert!(rt_bytes_to_text(array).is_nil());
+            let text = rt_string_from_byte_array(array);
+            rt_array_free(array);
+            assert_decoded(text, "");
+            rt_string_free(text);
+        }
     }
 
     #[test]

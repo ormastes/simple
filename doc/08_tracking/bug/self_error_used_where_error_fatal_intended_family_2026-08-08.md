@@ -467,3 +467,34 @@ allows three additional meaningful cycles7–9 until2026-11-07 18:56UTC. This is
 cycle7. Independent source review is required before commit/landing. SSpec and
 compiler/core/MCP/native verification remain NOT_RUN pending an admitted runtime
 and root build slot; source landing is not verification PASS or full closure.
+
+## Function-value refusal follow-up, 2026-11-06
+
+Source pin: release `fadd88059b3c376d709ef697318c6e609b885062`.
+`try_lower_function_value` in `expr_dispatch.spl` documents that it refuses
+missing or unresolved function signatures rather than guessing a function
+pointer ABI. Both refusal paths nevertheless used `self.error`, emitted an
+integer-zero recovery local, and returned `Some(local)`. Neither message
+matches the shared driver's legacy fatal-prefix rules, so refusal alone did
+not block code publication.
+
+The owner-level counterexamples use a known top-level function symbol with
+either no retained type, or a signature whose return contains an unresolved
+type parameter. The latter checks the return before lowering parameters, so
+no separate `lower_type` failure explains away the missing fatal diagnostic.
+These are compiler-owner counterexamples; source-level reachability through a
+particular HIR producer has not been executed or qualified.
+
+Both refusal paths now use `error_fatal`. Message text, source span, recovery
+local creation and continued diagnostic collection remain unchanged. This does
+not add support for unresolved function signatures or alter concrete-function
+ABI lowering.
+
+`test/01_unit/compiler/mir/function_value_refusal_fatal_spec.spl` checks the
+actual owner and driver classifier for both failures, verifies source location,
+and retains a concrete i32-to-bool function pointer as the positive ABI control.
+Status: **source repair implemented; executable verification pending**.
+The SSpec, compiler/core/MCP checks and native smokes are unrun pending a
+qualified self-hosted producer. No seed test is substituted, and the broader
+diagnostic family remains open.
+

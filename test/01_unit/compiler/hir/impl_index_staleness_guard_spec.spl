@@ -104,9 +104,9 @@ describe("impl index staleness guard", fn():
         expect(lowering.symbols.lookup_or_invalid("pkg.w.Widget::m2").is_valid()).to_equal(true)
     )
 
-    it("a stale index over an emptied surface reports one diagnostic and never indexes", fn():
+    it("an emptied surface misses the memo instead of using stale positions", fn():
         # @req: REQ-SSPEC-LOCAL-001
-        step("Verify: teardown without invalidation hits the fail-closed guard")
+        step("Verify: same physical_index, no impls -> re-index, no stale read")
         val registry = build_registry()
         var lowering = hirlowering_for_module("app/main.spl", registry)
         lowering.begin_module("app/main.spl")
@@ -118,8 +118,41 @@ describe("impl index staleness guard", fn():
         dead.impls = []
         lowering.register_imported_type_methods_inner(
             dead, "pkg.w", SPAN_OWNER_NAME, SymbolId(id: 0), Span.empty(), true)
-        expect(count_stale_diagnostics(lowering, "impls")).to_equal(1)
+        expect(count_stale_diagnostics(lowering, "impls")).to_equal(0)
+        expect(lowering.impl_index_build_count).to_equal(2)
         expect(lowering.symbols.lookup_or_invalid("pkg.w.Widget::m0").is_valid()).to_equal(false)
+    )
+
+    it("a shrunk surface (s3 self-build shape) resolves against the live rows", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: memo over 3 impls, live array has 1 -> m0 registered, no stale diagnostic")
+        val registry = build_registry()
+        var lowering = hirlowering_for_module("app/main.spl", registry)
+        lowering.begin_module("app/main.spl")
+        val idx = registry.index_by_name["pkg.w"]
+        val live = registry.surfaces[idx]
+        val _key = lowering.ensure_impl_index(live)
+        var shrunk = live
+        val first_row: ModuleSurfaceImpl = live.impls[0]
+        shrunk.impls = [first_row]
+        lowering.register_imported_type_methods_inner(
+            shrunk, "pkg.w", SPAN_OWNER_NAME, SymbolId(id: 0), Span.empty(), true)
+        expect(count_stale_diagnostics(lowering, "impls")).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("pkg.w.Widget::m0").is_valid()).to_equal(true)
+        expect(lowering.symbols.lookup_or_invalid("pkg.w.Widget::m2").is_valid()).to_equal(false)
+    )
+
+    it("an unchanged surface reuses the memo (one build)", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: identical surface -> same key, no rebuild")
+        val registry = build_registry()
+        var lowering = hirlowering_for_module("app/main.spl", registry)
+        lowering.begin_module("app/main.spl")
+        val idx = registry.index_by_name["pkg.w"]
+        val k1 = lowering.ensure_impl_index(registry.surfaces[idx])
+        val k2 = lowering.ensure_impl_index(registry.surfaces[idx])
+        expect(k1).to_equal(k2)
+        expect(lowering.impl_index_build_count).to_equal(1)
     )
 
     it("the diagnostic names module, surface key, owner, position and len", fn():
