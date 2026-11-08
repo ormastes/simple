@@ -39,3 +39,29 @@ to the `check-no-refresh-file-lock.shs` scan scope. Evidence:
 (no lock file, benign duplicate, superseded-base rejection, same-base race
 loses with `parent-generation-changed`); regression
 `persisted_graph_host_write_spec.spl` still green.
+
+## Retry publication follow-up (2026-11-08)
+
+Source review of release commit `e87258dba95a096fb1e2cf63e69651b101a11a15`
+found that identical existing generation bytes returned `ok` before consulting
+`CURRENT`. A failed pointer write can leave the generation blob behind, so a
+retry could report success without publishing the pointer. Similarly, retrying
+a graph rejected for a superseded parent could incorrectly return `ok`.
+
+The candidate repair skips rewriting an identical immutable generation, then
+continues through the existing pointer write and parent-generation check. It
+does not change the concurrency algorithm or claim the read-then-rename is an
+atomic compare-and-swap.
+
+`persisted_graph_lockless_publish_spec.spl` adds two regressions: an existing
+immutable blob with absent `CURRENT` must publish the pointer, and a second
+attempt with the same superseded parent must still reject the publication.
+Existing successful duplicate coverage remains in place.
+
+Status: implementation and regression source prepared; execution pending.
+No admitted full-CLI self-hosted runtime was available in this lane, so no
+Simple test/check/build, interpreter/native qualification, or pass count is
+claimed. Required verification includes the focused lockless publication and
+host-write specs plus compiler/core/MCP checks under the repo verification
+policy before landing. The original lock-removal source was already present;
+this follow-up does not newly claim that repair.

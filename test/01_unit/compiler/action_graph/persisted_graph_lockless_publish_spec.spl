@@ -3,7 +3,7 @@
 
 use std.spec.*
 use std.spec.step
-use std.io_runtime.{cwd_process, dir_remove_all, file_exists, file_read_result}
+use std.io_runtime.{cwd_process, dir_remove_all, file_exists, file_read_result, file_write_exact, dir_create_all}
 use compiler.driver.action_graph.persisted_graph.{
     PersistedBuildGraphV1, persisted_graph_digest_v1,
     persisted_graph_encode_v1, persisted_graph_load_current_v1,
@@ -48,6 +48,8 @@ describe "compiler build graph lockless publication":
         val generation_b = persisted_graph_digest_v1(provisional_b)
         val graph_b = PersistedBuildGraphV1(generation_b, "", "snapshot-2", [])
         expect(persisted_graph_publish_v1(root, graph_b)).to_equal("parent-generation-changed")
+        step("Retrying the rejected generation must still validate its superseded parent")
+        expect(persisted_graph_publish_v1(root, graph_b)).to_equal("parent-generation-changed")
         expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_a)
 
         step("The owner re-derives from the winner's generation and publishes cleanly")
@@ -85,5 +87,26 @@ describe "compiler build graph lockless publication":
         expect(persisted_graph_publish_v1(root, graph_y)).to_equal("parent-generation-changed")
         expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_x)
         expect(persisted_graph_load_current_v1(root).unwrap().generation).to_equal(generation_x)
+        expect(file_exists(root + "/publication.lock")).to_equal(false)
+        dir_remove_all(root)
+
+    it "advances CURRENT when an earlier attempt left only its immutable generation":
+        # @req REQ-SSPEC-UNIT
+        val root = cwd_process() + "/build/test/persisted-graph-retry-pointer"
+        dir_remove_all(root)
+        val provisional = PersistedBuildGraphV1("seed", "", "snapshot-retry", [])
+        val generation = persisted_graph_digest_v1(provisional)
+        val graph = PersistedBuildGraphV1(generation, "", "snapshot-retry", [])
+
+        step("Retain the generation bytes from an attempt that did not publish CURRENT")
+        expect(dir_create_all(root + "/generations")).to_equal(true)
+        expect(file_write_exact(root + "/generations/" + generation + ".graph",
+            persisted_graph_encode_v1(graph))).to_equal(true)
+        expect(file_exists(root + "/CURRENT")).to_equal(false)
+
+        step("Retry must publish the missing pointer before reporting success")
+        expect(persisted_graph_publish_v1(root, graph)).to_equal("ok")
+        expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation)
+        expect(persisted_graph_load_current_v1(root).unwrap().generation).to_equal(generation)
         expect(file_exists(root + "/publication.lock")).to_equal(false)
         dir_remove_all(root)
