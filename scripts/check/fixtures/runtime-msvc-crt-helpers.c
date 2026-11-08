@@ -66,6 +66,16 @@ int main(void) {
     assert(!rt_win_fopen_read_shared("missing-msvc-crt-fixture.tmp"));
     /* Invalid UTF-8 forces the CRT fallback; the missing file must fail. */
     assert(!rt_win_fopen_read_shared("missing-\xff-msvc-crt-fixture.tmp"));
+    /* The ANSI CRT accepts this name, while UTF-8 widening rejects it.
+     * Preserve the original fallback's sharing with concurrent writers. */
+    const char* fallback_path = "fallback-\xff-msvc-crt-fixture.tmp";
+    FILE* writer = _fsopen(fallback_path, "wb", _SH_DENYNO);
+    assert(writer && fputc('x', writer) == 'x' && fclose(writer) == 0);
+    file = rt_win_fopen_read_shared(fallback_path);
+    assert(file && fgetc(file) == 'x');
+    writer = _fsopen(fallback_path, "rb+", _SH_DENYNO);
+    assert(writer && fclose(writer) == 0);
+    assert(fclose(file) == 0 && remove(fallback_path) == 0);
     puts("runtime MSVC CRT helpers: PASS");
     return 0;
 }
