@@ -52,3 +52,37 @@ u8 `4 116 224`, lit `44 144`, u16 `4464 15536 17920`, u32 `205032704 794967296 1
 mixed `180 60000`. Note `simple test` runs specs in the interpreter regardless of the env
 var, so JIT proof is via `run` of a probe file. Cost: one `and` with immediate per narrow op.
 LLVM backend not changed.
+
+
+## 2026-11-08: pure-Simple same-width MIR candidate, verification pending
+
+The host MIR lowerer used `infer_binop_type`'s i64 default for unsigned
+arithmetic. LLVM then correctly widened both operands to that incorrect
+result width before adding/subtracting/multiplying. A backend-only mask would
+leave the MIR type wrong. The candidate preserves the operand type only for
+host `+ - *` with two actual MIR locals of exactly the same U8, U16 or U32
+kind. GPU lowering, signed operations, mixed widths, i64 literals, division
+and comparison retain their previous behavior. Literal and mixed-promotion
+residuals remain open; this is not a complete repair of the broad bug.
+
+Same-width wrapping is an existing contract, documented at
+`doc/05_design/platform/structural_compute/execution_profile_contract_v1.md:219`
+and asserted by `test/01_unit/bugs/jit_narrow_unsigned_wrap_spec.spl`.
+The wider-variable contrast is pinned by `u8_times_wider_int_widens_spec.spl`.
+No new general promotion or overflow policy is selected here.
+
+Executable MIR regression:
+`test/01_unit/compiler/mir/same_width_unsigned_binop_spec.spl` calls the real
+binary expression lowerer with typed locals, checks all nine width/operator
+pairs and negative wider/signed/nonarithmetic controls. Native regression:
+`test/fixtures/compiler/same_width_unsigned_binop/main.spl` widens the completed
+operation to i64 before returning and checks nine overflow results plus one
+mixed-width control. Both are **UNRUN**, because no admitted full test CLI is
+available and disk capacity precludes a new build. Existing green evidence is
+not rerun or borrowed as native qualification of this patch.
+
+Required admission: current-source core/compiler/lib/MCP/LSP checks, executable
+MIR spec, LLVM and Cranelift fixture compilation/execution with exact10-check
+stdout, and an intentional wrong-expectation negative control. Retain source,
+producer/runtime/tool identities and actual exit status. Keep status
+`fix-implemented-verification-pending`; no fixed/done promotion is justified.

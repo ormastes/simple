@@ -1,0 +1,61 @@
+# @req REQ-MIR-SAME-WIDTH-UNSIGNED-ARITHMETIC
+# UNRUN: requires an admitted current-source pure-Simple test runner.
+# Calls the real MIR expression lowerer; no source-string assertions.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_operators.{HirBinOp}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.mir.mir.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+fn unsigned_binop_var(symbol: i64, bits: i64, signed: bool) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(SymbolId(id: symbol)), has_type_: true,
+        type_: HirType(kind: HirTypeKind.Int(bits, signed), span: Span.empty()),
+        span: Span.empty())
+
+fn unsigned_binop_result(left_kind: MirTypeKind, right_kind: MirTypeKind,
+    op: HirBinOp, left_bits: i64, right_bits: i64, signed: bool = false, gpu: text = ""
+) -> MirTypeKind:
+    var lowering = MirLowering.new(SymbolTable.new())
+    lowering.current_gpu_kernel_target = gpu
+    var builder = lowering.builder
+    builder.begin_simple_function("same_width_unsigned", "unit")
+    val left_local = builder.new_temp(MirType(kind: left_kind))
+    val right_local = builder.new_temp(MirType(kind: right_kind))
+    lowering.builder = builder
+    lowering.local_map[101] = left_local
+    lowering.local_map[102] = right_local
+    val left = unsigned_binop_var(101, left_bits, signed)
+    val right = unsigned_binop_var(102, right_bits, signed)
+    val expression = HirExpr(kind: HirExprKind.Binary(op, left, right),
+        has_type_: false, type_: nil, span: Span.empty())
+    val result = lowering.lower_binary_expr(expression, op, left, right)
+    expect(lowering.errors.len()).to_equal(0)
+    val result_type = lowering.local_mir_type_of(result)
+    if result_type == nil:
+        fail("real binary lowering did not retain its result type")
+        return MirTypeKind.Unit
+    result_type.unwrap().kind
+
+describe "same-width unsigned MIR arithmetic":
+    it "retains each unsigned width at every arithmetic operation":
+        for op in [HirBinOp.Add, HirBinOp.Sub, HirBinOp.Mul]:
+            expect(unsigned_binop_result(MirTypeKind.U8, MirTypeKind.U8, op, 8, 8)).to_equal(MirTypeKind.U8)
+            expect(unsigned_binop_result(MirTypeKind.U16, MirTypeKind.U16, op, 16, 16)).to_equal(MirTypeKind.U16)
+            expect(unsigned_binop_result(MirTypeKind.U32, MirTypeKind.U32, op, 32, 32)).to_equal(MirTypeKind.U32)
+
+    it "preserves the existing wider and signed policies":
+        for op in [HirBinOp.Add, HirBinOp.Sub, HirBinOp.Mul]:
+            expect(unsigned_binop_result(MirTypeKind.U8, MirTypeKind.U16, op, 8, 16)).to_equal(MirTypeKind.I64)
+            expect(unsigned_binop_result(MirTypeKind.U8, MirTypeKind.I64, op, 8, 64)).to_equal(MirTypeKind.I64)
+            expect(unsigned_binop_result(MirTypeKind.I8, MirTypeKind.I8, op, 8, 8, true)).to_equal(MirTypeKind.I64)
+            expect(unsigned_binop_result(MirTypeKind.U64, MirTypeKind.U64, op, 64, 64)).to_equal(MirTypeKind.I64)
+
+    it "does not apply arithmetic wrapping to comparisons or division":
+        expect(unsigned_binop_result(MirTypeKind.U8, MirTypeKind.U8, HirBinOp.Eq, 8, 8)).to_equal(MirTypeKind.Bool)
+        expect(unsigned_binop_result(MirTypeKind.U16, MirTypeKind.U16, HirBinOp.Div, 16, 16)).to_equal(MirTypeKind.I64)
+
+    it "leaves existing GPU arithmetic selection unchanged":
+        expect(unsigned_binop_result(MirTypeKind.U8, MirTypeKind.U8, HirBinOp.Add, 8, 8, false, "cuda")).to_equal(MirTypeKind.I64)
+        expect(unsigned_binop_result(MirTypeKind.U32, MirTypeKind.U32, HirBinOp.Add, 32, 32, false, "vulkan")).to_equal(MirTypeKind.U32)
