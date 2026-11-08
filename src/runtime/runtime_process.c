@@ -4084,8 +4084,10 @@ static bool rt_mcp_wrapper_w(wchar_t* wrapper, size_t capacity) {
     if (length == 0 || length >= sizeof(exe) / sizeof(exe[0])) return false;
     if (!rt_mcp_parent_w(exe)) return false;
     wchar_t bin[32768];
-    wcscpy(bin, exe);
-    if (!rt_mcp_parent_w(bin) || !rt_mcp_parent_w(bin)) wcscpy(bin, exe);
+    /* GetModuleFileNameW and parent trimming bound exe below both array capacities. */
+    size_t exe_bytes = (wcslen(exe) + 1) * sizeof(*exe);
+    memcpy(bin, exe, exe_bytes);
+    if (!rt_mcp_parent_w(bin) || !rt_mcp_parent_w(bin)) memcpy(bin, exe, exe_bytes);
     const wchar_t* name = L"simple_mcp_server.cmd";
     int written = swprintf(wrapper, capacity, L"%ls\\%ls", bin, name);
     if (written < 0 || (size_t)written >= capacity) return false;
