@@ -1882,3 +1882,67 @@ fn erased(value: any) -> i64:
     assert!(matches!(returned.kind, HirExprKind::Binary { .. }), "{:?}", returned.kind);
     assert_eq!(returned.ty, TypeId::I64, "a - b on two untyped byte_len bindings must be i64");
 }
+
+// optional_as_cast_yields_zero_2026_11_09: `T? as <numeric>` outside `unsafe`
+// must be a lowering error, not a value. Both engines produced a silent
+// wrong number for it (interpreter: the `Option.Some` variant ORDINAL 0; JIT:
+// the reinterpreted heap word). Narrowed forms and the `unsafe:` form stay
+// admitted.
+#[test]
+fn optional_as_numeric_cast_is_rejected_outside_unsafe() {
+    let mk = "fn mk(v: u64) -> u64?:\n    if v != 0:\n        v\n    else:\n        nil\n\n";
+
+    // Function-returned `T?` (the shape that masked the acpi spec zero reads).
+    let returned = parse_and_lower(&format!("{mk}fn bad() -> u64:\n    return mk(1) as u64\n"));
+    let err = returned.expect_err("`mk(1) as u64` on a `u64?` must not lower");
+    let msg = format!("{err}");
+    assert!(msg.contains("SIMPLE_JIT_STRICT:"), "must carry the strict marker so the JIT cannot demote: {msg}");
+    assert!(msg.contains("optional") && msg.contains("u64") && msg.contains("unsafe"), "{msg}");
+
+    // Locally typed `T?`, float target, and `Option<T>` spelling: same rule.
+    for (src, what) in [
+        ("fn bad() -> u32:\n    val r: u32? = 45064\n    return r as u32\n", "local `u32?`"),
+        (
+            "fn bad() -> f64:\n    val r: f64? = 1.5\n    return r as f64\n",
+            "float target",
+        ),
+        ("fn bad(r: Option<i64>) -> i64:\n    return r as i64\n", "`Option<i64>` spelling"),
+    ] {
+        assert!(parse_and_lower(src).is_err(), "{what}: `as` on an optional must be rejected");
+    }
+
+    // Narrowing first is fine, and so is the cast inside `unsafe:`.
+    parse_and_lower(&format!("{mk}fn ok() -> u64:\n    return (mk(1) ?? 0) as u64\n"))
+        .expect("`(mk(1) ?? 0) as u64` must lower");
+    parse_and_lower(&format!("{mk}fn ok() -> u64:\n    unsafe:\n        return mk(1) as u64\n"))
+        .expect("`mk(1) as u64` inside `unsafe:` must lower");
+    // The unsafe depth must be restored after the block: a cast AFTER it is
+    // rejected again.
+    assert!(
+        parse_and_lower(&format!(
+            "{mk}fn bad() -> u64:\n    unsafe:\n        val x = mk(1) as u64\n    return mk(2) as u64\n"
+        ))
+        .is_err(),
+        "unsafe depth must not leak past the block"
+    );
+    // Non-optional casts are untouched.
+    parse_and_lower("fn ok(v: i64) -> u8:\n    return v as u8\n").expect("plain numeric cast must lower");
+    // `any?` narrowed with `??` is plain `any`, so the recommended idiom
+    // `(json_to_number(v) ?? 0) as i64` lowers; left typed `any?`, the
+    // narrowing itself was rejected (the three spipe_knowledge_provider
+    // callers surfaced by the corpus sweep).
+    let module = parse_and_lower(
+        "fn j(flag: bool) -> any?:\n    if flag:\n        42\n    else:\n        nil\n\nfn ok() -> i64:\n    return (j(true) ?? 0) as i64\n",
+    )
+    .expect("`(any? ?? 0) as i64` must lower");
+    let ok = module.functions.iter().find(|f| f.name == "ok").unwrap();
+    let cast = ok
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(&cast.kind, HirExprKind::Cast { expr, .. } if expr.ty == TypeId::ANY), "{:?}", cast.kind);
+}
