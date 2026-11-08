@@ -42,7 +42,7 @@ use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_TUPLE, EXPR_UNIT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_FIELD_ACCESS}
-use compiler.core.ast.{decl_get_fields, decl_get_field_types, decl_get_field_defaults, DECL_STRUCT, expr_struct_lit, expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
+use compiler.core.ast.{decl_get_fields, decl_get_field_types, decl_get_field_defaults, DECL_STRUCT, expr_struct_lit, expr_array_lit, expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
 use compiler.core.ast.{expr_int_lit, expr_float_lit}
 use compiler.core.ast.{expr_array_repeat}
 use compiler.core.ast_expr.{expr_mark_colon_block}
@@ -1766,8 +1766,18 @@ fn fixed_array_no_init_default_expr(type_tag: i64, fixed_elem: i64, fixed_size: 
         if elem_zero == -1:
             return 0
         if elem_zero == -2:
-            elem_zero = expr_nil_lit(0)
-        return expr_array_repeat(elem_zero, expr_int_lit(fixed_size, 0), 0)
+            return expr_array_repeat(expr_nil_lit(0), expr_int_lit(fixed_size, 0), 0)
+        # One DISTINCT zero struct literal per element: array-repeat would
+        # evaluate a single literal and could alias all elements.
+        if fixed_size > 4096:
+            parser_error("no-initializer struct array larger than 4096 elements; add an explicit initializer")
+            return 0
+        var zero_elems: [i64] = [elem_zero]
+        var zi = 1
+        while zi < fixed_size:
+            zero_elems.push(struct_zero_expr_v1(fixed_elem, 0))
+            zi = zi + 1
+        return expr_array_lit(zero_elems, 0)
     if fixed_elem == TYPE_BOOL:
         return expr_array_repeat(expr_bool_lit(0, 0), expr_int_lit(fixed_size, 0), 0)
     if fixed_elem == TYPE_F64:
