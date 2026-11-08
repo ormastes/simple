@@ -28,6 +28,16 @@ The Simple language build system is fully self-hosted, written in Simple and con
 > problem in pure-Simple (`src/compiler`, `src/lib`, `src/app`) and re-deploy —
 > don't make the seed the default. See `.claude/rules/bootstrap.md`.
 
+On Windows, `bin/simple.cmd lint` selects the deployed runtime from
+`bin/release`, even when a bootstrap seed is present. If no nonempty deployed
+runtime exists, lint fails with a deployment diagnostic instead of using the
+seed. An explicit `SIMPLE_BINARY` still takes precedence for operator-selected
+diagnostics. This selection rule does not itself establish runtime admission;
+use the bootstrap provenance checks before accepting compiler evidence.
+The wrapper contract can be checked without a compiler bootstrap using
+`powershell -NoProfile -File scripts/check/check-simple-cmd-lint-routing.ps1
+-OutputDirectory <fresh-directory>`.
+
 | Command | Description |
 |---------|-------------|
 | `bin/simple build` | Build the project |
