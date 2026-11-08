@@ -3,7 +3,7 @@
 
 use std.spec.*
 use std.spec.step
-use std.io_runtime.{cwd_process, dir_remove_all, file_exists, file_read_result}
+use std.io_runtime.{cwd_process, dir_create_all, dir_remove_all, file_exists, file_read_result, file_write_exact}
 use compiler.driver.action_graph.persisted_graph.{
     PersistedBuildGraphV1, persisted_graph_digest_v1,
     persisted_graph_encode_v1, persisted_graph_load_current_v1,
@@ -50,6 +50,10 @@ describe "compiler build graph lockless publication":
         expect(persisted_graph_publish_v1(root, graph_b)).to_equal("parent-generation-changed")
         expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_a)
 
+        step("Retrying the rejected graph must still reject its superseded base")
+        expect(persisted_graph_publish_v1(root, graph_b)).to_equal("parent-generation-changed")
+        expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_a)
+
         step("The owner re-derives from the winner's generation and publishes cleanly")
         val provisional_c = PersistedBuildGraphV1("seed-c", generation_a, "snapshot-2", [])
         val generation_c = persisted_graph_digest_v1(provisional_c)
@@ -57,6 +61,27 @@ describe "compiler build graph lockless publication":
         expect(persisted_graph_publish_v1(root, graph_c)).to_equal("ok")
         expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_c)
         expect(persisted_graph_load_current_v1(root).unwrap().generation).to_equal(generation_c)
+        expect(file_exists(root + "/publication.lock")).to_equal(false)
+        dir_remove_all(root)
+
+    it "finishes CURRENT publication when a previous attempt left only the immutable blob":
+        # @req REQ-SSPEC-UNIT
+        val root = cwd_process() + "/build/test/persisted-graph-interrupted-retry"
+        dir_remove_all(root)
+        val provisional = PersistedBuildGraphV1("seed", "", "snapshot-retry", [])
+        val generation = persisted_graph_digest_v1(provisional)
+        val graph = PersistedBuildGraphV1(generation, "", "snapshot-retry", [])
+
+        step("Retain the complete generation from an attempt interrupted before CURRENT")
+        expect(dir_create_all(root + "/generations")).to_equal(true)
+        expect(file_write_exact(root + "/generations/" + generation + ".graph",
+            persisted_graph_encode_v1(graph))).to_equal(true)
+        expect(file_exists(root + "/CURRENT")).to_equal(false)
+
+        step("Retry validates the blob and completes the missing pointer publication")
+        expect(persisted_graph_publish_v1(root, graph)).to_equal("ok")
+        expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation)
+        expect(persisted_graph_load_current_v1(root).unwrap().generation).to_equal(generation)
         expect(file_exists(root + "/publication.lock")).to_equal(false)
         dir_remove_all(root)
 

@@ -140,21 +140,23 @@ fn persisted_graph_publish_v1(root: text, graph: PersistedBuildGraphV1) -> text:
     val staged_path = "{generation_path}.tmp.{rt_getpid()}"
     if rt_file_exists(generation_path):
         val existing = rt_file_read_regular_no_follow_bounded(generation_path, BUILD_GRAPH_MAX_BYTES_V1)
-        if existing != nil and existing! == encoded:
-            return "ok"
-        return "generation-conflict"
-    if not file_write_exact(staged_path, encoded) or not rt_file_fsync(staged_path):
-        rt_file_delete(staged_path)
-        return "generation-write-failed"
-    val published = file_publish_noreplace_raw(staged_path, generation_path)
-    if rt_file_exists(staged_path):
-        rt_file_delete(staged_path)
-    if published != 1:
-        # Lost the no-replace race: identical content is benign, anything else
-        # under the same content-addressed name is a conflict.
-        val raced = rt_file_read_regular_no_follow_bounded(generation_path, BUILD_GRAPH_MAX_BYTES_V1)
-        if raced == nil or raced! != encoded:
+        if existing == nil or existing! != encoded:
             return "generation-conflict"
+        # A complete blob can outlive an interrupted or rejected CURRENT swap.
+        # Reuse its bytes, then apply the same pointer checks as a fresh blob.
+    else:
+        if not file_write_exact(staged_path, encoded) or not rt_file_fsync(staged_path):
+            rt_file_delete(staged_path)
+            return "generation-write-failed"
+        val published = file_publish_noreplace_raw(staged_path, generation_path)
+        if rt_file_exists(staged_path):
+            rt_file_delete(staged_path)
+        if published != 1:
+            # Lost the no-replace race: identical content is benign, anything else
+            # under the same content-addressed name is a conflict.
+            val raced = rt_file_read_regular_no_follow_bounded(generation_path, BUILD_GRAPH_MAX_BYTES_V1)
+            if raced == nil or raced! != encoded:
+                return "generation-conflict"
     val current_stage = "{root}/CURRENT.tmp.{rt_getpid()}"
     if not file_write_exact(current_stage, graph.generation) or not rt_file_fsync(current_stage):
         rt_file_delete(current_stage)
