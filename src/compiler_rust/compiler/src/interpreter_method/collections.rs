@@ -767,6 +767,45 @@ pub fn handle_array_methods(
             }
             Value::Int(-1)
         }
+        "sort_by" => {
+            if args.len() != 1 {
+                return Err(CompileError::semantic("sort_by expects one comparator argument".to_string()));
+            }
+            let comparator = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            if !matches!(&comparator, Value::Function { .. } | Value::Lambda { .. }) {
+                return Err(CompileError::semantic("sort_by expects a lambda or named function".to_string()));
+            }
+            if matches!(&comparator, Value::Lambda { params, .. } if params.len() != 2) {
+                return Err(CompileError::semantic("sort_by comparator expects two parameters".to_string()));
+            }
+            let sorted = super::fallible_sort::stable_sort_by(arr, &mut |left, right| {
+                crate::interpreter::check_execution_limit()?;
+                let result = match &comparator {
+                    Value::Function { def, captured_env, .. } => {
+                        let mut call_env = Env::clone(captured_env);
+                        crate::interpreter::interpreter_call::exec_function_with_values(
+                            def, &[left.clone(), right.clone()], &mut call_env,
+                            functions, classes, enums, impl_methods,
+                        )?
+                    }
+                    Value::Lambda { params, body, env: captured } => {
+                        let mut call_env = Env::clone(captured);
+                        call_env.insert(params[0].clone(), left.clone());
+                        call_env.insert(params[1].clone(), right.clone());
+                        crate::interpreter::interpreter_helpers::eval_lambda_body(
+                            body, &mut call_env, functions, classes, enums, impl_methods,
+                        )?
+                    }
+                    _ => unreachable!("comparator shape validated before sorting"),
+                };
+                match result {
+                    Value::Int(value) => Ok(value.cmp(&0)),
+                    Value::UInt { value, .. } => Ok(value.cmp(&0)),
+                    _ => Err(CompileError::semantic("sort_by comparator must return an integer".to_string())),
+                }
+            })?;
+            Value::array(sorted)
+        }
         "sort" => {
             let mut new_arr = arr.to_vec();
             new_arr.sort_by(|a, b| match (a, b) {
@@ -1316,7 +1355,7 @@ pub fn handle_frozen_array_methods(
 ) -> Result<Option<Value>, CompileError> {
     // Reject mutation methods on frozen arrays
     match method {
-        "push" | "append" | "pop" | "insert" | "remove" | "clear" | "reverse" | "sort" => {
+        "push" | "append" | "pop" | "insert" | "remove" | "clear" | "reverse" | "sort" | "sort_by" => {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_OPERATION)
                 .with_help("Cannot mutate a frozen array. Use freeze() to create immutable copies.");
@@ -1366,7 +1405,7 @@ pub fn handle_byte_array_methods(
     if frozen
         && matches!(
             method,
-            "push" | "append" | "pop" | "insert" | "remove" | "clear" | "reverse" | "sort" | "extend"
+            "push" | "append" | "pop" | "insert" | "remove" | "clear" | "reverse" | "sort" | "sort_by" | "extend"
         )
     {
         let ctx = ErrorContext::new()
@@ -1426,6 +1465,108 @@ pub fn handle_byte_array_methods(
     let values = Value::byte_array_values(bytes);
     handle_array_methods(&values, method, args, env, functions, classes, enums, impl_methods)
         .map(|result| result.map(|value| repack_byte_result(value, frozen)))
+}
+
+#[cfg(test)]
+mod sort_by_tests {
+    use super::*;
+    use simple_parser::ast::BinOp;
+
+    fn comparator(body: Expr) -> Value {
+        let mut captured = Env::new();
+        captured.insert("direction".into(), Value::Int(-1));
+        Value::Lambda {
+            params: vec!["a".into(), "b".into()],
+            body: Box::new(body),
+            env: Arc::new(captured),
+        }
+    }
+
+    fn invoke(subject: Value, cmp: Value) -> (Result<Value, CompileError>, Env) {
+        let mut env = Env::new();
+        env.insert("subject".into(), subject);
+        env.insert("cmp".into(), cmp);
+        let expression = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("subject".into())),
+            method: "sort_by".into(),
+            args: vec![Argument::new(None, Expr::Identifier("cmp".into()))],
+            generic_args: vec![],
+        };
+        let result = evaluate_expr(
+            &expression, &mut env, &mut HashMap::new(), &mut HashMap::new(),
+            &Enums::new(), &ImplMethods::new(),
+        );
+        (result, env)
+    }
+
+    #[test]
+    fn sorts_and_updates_receiver_using_captured_comparator() {
+        let difference = Expr::Binary {
+            op: BinOp::Sub,
+            left: Box::new(Expr::Identifier("a".into())),
+            right: Box::new(Expr::Identifier("b".into())),
+        };
+        let body = Expr::Binary {
+            op: BinOp::Mul,
+            left: Box::new(difference),
+            right: Box::new(Expr::Identifier("direction".into())),
+        };
+        let expected = Value::array(vec![Value::Int(3), Value::Int(2), Value::Int(1)]);
+        let (result, env) = invoke(
+            Value::array(vec![Value::Int(1), Value::Int(3), Value::Int(2)]), comparator(body),
+        );
+        assert_eq!(result.unwrap(), expected);
+        assert_eq!(env.get("subject"), Some(&expected));
+    }
+
+    #[test]
+    fn comparator_error_preserves_receiver() {
+        let original = Value::array(vec![Value::Int(2), Value::Int(1)]);
+        let (result, env) = invoke(original.clone(), comparator(Expr::String("bad ordering".into())));
+        assert!(result.is_err());
+        assert_eq!(env.get("subject"), Some(&original));
+    }
+
+    #[test]
+    fn named_function_sorts_packed_bytes_and_updates_receiver() {
+        let module = simple_parser::Parser::new("fn compare(a: i64, b: i64) -> i64:\n    a - b\n")
+            .parse().expect("parse named comparator");
+        let definition = module.items.into_iter().find_map(|item| match item {
+            simple_parser::ast::Node::Function(function) => Some(function),
+            _ => None,
+        }).expect("comparator definition");
+        let named = Value::Function {
+            name: "compare".into(),
+            def: Arc::new(definition),
+            captured_env: Arc::new(Env::new()),
+        };
+        let expected = Value::byte_array(vec![1, 2, 3]);
+        let (result, env) = invoke(Value::byte_array(vec![3, 1, 2]), named);
+        assert_eq!(result.unwrap(), expected);
+        assert_eq!(env.get("subject"), Some(&expected));
+    }
+
+    #[test]
+    fn rejects_frozen_arrays_and_frozen_bytes() {
+        for subject in [
+            Value::frozen_array(vec![Value::Int(2), Value::Int(1)]),
+            Value::frozen_byte_array(vec![2, 1]),
+        ] {
+            let (result, _) = invoke(subject, comparator(Expr::Integer(0)));
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_comparator_arity_even_on_empty_array() {
+        let malformed = Value::Lambda {
+            params: vec!["a".into()],
+            body: Box::new(Expr::Integer(0)),
+            env: Arc::new(Env::new()),
+        };
+        let (result, _) = invoke(Value::array(vec![]), malformed);
+        assert!(result.is_err());
+    }
 }
 
 #[cfg(test)]

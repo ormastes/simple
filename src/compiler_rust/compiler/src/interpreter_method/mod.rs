@@ -1,6 +1,7 @@
 // Method call dispatcher - delegates to type-specific handlers
 
 pub(crate) mod collections;
+mod fallible_sort;
 mod primitives;
 mod special;
 
