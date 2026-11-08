@@ -89,3 +89,42 @@ wrong-space/zero-address FADT extended GAS. No physical MMIO is accessed.
 executed. The 13 authored examples and their output/cast boundaries still require
 execution through a qualified producer. This bug remains open; neither a hardware
 PASS nor a diagnosis/closure of the historical three zero reads is claimed.
+
+## 2026-11-09 diagnosis — root cause found, fix implemented (verification pending)
+
+Executed against worktree source with `child binary: C:\dev\wt\acpi\bin\simple.exe`
+(release/1.0.0 @ e954b1d95e2 + this change).
+
+**Red (before):** 13 examples, 3 failed — the same three, same numbers
+(`expected 0 to equal 4275044352 / 45064 / 47104`).
+
+**Root cause is NOT in the ACPI parsers or fixtures.** In each failing example
+the `expect(result ?? 0).to_equal(...)` assertion already PASSED; only the
+trailing `expect(result as u64)` / `expect(result as u32)` line failed. The
+sibling examples that use only `?? 0` (`preserves both HPET address words`,
+both `falls back to a nonzero legacy port` cases) were green on the same run,
+so `acpi_hpet_base_raw` and `acpi_fadt_pm_tmr_port_raw` return the correct
+payloads.
+
+The zero comes from applying `as <int>` to a `T?` value returned from a
+function: the seed evaluates `Some(0xFED00000) as u64` to `0`. A spec-independent
+probe reproduces it (`fn mk(v: u64) -> u64?` returning `v`; `mk(0xFED00000) as u64`
+-> `0`, while `?? 0` -> `0xFED00000`; a locally-typed `val r: u32? = 0xB008; r as u32`
+passes, so the defect is specific to the boxed/returned optional). Under the
+nil-only-in-unsafe policy (`T?` -> `T` must go through `??`/unwrap), that cast
+should be rejected at compile time, not silently zeroed — filed separately as
+`optional_as_cast_yields_zero_2026_11_09`.
+
+Why it looked like "three reads": the only positive-payload assertions in the
+original spec were written with `as`, and the nil siblings cannot distinguish a
+zeroing parser from a working one. The nested-fn attribution, the HPET GAS
+offset (fixed in #6338), and the FADT 76/208 layout were all red herrings for
+this symptom.
+
+**Fix (spec):** drop every `as` cast on an optional; assert `to_not_be_nil()` and
+`?? 0` payload separately; add a discriminating example that pairs a zero fixture
+(nil) with a nonzero fixture (present) for both parsers.
+
+**Green (after):** `SPEC FILE VERDICT: ... outcome=OK executed=14 passed=14 failed=0`.
+Status: fix-implemented-verification-pending (interpreter run on the Windows seed;
+native verification outstanding).
