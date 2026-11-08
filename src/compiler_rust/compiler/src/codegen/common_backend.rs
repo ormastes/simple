@@ -431,6 +431,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             "rt_string_concat",
                             "rt_string_ends_with",
                             "rt_string_len",
+                            "rt_string_char_count",
                             "rt_string_starts_with",
                             "rt_string_parse_int",
                             "rt_string_to_float",
@@ -611,6 +612,9 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_string_new_literal"
             | "rt_string_data"
             | "rt_string_len"
+            // Emitted by `inline_runtime_len_value` for the text arm of a
+            // user-facing `.len()` (code points, ADR-005 item 5).
+            | "rt_string_char_count"
             | "rt_string_bytes"
             // Erased `.to_i64()`/`.to_int()` receivers synthesize this call
             // during Cranelift lowering, so it is absent from MIR call names.

@@ -2722,6 +2722,10 @@ int main(int argc, char** argv) {
         #[cfg(target_os = "windows")]
         if is_msvc {
             msvc_link_args.push("/errorlimit:0".to_string());
+        } else if !strict_no_stub_fallback {
+            // ld.lld (mingw flavor) resolves before section GC exactly like
+            // lld-link; the parity retry below needs its complete list too.
+            cmd.arg("-Wl,--error-limit=0");
         }
 
         // Single `/link` group, last: everything after it belongs to the
@@ -2748,8 +2752,14 @@ int main(int argc, char** argv) {
         // rejects them. Retry once with loud trap stubs for exactly the
         // reported names (Rust std internals are never stubbed), print the
         // count and write the list beside the binary.
+        //
+        // Both COFF lanes: ld.lld `-m i386pep` (llvm-mingw) has the same
+        // resolve-before-GC order as lld-link, so the gnu lane needs the same
+        // retry -- with stubs built by the gnu clang, never clang-cl (an MSVC
+        // object drags /DEFAULTLIB:libcmt and __security_check_cookie into a
+        // mingw link). Stage2 on windows-gnu: 112 dead-code rt_* references.
         #[cfg(target_os = "windows")]
-        if !output_result.status.success() && is_msvc && !strict_no_stub_fallback {
+        if !output_result.status.success() && !strict_no_stub_fallback {
             let diagnostics = link_failure_output(&output_result.stdout, &output_result.stderr);
             let undefined = super::stubs::lld_link_undefined_symbols(&diagnostics);
             if !undefined.is_empty() {
@@ -2765,11 +2775,20 @@ int main(int argc, char** argv) {
                         diagnostics
                     ));
                 }
-                let stubs_o = super::stubs::compile_coff_gc_parity_stubs(temp_dir, &stubbable)?;
-                if msvc_link_args.is_empty() {
-                    cmd.arg("/link");
+                let toolchain = if is_msvc {
+                    super::stubs::CoffStubToolchain::Msvc
+                } else {
+                    super::stubs::CoffStubToolchain::Gnu
+                };
+                let stubs_o = super::stubs::compile_coff_gc_parity_stubs(temp_dir, &stubbable, toolchain)?;
+                if is_msvc {
+                    if msvc_link_args.is_empty() {
+                        cmd.arg("/link");
+                    }
+                    cmd.arg(&stubs_o);
+                } else {
+                    cmd.arg(external_tool_path(&stubs_o));
                 }
-                cmd.arg(&stubs_o);
                 output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
                 if output_result.status.success() {
                     let list_path = PathBuf::from(format!("{}.stubbed_symbols.txt", self.output.display()));
@@ -2854,10 +2873,10 @@ int main(int argc, char** argv) {
             #[cfg(target_os = "windows")]
             let diagnostics = {
                 let undefined = super::stubs::lld_link_undefined_symbols(&diagnostics);
-                if is_msvc && strict_no_stub_fallback && !undefined.is_empty() {
+                if strict_no_stub_fallback && !undefined.is_empty() {
                     format!(
                         "{} undefined symbol(s) with SIMPLE_NO_STUB_FALLBACK=1: {}\n\
-note: on Windows the module archive is /WHOLEARCHIVE'd and lld-link resolves before /OPT:REF, so an \
+note: on Windows the module archive is whole-archived and the COFF linker (lld-link / ld.lld) resolves before section GC, so an \
 extern declared by ANY module in the closure must be defined even if nothing calls it (ELF/Mach-O drop \
 the dead section first). Define the symbol in the runtime lane this link uses, or keep the declaring \
 module out of the closure.\n{}",

@@ -1,0 +1,242 @@
+# Purpose and audience: compiler engineers who own HIR local-name resolution.
+# @req REQ-SSPEC-COMPILER
+"""
+# A local binding shadows a same-named top-level function
+
+Bug `phase2_resource_scope_shell_shadow_2026_10_28`: the cached phase-2
+producer resolved the local `shell` in
+`std.nogc_sync_mut.io.resource_scope._run_with_unix_limits` (and the loop
+variable `shell` in `_limit_shell`) to the global function
+`std.nogc_sync_mut.io.process_ops.shell`. The native runner then passed the
+function's code bytes as the child command.
+
+This spec pins the source-to-HIR contract that rules that out: every
+reference to `shell` inside the shadowing scope must bind to the local's
+own `Let`/`For` symbol, never to the function's symbol. MIR lowering
+(`expr_dispatch.spl` `Var`/`NamedVar`) consults `find_local` before
+`try_lower_function_value`, so a correct HIR binding is sufficient.
+
+Each case also checks the function itself is still callable by name outside
+the shadowing scope, so a lowering that drops the function cannot pass.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:name_resolution
+
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.*
+
+struct ShadowRefs:
+    # symbol ids of every `shell` reference found, in source order
+    refs: [i64]
+    # symbol ids bound by `val shell` / `for shell`
+    binders: [i64]
+
+fn shadow_empty() -> ShadowRefs:
+    ShadowRefs(refs: [], binders: [])
+
+fn shadow_merge(a: ShadowRefs, b: ShadowRefs) -> ShadowRefs:
+    var refs = a.refs
+    for r in b.refs:
+        refs.push(r)
+    var binders = a.binders
+    for x in b.binders:
+        binders.push(x)
+    ShadowRefs(refs: refs, binders: binders)
+
+fn shadow_scan_block(block: HirBlock, name: text) -> ShadowRefs:
+    var acc = shadow_empty()
+    for stmt in block.stmts:
+        match stmt.kind:
+            case HirStmtKind.Expr(e):
+                acc = shadow_merge(acc, shadow_scan_expr(e, name))
+            case HirStmtKind.Let(symbol, _, init):
+                acc = shadow_merge(acc, shadow_scan_expr(init, name))
+                acc = shadow_merge(acc, ShadowRefs(refs: [], binders: [symbol.id]))
+            case _:
+                ()
+    if block.has:
+        acc = shadow_merge(acc, shadow_scan_expr(block.value, name))
+    acc
+
+fn shadow_scan_expr(e: HirExpr, name: text) -> ShadowRefs:
+    match e.kind:
+        case HirExprKind.NamedVar(symbol, ref_name):
+            if ref_name == name:
+                return ShadowRefs(refs: [symbol.id], binders: [])
+            shadow_empty()
+        case HirExprKind.Call(callee, args, _):
+            var acc = shadow_scan_expr(callee, name)
+            for a in args:
+                acc = shadow_merge(acc, shadow_scan_expr(a.value, name))
+            acc
+        case HirExprKind.If(cond, then_, else_):
+            var acc = shadow_merge(shadow_scan_expr(cond, name), shadow_scan_block(then_, name))
+            if val eb = else_:
+                acc = shadow_merge(acc, shadow_scan_block(eb, name))
+            acc
+        case HirExprKind.IfChain(arms, else_):
+            var acc = shadow_empty()
+            for arm in arms:
+                acc = shadow_merge(acc, shadow_scan_expr(arm.cond, name))
+                acc = shadow_merge(acc, shadow_scan_block(arm.then_, name))
+            if val eb = else_:
+                acc = shadow_merge(acc, shadow_scan_block(eb, name))
+            acc
+        case HirExprKind.For(var_, iter, body, _):
+            var acc = shadow_scan_expr(iter, name)
+            acc = shadow_merge(acc, ShadowRefs(refs: [], binders: [var_.id]))
+            shadow_merge(acc, shadow_scan_block(body, name))
+        case HirExprKind.Binary(_, l, r):
+            shadow_merge(shadow_scan_expr(l, name), shadow_scan_expr(r, name))
+        case HirExprKind.Block(b):
+            shadow_scan_block(b, name)
+        case HirExprKind.Return(value):
+            if val v = value:
+                return shadow_scan_expr(v, name)
+            shadow_empty()
+        case _:
+            shadow_empty()
+
+fn shadow_function(hir: HirModule, fn_name: text) -> HirFunction?:
+    for f in hir.functions.values():
+        if f.name == fn_name:
+            return Some(f)
+    nil
+
+struct ShadowCase:
+    errors: [text]
+    fn_symbol: i64
+    inside: ShadowRefs
+    outside: ShadowRefs
+
+fn shadow_case_from(hir: HirModule, errors: [text], shadow_fn: text, caller_fn: text) -> ShadowCase:
+    var fn_symbol = -1
+    if val f = shadow_function(hir, "shell"):
+        fn_symbol = f.symbol.id
+    var inside = shadow_empty()
+    if val f = shadow_function(hir, shadow_fn):
+        inside = shadow_scan_block(f.body, "shell")
+    var outside = shadow_empty()
+    if val f = shadow_function(hir, caller_fn):
+        outside = shadow_scan_block(f.body, "shell")
+    ShadowCase(errors: errors, fn_symbol: fn_symbol, inside: inside, outside: outside)
+
+fn shadow_lower_single(source: text, shadow_fn: text) -> ShadowCase:
+    val parsed = parse_full_frontend(source, "shadow_fixture.spl", "shadow_fixture", Logger(level: 0))
+    expect(parser_has_errors()).to_equal(false)
+    var lowering = HirLowering.with_filename("shadow_fixture.spl")
+    val hir: HirModule = lowering.lower_module(parsed)
+    var errors: [text] = []
+    for e in lowering.errors:
+        errors.push(e.message)
+    shadow_case_from(hir, errors, shadow_fn, "calls_global")
+
+fn expect_local_wins(c: ShadowCase, expected_refs: i64):
+    expect(c.errors.len()).to_equal(0)
+    # control: the function exists and the unshadowed caller binds to it
+    expect(c.fn_symbol).to_be_greater_than(-1)
+    expect(c.outside.refs.len()).to_equal(1)
+    expect(c.outside.refs[0]).to_equal(c.fn_symbol)
+    # the shadowing scope: exactly one binder, every reference is that binder
+    expect(c.inside.binders.len()).to_equal(1)
+    val local_id = c.inside.binders[0]
+    expect(local_id == c.fn_symbol).to_equal(false)
+    expect(c.inside.refs.len()).to_equal(expected_refs)
+    for r in c.inside.refs:
+        expect(r).to_equal(local_id)
+
+val shadow_prelude = "fn shell(command: text) -> i64:\n    command.len()\n\nfn consume(path: text) -> i64:\n    path.len()\n\nfn calls_global() -> i64:\n    shell(\"true\")\n\n"
+
+describe "HIR: local named like a top-level function shadows it (phase2_resource_scope_shell_shadow_2026_10_28)":
+    it "binds a val-if local used as a call argument to the local (_run_with_unix_limits shape)":
+        step("val shell = if ...: ... else: ...; consume(shell)")
+        val src = shadow_prelude + "fn run(flag: bool) -> i64:\n    val shell = if flag: \"/bin/sh\" else: \"/bin/bash\"\n    if shell == \"\":\n        return 0\n    consume(shell)\n"
+        expect_local_wins(shadow_lower_single(src, "run"), 2)
+
+    it "binds a for-loop variable to the loop binder (_limit_shell shape)":
+        step("for shell in [...]: if consume(shell) > 0: return shell")
+        val src = shadow_prelude + "fn pick() -> text:\n    for shell in [\"/bin/bash\", \"/bin/zsh\"]:\n        if consume(shell) > 0:\n            return shell\n    \"\"\n"
+        expect_local_wins(shadow_lower_single(src, "pick"), 2)
+
+    it "shadows an imported function the same way":
+        step("provider exports pub fn shell; consumer imports it and shadows it locally")
+        val log = Logger(level: 0)
+        val provider_src = "pub fn shell(command: text) -> i64:\n    command.len()\n"
+        val consumer_src = "use shadow_provider.\{shell\}\n\nfn consume(path: text) -> i64:\n    path.len()\n\nfn calls_global() -> i64:\n    shell(\"true\")\n\nfn run(flag: bool) -> i64:\n    val shell = if flag: \"/bin/sh\" else: \"/bin/bash\"\n    consume(shell)\n"
+        var modules: Dict<text, Module> = {}
+        modules["shadow_provider"] = parse_full_frontend(provider_src, "shadow_provider.spl", "shadow_provider", log)
+        modules["shadow_consumer"] = parse_full_frontend(consumer_src, "shadow_consumer.spl", "shadow_consumer", log)
+        val files = [SourceFile(path: "shadow_provider.spl", content: provider_src, module_name: "shadow_provider"), SourceFile(path: "shadow_consumer.spl", content: consumer_src, module_name: "shadow_consumer")]
+        val surfaces_result = module_surfaces_from_modules(modules, files)
+        expect(surfaces_result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("shadow_consumer", surfaces_result.unwrap())
+        val hir: HirModule = lowering.lower_module(modules["shadow_consumer"])
+        var errors: [text] = []
+        for e in lowering.errors:
+            errors.push(e.message)
+        expect(errors.len()).to_equal(0)
+        var inside = shadow_empty()
+        if val f = shadow_function(hir, "run"):
+            inside = shadow_scan_block(f.body, "shell")
+        var outside = shadow_empty()
+        if val f = shadow_function(hir, "calls_global"):
+            outside = shadow_scan_block(f.body, "shell")
+        expect(outside.refs.len()).to_equal(1)
+        expect(inside.binders.len()).to_equal(1)
+        expect(inside.refs.len()).to_equal(1)
+        expect(inside.refs[0]).to_equal(inside.binders[0])
+        expect(inside.refs[0] == outside.refs[0]).to_equal(false)
+
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.*
+use compiler.mir.mir_data.*
+
+# Count FuncPtr casts of a constant naming `shell` inside the function `fn_name`:
+# that is the exact MIR shape `try_lower_function_value` emits for a bare
+# function-value reference, which the bug's native runner then called.
+fn shadow_mir_fnvalue_refs(source: text, fn_name: text) -> [i64]:
+    val parsed = parse_full_frontend(source, "shadow_fixture.spl", "shadow_fixture", Logger(level: 0))
+    var lowering = HirLowering.with_filename("shadow_fixture.spl")
+    val hir: HirModule = lowering.lower_module(parsed)
+    var mir = MirLowering.new(hir.symbols)
+    val m = mir.lower_module(hir, [hir])
+    var counts: [i64] = []
+    if true:
+        for f in m.functions.values():
+            if f.name == fn_name or f.name.ends_with("." + fn_name) or f.name.ends_with("__" + fn_name):
+                var n = 0
+                for b in f.blocks:
+                    for inst in b.instructions:
+                        match inst.kind:
+                            case MirInstKind.Cast(_, operand, _):
+                                match operand.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str(s), _):
+                                        if s.contains("shell"):
+                                            n = n + 1
+                                    case _: ()
+                            case _: ()
+                counts.push(n)
+    counts
+
+describe "MIR: local named like a top-level function is not lowered as a function value (phase2_resource_scope_shell_shadow_2026_10_28)":
+    it "does not emit a function-value cast for a val-if local":
+        step("run() reads the local `shell`; calls_global() is the control")
+        val src = shadow_prelude + "fn run(flag: bool) -> i64:\n    val shell = if flag: \"/bin/sh\" else: \"/bin/bash\"\n    if shell == \"\":\n        return 0\n    consume(shell)\n"
+        expect(shadow_mir_fnvalue_refs(src, "run")).to_equal([0])
+
+    it "does not emit a function-value cast for a for-loop variable":
+        step("pick() loops with `shell` as the binder")
+        val src = shadow_prelude + "fn pick() -> text:\n    for shell in [\"/bin/bash\", \"/bin/zsh\"]:\n        if consume(shell) > 0:\n            return shell\n    \"\"\n"
+        expect(shadow_mir_fnvalue_refs(src, "pick")).to_equal([0])

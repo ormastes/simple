@@ -1,0 +1,99 @@
+# Regression spec for result_struct_payload_pushed_into_struct_array_crashes_2026-10-25.
+# A struct payload taken out of a Result (matched or unwrapped, typed or not)
+# and pushed into a [Struct] must reach rt_array_push as the record handle.
+# Stage 2 emitted rt_value_int_wide before the push (handle << 3), and
+# `for r in xs` then SEGVed loading a field. MIR-level: no int-boxing call may
+# appear in these functions, matching the direct-constructor control.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.semantics.resolve.{resolve_methods_quiet}
+
+val RESULT_PUSH_SOURCE = (
+    "struct Rc:\n    name: text\n    n: i64\n" +
+    "fn make(n: i64) -> Result<Rc, text>:\n" +
+    "    if n < 0:\n        return Err(\"neg\")\n" +
+    "    Ok(Rc(name: \"r\", n: n))\n" +
+    "fn matched(xs: [Rc], n: i64) -> [Rc]:\n" +
+    "    var out = xs\n" +
+    "    match make(n):\n" +
+    "        case Err(reason): print(reason)\n" +
+    "        case Ok(receipt): out.push(receipt)\n" +
+    "    out\n" +
+    "fn matched_ok_only(xs: [Rc], n: i64) -> [Rc]:\n" +
+    "    var out = xs\n" +
+    "    match make(n):\n" +
+    "        case Ok(receipt): out.push(receipt)\n" +
+    "        case _: ()\n" +
+    "    out\n" +
+    "fn matched_typed(xs: [Rc], n: i64) -> [Rc]:\n" +
+    "    var out = xs\n" +
+    "    match make(n):\n" +
+    "        case Err(reason): print(reason)\n" +
+    "        case Ok(receipt):\n" +
+    "            val typed: Rc = receipt\n" +
+    "            out.push(typed)\n" +
+    "    out\n" +
+    "fn unwrapped(xs: [Rc], n: i64) -> [Rc]:\n" +
+    "    var out = xs\n" +
+    "    val res = make(n)\n" +
+    "    val r: Rc = res.unwrap()\n" +
+    "    out.push(r)\n" +
+    "    out\n" +
+    "fn direct(xs: [Rc], n: i64) -> [Rc]:\n" +
+    "    var out = xs\n" +
+    "    out.push(Rc(name: \"d\", n: n))\n" +
+    "    out\n"
+)
+
+fn result_push_function_json(target: text, resolved: bool) -> text:
+    val ast = parse_full_frontend(RESULT_PUSH_SOURCE, "result_push.spl", "result_push.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("result_push.spl")
+    var hir = hir_lowering.lower_module(ast)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    if resolved:
+        val (resolved_hir, errors) = resolve_methods_quiet(hir)
+        expect(errors.len()).to_equal(0)
+        hir = resolved_hir
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with(".{target}"):
+            return serialize_mir_function(function)
+    fail("result push fixture did not emit requested function: " + target)
+
+fn result_push_occurrences(hay: text, needle: text) -> i64:
+    var count = 0
+    var index = 0
+    while index + needle.len() <= hay.len():
+        if hay.substring(index, index + needle.len()) == needle:
+            count = count + 1
+            index = index + needle.len()
+        else:
+            index = index + 1
+    count
+
+describe "Result struct payload pushed into a struct array", tag: ["only-compiled"]:
+    it "pushes a directly constructed struct without int-boxing (control)":
+        for resolved in [false, true]:
+            val mir = result_push_function_json("direct", resolved)
+            expect(result_push_occurrences(mir, "rt_array_push") > 0).to_equal(true)
+            expect(result_push_occurrences(mir, "rt_value_int_wide")).to_equal(0)
+
+    it "pushes a matched Ok payload as the record handle":
+        for resolved in [false, true]:
+            for target in ["matched", "matched_ok_only", "matched_typed"]:
+                val mir = result_push_function_json(target, resolved)
+                expect(result_push_occurrences(mir, "rt_array_push") > 0).to_equal(true)
+                expect(result_push_occurrences(mir, "rt_value_int_wide")).to_equal(0)
+
+    it "pushes an unwrapped Ok payload as the record handle":
+        for resolved in [false, true]:
+            val mir = result_push_function_json("unwrapped", resolved)
+            expect(result_push_occurrences(mir, "rt_array_push") > 0).to_equal(true)
+            expect(result_push_occurrences(mir, "rt_value_int_wide")).to_equal(0)
