@@ -1307,8 +1307,10 @@ static void rt_host_gpu_queue_copy_payload_text(char* dst, const char* src) {
         dst[0] = '\0';
         return;
     }
-    strncpy(dst, src, 4095);
-    dst[4095] = '\0';
+    size_t length = 0;
+    while (length < 4095 && src[length]) ++length;
+    memcpy(dst, src, length);
+    dst[length] = '\0';
 }
 
 int64_t rt_host_gpu_queue_emit_payload_text(int64_t lane_code, int64_t kind_code, int64_t payload_size, int64_t backend_handle, int64_t payload_hash, const char* payload_text) {
