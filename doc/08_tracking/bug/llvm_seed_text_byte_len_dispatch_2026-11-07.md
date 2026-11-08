@@ -66,3 +66,14 @@ bootstrap-host tests, never a substitute for admitted self-hosted Simple
 tests. The active 88237 build and other owners' Cargo targets remain untouched.
 Source review and landing do not qualify a rebuilt seed or bootstrap. Replay
 requires new immutable producer/source/runtime identities and retained results.
+
+## 2026-11-08 note (lane-f-p2helper): frozen pure-Simple stage2 side, plus `fill_span`
+
+Rebuilding the Phase 2 subsystem helpers with the frozen stage2 `stage2.ef0681fc0e1.exe`
+(source 2026-10-27) on `release/1.0.0` @ `01a8acae210` fails MIR with
+`unresolved method call: byte_len` at 45 (generator) / 36 (verdict) sites and
+`unresolved method call: fill_span` at `src/lib/common/crypto/secure_memory.spl:57,78,94,106`.
+Neither method name occurs in `src/compiler` at `ef0681fc0e1`; both arms landed 2026-11-07
+(`4183b795175`, `f680394dddf`). Any producer frozen before 2026-11-07 therefore cannot lower
+current `src/lib`; this is a producer-vocabulary gap, not a receiver-type one. Evidence:
+`doc/08_tracking/bug/phase2_subsystem_helper_mir_failures_2026-10-05.md` § 2026-11-08.
