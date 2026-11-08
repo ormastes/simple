@@ -63,3 +63,24 @@ everyone is actually running. Whoever picks this up should start by diffing the
 deployed seed's provenance against `f26970e9d93` rather than by hunting the
 crash.
 
+
+## CLOSED 2026-11-09 — stale (not reproducible on the current seed)
+
+Re-checked on the current deployed seed (Windows x86_64, `bin/simple.exe`,
+sha256 prefix `8c7341592f4d47de`, release/1.0.0 at `f7e0be6779b`), host idle:
+
+| invocation | runs | rc >= 128 (crash) | observed rc |
+|---|---:|---:|---|
+| `lint probe.spl` (`fn main() -> i64:` / `0`, the record's probe) | 20 | 0 | 1 x20 (deterministic `STUB002` finding, verdict printed every run) |
+| `lint probe2.spl` (`fn main():` / `print("hi")`) | 30 | 0 | 0 x30, `Lint passed: all files clean` |
+| `lint src/lib/common/base_encoding.spl` | 10 | 0 | 0 x10, `Lint passed: all files clean` |
+
+Every run printed its verdict line; no empty-stdout exit and no signal exit in
+60 invocations. This matches the record's own finding that a seed rebuilt from
+`f26970e9d93` already ran 4/4 clean — the crash lived only in a stale deployed
+aarch64 artifact (`3d120a6f...`) that no longer exists as a tooling surface.
+The strace-amplified lane cannot be replayed on Windows, but the no-strace
+intermittent case (1/3 in the record) did not reproduce in 60 runs.
+
+Closed as stale; reopen with a fresh crash transcript against a named current
+binary if it recurs.
