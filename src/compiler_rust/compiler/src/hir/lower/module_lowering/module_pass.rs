@@ -1538,6 +1538,31 @@ impl Lowerer {
             if let Node::Function(f) = item {
                 self.own_declared_function_names.insert(f.name.clone());
             }
+            if let Node::Struct(s) = item {
+                self.own_declared_type_names.insert(s.name.clone());
+            }
+            if let Node::Class(c) = item {
+                self.own_declared_type_names.insert(c.name.clone());
+            }
+            if let Node::UseStmt(use_stmt) = item {
+                Self::collect_imported_target_names(&use_stmt.target, &mut self.own_imported_names);
+            }
+        }
+    }
+
+    fn collect_imported_target_names(target: &simple_parser::ast::ImportTarget, out: &mut std::collections::HashSet<String>) {
+        use simple_parser::ast::ImportTarget;
+        match target {
+            ImportTarget::Single(name) => {
+                out.insert(name.clone());
+            }
+            ImportTarget::Aliased { alias, .. } => {
+                out.insert(alias.clone());
+            }
+            ImportTarget::Group(items) => items.iter().for_each(|t| Self::collect_imported_target_names(t, out)),
+            ImportTarget::Glob => {
+                out.insert("*".to_string());
+            }
         }
     }
 

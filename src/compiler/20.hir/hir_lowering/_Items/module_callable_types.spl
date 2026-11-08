@@ -343,6 +343,88 @@ impl HirLowering:
                 case _: return Some(tail_type)
         nil
 
+    me bare_tuple_return_elements_v1(fn_decl: ParserFunction) -> [HirType]:
+        """Element types of a bare `-> tuple` return, inferred from the body.
+
+        Bug stage2_bare_tuple_return_type_index_arity_2026-11-07: the bare
+        annotation lowers to Tuple([]), so indexing a call result was a fatal
+        "tuple index N is out of range for a 0-element tuple". The arity is the
+        widest tuple literal returned (tail or `return`); element types come
+        from simple-type inference, else Any. Empty when nothing is found.
+        """
+        val fn_params: [Param] = fn_decl.params
+        val found: [Expr] = self.bare_tuple_returned_literal_v1(fn_decl.body, fn_params)
+        var elems: [HirType] = []
+        for raw_elem in found:
+            val elem: Expr = raw_elem
+            val name: text = self.infer_simple_type_name_ast(elem, fn_params) ?? ""
+            if name != "" and hir_simple_type_name_is_known(name):
+                elems.push(HirType(kind: hir_type_kind_from_simple_name(name), span: fn_decl.span))
+            else:
+                elems.push(HirType(kind: HirTypeKind.Any, span: fn_decl.span))
+        elems
+
+    me bare_tuple_returned_literal_v1(b: Block, params: [Param]) -> [Expr]:
+        """Elements of the widest returned tuple literal in `b` ([] if none)."""
+        var best: [Expr] = []
+        val stmts: [Stmt] = b.stmts
+        var si: i64 = 0
+        while si < stmts.len():
+            val stmt: Stmt = stmts[si]
+            var cand: [Expr] = []
+            match stmt.kind:
+                case StmtKind.Return(rv):
+                    val rv_opt: Expr? = rv
+                    if val rve = rv_opt:
+                        cand = self.bare_tuple_literal_elements_v1(rve, params)
+                case StmtKind.For(_, _, body):
+                    val body_block: Block = body
+                    cand = self.bare_tuple_returned_literal_v1(body_block, params)
+                case StmtKind.While(_, body):
+                    val body_block: Block = body
+                    cand = self.bare_tuple_returned_literal_v1(body_block, params)
+                case StmtKind.Loop(body):
+                    val body_block: Block = body
+                    cand = self.bare_tuple_returned_literal_v1(body_block, params)
+                case _:
+                    if val ex = hir_ast_expr_statement_payload_v1(stmt.kind):
+                        cand = self.bare_tuple_literal_elements_v1(ex, params)
+            if cand.len() > best.len():
+                best = cand
+            si = si + 1
+        best
+
+    me bare_tuple_literal_elements_v1(e: Expr, params: [Param]) -> [Expr]:
+        var out: [Expr] = []
+        if e == nil:
+            return out
+        val e_kind = e.kind
+        val if_exemplar = ExprKind.If(Expr(kind: ExprKind.NilLit, span: e.span),
+            Block(stmts: [], span: e.span), None)
+        if rt_enum_discriminant(e_kind) == rt_enum_discriminant(if_exemplar):
+            val if_payload = rt_enum_payload(e_kind)
+            val if_then: Block = unsafe(capabilities: [ffi]):
+                rt_tuple_get<Block>(if_payload, 1)
+            val if_else: Block? = unsafe(capabilities: [ffi]):
+                rt_tuple_get<Block>(if_payload, 2)
+            out = self.bare_tuple_returned_literal_v1(if_then, params)
+            if val else_b = if_else:
+                val else_elems: [Expr] = self.bare_tuple_returned_literal_v1(else_b, params)
+                if else_elems.len() > out.len():
+                    out = else_elems
+            return out
+        match e_kind:
+            case ExprKind.TupleLit(items):
+                for raw_item in items:
+                    val item: Expr = raw_item
+                    out.push(item)
+            case ExprKind.Return(rv):
+                val rv_opt: Expr? = rv
+                if val rve = rv_opt:
+                    out = self.bare_tuple_literal_elements_v1(rve, params)
+            case _: ()
+        out
+
     me declared_callable_type(fn_decl: ParserFunction, owner_symbol: SymbolId?) -> HirType?:
         # Generic callables keep the existing untyped-symbol behavior.
         if fn_decl.type_params.len() > 0:
@@ -394,7 +476,12 @@ impl HirLowering:
 
         val return_type = if fn_decl.has_return_type:
             val declared_return_type: Type = fn_decl.return_type
-            self.lower_type(declared_return_type)
+            var lowered_return = self.lower_type(declared_return_type)
+            if parser_type_kind_named_name(declared_return_type.kind) == "tuple":
+                val inferred_tuple = self.bare_tuple_return_elements_v1(fn_decl)
+                if inferred_tuple.len() > 0:
+                    lowered_return = HirType(kind: HirTypeKind.Tuple(inferred_tuple), span: fn_decl.span)
+            lowered_return
         else:
             self.infer_untyped_return_type(fn_decl)
         val callable_type = HirType(

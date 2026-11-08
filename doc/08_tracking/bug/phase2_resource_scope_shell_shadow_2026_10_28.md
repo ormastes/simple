@@ -67,3 +67,18 @@ MC/DC compile fallback diagnostic (`struct i64 has no field recorder`). No
 positive BDD/SSpec/plain-SPL acceptance or whole comment-command success is
 claimed. See `phase2_runner_empty_limit_classification_2026_10_28.md` for the
 next blocker. Do not promote this candidate or mark the compiler defect fixed.
+
+## Source-to-HIR prevention (2026-11-08)
+
+`test/01_unit/compiler/20.hir/bootstrap_regressions/local_shadows_function_name_spec.spl`
+pins that HIR lowering binds a local (`val shell`, `for shell`, imported-function
+shadow) to its own symbol, never the same-named function. 3/3 GREEN on the seed
+interpreter, so the defect is NOT in source-to-HIR name binding; it lies in the
+cached phase2 producer's later stage (MIR/codegen function-value resolution).
+Status unchanged: still open pending an admitted producer rebuild.
+
+MIR extension (2026-11-08): the same fixtures lowered through `MirLowering` emit zero
+function-value casts naming `shell` inside the shadowing functions (5/5 spec GREEN on
+the seed). Current source (`find_local` before `try_lower_function_value`) is correct
+through MIR; the defect is specific to the cached phase2 producer build. Native-build
+was not run (single-shard s3 path has an open heap-corruption crash).
