@@ -198,3 +198,45 @@ describe "HIR: local named like a top-level function shadows it (phase2_resource
         expect(inside.refs.len()).to_equal(1)
         expect(inside.refs[0]).to_equal(inside.binders[0])
         expect(inside.refs[0] == outside.refs[0]).to_equal(false)
+
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.*
+use compiler.mir.mir_data.*
+
+# Count FuncPtr casts of a constant naming `shell` inside the function `fn_name`:
+# that is the exact MIR shape `try_lower_function_value` emits for a bare
+# function-value reference, which the bug's native runner then called.
+fn shadow_mir_fnvalue_refs(source: text, fn_name: text) -> [i64]:
+    val parsed = parse_full_frontend(source, "shadow_fixture.spl", "shadow_fixture", Logger(level: 0))
+    var lowering = HirLowering.with_filename("shadow_fixture.spl")
+    val hir: HirModule = lowering.lower_module(parsed)
+    var mir = MirLowering.new(hir.symbols)
+    val m = mir.lower_module(hir, [hir])
+    var counts: [i64] = []
+    if true:
+        for f in m.functions.values():
+            if f.name == fn_name or f.name.ends_with("." + fn_name) or f.name.ends_with("__" + fn_name):
+                var n = 0
+                for b in f.blocks:
+                    for inst in b.instructions:
+                        match inst.kind:
+                            case MirInstKind.Cast(_, operand, _):
+                                match operand.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str(s), _):
+                                        if s.contains("shell"):
+                                            n = n + 1
+                                    case _: ()
+                            case _: ()
+                counts.push(n)
+    counts
+
+describe "MIR: local named like a top-level function is not lowered as a function value (phase2_resource_scope_shell_shadow_2026_10_28)":
+    it "does not emit a function-value cast for a val-if local":
+        step("run() reads the local `shell`; calls_global() is the control")
+        val src = shadow_prelude + "fn run(flag: bool) -> i64:\n    val shell = if flag: \"/bin/sh\" else: \"/bin/bash\"\n    if shell == \"\":\n        return 0\n    consume(shell)\n"
+        expect(shadow_mir_fnvalue_refs(src, "run")).to_equal([0])
+
+    it "does not emit a function-value cast for a for-loop variable":
+        step("pick() loops with `shell` as the binder")
+        val src = shadow_prelude + "fn pick() -> text:\n    for shell in [\"/bin/bash\", \"/bin/zsh\"]:\n        if consume(shell) > 0:\n            return shell\n    \"\"\n"
+        expect(shadow_mir_fnvalue_refs(src, "pick")).to_equal([0])

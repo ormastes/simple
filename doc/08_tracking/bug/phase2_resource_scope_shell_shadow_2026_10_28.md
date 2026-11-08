@@ -76,3 +76,9 @@ shadow) to its own symbol, never the same-named function. 3/3 GREEN on the seed
 interpreter, so the defect is NOT in source-to-HIR name binding; it lies in the
 cached phase2 producer's later stage (MIR/codegen function-value resolution).
 Status unchanged: still open pending an admitted producer rebuild.
+
+MIR extension (2026-11-08): the same fixtures lowered through `MirLowering` emit zero
+function-value casts naming `shell` inside the shadowing functions (5/5 spec GREEN on
+the seed). Current source (`find_local` before `try_lower_function_value`) is correct
+through MIR; the defect is specific to the cached phase2 producer build. Native-build
+was not run (single-shard s3 path has an open heap-corruption crash).
