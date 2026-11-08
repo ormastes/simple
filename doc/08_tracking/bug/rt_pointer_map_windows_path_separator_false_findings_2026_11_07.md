@@ -1,7 +1,7 @@
 # Windows pointer-map baseline keys use the wrong path separator
 
 - Severity: P2
-- Status: open pending PR landing; checker repair verified below.
+- Status: FIXED — scoped mapping-checker repair merged in PR #7336; retained verification below is unchanged.
 - Owner: `scripts/check/check-rt-pointer-ref-map.py`, lines 241 and 251.
 - Session: `01a1afac/pointer-map-windows`.
 
@@ -58,3 +58,30 @@ average, and ratio are unavailable; no zero-filled or estimated usage is claimed
 This scoped checker PASS does not qualify compiler/runtime ABI behavior or
 complete the wider MIR/codegen P0–P3 campaign. The root owns the canonical claim
 until this repair lands through its reviewed release-branch PR.
+
+## Release status reconciliation (2026-11-08)
+
+The original repair merged into `release/1.0.0` through
+[PR #7336](https://github.com/ormastes/simple/pull/7336) at
+`5dba5390b5892dafb363e670aed11acb7741480c` on 2026-11-06T15:36:49Z.
+Its reviewed head is `2f7113f062da276e8626169103975ad6f005d390`.
+The original exact-head review records P0=0/P1=0, the native Windows
+selftest and full mapping scan above, and all ten blocking push gates passing.
+The original PR has no conversation comments; structural, RTL source-truth and
+component-plan checks succeeded.
+
+Read-only reconciliation pinned release commit
+`e87258dba95a096fb1e2cf63e69651b101a11a15`, confirmed the original merge is
+an ancestor, and compared the complete checker bytes against the merged repair.
+They are identical, SHA256
+`88a4f449144891a99698ca770c5af1779b9a4e724c6b1f389418f2649fc515d5`.
+No already-green checker test was repeated. The raw Windows logs remain at the
+original host-local evidence locations above; this reconciliation uses their
+tracked report and the original GitHub exact-head review, and does not claim
+to have reopened those host-local files on Linux.
+
+The bug's status now reflects the reviewed, tested landing rather than waiting
+for a PR that has already merged. Its existing `valid=false` flag is preserved:
+that field represents formal record review under the database schema, and no
+new raw-log review is claimed here. No compiler, link, runtime, platform ABI or
+broader P2 campaign qualification is inferred.
