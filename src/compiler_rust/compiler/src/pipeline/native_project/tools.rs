@@ -534,6 +534,7 @@ fn build_c_runtime_library(
     }).ok()?;
     let mut runtime_inputs = vec![
         "runtime_native.c",
+        "runtime_payload_text.h",
         "runtime_file_view.c",
         "runtime_disk_headroom.c",
         "runtime_memory_headroom.c",

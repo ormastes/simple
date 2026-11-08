@@ -115,9 +115,11 @@ static inline void* spl_rt_realloc(void* ptr, size_t size, const char* tag) {
 }
 
 static inline char* spl_rt_strdup(const char* s, const char* tag) {
-    char* p = strdup(s);
+    size_t size = strlen(s) + 1;
+    char* p = (char*)malloc(size);
+    if (p) memcpy(p, s, size);
     if (g_memtrack_enabled && p)
-        spl_memtrack_record(p, (int64_t)(strlen(p) + 1), tag);
+        spl_memtrack_record(p, (int64_t)size, tag);
     return p;
 }
 

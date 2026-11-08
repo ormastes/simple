@@ -1301,15 +1301,7 @@ void rt_host_gpu_queue_reset(void) {
     rt_host_gpu_queue_last_payload_text_value[0] = '\0';
 }
 
-static void rt_host_gpu_queue_copy_payload_text(char* dst, const char* src) {
-    if (!dst) return;
-    if (!src) {
-        dst[0] = '\0';
-        return;
-    }
-    strncpy(dst, src, 4095);
-    dst[4095] = '\0';
-}
+#include "runtime_payload_text.h"
 
 int64_t rt_host_gpu_queue_emit_payload_text(int64_t lane_code, int64_t kind_code, int64_t payload_size, int64_t backend_handle, int64_t payload_hash, const char* payload_text) {
     if ((lane_code != RT_HOST_GPU_LANE_HOST && lane_code != RT_HOST_GPU_LANE_GPU) ||

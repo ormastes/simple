@@ -199,7 +199,15 @@ static inline int rt_win_long_path_rename(const char* old_path, const char* new_
 #include <fcntl.h>
 static inline FILE* rt_win_fopen_read_shared(const char* path) {
     wchar_t* wide = rt_win_long_path_widen(path);
-    if (!wide) return fopen(path, "rb");
+    if (!wide) {
+#if defined(_MSC_VER)
+        FILE* file = NULL;
+        if (fopen_s(&file, path, "rb") != 0) return NULL;
+        return file;
+#else
+        return fopen(path, "rb");
+#endif
+    }
     HANDLE handle = CreateFileW(wide, GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
