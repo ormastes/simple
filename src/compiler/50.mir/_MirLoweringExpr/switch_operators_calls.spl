@@ -7171,6 +7171,9 @@ impl MirLowering:
                 val saved_ids = self.local_symbol_ids
                 val saved_values = self.local_symbol_values
                 val saved_index_slots = self.local_symbol_index_slots
+                # @workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03 reason=find_local now consults the local_map mirror before the hashed index, so the overlay and param bindings that bind_local writes into the mirror below must be rolled back after the body is lowered (the parallel arrays are restored wholesale; the mirror has no snapshot), or the enclosing scope would keep resolving the free variable to the frozen capture
+                var rollback_syms: [i64] = []
+                var rollback_prev: [LocalId] = []
                 if self.lambda_capture_snapshot.has(sid):
                     # Re-derive the free-variable list instead of iterating
                     # `snap.keys()`: under the seed interpreter dict keys come
@@ -7186,6 +7189,8 @@ impl MirLowering:
                     while sfi < snap_free.len():
                         val snap_sid = snap_free[sfi]
                         if snap.has(snap_sid):
+                            rollback_syms = rollback_syms.push(snap_sid)
+                            rollback_prev = rollback_prev.push(self.mirror_binding(snap_sid))
                             self.bind_local(snap_sid, snap[snap_sid])
                         sfi = sfi + 1
                 var pi = 0
@@ -7193,12 +7198,15 @@ impl MirLowering:
                     if pi < arg_locals.len():
                         val pid = mir_expr_symbol_id_value(params[pi].symbol)
                         if pid >= 0:
+                            rollback_syms = rollback_syms.push(pid)
+                            rollback_prev = rollback_prev.push(self.mirror_binding(pid))
                             self.bind_local(pid, arg_locals[pi])
                     pi = pi + 1
                 val result = self.lower_expr(body)
                 self.local_symbol_ids = saved_ids
                 self.local_symbol_values = saved_values
                 self.local_symbol_index_slots = saved_index_slots
+                self.restore_mirror_bindings(rollback_syms, rollback_prev)
                 Some(result)
             case _:
                 nil
@@ -7208,17 +7216,23 @@ impl MirLowering:
         val saved_ids = self.local_symbol_ids
         val saved_values = self.local_symbol_values
         val saved_index_slots = self.local_symbol_index_slots
+        # @workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03 reason=roll the local_map mirror back with the arrays (see try_inline_lambda_call)
+        var rollback_syms: [i64] = []
+        var rollback_prev: [LocalId] = []
         var pi = 0
         while pi < params.len():
             if pi < arg_locals.len():
                 val pid = mir_expr_symbol_id_value(params[pi].symbol)
                 if pid >= 0:
+                    rollback_syms = rollback_syms.push(pid)
+                    rollback_prev = rollback_prev.push(self.mirror_binding(pid))
                     self.bind_local(pid, arg_locals[pi])
             pi = pi + 1
         val result = self.lower_expr(body)
         self.local_symbol_ids = saved_ids
         self.local_symbol_values = saved_values
         self.local_symbol_index_slots = saved_index_slots
+        self.restore_mirror_bindings(rollback_syms, rollback_prev)
         result
 
     me lower_iife_call(params: [HirParam], body: HirExpr, args: [HirCallArg]) -> LocalId:
