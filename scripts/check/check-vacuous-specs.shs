@@ -82,6 +82,47 @@ function strip_comment(s,   i, c, q, out) {
     return out
 }
 
+# Only delimiters outside comments and ordinary quoted tokens open docstrings.
+# DOC_QUOTE is the sole cross-line state and resets for every input file.
+# The core lexer treats both triple quote styles as literal content: the first
+# matching triple closes them even after a backslash (lexer_struct.scan_string).
+function strip_doc_comments(s,   i, c, q, raw_q, out, single_quote, triple) {
+    single_quote = sprintf("%c", 39)
+    q = ""; raw_q = 0; out = ""
+    for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (DOC_QUOTE != "") {
+            triple = DOC_QUOTE DOC_QUOTE DOC_QUOTE
+            if (substr(s, i, 3) == triple) {
+                out = out "   "; i += 2; DOC_QUOTE = ""
+            } else out = out " "
+            continue
+        }
+        if (q != "") {
+            out = out c
+            if (!raw_q && c == "\\") {
+                if (i < length(s)) { i++; out = out substr(s, i, 1) }
+            } else if (c == q) { q = ""; raw_q = 0 }
+            continue
+        }
+        if (c == "#") break
+        if (c == "\"" || c == single_quote) {
+            triple = c c c
+            if (substr(s, i, 3) == triple) {
+                DOC_QUOTE = c; out = out "   "; i += 2
+            } else {
+                q = c
+                raw_q = (c == "\"" && i > 1 && substr(s, i - 1, 1) == "r" &&
+                         (i == 2 || substr(s, i - 2, 1) !~ /[a-zA-Z0-9_]/))
+                out = out c
+            }
+            continue
+        }
+        out = out c
+    }
+    return out
+}
+
 function trim(s) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", s); return s }
 function indent_of(s,   m) { match(s, /^[ \t]*/); return RLENGTH }
 
@@ -233,27 +274,9 @@ function process_file(   i, s, raw, ind, in_doc, n, itstart, itindent, itname,
     FILES_SCANNED++
     print "#FILE\t" CUR
 
-    # ---- pass 0: strip docstrings and comments into code_lines[] ----
-    in_doc = 0
-    for (i = 1; i <= NLINES; i++) {
-        raw = LINES[i]
-        s = raw
-        # fast path: no docstring delimiter and not inside one
-        if (!in_doc && index(s, "\"\"\"") == 0) { CODE[i] = strip_comment(s); continue }
-        # triple-quoted docstring toggling (handles open+close on one line)
-        while (match(s, /"""/)) {
-            if (in_doc) { s = substr(s, RSTART + 3); in_doc = 0 }
-            else {
-                rest = substr(s, RSTART + 3)
-                s = substr(s, 1, RSTART - 1)
-                if (match(rest, /"""/)) { s = s substr(rest, RSTART + 3); continue }
-                in_doc = 1
-                break
-            }
-        }
-        if (in_doc && !match(raw, /"""/)) s = ""
-        CODE[i] = strip_comment(s)
-    }
+    # Preserve offsets while masking only real docstrings and line comments.
+    DOC_QUOTE = ""
+    for (i = 1; i <= NLINES; i++) CODE[i] = strip_doc_comments(LINES[i])
 
     # ---- collect local helper fns and classify them ----
     # Specs in this repo very commonly wrap the assertion in a local helper, e.g.
@@ -592,6 +615,74 @@ describe "quoted fail helper":
         fixture_text()
 EOF
 
+    # F13-F19: doc delimiters are tokens, not arbitrary quoted/comment text.
+    mkdir -p "$st_dir/f13"
+    cat > "$st_dir/f13/comment_delimiter_spec.spl" <<'EOF'
+describe "comment delimiter":
+    it "retains a real computed assertion":
+        # """ ordinary line comment
+        val actual = compute_checksum("payload") # """ trailing comment
+        expect(actual).to_equal("9f2c41ab")
+EOF
+
+    mkdir -p "$st_dir/f14"
+    cat > "$st_dir/f14/quoted_delimiter_spec.spl" <<'EOF'
+describe "quoted delimiter":
+    it "keeps quote markers inside ordinary strings":
+        val marker = '""" # expect(hidden).to_equal(0)'
+        val escaped = "escaped \" # expect(hidden).to_equal(0)"
+        val actual = compute_checksum(marker)
+        expect(actual).to_equal("9f2c41ab")
+EOF
+
+    mkdir -p "$st_dir/f15"
+    cat > "$st_dir/f15/double_doc_data_spec.spl" <<'EOF'
+describe "double doc data":
+    it "executes no assertion":
+        """
+        expect(hidden()).to_equal("pretend")
+        """
+        val fixture_only = 1
+EOF
+
+    mkdir -p "$st_dir/f16"
+    cat > "$st_dir/f16/inline_doc_code_spec.spl" <<'EOF'
+describe "inline doc code":
+    it "keeps code after the closing delimiter":
+        val actual = compute_checksum("payload")
+        """ expect(hidden()).to_equal(0) """; expect(actual).to_equal("9f2c41ab")
+EOF
+
+    mkdir -p "$st_dir/f17"
+    cat > "$st_dir/f17/single_doc_data_spec.spl" <<'EOF'
+describe "single doc data":
+    it "executes no assertion":
+        '''
+        expect(hidden()).to_equal("pretend")
+        '''
+        val fixture_only = 1
+EOF
+
+    mkdir -p "$st_dir/f18"
+    cat > "$st_dir/f18/raw_doc_backslash_spec.spl" <<'EOF'
+describe "raw doc closing":
+    it "matches the core lexer literal triple closing rule":
+        r""" a literal trailing backslash \"""
+        val actual = compute_checksum("payload")
+        expect(actual).to_equal("9f2c41ab")
+EOF
+
+    mkdir -p "$st_dir/f19"
+    cat > "$st_dir/f19/post_doc_comment_spec.spl" <<'EOF'
+describe "post doc comment":
+    it "has a real computed assertion":
+        val actual = compute_checksum("payload")
+        expect(actual).to_equal("9f2c41ab")
+        """ inline documentation """ # """ only a comment
+    it "must remain visible as zero assertion":
+        val fixture_only = 1
+EOF
+
     st_fail=0
     st_raw=$(find "$st_dir" -name '*_spec.spl' | sort | xargs awk "$AWK_PROG" 2>/dev/null)
     st_scanned=$(echo "$st_raw" | sed -n 's/^#SCANNED\t//p' | awk '{t+=$1} END{print t+0}')
@@ -601,7 +692,7 @@ EOF
     # "was flagged" check regardless of whether V-codes were actually emitted.
     st_out=$(echo "$st_raw" | /usr/bin/grep -av '^#SCANNED' | /usr/bin/grep -av '^#FILE')
 
-    [ "$st_scanned" = "12" ] || { echo "selftest: expected 12 files scanned, got '$st_scanned'"; st_fail=1; }
+    [ "$st_scanned" = "19" ] || { echo "selftest: expected 19 files scanned, got '$st_scanned'"; st_fail=1; }
     echo "$st_out" | /usr/bin/grep -aq "V0_NO_ASSERT_FILE.*f9/quoted_assertion_spec.spl" || { echo "selftest: F9 quoted builtin text counted as a file assertion"; st_fail=1; }
     echo "$st_out" | /usr/bin/grep -aq "V1_ZERO_ASSERT.*f9/quoted_assertion_spec.spl" || { echo "selftest: F9 quoted builtin text counted as a block assertion"; st_fail=1; }
     echo "$st_out" | /usr/bin/grep -aq "V1_ZERO_ASSERT.*f10/quoted_helper_spec.spl" || { echo "selftest: F10 quoted helper text counted as delegation"; st_fail=1; }
@@ -633,11 +724,30 @@ EOF
     echo "$st_out" | /usr/bin/grep -aq "f3/late_vacuous_spec.spl" || { echo "selftest: F3 late-line vacuity NOT flagged (line-1-only regex bug)"; st_fail=1; }
     echo "$st_out" | /usr/bin/grep -aq "f4/test/01_unit/compiler/deep/nest/deep_spec.spl" || { echo "selftest: F4 deep-path spec NOT flagged (path-prefix filter bug)"; st_fail=1; }
 
+    for st_clean in f13/comment_delimiter f14/quoted_delimiter f16/inline_doc_code f18/raw_doc_backslash; do
+        if echo "$st_out" | /usr/bin/grep -aq "$st_clean"; then
+            echo "selftest: $st_clean real assertion was hidden by delimiter-like data"; st_fail=1
+        fi
+    done
+    for st_doc in f15/double_doc_data f17/single_doc_data; do
+        for st_code in V0_NO_ASSERT_FILE V1_ZERO_ASSERT; do
+            echo "$st_out" | /usr/bin/grep -aq "$st_code.*$st_doc" || {
+                echo "selftest: $st_doc documentation counted as an assertion ($st_code missing)"; st_fail=1
+            }
+        done
+    done
+    echo "$st_out" | /usr/bin/grep -aq "V1_ZERO_ASSERT.*f19/post_doc_comment_spec.spl" || {
+        echo "selftest: F19 post-doc comment hid a following zero-assertion example"; st_fail=1
+    }
+    if echo "$st_out" | /usr/bin/grep -aq "V0_NO_ASSERT_FILE.*f19/post_doc_comment_spec.spl"; then
+        echo "selftest: F19 real assertion before the comment was lost"; st_fail=1
+    fi
+
     if [ "$st_fail" -ne 0 ]; then
         echo "SELFTEST FAILED — detector is not trustworthy, refusing to scan"
         return 1
     fi
-    echo "selftest: 12/12 fixtures behaved correctly (F1,F3,F4,F6,F9,F10,F12 flagged; F2,F5,F7,F8,F11 clean)"
+    echo "selftest: 19/19 fixtures behaved correctly (F1,F3,F4,F6,F9,F10,F12,F15,F17,F19 flagged; F2,F5,F7,F8,F11,F13,F14,F16,F18 clean)"
     return 0
 }
 
@@ -648,7 +758,7 @@ if ! run_selftest; then
 fi
 
 if [ "$SELFTEST" -eq 1 ]; then
-    echo "PASS — selftest only, 12 fixtures checked, 0 flagged in corpus"
+    echo "PASS — selftest only, 19 fixtures checked, 0 flagged in corpus"
     exit 0
 fi
 

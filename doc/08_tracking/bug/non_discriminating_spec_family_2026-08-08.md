@@ -477,3 +477,46 @@ Done on branch `work/hir-typeid-port`:
 
 The family (other flagged specs) remains OPEN; only the headline
 `hir_types_spec` finding is remediated.
+
+
+## 2026-11-08 detector comment/docstring lexical repair (partial family)
+
+The current detector's pass0 toggled raw triple-quote substrings before
+stripping ordinary comments. A valid `# """` comment therefore entered docstring
+mode and hid following real assertions. An independent two-file corpus differing
+only by that comment produced V0 and V1 for the comment variant, while its
+otherwise identical computed-assertion control stayed clean.
+
+Pass0 now scans lexical context once: line comments and ordinary quoted tokens
+cannot open docstrings; both triple quote styles mask their body; code after a
+real closing delimiter survives. It keeps original source positions. The triple
+closing rule matches the actual core lexer (`lexer_struct.scan_string` and
+`scan_raw_string`): triple-string bodies are literal, so a matching delimiter
+closes even after a backslash. Ordinary short-string escapes remain protected.
+The assertion classifier, finding vocabulary, scan policy and existing baselines
+are unchanged.
+
+Seven new fixtures extend the detector selftest from 12 to 19: comment delimiters,
+quoted delimiter data with escapes/comment markers, real double- and single-
+quoted multiline documentation, inline closing followed by real assertion code,
+raw-triple backslash closing, and a trailing comment that must not hide the next
+zero-assertion example. The single-triple and trailing-comment cases also prevent
+false clean reports, beyond the original false positive.
+
+Executed once on Linux/aarch64 using the shell/AWK detector, pinned to CPU 16:
+
+- 19/19 selftest fixtures pass; syntax and whitespace checks pass.
+- Restoring exactly the old pass0 in an isolated mutant makes the new selftest
+  reject it with `SELFTEST FAILED` and exit 2. It catches the comment/quoted-data
+  false positives and the single-doc/post-doc-comment false negatives.
+- The original independent two-file corpus now has 0 V-code findings, scanned 2.
+
+Retained local evidence: `/tmp/p2-vacuous-evidence-20261108/receipt.json`,
+`mutant.log`, `independent-probe.log`, and
+`/tmp/p2-vacuous-selftest-20261108.log`.
+
+This qualifies the narrow shell detector repair. It does not execute any Simple
+spec, perform a broad corpus sweep, establish Tier-B semantic discrimination,
+or remediate the remaining vacuous specs. The family remains partial and
+verification pending; no fixed/closed mark or compiler/bootstrap qualification
+is claimed.
