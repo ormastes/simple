@@ -70,6 +70,34 @@ fn module_has_method_leaf(module: &Module<'static>, leaf: &str) -> bool {
     false
 }
 
+
+/// Does the module define or declare a USER `byte_len` (free function or a
+/// non-text-owner method)? Text-owner spellings (`str.byte_len`, ...) are the
+/// builtin itself and do not count. A bare `byte_len` may only be rebound to
+/// `rt_string_len` when this is false, mirroring the #7873 owner gate:
+/// `src/os/kernel/loader/byte_utils.spl` defines `fn byte_len(data: [u8])`.
+#[cfg(feature = "llvm")]
+pub(crate) fn module_has_user_byte_len(module: &Module<'static>) -> bool {
+    let mut func_opt = module.get_first_function();
+    while let Some(f) = func_opt {
+        let name = f.get_name().to_string_lossy().into_owned();
+        let leaf_hit = name == "byte_len" || name.ends_with(".byte_len") || name.ends_with("_dot_byte_len");
+        if leaf_hit && super::super::resolved_text_runtime_method(&name) != Some("rt_string_len") {
+            return true;
+        }
+        func_opt = f.get_next_function();
+    }
+    false
+}
+
+/// A bare `byte_len` redirect needs a text-or-erased receiver; anything else
+/// falls through to normal resolution instead of failing the build.
+pub(crate) fn byte_len_receiver_is_text_or_erased(ty: Option<crate::hir::TypeId>) -> bool {
+    ty.map_or(true, |t| {
+        t == crate::hir::TypeId::STRING || t == crate::hir::TypeId::ANY || t == crate::hir::TypeId::UNKNOWN
+    })
+}
+
 fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
     match rt_name {
         "rt_len"
@@ -2122,10 +2150,16 @@ impl LlvmBackend {
         // we must map these to rt_* functions. The first arg is the receiver.
         let bare_rt_redirect: Option<&str> = match func_name_raw {
             // String methods (all verified as T symbols in runtime)
-            // Bare `byte_len` is the text byte-length builtin (no user
-            // `fn byte_len` exists; matches Cranelift's bare-leaf mapping).
-            // Guarded below: exactly one text-or-erased receiver.
-            "byte_len" => Some("rt_string_len"),
+            // Bare `byte_len` is the text byte-length builtin ONLY when the module
+            // defines no user `byte_len` (src/os/kernel/loader/byte_utils.spl does)
+            // and the single receiver is text-or-erased; else normal resolution.
+            "byte_len"
+                if !module_has_user_byte_len(module)
+                    && args.len() == 1
+                    && byte_len_receiver_is_text_or_erased(vreg_types.get(&args[0]).copied()) =>
+            {
+                Some("rt_string_len")
+            }
             "starts_with" => Some("rt_string_starts_with"),
             "ends_with" => Some("rt_string_ends_with"),
             "contains" => Some("rt_contains"),
