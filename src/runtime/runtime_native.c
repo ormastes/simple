@@ -11889,7 +11889,134 @@ typedef struct RtEnumInternEntry {
 static RtEnumInternEntry rt_enum_intern_table[RT_ENUM_INTERN_MAX];
 static int rt_enum_intern_count = 0;
 
+/* Payload-less variants are process-lifetime singletons, even inside a
+ * transient scope (bug option_struct_none_box_freed_by_transient_scope_2026_11_09).
+ *
+ * `Option<struct>`'s native `nil` is `rt_option_none()`: a heap-boxed None
+ * enum. Until this fix rt_enum_new treated it like any other construction:
+ * outside a transient scope it was interned and immortal, but INSIDE a scope
+ * it was a fresh scope-owned box, freed at rt_transient_array_scope_end.
+ * Any function that opens a scope, computes an `Option<struct>` and returns
+ * the None past scope end therefore returned a dangling pointer: the
+ * caller's `x == nil` read freed memory (false), `.unwrap()` wrote into it,
+ * and the Windows heap reported c0000374 at the next malloc (stage3
+ * `native-build hello.spl`, bug
+ * stage3_native_build_heap_corruption_c0000374_2026_11_08). Unlike a
+ * `Some(struct)`, a None gives the caller nothing to rt_transient_heap_promote,
+ * so this could not be fixed at the call sites in general.
+ *
+ * A variant whose payload is the nil special or the integer 0 (the constant
+ * lower_enum_construct_named passes for unit variants) owns no heap state,
+ * so it has no reason to belong to the scope: intern it by (enum_id,
+ * discriminant, payload) in the lock-free singleton list below and register
+ * the single allocation as a plain immortal (scope id 0, never tracked by a
+ * transient scope or a session heap). Exactly one node exists per distinct
+ * key, so memory is bounded by the program's unit variant count and no
+ * construction ever allocates a second time. rt_transient_heap_promote
+ * already treats a registered immortal root as a no-op success, so callers
+ * that promote a None keep working. */
+static inline int enum_payload_is_unit(int64_t payload) {
+    /* nil, the integer 0, and the two bool specials: `Ok(true)` /
+     * `Some(false)` built inside a scope (Result<bool, text> lease owners)
+     * own no heap state either, and the set stays bounded by variant count.
+     * Other scalar payloads keep today's scoped-box behaviour; a caller that
+     * returns one past scope end must rt_transient_heap_promote it. */
+    return payload == rt_core_nil() || payload == 0 ||
+        payload == rt_core_from_special(RT_VALUE_SPECIAL_TRUE) ||
+        payload == rt_core_from_special(RT_VALUE_SPECIAL_FALSE);
+}
+
+/* Lock-free, prepend-only singleton list. rt_enum_new is called from every
+ * native-build thread, so the set is published with CAS and read with
+ * acquire loads; there is no capacity and no fallback allocation (the list
+ * holds exactly one node per distinct key, bounded by the program's unit
+ * variant count). A thread that loses the publish race re-scans only the
+ * nodes prepended since its snapshot (the list never reorders or removes),
+ * and releases its own allocation if a twin was published meanwhile.
+ * Option.None is by far the hottest key and gets a dedicated slot so the
+ * common path is one acquire load. */
+typedef struct RtEnumUnitSingleton {
+    uint32_t enum_id;
+    uint32_t discriminant;
+    int64_t payload;
+    int64_t value;
+    struct RtEnumUnitSingleton* _Atomic next;
+} RtEnumUnitSingleton;
+static RtEnumUnitSingleton* _Atomic rt_enum_unit_singletons = NULL;
+static _Atomic int64_t rt_option_none_singleton = 0;
+
+static int64_t enum_unit_singleton_find(RtEnumUnitSingleton* from, RtEnumUnitSingleton* stop,
+                                        int32_t enum_id, int32_t discriminant, int64_t payload) {
+    for (RtEnumUnitSingleton* n = from; n && n != stop;
+         n = atomic_load_explicit(&n->next, memory_order_acquire)) {
+        if (n->enum_id == (uint32_t)enum_id && n->discriminant == (uint32_t)discriminant &&
+            n->payload == payload) {
+            return n->value;
+        }
+    }
+    return 0;
+}
+
+static int64_t enum_new_unit_singleton(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    const int is_option_none = enum_id == RT_OPTION_ENUM_ID &&
+        (discriminant == RT_DISC_NONE || discriminant == 1) && payload == rt_core_nil();
+    if (is_option_none) {
+        int64_t cached = atomic_load_explicit(&rt_option_none_singleton, memory_order_acquire);
+        if (cached) return cached;
+    }
+    RtEnumUnitSingleton* head = atomic_load_explicit(&rt_enum_unit_singletons, memory_order_acquire);
+    int64_t existing = enum_unit_singleton_find(head, NULL, enum_id, discriminant, payload);
+    if (existing) return existing;
+
+    RtCoreEnum* value = (RtCoreEnum*)rt_observed_calloc_v1(1, sizeof(RtCoreEnum));
+    if (!value) return rt_core_nil();
+    value->kind = RT_VALUE_HEAP_ENUM;
+    value->enum_id = (uint32_t)enum_id;
+    value->discriminant = (uint32_t)discriminant;
+    value->payload = payload;
+    value->transient_scope_id = 0;
+    if (!rt_core_register_immortal_ptr(value)) {
+        free(value);
+        return rt_core_nil();
+    }
+    int64_t tagged = (int64_t)(((uint64_t)(uintptr_t)value) | RT_VALUE_TAG_HEAP);
+    RtEnumUnitSingleton* node = (RtEnumUnitSingleton*)calloc(1, sizeof(RtEnumUnitSingleton));
+    if (!node) {
+        rt_core_unregister_immortal_ptr(value);
+        free(value);
+        return rt_core_nil();
+    }
+    node->enum_id = (uint32_t)enum_id;
+    node->discriminant = (uint32_t)discriminant;
+    node->payload = payload;
+    node->value = tagged;
+    for (;;) {
+        atomic_store_explicit(&node->next, head, memory_order_relaxed);
+        RtEnumUnitSingleton* expected = head;
+        if (atomic_compare_exchange_weak_explicit(&rt_enum_unit_singletons, &expected, node,
+                                                  memory_order_acq_rel, memory_order_acquire)) {
+            if (is_option_none) {
+                atomic_store_explicit(&rt_option_none_singleton, tagged, memory_order_release);
+            }
+            return tagged;
+        }
+        /* Lost the race: `expected` is the new head. Only nodes between it
+         * and our snapshot are new; if one carries our key, use it. */
+        int64_t raced = enum_unit_singleton_find(expected, head, enum_id, discriminant, payload);
+        if (raced) {
+            rt_core_unregister_immortal_ptr(value);
+            free(value);
+            free(node);
+            return raced;
+        }
+        head = expected;
+    }
+}
+
 int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    if (enum_payload_is_unit(payload)) {
+        return enum_new_unit_singleton(enum_id, discriminant, payload);
+    }
     const int transient = rt_core_transient_scope_for_new_object() != 0;
     if (!transient) {
         for (int i = 0; i < rt_enum_intern_count; i++) {

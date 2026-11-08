@@ -2562,13 +2562,29 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
-                let text_byte_len = super::resolved_text_runtime_method(func_name) == Some("rt_string_len");
+                // A BARE `byte_len` (no `str.`/`text.` owner) is the text
+                // byte-length builtin unless the module defines a user `byte_len`
+                // (Cranelift codegen/instr/calls.rs maps the bare leaf to
+                // `rt_string_len`). Without this the leaf fell through to an
+                // undefined `byte_len` extern at the stage2 link
+                // (stage2_byte_len_unresolved_symbol_2026-11-08).
+                // Gated like #7873's owner check: only when the module defines no
+                // user `byte_len` and the receiver is text/erased; otherwise the
+                // call falls through to normal resolution.
+                let bare_byte_len = method == "byte_len"
+                    && !func_name.replace("_dot_", ".").contains('.')
+                    && !calls::module_has_user_byte_len(module)
+                    && calls::byte_len_receiver_is_text_or_erased(vreg_types.get(receiver).copied());
+                let text_byte_len =
+                    bare_byte_len || super::resolved_text_runtime_method(func_name) == Some("rt_string_len");
                 if text_byte_len {
                     if !args.is_empty() {
                         return Err(CompileError::semantic("text.byte_len expects no arguments"));
                     }
                     if vreg_types.get(receiver).is_some_and(|ty| {
-                        *ty != crate::hir::TypeId::STRING && *ty != crate::hir::TypeId::ANY
+                        *ty != crate::hir::TypeId::STRING
+                            && *ty != crate::hir::TypeId::ANY
+                            && *ty != crate::hir::TypeId::UNKNOWN
                     }) {
                         return Err(CompileError::semantic("text.byte_len requires a text receiver"));
                     }
@@ -4242,6 +4258,88 @@ mod tests {
             let ir = byte_len_dispatch_ir(inst, crate::hir::TypeId::STRING).unwrap();
             assert!(ir.contains("call i64 @rt_string_len(i64 "), "{owner}: {ir}");
             assert!(ir.contains("declare i64 @rt_string_len(i64)"), "{owner}: {ir}");
+        }
+    }
+
+    /// stage2 link `Unresolved symbol preview: byte_len`: MIR hands the LLVM
+    /// backend a BARE `byte_len` (no `str.`/`text.` owner) for a `.byte_len()`
+    /// whose receiver is proven text or erased. `byte_len` is a compiler
+    /// builtin with no user definition anywhere, and Cranelift already maps
+    /// the bare leaf to `rt_string_len`; LLVM must not declare an undefined
+    /// `byte_len` extern instead.
+    #[test]
+    fn bare_byte_len_dispatches_to_text_byte_abi_for_text_and_erased_receivers() {
+        for receiver_type in [crate::hir::TypeId::STRING, crate::hir::TypeId::ANY, crate::hir::TypeId::UNKNOWN] {
+            for inst in [
+                MirInst::Call {
+                    dest: Some(VReg(1)), target: CallTarget::from_name("byte_len"), args: vec![VReg(0)],
+                },
+                MirInst::MethodCallStatic {
+                    dest: Some(VReg(1)), receiver: VReg(0), func_name: "byte_len".to_string(), args: vec![],
+                },
+            ] {
+                let ir = byte_len_dispatch_ir(inst, receiver_type).unwrap();
+                assert!(ir.contains("call i64 @rt_string_len(i64 "), "{receiver_type:?}: {ir}");
+                assert!(ir.contains("declare i64 @rt_string_len(i64)"), "{receiver_type:?}: {ir}");
+                assert!(!ir.contains("@byte_len("), "bare extern leaked: {receiver_type:?}: {ir}");
+            }
+        }
+        // A proven non-text receiver is NOT a text byte_len: it falls through
+        // to normal resolution (no rt_string_len rebinding, no build error).
+        for inst in [
+            MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name("byte_len"), args: vec![VReg(0)] },
+            MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: "byte_len".to_string(), args: vec![] },
+        ] {
+            match byte_len_dispatch_ir(inst, crate::hir::TypeId::I64) {
+                Ok(ir) => assert!(!ir.contains("@rt_string_len("), "non-text receiver rebound to text builtin: {ir}"),
+                // Normal resolution may still reject it, but NOT via the text-builtin guard.
+                Err(e) => assert!(!e.to_string().contains("text receiver"), "text guard hijacked a non-text receiver: {e}"),
+            }
+        }
+    }
+
+    /// Module with a USER byte_len (`name`), then a caller of bare `byte_len`
+    /// on a receiver of `receiver_type`. Returns the IR.
+    fn bare_byte_len_with_user_def_ir(user_name: &str, receiver_type: crate::hir::TypeId, call_route: bool) -> String {
+        let backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("user_byte_len_gate").unwrap();
+        let mut user = MirFunction::new(user_name.to_string(), crate::hir::TypeId::I64, simple_parser::ast::Visibility::Public);
+        user.params.push(MirLocal { name: "data".to_string(), ty: crate::hir::TypeId::I64, kind: LocalKind::Parameter, is_ghost: false });
+        user.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+        backend.compile_function(&user).unwrap();
+        let mut caller = MirFunction::new("caller".to_string(), crate::hir::TypeId::I64, simple_parser::ast::Visibility::Public);
+        caller.params.push(MirLocal { name: "recv".to_string(), ty: receiver_type, kind: LocalKind::Parameter, is_ghost: false });
+        caller.blocks[0].instructions.push(if call_route {
+            MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name("byte_len"), args: vec![VReg(0)] }
+        } else {
+            MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: "byte_len".to_string(), args: vec![] }
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&caller).unwrap();
+        backend.verify().unwrap();
+        backend.get_ir().unwrap()
+    }
+
+    /// src/os/kernel/loader/byte_utils.spl defines `fn byte_len(data: [u8])`.
+    /// A bare free call must keep binding to it, never `rt_string_len`.
+    #[test]
+    fn bare_byte_len_free_call_still_binds_user_function() {
+        for receiver_type in [crate::hir::TypeId::I64, crate::hir::TypeId::ANY, crate::hir::TypeId::UNKNOWN] {
+            let ir = bare_byte_len_with_user_def_ir("byte_len", receiver_type, true);
+            assert!(ir.contains("call i64 @byte_len("), "{receiver_type:?}: {ir}");
+            assert!(!ir.contains("@rt_string_len("), "{receiver_type:?}: {ir}");
+        }
+    }
+
+    /// An ERASED receiver must not be silently rebound to the text builtin
+    /// when a user `byte_len` (free or method) exists in the module.
+    #[test]
+    fn erased_receiver_bare_byte_len_not_rebound_when_user_byte_len_exists() {
+        for user_name in ["byte_len", "ByteBuf.byte_len"] {
+            for call_route in [true, false] {
+                let ir = bare_byte_len_with_user_def_ir(user_name, crate::hir::TypeId::ANY, call_route);
+                assert!(!ir.contains("@rt_string_len("), "{user_name} call_route={call_route}: {ir}");
+            }
         }
     }
 
