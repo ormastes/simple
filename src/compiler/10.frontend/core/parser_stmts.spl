@@ -42,7 +42,7 @@ use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_TUPLE, EXPR_UNIT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_FIELD_ACCESS}
-use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
+use compiler.core.ast.{decl_get_fields, decl_get_field_types, decl_get_field_defaults, DECL_STRUCT, expr_struct_lit, expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
 use compiler.core.ast.{expr_int_lit, expr_float_lit}
 use compiler.core.ast.{expr_array_repeat}
 use compiler.core.ast_expr.{expr_mark_colon_block}
@@ -1762,7 +1762,12 @@ fn fixed_array_no_init_default_expr(type_tag: i64, fixed_elem: i64, fixed_size: 
     # contract as a bare named `var g: T` (owner decision 2026-11-06 item 8).
     # fn-typed and other elements have no safe zero (nil only in unsafe): 0.
     if fixed_elem >= TYPE_NAMED_BASE:
-        return expr_array_repeat(expr_nil_lit(0), expr_int_lit(fixed_size, 0), 0)
+        var elem_zero = struct_zero_expr_v1(fixed_elem, 0)
+        if elem_zero == -1:
+            return 0
+        if elem_zero == -2:
+            elem_zero = expr_nil_lit(0)
+        return expr_array_repeat(elem_zero, expr_int_lit(fixed_size, 0), 0)
     if fixed_elem == TYPE_BOOL:
         return expr_array_repeat(expr_bool_lit(0, 0), expr_int_lit(fixed_size, 0), 0)
     if fixed_elem == TYPE_F64:
@@ -2913,6 +2918,7 @@ export parse_block, parse_statement, parse_trailing_colon_block_arg
 export try_parse_bare_ident_string_call
 export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
 export var_no_init_default_expr, fixed_array_no_init_default_expr
+export struct_zero_expr_v1
 export set_noinit_robust_mode_v1, noinit_robust_mode_v1
 export parse_if_stmt, parse_for_stmt, parse_while_stmt
 export parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow
@@ -2929,3 +2935,57 @@ fn set_noinit_robust_mode_v1(on: bool):
 
 fn noinit_robust_mode_v1() -> bool:
     noinit_robust_mode_state_v1
+
+# Zero value of a named struct declared EARLIER in the module: a struct
+# literal whose fields are the field default when present, else the zero of
+# the field type (scalars 0/false/0.0, nested earlier struct recursively,
+# fixed arrays are not field-typed here). A field with no safe zero errors,
+# naming the struct and field (nil is only allowed in unsafe). Returns -1
+# after reporting when no zero exists (unknown struct, e.g. declared later).
+fn struct_zero_expr_v1(type_tag: i64, depth: i64) -> i64:
+    if type_tag < TYPE_NAMED_BASE:
+        return -1
+    val sname = named_type_name(type_tag - TYPE_NAMED_BASE)
+    if depth > 8:
+        parser_error("no safe zero value for struct {sname}: recursive field nesting; add an explicit initializer")
+        return -1
+    var di = 0
+    var found = -1
+    while di < module_decl_count_get():
+        val d = module_decl_at(di)
+        if decl_get_tag(d) == DECL_STRUCT and decl_get_name(d) == sname:
+            found = d
+        di = di + 1
+    if found < 0:
+        # Not a struct declared earlier in this module (class, enum, imported
+        # type): caller keeps the existing nil-until-assignment contract.
+        return -2
+    val names = decl_get_fields(found)
+    val types = decl_get_field_types(found)
+    val defaults = decl_get_field_defaults(found)
+    var entries: [i64] = []
+    var fi = 0
+    while fi < names.len():
+        var v = -1
+        if fi < defaults.len() and defaults[fi] >= 0:
+            v = defaults[fi]
+        else:
+            val ft = types[fi]
+            if ft == TYPE_BOOL:
+                v = expr_bool_lit(0, 0)
+            elif ft == TYPE_F64:
+                v = expr_float_lit("0.0", 0)
+            elif ft == TYPE_I64 or ft == TYPE_U8 or ft == TYPE_U16 or ft == TYPE_U32 or ft == TYPE_U64 or ft == TYPE_I8 or ft == TYPE_I16 or ft == TYPE_I32:
+                v = expr_int_lit(0, 0)
+            elif ft >= TYPE_NAMED_BASE:
+                v = struct_zero_expr_v1(ft, depth + 1)
+                if v == -2:
+                    parser_error("no safe zero value for field {sname}.{names[fi]}: its type is not a struct declared earlier; add an explicit initializer")
+                if v < 0:
+                    return -1
+            else:
+                parser_error("no safe zero value for field {sname}.{names[fi]}; add an explicit initializer")
+                return -1
+        entries.push(expr_field_access(v, names[fi], 0))
+        fi = fi + 1
+    expr_struct_lit(sname, entries, [], 0)

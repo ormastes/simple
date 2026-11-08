@@ -1,16 +1,53 @@
 # @req bug p4p2_flat_parser_noinit_module_var_struct_and_fn_types_2026-10-20
-# Module-level var without initializer: non-robust modes default-initialize,
-# fn-typed has no safe zero (error), robust mode errors.
+# Module var without initializer (owner decision 2026-11-06 item 8): non-robust
+# modes zero-initialize (struct elements/vars get a zero STRUCT LITERAL, not
+# nil); a field/type with no safe zero errors; robust mode errors.
 use std.spec
 use compiler.core.parser.{parse_module_silent_checked}
+use compiler.core.ast.{module_decl_count_get, module_decl_at, decl_get_name, decl_get_body}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_left, EXPR_INT_LIT, EXPR_BOOL_LIT, EXPR_STRUCT_LIT, EXPR_ARRAY_REPEAT, EXPR_NIL_LIT}
 use compiler.frontend.core.parser_stmts.{set_noinit_robust_mode_v1}
 
+fn noinit_body_tag(name: text) -> i64:
+    var i = 0
+    while i < module_decl_count_get():
+        val d = module_decl_at(i)
+        if decl_get_name(d) == name:
+            val b = decl_get_body(d)
+            if b.len() == 1:
+                return expr_get_tag(b[0])
+        i = i + 1
+    -1
+
+fn noinit_body_first_arg_tag(name: text) -> i64:
+    var i = 0
+    while i < module_decl_count_get():
+        val d = module_decl_at(i)
+        if decl_get_name(d) == name:
+            val b = decl_get_body(d)
+            val args = [expr_get_left(b[0])]
+            if args.len() > 0:
+                return expr_get_tag(args[0])
+        i = i + 1
+    -1
+
 describe "module var without initializer":
-    it "accepts struct-element fixed array":
-        val src = "struct E:\n    a: i64\nvar tbl: [E; 4]\n"
+    it "zero-fills a struct-element fixed array with zero struct literals, not nil":
+        val src = "struct E:\n    a: i64\n    b: bool\nvar tbl: [E; 4]\n"
         expect(parse_module_silent_checked(src, "t1.spl")).to_equal(false)
-    it "accepts scalar module var":
+        expect(noinit_body_tag("tbl")).to_equal(EXPR_ARRAY_REPEAT)
+        expect(noinit_body_first_arg_tag("tbl")).to_equal(EXPR_STRUCT_LIT)
+    it "zero-initializes a bare struct var with a struct literal, not nil":
+        val src = "struct P:\n    x: i64\nvar origin: P\n"
+        expect(parse_module_silent_checked(src, "t1b.spl")).to_equal(false)
+        expect(noinit_body_tag("origin")).to_equal(EXPR_STRUCT_LIT)
+    it "errors naming a struct field with no safe zero":
+        val src = "struct H:\n    cb: fn(i64)\nvar hs: [H; 2]\n"
+        expect(parse_module_silent_checked(src, "t1c.spl")).to_equal(true)
+    it "zero-initializes scalars with literal zero values":
         expect(parse_module_silent_checked("var counter: i64\nvar flag: bool\n", "t2.spl")).to_equal(false)
+        expect(noinit_body_tag("counter")).to_equal(EXPR_INT_LIT)
+        expect(noinit_body_tag("flag")).to_equal(EXPR_BOOL_LIT)
     it "rejects fn-element fixed array (no safe zero)":
         expect(parse_module_silent_checked("var h: [fn(i64); 4]\n", "t3.spl")).to_equal(true)
     it "rejects any no-init module var in robust mode":
