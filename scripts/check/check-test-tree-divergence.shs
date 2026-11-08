@@ -333,7 +333,7 @@ run_selftest() {
         printf '  - q:deleted_both.spl\n  - q:deleted_canon.spl\n  - q:deleted_shadow.spl\n' > "$st_root/expected-missing"
         awk '/baseline entries that are now IDENTICAL/{on=1;next} on && /^  - /{print;next} on{exit}' \
             "$st_log" > "$st_root/actual-identical"
-        awk '/baseline entries with a MISSING counterpart/{on=1;next} on && /^  - /{print;next} on{exit}' \
+        awk '/baseline entries NOT COMPARED/{on=1;next} on && /^  - /{print;next} on{exit}' \
             "$st_log" > "$st_root/actual-missing"
         if [ "$st_status" -eq 1 ] \
             && cmp -s "$st_root/expected-identical" "$st_root/actual-identical" \
@@ -342,6 +342,34 @@ run_selftest() {
             st_check ok "(6) $st_mode stale baseline distinguishes identical and missing legs"
         else
             st_check no "(6) $st_mode stale baseline classification" "status=$st_status; $(cat "$st_log")"
+        fi
+    done
+
+    # (7) A missing-only stale baseline must fail independently: an
+    # identical stale row must not mask a missing-leg fail-open regression.
+    printf '%s\n' q:drift.spl q:deleted_both.spl > "$fx4/scripts/check/test_tree_divergence_baseline.txt"
+    ( cd "$fx4" && git add scripts/check/test_tree_divergence_baseline.txt \
+        && git -c user.email=s@e -c user.name=s commit -q -m missing-only-baseline ) \
+        || die 2 "selftest missing-only fixture commit failed"
+    fx4ref=$( cd "$fx4" && git rev-parse HEAD ) || die 2 "selftest missing-only rev-parse failed"
+    for st_mode in disk committed; do
+        set --
+        [ "$st_mode" = disk ] || set -- --ref "$fx4ref"
+        st_log="$st_root/missing-only-$st_mode.log"
+        ( cd "$fx4" && TEST_TREE_DIVERGENCE_PAIRS="q:test/canon:test/shadow" \
+            TEST_TREE_DIVERGENCE_OUT="$st_root/missing-only-$st_mode.offenders" TTD_SELFTEST_CHILD=1 \
+            sh "$SELF_PATH" "$@" ) > "$st_log" 2>&1
+        st_status=$?
+        printf '  - q:deleted_both.spl\n' > "$st_root/expected-missing-only"
+        awk '/baseline entries NOT COMPARED/{on=1;next} on && /^  - /{print;next} on{exit}' \
+            "$st_log" > "$st_root/actual-missing-only"
+        if [ "$st_status" -eq 1 ] \
+            && ! /usr/bin/grep -q 'baseline entries that are now IDENTICAL' "$st_log" \
+            && cmp -s "$st_root/expected-missing-only" "$st_root/actual-missing-only" \
+            && /usr/bin/grep -q '0 new, 1 fixed-but-still-baselined' "$st_log"; then
+            st_check ok "(7) $st_mode missing-only stale baseline FAILs"
+        else
+            st_check no "(7) $st_mode missing-only stale baseline" "status=$st_status; $(cat "$st_log")"
         fi
     done
 
@@ -359,7 +387,7 @@ if [ "${TTD_SELFTEST_CHILD:-0}" != "1" ]; then
     run_selftest
     if [ "$selftest_only" -eq 1 ]; then
         VERDICT_EMITTED=1
-        echo "$SELF: PASS — 6 selftest fixture(s) checked, 0 failures (no divergence scan performed in --selftest mode)"
+        echo "$SELF: PASS — 7 selftest fixture(s) checked, 0 failures (no divergence scan performed in --selftest mode)"
         exit 0
     fi
 elif [ "$selftest_only" -eq 1 ]; then
@@ -746,7 +774,7 @@ if [ "$n_fixed" -gt 0 ]; then
         sed 's/^/  - /' "$work/identical_baseline.txt" >&2
     fi
     if [ -s "$work/missing_baseline.txt" ]; then
-        echo "$SELF: baseline entries with a MISSING counterpart (not compared; review deletions before removing stale lines from $BASELINE):" >&2
+        echo "$SELF: baseline entries NOT COMPARED (missing leg, unknown pair label, filtered or malformed path; review before removing stale lines from $BASELINE):" >&2
         sed 's/^/  - /' "$work/missing_baseline.txt" >&2
     fi
     status=1
