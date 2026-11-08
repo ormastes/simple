@@ -209,11 +209,21 @@ pub fn rt_string_ends_with_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// returns -1.
 pub fn rt_string_rfind_fn(args: &[Value]) -> Result<Value, CompileError> {
     let (s, needle) = extern_string_pair(args, "rt_string_rfind")?;
+    // CODE-POINT index (ADR-005 item 5), mirroring the native runtimes'
+    // rt_string_rfind; ASCII text keeps byte == code point.
     if needle.is_empty() {
-        return Ok(Value::Int(s.len() as i64));
+        return Ok(Value::Int(text_cp_count(s.as_bytes()) as i64));
     }
     let found = s.as_bytes().windows(needle.len()).rposition(|w| w == needle.as_bytes());
-    Ok(Value::Int(found.map_or(-1, |i| i as i64)))
+    Ok(Value::Int(found.map_or(-1, |i| text_cp_count(&s.as_bytes()[..i]) as i64)))
+}
+
+/// Code points in UTF-8 `bytes` (non-continuation bytes); ASCII is its length.
+fn text_cp_count(bytes: &[u8]) -> usize {
+    if bytes.is_ascii() {
+        return bytes.len();
+    }
+    bytes.iter().filter(|b| (**b & 0xC0) != 0x80).count()
 }
 
 /// First byte offset, or -1 when absent; an empty needle returns 0.
@@ -251,8 +261,10 @@ pub fn rt_string_find_fn(args: &[Value]) -> Result<Value, CompileError> {
     if needle.is_empty() {
         return Ok(Value::Int(0));
     }
+    // CODE-POINT index (ADR-005 item 5), mirroring the native runtimes'
+    // rt_string_find; ASCII text keeps byte == code point.
     let found = subject.windows(needle.len()).position(|window| window == needle);
-    Ok(Value::Int(found.map_or(-1, |offset| offset as i64)))
+    Ok(Value::Int(found.map_or(-1, |offset| text_cp_count(&subject[..offset]) as i64)))
 }
 
 /// Resolve two `text`-typed extern arguments to owned Rust strings.

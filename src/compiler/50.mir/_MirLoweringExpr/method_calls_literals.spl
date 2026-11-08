@@ -3597,7 +3597,9 @@ impl MirLowering:
                 elif self.local_is_runtime_dict(receiver_local):
                     len_symbol = "rt_dict_len"
                 elif self.local_is_str(receiver_local):
-                    len_symbol = "rt_string_len"
+                    # User-facing text len counts CODE POINTS (ADR-005 item 5);
+                    # byte_len() above is the rt_string_len route.
+                    len_symbol = "rt_string_char_count"
             # methods-mir-20261031 shape 3: a `text?` receiver after an
             # early-return nil guard (`if x == nil: return 0` then `x.len()`)
             # still carries Optional(Str) -- MIR has no flow narrowing. Take
@@ -3619,7 +3621,7 @@ impl MirLowering:
                                 prelowered_method_receiver = narrowed_len_receiver
                                 receiver_local = narrowed_len_receiver
                                 receiver_lowered = true
-                                len_symbol = "rt_string_len"
+                                len_symbol = "rt_string_char_count"
                         case _: ()
             # `rt_len` is an intentional recovery path only for unresolved
             # len/length calls.  An unresolved user-defined `is_empty` must
@@ -3695,16 +3697,17 @@ impl MirLowering:
             if len_symbol != "":
                 if not receiver_lowered:
                     receiver_local = self.lower_expr(receiver)
-                # rt_string_len distinguishes tagged strings from raw text at
-                # runtime. Tagged strings use their stored byte length (and
-                # preserve embedded NUL); raw literals fall back to strlen.
-                # Known arrays retain rt_len.
+                # rt_string_char_count distinguishes tagged strings from raw
+                # text at runtime exactly like rt_string_len (same receiver
+                # fallback), but answers in CODE POINTS (ADR-005 item 5); a
+                # text `.len()` is never the byte count. Known arrays retain
+                # rt_len.
                 # Returned arrays can have a declared MIR Array/Slice type
                 # without an id-map entry. Sending their handles to the string
                 # accessor silently returns zero. Consult both type and map,
                 # as indexing and the dict-length path already do.
                 if len_symbol == "rt_len" and not self.local_is_runtime_array(receiver_local):
-                    len_symbol = "rt_string_len"
+                    len_symbol = "rt_string_char_count"
                 val func_operand = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str(len_symbol),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
@@ -6017,7 +6020,7 @@ impl MirLowering:
             val concrete_type: HirType = present_type
             match concrete_type.kind:
                 case HirTypeKind.Str:
-                    "rt_string_len"
+                    "rt_string_char_count"
                 case Array(_, _):
                     "rt_array_len"
                 case Slice(_):
