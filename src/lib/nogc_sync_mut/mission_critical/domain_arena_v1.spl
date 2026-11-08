@@ -26,6 +26,9 @@ const ARENA_CONTEXT_OWNERSHIP_PUBLICATION: u64 = 16u64
 const ARENA_CONTEXT_ISOLATION_TRANSITION: u64 = 32u64
 pub const ARENA_CONTEXT_CRITICAL_MASK: u64 = 62u64
 const DOMAIN_ARENA_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
+# Both V1 byte banks are sized to quota_bytes at construction; a larger quota
+# is refused before either bank is built.
+pub const DOMAIN_ARENA_V1_MAX_QUOTA_BYTES: u64 = 65536u64
 
 struct RelaxedAllocationProfileV1:
     schema_version: u16
@@ -205,6 +208,32 @@ class DomainArenaV1:
     checkpoint_publication_epoch: u64
     generation_terminal: bool
     committed_state: ArenaCommittedSnapshotV1
+    # Staged writes live here until commit copies them into committed_bytes.
+    staging_bytes: [u8]
+    committed_bytes: [u8]
+    # Exact allocation spans; a ref must name one of them, never a subspan.
+    staging_span_offsets: [u64]
+    staging_span_sizes: [u64]
+    committed_span_offsets: [u64]
+    committed_span_sizes: [u64]
+
+fn domain_arena_zero_bank_v1(quota_bytes: u64) -> [u8]:
+    var bank: [u8] = []
+    if quota_bytes > DOMAIN_ARENA_V1_MAX_QUOTA_BYTES:
+        return bank
+    var i = 0u64
+    while i < quota_bytes:
+        bank.push(0u8)
+        i = i + 1u64
+    bank
+
+fn domain_arena_span_index_v1(offsets: [u64], sizes: [u64], reference: DomainArenaRefV1) -> i64:
+    var i = 0
+    while i < offsets.len():
+        if offsets[i] == reference.offset_bytes and sizes[i] == reference.size_bytes:
+            return i
+        i = i + 1
+    -1
 
 impl DomainArenaV1:
     static fn from_sealed_profile(arena_id: u64, profile: RelaxedAllocationProfileV1) -> DomainArenaV1:
@@ -225,7 +254,11 @@ impl DomainArenaV1:
             committed_state: ArenaCommittedSnapshotV1(
                 generation: 0u64, cursor_bytes: 0u64, allocation_count: 0u32,
                 publication_epoch: 0u64
-            )
+            ),
+            staging_bytes: domain_arena_zero_bank_v1(profile.quota_bytes),
+            committed_bytes: domain_arena_zero_bank_v1(profile.quota_bytes),
+            staging_span_offsets: [], staging_span_sizes: [],
+            committed_span_offsets: [], committed_span_sizes: []
         )
 
     me arm_fault_once(fault_point: u16) -> bool:
@@ -254,6 +287,8 @@ impl DomainArenaV1:
                 self.next_generation = self.next_generation + 1u64
             self.cursor_bytes = 0u64
             self.allocation_count = 0u32
+            self.staging_span_offsets = []
+            self.staging_span_sizes = []
             self.checkpoint_generation = self.staging_generation
             self.checkpoint_cursor_bytes = 0u64
             self.checkpoint_allocation_count = 0u32
@@ -307,6 +342,7 @@ impl DomainArenaV1:
             self.profile.schema_version != 1u16 or self.profile.profile_id.len() == 0 or
             not self.profile.strict_default or self.profile.domain_id == 0u32 or
             self.profile.quota_bytes == 0u64 or
+            self.profile.quota_bytes > DOMAIN_ARENA_V1_MAX_QUOTA_BYTES or
             self.profile.max_allocations_per_generation == 0u32 or
             not alignment_is_power_of_two or not profile_masks_are_valid):
             reason = ARENA_EXHAUSTION_INVALID_REQUEST
@@ -346,6 +382,13 @@ impl DomainArenaV1:
         val offset = aligned_cursor
         self.cursor_bytes = aligned_cursor + bytes
         self.allocation_count = self.allocation_count + 1u32
+        # A fresh allocation never exposes bytes left by a rolled-back generation.
+        var zero_at = offset
+        while zero_at < self.cursor_bytes:
+            self.staging_bytes[zero_at] = 0u8
+            zero_at = zero_at + 1u64
+        self.staging_span_offsets.push(offset)
+        self.staging_span_sizes.push(bytes)
         if self.cursor_bytes > self.high_water_bytes:
             self.high_water_bytes = self.cursor_bytes
         DomainArenaAllocationV1.Allocated(DomainArenaRefV1(
@@ -372,6 +415,12 @@ impl DomainArenaV1:
             allocation_count: self.allocation_count,
             publication_epoch: self.committed_state.publication_epoch + 1u64
         )
+        var copy_at = 0u64
+        while copy_at < self.cursor_bytes:
+            self.committed_bytes[copy_at] = self.staging_bytes[copy_at]
+            copy_at = copy_at + 1u64
+        self.committed_span_offsets = self.staging_span_offsets
+        self.committed_span_sizes = self.staging_span_sizes
         # This single value assignment is the observable publication point.
         self.committed_state = published
         # Compatibility mirrors are not publication authority.
@@ -405,6 +454,28 @@ impl DomainArenaV1:
             reference.generation == self.committed_state.generation and
             self._profile_is_frozen() and end_is_bounded
 
+    me write_byte(reference: DomainArenaRefV1, index: u64, value: u8) -> bool:
+        """Stage one byte inside an exact allocation of the open generation."""
+        if not self.transaction_open or not self._profile_is_frozen():
+            return false
+        if (reference.arena_id != self.arena_id or
+            reference.domain_id != self.profile.domain_id or
+            reference.generation != self.staging_generation or
+            index >= reference.size_bytes):
+            return false
+        if domain_arena_span_index_v1(self.staging_span_offsets, self.staging_span_sizes, reference) < 0:
+            return false
+        self.staging_bytes[reference.offset_bytes + index] = value
+        true
+
+    fn read_byte(reference: DomainArenaRefV1, index: u64) -> u8?:
+        """Read one published byte; staged bytes are never readable."""
+        if not self.validates(reference) or index >= reference.size_bytes:
+            return nil
+        if domain_arena_span_index_v1(self.committed_span_offsets, self.committed_span_sizes, reference) < 0:
+            return nil
+        Some(self.committed_bytes[reference.offset_bytes + index])
+
 fn relaxed_allocation_profile_canonical_v1(profile: RelaxedAllocationProfileV1) -> text:
     # Decimal values and byte-counted text make this independent of host word
     # size, endianness, struct padding, locale, and map/field iteration order.
@@ -437,6 +508,14 @@ fn domain_arena_committed_state_hash_v1(arena: DomainArenaV1) -> text:
         "|publication_epoch=" + arena.committed_state.publication_epoch.to_text()
     )
     sha256_text(canonical)
+
+fn domain_arena_committed_bytes_hash_v1(arena: DomainArenaV1) -> text:
+    var parts: [text] = []
+    var i = 0u64
+    while i < arena.committed_state.cursor_bytes:
+        parts.push(arena.committed_bytes[i].to_text())
+        i = i + 1u64
+    sha256_text("domain-arena-committed-bytes-v1|cursor=" + arena.committed_state.cursor_bytes.to_text() + "|" + parts.join(","))
 
 fn domain_arena_evidence_scenario_row_v1(scenario_id: text) -> text:
     "MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=scenario|id=" + scenario_id + "|result=pass"
@@ -473,12 +552,14 @@ export ARENA_EXHAUSTION_QUOTA, ARENA_EXHAUSTION_ALLOCATION_COUNT,
     ARENA_CONTEXT_NORMAL, ARENA_CONTEXT_KERNEL, ARENA_CONTEXT_ISR,
     ARENA_CONTEXT_STORAGE_COMMIT, ARENA_CONTEXT_OWNERSHIP_PUBLICATION,
     ARENA_CONTEXT_ISOLATION_TRANSITION, ARENA_CONTEXT_CRITICAL_MASK,
+    DOMAIN_ARENA_V1_MAX_QUOTA_BYTES,
     RelaxedAllocationProfileV1, ArenaCheckpointV1, ArenaExhaustionV1,
     ArenaFailureInjectionLedgerEntryV1, ArenaCommittedSnapshotV1,
     DomainArenaRefV1, DomainArenaAllocationV1, DomainArenaV1
 export relaxed_allocation_profile_fingerprint_v1
 export relaxed_allocation_profile_canonical_v1, relaxed_allocation_profile_hash_v1,
-    domain_arena_committed_state_hash_v1, arena_failure_point_count_v1,
+    domain_arena_committed_state_hash_v1, domain_arena_committed_bytes_hash_v1,
+    arena_failure_point_count_v1,
     arena_failure_point_at_v1, arena_failure_point_name_v1,
     arena_failure_point_registered_v1, arena_failure_injection_ledger_entry_valid_v1
 export arena_sha256_lower_hex_valid_v1, arena_failure_injection_ledger_complete_v1

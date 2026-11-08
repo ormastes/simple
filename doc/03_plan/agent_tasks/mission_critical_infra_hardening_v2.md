@@ -285,3 +285,16 @@ development diagnostics, not pure-Simple release evidence.
 - `provider_loader_path_digest_toctou_2026-08-16`, `tls_signature_positive_verification_blockers_2026-06-06`: fix in PR #7160 (open); status kept.
 - `direct_arch_imports_outside_arch_2026-08-11`: 2 named sites fixed via arch_adapt; remaining sites listed in the bug note.
 - `guard_wiring_optout_false_exemptions_2026-08-06`: PR #6345 wired the RTL audit only; still open.
+
+## Status 2026-11-08 (release/1.0.0)
+
+Supersedes the 2026-11-05 "still open" line:
+- `domain_arena_v1_spec` is GREEN (15/15 on the Windows seed runner). `domain_arena_v1.spl` now has:
+  - Staged/committed byte banks: `write_byte` stages bytes inside an exact allocation of the open generation, `read_byte` reads published bytes only, `commit` copies the staged bytes, and `rollback` discards them.
+  - Exact-span refs; forged subspans are rejected.
+  - New allocations are zeroed.
+  - `DOMAIN_ARENA_V1_MAX_QUOTA_BYTES` (64 KiB), refused before either bank is built.
+  - `domain_arena_committed_bytes_hash_v1`.
+- One prevention case was added: rolled-back bytes are never republished.
+- `provider_loader_path_digest_toctou_2026-08-16` and `tls_signature_positive_verification_blockers_2026-06-06`: fix PR #7160 is now CLOSED unmerged. Both bugs stay open and need a new lane.
+- Seed results remain development diagnostics, not pure-Simple release evidence.

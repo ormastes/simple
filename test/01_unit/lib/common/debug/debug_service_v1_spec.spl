@@ -2,14 +2,14 @@
 """
 ## Purpose and audience
 
-Probe lifecycle contract for the central debug service: probe registration
-against a registered target, source-anchor and unknown-target rejection,
-observe-only denial of Probe operations with a retained denial receipt, and
-session close making further probe registration fail closed. Evidence export
-(`DebugEvidenceArtifactV1`, `export_evidence`) is still not shipped, so the
-evidence scenarios keep an absence tripwire. Written for the debug-service
-owner; the surface under test is `std.common.debug.service_v1` /
-`contracts_v1` (the `central_debug_service_v1_*` functions).
+Probe and evidence lifecycle contract for the central debug service: probe
+registration against a registered target, source-anchor and unknown-target
+rejection, observe-only denial of Probe operations with a retained denial
+receipt, session close making further probe registration fail closed, and
+build-bound evidence export with digest admission. Written for the
+debug-service owner; the surface under test is `std.common.debug.service_v1` /
+`contracts_v1` (the `central_debug_service_v1_*` functions and
+`DebugServiceV1`).
 
 ## Operator workflow
 
@@ -17,19 +17,13 @@ Run one spec: `bin/simple test test/01_unit/lib/common/debug/debug_service_v1_sp
 
 ## Compatibility and limitations
 
-The shipped service owns session/authorization bookkeeping and probe identity
-minting only: no per-session receipt list and no evidence export. The evidence
-tripwire fails closed if `DebugEvidenceArtifactV1` or `export_evidence`
-appears in the shipped modules, or if `SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1`
-claims it landed; port those scenarios onto it and delete the helper.
+The evidence scenarios were absence tripwires until `DebugEvidenceArtifactV1`
+and `export_evidence` landed; they now assert the real export contract.
 
 ## Verification guidance and troubleshooting
 
-A failure quoting the shipped modules means the evidence API landed. A failure
-naming the env flag means the flag was set without landing the API. Any other
-failure is a genuine regression in `std.common.debug.service_v1`.
+Any failure is a genuine regression in `std.common.debug.service_v1`.
 """
-# Lifecycle: doc/01_research/app/tools/simple_unified_debugging_evidence_2026-08-14.md ;
 # doc/03_plan/agent_tasks/simple_unified_debugging_evidence.md ;
 # doc/04_architecture/simple_unified_debugging_evidence.md ;
 # doc/05_design/simple_unified_debugging_evidence.md
@@ -39,30 +33,17 @@ use std.spec.*
 use std.common.debug.contracts_v1.{
     DebugCapabilityV1, DebugVerificationV1, DebugPerturbationV1,
     DebugTargetNodeV1, DebugProbeKindV1, DebugRootOperationV1,
-    DebugPolicyV1, DebugSessionId,
+    DebugPolicyV1, DebugSessionId, DebugEvidenceArtifactV1,
 }
 use std.common.debug.capability.{CapLevel}
 use std.common.debug.service_v1.{
     debug_policy_development_v1, debug_policy_observe_only_v1,
     central_debug_service_v1_open, central_debug_service_v1_add_target,
     central_debug_service_v1_apply_probe, central_debug_service_v1_authorize,
-    central_debug_service_v1_close,
+    central_debug_service_v1_close, central_debug_service_v1_export_evidence,
+    central_debug_service_v1_receipts,
 }
 
-extern fn rt_file_read_text(path: text) -> text?
-use std.io_runtime.{env_get}
-
-# Fail-closed tripwire: true only while the drafted evidence export API is
-# still absent from the shipped debug modules AND unclaimed.
-fn evidence_still_absent() -> bool:
-    val service_source = rt_file_read_text("src/lib/common/debug/service_v1.spl") ?? ""
-    val contracts_source = rt_file_read_text("src/lib/common/debug/contracts_v1.spl") ?? ""
-    val keeps_evidence_out = not service_source.contains("export_evidence") and not contracts_source.contains("DebugEvidenceArtifactV1")
-    if not keeps_evidence_out:
-        fail("debug service lifecycle: the drafted evidence export API now appears in the shipped debug modules - port these scenarios onto it and delete the tripwire helper")
-    if env_get("SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED") == "1":
-        fail("debug service lifecycle: SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1 claims the lifecycle landed but the shipped modules still lack it - implement it or unset the flag")
-    true
 
 fn open_with_target(policy: DebugPolicyV1) -> DebugSessionId:
     val session = central_debug_service_v1_open("sha256:probe-build", policy).unwrap()
@@ -119,10 +100,25 @@ describe "DebugServiceV1 probe lifecycle":
 describe "DebugServiceV1 evidence lifecycle":
     it "should bind valid evidence to the exact session build and preserve its digest":
         # @req REQ-010
-        step("Probe the shipped modules for the drafted evidence manifest binding")
-        expect(evidence_still_absent()).to_be(true)
+        step("Export one typed artifact from a development session")
+        val session = open_with_target(debug_policy_development_v1())
+        val artifact = DebugEvidenceArtifactV1("raw/core", "application/x-core", "sha256:abc123", true, "restricted")
+        val manifest = central_debug_service_v1_export_evidence(session, 42, [artifact]).unwrap()
+        expect(manifest.build_id).to_equal("sha256:probe-build")
+        expect(manifest.session_id.value).to_equal(session.value)
+        expect(manifest.captured_at_ns).to_equal(42)
+        expect(manifest.artifacts.len()).to_equal(1)
+        expect(manifest.artifacts[0].digest).to_equal("sha256:abc123")
 
     it "should reject a missing digest and receipt the failed export as denied":
         # @req REQ-011
-        step("Probe the shipped modules for the drafted digest-less export denial")
-        expect(evidence_still_absent()).to_be(true)
+        step("Export an artifact without a digest")
+        val session = open_with_target(debug_policy_development_v1())
+        val artifact = DebugEvidenceArtifactV1("raw/core", "application/x-core", "", true, "restricted")
+        match central_debug_service_v1_export_evidence(session, 42, [artifact]):
+            case Ok(_): fail("evidence without a digest must be rejected")
+            case Err(reason): expect(reason).to_contain("path and digest")
+        val receipts = central_debug_service_v1_receipts(session)
+        val last = receipts[receipts.len() - 1]
+        expect(last.action).to_equal("evidence.export")
+        expect(last.allowed).to_equal(false)
