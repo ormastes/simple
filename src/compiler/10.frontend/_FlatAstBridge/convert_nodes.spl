@@ -663,13 +663,14 @@ fn op_kind_to_unaryop(kind: i64) -> UnaryOp:
     UnaryOp.Neg
 
 # Convert an expression-form if/else branch (stored as an EXPR id) into a Block.
-# Block-form branches are EXPR_BLOCK (tag 18) carrying STMTS; ternary/inline
+# Block-form branches are EXPR_BLOCK/EXPR_DO_BLOCK carrying STMTS; ternary/inline
 # branches are a bare expr wrapped as a single expression statement. Used by the
 # EXPR_IF bridge so expression-if then/else bodies are not dropped.
 fn flat_if_branch_block(branch_idx: i64, span: Span) -> Block:
     if branch_idx < 0:
         return Block(stmts: [], span: span)
-    if expr_get_tag(branch_idx) == 18:
+    val branch_tag = expr_get_tag(branch_idx)
+    if branch_tag == EXPR_BLOCK or branch_tag == EXPR_DO_BLOCK:
         val b_stmts = expr_get_stmts(branch_idx)
         var b_body: [Stmt] = []
         var bi = 0
@@ -978,7 +979,10 @@ fn convert_flat_expr(idx: i64) -> Expr:
         return Expr(kind: ExprKind.BoolLit(expr_get_int(idx) != 0), span: span)
     if tag == EXPR_NIL_LIT:
         return Expr(kind: ExprKind.NilLit, span: span)
-    if tag == EXPR_BLOCK:
+    if tag == EXPR_BLOCK or tag == EXPR_DO_BLOCK:
+        # Blocks and do/ce bodies share statement-preserving lexical semantics.
+        # EXPR_DO_BLOCK stores its tail among STMTS; EXPR_BLOCK may also
+        # carry a separate LEFT tail. The common helper preserves both.
         # Blocks are general expression nodes, not only if/lambda helpers.
         # Route every standalone block through the same statement-preserving
         # conversion so a declaration-level initializer cannot fall into the

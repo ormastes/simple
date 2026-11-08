@@ -1,0 +1,95 @@
+"""
+Purpose: preserve do/ce block statements and tail values through the real flat bridge.
+Run: bin/simple test test/01_unit/compiler/frontend/flat_ast_do_block_bridge_spec.spl
+The raw-node cases isolate tag44 conversion; parsed cases also cover the actual parser route.
+Execution evidence is required before this spec can qualify a compiler producer.
+"""
+# @req REQ-COMPILER-FRONTEND-001
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+
+use std.spec.*
+use compiler.core.ast.{ast_reset, expr_int_lit, expr_block, expr_do_block, stmt_expr_stmt}
+use compiler.core.parser.{parser_has_errors, parser_set_had_error}
+use compiler.frontend.flat_ast_bridge.{convert_flat_expr, parse_and_build_module}
+use compiler.frontend.parser_types.*
+
+fn cdb_block(expr: Expr) -> Block:
+    match expr.kind:
+        case ExprKind.Block(block): return block
+        case _: panic("flat block was discarded or converted to another expression")
+
+fn cdb_int(stmt: Stmt) -> i64:
+    match stmt.kind:
+        case StmtKind.Expr(expr):
+            match expr.kind:
+                case ExprKind.IntLit(value): return value
+                case _: panic("flat block statement lost its integer expression")
+        case _: panic("flat block lost its expression statement")
+
+fn cdb_reset():
+    ast_reset()
+    parser_set_had_error(false)
+
+fn cdb_parsed_body(source: text) -> Block:
+    val parsed = parse_and_build_module(source, "do_block_bridge.spl")
+    expect(parser_has_errors()).to_equal(false)
+    val function = parsed.functions["sample"]
+    expect(function.body.stmts.len()).to_equal(1)
+    match function.body.stmts[0].kind:
+        case StmtKind.Expr(expr): return cdb_block(expr)
+        case _: panic("parsed do/ce expression disappeared")
+
+describe "flat bridge preserves do block bodies":
+    it "converts an empty do block without recursion or an unsupported tag error":
+        step("Convert a real empty EXPR_DO_BLOCK node")
+        cdb_reset()
+        val body = cdb_block(convert_flat_expr(expr_do_block([], 0)))
+        expect(body.stmts.len()).to_equal(0)
+        expect(parser_has_errors()).to_equal(false)
+
+    it "preserves a single expression as the do block tail":
+        step("Require the literal stored in STMTS to survive bridge conversion")
+        cdb_reset()
+        val node = expr_do_block([stmt_expr_stmt(expr_int_lit(37, 0), 0)], 0)
+        val body = cdb_block(convert_flat_expr(node))
+        expect(body.stmts.len()).to_equal(1)
+        expect(cdb_int(body.stmts[0])).to_equal(37)
+        expect(parser_has_errors()).to_equal(false)
+
+    it "preserves statement order and a nested do block tail":
+        step("Walk nested real block output rather than searching source text")
+        cdb_reset()
+        val inner = expr_do_block([stmt_expr_stmt(expr_int_lit(29, 0), 0)], 0)
+        val outer = expr_do_block([stmt_expr_stmt(expr_int_lit(11, 0), 0), stmt_expr_stmt(inner, 0)], 0)
+        val body = cdb_block(convert_flat_expr(outer))
+        expect(body.stmts.len()).to_equal(2)
+        expect(cdb_int(body.stmts[0])).to_equal(11)
+        match body.stmts[1].kind:
+            case StmtKind.Expr(expr):
+                val nested = cdb_block(expr)
+                expect(nested.stmts.len()).to_equal(1)
+                expect(cdb_int(nested.stmts[0])).to_equal(29)
+            case _: fail("nested block expression was discarded")
+        expect(parser_has_errors()).to_equal(false)
+
+    it "keeps the separate EXPR_BLOCK tail after existing statements":
+        step("Protect the ordinary block route while sharing its helper with do blocks")
+        cdb_reset()
+        val first = stmt_expr_stmt(expr_int_lit(5, 0), 0)
+        val node = expr_block([first], expr_int_lit(19, 0), 0)
+        val body = cdb_block(convert_flat_expr(node))
+        expect(body.stmts.len()).to_equal(2)
+        expect(cdb_int(body.stmts[0])).to_equal(5)
+        expect(cdb_int(body.stmts[1])).to_equal(19)
+        expect(parser_has_errors()).to_equal(false)
+
+    it "bridges parsed do and ce bodies with the same ordered statements":
+        step("Exercise both production parser branches that emit EXPR_DO_BLOCK")
+        val do_body = cdb_parsed_body("fn sample():\n    do:\n        7\n        43\n")
+        expect(do_body.stmts.len()).to_equal(2)
+        expect(cdb_int(do_body.stmts[0])).to_equal(7)
+        expect(cdb_int(do_body.stmts[1])).to_equal(43)
+        val ce_body = cdb_parsed_body("fn sample():\n    ce builder:\n        13\n        47\n")
+        expect(ce_body.stmts.len()).to_equal(2)
+        expect(cdb_int(ce_body.stmts[0])).to_equal(13)
+        expect(cdb_int(ce_body.stmts[1])).to_equal(47)
