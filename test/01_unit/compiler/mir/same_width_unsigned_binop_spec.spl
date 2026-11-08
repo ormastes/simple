@@ -3,7 +3,7 @@
 # Calls the actual MIR expression lowerer and inspects its real instruction.
 use std.spec.*
 use compiler.common.diagnostics.span.{Span}
-use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBlock}
 use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp}
 use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
 use compiler.mir.mir_lowering_types.{MirLowering}
@@ -11,9 +11,10 @@ use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir.mir_data.{MirBuilder}
 use compiler.mir.mir_types.{MirType, MirTypeKind, LocalId}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
-use compiler.mir.mir_instruction_support.{MirOperandKind}
+use compiler.mir.mir_instruction_support.{MirOperandKind, MirBinOp}
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 
 struct UnsignedBinopProbe:
     result_kind: MirTypeKind
@@ -114,6 +115,39 @@ fn unsigned_unknown_comparison_casts(unknown_left: bool) -> i64:
     expect(comparisons).to_equal(1)
     casts
 
+fn unsigned_match_body(value: i64) -> HirBlock:
+    val expression = HirExpr(kind: HirExprKind.IntLit(value, nil),
+        has_type_: false, type_: nil, span: Span.empty())
+    HirBlock(stmts: [], has: true, value: expression, span: Span.empty())
+
+fn unsigned_sparse_match_operands(kind: MirTypeKind) -> [MirTypeKind]:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_simple_function("unsigned_sparse_match", "unit")
+    val scrutinee = builder.new_temp(MirType(kind: kind))
+    lowering.builder = builder
+    lowering.emit_if_chain_dispatch(scrutinee, [(256, unsigned_match_body(1))],
+        unsigned_match_body(0), nil,
+        Some(HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())))
+    expect(lowering.errors.len()).to_equal(0)
+    var finished = lowering.builder
+    val function = finished.end_function()
+    var compared: [MirTypeKind] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.BinOp(_, MirBinOp.Eq, left, right):
+                    for operand in [left, right]:
+                        match operand.kind:
+                            case MirOperandKind.Copy(id):
+                                for local in function.locals:
+                                    if local.id.id == id.id:
+                                        compared.push(local.type_.kind)
+                            case _: fail("sparse match comparison lost its local")
+                case _: ()
+    expect(compared.len()).to_equal(2)
+    compared
+
 describe "same-width unsigned MIR arithmetic":
     it "retains each unsigned width at every arithmetic operation":
         for op in [HirBinOp.Add, HirBinOp.Sub, HirBinOp.Mul]:
@@ -163,3 +197,7 @@ describe "same-width unsigned MIR arithmetic":
     it "does not manufacture casts from missing operand type metadata":
         expect(unsigned_unknown_comparison_casts(true)).to_equal(0)
         expect(unsigned_unknown_comparison_casts(false)).to_equal(0)
+
+    it "compares sparse literal-match keys at a lossless word width":
+        for kind in [MirTypeKind.U8, MirTypeKind.U16, MirTypeKind.U32]:
+            expect(unsigned_sparse_match_operands(kind)).to_equal([MirTypeKind.I64, MirTypeKind.I64])

@@ -21,6 +21,7 @@ fn narrow_consumer_translator(width: i64, unsigned: bool, extra_params: [text] =
     translator.current_function_name = "probe"
     expect(translator.builder.sb).to_be_greater_than(0)
     translator.builder.emit("declare void @wide(i64)")
+    translator.builder.emit("declare void @__simple_intrinsic_bounds_check(i64, i64)")
     translator.builder.emit("declare void @rt_exception_throw(i64, i64)")
     translator.builder.emit("declare void @rt_exception_resume(i64, i64)")
     translator.builder.emit("@global_wide = global i64 0")
@@ -125,6 +126,12 @@ fn narrow_consumer_terminator_ir(width: i64, unsigned: bool, route: text) -> tex
         translator.builder.emit_ret_void()
     narrow_consumer_finish(translator, true)
 
+fn narrow_consumer_bounds_ir(width: i64, unsigned: bool) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    translator.llvm_intrinsic_impl(nil, "bounds_check",
+        [mir_operand_copy(LocalId(id: 0)), mir_operand_const_int(256)])
+    narrow_consumer_finish(translator)
+
 fn narrow_consumer_phi_ir(width: i64, unsigned: bool) -> text:
     # Only well-typed matching incoming carriers. Mixed-width phis need
     # predecessor casts and are an explicitly unqualified existing residual.
@@ -214,3 +221,11 @@ describe "narrow unsigned consumers preserve source signedness":
     it "keeps signed i64 negation and complement controls wide":
         expect(narrow_consumer_unary_ir(64, false, MirUnaryOp.Neg)).to_contain("sub i64 0, %l0")
         expect(narrow_consumer_unary_ir(64, false, MirUnaryOp.BitNot)).to_contain("xor i64 %l0, -1")
+
+    it "preserves high-bit indices in the bounds-check intrinsic":
+        for width in [8, 16, 32]:
+            val unsigned_ir = narrow_consumer_bounds_ir(width, true)
+            val signed_ir = narrow_consumer_bounds_ir(width, false)
+            expect(unsigned_ir).to_contain("zext i{width} %l0 to i64")
+            expect(signed_ir).to_contain("sext i{width} %l0 to i64")
+            expect(unsigned_ir).to_contain("call void @__simple_intrinsic_bounds_check(i64")
