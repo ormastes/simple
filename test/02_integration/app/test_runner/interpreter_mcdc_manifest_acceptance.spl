@@ -1,0 +1,43 @@
+"""
+Default-on MC/DC must not require a native manifest on the interpreter route.
+AUTHORED_UNRUN: operator must independently admit a source-matched full CLI in
+SIMPLE_MCDC_TEST_RUNNER and its SHA-256 in SIMPLE_MCDC_TEST_RUNNER_SHA256.
+No seed fallback or compiler rebuild is performed by this specification.
+Run this acceptance harness by explicit file path only. Its filename has no
+_spec. or _test. segment, so directory discovery excludes it independently
+of slow-test policy. It deliberately fails if the operator omitted its pin.
+"""
+# @req REQ-MC-012
+# @timeout_secs 1500
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io_runtime.{file_hash_sha256_or_empty, cwd}
+
+fn check_interpreter_example(mode: text, should_fail: bool):
+    val binary = env_get("SIMPLE_MCDC_TEST_RUNNER")
+    val digest = env_get("SIMPLE_MCDC_TEST_RUNNER_SHA256")
+    if binary == "" or digest.len() != 64:
+        panic("requires explicitly pinned full CLI; admission is an operator prerequisite")
+    if file_hash_sha256_or_empty(binary) != digest:
+        panic("full CLI digest does not match the requested producer")
+    val failure = if should_fail: "1" else: "0"
+    val (out, err, code) = process_run_bounded(binary, [
+        "run", cwd() + "/test/fixtures/test_runner/interpreter_mcdc_child_probe.spl",
+        "--mcdc-probe-mode=" + mode, "--mcdc-probe-failure=" + failure,
+        "--mcdc-probe-binary=" + binary, "--mcdc-probe-sha256=" + digest
+    ], 300000, 1048576)
+    expect(code).to_equal(0)
+    expect(out + err).to_contain("MCDC_INTERPRETER_REAL_VERDICT " + mode + " " + (if should_fail: "FAIL" else: "PASS"))
+    expect(out + err).to_contain("[diag] resolved child binary = " + binary)
+    expect((out + err).contains("invalid MC/DC manifest contract")).to_equal(false)
+
+describe "interpreter ignores unavailable native MC/DC manifest transport":
+    it "executes a passing example with static MC/DC enabled":
+        check_interpreter_example("on", false)
+    it "preserves a failing example with static MC/DC enabled":
+        check_interpreter_example("on", true)
+    it "executes a passing example with dynamic MC/DC enabled":
+        check_interpreter_example("dynamic", false)
+    it "preserves a failing example with dynamic MC/DC enabled":
+        check_interpreter_example("dynamic", true)
