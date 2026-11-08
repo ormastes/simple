@@ -1,7 +1,7 @@
 # Phase 2: private SFFI helper imports reach the linker undeclared
 
 Canonical ID: `phase2_private_sffi_cross_owner_export_unresolved_2026-10-27`.
-Status: open; public-owner facade workaround authored, compile retry pending.
+Status: fix-implemented-verification-pending. Resolution (owner decision 7: cross-module private access is an error): the proper path is public owner facades (driver_parse_*_v1) with explicit imports, now the permanent design, not a workaround; private-inline wildcard export is intentionally unsupported. Compile retry pending.
 Severity: build-blocking. DB reconciliation pending: no admitted full CLI is
 available to update the authoritative bug DB in this lane.
 
@@ -56,3 +56,5 @@ bug open until an isolated original-form producer regression demonstrates that
 private inline helpers cross an explicitly exported module boundary correctly.
 Retire only the linked workaround after that root fix and compatible producer
 evidence; a successful public-facade build does not prove the language bug fixed.
+
+Evidence (2026-11-09): test/01_unit/compiler/driver/source_parse_public_boundary_spec.spl pins the decision (public driver_parse_*_v1 facades exist; selected/streaming/retained consumers use explicit imports, no wildcard import, no consumer SFFI aliases). Run from a worktree of this head (CWD=worktree): GREEN outcome=OK executed=1 passed=1; RED with `pub` removed from driver_parse_exit_v1: outcome=ERROR failed=1. Compile retry of the Phase 2 command still pending (hence verification-pending).
