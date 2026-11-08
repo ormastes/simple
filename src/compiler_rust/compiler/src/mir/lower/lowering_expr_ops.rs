@@ -178,6 +178,12 @@ impl<'a> MirLowerer<'a> {
             let mut left_reg = self.lower_expr(left)?;
             let mut right_reg = self.lower_expr(right)?;
 
+            if matches!(op, BinOp::Eq | BinOp::NotEq) && left.ty == right.ty {
+                if let Some(result) = self.lower_struct_field_equality(op, left, left_reg, right_reg)? {
+                    return Ok(result);
+                }
+            }
+
             // Mixed ANY/concrete arithmetic operand: an ANY-typed operand
             // (e.g. an element read off a `list`-typed parameter — its
             // element type is genuinely unresolvable at `lower_index_expr`'s
@@ -710,6 +716,15 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // A flat struct/class value is a raw `rt_alloc` block with no runtime
+        // type header, so `rt_value_to_string` cannot render it (it printed
+        // `<invalid-heap:0x..>`). Render `Name(f: v, ...)` like the
+        // interpreter, field by field.
+        // doc/08_tracking/bug/jit_class_equality_false_and_invalid_heap_print_2026-11-06.md
+        if let Some(rendered) = self.emit_struct_to_string(reg, ty)? {
+            return Ok(rendered);
+        }
+
         // U64 must not go through BoxInt (sign issues); use the raw helper.
         //
         // I64 must not either, for the SAME reason and via the signed
@@ -805,6 +820,207 @@ impl<'a> MirLowerer<'a> {
                     ..
                 })
             )
+        })
+    }
+}
+
+impl<'a> MirLowerer<'a> {
+    /// Structural `==` / `!=` for two operands of the same flat struct/class
+    /// type whose fields are all scalar or text.
+    ///
+    /// A class value is a raw `rt_alloc` block with the heap tag in bit 0 and
+    /// no runtime type header, so the generic `rt_native_eq` fallback can only
+    /// compare the two pointers (always false for two distinct allocations).
+    /// The tree-walk interpreter compares fields; expand to the same
+    /// field-wise comparison here so both engines agree.
+    /// doc/08_tracking/bug/jit_class_equality_false_and_invalid_heap_print_2026-11-06.md
+    fn lower_struct_field_equality(
+        &mut self,
+        op: BinOp,
+        operand: &HirExpr,
+        left_reg: VReg,
+        right_reg: VReg,
+    ) -> MirLowerResult<Option<VReg>> {
+        let Some(registry) = self.type_registry else {
+            return Ok(None);
+        };
+        let Some(HirType::Struct {
+            name,
+            fields,
+            is_generic_template,
+            ..
+        }) = registry.get(operand.ty)
+        else {
+            return Ok(None);
+        };
+        let scalar = |t: TypeId| {
+            matches!(
+                t,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::BOOL
+                    | TypeId::STRING
+            )
+        };
+        if *is_generic_template || fields.is_empty() || !fields.iter().all(|(_, t)| scalar(*t)) {
+            return Ok(None);
+        }
+        let name = name.clone();
+        let field_types: Vec<TypeId> = fields.iter().map(|(_, t)| *t).collect();
+        let mut acc = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block)
+                .unwrap()
+                .instructions
+                .push(MirInst::ConstInt { dest, value: 1 });
+            dest
+        })?;
+        for (index, field_ty) in field_types.into_iter().enumerate() {
+            acc = self.with_func(|func, current_block| {
+                let byte_offset = (index as u32) * 8;
+                let l = func.new_vreg();
+                let r = func.new_vreg();
+                let eq = func.new_vreg();
+                let both = func.new_vreg();
+                for (dest, object) in [(l, left_reg), (r, right_reg)] {
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::FieldGet {
+                        dest,
+                        object,
+                        owner_name: Some(name.clone()),
+                        owner_has_vtable: None,
+                        byte_offset,
+                        field_type: field_ty,
+                    });
+                }
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::BinOp {
+                    dest: eq,
+                    op: BinOp::Eq,
+                    left: l,
+                    right: r,
+                });
+                block.instructions.push(MirInst::BinOp {
+                    dest: both,
+                    op: BinOp::BitAnd,
+                    left: acc,
+                    right: eq,
+                });
+                both
+            })?;
+        }
+        if op == BinOp::Eq {
+            return Ok(Some(acc));
+        }
+        let zero = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block)
+                .unwrap()
+                .instructions
+                .push(MirInst::ConstInt { dest, value: 0 });
+            dest
+        })?;
+        let dest = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::BinOp {
+                dest,
+                op: BinOp::Eq,
+                left: acc,
+                right: zero,
+            });
+            dest
+        })?;
+        Ok(Some(dest))
+    }
+}
+
+impl<'a> MirLowerer<'a> {
+    pub(super) fn emit_struct_to_string(&mut self, reg: VReg, ty: TypeId) -> MirLowerResult<Option<VReg>> {
+        let Some(registry) = self.type_registry else {
+            return Ok(None);
+        };
+        let Some(HirType::Struct {
+            name,
+            fields,
+            is_generic_template,
+            ..
+        }) = registry.get(ty)
+        else {
+            return Ok(None);
+        };
+        let scalar = |t: TypeId| {
+            matches!(
+                t,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::BOOL
+                    | TypeId::STRING
+            )
+        };
+        if *is_generic_template || !fields.iter().all(|(_, t)| scalar(*t)) {
+            return Ok(None);
+        }
+        let name = name.clone();
+        let fields: Vec<(String, TypeId)> = fields.clone();
+        let mut acc = self.emit_const_string(format!("{name}("))?;
+        for (index, (field_name, field_ty)) in fields.into_iter().enumerate() {
+            let label = if index == 0 {
+                format!("{field_name}: ")
+            } else {
+                format!(", {field_name}: ")
+            };
+            let label_reg = self.emit_const_string(label)?;
+            acc = self.emit_string_concat(acc, label_reg)?;
+            let value = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block).unwrap().instructions.push(MirInst::FieldGet {
+                    dest,
+                    object: reg,
+                    owner_name: Some(name.clone()),
+                    owner_has_vtable: None,
+                    byte_offset: (index as u32) * 8,
+                    field_type: field_ty,
+                });
+                dest
+            })?;
+            let text = self.emit_to_string(value, field_ty)?;
+            acc = self.emit_string_concat(acc, text)?;
+        }
+        let close = self.emit_const_string(")".to_string())?;
+        Ok(Some(self.emit_string_concat(acc, close)?))
+    }
+
+    fn emit_const_string(&mut self, value: String) -> MirLowerResult<VReg> {
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block)
+                .unwrap()
+                .instructions
+                .push(MirInst::ConstString { dest, value });
+            dest
+        })
+    }
+
+    fn emit_string_concat(&mut self, a: VReg, b: VReg) -> MirLowerResult<VReg> {
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                dest: Some(dest),
+                target: crate::mir::CallTarget::from_name("rt_string_concat"),
+                args: vec![a, b],
+            });
+            dest
         })
     }
 }

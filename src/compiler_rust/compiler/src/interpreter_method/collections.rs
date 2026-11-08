@@ -780,6 +780,59 @@ pub fn handle_array_methods(
             });
             Value::array(new_arr)
         }
+        "sort_by" => {
+            // `xs.sort_by(\a, b: a - b)`: comparator returns an int (sign is the
+            // ordering) or a bool (true = a before b). Stable merge sort so a
+            // comparator error propagates instead of panicking.
+            let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let mut items = arr.to_vec();
+            let mut width = 1;
+            while width < items.len() {
+                let mut merged = Vec::with_capacity(items.len());
+                let mut start = 0;
+                while start < items.len() {
+                    let mid = (start + width).min(items.len());
+                    let end = (start + 2 * width).min(items.len());
+                    let (mut i, mut j) = (start, mid);
+                    while i < mid && j < end {
+                        // reduce over [right] with init left calls func(left, right).
+                        let ord = eval_array_reduce(
+                            &[items[j].clone()],
+                            items[i].clone(),
+                            func.clone(),
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
+                        let right_first = match ord {
+                            Value::Int(n) => n > 0,
+                            Value::Bool(b) => !b,
+                            other => {
+                                return Err(CompileError::semantic(format!(
+                                    "sort_by comparator must return an int or bool, got {}",
+                                    other.type_name()
+                                )))
+                            }
+                        };
+                        // Ties keep the left element first (stable).
+                        if right_first {
+                            merged.push(items[j].clone());
+                            j += 1;
+                        } else {
+                            merged.push(items[i].clone());
+                            i += 1;
+                        }
+                    }
+                    merged.extend_from_slice(&items[i..mid]);
+                    merged.extend_from_slice(&items[j..end]);
+                    start = end;
+                }
+                items = merged;
+                width *= 2;
+            }
+            Value::array(items)
+        }
         "sort_desc" => {
             let mut new_arr = arr.to_vec();
             new_arr.sort_by(|a, b| match (a, b) {
