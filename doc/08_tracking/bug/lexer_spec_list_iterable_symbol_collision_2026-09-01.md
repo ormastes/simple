@@ -4,8 +4,17 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
 **Filed:** 2026-09-01
+
+Resolution: owner-qualified class handling now covers duplicate `List`
+declarations; the interpreter checks every same-named trait candidate and
+accepts the conforming implementation instead of selecting the first trait.
+`85e8e3b7706` fixed same-named trait default selection in JIT. The added
+`interpreter_same_name_type_regressions.rs` integration test covers duplicate
+`List<T>` classes with a valid `Iterable<T>` implementation. The test target
+compile-checks, but execution is blocked by unrelated existing runtime link
+symbols, so the original lexer spec is not claimed as rerun.
 **Found by:** triage of `test/01_unit/lib/std/` failures on Windows
   (`test/01_unit/lib/std/compiler/lexer_spec.spl`, 0/1 examples executed;
   runner's own verdict reports `declared>=128`).
