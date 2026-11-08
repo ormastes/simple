@@ -33,6 +33,10 @@ use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
 use std.common.contracts.container.output_capabilities_v2.ContainerOutputCapabilitiesV2
 use std.nogc_sync_mut.io.linux_process_owner.linux_process_stream_template_admit_v3
 use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_command_v2
+use std.nogc_async_mut.container.providers.linux.primary_attach_v1.linux_oci_primary_attach_launch_template_v1
+use std.common.contracts.container.primary_attach_v1.{ContainerPrimaryAttachPlanV1,
+    container_primary_attach_plan_digest_v1, container_primary_attach_plan_encode_v1,
+    container_primary_attach_admission_validate_v1}
 use std.common.contracts.container.exec_installed_v3.{ContainerExecInstalledV3, container_exec_installed_match_v3}
 use std.common.contracts.container.exec_admission_v3.ContainerExecAdmissionV3
 use std.common.contracts.container.exec_control_v3.ContainerExecControlObservationV3
@@ -336,6 +340,53 @@ impl LinuxSimpleContainerAdapterV2:
             proof_kind: "exact-native-execution-user-v1")
         val canonical = container_execution_user_receipt_encode_v2(receipt)?
         Ok(receipt)
+
+    pub me primary_attach_plan_v1(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            identity: ContainerOutputIdentityV2, policy: ContainerStreamPolicyV2,
+            resources: ContainerOutputResourcesV2, terminal_mode: text) -> Result<ContainerPrimaryAttachPlanV1, text>:
+        val checked = self._checked_request_v2(request)?
+        if checked.0.containment_profile_digest != "": return Err("primary-attach-containment-not-admitted")
+        val policy_digest = container_stream_policy_digest_v2(policy)?
+        self._set_duration_v2(checked.0)?
+        val pin = self._observed_host.provider_identity_digest
+        val observed = self.provider.primary_attach_observation_v1(checked.0, expected, pin, terminal_mode)?
+        val launch = linux_oci_primary_attach_launch_template_v1(policy, identity, resources, expected,
+            self.scope.provider_generation, self.provider.engine_policy.unwrap(), observed)?
+        var plan = ContainerPrimaryAttachPlanV1(workload: request.plan, runtime: expected,
+            identity: identity, resources: resources, provider_identity_digest: pin,
+            policy_digest: policy_digest, terminal_mode: terminal_mode,
+            launch_template: launch, request_digest: "")
+        plan.request_digest = container_primary_attach_plan_digest_v1(plan)?
+        Ok(plan)
+
+    pub me open_primary_attach_v1(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            plan: ContainerPrimaryAttachPlanV1, helper: ContainerHelperAdmissionV2,
+            policy: ContainerStreamPolicyV2) -> PipedProcessOwnedSpawnV2:
+        if plan.containment_profile_digest != "" or plan.containment_identity_digest != "":
+            return PipedProcessOwnedSpawnV2.Rejected("primary-attach-containment-not-admitted")
+        val original = match container_primary_attach_plan_encode_v1(plan):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        val current = match self.primary_attach_plan_v1(request, expected, plan.identity, policy,
+                plan.resources, plan.terminal_mode):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        val canonical = match container_primary_attach_plan_encode_v1(current):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        if original != canonical: return PipedProcessOwnedSpawnV2.Rejected("primary-attach-plan-changed")
+        match container_primary_attach_admission_validate_v1(current, helper):
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+            case Ok(_): pass
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        var launch = current.launch_template
+        var child = launch.request
+        child.launch_deadline_unix_ms = helper.deadline.expires_at_unix_ms
+        launch.request = child
+        self.provider.open_primary_attach_v1(checked.0, expected, current.provider_identity_digest,
+            current.terminal_mode, launch)
 
     pub fn output_plan(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
             identity: ContainerOutputIdentityV2, policy: ContainerStreamPolicyV2,

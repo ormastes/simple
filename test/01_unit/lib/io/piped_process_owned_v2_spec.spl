@@ -1,9 +1,12 @@
 # @req GSTREAM-04 GSTREAM-05 GSTREAM-06
-# These pure owner/binding cases do not claim native stream execution coverage.
+# Owner/binding and actual negative-filesystem cases; no native stream execution coverage.
 use std.spec.{describe, it, expect, fail}
-use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2, GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2, group_process_stream_identity_v2}
-use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2}
-use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, PipedProcessOwnedTransferV2, PipedProcessOwnedSpawnV2, process_piped_ref_equal_v1, process_piped_owned_transfer_equal_v2, process_validate_piped_owned_transfer_v2, process_spawn_piped_owned_v2, process_cleanup_piped_owned_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2, GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2, group_process_stream_identity_v2, group_process_stream_launch_encode_profiled_v3}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2, group_process_stream_prepare_v2}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, PipedProcessOwnedTransferV2, PipedProcessOwnedSpawnV2, process_piped_ref_equal_v1, process_piped_owned_transfer_equal_v2, process_validate_piped_owned_transfer_v2, process_spawn_piped_owned_v2, process_cleanup_piped_owned_v2, process_retire_piped_owned_v2}
+
+use std.nogc_sync_mut.io_runtime.{file_exists, file_write, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_read_regular_no_follow_bounded}
 
 fn owned_stream_fixture_v2() -> GroupProcessStreamOwnerV2:
     val program = "/opt/child"
@@ -79,3 +82,50 @@ describe "owned piped stream transfer authority":
         changed.identity_digest = group_process_stream_identity_v2(launch)
         val successor = PipedProcessOwnedTransferV2(owner: changed, reference: owned_stream_reference_v2(changed))
         expect(process_piped_owned_transfer_equal_v2(original, successor)).to_equal(false)
+
+    it "refuses proof-only retirement for tampered owner or mismatched retained reference":
+        val owner = owned_stream_fixture_v2()
+        var reference = owned_stream_reference_v2(owner)
+        reference.group_identity = "e".repeat(64)
+        match process_retire_piped_owned_v2(owner, Some(reference)):
+            case Ok(_): fail("mismatched retirement reached native owner")
+            case Err(reason): expect(reason).to_equal("process_owned_transfer_binding_mismatch")
+        var tampered = owner
+        var launch = tampered.launch
+        launch.cache_identity = "e".repeat(64)
+        tampered.launch = launch
+        match process_retire_piped_owned_v2(tampered, nil):
+            case Ok(_): fail("tampered retirement owner accepted")
+            case Err(reason): expect(reason).to_equal("stream owner request identity differs")
+
+    it "leaves actual control transport untouched when cleanup proof is missing or malformed":
+        val root = match secure_temp_dir("/tmp", "simple-proof-only-retire"):
+            case Ok(path): path
+            case Err(reason):
+                fail("actual private temporary root unavailable: {reason}")
+                ""
+        var launch = owned_stream_fixture_v2().launch
+        launch.root = root
+        val owner = match group_process_stream_prepare_v2(launch):
+            case Ok(value): value
+            case Err(reason):
+                fail("actual immutable metadata setup failed: {reason}")
+                owned_stream_fixture_v2()
+        # Negative filesystem fixture only: no native launch, tree/unlaunched
+        # success receipt, live ref or process authority is fabricated.
+        val identity = owner.identity_digest
+        val request_bytes = group_process_stream_launch_encode_profiled_v3(owner.launch)
+        expect(file_read_regular_no_follow_bounded(root + "/broker.claim", 128).unwrap()).to_equal(identity)
+        expect(file_read_regular_no_follow_bounded(root + "/broker.request.sdn", 16777216).unwrap()).to_equal(request_bytes)
+        expect(process_retire_piped_owned_v2(owner, nil).is_err()).to_equal(true)
+        expect(file_exists(root + "/broker.control.request")).to_equal(false)
+        assert(file_write(root + "/broker.stream.unlaunched.sdn", "malformed-negative-proof"))
+        match process_retire_piped_owned_v2(owner, nil):
+            case Ok(_): fail("malformed proof caused retirement")
+            case Err(reason): expect(reason).to_equal("stream no-child admission proof differs")
+        expect(file_exists(root + "/broker.control.request")).to_equal(false)
+        expect(owner.identity_digest).to_equal(identity)
+        expect(owner.launch.root).to_equal(root)
+        expect(file_read_regular_no_follow_bounded(root + "/broker.claim", 128).unwrap()).to_equal(identity)
+        expect(file_read_regular_no_follow_bounded(root + "/broker.request.sdn", 16777216).unwrap()).to_equal(request_bytes)
+        assert(dir_remove_all(root))

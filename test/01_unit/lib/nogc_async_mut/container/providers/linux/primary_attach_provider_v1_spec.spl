@@ -1,0 +1,178 @@
+# AUTHORED/NOT_RUN. Actual common dispatch with explicit scripted process results.
+use std.spec.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.stream_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.primary_attach_v1.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.orchestration.primary_attach_fixture_v1.*
+
+use std.common.contracts.container.primary_attach_v1.*
+use test.fixtures.orchestration.host_helper_fixture_v1.host_helper_fixture_v1
+use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_digest_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_bind_intent_v1,
+    host_helper_reservation_receipt_v1}
+
+# Structural correlation carrier ONLY. It is not an authenticated Host lease;
+# unchanged submissions below target an explicit scripted-native refusal.
+fn _primary_helper_v1(plan: ContainerPrimaryAttachPlanV1) -> ContainerHelperAdmissionV2:
+    val fixture = host_helper_fixture_v1()
+    val scope = linux_container_scope_fixture_v2()
+    var helper_plan = fixture.request.plan
+    helper_plan.helper_kind = "attach-broker"
+    helper_plan.operation_id = plan.identity.operation_id
+    helper_plan.parent_operation_id = plan.identity.parent_operation_id
+    helper_plan.parent_operation_digest = plan.identity.parent_operation_digest
+    helper_plan.parent_assignment_digest = plan.identity.parent_assignment_digest
+    helper_plan.parent_budget_digest = plan.identity.parent_budget_digest
+    helper_plan.request_digest = plan.request_digest
+    helper_plan.scope = scope
+    var intent = fixture.request.intent
+    intent.physical_host_id = scope.physical_host_id
+    intent.fence.boot_id = container_scope_fence_id_v2(scope).unwrap()
+    intent.fence.provider_generation = scope.provider_generation
+    intent.plan_digest = host_helper_plan_digest_v1(helper_plan).unwrap()
+    intent.reservation.operation_id = plan.identity.operation_id
+    intent.reservation.service_scope_id = scope.service_scope_id
+    intent.reservation.cpu_millis = plan.resources.cpu_millis
+    intent.reservation.memory_bytes = plan.resources.memory_bytes
+    intent = host_reservation_bind_intent_v1(intent).unwrap()
+    var operation = fixture.request.operation
+    operation.id = plan.identity.operation_id
+    operation.host_id = scope.physical_host_id
+    operation.memory_bytes = plan.resources.memory_bytes
+    operation.duration_ms = plan.launch_template.request.timeout_ms
+    operation.payload_digest = intent.reservation.payload_digest
+    val receipt = host_helper_reservation_receipt_v1(intent, operation).unwrap()
+    ContainerHelperAdmissionV2(plan: helper_plan, intent: intent, operation: operation, receipt: receipt,
+        deadline: container_effect_deadline_v1(plan.request_digest, plan.identity.operation_id, ["attach"], 100).unwrap(),
+        grant_id: fixture.execution_signed.grant.id, issuer_id: fixture.execution_signed.issuer_id,
+        approver_id: fixture.execution_approval.approver_id, cpu_millis: plan.resources.cpu_millis, memory_bytes: plan.resources.memory_bytes)
+
+fn _primary_create_args_v1(mode: text) -> [text]:
+    var args = ["--remote=false", "--root", "/home/test/storage", "--runroot", "/run/user/1000/storage",
+        "--storage-driver", "overlay", "--storage-opt=", "create", "--name", "simpleorch-workload-1-1",
+        "--label", "io.simpleorch.pod_uid=workload-1", "--label", "io.simpleorch.attempt=1",
+        "--label", "io.simpleorch.node_boot_id=" + container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap(),
+        "--label", "io.simpleorch.provider_generation=7", "--label", "io.simpleorch.operation_id=create-api",
+        "--cpu-period", "100000", "--cpu-quota", "100000", "--memory", "268435456", "--pids-limit", "64",
+        "--network", "none", "--read-only", "--security-opt", "no-new-privileges", "--cap-drop", "ALL", "--http-proxy=false", "--interactive"]
+    if mode == "tty": args.push("--tty")
+    args + ["example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "/agent", "literal"]
+
+fn _primary_request_v1(mode: text) -> ContainerExecutionRequestV2:
+    var leaf = linux_container_leaf_fixture_v2()
+    leaf.terminal_mode = mode
+    linux_container_request_fixture_v2(leaf)
+
+fn _primary_raw_v1(tty: bool) -> text:
+    primary_json_v1(tty).replace("boot-1", container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap())
+
+fn _primary_created_v1(mode: text, raw: text) -> ContainerOperationTurnV2:
+    val format = "{\"id\":{{json .Id}},\"pod_uid\":{{json (index .Config.Labels \"io.simpleorch.pod_uid\")}},\"attempt\":{{json (index .Config.Labels \"io.simpleorch.attempt\")}},\"node_boot_id\":{{json (index .Config.Labels \"io.simpleorch.node_boot_id\")}},\"provider_generation\":{{json (index .Config.Labels \"io.simpleorch.provider_generation\")}},\"operation_id\":{{json (index .Config.Labels \"io.simpleorch.operation_id\")}},\"status\":{{json .State.Status}},\"open_stdin\":{{json .Config.OpenStdin}},\"tty\":{{json .Config.Tty}}}"
+    val query = ScriptedCommandResultV1(operation: "primary-eligibility", program: "/usr/bin/podman",
+        args: ["--remote=false", "--root", "/home/test/storage", "--runroot", "/run/user/1000/storage", "--storage-driver", "overlay", "--storage-opt=",
+            "container", "inspect", "--format", format, "b".repeat(64)], stdout: raw, stderr: "", exit_code: 0)
+    val create = ScriptedCommandResultV1(operation: "create", program: "/usr/bin/podman", args: _primary_create_args_v1(mode),
+        stdout: "b".repeat(64), stderr: "", exit_code: 0)
+    val owner = linux_container_owner_fixture_v2([create, query, query, query], [1])
+    val request = _primary_request_v1(mode)
+    simple_container_apply_v2(owner, "create", request,
+        container_effect_deadline_v1(request.plan.request_digest, "create-api", ["create"], 100).unwrap())
+
+describe "primary attach common provider prevention":
+    it "creates both modes and plans using independent exact create and eligibility vectors":
+        for mode in ["stdin", "tty"]:
+            val created = _primary_created_v1(mode, _primary_raw_v1(mode == "tty"))
+            expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+            expect(created.operation.command.args).to_equal(_primary_create_args_v1(mode))
+            val planned = simple_container_primary_attach_plan_v1(created.owner, _primary_request_v1(mode), created.operation.state.identity,
+                primary_identity_fixture_v1(), primary_policy_fixture_v1(), ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), mode)
+            expect(planned.error).to_equal("")
+            expect(planned.plan.?).to_equal(true)
+            expect(planned.plan.unwrap().launch_template.request.args).to_equal(["--remote=false", "--root", "/home/test/storage", "--runroot", "/run/user/1000/storage",
+                "--storage-driver", "overlay", "--storage-opt=", "attach", "--no-stdin=false", "--sig-proxy=false", "--detach-keys=", "b".repeat(64)])
+            match planned.owner:
+                case SimpleContainerOwnerV2.Linux(_, adapter):
+                    expect(adapter.provider.scripted_cursor).to_equal(2)
+                    expect(adapter.provider.executor_call_count()).to_equal(2)
+                    expect(adapter.provider.retained_state_count()).to_equal(1)
+                case _: assert(false, "expected retained Linux owner")
+
+    it "refuses closed stdin wrong tty and mismatched labels after fresh eligibility query":
+        val source = _primary_raw_v1(false)
+        for pair in [("\"open_stdin\":true", "\"open_stdin\":false"), ("\"tty\":false", "\"tty\":true"), ("workload-1", "foreign"), ("create-api", "foreign")]:
+            val changed = source.replace(pair.0, pair.1)
+            expect(changed == source).to_equal(false)
+            val created = _primary_created_v1("stdin", changed)
+            expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+            val planned = simple_container_primary_attach_plan_v1(created.owner, _primary_request_v1("stdin"), created.operation.state.identity,
+                primary_identity_fixture_v1(), primary_policy_fixture_v1(), ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), "stdin")
+            expect(planned.plan.?).to_equal(false)
+            expect(planned.error == "").to_equal(false)
+            match planned.owner:
+                case SimpleContainerOwnerV2.Linux(_, adapter):
+                    expect(adapter.provider.scripted_cursor).to_equal(2)
+                    expect(adapter.provider.executor_call_count()).to_equal(2)
+                case _: assert(false, "expected retained Linux owner")
+
+    it "refuses tampered request and requested mode without an additional query":
+        for kind in ["request", "mode"]:
+            val created = _primary_created_v1("stdin", _primary_raw_v1(false))
+            var request = _primary_request_v1("stdin")
+            if kind == "request": request.request_bytes = request.request_bytes + "x"
+            val mode = if kind == "mode": "tty" else: "stdin"
+            val planned = simple_container_primary_attach_plan_v1(created.owner, request, created.operation.state.identity,
+                primary_identity_fixture_v1(), primary_policy_fixture_v1(), ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), mode)
+            expect(planned.plan.?).to_equal(false)
+            match planned.owner:
+                case SimpleContainerOwnerV2.Linux(_, adapter):
+                    expect(adapter.provider.scripted_cursor).to_equal(1)
+                    expect(adapter.provider.executor_call_count()).to_equal(1)
+                case _: assert(false, "expected retained Linux owner")
+
+    it "refuses changed canonical plan and corrupted helper binding without native ownership":
+        for kind in ["plan", "helper"]:
+            val created = _primary_created_v1("stdin", _primary_raw_v1(false))
+            val request = _primary_request_v1("stdin")
+            val planned = simple_container_primary_attach_plan_v1(created.owner, request, created.operation.state.identity,
+                primary_identity_fixture_v1(), primary_policy_fixture_v1(), ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), "stdin")
+            expect(planned.error).to_equal("")
+            var plan = planned.plan.unwrap()
+            var helper = _primary_helper_v1(plan)
+            expect(container_primary_attach_admission_validate_v1(plan, helper).unwrap()).to_equal(true)
+            if kind == "plan": plan.launch_template.request.args.push("foreign")
+            if kind == "helper": helper.deadline.request_digest = "e".repeat(64)
+            val opened = simple_container_open_primary_attach_v1(planned.owner, request, created.operation.state.identity, plan, helper, primary_policy_fixture_v1())
+            expect(opened.error == "").to_equal(false)
+            expect(opened.session.?).to_equal(false)
+            expect(opened.cleanup_spawn.?).to_equal(false)
+            match opened.owner:
+                case SimpleContainerOwnerV2.Linux(_, adapter):
+                    val expected = if kind == "plan": 2 else: 3
+                    expect(adapter.provider.scripted_cursor).to_equal(expected)
+                    expect(adapter.provider.executor_call_count()).to_equal(expected)
+                case _: assert(false, "expected retained Linux owner")
+
+    it "refuses native spawn at the scripted boundary even after structural admission matches":
+        val created = _primary_created_v1("stdin", _primary_raw_v1(false))
+        val request = _primary_request_v1("stdin")
+        val planned = simple_container_primary_attach_plan_v1(created.owner, request, created.operation.state.identity,
+            primary_identity_fixture_v1(), primary_policy_fixture_v1(), ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), "stdin")
+        expect(planned.error).to_equal("")
+        val plan = planned.plan.unwrap()
+        val helper = _primary_helper_v1(plan)
+        expect(container_primary_attach_admission_validate_v1(plan, helper).unwrap()).to_equal(true)
+        val opened = simple_container_open_primary_attach_v1(planned.owner, request, created.operation.state.identity, plan, helper, primary_policy_fixture_v1())
+        expect(opened.error).to_equal("primary-attach-scripted-native-spawn-forbidden")
+        expect(opened.session.?).to_equal(false)
+        expect(opened.cleanup_spawn.?).to_equal(false)
+        match opened.owner:
+            case SimpleContainerOwnerV2.Linux(_, adapter):
+                expect(adapter.provider.scripted_cursor).to_equal(4)
+                expect(adapter.provider.executor_call_count()).to_equal(4)
+                expect(adapter.provider.retained_state_count()).to_equal(1)
+            case _: assert(false, "expected retained Linux owner")

@@ -1,0 +1,101 @@
+# Primary attach leaf construction. Native owner/transport authority stays with
+# the canonical daemon; this module neither reads output nor adopts bare PIDs.
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeIdentityV1}
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2,
+    ContainerStreamPolicyV2, ContainerOutputResourcesV2, container_output_identity_digest_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2,
+    GroupProcessStreamRequestV2, group_process_child_argv_digest_v2,
+    group_process_stream_template_encode_v3}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessStreamProfileV3,
+    group_process_cpu_quota_v3}
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1,
+    LinuxOciEngineObservationV1, linux_oci_engine_route_v1}
+
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_async_mut.container.providers.linux.execution_user_v2.linux_oci_flat_inspect_json_v2
+use std.common.json.value.{JsonValue, json_value_keys, json_value_get, json_value_as_text}
+
+pub fn linux_oci_primary_attach_command_v1(policy: LinuxOciEnginePolicyV1,
+        expected: RuntimeIdentityV1) -> Result<RuntimeCommandV1, text>:
+    if expected.engine != "podman" or not builder_digest_valid_v1(expected.native_id):
+        return Err("primary-attach-full-podman-native-identity-required")
+    val arguments = linux_oci_engine_route_v1(policy,
+        ["attach", "--no-stdin=false", "--sig-proxy=false", "--detach-keys=", expected.native_id])?
+    if arguments.len() >= 64: return Err("primary-attach-argv-bound")
+    Ok(RuntimeCommandV1(operation: "primary-attach", program: policy.executable_path, args: arguments))
+
+pub fn linux_oci_primary_attach_launch_template_v1(policy: ContainerStreamPolicyV2,
+        identity: ContainerOutputIdentityV2, resources: ContainerOutputResourcesV2,
+        expected: RuntimeIdentityV1, generation: i64, engine_policy: LinuxOciEnginePolicyV1,
+        observed: LinuxOciEngineObservationV1) -> Result<GroupProcessStreamLaunchV2, text>:
+    if not builder_identifier_valid_v1(identity.operation_id): return Err("primary-attach-helper-operation-invalid")
+    if identity.parent_operation_id != expected.operation_id: return Err("primary-attach-parent-operation-mismatch")
+    if generation != expected.provider_generation: return Err("primary-attach-provider-generation-mismatch")
+    if policy.child_image_mode != "trusted-local-admin-image-fd-v1":
+        return Err("primary-attach-engine-image-mode-unsupported")
+    val command = linux_oci_primary_attach_command_v1(engine_policy, expected)?
+    if observed.executable_path != command.program or not builder_digest_valid_v1(observed.executable_digest):
+        return Err("primary-attach-observed-engine-image-mismatch")
+    val identity_digest = container_output_identity_digest_v2(identity)?
+    val root = policy.root + "/primary-attach-" + identity_digest
+    val profile = GroupProcessStreamProfileV3(helper_cpu: group_process_cpu_quota_v3(resources.cpu_millis)?,
+        broker: policy.broker_budget, child_image_mode: policy.child_image_mode)
+    val request = GroupProcessStreamRequestV2(program: command.program,
+        producer_digest: observed.executable_digest, args: command.args,
+        environment: policy.environment, directory: policy.directory, inputs: [],
+        timeout_ms: policy.timeout_ms, broker_program: policy.broker_program,
+        broker_digest: policy.broker_digest,
+        child_argv_digest: group_process_child_argv_digest_v2(command.program, command.args),
+        launch_deadline_unix_ms: 0)
+    val launch = GroupProcessStreamLaunchV2(root: root, worker_id: identity.operation_id,
+        generation: generation, snapshot_digest: policy.snapshot_digest,
+        cache_identity: policy.cache_identity, memory_limit_bytes: resources.memory_bytes,
+        request: request, delegated_cgroup_path: policy.delegated_cgroup_path,
+        memory_policy: policy.memory_policy, transport_generation: 0, profile_v3: Some(profile))
+    # Use the owner serializer; only admission fills deadline/transport fields.
+    val canonical = group_process_stream_template_encode_v3(launch)?
+    Ok(launch)
+
+# Podman v5.2.5 inspect producer ef4bac...: OpenStdin=config.Stdin,
+# Tty=spec.Process.Terminal. Eligibility is configuration, not native ownership.
+
+pub fn linux_oci_primary_attach_inspect_command_v1(native_id: text) -> Result<RuntimeCommandV1, text>:
+    if not builder_digest_valid_v1(native_id): return Err("primary-attach-full-native-id-required")
+    val format = "{\"id\":{{json .Id}},\"pod_uid\":{{json (index .Config.Labels \"io.simpleorch.pod_uid\")}},\"attempt\":{{json (index .Config.Labels \"io.simpleorch.attempt\")}},\"node_boot_id\":{{json (index .Config.Labels \"io.simpleorch.node_boot_id\")}},\"provider_generation\":{{json (index .Config.Labels \"io.simpleorch.provider_generation\")}},\"operation_id\":{{json (index .Config.Labels \"io.simpleorch.operation_id\")}},\"status\":{{json .State.Status}},\"open_stdin\":{{json .Config.OpenStdin}},\"tty\":{{json .Config.Tty}}}"
+    Ok(RuntimeCommandV1(operation: "primary-eligibility", program: "podman",
+        args: ["container", "inspect", "--format", format, native_id]))
+
+fn primary_field_v1(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(found): Ok(found)
+        case None: Err("primary-attach-field-missing:" + key)
+
+fn primary_text_v1(value: JsonValue, key: text) -> Result<text, text>:
+    match json_value_as_text(primary_field_v1(value, key)?):
+        case Some(found): Ok(found)
+        case None: Err("primary-attach-field-type:" + key)
+
+pub fn linux_oci_primary_attach_eligible_v1(raw: text, expected: RuntimeIdentityV1,
+        request: LinuxOciRequestV1, terminal_mode: text) -> Result<bool, text>:
+    linux_oci_request_bounds_v1(request)?
+    if (expected.engine != "podman" or not builder_digest_valid_v1(expected.native_id) or
+            expected.pod_uid != request.pod_uid or expected.attempt != request.attempt or
+            expected.operation_id != request.operation_id): return Err("primary-attach-request-identity-mismatch")
+    if request.containment_profile_digest != "": return Err("primary-attach-containment-not-supported")
+    if (not ["stdin", "tty"].contains(terminal_mode) or request.terminal_mode != terminal_mode):
+        return Err("primary-attach-terminal-mode-mismatch")
+    val value = linux_oci_flat_inspect_json_v2(raw)?
+    if json_value_keys(value).len() != 9: return Err("primary-attach-inspect-fields")
+    if (primary_text_v1(value, "id")? != expected.native_id or
+            primary_text_v1(value, "pod_uid")? != expected.pod_uid or
+            primary_text_v1(value, "attempt")? != expected.attempt.to_text() or
+            primary_text_v1(value, "node_boot_id")? != expected.node_boot_id or
+            primary_text_v1(value, "provider_generation")? != expected.provider_generation.to_text() or
+            primary_text_v1(value, "operation_id")? != expected.operation_id):
+        return Err("primary-attach-inspect-identity-mismatch")
+    if (primary_text_v1(value, "status")? != "running" or
+            primary_field_v1(value, "open_stdin")? != JsonValue.Bool(true) or
+            primary_field_v1(value, "tty")? != JsonValue.Bool(terminal_mode == "tty")):
+        return Err("primary-attach-primary-ineligible")
+    Ok(true)

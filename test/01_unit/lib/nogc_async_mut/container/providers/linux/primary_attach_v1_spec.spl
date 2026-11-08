@@ -1,0 +1,90 @@
+# AUTHORED/NOT_RUN. Pure leaf planning/eligibility; no native handles.
+use std.spec.*
+use std.common.contracts.container.stream_v2.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.build_manager.group_process_stream_profile_v3.GroupProcessBrokerBudgetV3
+use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_digest_v3,
+    group_process_stream_template_encode_v3}
+use std.nogc_async_mut.container.providers.linux.primary_attach_v1.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+
+use test.fixtures.orchestration.primary_attach_fixture_v1.*
+
+describe "primary attach leaf planning and eligibility":
+    it "builds exact stdin-enabled attach argv and container-only eligibility query":
+        val command = linux_oci_primary_attach_command_v1(linux_container_policy_fixture_v2(), primary_runtime_v1()).unwrap()
+        expect(command.operation).to_equal("primary-attach")
+        expect(command.program).to_equal("/usr/bin/podman")
+        expect(command.args).to_equal(["--remote=false", "--root", "/home/test/storage", "--runroot", "/run/user/1000/storage",
+            "--storage-driver", "overlay", "--storage-opt=", "attach", "--no-stdin=false", "--sig-proxy=false", "--detach-keys=", "b".repeat(64)])
+        val query = linux_oci_primary_attach_inspect_command_v1("b".repeat(64)).unwrap()
+        expect(query.operation).to_equal("primary-eligibility")
+        expect(query.program).to_equal("podman")
+        expect(query.args[0]).to_equal("container")
+        expect(query.args[1]).to_equal("inspect")
+        expect(query.args[2]).to_equal("--format")
+        expect(query.args[3]).to_contain("{{json .Config.OpenStdin}}")
+        expect(query.args[3]).to_contain("{{json .Config.Tty}}")
+        expect(query.args[4]).to_equal("b".repeat(64))
+        expect(query.args.len()).to_equal(5)
+        for invalid in ["--all", "name", "abc", "B".repeat(64)]:
+            var runtime = primary_runtime_v1()
+            runtime.native_id = invalid
+            expect(linux_oci_primary_attach_command_v1(linux_container_policy_fixture_v2(), runtime).is_err()).to_equal(true)
+            expect(linux_oci_primary_attach_inspect_command_v1(invalid).is_err()).to_equal(true)
+
+    it "binds a distinct canonical owned template without granting input authority":
+        val identity = primary_identity_fixture_v1()
+        val launch = linux_oci_primary_attach_launch_template_v1(primary_policy_fixture_v1(), identity,
+            ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), primary_runtime_v1(), 7,
+            linux_container_policy_fixture_v2(), linux_container_engine_fixture_v2()).unwrap()
+        expect(launch.root).to_equal("/trusted/output/primary-attach-" + container_output_identity_digest_v2(identity).unwrap())
+        expect(launch.worker_id).to_equal("primary-api")
+        expect(launch.generation).to_equal(7)
+        expect(launch.transport_generation).to_equal(0)
+        expect(launch.request.launch_deadline_unix_ms).to_equal(0)
+        expect(launch.request.args).to_equal(linux_oci_primary_attach_command_v1(linux_container_policy_fixture_v2(), primary_runtime_v1()).unwrap().args)
+        expect(launch.profile_v3.unwrap().helper_cpu.cpu_millis).to_equal(50)
+        expect(launch.memory_limit_bytes).to_equal(33554432)
+        expect(launch.request.producer_digest).to_equal(linux_container_engine_fixture_v2().executable_digest)
+        val digest = group_process_stream_template_digest_v3(launch).unwrap()
+        var dynamic = launch
+        dynamic.transport_generation = 9
+        dynamic.request.launch_deadline_unix_ms = 100
+        expect(group_process_stream_template_digest_v3(dynamic).unwrap()).to_equal(digest)
+        expect(group_process_stream_template_encode_v3(launch).is_ok()).to_equal(true)
+
+    it "accepts exact running stdin and tty configuration and refuses wrong modes or containment":
+        for mode in ["stdin", "tty"]:
+            var request = linux_container_leaf_fixture_v2()
+            request.terminal_mode = mode
+            expect(linux_oci_primary_attach_eligible_v1(primary_json_v1(mode == "tty"), primary_runtime_v1(), request, mode).unwrap()).to_equal(true)
+            expect(linux_oci_primary_attach_eligible_v1(primary_json_v1(mode != "tty"), primary_runtime_v1(), request, mode).is_err()).to_equal(true)
+            expect(linux_oci_primary_attach_eligible_v1(primary_json_v1(mode == "tty"), primary_runtime_v1(), request, "none").is_err()).to_equal(true)
+            request.containment_profile_digest = "c".repeat(64)
+            expect(linux_oci_primary_attach_eligible_v1(primary_json_v1(mode == "tty"), primary_runtime_v1(), request, mode).is_err()).to_equal(true)
+
+    it "refuses every identity mismatch closed stdin and nonrunning primary":
+        var request = linux_container_leaf_fixture_v2()
+        request.terminal_mode = "stdin"
+        val source = primary_json_v1(false)
+        for pair in [("workload-1", "foreign"), ("boot-1", "boot-2"), ("create-api", "foreign"),
+                ("\"attempt\":\"1\"", "\"attempt\":\"2\""), ("\"provider_generation\":\"7\"", "\"provider_generation\":\"8\""),
+                ("running", "exited"), ("\"open_stdin\":true", "\"open_stdin\":false"), ("b".repeat(64), "c".repeat(64))]:
+            val changed = source.replace(pair.0, pair.1)
+            expect(changed == source).to_equal(false)
+            expect(linux_oci_primary_attach_eligible_v1(changed, primary_runtime_v1(), request, "stdin").is_err()).to_equal(true)
+        request.operation_id = "foreign"
+        expect(linux_oci_primary_attach_eligible_v1(source, primary_runtime_v1(), request, "stdin").is_err()).to_equal(true)
+
+    it "refuses duplicate unknown nested trailing wrong-type and oversized JSON":
+        var request = linux_container_leaf_fixture_v2()
+        request.terminal_mode = "stdin"
+        val source = primary_json_v1(false)
+        for changed in [source + "{}", source + " ".repeat(16385),
+                source.replace("\"tty\":false", "\"tty\":false,\"extra\":true"),
+                source.replace("\"tty\":false", "\"tty\":false,\"tty\":false"),
+                source.replace("\"tty\":false", "\"tty\":{}"),
+                source.replace("\"tty\":false", "\"tty\":\"false\"")]:
+            expect(changed == source).to_equal(false)
+            expect(linux_oci_primary_attach_eligible_v1(changed, primary_runtime_v1(), request, "stdin").is_err()).to_equal(true)
