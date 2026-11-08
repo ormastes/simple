@@ -503,9 +503,11 @@ raw-triple backslash closing, and a trailing comment that must not hide the next
 zero-assertion example. The single-triple and trailing-comment cases also prevent
 false clean reports, beyond the original false positive.
 
-Executed once on Linux/aarch64 using the shell/AWK detector, pinned to CPU 16:
+Executed on Linux/aarch64 using the shell/AWK detector, pinned to CPU 16:
 
-- 19/19 selftest fixtures pass; syntax and whitespace checks pass.
+- 19/19 selftest fixtures pass for each of two implementation revisions; the
+  second adds bounded fast paths to avoid character-scanning ordinary lines and
+  real docstring body lines. No unchanged green check was repeated.
 - Restoring exactly the old pass0 in an isolated mutant makes the new selftest
   reject it with `SELFTEST FAILED` and exit 2. It catches the comment/quoted-data
   false positives and the single-doc/post-doc-comment false negatives.
@@ -520,3 +522,11 @@ spec, perform a broad corpus sweep, establish Tier-B semantic discrimination,
 or remediate the remaining vacuous specs. The family remains partial and
 verification pending; no fixed/closed mark or compiler/bootstrap qualification
 is claimed.
+
+The final revision retains index-based fast paths for ordinary corpus lines and
+uses the lexical character scan only where a triple marker is present. A single
+bounded 410,924-byte / 2,000-example synthetic comparison produced identical
+findings: baseline 0.16 s / 8,204 KiB max RSS, new 0.18 s / 9,964 KiB. This small one-shot
+signal is not a statistically established performance delta; whole-corpus
+throughput/RSS remains an explicit followup, not a claimed speedup. The exact
+old-pass0 mutant was again rejected against the final revision.
