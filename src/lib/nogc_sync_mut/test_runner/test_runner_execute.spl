@@ -17,9 +17,10 @@ use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_
 use std.test_runner.compiler_select.{select_test_child_binary}
 use std.test_runner.test_runner_config.{interpreter_run_diverts_to_native, interpreter_mcdc_not_instrumented_notice}
 use std.test_runner.native_compile_contract.{native_test_request_error, native_test_compile_threads, native_test_compile_args, native_test_compile_args_with_threads, native_test_invocation_receipt, native_test_source_roots_identity}
-use std.test_runner.native_compile_contract.{native_test_artifact_path_v1}
+use std.test_runner.native_compile_contract.{native_test_artifact_path_v1, native_test_temporary_artifact_path}
 use std.nogc_sync_mut.test_runner.native_execution_evidence.{native_execution_completion_v1}
 use std.common.test_runner.native_framework_wrapper.{spipe_partition_source, spipe_rewrite_infix_expect_line, native_framework_wrapper_source, native_plain_wrapper_source}
+use std.common.test_runner.wrapper_filename.{spipe_wrapper_filename}
 use std.nogc_sync_mut.test_runner.source_route.{interpreter_snippet_source, source_has_bdd_structure}
 use std.test_runner.test_result_wrapper.{result_wrapper_path}
 use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
@@ -55,7 +56,7 @@ use std.test_runner.test_executor_parsing.{
     extract_number_before, extract_number_after_colon,
     build_child_args, make_result_from_output,
     make_result_from_structured_evidence,
-    coverage_wrapper_suffix, build_coverage_wrapper,
+    coverage_wrapper_suffix, build_coverage_wrapper, build_coverage_wrapper_checked,
     extract_coverage_sdn, strip_coverage_blocks,
     COVERAGE_BEGIN, COVERAGE_END,
     extract_compiler_mcdc_obligation_manifest, mcdc_obligation_manifest_absent,
@@ -251,9 +252,9 @@ fn _test_child_binary(options: TestOptions) -> Result<text, text>:
                 return Ok(selected)
     Ok(find_simple_binary())
 
-fn _compiler_select_failure(file_path: text, message: text) -> TestFileResult:
+fn _compiler_select_failure(file_path: text, message: text, duration_ms: i64 = 0) -> TestFileResult:
     TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-        duration_ms: 0, setup_ms: 0, error: "test-runner: " + message, timed_out: false, cached: false)
+        duration_ms: duration_ms, setup_ms: 0, error: "test-runner: " + message, timed_out: false, cached: false)
 
 fn preprocess_probe_verdict(exit_code: i64, stdout: text) -> text:
     """Empty when the child probe lexed the spec cleanly; else the failure detail.
@@ -764,23 +765,24 @@ pub fn native_test_source_kind_v1(file_path: text, content: text) -> Result<text
     if checked.is_err(): return Err(checked.unwrap_err())
     Ok("plain")
 
-fn preprocess_spipe_file(file_path: text, native_framework: bool = false, completion_evidence: bool = false, completion_kind: text = "", source_override: text = "") -> text:
+fn preprocess_spipe_file_checked(file_path: text, native_framework: bool = false, completion_evidence: bool = false, completion_kind: text = "", source_override: text = "") -> Result<text, text>:
     """Wrap specs with legacy SMF helpers or the complete configured framework.
     Native AOT preserves framework calls and obtains its actual result status.
-    Returns an empty path on native refusal, never an alternative test engine."""
+    Refusal reasons distinguish source, entropy and persistence boundaries."""
+    if file_path == "": return Err("native preprocessing source path is empty")
     if not file_path.ends_with("_spec.spl") and not completion_evidence:
-        return file_path
+        return Ok(file_path)
 
     var content = if source_override != "": source_override else: read_file_content(file_path)
     if content == "":
-        return if native_framework: "" else: file_path
+        if native_framework: return Err("native preprocessing source is empty")
+        return Ok(file_path)
 
     var selected_kind = completion_kind
     if completion_evidence and selected_kind == "":
         val selected = native_test_source_kind_v1(file_path, content)
         if selected.is_err():
-            print selected.unwrap_err()
-            return ""
+            return Err("native preprocessing source rejected: " + selected.unwrap_err())
         selected_kind = selected.unwrap()
 
     # Coverage wraps before SPipe preprocessing. Preserve its authenticated
@@ -806,26 +808,22 @@ fn preprocess_spipe_file(file_path: text, native_framework: bool = false, comple
         else:
             native_framework_wrapper_source(content, code_lines, string_continuation, simple_string_byte_ranges(content), completion_evidence)
         if native_source.is_err():
-            print "native-test: " + native_source.unwrap_err()
-            return ""
+            return Err("native preprocessing source rejected: " + native_source.unwrap_err())
         var wrapped = native_source.unwrap()
         if coverage_source_marker != "": wrapped = coverage_source_marker + "\n" + wrapped
-        val safe_name = file_path.replace("/", "_").replace("\\", "_").replace(":", "_")
-        var invocation_suffix = ""
-        if completion_evidence:
-            val nonce = test_runner_random_hex(16)
-            if nonce == nil: return ""
-            invocation_suffix = "_" + nonce.unwrap()
-        val tmp_path = _tp_get_temp_dir() + "/spipe_wrapped_" + getpid().to_text() + "_" + safe_name[0:safe_name.len() - 4] + invocation_suffix + "_native.spl"
-        val persisted = if completion_evidence: file_create_exclusive(tmp_path, wrapped) else: file_write(tmp_path, wrapped)
-        if not persisted: return ""
-        return tmp_path
+        val nonce = test_runner_random_hex(16)
+        val filename = spipe_wrapper_filename(getpid(), nonce)
+        if filename.is_err(): return Err(filename.unwrap_err())
+        val tmp_path = _tp_get_temp_dir() + "/" + filename.unwrap()
+        val persisted = file_create_exclusive(tmp_path, wrapped)
+        if not persisted: return Err("native wrapper exclusive create refused: " + tmp_path)
+        return Ok(tmp_path)
 
     var rendered_lines: [text] = []
     for raw_line in content.split("\n"):
         rendered_lines.push(spipe_rewrite_method_expect_line(spipe_rewrite_infix_expect_line(raw_line)))
     val partition = spipe_partition_source(content, rendered_lines, code_lines, string_continuation, false)
-    if partition.is_err(): return ""
+    if partition.is_err(): return Err("native preprocessing source rejected: " + partition.unwrap_err())
     val parts = partition.unwrap()
     val imports = parts.imports
     val top_level = parts.declarations
@@ -834,10 +832,41 @@ fn preprocess_spipe_file(file_path: text, native_framework: bool = false, comple
     var wrapped = imports + "\n" + helpers + "\n" + top_level + "\nfn main():\n" + body
     if coverage_source_marker != "":
         wrapped = coverage_source_marker + "\n" + wrapped
-    val safe_name = file_path.replace("/", "_").replace("\\", "_").replace(":", "_")
-    val tmp_path = _tp_get_temp_dir() + "/spipe_wrapped_" + getpid().to_text() + "_" + safe_name[0:safe_name.len() - 4] + "_native.spl"
-    if not file_write(tmp_path, wrapped): return ""
-    tmp_path
+    val nonce = test_runner_random_hex(16)
+    val filename = spipe_wrapper_filename(getpid(), nonce)
+    if filename.is_err(): return Err(filename.unwrap_err())
+    val tmp_path = _tp_get_temp_dir() + "/" + filename.unwrap()
+    if not file_create_exclusive(tmp_path, wrapped): return Err("native wrapper exclusive create refused: " + tmp_path)
+    Ok(tmp_path)
+
+fn preprocess_spipe_file(file_path: text, native_framework: bool = false, completion_evidence: bool = false, completion_kind: text = "", source_override: text = "") -> text:
+    val prepared = preprocess_spipe_file_checked(file_path, native_framework, completion_evidence, completion_kind, source_override)
+    if prepared.is_err():
+        print "native-test: " + prepared.unwrap_err()
+        return ""
+    prepared.unwrap()
+
+fn prepare_native_generated_source(file_path: text, options: TestOptions, authored_source: text,
+        explicit_aot: bool, native_kind: text) -> Result<(text, text, text), text>:
+    """Prepare source before staging; return preprocessing, coverage and cleanup paths.
+
+    A source-shape rejection and a filesystem refusal both fail closed. The
+    neutral preprocessing error does not mislabel a rejected source as an IO
+    failure. On failure this owner cleans only its generated coverage output.
+    """
+    val coverage = build_coverage_wrapper_checked(file_path, options, authored_source)
+    if coverage.is_err(): return Err(coverage.unwrap_err())
+    val coverage_paths = coverage.unwrap()
+    val wrapped_path = coverage_paths.0
+    val cleanup_path = coverage_paths.1
+    val preprocessed = preprocess_spipe_file_checked(wrapped_path, options.coverage or explicit_aot, explicit_aot, native_kind,
+        if wrapped_path == file_path: authored_source else: "")
+    if preprocessed.is_err():
+        cleanup_native_generated_files("", "", wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+        if not options.keep_artifacts and cleanup_path != "" and cleanup_path != file_path and file_exists(cleanup_path):
+            return Err(preprocessed.unwrap_err() + "; generated coverage cleanup refused: " + cleanup_path)
+        return Err(preprocessed.unwrap_err())
+    Ok((preprocessed.unwrap(), wrapped_path, cleanup_path))
 
 fn cleanup_native_generated_file(path: text, original_path: text, preserved_path: text, keep_artifacts: bool):
     if not keep_artifacts and path != "" and path != original_path and path != preserved_path and file_exists(path):
@@ -1226,9 +1255,13 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     # Native mode normally compiles SMF. Coverage must execute the MIR probes,
     # so it uses the LLVM AOT path and the core-C coverage owner instead.
     # Step 1: Preprocess SPipe files (wrap in fn main())
-    val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options, authored_source)
-    val preprocessed_path = preprocess_spipe_file(wrapped_path, options.coverage or explicit_aot, explicit_aot, native_kind,
-        if wrapped_path == file_path: authored_source else: "")
+    val prepared = prepare_native_generated_source(file_path, options, authored_source, explicit_aot, native_kind)
+    if prepared.is_err():
+        return _compiler_select_failure(file_path, prepared.unwrap_err(), (time_now_unix_micros() - start) / 1000)
+    val generated_paths = prepared.unwrap()
+    val preprocessed_path = generated_paths.0
+    val wrapped_path = generated_paths.1
+    val cleanup_path = generated_paths.2
     var source_path = preprocessed_path
     var generated_stage: Option<NativeTestSourceStageV1> = nil
     if options.coverage or explicit_aot:
@@ -1260,15 +1293,24 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     # cleanup below used to orphan a stub .smf next to the .spl, which then
     # shadowed the module and poisoned the smf cache (bug doc
     # smf_stub_shadowing_unresolved_describe_2026-07-24.md).
-    val artifact_suffix = if explicit_aot: "." + options.native_backend + "." + producer_digest + ".{start}.exe"
-        elif options.coverage: ".coverage-native"
-        elif mcdc_enabled: ".mcdc-native"
-        else: ".smf"
+    # Staging supplies a private source directory; SMF/MC-DC preprocessing
+    # supplies its already-validated nonce path. Reuse those identities rather
+    # than relying on a potentially equal PID/start or drawing another nonce.
+    var artifact_invocation_identity = source_path
+    if not explicit_aot and source_path == file_path:
+        # A plain non-spec with coverage/MC-DC off has no generated source and
+        # therefore no existing nonce to reuse. Allocate exactly one checked
+        # identity here; never silently fall back to PID/time on refusal.
+        val artifact_nonce = test_runner_random_hex(16)
+        if artifact_nonce == nil:
+            cleanup_native_generated_files("", "", wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+            return _compiler_select_failure(file_path, "plain native artifact entropy unavailable before test execution", (time_now_unix_micros() - start) / 1000)
+        artifact_invocation_identity = "plain-native-artifact-v1|" + artifact_nonce.unwrap()
     val smf_path = if explicit_aot:
             native_test_artifact_path_v1(_tp_get_temp_dir(), file_path, options.native_backend, producer_digest,
                 start, options.native_source_roots, options.library_mode)
         else:
-            _tp_get_temp_dir() + "/" + file_path.replace("/", "_").replace("\\", "_").replace(":", "_").replace(".spl", artifact_suffix)
+            native_test_temporary_artifact_path(_tp_get_temp_dir(), file_path, getpid(), start, options.coverage, mcdc_enabled, artifact_invocation_identity)
     var compile_args: [text] = []
     if options.coverage or explicit_aot:
         val selected_backend = if explicit_aot: options.native_backend else: "llvm"
@@ -1766,6 +1808,8 @@ export mcdc_compiler_lacks_probes, mcdc_compiler_identity_lacks_probes, MCDC_UNA
 export native_test_request_error, native_test_compile_threads, native_test_compile_args
 export native_test_compile_args_with_threads, native_test_invocation_receipt
 export cleanup_native_generated_files, make_native_completion_result_v1, native_test_source_kind_v1, allocate_native_completion_path_v1
+export prepare_native_generated_source
+export preprocess_spipe_file_checked
 
 fn compile_output_is_source_listing_line_v1(trimmed: text) -> bool:
     if trimmed.starts_with("|") or trimmed.starts_with("-->") or trimmed.starts_with("= "):
