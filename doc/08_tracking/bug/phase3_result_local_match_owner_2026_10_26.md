@@ -173,3 +173,24 @@ existing `native_result_method_match_owner.spl`, and a three-line hello world
 all SEGV (rc=139) in that probe binary, so no executable evidence was
 produced. The workarounds stay in place and the bug stays OPEN until the
 recovery gate above runs on a qualified producer.
+
+## MIR regression spec + status, 2026-11-08
+
+`test/01_unit/compiler/50.mir/result_local_match_owner_spec.spl` lowers typed
+`Result<i64, text>` locals bound from a concrete method, trait dispatch, and a
+generic free call, matched with bare `Ok`/`Err`, against a user enum
+`OtherVerdict` that also declares `Ok`/`Err`; plus a prevention case that the
+user enum still owns its qualified arms.
+
+- Green on `origin/release/1.0.0` (`bin/simple.exe test`, 4/4 passed).
+- Red-proof: with `enum_match_subject_type` stripped of local retention and
+  expression provenance (temporary local edit, reverted), 3/4 fail with the
+  exact reported diagnostic `bare variant 'Ok' is ambiguous ... has type
+  unresolved`; the prevention case stays green.
+
+Root cause: the immutable Stage 2 producer predates the declared-local
+retention in `enum_match_subject_type` (RTI PR1 `d0e58600707` and follow-ups),
+so a typed Result local reached `scrut_enum_lookup` with no owner. The source
+fix is in place; status moves to fix-implemented-verification-pending.
+Workaround tags stay until the recovery gate above runs on a qualified
+producer.
