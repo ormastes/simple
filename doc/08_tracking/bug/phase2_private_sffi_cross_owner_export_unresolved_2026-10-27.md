@@ -1,7 +1,7 @@
 # Phase 2: private SFFI helper imports reach the linker undeclared
 
 Canonical ID: `phase2_private_sffi_cross_owner_export_unresolved_2026-10-27`.
-Status: open; public-owner facade workaround authored, compile retry pending.
+Status: fix-implemented-verification-pending. Resolution (owner decision 7: cross-module private access is an error): the proper path is public owner facades (driver_parse_*_v1) with explicit imports, now the permanent design, not a workaround; private-inline wildcard export is intentionally unsupported. Compile retry pending.
 Severity: build-blocking. DB reconciliation pending: no admitted full CLI is
 available to update the authoritative bug DB in this lane.
 
