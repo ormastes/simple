@@ -28,7 +28,7 @@
 # scripts/check/test_tree_divergence_baseline.txt (one "label:relpath" per
 # line). The guard FAILS only on:
 #   (a) a NEW divergence not already in the baseline (regression), or
-#   (b) a baselined pair that is now IDENTICAL (the baseline is stale and
+#   (b) a baselined pair that is now identical or has a missing leg (the baseline is stale and
 #       MUST be shrunk — a baseline that only ever grows is exactly the
 #       kind of gate that quietly stops meaning anything).
 # Reconciling a pair (dropping it from the baseline) is therefore a real,
@@ -303,6 +303,76 @@ run_selftest() {
             st_check no "(5) --base half-landed scan" "got: $st_v4" ;;
     esac
 
+    # (6) stale entries must distinguish convergence from deleted legs.
+    # Exercise both disk and committed indexes; a retained divergent pair
+    # stays baselined and all stale entries remain a hard failure.
+    fx4="$st_root/fx4"
+    mkdir -p "$fx4/scripts/check" "$fx4/test/canon" "$fx4/test/shadow" || die 2 "selftest mkdir failed"
+    printf 'same\n' > "$fx4/test/canon/same.spl"
+    cp "$fx4/test/canon/same.spl" "$fx4/test/shadow/same.spl"
+    printf 'canon\n' > "$fx4/test/canon/drift.spl"
+    printf 'shadow\n' > "$fx4/test/shadow/drift.spl"
+    printf 'canonical only\n' > "$fx4/test/canon/deleted_shadow.spl"
+    printf 'shadow only\n' > "$fx4/test/shadow/deleted_canon.spl"
+    printf '%s\n' q:same.spl q:drift.spl q:deleted_shadow.spl q:deleted_canon.spl q:deleted_both.spl \
+        > "$fx4/scripts/check/test_tree_divergence_baseline.txt"
+    printf 'q:deleted_canon.spl\n' > "$fx4/scripts/check/test_tree_mirror_only_allowlist.txt"
+    ( cd "$fx4" && git init -q . && git add -A \
+        && git -c user.email=s@e -c user.name=s commit -q -m stale-fixture ) \
+        || die 2 "selftest stale fixture commit failed"
+    fx4ref=$( cd "$fx4" && git rev-parse HEAD ) || die 2 "selftest stale rev-parse failed"
+    for st_mode in disk committed; do
+        set --
+        [ "$st_mode" = disk ] || set -- --ref "$fx4ref"
+        st_log="$st_root/stale-$st_mode.log"
+        ( cd "$fx4" && TEST_TREE_DIVERGENCE_PAIRS="q:test/canon:test/shadow" \
+            TEST_TREE_DIVERGENCE_OUT="$st_root/stale-$st_mode.offenders" TTD_SELFTEST_CHILD=1 \
+            sh "$SELF_PATH" "$@" ) > "$st_log" 2>&1
+        st_status=$?
+        printf '  - q:same.spl\n' > "$st_root/expected-identical"
+        printf '  - q:deleted_both.spl\n  - q:deleted_canon.spl\n  - q:deleted_shadow.spl\n' > "$st_root/expected-missing"
+        awk '/baseline entries that are now IDENTICAL/{on=1;next} on && /^  - /{print;next} on{exit}' \
+            "$st_log" > "$st_root/actual-identical"
+        awk '/baseline entries NOT COMPARED/{on=1;next} on && /^  - /{print;next} on{exit}' \
+            "$st_log" > "$st_root/actual-missing"
+        if [ "$st_status" -eq 1 ] \
+            && cmp -s "$st_root/expected-identical" "$st_root/actual-identical" \
+            && cmp -s "$st_root/expected-missing" "$st_root/actual-missing" \
+            && /usr/bin/grep -q '0 new, 4 fixed-but-still-baselined' "$st_log"; then
+            st_check ok "(6) $st_mode stale baseline distinguishes identical and missing legs"
+        else
+            st_check no "(6) $st_mode stale baseline classification" "status=$st_status; $(cat "$st_log")"
+        fi
+    done
+
+    # (7) A missing-only stale baseline must fail independently: an
+    # identical stale row must not mask a missing-leg fail-open regression.
+    printf '%s\n' q:drift.spl q:deleted_both.spl > "$fx4/scripts/check/test_tree_divergence_baseline.txt"
+    ( cd "$fx4" && git add scripts/check/test_tree_divergence_baseline.txt \
+        && git -c user.email=s@e -c user.name=s commit -q -m missing-only-baseline ) \
+        || die 2 "selftest missing-only fixture commit failed"
+    fx4ref=$( cd "$fx4" && git rev-parse HEAD ) || die 2 "selftest missing-only rev-parse failed"
+    for st_mode in disk committed; do
+        set --
+        [ "$st_mode" = disk ] || set -- --ref "$fx4ref"
+        st_log="$st_root/missing-only-$st_mode.log"
+        ( cd "$fx4" && TEST_TREE_DIVERGENCE_PAIRS="q:test/canon:test/shadow" \
+            TEST_TREE_DIVERGENCE_OUT="$st_root/missing-only-$st_mode.offenders" TTD_SELFTEST_CHILD=1 \
+            sh "$SELF_PATH" "$@" ) > "$st_log" 2>&1
+        st_status=$?
+        printf '  - q:deleted_both.spl\n' > "$st_root/expected-missing-only"
+        awk '/baseline entries NOT COMPARED/{on=1;next} on && /^  - /{print;next} on{exit}' \
+            "$st_log" > "$st_root/actual-missing-only"
+        if [ "$st_status" -eq 1 ] \
+            && ! /usr/bin/grep -q 'baseline entries that are now IDENTICAL' "$st_log" \
+            && cmp -s "$st_root/expected-missing-only" "$st_root/actual-missing-only" \
+            && /usr/bin/grep -q '0 new, 1 fixed-but-still-baselined' "$st_log"; then
+            st_check ok "(7) $st_mode missing-only stale baseline FAILs"
+        else
+            st_check no "(7) $st_mode missing-only stale baseline" "status=$st_status; $(cat "$st_log")"
+        fi
+    done
+
     rm -rf "$st_root"
     # Do not leak the fixture git environment into the real scan below.
     unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
@@ -317,7 +387,7 @@ if [ "${TTD_SELFTEST_CHILD:-0}" != "1" ]; then
     run_selftest
     if [ "$selftest_only" -eq 1 ]; then
         VERDICT_EMITTED=1
-        echo "$SELF: PASS — 5 selftest fixture(s) checked, 0 failures (no divergence scan performed in --selftest mode)"
+        echo "$SELF: PASS — 7 selftest fixture(s) checked, 0 failures (no divergence scan performed in --selftest mode)"
         exit 0
     fi
 elif [ "$selftest_only" -eq 1 ]; then
@@ -440,6 +510,8 @@ if [ -n "$ref" ]; then
     [ "$ar" -eq 0 ] || die 2 "could not parse git ls-tree output at $ref (status $ar)"
 fi
 
+current_identical="$work/current_identical.txt"
+: > "$current_identical"
 current_diverged="$work/current_diverged.txt"
 : > "$current_diverged"
 mirror_only="$work/mirror_only.txt"
@@ -478,7 +550,7 @@ for line in $pairs_raw; do
         # unfiltered, exactly as the old `git cat-file -e` probe was.
         counts=$(awk -F'\t' \
             -v C="$canon_rel" -v S="$shadow_rel" -v L="$label" \
-            -v MO="$mirror_only" -v DV="$current_diverged" '
+            -v MO="$mirror_only" -v DV="$current_diverged" -v ID="$current_identical" '
             { oid[$1] = $2 }
             END {
                 cp = C "/"; sp = S "/"
@@ -499,10 +571,10 @@ for line in $pairs_raw; do
                         continue
                     }
                     common++
-                    if (oid[canon] == oid[p]) ident++
+                    if (oid[canon] == oid[p]) { ident++; print L ":" rel >> ID }
                     else { diverged++; print L ":" rel >> DV }
                 }
-                close(MO); close(DV)
+                close(MO); close(DV); close(ID)
                 print common " " ident " " diverged
             }
         ' "$ref_index")
@@ -535,6 +607,7 @@ for line in $pairs_raw; do
             total_common=$((total_common + 1))
             if cmp -s "$canon_file" "$f"; then
                 total_identical=$((total_identical + 1))
+                echo "$label:$relpath" >> "$current_identical"
             else
                 total_diverged=$((total_diverged + 1))
                 echo "$label:$relpath" >> "$current_diverged"
@@ -546,6 +619,7 @@ for line in $pairs_raw; do
 done
 IFS="$oldifs"
 
+sort -u "$current_identical" -o "$current_identical"
 sort -u "$current_diverged" -o "$current_diverged"
 sort -u "$mirror_only" -o "$mirror_only"
 
@@ -672,6 +746,9 @@ sort -u "$BASELINE" > "$work/baseline_sorted.txt"
 comm -23 "$current_diverged" "$work/baseline_sorted.txt" > "$work/new_divergence.txt"
 comm -13 "$current_diverged" "$work/baseline_sorted.txt" > "$work/fixed_baseline.txt"
 
+comm -12 "$work/fixed_baseline.txt" "$current_identical" > "$work/identical_baseline.txt"
+comm -23 "$work/fixed_baseline.txt" "$current_identical" > "$work/missing_baseline.txt"
+
 n_new=$(wc -l < "$work/new_divergence.txt" | tr -d ' ')
 n_fixed=$(wc -l < "$work/fixed_baseline.txt" | tr -d ' ')
 n_baseline=$(wc -l < "$work/baseline_sorted.txt" | tr -d ' ')
@@ -692,8 +769,14 @@ if [ "$n_new" -gt 0 ]; then
     status=1
 fi
 if [ "$n_fixed" -gt 0 ]; then
-    echo "$SELF: baseline entries that are now IDENTICAL (baseline is stale — remove these lines from $BASELINE):" >&2
-    sed 's/^/  - /' "$work/fixed_baseline.txt" >&2
+    if [ -s "$work/identical_baseline.txt" ]; then
+        echo "$SELF: baseline entries that are now IDENTICAL (remove these stale lines from $BASELINE):" >&2
+        sed 's/^/  - /' "$work/identical_baseline.txt" >&2
+    fi
+    if [ -s "$work/missing_baseline.txt" ]; then
+        echo "$SELF: baseline entries NOT COMPARED (missing leg, unknown pair label, filtered or malformed path; review before removing stale lines from $BASELINE):" >&2
+        sed 's/^/  - /' "$work/missing_baseline.txt" >&2
+    fi
     status=1
 fi
 if [ "$n_new_mirror_only" -gt 0 ]; then
@@ -718,6 +801,8 @@ if [ "$n_half_landed" -gt 0 ]; then
     status=1
 fi
 
+# Keep the historical fixed-but-still-baselined count label for the delta
+# guard parser; it counts every stale row, including missing counterparts.
 if [ "$status" -ne 0 ]; then
     VERDICT_EMITTED=1
     echo "$SELF: FAIL — $total_diverged diverged vs $n_baseline baselined ($n_new new, $n_fixed fixed-but-still-baselined); $n_mirror_only mirror-only ($n_new_mirror_only unallowlisted, $n_stale_allowlist stale-allowlist); half-landed: $half_landed_note"
