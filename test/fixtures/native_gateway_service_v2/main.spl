@@ -1,0 +1,123 @@
+# NOT_RUN. Actual two-process transport fixture; separately provisioned UIDs.
+use std.nogc_sync_mut.sffi.cli_args.cli_get_args
+use std.nogc_sync_mut.io.local_ipc_v1.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_v1.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_service_v2.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_client_v1.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.*
+use test.fixtures.daemon_sdk.gateway_cli_v2.{gateway_fixture_uid_v2, gateway_fixture_now_v2}
+
+struct FixtureDomainV2:
+    client_uid: i64
+    controls: i64
+    work: i64
+
+fn fixture_classify_v2(owner: FixtureDomainV2, request: LocalGatewayRequestV1) -> Result<LocalGatewayDispatchClassV2, text>:
+    if request.peer_uid != owner.client_uid or request.operation_id != "fixture-operation" or request.payload != "":
+        return Err("fixture-policy")
+    if request.action == "fixture-status": return Ok(LocalGatewayDispatchClassV2.ControlRead)
+    if request.action == "fixture-work": return Ok(LocalGatewayDispatchClassV2.Work)
+    Err("fixture-action")
+
+fn fixture_handler_v2(owner: FixtureDomainV2, request: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<FixtureDomainV2>:
+    assert(fixture_classify_v2(owner, request).is_ok())
+    var current = owner
+    if request.action == "fixture-status": current.controls = current.controls + 1
+    else: current.work = current.work + 1
+    LocalGatewayOwnedResponseV1(current, LocalGatewayResponseV1(request.request_id, 0, "handled"))
+
+fn serve_v2(work_path: text, control_path: text, service_uid: i64, client_uid: i64, mode: text) -> i64:
+    val config = LocalGatewayServiceConfigV2(work_path: work_path, control_path: control_path,
+        service_uid: service_uid, client_uid: client_uid, work_connections: 2,
+        control_connections: 2, request_timeout_ms: 10000)
+    var service = local_gateway_service_open_v2(FixtureDomainV2(client_uid, 0, 0), config)
+    assert(service.phase == 1 and service.error == "")
+    print "gateway-service-v2 LISTENING"
+    val deadline = gateway_fixture_now_v2() + 15000
+    var observed_refusal = false
+    var finished = false
+    while not finished:
+        assert(gateway_fixture_now_v2() < deadline)
+        val turn = local_gateway_service_turn_v2(service, fixture_classify_v2, fixture_handler_v2)
+        service = turn.service
+        assert(turn.error == "")
+        var control_empty = true
+        for connection in service.control.connections:
+            if connection != nil:
+                control_empty = false
+                if connection.unwrap().response != nil:
+                    if connection.unwrap().response.unwrap().exit_code == 75:
+                        observed_refusal = true
+        assert(service.owner.work == 0)
+        if mode == "saturation":
+            if service.owner.controls == 1 and control_empty:
+                # Both ordinary slots hold actual accepted sockets whose peers
+                # sent no frame. They cannot consume the control lane's slots.
+                assert(service.work.connections[0] != nil and service.work.connections[1] != nil)
+                assert(service.work.connections[0].unwrap().phase == 0)
+                assert(service.work.connections[1].unwrap().phase == 0)
+                finished = true
+        else:
+            assert(service.owner.controls == 0)
+            finished = observed_refusal and control_empty
+    val stopped = local_gateway_service_stop_v2(service)
+    service = stopped.service
+    assert(stopped.error == "" and service.phase == 3)
+    assert(service.owner.work == 0)
+    assert(service.owner.controls == (if mode == "saturation": 1 else: 0))
+    print "gateway-service-v2 server PASS"
+    0
+
+fn client_v2(work_path: text, control_path: text, service_uid: i64, mode: text) -> i64:
+    val deadline = gateway_fixture_now_v2() + 15000
+    var stalled: [LocalUnixConnectionV1] = []
+    if mode == "saturation":
+        for index in 0..2:
+            val opened = local_unix_connect_v1(work_path, service_uid, deadline)
+            assert(opened.error == "" and opened.owner != nil)
+            stalled = stalled.push(opened.owner.unwrap())
+    val header = LocalGatewayHeaderV1(response: false, request_id: "c".repeat(64),
+        action: if mode == "saturation": "fixture-status" else: "fixture-work",
+        operation_id: "fixture-operation", exit_code: 0, payload_bytes: 0, handoff_metadata: "")
+    val opened = local_gateway_client_open_v1(control_path, service_uid, header, "", 10000)
+    assert(opened.error == "" and opened.client != nil and opened.retained_connection == nil)
+    var client = opened.client.unwrap()
+    while client.phase < 4:
+        assert(gateway_fixture_now_v2() < deadline)
+        client = local_gateway_client_poll_v1(client)
+    assert(client.phase == 4 and client.error == "")
+    val response = client.reader.header.unwrap()
+    assert(response.exit_code == (if mode == "saturation": 0 else: 75))
+    val payload = local_gateway_payload_decode_v1(response, client.reader.payload).unwrap()
+    assert(payload == (if mode == "saturation": "handled" else: "gateway-control-port-refused"))
+    val closed = local_unix_close_v1(client.connection)
+    assert(closed.closed and closed.owner == nil and closed.error == "")
+    for retained in stalled:
+        var connection = retained
+        var eof = false
+        # Keep the ordinary peers genuinely stalled until the server has
+        # asserted saturation and explicitly stopped its transport owners.
+        while not eof:
+            assert(gateway_fixture_now_v2() < deadline)
+            val observed = local_unix_read_now_v1(connection, 1)
+            connection = observed.owner
+            assert(observed.bytes.len() == 0)
+            assert(observed.error == "" or observed.error == "local_unix_would_block" or observed.error == "local_unix_busy")
+            eof = observed.eof
+        val released = local_unix_close_v1(connection)
+        assert(released.closed and released.owner == nil and released.error == "")
+    print "gateway-service-v2 client PASS"
+    0
+
+fn main() -> i64:
+    val args = cli_get_args()
+    assert(args.len() == 8 and args[7] == "provisioned-distinct-uids")
+    val role = args[1]
+    val mode = args[2]
+    assert(mode == "saturation" or mode == "cross-port")
+    val service_uid = gateway_fixture_uid_v2(args[5])
+    val client_uid = gateway_fixture_uid_v2(args[6])
+    assert(service_uid != client_uid)
+    if role == "server": return serve_v2(args[3], args[4], service_uid, client_uid, mode)
+    assert(role == "client")
+    client_v2(args[3], args[4], service_uid, mode)

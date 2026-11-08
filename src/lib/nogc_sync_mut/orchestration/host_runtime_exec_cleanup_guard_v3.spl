@@ -1,0 +1,36 @@
+# Read-only same-journal child barriers. No effect, new ledger, native lookup,
+# decoded lease or inferred teardown. Labels/object absence are not discharge.
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2}
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.{distributed_decode_operation_v2, distributed_encode_operation_v2}
+use std.nogc_sync_mut.orchestration.host_runtime_exec_projection_v3.host_runtime_exec_child_packet_v3
+
+# Built once for a fixed projection; not caller-supplied permission. Every child
+# is validated before its parent ID is trusted. Missing/corrupt provenance fails
+# closed even when the malformed child cannot be attributed to a safe parent.
+pub fn host_runtime_exec_cleanup_index_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1) -> Result<Dict<text, text>, text>:
+    val current = distributed_operation_journal_lookup_v2(journal, "")
+    if current.is_ok() or current.unwrap_err() != "OPERATION_NOT_FOUND": return Err("host-child-cleanup-journal-not-current")
+    if journal.operations.len() > 4096: return Err("host-child-cleanup-history-full")
+    var barriers: Dict<text, text> = {}
+    for id in journal.operations.keys():
+        val row = distributed_operation_journal_lookup_v2(journal, id)?
+        val operation = distributed_decode_operation_v2(row.envelope)?
+        if operation.operation != "host_runtime_exec_v3": continue
+        val packet = host_runtime_exec_child_packet_v3(journal, capacity, operation)?
+        # ALL labels, including admitted/cancelled/completed/failed, remain
+        # barriers until a qualified no-effect/contained teardown owner exists.
+        # running=false and parent object absence do not establish that proof.
+        barriers[packet.parent_binding.host_operation.id] = operation.id
+    Ok(barriers)
+
+pub fn host_runtime_exec_parent_cleanup_guard_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1, parent: OperationEnvelopeV2) -> Result<bool, text>:
+    if parent.operation != "host_reservation_v1": return Err("host-child-cleanup-parent-action")
+    val row = distributed_operation_journal_lookup_v2(journal, parent.id)?
+    if row.envelope != distributed_encode_operation_v2(parent)?: return Err("host-child-cleanup-parent-mismatch")
+    val index = host_runtime_exec_cleanup_index_v3(journal, capacity)?
+    if index.contains_key(parent.id): return Err("host-child-cleanup-unsettled:" + index[parent.id])
+    Ok(true)

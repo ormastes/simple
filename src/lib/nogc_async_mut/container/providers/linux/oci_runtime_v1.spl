@@ -23,6 +23,8 @@ use std.nogc_async_mut.container.providers.linux.user_mapping_v3.*
 use std.nogc_sync_mut.io.linux_container_user_observation_v1.{linux_container_user_observe_v1,
     linux_container_user_observation_refresh_v1}
 use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_command_v2
+use std.nogc_async_mut.container.providers.linux.primary_attach_v1.{linux_oci_primary_attach_command_v1,
+    linux_oci_primary_attach_inspect_command_v1, linux_oci_primary_attach_eligible_v1}
 use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
 use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, process_spawn_piped_owned_v2}
 pub use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
@@ -412,6 +414,40 @@ impl LinuxOciRuntimeProviderV1:
             return PipedProcessOwnedSpawnV2.Rejected("output-scripted-provider-native-spawn-forbidden")
         process_spawn_piped_owned_v2(launch)
 
+    pub me primary_attach_observation_v1(request: LinuxOciRequestV1, expected: RuntimeIdentityV1,
+            pin: text, terminal_mode: text) -> Result<LinuxOciEngineObservationV1, text>:
+        # Reuse exact retained request/runtime correlation and fresh installed
+        # engine observation, without changing the output-follow command.
+        val observed = self.output_engine_observation_v2(request, expected, pin)?
+        if request.terminal_mode != terminal_mode or not ["stdin", "tty"].contains(terminal_mode):
+            return Err("primary-attach-request-mode-mismatch")
+        val retained = self.retained_intent_v1(request)?
+        if retained.phase == RUNTIME_PHASE_DESTROYED: return Err("primary-attach-destroyed")
+        val command = linux_oci_primary_attach_inspect_command_v1(expected.native_id)?
+        val run = self._execute(command, request)
+        if not run.matched or run.exit_code != 0 or run.stderr != "":
+            return Err(self._execution_failure_reason_v1(run, "primary-attach-eligibility-unavailable"))
+        val eligible = linux_oci_primary_attach_eligible_v1(run.stdout, expected, request, terminal_mode)?
+        Ok(observed)
+
+    # The common constructor receives this privately and installs the native
+    # controlled-input latch before publishing any session/transport capability.
+    # Ready means owned helper availability, never successful attachment.
+    pub me open_primary_attach_v1(request: LinuxOciRequestV1, expected: RuntimeIdentityV1,
+            pin: text, terminal_mode: text, launch: GroupProcessStreamLaunchV2) -> PipedProcessOwnedSpawnV2:
+        val observed = match self.primary_attach_observation_v1(request, expected, pin, terminal_mode):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        val command = match linux_oci_primary_attach_command_v1(self.engine_policy.unwrap(), expected):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        if (launch.request.program != command.program or not _args_equal(launch.request.args, command.args) or
+                launch.request.producer_digest != observed.executable_digest):
+            return PipedProcessOwnedSpawnV2.Rejected("primary-attach-launch-engine-route-mismatch")
+        if self.scripted:
+            return PipedProcessOwnedSpawnV2.Rejected("primary-attach-scripted-native-spawn-forbidden")
+        process_spawn_piped_owned_v2(launch)
+
     pub me observe_execution_user_mapping_v3(request: LinuxOciRequestV1, expected: RuntimeIdentityV1,
             pin: text) -> LinuxOciUserMappingOutcomeV3:
         val valid = self.validate(request)
@@ -604,13 +640,17 @@ impl LinuxOciRuntimeProviderV1:
         RuntimeValidationV1(accepted: true, reason: "")
 
     pub fn validate(request: LinuxOciRequestV1) -> RuntimeValidationV1:
+        # A selected profile needs the separately installed containment route.
+        # Historical constructors cannot silently execute the V4 request as V1.
+        if request.containment_profile_digest != "":
+            return RuntimeValidationV1(accepted: false, reason: "containment-profile-not-installed")
         if linux_oci_user_selection_v3(request) and self.engine != OCI_ENGINE_PODMAN:
             return RuntimeValidationV1(accepted: false, reason: "user-selection-podman-only")
         match linux_oci_request_bounds_v1(request):
             case Err(reason): return RuntimeValidationV1(accepted: false, reason: reason)
             case Ok(_): pass
-        if request.terminal_mode != "none":
-            return RuntimeValidationV1(accepted: false, reason: "terminal-mode-not-admitted")
+        if request.terminal_mode != "none" and (self.engine != OCI_ENGINE_PODMAN or not self.engine_policy.?):
+            return RuntimeValidationV1(accepted: false, reason: "terminal-mode-managed-podman-required")
         val build_roots_error = _linux_oci_build_roots_error_v1(request)
         if build_roots_error != "": return RuntimeValidationV1(accepted: false, reason: build_roots_error)
         if self.platform != "linux":
@@ -2020,13 +2060,15 @@ fn _base_command(engine: text, operation: text, state_dir: text,
 pub fn build_create_command(engine: text, state_dir: text,
         request: LinuxOciRequestV1, operation_id: text,
         provider_generation: i64, node_boot_id: text) -> (text, RuntimeCommandV1):
+    if request.containment_profile_digest != "":
+        return ("containment-profile-not-installed", runtime_command_empty())
     if linux_oci_user_selection_v3(request) and engine != OCI_ENGINE_PODMAN:
         return ("user-selection-podman-only", runtime_command_empty())
     match linux_oci_request_bounds_v1(request):
         case Err(reason): return (reason, runtime_command_empty())
         case Ok(_): pass
-    if request.terminal_mode != "none":
-        return ("terminal-mode-not-admitted", runtime_command_empty())
+    if request.terminal_mode != "none" and engine != OCI_ENGINE_PODMAN:
+        return ("terminal-mode-podman-only", runtime_command_empty())
     val build_roots_error = _linux_oci_build_roots_error_v1(request)
     if build_roots_error != "": return (build_roots_error, runtime_command_empty())
     match linux_oci_container_name(request.pod_uid, request.attempt):
@@ -2073,6 +2115,8 @@ pub fn build_create_command(engine: text, state_dir: text,
                 "--read-only", "--security-opt", "no-new-privileges",
                 "--cap-drop", "ALL"]
             if engine == OCI_ENGINE_PODMAN: args.push("--http-proxy=false")
+            if request.terminal_mode != "none": args.push("--interactive")
+            if request.terminal_mode == "tty": args.push("--tty")
             if linux_oci_user_selection_v3(request):
                 args.push("--user")
                 args.push(request.user_uid.to_text() + ":" + request.user_gid.to_text())

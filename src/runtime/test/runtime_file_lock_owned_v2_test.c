@@ -83,8 +83,8 @@ int main(int argc, char **argv) {
     assert(child >= 0);
     if (child == 0) {
         alarm(2); /* a regression deadlock fails rather than hanging forever */
-        assert(rt_file_lock_owned_state_v2(third) == 0);
-        assert(rt_file_lock_owned_release_v2(third) == 0);
+        assert(rt_file_lock_owned_state_v2(third) == 3);
+        assert(rt_file_lock_owned_release_v2(third) == 3);
         assert(acquire(path) == 0);
         _exit(0);
     }

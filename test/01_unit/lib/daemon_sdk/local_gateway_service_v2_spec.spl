@@ -1,0 +1,64 @@
+# NOT_RUN. Invalid startup/empty transport ownership; no fake listener success.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.daemon_sdk.local_gateway_v1.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_service_v2.*
+
+fn service_config_v2(work: i64, control: i64) -> LocalGatewayServiceConfigV2:
+    LocalGatewayServiceConfigV2(work_path: "/service/work", control_path: "/service/control",
+        service_uid: 1000, client_uid: 1001, work_connections: work,
+        control_connections: control, request_timeout_ms: 1000)
+
+fn service_classify_forbidden_v2(owner: i64, request: LocalGatewayRequestV1) -> Result<LocalGatewayDispatchClassV2, text>:
+    assert(false)
+    Err("no active service in invalid-startup tests")
+
+fn service_handler_forbidden_v2(owner: i64, request: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<i64>:
+    assert(false)
+    LocalGatewayOwnedResponseV1(owner, LocalGatewayResponseV1(request.request_id, 1, ""))
+
+describe "Bounded dual-ingress service ownership":
+    it "rejects capacity outside either reserved lane before native effects":
+        for bounds in [[0, 1], [17, 1], [1, 0], [1, 5]]:
+            val service = local_gateway_service_open_v2(19, service_config_v2(bounds[0], bounds[1]))
+            expect(service.owner).to_equal(19)
+            expect(service.phase).to_equal(4)
+            assert(service.work.listener == nil and service.control.listener == nil)
+            expect(service.error).to_equal("gateway-service-config")
+
+    it "refuses aliasing endpoints and a same-UID deployment":
+        var config = service_config_v2(1, 1)
+        config.control_path = config.work_path
+        val alias = local_gateway_service_open_v2(23, config)
+        expect(alias.owner).to_equal(23)
+        assert(alias.work.listener == nil and alias.control.listener == nil)
+        expect(alias.phase).to_equal(4)
+        config = service_config_v2(1, 1)
+        config.client_uid = config.service_uid
+        val same_uid = local_gateway_service_open_v2(29, config)
+        expect(same_uid.owner).to_equal(29)
+        expect(same_uid.phase).to_equal(4)
+
+    it "does not classify or dispatch a blocked startup":
+        val service = local_gateway_service_open_v2(31, service_config_v2(0, 1))
+        val turn = local_gateway_service_turn_v2(service, service_classify_forbidden_v2, service_handler_forbidden_v2)
+        expect(turn.service.owner).to_equal(31)
+        expect(turn.handled_control).to_equal(0)
+        expect(turn.handled_work).to_equal(0)
+        expect(turn.error).to_equal("gateway-service-config")
+
+    it "refuses stale failed-response selectors without dropping the domain":
+        val service = local_gateway_service_open_v2(37, service_config_v2(0, 1))
+        val turn = local_gateway_service_discard_failed_v2(service, true, 0, 1)
+        expect(turn.service.owner).to_equal(37)
+        expect(turn.service.phase).to_equal(4)
+        expect(turn.error).to_equal("gateway-failed-selector")
+
+    it "closes empty transport without claiming domain or journal release":
+        val service = local_gateway_service_open_v2(41, service_config_v2(0, 1))
+        val stopped = local_gateway_service_stop_v2(service)
+        expect(stopped.service.owner).to_equal(41)
+        expect(stopped.service.phase).to_equal(3)
+        expect(stopped.error).to_equal("gateway-service-config")
+        val again = local_gateway_service_stop_v2(stopped.service)
+        expect(again.service.owner).to_equal(41)
+        expect(again.error).to_equal(stopped.error)

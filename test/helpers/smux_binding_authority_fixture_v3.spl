@@ -1,0 +1,137 @@
+# AUTHORED_UNRUN. Supplied private keys must match the ACTUAL enrolled policy.
+# No fixed test seed, synthetic clock, host scope or provider is substituted.
+use app.io.mod.{env_get, file_read_regular_no_follow_bounded}
+use test.helpers.smux_owned_process_fixture.{owned_fixture_path, owned_fixture_private_path, owned_fixture_text}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.binary_inspect.{hex_to_bytes, bytes_to_hex_canonical}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_encode_grant_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2,
+    distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1, HostHelperExecutionProofV1,
+    host_helper_request_decode_v1, host_helper_execution_proof_decode_v1, host_helper_execution_proof_encode_v1}
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.{LocalAuthorityPolicyV1, local_authority_policy_load_v1}
+use std.nogc_sync_mut.orchestration.host_local_root_v1.host_local_context_v1
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.host_parent_budget_record_decode_v1
+use std.common.contracts.orchestration.controller_parent_budget_v1.{controller_parent_budget_digest_v1,
+    controller_parent_budget_proof_encode_v1}
+
+pub struct SignedBindingConfigV3:
+    host_root: text
+    request: HostHelperRequestV1
+    execution: HostHelperExecutionProofV1
+    issuer_seed_path: text
+    approver_seed_path: text
+    policy: LocalAuthorityPolicyV1
+    orchestrator_program: text
+    orchestrator_digest: text
+    marker_trigger_path: text
+
+pub fn signed_binding_fields_v3(bytes: text) -> Result<Dict<text, SdnValue>, text>:
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 16384,
+        max_depth: 3, max_nodes: 128, max_rows: 0, max_cells: 0, max_columns: 32))
+    if parsed.is_err(): return Err("signed fixture SDN malformed")
+    match parsed.unwrap().value:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("signed fixture SDN object required")
+
+pub fn signed_binding_int_v3(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key): return Err("signed fixture integer missing")
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("signed fixture integer required")
+
+fn signed_binding_private_v3(path: text) -> Result<(), text>:
+    if not owned_fixture_path(path): return Err("signed fixture absolute private path required")
+    val parts = path.split("/")
+    if parts.len() < 3: return Err("signed fixture private parent required")
+    for part in parts[1:]:
+        if part == "" or part == "." or part == "..": return Err("signed fixture normalized private path required")
+    owned_fixture_private_path(parts[0:parts.len() - 1].join("/"), "directory", "700")?
+    owned_fixture_private_path(path, "regular file", "600")?
+    Ok(())
+
+fn signed_binding_seed_v3(path: text) -> Result<[u8], text>:
+    signed_binding_private_v3(path)?
+    val source = file_read_regular_no_follow_bounded(path, 128)?.trim()
+    val seed = hex_to_bytes(source)
+    if source.len() != 64 or seed.len() != 32 or bytes_to_hex_canonical(seed) != source:
+        return Err("signed fixture seed must be canonical private 32-byte hex")
+    Ok(seed)
+
+# Signature verification against the pinned installed snapshot proves the
+# supplied seed corresponds to each requested issuer/approver identity and role.
+pub fn signed_binding_sign_v3(config: SignedBindingConfigV3,
+        original: HostHelperRequestV1) -> Result<(HostHelperRequestV1, text), text>:
+    val issuer = signed_binding_seed_v3(config.issuer_seed_path)?
+    val approver = signed_binding_seed_v3(config.approver_seed_path)?
+    var request = original
+    request.signed.signature = pure_ed25519_sign_from_seed_v1(issuer,
+        distributed_grant_signature_message_v2(request.signed)?).signature
+    request.approval.grant_digest = sha256_text(distributed_encode_grant_v2(request.signed.grant)?)
+    request.approval.request_digest = sha256_text(distributed_encode_operation_v2(request.operation)?)
+    request.approval.signature = pure_ed25519_sign_from_seed_v1(approver,
+        distributed_approval_signature_message_v2(request.approval)?).signature
+    var execution = config.execution
+    var operation = request.operation
+    operation.operation = "host_helper_execute_v1"
+    execution.signed.signature = pure_ed25519_sign_from_seed_v1(issuer,
+        distributed_grant_signature_message_v2(execution.signed)?).signature
+    execution.approval.grant_digest = sha256_text(distributed_encode_grant_v2(execution.signed.grant)?)
+    execution.approval.request_digest = sha256_text(distributed_encode_operation_v2(operation)?)
+    execution.approval.signature = pure_ed25519_sign_from_seed_v1(approver,
+        distributed_approval_signature_message_v2(execution.approval)?).signature
+    val context = host_local_context_v1(config.policy)
+    val _prepared = distributed_verify_grant_approval_from_snapshot_v2(config.policy.snapshot,
+        request.signed, request.approval, request.operation, context.grant_clock,
+        config.policy.snapshot.generation, context.policy_revision, context.revocation_epoch, context.session_generation)?
+    val _begun = distributed_verify_grant_approval_from_snapshot_v2(config.policy.snapshot,
+        execution.signed, execution.approval, operation, context.grant_clock,
+        config.policy.snapshot.generation, context.policy_revision, context.revocation_epoch, context.session_generation)?
+    Ok((request, host_helper_execution_proof_encode_v1(request, execution.signed, execution.approval)?))
+
+pub fn signed_binding_authority_config_v3() -> Result<SignedBindingConfigV3, text>:
+    val path = env_get("SMUX_SIGNED_BINDING_TEST_CONFIG")
+    signed_binding_private_v3(path)?
+    val fields = signed_binding_fields_v3(file_read_regular_no_follow_bounded(path, 16384)?)?
+    val keys = ["hostRoot", "helperRequestTemplate", "executionProofTemplate", "issuerSeed", "approverSeed",
+        "policyDigest", "orchestratorProgram", "orchestratorDigest", "markerTriggerPath"]
+    if fields.len() != keys.len(): return Err("signed fixture exact nine config fields required")
+    for key in keys:
+        if not fields.contains_key(key): return Err("signed fixture config field missing")
+    val root = owned_fixture_text(fields, "hostRoot")?
+    if not owned_fixture_path(root): return Err("signed fixture absolute host root required")
+    owned_fixture_private_path(root, "directory", "700")?
+    owned_fixture_private_path(root + "/smux-helper-staging", "directory", "700")?
+    val request_path = owned_fixture_text(fields, "helperRequestTemplate")?
+    val proof_path = owned_fixture_text(fields, "executionProofTemplate")?
+    signed_binding_private_v3(request_path)?
+    signed_binding_private_v3(proof_path)?
+    val request = host_helper_request_decode_v1(file_read_regular_no_follow_bounded(request_path, 2097152)?)?
+    val execution = host_helper_execution_proof_decode_v1(request,
+        file_read_regular_no_follow_bounded(proof_path, 2097152)?)?
+    val policy = local_authority_policy_load_v1(root, owned_fixture_text(fields, "policyDigest")?)?
+    val marker = owned_fixture_text(fields, "markerTriggerPath")?
+    signed_binding_private_v3(marker)?
+    val config = SignedBindingConfigV3(host_root: root, request: request, execution: execution,
+        issuer_seed_path: owned_fixture_text(fields, "issuerSeed")?, approver_seed_path: owned_fixture_text(fields, "approverSeed")?,
+        policy: policy, orchestrator_program: owned_fixture_text(fields, "orchestratorProgram")?,
+        orchestrator_digest: owned_fixture_text(fields, "orchestratorDigest")?, marker_trigger_path: marker)
+    if (request.signed.issuer_id != execution.signed.issuer_id or request.signed.key_revision != execution.signed.key_revision or
+            request.approval.approver_id != execution.approval.approver_id or request.approval.key_revision != execution.approval.key_revision):
+        return Err("signed fixture requires same enrolled issuer and approver keys for prepare and execute")
+    val _checked = signed_binding_sign_v3(config, request)?
+    val digest = controller_parent_budget_digest_v1(request.budget_proof.budget)?
+    val retained = host_parent_budget_record_decode_v1(file_read_regular_no_follow_bounded(
+        root + "/journal/host-parent-budget-records/" + digest + ".sdn", 2097152)?)?
+    if controller_parent_budget_proof_encode_v1(retained.proof)? != controller_parent_budget_proof_encode_v1(request.budget_proof)?:
+        return Err("signed fixture template does not match actual retained parent budget")
+    val context = host_local_context_v1(policy)
+    val _budget = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, retained.proof.signed,
+        retained.proof.approval, retained.proof.operation, context.grant_clock, policy.snapshot.generation,
+        context.policy_revision, context.revocation_epoch, context.session_generation)?
+    Ok(config)

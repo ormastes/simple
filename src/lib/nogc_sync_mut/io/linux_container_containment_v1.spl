@@ -1,0 +1,208 @@
+# Native observation owner only; no wire decoder, process control or capacity release.
+use std.common.string_core.str_len
+use std.common.contracts.container.kernel_qualification_v1.{ContainerKernelQualificationProfileV1, container_kernel_qualification_profile_digest_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+@unsafe(reason: "capture pinned cgroup and namespace observation owner", capabilities: [ffi])
+extern fn rt_linux_container_containment_capture_v1(pid: i64, cgroup: text, binding: text) -> i64
+@unsafe(reason: "read bounded events from retained native containment identity", capabilities: [ffi])
+extern fn rt_linux_container_containment_observe_v1(token: i64, binding: text) -> text
+@unsafe(reason: "retire observation descriptors without controlling workload", capabilities: [ffi])
+extern fn rt_linux_container_containment_close_v1(token: i64, binding: text) -> i64
+
+# Members are private to this owner module. Copied metadata cannot recreate it.
+pub class LinuxContainerContainmentOwnerV1:
+    native_token: i64
+    binding_digest: text
+
+pub enum LinuxContainerContainmentPopulationV1:
+    Populated
+    EmptySnapshot
+
+pub struct LinuxContainerContainmentSnapshotV1:
+    capture_pid: i64
+    process_start_ticks: i64
+    cgroup_path: text
+    cgroup_mount_id: i64
+    cgroup_mount_device: i64
+    cgroup_mount_inode: i64
+    cgroup_device: i64
+    cgroup_inode: i64
+    target_pidns_device: i64
+    target_pidns_inode: i64
+    target_cgroupns_device: i64
+    target_cgroupns_inode: i64
+    observer_pidns_device: i64
+    observer_pidns_inode: i64
+    observer_cgroupns_device: i64
+    observer_cgroupns_inode: i64
+    observer_mountns_device: i64
+    observer_mountns_inode: i64
+    observed_unix_ms: i64
+    binding_digest: text
+    state: LinuxContainerContainmentPopulationV1
+
+pub struct LinuxContainerContainmentTurnV1:
+    owner: LinuxContainerContainmentOwnerV1?
+    snapshot: LinuxContainerContainmentSnapshotV1?
+    error: text
+
+pub struct LinuxContainerContainmentCloseTurnV1:
+    owner: LinuxContainerContainmentOwnerV1?
+    closed: bool
+    error: text
+
+fn containment_number_v1(value: text) -> Result<i64, text>:
+    if str_len(value) < 1 or str_len(value) > 19 or (str_len(value) > 1 and value.starts_with("0")):
+        return Err("containment-native-number")
+    var result: i64 = 0
+    for i in 0..str_len(value):
+        val digit = (value.byte_at(i) as i64) - 48
+        if digit < 0 or digit > 9 or result > (9223372036854775807 - digit) / 10:
+            return Err("containment-native-number")
+        result = result * 10 + digit
+    Ok(result)
+
+fn containment_decode_v1(owner: LinuxContainerContainmentOwnerV1, bytes: text) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+    if (str_len(bytes) < 1 or str_len(bytes) > 6143 or not bytes.ends_with("\n") or
+            bytes.contains("\r") or bytes.contains("\t") or bytes.contains("\u{0}")):
+        return Err("containment-observation-unavailable-owner-retained")
+    val fields = bytes.split("\n")
+    if fields.len() != 24 or fields[0] != "linux-container-containment-native-v1" or fields[23] != "":
+        return Err("containment-native-schema")
+    if containment_number_v1(fields[1])? != owner.native_token or fields[2] != owner.binding_digest:
+        return Err("containment-native-binding")
+    var numbers: [i64] = []
+    for i in [3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]:
+        numbers.push(containment_number_v1(fields[i])?)
+    for i in [0, 1, 2, 4, 6, 8, 10, 12, 14, 16, 17]:
+        if numbers[i] <= 0: return Err("containment-native-identity")
+    if numbers[0] > 2147483647 or not fields[5].starts_with("/") or str_len(fields[5]) < 2:
+        return Err("containment-native-identity")
+    val state = match fields[22]:
+        case "0": LinuxContainerContainmentPopulationV1.EmptySnapshot
+        case "1": LinuxContainerContainmentPopulationV1.Populated
+        case _: return Err("containment-native-population")
+    Ok(LinuxContainerContainmentSnapshotV1(capture_pid: numbers[0], process_start_ticks: numbers[1],
+        cgroup_path: fields[5], cgroup_mount_id: numbers[2], cgroup_mount_device: numbers[3], cgroup_mount_inode: numbers[4],
+        cgroup_device: numbers[5], cgroup_inode: numbers[6], target_pidns_device: numbers[7], target_pidns_inode: numbers[8],
+        target_cgroupns_device: numbers[9], target_cgroupns_inode: numbers[10], observer_pidns_device: numbers[11],
+        observer_pidns_inode: numbers[12], observer_cgroupns_device: numbers[13], observer_cgroupns_inode: numbers[14],
+        observer_mountns_device: numbers[15], observer_mountns_inode: numbers[16], observed_unix_ms: numbers[17],
+        binding_digest: owner.binding_digest, state: state))
+
+pub fn linux_container_containment_capture_v1(pid: i64, expected_cgroup_path: text,
+        binding_digest: text) -> LinuxContainerContainmentTurnV1:
+    if pid <= 0 or pid > 2147483647 or not builder_digest_valid_v1(binding_digest):
+        return LinuxContainerContainmentTurnV1(nil, nil, "containment-capture-request-invalid")
+    val token = unsafe(capabilities: [ffi]):
+        rt_linux_container_containment_capture_v1(pid, expected_cgroup_path, binding_digest)
+    if token <= 0: return LinuxContainerContainmentTurnV1(nil, nil, "containment-capture-refused:{token}")
+    val owner = LinuxContainerContainmentOwnerV1(native_token: token, binding_digest: binding_digest)
+    linux_container_containment_observe_v1(owner)
+
+pub fn linux_container_containment_observe_v1(owner: LinuxContainerContainmentOwnerV1) -> LinuxContainerContainmentTurnV1:
+    val bytes = unsafe(capabilities: [ffi]):
+        rt_linux_container_containment_observe_v1(owner.native_token, owner.binding_digest)
+    match containment_decode_v1(owner, bytes):
+        case Ok(snapshot): LinuxContainerContainmentTurnV1(Some(owner), Some(snapshot), "")
+        case Err(error): LinuxContainerContainmentTurnV1(Some(owner), nil, error)
+
+pub fn linux_container_containment_close_v1(owner: LinuxContainerContainmentOwnerV1) -> LinuxContainerContainmentCloseTurnV1:
+    val result = unsafe(capabilities: [ffi]):
+        rt_linux_container_containment_close_v1(owner.native_token, owner.binding_digest)
+    if result != 0:
+        return LinuxContainerContainmentCloseTurnV1(Some(owner), false, "containment-close-unconfirmed:{result}")
+    LinuxContainerContainmentCloseTurnV1(nil, true, "")
+
+# Running observations are distinct from approved installed policy and from any
+# terminal proof. There is intentionally no eligibility/qualified/discharge bit.
+@unsafe(reason: "observe retained native kernel notes and current thread protections", capabilities: [ffi])
+extern fn rt_linux_container_containment_kernel_observe_v1(token: i64, binding: text,
+    expected_release: text, expected_build_id: text, profile_digest: text) -> text
+
+pub struct LinuxContainerContainmentKernelFactsV1:
+    kernel_release: text
+    kernel_build_id: text
+    kernel_notes_digest: text
+    observer_pid: i64
+    observer_tid: i64
+    seccomp_mode: i64
+    status_seccomp_mode: i64
+    tracer_pid: i64
+    dumpable: i64
+    no_new_privs: i64
+    status_no_new_privs: i64
+    proc_device: i64
+    proc_inode: i64
+    sysfs_device: i64
+    sysfs_inode: i64
+    notes_device: i64
+    notes_inode: i64
+    observer_pidns_device: i64
+    observer_pidns_inode: i64
+    observer_cgroupns_device: i64
+    observer_cgroupns_inode: i64
+    observer_mountns_device: i64
+    observer_mountns_inode: i64
+    observed_unix_ms: i64
+    binding_digest: text
+    profile_digest: text
+    evidence_digest: text
+
+pub struct LinuxContainerContainmentKernelTurnV1:
+    owner: LinuxContainerContainmentOwnerV1
+    facts: LinuxContainerContainmentKernelFactsV1?
+    error: text
+
+fn containment_kernel_decode_v1(owner: LinuxContainerContainmentOwnerV1, profile: ContainerKernelQualificationProfileV1,
+        profile_digest: text, bytes: text) -> Result<LinuxContainerContainmentKernelFactsV1, text>:
+    if (str_len(bytes) < 1 or str_len(bytes) > 2047 or not bytes.ends_with("\n") or
+            bytes.contains("\r") or bytes.contains("\t") or bytes.contains("\u{0}")):
+        return Err("containment-kernel-observation-unavailable-owner-retained")
+    val fields = bytes.split("\n")
+    if fields.len() != 29 or fields[0] != "linux-container-kernel-native-v1" or fields[28] != "":
+        return Err("containment-kernel-native-schema")
+    if (containment_number_v1(fields[1])? != owner.native_token or fields[2] != owner.binding_digest or
+            fields[3] != profile_digest or fields[4] != profile.kernel_release or fields[5] != profile.kernel_build_id or
+            not builder_digest_valid_v1(fields[6])):
+        return Err("containment-kernel-native-binding")
+    var numbers: [i64] = []
+    for i in 7..28: numbers.push(containment_number_v1(fields[i])?)
+    for i in [0, 1, 9, 11, 13, 15, 17, 19, 20]:
+        if numbers[i] <= 0: return Err("containment-kernel-native-identity")
+    if (numbers[0] > 2147483647 or numbers[1] > 2147483647 or numbers[2] != 0 or numbers[3] != 0 or
+            numbers[4] != 0 or numbers[5] != 0 or numbers[6] > 1 or numbers[6] != numbers[7]):
+        return Err("containment-kernel-protection-unqualified")
+    # Canonical evidence binds every fact and owner association, never the
+    # process-local native token. This digest is integrity, not installation.
+    val names = ["observerPid", "observerTid", "seccompMode", "statusSeccompMode", "tracerPid", "dumpable",
+        "noNewPrivs", "statusNoNewPrivs", "procDevice", "procInode", "sysfsDevice", "sysfsInode", "notesDevice", "notesInode",
+        "observerPidnsDevice", "observerPidnsInode", "observerCgroupnsDevice", "observerCgroupnsInode",
+        "observerMountnsDevice", "observerMountnsInode", "observedUnixMs"]
+    var record: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("linux-container-kernel-observation"),
+        "kernelRelease": SdnValue.String(fields[4]), "kernelBuildId": SdnValue.String(fields[5]), "kernelNotesDigest": SdnValue.String(fields[6]),
+        "bindingDigest": SdnValue.String(fields[2]), "profileDigest": SdnValue.String(fields[3])}
+    for i in 0..names.len(): record[names[i]] = SdnValue.Int(numbers[i])
+    val evidence = sha256_text(sdn_encode_canonical(SdnValue.Dict(record)))
+    Ok(LinuxContainerContainmentKernelFactsV1(kernel_release: fields[4], kernel_build_id: fields[5], kernel_notes_digest: fields[6],
+        observer_pid: numbers[0], observer_tid: numbers[1], seccomp_mode: numbers[2], status_seccomp_mode: numbers[3],
+        tracer_pid: numbers[4], dumpable: numbers[5], no_new_privs: numbers[6], status_no_new_privs: numbers[7],
+        proc_device: numbers[8], proc_inode: numbers[9], sysfs_device: numbers[10], sysfs_inode: numbers[11],
+        notes_device: numbers[12], notes_inode: numbers[13], observer_pidns_device: numbers[14], observer_pidns_inode: numbers[15],
+        observer_cgroupns_device: numbers[16], observer_cgroupns_inode: numbers[17], observer_mountns_device: numbers[18],
+        observer_mountns_inode: numbers[19], observed_unix_ms: numbers[20], binding_digest: fields[2], profile_digest: fields[3], evidence_digest: evidence))
+
+pub fn linux_container_containment_kernel_observe_v1(owner: LinuxContainerContainmentOwnerV1,
+        profile: ContainerKernelQualificationProfileV1) -> LinuxContainerContainmentKernelTurnV1:
+    val digest = container_kernel_qualification_profile_digest_v1(profile)
+    if digest.is_err(): return LinuxContainerContainmentKernelTurnV1(owner, nil, digest.unwrap_err())
+    val bytes = unsafe(capabilities: [ffi]):
+        rt_linux_container_containment_kernel_observe_v1(owner.native_token, owner.binding_digest,
+            profile.kernel_release, profile.kernel_build_id, digest.unwrap())
+    match containment_kernel_decode_v1(owner, profile, digest.unwrap(), bytes):
+        case Ok(facts): LinuxContainerContainmentKernelTurnV1(owner, Some(facts), "")
+        case Err(reason): LinuxContainerContainmentKernelTurnV1(owner, nil, reason)

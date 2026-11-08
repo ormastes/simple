@@ -1,0 +1,45 @@
+# Actual Windows AOT Engine pipe fixture. SOURCE-ONLY NOT_RUN; no fake server.
+use std.spec.*
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.*
+use test.fixtures.orchestration.windows_docker_engine_exchange_fixture_v3.*
+
+describe "Windows actual private Engine HTTP exchange":
+    it "captures real info bytes on the same admitted pipe and collects before assertions":
+        step("Capture actual Engine info over the protected fixed named pipe")
+        val result = windows_engine_exchange_info_fixture_v3()
+        # Fixture retained every cleanup owner before reaching these assertions.
+        expect(result.cleanup_complete).to_equal(true)
+        expect(result.failure).to_equal("")
+        val observation = result.observation.unwrap()
+        expect(observation.server_pid > 0).to_equal(true)
+        expect(observation.owner_class != "").to_equal(true)
+        expect(observation.dacl_protected).to_equal(true)
+        expect(observation.untrusted_control_rights).to_equal(false)
+        expect(result.same_completed_observation).to_equal(true)
+        expect(result.closed_observation_refused).to_equal(true)
+        val response = result.response.unwrap()
+        expect(response.status).to_equal(200)
+        expect(response.stream_mode).to_equal("")
+        expect(result.written_bytes > 0).to_equal(true)
+        val info = windows_engine_info_decode_v3(response.body).unwrap()
+        expect(info.os_type).to_equal("windows")
+        expect(info.engine_id != "").to_equal(true)
+        expect(info.kernel_version != "").to_equal(true)
+
+    it "cancels the exact connected pipe before any HTTP write and retains it until native collection":
+        step("Cancel a real admitted lease before its first request byte")
+        val result = windows_engine_exchange_info_fixture_v3(true)
+        expect(result.cleanup_complete).to_equal(true)
+        expect(result.observation.unwrap().server_pid > 0).to_equal(true)
+        expect(result.written_bytes).to_equal(0)
+        expect(result.response).to_be_nil()
+        expect(result.closed_observation_refused).to_equal(true)
+
+    it "refuses the first request write after the monotonic transport window expires":
+        step("Expire a one-millisecond exchange before its first request byte")
+        val result = windows_engine_exchange_info_fixture_v3(false, true)
+        expect(result.cleanup_complete).to_equal(true)
+        expect(result.failure).to_equal("engine-exchange-control-window-expired")
+        expect(result.written_bytes).to_equal(0)
+        expect(result.response).to_be_nil()
+        expect(result.closed_observation_refused).to_equal(true)

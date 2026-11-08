@@ -1,0 +1,124 @@
+# NOT_RUN. Two externally launched processes under already provisioned distinct
+# UIDs. This fixture never creates identities, elevates, or fabricates tokens.
+use std.nogc_sync_mut.sffi.cli_args.cli_get_args
+use std.common.string_core.str_len
+use test.fixtures.daemon_sdk.gateway_cli_v2.{gateway_fixture_uid_v2, gateway_fixture_now_v2}
+use std.nogc_sync_mut.io.local_ipc_v1.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_v1.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_client_v1.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.*
+
+fn counted_v2(owner: i64, request: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<i64>:
+    assert(request.action == "fixture-count" and request.operation_id == "fixture-operation")
+    assert(request.payload == "nonce-é")
+    LocalGatewayOwnedResponseV1(owner + 1, LocalGatewayResponseV1(request.request_id, 0, "counted-once"))
+
+fn mismatch_v2(owner: i64, request: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<i64>:
+    val result = counted_v2(owner, request)
+    LocalGatewayOwnedResponseV1(result.owner, LocalGatewayResponseV1("b".repeat(64), 0, "retained-owner"))
+
+fn forbidden_v2(owner: i64, request: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<i64>:
+    assert(false) # A copied already-claimed connection must not invoke again.
+    LocalGatewayOwnedResponseV1(owner, LocalGatewayResponseV1(request.request_id, 1, ""))
+
+fn server_v2(path: text, service_uid: i64, client_uid: i64, mode: text) -> i64:
+    val opened = local_unix_listen_v1(path, service_uid, 2)
+    assert(opened.error == "" and opened.owner != nil)
+    var listener = opened.owner.unwrap()
+    print "gateway-dispatch-v2 LISTENING"
+    val deadline = gateway_fixture_now_v2() + 15000
+    var accepted: LocalGatewayConnectionV1? = nil
+    while accepted == nil:
+        assert(gateway_fixture_now_v2() < deadline)
+        val turn = local_gateway_accept_v1(listener, client_uid, 15000)
+        listener = turn.listener
+        accepted = turn.connection
+        assert(turn.error == "" or turn.error == "local_unix_would_block" or turn.error == "local_unix_busy")
+    var connection = accepted.unwrap()
+    var request: LocalGatewayRequestV1? = nil
+    while request == nil:
+        assert(gateway_fixture_now_v2() < deadline)
+        val received = local_gateway_receive_v2(connection)
+        connection = received.connection
+        assert(received.error == "")
+        request = received.request
+    assert(request.unwrap().peer_uid == client_uid)
+    assert(connection.phase == 5 and connection.response == nil)
+    val copied_ready = connection
+    # Re-reading readiness neither claims nor invokes a domain handler.
+    val again = local_gateway_receive_v2(connection)
+    connection = again.connection
+    assert(again.error == "" and again.request != nil)
+    val dispatched = if mode == "correlation":
+        local_gateway_dispatch_owned_v2(17, connection, mismatch_v2)
+    else:
+        local_gateway_dispatch_owned_v2(17, connection, counted_v2)
+    connection = dispatched.connection
+    assert(dispatched.handled and dispatched.owner == 18)
+    val duplicate = local_gateway_dispatch_owned_v2(dispatched.owner, copied_ready, forbidden_v2)
+    assert(not duplicate.handled and duplicate.owner == 18 and duplicate.error != "")
+    if mode == "correlation":
+        assert(dispatched.error == "gateway-response-correlation")
+        assert(connection.response.unwrap().payload == "retained-owner")
+    else:
+        assert(dispatched.error == "" and connection.phase == 2)
+    if mode == "publication":
+        # Actual native close after callback, before publication. The stale
+        # copied connection is diagnostic metadata, not retained FD authority.
+        val closed = local_unix_close_v1(connection.native)
+        assert(closed.closed and closed.owner == nil and closed.error == "")
+        val failed = local_gateway_publish_v2(connection)
+        connection = failed.connection
+        assert(failed.error != "" and connection.phase == 4)
+        assert(dispatched.owner == 18 and connection.response.unwrap().payload == "counted-once")
+        val stopped = local_gateway_turn_owned_v1(dispatched.owner, connection, forbidden_v2)
+        assert(stopped.owner == 18 and not stopped.handled)
+    else:
+        if mode == "success":
+            while connection.phase == 2:
+                assert(gateway_fixture_now_v2() < deadline)
+                val sent = local_gateway_publish_v2(connection)
+                connection = sent.connection
+                assert(sent.error == "")
+            assert(connection.phase == 3)
+        val closed = local_unix_close_v1(connection.native)
+        assert(closed.closed and closed.owner == nil and closed.error == "")
+    val closed_listener = local_unix_listener_close_v1(listener)
+    assert(closed_listener.closed and closed_listener.owner == nil and closed_listener.error == "")
+    print "gateway-dispatch-v2 server PASS"
+    0
+
+fn client_v2(path: text, service_uid: i64, mode: text) -> i64:
+    val payload = "nonce-é"
+    val header = LocalGatewayHeaderV1(response: false, request_id: "a".repeat(64),
+        action: "fixture-count", operation_id: "fixture-operation", exit_code: 0,
+        payload_bytes: str_len(payload), handoff_metadata: "")
+    val opened = local_gateway_client_open_v1(path, service_uid, header, payload, 15000)
+    assert(opened.error == "" and opened.client != nil and opened.retained_connection == nil)
+    var client = opened.client.unwrap()
+    val deadline = gateway_fixture_now_v2() + 15000
+    while client.phase < 4:
+        assert(gateway_fixture_now_v2() < deadline)
+        client = local_gateway_client_poll_v1(client)
+    if mode == "success":
+        assert(client.phase == 4 and client.error == "")
+        assert(local_gateway_payload_decode_v1(client.reader.header.unwrap(), client.reader.payload).unwrap() == "counted-once")
+    else:
+        assert(client.phase == 5 and client.error != "")
+    val closed = local_unix_close_v1(client.connection)
+    assert(closed.closed and closed.owner == nil and closed.error == "")
+    print "gateway-dispatch-v2 client PASS"
+    0
+
+fn main() -> i64:
+    val args = cli_get_args()
+    assert(args.len() == 7)
+    val role = args[1]
+    val mode = args[2]
+    assert(mode == "success" or mode == "correlation" or mode == "publication")
+    val service_uid = gateway_fixture_uid_v2(args[4])
+    val client_uid = gateway_fixture_uid_v2(args[5])
+    assert(service_uid != client_uid and args[6] == "provisioned-distinct-uids")
+    if role == "server": return server_v2(args[3], service_uid, client_uid, mode)
+    assert(role == "client")
+    client_v2(args[3], service_uid, mode)

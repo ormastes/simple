@@ -10,6 +10,7 @@ use std.nogc_sync_mut.orchestration.host_authorized_reservation_v1.host_authoriz
 use std.nogc_sync_mut.orchestration.host_parent_budget_v1.{
     host_parent_budget_record_decode_v1, host_parent_budget_store_v1}
 use std.common.contracts.orchestration.host_prepare_request_v1.host_prepare_request_decode_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.nogc_sync_mut.orchestration.host_local_command_v1.{host_local_status_v1, host_local_validate_payload_v2}
 use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_lookup_v2,
     DistributedOperationJournalOpenCleanupV2, DistributedOperationJournalCleanupTurnV2,
@@ -38,6 +39,12 @@ pub struct HostServiceRequestV2:
     operation_id: text
     payload: text
 
+# Trusted composition data from a loaded transport policy, never wire identity.
+pub struct HostServiceMappedPeerV2:
+    principal: text
+    project: text
+    service_scope_id: text
+
 pub struct HostServiceTurnV2:
     owner: HostServiceDomainV2
     exit_code: i64
@@ -46,11 +53,14 @@ pub struct HostServiceTurnV2:
 pub fn host_service_effect_action_v2(action: text) -> bool:
     ["host-execute", "host-inspect", "host-wait", "host-cleanup"].contains(action)
 
+pub fn host_service_supported_action_v2(action: text) -> bool:
+    ["host-status", "host-validate", "host-parent-budget", "host-prepare",
+        "host-execute", "host-inspect", "host-wait", "host-cleanup"].contains(action)
+
 pub fn host_service_request_error_v2(request: HostServiceRequestV2) -> text:
     if str_len(request.action) == 0 or str_len(request.action) > HOST_SERVICE_MAX_ACTION_BYTES_V2:
         return "host-service-action-size"
-    if not ["host-status", "host-validate", "host-parent-budget", "host-prepare",
-            "host-execute", "host-inspect", "host-wait", "host-cleanup"].contains(request.action):
+    if not host_service_supported_action_v2(request.action):
         return "host-service-action-unsupported"
     if str_len(request.operation_id) > HOST_SERVICE_MAX_OPERATION_BYTES_V2:
         return "host-service-operation-size"
@@ -125,6 +135,33 @@ pub fn host_service_domain_close_v2(owner: HostServiceDomainV2) -> DistributedOp
 
 pub fn host_service_domain_turn_v2(owner: HostServiceDomainV2,
         request: HostServiceRequestV2) -> HostServiceTurnV2:
+    # Existing trusted in-process port. Transport callers use the mapped port.
+    host_service_domain_dispatch_v2(owner, request, nil)
+
+pub fn host_service_domain_mapped_turn_v2(owner: HostServiceDomainV2,
+        request: HostServiceRequestV2, peer: HostServiceMappedPeerV2) -> HostServiceTurnV2:
+    val mapped_error = host_service_mapped_peer_error_v2(owner, peer)
+    if mapped_error != "": return host_service_error_v2(owner, request, mapped_error)
+    host_service_domain_dispatch_v2(owner, request, Some(peer))
+
+pub fn host_service_mapped_peer_error_v2(owner: HostServiceDomainV2, peer: HostServiceMappedPeerV2) -> text:
+    if (not builder_identifier_valid_v1(peer.principal) or not builder_identifier_valid_v1(peer.project) or
+            not builder_identifier_valid_v1(peer.service_scope_id) or peer.service_scope_id != owner.local.config.service_scope_id or
+            peer.service_scope_id != owner.local.scope.service_scope_id):
+        return "host-service-peer-scope-mismatch"
+    ""
+
+fn host_service_peer_operation_error_v2(peer: Option<HostServiceMappedPeerV2>, operation: OperationEnvelopeV2,
+        service_scope_id: text) -> text:
+    match peer:
+        case Some(mapped):
+            if (operation.principal != mapped.principal or operation.project != mapped.project or
+                    service_scope_id != mapped.service_scope_id): return "host-service-peer-subject-mismatch"
+        case None: ()
+    ""
+
+fn host_service_domain_dispatch_v2(owner: HostServiceDomainV2,
+        request: HostServiceRequestV2, peer: Option<HostServiceMappedPeerV2>) -> HostServiceTurnV2:
     val request_error = host_service_request_error_v2(request)
     if request_error != "": return host_service_error_v2(owner, request, request_error)
     val live = host_service_live_v2(owner)
@@ -153,6 +190,9 @@ pub fn host_service_domain_turn_v2(owner: HostServiceDomainV2,
             return host_service_error_v2(owner, request, "host-service-operation-mismatch")
         if prepared_request.intent.reservation.service_scope_id != owner.local.config.service_scope_id:
             return host_service_error_v2(owner, request, "host-service-scope-mismatch")
+        val mapped_error = host_service_peer_operation_error_v2(peer, prepared_request.operation,
+            prepared_request.intent.reservation.service_scope_id)
+        if mapped_error != "": return host_service_error_v2(owner, request, mapped_error)
         val prepared = host_authorized_prepare_reply_v1(owner.local.capacity, request.payload,
             owner.local.policy.snapshot, owner.local.policy.snapshot.generation,
             host_local_context_v1(owner.local.policy), refresh)
@@ -170,6 +210,18 @@ pub fn host_service_domain_turn_v2(owner: HostServiceDomainV2,
     if record.is_err(): return host_service_error_v2(owner, request, record.unwrap_err())
     if record.unwrap().proof.budget.parent_operation_id != request.operation_id:
         return host_service_error_v2(owner, request, "host-service-operation-mismatch")
+    # Check this SAME decoded record before its actual SDK store/verifier.
+    # No gateway predecoder or wire-supplied identity can select another subject.
+    val budget_record = record.unwrap()
+    val budget_peer = host_service_peer_operation_error_v2(peer, budget_record.proof.operation,
+        budget_record.proof.budget.scope.service_scope_id)
+    if budget_peer != "": return host_service_error_v2(owner, request, budget_peer)
+    val parent_peer = host_service_peer_operation_error_v2(peer, budget_record.parent_binding.host_operation,
+        budget_record.parent_binding.host_intent.reservation.service_scope_id)
+    if parent_peer != "": return host_service_error_v2(owner, request, parent_peer)
+    val controller_peer = host_service_peer_operation_error_v2(peer, budget_record.parent_controller_operation,
+        budget_record.proof.budget.scope.service_scope_id)
+    if controller_peer != "": return host_service_error_v2(owner, request, controller_peer)
     val stored = host_parent_budget_store_v1(owner.local, record.unwrap(), host_local_context_v1(owner.local.policy), refresh)
     if stored.is_err(): return host_service_error_v2(owner, request, stored.unwrap_err(), true)
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-parent-budget-reference"),

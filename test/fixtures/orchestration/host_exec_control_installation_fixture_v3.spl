@@ -1,0 +1,145 @@
+# Real signed verification, SAME operation WAL and native owned lock/private IO.
+# Root/native facts and prior container commands are explicit scripted fixture
+# data; this is NOT native enrollment, policy probing or exec readiness evidence.
+use std.spec.{expect, fail}
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.host_execution_fixture_v2
+use test.fixtures.orchestration.host_owned_journal_fixture_v2.host_owned_journal_ready_v2
+use test.fixtures.orchestration.host_enrollment_claim_fixture_v1.{host_claim_key_fields_v1, host_claim_fixture_v1}
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.host_enrollment_payload_digest_v1
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.local_authority_policy_load_v1
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
+use std.common.contracts.orchestration.host_execute_request_v2.HostExecuteRequestV2
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_config_v1.decode_host_config
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.*
+use std.common.contracts.distributed_control_codec_v2.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+
+pub struct HostInstallationFixtureV3:
+    local: HostLocalRootV1
+    request: HostExecControlInstallationRequestV3
+    context: HostReservationAuthorizationContextV1
+    auxiliary_root: text
+    parent: HostExecuteRequestV2
+
+pub fn host_installation_resign_v3(request: HostExecControlInstallationRequestV3) -> HostExecControlInstallationRequestV3:
+    var value = request
+    value.operation.id = value.intent.operation_id
+    value.operation.payload_digest = host_exec_control_installation_intent_digest_v3(value.intent).unwrap()
+    value.signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), distributed_grant_signature_message_v2(value.signed).unwrap()).signature
+    value.approval.grant_digest = sha256_text(distributed_encode_grant_v2(value.signed.grant).unwrap())
+    value.approval.request_digest = sha256_text(distributed_encode_operation_v2(value.operation).unwrap())
+    value.approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), distributed_approval_signature_message_v2(value.approval).unwrap()).signature
+    value
+
+pub fn host_installation_fixture_v3(mode: text = "success",
+        actions: [text] = ["host_exec_control_install_v3"], grant_clock: i64 = 100,
+        authority_window_ms: i64 = 0, key_expires_at: Option<i64> = nil) -> HostInstallationFixtureV3:
+    val timing_override = authority_window_ms > 0
+    val clock = grant_clock
+    val window = authority_window_ms
+    assert(clock > 0 and window >= 0 and window <= 1000000000)
+    if timing_override:
+        assert(window > 10 and clock <= 9223372036854775807 - 2 * window)
+    val expires = if timing_override: clock + window else: 0
+    val shape = host_execution_fixture_v2(mode)
+    assert(host_capacity_owner_close_v1(shape.owner).unwrap())
+    val root = host_claim_fixture_v1()
+    val config = decode_host_config(root.configuration_bytes).unwrap()
+    var binding = root.enrollment.binding
+    binding.native_machine_id = shape.scope.native_machine_id
+    binding.native_boot_id = shape.scope.boot_id
+    binding.provider_identity_digest = shape.provider_digest
+    val base = verification_fixture()
+    var issuer = base.issuer
+    var approver = base.approver
+    issuer.operations = actions
+    approver.operations = actions
+    if timing_override:
+        issuer.expires_at = clock + 2 * window
+        approver.expires_at = clock + 2 * window
+    if val key_expiry = key_expires_at:
+        issuer.expires_at = key_expiry
+        approver.expires_at = key_expiry
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "generation": SdnValue.Int(7),
+        "policyRevision": SdnValue.Int(4), "revocationEpoch": SdnValue.Int(2), "sessionGeneration": SdnValue.Int(3),
+        "keys": SdnValue.Array([host_claim_key_fields_v1(issuer), host_claim_key_fields_v1(approver)])}
+    val policy_bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    assert(file_atomic_write_mode(root.parent + "/authority-policy.sdn", policy_bytes, 0o600))
+    binding.policy_digest = sha256_text(policy_bytes)
+    val policy = local_authority_policy_load_v1(root.parent, binding.policy_digest).unwrap()
+    val digest = host_enrollment_payload_digest_v1(binding).unwrap()
+    val capacity = HostCapacityV1(physical_host_id: config.physical_host_id, authority_id: "host-" + digest,
+        boot_id: container_scope_fence_id_v2(shape.scope).unwrap(), provider_generation: shape.scope.provider_generation,
+        cpu_millis: config.cpu_ceiling_millis, memory_bytes: config.memory_ceiling_bytes, exclusive_devices: [])
+    val opened = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(root.parent + "/journal", capacity, "d".repeat(64), 100, true))
+    var retained_intent = shape.envelope.intent
+    retained_intent.fence.authority_id = capacity.authority_id
+    retained_intent.fence.revision = opened.ledger.revision
+    retained_intent = host_reservation_bind_intent_v1(retained_intent).unwrap()
+    var retained_operation = shape.envelope.operation
+    retained_operation.payload_digest = retained_intent.reservation.payload_digest
+    var preparation = shape.envelope.signed.grant
+    preparation.operations = ["host_reservation_v1"]
+    if timing_override: preparation.expires_at = expires
+    val context = HostReservationAuthorizationContextV1(clock, 10, 4, 2, 3)
+    val prepared = host_capacity_owner_prepare_v1(opened, retained_intent, retained_operation, preparation, context).unwrap()
+    val local = HostLocalRootV1(root: root.parent, binding: binding, config: config, policy: policy,
+        scope: shape.scope, container: shape.container, capacity: prepared)
+    var parent = shape.envelope
+    parent.intent = retained_intent
+    parent.operation = retained_operation
+    parent.receipt = host_capacity_owner_prepared_receipt_v1(prepared, retained_intent, retained_operation, preparation, context).unwrap()
+    if timing_override:
+        parent.signed.grant.expires_at = expires
+        parent.approval.expires_at = expires - 10
+    parent.signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), distributed_grant_signature_message_v2(parent.signed).unwrap()).signature
+    var execution_operation = retained_operation
+    execution_operation.operation = "host_execute_v1"
+    parent.approval.grant_digest = sha256_text(distributed_encode_grant_v2(parent.signed.grant).unwrap())
+    parent.approval.request_digest = sha256_text(distributed_encode_operation_v2(execution_operation).unwrap())
+    parent.approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), distributed_approval_signature_message_v2(parent.approval).unwrap()).signature
+    val control_fields: Dict<text, SdnValue> = {"fixtureOnly": SdnValue.Bool(true)}
+    val control = sdn_encode_canonical(SdnValue.Dict(control_fields)) + "\n"
+    val intent = HostExecControlInstallationIntentV3(operation_id: "control-install-1",
+        enrollment_binding_digest: host_enrollment_payload_digest_v1(local.binding).unwrap(), scope: local.scope,
+        provider_identity_digest: local.binding.provider_identity_digest,
+        control_policy_bytes: control, control_policy_digest: sha256_text(control))
+    var operation = base.request
+    operation.id = intent.operation_id
+    operation.operation = "host_exec_control_install_v3"
+    operation.payload_digest = host_exec_control_installation_intent_digest_v3(intent).unwrap()
+    operation.environment_digest = local.binding.provider_identity_digest
+    var signed = base.signed
+    signed.grant.operations = ["host_exec_control_install_v3"]
+    if timing_override: signed.grant.expires_at = expires
+    signed.grant.environment_digest = local.binding.provider_identity_digest
+    val fixture = HostInstallationFixtureV3(local, HostExecControlInstallationRequestV3(intent, operation, signed, base.approval), context, shape.root, parent)
+    var complete = fixture
+    if timing_override: complete.request.approval.expires_at = expires - 10
+    complete.request = host_installation_resign_v3(complete.request)
+    complete
+
+pub fn host_installation_cursor_v3(local: HostLocalRootV1) -> i64:
+    match local.container:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.provider.scripted_cursor
+        case _: fail("installation source fixture requires actual scripted Linux common adapter")
+
+pub fn host_installation_dispose_v3(local: HostLocalRootV1, auxiliary_root: text):
+    val closed = host_capacity_owner_close_owned_v2(local.capacity)
+    expect(closed.closed).to_equal(true)
+    expect(closed.error).to_equal("")
+    assert(closed.cleanup.is_none())
+    assert(dir_remove(local.root, true))
+    assert(dir_remove(auxiliary_root, true))

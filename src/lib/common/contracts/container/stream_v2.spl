@@ -174,35 +174,45 @@ pub fn container_output_plan_digest_v2(plan: ContainerOutputPlanV2) -> Result<te
 
 # Structural matching only. A copied carrier does not grant another launch;
 # the daemon's exclusive per-helper claim independently prevents respawn.
-pub fn container_output_admission_validate_v2(plan: ContainerOutputPlanV2,
+pub struct ContainerHelperAssociationV3:
+    workload: ContainerExecutionPlanV2
+    runtime: RuntimeIdentityV1
+    identity: ContainerOutputIdentityV2
+    resources: ContainerOutputResourcesV2
+    request_digest: text
+    timeout_ms: i64
+
+# Caller MUST first validate its kind-specific canonical plan digest, as both
+# output and primary wrappers do. This is correlation only: no authority or
+# validation of the actual native argv/config is provided by this association.
+pub fn container_helper_admission_validate_v3(plan: ContainerHelperAssociationV3,
         helper: ContainerHelperAdmissionV2) -> Result<bool, text>:
-    val digest = container_output_plan_digest_v2(plan)?
-    if plan.request_digest != digest or helper.plan.request_digest != digest or
-            helper.deadline.request_digest != digest or helper.deadline.operation_id != plan.identity.operation_id or
-            helper.deadline.actions != ["attach"] or helper.deadline.expires_at_unix_ms <= 0:
+    if (helper.plan.request_digest != plan.request_digest or
+            helper.deadline.request_digest != plan.request_digest or helper.deadline.operation_id != plan.identity.operation_id or
+            helper.deadline.actions != ["attach"] or helper.deadline.expires_at_unix_ms <= 0):
         return Err("container-output-admission-template-mismatch")
     val encoded_plan = host_helper_plan_bytes_v1(helper.plan)?
-    if helper.plan.helper_kind != "attach-broker" or helper.plan.operation_id != plan.identity.operation_id or
+    if (helper.plan.helper_kind != "attach-broker" or helper.plan.operation_id != plan.identity.operation_id or
             helper.plan.parent_operation_id != plan.identity.parent_operation_id or
             helper.plan.parent_operation_digest != plan.identity.parent_operation_digest or
             helper.plan.parent_assignment_digest != plan.identity.parent_assignment_digest or
-            helper.plan.parent_budget_digest != plan.identity.parent_budget_digest:
+            helper.plan.parent_budget_digest != plan.identity.parent_budget_digest):
         return Err("container-output-admission-parent-mismatch")
     val workload = plan.workload
     val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id,
         service_scope_id: workload.service_scope_id, boot_id: workload.boot_id,
         provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
         continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
-    if container_host_scope_bytes_v2(helper.plan.scope)? != container_host_scope_bytes_v2(scope)? or
-            plan.runtime.node_boot_id != container_scope_fence_id_v2(scope)?:
+    if (container_host_scope_bytes_v2(helper.plan.scope)? != container_host_scope_bytes_v2(scope)? or
+            plan.runtime.node_boot_id != container_scope_fence_id_v2(scope)?):
         return Err("container-output-admission-scope-mismatch")
-    if helper.cpu_millis != plan.resources.cpu_millis or helper.memory_bytes != plan.resources.memory_bytes or
+    if (helper.cpu_millis != plan.resources.cpu_millis or helper.memory_bytes != plan.resources.memory_bytes or
             helper.operation.memory_bytes != helper.memory_bytes or
-            helper.operation.duration_ms < plan.launch_template.request.timeout_ms:
+            helper.operation.duration_ms < plan.timeout_ms):
         return Err("container-output-admission-resource-mismatch")
-    if helper.operation.operation != "host_helper_reservation_v1" or
+    if (helper.operation.operation != "host_helper_reservation_v1" or
             helper.operation.host_id != scope.physical_host_id or
-            helper.operation.id != plan.identity.operation_id:
+            helper.operation.id != plan.identity.operation_id):
         return Err("container-output-admission-operation-mismatch")
     # The signed operation binds the reservation intent; its plan_digest in
     # turn binds the helper plan. These are distinct hash domains.
@@ -221,6 +231,15 @@ pub fn container_output_admission_validate_v2(plan: ContainerOutputPlanV2,
     for identity in [helper.grant_id, helper.issuer_id, helper.approver_id]:
         if not builder_identifier_valid_v1(identity): return Err("container-output-admission-principal-invalid")
     Ok(true)
+
+
+pub fn container_output_admission_validate_v2(plan: ContainerOutputPlanV2,
+        helper: ContainerHelperAdmissionV2) -> Result<bool, text>:
+    val digest = container_output_plan_digest_v2(plan)?
+    if plan.request_digest != digest: return Err("container-output-admission-template-mismatch")
+    container_helper_admission_validate_v3(ContainerHelperAssociationV3(workload: plan.workload, runtime: plan.runtime,
+        identity: plan.identity, resources: plan.resources, request_digest: digest,
+        timeout_ms: plan.launch_template.request.timeout_ms), helper)
 
 # Retained plan data is not an admission or restored host lease. The common
 # open owner still requires a fresh actual plan and verified helper authority.

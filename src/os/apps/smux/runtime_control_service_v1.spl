@@ -1,0 +1,99 @@
+# Trusted-local configured server only. The caller has already compared its
+# retained service credential. No wire principal or decoded lease is accepted.
+use os.apps.smux.runtime_binding_state_v3.SmuxRuntimeBindingOwnerV3
+use os.apps.smux.runtime_control_request_v1.{SmuxRuntimeControlRequestV1, smux_runtime_control_request_validate_v1}
+use os.apps.smux.runtime_control_reply_v1.smux_runtime_control_reply_v1
+use os.apps.smux.runtime_control_target_v1.smux_runtime_control_target_v1
+use os.apps.smux.smux_runtime_control_owner_v1.{SmuxRuntimeControlOwnerV1, SmuxRuntimeControlTurnV1,
+    smux_runtime_control_find_v1, smux_runtime_control_issue_v1, smux_runtime_control_check_v1,
+    smux_runtime_control_revoke_v1}
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlLeaseV1, session_runtime_control_target_digest_v1}
+use std.common.crypto.constant_time.constant_time_compare
+use std.sosix.time.sosix_time_now_monotonic_ms
+use std.sosix.entropy.sosix_random_hex
+
+pub struct SmuxRuntimeControlServiceTurnV1:
+    owner: SmuxRuntimeControlOwnerV1
+    reply: text
+
+fn control_reply(owner: SmuxRuntimeControlOwnerV1, request: SmuxRuntimeControlRequestV1,
+        status: text, reason: text, revision: i64, lease: SessionRuntimeControlLeaseV1?, nonce: text) -> SmuxRuntimeControlServiceTurnV1:
+    val encoded = smux_runtime_control_reply_v1(request, owner.service_incarnation, status, reason, revision, lease, nonce)
+    SmuxRuntimeControlServiceTurnV1(owner, if encoded.is_ok(): encoded.unwrap() else: "smux: control reply unavailable; inspect same binding and kind")
+
+fn control_owner_reply(request: SmuxRuntimeControlRequestV1, turn: SmuxRuntimeControlTurnV1) -> SmuxRuntimeControlServiceTurnV1:
+    if turn.error != "": return control_reply(turn.owner, request, "rejected", turn.error, turn.revision, nil, "")
+    val status = if request.action == "issue": (if turn.replay: "replayed" else: "issued") else: "revoked"
+    control_reply(turn.owner, request, status, "", turn.revision, turn.lease, if request.action == "issue": turn.nonce else: "")
+
+pub fn smux_runtime_control_service_v1(binding: SmuxRuntimeBindingOwnerV3, owner: SmuxRuntimeControlOwnerV1,
+        request: SmuxRuntimeControlRequestV1) -> SmuxRuntimeControlServiceTurnV1:
+    var current = owner
+    if smux_runtime_control_request_validate_v1(request).is_err() or binding.service_incarnation != owner.service_incarnation:
+        return control_reply(current, request, "rejected", "runtime-control-context-invalid", 0, nil, "")
+    if request.action == "revoke":
+        return control_owner_reply(request, smux_runtime_control_revoke_v1(current, request.binding_uid,
+            request.control_kind, request.expected_revision, sosix_time_now_monotonic_ms()))
+    if request.action == "issue" or request.action == "resolve":
+        val resolved = smux_runtime_control_target_v1(binding, request.binding_uid, request.client_id, request.attachment_token)
+        if resolved.is_err(): return control_reply(current, request, "rejected", resolved.unwrap_err(), 0, nil, "")
+        val target_digest = session_runtime_control_target_digest_v1(resolved.unwrap().target)
+        if target_digest.is_err(): return control_reply(current, request, "rejected", "runtime-control-target-invalid", 0, nil, "")
+        if request.action == "resolve":
+            val encoded = smux_runtime_control_reply_v1(request, owner.service_incarnation, "resolved", "", 0, nil, "", target_digest.unwrap())
+            return SmuxRuntimeControlServiceTurnV1(current, if encoded.is_ok(): encoded.unwrap() else: "smux: control resolution unavailable")
+        if request.expected_target_digest != target_digest.unwrap():
+            return control_reply(current, request, "rejected", "runtime-control-target-changed", 0, nil, "")
+        val fresh = sosix_random_hex(32)
+        if fresh == nil: return control_reply(current, request, "rejected", "runtime-control-entropy-unavailable", 0, nil, "")
+        return control_owner_reply(request, smux_runtime_control_issue_v1(current, resolved.unwrap().target,
+            request.control_kind, resolved.unwrap().attachment.token, resolved.unwrap().attachment.deadline_ms,
+            request.expected_revision, fresh.unwrap(), sosix_time_now_monotonic_ms()))
+    val found = smux_runtime_control_find_v1(current, request.binding_uid, request.control_kind)
+    if found == nil:
+        return control_reply(current, request, if request.action == "inspect": "absent" else: "rejected",
+            "runtime-control-not-issued", 0, nil, "")
+    val entry = found.unwrap()
+    if request.action != "inspect":
+        # A bad bearer must not revoke a different caller's legitimate record.
+        if (request.expected_revision != entry.lease.revision or not constant_time_compare(request.nonce, entry.nonce)):
+            return control_reply(current, request, "rejected", "runtime-control-capability-mismatch", entry.lease.revision, nil, "")
+    if not entry.active:
+        return control_reply(current, request, if request.action == "inspect": "retired" else: "rejected",
+            entry.retired_reason, entry.lease.revision, Some(entry.lease), "")
+    val resolved = smux_runtime_control_target_v1(binding, request.binding_uid, entry.lease.target.client_id, entry.attachment_token)
+    if resolved.is_err():
+        # A removed holder of one right cannot revoke a healthy holder of the
+        # other right. Stable binding drift is also checked by the issuer.
+        current = smux_runtime_control_revoke_v1(current, request.binding_uid, request.control_kind,
+            entry.lease.revision, sosix_time_now_monotonic_ms()).owner
+        return control_reply(current, request, if request.action == "inspect": "retired" else: "rejected",
+            resolved.unwrap_err(), entry.lease.revision, Some(entry.lease), "")
+    val checked = smux_runtime_control_check_v1(current, request.binding_uid, request.control_kind,
+        entry.nonce, entry.lease.revision, resolved.unwrap().target, sosix_time_now_monotonic_ms())
+    current = checked.owner
+    if checked.error != "":
+        return control_reply(current, request, if request.action == "inspect": "retired" else: "rejected",
+            checked.error, checked.revision, checked.lease, "")
+    if request.action == "inspect": return control_reply(current, request, "active", "", checked.revision, checked.lease, "")
+    # Both platform adapters currently expose output only. Never fall through
+    # to pane_send/client-size/raw stdin or infer a port from metadata rights.
+    # A future Container API port must consume this live check immediately and
+    # repeat its native clock/target fence at the actual effect boundary.
+    control_reply(current, request, "unsupported", "container-runtime-control-port-unavailable", checked.revision, checked.lease, "")
+
+pub fn smux_runtime_control_sweep_v1(binding: SmuxRuntimeBindingOwnerV3,
+        owner: SmuxRuntimeControlOwnerV1) -> SmuxRuntimeControlOwnerV1:
+    var current = owner
+    for entry in owner.entries:
+        if entry.active:
+            val resolved = smux_runtime_control_target_v1(binding, entry.lease.target.binding_uid,
+                entry.lease.target.client_id, entry.attachment_token)
+            if resolved.is_err():
+                current = smux_runtime_control_revoke_v1(current, entry.lease.target.binding_uid,
+                    entry.lease.kind, entry.lease.revision, sosix_time_now_monotonic_ms()).owner
+            else:
+                val checked = smux_runtime_control_check_v1(current, entry.lease.target.binding_uid, entry.lease.kind,
+                    entry.nonce, entry.lease.revision, resolved.unwrap().target, sosix_time_now_monotonic_ms())
+                current = checked.owner
+    current

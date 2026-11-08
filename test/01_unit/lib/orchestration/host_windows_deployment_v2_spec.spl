@@ -1,0 +1,84 @@
+# @req HOST-WINDOWS-DEPLOYMENT-01 HOST-WINDOWS-DEPLOYMENT-02
+# Pure canonical provenance records only; no native role or successful claim.
+# All cases authored NOT_RUN, including the SDK-first native companion.
+use std.spec
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
+use test.fixtures.orchestration.host_windows_deployment_v2.windows_deployment_binding_data_v2
+use test.fixtures.orchestration.host_enrollment_native_probe.host_enrollment_fixture_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn deployment_changed_record_v2(source: text, name: text, value: SdnValue) -> Result<text, text>:
+    val document = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(parsed): parsed
+        case Err(issue): return Err(issue.code)
+    var fields = match document.value:
+        case SdnValue.Dict(items): items
+        case _: return Err("fixture record required")
+    fields[name] = value
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+describe "Windows deployment immutable provenance records":
+    it "derives one fixed machine claim and exact direct child manifest":
+        val binding = windows_deployment_binding_data_v2()
+        val claim = host_windows_deployment_claim_bytes_v2(binding, "enrollment_1", "d".repeat(64), "a".repeat(64), 100).unwrap()
+        val manifest = host_windows_deployment_manifest_bytes_v2(binding, claim, 150).unwrap()
+        expect(host_windows_deployment_claim_name_v2(binding).unwrap()).to_equal(
+            "host-claim-" + sha256_text(binding.native_machine_id) + ".sdn")
+        expect(host_windows_deployment_records_check_v2(binding, claim, manifest).unwrap()).to_equal(150)
+        assert(claim.contains("host-root-" + "a".repeat(64)))
+        assert(not claim.contains("serviceEpoch"))
+
+    it "rejects copied records under another configured parent or another child":
+        var binding = windows_deployment_binding_data_v2()
+        val claim = host_windows_deployment_claim_bytes_v2(binding, "enrollment_1", "d".repeat(64), "a".repeat(64), 100).unwrap()
+        val manifest = host_windows_deployment_manifest_bytes_v2(binding, claim, 150).unwrap()
+        binding.machine_parent = "C:/another-installed-parent"
+        assert(host_windows_deployment_records_check_v2(binding, claim, manifest).is_err())
+        binding = windows_deployment_binding_data_v2()
+        val changed = deployment_changed_record_v2(manifest, "root", SdnValue.String("C:/copied-tree")).unwrap()
+        assert(host_windows_deployment_records_check_v2(binding, claim, changed).is_err())
+
+    it "rejects nonce claim digest state and credential replacement":
+        val binding = windows_deployment_binding_data_v2()
+        val claim = host_windows_deployment_claim_bytes_v2(binding, "enrollment_1", "d".repeat(64), "a".repeat(64), 100).unwrap()
+        val manifest = host_windows_deployment_manifest_bytes_v2(binding, claim, 150).unwrap()
+        for name in ["nonce", "claimDigest", "credentialDigest"]:
+            val changed = deployment_changed_record_v2(manifest, name, SdnValue.String("b".repeat(64))).unwrap()
+            assert(host_windows_deployment_records_check_v2(binding, claim, changed).is_err())
+        val pending = deployment_changed_record_v2(manifest, "state", SdnValue.String("claimed")).unwrap()
+        assert(host_windows_deployment_records_check_v2(binding, claim, pending).is_err())
+
+    it "rejects unknown noncanonical oversized and regressed records":
+        val binding = windows_deployment_binding_data_v2()
+        val claim = host_windows_deployment_claim_bytes_v2(binding, "enrollment_1", "d".repeat(64), "a".repeat(64), 100).unwrap()
+        val manifest = host_windows_deployment_manifest_bytes_v2(binding, claim, 150).unwrap()
+        assert(host_windows_deployment_records_check_v2(binding, claim + "\n", manifest).is_err())
+        assert(host_windows_deployment_records_check_v2(binding, claim, manifest + "\n").is_err())
+        val extra = deployment_changed_record_v2(manifest, "ready", SdnValue.Bool(true)).unwrap()
+        assert(host_windows_deployment_records_check_v2(binding, claim, extra).is_err())
+        expect(host_windows_deployment_manifest_bytes_v2(binding, claim, 99).unwrap_err()).to_equal("windows-deployment-clock-regressed")
+        assert(host_windows_deployment_records_check_v2(binding, "x".repeat(16385), manifest).is_err())
+
+    it "refuses a packet-selected alternate parent before native acquisition":
+        val binding = windows_deployment_binding_data_v2()
+        val credential = host_enrollment_fixture_v1().credential
+        match host_windows_deployment_enroll_v2(HostWindowsDeploymentAnchorV2("C:/another-parent", binding.policy_digest),
+                binding, credential, "configuration", "engine", "broker"):
+            case HostWindowsDeploymentOpenV2.Rejected(error): expect(error).to_equal("windows-deployment-installed-anchor-mismatch")
+            case _: fail("alternate parent reached native acquisition")
+
+    it "bounds every raw caller text before byte-array allocation or native acquisition":
+        val binding = windows_deployment_binding_data_v2()
+        val credential = host_enrollment_fixture_v1().credential
+        val anchor = HostWindowsDeploymentAnchorV2(binding.machine_parent, binding.policy_digest)
+        for index in 0..3:
+            var source = ["configuration", "engine", "broker"]
+            source[index] = "x".repeat(1048577)
+            match host_windows_deployment_enroll_v2(anchor, binding, credential, source[0], source[1], source[2]):
+                case HostWindowsDeploymentOpenV2.Rejected(error): expect(error).to_equal("windows-deployment-metadata-byte-limit")
+                case _: fail("oversized raw source reached native acquisition")

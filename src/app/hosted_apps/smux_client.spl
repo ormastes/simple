@@ -1,22 +1,72 @@
 use os.apps.smux.smux_remote.{smux_remote_main, smux_remote_reply_ok}
-use os.apps.smux.server.{smux_server_serve, smux_server_serve_owner_file, smux_server_request}
+use os.apps.smux.server.{smux_server_serve, smux_server_serve_owner_file,
+    smux_server_serve_runtime_owner_file, smux_server_request}
 use std.sosix.host.{sosix_get_cli_args as get_cli_args}
 use std.sosix.stdio.{sosix_println}
 use os.apps.smux.interactive_client.{smux_interactive_attach}
 use os.apps.smux.runtime_binding_protocol_v1.smux_runtime_binding_capabilities_decode_v1
+use os.apps.smux.runtime_binding_request_v3.{smux_runtime_bind_request_from_token_v3,
+    smux_runtime_bind_request_digest_v3}
+use os.apps.smux.runtime_binding_reply_v3.smux_runtime_binding_reply_decode_v3
+use os.apps.smux.runtime_binding_target_v3.smux_runtime_target_decode_v3
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.contracts.mux.request_validation_v1.mux_validate_name_v1
+use os.apps.smux.runtime_control_request_v1.smux_runtime_control_request_from_token_v1
+use os.apps.smux.runtime_control_reply_v1.smux_runtime_control_reply_ok_v1
 
 pub fn smux_client_request_reply_ok(command: text, body: text) -> bool:
     if command == "runtime-binding-capabilities-v1":
         return smux_runtime_binding_capabilities_decode_v1(body).is_ok()
-    if command == "bind-existing-runtime-v3" or command.starts_with("bind-existing-runtime-v3 "):
-        return false
+    val parts = command.split(" ")
+    if parts.len() == 0: return false
+    if parts[0] == "runtime-control-v1":
+        if parts.len() != 2: return false
+        val request = smux_runtime_control_request_from_token_v1(parts[1])
+        if request.is_err(): return false
+        return smux_runtime_control_reply_ok_v1(request.unwrap(), body)
+    if parts[0] == "create-runtime-target-v3":
+        if parts.len() != 2 or mux_validate_name_v1(parts[1]).is_err(): return false
+        val target = smux_runtime_target_decode_v3(body)
+        if target.is_err(): return false
+        return target.unwrap().vacant
+    if parts[0] == "plan-existing-runtime-v3" or parts[0] == "bind-existing-runtime-v3":
+        if parts.len() != 2: return false
+        val request = smux_runtime_bind_request_from_token_v3(parts[1])
+        val reply = smux_runtime_binding_reply_decode_v3(body)
+        if request.is_err() or reply.is_err(): return false
+        val wanted = request.unwrap()
+        val actual = reply.unwrap()
+        val digest = smux_runtime_bind_request_digest_v3(wanted)
+        if digest.is_err(): return false
+        if (actual.binding_uid != wanted.binding_uid or actual.service_incarnation != wanted.service_incarnation or
+                actual.binding_digest != digest.unwrap() or actual.workload_operation_id != wanted.workload_operation_id or
+                actual.helper_operation_id != wanted.helper_operation_id): return false
+        # ContainerOutputPlan request_digest is independently checked by the
+        # configured owner; it cannot be reconstructed from this wire request.
+        if parts[0] == "plan-existing-runtime-v3": return actual.status == "planned"
+        return actual.status == "adopted-opening"
+    if parts[0] == "inspect-runtime-binding-v3" or parts[0] == "prepare-runtime-helper-v3":
+        if parts.len() != 2 or not builder_identifier_valid_v1(parts[1]): return false
+        val reply = smux_runtime_binding_reply_decode_v3(body)
+        if reply.is_err(): return false
+        val actual = reply.unwrap()
+        if parts[0] == "prepare-runtime-helper-v3":
+            return actual.binding_uid == parts[1] and actual.status == "helper-prepared"
+        return (actual.binding_uid == parts[1] and
+            not ["rejected", "not-found", "unconfirmed"].contains(actual.status))
+    if parts[0] == "runtime-binding-target-v3":
+        if parts.len() != 4: return false
+        val target = smux_runtime_target_decode_v3(body)
+        if target.is_err(): return false
+        val actual = target.unwrap()
+        return actual.session_id == parts[1] and actual.window_id == parts[2] and actual.pane_id == parts[3]
     return smux_remote_reply_ok(body)
 
 fn main() -> i64:
     val args = get_cli_args()
     if args.len() > 0:
         if args[0] == "--help":
-            sosix_println("smux --serve 127.0.0.1:PORT TOKEN\nsmux --serve-owner-file PATH\nsmux --request 127.0.0.1:PORT TOKEN VERB [args]\nsmux --attach 127.0.0.1:PORT TOKEN SESSION CLIENT_ID\nCtrl-B d detaches. Without arguments: legacy stdin owner; EOF stops its children.")
+            sosix_println("smux --serve 127.0.0.1:PORT TOKEN\nsmux --serve-owner-file PATH\nsmux --serve-runtime-owner-file OWNER HOSTROOT\nsmux --request 127.0.0.1:PORT TOKEN VERB [args]\nsmux --attach 127.0.0.1:PORT TOKEN SESSION CLIENT_ID\nCtrl-B d detaches. Without arguments: legacy stdin owner; EOF stops its children.")
             return 0
         if args[0] == "--attach" and args.len() == 5:
             return smux_interactive_attach(args[1], args[2], args[3], args[4])
@@ -25,6 +75,8 @@ fn main() -> i64:
         # Owner file `<workspace-id> TOKEN`: keeps the token off the command line.
         if args[0] == "--serve-owner-file" and args.len() == 2:
             return smux_server_serve_owner_file(args[1])
+        if args[0] == "--serve-runtime-owner-file" and args.len() == 3:
+            return smux_server_serve_runtime_owner_file(args[1], args[2])
         if args[0] == "--request" and args.len() >= 4:
             val command = args[3:].join(" ")
             val reply = smux_server_request(args[1], args[2], command)

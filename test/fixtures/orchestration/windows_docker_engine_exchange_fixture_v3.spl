@@ -1,0 +1,84 @@
+# ACTUAL fixed Windows Engine pipe, read-only GET /info or cancel-before-write.
+# SOURCE-ONLY NOT_RUN. No synthetic HTTP response or native ownership is used.
+# This finite TEST caller driver may schedule 1ms turns for <=5s; production
+# exchange methods never wait. Retain the latest cleanup owner before assertions.
+use std.nogc_sync_mut.io.env_ops.host_os
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.io_runtime.thread_sleep
+use std.common.process.windows_engine_pipe_v1.WindowsEnginePipeObservationV1
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.*
+use std.nogc_async_mut.container.providers.windows.docker_engine_exchange_v3.*
+
+var exchange_fixture_retained_v3: WindowsDockerEngineExchangeV3? = None
+
+pub struct WindowsDockerEngineExchangeFixtureResultV3:
+    failure: text
+    response: WindowsEngineHttpResponseV3?
+    observation: WindowsEnginePipeObservationV1?
+    same_completed_observation: bool
+    written_bytes: i64
+    cleanup_complete: bool
+    closed_observation_refused: bool
+
+# Slot is retention for cleanup ONLY, never a second independently callable
+# logical reader. Replace it with the newest returned owner before any assertion.
+fn exchange_fixture_keep_v3(outcome: WindowsDockerEngineExchangeOutcomeV3) -> Result<WindowsDockerEngineExchangeV3, text>:
+    match outcome:
+        case WindowsDockerEngineExchangeOutcomeV3.Ready(owner):
+            exchange_fixture_retained_v3 = Some(owner)
+            Ok(owner)
+        case WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(owner, _reason):
+            exchange_fixture_retained_v3 = Some(owner)
+            Ok(owner)
+        case WindowsDockerEngineExchangeOutcomeV3.Rejected(reason): Err(reason)
+
+fn exchange_fixture_rejected_v3(reason: text) -> WindowsDockerEngineExchangeFixtureResultV3:
+    WindowsDockerEngineExchangeFixtureResultV3(failure: reason, response: None, observation: None,
+        same_completed_observation: false, written_bytes: 0, cleanup_complete: true, closed_observation_refused: true)
+
+pub fn windows_engine_exchange_info_fixture_v3(cancel_before_write: bool = false, expire_before_write: bool = false) -> WindowsDockerEngineExchangeFixtureResultV3:
+    if host_os() != "windows": return exchange_fixture_rejected_v3("actual native Windows AOT fixture required; no skip or script fallback")
+    if val previous = exchange_fixture_retained_v3:
+        if previous.has_owned_pipe_v3(): return WindowsDockerEngineExchangeFixtureResultV3(failure: "previous fixture cleanup remains owned",
+            response: previous.response_v3(), observation: None, same_completed_observation: false,
+            written_bytes: previous.write_offset_v3(), cleanup_complete: false, closed_observation_refused: false)
+    val began = time_sample_monotonic_nanos_or_failure()
+    if began < 0 or began > 9223372036854775807 - 5000000000: return exchange_fixture_rejected_v3("fixture monotonic clock unavailable")
+    val deadline = began + 5000000000
+    val timeout = if expire_before_write: 1 else: 2500
+    var owner = match exchange_fixture_keep_v3(WindowsDockerEngineExchangeV3.begin_read_only_v3(windows_engine_info_v3("1.48").unwrap(), timeout)):
+        case Ok(value): value
+        case Err(reason): return exchange_fixture_rejected_v3(reason)
+    val observation = match owner.observation_v3():
+        case Ok(value): Some(value)
+        case Err(_reason): None
+    if expire_before_write:
+        thread_sleep(2)
+        owner = exchange_fixture_keep_v3(owner.poll_v3()).unwrap()
+    elif cancel_before_write:
+        owner = exchange_fixture_keep_v3(owner.cancel_v3()).unwrap()
+    else:
+        for turn in 0..5000:
+            val now = time_sample_monotonic_nanos_or_failure()
+            if now < began or now >= deadline: break
+            if owner.response_v3() != None or owner.phase_v3() == WindowsDockerEngineExchangePhaseV3.Failed or not owner.has_owned_pipe_v3(): break
+            owner = exchange_fixture_keep_v3(owner.poll_v3()).unwrap()
+            if owner.response_v3() == None and owner.phase_v3() != WindowsDockerEngineExchangePhaseV3.Failed: thread_sleep(1)
+    val response = owner.response_v3()
+    var same_observation = false
+    if response != None and observation != None:
+        match owner.observation_v3():
+            case Ok(value): same_observation = value == observation.unwrap()
+            case Err(_reason): same_observation = false
+    val written = owner.write_offset_v3()
+    val failure = owner.first_error_v3()
+    # Exact retained lease only; never reconnect or replay the HTTP request.
+    # Every returned owner is retained even if cancellation is still pending.
+    for turn in 0..5000:
+        val now = time_sample_monotonic_nanos_or_failure()
+        if not owner.has_owned_pipe_v3() or now < began or now >= deadline: break
+        owner = exchange_fixture_keep_v3(owner.collect_v3()).unwrap()
+        if owner.has_owned_pipe_v3(): thread_sleep(1)
+    WindowsDockerEngineExchangeFixtureResultV3(failure: failure, response: response, observation: observation,
+        same_completed_observation: same_observation, written_bytes: written, cleanup_complete: not owner.has_owned_pipe_v3(),
+        closed_observation_refused: owner.observation_v3().is_err())

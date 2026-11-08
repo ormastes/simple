@@ -1,0 +1,41 @@
+# Domain adapter over the single same-WAL installation transaction.
+# Configuration installation is not native containment/readiness observation.
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.host_policy_installation_data_v1.{HostPolicyInstallationKindV1, host_policy_installation_error_v1}
+use std.nogc_sync_mut.orchestration.host_policy_installation_owner_v1.*
+
+pub struct HostExecControlInstalledV3:
+    intent: HostExecControlInstallationIntentV3
+    canonical_policy_bytes: text
+    artifact_digest: text
+    request: HostExecControlInstallationRequestV3
+
+pub struct HostExecControlInstallationTurnV3:
+    local: HostLocalRootV1
+    installation: Option<HostExecControlInstalledV3>
+    recovery_required: bool
+    error: text
+
+pub fn host_exec_control_installation_load_v3(local: HostLocalRootV1) -> Result<HostExecControlInstalledV3, text>:
+    val result = host_policy_installation_load_v1(HostPolicyInstallationKindV1.ExecControlV3, local)
+    if result.is_err(): return Err(host_policy_installation_error_v1(HostPolicyInstallationKindV1.ExecControlV3, result.unwrap_err()))
+    val installed = result.unwrap()
+    val request = host_exec_control_installation_request_decode_v3(installed.request.original_bytes)?
+    Ok(HostExecControlInstalledV3(request.intent, request.intent.control_policy_bytes, installed.artifact_digest, request))
+
+pub fn host_exec_control_installation_install_v3(local: HostLocalRootV1, packet: text,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> HostExecControlInstallationTurnV3:
+    val turn = host_policy_installation_install_v1(HostPolicyInstallationKindV1.ExecControlV3, local, packet, context, refresh)
+    if turn.error != "": return HostExecControlInstallationTurnV3(turn.local, nil, turn.recovery_required,
+        host_policy_installation_error_v1(HostPolicyInstallationKindV1.ExecControlV3, turn.error))
+    val installed = match turn.installation:
+        case Some(value): value
+        case nil: return HostExecControlInstallationTurnV3(turn.local, nil, true, "host-exec-install-result-required")
+    val decoded = host_exec_control_installation_request_decode_v3(installed.request.original_bytes)
+    if decoded.is_err(): return HostExecControlInstallationTurnV3(turn.local, nil, true, decoded.unwrap_err())
+    val request = decoded.unwrap()
+    HostExecControlInstallationTurnV3(turn.local, Some(HostExecControlInstalledV3(request.intent,
+        request.intent.control_policy_bytes, installed.artifact_digest, request)), turn.recovery_required, "")

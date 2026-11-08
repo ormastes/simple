@@ -1,0 +1,31 @@
+# NOT_RUN. Invalid-reference preeffect contracts only; actual pipe gate has a
+# separate native fixture. No fake native write or positive process authority.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.process_ops.PipedProcessRefV1
+use std.nogc_sync_mut.io.process_input_control_v1.*
+
+fn input_invalid_reference_v1() -> PipedProcessRefV1:
+    PipedProcessRefV1(pid: 0, generation: 0, group_root: "", group_identity: "")
+
+describe "grouped process input control V1":
+    it "refuses enable install and revoke without a grouped reference":
+        val reference = input_invalid_reference_v1()
+        expect(process_input_control_enable_ref_v1(reference).is_err()).to_equal(true)
+        expect(process_input_control_install_ref_v1(reference, "a".repeat(64), "b".repeat(64), 1, 100).is_err()).to_equal(true)
+        expect(process_input_control_revoke_ref_v1(reference, "a".repeat(64), "b".repeat(64), 1).is_err()).to_equal(true)
+
+    it "does not fabricate a state snapshot for an invalid reference":
+        expect(process_input_control_state_ref_v1(input_invalid_reference_v1()).is_err()).to_equal(true)
+
+    it "preserves a rejected write reference and requested attempt without an effect claim":
+        val reference = input_invalid_reference_v1()
+        val turn = process_write_stdin_some_controlled_ref_v1(reference,
+            "a".repeat(64), "b".repeat(64), 1, 7, "bytes", 0, 5)
+        expect(turn.reference.pid).to_equal(reference.pid)
+        expect(turn.reference.generation).to_equal(reference.generation)
+        expect(turn.reference.group_root).to_equal(reference.group_root)
+        expect(turn.reference.group_identity).to_equal(reference.group_identity)
+        expect(turn.disposition).to_equal(ProcessInputWriteDispositionV1.Rejected)
+        expect(turn.attempt_sequence).to_equal(7)
+        expect(turn.accepted_bytes).to_equal(0)
+        expect(turn.error).to_equal("invalid_grouped_process_reference")

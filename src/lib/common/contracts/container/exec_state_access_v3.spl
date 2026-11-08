@@ -1,0 +1,103 @@
+# Lower installed-state port. Only the Host composition above a verified unique
+# deployment and completed installation constructs a live implementation.
+# Binding/record bytes are metadata; there is no decoder or generic-root factory
+# for access authority. Providers retain ONE access field and mutate it with me.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+use std.common.contracts.container.exec_admission_v3.{ContainerExecAdmissionV3, container_exec_admission_binding_match_v3}
+use std.common.contracts.container.exec_v3.container_exec_request_digest_v3
+use std.common.contracts.orchestration.host_runtime_exec_v3.host_runtime_exec_intent_digest_v3
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.string_core.str_len
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub enum ContainerExecStateRecordKindV3:
+    Create
+    Birth
+    Start
+
+pub struct ContainerExecStateBindingV3:
+    scope: ContainerHostScopeV2
+    child_operation_id: text
+    request_digest: text
+    intent_digest: text
+    installation_artifact_digest: text
+    exec_control_identity_digest: text
+    deployment_claim_digest: text
+
+pub struct ContainerExecStatePublishResultV3:
+    published_new: bool
+    existing_bytes: text?
+    error: text
+
+pub struct ContainerExecStateCloseResultV3:
+    closed: bool
+    cleanup_pending: bool
+    error: text
+
+pub trait ContainerExecStateAccessV3:
+    fn binding() -> ContainerExecStateBindingV3
+    # An error means unknown, not absent. Implementations retain newly acquired
+    # file/cleanup owners before returning, including read and publication errors.
+    me read_record(kind: ContainerExecStateRecordKindV3) -> Result<text, text>
+    me publish_record_no_replace(kind: ContainerExecStateRecordKindV3,
+        bytes: text) -> ContainerExecStatePublishResultV3
+    me close() -> ContainerExecStateCloseResultV3
+
+# me expresses updates; it does not make a value uncopyable. The actual caller
+# retains the updated field, native generations and exclusive publication guard
+# effects, and copied binding metadata cannot create a second continuation.
+pub fn container_exec_state_binding_bytes_v3(value: ContainerExecStateBindingV3) -> Result<text, text>:
+    val scope = container_host_scope_bytes_v2(value.scope)?
+    if not builder_identifier_valid_v1(value.child_operation_id):
+        return Err("container-exec-state-operation-invalid")
+    for digest in [value.request_digest, value.intent_digest, value.installation_artifact_digest,
+            value.exec_control_identity_digest, value.deployment_claim_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-exec-state-digest-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String("container-exec-state-binding"), "scope": SdnValue.String(scope),
+        "childOperationId": SdnValue.String(value.child_operation_id),
+        "requestDigest": SdnValue.String(value.request_digest), "intentDigest": SdnValue.String(value.intent_digest),
+        "installationArtifactDigest": SdnValue.String(value.installation_artifact_digest),
+        "execControlIdentityDigest": SdnValue.String(value.exec_control_identity_digest),
+        "deploymentClaimDigest": SdnValue.String(value.deployment_claim_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+# A changed request/helper/installation MUST collide in the same scope+operation
+# namespace, where the immutable original record can refuse the change.
+pub fn container_exec_state_namespace_key_v3(scope: ContainerHostScopeV2,
+        child_operation_id: text) -> Result<text, text>:
+    if not builder_identifier_valid_v1(child_operation_id): return Err("container-exec-state-operation-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String("container-exec-state-namespace"),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(scope)?),
+        "childOperationId": SdnValue.String(child_operation_id)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
+
+# Pure correlation only. Historical read/cleanup does not require an unexpired
+# launch grant; create/start separately use the timed admission matcher.
+pub fn container_exec_state_binding_match_v3(value: ContainerExecStateBindingV3,
+        admission: ContainerExecAdmissionV3, installation_artifact_digest: text,
+        deployment_claim_digest: text) -> Result<(), text>:
+    val encoded = container_exec_state_binding_bytes_v3(value)?
+    val matched = container_exec_admission_binding_match_v3(admission, admission.request,
+        value.exec_control_identity_digest)?
+    val parent = admission.request.parent
+    val expected_scope = ContainerHostScopeV2(physical_host_id: parent.physical_host_id,
+        service_scope_id: parent.service_scope_id, boot_id: parent.boot_id,
+        provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
+        continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
+    if (container_host_scope_bytes_v2(value.scope)? != container_host_scope_bytes_v2(expected_scope)? or
+            value.child_operation_id != admission.operation.id or
+            value.request_digest != container_exec_request_digest_v3(admission.request)? or
+            value.intent_digest != host_runtime_exec_intent_digest_v3(admission.intent)? or
+            value.installation_artifact_digest != installation_artifact_digest or
+            value.deployment_claim_digest != deployment_claim_digest):
+        return Err("container-exec-state-binding-mismatch")
+    Ok(())
+
+pub fn container_exec_state_record_bytes_validate_v3(bytes: text) -> Result<(), text>:
+    if str_len(bytes) == 0 or str_len(bytes) > 4194304:
+        return Err("container-exec-state-record-size")
+    Ok(())

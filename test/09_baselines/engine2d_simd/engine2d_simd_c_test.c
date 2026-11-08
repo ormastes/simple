@@ -24,7 +24,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
+#include "runtime_simd_dispatch.h"
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 #  include <arm_neon.h>
@@ -34,7 +36,6 @@
  * dead on aarch64 but must resolve if this gate is ever compiled on x86. */
 #if defined(__x86_64__) || defined(_M_X64)
 #  include <immintrin.h>
-static int simd_detect_avx2(void) { return 0; }
 #endif
 
 #if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)

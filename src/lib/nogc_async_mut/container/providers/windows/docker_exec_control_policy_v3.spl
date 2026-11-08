@@ -1,0 +1,118 @@
+# Installed administrator profile only. A decoded profile or its digest is not
+# a host/Engine observation, execution grant, or proof of an installed binary.
+# The observation owner must independently capture installed bytes and facts.
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.WindowsDockerPolicyV1
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.{
+    windows_docker_policy_encode_v1, windows_docker_policy_decode_v1, WINDOWS_DOCKER_POLICY_MAX_BYTES_V1}
+use std.common.contracts.container.windows_stream_v3.{WindowsContainerStreamPolicyV3,
+    windows_container_stream_policy_bytes_v3, WINDOWS_STREAM_HEADER_LIMIT_V3,
+    WINDOWS_STREAM_CONTROL_LIMIT_V3, WINDOWS_STREAM_FRAME_LIMIT_V3, WINDOWS_STREAM_PENDING_LIMIT_V3}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub const WINDOWS_INSTALLED_EXEC_CONTROL_MAX_BYTES_V3: i64 = 1048576
+pub const WINDOWS_INSTALLED_EXEC_STREAM_MAX_BYTES_V3: i64 = 524288
+
+pub struct WindowsInstalledExecControlProfileV3:
+    docker_policy: WindowsDockerPolicyV1
+    stream_policy: WindowsContainerStreamPolicyV3
+
+fn fields(source: text, names: [text], maximum: i64) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() == 0 or source.byte_len() > maximum: return Err("windows-installed-exec-record-byte-bound")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: maximum,
+            max_depth: 4, max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value
+        case Err(_): return Err("windows-installed-exec-record-syntax")
+    val values = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("windows-installed-exec-record-object")
+    for key in values.keys():
+        if not names.contains(key): return Err("windows-installed-exec-field-unknown:" + key)
+    for key in names:
+        if not values.contains_key(key): return Err("windows-installed-exec-field-missing:" + key)
+    Ok(values)
+
+fn string_value(value: SdnValue) -> Result<text, text>:
+    match value:
+        case SdnValue.String(content): Ok(content)
+        case _: Err("windows-installed-exec-field-text-required")
+
+fn text_field(values: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    string_value(values[key])
+
+fn int_field(values: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match values[key]:
+        case SdnValue.Int(content): Ok(content)
+        case _: Err("windows-installed-exec-field-integer-required:" + key)
+
+fn decode_stream(source: text) -> Result<WindowsContainerStreamPolicyV3, text>:
+    val values = fields(source, ["kind", "root", "brokerProgram", "brokerDigest", "environment",
+        "directory", "apiVersion", "timeoutMs", "headerLimit", "controlLimit", "frameLimit", "pendingLimit"],
+        WINDOWS_INSTALLED_EXEC_STREAM_MAX_BYTES_V3)?
+    if text_field(values, "kind")? != "windows-container-stream-policy-v3":
+        return Err("windows-installed-exec-stream-kind")
+    if int_field(values, "headerLimit")? != WINDOWS_STREAM_HEADER_LIMIT_V3 or
+            int_field(values, "controlLimit")? != WINDOWS_STREAM_CONTROL_LIMIT_V3 or
+            int_field(values, "frameLimit")? != WINDOWS_STREAM_FRAME_LIMIT_V3 or
+            int_field(values, "pendingLimit")? != WINDOWS_STREAM_PENDING_LIMIT_V3:
+        return Err("windows-installed-exec-stream-constant")
+    val entries = match values["environment"]:
+        case SdnValue.Array(content): content
+        case _: return Err("windows-installed-exec-environment-pairs-required")
+    if entries.len() > 64: return Err("windows-installed-exec-environment-count")
+    var environment: [text] = []
+    for entry in entries:
+        val pair = match entry:
+            case SdnValue.Array(content): content
+            case _: return Err("windows-installed-exec-environment-pair-required")
+        if pair.len() != 2: return Err("windows-installed-exec-environment-pair-arity")
+        environment.push(string_value(pair[0])? + "=" + string_value(pair[1])?)
+    val policy = WindowsContainerStreamPolicyV3(root: text_field(values, "root")?,
+        broker_program: text_field(values, "brokerProgram")?, broker_digest: text_field(values, "brokerDigest")?,
+        environment: environment, directory: text_field(values, "directory")?,
+        api_version: text_field(values, "apiVersion")?, timeout_ms: int_field(values, "timeoutMs")?)
+    # Existing policy encoder validates paths, digests, API, time and env names,
+    # case-folded duplicates, values and size. No aliases or normalized spelling.
+    if windows_container_stream_policy_bytes_v3(policy)? != source:
+        return Err("windows-installed-exec-stream-not-canonical")
+    Ok(policy)
+
+pub fn windows_installed_exec_control_profile_encode_v3(profile: WindowsInstalledExecControlProfileV3) -> Result<text, text>:
+    val docker = windows_docker_policy_encode_v1(profile.docker_policy)?
+    val stream = windows_container_stream_policy_bytes_v3(profile.stream_policy)?
+    if docker.byte_len() > WINDOWS_DOCKER_POLICY_MAX_BYTES_V1 or stream.byte_len() > WINDOWS_INSTALLED_EXEC_STREAM_MAX_BYTES_V3:
+        return Err("windows-installed-exec-component-byte-bound")
+    val values: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-installed-exec-control-profile-v3"),
+        "version": SdnValue.Int(3), "dockerPolicy": SdnValue.String(docker),
+        "dockerPolicyDigest": SdnValue.String(sha256_text(docker)), "streamPolicy": SdnValue.String(stream),
+        "streamPolicyDigest": SdnValue.String(sha256_text(stream))}
+    val source = sdn_encode_canonical(SdnValue.Dict(values)) + "\n"
+    if source.byte_len() > WINDOWS_INSTALLED_EXEC_CONTROL_MAX_BYTES_V3:
+        return Err("windows-installed-exec-record-byte-bound")
+    Ok(source)
+
+pub fn windows_installed_exec_control_profile_decode_v3(source: text) -> Result<WindowsInstalledExecControlProfileV3, text>:
+    val values = fields(source, ["kind", "version", "dockerPolicy", "dockerPolicyDigest",
+        "streamPolicy", "streamPolicyDigest"], WINDOWS_INSTALLED_EXEC_CONTROL_MAX_BYTES_V3)?
+    if text_field(values, "kind")? != "windows-installed-exec-control-profile-v3" or int_field(values, "version")? != 3:
+        return Err("windows-installed-exec-wrapper-kind-version")
+    val docker = text_field(values, "dockerPolicy")?
+    val stream = text_field(values, "streamPolicy")?
+    if docker.byte_len() > WINDOWS_DOCKER_POLICY_MAX_BYTES_V1 or stream.byte_len() > WINDOWS_INSTALLED_EXEC_STREAM_MAX_BYTES_V3:
+        return Err("windows-installed-exec-component-byte-bound")
+    if text_field(values, "dockerPolicyDigest")? != sha256_text(docker) or
+            text_field(values, "streamPolicyDigest")? != sha256_text(stream):
+        return Err("windows-installed-exec-component-digest-mismatch")
+    val profile = WindowsInstalledExecControlProfileV3(docker_policy: windows_docker_policy_decode_v1(docker)?,
+        stream_policy: decode_stream(stream)?)
+    if windows_installed_exec_control_profile_encode_v3(profile)? != source:
+        return Err("windows-installed-exec-wrapper-not-canonical")
+    Ok(profile)
+
+# The installed observation owner binds this derived wrapper hash to actual
+# installed bytes. Computing it here supplies neither observation nor grant.
+pub fn windows_installed_exec_control_profile_digest_v3(profile: WindowsInstalledExecControlProfileV3) -> Result<text, text>:
+    Ok(sha256_text(windows_installed_exec_control_profile_encode_v3(profile)?))

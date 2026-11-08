@@ -599,3 +599,100 @@ authorized by this report. CPU affinity remains shared `0-4`, five cores total.
 Overall status remains **AWAITING_VERIFICATION**. This update prevents an
 unsupported bootstrap attempt; it does not complete the orchestrator, admit
 the drafts, or certify source, compiler, platform or runtime gates.
+
+## Subsequent reviewed source delivery — through PR #7790
+
+Snapshot: `release/1.0.0` at
+`5e7916bc19b645d48607984e2ac6acb9d21fbcac`. The following PRs are **MERGED**,
+not merely open. They supplement the earlier lane inventory; they do not
+replace its full-system acceptance requirements or change the definition of
+done. Linux uses Podman and Windows uses Windows Docker process isolation,
+with consumers routed through Simple Container API.
+
+| Landed PR | Source delivered | Remaining boundary |
+| --- | --- | --- |
+| [#7780](https://github.com/ormastes/simple/pull/7780) | Authenticated smux Input/Geometry issuance, binding checks and revocation | Actual provider input/resize and native-confirmed effect/revocation semantics |
+| [#7781](https://github.com/ormastes/simple/pull/7781) | Pinned private Host peer policy and owner-preserving gateway | Native service composition and response-loss qualification |
+| [#7782](https://github.com/ormastes/simple/pull/7782) | Containment observation and discharge design | This is a design, not a runtime capability |
+| [#7783](https://github.com/ormastes/simple/pull/7783) | Signed Windows deployment claim, retained private provenance, manifest-last publication | Running service, completed exec installation, access factory and execution authority |
+| [#7784](https://github.com/ormastes/simple/pull/7784) | Separate receive-ready, one-use dispatch and publication turns | Actual bounded service loop and nonblocking provider effects |
+| [#7785](https://github.com/ormastes/simple/pull/7785) | Shared authorization before Host scheduling classification | Reserved control ingress and measured responsiveness under saturation |
+| [#7786](https://github.com/ormastes/simple/pull/7786) | Podman containment profile and V4 request binding, preserving V1–V3 | Configured creation and native capture; historical routes refuse selected profiles |
+| [#7787](https://github.com/ormastes/simple/pull/7787) | Retained native Linux containment observations in the existing registry | Qualified lifetime containment and removal/no-repopulation proof; EmptySnapshot is not discharge |
+| [#7788](https://github.com/ormastes/simple/pull/7788) | Child-aware parent settlement, reopen, abort and expiry guards | Positive no-BEGIN or containment discharge evidence; authorized stop/destroy remains available |
+| [#7789](https://github.com/ormastes/simple/pull/7789) | Lower installed exec-state access contract with stable scope/child-operation namespace | Actual Host-owned native implementation, not decoded metadata authority |
+| [#7790](https://github.com/ormastes/simple/pull/7790) | Windows claim consumer with retained access and exact publication readback | Actual installed-access producer and authenticated broker; public Engine exchange remains read-only |
+
+Each landed checkpoint received scoped Astra source review and passed its
+eleven blocking push gates. The push skipped 107 advisory gates and did not
+produce a signed local runtime-test receipt. These checks do not establish
+compiler, native ABI, SSpec or end-to-end qualification. The executable
+scenarios added in the rows above remain **NOT_RUN**; scripted provider/port
+fixtures are not evidence of live Podman or Windows execution.
+
+The observer's pointer/host mapping audits remain **FAIL** on recorded unchanged
+group-owner sources: one `rt_linux_group_collected_stream_v2` nil mismatch and
+27 non-Linux symbol mapping gaps. Exact commands and source identities are in
+`doc/05_design/linux_container_containment_source_checks_v1.sdn`. A scoped source
+review pass and successful push gates do not override those failures.
+
+Separately, unlanded deferred-launch candidate
+`10320e27495e67bf5d5012c5c8cff20099b0d65e` is **HOLD** after independent review
+cycle 1: a fork child can encounter an inherited reservation mutex before the
+new V6 path rejects foreign process origin. An immutable repaired successor
+and independent review are required before landing; no runtime pass is claimed.
+
+Overall status is still **AWAITING_VERIFICATION**, with implementation incomplete.
+The original controller/SDN, daemon, Host, providers, Caret/smux, runner evidence,
+recovery, observability and optional-backend requirements retain their existing
+acceptance gates. Merge count is not full-feature completion. The earlier
+toolchain restrictions, exhausted retry limits and aggregate five-core budget
+remain in force; this status update authorizes no new build or native campaign.
+
+
+## Service integration update — 2026-11-08, through PR #7799
+
+Snapshot: `release/1.0.0` at
+`61dfa84264ceac242c0b6cbe962ba78dc83f0d8b`. All PRs below are **MERGED**.
+This dated update supersedes the earlier deferred-launch HOLD and service-loop
+implementation gaps; historical evidence above remains unchanged.
+
+| Landed PR | Delivered source | Remaining acceptance boundary |
+| --- | --- | --- |
+| [#7791](https://github.com/ormastes/simple/pull/7791) | Earlier delivery/evidence inventory | Documentation does not establish qualification |
+| [#7792](https://github.com/ormastes/simple/pull/7792) | Signed containment policy installer and actual CLI route using the existing journal | Installation explicitly reports containment not ready; configured runtime capture remains held |
+| [#7793](https://github.com/ormastes/simple/pull/7793) | Distinct primary-attach plan, codec and shared helper admission | Actual interactive provider transport, single-owner session composition and input/resize |
+| [#7794](https://github.com/ormastes/simple/pull/7794) | Cancellation receipt interlock before preparation and immediately before child BEGIN | Positive no-BEGIN proof requires canonical history and protected receipt production |
+| [#7795](https://github.com/ormastes/simple/pull/7795) | Deferred admitted launch in the existing reservation; canonical origin before every eligible Linux reservation mint/acquire | Native fork/exec/cancel/timeout qualification, dynamic Podman image policy and provider scheduling |
+| [#7796](https://github.com/ormastes/simple/pull/7796) | Bounded Windows broker frame/progress/output consumers | Authenticated broker startup, completed Host installation/access and native effect gating |
+| [#7797](https://github.com/ormastes/simple/pull/7797) | Kernel proof study, Windows installed-state audit and no-BEGIN cancellation proposal | These document prerequisites and conditional reasoning, not working capabilities |
+| [#7798](https://github.com/ormastes/simple/pull/7798) | Actual shared two-listener service with separate bounded control/work slots and one retained domain owner | Executed saturation, partial-open and response-loss tests; bounded domain/provider callbacks |
+| [#7799](https://github.com/ormastes/simple/pull/7799) | Actual Linux Host metadata runtime, peer mapping, writer-first shutdown and cleanup-only status without a stale journal | Public enrollment/peer qualification, fresh service epochs, provider jobs and Windows service composition |
+
+Deferred launch passed independent Astra source review on repair cycle 3 at
+`ea9df0b377ed80acd35d9db11eae097d4e8a7a66`; all eleven final integrated blobs
+matched that reviewed tree. This resolves the source finding recorded against
+`10320e27495e67bf5d5012c5c8cff20099b0d65e`, not its unrun native acceptance.
+No compiler/bootstrap or exhausted native campaign was restarted.
+
+All added executable cases remain **NOT_RUN**. Each implementation checkpoint
+received scoped Astra source review and passed eleven blocking push gates;
+107 advisory gates were skipped. Server source checks for #7788–#7795 and
+#7798 were observed successful or intentionally skipped. At this snapshot,
+#7796, #7797 and #7799 have not all had terminal server status recorded here.
+None of those source checks is evidence of native ABI, real engine, SSpec or
+end-to-end behavior. Existing mapping audit failures remain recorded above.
+
+The separate configured Podman capture draft remains **HOLD at six source
+review cycles**: retained observer evidence does not yet rule out primary
+restart/PID-reuse association. The request for one extra focused cycle is
+unanswered. Primary stdin/TTY work is a distinct feature and must not bypass,
+repair or claim qualification for that held association. The original durable
+Podman exec-owner campaign also remains closed.
+
+Windows read-only sharing, installed access, native input revision barriers,
+common primary sessions and canonical-history cancellation are active dependent
+work, not delivered readiness in this snapshot. Linux remains explicit Podman;
+Windows remains Docker process isolation; both are accessed through Simple
+Container API. Overall status remains **AWAITING_VERIFICATION**, implementation
+incomplete, with the original full-plan acceptance scope and five-core limit.

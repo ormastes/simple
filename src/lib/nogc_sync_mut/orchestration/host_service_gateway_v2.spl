@@ -1,0 +1,124 @@
+# Actual pinned transport composition. Only the SDK constructs production
+# requests after kernel peer verification, exact frame and one-use dispatch.
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.*
+use std.nogc_sync_mut.orchestration.host_service_peer_policy_v2.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_v1.{LocalGatewayRequestV1, LocalGatewayResponseV1,
+    LocalGatewayOwnedResponseV1, LocalGatewayConnectionV1, LocalGatewayOwnedTurnV1, local_gateway_turn_owned_v1}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenCleanupV2,
+    DistributedOperationJournalCleanupTurnV2}
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+
+pub struct HostServiceGatewayV2:
+    domain: HostServiceDomainV2
+    peers: HostServicePeerPolicySnapshotV2
+
+pub enum HostServiceDispatchClassV2:
+    ControlRead
+    Work
+
+struct HostServiceMappedRequestV2:
+    request: HostServiceRequestV2
+    peer: HostServiceMappedPeerV2
+
+pub enum HostServiceGatewayOpenV2:
+    Ready(HostServiceGatewayV2)
+    Rejected(text)
+    OpenCleanupRequired(DistributedOperationJournalOpenCleanupV2, text)
+    CloseCleanupRequired(DistributedOperationJournalCleanupTurnV2, text)
+
+pub fn host_service_gateway_open_v2(protected_root: text,
+        expected_transport_policy_digest: text) -> HostServiceGatewayOpenV2:
+    # Both arguments are trusted local-admin bootstrap inputs, not wire fields.
+    val loaded = host_service_peer_policy_load_v2(protected_root, expected_transport_policy_digest)
+    if loaded.is_err(): return HostServiceGatewayOpenV2.Rejected(loaded.unwrap_err())
+    val peers = loaded.unwrap()
+    match host_service_domain_open_v2(protected_root):
+        case HostServiceDomainOpenV2.Rejected(reason): HostServiceGatewayOpenV2.Rejected(reason)
+        case HostServiceDomainOpenV2.CleanupRequired(cleanup, reason): HostServiceGatewayOpenV2.OpenCleanupRequired(cleanup, reason)
+        case HostServiceDomainOpenV2.Ready(domain):
+            var scope_matches = domain.local.scope.service_scope_id == domain.local.config.service_scope_id
+            for rule in peers.policy.rules:
+                if rule.service_scope_id != domain.local.config.service_scope_id: scope_matches = false
+            if not scope_matches:
+                val closed = host_service_domain_close_v2(domain)
+                if (closed.closed and closed.error == "" and closed.cleanup.is_none() and
+                        closed.state == FileLockReleaseStateV2.Released):
+                    return HostServiceGatewayOpenV2.Rejected("host-peer-policy-opened-scope-mismatch")
+                return HostServiceGatewayOpenV2.CloseCleanupRequired(closed, "host-peer-policy-opened-scope-mismatch")
+            HostServiceGatewayOpenV2.Ready(HostServiceGatewayV2(domain: domain, peers: peers))
+
+pub fn host_service_gateway_open_cleanup_v2(cleanup: DistributedOperationJournalOpenCleanupV2) -> DistributedOperationJournalCleanupTurnV2:
+    host_service_domain_open_cleanup_v2(cleanup)
+
+pub fn host_service_gateway_close_v2(owner: HostServiceGatewayV2) -> DistributedOperationJournalCleanupTurnV2:
+    host_service_domain_close_v2(owner.domain)
+
+fn host_gateway_rejected_v2(owner: HostServiceGatewayV2, incoming: LocalGatewayRequestV1,
+        request: HostServiceRequestV2, reason: text) -> LocalGatewayOwnedResponseV1<HostServiceGatewayV2>:
+    LocalGatewayOwnedResponseV1(owner: owner, response: LocalGatewayResponseV1(request_id: incoming.request_id,
+        exit_code: 1, payload: host_service_error_payload_v2(request, reason, false)))
+
+# One installed-snapshot mapper for live and cleanup-only metadata. It has no
+# HostLocalRoot/WAL argument and cannot dispatch or authorize domain effects.
+pub fn host_service_gateway_map_peer_v2(peers: HostServicePeerPolicySnapshotV2,
+        protected_root: text, configured_scope: text, actual_scope: text,
+        incoming: LocalGatewayRequestV1) -> Result<HostServiceMappedPeerV2, text>:
+    val request = HostServiceRequestV2(action: incoming.action, operation_id: incoming.operation_id, payload: incoming.payload)
+    if peers.protected_root != protected_root:
+        return Err("host-service-peer-root-mismatch")
+    if incoming.peer_uid == peers.service_uid:
+        return Err("host-service-peer-service-uid-forbidden")
+    var selected: Option<HostServicePeerRuleV2> = nil
+    for rule in peers.policy.rules:
+        if rule.peer_uid == incoming.peer_uid:
+            if selected.is_some(): return Err("host-service-peer-policy-duplicate")
+            selected = Some(rule)
+    if selected.is_none(): return Err("host-service-peer-uid-unmapped")
+    val rule = selected.unwrap()
+    if not rule.actions.contains(incoming.action):
+        return Err("host-service-peer-action-forbidden")
+    val peer = HostServiceMappedPeerV2(principal: rule.principal, project: rule.project, service_scope_id: rule.service_scope_id)
+    if (not builder_identifier_valid_v1(peer.principal) or not builder_identifier_valid_v1(peer.project) or
+            not builder_identifier_valid_v1(peer.service_scope_id) or peer.service_scope_id != configured_scope or
+            peer.service_scope_id != actual_scope):
+        return Err("host-service-peer-scope-mismatch")
+    val shape_error = host_service_request_error_v2(request)
+    if shape_error != "": return Err(shape_error)
+    Ok(peer)
+
+fn host_gateway_mapped_request_v2(owner: HostServiceGatewayV2,
+        incoming: LocalGatewayRequestV1) -> Result<HostServiceMappedRequestV2, text>:
+    val peer = host_service_gateway_map_peer_v2(owner.peers, owner.domain.local.root,
+        owner.domain.local.config.service_scope_id, owner.domain.local.scope.service_scope_id, incoming)?
+    val request = HostServiceRequestV2(action: incoming.action, operation_id: incoming.operation_id, payload: incoming.payload)
+    Ok(HostServiceMappedRequestV2(request: request, peer: peer))
+
+# Scheduling classification only after the installed peer/action/scope gates.
+# Caller passes actual SDK receive-ready metadata. This does not decode/verify
+# signed packets, touch a journal/provider, accept work or publish a response.
+pub fn host_service_gateway_classify_v2(owner: HostServiceGatewayV2,
+        incoming: LocalGatewayRequestV1) -> Result<HostServiceDispatchClassV2, text>:
+    val mapped = host_gateway_mapped_request_v2(owner, incoming)?
+    if host_service_effect_action_v2(mapped.request.action): return Err("host-service-effect-dispatch-required")
+    if mapped.request.action == "host-status": return Ok(HostServiceDispatchClassV2.ControlRead)
+    Ok(HostServiceDispatchClassV2.Work)
+
+pub fn host_service_gateway_callback_v2(owner: HostServiceGatewayV2,
+        incoming: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<HostServiceGatewayV2>:
+    # Revalidate at dispatch; a prior classification is never an admission or a
+    # capability to skip same-decoded subject checks and fresh SDK verification.
+    val mapped = host_gateway_mapped_request_v2(owner, incoming)
+    if mapped.is_err():
+        val request = HostServiceRequestV2(action: incoming.action, operation_id: incoming.operation_id, payload: incoming.payload)
+        return host_gateway_rejected_v2(owner, incoming, request, mapped.unwrap_err())
+    val turn = host_service_domain_mapped_turn_v2(owner.domain, mapped.unwrap().request, mapped.unwrap().peer)
+    # Retain the complete returned owner BEFORE response validation or send in
+    # the SDK. A publication error never rolls the journal back to this input.
+    val current = HostServiceGatewayV2(domain: turn.owner, peers: owner.peers)
+    LocalGatewayOwnedResponseV1(owner: current, response: LocalGatewayResponseV1(request_id: incoming.request_id,
+        exit_code: turn.exit_code, payload: turn.response))
+
+pub fn host_service_gateway_turn_v2(owner: HostServiceGatewayV2,
+        connection: LocalGatewayConnectionV1) -> LocalGatewayOwnedTurnV1<HostServiceGatewayV2>:
+    local_gateway_turn_owned_v1<HostServiceGatewayV2>(owner, connection, host_service_gateway_callback_v2)

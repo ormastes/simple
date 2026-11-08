@@ -1,5 +1,5 @@
-# Negotiated textual compatibility boundary only. No runtime binding owner or
-# provider transport is installed, so this module cannot commit a binding.
+# Negotiated textual compatibility facts only. Discovery never commits a bind
+# or certifies provider attachment, workload readiness or completion.
 # The server invokes it only after authenticating its trusted local owner.
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
@@ -14,6 +14,12 @@ pub struct SmuxRuntimeBindingCapabilitiesV1:
     bind_existing_runtime: bool
     framed_core_mux: bool
     reason: text
+    service_incarnation: text = ""
+    input_supported: bool = false
+    geometry_supported: bool = false
+    interactive: bool = false
+    output_mode: text = ""
+    planning_supported: bool = false
 
 fn runtime_capability_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
     match fields[key]:
@@ -25,8 +31,7 @@ fn runtime_capability_false_v1(fields: Dict<text, SdnValue>, key: text) -> bool:
         case SdnValue.Bool(value): not value
         case _: false
 
-# Decode only the actually installed protocol. Future positive capability
-# shapes require coordinated owner composition; discovery is never readiness.
+# Accept the exact legacy absence or configured output-follow capability shape.
 pub fn smux_runtime_binding_capabilities_decode_v1(reply: text) -> Result<SmuxRuntimeBindingCapabilitiesV1, text>:
     if reply.bytes().len() == 0 or reply.bytes().len() > 4096:
         return Err("runtime-capability-size")
@@ -37,28 +42,55 @@ pub fn smux_runtime_binding_capabilities_decode_v1(reply: text) -> Result<SmuxRu
     match decoded.unwrap().value:
         case SdnValue.Dict(value): fields = value
         case _: return Err("runtime-capability-type")
-    val keys = ["version", "kind", "authenticationScope", "transport",
+    var version: i64 = 0
+    if not fields.contains_key("version"): return Err("runtime-capability-version")
+    match fields["version"]:
+        case SdnValue.Int(value): version = value
+        case _: return Err("runtime-capability-version")
+    if version != 1 and version != 2: return Err("runtime-capability-version")
+    var keys = ["version", "kind", "authenticationScope", "transport",
         "bindExistingRuntime", "framedCoreMux", "reason"]
+    if version == 2:
+        keys = keys + ["serviceIncarnation", "inputSupported", "geometrySupported", "interactive", "outputMode", "planningSupported"]
     if fields.len() != keys.len(): return Err("runtime-capability-fields")
     for key in keys:
         if not fields.contains_key(key): return Err("runtime-capability-fields")
-    match fields["version"]:
-        case SdnValue.Int(value):
-            if value != 1: return Err("runtime-capability-version")
-        case _: return Err("runtime-capability-version")
     val kind = runtime_capability_text_v1(fields, "kind")?
     val scope = runtime_capability_text_v1(fields, "authenticationScope")?
     val transport = runtime_capability_text_v1(fields, "transport")?
     val reason = runtime_capability_text_v1(fields, "reason")?
     if (kind != "smux-runtime-binding-capabilities" or scope != "trusted-local-owner" or
-            transport != "smux-text-v1" or reason != "runtime-binding-owner-not-installed"):
+            transport != "smux-text-v1"):
         return Err("runtime-capability-protocol")
-    if (not runtime_capability_false_v1(fields, "bindExistingRuntime") or
-            not runtime_capability_false_v1(fields, "framedCoreMux")):
+    if not runtime_capability_false_v1(fields, "framedCoreMux"):
         return Err("runtime-capability-unsupported-claim")
-    Ok(SmuxRuntimeBindingCapabilitiesV1(version: 1, kind: kind,
+    if version == 1:
+        if (reason != "runtime-binding-owner-not-installed" or
+                not runtime_capability_false_v1(fields, "bindExistingRuntime")):
+            return Err("runtime-capability-unsupported-claim")
+        return Ok(SmuxRuntimeBindingCapabilitiesV1(version: 1, kind: kind,
+            authentication_scope: scope, transport: transport,
+            bind_existing_runtime: false, framed_core_mux: false, reason: reason))
+    val incarnation = runtime_capability_text_v1(fields, "serviceIncarnation")?
+    if incarnation.len() != 32: return Err("runtime-capability-incarnation")
+    for ch in incarnation.chars():
+        if not "0123456789abcdef".contains(ch): return Err("runtime-capability-incarnation")
+    if (not runtime_capability_false_v1(fields, "inputSupported") or
+            not runtime_capability_false_v1(fields, "geometrySupported") or
+            not runtime_capability_false_v1(fields, "interactive") or
+            runtime_capability_text_v1(fields, "outputMode")? != "output-follow"):
+        return Err("runtime-capability-unsupported-claim")
+    if (not runtime_capability_false_v1(fields, "bindExistingRuntime") or
+            reason != "container-output-plan-required"):
+        return Err("runtime-capability-unsupported-claim")
+    match fields["planningSupported"]:
+        case SdnValue.Bool(value):
+            if not value: return Err("runtime-capability-unsupported-claim")
+        case _: return Err("runtime-capability-field-type")
+    Ok(SmuxRuntimeBindingCapabilitiesV1(version: 2, kind: kind,
         authentication_scope: scope, transport: transport,
-        bind_existing_runtime: false, framed_core_mux: false, reason: reason))
+        bind_existing_runtime: false, framed_core_mux: false, reason: reason,
+        service_incarnation: incarnation, output_mode: "output-follow", planning_supported: true))
 
 pub fn smux_runtime_binding_capabilities_v1() -> text:
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),

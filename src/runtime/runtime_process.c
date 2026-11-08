@@ -37,6 +37,7 @@
 
 #include "runtime.h"
 #include "runtime_process_observer_private.h"
+#include "runtime_local_unix_bridge_v1.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1734,6 +1735,14 @@ static int64_t rt_process_spawn_piped_argv(
 
 struct RtProcSlot {
     pid_t pid;       /* 0 = empty, -1 = reserved during spawn */
+    bool byte_endpoint; /* Descriptor-only occupied slot: pid remains zero. */
+    bool input_controlled, input_active;
+    int64_t input_revision,input_expires,input_sequence;
+    int64_t input_last_sequence,input_last_accepted,input_last_status,input_last_disposition;
+    int64_t input_last_revision,input_last_expires;
+    char input_target[65],input_nonce[65],input_last_target[65],input_last_nonce[65];
+    bool stdout_started;
+    char byte_binding[65];
     int   stdin_fd;  /* parent writes here  → child's stdin */
     int   stdout_fd; /* parent reads here   ← child's stdout */
     uint64_t generation;
@@ -1771,27 +1780,38 @@ static char s_browser_renderer_stdin_buf[RT_PROC_READ_BUF];
 
 static struct RtProcSlot* proc_find(pid_t pid) {
     for (int i = 0; i < RT_PROC_MAX; i++) {
-        if (s_procs[i].pid == pid) return &s_procs[i];
+        if (!s_procs[i].byte_endpoint && s_procs[i].pid == pid) return &s_procs[i];
     }
     return NULL;
 }
 
-static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
-    if (pthread_mutex_lock(&s_proc_lock) != 0) return NULL;
+/* Same allocator and capacity for process tickets and descriptor-only endpoints.
+ * Caller owns the existing registry lock; no native process identity is minted
+ * for a byte endpoint. Legacy callers keep their previous locking behavior. */
+static struct RtProcSlot* proc_alloc_locked(bool sandboxed_renderer) {
     if (s_proc_generation >= INT64_MAX || (sandboxed_renderer &&
         s_renderer_slots_active >= RT_RENDERER_PROC_MAX)) {
-        (void)pthread_mutex_unlock(&s_proc_lock);
         return NULL;
     }
     for (int i = 0; i < RT_PROC_MAX; i++) {
-        if (s_procs[i].pid == 0) {
+        if (s_procs[i].pid == 0 && !s_procs[i].byte_endpoint) {
             s_procs[i].pid = -1;
+            s_procs[i].byte_endpoint = false;
+            s_procs[i].stdout_started = false;
+            s_procs[i].byte_binding[0] = 0;
             s_procs[i].generation = ++s_proc_generation;
             s_procs[i].closing = false;
             s_procs[i].stream_ticket = false; s_procs[i].stream_phase = 0;
             s_procs[i].stream_child_in = -1; s_procs[i].stream_child_out = -1;
             s_procs[i].stream_root_fd = -1;
             s_procs[i].stream_root[0] = 0; s_procs[i].stream_identity[0] = 0;
+            s_procs[i].input_controlled=false;s_procs[i].input_active=false;
+            s_procs[i].input_revision=s_procs[i].input_expires=s_procs[i].input_sequence=0;
+            s_procs[i].input_last_sequence=s_procs[i].input_last_accepted=0;
+            s_procs[i].input_last_status=s_procs[i].input_last_disposition=0;
+            s_procs[i].input_last_revision=s_procs[i].input_last_expires=0;
+            memset(s_procs[i].input_target,0,65);memset(s_procs[i].input_nonce,0,65);
+            memset(s_procs[i].input_last_target,0,65);memset(s_procs[i].input_last_nonce,0,65);
             s_procs[i].stdin_fd = -1;
             s_procs[i].stdout_fd = -1;
             s_procs[i].sandboxed_renderer = sandboxed_renderer;
@@ -1802,17 +1822,21 @@ static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
             s_procs[i].stdout_state = 0;
             memset(&s_procs[i].stdout_tail,0,sizeof(s_procs[i].stdout_tail));
             if (sandboxed_renderer) s_renderer_slots_active++;
-            (void)pthread_mutex_unlock(&s_proc_lock);
             return &s_procs[i];
         }
     }
-    (void)pthread_mutex_unlock(&s_proc_lock);
     return NULL;
+}
+static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return NULL;
+    struct RtProcSlot* slot=proc_alloc_locked(sandboxed_renderer);
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return slot;
 }
 
 /* Caller holds s_proc_lock. Close/free cannot race a read or state query. */
 static void proc_free_locked(struct RtProcSlot* slot) {
-    if (!slot || slot->pid == 0) return;
+    if (!slot || (slot->pid == 0 && !slot->byte_endpoint)) return;
     int stdin_fd=slot->stdin_fd, stdout_fd=slot->stdout_fd;
     if (slot->stream_child_in >= 0) close(slot->stream_child_in);
     if (slot->stream_child_out >= 0) close(slot->stream_child_out);
@@ -1824,6 +1848,7 @@ static void proc_free_locked(struct RtProcSlot* slot) {
     slot->stdin_fd=-1;slot->stdout_fd=-1;slot->sandboxed_renderer=false;
     slot->leader_reaped=false;slot->leader_status_valid=false;slot->leader_status=0;
     slot->tree_stopped=false;slot->stdout_state=0;
+    slot->byte_endpoint=false;slot->stdout_started=false;slot->byte_binding[0]=0;
     slot->closing=false;slot->generation=0;slot->pid=0;
     if (stdin_fd>=0) close(stdin_fd);
     if (stdout_fd>=0) close(stdout_fd);
@@ -2935,7 +2960,7 @@ static int64_t posix_core_rt_process_write_stdin_some_slot(
         offset > data_len || max_bytes <= 0) {
         return -1;
     }
-    if (!slot || slot->closing || slot->stdin_fd < 0) return -1;
+    if (!slot || slot->closing || slot->stdin_fd < 0 || slot->input_controlled) return -1;
     if (offset == data_len) return 0;
     int64_t remaining = data_len - offset;
     uint64_t request64 = (uint64_t)(
@@ -2997,6 +3022,9 @@ int64_t rt_process_stream_reserve_v2(void) {
 #ifndef __linux__
     return -1;
 #else
+    /* Establish origin before any export-eligible stream owner exists. A fork
+     * child cannot later export its copied parent ticket through gateway IO. */
+    if(!simple_local_unix_origin_v1())return -1;
     int input[2] = {-1,-1}, output[2] = {-1,-1};
     if (!proc_pipe_cloexec(input) || !proc_pipe_cloexec(output)) goto failed;
     int flags = fcntl(input[1], F_GETFL);
@@ -3124,9 +3152,11 @@ int64_t rt_process_stream_retire_v2(int64_t generation,const char* root,int64_t 
  * Returns available data (may be partial), or "" if nothing ready.
  * The returned pointer is valid until the next call.
  */
-static const char* posix_core_rt_process_read_stdout_slot(struct RtProcSlot* slot) {
+static const char* posix_core_rt_process_read_stdout_slot_count(struct RtProcSlot* slot,size_t* byte_count) {
     s_read_buf[0]=0;
+    if(byte_count)*byte_count=0;
     if(slot&&!slot->closing&&slot->stdout_fd>=0&&slot->stdout_state==0) {
+        slot->stdout_started=true;
         uint8_t raw[PIPED_RAW_CAP];ssize_t count=read(slot->stdout_fd,raw,sizeof(raw));int eof=count==0;
         if(count<0) {
             if(errno!=EAGAIN&&errno!=EWOULDBLOCK&&errno!=EINTR)slot->stdout_state=-1;
@@ -3134,9 +3164,12 @@ static const char* posix_core_rt_process_read_stdout_slot(struct RtProcSlot* slo
         }
         size_t written=0;
         if(!piped_utf8_frame(&slot->stdout_tail,raw,(size_t)count,eof,(uint8_t*)s_read_buf,PIPED_TEXT_CAP,&written))slot->stdout_state=-1;
-        else {s_read_buf[written]=0;if(eof&&slot->stdout_tail.len==0)slot->stdout_state=1;}
+        else {s_read_buf[written]=0;if(byte_count)*byte_count=written;if(eof&&slot->stdout_tail.len==0)slot->stdout_state=1;}
     }
     return s_read_buf;
+}
+static const char* posix_core_rt_process_read_stdout_slot(struct RtProcSlot* slot) {
+    return posix_core_rt_process_read_stdout_slot_count(slot,NULL);
 }
 static const char* posix_core_rt_process_read_stdout(int64_t pid) {
     struct RtProcSlot* slot = proc_find((pid_t)pid);
@@ -3210,6 +3243,9 @@ int64_t rt_process_validate_piped_owned_v2(int64_t pid,int64_t generation,const 
 int64_t rt_process_write_stdin_some_owned_v2(int64_t pid,int64_t generation,const char* root,
         int64_t root_len,const char* identity,int64_t identity_len,const char* data,
         int64_t data_len,int64_t offset,int64_t max_bytes) {
+#if defined(__linux__)
+    if(!simple_local_unix_origin_v1())return -10;
+#endif
     if(pthread_mutex_lock(&s_proc_lock)!=0)return -1;
     struct RtProcSlot* slot=stream_action_locked_v2(pid,generation,root,root_len,identity,identity_len);
     int64_t result=slot?posix_core_rt_process_write_stdin_some_slot(slot,data,data_len,offset,max_bytes):-2;
@@ -4592,3 +4628,195 @@ bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {
     return ioctl((int)handle, TIOCSWINSZ, &size) == 0;
 }
 #endif
+
+#include "runtime_piped_byte_endpoint_v1_impl.h"
+int64_t rt_process_validate_byte_endpoint_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
+    return byte_endpoint_validate_impl_v1(generation,binding,binding_bytes);
+}
+int64_t rt_process_byte_endpoint_state_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
+    return byte_endpoint_state_impl_v1(generation,binding,binding_bytes);
+}
+SplArray* rt_process_read_byte_endpoint_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
+    return byte_endpoint_read_impl_v1(generation,binding,binding_bytes);
+}
+SplArray* rt_process_close_byte_endpoint_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
+    return byte_endpoint_close_impl_v1(generation,binding,binding_bytes);
+}
+
+/* Revision barrier uses the canonical pipe slot and same write gate. Receipts
+ * are allocated/prefilled before effects; every written integer is immediate. */
+#define INPUT_IMMEDIATE_MAX_V1 INT64_C(1152921504606846975)
+static int input_positive_v1(int64_t n){return n>0&&n<=INPUT_IMMEDIATE_MAX_V1;}
+#if defined(__linux__)
+static int input_now_v1(int64_t* out){
+    struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t)!=0||t.tv_sec<0||t.tv_nsec<0||t.tv_nsec>=1000000000L||
+        (uint64_t)t.tv_sec>(uint64_t)INPUT_IMMEDIATE_MAX_V1/1000000000)return 0;
+    int64_t n=(int64_t)t.tv_sec*1000000000+t.tv_nsec;
+    if(!input_positive_v1(n))return 0;*out=n;return 1;
+}
+static int input_pair_v1(const char* t,int64_t tl,const char* n,int64_t nl){
+    return byte_endpoint_binding_v1(t,tl)&&byte_endpoint_binding_v1(n,nl);
+}
+static int input_match_v1(struct RtProcSlot* s,const char* t,const char* n,int64_t r){
+    return s->input_revision==r&&memcmp(s->input_target,t,64)==0&&memcmp(s->input_nonce,n,64)==0;
+}
+#endif
+static SplArray* input_receipt_v1(int count){
+#if defined(__linux__)
+    if(!simple_local_unix_origin_v1())return NULL;
+#endif
+    return byte_endpoint_receipt_v1(count);
+}
+#define INPUT_REF_ARGS int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes
+#define INPUT_REF_PASS pid,generation,root,root_bytes,identity,identity_bytes
+SplArray* rt_process_input_enable_v1(INPUT_REF_ARGS){
+    SplArray* a=input_receipt_v1(2);if(!a)return NULL;int status=-4;
+#if defined(__linux__)
+    status=byte_endpoint_lock_v1();if(!status){
+        struct RtProcSlot* s=stream_action_locked_v2(INPUT_REF_PASS);
+        if(!s)status=-2;
+        else if(s->stdin_fd<0)status=-3;
+        else{s->input_controlled=true;byte_endpoint_word_v1(a,1,1);}
+        pthread_mutex_unlock(&s_proc_lock);
+    }
+#else
+    (void)pid;(void)generation;(void)root;(void)root_bytes;(void)identity;(void)identity_bytes;
+#endif
+    byte_endpoint_word_v1(a,0,status);return a;
+}
+SplArray* rt_process_input_install_v1(INPUT_REF_ARGS,const char* target,int64_t target_bytes,
+        const char* nonce,int64_t nonce_bytes,int64_t revision,int64_t expires){
+    SplArray* a=input_receipt_v1(2);if(!a)return NULL;int status=-4;
+#if defined(__linux__)
+    if(!input_pair_v1(target,target_bytes,nonce,nonce_bytes)||!input_positive_v1(revision)||!input_positive_v1(expires))status=-1;
+    else if(!(status=byte_endpoint_lock_v1())){
+        struct RtProcSlot* s=stream_action_locked_v2(INPUT_REF_PASS);int64_t now;
+        if(!s)status=-2;
+        else if(!s->input_controlled)status=-11;
+        else if(!input_now_v1(&now))status=-16;
+        else if(expires<=now)status=-14;
+        else if(revision==s->input_revision){
+            if(!s->input_active||!input_match_v1(s,target,nonce,revision)||s->input_expires!=expires)status=-13;
+            else byte_endpoint_word_v1(a,1,1);
+        }else if(revision<s->input_revision)status=-13;
+        else{
+            s->input_revision=revision;s->input_expires=expires;s->input_sequence=0;s->input_active=true;
+            memcpy(s->input_target,target,64);memcpy(s->input_nonce,nonce,64);
+            byte_endpoint_word_v1(a,1,1);
+        }
+        pthread_mutex_unlock(&s_proc_lock);
+    }
+#else
+    (void)pid;(void)generation;(void)root;(void)root_bytes;(void)identity;(void)identity_bytes;
+    (void)target;(void)target_bytes;(void)nonce;(void)nonce_bytes;(void)revision;(void)expires;
+#endif
+    byte_endpoint_word_v1(a,0,status);return a;
+}
+SplArray* rt_process_input_revoke_v1(INPUT_REF_ARGS,const char* target,int64_t target_bytes,
+        const char* nonce,int64_t nonce_bytes,int64_t revision){
+    SplArray* a=input_receipt_v1(2);if(!a)return NULL;int status=-4;
+#if defined(__linux__)
+    if(!input_pair_v1(target,target_bytes,nonce,nonce_bytes)||!input_positive_v1(revision))status=-1;
+    else if(!(status=byte_endpoint_lock_v1())){
+        struct RtProcSlot* s=stream_action_locked_v2(INPUT_REF_PASS);
+        if(!s)status=-2;else if(!s->input_controlled)status=-11;
+        else if(!input_match_v1(s,target,nonce,revision))status=-13;
+        else{s->input_active=false;byte_endpoint_word_v1(a,1,1);}
+        pthread_mutex_unlock(&s_proc_lock);
+    }
+#else
+    (void)pid;(void)generation;(void)root;(void)root_bytes;(void)identity;(void)identity_bytes;
+    (void)target;(void)target_bytes;(void)nonce;(void)nonce_bytes;(void)revision;
+#endif
+    byte_endpoint_word_v1(a,0,status);return a;
+}
+SplArray* rt_process_input_state_v1(INPUT_REF_ARGS){
+    SplArray* a=input_receipt_v1(268);if(!a)return NULL;int status=-4;
+#if defined(__linux__)
+    status=byte_endpoint_lock_v1();if(!status){
+        struct RtProcSlot* s=stream_action_locked_v2(INPUT_REF_PASS);
+        if(!s)status=-2;
+        else{
+            int64_t w[11]={s->input_controlled,s->input_active,s->input_revision,s->input_expires,
+                s->input_sequence,s->input_last_sequence,s->input_last_accepted,s->input_last_status,
+                s->input_last_disposition,s->input_last_revision,s->input_last_expires};
+            for(int i=0;i<11;i++)byte_endpoint_word_v1(a,i+1,w[i]);
+            for(int i=0;i<64;i++){
+                byte_endpoint_word_v1(a,12+i,(unsigned char)s->input_target[i]);
+                byte_endpoint_word_v1(a,76+i,(unsigned char)s->input_nonce[i]);
+                byte_endpoint_word_v1(a,140+i,(unsigned char)s->input_last_target[i]);
+                byte_endpoint_word_v1(a,204+i,(unsigned char)s->input_last_nonce[i]);
+            }
+        }
+        pthread_mutex_unlock(&s_proc_lock);
+    }
+#else
+    (void)pid;(void)generation;(void)root;(void)root_bytes;(void)identity;(void)identity_bytes;
+#endif
+    byte_endpoint_word_v1(a,0,status);return a;
+}
+SplArray* rt_process_input_write_some_v1(INPUT_REF_ARGS,const char* target,int64_t target_bytes,
+        const char* nonce,int64_t nonce_bytes,int64_t revision,int64_t attempt,
+        const char* data,int64_t data_bytes,int64_t offset,int64_t maximum){
+    SplArray* a=input_receipt_v1(4);if(!a)return NULL;int status=-4;
+    byte_endpoint_word_v1(a,2,input_positive_v1(attempt)?attempt:0);
+#if defined(__linux__)
+    if(!input_pair_v1(target,target_bytes,nonce,nonce_bytes)||!input_positive_v1(revision)||!input_positive_v1(attempt)||
+        !data||data_bytes<0||offset<0||offset>data_bytes||maximum<1||maximum>4096)status=-1;
+    else if(!(status=byte_endpoint_lock_v1())){
+        struct RtProcSlot* s=stream_action_locked_v2(INPUT_REF_PASS);
+        if(!s)status=-2;else if(!s->input_controlled)status=-11;else if(!s->input_active)status=-12;
+        else if(!input_match_v1(s,target,nonce,revision))status=-13;
+        else if(s->input_sequence>=INPUT_IMMEDIATE_MAX_V1||attempt!=s->input_sequence+1)status=-15;
+        else if(s->stdin_fd<0)status=-3;
+        else{
+            sigset_t block,old,pending;int64_t now;
+            sigemptyset(&block);sigaddset(&block,SIGPIPE);
+            int mask_error=pthread_sigmask(SIG_BLOCK,&block,&old);
+            if(mask_error)status=-17;
+            else{
+                bool restore_mask=true;
+                if(sigpending(&pending)!=0)status=-17;
+                else if(!input_now_v1(&now))status=-16;
+                else if(now>=s->input_expires)status=-14;
+                else{
+                    /* Consume exact attempt immediately before ONE nonblocking write.
+                     * Metadata checks, revoke and actual syscall share this gate. */
+                    s->input_sequence=attempt;
+                    int64_t count=data_bytes-offset;if(count>maximum)count=maximum;
+                    ssize_t written=write(s->stdin_fd,data+offset,(size_t)count);
+                    int error=written<0?errno:0;
+                    int64_t accepted=written>=0?written:0;
+                    status=error==0||error==EAGAIN||error==EWOULDBLOCK||error==EINTR?0:-3;
+                    if(error==EPIPE&&sigismember(&pending,SIGPIPE)!=1){
+                        struct timespec zero={0,0};
+                        int drained=sigtimedwait(&block,NULL,&zero);
+                        if(drained!=SIGPIPE&&!(drained<0&&errno==EAGAIN)){status=-17;restore_mask=false;}
+                        /* On uncertain drain, keep SIGPIPE blocked rather than
+                         * unmasking a possibly pending fatal signal. Report it. */
+                    }
+                    /* This syscall's count is known even if mask restoration fails. */
+                    s->input_last_sequence=attempt;s->input_last_accepted=accepted;
+                    s->input_last_disposition=1;s->input_last_status=status;
+                    s->input_last_revision=revision;s->input_last_expires=s->input_expires;
+                    memcpy(s->input_last_target,target,64);memcpy(s->input_last_nonce,nonce,64);
+                    byte_endpoint_word_v1(a,1,1);byte_endpoint_word_v1(a,3,accepted);
+                }
+                if(!restore_mask||pthread_sigmask(SIG_SETMASK,&old,NULL)!=0){
+                    status=-17;
+                    if(s->input_last_revision==revision&&s->input_last_sequence==attempt&&s->input_sequence==attempt)
+                        s->input_last_status=status;
+                }
+            }
+        }
+        pthread_mutex_unlock(&s_proc_lock);
+    }
+#else
+    (void)pid;(void)generation;(void)root;(void)root_bytes;(void)identity;(void)identity_bytes;
+    (void)target;(void)target_bytes;(void)nonce;(void)nonce_bytes;(void)revision;
+    (void)data;(void)data_bytes;(void)offset;(void)maximum;
+#endif
+    byte_endpoint_word_v1(a,0,status);return a;
+}
+#undef INPUT_REF_ARGS
+#undef INPUT_REF_PASS

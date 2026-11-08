@@ -1,0 +1,193 @@
+# Pure bounded issuer for authenticated trusted-local-owner composition only.
+# No wire principal, decoded lease, provider support or native effect is trusted.
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlKindV1,
+    SessionRuntimeControlTargetV1, SessionRuntimeControlLeaseV1, session_runtime_control_incarnation_valid_v1,
+    session_runtime_control_target_validate_v1, session_runtime_control_target_match_v1,
+    session_runtime_control_target_binding_match_v1, session_runtime_control_lease_check_v1}
+use os.apps.smux.runtime_control_policy_v1.{SmuxRuntimeControlPolicyV1, smux_runtime_control_policy_validate_v1}
+use os.apps.smux.client_leases.client_lease_token_valid
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.constant_time.constant_time_compare
+
+pub struct SmuxRuntimeControlEntryV1:
+    lease: SessionRuntimeControlLeaseV1
+    nonce: text
+    attachment_token: text
+    base_revision: i64
+    active: bool
+    retired_reason: text = ""
+
+pub struct SmuxRuntimeControlOwnerV1:
+    policy: SmuxRuntimeControlPolicyV1
+    service_incarnation: text
+    last_clock: i64
+    quarantined: bool
+    entries: [SmuxRuntimeControlEntryV1]
+
+pub struct SmuxRuntimeControlTurnV1:
+    owner: SmuxRuntimeControlOwnerV1
+    lease: SessionRuntimeControlLeaseV1?
+    nonce: text
+    revision: i64
+    status: text
+    error: text
+    replay: bool
+
+pub fn smux_runtime_control_owner_new_v1(policy: SmuxRuntimeControlPolicyV1,
+        service_incarnation: text) -> Result<SmuxRuntimeControlOwnerV1, text>:
+    smux_runtime_control_policy_validate_v1(policy)?
+    if not session_runtime_control_incarnation_valid_v1(service_incarnation): return Err("control-owner-incarnation-invalid")
+    Ok(SmuxRuntimeControlOwnerV1(policy: policy, service_incarnation: service_incarnation,
+        last_clock: 0, quarantined: false, entries: []))
+
+fn control_index_v1(owner: SmuxRuntimeControlOwnerV1, uid: text, kind: SessionRuntimeControlKindV1) -> int:
+    if owner.entries.len() > 16: return -1
+    var index = 0
+    while index < owner.entries.len():
+        val entry = owner.entries[index]
+        if entry.lease.target.binding_uid == uid and entry.lease.kind == kind: return index
+        index = index + 1
+    -1
+
+pub fn smux_runtime_control_find_v1(owner: SmuxRuntimeControlOwnerV1,
+        binding_uid: text, kind: SessionRuntimeControlKindV1) -> SmuxRuntimeControlEntryV1?:
+    val index = control_index_v1(owner, binding_uid, kind)
+    if index < 0: return nil
+    Some(owner.entries[index])
+
+fn control_retire_at_v1(original: SmuxRuntimeControlOwnerV1, index: int, reason: text) -> SmuxRuntimeControlOwnerV1:
+    var owner = original
+    var entry = owner.entries[index]
+    entry.active = false
+    entry.nonce = ""
+    entry.retired_reason = reason
+    owner.entries[index] = entry
+    owner
+
+fn control_observe_v1(original: SmuxRuntimeControlOwnerV1, now_ms: i64) -> SmuxRuntimeControlOwnerV1:
+    var owner = original
+    if owner.entries.len() > 16:
+        owner.quarantined = true
+        return owner
+    if (owner.quarantined or now_ms <= 0 or now_ms < owner.last_clock or
+            smux_runtime_control_policy_validate_v1(owner.policy).is_err() or
+            not session_runtime_control_incarnation_valid_v1(owner.service_incarnation)):
+        owner.quarantined = true
+        var index = 0
+        while index < owner.entries.len():
+            owner = control_retire_at_v1(owner, index, "owner-quarantined")
+            index = index + 1
+        return owner
+    owner.last_clock = now_ms
+    var index = 0
+    while index < owner.entries.len():
+        val entry = owner.entries[index]
+        if entry.active and now_ms >= entry.lease.expires_monotonic_ms:
+            owner = control_retire_at_v1(owner, index, "expired")
+        index = index + 1
+    owner
+
+fn control_denied_v1(owner: SmuxRuntimeControlOwnerV1, revision: i64, error: text) -> SmuxRuntimeControlTurnV1:
+    SmuxRuntimeControlTurnV1(owner: owner, lease: nil, nonce: "", revision: revision,
+        status: "denied", error: error, replay: false)
+
+pub fn smux_runtime_control_invalidate_binding_v1(original: SmuxRuntimeControlOwnerV1,
+        binding_uid: text, reason: text, now_ms: i64) -> SmuxRuntimeControlOwnerV1:
+    var owner = control_observe_v1(original, now_ms)
+    if owner.entries.len() > 16: return owner
+    var safe_reason = reason
+    if reason == "" or reason.bytes().len() > 128: safe_reason = "invalidated"
+    for ch in reason.chars():
+        if ch.ord() < 32 or ch.ord() == 127: safe_reason = "invalidated"
+    var index = 0
+    while index < owner.entries.len():
+        if owner.entries[index].lease.target.binding_uid == binding_uid:
+            owner = control_retire_at_v1(owner, index, safe_reason)
+        index = index + 1
+    owner
+
+pub fn smux_runtime_control_issue_v1(original: SmuxRuntimeControlOwnerV1,
+        target: SessionRuntimeControlTargetV1, kind: SessionRuntimeControlKindV1,
+        attachment_token: text, attachment_deadline_ms: i64, expected_revision: i64,
+        nonce: text, now_ms: i64) -> SmuxRuntimeControlTurnV1:
+    var owner = control_observe_v1(original, now_ms)
+    if owner.quarantined: return control_denied_v1(owner, 0, "control-owner-quarantined")
+    val index = control_index_v1(owner, target.binding_uid, kind)
+    val current_revision = if index < 0: 0 else: owner.entries[index].lease.revision
+    if not owner.policy.allowed.contains(kind): return control_denied_v1(owner, current_revision, "control-kind-not-allowed")
+    if (session_runtime_control_target_validate_v1(target).is_err() or
+            target.service_incarnation != owner.service_incarnation):
+        return control_denied_v1(owner, current_revision, "control-target-invalid")
+    if (not client_lease_token_valid(attachment_token) or attachment_deadline_ms <= now_ms or
+            expected_revision < 0 or not builder_digest_valid_v1(nonce)):
+        return control_denied_v1(owner, current_revision, "control-issue-input-invalid")
+    for entry in owner.entries:
+        if (entry.lease.target.binding_uid == target.binding_uid and
+                session_runtime_control_target_binding_match_v1(entry.lease.target, target).is_err()):
+            owner = smux_runtime_control_invalidate_binding_v1(owner, target.binding_uid, "binding-changed", now_ms)
+            return control_denied_v1(owner, current_revision, "control-binding-changed")
+    if index >= 0:
+        val entry = owner.entries[index]
+        if expected_revision == entry.base_revision:
+            if (session_runtime_control_target_match_v1(entry.lease.target, target).is_err() or
+                    not constant_time_compare(entry.attachment_token, attachment_token)):
+                return control_denied_v1(owner, current_revision, "control-issue-replay-conflict")
+            if not entry.active: return control_denied_v1(owner, current_revision, "control-lease-retired")
+            return SmuxRuntimeControlTurnV1(owner: owner, lease: Some(entry.lease), nonce: entry.nonce,
+                revision: current_revision, status: "issued", error: "", replay: true)
+    if expected_revision != current_revision: return control_denied_v1(owner, current_revision, "control-revision-conflict")
+    if current_revision == 9223372036854775807: return control_denied_v1(owner, current_revision, "control-revision-exhausted")
+    if index < 0 and owner.entries.len() >= 16: return control_denied_v1(owner, 0, "control-owner-capacity")
+    val nonce_digest = sha256_text(nonce)
+    for entry in owner.entries:
+        if constant_time_compare(entry.lease.nonce_digest, nonce_digest):
+            return control_denied_v1(owner, current_revision, "control-nonce-reused")
+    if now_ms > 9223372036854775807 - owner.policy.max_lease_ms:
+        return control_denied_v1(owner, current_revision, "control-deadline-overflow")
+    var expiry = now_ms + owner.policy.max_lease_ms
+    if attachment_deadline_ms < expiry: expiry = attachment_deadline_ms
+    val lease = SessionRuntimeControlLeaseV1(target: target, kind: kind, principal_id: owner.policy.principal_id,
+        nonce_digest: nonce_digest, revision: current_revision + 1,
+        issued_monotonic_ms: now_ms, expires_monotonic_ms: expiry)
+    val entry = SmuxRuntimeControlEntryV1(lease: lease, nonce: nonce, attachment_token: attachment_token,
+        base_revision: expected_revision, active: true)
+    if index < 0: owner.entries.push(entry)
+    else: owner.entries[index] = entry
+    SmuxRuntimeControlTurnV1(owner: owner, lease: Some(lease), nonce: nonce,
+        revision: lease.revision, status: "issued", error: "", replay: false)
+
+pub fn smux_runtime_control_check_v1(original: SmuxRuntimeControlOwnerV1, binding_uid: text,
+        kind: SessionRuntimeControlKindV1, nonce: text, revision: i64,
+        current_target: SessionRuntimeControlTargetV1, now_ms: i64) -> SmuxRuntimeControlTurnV1:
+    var owner = control_observe_v1(original, now_ms)
+    if owner.quarantined: return control_denied_v1(owner, 0, "control-owner-quarantined")
+    val index = control_index_v1(owner, binding_uid, kind)
+    if index < 0: return control_denied_v1(owner, 0, "control-lease-not-found")
+    val entry = owner.entries[index]
+    if (not builder_digest_valid_v1(nonce) or not constant_time_compare(entry.nonce, nonce) or
+            entry.lease.revision != revision): return control_denied_v1(owner, entry.lease.revision, "control-capability-stale")
+    if not entry.active: return control_denied_v1(owner, entry.lease.revision, "control-lease-retired")
+    if session_runtime_control_target_binding_match_v1(entry.lease.target, current_target).is_err():
+        owner = smux_runtime_control_invalidate_binding_v1(owner, binding_uid, "binding-changed", now_ms)
+        return control_denied_v1(owner, entry.lease.revision, "control-binding-changed")
+    val checked = session_runtime_control_lease_check_v1(entry.lease, current_target, kind,
+        owner.policy.principal_id, sha256_text(nonce), revision, now_ms)
+    if checked.is_err():
+        owner = control_retire_at_v1(owner, index, "control-holder-or-lease-changed")
+        return control_denied_v1(owner, entry.lease.revision, checked.unwrap_err())
+    SmuxRuntimeControlTurnV1(owner: owner, lease: Some(entry.lease), nonce: "", revision: entry.lease.revision,
+        status: "checked", error: "", replay: false)
+
+pub fn smux_runtime_control_revoke_v1(original: SmuxRuntimeControlOwnerV1, binding_uid: text,
+        kind: SessionRuntimeControlKindV1, expected_revision: i64, now_ms: i64) -> SmuxRuntimeControlTurnV1:
+    var owner = control_observe_v1(original, now_ms)
+    if owner.quarantined: return control_denied_v1(owner, 0, "control-owner-quarantined")
+    val index = control_index_v1(owner, binding_uid, kind)
+    if index < 0: return control_denied_v1(owner, 0, "control-lease-not-found")
+    val entry = owner.entries[index]
+    if expected_revision != entry.lease.revision:
+        return control_denied_v1(owner, entry.lease.revision, "control-revision-conflict")
+    owner = control_retire_at_v1(owner, index, "revoked")
+    SmuxRuntimeControlTurnV1(owner: owner, lease: nil, nonce: "", revision: entry.lease.revision,
+        status: "revoked", error: "", replay: not entry.active)

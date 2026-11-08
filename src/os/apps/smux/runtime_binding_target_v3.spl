@@ -1,0 +1,101 @@
+# Exact metadata only. Caller authentication and service incarnation ownership
+# precede this helper; no label, index or implicit focus resolution occurs.
+use os.apps.smux.service.ServiceState
+use os.apps.smux.service_revision.{ServiceRevisionState, service_revision_writable}
+use std.common.contracts.mux.request_validation_v1.mux_validate_name_v1
+use std.common.contracts.mux.wire_primitives_v1.{mux_wire_encode_u64_v1, mux_wire_decode_u64_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct SmuxRuntimeTargetV3:
+    service_incarnation: text
+    session_id: text
+    window_id: text
+    pane_id: text
+    epoch: u64
+    revision: u64
+    child_incarnation: u64
+    vacant: bool
+
+pub fn smux_runtime_target_v3(snapshot: ServiceState, clock: ServiceRevisionState,
+        closing: bool, service_incarnation: text, session_id: text,
+        window_id: text, pane_id: text) -> Result<SmuxRuntimeTargetV3, text>:
+    if service_incarnation.len() != 32: return Err("runtime-target-service-incarnation")
+    for ch in service_incarnation.chars():
+        if not "0123456789abcdef".contains(ch): return Err("runtime-target-service-incarnation")
+    if clock.epoch == 0 or clock.value == 0 or not service_revision_writable(clock): return Err("runtime-target-clock-unavailable")
+    if closing: return Err("runtime-target-closing")
+    for identity in [session_id, window_id, pane_id]:
+        if mux_validate_name_v1(identity).is_err(): return Err("runtime-target-identity")
+    val si = snapshot.find_session_idx(session_id)
+    val wi = snapshot.find_window_idx(window_id)
+    val pi = snapshot.find_pane_idx(pane_id)
+    if si < 0 or wi < 0 or pi < 0: return Err("runtime-target-not-found")
+    val pane = snapshot.get_pane(pi)
+    if (snapshot.get_window(wi).session_id != session_id or pane.pane.session_id != session_id or
+            pane.pane.window_id != window_id): return Err("runtime-target-ancestry")
+    val vacant = (pane.owned_terminal_transfer == nil and not pane.helper_cleaned_awaiting_release and
+        pane.terminal_ref == nil and pane.child_pid <= 0 and pane.pty_fd < 0 and pane.can_attach())
+    Ok(SmuxRuntimeTargetV3(service_incarnation: service_incarnation, session_id: session_id,
+        window_id: window_id, pane_id: pane_id, epoch: clock.epoch, revision: clock.value,
+        child_incarnation: pane.child_incarnation, vacant: vacant))
+
+pub fn smux_runtime_target_encode_v3(target: SmuxRuntimeTargetV3) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String("smux-runtime-binding-target"),
+        "serviceIncarnation": SdnValue.String(target.service_incarnation),
+        "sessionId": SdnValue.String(target.session_id), "windowId": SdnValue.String(target.window_id),
+        "paneId": SdnValue.String(target.pane_id), "epoch": mux_wire_encode_u64_v1(target.epoch),
+        "revision": mux_wire_encode_u64_v1(target.revision),
+        "childIncarnation": mux_wire_encode_u64_v1(target.child_incarnation), "vacant": SdnValue.Bool(target.vacant)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn runtime_target_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("runtime-target-text")
+
+fn runtime_target_u64_v3(value: SdnValue) -> Result<u64, text>:
+    val parsed = mux_wire_decode_u64_v1(value)
+    if parsed.is_err(): return Err("runtime-target-u64")
+    Ok(parsed.unwrap())
+
+pub fn smux_runtime_target_decode_v3(bytes: text) -> Result<SmuxRuntimeTargetV3, text>:
+    if bytes.bytes().len() == 0 or bytes.bytes().len() > 2049: return Err("runtime-target-size")
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 2049,
+        max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16))
+    if parsed.is_err(): return Err("runtime-target-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("runtime-target-object")
+    val keys = ["version", "kind", "serviceIncarnation", "sessionId", "windowId", "paneId",
+        "epoch", "revision", "childIncarnation", "vacant"]
+    if fields.len() != keys.len(): return Err("runtime-target-fields")
+    for key in keys:
+        if not fields.contains_key(key): return Err("runtime-target-fields")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 3: return Err("runtime-target-version")
+        case _: return Err("runtime-target-version")
+    if runtime_target_text_v3(fields, "kind")? != "smux-runtime-binding-target": return Err("runtime-target-kind")
+    val incarnation = runtime_target_text_v3(fields, "serviceIncarnation")?
+    if incarnation.len() != 32: return Err("runtime-target-service-incarnation")
+    for ch in incarnation.chars():
+        if not "0123456789abcdef".contains(ch): return Err("runtime-target-service-incarnation")
+    val vacant = match fields["vacant"]:
+        case SdnValue.Bool(value): value
+        case _: return Err("runtime-target-vacant")
+    val target = SmuxRuntimeTargetV3(service_incarnation: incarnation,
+        session_id: runtime_target_text_v3(fields, "sessionId")?, window_id: runtime_target_text_v3(fields, "windowId")?,
+        pane_id: runtime_target_text_v3(fields, "paneId")?, epoch: runtime_target_u64_v3(fields["epoch"])?,
+        revision: runtime_target_u64_v3(fields["revision"])?,
+        child_incarnation: runtime_target_u64_v3(fields["childIncarnation"])?, vacant: vacant)
+    for identity in [target.session_id, target.window_id, target.pane_id]:
+        if mux_validate_name_v1(identity).is_err(): return Err("runtime-target-identity")
+    if target.epoch == 0 or target.revision == 0: return Err("runtime-target-clock-unavailable")
+    val encoded = smux_runtime_target_encode_v3(target)
+    if encoded.bytes().len() > 2048: return Err("runtime-target-size")
+    if bytes != encoded and bytes != encoded + "\n": return Err("runtime-target-noncanonical")
+    Ok(target)

@@ -1,0 +1,117 @@
+# Historical same-journal child provenance, not live execution authorization.
+# This module never imports the capacity owner/local root or a provider, writes
+# a journal, observes a current native process, or creates an exec lease.
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_lookup_v2}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+use std.common.contracts.orchestration.host_runtime_exec_v3.{HostRuntimeExecRequestV3, host_runtime_exec_request_decode_v3,
+    host_runtime_exec_match_operation_v3, host_runtime_exec_match_parent_v3}
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_decode_intent_v1,
+    host_reservation_encode_intent_v1, host_reservation_match_operation_v1}
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_decode_v2
+use std.common.contracts.container.execution_v2.{ContainerExecutionPlanV2, ContainerHostScopeV2,
+    container_execution_plan_bytes_v2, container_host_scope_bytes_v2}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeIntentV1}
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.host_execution_intent_load_v1
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_load_v2
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.crypto.sha256.sha256_text
+
+fn exec_projection_scope_v3(plan: ContainerExecutionPlanV2) -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+
+fn exec_projection_creation_matches_v3(created: RuntimeIntentV1, expected: RuntimeIdentityV1) -> bool:
+    (created.phase == "created" and created.pod_uid == expected.pod_uid and created.attempt == expected.attempt and
+        created.provider_generation == expected.provider_generation and created.operation_id == expected.operation_id and
+        created.engine == expected.engine and created.native_id == expected.native_id and created.node_boot_id == expected.node_boot_id)
+
+fn exec_projection_runtime_matches_v3(observed: RuntimeIdentityV1, expected: RuntimeIdentityV1) -> bool:
+    (observed.pod_uid == expected.pod_uid and observed.attempt == expected.attempt and
+        observed.provider_generation == expected.provider_generation and observed.operation_id == expected.operation_id and
+        observed.engine == expected.engine and observed.native_id == expected.native_id and observed.node_boot_id == expected.node_boot_id)
+
+pub fn host_runtime_exec_child_packet_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1, child: OperationEnvelopeV2) -> Result<HostRuntimeExecRequestV3, text>:
+    if child.operation != "host_runtime_exec_v3": return Err("exec-projection-action-mismatch")
+    val child_envelope = distributed_encode_operation_v2(child)?
+    val child_state = distributed_operation_journal_lookup_v2(journal, child.id)?
+    if child_state.envelope != child_envelope: return Err("exec-projection-child-envelope-mismatch")
+    val packet_path = journal.root + "/host-runtime-exec-requests/" + sha256_text(child.id) + ".sdn"
+    val packet = host_runtime_exec_request_decode_v3(file_read_regular_no_follow_bounded(packet_path, 4194304)?)?
+    if distributed_encode_operation_v2(packet.operation)? != child_envelope:
+        return Err("exec-projection-retained-child-mismatch")
+    val matched = host_runtime_exec_parent_projection_v3(journal, capacity, packet)?
+    if not matched: return Err("exec-projection-parent-chain-refused")
+    Ok(packet)
+
+pub fn host_runtime_exec_child_projection_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1, child: OperationEnvelopeV2) -> Result<bool, text>:
+    val packet = host_runtime_exec_child_packet_v3(journal, capacity, child)?
+    Ok(true)
+
+# Also used before first child admission by the trusted live producer. This
+# historical check alone grants no permission and performs no native observation.
+pub fn host_runtime_exec_parent_projection_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1, packet: HostRuntimeExecRequestV3) -> Result<bool, text>:
+    val child = packet.operation
+    val operation_matched = host_runtime_exec_match_operation_v3(packet.intent, child)?
+    val parent_chain_matched = host_runtime_exec_match_parent_v3(packet)?
+    if not operation_matched or not parent_chain_matched: return Err("exec-projection-chain-refused")
+
+    # A parent can occur later in the unordered projection. Resolve the exact
+    # actual ordinary reservation independently; child/helper recursion is refused.
+    val parent = packet.parent_binding.host_operation
+    if parent.operation != "host_reservation_v1": return Err("exec-projection-parent-reservation-required")
+    val parent_envelope = distributed_encode_operation_v2(parent)?
+    val parent_state = distributed_operation_journal_lookup_v2(journal, parent.id)?
+    if parent_state.envelope != parent_envelope: return Err("exec-projection-parent-envelope-mismatch")
+    val parent_payload = file_read_regular_no_follow_bounded(journal.root + "/reservation-payloads/" + parent.payload_digest + ".sdn", 65536)?
+    val parent_intent = host_reservation_decode_intent_v1(parent_payload)?
+    if host_reservation_encode_intent_v1(packet.parent_binding.host_intent)? != parent_payload:
+        return Err("exec-projection-parent-intent-mismatch")
+    val parent_matched = host_reservation_match_operation_v1(parent_intent, parent)?
+    if not parent_matched: return Err("exec-projection-parent-reservation-refused")
+    if (parent_intent.physical_host_id != capacity.physical_host_id or
+            parent_intent.fence.authority_id != capacity.authority_id):
+        return Err("exec-projection-parent-authority-mismatch")
+    if child.memory_bytes != parent_intent.reservation.memory_bytes:
+        return Err("exec-projection-parent-memory-mismatch")
+    if (child.principal != parent.principal or child.project != parent.project or
+            child.environment_digest != parent.environment_digest):
+        return Err("exec-projection-parent-subject-mismatch")
+    if packet.intent.request.timeout_ms > child.duration_ms:
+        return Err("exec-projection-control-window-mismatch")
+
+    val execute_path = journal.root + "/host-execute-packets/" + sha256_text(parent.id) + ".sdn"
+    # V2 only. A current supplied controller chain is correlated to this retained
+    # Host record; it is not a claim of historical Host assignment-object storage.
+    val executed = host_execute_request_decode_v2(file_read_regular_no_follow_bounded(execute_path, 2097152)?)?
+    if (distributed_encode_operation_v2(executed.operation)? != parent_envelope or
+            host_reservation_encode_intent_v1(executed.intent)? != parent_payload):
+        return Err("exec-projection-parent-execution-envelope-mismatch")
+    val expected_plan = packet.intent.request.parent
+    if container_execution_plan_bytes_v2(executed.execution.plan)? != container_execution_plan_bytes_v2(expected_plan)?:
+        return Err("exec-projection-parent-plan-mismatch")
+    val expected_runtime = packet.intent.request.parent_runtime
+    val created = host_execution_intent_load_v1(journal.root, parent.id)?
+    if not exec_projection_creation_matches_v3(created, expected_runtime):
+        return Err("exec-projection-parent-creation-mismatch")
+    # Load the original immutable observation, never a latest native inspection.
+    val observed = host_execution_observation_load_v2(journal.root, parent.id)?
+    if (observed.operation_id != parent.id or observed.operation_digest != packet.intent.parent_operation_digest or
+            observed.plan_digest != parent_intent.plan_digest or observed.request_digest != expected_plan.request_digest or
+            observed.provider_identity_digest != packet.intent.parent_provider_identity_digest or
+            container_host_scope_bytes_v2(observed.scope)? != container_host_scope_bytes_v2(exec_projection_scope_v3(expected_plan))?):
+        return Err("exec-projection-parent-observation-mismatch")
+    if not exec_projection_runtime_matches_v3(observed.runtime, expected_runtime):
+        return Err("exec-projection-parent-native-identity-mismatch")
+    if (observed.grant_id != executed.signed.grant.id or observed.principal != executed.signed.grant.principal or
+            observed.issuer_id != executed.signed.issuer_id or observed.approver_id != executed.approval.approver_id):
+        return Err("exec-projection-parent-observation-provenance-mismatch")
+    # Do not inspect child terminal/error state to free anything. The caller
+    # still projects the real parent's allocation and existing release proof.
+    Ok(true)

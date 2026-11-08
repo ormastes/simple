@@ -1,0 +1,188 @@
+# Actual common exec continuation. Leaf exclusively owns WAL, native exchanges
+# and cleanup fencing. No decoder, caller-selected state root or generic native
+# close exists here. Windows effects/inspection explicitly remain unsupported.
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.exec_admission_v3.*
+use std.common.contracts.container.exec_installed_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.exec_control_v3.container_exec_control_parent_match_v3
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_backend_v2, simple_container_scope_v2,
+    simple_container_observation_v2, simple_container_project_v2}
+use std.nogc_async_mut.container.exec_control_v3.{ContainerExecControlCleanupV3, simple_container_exec_control_probe_v3}
+use std.nogc_async_mut.container.providers.linux.engine_exec_owner_v3.{LinuxOciEngineExecOwnerV3, LinuxOciEngineExecTurnV3}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+
+pub struct ContainerExecInspectionV3:
+    request_digest: text
+    parent_runtime: RuntimeIdentityV1
+    native_exec_id: text
+    running: bool
+    observed_exit_code: i64
+
+pub enum ContainerExecSessionV3:
+    Linux(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3, admission: ContainerExecAdmissionV3,
+        action: text, scope: ContainerHostScopeV2, baseline_digest: text, leaf: LinuxOciEngineExecOwnerV3)
+
+pub struct ContainerExecTurnV3:
+    owner: SimpleContainerOwnerV2
+    session: ContainerExecSessionV3?
+    probe_cleanup: ContainerExecControlCleanupV3?
+    birth: ContainerExecBirthReceiptV3?
+    inspection: ContainerExecInspectionV3?
+    phase: text
+    error: text
+    # Actual leaf retirement fact only; not workload completion or success.
+    cleanup_complete: bool = false
+
+fn exec_common_failed_v3(owner: SimpleContainerOwnerV2, session: ContainerExecSessionV3?, reason: text) -> ContainerExecTurnV3:
+    ContainerExecTurnV3(owner: owner, session: session, probe_cleanup: nil, birth: nil, inspection: nil,
+        phase: "rejected", error: reason)
+
+# Diagnostic integrity projection ONLY. Exit/running observations grant no PID
+# control, reaping, completion acceptance, resource retirement or native removal.
+pub fn container_exec_inspection_project_v3(request: ContainerExecRequestV3,
+        native_exec_id: text, parent_native_id: text, running: bool, observed_exit_code: i64) -> Result<ContainerExecInspectionV3, text>:
+    val digest = container_exec_request_digest_v3(request)?
+    if (request.parent.backend != "linux-podman" or not builder_digest_valid_v1(native_exec_id) or native_exec_id == request.parent_runtime.native_id or
+            parent_native_id != request.parent_runtime.native_id or observed_exit_code < -1 or observed_exit_code > 255):
+        return Err("container-exec-inspection-identity-invalid")
+    Ok(ContainerExecInspectionV3(request_digest: digest, parent_runtime: request.parent_runtime,
+        native_exec_id: native_exec_id, running: running, observed_exit_code: observed_exit_code))
+
+fn exec_common_binding_v3(owner: SimpleContainerOwnerV2, parent: ContainerExecutionRequestV2,
+        installed: ContainerExecInstalledV3, admission: ContainerExecAdmissionV3) -> Result<bool, text>:
+    if simple_container_backend_v2(owner) != "linux-podman": return Err("container-exec-windows-unsupported")
+    val scope = simple_container_scope_v2(owner)
+    val cached = simple_container_observation_v2(owner)
+    if (cached.backend != "linux-podman" or cached.execution_os != "linux" or cached.native_machine_id != scope.native_machine_id or
+            cached.provider_identity_digest != admission.intent.parent_provider_identity_digest):
+        return Err("container-exec-owner-platform-baseline-mismatch")
+    if container_execution_plan_bytes_v2(parent.plan)? != container_execution_plan_bytes_v2(admission.request.parent)?:
+        return Err("container-exec-original-parent-mismatch")
+    val matched = container_exec_control_parent_match_v3(parent, admission.request.parent_runtime)?
+    val projected = simple_container_project_v2(owner, parent)?
+    val installation = container_exec_installed_match_v3(installed, admission)?
+    if container_scope_fence_id_v2(installed.intent.scope)? != container_scope_fence_id_v2(scope)?:
+        return Err("container-exec-installed-owner-scope-mismatch")
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter):
+            if adapter.is_scripted_fixture_v2(): return Err("container-exec-scripted-owner-unsupported")
+        case SimpleContainerOwnerV2.Windows(_, _): return Err("container-exec-windows-unsupported")
+    Ok(true)
+
+fn exec_common_cached_v3(owner: SimpleContainerOwnerV2, scope: ContainerHostScopeV2,
+        baseline: text) -> Result<bool, text>:
+    # Small cached check only: no full request hash/project, CLI or native query.
+    if (simple_container_backend_v2(owner) != "linux-podman" or
+            container_scope_fence_id_v2(simple_container_scope_v2(owner))? != container_scope_fence_id_v2(scope)? or
+            simple_container_observation_v2(owner).provider_identity_digest != baseline):
+        return Err("container-exec-session-owner-drift")
+    Ok(true)
+
+fn exec_common_accept_v3(owner: SimpleContainerOwnerV2, parent: ContainerExecutionRequestV2,
+        installed: ContainerExecInstalledV3, admission: ContainerExecAdmissionV3, action: text,
+        scope: ContainerHostScopeV2, baseline: text, turn: LinuxOciEngineExecTurnV3,
+        previous: ContainerExecSessionV3? = nil) -> ContainerExecTurnV3:
+    val leaf = match turn.owner:
+        case Some(value): value
+        case None:
+            val reason = if turn.error == "": "container-exec-leaf-owner-unconfirmed" else: turn.error
+            return exec_common_failed_v3(owner, previous, reason)
+    # Always retain the EXACT returned leaf. A stale view has no authority over
+    # a newer canonical connection; only leaf.cleanup may perform fenced cleanup.
+    val session = ContainerExecSessionV3.Linux(parent, installed, admission, action, scope, baseline, leaf)
+    var birth: ContainerExecBirthReceiptV3? = nil
+    var inspection: ContainerExecInspectionV3? = nil
+    if turn.error == "" and turn.phase == "complete":
+        if val value = turn.birth:
+            val matched = container_exec_birth_match_v3(value, admission.request)
+            if matched.is_err(): return exec_common_failed_v3(owner, Some(session), matched.unwrap_err())
+            if value.provider_identity_digest != admission.provider_identity_digest:
+                return exec_common_failed_v3(owner, Some(session), "container-exec-birth-control-pin-mismatch")
+            birth = Some(value)
+        if val value = turn.inspection:
+            if birth == nil or birth.unwrap().native_exec_id != value.native_exec_id:
+                return exec_common_failed_v3(owner, Some(session), "container-exec-inspection-known-birth-required")
+            val projected = container_exec_inspection_project_v3(admission.request, value.native_exec_id, value.parent_native_id, value.running, value.exit_code)
+            if projected.is_err(): return exec_common_failed_v3(owner, Some(session), projected.unwrap_err())
+            inspection = Some(projected.unwrap())
+    ContainerExecTurnV3(owner: owner, session: Some(session), probe_cleanup: nil, birth: birth,
+        inspection: inspection, phase: turn.phase, error: turn.error, cleanup_complete: turn.cleanup_complete)
+
+fn exec_common_clock_v3() -> i64:
+    val micros = time_sample_unix_micros_or_failure()
+    if micros <= 0: return -1
+    micros / 1000
+
+pub fn simple_container_exec_begin_v3(owner: SimpleContainerOwnerV2, parent: ContainerExecutionRequestV2,
+        installed: ContainerExecInstalledV3, admission: ContainerExecAdmissionV3, action: text) -> ContainerExecTurnV3:
+    if not ["create", "start"].contains(action): return exec_common_failed_v3(owner, nil, "container-exec-action-unsupported")
+    val bound = exec_common_binding_v3(owner, parent, installed, admission)
+    if bound.is_err(): return exec_common_failed_v3(owner, nil, bound.unwrap_err())
+    val remaining = container_exec_admission_match_v3(admission, admission.request, admission.provider_identity_digest, exec_common_clock_v3())
+    if remaining.is_err(): return exec_common_failed_v3(owner, nil, remaining.unwrap_err())
+    var timeout = if admission.request.timeout_ms < 30000: admission.request.timeout_ms else: 30000
+    if remaining.unwrap() < timeout: timeout = remaining.unwrap()
+    val probed = simple_container_exec_control_probe_v3(owner, parent, admission.request.parent_runtime,
+        installed.intent.control_policy_bytes, timeout)
+    if probed.error != "" or probed.cleanup != nil or probed.observation == nil:
+        return ContainerExecTurnV3(owner: probed.owner, session: nil, probe_cleanup: probed.cleanup, birth: nil, inspection: nil,
+            phase: "probe-failed", error: if probed.error == "": "container-exec-control-probe-unconfirmed" else: probed.error)
+    val observed = probed.observation.unwrap()
+    if observed.exec_control_identity_digest != admission.provider_identity_digest:
+        return exec_common_failed_v3(probed.owner, nil, "container-exec-control-pin-mismatch")
+    val fresh = container_exec_admission_match_v3(admission, admission.request, admission.provider_identity_digest, exec_common_clock_v3())
+    if fresh.is_err(): return exec_common_failed_v3(probed.owner, nil, fresh.unwrap_err())
+    val scope = simple_container_scope_v2(probed.owner)
+    val baseline = simple_container_observation_v2(probed.owner).provider_identity_digest
+    match probed.owner:
+        case SimpleContainerOwnerV2.Linux(current_scope, adapter):
+            var active = adapter
+            val turn = active.exec_begin_v3(parent, installed, admission, observed, action)
+            val retained = SimpleContainerOwnerV2.Linux(current_scope, active)
+            exec_common_accept_v3(retained, parent, installed, admission, action, scope, baseline, turn)
+        case SimpleContainerOwnerV2.Windows(_, _): exec_common_failed_v3(probed.owner, nil, "container-exec-windows-unsupported")
+
+pub fn simple_container_exec_inspect_v3(owner: SimpleContainerOwnerV2, parent: ContainerExecutionRequestV2,
+        installed: ContainerExecInstalledV3, admission: ContainerExecAdmissionV3) -> ContainerExecTurnV3:
+    # Pure binding only: known-birth inspection may outlive expiry or parent exit.
+    val bound = exec_common_binding_v3(owner, parent, installed, admission)
+    if bound.is_err(): return exec_common_failed_v3(owner, nil, bound.unwrap_err())
+    val matched = container_exec_admission_binding_match_v3(admission, admission.request, admission.provider_identity_digest)
+    if matched.is_err(): return exec_common_failed_v3(owner, nil, matched.unwrap_err())
+    val scope = simple_container_scope_v2(owner)
+    val baseline = simple_container_observation_v2(owner).provider_identity_digest
+    match owner:
+        case SimpleContainerOwnerV2.Linux(current_scope, adapter):
+            var active = adapter
+            val turn = active.exec_inspect_v3(parent, installed, admission)
+            val retained = SimpleContainerOwnerV2.Linux(current_scope, active)
+            exec_common_accept_v3(retained, parent, installed, admission, "inspect", scope, baseline, turn)
+        case SimpleContainerOwnerV2.Windows(_, _): exec_common_failed_v3(owner, nil, "container-exec-windows-unsupported")
+
+pub fn simple_container_exec_poll_v3(owner: SimpleContainerOwnerV2, session: ContainerExecSessionV3,
+        budget: i64) -> ContainerExecTurnV3:
+    if budget < 1 or budget > 25: return exec_common_failed_v3(owner, Some(session), "container-exec-step-budget")
+    match session:
+        case ContainerExecSessionV3.Linux(parent, installed, admission, action, scope, baseline, leaf):
+            val checked = exec_common_cached_v3(owner, scope, baseline)
+            if checked.is_err(): return exec_common_failed_v3(owner, Some(session), checked.unwrap_err())
+            var active = leaf
+            val turn = active.step(budget)
+            exec_common_accept_v3(owner, parent, installed, admission, action, scope, baseline, turn, Some(session))
+
+pub fn simple_container_exec_cleanup_v3(owner: SimpleContainerOwnerV2,
+        session: ContainerExecSessionV3) -> ContainerExecTurnV3:
+    # No parent readiness/epoch/provider guard: drift cannot erase cleanup owed.
+    # Native leaf WAL fences stale views and does no sends during cleanup. Never
+    # generic-close a prior connection copy or infer native exec termination.
+    match session:
+        case ContainerExecSessionV3.Linux(parent, installed, admission, action, scope, baseline, leaf):
+            var active = leaf
+            val turn = active.cleanup()
+            var returned = exec_common_accept_v3(owner, parent, installed, admission, action, scope, baseline, turn, Some(session))
+            returned.birth = nil
+            returned.inspection = nil
+            returned

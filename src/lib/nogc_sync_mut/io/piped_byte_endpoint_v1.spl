@@ -1,0 +1,93 @@
+# Process-local byte endpoint. No PID, cleanup lease, process liveness or
+# resource-release authority. Native SCM adoption is the only producer.
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.string_core.str_len
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+
+pub struct PipedByteEndpointV1:
+    generation: i64
+    binding_digest: text
+
+pub struct PipedByteReadTurnV1:
+    endpoint: PipedByteEndpointV1
+    bytes: text
+    eof: bool
+    error: text
+
+pub struct PipedByteCloseTurnV1:
+    endpoint: PipedByteEndpointV1?
+    closed: bool
+    error: text
+
+@unsafe(reason: "generation and binding lookup in canonical descriptor-only pipe slot", capabilities: [ffi])
+extern fn rt_process_validate_byte_endpoint_v1(generation: i64, binding: text, binding_bytes: i64) -> i64
+@unsafe(reason: "byte EOF state only; never waitpid or process liveness", capabilities: [ffi])
+extern fn rt_process_byte_endpoint_state_v1(generation: i64, binding: text, binding_bytes: i64) -> i64
+@unsafe(reason: "same bounded UTF8 pipe reader under exact owner; nullable preallocated receipt", capabilities: [ffi])
+extern fn rt_process_read_byte_endpoint_v1(generation: i64, binding: text, binding_bytes: i64) -> [i64]?
+@unsafe(reason: "close only the exact endpoint FD, consumed Linux descriptor never retried", capabilities: [ffi])
+extern fn rt_process_close_byte_endpoint_v1(generation: i64, binding: text, binding_bytes: i64) -> [i64]?
+
+fn byte_endpoint_shape_v1(endpoint: PipedByteEndpointV1) -> bool:
+    endpoint.generation > 0 and builder_digest_valid_v1(endpoint.binding_digest)
+
+fn byte_endpoint_error_v1(status: i64) -> text:
+    match status:
+        case 0: ""
+        case -1: "byte_endpoint_invalid"
+        case -2: "byte_endpoint_stale"
+        case -3: "byte_endpoint_io_error"
+        case -4: "byte_endpoint_unsupported"
+        case -5: "byte_endpoint_capacity"
+        case -7: "byte_endpoint_busy"
+        case -10: "byte_endpoint_origin_unavailable"
+        case _: "byte_endpoint_native_receipt_invalid"
+
+pub fn process_byte_endpoint_equal_v1(left: PipedByteEndpointV1, right: PipedByteEndpointV1) -> bool:
+    (byte_endpoint_shape_v1(left) and byte_endpoint_shape_v1(right) and
+        left.generation == right.generation and left.binding_digest == right.binding_digest)
+
+pub fn process_validate_byte_endpoint_v1(endpoint: PipedByteEndpointV1) -> Result<(), text>:
+    if not byte_endpoint_shape_v1(endpoint): return Err("byte_endpoint_invalid")
+    val status = unsafe(capabilities: [ffi]):
+        rt_process_validate_byte_endpoint_v1(endpoint.generation, endpoint.binding_digest, str_len(endpoint.binding_digest))
+    if status != 0: return Err(byte_endpoint_error_v1(status))
+    Ok(())
+
+pub fn process_byte_endpoint_state_v1(endpoint: PipedByteEndpointV1) -> Result<i64, text>:
+    if not byte_endpoint_shape_v1(endpoint): return Err("byte_endpoint_invalid")
+    val status = unsafe(capabilities: [ffi]):
+        rt_process_byte_endpoint_state_v1(endpoint.generation, endpoint.binding_digest, str_len(endpoint.binding_digest))
+    if status < 0: return Err(byte_endpoint_error_v1(status))
+    if status > 1: return Err("byte_endpoint_native_receipt_invalid")
+    Ok(status)
+
+pub fn process_read_byte_endpoint_v1(endpoint: PipedByteEndpointV1) -> PipedByteReadTurnV1:
+    if not byte_endpoint_shape_v1(endpoint): return PipedByteReadTurnV1(endpoint, "", false, "byte_endpoint_invalid")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_read_byte_endpoint_v1(endpoint.generation, endpoint.binding_digest, str_len(endpoint.binding_digest))
+    if raw == nil: return PipedByteReadTurnV1(endpoint, "", false, "byte_endpoint_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 24588: return PipedByteReadTurnV1(endpoint, "", false, "byte_endpoint_native_receipt_invalid")
+    val count = result[2]
+    if count < 0 or count > result.len() - 3 or (result[1] != 0 and result[1] != 1):
+        return PipedByteReadTurnV1(endpoint, "", false, "byte_endpoint_native_receipt_invalid")
+    var bytes: [u8] = []
+    for index in 0..count:
+        val byte = result[index + 3]
+        if byte < 0 or byte > 255: return PipedByteReadTurnV1(endpoint, "", false, "byte_endpoint_native_receipt_invalid")
+        bytes.push(byte as u8)
+    if bytes.len() != count or not utf8_bytes_valid(bytes):
+        return PipedByteReadTurnV1(endpoint, "", false, "byte_endpoint_native_receipt_invalid")
+    PipedByteReadTurnV1(endpoint, bytes_to_text(bytes), result[1] == 1, byte_endpoint_error_v1(result[0]))
+
+pub fn process_close_byte_endpoint_v1(endpoint: PipedByteEndpointV1) -> PipedByteCloseTurnV1:
+    if not byte_endpoint_shape_v1(endpoint): return PipedByteCloseTurnV1(Some(endpoint), false, "byte_endpoint_invalid")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_close_byte_endpoint_v1(endpoint.generation, endpoint.binding_digest, str_len(endpoint.binding_digest))
+    if raw == nil: return PipedByteCloseTurnV1(Some(endpoint), false, "byte_endpoint_native_receipt_unavailable")
+    val result: [i64] = raw ?? []
+    if result.len() != 2 or (result[1] != 0 and result[1] != 1):
+        return PipedByteCloseTurnV1(Some(endpoint), false, "byte_endpoint_native_receipt_invalid")
+    if result[1] == 1: return PipedByteCloseTurnV1(nil, true, byte_endpoint_error_v1(result[0]))
+    PipedByteCloseTurnV1(Some(endpoint), false, byte_endpoint_error_v1(result[0]))

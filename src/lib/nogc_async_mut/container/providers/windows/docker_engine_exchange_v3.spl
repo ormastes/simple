@@ -1,0 +1,401 @@
+# Private nonblocking READ-ONLY Engine HTTP exchange. Public acquisition admits
+# only exact info/container-inspect GETs. Mutation codecs below are pure data;
+# no create/start/attach/resize entry opens a pipe until a real effect owner exists.
+# Context is deadline metadata only, never an execution grant.
+# SOURCE-ONLY NOT_RUN. No reconnect/replay; timeout never proves exec absence.
+# Sole broker-owner discipline is required: class/lease values are not copy-safe
+# logical reader capabilities. Never invoke a stale copied owner after transfer.
+use std.nogc_sync_mut.io.windows_engine_pipe_owner_v1.*
+use std.common.process.windows_engine_pipe_v1.{WINDOWS_ENGINE_PIPE_MAX_BYTES_V1, windows_engine_pipe_write_context_reason_v1}
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid, text_bytes_concat_checked}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get}
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.*
+
+pub const WINDOWS_DOCKER_ENGINE_EXCHANGE_TIMEOUT_MAX_V3: i64 = 300000
+pub const WINDOWS_DOCKER_ENGINE_EXCHANGE_RESPONSE_MAX_V3: i64 = WINDOWS_ENGINE_HEADER_MAX_V3 + WINDOWS_ENGINE_CONTROL_MAX_V3 + WINDOWS_ENGINE_FRAME_MAX_V3
+pub const WINDOWS_DOCKER_ENGINE_EXCHANGE_REQUEST_MAX_V3: i64 = WINDOWS_ENGINE_HEADER_MAX_V3 + WINDOWS_ENGINE_REQUEST_MAX_V3
+
+pub enum WindowsDockerEngineExchangePhaseV3:
+    Writing
+    Reading
+    ControlComplete
+    Hijacked
+    Closing
+    Closed
+    Failed
+    Transferred
+
+pub enum WindowsDockerEngineExchangeOutcomeV3:
+    Ready(owner: WindowsDockerEngineExchangeV3)
+    CleanupRequired(owner: WindowsDockerEngineExchangeV3, reason: text)
+    Rejected(reason: text)
+
+pub struct WindowsDockerEngineHijackV3:
+    lease: WindowsEnginePipeLeaseV1
+    response: WindowsEngineHttpResponseV3
+    operation: text
+    tty: bool
+
+pub enum WindowsDockerEngineTransferOutcomeV3:
+    Transferred(source: WindowsDockerEngineExchangeV3, stream: WindowsDockerEngineHijackV3)
+    Retained(owner: WindowsDockerEngineExchangeV3, reason: text)
+
+fn exchange_field_v3(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(field): Ok(field)
+        case None: Err("engine-exchange-json-field:" + key)
+
+fn exchange_bool_v3(value: JsonValue, key: text) -> Result<bool, text>:
+    match exchange_field_v3(value, key)?:
+        case JsonValue.Bool(field): Ok(field)
+        case _: Err("engine-exchange-json-bool:" + key)
+
+fn exchange_text_v3(value: JsonValue, key: text) -> Result<text, text>:
+    match exchange_field_v3(value, key)?:
+        case JsonValue.Str(field): Ok(field)
+        case _: Err("engine-exchange-json-text:" + key)
+
+fn exchange_strings_v3(value: JsonValue, key: text, maximum: i64) -> Result<[text], text>:
+    val items = match exchange_field_v3(value, key)?:
+        case JsonValue.Array(fields): fields
+        case _: return Err("engine-exchange-json-array:" + key)
+    if items.len() > maximum: return Err("engine-exchange-json-array-bound:" + key)
+    var strings: [text] = []
+    for item in items:
+        match item:
+            case JsonValue.Str(field): strings.push(field)
+            case _: return Err("engine-exchange-json-array-text:" + key)
+    Ok(strings)
+
+# Tiny lexical depth guard bounds the SHARED strict parser. Exact canonical
+# builder-byte comparison below rejects alternative/lossy escape spellings.
+fn exchange_json_v3(body: [u8]) -> Result<JsonValue, text>:
+    if body.len() == 0 or body.len() > WINDOWS_ENGINE_REQUEST_MAX_V3 or not utf8_bytes_valid(body): return Err("engine-exchange-json-body")
+    var quoted = false
+    var escaped = false
+    var depth = 0
+    var tokens = 0
+    for byte in body:
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92u8: escaped = true
+            elif byte == 34u8: quoted = false
+        elif byte == 34u8:
+            quoted = true
+            tokens = tokens + 1
+        elif byte == 123u8 or byte == 91u8:
+            depth = depth + 1
+            tokens = tokens + 1
+            if depth > 8: return Err("engine-exchange-json-depth")
+        elif byte == 125u8 or byte == 93u8:
+            depth = depth - 1
+            if depth < 0: return Err("engine-exchange-json-depth")
+        elif byte == 44u8: tokens = tokens + 1
+        if tokens > 1024: return Err("engine-exchange-json-token-bound")
+    if quoted or depth != 0: return Err("engine-exchange-json-incomplete")
+    val text = bytes_to_text(body)
+    if text.byte_len() != body.len(): return Err("engine-exchange-json-byte-conversion")
+    json_parse_value_strict(text)
+
+fn exchange_target_id_v3(target: text, container: bool) -> Result<text, text>:
+    val prefix = if container: "/v1.48/containers/" else: "/v1.48/exec/"
+    if not target.starts_with(prefix) or target.len() < prefix.len() + 64: return Err("engine-exchange-target")
+    Ok(target.substring(prefix.len(), prefix.len() + 64))
+
+fn exchange_resize_v3(request: WindowsEngineHttpRequestV3, container: bool) -> Result<WindowsEngineHttpRequestV3, text>:
+    val id = exchange_target_id_v3(request.target, container)?
+    val query = request.target.split("?h=")
+    if query.len() != 2: return Err("engine-exchange-resize-query")
+    val parts = query[1].split("&w=")
+    if parts.len() != 2: return Err("engine-exchange-resize-query")
+    var numbers: [i64] = []
+    for part in parts:
+        if part == "" or part.len() > 5: return Err("engine-exchange-resize-query")
+        for index in 0..part.len():
+            val byte = part.byte_at(index)
+            if byte < 48 or byte > 57: return Err("engine-exchange-resize-query")
+        numbers.push(part.to_i64() ?? -1)
+    if container: windows_engine_container_resize_v3("1.48", id, numbers[0], numbers[1], request.tty)
+    else: windows_engine_exec_resize_v3("1.48", id, numbers[0], numbers[1], request.tty)
+
+fn exchange_expected_request_v3(request: WindowsEngineHttpRequestV3) -> Result<WindowsEngineHttpRequestV3, text>:
+    match request.operation:
+        case "info": windows_engine_info_v3("1.48")
+        case "container-inspect": windows_engine_container_inspect_v3("1.48", exchange_target_id_v3(request.target, true)?)
+        case "exec-inspect": windows_engine_exec_inspect_v3("1.48", exchange_target_id_v3(request.target, false)?)
+        case "attach": windows_engine_attach_v3("1.48", exchange_target_id_v3(request.target, true)?, request.tty, request.target.contains("&stdin=1&"))
+        case "container-resize": exchange_resize_v3(request, true)
+        case "exec-resize": exchange_resize_v3(request, false)
+        case "exec-start":
+            val value = exchange_json_v3(request.body)?
+            if exchange_bool_v3(value, "Detach")? or exchange_bool_v3(value, "Tty")? != request.tty: return Err("engine-exchange-start-body")
+            windows_engine_exec_start_v3("1.48", exchange_target_id_v3(request.target, false)?, request.tty)
+        case "exec-create":
+            val value = exchange_json_v3(request.body)?
+            if exchange_text_v3(value, "User")? != "ContainerUser" or exchange_bool_v3(value, "Privileged")? or
+                    exchange_bool_v3(value, "Tty")? != request.tty or not exchange_bool_v3(value, "AttachStdout")? or
+                    not exchange_bool_v3(value, "AttachStderr")?: return Err("engine-exchange-create-body")
+            var environment: [(text, text)] = []
+            for item in exchange_strings_v3(value, "Env", 64)?:
+                val equal = item.index_of("=")
+                if equal <= 0: return Err("engine-exchange-environment-assignment")
+                environment.push((item.substring(0, equal), item.substring(equal + 1, item.len())))
+            val exec = WindowsEngineExecRequestV3(container_id: exchange_target_id_v3(request.target, true)?,
+                argv: exchange_strings_v3(value, "Cmd", 128)?, environment: environment,
+                working_directory: exchange_text_v3(value, "WorkingDir")?, tty: request.tty,
+                stdin_requested: exchange_bool_v3(value, "AttachStdin")?)
+            windows_engine_exec_create_v3("1.48", exec)
+        case _: Err("engine-exchange-operation-unsupported")
+
+# Framing validation is NOT argv/env authentication. Broker must independently
+# compare this exact query to its installed shared request and retained claim.
+pub fn windows_docker_engine_exchange_serialize_v3(request: WindowsEngineHttpRequestV3) -> Result<[u8], text>:
+    # Bound caller-owned DTO fields before splits, JSON parsing or rebuilding.
+    if request.operation.byte_len() > 32 or request.method.byte_len() > 8 or request.target.byte_len() > 1024 or
+            request.headers.len() > 8 or request.body.len() > WINDOWS_ENGINE_REQUEST_MAX_V3:
+        return Err("engine-exchange-request-input-bound")
+    for (name, value) in request.headers:
+        if name.byte_len() > 64 or value.byte_len() > 128: return Err("engine-exchange-request-header-bound")
+    val expected = exchange_expected_request_v3(request)?
+    if request.method != expected.method or request.target != expected.target or request.hijack != expected.hijack or
+            request.tty != expected.tty or request.headers != expected.headers or request.body != expected.body:
+        return Err("engine-exchange-request-not-exact-codec-output")
+    var source = expected.method + " " + expected.target + " HTTP/1.1\r\n"
+    for (name, value) in expected.headers: source = source + name + ": " + value + "\r\n"
+    source = source + "\r\n"
+    val prefix = match boxed_text_bytes_checked(source):
+        case Ok(value): value
+        case Err(_): return Err("engine-exchange-header-extraction")
+    if prefix.len() > WINDOWS_ENGINE_HEADER_MAX_V3: return Err("engine-exchange-header-bound")
+    match text_bytes_concat_checked(prefix, expected.body):
+        case Ok(value): Ok(value)
+        case Err(_): Err("engine-exchange-wire-allocation")
+
+pub fn windows_docker_engine_exchange_context_reason_v3(request: WindowsEngineHttpRequestV3, context: WindowsEnginePipeWriteContextV1?) -> text:
+    val effect = request.operation == "exec-create" or request.operation == "exec-start"
+    match context:
+        case None:
+            if effect: "engine-exchange-create-start-context-required" else: ""
+        case Some(value):
+            if not effect: return "engine-exchange-context-forbidden-for-operation"
+            val reason = windows_engine_pipe_write_context_reason_v1(value)
+            if reason != "": return reason
+            if value.action != (if request.operation == "exec-create": "create" else: "start"): return "engine-exchange-context-action-mismatch"
+            ""
+
+# Independent operation allowlist precedes serialization and every native call.
+# Regeneration then checks the entire method/target/headers/body/flags, so an
+# info operation label cannot hide a POST, hijack or different endpoint.
+pub fn windows_docker_engine_exchange_read_only_serialize_v3(request: WindowsEngineHttpRequestV3) -> Result<[u8], text>:
+    if request.operation != "info" and request.operation != "container-inspect":
+        return Err("engine-exchange-read-only-operation-required")
+    windows_docker_engine_exchange_serialize_v3(request)
+
+pub class WindowsDockerEngineExchangeV3:
+    lease: WindowsEnginePipeLeaseV1?
+    request: WindowsEngineHttpRequestV3
+    wire: [u8]
+    write_offset: i64
+    response_bytes: [u8]
+    response: WindowsEngineHttpResponseV3?
+    context: WindowsEnginePipeWriteContextV1?
+    phase: WindowsDockerEngineExchangePhaseV3
+    started_nanos: i64
+    deadline_nanos: i64
+    first_error: text
+    cleanup_error: text
+    last_pipe: WindowsEnginePipePollV1?
+    admitted_observation: WindowsEnginePipeObservationV1?
+
+impl WindowsDockerEngineExchangeV3:
+    # Compatibility spelling remains fail-closed. A data-only write context
+    # cannot unlock effects, even when its deadline and action are well formed.
+    pub static fn begin_v3(request: WindowsEngineHttpRequestV3, context: WindowsEnginePipeWriteContextV1?,
+            timeout_ms: i64) -> WindowsDockerEngineExchangeOutcomeV3:
+        if request.operation != "info" and request.operation != "container-inspect":
+            return WindowsDockerEngineExchangeOutcomeV3.Rejected("engine-exchange-read-only-operation-required")
+        if context != None:
+            return WindowsDockerEngineExchangeOutcomeV3.Rejected("engine-exchange-read-only-context-forbidden")
+        WindowsDockerEngineExchangeV3.begin_read_only_v3(request, timeout_ms)
+
+    pub static fn begin_read_only_v3(request: WindowsEngineHttpRequestV3,
+            timeout_ms: i64) -> WindowsDockerEngineExchangeOutcomeV3:
+        val wire = match windows_docker_engine_exchange_read_only_serialize_v3(request):
+            case Ok(value): value
+            case Err(reason): return WindowsDockerEngineExchangeOutcomeV3.Rejected(reason)
+        if timeout_ms <= 0 or timeout_ms > WINDOWS_DOCKER_ENGINE_EXCHANGE_TIMEOUT_MAX_V3:
+            return WindowsDockerEngineExchangeOutcomeV3.Rejected("engine-exchange-control-window-bound")
+        val started = time_sample_monotonic_nanos_or_failure()
+        if started < 0 or started > 9223372036854775807 - timeout_ms * 1000000:
+            return WindowsDockerEngineExchangeOutcomeV3.Rejected("engine-exchange-monotonic-clock")
+        var owner = WindowsDockerEngineExchangeV3(lease: None, request: request, wire: wire, write_offset: 0,
+            response_bytes: [], response: None, context: None, phase: WindowsDockerEngineExchangePhaseV3.Writing,
+            started_nanos: started, deadline_nanos: started + timeout_ms * 1000000, first_error: "", cleanup_error: "", last_pipe: None, admitted_observation: None)
+        match windows_engine_pipe_connect_v1():
+            case WindowsEnginePipeAdmissionV1.Rejected(error): return WindowsDockerEngineExchangeOutcomeV3.Rejected(error)
+            case WindowsEnginePipeAdmissionV1.CleanupRequired(lease, error):
+                owner.lease = Some(lease)
+                return owner._failure(error)
+            case WindowsEnginePipeAdmissionV1.Ready(lease):
+                owner.lease = Some(lease)
+                # Capture the actual connected endpoint before HTTP writes.
+                # A completed Connection:close response may disconnect later.
+                match windows_engine_pipe_observe_v1(lease):
+                    case Ok(value): owner.admitted_observation = Some(value)
+                    case Err(error): return owner._failure(error)
+        owner._window_result()
+
+    pub fn phase_v3() -> WindowsDockerEngineExchangePhaseV3: self.phase
+    pub fn response_v3() -> WindowsEngineHttpResponseV3?: self.response
+    pub fn write_offset_v3() -> i64: self.write_offset
+    pub fn has_owned_pipe_v3() -> bool: self.lease != None
+    pub fn first_error_v3() -> text: self.first_error
+    pub fn cleanup_error_v3() -> text: self.cleanup_error
+    pub fn last_pipe_v3() -> WindowsEnginePipePollV1?: self.last_pipe
+
+    # Cached ACTUAL admission observation from this exact connection, not a
+    # caller profile or a new live PID query after Connection:close completion.
+    # Refuse after failure, relinquishment or cleanup; no authority is inferred.
+    pub fn observation_v3() -> Result<WindowsEnginePipeObservationV1, text>:
+        if self.lease == None or self.phase == WindowsDockerEngineExchangePhaseV3.Failed or
+                self.phase == WindowsDockerEngineExchangePhaseV3.Closing or self.phase == WindowsDockerEngineExchangePhaseV3.Closed or
+                self.phase == WindowsDockerEngineExchangePhaseV3.Transferred:
+            return Err("engine-exchange-observation-unavailable")
+        match self.admitted_observation:
+            case Some(value): Ok(value)
+            case None: Err("engine-exchange-admission-not-observed")
+
+    me fn _cancel_owned():
+        if val lease = self.lease:
+            match windows_engine_pipe_cancel_v1(lease):
+                case Err(error): self.cleanup_error = error
+                case Ok(state):
+                    self.last_pipe = Some(state)
+                    if state.closed:
+                        self.lease = None
+                        self.phase = WindowsDockerEngineExchangePhaseV3.Closed
+
+    me fn _failure(reason: text) -> WindowsDockerEngineExchangeOutcomeV3:
+        if self.first_error == "": self.first_error = reason
+        self.phase = WindowsDockerEngineExchangePhaseV3.Failed
+        self._cancel_owned()
+        WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(self, reason)
+
+    me fn _window_result() -> WindowsDockerEngineExchangeOutcomeV3:
+        val sampled = time_sample_monotonic_nanos_or_failure()
+        if sampled < self.started_nanos or sampled >= self.deadline_nanos: return self._failure("engine-exchange-control-window-expired")
+        WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+
+    # One bounded submission/read advancement after one native poll. No sleeps,
+    # waiting loops, request replay, reconnect, or fresh authorization synthesis.
+    pub me fn poll_v3() -> WindowsDockerEngineExchangeOutcomeV3:
+        if self.lease == None: return WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+        if self.phase == WindowsDockerEngineExchangePhaseV3.ControlComplete or self.phase == WindowsDockerEngineExchangePhaseV3.Hijacked:
+            return WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+        val lease = self.lease.unwrap()
+        val state = match windows_engine_pipe_poll_v1(lease):
+            case Ok(value): value
+            case Err(reason): return self._failure(reason)
+        self.last_pipe = Some(state)
+        if state.closed:
+            val incomplete = self.phase == WindowsDockerEngineExchangePhaseV3.Writing or self.phase == WindowsDockerEngineExchangePhaseV3.Reading
+            self.lease = None
+            self.phase = WindowsDockerEngineExchangePhaseV3.Closed
+            if incomplete:
+                if self.first_error == "": self.first_error = "engine-exchange-pipe-closed-before-response"
+                return WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(self, self.first_error)
+            return WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+        if self.phase == WindowsDockerEngineExchangePhaseV3.Closing: return WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+        if self.phase == WindowsDockerEngineExchangePhaseV3.Failed:
+            return WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(self, self.first_error)
+        if state.closing: return self._failure("engine-exchange-pipe-closing")
+        val sampled = time_sample_monotonic_nanos_or_failure()
+        if sampled < self.started_nanos or sampled >= self.deadline_nanos: return self._failure("engine-exchange-control-window-expired")
+        if self.phase == WindowsDockerEngineExchangePhaseV3.Writing:
+            if state.write_pending: return WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+            if self.write_offset == self.wire.len():
+                self.phase = WindowsDockerEngineExchangePhaseV3.Reading
+                return WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+            val remaining = self.wire.len() - self.write_offset
+            val count = if remaining > WINDOWS_ENGINE_PIPE_MAX_BYTES_V1: WINDOWS_ENGINE_PIPE_MAX_BYTES_V1 else: remaining
+            val bytes = [for index in self.write_offset..(self.write_offset + count): self.wire[index]]
+            val accepted = match self.context:
+                case Some(value): windows_engine_pipe_write_some_admitted_v1(lease, bytes, value)
+                case None: windows_engine_pipe_write_some_v1(lease, bytes)
+            match accepted:
+                case Err(reason): return self._failure(reason)
+                case Ok(written):
+                    if written < 0 or written > count: return self._failure("engine-exchange-write-prefix-invalid")
+                    # Pending writes report their queued prefix once. Wait for
+                    # the authoritative owner completion before another prefix.
+                    self.write_offset = self.write_offset + written
+            return self._window_result()
+        if self.phase != WindowsDockerEngineExchangePhaseV3.Reading: return self._failure("engine-exchange-phase-invalid")
+        match windows_engine_pipe_read_some_v1(lease, WINDOWS_ENGINE_PIPE_MAX_BYTES_V1):
+            case WindowsEnginePipeReadV1.Pending: self._window_result()
+            case WindowsEnginePipeReadV1.End: self._failure("engine-exchange-eof-before-complete-response")
+            case WindowsEnginePipeReadV1.Failed(reason): self._failure(reason)
+            case WindowsEnginePipeReadV1.Data(bytes):
+                if bytes.len() == 0 or bytes.len() > WINDOWS_ENGINE_PIPE_MAX_BYTES_V1 or self.response_bytes.len() > WINDOWS_DOCKER_ENGINE_EXCHANGE_RESPONSE_MAX_V3 - bytes.len():
+                    return self._failure("engine-exchange-response-buffer-bound")
+                self.response_bytes = match text_bytes_concat_checked(self.response_bytes, bytes):
+                    case Ok(value): value
+                    case Err(_): return self._failure("engine-exchange-response-allocation")
+                match windows_engine_http_parse_v3(self.response_bytes, self.request.operation, self.request.tty):
+                    case Err(reason): self._failure(reason)
+                    case Ok(WindowsEngineHttpParseV3.NeedMore): self._window_result()
+                    case Ok(WindowsEngineHttpParseV3.Complete(response)):
+                        self.response = Some(response)
+                        self.phase = if self.request.hijack: WindowsDockerEngineExchangePhaseV3.Hijacked else: WindowsDockerEngineExchangePhaseV3.ControlComplete
+                        self._window_result()
+
+    pub me fn cancel_v3() -> WindowsDockerEngineExchangeOutcomeV3:
+        if self.lease == None: return WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+        if self.phase != WindowsDockerEngineExchangePhaseV3.Failed: self.phase = WindowsDockerEngineExchangePhaseV3.Closing
+        match windows_engine_pipe_cancel_v1(self.lease.unwrap()):
+            case Err(reason):
+                self.cleanup_error = reason
+                WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(self, reason)
+            case Ok(state):
+                self.last_pipe = Some(state)
+                if state.closed:
+                    self.lease = None
+                    self.phase = WindowsDockerEngineExchangePhaseV3.Closed
+                WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+
+    pub me fn collect_v3() -> WindowsDockerEngineExchangeOutcomeV3:
+        if self.lease == None: return WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+        if self.phase != WindowsDockerEngineExchangePhaseV3.Failed: self.phase = WindowsDockerEngineExchangePhaseV3.Closing
+        match windows_engine_pipe_collect_v1(self.lease.unwrap()):
+            case Err(reason):
+                self.cleanup_error = reason
+                WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(self, reason)
+            case Ok(state):
+                self.last_pipe = Some(state)
+                if not state.closed: return WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(self, "engine-exchange-native-collection-incomplete")
+                self.lease = None
+                self.phase = WindowsDockerEngineExchangePhaseV3.Closed
+                WindowsDockerEngineExchangeOutcomeV3.Ready(self)
+
+    # Same native owner domain only. Receiver must drain response.leftover before
+    # its next read, and separately authorize input/resize. Source loses lease.
+    pub me fn take_hijack_v3() -> WindowsDockerEngineTransferOutcomeV3:
+        if self.phase != WindowsDockerEngineExchangePhaseV3.Hijacked or self.lease == None or self.response == None:
+            return WindowsDockerEngineTransferOutcomeV3.Retained(self, "engine-exchange-no-hijack-to-transfer")
+        val lease = self.lease.unwrap()
+        val state = match windows_engine_pipe_poll_v1(lease):
+            case Err(reason):
+                if self.first_error == "": self.first_error = reason
+                self.phase = WindowsDockerEngineExchangePhaseV3.Failed
+                self._cancel_owned()
+                return WindowsDockerEngineTransferOutcomeV3.Retained(self, reason)
+            case Ok(value): value
+        self.last_pipe = Some(state)
+        if state.closing or state.closed or state.read_pending or state.write_pending:
+            return WindowsDockerEngineTransferOutcomeV3.Retained(self, "engine-exchange-hijack-pipe-not-transferable")
+        val stream = WindowsDockerEngineHijackV3(lease: lease, response: self.response.unwrap(), operation: self.request.operation, tty: self.request.tty)
+        self.lease = None
+        self.context = None
+        self.phase = WindowsDockerEngineExchangePhaseV3.Transferred
+        WindowsDockerEngineTransferOutcomeV3.Transferred(self, stream)

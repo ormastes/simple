@@ -1,0 +1,134 @@
+# @req ORCH-02 HOST-02
+# Actual common negative calls and neutral diagnostic data projections only.
+# Execution NOT_RUN. No native success, Host lease or leaf session is fabricated.
+use std.nogc_async_mut.container.exec_v3.*
+use std.nogc_async_mut.container.api_v2.*
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.exec_admission_v3.*
+use std.common.contracts.container.exec_installed_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+
+struct CommonExecRouteFixtureV3:
+    parent: ContainerExecutionRequestV2
+    installed: ContainerExecInstalledV3
+    admission: ContainerExecAdmissionV3
+
+fn common_exec_route_fixture_v3() -> CommonExecRouteFixtureV3:
+    val parent = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+    val scope = linux_container_scope_fixture_v2()
+    val baseline = linux_container_engine_fixture_v2().identity_digest
+    val runtime = RuntimeIdentityV1(pod_uid: parent.plan.workload_uid, attempt: parent.plan.attempt,
+        operation_id: parent.plan.operation_id, provider_generation: parent.plan.provider_generation, engine: "podman",
+        native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val request = ContainerExecRequestV3(parent: parent.plan, parent_runtime: runtime, operation_id: "exec-operation", nonce: "c".repeat(64),
+        argv: ["/usr/bin/agent", "--version"], environment: [], working_directory: "/workspace", selected_user: "1000:1000",
+        terminal_mode: "none", stdin_requested: false, timeout_ms: 1000)
+    val intent = HostRuntimeExecIntentV3(request: request, parent_operation_digest: "d".repeat(64), parent_assignment_digest: "e".repeat(64),
+        parent_controller_operation_digest: "f".repeat(64), parent_provider_identity_digest: baseline, exec_control_identity_digest: "1".repeat(64))
+    val operation = OperationEnvelopeV2(version: 2, id: request.operation_id, operation: "host_runtime_exec_v3",
+        payload_digest: host_runtime_exec_intent_digest_v3(intent).unwrap(), principal: "user", project: "project", host_id: scope.physical_host_id,
+        environment_digest: baseline, policy_revision: 1, revocation_epoch: 0, session_generation: 1, memory_bytes: 4096, duration_ms: 1000)
+    val admission = ContainerExecAdmissionV3(intent: intent, request: request, operation: operation,
+        parent_operation_digest: intent.parent_operation_digest, parent_assignment_digest: intent.parent_assignment_digest,
+        provider_identity_digest: intent.exec_control_identity_digest,
+        deadline: container_effect_deadline_v1(container_exec_request_digest_v3(request).unwrap(), request.operation_id, ["exec"], 1000).unwrap(),
+        grant_id: "grant", issuer_id: "issuer", approver_id: "approver", execution_proof_digest: "2".repeat(64))
+    val policy = LinuxOciInstalledPolicyV3(cli_policy: linux_container_policy_fixture_v2(), socket_path: "/run/user/1000/podman/podman.sock",
+        expected_service_uid: 1000, api_version: "5.2.5")
+    val install_intent = HostExecControlInstallationIntentV3(operation_id: "install-control", enrollment_binding_digest: "3".repeat(64),
+        scope: scope, provider_identity_digest: baseline, control_policy_bytes: linux_oci_installed_policy_encode_v3(policy).unwrap(),
+        control_policy_digest: linux_oci_installed_policy_digest_v3(policy).unwrap())
+    val installed = ContainerExecInstalledV3(intent: install_intent, artifact_digest: host_exec_control_installation_intent_digest_v3(install_intent).unwrap())
+    CommonExecRouteFixtureV3(parent: parent, installed: installed, admission: admission)
+
+fn common_exec_assert_refused_v3(turn: ContainerExecTurnV3):
+    expect(turn.error == "").to_equal(false)
+    expect(turn.cleanup_complete).to_equal(false)
+    expect(turn.session == nil and turn.probe_cleanup == nil and turn.birth == nil and turn.inspection == nil).to_equal(true)
+    match turn.owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): expect(adapter.provider.executor_call_count()).to_equal(0)
+        case SimpleContainerOwnerV2.Windows(_, _): expect(windows_adapter_consumed_fixture_v2(turn.owner)).to_equal(0)
+
+describe "actual common finite exec route boundaries":
+    it "refuses unsupported action through the actual common route before effects":
+        step("refuses unsupported action through the actual common route before effects")
+        val fixture = common_exec_route_fixture_v3()
+        val owner = linux_container_owner_fixture_v2([], [])
+        val turn = simple_container_exec_begin_v3(owner, fixture.parent, fixture.installed, fixture.admission, "destroy")
+        expect(turn.error).to_equal("container-exec-action-unsupported")
+        common_exec_assert_refused_v3(turn)
+
+    it "refuses scripted begin before actual control probe or exec native creation":
+        step("refuses scripted begin before actual control probe or exec native creation")
+        val fixture = common_exec_route_fixture_v3()
+        val owner = linux_container_owner_fixture_v2([], [])
+        for action in ["create", "start"]:
+            val turn = simple_container_exec_begin_v3(owner, fixture.parent, fixture.installed, fixture.admission, action)
+            expect(turn.error).to_equal("container-exec-scripted-owner-unsupported")
+            common_exec_assert_refused_v3(turn)
+            expect(simple_container_scope_v2(turn.owner)).to_equal(simple_container_scope_v2(owner))
+
+    it "uses pure binding for expired inspect but still refuses scripted native observation":
+        step("uses pure binding for expired inspect but still refuses scripted native observation")
+        val fixture = common_exec_route_fixture_v3()
+        expect(fixture.admission.deadline.expires_at_unix_ms).to_equal(1000)
+        val turn = simple_container_exec_inspect_v3(linux_container_owner_fixture_v2([], []), fixture.parent, fixture.installed, fixture.admission)
+        expect(turn.error).to_equal("container-exec-scripted-owner-unsupported")
+        common_exec_assert_refused_v3(turn)
+        # Historical deadline is not replaced with a fictitious fresh grant.
+
+    it "refuses original parent baseline and installation artifact mismatches before effects":
+        step("refuses original parent baseline and installation artifact mismatches before effects")
+        val fixture = common_exec_route_fixture_v3()
+        val owner = linux_container_owner_fixture_v2([], [])
+        var parent = fixture.parent
+        parent.plan.request_digest = "4".repeat(64)
+        val changed_parent = simple_container_exec_begin_v3(owner, parent, fixture.installed, fixture.admission, "create")
+        expect(changed_parent.error).to_equal("container-exec-original-parent-mismatch")
+        common_exec_assert_refused_v3(changed_parent)
+        var installed = fixture.installed
+        installed.artifact_digest = "4".repeat(64)
+        common_exec_assert_refused_v3(simple_container_exec_begin_v3(owner, fixture.parent, installed, fixture.admission, "create"))
+        var admission = fixture.admission
+        admission.intent.parent_provider_identity_digest = "4".repeat(64)
+        common_exec_assert_refused_v3(simple_container_exec_begin_v3(owner, fixture.parent, fixture.installed, admission, "create"))
+
+    it "explicitly refuses Windows effect and inspect without a platform fallback":
+        step("explicitly refuses Windows effect and inspect without a platform fallback")
+        val fixture = common_exec_route_fixture_v3()
+        val owner = windows_adapter_owner_fixture_v2([], [])
+        val begin = simple_container_exec_begin_v3(owner, fixture.parent, fixture.installed, fixture.admission, "create")
+        expect(begin.error).to_equal("container-exec-windows-unsupported")
+        common_exec_assert_refused_v3(begin)
+        val inspect = simple_container_exec_inspect_v3(owner, fixture.parent, fixture.installed, fixture.admission)
+        expect(inspect.error).to_equal("container-exec-windows-unsupported")
+        common_exec_assert_refused_v3(inspect)
+
+    it "projects diagnostic running and exit data without PID removal or completion authority":
+        step("projects diagnostic running and exit data without PID removal or completion authority")
+        val request = common_exec_route_fixture_v3().admission.request
+        val running = container_exec_inspection_project_v3(request, "e".repeat(64), request.parent_runtime.native_id, true, -1).unwrap()
+        expect(running.request_digest).to_equal(container_exec_request_digest_v3(request).unwrap())
+        expect(running.parent_runtime).to_equal(request.parent_runtime)
+        expect(running.running).to_equal(true)
+        expect(running.observed_exit_code).to_equal(-1)
+        val exited = container_exec_inspection_project_v3(request, "e".repeat(64), request.parent_runtime.native_id, false, 23).unwrap()
+        expect(exited.running).to_equal(false)
+        expect(exited.observed_exit_code).to_equal(23)
+        # Pure projection is not actual query/native ownership or parent acceptance.
+
+    it "refuses wrong full exec parent identities and impossible exit diagnostic bounds":
+        step("refuses wrong full exec parent identities and impossible exit diagnostic bounds")
+        val request = common_exec_route_fixture_v3().admission.request
+        expect(container_exec_inspection_project_v3(request, request.parent_runtime.native_id, request.parent_runtime.native_id, false, 0).is_err()).to_equal(true)
+        expect(container_exec_inspection_project_v3(request, "short", request.parent_runtime.native_id, false, 0).is_err()).to_equal(true)
+        expect(container_exec_inspection_project_v3(request, "e".repeat(64), "f".repeat(64), false, 0).is_err()).to_equal(true)
+        expect(container_exec_inspection_project_v3(request, "e".repeat(64), request.parent_runtime.native_id, false, 256).is_err()).to_equal(true)

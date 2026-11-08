@@ -4,6 +4,7 @@
 use std.common.contracts.container.exec_v3.*
 use std.common.contracts.orchestration.host_runtime_exec_v3.*
 use std.common.contracts.container.exec_admission_v3.*
+use std.common.contracts.container.exec_state_access_v3.*
 use std.common.contracts.container.execution_v2.*
 use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
 use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
@@ -31,6 +32,17 @@ fn exec_admission_fixture_v3() -> ContainerExecAdmissionV3:
         parent_assignment_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
         deadline: container_effect_deadline_v1(digest, request.operation_id, ["exec"], 1000).unwrap(),
         grant_id: "grant", issuer_id: "issuer", approver_id: "approver", execution_proof_digest: "2".repeat(64))
+
+fn exec_state_binding_fixture_v3(admission: ContainerExecAdmissionV3) -> ContainerExecStateBindingV3:
+    val parent = admission.request.parent
+    val scope = ContainerHostScopeV2(physical_host_id: parent.physical_host_id, service_scope_id: parent.service_scope_id,
+        boot_id: parent.boot_id, provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
+        continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
+    ContainerExecStateBindingV3(scope: scope, child_operation_id: admission.operation.id,
+        request_digest: container_exec_request_digest_v3(admission.request).unwrap(),
+        intent_digest: host_runtime_exec_intent_digest_v3(admission.intent).unwrap(),
+        installation_artifact_digest: "6".repeat(64), exec_control_identity_digest: admission.provider_identity_digest,
+        deployment_claim_digest: "7".repeat(64))
 
 describe "nonserialized exec admission final-boundary integrity":
     it "matches exact request provider and live exec admission window":
@@ -72,6 +84,9 @@ describe "nonserialized exec admission final-boundary integrity":
         changed = original
         changed.operation.memory_bytes = 0
         expect(container_exec_admission_match_v3(changed, original.request, original.provider_identity_digest, 100).is_err()).to_equal(true)
+        changed = original
+        changed.operation.duration_ms = original.request.timeout_ms - 1
+        expect(container_exec_admission_match_v3(changed, original.request, original.provider_identity_digest, 100).is_err()).to_equal(true)
 
     it "refuses provider mismatch invalid retained digests and noncanonical proof identities":
         step("refuses provider mismatch invalid retained digests and noncanonical proof identities")
@@ -112,3 +127,66 @@ describe "nonserialized exec admission final-boundary integrity":
         expect(container_exec_admission_match_v3(original, original.request, original.provider_identity_digest, 1000).is_err()).to_equal(true)
         expect(container_exec_admission_match_v3(original, original.request, original.provider_identity_digest, -1).is_err()).to_equal(true)
         # Expiration only denies a NEW effect; it cannot stop or release exec.
+
+    it "preserves exact binding for read-only reconciliation without inventing a fresh clock":
+        step("preserves exact binding for read-only reconciliation without inventing a fresh clock")
+        val original = exec_admission_fixture_v3()
+        expect(container_exec_admission_binding_match_v3(original, original.request, original.provider_identity_digest).is_ok()).to_equal(true)
+        expect(container_exec_admission_match_v3(original, original.request, original.provider_identity_digest, 1001).is_err()).to_equal(true)
+        var changed = original
+        changed.deadline.request_digest = "3".repeat(64)
+        expect(container_exec_admission_binding_match_v3(changed, original.request, original.provider_identity_digest).is_err()).to_equal(true)
+        changed = original
+        changed.deadline.expires_at_unix_ms = 0
+        expect(container_exec_admission_binding_match_v3(changed, original.request, original.provider_identity_digest).is_err()).to_equal(true)
+
+    it "keeps changed exec requests in the original scope operation namespace":
+        step("keeps changed exec requests in the original scope operation namespace")
+        val original = exec_state_binding_fixture_v3(exec_admission_fixture_v3())
+        val key = container_exec_state_namespace_key_v3(original.scope, original.child_operation_id).unwrap()
+        var changed = original
+        changed.request_digest = "8".repeat(64)
+        changed.intent_digest = "9".repeat(64)
+        changed.installation_artifact_digest = "a".repeat(64)
+        expect(container_exec_state_namespace_key_v3(changed.scope, changed.child_operation_id).unwrap()).to_equal(key)
+        expect(container_exec_state_binding_bytes_v3(changed).unwrap() == container_exec_state_binding_bytes_v3(original).unwrap()).to_equal(false)
+        changed.child_operation_id = "another-child"
+        expect(container_exec_state_namespace_key_v3(changed.scope, changed.child_operation_id).unwrap() == key).to_equal(false)
+        changed = original
+        changed.scope.provider_generation = changed.scope.provider_generation + 1
+        expect(container_exec_state_namespace_key_v3(changed.scope, changed.child_operation_id).unwrap() == key).to_equal(false)
+
+    it "matches installed state provenance without renewing exec effect authority":
+        step("matches installed state provenance without renewing exec effect authority")
+        val admission = exec_admission_fixture_v3()
+        val original = exec_state_binding_fixture_v3(admission)
+        expect(container_exec_state_binding_match_v3(original, admission, "6".repeat(64), "7".repeat(64)).is_ok()).to_equal(true)
+        expect(container_exec_admission_match_v3(admission, admission.request, admission.provider_identity_digest, 1001).is_err()).to_equal(true)
+        expect(container_exec_state_binding_match_v3(original, admission, "8".repeat(64), "7".repeat(64)).is_err()).to_equal(true)
+        expect(container_exec_state_binding_match_v3(original, admission, "6".repeat(64), "8".repeat(64)).is_err()).to_equal(true)
+        var changed = original
+        changed.child_operation_id = "another-child"
+        expect(container_exec_state_binding_match_v3(changed, admission, "6".repeat(64), "7".repeat(64)).is_err()).to_equal(true)
+        changed = original
+        changed.request_digest = "8".repeat(64)
+        expect(container_exec_state_binding_match_v3(changed, admission, "6".repeat(64), "7".repeat(64)).is_err()).to_equal(true)
+        changed = original
+        changed.intent_digest = "8".repeat(64)
+        expect(container_exec_state_binding_match_v3(changed, admission, "6".repeat(64), "7".repeat(64)).is_err()).to_equal(true)
+        changed = original
+        changed.exec_control_identity_digest = "8".repeat(64)
+        expect(container_exec_state_binding_match_v3(changed, admission, "6".repeat(64), "7".repeat(64)).is_err()).to_equal(true)
+        changed = original
+        changed.scope.service_scope_id = "another-service"
+        expect(container_exec_state_binding_match_v3(changed, admission, "6".repeat(64), "7".repeat(64)).is_err()).to_equal(true)
+
+    it "bounds immutable state records and rejects malformed namespace provenance":
+        step("bounds immutable state records and rejects malformed namespace provenance")
+        val original = exec_state_binding_fixture_v3(exec_admission_fixture_v3())
+        expect(container_exec_state_record_bytes_validate_v3("record").is_ok()).to_equal(true)
+        expect(container_exec_state_record_bytes_validate_v3("").is_err()).to_equal(true)
+        expect(container_exec_state_record_bytes_validate_v3("x".repeat(4194305)).is_err()).to_equal(true)
+        expect(container_exec_state_namespace_key_v3(original.scope, "bad/path").is_err()).to_equal(true)
+        var changed = original
+        changed.deployment_claim_digest = "not-a-digest"
+        expect(container_exec_state_binding_bytes_v3(changed).is_err()).to_equal(true)

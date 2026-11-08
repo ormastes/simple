@@ -1,0 +1,153 @@
+# Static installed service authority. A fresh live service epoch is NOT an
+# enrollment field: the Container factory mints it on every process startup.
+# The separately signed broker partition is charged once before any helper.
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.HostEnrollmentCredentialV1
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.common.contracts.distributed_control_v2.ExecutionGrantV2
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.string_core.str_len
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostServiceEnrollmentBindingV2:
+    physical_host_id: text
+    service_scope_id: text
+    config_digest: text
+    policy_digest: text
+    policy_revision: i64
+    native_machine_id: text
+    provider_identity_digest: text
+    engine_policy_digest: text
+    machine_parent: text
+    backend: text
+    broker_policy_digest: text
+    physical_cpu_millis: i64
+    physical_memory_bytes: i64
+    reserved_cpu_millis: i64
+    reserved_memory_bytes: i64
+
+pub struct HostServiceAllocatableV2:
+    cpu_millis: i64
+    memory_bytes: i64
+
+pub fn host_service_allocatable_v2(binding: HostServiceEnrollmentBindingV2) -> Result<HostServiceAllocatableV2, text>:
+    # Validate before subtracting. No upward rounding and no per-helper debit
+    # of this shared service-broker partition.
+    if (binding.physical_cpu_millis <= 0 or binding.physical_memory_bytes <= 0 or
+            binding.reserved_cpu_millis <= 0 or binding.reserved_memory_bytes <= 0 or
+            binding.reserved_cpu_millis >= binding.physical_cpu_millis or
+            binding.reserved_memory_bytes >= binding.physical_memory_bytes):
+        return Err("host-service-broker-partition-invalid")
+    Ok(HostServiceAllocatableV2(binding.physical_cpu_millis - binding.reserved_cpu_millis,
+        binding.physical_memory_bytes - binding.reserved_memory_bytes))
+
+fn host_service_parent_valid_v2(path: text) -> bool:
+    if (str_len(path) < 2 or str_len(path) > 4096 or path.contains("\0") or path.contains("\n") or
+            path.contains("\r") or path.contains("\t")): return false
+    # Canonical native absolute path spelling is independently checked by the
+    # installed-root filesystem owner. This codec rejects relative traversal.
+    val unix = path.starts_with("/")
+    val drive = str_len(path) >= 3 and "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(path[0:1]) and path[1:3] == ":/"
+    if not unix and not drive: return false
+    if path.ends_with("/") or path.contains("\\"): return false
+    val parts = path.split("/")
+    var index = 1
+    while index < parts.len():
+        if parts[index] == "" or parts[index] == "." or parts[index] == "..": return false
+        index = index + 1
+    true
+
+pub fn host_service_enrollment_payload_bytes_v2(binding: HostServiceEnrollmentBindingV2) -> Result<text, text>:
+    for digest in [binding.config_digest, binding.policy_digest, binding.provider_identity_digest, binding.engine_policy_digest, binding.broker_policy_digest]:
+        if str_len(digest) != 64 or not builder_digest_valid_v1(digest): return Err("host-service-enrollment-digest-invalid")
+    for identifier in [binding.physical_host_id, binding.service_scope_id]:
+        if str_len(identifier) > 128 or not builder_identifier_valid_v1(identifier): return Err("host-service-enrollment-identity-invalid")
+    # Native identity is a namespaced observed value (for example the Windows
+    # MachineGuid owner uses a colon), not the public host alias grammar.
+    if str_len(binding.native_machine_id) == 0 or str_len(binding.native_machine_id) > 256:
+        return Err("host-service-enrollment-identity-invalid")
+    for index in 0..binding.native_machine_id.byte_len():
+        val code = binding.native_machine_id.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or
+                (code >= 97 and code <= 122) or code == 45 or code == 95 or code == 58 or code == 46):
+            return Err("host-service-enrollment-identity-invalid")
+    if binding.policy_revision < 0 or binding.backend != "windows-docker-process": return Err("host-service-enrollment-mode-invalid")
+    if not host_service_parent_valid_v2(binding.machine_parent): return Err("host-service-enrollment-parent-invalid")
+    val capacity = host_service_allocatable_v2(binding)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-service-enrollment-binding"),
+        "physicalHostId": SdnValue.String(binding.physical_host_id), "serviceScopeId": SdnValue.String(binding.service_scope_id),
+        "configDigest": SdnValue.String(binding.config_digest), "policyDigest": SdnValue.String(binding.policy_digest),
+        "policyRevision": SdnValue.Int(binding.policy_revision), "nativeMachineId": SdnValue.String(binding.native_machine_id),
+        "providerIdentityDigest": SdnValue.String(binding.provider_identity_digest), "enginePolicyDigest": SdnValue.String(binding.engine_policy_digest), "machineParent": SdnValue.String(binding.machine_parent),
+        "backend": SdnValue.String(binding.backend), "continuityMode": SdnValue.String("service-incarnation-v1"),
+        "durabilityProfile": SdnValue.String("process-crash-v1"), "brokerPolicyDigest": SdnValue.String(binding.broker_policy_digest),
+        "physicalCpuMillis": SdnValue.Int(binding.physical_cpu_millis), "physicalMemoryBytes": SdnValue.Int(binding.physical_memory_bytes),
+        "reservedCpuMillis": SdnValue.Int(binding.reserved_cpu_millis), "reservedMemoryBytes": SdnValue.Int(binding.reserved_memory_bytes)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn host_service_enrollment_payload_digest_v2(binding: HostServiceEnrollmentBindingV2) -> Result<text, text>:
+    Ok(sha256_text(host_service_enrollment_payload_bytes_v2(binding)?))
+
+fn host_service_enrollment_text_v2(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-service-enrollment-field-type:" + name)
+
+fn host_service_enrollment_int_v2(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-service-enrollment-field-type:" + name)
+
+pub fn host_service_enrollment_payload_decode_v2(source: text) -> Result<HostServiceEnrollmentBindingV2, text>:
+    if str_len(source) == 0 or str_len(source) > 16384: return Err("host-service-enrollment-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384, max_depth: 2,
+            max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(value): value
+        case Err(issue): return Err("host-service-enrollment-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-service-enrollment-object-required")
+    val names = ["version", "kind", "physicalHostId", "serviceScopeId", "configDigest", "policyDigest", "policyRevision",
+        "nativeMachineId", "providerIdentityDigest", "enginePolicyDigest", "machineParent", "backend", "continuityMode", "durabilityProfile",
+        "brokerPolicyDigest", "physicalCpuMillis", "physicalMemoryBytes", "reservedCpuMillis", "reservedMemoryBytes"]
+    for name in fields.keys():
+        if not names.contains(name): return Err("host-service-enrollment-unknown-field:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("host-service-enrollment-missing-field:" + name)
+    if (host_service_enrollment_int_v2(fields, "version")? != 2 or
+            host_service_enrollment_text_v2(fields, "kind")? != "host-service-enrollment-binding" or
+            host_service_enrollment_text_v2(fields, "continuityMode")? != "service-incarnation-v1" or
+            host_service_enrollment_text_v2(fields, "durabilityProfile")? != "process-crash-v1"):
+        return Err("host-service-enrollment-version-mode")
+    val binding = HostServiceEnrollmentBindingV2(
+        physical_host_id: host_service_enrollment_text_v2(fields, "physicalHostId")?, service_scope_id: host_service_enrollment_text_v2(fields, "serviceScopeId")?,
+        config_digest: host_service_enrollment_text_v2(fields, "configDigest")?, policy_digest: host_service_enrollment_text_v2(fields, "policyDigest")?,
+        policy_revision: host_service_enrollment_int_v2(fields, "policyRevision")?, native_machine_id: host_service_enrollment_text_v2(fields, "nativeMachineId")?,
+        provider_identity_digest: host_service_enrollment_text_v2(fields, "providerIdentityDigest")?,
+        engine_policy_digest: host_service_enrollment_text_v2(fields, "enginePolicyDigest")?, machine_parent: host_service_enrollment_text_v2(fields, "machineParent")?,
+        backend: host_service_enrollment_text_v2(fields, "backend")?, broker_policy_digest: host_service_enrollment_text_v2(fields, "brokerPolicyDigest")?,
+        physical_cpu_millis: host_service_enrollment_int_v2(fields, "physicalCpuMillis")?, physical_memory_bytes: host_service_enrollment_int_v2(fields, "physicalMemoryBytes")?,
+        reserved_cpu_millis: host_service_enrollment_int_v2(fields, "reservedCpuMillis")?, reserved_memory_bytes: host_service_enrollment_int_v2(fields, "reservedMemoryBytes")?)
+    if host_service_enrollment_payload_bytes_v2(binding)? != source: return Err("host-service-enrollment-noncanonical")
+    Ok(binding)
+
+pub fn host_service_enrollment_authorize_v2(binding: HostServiceEnrollmentBindingV2,
+        credential: HostEnrollmentCredentialV1, policy: LocalAuthorityPolicyV1,
+        context: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
+    val digest = host_service_enrollment_payload_digest_v2(binding)?
+    val operation = credential.operation
+    if (operation.operation != "host_enroll_v1" or operation.payload_digest != digest or
+            operation.host_id != binding.physical_host_id or operation.memory_bytes != binding.physical_memory_bytes or
+            operation.environment_digest != binding.provider_identity_digest): return Err("host-service-enrollment-signed-binding-mismatch")
+    if (policy.source_digest != binding.policy_digest or policy.snapshot.policy_revision != binding.policy_revision or
+            context.policy_revision != binding.policy_revision or context.revocation_epoch != policy.snapshot.revocation_epoch or
+            context.session_generation != policy.session_generation or context.grant_clock <= 0):
+        return Err("host-service-enrollment-authority-context-mismatch")
+    distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, credential.signed, credential.approval,
+        operation, context.grant_clock, policy.snapshot.generation, context.policy_revision,
+        context.revocation_epoch, context.session_generation)

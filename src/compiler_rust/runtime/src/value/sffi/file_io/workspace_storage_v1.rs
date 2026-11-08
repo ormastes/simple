@@ -34,3 +34,26 @@ pub extern "C" fn rt_linux_container_user_observe_v1(_token:i64,_binding:Runtime
 }
 #[no_mangle]
 pub extern "C" fn rt_linux_container_user_close_v1(_token:i64,_binding:RuntimeValue)->i64{-95}
+
+#[no_mangle]
+pub extern "C" fn rt_workspace_storage_prepare_executable_v1(_storage:i64,_user:i64,
+    _mapping:RuntimeValue,_stage:RuntimeValue,_expiry:i64,_input:RuntimeValue,
+    _output:RuntimeValue,_executable:RuntimeValue,_digest:RuntimeValue)->RuntimeValue{
+    unsafe {rt_string_new(b"".as_ptr(),0)}
+}
+
+// Capability absent in this provider; no process or filesystem fallback.
+#[no_mangle]
+pub extern "C" fn rt_linux_container_containment_capture_v1(_pid:i64,_cgroup:RuntimeValue,_binding:RuntimeValue)->i64{-95}
+#[no_mangle]
+pub extern "C" fn rt_linux_container_containment_observe_v1(_token:i64,_binding:RuntimeValue)->RuntimeValue{
+    unsafe {rt_string_new(b"".as_ptr(),0)}
+}
+#[no_mangle]
+pub extern "C" fn rt_linux_container_containment_close_v1(_token:i64,_binding:RuntimeValue)->i64{-95}
+
+#[no_mangle]
+pub extern "C" fn rt_linux_container_containment_kernel_observe_v1(_token:i64,_binding:RuntimeValue,
+    _release:RuntimeValue,_build:RuntimeValue,_profile:RuntimeValue)->RuntimeValue{
+    unsafe {rt_string_new(b"".as_ptr(),0)}
+}

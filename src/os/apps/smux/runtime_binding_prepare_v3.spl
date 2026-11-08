@@ -1,0 +1,75 @@
+# Explicit exclusive in-process mode only: this is the SAME host writer held
+# by the configured owner. No finite host command or second journal is opened.
+use os.apps.smux.runtime_binding_state_v3.{SmuxRuntimeBindingOwnerV3, SmuxRuntimeBindingTurnV3,
+    smux_runtime_binding_reply_turn_v3}
+use os.apps.smux.runtime_binding_request_v3.SmuxRuntimeBindRequestV3
+use os.apps.smux.runtime_binding_reply_v3.SmuxRuntimeBindingReplyV3
+use os.apps.smux.runtime_binding_planning_v3.smux_runtime_binding_target_check_v3
+use os.apps.smux.runtime_binding_store_v3.{smux_binding_request_load_v3,
+    smux_binding_plan_load_v3, smux_binding_output_plan_load_v3}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1,
+    HostHelperExecutionProofV1, host_helper_request_decode_v1, host_helper_execution_proof_decode_v1}
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.host_helper_prepare_v1
+use std.nogc_sync_mut.orchestration.host_local_root_v1.{host_local_context_v1, host_local_refresh_context_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+
+pub fn smux_runtime_binding_staged_execution_v3(root: text, binding_uid: text,
+        request: HostHelperRequestV1) -> Result<HostHelperExecutionProofV1, text>:
+    if not builder_identifier_valid_v1(binding_uid): return Err("runtime-binding-uid-invalid")
+    val path = root + "/smux-helper-staging/" + sha256_text(binding_uid) + ".execution.sdn"
+    host_helper_execution_proof_decode_v1(request, file_read_regular_no_follow_bounded(path, 2097152)?)
+
+fn prepare_error_v3(owner: SmuxRuntimeBindingOwnerV3, uid: text) -> SmuxRuntimeBindingTurnV3:
+    val reply = SmuxRuntimeBindingReplyV3(binding_uid: uid, service_incarnation: owner.service_incarnation,
+        binding_digest: "", workload_operation_id: "", helper_operation_id: "", request_digest: "",
+        status: "rejected", code: "runtime-binding-staged-helper-invalid", committed: false,
+        stream_owned: false, cleanup_retained: false, host_release_pending: false)
+    smux_runtime_binding_reply_turn_v3(owner, reply)
+
+pub fn smux_runtime_binding_prepare_v3(owner: SmuxRuntimeBindingOwnerV3,
+        binding_uid: text) -> SmuxRuntimeBindingTurnV3:
+    var current = owner
+    val root = current.local.capacity.journal.root
+    val loaded = smux_binding_request_load_v3(root, binding_uid)
+    if loaded.is_err(): return prepare_error_v3(current, binding_uid)
+    val request = loaded.unwrap()
+    val target = smux_runtime_binding_target_check_v3(request, current.service_incarnation)
+    if target.is_err(): return prepare_error_v3(current, binding_uid)
+    val planned = smux_binding_plan_load_v3(root, request)
+    val output = smux_binding_output_plan_load_v3(root, request)
+    if planned.is_err() or output.is_err(): return prepare_error_v3(current, binding_uid)
+    val path = current.local.root + "/smux-helper-staging/" + sha256_text(binding_uid) + ".request.sdn"
+    val staged = file_read_regular_no_follow_bounded(path, 2097152)
+    if staged.is_err(): return prepare_error_v3(current, binding_uid)
+    val decoded = host_helper_request_decode_v1(staged.unwrap())
+    if decoded.is_err(): return prepare_error_v3(current, binding_uid)
+    val helper = decoded.unwrap()
+    val plan = output.unwrap()
+    if (helper.plan.helper_kind != "attach-broker" or helper.operation.id != request.helper_operation_id or
+            helper.plan.operation_id != request.helper_operation_id or
+            helper.plan.request_digest != plan.request_digest or helper.plan.parent_operation_id != request.workload_operation_id or
+            helper.plan.parent_operation_digest != plan.identity.parent_operation_digest or
+            helper.plan.parent_assignment_digest != plan.identity.parent_assignment_digest or
+            helper.plan.parent_budget_digest != request.parent_budget_digest or
+            helper.intent.reservation.cpu_millis != plan.resources.cpu_millis or
+            helper.intent.reservation.memory_bytes != plan.resources.memory_bytes):
+        return prepare_error_v3(current, binding_uid)
+    val host_root = current.local.root
+    val enrollment = current.local.binding
+    val refresh = fn() -> HostReservationAuthorizationContextV1:
+        host_local_refresh_context_v1(host_root, enrollment)
+    val prepared = host_helper_prepare_v1(current.local.capacity, helper, current.local.policy, current.local.scope,
+        host_local_context_v1(current.local.policy), refresh)
+    current.local.capacity = prepared.owner
+    var reply = planned.unwrap()
+    reply.host_release_pending = true
+    if prepared.error != "" or prepared.receipt == nil:
+        reply.status = "unconfirmed"
+        reply.code = "runtime-binding-helper-preparation-unconfirmed"
+    else:
+        reply.status = "helper-prepared"
+        reply.code = "helper-reservation-prepared-no-transport"
+    smux_runtime_binding_reply_turn_v3(current, reply)

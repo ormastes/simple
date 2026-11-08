@@ -34,6 +34,7 @@
 #endif
 
 #define SPL_LEGACY_VALUE_RUNTIME 1
+#define SIMPLE_RETAINED_PRIVATE_CREDENTIAL_IMPLEMENTATION
 #include "runtime.h"
 #include "runtime_nonnull.h"
 #if defined(__APPLE__)

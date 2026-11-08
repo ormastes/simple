@@ -1,0 +1,105 @@
+# Source cases NOT_RUN until an admitted Simple producer executes this spec.
+use std.spec.{describe, it, expect}
+use std.common.text_bytes.text_to_utf8_bytes
+use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_frame_v1.*
+
+fn gateway_request_fixture_v1(payload_bytes: i64) -> LocalGatewayHeaderV1:
+    LocalGatewayHeaderV1(response: false, request_id: "a".repeat(64), action: "host-status",
+        operation_id: "", exit_code: 0, payload_bytes: payload_bytes, handoff_metadata: "")
+
+describe "Bounded local gateway canonical framing":
+    it "roundtrips request correlation and permits empty operation only as metadata":
+        val value = gateway_request_fixture_v1(4)
+        val source = local_gateway_header_encode_v1(value).unwrap()
+        val decoded = local_gateway_header_decode_v1(source, false).unwrap()
+        expect(decoded.request_id).to_equal(value.request_id)
+        expect(decoded.action).to_equal("host-status")
+        expect(decoded.operation_id).to_equal("")
+        expect(decoded.payload_bytes).to_equal(4)
+        assert(local_gateway_header_decode_v1(source, true).is_err())
+
+    it "keeps response metadata distinct from live descriptor authority":
+        val value = LocalGatewayHeaderV1(response: true, request_id: "b".repeat(64),
+            action: "", operation_id: "", exit_code: 17, payload_bytes: 0, handoff_metadata: "opaque")
+        val source = local_gateway_header_encode_v1(value).unwrap()
+        val decoded = local_gateway_header_decode_v1(source, true).unwrap()
+        expect(decoded.handoff_metadata).to_equal("opaque")
+        expect(decoded.exit_code).to_equal(17)
+        assert(local_gateway_header_decode_v1(source, false).is_err())
+
+    it "rejects caller peer identity and duplicate missing or wrong typed fields":
+        val source = local_gateway_header_encode_v1(gateway_request_fixture_v1(4)).unwrap()
+        assert(local_gateway_header_decode_v1("{}\n", false).is_err())
+        val peer = source.replace("payloadBytes", "peerUid")
+        assert(peer != source)
+        assert(local_gateway_header_decode_v1(peer, false).is_err())
+        val duplicate = source.replace("payloadBytes: 4", "payloadBytes: 4, payloadBytes: 4")
+        assert(duplicate != source)
+        assert(local_gateway_header_decode_v1(duplicate, false).is_err())
+        val wrong_type = source.replace("payloadBytes: 4", "payloadBytes: \"4\"")
+        assert(wrong_type != source)
+        assert(local_gateway_header_decode_v1(wrong_type, false).is_err())
+
+    it "rejects noncanonical trailing data and oversized headers before dispatch":
+        val source = local_gateway_header_encode_v1(gateway_request_fixture_v1(0)).unwrap()
+        assert(local_gateway_header_decode_v1(" " + source, false).is_err())
+        assert(local_gateway_header_decode_v1(source + "\n", false).is_err())
+        assert(local_gateway_header_decode_v1("x".repeat(8193), false).is_err())
+
+    it "checks prefix counts before arithmetic or payload allocation":
+        val value = gateway_request_fixture_v1(2097152)
+        var prefix = local_gateway_prefix_encode_v1(value).unwrap()
+        expect(local_gateway_prefix_decode_v1(prefix, false).unwrap().payload_bytes).to_equal(2097152)
+        prefix[15] = 255
+        assert(local_gateway_prefix_decode_v1(prefix, false).is_err())
+        prefix = local_gateway_prefix_encode_v1(value).unwrap()
+        prefix[8] = 1
+        assert(local_gateway_prefix_decode_v1(prefix, false).is_err())
+        prefix = local_gateway_prefix_encode_v1(value).unwrap()
+        prefix[0] = 0
+        assert(local_gateway_prefix_decode_v1(prefix, false).is_err())
+        assert(local_gateway_header_encode_v1(gateway_request_fixture_v1(2097153)).is_err())
+
+    it "assembles fragmented Unicode and embedded NUL with exact byte counts":
+        val payload = text_to_utf8_bytes("é\0Z")
+        val value = gateway_request_fixture_v1(payload.len())
+        var reader = local_gateway_frame_reader_v1(false).unwrap()
+        for byte in local_gateway_prefix_encode_v1(value).unwrap():
+            reader.feed([byte]).unwrap()
+        for byte in text_to_utf8_bytes(local_gateway_header_encode_v1(value).unwrap()):
+            reader.feed([byte]).unwrap()
+        for byte in payload: reader.feed([byte]).unwrap()
+        expect(reader.complete()).to_equal(true)
+        expect(local_gateway_payload_decode_v1(reader.header.unwrap(), reader.payload).unwrap()).to_equal("é\0Z")
+        assert(reader.feed([1]).is_err())
+
+    it "rejects prefix header disagreement before body admission":
+        val value = gateway_request_fixture_v1(1)
+        var reader = local_gateway_frame_reader_v1(false).unwrap()
+        reader.feed(local_gateway_prefix_encode_v1(value).unwrap()).unwrap()
+        val different = local_gateway_header_encode_v1(gateway_request_fixture_v1(2)).unwrap()
+        assert(reader.feed(text_to_utf8_bytes(different)).is_err())
+        expect(reader.error).to_equal("gateway-frame-count-mismatch")
+        expect(reader.complete()).to_equal(false)
+
+    it "rejects malformed UTF8 and incomplete EOF without replacement decoding":
+        val value = gateway_request_fixture_v1(2)
+        var reader = local_gateway_frame_reader_v1(false).unwrap()
+        reader.feed(local_gateway_prefix_encode_v1(value).unwrap()).unwrap()
+        reader.feed(text_to_utf8_bytes(local_gateway_header_encode_v1(value).unwrap())).unwrap()
+        assert(reader.feed([192, 128]).is_err())
+        expect(reader.error).to_equal("gateway-payload-utf8")
+        var truncated = local_gateway_frame_reader_v1(false).unwrap()
+        truncated.feed([76]).unwrap()
+        assert(truncated.end_of_stream().is_err())
+        expect(truncated.error).to_equal("gateway-frame-truncated")
+
+    it "completes an empty body after its canonical header":
+        val value = gateway_request_fixture_v1(0)
+        var reader = local_gateway_frame_reader_v1(false).unwrap()
+        reader.feed(local_gateway_prefix_encode_v1(value).unwrap()).unwrap()
+        reader.feed(text_to_utf8_bytes(local_gateway_header_encode_v1(value).unwrap())).unwrap()
+        expect(reader.complete()).to_equal(true)
+        expect(reader.read_limit()).to_equal(0)
+        reader.end_of_stream().unwrap()
