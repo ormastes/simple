@@ -37,6 +37,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
  * runtime.c + platform headers. We must NOT include platform/platform.h
  * here to avoid duplicate symbol definitions. */
 #include "runtime.h"
+#include "runtime_crt_file.h"
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
@@ -233,13 +234,13 @@ int64_t rt_random_hex(int64_t len) {
             ssize_t count = read(fd, random_bytes + offset, byte_len - offset);
             if (count < 0 && errno == EINTR) continue;
             if (count <= 0) {
-                close(fd);
+                rt_crt_close(fd);
                 free(random_bytes);
                 return 3;
             }
             offset += (size_t)count;
         }
-        close(fd);
+        rt_crt_close(fd);
 #endif
     }
     char* encoded = (char*)rt_observed_malloc_v1(byte_len * 2 + 1);
@@ -8104,13 +8105,13 @@ int64_t rt_file_preload_pages(int64_t path_value) {
 
     off_t size = lseek(fd, 0, SEEK_END);
     if (size <= 0) {
-        close(fd);
+        rt_crt_close(fd);
         return 0;
     }
     lseek(fd, 0, SEEK_SET);
 
     unsigned char* mapped = (unsigned char*)mmap(NULL, (size_t)size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
+    rt_crt_close(fd);
     if (mapped == MAP_FAILED) return -3;
 
     volatile uint64_t sum = 0;
@@ -8144,7 +8145,7 @@ int64_t rt_net_tcp_connect_local_discard(void) {
     struct sockaddr_in addr;
     rt_core_sockaddr_loopback(9, &addr);
     connect(fd, (struct sockaddr*)&addr, sizeof(addr));
-    close(fd);
+    rt_crt_close(fd);
     return 0;
 #endif
 }
@@ -8158,7 +8159,7 @@ int64_t rt_net_udp_send_local_discard(void) {
     struct sockaddr_in addr;
     rt_core_sockaddr_loopback(9, &addr);
     sendto(fd, "x", 1, 0, (struct sockaddr*)&addr, sizeof(addr));
-    close(fd);
+    rt_crt_close(fd);
     return 0;
 #endif
 }
@@ -8174,7 +8175,7 @@ int64_t rt_net_http_plain_local_probe(void) {
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
         write(fd, "GET / HTTP/1.0\r\n\r\n", 18);
     }
-    close(fd);
+    rt_crt_close(fd);
     return 0;
 #endif
 }
@@ -10102,7 +10103,7 @@ int64_t rt_random_bytes_c(uint64_t count) {
 #else
         fd = open("/dev/urandom", O_RDONLY);
         if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
-            close(fd);
+            rt_crt_close(fd);
             fd = -1;
         }
 #endif
@@ -13626,9 +13627,9 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
     if (stat(path, &st) != 0) { int64_t rc = -(int64_t)errno; free(path); return rc; }
     int64_t rc;
     if (S_ISDIR(st.st_mode)) {
-        rc = rmdir(path) == 0 ? 0 : -(int64_t)errno;
+        rc = rt_crt_rmdir(path) == 0 ? 0 : -(int64_t)errno;
     } else {
-        rc = unlink(path) == 0 ? 0 : -(int64_t)errno;
+        rc = rt_crt_unlink(path) == 0 ? 0 : -(int64_t)errno;
     }
     free(path);
     return rc;
@@ -13992,12 +13993,12 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     if (fd < 0) return 0;
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size < end) {
-        close(fd);
+        rt_crt_close(fd);
         return 0;
     }
     int protection = readonly ? PROT_READ : (PROT_READ | PROT_WRITE);
     void* address = mmap(NULL, (size_t)size, protection, MAP_SHARED, fd, (off_t)offset);
-    close(fd);
+    rt_crt_close(fd);
     if (address == MAP_FAILED) return 0;
     if ((uintptr_t)address > (uintptr_t)INT64_MAX) {
         munmap(address, (size_t)size);
@@ -14035,7 +14036,7 @@ int64_t rt_mmap_create(int64_t path_value, int64_t size) {
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) return 0;
     int sized = ftruncate(fd, (off_t)size) == 0;
-    close(fd);
+    rt_crt_close(fd);
     if (!sized) return 0;
 #endif
     return rt_mmap(path_value, size, 0, 0);
@@ -14112,7 +14113,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
      * LOCKFILE_EXCLUSIVE_LOCK alone blocks; adding LOCKFILE_FAIL_IMMEDIATELY
      * gives the LOCK_NB poll the timeout path needs. The whole file is locked
      * (MAXDWORD:MAXDWORD), matching flock's whole-file semantics. */
-    int fd = _open(path, _O_RDWR | _O_CREAT | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
+    int fd = rt_crt_open(path, _O_RDWR | _O_CREAT | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
     if (fd < 0) return -1;
     HANDLE handle = (HANDLE)_get_osfhandle(fd);
     if (handle == INVALID_HANDLE_VALUE) { _close(fd); return -1; }
@@ -14147,7 +14148,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
     if (fd < 0) return -1;
     if (timeout_secs <= 0) {
         if (flock(fd, LOCK_EX | LOCK_NB) == 0) return (int64_t)fd;
-        close(fd);
+        rt_crt_close(fd);
         return -1;
     }
     struct timespec deadline;
@@ -14160,7 +14161,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (now.tv_sec > deadline.tv_sec ||
             (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
-            close(fd);
+            rt_crt_close(fd);
             return -1;
         }
         struct timespec sleep_for = {0, 50000000L}; /* 50ms */
@@ -14204,7 +14205,7 @@ int64_t rt_io_file_open(const uint8_t* path_ptr, uint64_t path_len, int64_t mode
     }
 #if defined(_WIN32)
     flags |= _O_BINARY;
-    return (int64_t)_open(path, flags, _S_IREAD | _S_IWRITE);
+    return (int64_t)rt_crt_open(path, flags, _S_IREAD | _S_IWRITE);
 #else
     return (int64_t)open(path, flags, 0666);
 #endif
@@ -14621,7 +14622,7 @@ int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_core_nil();
 #if defined(_WIN32)
-    int fd = _open(path, _O_RDONLY | _O_BINARY);
+    int fd = rt_crt_open(path, _O_RDONLY | _O_BINARY);
     if (fd < 0) return rt_core_nil();
     struct _stat64 st;
     if (_fstat64(fd, &st) != 0 || st.st_size <= 0) { _close(fd); return rt_core_nil(); }
@@ -14637,7 +14638,7 @@ int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     _close(fd);
     return result;
 #else
-    int fd = open(path, O_RDONLY);
+    int fd = rt_crt_open(path, O_RDONLY);
     if (fd < 0) return rt_core_nil();
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return rt_core_nil(); }
@@ -14647,7 +14648,7 @@ int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     if (data == MAP_FAILED) { close(fd); return rt_core_nil(); }
     int64_t result = rt_string_new(data, (uint64_t)len);
     munmap((void*)data, len);
-    close(fd);
+    rt_crt_close(fd);
     return result;
 #endif
 }
@@ -14765,7 +14766,7 @@ done:
 #if defined(_WIN32)
     CloseHandle(handle);
 #elif defined(O_NOFOLLOW)
-    close(fd);
+    rt_crt_close(fd);
 #endif
     if (error != 100) {
         free(bytes);
@@ -15852,7 +15853,7 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
         if (deadline_ms != 0) {
             int flags = fcntl(fd, F_GETFL, 0);
             if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-                close(fd); fd = -1; continue;
+                rt_crt_close(fd); fd = -1; continue;
             }
         }
         int connected = connect(fd, item->ai_addr, item->ai_addrlen) == 0;
@@ -15906,7 +15907,7 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
                  rt_http_send_all(fd, body, body_len, deadline_ms);
     free(request); free(host_port);
     if (!ok) {
-        close(fd);
+        rt_crt_close(fd);
         snprintf(error, error_cap, errno == ETIMEDOUT ? "HTTP request timed out" : "HTTP request write failed");
         return 0;
     }
@@ -15930,7 +15931,7 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
         if (n == 0) break;
         received += (size_t)n;
     }
-    close(fd); response[received] = '\0';
+    rt_crt_close(fd); response[received] = '\0';
     const char* header_end = rt_http_header_end(response, received);
     if (!header_end) { free(response); snprintf(error, error_cap, "invalid HTTP response"); return 0; }
     int status = 0;
@@ -16397,7 +16398,7 @@ int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
                              &status, &body, &body_len, NULL, NULL, NULL, NULL,
                              error, sizeof(error));
     if (ok) {
-        FILE* file = fopen(output_path->data, "wb");
+        FILE* file = rt_crt_fopen(output_path->data, "wb");
         if (!file) {
             ok = 0; snprintf(error, sizeof(error), "HTTP download write failed");
         } else {
@@ -16858,10 +16859,10 @@ int32_t rt_file_open(const uint8_t* path_ptr, uint64_t path_len, int32_t mode) {
     int fd = -1;
 #if defined(_WIN32)
     switch (mode) {
-        case 0: fd = _open(path, _O_RDONLY | _O_BINARY); break;
-        case 1: fd = _open(path, _O_RDWR | _O_BINARY); break;
-        case 2: fd = _open(path, _O_WRONLY | _O_BINARY); break;
-        case 3: fd = _open(path, _O_RDWR | _O_CREAT | _O_BINARY, 0666); break;
+        case 0: fd = rt_crt_open(path, _O_RDONLY | _O_BINARY); break;
+        case 1: fd = rt_crt_open(path, _O_RDWR | _O_BINARY); break;
+        case 2: fd = rt_crt_open(path, _O_WRONLY | _O_BINARY); break;
+        case 3: fd = rt_crt_open(path, _O_RDWR | _O_CREAT | _O_BINARY, 0666); break;
         default: fd = -1; break;
     }
 #else
@@ -17150,7 +17151,7 @@ static int64_t spl_file_atomic_write_data(int64_t path_value, const uint8_t* con
                                 (unsigned long)GetCurrentProcessId(),
                                 (unsigned long long)atomic_fetch_add(&sequence, 1));
         if (temp_len >= 0 && (size_t)temp_len < path_len + 64)
-            fd = _open(temp_path, _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY, _S_IREAD | _S_IWRITE);
+            fd = rt_crt_open(temp_path, _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY, _S_IREAD | _S_IWRITE);
 #else
         int temp_len = snprintf(temp_path, path_len + 64, "%s.tmp.%ld.%llu", path,
                                 (long)getpid(), (unsigned long long)atomic_fetch_add(&sequence, 1));
@@ -17188,7 +17189,7 @@ static int64_t spl_file_atomic_write_data(int64_t path_value, const uint8_t* con
 #if defined(_WIN32)
         _close(fd);
 #else
-        close(fd);
+        rt_crt_close(fd);
 #endif
     }
 #if defined(_WIN32)
@@ -17418,7 +17419,7 @@ int64_t rt_file_list_dir(int64_t path_value) {
 static ssize_t rt_file_read_at_fd(int fd, void* buffer, size_t size, int64_t offset) {
 #if defined(_WIN32)
     if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
-    return (ssize_t)read(fd, buffer, (unsigned int)size);
+    return (ssize_t)rt_crt_read(fd, buffer, (unsigned int)size);
 #else
     return pread(fd, buffer, size, (off_t)offset);
 #endif
@@ -17427,7 +17428,7 @@ static ssize_t rt_file_read_at_fd(int fd, void* buffer, size_t size, int64_t off
 static ssize_t rt_file_write_at_fd(int fd, const void* data, size_t size, int64_t offset) {
 #if defined(_WIN32)
     if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
-    return (ssize_t)write(fd, data, (unsigned int)size);
+    return (ssize_t)rt_crt_write(fd, data, (unsigned int)size);
 #else
     return pwrite(fd, data, size, (off_t)offset);
 #endif
@@ -17460,18 +17461,18 @@ const char* rt_file_read_text_at(const char* path_value, int64_t offset, int64_t
         return "";
     }
 
-    int fd = open(path, O_RDONLY);
+    int fd = rt_crt_open(path, O_RDONLY);
     free(path);
     if (fd < 0) return "";
 
     char* buffer = (char*)rt_observed_malloc_v1((size_t)size + 1);
     if (!buffer) {
-        close(fd);
+        rt_crt_close(fd);
         return "";
     }
 
     ssize_t bytes_read = rt_file_read_at_fd(fd, buffer, (size_t)size, offset);
-    close(fd);
+    rt_crt_close(fd);
     if (bytes_read < 0) {
         free(buffer);
         return "";
@@ -17499,7 +17500,7 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
      * code page and cannot reliably open source paths containing Unicode. */
     int fd = (int)rt_open_fd(path, 0, 0);
 #else
-    int fd = open(path, O_RDONLY);
+    int fd = rt_crt_open(path, O_RDONLY);
 #endif
     free(path);
     if (fd < 0) return rt_core_nil();
@@ -17514,17 +17515,17 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
         if (remaining < size) size = remaining;
     }
     if (size == 0) {
-        close(fd);
+        rt_crt_close(fd);
         return rt_string_new(NULL, 0);
     }
 
     uint8_t* buffer = (uint8_t*)rt_observed_malloc_v1((size_t)size);
     if (!buffer) {
-        close(fd);
+        rt_crt_close(fd);
         return rt_core_nil();
     }
     ssize_t bytes_read = rt_file_read_at_fd(fd, buffer, (size_t)size, offset);
-    close(fd);
+    rt_crt_close(fd);
     if (bytes_read < 0) {
         free(buffer);
         return rt_core_nil();
@@ -17548,12 +17549,12 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
         return 0;
     }
 
-    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    int fd = rt_crt_open(path, O_WRONLY | O_CREAT, 0644);
     free(path);
     if (fd < 0) return -1;
 
     ssize_t bytes_written = rt_file_write_at_fd(fd, data, (size_t)data_len, offset);
-    close(fd);
+    rt_crt_close(fd);
     return (int64_t)bytes_written;
 }
 
@@ -17569,7 +17570,7 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * not rename it back. */
 void* rt_file_open_stream(const char* path, const char* mode) {
     if (!path || !mode) return NULL;
-    return (void*)fopen(path, mode);
+    return (void*)rt_crt_fopen(path, mode);
 }
 
 /* Two `text` arguments -> FOUR machine words; runtime_sffi.rs:1881 declares
@@ -17655,7 +17656,7 @@ static int rt_core_file_write_data(
     if (!path_ptr || (!data && data_len != 0) || path_len > SIZE_MAX - 1) return 0;
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return 0;
-    FILE* f = fopen(path, mode);
+    FILE* f = rt_crt_fopen(path, mode);
     free(path);
     if (!f) return 0;
     size_t written = fwrite(data, 1, (size_t)data_len, f);
@@ -18138,10 +18139,10 @@ int rt_file_write_bytes(const uint8_t* path_ptr, uint64_t path_len, const uint8_
  * kernel rather than building a giant byte-array in the interpreter. */
 int rt_file_truncate(const char* path, uint64_t size) {
     if (!path) return 0;
-    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    int fd = rt_crt_open(path, O_WRONLY | O_CREAT, 0644);
     if (fd < 0) return 0;
     int rc = ftruncate(fd, (off_t)size);
-    close(fd);
+    rt_crt_close(fd);
     return rc == 0 ? 1 : 0;
 }
 
@@ -18602,13 +18603,13 @@ int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
     char dst[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(src_ptr, src_len, src, sizeof(src))) return 0;
     if (!rt_text_arg_to_path(dst_ptr, dst_len, dst, sizeof(dst))) return 0;
-    FILE* in = fopen(src, "rb");
+    FILE* in = rt_crt_fopen(src, "rb");
     if (!in) return 0;
 #if !defined(_WIN32)
     struct stat source_stat;
     if (fstat(fileno(in), &source_stat) != 0) { fclose(in); return 0; }
 #endif
-    FILE* out = fopen(dst, "wb");
+    FILE* out = rt_crt_fopen(dst, "wb");
     if (!out) { fclose(in); return 0; }
     uint8_t buf[65536];
     int ok = 1;
@@ -18741,7 +18742,7 @@ int rt_sha256_file_raw_v1(const char *path, uint8_t out[32]) {
 #if defined(_WIN32)
     wchar_t* wide = rt_win_long_path_widen(path);
     if (!wide) return 0;
-    FILE* in = _wfopen(wide, L"rb");
+    FILE* in = rt_crt_wfopen(wide, L"rb");
     free(wide);
 #else
     FILE* in = fopen(path, "rb");
@@ -20006,13 +20007,13 @@ int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
     if (fd < 0) return -1;
     int original_flags = fcntl(fd, F_GETFL, 0);
     if (original_flags < 0 || fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) != 0) {
-        close(fd);
+        rt_crt_close(fd);
         return -1;
     }
     int connected = connect(fd, (struct sockaddr*)&socket_address,
                             sizeof(socket_address));
     if (connected != 0 && errno != EINPROGRESS) {
-        close(fd);
+        rt_crt_close(fd);
         return -1;
     }
     if (connected != 0) {
@@ -20021,19 +20022,19 @@ int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
         pfd.fd = fd;
         pfd.events = POLLOUT;
         if (poll(&pfd, 1, (int)ms) <= 0) {
-            close(fd);
+            rt_crt_close(fd);
             return -1;
         }
         int socket_error = 0;
         socklen_t error_length = sizeof(socket_error);
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) != 0 ||
             socket_error != 0) {
-            close(fd);
+            rt_crt_close(fd);
             return -1;
         }
     }
     if (fcntl(fd, F_SETFL, original_flags) != 0) {
-        close(fd);
+        rt_crt_close(fd);
         return -1;
     }
     return (int64_t)fd;

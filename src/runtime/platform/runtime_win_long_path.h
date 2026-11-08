@@ -197,13 +197,14 @@ static inline int rt_win_long_path_rename(const char* old_path, const char* new_
  * the POSIX rename(2) contract every caller assumes. Long-path aware. */
 #include <io.h>
 #include <fcntl.h>
+#if defined(_MSC_VER)
+#include <share.h>
+#endif
 static inline FILE* rt_win_fopen_read_shared(const char* path) {
     wchar_t* wide = rt_win_long_path_widen(path);
     if (!wide) {
 #if defined(_MSC_VER)
-        FILE* file = NULL;
-        if (fopen_s(&file, path, "rb") != 0) return NULL;
-        return file;
+        return _fsopen(path, "rb", _SH_DENYNO);
 #else
         return fopen(path, "rb");
 #endif
