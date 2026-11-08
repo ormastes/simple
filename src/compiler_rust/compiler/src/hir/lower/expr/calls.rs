@@ -427,7 +427,7 @@ impl Lowerer {
             match slot {
                 Some(hir) => out.push(hir),
                 None => match defaults.get(index).and_then(|d| d.as_ref()) {
-                    Some(expr) if Self::is_constant_default(expr) => out.push(self.lower_expr(expr, ctx)?),
+                    Some(expr) if self.is_fillable_default(expr) => out.push(self.lower_expr(expr, ctx)?),
                     Some(_) => {
                         return Err(LowerError::Unsupported(format!(
                             "call to `{callee}` omits argument {} whose default is not a call-site constant; \
@@ -468,7 +468,7 @@ impl Lowerer {
         let first_omitted = args_hir.len();
         for (index, slot) in defaults.iter().enumerate().skip(first_omitted) {
             match slot {
-                Some(expr) if Self::is_constant_default(expr) => {
+                Some(expr) if self.is_fillable_default(expr) => {
                     let lowered = self.lower_expr(expr, ctx)?;
                     args_hir.push(lowered);
                 }
@@ -483,6 +483,29 @@ impl Lowerer {
             }
         }
         Ok(())
+    }
+
+    /// `is_constant_default`, plus a constructor call `T(const, ...)` whose `T`
+    /// resolves in the CALLER to a struct/class not declared by the caller's
+    /// own module (a local `T` would shadow the callee's type). Constructor
+    /// arguments must themselves be fillable, so nothing captures caller scope.
+    /// (lean_native_constructor_default_argument_2026_10_21)
+    pub(super) fn is_fillable_default(&self, expr: &Expr) -> bool {
+        if Self::is_constant_default(expr) {
+            return true;
+        }
+        match expr {
+            Expr::Call { callee, args } => match callee.as_ref() {
+                Expr::Identifier(name) => {
+                    !self.own_declared_type_names.contains(name)
+                        && (self.own_imported_names.contains(name) || self.own_imported_names.contains("*"))
+                        && self.resolve_constructor_type(name).is_some()
+                        && args.iter().all(|a| self.is_fillable_default(&a.value))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// True for default-value expressions that are self-contained constants —

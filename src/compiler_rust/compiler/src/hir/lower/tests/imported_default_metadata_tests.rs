@@ -292,3 +292,50 @@ fn named_call_errors_instead_of_nil_padding() {
         assert!(format!("{err}").contains(needle), "{call}: {err}");
     }
 }
+
+// lean_native_constructor_default_argument_2026_10_21: an imported callee
+// whose default is a constructor call on an imported struct
+// (`lim: Limits = Limits()`) used to be rejected at every omitting call site
+// ("omits argument 2 whose default is not a call-site constant"). The caller
+// may lower such a default only when the constructor name resolves, in the
+// CALLER, to the very type the callee's parameter is declared with, and every
+// constructor argument is itself a constant.
+fn ctor_default_project(owner: &str, caller: &str) -> Result<crate::hir::HirModule, String> {
+    let dir = create_test_project();
+    let src = dir.path().join("src");
+    fs::create_dir_all(src.join("owner")).unwrap();
+    fs::write(src.join("owner/limits.spl"), owner).unwrap();
+    let ast = Parser::new(caller).parse().expect("parse caller");
+    let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+    let lowerer = Lowerer::with_module_resolver(resolver, src.join("main.spl"));
+    lowerer.lower_module(&ast).map_err(|e| format!("{e}"))
+}
+
+const CTOR_OWNER: &str = "struct Limits:\n    depth: i64 = 128\n    nodes: i64 = 65536\n\nfn plan(name: text, lim: Limits = Limits()) -> i64:\n    lim.depth\n\nfn plan_named(name: text, lim: Limits = Limits(depth: 7)) -> i64:\n    lim.depth\n\nfn plan_dynamic(name: text, lim: Limits = Limits(depth: name.len())) -> i64:\n    lim.depth\n";
+
+#[test]
+fn imported_constructor_default_lowers_in_caller() {
+    for call in ["plan(\"m\")", "plan_named(\"m\")", "plan(name: \"m\")"] {
+        let caller = format!("use owner.limits.{{Limits, plan, plan_named}}\nfn caller() -> i64:\n    {call}\n");
+        let module = ctor_default_project(CTOR_OWNER, &caller).unwrap_or_else(|e| panic!("{call}: {e}"));
+        let args = call_args(&module, "caller");
+        assert_eq!(args.len(), 2, "{call}");
+        assert!(!matches!(args[1].kind, HirExprKind::Nil), "{call}: {:?}", args[1]);
+    }
+}
+
+#[test]
+fn constructor_default_with_nonconstant_args_or_unresolved_type_still_errors() {
+    // Non-constant constructor argument: would capture callee parameters.
+    let caller = "use owner.limits.{Limits, plan_dynamic}\nfn caller() -> i64:\n    plan_dynamic(\"m\")\n";
+    let err = ctor_default_project(CTOR_OWNER, caller).expect_err("dynamic ctor arg");
+    assert!(err.contains("omits argument 2"), "{err}");
+    // Caller does not see `Limits` at all: cannot be lowered in the caller.
+    let caller = "use owner.limits.{plan}\nfn caller() -> i64:\n    plan(\"m\")\n";
+    let err = ctor_default_project(CTOR_OWNER, caller).expect_err("unimported ctor");
+    assert!(err.contains("omits argument 2"), "{err}");
+    // Caller's `Limits` is a DIFFERENT type than the callee's parameter type.
+    let caller = "use owner.limits.{plan}\nstruct Limits:\n    depth: i64 = 1\nfn caller() -> i64:\n    plan(\"m\")\n";
+    let err = ctor_default_project(CTOR_OWNER, caller).expect_err("shadowed ctor");
+    assert!(err.contains("omits argument 2"), "{err}");
+}
