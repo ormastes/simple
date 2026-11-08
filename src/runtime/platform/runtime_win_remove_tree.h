@@ -18,7 +18,9 @@ static bool rt_win_remove_tree_wide(const wchar_t* path, bool missing_ok) {
     wchar_t* pattern = malloc((length + 3) * sizeof(wchar_t));
     if (!pattern) return false;
     memcpy(pattern, path, length * sizeof(wchar_t));
-    wcscpy(pattern + length, trailing_separator ? L"*" : L"\\*");
+    /* Allocation reserves the longest suffix plus its terminator. */
+    const wchar_t* suffix = trailing_separator ? L"*" : L"\\*";
+    memcpy(pattern + length, suffix, (trailing_separator ? 2 : 3) * sizeof(*pattern));
     WIN32_FIND_DATAW entry;
     HANDLE scan = FindFirstFileW(pattern, &entry);
     free(pattern);
@@ -29,12 +31,15 @@ static bool rt_win_remove_tree_wide(const wchar_t* path, bool missing_ok) {
     bool ok = true;
     do {
         if (!wcscmp(entry.cFileName, L".") || !wcscmp(entry.cFileName, L"..")) continue;
-        size_t child_length = length + 1 + wcslen(entry.cFileName) + 1;
+        size_t name_length = wcslen(entry.cFileName);
+        size_t child_length = length + 1 + name_length + 1;
         wchar_t* child = malloc(child_length * sizeof(wchar_t));
         if (!child) { ok = false; break; }
-        wcscpy(child, path);
-        if (!trailing_separator) wcscat(child, L"\\");
-        wcscat(child, entry.cFileName);
+        /* child_length includes a separator even when the parent already ends in one. */
+        memcpy(child, path, length * sizeof(*child));
+        size_t name_offset = length;
+        if (!trailing_separator) child[name_offset++] = L'\\';
+        memcpy(child + name_offset, entry.cFileName, (name_length + 1) * sizeof(*child));
         if (!rt_win_remove_tree_wide(child, missing_ok)) ok = false;
         free(child);
     } while (FindNextFileW(scan, &entry));
@@ -61,12 +66,13 @@ static bool rt_win_remove_tree_utf8(const char* path, bool missing_ok, bool file
         if (!got || got >= need) { free(full); return false; }
         wide = malloc(((size_t)got + 9) * sizeof(wchar_t));
         if (!wide) { free(full); return false; }
+        /* got excludes NUL; the allocation reserves even the longer UNC prefix. */
         if (full[0] == L'\\' && full[1] == L'\\') {
-            wcscpy(wide, L"\\\\?\\UNC\\");
-            wcscat(wide, full + 2);
+            memcpy(wide, L"\\\\?\\UNC\\", 8 * sizeof(*wide));
+            memcpy(wide + 8, full + 2, ((size_t)got - 1) * sizeof(*wide));
         } else {
-            wcscpy(wide, L"\\\\?\\");
-            wcscat(wide, full);
+            memcpy(wide, L"\\\\?\\", 4 * sizeof(*wide));
+            memcpy(wide + 4, full, ((size_t)got + 1) * sizeof(*wide));
         }
         free(full);
     }
