@@ -228,7 +228,7 @@ fn fam_generic_rt_len_array_arm_uses_u32_and_string_arm_keeps_u64() {
 
     // Generic rt_len on the FAM array (baremetal tag vocabulary, fam layout).
     let (_m, fam) = jit_array_fn("fam_rt_len", true, &[], |ctx, fb, a| {
-        let v = inline_runtime_len_value(fb, ctx.vreg_values[&a], true, true);
+        let v = inline_runtime_len_value(fb, ctx.vreg_values[&a], true, true, None);
         ctx.vreg_values.insert(VReg(2000), v);
     });
     assert_eq!(fam(arr.tagged_ptr), 512);
@@ -238,7 +238,7 @@ fn fam_generic_rt_len_array_arm_uses_u32_and_string_arm_keeps_u64() {
     let mut string_storage: Vec<u64> = vec![1, 7]; // type=HEAP_STRING, u64 len=7
     let str_ptr = (string_storage.as_ptr() as i64) | 1;
     let (_m2, fam_str) = jit_array_fn("fam_rt_len_str", true, &[], |ctx, fb, a| {
-        let v = inline_runtime_len_value(fb, ctx.vreg_values[&a], true, true);
+        let v = inline_runtime_len_value(fb, ctx.vreg_values[&a], true, true, None);
         ctx.vreg_values.insert(VReg(2000), v);
     });
     assert_eq!(fam_str(str_ptr), 7);
@@ -254,7 +254,7 @@ fn generic_rt_len_hosted_and_core_closures_return_invalid() {
     let hosted = simple_runtime::value::rt_closure_new(std::ptr::null(), 2);
     assert_eq!(simple_runtime::value::rt_len(hosted), -1);
     let (_m, hosted_len) = jit_array_fn("hosted_closure_len", false, &[], |ctx, fb, value| {
-        let out = inline_runtime_len_value(fb, ctx.vreg_values[&value], false, false);
+        let out = inline_runtime_len_value(fb, ctx.vreg_values[&value], false, false, None);
         ctx.vreg_values.insert(VReg(2000), out);
     });
     assert_eq!(hosted_len(hosted.to_raw() as i64), -1);
@@ -265,7 +265,7 @@ fn generic_rt_len_hosted_and_core_closures_return_invalid() {
     let core = (core_storage.as_ptr() as i64) | 1;
     for (name, baremetal) in [("core_closure_len_hosted", false), ("core_closure_len_baremetal", true)] {
         let (_m, core_len) = jit_array_fn(name, false, &[], |ctx, fb, value| {
-            let out = inline_runtime_len_value(fb, ctx.vreg_values[&value], baremetal, false);
+            let out = inline_runtime_len_value(fb, ctx.vreg_values[&value], baremetal, false, None);
             ctx.vreg_values.insert(VReg(2000), out);
         });
         assert_eq!(core_len(core), -1);
@@ -289,7 +289,7 @@ fn generic_rt_len_hosted_and_core_dicts_read_shared_len_offset() {
         RuntimeValue::from_int(20)
     ));
     let (_m, hosted_len) = jit_array_fn("hosted_dict_len", false, &[], |ctx, fb, value| {
-        let out = inline_runtime_len_value(fb, ctx.vreg_values[&value], false, false);
+        let out = inline_runtime_len_value(fb, ctx.vreg_values[&value], false, false, None);
         ctx.vreg_values.insert(VReg(2000), out);
     });
     assert_eq!(hosted_len(hosted.to_raw() as i64), 2);
@@ -300,7 +300,7 @@ fn generic_rt_len_hosted_and_core_dicts_read_shared_len_offset() {
     let core = (core_storage.as_ptr() as i64) | 1;
     for (name, baremetal) in [("core_dict_len_hosted", false), ("core_dict_len_baremetal", true)] {
         let (_m, core_len) = jit_array_fn(name, false, &[], |ctx, fb, value| {
-            let out = inline_runtime_len_value(fb, ctx.vreg_values[&value], baremetal, false);
+            let out = inline_runtime_len_value(fb, ctx.vreg_values[&value], baremetal, false, None);
             ctx.vreg_values.insert(VReg(2000), out);
         });
         assert_eq!(core_len(core), 2);
