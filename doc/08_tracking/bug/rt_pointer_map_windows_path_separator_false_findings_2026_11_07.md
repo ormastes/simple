@@ -57,7 +57,7 @@ average, and ratio are unavailable; no zero-filled or estimated usage is claimed
 
 This scoped checker PASS does not qualify compiler/runtime ABI behavior or
 complete the wider MIR/codegen P0–P3 campaign. The root owns the canonical claim
-until this repair lands through its reviewed release-branch PR.
+until this repair lands through its reviewed release-branch PR (historical statement, superseded below).
 
 ## Release status reconciliation (2026-11-08)
 
@@ -71,7 +71,7 @@ The original PR has no conversation comments; structural, RTL source-truth and
 component-plan checks succeeded.
 
 Read-only reconciliation pinned release commit
-`e87258dba95a096fb1e2cf63e69651b101a11a15`, confirmed the original merge is
+`01a8acae2101320f5c18d52a3e17956f8a2d34f3`, confirmed the original merge is
 an ancestor, and compared the complete checker bytes against the merged repair.
 They are identical, SHA256
 `88a4f449144891a99698ca770c5af1779b9a4e724c6b1f389418f2649fc515d5`.
