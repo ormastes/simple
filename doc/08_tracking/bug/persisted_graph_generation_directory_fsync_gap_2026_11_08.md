@@ -1,6 +1,6 @@
 # Persisted graph generation directory durability gap
 
-Status: OPEN, source finding; crash reproduction not run.
+Status: fix-implemented-verification-pending. Fixed: generations dir fsynced (persisted_graph_sync_dir_v1) before CURRENT is published; retry with CURRENT==generation re-syncs root before ok; C rt_file_fsync on Windows now opens dirs (BACKUP_SEMANTICS). Spec: persisted_graph_host_write_spec.spl. Crash injection not run.
 Severity: P2.
 Found during source review of graph pointer retry candidate
 `fb55b2519b8fb183348bdb60b615a15b49b81aba`.
