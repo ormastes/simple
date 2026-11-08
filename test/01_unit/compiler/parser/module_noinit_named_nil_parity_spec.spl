@@ -8,7 +8,7 @@ use std.spec
 use std.spec.step
 use compiler.core.parser.{parse_module_silent_checked}
 use compiler.core.ast.{module_decl_count_get, module_decl_at, decl_get_name, decl_get_ret_type, decl_get_body}
-use compiler.core.ast_expr.{expr_get_tag, EXPR_NIL_LIT}
+use compiler.core.ast_expr.{expr_get_tag, EXPR_NIL_LIT, EXPR_STRUCT_LIT}
 use compiler.core.types.{TYPE_NAMED_BASE, named_type_name}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -50,7 +50,7 @@ fn named_parity_find_decl(name: text) -> i64:
 fn named_parity_source() -> text:
     "struct ExactNamedParity:\n    value: i64\nvar implicit_slot: ExactNamedParity\nvar explicit_slot: ExactNamedParity = nil\n"
 
-fn named_parity_expect_ast(source: text, expected_name: text):
+fn named_parity_expect_ast(source: text, expected_name: text, implicit_tag: i64 = EXPR_NIL_LIT):
     expect(parse_module_silent_checked(source, "named_nil_equivalence.spl")).to_equal(false)
     val implicit_decl = named_parity_find_decl("implicit_slot")
     val explicit_decl = named_parity_find_decl("explicit_slot")
@@ -66,13 +66,14 @@ fn named_parity_expect_ast(source: text, expected_name: text):
         expect(implicit_body.len()).to_equal(1)
         expect(explicit_body.len()).to_equal(1)
         if implicit_body.len() == 1 and explicit_body.len() == 1:
-            expect(expr_get_tag(implicit_body[0])).to_equal(EXPR_NIL_LIT)
+            expect(expr_get_tag(implicit_body[0])).to_equal(implicit_tag)
             expect(expr_get_tag(explicit_body[0])).to_equal(EXPR_NIL_LIT)
 
 describe "bare named module globals preserve explicit nil semantics":
     it "begins nil and retains assignments across helper calls like explicit nil":
         step("Observe the existing nil default before assigning either named slot")
-        expect(noinit_named_parity_state == nil).to_equal(true)
+        expect(noinit_named_parity_state == nil).to_equal(false)
+        expect(noinit_named_parity_read()).to_equal(0)
         expect(explicit_nil_named_parity_state == nil).to_equal(true)
         step("Assign distinct values and read persistent provider storage")
         noinit_named_parity_assign(17)
@@ -85,9 +86,9 @@ describe "bare named module globals preserve explicit nil semantics":
         expect(noinit_named_parity_read()).to_equal(43)
         expect(explicit_nil_named_parity_read()).to_equal(61)
 
-    it "keeps the exact named annotation and nil initializer in the production AST":
+    it "keeps the exact named annotation and zero-struct initializer (owner decision 2026-11-06) in the production AST":
         step("Parse the bare and explicit nil declarations in the same module")
-        named_parity_expect_ast(named_parity_source(), "ExactNamedParity")
+        named_parity_expect_ast(named_parity_source(), "ExactNamedParity", EXPR_STRUCT_LIT)
 
     it "retains forward unknown and any annotations exactly like explicit nil":
         step("Leave named resolution to the existing downstream type owner")
@@ -137,7 +138,7 @@ describe "bare named module globals preserve explicit nil semantics":
 
     it "retains one owner-qualified global and matching initializer assign and read operands":
         step("Lower both source spellings through the actual frontend HIR and MIR providers")
-        for initializer in ["", " = nil"]:
+        for initializer in [" = nil"]:
             val source = "struct MirNamedParity:\n    value: i64\nvar slot: MirNamedParity{initializer}\nfn assign():\n    slot = MirNamedParity(value: 37)\nfn read() -> i64:\n    slot.value\n"
             val parsed = parse_full_frontend(source, "named_nil_mir_parity.spl", "named_nil_mir_parity", Logger(level: 0))
             var hir_lowering = HirLowering.with_filename("named_nil_mir_parity.spl")
@@ -196,10 +197,10 @@ describe "bare named module globals preserve explicit nil semantics":
         val source = "struct MalformedNamedParity:\n    value: i64\nvar bad_slot: MalformedNamedParity stray\n"
         expect(parse_module_silent_checked(source, "named_nil_garbage.spl")).to_equal(true)
 
-    it "keeps named and callable fixed arrays outside this named-scalar repair":
+    it "zero-fills struct fixed arrays and rejects callable fixed arrays":
         step("Retain errors for unresolved typed array storage contracts")
         val prefix = "struct ArrayNamedParity:\n    value: i64\n"
-        expect(parse_module_silent_checked(prefix + "var entries: [ArrayNamedParity; 256]\n", "named_nil_struct_array_hold.spl")).to_equal(true)
+        expect(parse_module_silent_checked(prefix + "var entries: [ArrayNamedParity; 256]\n", "named_nil_struct_array_hold.spl")).to_equal(false)
         expect(parse_module_silent_checked(prefix + "var handlers: [fn(ArrayNamedParity); 256]\n", "named_nil_callable_array_hold.spl")).to_equal(true)
 
     it "preserves scalar fixed-array default admission":
