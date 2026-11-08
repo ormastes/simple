@@ -321,7 +321,8 @@ static int rt_sdr_create_private_v1(const RtSdrRootV1 *shared, const char *reque
     char target[RT_SDR_PATH_V1], parent_path[RT_SDR_PATH_V1];
     int status = rt_sdr_path_v1(requested, target);
     if (status) return status;
-    strcpy(parent_path, target);
+    /* target passed rt_sdr_path_v1: both buffers hold RT_SDR_PATH_V1 bytes. */
+    memcpy(parent_path, target, strlen(target) + 1);
     RtSdrRootV1 parent;
     for (;;) {
         char *last = strrchr(parent_path, '/');
@@ -335,7 +336,7 @@ static int rt_sdr_create_private_v1(const RtSdrRootV1 *shared, const char *reque
         if (status != -ENOENT) return status;
     }
     RtSdrRootV1 prospective = parent;
-    strcpy(prospective.path, target);
+    memcpy(prospective.path, target, strlen(target) + 1);
 #if defined(_WIN32)
     wchar_t tail[RT_SDR_PATH_V1];
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
@@ -343,10 +344,12 @@ static int rt_sdr_create_private_v1(const RtSdrRootV1 *shared, const char *reque
         rt_sdr_root_close_v1(&parent); return -EINVAL;
     }
     for (size_t i = 0; tail[i]; ++i) if (tail[i] == L'/') tail[i] = L'\\';
-    if (wcslen(parent.physical) + wcslen(tail) >= RT_SDR_PATH_V1) {
+    size_t parent_length = wcslen(parent.physical), tail_length = wcslen(tail);
+    if (parent_length + tail_length >= RT_SDR_PATH_V1) {
         rt_sdr_root_close_v1(&parent); return -ENAMETOOLONG;
     }
-    wcscpy(prospective.physical, parent.physical); wcscat(prospective.physical, tail);
+    /* prospective already contains parent; the checked tail includes its terminator. */
+    memcpy(prospective.physical + parent_length, tail, (tail_length + 1) * sizeof(*tail));
 #else
     int n = snprintf(prospective.physical, sizeof(prospective.physical), "%s%s",
         parent.physical, target + strlen(parent_path));
@@ -357,8 +360,10 @@ static int rt_sdr_create_private_v1(const RtSdrRootV1 *shared, const char *reque
     if (rt_sdr_overlap_v1(shared, &prospective)) {
         rt_sdr_root_close_v1(&parent); return RT_SDR_OVERLAP_V1;
     }
-    char walk[RT_SDR_PATH_V1]; strcpy(walk, parent_path);
-    char remaining[RT_SDR_PATH_V1]; strcpy(remaining, target + strlen(parent_path) + 1);
+    char walk[RT_SDR_PATH_V1]; memcpy(walk, parent_path, strlen(parent_path) + 1);
+    char remaining[RT_SDR_PATH_V1];
+    const char *suffix = target + strlen(parent_path) + 1;
+    memcpy(remaining, suffix, strlen(suffix) + 1);
     char *part = remaining;
     while (part && *part) {
         char *slash = strchr(part, '/'); if (slash) *slash = 0;
@@ -537,7 +542,9 @@ static int64_t rt_sdr_check_v1(const char *shared, const char *private_root) {
     if (!cache || !slot || rt_sdr_next_v1 <= 0 || rt_sdr_next_v1 == INT64_MAX) {
         RT_SDR_UNLOCK(); return -EMFILE;
     }
-    strcpy(cache->shared, a_path); strcpy(cache->private_root, b_path); cache->used = 1;
+    /* Both canonical paths passed rt_sdr_path_v1 and fit these same-size arrays. */
+    memcpy(cache->shared, a_path, strlen(a_path) + 1);
+    memcpy(cache->private_root, b_path, strlen(b_path) + 1); cache->used = 1;
     RtSdrRootV1 a, b;
     status = rt_sdr_root_open_v1(a_path, &a);
     if (!status) {
