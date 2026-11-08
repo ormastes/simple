@@ -9,6 +9,7 @@
 #include <io.h>
 #include <direct.h>
 #include <share.h>
+#include <sys/stat.h>
 static int rt_crt_open(const char* path, int flags, ...) {
     int mode = 0;
     if (flags & _O_CREAT) {
