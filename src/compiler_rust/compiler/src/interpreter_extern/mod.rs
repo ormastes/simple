@@ -4155,8 +4155,8 @@ mod tests {
     }
 
     /// Same gap, next line of `src/lib/text.spl`. Pins the C runtime's exact
-    /// contract (`runtime_native.c:3733`): LAST byte index, -1 on miss, and
-    /// the empty needle returning the subject's LENGTH rather than 0.
+    /// contract: LAST CODE-POINT index (ADR-005 item 5), -1 on miss, and
+    /// the empty needle returning the subject's code-point LENGTH rather than 0.
     #[test]
     fn rt_string_rfind_is_registered_and_matches_c_runtime_semantics() {
         assert!(
@@ -4174,6 +4174,8 @@ mod tests {
             ("abc", "", 3),
             ("", "", 0),
             ("", "a", -1),
+            ("é🙂xé", "é", 3),
+            ("é🙂xé", "", 4),
         ];
 
         for &(subject, needle, expected) in cases {
@@ -4208,7 +4210,7 @@ mod tests {
             ("abc", "", 0),
             ("", "", 0),
             ("", "a", -1),
-            ("é🙂xé", "x", 6),
+            ("é🙂xé", "x", 2),
             ("é🙂xé", "é", 0),
             ("a\0b\0c", "b\0", 2),
             ("a\0b", "\0", 1),

@@ -9,6 +9,7 @@ use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget,
     compileerror_backend_error}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_retain_for_scope}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.llvm_backend_tools.{LlvmObjectCode,
     compile_ir_to_object, compile_ir_to_object_path}
@@ -168,10 +169,6 @@ pub fn llvm_compile_module_direct_to_path(
     # MIR optimization (persistent provider report) runs before this call and
     # backend-session authority writes run after it; neither is in scope.
     var scoped = llvm_codegen_module_scope_enabled_v1()
-    # @workaround bug=llvm_bootstrap_string_cache_scope_escape_2026_10_25 reason=bootstrap-translator-publishes-heap-text-in-exported-global-cache
-    if scoped and (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1":
-        eprint("[codegen-scope] WARNING LLVM bootstrap string cache requires unscoped translation: module={module.name}")
-        scoped = false
     # Bitcode debug discovers llvm-as/opt lazily inside emission; keep it unscoped.
     if scoped and (env_get_opt("SIMPLE_LLVM_BITCODE_DEBUG") ?? "") == "1":
         scoped = false
@@ -191,8 +188,11 @@ pub fn llvm_compile_module_direct_to_path(
         llvm_ir, config, options.opt_level, object_path, diagnostic_path, retained_config != nil)
     if scoped:
         val paused = transient_scope_pause()
+        # The bootstrap translator publishes heap text into the exported
+        # string-global cache; retain it before scope end so it never dangles.
+        val retained = paused and llvm_bootstrap_string_globals_retain_for_scope()
         val ended = transient_scope_end()
-        if not paused or not ended:
+        if not paused or not retained or not ended:
             panic("LLVM codegen scope ownership failed")
     status
 

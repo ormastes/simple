@@ -82,3 +82,17 @@ The attempted `--emit-object` option is unsupported by this seed and is absent
 from both successful scoped native commands above. This full-checkout startup
 performance issue remains unqualified; tiny-checkout negative/positive builds
 completed in seconds. No canonical parent cache was modified.
+
+## Fix (2026-11-09, seed HIR lowering)
+
+`is_fillable_default` (`src/compiler_rust/compiler/src/hir/lower/expr/calls.rs`)
+now admits an omitted imported default of the form `T(const, ...)` and lowers it
+in the caller when `T` is imported by the caller (`own_imported_names`), is not
+declared by the caller (`own_declared_type_names`), resolves to a struct/class,
+and every constructor argument is itself fillable. Non-constant ctor arguments,
+unimported types, and caller-shadowed types still raise the loud diagnostic.
+Tests: `imported_constructor_default_lowers_in_caller` and
+`constructor_default_with_nonconstant_args_or_unresolved_type_still_errors` in
+`imported_default_metadata_tests.rs` (14/14 green). Status
+fix-implemented-verification-pending: native verification of the original
+omitted `lean_plan_type_declarations` form against a rebuilt producer remains.

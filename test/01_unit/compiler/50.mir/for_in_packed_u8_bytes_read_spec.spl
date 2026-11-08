@@ -115,3 +115,32 @@ describe "for-in over a [u8] reads each byte through rt_bytes_u8_at":
         expect(callee_count(low.callees, "rt_typed_words_u64_at")).to_equal(1)
         expect(callee_count(low.callees, "rt_array_get")).to_equal(0)
         expect(callee_count(low.callees, "rt_value_as_int_wide")).to_equal(0)
+
+    # bootstrap_raw_byte_loop_unbox_2026_10_16: the native root validator
+    # iterated a CALL RESULT (`for byte in text_to_utf8_bytes(value)`), not a
+    # param, and decoded the packed byte as a tagged integer (112 'p' -> 14).
+    it "a [u8] call-result iterable reads through rt_bytes_u8_at, never rt_array_get":
+        val low = for_bytes_lower("fn mk(s: text) -> [u8]:\n" +
+            "    [112u8, 104u8]\n" +
+            "fn bad(s: text) -> bool:\n" +
+            "    for byte in mk(s):\n" +
+            "        if byte < 32 or byte == 127:\n" +
+            "            return true\n" +
+            "    false\n")
+        print "errors: [{low.errors}] rt_bytes_u8_at={callee_count(low.callees, "rt_bytes_u8_at")} rt_array_get={callee_count(low.callees, "rt_array_get")}"
+        expect(low.errors).to_equal("")
+        expect(callee_count(low.callees, "rt_bytes_u8_at")).to_equal(1)
+        expect(callee_count(low.callees, "rt_array_get")).to_equal(0)
+
+    it "a [u8] local bound from a call reads through rt_bytes_u8_at":
+        val low = for_bytes_lower("fn mk(s: text) -> [u8]:\n" +
+            "    [112u8, 104u8]\n" +
+            "fn bad(s: text) -> bool:\n" +
+            "    val bytes = mk(s)\n" +
+            "    for byte in bytes:\n" +
+            "        if byte < 32 or byte == 127:\n" +
+            "            return true\n" +
+            "    false\n")
+        expect(low.errors).to_equal("")
+        expect(callee_count(low.callees, "rt_bytes_u8_at")).to_equal(1)
+        expect(callee_count(low.callees, "rt_array_get")).to_equal(0)
