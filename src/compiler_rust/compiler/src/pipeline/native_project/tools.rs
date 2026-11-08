@@ -536,6 +536,7 @@ fn build_c_runtime_library(
         "runtime_native.c",
         "runtime_payload_text.h",
         "runtime_crt_file.h",
+        "runtime_env_owned.h",
         "runtime_file_view.c",
         "runtime_disk_headroom.c",
         "runtime_memory_headroom.c",
