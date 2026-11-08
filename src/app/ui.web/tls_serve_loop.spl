@@ -87,12 +87,21 @@ class ConnStream:
         return self.open
 
     me read_line() -> Result<text, text>:
-        """Read one line (terminated by \\n) from the stream.
+        self.read_line_bounded(8192)
+
+    me read_line_bounded(max_bytes: i64) -> Result<text, text>:
+        """Read one bounded line (terminated by \\n) from the stream.
 
         Buffers partial reads internally. Returns the line without the
-        trailing \\r\\n or \\n.
+        trailing \\r\\n or \\n, or fails closed once max_bytes is crossed.
         """
+        if max_bytes < 0:
+            self.open = false
+            return Err("invalid line bound")
         loop:
+            if self.buffer.len() > max_bytes:
+                self.open = false
+                return Err("line exceeds max_bytes ({max_bytes})")
             # Scan existing buffer for a newline
             val nl = self.buffer.find("\n")
             if nl >= 0:
@@ -110,7 +119,7 @@ class ConnStream:
 
             if self.kind == "tcp":
                 val tcp = self.tcp_stream.unwrap()
-                match tcp.read_line():
+                match tcp.read_line_bounded(max_bytes):
                     Err(e):
                         self.open = false
                         return Err(e)
@@ -126,6 +135,9 @@ class ConnStream:
                     self.open = false
                     return Err("connection closed")
                 self.buffer = self.buffer + chunk_text
+                if self.buffer.len() > max_bytes:
+                    self.open = false
+                    return Err("line exceeds max_bytes ({max_bytes})")
                 if not ui_web_request_head_allowed(self.buffer.len()):
                     self.open = false
                     return Err("request_head_too_large")
@@ -309,7 +321,7 @@ class TlsWebServer:
 
     me handle_connection(conn: ConnStream):
         """Handle a single incoming TLS HTTP connection."""
-        match conn.read_line():
+        match conn.read_line_bounded(8192):
             Err(_):
                 conn.close()
                 return
@@ -329,7 +341,7 @@ class TlsWebServer:
                 var headers = ""
                 var is_ws_upgrade = false
                 loop:
-                    match conn.read_line():
+                    match conn.read_line_bounded(8192):
                         Ok(header_line):
                             if header_line.trim() == "":
                                 break
