@@ -12,7 +12,10 @@ use std.mcdc.dynamic_probe.{mcdc_dynamic_probe_controller_load_builtin_current_o
 use std.test_runner.test_runner_mcdc_report.{test_runner_result_with_mcdc_evidence}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete, file_size, file_read_regular_no_follow_bounded}
-use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out, process_run_bounded}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use nogc_sync_mut.io.crypto_sffi.{random_hex as coverage_wrapper_random_hex}
+use std.common.test_runner.wrapper_filename.{coverage_wrapper_filename}
+use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out, process_run_bounded, process_last_child_peak_rss_kib}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.sosix.test_process.{sosix_test_temp_dir}
 use std.common.traceability.case_events.{collect_trace_case_events, collect_trace_event_documents, decode_trace_case_events}
@@ -1204,7 +1207,7 @@ fn _make_result_from_structured_evidence_core(file_path: text, stdout: text, std
         val detail = if assertion_detail != "": assertion_detail else: "assertion failed"
         error = "test-runner: authenticated BDD assertion failure: {detail}"
     test_runner_result_with_mcdc_evidence(
-        TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false),
+        TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, peak_rss_kib: process_last_child_peak_rss_kib(), setup_ms: 0, error: error, timed_out: false, cached: false),
         combined
     )
 
@@ -1223,22 +1226,24 @@ fn coverage_wrapper_suffix(file_path: text) -> text:
     else:
         ".spl"
 
-fn build_coverage_wrapper(file_path: text, options: TestOptions, source_override: text = "") -> (text, text):
+fn build_coverage_wrapper_checked(file_path: text, options: TestOptions, source_override: text = "") -> Result<(text, text), text>:
+    if file_path == "": return Err("coverage wrapper source path is empty")
     val configured_mcdc = env_get("SIMPLE_MCDC_MODE") ?? ""
     val mcdc_enabled = configured_mcdc == "on" or
         configured_mcdc == "dynamic"
     if not options.coverage and not mcdc_enabled:
-        return (file_path, "")
+        return Ok((file_path, ""))
     val content = if source_override != "": source_override else: read_file_content(file_path)
     if content == "":
-        return (file_path, "")
+        return Ok((file_path, ""))
 
-    # Windows paths arrive with backslashes; leaving them in `base` produced
-    # mixed-separator temp subpaths whose parent dirs are never created, so
-    # every spec degraded to plain interpreter (os error 3). Flatten both.
-    var base = file_path.replace("/", "_").replace("\\", "_")
-    base = base.replace(".spl", "")
-    val tmp_path = _tp_get_temp_dir() + "/simple_cov_" + getpid().to_text() + "_" + base + coverage_wrapper_suffix(file_path)
+    # Full source paths can exceed NAME_MAX after flattening. This is an
+    # invocation artifact: PID + random nonce is sufficient for file ownership.
+    # Keep the reserved prefix and spec suffix for existing readers. AOT source
+    # binding remains in staging; legacy coverage attribution is unchanged.
+    val filename = coverage_wrapper_filename(getpid(), coverage_wrapper_random_hex(16), coverage_wrapper_suffix(file_path) == "_spec.spl")
+    if filename.is_err(): return Err(filename.unwrap_err())
+    val tmp_path = _tp_get_temp_dir() + "/" + filename.unwrap()
 
     var lines: [text] = []
     if mcdc_enabled:
@@ -1303,8 +1308,15 @@ fn build_coverage_wrapper(file_path: text, options: TestOptions, source_override
         lines.push("__simple_mcdc_dump()")
 
     val wrapped = lines.join("\n")
-    file_write(tmp_path, wrapped)
-    (tmp_path, tmp_path)
+    if not file_create_exclusive(tmp_path, wrapped): return Err("coverage wrapper exclusive create refused: " + tmp_path)
+    Ok((tmp_path, tmp_path))
+
+fn build_coverage_wrapper(file_path: text, options: TestOptions, source_override: text = "") -> (text, text):
+    val prepared = build_coverage_wrapper_checked(file_path, options, source_override)
+    if prepared.is_err():
+        print "test-runner: " + prepared.unwrap_err()
+        return ("", "")
+    prepared.unwrap()
 
 fn extract_coverage_sdn(output: text) -> text:
     var in_block = false
@@ -1395,5 +1407,6 @@ export build_child_args, make_result_from_output, read_structured_test_evidence,
 export read_structured_test_expectations, vacuous_result_error, vacuous_spec_baselined, spec_source_has_raw_assert
 export hosted_lane_child_error, apply_hosted_lane_child_error
 export coverage_wrapper_suffix, build_coverage_wrapper
+export build_coverage_wrapper_checked
 export extract_coverage_sdn, strip_coverage_blocks
 export list_tests_static, extract_static_test_name

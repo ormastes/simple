@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
-**Status:** Open
+**Status:** FIXED (2026-11-07 implementation; revalidated on release 2026-11-08)
 **Severity:** High — silently corrupts TLS wire lengths/values whenever a byte has its high bit set
 **Area:** `src/lib/nogc_async_mut/io/tls_common.spl` (`bytes_to_wire`, `wire_to_bytes`)
 

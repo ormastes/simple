@@ -4,7 +4,12 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (blocks every push through the tracked pre-push dispatcher)
+**Status:** FIXED, 2026-11-08. The gate now permits an `unrecorded`, all-TODO
+ledger only when the published predecessor is also unpromoted; any genuine PASS
+still requires the matching fingerprint and evidence. The exact unpromoted-TODO
+and unpromoted-with-PASS fixtures are covered by `sh
+scripts/check/check-push-must-pass.shs --self-test`, which passes all 33
+ledger/budget/dispatcher/rebase/stale-merge fixtures.
 **Introduced by:** 09e879ff838 `fix(check): harden must-check ledger ownership`
 **Hook chain:** `scripts/hooks/pre-push` -> `pre-push-conflict-tree-guard.shs` -> `exec check-push-must-pass.shs`
 

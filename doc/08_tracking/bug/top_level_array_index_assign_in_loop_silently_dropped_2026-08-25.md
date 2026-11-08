@@ -51,7 +51,9 @@ off-limits during this pass (a bootstrap was running and editing Rust sources
 aborts it). Entry stays OPEN with a sharper repro.
 
 
-**Status:** OPEN. **Binary:** Rust seed, `bin/simple run` (JIT and interpreter fallback both).
+**Status:** FIXED (revalidated 2026-11-08). The exact module-scope
+`for x in [1,2,3]: n = n + 1` reproduction now prints `n=3`, so the
+scope/snapshot defect no longer reproduces on release.
 
 ## Symptom
 ```

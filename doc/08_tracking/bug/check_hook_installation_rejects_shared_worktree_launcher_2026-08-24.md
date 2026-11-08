@@ -6,7 +6,10 @@ evidence found in the body. This is bookkeeping, not verification.
 
 - Filed: 2026-08-24
 - Component: `scripts/check/check-hook-installation.shs`
-- Status: OPEN
+- Status: FIXED, 2026-11-08. Check 4 accepts the tracked worktree launcher by
+  resolved path or byte identity, and the cache selftest exercises that launcher
+  shape. `sh scripts/check/check-hook-installation.shs --selftest` passes 7/7
+  fixtures; the real linked-worktree check passes all 12 wiring checks.
 - Effect: blocks every push from a linked worktree, including pushes whose
   content guards all pass
 

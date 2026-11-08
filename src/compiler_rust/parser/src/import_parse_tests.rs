@@ -16,6 +16,11 @@ mod tests {
         assert_eq!(try_parse("val x = 5; print(x)\n").unwrap(), 2);
     }
 
+    #[test]
+    fn parses_one_line_fail_and_return_statements() {
+        assert_eq!(try_parse("fail(\"expected failure\"); return\n").unwrap(), 2);
+    }
+
     fn parse_file_detail(path: &str) -> String {
         let full_path = format!("/home/ormastes/dev/pub/simple/{}", path);
         let source = match std::fs::read_to_string(&full_path) {

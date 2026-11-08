@@ -26,6 +26,26 @@ pub fn resolve_strategies_publish_unresolved_method_v1(subject: text,
     reverse_reference_owner_mark_known_v1("unresolved-method-candidate")
     reverse_reference_register_unresolved_method_v1(subject, consumer, evidence)
 
+pub fn ufcs_receiver_may_bind_param(receiver_type: HirType, first_param_type: HirType) -> bool:
+    """Fail-closed gate for UFCS on an untyped receiver.
+
+    TypeChecker.is_compatible treats an inference variable as compatible with
+    anything, so an untyped receiver bound `x.m(...)` to ANY free function `m`
+    whose first parameter is a concrete type -- the hazard class of the seed
+    LLVM suffix-match fallback (llvm_suffix_match_fallback_binds_untyped_
+    receiver_to_user_method_2026-11-08) and stage2_ufcs_method_result_untyped_
+    match_payload_2026-11-07. An untyped receiver may only bind an
+    unconstrained parameter (type parameter or inference variable); otherwise
+    resolution stays Unresolved and MIR's typed / loud paths decide.
+    """
+    match receiver_type.kind:
+        case HirTypeKind.Infer(_, _):
+            match first_param_type.kind:
+                case HirTypeKind.TypeParam(_, _): true
+                case HirTypeKind.Infer(_, _): true
+                case _: false
+        case _: true
+
 impl MethodResolver:
     me resolve_method(receiver: HirExpr, method: text, args: [HirCallArg]) -> MethodResolution:
         """Resolve a method call using UFCS priority rules.
@@ -315,6 +335,8 @@ impl MethodResolver:
                     return nil
 
                 val first_param_type = params[0]
+                if not ufcs_receiver_may_bind_param(receiver_type, first_param_type):
+                    return nil
                 if self.type_checker.is_compatible(receiver_type, first_param_type):
                     val resolved_id = resolved_lookup_id
                     match self.current_fn_sym:

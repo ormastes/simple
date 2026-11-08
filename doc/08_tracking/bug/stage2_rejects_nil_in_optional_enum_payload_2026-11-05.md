@@ -28,3 +28,17 @@ on the following line by `nil`, drop the tag, re-run the owning spec, and close 
 - `src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl` (2 sites, `Array(int_elem|float_elem, None)`)
 - Sibling scan 2026-11-05 over every file merged by the fix lane that day found no other bare-nil enum-payload literal;
   pre-existing `None` spellings elsewhere (e.g. `expression_core.spl:628/633`) are not tagged by this row.
+
+## Re-check 2026-11-08 (lane bootp2) — blocked, and NOT only a frozen-stage2 artifact
+Checked against current policy (ERR-01: `nil` is the canonical `T?` absence, allowed in safe code):
+still valid, but the premise "seed accepts / stage2 rejects" is incomplete. CURRENT source
+deliberately rejects it too: `src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl`
+`enum_payload_local_compatible` (`case HirExprKind.NilLit: return self.unsafe_depth > 0` for an
+`Optional` slot) and `enum_payload_mismatch_message` ("nil outside unsafe ... use None"). So a
+stage2 rebuilt from current source would STILL reject the restored `nil`. Pinned as expected
+behaviour by: `test/01_unit/compiler/50.mir/enum_payload_value_shapes_spec.spl:108-113`,
+`enum_optional_payload_nil_literal_phase2_helper_spec.spl:113`, and
+`test/03_system/language/policy/nil_unsafe_only*_spec.spl`.
+Fix needed first (policy migration, owner: nil lane): admit `NilLit` into an `Optional` payload
+slot in safe code (lowers to the same nil word `None` already uses), flip those specs, then
+redeploy stage2; only then run the restore recipe above. Left open.

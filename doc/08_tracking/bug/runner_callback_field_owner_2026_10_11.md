@@ -1,6 +1,39 @@
 # Callback field dispatch and indirect return owner loss
 
-Status: OPEN. Canonical bug ID: `runner_callback_field_owner_2026_10_11`. GitHub: https://github.com/ormastes/simple/issues/2980
+Status: fix-implemented-verification-pending (2026-11-08). Canonical bug ID: `runner_callback_field_owner_2026_10_11`. GitHub: https://github.com/ormastes/simple/issues/2980
+
+## Root cause and fix (2026-11-08)
+
+`lower_call_with_value` (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`)
+already recovered the declared `fn(..) -> Record` signature of a callback
+field through `receiver_declared_type` -> `declared_field_hir_type` for an
+explicit call `(port.execute_fn)(x)`, but used it only to type the arguments
+and set an `indirect_return` value that `emit_typed_function_value_call`
+never reads. The signature actually used for emission came from the
+projected callee local's HIR type (absent or an erased scalar for
+entry-closure / loop-binding shapes) or from `enum_match_expr_type`, which
+has no `Field` arm. The call therefore failed closed with
+`indirect callable lacks a proven function signature`, or ran the legacy
+word-ABI path with no return owner so `observed.status` on the aggregate
+result was unresolved -- the "unresolved callback fields" MIR errors in
+`env_access_host` / `rt_hal_isolated_host`.
+
+Fix: retain the declared callable type and use it as the indirect call's
+signature whenever the callee local does not itself prove a callable
+(`Function` / `Optional<Function>`) type. A callee local that proves its own
+callable type is never overridden.
+
+- Reproducing spec: `test/01_unit/compiler/mir/callback_field_explicit_call_owner_spec.spl`
+  (3/3; before the fix: 2 failures, `indirect callable lacks a proven function signature`).
+- Generalization spec: `test/01_unit/compiler/mir/callback_field_declared_signature_generalization_spec.spl`
+  (erased scalar callee type, nested `host.port.execute_fn` chain, no override of a proven callee type; 3/3, 2 failed before).
+- Original-form fixture (no owner-retaining wrappers):
+  `test/fixtures/compiler/callback_field_explicit_call/original_form.spl` -- interpreter PASS.
+- NOT done: native qualification of the actual consumers on a rebuilt producer. The
+  `@workaround` sites in `src/lib/nogc_sync_mut/rt_hal/*.spl` and the wrapped `main.spl`
+  fixture stay until that runs. Pre-existing, unrelated: `indirect_call_return_owner_spec.spl`
+  and `fn_typed_parameter_indirect_call_spec.spl` fail 7/8 with and without this fix
+  (stale 4-argument `emit_typed_function_value_call` calls and the pre-v1 ownership-proof format).
 
 Original failure: C35 full runner: HIR251 PASS, MIR20 errors including callback fields; initial workaround ARM exit14 exposed record field owner loss.
 

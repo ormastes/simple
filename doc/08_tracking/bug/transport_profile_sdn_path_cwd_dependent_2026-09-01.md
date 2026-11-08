@@ -7,7 +7,13 @@ fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-01
 **Found by:** parent session, while (incorrectly) investigating a suspected regression.
-**Status:** OPEN — latent, and it already produced one false regression report.
+**Status:** FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08).
+`transport_profile_sdn_path` now walks upward from the process cwd until it
+finds `nvme_transport_profiles.sdn`, and `transport_profile_load` reports the
+absolute attempted path when the profile cannot be read. This prevents an
+all-zero profile from masquerading as logic failures. Execution from repo root
+and `fw/` remains blocked before the check by the pre-existing
+`windows_redirected_process.spl` parse error, so no fresh PASS is claimed.
 
 ## Measured
 
