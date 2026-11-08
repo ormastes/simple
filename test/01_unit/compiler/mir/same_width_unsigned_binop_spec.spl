@@ -4,12 +4,12 @@
 use std.spec.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
-use compiler.hir.hir_operators.{HirBinOp}
+use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp}
 use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir.mir_data.{MirBuilder}
-use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.mir.mir_types.{MirType, MirTypeKind, LocalId}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_support.{MirOperandKind}
 use compiler.mir.mir_lowering_stmts.*
@@ -71,6 +71,49 @@ fn unsigned_binop_probe(left_kind: MirTypeKind, right_kind: MirTypeKind,
     expect(operands.len()).to_equal(2)
     UnsignedBinopProbe(result_kind: result_type.unwrap().kind, operand_kinds: operands)
 
+fn unsigned_unary_result(kind: MirTypeKind, op: HirUnaryOp) -> MirTypeKind:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_simple_function("unsigned_unary", "unit")
+    val local = builder.new_temp(MirType(kind: kind))
+    lowering.builder = builder
+    lowering.local_map[101] = local
+    val operand = unsigned_binop_var(101, kind)
+    val expression = HirExpr(kind: HirExprKind.Unary(op, operand),
+        has_type_: false, type_: nil, span: Span.empty())
+    val result = lowering.lower_expr(expression)
+    expect(lowering.errors.len()).to_equal(0)
+    val result_type = lowering.local_mir_type_of(result)
+    if result_type == nil:
+        fail("real unary lowering did not retain its result type")
+        return MirTypeKind.Unit
+    result_type.unwrap().kind
+
+fn unsigned_unknown_comparison_casts(unknown_left: bool) -> i64:
+    # An unresolved recovery local has no registered MIR type. Preserve that
+    # missing metadata instead of treating the i64 fallback as proof of type.
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_simple_function("unknown_comparison", "unit")
+    val narrow = builder.new_temp(MirType(kind: MirTypeKind.U8))
+    lowering.builder = builder
+    lowering.local_map[101] = if unknown_left: LocalId(id: 9999) else: narrow
+    lowering.local_map[102] = if unknown_left: narrow else: LocalId(id: 9999)
+    val left = unsigned_binop_var(101, if unknown_left: MirTypeKind.I64 else: MirTypeKind.U8)
+    val right = unsigned_binop_var(102, if unknown_left: MirTypeKind.U8 else: MirTypeKind.I64)
+    val expression = HirExpr(kind: HirExprKind.Binary(HirBinOp.Lt, left, right),
+        has_type_: false, type_: nil, span: Span.empty())
+    lowering.lower_binary_expr(expression, HirBinOp.Lt, left, right)
+    var casts = 0
+    var comparisons = 0
+    for instruction in lowering.builder.instructions:
+        match instruction.kind:
+            case MirInstKind.Cast(_, _, _): casts = casts + 1
+            case MirInstKind.BinOp(_, _, _, _): comparisons = comparisons + 1
+            case _: ()
+    expect(comparisons).to_equal(1)
+    casts
+
 describe "same-width unsigned MIR arithmetic":
     it "retains each unsigned width at every arithmetic operation":
         for op in [HirBinOp.Add, HirBinOp.Sub, HirBinOp.Mul]:
@@ -86,7 +129,7 @@ describe "same-width unsigned MIR arithmetic":
             expect(unsigned_binop_probe(MirTypeKind.I8, MirTypeKind.I8, op).result_kind).to_equal(MirTypeKind.I64)
 
     it "widens narrow unsigned comparisons without discarding signed values or bounds":
-        for op in [HirBinOp.Eq, HirBinOp.NotEq, HirBinOp.Is, HirBinOp.IsNot, HirBinOp.Lt, HirBinOp.LtEq, HirBinOp.Gt, HirBinOp.GtEq]:
+        for op in [HirBinOp.Eq, HirBinOp.NotEq, HirBinOp.Lt, HirBinOp.LtEq, HirBinOp.Gt, HirBinOp.GtEq]:
             for narrow in [MirTypeKind.U8, MirTypeKind.U16, MirTypeKind.U32]:
                 for other in [MirTypeKind.I8, MirTypeKind.I16, MirTypeKind.I32, MirTypeKind.I64, MirTypeKind.U8, MirTypeKind.U16, MirTypeKind.U32]:
                     val forward = unsigned_binop_probe(narrow, other, op)
@@ -110,3 +153,13 @@ describe "same-width unsigned MIR arithmetic":
         val division = unsigned_binop_probe(MirTypeKind.U16, MirTypeKind.U16, HirBinOp.Div)
         expect(division.result_kind).to_equal(MirTypeKind.I64)
         expect(division.operand_kinds).to_equal([MirTypeKind.I64, MirTypeKind.I64])
+
+    it "retains operand width for unsigned negation and complement":
+        for op in [HirUnaryOp.Neg, HirUnaryOp.BitNot]:
+            for kind in [MirTypeKind.U8, MirTypeKind.U16, MirTypeKind.U32]:
+                expect(unsigned_unary_result(kind, op)).to_equal(kind)
+            expect(unsigned_unary_result(MirTypeKind.I64, op)).to_equal(MirTypeKind.I64)
+
+    it "does not manufacture casts from missing operand type metadata":
+        expect(unsigned_unknown_comparison_casts(true)).to_equal(0)
+        expect(unsigned_unknown_comparison_casts(false)).to_equal(0)

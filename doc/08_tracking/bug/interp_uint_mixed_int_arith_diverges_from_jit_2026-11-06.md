@@ -73,7 +73,7 @@ mixed-promotion residuals remain open; this is not the complete broad bug.
 
 The new narrow SSA values also exposed signed-default widening at LLVM call,
 aggregate field/global stores, raw GEP/offset indices, unary operands, switch/
-exception carriers and SSA-phi consumers. The candidate threads each
+exception carriers. The candidate threads each
 actual operand's unsigned metadata through existing numeric conversion helpers.
 Field storage retains its verbatim/no-sticky-value-map contract, signed operands
 still sign-extend and pointers keep their existing representation.
@@ -82,7 +82,11 @@ Same-width wrapping is an existing contract, documented at
 `doc/05_design/platform/structural_compute/execution_profile_contract_v1.md:219`
 and asserted by `test/01_unit/bugs/jit_narrow_unsigned_wrap_spec.spl`.
 The wider-variable contrast is pinned by `u8_times_wider_int_widens_spec.spl`.
-No new general promotion or overflow policy is selected here.
+The common-carrier implementation decision above was explicitly approved
+for this repair. It aligns the narrow unsigned wrapping and wider signed-peer
+profile without claiming a new general language promotion/overflow rule.
+In-range literals and broader mixed-policy cases remain residuals. Native and
+interpreter results must be compared before any acceptance claim.
 
 Executable MIR regression:
 `test/01_unit/compiler/mir/same_width_unsigned_binop_spec.spl` calls the real
@@ -93,13 +97,15 @@ operators, and negative wider/signed/nonarithmetic controls. Native regression:
 operation to i64 before returning and checks nine overflow results, a mixed-width control, comparison bounds and
 negative peers, chained wrapping, and implicit return/let/call/field/index/text
 consumers, signed call controls, negative-peer division/remainder and branch
-joins, global stores and unary/match consumers (40 checks). Both are **UNRUN**, because no admitted full test CLI is
+joins, global stores and unary/match consumers and signed i64 controls (42 checks). Both are **UNRUN**, because no admitted full test CLI is
 available and disk capacity precludes a new build. Existing green evidence is
 not rerun or borrowed as native qualification of this patch.
 
 Required admission: current-source core/compiler/lib/MCP/LSP checks, executable
-MIR spec, LLVM and Cranelift fixture compilation/execution with exact40-check
-stdout, and an intentional wrong-expectation negative control. Retain source,
+MIR spec, LLVM and Cranelift fixture compilation/execution with exact42-check
+stdout, the same fixture through the admitted interpreter with an exact
+result/output differential, and an intentional wrong-expectation negative
+control. Retain source,
 producer/runtime/tool identities and actual exit status. Keep status
 `fix-implemented-verification-pending`; no fixed/done promotion is justified.
 
@@ -110,7 +116,26 @@ address these findings; no second review or runtime PASS is implied here.
 `test/01_unit/compiler/backend/narrow_unsigned_consumer_widening_spec.spl`
 executes actual LLVM owners for normal/terminator/indirect calls, verbatim field
 storage, both global-store routes, raw GEP/offset indexing, unary/switch/exception
-carriers and SSA joins, with signed controls and all three
-narrow widths. It remains UNRUN. The SSA transform's real `ssa_phi_instruction`
-producer emits incoming locals without conversion; the backend therefore owns
-widening incoming scalar values to its declared phi carrier.
+carriers and matching-carrier SSA joins, with signed controls and all three
+narrow widths. It remains UNRUN. Generator tests now own a real positive
+LlvmIRBuilder handle and complete typed function/CFG context; streamed calls
+and global stores use that owned handle rather than zero or a dummy writer.
+
+## Cycle-2 review disposition and PHI residual (2026-11-08)
+
+The second review also returned FAIL. Checks for unsigned unary negation and
+complement incorrectly expected wide signed results. The actual Unary MIR
+arm already uses the operand type; corrected checks require u8 results56/55,
+with signed-i64 controls-200/-201 and actual unary-lowering type assertions.
+Boolean Not is unchanged. Common promotion now requires both local types to
+be explicitly present, and Is/IsNot are excluded from this scope.
+
+The speculative mixed-width PHI widening change was removed. The actual LLVM
+function path first uses typed alloca SSA in both bootstrap and normal modes;
+its already unsigned-aware stores widen normal branch values safely. A direct
+intrinsic or rejected-alloca legacy fallback with mixed physical widths remains
+unqualified: casting inside a merge before phi is invalid placement. Such a
+repair requires predecessor conversions, not an admitted-looking synthetic
+merge test. Matching-width PHI tests now build a real CFG; no mixed-width PHI
+fix or execution is claimed. No third review has run; review capacity is
+currently blocked, and the source candidate must not land without approval.
