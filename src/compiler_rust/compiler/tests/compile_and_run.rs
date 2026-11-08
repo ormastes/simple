@@ -472,3 +472,44 @@ fn main() -> i64:
     // qualifies typed receivers (verified via native-build e2e repro).
     assert_eq!(compile_and_run(code), 3);
 }
+
+/// seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09 (PR #7883):
+/// the exact text-scan loop whose bound `value_len - needle_len` was built
+/// from two UNTYPED `byte_len` bindings. Under the JIT the raw i64 results
+/// were carried as if tagged, the difference misdecoded, and the loop never
+/// terminated; with a bounded guard here it returned the wrong position.
+#[test]
+fn untyped_byte_len_difference_is_integer_under_jit() {
+    let src = r#"fn index_of(value: text, needle: text) -> i64:
+    val value_len = value.byte_len()
+    val needle_len = needle.byte_len()
+    if needle_len > value_len:
+        return -1
+    var start = 0
+    var guard = 0
+    while start <= value_len - needle_len:
+        guard = guard + 1
+        if guard > 64:
+            return -99
+        var offset = 0
+        while offset < needle_len and value.byte_at(start + offset) == needle.byte_at(offset):
+            offset = offset + 1
+        if offset == needle_len:
+            return start
+        start = start + 1
+    return -1
+
+fn main() -> i64:
+    val a = "semantic".byte_len()
+    val b = "/".byte_len()
+    if a - b != 7:
+        return 100 + (a - b)
+    val pos = index_of("abc/def", "/")
+    if pos != 3:
+        return 50 + pos
+    if index_of("semantic_surface.spl", "/") != -1:
+        return 40
+    return 0
+"#;
+    assert_eq!(compile_and_run(src), 0);
+}
