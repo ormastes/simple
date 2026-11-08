@@ -9,13 +9,16 @@ Execution evidence is required before this spec can qualify a compiler producer.
 
 use std.spec.*
 use compiler.core.ast.{ast_reset}
-use compiler.core.ast_expr.{expr_int_lit, expr_bool_lit, expr_block, expr_do_block, expr_if_expr, expr_lambda}
+use compiler.core.ast_expr.{expr_int_lit, expr_bool_lit, expr_block, expr_do_block, expr_if_expr, expr_lambda, expr_get_tag, expr_get_str, EXPR_DO_BLOCK}
 use compiler.core.ast_stmt.{stmt_expr_stmt}
-use compiler.core.parser.{parser_has_errors, parser_set_had_error}
+use compiler.core.parser.{parser_has_errors, parser_set_had_error, parser_init_with_path}
+use compiler.core.parser_expr.{parse_expr}
 use compiler.frontend.flat_ast_bridge.{convert_flat_expr, parse_and_build_module}
 use compiler.frontend.parser_types.*
-use compiler.hir.hir_lowering.*
-use compiler.hir.hir.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
 
 fn cdb_block(expr: Expr) -> Block:
     match expr.kind:
@@ -42,7 +45,7 @@ fn cdb_parsed_body(source: text) -> Block:
     expect(function.body.stmts.len()).to_equal(1)
     match function.body.stmts[0].kind:
         case StmtKind.Expr(expr): return cdb_block(expr)
-        case _: panic("parsed do/ce expression disappeared")
+        case _: panic("parsed do expression disappeared")
 
 describe "flat bridge preserves do block bodies":
     it "converts an empty do block without recursion or an unsupported tag error":
@@ -143,3 +146,13 @@ describe "flat bridge preserves do block bodies":
                     case HirExprKind.IntLit(value, _): expect(value).to_equal(43)
                     case _: fail("do-block tail did not become its HIR value")
             case _: fail("function tail lost its do block")
+
+    it "preserves ce builder identity without rejecting shared parser consumers":
+        step("Check the real flat parser succeeds and leaves the builder name in S")
+        parser_init_with_path("ce builder:\n    1\n", "ce_builder_owner.spl")
+        val node = parse_expr()
+        expect(parser_has_errors()).to_equal(false)
+        expect(expr_get_tag(node)).to_equal(EXPR_DO_BLOCK)
+        expect(expr_get_str(node)).to_equal("builder")
+        val rejected = convert_flat_expr(node)
+        expect(parser_has_errors()).to_equal(true)

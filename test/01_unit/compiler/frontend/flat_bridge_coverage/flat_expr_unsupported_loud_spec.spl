@@ -8,9 +8,8 @@ use std.spec.*
 use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.frontend.flat_ast_bridge.{convert_flat_expr}
-use compiler.core.ast.{ast_reset}
 use compiler.core.ast_expr.{expr_alloc}
-use compiler.core.parser.{parser_get_errors, parser_has_errors, parser_set_had_error}
+use compiler.core.parser.{parser_get_errors, parser_has_errors, parser_init_with_path}
 
 fn bridge_expr_has_diag(fragment: text) -> bool:
     val errors = parser_get_errors()
@@ -21,24 +20,28 @@ fn bridge_expr_has_diag(fragment: text) -> bool:
 describe "unsupported flat expr kinds raise a loud diagnostic":
     it "rejects a truly unknown expression tag through the production bridge":
         step("Keep the generic unsupported-node guard discriminating after tag44 admission")
-        ast_reset()
-        parser_set_had_error(false)
+        parser_init_with_path("", "unsupported_expr_reset.spl")
         val tree = convert_flat_expr(expr_alloc(9999, 0))
         expect(parser_has_errors()).to_equal(true)
         expect(bridge_expr_has_diag("flat AST bridge: unhandled expr node kind")).to_equal(true)
 
     it "keeps ce builder expressions loud instead of dropping builder identity":
         step("Parse the actual ce owner route and require its unsupported diagnostic")
-        ast_reset()
-        parser_set_had_error(false)
+        parser_init_with_path("", "unsupported_expr_reset.spl")
         val parsed = parse_full_frontend("fn boot() -> i64:\n    ce builder:\n        1\n", "ce_unsupported.spl", "ce_unsupported", Logger(level: 0))
         expect(parser_has_errors()).to_equal(true)
-        expect(bridge_expr_has_diag("ce builder expression is not supported by the flat AST route: builder")).to_equal(true)
+        expect(bridge_expr_has_diag("ce builder expression is not supported by the flat AST bridge: builder")).to_equal(true)
 
     it "does not fire on an ordinary call expression":
         step("Keep a supported control independent of earlier diagnostic state")
-        ast_reset()
-        parser_set_had_error(false)
+        parser_init_with_path("", "unsupported_expr_reset.spl")
         val parsed = parse_full_frontend("fn identity(w: i64) -> i64:\n    w\n\nfn boot(w: i64):\n    identity(w)\n", "ordinary_call.spl", "ordinary_call", Logger(level: 0))
         expect(parser_has_errors()).to_equal(false)
         expect(bridge_expr_has_diag("flat AST bridge: unhandled expr node kind")).to_equal(false)
+
+    it "reports an unsupported atom produced from real source":
+        step("Keep a real parser-produced unsupported expression alongside the synthetic guard")
+        parser_init_with_path("", "atom_reset.spl")
+        val parsed = parse_full_frontend("fn boot():\n    `owner\n", "unsupported_atom.spl", "unsupported_atom", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(true)
+        expect(bridge_expr_has_diag("flat AST bridge: unhandled expr node kind (tag=45)")).to_equal(true)
