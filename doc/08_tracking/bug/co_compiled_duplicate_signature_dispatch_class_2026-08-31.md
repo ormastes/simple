@@ -1,7 +1,17 @@
 # Co-compiled duplicate definitions with differing signatures — dispatch class
 
-Status: OPEN (recorded, not fixed)
+Status: FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
 Found: 2026-08-31, while fixing known_bugs C12/C13.
+
+Resolution: the five remaining raw/high-level collisions (`atomic_bool_new`,
+`env_get`, `env_vars`, `process_run_with_limits`, and `process_wait`) now use
+unique `sffi_`-prefixed raw names. Re-export facades and every caller across
+`src`, including the MIR lowering caller, are migrated; unset environment
+values retain their `?? ""` behavior. `atomic_i64_new`,
+`mcdc_condition_key`, and `shell` were already fixed and are unchanged.
+`raw_high_level_duplicate_signature_spec.spl` statically pins all eight pairs
+as absent and forbids bare facade re-exports. The Simple spec was not executed
+in this lane, so runtime verification remains pending.
 
 ## Symptom
 
