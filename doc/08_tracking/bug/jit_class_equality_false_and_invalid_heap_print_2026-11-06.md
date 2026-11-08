@@ -1,6 +1,6 @@
 # BUG: JIT `==` on two equal class objects is false; printing one shows `<invalid-heap:…>`
 
-- **Status:** open
+- **Status:** fix-implemented-verification-pending (MIR lowering expands class == field-wise and renders Name(f: v); test compiler/tests/class_equality_print_jit.rs)
 - **Severity:** P2
 - **Found:** 2026-11-06, seed-class-reference lane review
 - **Lane:** Rust seed, `SIMPLE_EXECUTION_MODE=jit` (tree-walk interpreter is correct)
