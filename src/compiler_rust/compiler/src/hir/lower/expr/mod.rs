@@ -2362,6 +2362,15 @@ impl Lowerer {
                 "starts_with" | "ends_with" => Some(TypeId::BOOL),
                 "rfind" | "last_index_of" => Some(TypeId::I64),
                 "find" if hir_args.len() == 1 && !self.is_callable_arg(&hir_args[0]) => Some(TypeId::I64),
+                // `byte_len`/`char_count` exist only on text and return a raw
+                // i64 (`rt_string_len` / `rt_string_char_count`). #7174 added
+                // them to the STRING-receiver table above but not here, so on
+                // an erased receiver `val n = value.byte_len()` stayed ANY and
+                // the raw word was misdecoded (20 -> `<value:0x14>`, 1 -> nil,
+                // `a - b` -> a float), making `while start <= a - b` never
+                // terminate. Bug row:
+                // seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09.
+                "byte_len" | "char_count" if hir_args.is_empty() => Some(TypeId::I64),
                 // "length" synonym — see the string-methods comment above.
                 "len" | "length" | "size" => Some(TypeId::I64),
                 "keys" => Some(match dict_kv {

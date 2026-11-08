@@ -89,3 +89,5 @@ not executable qualification: no changed compiler was built, the absent type's
 producer remains unproved, and the original valid Result program must still
 compile and execute rather than merely receive a safer error. All authored
 compiler regressions remain UNRUN under the exhausted shared diagnostic budget.
+
+See also stage3_native_build_heap_corruption_c0000374_2026_11_08 (2026-11-08: stage3 s3_fable64b.exe heap-corrupts on hello world, blocks retest).

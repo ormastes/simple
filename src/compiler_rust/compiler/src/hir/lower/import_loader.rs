@@ -33,6 +33,18 @@ pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync
 }
 
 impl Lowerer {
+    fn record_imported_type_owner(&mut self, name: &str) {
+        if let Some(path) = self.current_file.clone() {
+            self.imported_type_owners.entry(name.to_string()).or_default().insert(path);
+        }
+    }
+
+    fn record_imported_fn_owner(&mut self, name: &str) {
+        if let Some(path) = self.current_file.clone() {
+            self.imported_fn_owners.entry(name.to_string()).or_default().insert(path);
+        }
+    }
+
     fn bind_imported_defaults(&mut self, source: &Path, caller: &Path, target: &ImportTarget) {
         fn selected_names(target: &ImportTarget, contracts: &std::collections::HashMap<String, Vec<Option<Expr>>>, output: &mut Vec<(String, String)>) {
             match target {
@@ -468,6 +480,7 @@ impl Lowerer {
                             self.register_class(&scoped)?
                         };
                         self.globals.insert(class_def.name.clone(), class_type_id);
+                        self.record_imported_type_owner(&class_def.name);
                         self.record_imported_method_defaults(&class_def.name, &class_def.methods);
                         imported_count += 1;
                     }
@@ -522,6 +535,7 @@ impl Lowerer {
                             self.register_struct(&scoped)?
                         };
                         self.globals.insert(struct_def.name.clone(), struct_type_id);
+                        self.record_imported_type_owner(&struct_def.name);
                         self.record_imported_method_defaults(&struct_def.name, &struct_def.methods);
                         imported_count += 1;
                     }
@@ -536,6 +550,7 @@ impl Lowerer {
                 Node::Function(func_def) => {
                     if self.should_import_symbol(&func_def.name, target) {
                         let defaults: Vec<_> = func_def.params.iter().map(|p| p.default.clone()).collect();
+                        self.record_imported_fn_owner(&func_def.name);
                         if let Some(path) = &self.current_file {
                             self.imported_fn_param_defaults
                                 .entry(crate::interpreter::normalize_path_key(path)).or_default()
