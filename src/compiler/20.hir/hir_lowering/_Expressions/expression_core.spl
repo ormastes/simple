@@ -200,17 +200,16 @@ impl HirLowering:
         val owner = _hir_expr_symbol_or_invalid(receiver_kind)
         if not owner.is_valid():
             return MethodResolution.Unresolved
-        val owner_symbol = self.symbols.get_symbol_raw(owner.id)
-        if owner_symbol == nil:
+        # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-tests HirSymbol? == nil and if-val on SymbolId?; prove the owner kind through a scalar accessor and carry the method id as raw i64
+        if not self.symbols.symbol_is_type_declaration_scalar_raw(owner.id):
             return MethodResolution.Unresolved
-        match owner_symbol.kind:
-            case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum:
-                val method_symbol = self.symbols.lookup_static_method_raw(owner.id, method)
-                if val declared_method = method_symbol:
-                    if declared_method != nil and declared_method.is_valid():
-                        val method_id: SymbolId = declared_method
-                        return MethodResolution.StaticMethod(owner, method_id)
+        var declared_method_raw: i64 = -1
+        match self.symbols.lookup_static_method_raw(owner.id, method):
+            case Some(declared_method):
+                declared_method_raw = declared_method.id
             case _: ()
+        if declared_method_raw >= 0:
+            return MethodResolution.StaticMethod(owner, SymbolId(id: declared_method_raw))
         MethodResolution.Unresolved
 
     me lower_static_owner_receiver(receiver: Expr) -> HirExpr:
@@ -904,7 +903,6 @@ impl HirLowering:
                 # Typed rebind: extracted ANY-ish payload misreads on stage4
                 # when consumed directly (bug doc iteration 18).
                 val ident_name_t: text = name
-                val symbol = self.symbols.lookup(ident_name_t)
                 # Cycle-160 (v21, 2026-10-18): the `if val` presence bind of
                 # this lookup optional copied the Some payload from an
                 # erased-draw optional and SIGSEGV'd inside lower_hir_expr
@@ -916,10 +914,12 @@ impl HirLowering:
                 # absent (either level of nil) -> lower_unresolved_ident;
                 # present -> NamedVar. (The older NOTE's nil-recheck is
                 # subsumed by the pre-guard.)
-                if symbol == nil or symbol.? == nil:
+                # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-tests SymbolId? == nil / .?; resolve through lookup_or_invalid and test the raw id
+                val symbol_raw: i64 = self.symbols.lookup_or_invalid(ident_name_t).id
+                if symbol_raw < 0:
                     self.lower_unresolved_ident(ident_name_t, e.span)
                 else:
-                    val found_symbol: SymbolId = symbol.?
+                    val found_symbol: SymbolId = SymbolId(id: symbol_raw)
                     # Under a --entry-closure bootstrap build, a
                     # cross-module imported (or same-module,
                     # non-entry-module) function's stored symbol name may
