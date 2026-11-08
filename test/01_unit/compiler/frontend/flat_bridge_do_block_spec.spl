@@ -1,0 +1,90 @@
+"""
+The flat do: node stores its whole body as statements. The rich bridge must
+preserve statement order, the final value, empty bodies and nested scopes.
+Run with the qualified self-hosted CLI:
+bin/simple test test/01_unit/compiler/frontend/flat_bridge_do_block_spec.spl
+"""
+use std.spec
+use compiler.core.ast.{ast_reset, expr_int_lit, expr_do_block, expr_block, stmt_expr_stmt}
+use compiler.frontend.flat_ast_bridge.{convert_flat_expr}
+use compiler.frontend.parser_types_expr.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_get_errors}
+
+fn do_bridge_int_stmt(value: i64) -> i64:
+    stmt_expr_stmt(expr_int_lit(value, 0), 0)
+
+fn do_bridge_value(expr: Expr, position: i64) -> i64:
+    match expr.kind:
+        case ExprKind.Block(body):
+            match body.stmts[position].kind:
+                case StmtKind.Expr(value):
+                    match value.kind:
+                        case ExprKind.IntLit(number): return number
+                        case _: return -3
+                case _: return -2
+        case _: return -1
+
+fn do_bridge_size(expr: Expr) -> i64:
+    match expr.kind:
+        case ExprKind.Block(body): return body.stmts.len()
+        case _: return -1
+
+describe "flat do blocks retain their scoped statement body":
+    it "preserves both statement order and the final value":
+        ast_reset()
+        val node = expr_do_block([do_bridge_int_stmt(17), do_bridge_int_stmt(29)], 0)
+        val bridged = convert_flat_expr(node)
+        expect(do_bridge_size(bridged)).to_equal(2)
+        expect(do_bridge_value(bridged, 0)).to_equal(17)
+        expect(do_bridge_value(bridged, 1)).to_equal(29)
+
+    it "keeps an empty do body empty":
+        ast_reset()
+        val bridged = convert_flat_expr(expr_do_block([], 0))
+        expect(do_bridge_size(bridged)).to_equal(0)
+
+    it "retains nested blocks instead of flattening their scope":
+        ast_reset()
+        val inner = expr_do_block([do_bridge_int_stmt(43)], 0)
+        val outer = expr_do_block([stmt_expr_stmt(inner, 0)], 0)
+        val bridged = convert_flat_expr(outer)
+        var inner_value = -1
+        match bridged.kind:
+            case ExprKind.Block(body):
+                expect(body.stmts.len()).to_equal(1)
+                match body.stmts[0].kind:
+                    case StmtKind.Expr(value): inner_value = do_bridge_value(value, 0)
+                    case _: inner_value = -2
+            case _: inner_value = -3
+        expect(inner_value).to_equal(43)
+
+    it "preserves the explicit tail of an ordinary block":
+        ast_reset()
+        val node = expr_block([do_bridge_int_stmt(61)], expr_int_lit(73, 0), 0)
+        val bridged = convert_flat_expr(node)
+        expect(do_bridge_size(bridged)).to_equal(2)
+        expect(do_bridge_value(bridged, 1)).to_equal(73)
+
+    it "parses a do initializer and preserves its final source value":
+        val source = "fn boot() -> i64:\n    val answer = do:\n        17\n        29\n    answer\n"
+        val parsed = parse_full_frontend(source, "fixture_do_initializer.spl", "fixture_do_initializer", Logger(level: 0))
+        expect(parser_get_errors().len()).to_equal(0)
+        val function = parsed.functions["boot"] ?? panic("missing boot function")
+        var final_value = -1
+        match function.body.stmts[0].kind:
+            case StmtKind.Val(_, _, init):
+                expect(do_bridge_size(init)).to_equal(2)
+                final_value = do_bridge_value(init, 1)
+            case _: final_value = -2
+        expect(final_value).to_equal(29)
+
+    it "rejects a computation expression instead of erasing its builder":
+        val source = "fn boot():\n    ce builder:\n        29\n"
+        val parsed = parse_full_frontend(source, "fixture_ce_rejected.spl", "fixture_ce_rejected", Logger(level: 0))
+        var rejected = false
+        for diagnostic in parser_get_errors():
+            if diagnostic.contains("computation expression builders are not supported by the flat frontend"):
+                rejected = true
+        expect(rejected).to_equal(true)
