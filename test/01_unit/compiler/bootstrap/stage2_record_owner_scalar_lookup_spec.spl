@@ -1,0 +1,105 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Bug: stage2_test_runner_record_collection_owner_unavailable_2026_10_12 (GH #3298).
+# The Stage 2 MIR build of the test runner visits 252 modules and then dies with
+# "record collection payload owner is unavailable in the consumer". The exact
+# record-owner rebind (`rebind_named_type_owner`) used to carry a `SymbolId?`
+# struct Option across the `lookup_exact_type` boundary and bind it via
+# `if val`; frozen stage2 native code miscompiles that transport (see the
+# `lookup_qualified_type_raw` docstring), so a present exact owner reads as
+# nil/corrupt and the strict ownership refusal fires on a valid provider.
+# Only native can reproduce the miscompile; this spec pins the scalar lookup
+# behaviour and guards the source shape so the workaround cannot regress.
+
+use std.spec.step
+
+use std.spec
+use std.fs.{read_file}
+use compiler.hir.hir_types.{SymbolTable, HirSymbol, SymbolId, ScopeId, SymbolKind}
+use compiler.hir.hir_symbol_table_methods
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+
+val EXPR_DISPATCH = "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl"
+val BUILTIN_EXTRAS = "src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl"
+val SYMBOL_METHODS = "src/compiler/20.hir/hir_symbol_table_methods.spl"
+val BUG_TAG = "@workaround bug=stage2_test_runner_record_collection_owner_unavailable_2026_10_12"
+
+fn probe_symbol(raw: i64, name: text, kind: SymbolKind, module: text?) -> HirSymbol:
+    HirSymbol(
+        id: SymbolId(id: raw),
+        name: name,
+        kind: kind,
+        type_: nil,
+        scope: ScopeId(id: 0),
+        span: Span(start: 0, end: 1, line: 1, col: 1, file: "probe.spl", length: 1),
+        visibility: Visibility.Public,
+        is_public: true,
+        is_mutable: false,
+        defining_module: module
+    )
+
+describe "Stage 2 exact record owner scalar lookup":
+    it "answers the raw id of an exact struct/class/enum name without an Option":
+        # @req REQ-SSPEC-COMPILER
+        step("lookup_exact_type_raw returns the registered raw id for aggregate kinds")
+        val table = SymbolTable.new()
+        table.register_preserved_symbol(probe_symbol(31, "TestCaseRecord", SymbolKind.Struct, Some("app.test_runner_new.types")))
+        table.register_preserved_symbol(probe_symbol(32, "Runner", SymbolKind.Class, Some("app.test_runner_new.runner")))
+        table.register_preserved_symbol(probe_symbol(33, "Verdict", SymbolKind.Enum, Some("app.test_runner_new.types")))
+        # oracle: the scalar lookup agrees with the Option lookup on every hit
+        expect(table.lookup_exact_type_raw("TestCaseRecord")).to_equal(31)
+        expect(table.lookup_exact_type_raw("Runner")).to_equal(32)
+        expect(table.lookup_exact_type_raw("Verdict")).to_equal(33)
+        expect(table.lookup_exact_type("TestCaseRecord").?.id).to_equal(31)
+
+    it "answers -1 for an absent name and for a non-type symbol":
+        # @req REQ-SSPEC-COMPILER
+        step("miss sentinel is -1, never 0 and never a stale id")
+        val table = SymbolTable.new()
+        table.register_preserved_symbol(probe_symbol(41, "collect_records", SymbolKind.Function, Some("app.test_runner_new.collect")))
+        # oracle: a Function-kind symbol is not an exact type
+        expect(table.lookup_exact_type_raw("collect_records")).to_equal(-1)
+        # oracle: an unregistered name misses with the documented sentinel
+        expect(table.lookup_exact_type_raw("NoSuchRecord")).to_equal(-1)
+        # oracle: the Option form agrees on the miss
+        assert_nil(table.lookup_exact_type("collect_records"))
+
+    it "keeps the exact record owner rebind on the scalar lookup path":
+        # @req REQ-SSPEC-COMPILER
+        step("rebind_named_type_owner must not transport SymbolId? across lookup_exact_type")
+        val dispatch = read_file(EXPR_DISPATCH)
+        val rebind_at = dispatch.index_of("me rebind_named_type_owner(")
+        val rebind_end = dispatch.index_of("fn symbol_matches_ownership_key(")
+        assert_true(rebind_at >= 0)
+        assert_true(rebind_end > rebind_at)
+        val rebind_body = dispatch.substring(rebind_at, rebind_end)
+        expect(rebind_body).to_contain("self.symbols.lookup_exact_type_raw(")
+        expect(rebind_body).to_not_contain("if val present_rebound = self.symbols.lookup_exact_type(")
+        expect(rebind_body).to_contain(BUG_TAG)
+
+    it "binds the provider ownership-key array to a typed local, not an Option":
+        # @req REQ-SSPEC-COMPILER
+        step("class-field Dict<text,[text]> bracket-reads bind straight to [text]")
+        val dispatch = read_file(EXPR_DISPATCH)
+        expect(dispatch).to_not_contain("val optional_keys: [text]? = self.struct_field_type_ownership_key[owner]")
+        expect(dispatch).to_not_contain("if val present_keys = optional_keys:")
+        expect(dispatch).to_not_contain("if val present_optional_keys = optional_keys:")
+        expect(dispatch).to_contain("fn struct_field_ownership_key_at(owner: text, field_idx: i64) -> text:")
+
+    it "keeps the sibling Result payload rebind on the scalar lookup path":
+        # @req REQ-SSPEC-COMPILER
+        step("builtin_method_extras shares the rebind shape and must not regress it")
+        val extras = read_file(BUILTIN_EXTRAS)
+        expect(extras).to_not_contain("if val rebound = self.symbols.lookup_exact_type(")
+        expect(extras).to_contain("self.symbols.lookup_exact_type_raw(")
+
+    it "defines the scalar lookup on the proven Dict bracket path":
+        # @req REQ-SSPEC-COMPILER
+        step("lookup_exact_type_raw must not round-trip HirSymbol? either")
+        val methods = read_file(SYMBOL_METHODS)
+        val at = methods.index_of("fn lookup_exact_type_raw(name: text) -> i64:")
+        assert_true(at >= 0)
+        val body = methods.substring(at, at + 900)
+        expect(body).to_contain("self.symbols.has(raw_id)")
+        expect(body).to_not_contain("if val symbol = self.get_symbol_raw(raw_id):")
