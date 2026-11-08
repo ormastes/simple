@@ -1801,3 +1801,84 @@ fn test_lower_omitted_field_uses_global_declared_default() {
     assert!(body.contains("Integer(12345)"), "omitted gpc must lower its declared default: {body}");
     assert!(!body.contains("kind: Nil"), "no omitted field may fall back to the nil tag: {body}");
 }
+
+// Regression for seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09
+// (surfaced by PR #7883): `byte_len`, `byte_at`, `char_code_at` and
+// `ord`/`codepoint`/`code_point` return a raw i64 from the runtime. When one
+// is missing from a result-type table, an UNTYPED `val n = s.byte_len()` is
+// typed ANY, MIR skips the int boxing, the raw word 20 prints as
+// `<value:0x14>`, the raw word 1 as `nil`, and `a - b` on two such bindings
+// is a tagged-arithmetic misdecode (2.0), so
+// `while start <= value_len - needle_len` never terminates. The typed
+// `val n: i64 = s.byte_len()` form only survives because the declared type
+// forces an UnboxInt. #7174 closed the STRING-receiver table; the erased
+// (`any`) receiver table still lacked `byte_len` and is what this pins.
+#[test]
+fn byte_len_and_raw_i64_text_builtins_infer_i64() {
+    let module = parse_and_lower(
+        r#"fn diff(value: text, needle: text) -> i64:
+    val a = value.byte_len()
+    val b = needle.byte_len()
+    return a - b
+
+fn byte_at_value(value: text) -> i64:
+    val a = value.byte_at(0)
+    return a
+
+fn char_code(value: text) -> i64:
+    val a = value.char_code_at(0)
+    return a
+
+fn ordinal(value: text) -> i64:
+    val a = value.ord()
+    return a
+
+fn erased(value: any) -> i64:
+    val a = value.byte_len()
+    return a
+"#,
+    )
+    .unwrap();
+
+    for (name, method) in [
+        ("diff", "byte_len"),
+        ("byte_at_value", "byte_at"),
+        ("char_code", "char_code_at"),
+        ("ordinal", "ord"),
+        ("erased", "byte_len"),
+    ] {
+        let function = module.functions.iter().find(|f| f.name == name).expect(name);
+        let lets: Vec<_> = function
+            .body
+            .iter()
+            .filter_map(|stmt| match stmt {
+                HirStmt::Let { ty, value: Some(value), .. } => Some((*ty, value)),
+                _ => None,
+            })
+            .collect();
+        assert!(!lets.is_empty(), "{name}: expected an untyped `val` binding");
+        for (local_ty, value) in &lets {
+            assert!(
+                matches!(&value.kind, HirExprKind::MethodCall { method: m, .. } if m == method),
+                "{name}: binding must stay a `{method}` method call, got {:?}",
+                value.kind
+            );
+            assert_eq!(value.ty, TypeId::I64, "{name}: `.{method}()` must infer i64, not ANY");
+            assert_eq!(*local_ty, TypeId::I64, "{name}: the untyped local must be i64");
+        }
+    }
+
+    // The exact #7883 loop-bound shape: the difference of two untyped
+    // `byte_len` bindings must be an integer binary op, never a dynamic one.
+    let diff = module.functions.iter().find(|f| f.name == "diff").unwrap();
+    let returned = diff
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        })
+        .expect("diff must return a - b");
+    assert!(matches!(returned.kind, HirExprKind::Binary { .. }), "{:?}", returned.kind);
+    assert_eq!(returned.ty, TypeId::I64, "a - b on two untyped byte_len bindings must be i64");
+}
