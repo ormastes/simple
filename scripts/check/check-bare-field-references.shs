@@ -55,31 +55,48 @@ set -u
 # counter substring alone is insufficient: ERROR and zero-example verdicts also
 # carry failed=0. This helper is shared by real execution and shell selftests.
 bare_field_spec_verdict_ok() {
-    [ "$1" -eq 0 ] || return 1
-    awk -v expected="$3" '
-        /semantic: variable .* not found/ { bad=1 }
+    # 0 = positive evidence, 1 = observed product failure, 2 = unavailable or
+    # malformed execution evidence. Never book an infrastructure non-outcome
+    # as an assertion failure merely because it did not pass admission.
+    awk -v expected="$3" -v child_status="$1" '
+        /semantic: variable .* not found/ { semantic_failure=1 }
         /^SPEC FILE VERDICT:/ {
             verdicts++
             if ($1 != "SPEC" || $2 != "FILE" || $3 != "VERDICT:" || $4 != expected) bad=1
             for (i=5; i<=NF; i++) {
                 n=split($i, parts, "=")
                 key=parts[1]; value=parts[2]
-                if (key == "outcome" || key == "executed" || key == "passed" || key == "failed" || key == "dropped") {
-                    if (seen[key]++ || n != 2) bad=1
-                    values[key]=value
-                }
-                if (key == "process_error" || key == "timeout" || key == "unrun" || key == "in_development" || key == "skipped") {
-                    if (n != 2 || value !~ /^[0-9]+$/ || value+0 != 0) bad=1
+                if (n != 2 || seen[key]++) bad=1
+                values[key]=value
+                if (key == "outcome") continue
+                if (key == "declared>" || key == "executed" || key == "passed" || key == "failed" || key == "dropped") {
+                    if (value !~ /^[0-9]+$/) bad=1
+                } else if (key == "process_error" || key == "timeout" || key == "unrun" || key == "inconclusive" || key == "in_development" || key == "skipped") {
+                    if (value !~ /^[0-9]+$/ || value+0 != 0) bad=1
+                } else {
+                    # A degraded fallback or future unknown flag cannot qualify
+                    # this behavioral leg without an explicit protocol review.
+                    bad=1
                 }
             }
         }
         END {
-            if (verdicts != 1 || bad || values["outcome"] != "OK") exit 1
-            split("executed passed failed dropped", keys, " ")
-            for (i=1;i<=4;i++) if (!seen[keys[i]] || values[keys[i]] !~ /^[0-9]+$/) exit 1
-            if (values["executed"]+0 <= 0 || values["passed"]+0 != values["executed"]+0 || values["failed"]+0 != 0 || values["dropped"]+0 != 0) exit 1
+            if (verdicts != 1 || bad) exit 2
+            split("outcome declared> executed passed failed dropped", keys, " ")
+            for (i=1;i<=6;i++) if (!seen[keys[i]]) exit 2
+            if (values["executed"]+0 <= 0 || values["dropped"]+0 != 0 || values["passed"]+0 + values["failed"]+0 != values["executed"]+0) exit 2
+            if (values["outcome"] != "OK" && values["outcome"] != "ERROR") exit 2
+            if (child_status != 0 && child_status != 1) exit 2
+            # Both current emitters use ERROR for actual assertion failures too.
+            # Positive executed/failed counts distinguish those from unrun ERROR.
+            if (values["failed"]+0 > 0 || semantic_failure) exit 1
+            if (child_status != 0 || values["outcome"] != "OK") exit 2
         }
     ' "$2"
+}
+
+bare_field_run_spec() {
+    "$1" test "$3" --no-session-daemon --sequential < /dev/null > "$2" 2>&1
 }
 
 bare_field_unique_specs() {
@@ -92,7 +109,7 @@ bare_field_check_floor_ok() {
 }
 
 bare_field_admission_selftest() {
-    st_dir=$(mktemp -d) || return 2
+    st_dir=$(mktemp -d) || { echo "ERROR — shell admission selftest could not create scratch"; return 2; }
     st_failed=0
     st_count=0
     st_good='SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=3 executed=3 passed=3 failed=0 skipped=0 dropped=0'
@@ -101,7 +118,7 @@ bare_field_admission_selftest() {
     while IFS='|' read -r st_name st_want st_status st_line; do
         [ -n "$st_name" ] || continue
         printf '%s\n' "$st_line" > "$st_dir/output"
-        if bare_field_spec_verdict_ok "$st_status" "$st_dir/output" test/example_spec.spl; then st_got=0; else st_got=1; fi
+        if bare_field_spec_verdict_ok "$st_status" "$st_dir/output" test/example_spec.spl; then st_got=0; else st_got=$?; fi
         st_count=$((st_count + 1))
         if [ "$st_got" -ne "$st_want" ]; then
             echo "FAIL — admission fixture $st_name wanted=$st_want got=$st_got"
@@ -109,31 +126,39 @@ bare_field_admission_selftest() {
         fi
     done <<EOF
 success|0|0|$st_good
-runner-error|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=3 executed=3 passed=3 failed=0 dropped=0
-zero-examples|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=0 executed=0 passed=0 failed=0 dropped=0
+runner-error|2|0|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=3 executed=3 passed=3 failed=0 dropped=0
+zero-examples|2|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=0 executed=0 passed=0 failed=0 dropped=0
 aggregate-success|0|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=3 executed=3 passed=3 failed=0 in_development=0 dropped=0
-nonzero-exit|1|7|$st_good
+nonzero-exit|2|7|$st_good
 failed-examples|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=3 executed=3 passed=2 failed=1 dropped=0
-dropped-examples|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=4 executed=3 passed=3 failed=0 dropped=1
-wrong-file|1|0|SPEC FILE VERDICT: test/other_spec.spl outcome=OK declared>=3 executed=3 passed=3 failed=0 dropped=0
-duplicate-counter|1|0|$st_good failed=1
-malformed-counter|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK executed=3 passed=3 failed=0oops dropped=0
-mismatched-passed|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK executed=3 passed=2 failed=0 dropped=0
-missing-counter|1|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK executed=3 passed=3 failed=0
-process-error|1|0|$st_good process_error=1
-no-verdict|1|0|Results: 3 total, 3 passed, 0 failed
-missing-outcome|1|0|SPEC FILE VERDICT: test/example_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
+dropped-examples|2|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK declared>=4 executed=3 passed=3 failed=0 dropped=1
+wrong-file|2|0|SPEC FILE VERDICT: test/other_spec.spl outcome=OK declared>=3 executed=3 passed=3 failed=0 dropped=0
+duplicate-counter|2|0|$st_good failed=1
+malformed-counter|2|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK executed=3 passed=3 failed=0oops dropped=0
+mismatched-passed|2|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK executed=3 passed=2 failed=0 dropped=0
+missing-counter|2|0|SPEC FILE VERDICT: test/example_spec.spl outcome=OK executed=3 passed=3 failed=0
+process-error|2|0|$st_good process_error=1
+timeout|2|124|$st_good timeout=1
+unrun|2|0|$st_good unrun=1
+inconclusive|2|0|$st_good inconclusive=1
+degraded|2|0|$st_good degraded=standalone-smf-fallback
+unknown-field|2|0|$st_good new_flag=0
+assertion-error-token|1|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=3 executed=3 passed=2 failed=1 skipped=0 dropped=0
+no-verdict|2|0|Results: 3 total, 3 passed, 0 failed
+missing-outcome|2|0|SPEC FILE VERDICT: test/example_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
 EOF
     printf '%s\n%s\n' "error: semantic: variable 'xlen' not found" "$st_good" > "$st_dir/output"
     st_count=$((st_count + 1))
-    if bare_field_spec_verdict_ok 0 "$st_dir/output" test/example_spec.spl; then
-        echo 'FAIL — bare-field diagnostic hidden by plausible success verdict'
+    if bare_field_spec_verdict_ok 0 "$st_dir/output" test/example_spec.spl; then st_code=0; else st_code=$?; fi
+    if [ "$st_code" -ne 1 ]; then
+        echo "FAIL — bare-field diagnostic must be product FAIL1, got=$st_code"
         st_failed=$((st_failed + 1))
     fi
     printf '%s\n%s\n' "$st_good" "$st_good" > "$st_dir/output"
     st_count=$((st_count + 1))
-    if bare_field_spec_verdict_ok 0 "$st_dir/output" test/example_spec.spl; then
-        echo 'FAIL — duplicate verdicts admitted'
+    if bare_field_spec_verdict_ok 0 "$st_dir/output" test/example_spec.spl; then st_code=0; else st_code=$?; fi
+    if [ "$st_code" -ne 2 ]; then
+        echo "FAIL — duplicate verdicts must be evidence ERROR2, got=$st_code"
         st_failed=$((st_failed + 1))
     fi
     printf '%s\n' test/a_spec.spl test/a_spec.spl test/b_spec.spl | bare_field_unique_specs > "$st_dir/unique"
@@ -143,12 +168,37 @@ EOF
         echo 'FAIL — duplicate behavioral legs counted'
         st_failed=$((st_failed + 1))
     fi
+    # Exercise the production invocation within the real while-read shape.
+    # This shell stub probes stdin isolation only; it is not a compiler stand-in.
+    cat > "$st_dir/reader" <<'READER'
+#!/bin/sh
+if IFS= read -r stolen; then
+    echo "unexpected stdin: $stolen"
+    exit 7
+fi
+printf 'SPEC FILE VERDICT: %s outcome=OK declared>=1 executed=1 passed=1 failed=0 dropped=0\n' "$2"
+READER
+    chmod +x "$st_dir/reader"
+    printf '%s\n' test/first_spec.spl test/second_spec.spl > "$st_dir/legs"
+    st_legs=0
+    st_leg_failed=0
+    while IFS= read -r st_spec; do
+        if bare_field_run_spec "$st_dir/reader" "$st_dir/leg_output" "$st_spec"; then st_code=0; else st_code=$?; fi
+        if ! bare_field_spec_verdict_ok "$st_code" "$st_dir/leg_output" "$st_spec"; then st_leg_failed=1; fi
+        st_legs=$((st_legs + 1))
+    done < "$st_dir/legs"
+    st_count=$((st_count + 1))
+    if [ "$st_legs" -ne 2 ] || [ "$st_leg_failed" -ne 0 ]; then
+        echo "FAIL — spec child consumed remaining loop legs ($st_legs ran)"
+        st_failed=$((st_failed + 1))
+    fi
     st_count=$((st_count + 2))
-    if bare_field_check_floor_ok 5; then
+    st_one_leg=$(printf '%s\n' test/a_spec.spl test/a_spec.spl | bare_field_unique_specs | wc -l | tr -d ' ')
+    if bare_field_check_floor_ok "$((4 + st_one_leg))"; then
         echo 'FAIL — one distinct behavioral leg satisfied the six-check floor'
         st_failed=$((st_failed + 1))
     fi
-    if ! bare_field_check_floor_ok 6; then
+    if ! bare_field_check_floor_ok "$((4 + st_legs))"; then
         echo 'FAIL — two distinct behavioral legs did not satisfy the six-check floor'
         st_failed=$((st_failed + 1))
     fi
@@ -480,18 +530,24 @@ while IFS= read -r spec; do
     [ -f "$spec" ] || continue
     # The direct lane avoids shared daemon state. Never remove another
     # session's daemon directory or retry an unchanged non-verdict.
-    "$SIMPLE" test "$spec" --no-session-daemon --sequential > "$TMPD/spec_output" 2>&1
+    bare_field_run_spec "$SIMPLE" "$TMPD/spec_output" "$spec"
     spec_status=$?
     cat "$TMPD/spec_output"
-    if ! bare_field_spec_verdict_ok "$spec_status" "$TMPD/spec_output" "$spec"; then
-        echo "FAIL — $spec lacks a successful nonempty terminal verdict (process exit $spec_status)"
-        exit 1
+    if bare_field_spec_verdict_ok "$spec_status" "$TMPD/spec_output" "$spec"; then
+        checks=$((checks + 1))
+    else
+        admission_status=$?
+        if [ "$admission_status" -eq 1 ]; then
+            echo "FAIL — $spec reported an observed behavioral failure"
+            exit 1
+        fi
+        echo "ERROR — $spec has unavailable or malformed terminal evidence (process exit $spec_status)"
+        exit 2
     fi
-    checks=$((checks + 1))
 done < "$TMPD/behavioral_specs"
 
 if ! bare_field_check_floor_ok "$checks"; then
-    echo "ERROR — nothing was checked: only $checks check(s) ran"
+    echo "ERROR — behavioral coverage incomplete: $checks check(s) ran; minimum 6 distinct control/spec checks required"
     exit 2
 fi
 
