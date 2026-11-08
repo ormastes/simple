@@ -427,7 +427,7 @@ impl Lowerer {
             match slot {
                 Some(hir) => out.push(hir),
                 None => match defaults.get(index).and_then(|d| d.as_ref()) {
-                    Some(expr) if self.is_fillable_default(expr) => out.push(self.lower_expr(expr, ctx)?),
+                    Some(expr) if self.is_fillable_default(callee, expr) => out.push(self.lower_expr(expr, ctx)?),
                     Some(_) => {
                         return Err(LowerError::Unsupported(format!(
                             "call to `{callee}` omits argument {} whose default is not a call-site constant; \
@@ -468,7 +468,7 @@ impl Lowerer {
         let first_omitted = args_hir.len();
         for (index, slot) in defaults.iter().enumerate().skip(first_omitted) {
             match slot {
-                Some(expr) if self.is_fillable_default(expr) => {
+                Some(expr) if self.is_fillable_default(callee, expr) => {
                     let lowered = self.lower_expr(expr, ctx)?;
                     args_hir.push(lowered);
                 }
@@ -485,12 +485,23 @@ impl Lowerer {
         Ok(())
     }
 
+    /// The constructor type the caller sees must be the very type the callee
+    /// module declares: the callee has exactly one defining file, and the
+    /// caller imported `type_name` from that single file and no other (an
+    /// unrelated same-named type, directly or via glob, adds a second owner).
+    fn ctor_type_matches_callee(&self, callee: &str, type_name: &str) -> bool {
+        match (self.imported_fn_owners.get(callee), self.imported_type_owners.get(type_name)) {
+            (Some(f), Some(t)) => f.len() == 1 && f == t,
+            _ => false,
+        }
+    }
+
     /// `is_constant_default`, plus a constructor call `T(const, ...)` whose `T`
     /// resolves in the CALLER to a struct/class not declared by the caller's
     /// own module (a local `T` would shadow the callee's type). Constructor
     /// arguments must themselves be fillable, so nothing captures caller scope.
     /// (lean_native_constructor_default_argument_2026_10_21)
-    pub(super) fn is_fillable_default(&self, expr: &Expr) -> bool {
+    pub(super) fn is_fillable_default(&self, fn_name: &str, expr: &Expr) -> bool {
         if Self::is_constant_default(expr) {
             return true;
         }
@@ -500,7 +511,8 @@ impl Lowerer {
                     !self.own_declared_type_names.contains(name)
                         && (self.own_imported_names.contains(name) || self.own_imported_names.contains("*"))
                         && self.resolve_constructor_type(name).is_some()
-                        && args.iter().all(|a| self.is_fillable_default(&a.value))
+                        && self.ctor_type_matches_callee(fn_name, name)
+                        && args.iter().all(|a| self.is_fillable_default(fn_name, &a.value))
                 }
                 _ => false,
             },

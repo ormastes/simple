@@ -104,6 +104,12 @@ pub struct Lowerer {
     /// Names this module imports by `use` (`*` for a glob import). A constructor
     /// default is lowered in the caller only for a type the caller itself sees.
     pub(super) own_imported_names: std::collections::HashSet<String>,
+    /// Defining files of every imported struct/class, by bare name. A
+    /// constructor default is lowered in the caller only when the caller sees
+    /// exactly the callee module's own type (same single defining file).
+    pub(super) imported_type_owners: HashMap<String, std::collections::HashSet<std::path::PathBuf>>,
+    /// Defining files of every imported free function, by bare name.
+    pub(super) imported_fn_owners: HashMap<String, std::collections::HashSet<std::path::PathBuf>>,
     /// Reverse lookup for suggestions: original -> Vec<aliases>
     pub(super) type_aliases_reverse: HashMap<String, Vec<String>>,
     /// Reverse lookup for function suggestions: original -> Vec<aliases>
@@ -323,6 +329,8 @@ impl Lowerer {
             own_declared_function_names: std::collections::HashSet::new(),
             own_declared_type_names: std::collections::HashSet::new(),
             own_imported_names: std::collections::HashSet::new(),
+            imported_type_owners: HashMap::new(),
+            imported_fn_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
@@ -402,6 +410,8 @@ impl Lowerer {
             own_declared_function_names: std::collections::HashSet::new(),
             own_declared_type_names: std::collections::HashSet::new(),
             own_imported_names: std::collections::HashSet::new(),
+            imported_type_owners: HashMap::new(),
+            imported_fn_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
@@ -504,6 +514,8 @@ impl Lowerer {
             own_declared_function_names: std::collections::HashSet::new(),
             own_declared_type_names: std::collections::HashSet::new(),
             own_imported_names: std::collections::HashSet::new(),
+            imported_type_owners: HashMap::new(),
+            imported_fn_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),

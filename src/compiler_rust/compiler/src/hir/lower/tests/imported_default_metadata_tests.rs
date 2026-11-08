@@ -339,3 +339,24 @@ fn constructor_default_with_nonconstant_args_or_unresolved_type_still_errors() {
     let err = ctor_default_project(CTOR_OWNER, caller).expect_err("shadowed ctor");
     assert!(err.contains("omits argument 2"), "{err}");
 }
+
+#[test]
+fn constructor_default_with_same_named_unrelated_type_still_errors() {
+    // The caller imports an UNRELATED `Limits` (directly, then via glob) next to
+    // the callee's own `Limits`-typed default: not the same type, so the loud
+    // diagnostic must stay (red before the module-identity check).
+    for other_use in ["use other.types.{Limits}", "use other.types.*"] {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("owner")).unwrap();
+        fs::create_dir_all(src.join("other")).unwrap();
+        fs::write(src.join("owner/limits.spl"), "struct Limits:\n    depth: i64 = 128\n\nfn plan(name: text, lim: Limits = Limits()) -> i64:\n    lim.depth\n").unwrap();
+        fs::write(src.join("other/types.spl"), "struct Limits:\n    depth: i64 = 1\n").unwrap();
+        let caller = format!("use owner.limits.{{plan}}\n{other_use}\nfn caller() -> i64:\n    plan(\"m\")\n");
+        let ast = Parser::new(&caller).parse().expect("parse caller");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let lowerer = Lowerer::with_module_resolver(resolver, src.join("main.spl"));
+        let err = lowerer.lower_module(&ast).expect_err(other_use);
+        assert!(format!("{err}").contains("omits argument 2"), "{other_use}: {err}");
+    }
+}
