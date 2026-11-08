@@ -73,7 +73,7 @@ static void ws_native_close_v1(WsNativeV1* native) {
 static int ws_windows_measure_v1(WsNativeV1* native,int64_t hard,int64_t* used,int64_t* inodes) {
     GET_LENGTH_INFORMATION length;NTFS_VOLUME_DATA_BUFFER data;DWORD bytes=0;
     if(!DeviceIoControl(native->volume,IOCTL_DISK_GET_LENGTH_INFO,NULL,0,&length,sizeof(length),&bytes,NULL)||
-            bytes<sizeof(length)||length.Length.QuadPart!=hard)return ESTALE;
+            bytes<sizeof(length)||length.Length.QuadPart!=hard)return WS_STALE_ERROR_V1;
     if(!DeviceIoControl(native->volume,FSCTL_GET_NTFS_VOLUME_DATA,NULL,0,&data,sizeof(data),&bytes,NULL)||
             bytes<sizeof(data)||!data.BytesPerCluster||data.TotalClusters.QuadPart<0||
             data.FreeClusters.QuadPart<0||data.FreeClusters.QuadPart>data.TotalClusters.QuadPart)return ENOTSUP;
@@ -87,7 +87,7 @@ static int ws_windows_identity_v1(WsNativeV1* native,char* pool,size_t pool_size
         char* workspace,size_t workspace_size) {
     wchar_t final[4096];
     DWORD count=GetFinalPathNameByHandleW(native->parent,final,4096,FILE_NAME_NORMALIZED|VOLUME_NAME_GUID);
-    if(!count||count>=4096||wcsncmp(final,L"\\\\?\\Volume{",11))return ESTALE;
+    if(!count||count>=4096||wcsncmp(final,L"\\\\?\\Volume{",11))return WS_STALE_ERROR_V1;
     wchar_t* end=wcschr(final,L'}');
     if(!end||end[1]!=L'\\'||end[2]!=0)return EINVAL; /* dedicated volume root only */
     char guid[128];
@@ -96,7 +96,7 @@ static int ws_windows_identity_v1(WsNativeV1* native,char* pool,size_t pool_size
     if(!GetFileInformationByHandle(native->parent,&root)||!GetFileInformationByHandle(native->workspace,&child))return EIO;
     if(!(root.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)||!(child.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)||
             (root.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)||(child.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)||
-            root.dwVolumeSerialNumber!=child.dwVolumeSerialNumber)return ESTALE;
+            root.dwVolumeSerialNumber!=child.dwVolumeSerialNumber)return WS_STALE_ERROR_V1;
     int a=snprintf(pool,pool_size,"windows-volume:%s:%08lx",guid,(unsigned long)root.dwVolumeSerialNumber);
     int b=snprintf(workspace,workspace_size,"file:%08lx:%08lx:%08lx:%08lx:%08lx",
         (unsigned long)child.dwVolumeSerialNumber,(unsigned long)child.nFileIndexHigh,
@@ -126,7 +126,7 @@ static int ws_native_open_v1(WsNativeV1* native,const char* kind,const char* par
     if(native->workspace==INVALID_HANDLE_VALUE)return ws_windows_error_v1();
     char pool[256],workspace[256];
     error=ws_windows_identity_v1(native,pool,sizeof(pool),workspace,sizeof(workspace));if(error)return error;
-    if(strcmp(pool,expected_pool)||strcmp(workspace,expected_workspace))return ESTALE;
+    if(strcmp(pool,expected_pool)||strcmp(workspace,expected_workspace))return WS_STALE_ERROR_V1;
     wchar_t volume[4096];memcpy(volume,native->parent_path,(count+1)*sizeof(wchar_t));volume[count-1]=0;
     native->volume=CreateFileW(volume,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,
         NULL,OPEN_EXISTING,0,NULL);
@@ -136,7 +136,7 @@ static int ws_native_open_v1(WsNativeV1* native,const char* kind,const char* par
 static int ws_native_observe_v1(WsNativeV1* native,const char* leaf,const char* pool,
         const char* workspace,int64_t hard,int64_t* used,int64_t* inodes) {
     (void)leaf;
-    if(!native->parent||!native->workspace)return ESTALE;
+    if(!native->parent||!native->workspace)return WS_STALE_ERROR_V1;
     HANDLE current=CreateFileW(native->workspace_path,FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,NULL);
@@ -144,11 +144,11 @@ static int ws_native_observe_v1(WsNativeV1* native,const char* leaf,const char* 
     BY_HANDLE_FILE_INFORMATION identity;
     int equal=GetFileInformationByHandle(current,&identity)&&!(identity.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)&&
         identity.dwVolumeSerialNumber==native->volume_serial&&identity.nFileIndexHigh==native->file_high&&identity.nFileIndexLow==native->file_low;
-    CloseHandle(current);if(!equal)return ESTALE;
+    CloseHandle(current);if(!equal)return WS_STALE_ERROR_V1;
     char actual_pool[256],actual_workspace[256];
     int error=ws_windows_identity_v1(native,actual_pool,sizeof(actual_pool),actual_workspace,sizeof(actual_workspace));
     if(error)return error;
-    if(strcmp(pool,actual_pool)||strcmp(workspace,actual_workspace))return ESTALE;
+    if(strcmp(pool,actual_pool)||strcmp(workspace,actual_workspace))return WS_STALE_ERROR_V1;
     error=ws_windows_protected_parent_v1(native->parent);if(error)return error;
     return ws_windows_measure_v1(native,hard,used,inodes);
 }

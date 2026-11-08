@@ -12,6 +12,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+/* Stale capabilities use the host errno vocabulary. The Windows CRT has no
+ * ESTALE; EBADF reports an invalid handle without inventing a POSIX errno or
+ * exposing a Win32 status through this negative-errno ABI. */
+#if defined(_WIN32) && !defined(ESTALE)
+#define WS_STALE_ERROR_V1 EBADF
+#else
+#define WS_STALE_ERROR_V1 ESTALE
+#endif
 #if defined(__linux__)
 #include <unistd.h>
 #include <sys/stat.h>
@@ -237,7 +245,7 @@ static int ws_release_busy_pair_v1(WsSlotV1* first,int64_t first_token,
     atomic_int* first_busy=&first->busy;atomic_int* second_busy=&second->busy;
     if(atomic_load_explicit(first_busy,memory_order_acquire)!=1||
             atomic_load_explicit(second_busy,memory_order_acquire)!=1)return EBUSY;
-    if(first->token!=first_token||second->token!=second_token)return ESTALE;
+    if(first->token!=first_token||second->token!=second_token)return WS_STALE_ERROR_V1;
     error=ws_origin_guard_v1();if(error)return error;
     /* After the first store, either slot may immediately close/reuse. Only the
      * precomputed atomic destinations are used below: no slot reads follow. */
@@ -318,7 +326,7 @@ int64_t rt_workspace_storage_release_if_absent_v1(int64_t token) {
     int origin_error=ws_origin_guard_v1();if(origin_error)return -origin_error;
     int error=ws_lock_acquire_v1();if(error)return -error;
     WsSlotV1* slot=ws_find_v1(token);
-    if(!slot||slot->role!=1) {ws_lock_release_v1();return -ESTALE;}
+    if(!slot||slot->role!=1) {ws_lock_release_v1();return -WS_STALE_ERROR_V1;}
     if(slot->busy){ws_lock_release_v1();return -EBUSY;}
     if(!slot->released) {
         error=ws_native_release_if_absent_v1(&slot->native,slot->leaf,slot->hard_bytes,
@@ -331,7 +339,7 @@ int64_t rt_workspace_storage_forget_released_v1(int64_t token) {
     int origin_error=ws_origin_guard_v1();if(origin_error)return -origin_error;
     int error=ws_lock_acquire_v1();if(error)return -error;
     WsSlotV1* slot=ws_find_v1(token);
-    if(!slot||slot->role!=1)error=ESTALE;
+    if(!slot||slot->role!=1)error=WS_STALE_ERROR_V1;
     else if(slot->busy||!slot->released)error=EBUSY;
     else {ws_native_close_v1(&slot->native);memset(slot,0,sizeof(*slot));}
     ws_lock_release_v1();return -error;
@@ -389,7 +397,7 @@ int64_t rt_linux_container_user_close_v1(int64_t token,int64_t binding) {
     if(!ws_copy_text_v1(binding,expected,sizeof(expected))||!ws_digest_v1(expected))return -EINVAL;
     int error=ws_lock_acquire_v1();if(error)return -error;
     WsSlotV1* slot=ws_find_v1(token);
-    if(!slot||slot->role!=2||strcmp(slot->policy,expected))error=ESTALE;
+    if(!slot||slot->role!=2||strcmp(slot->policy,expected))error=WS_STALE_ERROR_V1;
     else if(slot->busy)error=EBUSY;
     else {ws_user_close_v1(&slot->user);memset(slot,0,sizeof(*slot));}
     ws_lock_release_v1();return -error;
@@ -528,7 +536,7 @@ int64_t rt_linux_container_containment_close_v1(int64_t token,int64_t binding) {
     char digest[65];if(!ws_copy_text_v1(binding,digest,sizeof(digest))||!ws_digest_v1(digest))return -EINVAL;
     error=ws_lock_acquire_v1();if(error)return -error;
     WsSlotV1* slot=ws_find_v1(token);
-    if(!slot||slot->role!=3||strcmp(slot->policy,digest))error=ESTALE;
+    if(!slot||slot->role!=3||strcmp(slot->policy,digest))error=WS_STALE_ERROR_V1;
     else if(slot->busy)error=EBUSY;
     else if(!(error=ws_contain_close_v1(&slot->containment)))memset(slot,0,sizeof(*slot));
     ws_lock_release_v1();return -error;
