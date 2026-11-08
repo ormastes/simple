@@ -2702,8 +2702,10 @@ impl MirLowering:
         if static_receiver_name == "" and resolved_static_receiver_symbol < 0:
             resolved_static_receiver_symbol = self.declared_static_method_receiver_symbol_v1(receiver)
         if static_receiver_name == "" and resolved_static_receiver_symbol >= 0:
-            if val static_owner = self.symbols.get_symbol_raw(resolved_static_receiver_symbol):
-                static_receiver_name = mir_class_identity_raw(self.symbols, resolved_static_receiver_symbol)
+            # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-binds if-val on HirSymbol?; mir_class_identity_raw already yields "" for a missing symbol, so test the scalar identity
+            val static_owner_identity: text = mir_class_identity_raw(self.symbols, resolved_static_receiver_symbol)
+            if static_owner_identity != "":
+                static_receiver_name = static_owner_identity
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] static-owner method={method}\n")
 
@@ -4876,25 +4878,21 @@ impl MirLowering:
                 # previously re-lowered it) to avoid double-evaluating a
                 # side-effecting receiver expression.
                 val static_method_key = "static::{static_receiver_name}::{method}"
-                val static_receiver_symbol: SymbolId? = if resolved_static_receiver_symbol >= 0:
-                    Some(SymbolId(id: resolved_static_receiver_symbol))
-                else:
-                    nil
-                var static_method_id: SymbolId? = nil
+                # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-tests a SymbolId? var (== nil / != nil / ?? default) and a SymbolId? built from a valid id; carry the raw i64 (-1 = unresolved) end to end
+                var static_method_raw: i64 = -1
                 if static_receiver_name != "" and self.struct_method_key_present_v1(static_method_key):
-                    static_method_id = Some(self.struct_method_syms[static_method_key])
-                elif static_receiver_name != "":
-                    match static_receiver_symbol:
-                        case Option.Some(static_symbol):
-                            val static_candidate_result: SymbolId? = self.symbols.lookup_method_in_type(static_symbol, method)
-                            match static_candidate_result:
-                                case Option.Some(static_candidate_id):
-                                    val static_candidate_symbol_result: HirSymbol? = self.symbols.get_symbol_raw(static_candidate_id.id)
-                                    match static_candidate_symbol_result:
-                                        case Option.Some(static_candidate_symbol):
-                                            match static_candidate_symbol.kind:
-                                                case SymbolKind.Function: static_method_id = Some(static_candidate_id)
-                                                case _: ()
+                    val static_key_symbol: SymbolId = self.struct_method_syms[static_method_key]
+                    static_method_raw = static_key_symbol.id
+                elif static_receiver_name != "" and resolved_static_receiver_symbol >= 0:
+                    val static_symbol = SymbolId(id: resolved_static_receiver_symbol)
+                    val static_candidate_result: SymbolId? = self.symbols.lookup_method_in_type(static_symbol, method)
+                    match static_candidate_result:
+                        case Option.Some(static_candidate_id):
+                            val static_candidate_symbol_result: HirSymbol? = self.symbols.get_symbol_raw(static_candidate_id.id)
+                            match static_candidate_symbol_result:
+                                case Option.Some(static_candidate_symbol):
+                                    match static_candidate_symbol.kind:
+                                        case SymbolKind.Function: static_method_raw = static_candidate_id.id
                                         case _: ()
                                 case _: ()
                         case _: ()
@@ -4924,7 +4922,7 @@ impl MirLowering:
                 # NAME-DERIVED OWNER LOOKUP (native_build_static_method_owner_
                 # unresolved_2026-08-17, second half). Recovering the owner NAME
                 # is not enough: the branch above looks the method up via
-                # `static_receiver_symbol`, which is the receiver NamedVar's
+                # `resolved_static_receiver_symbol`, which is the receiver NamedVar's
                 # attached symbol id -- the very id that is unresolved on this
                 # lane. Measured with the name fallback in place but this block
                 # absent: `srn='Widget' found=false`, i.e. the owner was correct
@@ -4934,7 +4932,7 @@ impl MirLowering:
                 # `lookup_or_invalid` + `lookup_method_in_type`. Accept only a
                 # Function symbol, so an instance method can never be dispatched
                 # here as a static one.
-                if static_method_id == nil and static_receiver_name != "":
+                if static_method_raw < 0 and static_receiver_name != "":
                     val nd_static_owner = self.symbols.lookup_or_invalid(static_receiver_name)
                     if nd_static_owner.is_valid():
                         val nd_static_candidate_result: SymbolId? = self.symbols.lookup_method_in_type(nd_static_owner, method)
@@ -4944,15 +4942,19 @@ impl MirLowering:
                                 match nd_static_symbol_result:
                                     case Option.Some(nd_static_symbol):
                                         match nd_static_symbol.kind:
-                                            case SymbolKind.Function: static_method_id = Some(nd_static_candidate)
+                                            case SymbolKind.Function: static_method_raw = nd_static_candidate.id
                                             case _: ()
                                     case _: ()
                             case _: ()
                 # A proven scalar is a runtime value, never a lost class
                 # name. A globally unique static leaf cannot own this call.
-                if static_method_id == nil and static_receiver_name == "" and known_record_owner < 0 and not proven_scalar_receiver:
-                    val unique_static_method = self.symbols.lookup_unique_static_method(method)
-                    if unique_static_method != nil:
+                if static_method_raw < 0 and static_receiver_name == "" and known_record_owner < 0 and not proven_scalar_receiver:
+                    var unique_static_method_raw: i64 = -1
+                    match self.symbols.lookup_unique_static_method(method):
+                        case Some(unique_static_method):
+                            unique_static_method_raw = unique_static_method.id
+                        case _: ()
+                    if unique_static_method_raw >= 0:
                         # A call result is a runtime receiver, not a lost type
                         # name. Its declared return owner becomes available
                         # when lowered; retain it before accepting a foreign
@@ -4972,11 +4974,11 @@ impl MirLowering:
                                             known_record_owner = nested_owner.id
                                     case _: ()
                         if known_record_owner < 0:
-                            static_method_id = unique_static_method
+                            static_method_raw = unique_static_method_raw
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] unresolved-static method={method}\n")
-                if static_method_id != nil:
-                    val resolved_static_method_id = static_method_id ?? SymbolId(id: -1)
+                if static_method_raw >= 0:
+                    val resolved_static_method_id = SymbolId(id: static_method_raw)
                     var static_args: [MirOperand] = []
                     val name_static_param_types = self.resolved_call_hir_param_types(resolved_static_method_id)
                     var name_static_arg_index = 0
@@ -4986,8 +4988,9 @@ impl MirLowering:
                         name_static_arg_index = name_static_arg_index + 1
                     var static_return_type = self.resolved_call_return_type(resolved_static_method_id)
                     self.provider_method_materialize_v1("{static_receiver_name}::{method}")
-                    val static_result_name = self.struct_method_return_names.get("{static_receiver_name}::{method}")
-                    if static_result_name != nil and static_result_name != "":
+                    # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-tests text? != nil from a class-field Dict.get (vb_mm1 shape); test the unwrapped text
+                    val static_result_name: text = self.struct_method_return_names.get("{static_receiver_name}::{method}") ?? ""
+                    if static_result_name != "":
                         for static_result_symbol in self.symbols.symbols.values():
                             if static_result_symbol.name == static_result_name:
                                 match static_result_symbol.kind:
