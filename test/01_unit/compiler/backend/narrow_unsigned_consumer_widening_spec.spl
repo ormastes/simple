@@ -3,6 +3,7 @@
 use std.spec.*
 use compiler.backend._MirToLlvm.class_def.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, LocalId, MirConstValue}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_graph.{MirInst, MirBlock}
@@ -56,6 +57,19 @@ fn narrow_consumer_field_ir(width: i64, unsigned: bool) -> text:
     translator.store_field_bits_verbatim("%l0", "i{width}", "i64", unsigned)
     translator.builder.build()
 
+fn narrow_consumer_global_ir(width: i64, unsigned: bool, indexed: bool) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    val key = translator.global_static_key(77)
+    translator.global_static_names[key] = "@global_wide"
+    translator.global_static_types[key] = "i64"
+    val source = mir_operand_copy(LocalId(id: 0))
+    if indexed:
+        val instruction = MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 77), source), span: nil)
+        translator.translate_store_global_at([instruction], 0, -1, -1)
+    else:
+        translator.translate_store_global(SymbolId(id: 77), source)
+    translator.builder.build()
+
 fn narrow_consumer_phi_ir(width: i64, unsigned: bool) -> text:
     var translator = narrow_consumer_translator(width, unsigned)
     translator.local_types[1] = "i64"
@@ -105,3 +119,13 @@ describe "narrow unsigned consumers preserve source signedness":
             expect(signed_ir).to_contain("sext i{width} %l0 to i64")
             expect(unsigned_ir).to_contain("phi i64")
             expect(signed_ir).to_contain("phi i64")
+
+    it "preserves unsigned and signed values at both global-store routes":
+        for width in [8, 16, 32]:
+            for indexed in [false, true]:
+                val unsigned_ir = narrow_consumer_global_ir(width, true, indexed)
+                val signed_ir = narrow_consumer_global_ir(width, false, indexed)
+                expect(unsigned_ir).to_contain("zext i{width} %l0 to i64")
+                expect(signed_ir).to_contain("sext i{width} %l0 to i64")
+                expect(unsigned_ir).to_contain("store i64")
+                expect(signed_ir).to_contain("store i64")
