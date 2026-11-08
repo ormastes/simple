@@ -46,11 +46,6 @@ for %%P in (
     )
 )
 
-if /I "%~1"=="lint" if defined BOOTSTRAP_BIN (
-    "%BOOTSTRAP_BIN%" %*
-    goto :done
-)
-
 if /I "%~x1"==".spl" if defined CURRENT_DRIVER_BIN (
     "%CURRENT_DRIVER_BIN%" %*
     goto :done
@@ -59,6 +54,14 @@ if /I "%~x1"==".spl" if defined CURRENT_DRIVER_BIN (
 if defined RELEASE_BIN (
     "%RELEASE_BIN%" %*
     goto :done
+)
+
+rem Lint uses the deployed self-hosted CLI. Bootstrap diagnostics remain
+rem available through an explicitly named SIMPLE_BINARY above.
+if /I "%~1"=="lint" (
+    echo error: lint requires a deployed self-hosted Simple runtime under %REPO_ROOT%\bin\release 1>&2
+    echo   deploy a runtime or set SIMPLE_BINARY explicitly for diagnostics 1>&2
+    exit /b 1
 )
 
 if defined BOOTSTRAP_BIN (
