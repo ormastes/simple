@@ -28,6 +28,19 @@ int main(void) {
     file = rt_crt_wfopen(L"msvc-crt-descriptor.tmp", L"rb");
     assert(file && fgetc(file) == 'a' && fclose(file) == 0);
     assert(rt_crt_unlink(path) == 0);
+    fd = rt_crt_wopen(L"msvc-crt-wide-\x00e9.tmp",
+                     _O_CREAT | _O_TRUNC | _O_RDWR | _O_BINARY, 0666);
+    assert(fd >= 0 && rt_crt_write(fd, "wide", 4) == 4);
+    second = rt_crt_wopen(L"msvc-crt-wide-\x00e9.tmp", _O_RDONLY | _O_BINARY, 0);
+    assert(second >= 0 && rt_crt_read(second, buffer, 4) == 4);
+    assert(memcmp(buffer, "wide", 4) == 0);
+    assert(rt_crt_close(second) == 0 && rt_crt_close(fd) == 0);
+    errno = 0;
+    assert(rt_crt_wopen(L"msvc-crt-wide-\x00e9.tmp", _O_CREAT | _O_EXCL | _O_RDWR,
+                       _S_IREAD | _S_IWRITE) == -1 && errno == EEXIST);
+    assert(_wunlink(L"msvc-crt-wide-\x00e9.tmp") == 0);
+    errno = 0;
+    assert(rt_crt_wopen(L"msvc-crt-wide-\x00e9.tmp", _O_RDONLY, 0) == -1 && errno == ENOENT);
     fd = rt_crt_open(path, _O_CREAT | _O_RDWR | _O_BINARY, 0666);
     assert(fd >= 0 && rt_crt_close(fd) == 0);
     assert(rt_crt_unlink(path) == 0);
