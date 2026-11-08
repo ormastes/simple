@@ -192,3 +192,63 @@ Consequences:
 ## Reopened 2026-11-07
 
 PR #7408 changed these rows on seed-only evidence, which is insufficient. Stage3 (native) still fails: on s3_fable54m, s3_fable56 and s3_fable57s the 12-line fixture C:/dev/p3new/s3sanity/root/test/s3sanity/vb_mm1.spl (struct + impl method + one call) fails during HIR lowering with `[simple-runtime][error] rejected invalid array handle before dereference` followed by `unresolved method call: get route=runtime-fallback key=test.s3sanity.vb_mm1.Custom::get struct_method_syms=yes record_instance_method=n/a lookup_method_in_type=no receiver_has_type=false`. The same file without the call passes; fixture test/fixtures/compiler/native_entry_own_class_methods has the same shape. Status: OPEN, root-cause lane in progress.
+
+## Fix 2026-11-08 (lane-f-entrymeth) — source workaround landed, native verification pending
+
+**Root cause (upstream of the vb_mm1 recovery region).** HIR lowering resolved
+only STATIC methods (`declared_static_method_resolution`) and handed every
+instance call (`w.bump(1)`, `custom.get()`) to MIR as
+`MethodResolution.Unresolved` with an untyped `NamedVar` receiver (the Ident arm
+never attaches `has_type_`). Under the interpreter that is harmless: MIR's
+Unresolved-owner recovery (`50.mir/_MirLoweringExpr/method_calls_literals.spl`,
+`unresolved-receiver` .. `unresolved-owner-done`) resolves it. Natively that
+recovery is the region the frozen stage2 miscompiles — s3_fable64 (f64t2 run,
+`C:/dev/p3new/s3sanity/out_f64t2/vb_mm1/native-build.log.err`) still shows
+`resolution-enter unresolved=true` -> `unresolved-owner-get` -> `route=runtime-fallback
+... struct_method_syms=yes struct_method_sym_id=7 ... receiver_has_type=false`,
+with no `use` import at all (vb_mm1.spl). The import in this row's fixture was
+never the trigger; every same-module instance call is exposed. The
+`lookup_method_in_type=no` probe flag is a probe artefact (it looks the
+module-qualified owner text up with `lookup_or_invalid`), not evidence about
+`lookup_method_in_type_raw`.
+
+**Change.** Resolve `local.method()` at HIR time through raw-scalar lookups so
+MIR takes the plain `InstanceMethod` arm (the same arm the 35.semantics resolver
+feeds) and never enters the recovery:
+- `20.hir/hir_symbol_table_methods.spl`: new
+  `binding_declared_record_owner_scalar_raw(raw) -> i64` — Struct/Class owner id
+  of a Variable/Parameter symbol's declared `Named` type, else -1; no
+  `HirSymbol?`/`HirType?` Option crosses a call boundary.
+- `20.hir/hir_lowering/_Expressions/expression_core.spl`: new
+  `declared_instance_method_owner_raw_v1(receiver_kind, method, static_resolution) -> i64`
+  (owner id only when the static resolution is `Unresolved`, the receiver is a
+  binding whose owner is known — declared type, or, since `var w = Widget(...)`
+  is still `Infer` at HIR time (measured: `binding_type=Infer stored_type=nil`),
+  the constructor spelling the Let lowering already recorded in
+  `local_struct_types` resolved through `lookup_or_invalid` — and
+  `record_instance_method_scalar_raw(owner, method)` finds the owner-qualified
+  `Method`); both MethodCall arms (pre-dispatch arm A
+  and arm B) rebuild `MethodResolution.InstanceMethod(owner, method)`
+  statement-shaped from the two raw ids; `declared_exists_check_type` gained the
+  matching `InstanceMethod` arm so `if val x = w.find()` keeps its declared type.
+- Workaround tag at both new helpers:
+  `# @workaround bug=native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17 reason=...`.
+  Static, enum-constructor, Optional, generic, trait and UFCS receivers answer -1
+  and keep their previous path; an undeclared method stays `Unresolved`.
+
+**Specs (seed interpreter, `bin/simple.exe test`).**
+- NEW `test/01_unit/compiler/20.hir/entry_module_instance_method_hir_resolution_spec.spl`:
+  before the fix 1/4 (bump/peek `unresolved`, owner check fails); after 4/4 —
+  `me bump` and plain `fn peek` on `var w = Widget(...)` resolve to
+  `InstanceMethod` whose owner is `Widget` (not the same-leaf-name `Other.bump`,
+  method symbol `app.main.Widget::bump`), `Widget.stat` stays on the static arm,
+  `w.nope_missing` stays `Unresolved`.
+- EXISTING `test/01_unit/compiler/50.mir/entry_module_own_class_method_with_import_spec.spl`:
+  4/4 before and after; it now exercises the HIR `InstanceMethod` route into MIR
+  instead of the recovery.
+
+**Still unverified (native).** No stage3 rebuilt from this source exists; the
+fixture `test/fixtures/compiler/native_entry_own_class_methods/` (expected
+`w.n=42`) and `C:/dev/p3new/s3sanity/root/test/s3sanity/vb_mm1.spl` must be
+re-run with a producer built from this change. The vb_mm1 recovery region itself
+was not edited (owned by the vb_mm1 lane).
