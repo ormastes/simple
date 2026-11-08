@@ -2220,7 +2220,7 @@ mod tests {
     }
 
     fn piped_dispatch(name: &str, args: &[Value]) -> Value {
-        let handler = crate::interpreter_extern::EXTERN_DISPATCH
+        let handler = crate::interpreter::interpreter_extern::EXTERN_DISPATCH
             .get(name).unwrap_or_else(|| panic!("missing public extern {name}"));
         handler(args, &mut crate::value::Env::new(), &mut HashMap::new(),
             &mut HashMap::new(), &HashMap::new(), &HashMap::new()).unwrap()
@@ -2241,7 +2241,7 @@ mod tests {
             };
             let Value::Int(pid) = piped_dispatch("rt_process_spawn_piped", &[
                 Value::text(cmd.to_string()),
-                Value::array(script.into_iter().map(Value::text).collect()),
+                Value::array(script.into_iter().map(Value::text).collect::<Vec<_>>()),
             ]) else { panic!("expected pid"); };
             assert!(pid > 0);
             let args = [Value::Int(pid)];
