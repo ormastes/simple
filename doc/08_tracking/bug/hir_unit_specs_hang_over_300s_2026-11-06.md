@@ -25,3 +25,9 @@
 - Still open: needs a stack sample (`SIMPLE_TIMEOUT_SECONDS=3600` run to completion, or a
   sampler) to decide between "slow but terminates" (move to a slow/perf lane, or split the
   scenarios) and a real loop in the projection. Not fixable in a lib-only lane without that data.
+
+## 2026-11-09 note (PR #7883)
+Still open. The bare-path scan hang in `module_path_naming.spl` is worked around with typed
+`byte_len` bindings; root cause is `seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09`.
+The spec file is still slow and 4 scenarios still fail, so this row is not resolved. Known twin:
+`src/compiler/bootstrap_admission/stage2_module_path_naming.spl` keeps the untyped form.
