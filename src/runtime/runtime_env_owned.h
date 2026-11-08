@@ -31,6 +31,23 @@ static int rt_env_snapshot(const char* key, char** result) {
 #endif
 }
 
+/* Exact one-byte flag values need no allocation or borrowed CRT storage. */
+static char rt_env_flag_value(const char* key) {
+#if defined(_MSC_VER)
+    char value[2];
+    size_t length = 0;
+    return getenv_s(&length, value, sizeof(value), key) == 0 &&
+        length == 2 ? value[0] : '\0';
+#else
+    const char* value = getenv(key);
+    return value && value[0] && value[1] == '\0' ? value[0] : '\0';
+#endif
+}
+
+static int rt_env_flag_is(const char* key, char expected) {
+    return rt_env_flag_value(key) == expected;
+}
+
 static char* rt_env_owned(const char* key) {
     char* value = NULL;
     (void)rt_env_snapshot(key, &value);

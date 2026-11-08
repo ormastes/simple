@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "runtime_env_owned.h"
 #include <string.h>
 
 typedef struct {
@@ -120,8 +121,7 @@ static void coverage_record(CoverageRow **rows, size_t *count, uint32_t decision
 }
 
 bool rt_coverage_enabled(void) {
-    const char *value = getenv("SIMPLE_COVERAGE");
-    return value && strcmp(value, "1") == 0;
+    return rt_env_flag_is("SIMPLE_COVERAGE", '1');
 }
 
 void rt_coverage_decision_probe(uint32_t decision_id, bool result, const char *file,
