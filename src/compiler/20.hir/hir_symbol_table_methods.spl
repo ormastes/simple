@@ -323,6 +323,30 @@ impl SymbolTable:
             return self.symbols[raw].defining_module ?? ""
         ""
 
+    # @workaround bug=native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17 reason=frozen stage2 miscompiles the HirSymbol?/HirType? Option transport that lookup_method_in_type_raw and the MIR Unresolved-owner recovery lean on; read the binding's declared owner through raw scalars only
+    fn binding_declared_record_owner_scalar_raw(raw: i64) -> i64:
+        """Struct/Class owner id of a Variable/Parameter symbol's declared
+        `Named` type, or -1. No HirSymbol?/HirType? Option crosses a call
+        boundary; Optional/generic/enum/trait receivers answer -1 so their
+        existing resolution paths are untouched."""
+        if not self.symbols.has(raw): return -1
+        val binding: HirSymbol = self.symbols[raw]
+        var is_binding = false
+        match binding.kind:
+            case Variable | Parameter: is_binding = true
+            case _: ()
+        if not is_binding: return -1
+        var owner_raw: i64 = -1
+        match binding.type_:
+            case Option.Some(declared):
+                match declared.kind:
+                    case HirTypeKind.Named(owner, _): owner_raw = owner.id
+                    case _: ()
+            case _: ()
+        if owner_raw < 0: return -1
+        if self.record_owner_identity_scalar_raw(owner_raw) == "": return -1
+        owner_raw
+
     me symbol_display_name(id: SymbolId, fallback: text) -> text:
         """Return the CURRENT stored `.name` for `id` (reflecting any
         `rename_symbol` call), or `fallback` if the id isn't found.

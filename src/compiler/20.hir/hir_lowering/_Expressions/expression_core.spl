@@ -213,6 +213,32 @@ impl HirLowering:
             case _: ()
         MethodResolution.Unresolved
 
+    # @workaround bug=native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17 reason=HIR used to hand every instance call to MIR as Unresolved, so native builds depended on the Unresolved-owner recovery the frozen stage2 miscompiles (`unresolved method call: bump`, route=runtime-fallback with struct_method_syms=yes); resolve `local.method()` here through raw-scalar lookups so MIR takes the plain InstanceMethod arm
+    fn declared_instance_method_owner_raw_v1(receiver_kind: HirExprKind, method: text, static_resolution: MethodResolution) -> i64:
+        """Owner symbol id when `receiver` is a Variable/Parameter whose declared
+        type is a Struct/Class that itself declares `method` as an instance
+        Method; -1 otherwise. A static, enum-constructor, Optional, generic,
+        trait or UFCS shape keeps its existing resolution path."""
+        match static_resolution:
+            case MethodResolution.Unresolved: ()
+            case _: return -1
+        val receiver_symbol = _hir_expr_symbol_or_invalid(receiver_kind)
+        if not receiver_symbol.is_valid(): return -1
+        var owner_raw: i64 = self.symbols.binding_declared_record_owner_scalar_raw(receiver_symbol.id)
+        if owner_raw < 0:
+            # `var w = Widget(...)` has no declared type yet at HIR time (the
+            # binding is Infer until 30.types). The Let lowering already
+            # recorded the constructor's spelling for this binding symbol
+            # (try_register_local_struct_type); resolve that name in the
+            # current scope and let the owner-qualified registry decide.
+            if not self.local_struct_types.has(receiver_symbol.id): return -1
+            val constructed_name: text = self.local_struct_types[receiver_symbol.id]
+            val constructed_owner = self.symbols.lookup_or_invalid(constructed_name)
+            if not constructed_owner.is_valid(): return -1
+            owner_raw = constructed_owner.id
+        if self.symbols.record_instance_method_scalar_raw(owner_raw, method) < 0: return -1
+        owner_raw
+
     me lower_static_owner_receiver(receiver: Expr) -> HirExpr:
         var lowered = self.lower_hir_expr(receiver)
         if receiver.explicit_call_types.len() == 0:
@@ -311,6 +337,11 @@ impl HirLowering:
                 case HirExprKind.MethodCall(receiver, method_name, _, resolution):
                     match resolution:
                         case MethodResolution.StaticMethod(_, method_id):
+                            callable = method_id
+                        case MethodResolution.InstanceMethod(_, method_id):
+                            # HIR now resolves same-owner instance methods on
+                            # declared-type bindings; keep the declared return
+                            # type reachable for `if val x = w.find()`.
                             callable = method_id
                         case MethodResolution.Unresolved:
                             val receiver_owner = self.field_owner_for_hir_expr(receiver)
@@ -438,6 +469,14 @@ impl HirLowering:
                     val mc_lowered_receiver = self.lower_static_owner_receiver(method_receiver_t)
                     val mc_static_resolution = self.declared_static_method_resolution(mc_lowered_receiver.kind, method_name_t)
                     val mc_enum_owner = self.declared_enum_constructor_owner(mc_lowered_receiver, mc_static_resolution)
+                    # Same-owner instance method on a declared-type binding:
+                    # statement-shaped rebuild from raw ids (no enum through an
+                    # if-expression result boundary, see 35.semantics/resolve.spl).
+                    var mc_resolution: MethodResolution = mc_static_resolution
+                    val mc_instance_owner_raw = self.declared_instance_method_owner_raw_v1(mc_lowered_receiver.kind, method_name_t, mc_static_resolution)
+                    if mc_instance_owner_raw >= 0:
+                        val mc_instance_method_raw: i64 = self.symbols.record_instance_method_scalar_raw(mc_instance_owner_raw, method_name_t)
+                        mc_resolution = MethodResolution.InstanceMethod(SymbolId(id: mc_instance_owner_raw), SymbolId(id: mc_instance_method_raw))
                     var hir_args: [HirCallArg] = []
                     for arg in method_args_t:
                         val marg_t: CallArg = arg
@@ -628,12 +667,12 @@ impl HirLowering:
                                 case HirTypeKind.Dict(mc_dict_key, mc_dict_value):
                                     if method_name_t == "keys":
                                         return HirExpr(
-                                            kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
+                                            kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_resolution),
                                             has_type_: true,
                                             type_: HirType(kind: HirTypeKind.Array(mc_dict_key, None), span: e.span),
                                             span: e.span)
                                     return HirExpr(
-                                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
+                                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_resolution),
                                         has_type_: true,
                                         type_: HirType(kind: HirTypeKind.Array(mc_dict_value, None), span: e.span),
                                         span: e.span)
@@ -643,7 +682,7 @@ impl HirLowering:
                         self.validate_attributed_collection_factory(
                             mc_lowered_receiver, method_name_t, hir_args, e.span)
                     return HirExpr(
-                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
+                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_resolution),
                         has_type_: false,
                         type_: HirType(kind: HirTypeKind.Unit, span: e.span),
                         span: e.span
@@ -1081,6 +1120,14 @@ impl HirLowering:
                 val lowered_method_receiver = self.lower_static_owner_receiver(method_receiver_t)
                 val fallback_static_resolution = self.declared_static_method_resolution(lowered_method_receiver.kind, method_name_t)
                 val fallback_enum_owner = self.declared_enum_constructor_owner(lowered_method_receiver, fallback_static_resolution)
+                # Same instance-method resolution as arm A above (both arms are
+                # patched because the discriminant pre-dispatch is not
+                # guaranteed to fire on Stage 2).
+                var fallback_resolution: MethodResolution = fallback_static_resolution
+                val fallback_instance_owner_raw = self.declared_instance_method_owner_raw_v1(lowered_method_receiver.kind, method_name_t, fallback_static_resolution)
+                if fallback_instance_owner_raw >= 0:
+                    val fallback_instance_method_raw: i64 = self.symbols.record_instance_method_scalar_raw(fallback_instance_owner_raw, method_name_t)
+                    fallback_resolution = MethodResolution.InstanceMethod(SymbolId(id: fallback_instance_owner_raw), SymbolId(id: fallback_instance_method_raw))
                 var hir_args: [HirCallArg] = []
                 for arg in method_args_t:
                     val marg_t: CallArg = arg
@@ -1120,17 +1167,17 @@ impl HirLowering:
                             case HirTypeKind.Dict(fb_dict_key, fb_dict_value):
                                 if method_name_t == "keys":
                                     return HirExpr(
-                                        kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_static_resolution),
+                                        kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_resolution),
                                         has_type_: true,
                                         type_: HirType(kind: HirTypeKind.Array(fb_dict_key, None), span: e.span),
                                         span: e.span)
                                 return HirExpr(
-                                    kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_static_resolution),
+                                    kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_resolution),
                                     has_type_: true,
                                     type_: HirType(kind: HirTypeKind.Array(fb_dict_value, None), span: e.span),
                                     span: e.span)
                             case _: ()
-                HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_static_resolution)
+                HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_resolution)
 
             case ExprKind.MatchCase(scrutinee, arms):
                 # The scrutinee is lowered FIRST and OUTSIDE every arm scope:
