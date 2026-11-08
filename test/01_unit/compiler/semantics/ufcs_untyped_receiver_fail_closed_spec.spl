@@ -1,0 +1,51 @@
+"""
+## Purpose and audience
+Purpose: Pin that UFCS free-function resolution fails closed for an untyped
+(inference-variable) receiver instead of binding any same-name user function
+whose first parameter is a concrete type.
+Audience: compiler engineers working on
+doc/08_tracking/bug/stage2_ufcs_method_result_untyped_match_payload_2026-11-07.md and
+doc/08_tracking/bug/llvm_suffix_match_fallback_binds_untyped_receiver_to_user_method_2026-11-08.md.
+## Operator workflow
+Run with the test runner; a red scenario names the receiver/param pair that
+was wrongly admitted or wrongly rejected.
+## Compatibility and limitations
+Unit-level over ufcs_receiver_may_bind_param; the MethodResolver.try_ufcs
+caller consults it before TypeChecker.is_compatible.
+# @manual: primary
+REQ-COMPILER-SEMANTICS-001
+"""
+# @req: REQ-COMPILER-SEMANTICS-001
+
+use std.spec.*
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.semantics.resolve_strategies.{ufcs_receiver_may_bind_param}
+
+fn sp() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "", length: 0)
+
+fn infer_ty() -> HirType:
+    HirType(kind: HirTypeKind.Infer(7, 0), span: sp())
+
+fn named_ty(id: i64) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: sp())
+
+describe "UFCS untyped receiver fail-closed":
+    it "rejects an untyped receiver against a concrete user-type first param (repro)":
+        expect(ufcs_receiver_may_bind_param(infer_ty(), named_ty(42))).to_be_false()
+
+    it "rejects an untyped receiver against a concrete text first param":
+        val text_ty = HirType(kind: HirTypeKind.Str, span: sp())
+        expect(ufcs_receiver_may_bind_param(infer_ty(), text_ty)).to_be_false()
+
+    it "keeps an untyped receiver against a generic type-param first param":
+        val tp = HirType(kind: HirTypeKind.TypeParam("T", []), span: sp())
+        expect(ufcs_receiver_may_bind_param(infer_ty(), tp)).to_be_true()
+
+    it "keeps an untyped receiver against an inference first param":
+        expect(ufcs_receiver_may_bind_param(infer_ty(), infer_ty())).to_be_true()
+
+    it "keeps a typed receiver eligible (is_compatible still decides)":
+        expect(ufcs_receiver_may_bind_param(named_ty(42), named_ty(42))).to_be_true()
