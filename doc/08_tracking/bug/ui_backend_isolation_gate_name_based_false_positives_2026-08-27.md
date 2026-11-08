@@ -4,7 +4,11 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN. Found while clearing the gate's RED on `origin/main`.
+**Status:** FIXED, 2026-11-08. The checker now indexes real `extern fn rt_*`
+owners and retains only calls to those symbols, so local Simple `rt_*`
+definitions and calls no longer count as backend violations. The selftest
+passes 2/2 fixtures (local definition/call PASS; extern declaration/call FAIL),
+and the full gate reports `ui_backend_isolation_ok=true` with zero new entries.
 
 ## Symptom
 
