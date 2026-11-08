@@ -66,6 +66,14 @@ describe "MIR local symbol index":
         val saved_ids = lowering.local_symbol_ids
         val saved_values = lowering.local_symbol_values
         val saved_slots = lowering.local_symbol_index_slots
+        # Since stage2_local_symbol_index_bucket_tagged_id_2026-11-03 the
+        # local_map mirror is consulted before the index, so a wholesale
+        # rollback has a fourth component: record each symbol's mirror entry
+        # before binding it and restore those entries with the arrays.
+        val rollback_syms: [i64] = [7, 9]
+        val rollback_prev: [LocalId] = [lowering.mirror_binding(7), lowering.mirror_binding(9)]
+        expect(rollback_prev[0].id).to_equal(70)
+        expect(rollback_prev[1].id).to_equal(-1)
         lowering.bind_local(7, LocalId(id: 700))
         lowering.bind_local(9, LocalId(id: 90))
         expect(lowering.local_symbol_index_slots).not.to_equal(saved_slots)
@@ -75,9 +83,22 @@ describe "MIR local symbol index":
         lowering.local_symbol_ids = saved_ids
         lowering.local_symbol_values = saved_values
         lowering.local_symbol_index_slots = saved_slots
+        lowering.restore_mirror_bindings(rollback_syms, rollback_prev)
         expect(lowering.local_symbol_index_slots).to_equal(saved_slots)
         expect(lowering.find_local(7).id).to_equal(70)
         expect(lowering.find_local(9).id).to_equal(-1)
+
+    it "resolves through the mirror when the index would alias another symbol":
+        step("Corrupt the index the way the frozen stage2 reads it (slot of symbol 8 in bucket 1)")
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.bind_local(1, LocalId(id: 10))
+        lowering.bind_local(8, LocalId(id: 80))
+        val slot_of_8 = lowering.local_symbol_slot(8)
+        expect(slot_of_8 >= 0).to_equal(true)
+        lowering.local_symbol_index_slots[1] = slot_of_8
+        lowering.local_symbol_ids[slot_of_8] = 1
+        expect(lowering.find_local(1).id).to_equal(10)
+        expect(lowering.find_local(8).id).to_equal(80)
 
     it "clears index ownership at the next function boundary":
         step("Reset then reuse the same symbol id")
