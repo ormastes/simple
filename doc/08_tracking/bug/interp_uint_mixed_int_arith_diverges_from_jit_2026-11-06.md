@@ -128,7 +128,8 @@ complement incorrectly expected wide signed results. The actual Unary MIR
 arm already uses the operand type; corrected checks require u8 results56/55,
 with signed-i64 controls-200/-201 and actual unary-lowering type assertions.
 Boolean Not is unchanged. Common promotion now requires both local types to
-be explicitly present, and Is/IsNot are excluded from this scope.
+be explicitly present. Cycle 3 excluded Is/IsNot based on a stale mapping premise;
+the Astra correction below supersedes that exclusion.
 
 The speculative mixed-width PHI widening change was removed. The actual LLVM
 function path first uses typed alloca SSA in both bootstrap and normal modes;
@@ -152,3 +153,28 @@ The positive fixture deliberately excludes implicit integer-to-f64 call
 coercion. Cranelift's existing `cl_call_abi_mismatch` requires matching register
 classes and rejects that raw argument shape unless conversion is explicit.
 This repair does not change the floating call ABI policy.
+
+
+## Astra FAIL disposition — source cycle 4 (2026-11-08)
+
+Astra reviewed exact draft head9932323be75d2d44bc37ba1c078c4e4f6bab6409 and
+returned FAIL with two P1 findings. A declared i64 binding copied a narrow
+unsigned initializer without widening, so MIR claimed I64 while LLVM retained
+i8; later comparisons truncated wide bounds. The Let boundary now explicitly
+casts known U8/U16/U32 initializers into declared I64/U64 carriers before Copy,
+while preserving the existing raw optional-scalar exception. Actual HIR Let
+lowering regressions require a widening Cast, a wide-to-wide Copy and later
+wide Lt/Eq/Ne operands; LLVM generator tests cover that sequence.
+
+The current generic operator owner maps numeric Is/IsNot to Eq/Ne, contrary
+to the stale enum-pattern comment and cycle-3 exclusion premise. Those numeric
+operators now share the proven-integer common-carrier gate; type tests and
+qualified enum-pattern handling remain unchanged. MIR tests assert Eq/Ne and
+wide operands in both directions; generator and native fixture cases include
+456-vs-200 truncation, high-bit 200-vs-minus56, and equal-value controls.
+
+The fixture now has56 discriminating checks. All56 native/interpreter checks,
+MIR/IR specs and required core/MCP/fixedpoint/cachehash qualification remain
+UNRUN. This is source cycle4 of the six-cycle budget, after two Opus FAILs and
+one Astra FAIL. The next exact head requires Astra acceptance; PR7847 remains
+draft, verification pending, and must not land over these findings.

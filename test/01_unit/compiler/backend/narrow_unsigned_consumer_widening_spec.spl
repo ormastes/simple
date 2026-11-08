@@ -154,6 +154,26 @@ fn narrow_consumer_phi_ir(width: i64, unsigned: bool) -> text:
     expect(emitted).to_equal(true)
     narrow_consumer_finish(translator)
 
+fn narrow_consumer_bound_compare_ir(width: i64, op: MirBinOp, reverse: bool, through_binding: bool) -> text:
+    var translator = narrow_consumer_translator(width, true, ["i64 %l1"])
+    translator.local_types[1] = "i64"
+    translator.defined_locals[1] = true
+    translator.unsigned_locals[1] = false
+    # This is the Cast emitted by real Let/binary lowering, followed by
+    # the declared binding Copy when requested. The MIR spec checks that
+    # the real lowerer produces this sequence rather than an i8 Copy.
+    translator.translate_cast_dispatch(LocalId(id: 2), mir_operand_copy(LocalId(id: 0)), MirType.i64())
+    var widened = LocalId(id: 2)
+    if through_binding:
+        translator.local_types[3] = "i64"
+        translator.translate_copy_move(LocalId(id: 3), widened, false)
+        widened = LocalId(id: 3)
+        expect(translator.local_types[3]).to_equal("i64")
+    val left = if reverse: LocalId(id: 1) else: widened
+    val right = if reverse: widened else: LocalId(id: 1)
+    translator.translate_binop(LocalId(id: 4), op, mir_operand_copy(left), mir_operand_copy(right))
+    narrow_consumer_finish(translator)
+
 describe "narrow unsigned consumers preserve source signedness":
     it "zero-extends all three narrow widths at every call route":
         for width in [8, 16, 32]:
@@ -229,3 +249,21 @@ describe "narrow unsigned consumers preserve source signedness":
             expect(unsigned_ir).to_contain("zext i{width} %l0 to i64")
             expect(signed_ir).to_contain("sext i{width} %l0 to i64")
             expect(unsigned_ir).to_contain("call void @__simple_intrinsic_bounds_check(i64")
+
+    it "keeps annotated unsigned word bindings physically wide at later comparisons":
+        for width in [8, 16, 32]:
+            for op in [MirBinOp.Lt, MirBinOp.Eq, MirBinOp.Ne]:
+                val ir = narrow_consumer_bound_compare_ir(width, op, false, true)
+                expect(ir).to_contain("zext i{width} %l0 to i64")
+                expect(ir).to_contain("add i64")
+                expect(ir).to_contain("icmp")
+                expect(ir.contains("trunc i64 %l1")).to_equal(false)
+
+    it "keeps numeric is and is-not Eq-Ne carriers wide in both operand orders":
+        for width in [8, 16, 32]:
+            for reverse in [false, true]:
+                for op in [MirBinOp.Eq, MirBinOp.Ne]:
+                    val ir = narrow_consumer_bound_compare_ir(width, op, reverse, false)
+                    expect(ir).to_contain("zext i{width} %l0 to i64")
+                    expect(ir).to_contain(if op == MirBinOp.Eq: "icmp eq i64" else: "icmp ne i64")
+                    expect(ir.contains("trunc i64 %l1")).to_equal(false)

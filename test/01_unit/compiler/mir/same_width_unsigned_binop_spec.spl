@@ -3,7 +3,7 @@
 # Calls the actual MIR expression lowerer and inspects its real instruction.
 use std.spec.*
 use compiler.common.diagnostics.span.{Span}
-use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBlock}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBlock, HirStmt, HirStmtKind}
 use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp}
 use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
 use compiler.mir.mir_lowering_types.{MirLowering}
@@ -57,8 +57,10 @@ fn unsigned_binop_probe(left_kind: MirTypeKind, right_kind: MirTypeKind,
     var operands: [MirTypeKind] = []
     for instruction in lowering.builder.instructions:
         match instruction.kind:
-            case MirInstKind.BinOp(destination, _, lhs, rhs):
+            case MirInstKind.BinOp(destination, lowered_op, lhs, rhs):
                 if destination.id == result.id:
+                    if op == HirBinOp.Is: expect(lowered_op).to_equal(MirBinOp.Eq)
+                    if op == HirBinOp.IsNot: expect(lowered_op).to_equal(MirBinOp.Ne)
                     for operand in [lhs, rhs]:
                         match operand.kind:
                             case MirOperandKind.Copy(local):
@@ -148,6 +150,62 @@ fn unsigned_sparse_match_operands(kind: MirTypeKind) -> [MirTypeKind]:
     expect(compared.len()).to_equal(2)
     compared
 
+fn unsigned_annotated_binding_probe(kind: MirTypeKind, signed_word: bool, op: HirBinOp):
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_simple_function("annotated_unsigned_binding", "unit")
+    val left_local = builder.new_temp(MirType(kind: kind))
+    val right_local = builder.new_temp(MirType(kind: kind))
+    val word_kind = if signed_word: MirTypeKind.I64 else: MirTypeKind.U64
+    val peer = builder.new_temp(MirType(kind: word_kind))
+    lowering.builder = builder
+    lowering.local_map[101] = left_local
+    lowering.local_map[102] = right_local
+    lowering.local_map[104] = peer
+    val sum = HirExpr(kind: HirExprKind.Binary(HirBinOp.Add,
+        unsigned_binop_var(101, kind), unsigned_binop_var(102, kind)),
+        has_type_: false, type_: nil, span: Span.empty())
+    val declared = HirType(kind: HirTypeKind.Int(64, signed_word), span: Span.empty())
+    lowering.lower_stmt(HirStmt(kind: HirStmtKind.Let(SymbolId(id: 103), declared, sum), span: Span.empty()))
+    expect(lowering.errors.len()).to_equal(0)
+    var widened_initializer = false
+    var copied_wide_initializer = false
+    for instruction in lowering.builder.instructions:
+        match instruction.kind:
+            case MirInstKind.Cast(_, source, target):
+                match source.kind:
+                    case MirOperandKind.Copy(local):
+                        if val source_type = lowering.local_mir_type_of(local):
+                            if source_type.kind == kind and target.kind == word_kind:
+                                widened_initializer = true
+                    case _: ()
+            case MirInstKind.Copy(destination, source):
+                if val source_type = lowering.local_mir_type_of(source):
+                    if val destination_type = lowering.local_mir_type_of(destination):
+                        if source_type.kind == word_kind and destination_type.kind == word_kind:
+                            copied_wide_initializer = true
+            case _: ()
+    expect(widened_initializer).to_equal(true)
+    expect(copied_wide_initializer).to_equal(true)
+    val left = unsigned_binop_var(103, word_kind)
+    val right = unsigned_binop_var(104, word_kind)
+    val comparison = HirExpr(kind: HirExprKind.Binary(op, left, right),
+        has_type_: false, type_: nil, span: Span.empty())
+    val result = lowering.lower_binary_expr(comparison, op, left, right)
+    var checked_comparison = false
+    for instruction in lowering.builder.instructions:
+        match instruction.kind:
+            case MirInstKind.BinOp(destination, _, lhs, rhs):
+                if destination.id == result.id:
+                    for operand in [lhs, rhs]:
+                        match operand.kind:
+                            case MirOperandKind.Copy(local):
+                                expect(lowering.local_mir_type_of(local).unwrap().kind).to_equal(word_kind)
+                            case _: fail("annotated binding comparison lost its local")
+                    checked_comparison = true
+            case _: ()
+    expect(checked_comparison).to_equal(true)
+
 describe "same-width unsigned MIR arithmetic":
     it "retains each unsigned width at every arithmetic operation":
         for op in [HirBinOp.Add, HirBinOp.Sub, HirBinOp.Mul]:
@@ -156,6 +214,12 @@ describe "same-width unsigned MIR arithmetic":
                 expect(result.result_kind).to_equal(kind)
                 expect(result.operand_kinds).to_equal([kind, kind])
 
+    it "materializes declared word bindings before their later comparisons":
+        for kind in [MirTypeKind.U8, MirTypeKind.U16, MirTypeKind.U32]:
+            for signed_word in [false, true]:
+                for op in [HirBinOp.Lt, HirBinOp.Eq, HirBinOp.NotEq]:
+                    unsigned_annotated_binding_probe(kind, signed_word, op)
+
     it "preserves the existing mixed-width and signed arithmetic policies":
         for op in [HirBinOp.Add, HirBinOp.Sub, HirBinOp.Mul]:
             expect(unsigned_binop_probe(MirTypeKind.U8, MirTypeKind.U16, op).result_kind).to_equal(MirTypeKind.I64)
@@ -163,7 +227,7 @@ describe "same-width unsigned MIR arithmetic":
             expect(unsigned_binop_probe(MirTypeKind.I8, MirTypeKind.I8, op).result_kind).to_equal(MirTypeKind.I64)
 
     it "widens narrow unsigned comparisons without discarding signed values or bounds":
-        for op in [HirBinOp.Eq, HirBinOp.NotEq, HirBinOp.Lt, HirBinOp.LtEq, HirBinOp.Gt, HirBinOp.GtEq]:
+        for op in [HirBinOp.Eq, HirBinOp.NotEq, HirBinOp.Is, HirBinOp.IsNot, HirBinOp.Lt, HirBinOp.LtEq, HirBinOp.Gt, HirBinOp.GtEq]:
             for narrow in [MirTypeKind.U8, MirTypeKind.U16, MirTypeKind.U32]:
                 for other in [MirTypeKind.I8, MirTypeKind.I16, MirTypeKind.I32, MirTypeKind.I64, MirTypeKind.U8, MirTypeKind.U16, MirTypeKind.U32]:
                     val forward = unsigned_binop_probe(narrow, other, op)
