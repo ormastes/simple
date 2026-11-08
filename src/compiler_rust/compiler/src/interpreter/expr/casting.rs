@@ -144,6 +144,22 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
             let code_point = s.chars().next().unwrap() as i64;
             Ok(finalize_numeric_cast(cast_int_to_numeric(code_point, target), target))
         }
+        // A boxed optional (`Option.Some(payload)` — how a function-returned
+        // `T?` arrives here) is NOT an enum ordinal. The arm below used to
+        // turn `mk() as u64` into the position of `Some` (0) and silently
+        // zero every payload (bug optional_as_cast_yields_zero_2026_11_09).
+        // The HIR lowerer rejects this cast at compile time; this runtime
+        // arm is the fail-closed twin for the tree-walking lane.
+        Value::Enum { ref enum_name, .. } if enum_name == "Option" => {
+            let ctx = ErrorContext::new().with_code(codes::TYPE_MISMATCH).with_help(
+                "narrow the optional first with `?? <default>`, `if val x = ...`, or `match`; \
+                 `T? as T` is not allowed outside `unsafe` (nil-only-in-unsafe, ERR-01)",
+            );
+            Err(CompileError::semantic_with_context(
+                format!("type mismatch: cannot cast an optional `T?` to {}", target.name()),
+                ctx,
+            ))
+        }
         // Enum variant to numeric (ordinal position)
         Value::Enum {
             ref enum_name,
@@ -262,5 +278,30 @@ mod tests {
         };
         let cast = cast_value(original, &target).expect("packed byte array assertion");
         assert_eq!(cast.byte_array_view(), Some(&[1, 2, 3][..]));
+    }
+}
+
+#[cfg(test)]
+mod optional_cast_tests {
+    use super::*;
+
+    /// optional_as_cast_yields_zero_2026_11_09: a boxed `Option.Some(payload)`
+    /// reaching a numeric cast used to be treated as an enum ordinal and
+    /// yield 0. It must be a type error; a plain enum ordinal cast and the
+    /// `nil` rejection are unchanged.
+    #[test]
+    fn boxed_option_some_to_numeric_is_an_error_not_zero() {
+        let some = Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "Some".to_string(),
+            payload: Some(Box::new(Value::UInt { value: 4275044352, width: 64 })),
+        };
+        for target in ["u64", "i64", "u32", "f64"] {
+            let err = cast_value(some.clone(), &Type::Simple(target.to_string()))
+                .expect_err("Option.Some as numeric must fail, never yield the ordinal");
+            let msg = format!("{err}");
+            assert!(msg.contains("optional"), "{target}: {msg}");
+        }
+        assert!(cast_value(Value::Nil, &Type::Simple("u64".to_string())).is_err());
     }
 }

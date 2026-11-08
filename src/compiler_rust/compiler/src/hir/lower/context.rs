@@ -47,6 +47,11 @@ pub(super) struct FunctionContext {
     /// only an if-let / match payload binding inherits it as its
     /// `trait_dispatch_owner`, so the payload call lowers to vtable dispatch.
     pub optional_trait_payloads: HashMap<usize, crate::hir::HirTraitDispatch>,
+    /// Nesting depth of `unsafe:` blocks currently being lowered. Non-zero
+    /// means the expression under lowering sits inside an unsafe region, which
+    /// is the only place `T? as <numeric>` is admitted
+    /// (nil-only-in-unsafe, bug optional_as_cast_yields_zero_2026_11_09).
+    pub unsafe_depth: usize,
 }
 
 impl FunctionContext {
@@ -62,6 +67,7 @@ impl FunctionContext {
             static_call_type_hints: HashMap::new(),
             result_projection_types: HashMap::new(),
             optional_trait_payloads: HashMap::new(),
+            unsafe_depth: 0,
         }
     }
 
@@ -78,6 +84,7 @@ impl FunctionContext {
             static_call_type_hints: HashMap::new(),
             result_projection_types: HashMap::new(),
             optional_trait_payloads: HashMap::new(),
+            unsafe_depth: 0,
         }
     }
 

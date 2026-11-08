@@ -2204,7 +2204,14 @@ impl Lowerer {
             statements: statements.to_vec(),
             ..Default::default()
         };
-        let block_stmts = self.lower_block(&block, ctx)?;
+        // Track nesting so `lower_cast` can admit `T? as <numeric>` only here
+        // (bug optional_as_cast_yields_zero_2026_11_09). Decrement on BOTH
+        // exits so an error inside one unsafe block does not leave the rest
+        // of the function treated as unsafe.
+        ctx.unsafe_depth += 1;
+        let lowered = self.lower_block(&block, ctx);
+        ctx.unsafe_depth -= 1;
+        let block_stmts = lowered?;
         let result_ty = match block_stmts.last() {
             Some(crate::hir::HirStmt::Expr(expr)) => expr.ty,
             _ => TypeId::NIL,
@@ -2447,6 +2454,18 @@ impl Lowerer {
                 inner,
                 ..
             }) if *inner == TypeId::STRING && default_hir.ty == TypeId::STRING => TypeId::STRING,
+            // `any?` coalesces to plain `any`: the payload word of an erased
+            // optional IS the tagged RuntimeValue an `any` slot holds, and MIR
+            // (lowering_expr_builtin.rs, `rt_unwrap_or_self`) only unboxes a
+            // scalar-typed result, so no representation changes. Left as the
+            // `any?` pointer, `(json_to_number(v) ?? 0) as i64` was still an
+            // optional source for `lower_cast` and the recommended narrowing
+            // itself was rejected (optional_as_cast_yields_zero_2026_11_09).
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                inner,
+                ..
+            }) if *inner == TypeId::ANY => TypeId::ANY,
             _ => result_ty,
         };
 

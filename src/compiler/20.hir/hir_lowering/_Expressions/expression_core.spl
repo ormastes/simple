@@ -77,6 +77,36 @@ impl HirLowering:
             case _: ()
         ""
 
+    fn cast_operand_declared_type(operand: Expr) -> HirType?:
+        """Declared static type of an `as` operand, for the two shapes this
+        lowerer can resolve without inference: a named local/parameter
+        (`symbols.define(..., binding_type, ...)`) and a call of a named
+        function (the `ret` of its `HirTypeKind.Function`). Anything else is
+        nil -- never guessed. Used by the `T? as <numeric>` diagnostic
+        (optional_as_cast_yields_zero_2026_11_09)."""
+        match operand.kind:
+            case ExprKind.Ident(name):
+                val ident_t: text = name
+                val raw: i64 = self.symbols.lookup_or_invalid(ident_t).id
+                if raw < 0:
+                    return nil
+                self.symbols.get_symbol_type_raw(raw)
+            case ExprKind.Call(callee, _):
+                match callee.kind:
+                    case ExprKind.Ident(fname):
+                        val fname_t: text = fname
+                        val fraw: i64 = self.symbols.lookup_or_invalid(fname_t).id
+                        if fraw < 0:
+                            return nil
+                        if val fn_type = self.symbols.get_symbol_type_raw(fraw):
+                            match fn_type.kind:
+                                case HirTypeKind.Function(_, ret, _): ret
+                                case _: nil
+                        else:
+                            nil
+                    case _: nil
+            case _: nil
+
     fn attributed_factory_return_type(source: HirExpr) -> HirType?:
         if source.has_type_:
             return source.type_
@@ -1065,7 +1095,36 @@ impl HirLowering:
                 HirExprKind.Unwrap(self.lower_hir_expr(base))
 
             case ExprKind.Cast(operand, target_type):
-                HirExprKind.Cast(self.lower_hir_expr(operand), self.lower_type(target_type))
+                val cast_operand = self.lower_hir_expr(operand)
+                val cast_target = self.lower_type(target_type)
+                # `T? as <numeric>` outside `unsafe` is a type error, never a
+                # value (nil-only-in-unsafe, ERR-01). The seed produced a
+                # silent 0 / garbage for it; the seed's HIR lowerer now
+                # rejects it (LowerError::OptionalCast) and this is the
+                # self-hosted twin. Only fires when the operand's HIR type is
+                # KNOWN to be Optional; an untyped operand is not guessed at.
+                # Bug: optional_as_cast_yields_zero_2026_11_09.
+                if self.unsafe_block_depth == 0:
+                    var operand_is_optional = false
+                    if cast_operand.has_type_:
+                        operand_is_optional = match cast_operand.type_.kind:
+                            case HirTypeKind.Optional(_): true
+                            case _: false
+                    if not operand_is_optional:
+                        # This lowerer types few expressions itself; for a
+                        # named local/parameter or a call of a named function
+                        # the DECLARED type is in the symbol table.
+                        if val declared = self.cast_operand_declared_type(operand):
+                            operand_is_optional = match declared.kind:
+                                case HirTypeKind.Optional(_): true
+                                case _: false
+                    val target_is_numeric = match cast_target.kind:
+                        case HirTypeKind.Int(_, _): true
+                        case HirTypeKind.Float(_): true
+                        case _: false
+                    if operand_is_optional and target_is_numeric:
+                        self.error("[E-OPT-CAST-001] cannot cast an optional `T?` to a numeric type with `as` outside `unsafe`; narrow it first with `?? <default>`, `if val x = ...`, or `match`", e.span)
+                HirExprKind.Cast(cast_operand, cast_target)
 
             case ExprKind.Binary(op, left, right):
                 # Typed rebinds: extracted ANY-ish payloads misread on stage4
@@ -1424,7 +1483,11 @@ impl HirLowering:
                     unsafe_capability_set_contains(caps, UnsafeCapability.TypeErasure)
                 if grants_type_erasure:
                     self.written_any_unsafe_depth = self.written_any_unsafe_depth + 1
+                # Capability-agnostic depth: any `unsafe:` admits `T? as <numeric>`
+                # (see the Cast arm above).
+                self.unsafe_block_depth = self.unsafe_block_depth + 1
                 var unsafe_hir_body = self.lower_hir_block(body)
+                self.unsafe_block_depth = self.unsafe_block_depth - 1
                 if grants_type_erasure:
                     self.written_any_unsafe_depth = self.written_any_unsafe_depth - 1
                 unsafe_hir_body.unsafe_caps = caps
