@@ -1,0 +1,68 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-ERR-01-NIL-ONLY-IN-UNSAFE
+
+use std.spec.step
+
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+"""
+# `T? as <numeric>` is rejected outside `unsafe`
+
+Bug `optional_as_cast_yields_zero_2026_11_09`: on the Rust seed, `mk() as u64`
+on a function-returned `u64?` silently evaluated to `0` (interpreter: the
+`Option.Some` variant ordinal) or to a reinterpreted heap word (JIT), which
+masked two months of acpi zero reads. Per nil-only-in-unsafe (ERR-01) an
+optional must be narrowed with `?? <default>`, `if val x = ...` or `match`
+before it is used as `T`; `T? as T` is a compile error outside `unsafe`.
+
+The self-hosted HIR lowerer diagnoses the same shape as `[E-OPT-CAST-001]`
+whenever the operand's HIR type is known to be `Optional(_)` and the cast
+target is an integer or float type.
+"""
+
+fn lowering_errors(source: text) -> text:
+    val ast = parse_full_frontend(source, "optional_cast.spl", "optional_cast.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("optional_cast.spl")
+    val _hir = lowering.lower_module(ast)
+    var errors = ""
+    var idx = 0
+    while idx < lowering.lowering_error_count():
+        if not lowering.lowering_error_is_recovered_at(idx):
+            errors = errors + lowering.lowering_error_message_at(idx, "optional_cast.spl") + "\n"
+        idx = idx + 1
+    errors
+
+fn opt_cast_error_count(errors: text) -> i64:
+    errors.split("[E-OPT-CAST-001]").len() - 1
+
+describe "optional `as` numeric cast policy":
+    it "rejects `T? as <int>` on a local optional outside unsafe and admits the narrowed and unsafe forms":
+        val local_opt = "fn f() -> u32:\n    val r: u32? = 45064\n    r as u32\n"
+        val float_opt = "fn f() -> f64:\n    val r: f64? = 1.5\n    r as f64\n"
+        val narrowed = "fn f() -> u32:\n    val r: u32? = 45064\n    (r ?? 0) as u32\n"
+        val in_unsafe = "fn f() -> u32:\n    val r: u32? = 45064\n    unsafe:\n        r as u32\n"
+        val plain = "fn f(v: i64) -> u8:\n    v as u8\n"
+
+        step("a locally typed optional cast to an integer is an error")
+        assert_equal(opt_cast_error_count(lowering_errors(local_opt)), 1)
+        step("a float target is rejected the same way")
+        assert_equal(opt_cast_error_count(lowering_errors(float_opt)), 1)
+        step("narrowing with ?? first is accepted")
+        assert_equal(opt_cast_error_count(lowering_errors(narrowed)), 0)
+        step("the cast inside an unsafe block is accepted")
+        assert_equal(opt_cast_error_count(lowering_errors(in_unsafe)), 0)
+        step("a non-optional numeric cast is untouched")
+        assert_equal(opt_cast_error_count(lowering_errors(plain)), 0)
+
+    it "rejects the cast of a function-returned optional (the acpi shape) and restores the depth after unsafe":
+        val returned = "fn mk(v: u64) -> u64?:\n    if v != 0:\n        v\n    else:\n        nil\n\n" +
+            "fn bad() -> u64:\n    mk(1) as u64\n"
+        val after_unsafe = "fn f() -> u32:\n    val r: u32? = 1\n    unsafe:\n        val x = r as u32\n    r as u32\n"
+
+        step("a function-returned T? cast with `as` is an error")
+        assert_equal(opt_cast_error_count(lowering_errors(returned)), 1)
+        step("the unsafe depth does not leak past the block")
+        assert_equal(opt_cast_error_count(lowering_errors(after_unsafe)), 1)
