@@ -1,6 +1,6 @@
 # Compat loader unload() never frees executable mappings
 
-Status: open
+Status: FIXED (2026-11-06; revalidated on release 2026-11-08)
 
 `ModuleLoader.unload` (src/compiler/99.loader/module_loader_compat.spl) drops
 `global_symbols`/module entries but never calls `native_free_exec_memory` for
