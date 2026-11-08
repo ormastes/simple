@@ -1,8 +1,11 @@
 # Lane-local Rust seed unbuildable: REBASE91 salvage re-introduced a stale `INLINE_INT_BITS` block
 
-- **Status:** PARTIALLY REPAIRED 2026-08-18 — E0592 fixed; the seed still does
-  not compile for two OTHER pre-existing reasons (below). Bootstrap remains
-  blocked in this lane.
+- **Status:** CLOSED-OBSOLETE (2026-11-08) — the reported duplicate was
+  lane-local and was already repaired. Current `release/1.0.0` contains exactly
+  one `INLINE_INT_BITS` definition and one `fits_inline_int` definition in
+  `runtime/src/value/core.rs:292,309`. No release source change is required.
+  Unrelated historical seed/bootstrap blockers below are not part of this
+  duplicate-definition record.
 - **Date:** 2026-08-18
 - **Area:** `src/compiler_rust/runtime/src/value/core.rs` (lane-local),
   `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs`

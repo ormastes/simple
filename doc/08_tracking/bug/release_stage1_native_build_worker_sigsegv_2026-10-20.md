@@ -92,3 +92,30 @@ The Linux HIR-worker SIGSEGV half remains open.
 Windows: C owners (runtime_native.c; bootstrap archive via runtime_secure_staging.c) already define the symbol (e8186daac75). The Rust runtime crate lacked an `extern "C"` twin; added in `value/sffi/file_io/file_ops.rs` with a unit test. NOT compiled here (disk < 15 GB): run `cargo test -p simple-runtime secure_temp_dir_set_parent` in an own target dir. Needs a release.yml Windows rerun.
 
 Linux HIR-worker SIGSEGV: NOT explained by this symbol (a missing symbol aborts with "called unresolved symbol", not SIGSEGV, and the Linux link uses runtime_native.c which always defined it). Still needed: `ulimit -c unlimited; gdb -batch -ex run -ex bt -ex "info sharedlibrary" --args <stage1 native-build worker cmd from release.yml>`; record the faulting frame and whether it is in HIR lowering.
+
+## 2026-11-08 native verification attempt (status unchanged: verification-pending)
+
+No release.yml run had reached stage1 since 2026-10-22 (the last release/1.0.0
+run, 39728999309, died on `sudo: a password is required` on a self-hosted
+runner before the seed build). Both self-hosted Linux runners are offline, so a
+fresh `workflow_dispatch` on `release/1.0.0` (0ee4e247c0d) landed on GitHub-hosted
+runners: run 42457312983.
+
+- linux-x86_64 job 128659173410 (07:05-07:11 UTC): step "Build native Linux
+  x86_64/arm64 binary via bootstrap-only Rust seed" fails BEFORE stage1 —
+  `cargo build --profile bootstrap -p simple-driver` does not link:
+  `rust-lld: error: undefined symbol:` `simple_process_stdout_take_v1`,
+  `simple_process_byte_adopt_v1` (referenced by `runtime_socket_nonblock.o`,
+  `rt_local_unix_stage_stdout_v1` / `rt_local_unix_adopt_byte_endpoint_v1`) and
+  `rt_process_stream_claim_launch_v2`, `rt_process_stream_launch_not_started_v2`,
+  `rt_process_stream_publish_broker_v2` (referenced by `runtime_process_owned.o`,
+  `rt_lg_launch_broker_mode_v2`). All five are owned by `runtime_process.c`,
+  which the seed cannot compile. Filed separately as
+  `release_linux_seed_link_undefined_process_bridge_symbols_2026_11_08` with a
+  seed-only provider fix; that bug is upstream of this one.
+- Consequence: the HIR-worker SIGSEGV could neither be reproduced nor ruled out
+  on this run. This bug stays `verification-pending`. Next: once the seed links
+  on a release.yml run, read the "Create distribution package" step of the
+  linux-x86_64 job — `simple_test_runner built by: stage1` verifies the Linux
+  half; a `WORKAROUND release_stage1_native_build_worker_sigsegv_2026_10_20`
+  warning means it is still failing and the gdb step above is next.

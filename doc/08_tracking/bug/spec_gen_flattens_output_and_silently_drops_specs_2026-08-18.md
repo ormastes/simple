@@ -1,8 +1,16 @@
 # `simple spec-gen` flattens mirror paths and silently drops most specs
 
 - **Date:** 2026-08-18
-- **Status:** OPEN
+- **Status:** CLOSED (2026-11-08 revalidated)
 - **Component:** `src/app/spec_gen/main.spl`
+
+Resolution: `23d471bf267` fixed all three reported defects and recorded 9/9
+focused results, including `Generated 165 of 165` for the original office
+corpus. Current source retains those fixes. The added
+`spec_gen_scoped_cli_spec.spl` extends coverage to scoped nested paths, all
+parenthesised block forms, and skipped-file exit/output contracts; its fresh
+execution is blocked by the known pre-existing parser failure, so no new test
+pass is claimed here.
 - **Severity:** medium — produces wrong-path docs and under-reports coverage as success
 
 ## Summary

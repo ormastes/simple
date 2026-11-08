@@ -1,8 +1,16 @@
 # Bug: cross-module class-name collision — type resolution can pick the OTHER module's class
 
 - **Date filed:** 2026-08-17
-- **Status:** OPEN — NOT-REPRODUCED-MINIMALLY (original evidence stands; minimal fixtures pass)
+- **Status:** FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
 - **Suspected layer:** semantic / type resolution (co-compilation symbol table keyed by bare class name)
+
+Resolution: `93991c37304` added interpreter module-owner class resolution,
+including fail-closed `ambiguous type` handling, and `285c714d224` added
+owner-qualified flattened HIR struct/class declarations and lookups. Current
+source retains both paths. Added `interpreter_same_name_type_regressions.rs`
+for same-named `ModuleLoader` classes and duplicate `List<T>` declarations;
+its integration test target compile-checks successfully, while execution is
+blocked by unrelated existing runtime link symbols.
 
 ## Symptom (original incident, 2026-08-17)
 

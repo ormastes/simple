@@ -187,6 +187,82 @@ FX
     chk "found needs evidence" "requires evidence" "$(run environment NOSP-B-2 windows windows candidate unknown)"
     chk "verified environment" "state=verified" "$(run environment NOSP-B-2 windows windows verified retained-test-log)"
     chk "environment shown" "retained-test-log" "$(run show NOSP-B-2 --intent not_for_fixing)"
+    # The database loader splits on literal blank lines. A line-state reader
+    # can still see an appended record after that separator while load drops
+    # it. Exercise real writer commands and read only header-led chunks.
+    chunk_rows() {
+        awk -v table="$1" '
+        /^$/ { t = 0; seen = 0; next }
+        /^[A-Za-z_][A-Za-z0-9_]* [|]/ {
+            if (!seen) { t = ($1 == table); seen = 1 } else t = 0
+            next
+        }
+        t && /^[ \t]+[^ \t#]/ { print }' "$_fx"
+    }
+    for _tail in next-header eof; do
+        _fx="$_d/layout-$_tail.sdn"
+        cat > "$_fx" <<'LAYOUT'
+bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    layout_1, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+
+bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
+
+bug_environments |bug_id, found_env, reproduction_env, reproduction_state, evidence, recorded_at|
+    layout_1, unknown, unknown, unknown, old-env, 2026-10-01T00:00:00Z
+
+LAYOUT
+        if [ "$_tail" = next-header ]; then
+            printf '# Separator comment must stay outside both tables.\n\nbug_scope |bug_id, scope, root_layer, note|\n    layout_1, unknown, unknown, untouched\n' >> "$_fx"
+        fi
+        chk "layout first environment $_tail" "ENVIRONMENT:" "$(run environment layout_1 unknown linux candidate candidate-one)"
+        chk "layout second environment $_tail" "ENVIRONMENT:" "$(run environment layout_1 unknown windows candidate candidate-two)"
+        _env_order=$(chunk_rows bug_environments | awk -F, '{ v=$5; gsub(/[ \t"]/, "", v); printf "%s,", v }')
+        chk "environment chronology in loader chunk $_tail" "old-env,candidate-one,candidate-two," "$_env_order"
+        chk "layout claim $_tail" "CLAIMED:" "$(run claim layout_1 layout-owner)"
+        chk "layout release $_tail" "RELEASED:" "$(run release layout_1 layout-owner)"
+        _claim_order=$(chunk_rows bug_fix_claims | awk -F, '{ v=$2; gsub(/[ \t]/, "", v); printf "%s,", v }')
+        chk "claim chronology in loader chunk $_tail" "fixing,released," "$_claim_order"
+        if [ "$_tail" = next-header ]; then
+            chk "following table preserved" "layout_1, unknown, unknown, untouched" "$(chunk_rows bug_scope)"
+            chk "separator comment preserved outside tables" "outside" "$(awk '
+                /^$/ { t = 0; next }
+                /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 1; next }
+                /^# Separator comment/ { if (!t) print "outside"; else print "inside" }
+            ' "$_fx")"
+        fi
+    done
+    # Claims at EOF must stay before the trailing separator, too.
+    _fx="$_d/layout-claims-eof.sdn"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    layout_1, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true\n\nbug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|\n\n' > "$_fx"
+    chk "layout claim EOF" "CLAIMED:" "$(run claim layout_1 layout-owner)"
+    chk "layout release EOF" "RELEASED:" "$(run release layout_1 layout-owner)"
+    _claim_order=$(chunk_rows bug_fix_claims | awk -F, '{ v=$2; gsub(/[ \t]/, "", v); printf "%s,", v }')
+    chk "claim chronology at EOF" "fixing,released," "$_claim_order"
+    _fx="$_d/layout-no-final-newline.sdn"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    layout_1, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true' > "$_fx"
+    chk "absent table no final newline" "ENVIRONMENT:" "$(run environment layout_1 unknown linux candidate no-final-newline)"
+    chk "absent table has own loader chunk" "no-final-newline" "$(chunk_rows bug_environments)"
+    # A duplicate/mismatched header must never publish a shadow table, which
+    # would make the loader keep only the last table's history.
+    for _bad_header in duplicate mismatched indented duplicate-indented; do
+        cp "$_fx" "$_d/clean-header.sdn"
+        case "$_bad_header" in
+            duplicate|duplicate-indented)
+                _indent=""; [ "$_bad_header" = duplicate-indented ] && _indent="    "
+                printf '\n%sbug_environments |bug_id, found_env, reproduction_env, reproduction_state, evidence, recorded_at|\n' "$_indent" >> "$_fx"
+                _want="duplicate bug_environments table headers" ;;
+            indented)
+                sed 's/^bug_environments /    bug_environments /' "$_fx" > "$_fx.new" && mv "$_fx.new" "$_fx"
+                _want="unexpected bug_environments table header" ;;
+            mismatched)
+                sed 's/^bug_environments |.*$/& /' "$_fx" > "$_fx.new" && mv "$_fx.new" "$_fx"
+                _want="unexpected bug_environments table header" ;;
+        esac
+        cp "$_fx" "$_d/bad-header-before.sdn"
+        chk "refuse $_bad_header header" "$_want" "$(run environment layout_1 unknown linux candidate must-not-publish)"
+        cmp -s "$_fx" "$_d/bad-header-before.sdn" || { echo "selftest FAIL: $_bad_header header changed the database"; _fails=$((_fails+1)); }
+        cp "$_d/clean-header.sdn" "$_fx"
+    done
     rm -rf "$_d"
     if [ "$_fails" -eq 0 ]; then echo "bug-claim selftest PASS"; exit 0; fi
     echo "bug-claim selftest FAIL ($_fails)"; exit 1
@@ -268,18 +344,36 @@ load_current() { # bug
 
 # --- table writers ---------------------------------------------------------
 
-append_row() { # raw row text (without indent)
+append_table_row() { # exact header, complete indented row
     _tmp="$DB.edit.$$"
-    if ! grep -q '^bug_fix_claims |' "$DB"; then
-        { cat "$DB"; echo; echo "$TABLE_HDR"; echo "    $1"; } > "$_tmp" && mv "$_tmp" "$DB"
+    _table=${1%% *}
+    _headers=$(awk -v table="$_table" '
+        /^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*[|]/ {
+            name = $0; sub(/^[ \t]+/, "", name); sub(/[ \t]*[|].*$/, "", name)
+            if (name == table) n++
+        }
+        END { print n + 0 }' "$DB")
+    [ "$_headers" -le 1 ] || die "duplicate $_table table headers"
+    if ! grep -Fqx "$1" "$DB"; then
+        [ "$_headers" -eq 0 ] || die "unexpected $_table table header"
+        # Two newlines also separate the new table if the input had no final
+        # newline. Extra empty sections are harmless to the database loader.
+        { cat "$DB"; printf '\n\n%s\n%s\n' "$1" "$2"; } > "$_tmp" && mv "$_tmp" "$DB"
         return
     fi
-    awk -v row="    $1" '
-    /^bug_fix_claims \|/ { t = 1; print; next }
-    t && /^[A-Za-z_][A-Za-z0-9_]* [|]/ { if (!done) { print row; done = 1 } t = 0 }
-    t && /^[ \t]*$/ { held = held $0 "\n"; next }
-    { if (held != "") { printf "%s", held; held = "" } print }
-    END { if (t && !done) print row; if (held != "") printf "%s", held }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
+    # SdnDatabase.load splits on literal blank lines. Append at the END of
+    # this header-led chunk, before its separator, preserving event order.
+    awk -v hdr="$1" -v row="$2" '
+    $0 == hdr { t = 1; print; next }
+    t && (/^$/ || /^[A-Za-z_][A-Za-z0-9_]* [|]/) {
+        if (!done) { print row; done = 1 }; t = 0
+    }
+    { print }
+    END { if (t && !done) print row }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
+}
+
+append_row() { # raw claim row text (without indent)
+    append_table_row "$TABLE_HDR" "    $1"
 }
 
 remove_row() { # exact row line (without indent); removes the last occurrence
@@ -495,17 +589,7 @@ cmd_environment() {
     [ -n "$(main_status "$1")" ] || die "unknown bug $1"
     _header='bug_environments |bug_id, found_env, reproduction_env, reproduction_state, evidence, recorded_at|'
     _envrow="    $1, \"$_found\", \"$_repro\", $_verification, \"$_evidence\", $(now_iso)"
-    _tmp="$DB.edit.$$"
-    if ! grep -Fqx "$_header" "$DB"; then
-        { cat "$DB"; echo; echo "$_header"; echo "$_envrow"; } > "$_tmp" || die "environment append failed"
-    else
-        awk -v hdr="$_header" -v row="$_envrow" '
-        $0 == hdr { t = 1; print; next }
-        t && /^[^ \t#]/ { print row; t = 0; done = 1 }
-        { print }
-        END { if (t && !done) print row }' "$DB" > "$_tmp" || die "environment append failed"
-    fi
-    mv "$_tmp" "$DB" || die "environment update failed"
+    append_table_row "$_header" "$_envrow" || die "environment append failed"
     commit_db
     echo "ENVIRONMENT: $1 found=$_found reproduction=$_repro state=$_verification evidence=$_evidence"
 }

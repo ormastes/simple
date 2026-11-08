@@ -147,6 +147,42 @@ fn runtime_family_from_path(path: &Path) -> Option<RuntimeFamily> {
     None
 }
 
+fn family_relative_subpath(path: &Path, family: RuntimeFamily) -> Option<String> {
+    let normalized = path.to_string_lossy();
+    // Backslashes are separators only on Windows; on POSIX they are filename bytes.
+    #[cfg(windows)]
+    let normalized = normalized.replace('\\', "/");
+    let components: Vec<&str> = normalized
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect();
+
+    for (index, pair) in components.windows(2).enumerate() {
+        if (pair[0] == "lib" || pair[0] == "std") && pair[1] == family.name() {
+            let relative = components[index + 2..].join("/");
+            return if relative.is_empty() { None } else { Some(relative) };
+        }
+    }
+
+    None
+}
+
+fn is_family_mirror_facade(
+    importer_path: &Path,
+    imported_path: &Path,
+    importer_family: RuntimeFamily,
+    imported_family: RuntimeFamily,
+) -> bool {
+    if importer_family == imported_family {
+        return false;
+    }
+
+    let Some(importer_subpath) = family_relative_subpath(importer_path, importer_family) else {
+        return false;
+    };
+    family_relative_subpath(imported_path, imported_family) == Some(importer_subpath)
+}
+
 fn runtime_family_import_violation_reason(
     importer_family: RuntimeFamily,
     imported_family: RuntimeFamily,
@@ -186,6 +222,12 @@ fn gc_boundary_warning_message(importer_path: &Path, imported_path: &Path, modul
     }
 
     let reason = runtime_family_import_violation_reason(importer_family, imported_family)?;
+    if reason == "higher_layer_runtime_family"
+        && is_family_mirror_facade(importer_path, imported_path, importer_family, imported_family)
+    {
+        return None;
+    }
+
     let label = if importer_family.is_noalloc() && imported_family.is_allocating() {
         "Allocating"
     } else if imported_family.is_gc() {
@@ -1635,6 +1677,50 @@ mod tests {
         assert!(msg.contains("higher_layer_runtime_family"));
         assert!(msg.contains("family: nogc_sync_mut"));
         assert!(msg.contains("family: nogc_async_immut"));
+    }
+
+    #[test]
+    fn gc_boundary_warning_message_exempts_family_mirror_facades() {
+        let msg = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_mut/test_runner/doctest_runner.spl"),
+            Path::new("/repo/src/lib/nogc_sync_mut/test_runner/doctest_runner.spl"),
+            "std.nogc_sync_mut.test_runner.doctest_runner",
+        );
+
+        assert!(msg.is_none(), "family-mirror re-export shims must not warn: {msg:?}");
+    }
+
+    #[test]
+    fn gc_boundary_warning_message_flags_non_mirror_async_to_sync_imports() {
+        let msg = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_mut/app.spl"),
+            Path::new("/repo/src/lib/nogc_sync_mut/io.spl"),
+            "std.nogc_sync_mut.io",
+        )
+        .expect("a genuine async-to-sync crossing must still warn");
+
+        assert!(msg.contains("Higher-layer module 'std.nogc_sync_mut.io'"));
+        assert!(msg.contains("higher_layer_runtime_family"));
+        assert!(msg.contains("family: nogc_async_mut"));
+    }
+
+    #[test]
+    fn gc_boundary_warning_message_does_not_exempt_mirror_resource_violations() {
+        let noalloc = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_mut_noalloc/task.spl"),
+            Path::new("/repo/src/lib/nogc_async_mut/task.spl"),
+            "std.nogc_async_mut.task",
+        )
+        .expect("mirroring must not exempt no-alloc restrictions");
+        assert!(noalloc.contains("noalloc_imports_allocating_family"));
+
+        let gc = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_mut/task.spl"),
+            Path::new("/repo/src/lib/gc_async_mut/task.spl"),
+            "std.gc_async_mut.task",
+        )
+        .expect("mirroring must not exempt GC restrictions");
+        assert!(gc.contains("nogc_imports_gc_family"));
     }
 
     #[test]
