@@ -692,6 +692,37 @@ describe "post doc comment":
         val fixture_only = 1
 EOF
 
+    # F20-F22 contain triple markers on the SAME line as short-string escapes
+    # or raw closing quotes, forcing the new lexical path rather than its fast
+    # path. Opposite-quote triples are valid data inside ordinary short strings.
+    mkdir -p "$st_dir/f20"
+    cat > "$st_dir/f20/slow_escaped_double_spec.spl" <<'EOF'
+describe "slow escaped double token":
+    it "keeps the opposite triple marker inside the escaped quote token":
+        val e = "esc \" ''' "
+        val actual = compute_checksum(e)
+        expect(actual).to_equal("9f2c41ab")
+EOF
+
+    mkdir -p "$st_dir/f21"
+    cat > "$st_dir/f21/slow_raw_close_spec.spl" <<'EOF'
+describe "slow raw close token":
+    it "keeps the following multiline literal as data":
+        val p = r"C:\" + """
+        expect(hidden()).to_equal("pretend")
+        """
+        val fixture_only = p
+EOF
+
+    mkdir -p "$st_dir/f22"
+    cat > "$st_dir/f22/slow_escaped_single_spec.spl" <<'EOF'
+describe "slow escaped single token":
+    it "keeps the opposite triple marker inside the escaped quote token":
+        val e = 'esc \' """ '
+        val actual = compute_checksum(e)
+        expect(actual).to_equal("9f2c41ab")
+EOF
+
     st_fail=0
     st_raw=$(find "$st_dir" -name '*_spec.spl' | sort | xargs awk "$AWK_PROG" 2>/dev/null)
     st_scanned=$(echo "$st_raw" | sed -n 's/^#SCANNED\t//p' | awk '{t+=$1} END{print t+0}')
@@ -701,7 +732,7 @@ EOF
     # "was flagged" check regardless of whether V-codes were actually emitted.
     st_out=$(echo "$st_raw" | /usr/bin/grep -av '^#SCANNED' | /usr/bin/grep -av '^#FILE')
 
-    [ "$st_scanned" = "19" ] || { echo "selftest: expected 19 files scanned, got '$st_scanned'"; st_fail=1; }
+    [ "$st_scanned" = "22" ] || { echo "selftest: expected 22 files scanned, got '$st_scanned'"; st_fail=1; }
     echo "$st_out" | /usr/bin/grep -aq "V0_NO_ASSERT_FILE.*f9/quoted_assertion_spec.spl" || { echo "selftest: F9 quoted builtin text counted as a file assertion"; st_fail=1; }
     echo "$st_out" | /usr/bin/grep -aq "V1_ZERO_ASSERT.*f9/quoted_assertion_spec.spl" || { echo "selftest: F9 quoted builtin text counted as a block assertion"; st_fail=1; }
     echo "$st_out" | /usr/bin/grep -aq "V1_ZERO_ASSERT.*f10/quoted_helper_spec.spl" || { echo "selftest: F10 quoted helper text counted as delegation"; st_fail=1; }
@@ -752,11 +783,22 @@ EOF
         echo "selftest: F19 real assertion before the comment was lost"; st_fail=1
     fi
 
+    for st_escaped in f20/slow_escaped_double f22/slow_escaped_single; do
+        if echo "$st_out" | /usr/bin/grep -aq "$st_escaped"; then
+            echo "selftest: $st_escaped escaped short-string token opened a false docstring"; st_fail=1
+        fi
+    done
+    for st_code in V0_NO_ASSERT_FILE V1_ZERO_ASSERT; do
+        echo "$st_out" | /usr/bin/grep -aq "$st_code.*f21/slow_raw_close_spec.spl" || {
+            echo "selftest: F21 raw closing quote was treated as an escape ($st_code missing)"; st_fail=1
+        }
+    done
+
     if [ "$st_fail" -ne 0 ]; then
         echo "SELFTEST FAILED — detector is not trustworthy, refusing to scan"
         return 1
     fi
-    echo "selftest: 19/19 fixtures behaved correctly (F1,F3,F4,F6,F9,F10,F12,F15,F17,F19 flagged; F2,F5,F7,F8,F11,F13,F14,F16,F18 clean)"
+    echo "selftest: 22/22 fixtures behaved correctly (F1,F3,F4,F6,F9,F10,F12,F15,F17,F19,F21 flagged; F2,F5,F7,F8,F11,F13,F14,F16,F18,F20,F22 clean)"
     return 0
 }
 
@@ -767,7 +809,7 @@ if ! run_selftest; then
 fi
 
 if [ "$SELFTEST" -eq 1 ]; then
-    echo "PASS — selftest only, 19 fixtures checked, 0 flagged in corpus"
+    echo "PASS — selftest only, 22 fixtures checked, 0 flagged in corpus"
     exit 0
 fi
 

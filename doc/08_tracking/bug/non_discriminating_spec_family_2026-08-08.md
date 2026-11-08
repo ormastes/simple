@@ -492,7 +492,8 @@ cannot open docstrings; both triple quote styles mask their body; code after a
 real closing delimiter survives. It keeps original source positions. The triple
 closing rule matches the actual core lexer (`lexer_struct.scan_string` and
 `scan_raw_string`): triple-string bodies are literal, so a matching delimiter
-closes even after a backslash. Ordinary short-string escapes remain protected.
+closes even after a backslash. The initial 19-fixture revision did not discriminate the new slow-path escape
+branch; the review correction below adds that missing coverage.
 The assertion classifier, finding vocabulary, scan policy and existing baselines
 are unchanged.
 
@@ -530,3 +531,38 @@ findings: baseline 0.16 s / 8,204 KiB max RSS, new 0.18 s / 9,964 KiB. This smal
 signal is not a statistically established performance delta; whole-corpus
 throughput/RSS remains an explicit followup, not a claimed speedup. The exact
 old-pass0 mutant was again rejected against the final revision.
+
+
+## 2026-11-08 review correction — discriminate slow raw/escape branches
+
+Opus source review found no production defect, but returned FAIL because the
+initial 19 fixtures did not execute both `raw_q` and short-string escape branches
+on triple-marker lines. The escaped line took the old fast path, and the raw
+triple fixture bypassed the short-string branch. Those cases were not adequate
+proof of the new branch behavior.
+
+Three valid lexical fixtures now bring the total to 22. Each places an opposite-
+quote triple marker on the same line as the relevant short token, forcing the
+slow path. Double-quoted and single-quoted ordinary strings use an escaped
+matching quote followed by the opposite triple marker; those markers remain
+string data. A short raw `r"C:\"` token closes at its first quote after the
+backslash and is followed by an actual multiline string containing fake
+assertion text. Both quote styles process backslash escapes in the real
+`src/compiler/10.frontend/core/lexer_struct.spl:scan_string`; raw short strings
+and the bare `r` prefix are owned by `scan_raw_string` and `scan_ident`.
+
+The production AWK program is byte-identical to `cdc389ee302`; only selftest
+fixtures/counters/messages and evidence changed. Actual detector selftest:
+22/22 PASS, executed once after the fixture change. Four isolated mutants are
+all rejected with `SELFTEST FAILED` and exit 2: force `raw_q=0`, force `raw_q=1`,
+delete the slow escape branch, and restore the original pass0. The first three
+specifically fail the new F20/F21/F22 assertions; they cannot silently pass via
+the fast path.
+
+Durable final evidence is committed under `.spipe/p2_vacuous_lex_20261108/`:
+`receipt.sdn`, `selftest-cycle3.log`, and the four `*-cycle3.log` mutant outputs.
+Earlier `/tmp` paths above are historical local evidence, not the durable final
+receipt. This still proves shell-detector behavior only. No Simple fixture
+execution, production corpus scan, compiler/native build, or umbrella closure
+is claimed. Required Opus re-review remains pending; the previous FAIL is not
+converted to PASS by these local tests.
