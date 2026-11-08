@@ -1,0 +1,50 @@
+"""HIR infers the arity of a bare `-> tuple` return from the body.
+
+Bug: stage2_bare_tuple_return_type_index_arity_2026-11-07. A bare `-> tuple`
+lowered to HirTypeKind.Tuple([]), so indexing a call result was a fatal MIR
+"tuple index N is out of range for a 0-element tuple". The arity is now taken
+from the widest returned tuple literal (tail or `return`).
+"""
+
+use std.spec.{describe, expect, it}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_definitions.{HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+fn bare_tuple_hir_arity(source: text, fn_name: text) -> i64:
+    """HIR return-tuple arity of `fn_name`, or -1 when not a tuple."""
+    val prior_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP")
+    rt_env_set("SIMPLE_BOOTSTRAP", "1")
+    val parsed = parse_full_frontend(source, "{fn_name}.spl", fn_name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("{fn_name}.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var arity = -1
+    for function_ in hir.functions.values():
+        if function_.name == fn_name:
+            match function_.return_type.kind:
+                case HirTypeKind.Tuple(elems): arity = elems.len()
+                case _: arity = -1
+    if val prior_value = prior_bootstrap:
+        rt_env_set("SIMPLE_BOOTSTRAP", prior_value)
+    else:
+        rt_env_remove("SIMPLE_BOOTSTRAP")
+    arity
+
+describe "bare tuple return arity inference":
+    it "infers arity 2 from a tail tuple literal":
+        expect(bare_tuple_hir_arity("fn bt_tail(a: i64) -> tuple:\n    (a, 2)\n", "bt_tail")).to_equal(2)
+
+    it "infers arity 3 from a return statement":
+        expect(bare_tuple_hir_arity("fn bt_ret(a: i64) -> tuple:\n    return (a, 2, 3)\n", "bt_ret")).to_equal(3)
+
+    it "infers the widest arity across early return and tail":
+        expect(bare_tuple_hir_arity("fn bt_mix(a: i64) -> tuple:\n    if a > 0:\n        return (1, 2)\n    (a, 2, 3)\n", "bt_mix")).to_equal(3)
+
+    it "keeps an explicit tuple annotation untouched":
+        expect(bare_tuple_hir_arity("fn bt_exp(a: i64) -> (i64, i64):\n    (a, 2)\n", "bt_exp")).to_equal(2)
