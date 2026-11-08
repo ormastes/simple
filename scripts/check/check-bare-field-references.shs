@@ -71,8 +71,15 @@ bare_field_spec_verdict_ok() {
                 if (key == "outcome") continue
                 if (key == "declared>" || key == "executed" || key == "passed" || key == "failed" || key == "dropped") {
                     if (value !~ /^[0-9]+$/) bad=1
-                } else if (key == "process_error" || key == "timeout" || key == "unrun" || key == "inconclusive" || key == "in_development" || key == "skipped") {
-                    if (value !~ /^[0-9]+$/ || value+0 != 0) bad=1
+                } else if (key == "unrun") {
+                    if (value !~ /^[01]$/) bad=1
+                } else if (key == "reason") {
+                    # These are the canonical unrun reasons for an observed
+                    # unresolved variable. Other reasons cannot prove this defect.
+                    if (value != "zero-examples" && value != "unresolved-symbol") infrastructure=1
+                } else if (key == "process_error" || key == "timeout" || key == "inconclusive" || key == "in_development" || key == "skipped") {
+                    if (value !~ /^[0-9]+$/) bad=1
+                    else if (value+0 != 0) infrastructure=1
                 } else {
                     # A degraded fallback or future unknown flag cannot qualify
                     # this behavioral leg without an explicit protocol review.
@@ -84,12 +91,22 @@ bare_field_spec_verdict_ok() {
             if (verdicts != 1 || bad) exit 2
             split("outcome declared> executed passed failed dropped", keys, " ")
             for (i=1;i<=6;i++) if (!seen[keys[i]]) exit 2
-            if (values["executed"]+0 <= 0 || values["dropped"]+0 != 0 || values["passed"]+0 + values["failed"]+0 != values["executed"]+0) exit 2
+            if (infrastructure) exit 2
             if (values["outcome"] != "OK" && values["outcome"] != "ERROR") exit 2
             if (child_status != 0 && child_status != 1) exit 2
+            # An import-time compiler rejection is observed product evidence,
+            # even when the runner reports zero execution/dropped/unrun examples.
+            # The canonical unrun emitter uses failed=1 despite executed=0;
+            # the direct driver can use failed=0 for the same semantic rejection.
+            if (semantic_failure) {
+                if (values["executed"]+0 == 0 && values["passed"]+0 == 0 && values["failed"]+0 <= 1 && values["outcome"] == "ERROR") exit 1
+                if (values["executed"]+0 > 0 && values["passed"]+0 + values["failed"]+0 == values["executed"]+0 && values["unrun"]+0 == 0) exit 1
+                exit 2
+            }
+            if (values["executed"]+0 <= 0 || values["dropped"]+0 != 0 || values["unrun"]+0 != 0 || values["passed"]+0 + values["failed"]+0 != values["executed"]+0) exit 2
             # Both current emitters use ERROR for actual assertion failures too.
             # Positive executed/failed counts distinguish those from unrun ERROR.
-            if (values["failed"]+0 > 0 || semantic_failure) exit 1
+            if (values["failed"]+0 > 0) exit 1
             if (child_status != 0 || values["outcome"] != "OK") exit 2
         }
     ' "$2"
@@ -117,7 +134,10 @@ bare_field_admission_selftest() {
     # not a compiler, product suite, or the remaining bare-field migration.
     while IFS='|' read -r st_name st_want st_status st_line; do
         [ -n "$st_name" ] || continue
-        printf '%s\n' "$st_line" > "$st_dir/output"
+        case "$st_name" in
+            semantic-*) printf '%s\n%s\n' "error: semantic: variable 'xlen' not found" "$st_line" > "$st_dir/output" ;;
+            *) printf '%s\n' "$st_line" > "$st_dir/output" ;;
+        esac
         if bare_field_spec_verdict_ok "$st_status" "$st_dir/output" test/example_spec.spl; then st_got=0; else st_got=$?; fi
         st_count=$((st_count + 1))
         if [ "$st_got" -ne "$st_want" ]; then
@@ -144,6 +164,21 @@ inconclusive|2|0|$st_good inconclusive=1
 degraded|2|0|$st_good degraded=standalone-smf-fallback
 unknown-field|2|0|$st_good new_flag=0
 assertion-error-token|1|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=3 executed=3 passed=2 failed=1 skipped=0 dropped=0
+semantic-unrun|1|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples
+semantic-direct|1|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=0 skipped=0 dropped=1
+semantic-unresolved-symbol|1|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-symbol
+ordinary-unrun|2|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples
+semantic-timeout|2|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 timeout=1 reason=zero-examples
+semantic-process-error|2|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 process_error=1 reason=zero-examples
+semantic-inconclusive|2|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 inconclusive=1 reason=zero-examples
+semantic-unknown|2|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 future_flag=0 reason=zero-examples
+semantic-malformed|2|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=oops dropped=1 unrun=1 reason=zero-examples
+semantic-wrong-file|2|1|SPEC FILE VERDICT: test/other_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples
+semantic-no-verdict|2|1|Results: 0 total, 0 passed, 0 failed
+semantic-infra-reason|2|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module
+semantic-exit-signal|2|124|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples
+semantic-degraded|2|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 degraded=fallback reason=zero-examples
+semantic-inconsistent-counts|2|1|SPEC FILE VERDICT: test/example_spec.spl outcome=ERROR declared>=1 executed=0 passed=4 failed=1 dropped=1 unrun=1 reason=zero-examples
 no-verdict|2|0|Results: 3 total, 3 passed, 0 failed
 missing-outcome|2|0|SPEC FILE VERDICT: test/example_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
 EOF
