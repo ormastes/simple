@@ -85,3 +85,55 @@ fn main() -> i64:
 "#;
     assert_eq!(run(source), 42);
 }
+
+/// Text fields built at RUNTIME from distinct allocations (not interned
+/// literals) must compare by content, never by pointer.
+#[test]
+fn runtime_built_text_fields_compare_by_content() {
+    let source = r#"
+class P:
+    x: i64
+    y: text
+
+fn main() -> i64:
+    val p = "a"
+    val q = "b"
+    val a = P(x: 1, y: p + q)
+    val b = P(x: 1, y: "ab")
+    val c = P(x: 1, y: "a" + "b")
+    val d = P(x: 1, y: p + "c")
+    if not (a == b): return 1
+    if a != b: return 2
+    if not (a == c): return 3
+    if a == d: return 4
+    if not (a != d): return 5
+    return 42
+"#;
+    assert_eq!(run(source), 42, "runtime-built equal text fields must compare equal, differing must not");
+}
+
+/// Pins the 8-byte-slot-per-field layout assumption for narrow fields.
+#[test]
+fn mixed_narrow_field_class_equality_and_print() {
+    let source = r#"
+class N:
+    a: u8
+    b: i64
+    c: bool
+
+fn main() -> i64:
+    val x = N(a: 200, b: 123456789012, c: true)
+    val y = N(a: 200, b: 123456789012, c: true)
+    val z = N(a: 200, b: 123456789012, c: false)
+    val w = N(a: 7, b: 123456789012, c: true)
+    if not (x == y): return 1
+    if x != y: return 2
+    if x == z: return 3
+    if x == w: return 4
+    if not (x != w): return 5
+    val s = "{x}"
+    if s != "N(a: 200, b: 123456789012, c: true)": return 6
+    return 42
+"#;
+    assert_eq!(run(source), 42, "narrow fields must keep 8-byte slots under field-wise eq/print");
+}
