@@ -3,7 +3,7 @@
 
 use std.spec.*
 use std.spec.step
-use std.io_runtime.{cwd_process, dir_remove_all, file_exists, file_read_result, file_write_exact, dir_create_all}
+use std.io_runtime.{cwd_process, dir_remove_all, file_exists, file_read_result, file_write_exact, dir_create_all, getpid}
 use compiler.driver.action_graph.persisted_graph.{
     PersistedBuildGraphV1, persisted_graph_digest_v1,
     persisted_graph_encode_v1, persisted_graph_load_current_v1,
@@ -48,8 +48,13 @@ describe "compiler build graph lockless publication":
         val generation_b = persisted_graph_digest_v1(provisional_b)
         val graph_b = PersistedBuildGraphV1(generation_b, "", "snapshot-2", [])
         expect(persisted_graph_publish_v1(root, graph_b)).to_equal("parent-generation-changed")
+        expect(file_exists(root + "/generations/" + generation_b + ".graph")).to_equal(true)
+        expect(file_read_result(root + "/generations/" + generation_b + ".graph").unwrap()).to_equal(
+            persisted_graph_encode_v1(graph_b))
+        expect(file_exists(root + "/CURRENT.tmp.{getpid()}")).to_equal(false)
         step("Retrying the rejected generation must still validate its superseded parent")
         expect(persisted_graph_publish_v1(root, graph_b)).to_equal("parent-generation-changed")
+        expect(file_exists(root + "/CURRENT.tmp.{getpid()}")).to_equal(false)
         expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_a)
 
         step("The owner re-derives from the winner's generation and publishes cleanly")
@@ -59,6 +64,11 @@ describe "compiler build graph lockless publication":
         expect(persisted_graph_publish_v1(root, graph_c)).to_equal("ok")
         expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_c)
         expect(persisted_graph_load_current_v1(root).unwrap().generation).to_equal(generation_c)
+
+        step("Replay of an older successful graph must not report publication or rewind CURRENT")
+        expect(persisted_graph_publish_v1(root, graph_a)).to_equal("parent-generation-changed")
+        expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_c)
+        expect(file_exists(root + "/CURRENT.tmp.{getpid()}")).to_equal(false)
         expect(file_exists(root + "/publication.lock")).to_equal(false)
         dir_remove_all(root)
 

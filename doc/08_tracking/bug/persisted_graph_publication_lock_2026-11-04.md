@@ -65,3 +65,20 @@ claimed. Required verification includes the focused lockless publication and
 host-write specs plus compiler/core/MCP checks under the repo verification
 policy before landing. The original lock-removal source was already present;
 this follow-up does not newly claim that repair.
+
+### Review context and additional regression coverage
+
+At candidate base `e87258dba95a096fb1e2cf63e69651b101a11a15`, a tracked
+`src`, `test`, and `scripts` symbol scan finds no production caller of
+`persisted_graph_publish_v1`: the function is exported by its owner and used
+by the two publication specs. Returning `parent-generation-changed` for an
+older successful generation after a descendant becomes current is deliberate:
+the operation publishes CURRENT, so historical blob existence cannot establish
+that postcondition. A regression explicitly asserts the old replay rejects
+without rewinding CURRENT. The stale-parent regression now also checks its
+blob precondition and removal of CURRENT's staging file after each rejection.
+
+The pre-existing absence of a generations-directory fsync after no-replace
+publication is a separate crash-durability gap. This candidate leaves it
+unchanged; its tracking follow-up is
+`persisted_graph_generation_directory_fsync_gap_2026_11_08.md`.
