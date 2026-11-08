@@ -7,6 +7,7 @@
  * those references real so the linker never has to synthesize stubs.
  */
 
+#include "runtime_crt_file.h"
 #include "runtime.h"
 
 #include <errno.h>
@@ -473,7 +474,7 @@ void spl_panic(const char* msg) {
 
 char* spl_file_read(const char* path) {
     if (!path) return spl_str_new("");
-    FILE* f = fopen(path, "rb");
+    FILE* f = rt_crt_fopen(path, "rb");
     if (!f) return spl_str_new("");
     /* Do NOT size the buffer from fseek(SEEK_END)/ftell(): pseudo-filesystems
      * (procfs, sysfs, etc.) report length 0 for files that generate content
@@ -510,7 +511,7 @@ char* spl_file_read(const char* path) {
 }
 
 int rt_file_write(const char* path, const char* content) {
-    FILE* f = path ? fopen(path, "wb") : NULL;
+    FILE* f = path ? rt_crt_fopen(path, "wb") : NULL;
     if (!f) return 0;
     if (!content) content = "";
     size_t len = strlen(content);
@@ -520,7 +521,7 @@ int rt_file_write(const char* path, const char* content) {
 }
 
 int rt_file_append(const char* path, const char* content) {
-    FILE* f = path ? fopen(path, "ab") : NULL;
+    FILE* f = path ? rt_crt_fopen(path, "ab") : NULL;
     if (!f) return 0;
     if (!content) content = "";
     size_t len = strlen(content);
@@ -541,9 +542,9 @@ int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
 #if defined(_WIN32)
     /* _commit uses FlushFileBuffers, which requires a writable handle.
      * r+b opens the existing file without truncating or rewriting its bytes. */
-    FILE* f = fopen(path, "r+b");
+    FILE* f = rt_crt_fopen(path, "r+b");
 #else
-    FILE* f = fopen(path, "rb");
+    FILE* f = rt_crt_fopen(path, "rb");
 #endif
     if (!f) return 0;
 #if defined(_WIN32)
@@ -596,14 +597,14 @@ int rt_file_create_excl(const char* path, int64_t path_len,
     {
         wchar_t* wide = rt_widen_long_path_rc(path_copy);
         if (wide) {
-            f = _wfopen(wide, L"wbx");
+            f = rt_crt_wfopen(wide, L"wbx");
             free(wide);
         } else {
-            f = fopen(path_copy, "wbx");
+            f = rt_crt_fopen(path_copy, "wbx");
         }
     }
 #else
-    FILE* f = fopen(path_copy, "wbx");
+    FILE* f = rt_crt_fopen(path_copy, "wbx");
 #endif
     if (!f) {
         free(path_copy);
@@ -761,7 +762,7 @@ static int64_t rt_mem_snapshot_status_kib(const char* key) {
     return (int64_t)kp.ki_rssize * (int64_t)sysconf(_SC_PAGESIZE) / 1024;
 #endif
 #else
-    FILE* f = fopen("/proc/self/status", "r"); if (!f) return -1;
+    FILE* f = rt_crt_fopen("/proc/self/status", "r"); if (!f) return -1;
     char line[256]; int64_t value = -1;
     while (fgets(line, sizeof(line), f)) if (strncmp(line, key, strlen(key)) == 0) { value = strtoll(line + strlen(key), NULL, 10); break; }
     fclose(f); return value;
