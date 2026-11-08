@@ -30,6 +30,7 @@
  * simd_text_provider_status() report which route runs.
  */
 
+#include "runtime_crt_file.h"
 #include "runtime_simd_dispatch.h"
 #include "simple_vector_kernel_abi_v1.h"
 #include <stdlib.h>
@@ -353,7 +354,7 @@ static void text_sha256_hex(TextSha256* c, char hex[65]) {
 }
 /* Digest of the artifact's current bytes; 0 if unreadable (never "empty"). */
 static int text_file_sha256(const char* path, char hex[65]) {
-    FILE* f = fopen(path, "rb");
+    FILE* f = rt_crt_fopen(path, "rb");
     if (!f) return 0;
     TextSha256 c; text_sha256_init(&c);
     uint8_t buf[16384]; size_t got;

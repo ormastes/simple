@@ -5,6 +5,7 @@
  * The hash table itself uses raw malloc/realloc (NOT tracked) to avoid recursion.
  */
 
+#include "runtime_crt_file.h"
 #include "runtime_memtrack.h"
 
 #include <stdio.h>
@@ -219,9 +220,9 @@ int64_t spl_memtrack_snapshot(void) {
 void spl_memtrack_dump_since(int64_t snapshot_id, const char* out_path) {
     if (!out_path) return;
 #if defined(_WIN32)
-    FILE* f = fopen(out_path, "wb"); /* explicit binary; "w" text-translates LF->CRLF */
+    FILE* f = rt_crt_fopen(out_path, "wb"); /* explicit binary; "w" text-translates LF->CRLF */
 #else
-    FILE* f = fopen(out_path, "w");
+    FILE* f = rt_crt_fopen(out_path, "w");
 #endif
     if (!f) return;
 

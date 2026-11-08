@@ -8,6 +8,7 @@
 
 #define STBTT_STATIC
 #define STB_TRUETYPE_IMPLEMENTATION
+#include "runtime_crt_file.h"
 #include "stb_truetype.h"
 
 #include <stdint.h>
@@ -74,7 +75,7 @@ int64_t rt_font_load_bytes(int64_t data_ptr, int64_t size) {
 
 int64_t rt_font_load(const char* path) {
     if (!path) return 0;
-    FILE* f = fopen(path, "rb");
+    FILE* f = rt_crt_fopen(path, "rb");
     if (!f) return 0;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
     long size = ftell(f);
