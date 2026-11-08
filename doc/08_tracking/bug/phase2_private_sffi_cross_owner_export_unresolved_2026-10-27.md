@@ -56,3 +56,5 @@ bug open until an isolated original-form producer regression demonstrates that
 private inline helpers cross an explicitly exported module boundary correctly.
 Retire only the linked workaround after that root fix and compatible producer
 evidence; a successful public-facade build does not prove the language bug fixed.
+
+Evidence (2026-11-09): test/01_unit/compiler/driver/source_parse_public_boundary_spec.spl pins the decision (public driver_parse_*_v1 facades exist; selected/streaming/retained consumers use explicit imports, no wildcard import, no consumer SFFI aliases). Run from a worktree of this head (CWD=worktree): GREEN outcome=OK executed=1 passed=1; RED with `pub` removed from driver_parse_exit_v1: outcome=ERROR failed=1. Compile retry of the Phase 2 command still pending (hence verification-pending).
