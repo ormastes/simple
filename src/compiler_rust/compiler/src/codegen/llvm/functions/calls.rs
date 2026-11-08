@@ -448,7 +448,7 @@ impl LlvmBackend {
         // The freestanding/kernel runtime (riscv64-unknown-none, etc.) tags strings
         // with a single-byte object_type == RT_HEAP_STRING (0x01) instead of the
         // hosted 4-byte "STR1" magic (0x53545231). No hosted heap kind uses byte0 == 1
-        // (STRING=0x31, ARRAY=0x02, ENUM=0x04, DICT=0x06), so this extra check is safe
+        // (STRING=0x31, ARRAY=0x02, ENUM=0x04, DICT=0x03), so this extra check is safe
         // on both tiers and lets text.len() reach the len load instead of returning -1.
         let is_string_byte = builder
             .build_int_compare(

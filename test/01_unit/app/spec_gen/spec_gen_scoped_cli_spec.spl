@@ -1,0 +1,63 @@
+"""Regression coverage for scoped spec-gen output and incomplete runs."""
+
+use std.spec
+use std.spec.step
+use std.env.platform.{get_temp_dir}
+use std.io.{time_now_unix_micros}
+use app.spec_gen.main.{extract_spec_doc}
+
+extern fn rt_file_exists_str(path: text) -> bool
+extern fn rt_file_write_text(path: text, contents: text) -> i64
+extern fn rt_getpid() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val SCOPED_PATH = "test/01_unit/app/office"
+
+fn _setup_fixture() -> text:
+    val fixture_dir = get_temp_dir().replace("\\", "/") +
+        "/simple_spec_gen_scoped_cli_{rt_getpid()}_{time_now_unix_micros()}"
+    val _ = rt_process_run("/bin/mkdir", [
+        "-p", fixture_dir + "/" + SCOPED_PATH + "/nested"
+    ])
+    val _written = rt_file_write_text(
+        fixture_dir + "/" + SCOPED_PATH + "/nested/scoped_spec.spl",
+        "describe(\"scoped suite\"):\n    it(\"generates documentation\"):\n        pass\n"
+    )
+    fixture_dir
+
+fn _run_spec_gen(fixture_dir: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + fixture_dir + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/spec_gen/main.spl\" " + SCOPED_PATH
+    ])
+
+describe "spec-gen scoped CLI regressions":
+    it "mirrors paths from the repo test root for scoped invocations":
+        step("generate from a nested scoped directory")
+        val fixture_dir = _setup_fixture()
+        val (_out, _err, code) = _run_spec_gen(fixture_dir)
+        expect(code).to_equal(0)
+        expect(rt_file_exists_str(fixture_dir + "/doc/06_spec/01_unit/app/office/nested/scoped_spec.md")).to_equal(true)
+        expect(rt_file_exists_str(fixture_dir + "/doc/06_spec/scoped_spec.md")).to_equal(false)
+
+    it "extracts every parenthesised spec block form":
+        step("extract parenthesised describe context it and test forms")
+        val source = "describe(\"suite\"):\n    context(\"group\"):\n        it(\"case one\"):\n            pass\n        test(\"case two\"):\n            pass\n"
+        val doc = extract_spec_doc(source, "parenthesised_spec.spl")
+        expect(doc).to_contain("## suite")
+        expect(doc).to_contain("### group")
+        expect(doc).to_contain("- case one")
+        expect(doc).to_contain("- case two")
+
+    it "reports skipped files and exits nonzero instead of claiming success":
+        step("generate with one spec that has no extractable content")
+        val fixture_dir = _setup_fixture()
+        val _written = rt_file_write_text(
+            fixture_dir + "/" + SCOPED_PATH + "/empty_spec.spl",
+            "fn helper():\n    pass\n"
+        )
+        val (out, _err, code) = _run_spec_gen(fixture_dir)
+        expect(code).to_equal(2)
+        expect(out).to_contain("Generated 1 of 2 spec documents")
+        expect(out).to_contain("WARN no spec content extracted, skipped: " + SCOPED_PATH + "/empty_spec.spl")
+        expect(out).to_contain("spec-gen: skipped 1 of 2 spec files")

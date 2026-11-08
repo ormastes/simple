@@ -287,10 +287,18 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
 #define RT_VALUE_SPECIAL_ERROR 0x3ULL
 #define RT_VALUE_HEAP_STRING 0x53545231U
 #define RT_VALUE_HEAP_ARRAY 0x02U
-#define RT_VALUE_HEAP_CLOSURE 0x03U
+/* Keep the small heap-kind bytes identical to the hosted Rust HeapObjectType:
+ * Dict=0x03 and Closure=0x06. RtCoreDict also shares RuntimeDict's len@8,
+ * cap@16 prefix so target-independent inline len decoding cannot confuse a
+ * closure with a dictionary in either runtime. */
+#define RT_VALUE_HEAP_DICT 0x03U
 #define RT_VALUE_HEAP_ENUM 0x04U
-#define RT_VALUE_HEAP_DICT 0x06U
+#define RT_VALUE_HEAP_CLOSURE 0x06U
 #define RT_VALUE_HEAP_MUTEX 0x09U
+_Static_assert(RT_VALUE_HEAP_STRING == 0x53545231U, "RtCore string ABI changed");
+_Static_assert(RT_VALUE_HEAP_ARRAY == 0x02U, "RtCore array tag must match HeapObjectType");
+_Static_assert(RT_VALUE_HEAP_DICT == 0x03U, "RtCore dict tag must match HeapObjectType");
+_Static_assert(RT_VALUE_HEAP_CLOSURE == 0x06U, "RtCore closure tag must match HeapObjectType");
 /* Heap-boxed f64 (lossless container float). The inline TAG_FLOAT form stored
  * only (bits & ~7) | TAG_FLOAT, silently zeroing the low 3 mantissa bits, so a
  * container/Any float lost precision ([0.1][0] != 0.1). Container floats are now
@@ -1537,8 +1545,8 @@ typedef struct RtCoreDict {
     uint8_t flags;
     uint16_t reserved;
     uint32_t transient_scope_id;
-    int64_t cap;       /* power of two */
-    int64_t len;       /* live entries */
+    int64_t len;       /* live entries; shared with RuntimeDict at offset 8 */
+    int64_t cap;       /* power of two; shared with RuntimeDict at offset 16 */
     int64_t tombstones;
     RtCoreDictEntry* entries;
     int64_t read_owner;
@@ -1546,6 +1554,9 @@ typedef struct RtCoreDict {
     int64_t read_backing;
     int64_t next_seq;  /* next insertion stamp (appended: offsets above unchanged) */
 } RtCoreDict;
+
+_Static_assert(offsetof(RtCoreDict, len) == 8, "RtCoreDict len must match RuntimeDict");
+_Static_assert(offsetof(RtCoreDict, cap) == 16, "RtCoreDict cap must match RuntimeDict");
 
 static _Atomic int64_t rt_core_dict_read_owner_counter = 0;
 
