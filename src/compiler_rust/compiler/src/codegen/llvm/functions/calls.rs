@@ -475,12 +475,46 @@ impl LlvmBackend {
         } else {
             len_block
         };
+        let collection_block = self.context_ref().append_basic_block(function, "len_collection");
         builder
-            .build_conditional_branch(is_collection, kind_block, done_block)
+            .build_conditional_branch(is_collection, collection_block, done_block)
             .map_err(|e| crate::error::factory::llvm_build_failed("len type branch", &e))?;
         let type_loaded_block = builder
             .get_insert_block()
             .ok_or_else(|| CompileError::semantic("LLVM len type block missing".to_string()))?;
+
+        // Text: a user-facing `.len()` counts CODE POINTS (ADR-005 item 5), so
+        // the string arm calls rt_string_char_count (ASCII fast path inside)
+        // instead of loading the offset-8 BYTE length; arrays keep the inline
+        // element-count load. Bug:
+        // text_len_bytes_vs_codepoint_index_bound_disagree_2026_11_03.
+        let string_cp_block = self.context_ref().append_basic_block(function, "len_string_cp");
+        builder.position_at_end(collection_block);
+        builder
+            .build_conditional_branch(is_string_any, string_cp_block, kind_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("len string branch", &e))?;
+        builder.position_at_end(string_cp_block);
+        let string_cp_fn = {
+            let module = self.module.borrow();
+            module.get_function("rt_string_char_count").unwrap_or_else(|| {
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                module.add_function("rt_string_char_count", fn_type, None)
+            })
+        };
+        let string_cp_call = builder
+            .build_call(string_cp_fn, &[value.into()], "len_string_cp_call")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_char_count", &e))?;
+        let string_cp_len = string_cp_call
+            .try_as_basic_value()
+            .basic()
+            .unwrap_or_else(|| invalid.into())
+            .into_int_value();
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("len string cp done branch", &e))?;
+        let string_cp_loaded_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM len string cp block missing".to_string()))?;
 
         // FAM dispatch: arrays take the u32 load, strings the u64 load.
         let array_len_block = if fam_arrays {
@@ -542,6 +576,7 @@ impl LlvmBackend {
             phi.add_incoming(&[
                 (&invalid, current_block),
                 (&invalid, type_loaded_block),
+                (&string_cp_len, string_cp_loaded_block),
                 (&len, len_loaded_block),
                 (&array_len, array_len_loaded_block),
             ]);
@@ -556,6 +591,7 @@ impl LlvmBackend {
         phi.add_incoming(&[
             (&invalid, current_block),
             (&invalid, type_loaded_block),
+            (&string_cp_len, string_cp_loaded_block),
             (&len, len_loaded_block),
         ]);
         vreg_map.insert(dest, phi.as_basic_value());

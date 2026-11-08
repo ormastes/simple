@@ -4,7 +4,10 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** FIXED, 2026-11-08. The index already registers aliases from
+`export use`; a new end-to-end selftest fixture now proves that a consumer of
+`AliasAlpha` produces no SYMBOL finding. `sh
+scripts/check/check-dangling-references.shs --selftest` passes 4/4 fixtures.
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` scope)
 **Area:** `scripts/check/check-dangling-references.shs`
 **Severity:** low — false positives only, no missed defects. But it inflates the

@@ -44,11 +44,18 @@ pub(crate) fn get_vreg_or_default<M: Module>(
 /// overlaps hosted `HeapObjectType::Unique`. RtCore and hosted Rust dictionaries
 /// share tag 3 and the `{header, len, capacity}` prefix, while closures use tag
 /// 6 in both runtimes, so the ordinary dict/closure decode needs no target gate.
+///
+/// `string_cp_len` is the declared `rt_string_char_count` func ref. User-facing
+/// `.len()` on text counts CODE POINTS (ADR-005 item 5), so the string arm
+/// calls it instead of loading the offset-8 BYTE length; `None` (baremetal C
+/// cores without that symbol) keeps the byte load. Bug:
+/// text_len_bytes_vs_codepoint_index_bound_disagree_2026_11_03.
 pub(crate) fn inline_runtime_len_value(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,
     baremetal: bool,
     fam_arrays: bool,
+    string_cp_len: Option<cranelift_codegen::ir::FuncRef>,
 ) -> cranelift_codegen::ir::Value {
     let invalid = builder.ins().iconst(types::I64, -1);
     let tag_mask = builder.ins().iconst(types::I64, 7);
@@ -110,6 +117,35 @@ pub(crate) fn inline_runtime_len_value(
     builder.seal_block(type_block);
 
     builder.switch_to_block(len_block);
+    // Text: code-point count via the runtime (ASCII fast path inside it);
+    // arrays/dicts fall through to the inline offset-8 element count.
+    if let Some(cp_len_ref) = string_cp_len {
+        let cp_block = builder.create_block();
+        let other_block = builder.create_block();
+        builder.ins().brif(is_string, cp_block, &[], other_block, &[]);
+        builder.seal_block(len_block);
+
+        builder.switch_to_block(cp_block);
+        let cp_call = adapted_call(builder, cp_len_ref, &[value]);
+        let cp_len = builder.inst_results(cp_call)[0];
+        builder.ins().jump(done_block, &[cp_len]);
+        builder.seal_block(cp_block);
+
+        builder.switch_to_block(other_block);
+        let len = if fam_arrays {
+            let len32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 8);
+            builder.ins().uextend(types::I64, len32)
+        } else {
+            builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8)
+        };
+        builder.ins().jump(done_block, &[len]);
+        builder.seal_block(other_block);
+
+        builder.switch_to_block(done_block);
+        let result = builder.block_params(done_block)[0];
+        builder.seal_block(done_block);
+        return result;
+    }
     // On FAM-array baremetal targets (aarch64/arm32/x86_32 C runtimes) the
     // offset-8 length is a `u32` for arrays AND dicts
     // (`RuntimeMap{u32 len; u32 cap; keys*; values*}`), while RuntimeString
@@ -142,6 +178,20 @@ pub(crate) fn inline_runtime_len_value(
     let result = builder.block_params(done_block)[0];
     builder.seal_block(done_block);
     result
+}
+
+/// Declared `rt_string_char_count` for `inline_runtime_len_value`: the text arm of a
+/// user-facing `.len()` counts code points (ADR-005 item 5). `None` on baremetal
+/// targets, whose C cores do not define the symbol (byte load kept there).
+pub(crate) fn string_cp_len_ref<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+) -> Option<cranelift_codegen::ir::FuncRef> {
+    if ctx.baremetal {
+        return None;
+    }
+    let id = *ctx.runtime_funcs.get("rt_string_char_count")?;
+    Some(ctx.module.declare_func_in_func(id, builder.func))
 }
 
 pub(crate) fn inline_runtime_array_len_value(

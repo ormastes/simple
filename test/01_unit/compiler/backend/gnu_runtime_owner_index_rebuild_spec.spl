@@ -1,0 +1,30 @@
+# Regression: BUG-GNU-PHASE2-HOST-ALIAS-LINK-20261027.
+# After ceding C-owned COFF definitions, the GNU archive's old ar symbol index
+# still advertised removed symbols (e.g. ___chkstk_ms / host aliases) and made
+# ld.lld pull members whose bodies no longer exist. `llvm-ar s` alone may keep
+# that stale index; a no-member `rDs` rewrite rebuilds it. Root fix: 79261e409e9.
+use std.spec
+use std.io_runtime.{file_read}
+
+val OWNER_SRC = "src/compiler/70.backend/backend/llvm_native_link_runtime_owner.spl"
+
+describe "GNU runtime-owner projection rebuilds the archive symbol index":
+    it "rebuilds the index with a full deterministic rewrite (rDs), not s alone":
+        val src = file_read(OWNER_SRC)
+        expect(src.contains("process_run(archiver, [\"rDs\", staged])")).to_equal(true)
+        expect(src.contains("process_run(archiver, [\"s\"")).to_equal(false)
+        expect(src.contains("process_run(archiver, [\"sD\"")).to_equal(false)
+
+    it "fails closed when the index rebuild fails":
+        val src = file_read(OWNER_SRC)
+        expect(src.contains("GNU index rebuild failed")).to_equal(true)
+
+    it "binds the index mode and archiver hash into the cache identity":
+        val src = file_read(OWNER_SRC)
+        expect(src.contains("runtime-owner-gnu-c-v2;abi-v1;index=rDs;")).to_equal(true)
+        expect(src.contains("identity = identity + \";\" + archiver_digest")).to_equal(true)
+
+    it "uses the archiver from the selected Clang install, never an ambient ar":
+        val src = file_read(OWNER_SRC)
+        expect(src.contains("_runtime_owner_dir_of(cc) + \"/llvm-ar\"")).to_equal(true)
+        expect(src.contains("GNU index rebuild requires an absolute Clang CC")).to_equal(true)

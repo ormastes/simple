@@ -39,3 +39,15 @@ syntax against the repaired Rust parser. Retire the source workaround only
 after the affected fresh producer accepts the original form, required compiler
 admission succeeds, and the removal is separately reviewed. A parser unit test
 or fetched repair alone does not authorize retirement or Phase 3 qualification.
+
+## Re-verification 2026-11-08 (fix-lane)
+
+Premise check on origin/release/1.0.0: the Rust parser repair `9fc4b70a52c`
+is an ancestor; `parser_impl/core.rs` statement dispatch no longer routes
+`context <cmp>` to `parse_context`, and prevention tests
+`src/compiler_rust/parser/tests/context_statement_comparisons.rs` and
+`leading_comparison_continuation.rs` cover the original tail for all six
+comparison operators plus the context DSL. The `return` source workaround
+(`595121105c3`) is no longer present in `src/compiler` (no `context != ""`
+tail remains). Status: fix-implemented-verification-pending; native
+verification of a fresh producer is still required before `fixed`.

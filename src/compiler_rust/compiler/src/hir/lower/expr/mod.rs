@@ -1772,6 +1772,30 @@ impl Lowerer {
                             ty: TypeId::CHAR,
                         }));
                     }
+                    // Nullable text. `text?` reaches here either as a source
+                    // Optional over STRING or already flattened to STRING (the
+                    // text slot is itself nullable, and no `impl text` exists
+                    // that could own `unwrap`). Either way the payload is a
+                    // text, so the result MUST be typed STRING and lowered to
+                    // the builtin checked unwrap. Left on the generic path it
+                    // was typed ANY; a chained text method
+                    // (`digest.byte_at(i)`) then could not be routed to
+                    // `rt_string_byte_at` in MIR and the LLVM suffix-match
+                    // fallback bound it to an unrelated same-leaf user method
+                    // (`StrictSdnReaderV1.byte_at`), so the rebuilt stage2
+                    // AV'd in every native-build worker.
+                    // doc/08_tracking/bug/stage2_new3_native_build_worker_av_c01_2026-11-07.md
+                    if receiver.ty == TypeId::STRING
+                        || self.module.types.optional_inner(receiver.ty) == Some(TypeId::STRING)
+                    {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_trap".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: TypeId::STRING,
+                        }));
+                    }
                     let nullable_named_inner = match self.module.types.get(receiver.ty) {
                         Some(HirType::Pointer { inner, .. })
                             if matches!(self.module.types.get(*inner), Some(HirType::Struct { .. } | HirType::Enum { .. })) => Some(*inner),
@@ -2338,6 +2362,15 @@ impl Lowerer {
                 "starts_with" | "ends_with" => Some(TypeId::BOOL),
                 "rfind" | "last_index_of" => Some(TypeId::I64),
                 "find" if hir_args.len() == 1 && !self.is_callable_arg(&hir_args[0]) => Some(TypeId::I64),
+                // `byte_len`/`char_count` exist only on text and return a raw
+                // i64 (`rt_string_len` / `rt_string_char_count`). #7174 added
+                // them to the STRING-receiver table above but not here, so on
+                // an erased receiver `val n = value.byte_len()` stayed ANY and
+                // the raw word was misdecoded (20 -> `<value:0x14>`, 1 -> nil,
+                // `a - b` -> a float), making `while start <= a - b` never
+                // terminate. Bug row:
+                // seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09.
+                "byte_len" | "char_count" if hir_args.is_empty() => Some(TypeId::I64),
                 // "length" synonym — see the string-methods comment above.
                 "len" | "length" | "size" => Some(TypeId::I64),
                 "keys" => Some(match dict_kv {

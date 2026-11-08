@@ -41,6 +41,18 @@ pub struct PlatformLinkConfig {
 }
 
 impl PlatformLinkConfig {
+    /// True when the final link, with `unresolved_symbol_flags` applied, leaves
+    /// an undefined symbol in the binary (ELF `--unresolved-symbols=ignore-all`,
+    /// Mach-O `-undefined dynamic_lookup`) instead of failing. A COFF link
+    /// (lld-link, ld.lld `-m i386pep`) has no such flag here and rejects every
+    /// undefined symbol, so an undefined-symbol preflight that models a NULL
+    /// GOT slot does not apply there.
+    pub fn tolerates_unresolved_symbols(&self) -> bool {
+        self.unresolved_symbol_flags
+            .iter()
+            .any(|flag| flag.contains("--unresolved-symbols=ignore") || flag.contains("-undefined,dynamic_lookup"))
+    }
+
     /// Get the link configuration for the host platform.
     pub fn for_host() -> Self {
         Self::for_target(&Target::host())
@@ -371,6 +383,17 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coff_links_do_not_tolerate_unresolved_symbols() {
+        // ELF/Mach-O leave an undefined symbol as a NULL slot; both COFF lanes
+        // fail the link instead, so the NULL-GOT preflight must defer to them.
+        assert!(PlatformLinkConfig::linux().tolerates_unresolved_symbols());
+        assert!(PlatformLinkConfig::freebsd().tolerates_unresolved_symbols());
+        assert!(PlatformLinkConfig::macos().tolerates_unresolved_symbols());
+        assert!(!PlatformLinkConfig::windows().tolerates_unresolved_symbols());
+        assert!(!PlatformLinkConfig::windows_mingw().tolerates_unresolved_symbols());
+    }
 
     #[test]
     fn trampoline_quotes_digit_start_target() {

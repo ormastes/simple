@@ -3446,6 +3446,21 @@ impl LlvmBackend {
                                 if !owner_ok {
                                     matches.clear();
                                 }
+                            } else if !dotted_name.contains('.')
+                                && vreg_types.get(receiver).copied().map_or(true, |t| {
+                                    t == crate::hir::TypeId::ANY || t == crate::hir::TypeId::UNKNOWN
+                                })
+                            {
+                                // A BARE leaf on an ERASED receiver carries no owner
+                                // proof at all: neither the name nor the type names a
+                                // class. Binding the sole same-leaf/same-arity user
+                                // method made a text/array receiver run as that class
+                                // (c01 AV reading 0x48 in `StrictSdnReaderV1.byte_at`).
+                                // Fail closed: the call falls through to the bare
+                                // extern below, which links only if a real `leaf`
+                                // symbol exists, never to a guessed method.
+                                // doc/08_tracking/bug/llvm_suffix_match_fallback_binds_untyped_receiver_to_user_method_2026-11-08.md
+                                matches.clear();
                             }
                         }
                         match matches.len() {
@@ -5875,6 +5890,71 @@ mod tests {
             assert_eq!(ir.matches("inteldialect").count(), if dialect == AsmDialect::Intel { 3 } else { 0 }, "{ir}");
             assert_eq!(ir.matches("asm sideeffect").count(), 3, "{ir}");
         }
+    }
+
+    /// llvm_suffix_match_fallback_binds_untyped_receiver_to_user_method_2026-11-08:
+    /// compiles a user method `lib__x__Reader.peek_word(self, offset)` and a
+    /// probe calling `func_name` on a receiver of type `ty`; returns the IR.
+    fn leaf_call_on_receiver_ir(ty: crate::hir::TypeId, func_name: &str) -> Result<String, CompileError> {
+        let backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("suffix_owner_gate").unwrap();
+        let mut user = MirFunction::new(
+            "lib__x__Reader.peek_word".to_string(), crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        for name in ["self", "offset"] {
+            user.params.push(MirLocal {
+                name: name.to_string(), ty: crate::hir::TypeId::I64,
+                kind: LocalKind::Parameter, is_ghost: false,
+            });
+        }
+        user.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&user).unwrap();
+        let mut probe = MirFunction::new(
+            "probe".to_string(), crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        probe.params.push(MirLocal {
+            name: "receiver".to_string(), ty,
+            kind: LocalKind::Parameter, is_ghost: false,
+        });
+        probe.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(1), value: 0 });
+        probe.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(2)), receiver: VReg(0), func_name: func_name.to_string(), args: vec![VReg(1)],
+        });
+        probe.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+        backend.compile_function(&probe)?;
+        backend.get_ir()
+    }
+
+    fn probe_body(ir: &str) -> &str {
+        &ir[ir.find("@probe(").expect("probe emitted")..]
+    }
+
+    #[test]
+    fn erased_receiver_bare_leaf_is_not_bound_to_sole_user_method() {
+        for ty in [crate::hir::TypeId::ANY, crate::hir::TypeId::UNKNOWN] {
+            let ir = leaf_call_on_receiver_ir(ty, "peek_word").unwrap();
+            assert!(
+                !probe_body(&ir).contains("lib__x__Reader.peek_word"),
+                "erased receiver ({ty:?}) must not be statically bound by leaf+arity:\n{ir}"
+            );
+        }
+    }
+
+    #[test]
+    fn primitive_receiver_bare_leaf_is_not_bound_to_user_method() {
+        // A typed builtin receiver fails the build loudly (pre-existing gate).
+        match leaf_call_on_receiver_ir(crate::hir::TypeId::STRING, "peek_word") {
+            Ok(ir) => assert!(!probe_body(&ir).contains("lib__x__Reader.peek_word"), "{ir}"),
+            Err(e) => assert!(format!("{e:?}").contains("peek_word"), "{e:?}"),
+        }
+    }
+
+    #[test]
+    fn owner_qualified_name_still_binds_the_user_method() {
+        let ir = leaf_call_on_receiver_ir(crate::hir::TypeId::ANY, "lib__x__Reader.peek_word").unwrap();
+        assert!(probe_body(&ir).contains("lib__x__Reader.peek_word"), "{ir}");
     }
 
 }

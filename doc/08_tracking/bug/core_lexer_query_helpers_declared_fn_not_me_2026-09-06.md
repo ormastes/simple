@@ -1,7 +1,12 @@
 # CoreLexer query helpers declared `fn`, not the `me` receiver the spec expects; a documenting comment is missing
 
 - **Filed:** 2026-09-06
-- **Status:** OPEN
+- **Status:** FIXED, 2026-11-08 using Reading B. The `fn` value-copy receiver
+  is the tighter intended capability for all 13 query helpers; the spec now
+  asserts `fn` rather than `me`. The scratch comment explicitly documents the
+  caller's value copy, and the facade assertion follows the current
+  `core_lexer_char_slice` wrapper. An independent source-contract check passes
+  all 13 receiver assertions plus every snapshot/tuple/scratch assertion.
 - **Area:** compiler / frontend lexer — `src/compiler/10.frontend/core/lexer_struct.spl`
 - **Spec:** `test/01_unit/compiler/lexer/core_lexer_receiver_capability_source_spec.spl`
 

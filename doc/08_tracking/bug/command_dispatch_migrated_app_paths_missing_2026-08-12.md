@@ -4,7 +4,13 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — real drift, deliberately left RED in the spec.
+**Status:** FIXED, 2026-11-08. The spec now performs real
+`rt_file_exists_str` assertions for all 12 entrypoints instead of checking
+string literals against themselves. `fmt` and `lint` target the actual
+`src/app/cli/lint_entry.spl` dispatcher, and retired `depgraph` references are
+updated to `src/app/deps/main.spl` / `SIMPLE_DEPS_RUST`. A mechanical check
+confirmed all 12 paths are tracked production files and all 12 assertions use
+the real filesystem extern.
 
 `test/01_unit/app/tooling/command_dispatch_spec.spl` documented 12 commands as
 migrated to Simple apps dispatched at `src/app/<tool>/main.spl`, but its
