@@ -9019,6 +9019,12 @@ impl MirLowering:
                     case _:
                         ()
         var indirect_return: HirType? = nil
+        # The declared callable signature of a typed binding or field chain
+        # (`(port.execute_fn)(x)`). Retained whole: the projected callee local
+        # may reach emission without a HIR type and enum_match_expr_type has
+        # no Field arm, so this is the only proof of the field's signature and
+        # of its aggregate return owner (bug runner_callback_field_owner_2026_10_11).
+        var declared_callable: HirType? = nil
         if not is_direct:
             if val callable_type = self.receiver_declared_type(callee):
                 match callable_type.kind:
@@ -9031,6 +9037,7 @@ impl MirLowering:
                             return self.builder.emit_const_int(0)
                         call_param_types = typed_params
                         indirect_return = Some(typed_return)
+                        declared_callable = Some(callable_type)
                     case _: ()
         if not is_direct and indirect_return == nil:
             if val callable_type = self.enum_match_expr_type(callee):
@@ -9392,6 +9399,20 @@ impl MirLowering:
         var function_type = self.find_local_hir_type(callee_local.id)
         if not function_type.?:
             function_type = self.enum_match_expr_type(callee)
+        # A projected callback field whose local carries no callable type
+        # (or an erased word type) calls under its declared field signature;
+        # that is what proves the indirect return owner for `.status` reads.
+        var callee_type_is_callable = false
+        if val recovered_callable = function_type:
+            match recovered_callable.kind:
+                case HirTypeKind.Function(_, _, _): callee_type_is_callable = true
+                case HirTypeKind.Optional(recovered_inner):
+                    match recovered_inner.kind:
+                        case HirTypeKind.Function(_, _, _): callee_type_is_callable = true
+                        case _: ()
+                case _: ()
+        if not callee_type_is_callable and declared_callable.?:
+            function_type = declared_callable
         # `if val cb = self.opt_fn:` binds the raw Option word and keeps its
         # declared `Option<fn(..) -> R>` type; the present edge already ran.
         # Call the payload under the inner signature (rt_unwrap_or_self reads
