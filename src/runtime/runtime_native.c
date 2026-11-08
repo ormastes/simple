@@ -40,6 +40,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include "runtime_crt_file.h"
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
+#include "runtime_env_owned.h"
 #include "runtime_startup_args.h"
 #include "runtime_utf8_lossy_private.h"
 #include "platform/runtime_windows_private_atomic.h"
@@ -3430,7 +3431,7 @@ int8_t rt_transient_heap_promote(int64_t value) {
     }
     int ok = root_class == 1 &&
         rt_core_transient_add(&plan, value) == 1;
-    if (!ok && getenv("SIMPLE_TRANSIENT_PROMOTE_DEBUG")) {
+    if (!ok && rt_env_present("SIMPLE_TRANSIENT_PROMOTE_DEBUG")) {
         fprintf(stderr, "[transient-promote] root refused: value=0x%016llx class=%d heap=%d\n",
                 (unsigned long long)(uint64_t)value, root_class, (int)rt_core_is_heap(value));
     }
@@ -9948,8 +9949,10 @@ int8_t rt_rc_share(int64_t value) {
     if (core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr)) { ok = 1; goto out; }
     if (root.kind == RT_VALUE_HEAP_STRING &&
             (((RtCoreString*)root.ptr)->reserved & RT_CORE_STRING_FLAG_SHARED)) goto out;
-    const char* check = getenv("SIMPLE_RC_CYCLE_CHECK");
-    if (check && check[0] == '1' && core_rc_has_cycle(root) != 0) goto out;
+    char* check = rt_env_owned("SIMPLE_RC_CYCLE_CHECK");
+    int check_cycle = check && check[0] == '1';
+    free(check);
+    if (check_cycle && core_rc_has_cycle(root) != 0) goto out;
     if (core_rc_collect(root, core_rc_active_scope(), &owned, NULL) &&
             core_rc_set_insert(&rt_core_rc_table, (uintptr_t)root.ptr, 1)) {
         for (size_t i = 0; i < owned.len; i++) {
@@ -13831,8 +13834,9 @@ int64_t rt_typed_bytes_u8_data_at(int64_t data_ptr, int64_t index) {
 static int rt_bucket2_mem_attr_gate = -1; /* -1 unresolved, 0 off, 1 on */
 int64_t rt_mem_attr_enabled(void) {
     if (rt_bucket2_mem_attr_gate < 0) {
-        const char* v = getenv("SIMPLE_MEM_ATTR");
+        char* v = rt_env_owned("SIMPLE_MEM_ATTR");
         rt_bucket2_mem_attr_gate = (v && strcmp(v, "1") == 0) ? 1 : 0;
+        free(v);
     }
     return rt_bucket2_mem_attr_gate;
 }
@@ -16660,15 +16664,18 @@ int64_t rt_lexer_source_slice(int64_t start, int64_t end) {
 int64_t rt_env_get_i64(const uint8_t* key_ptr, uint64_t key_len, int64_t default_value) {
     char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
     if (!key) return default_value;
-    const char* value = getenv(key);
+    char* value = rt_env_owned(key);
     if (!value || value[0] == '\0') {
+        free(value);
         free(key);
         return default_value;
     }
     char* end = NULL;
     long long parsed = strtoll(value, &end, 10);
     free(key);
-    return end == value ? default_value : (int64_t)parsed;
+    int64_t result = end == value ? default_value : (int64_t)parsed;
+    free(value);
+    return result;
 }
 
 #if defined(_WIN32)
@@ -16812,12 +16819,17 @@ extern char** environ;
 /* env_process.rs: rt_env_home() -> RuntimeValue (nil if HOME/USERPROFILE
  * unset). Zero-arg call, confirmed at every call site (mod_748/798/832/840). */
 int64_t rt_env_home(void) {
-    const char* home = getenv("HOME");
+    char* home = rt_env_owned("HOME");
 #if defined(_WIN32)
-    if (!home || home[0] == '\0') home = getenv("USERPROFILE");
+    if (!home || home[0] == '\0') {
+        free(home);
+        home = rt_env_owned("USERPROFILE");
+    }
 #endif
-    if (!home || home[0] == '\0') return rt_core_nil();
-    return rt_string_new((const uint8_t*)home, (uint64_t)strlen(home));
+    int64_t result = (!home || home[0] == '\0') ? rt_core_nil() :
+        rt_string_new((const uint8_t*)home, (uint64_t)strlen(home));
+    free(home);
+    return result;
 }
 
 /* env_process.rs rt_env_all/rt_env_vars: array of (key, value) 2-tuples,
@@ -18387,9 +18399,10 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
  * the Win32 error instead; this runs only on a path that is already failing.
  * Set SIMPLE_QUIET_SECURE_TEMP_DIAG=1 to silence. */
 static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
-    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
+    DWORD error = GetLastError();
+    if (rt_env_present("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
     fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
-            stage, (unsigned long)GetLastError(), detail ? detail : "");
+            stage, (unsigned long)error, detail ? detail : "");
     fflush(stderr);
 }
 #endif
@@ -19159,8 +19172,12 @@ int64_t rt_io_file_close_value(int64_t fd) {
 int64_t rt_env_temp(void) {
     static const char* const keys[] = {"TMPDIR", "TMP", "TEMP"};
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
-        const char* v = getenv(keys[i]);
-        if (v) return rt_string_new((const uint8_t*)v, (uint64_t)strlen(v));
+        char* v = rt_env_owned(keys[i]);
+        if (v) {
+            int64_t result = rt_string_new((const uint8_t*)v, (uint64_t)strlen(v));
+            free(v);
+            return result;
+        }
     }
 #if defined(_WIN32)
     return rt_string_new((const uint8_t*)"/c/Temp", 7);
@@ -20853,13 +20870,20 @@ static int simple_startup_load_aspect_spec(const char *spec) {
 }
 
 int __simple_startup_before_main(int argc, char **argv) {
-    const char *spec = getenv(SIMPLE_STARTUP_ASPECT_ENV);
+    char *spec = NULL;
+    if (rt_env_snapshot(SIMPLE_STARTUP_ASPECT_ENV, &spec) != 0) {
+        fprintf(stderr, "simple runtime: unable to read %s.\n",
+                SIMPLE_STARTUP_ASPECT_ENV);
+        return 1;
+    }
     const char *option = "--startup-extension";
     size_t option_len = strlen(option);
     int i;
 
     /* Stable order: environment list first, then argv from left to right. */
-    if (simple_startup_load_aspect_spec(spec) != 0) return 1;
+    int env_result = simple_startup_load_aspect_spec(spec);
+    free(spec);
+    if (env_result != 0) return 1;
     for (i = 1; i < argc; i++) {
         const char *arg = argv[i];
         const char *path = NULL;
