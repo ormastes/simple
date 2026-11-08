@@ -416,26 +416,45 @@ pub(crate) fn compiler_accepts_target_flag(compiler: &str) -> bool {
     compiler.to_ascii_lowercase().contains("clang")
 }
 
-/// C11-atomics flags required by the MSVC-style drivers, and by nobody else.
+/// Whether the compiler accepts CL-style compile and output arguments.
+fn msvc_style_c_driver(cc: &str) -> bool {
+    let normalized = cc.replace('\\', "/");
+    let base = normalized.rsplit('/').next().unwrap_or(cc);
+    matches!(base.to_ascii_lowercase().as_str(), "cl" | "cl.exe" | "clang-cl" | "clang-cl.exe")
+}
+
+/// Runtime C codegen switches, selected by driver syntax rather than target ABI.
+fn core_c_codegen_flags(cc: &str) -> &'static [&'static str] {
+    if msvc_style_c_driver(cc) {
+        // Windows SEH unwind data is mandatory; GNU PIC/unwind flags do not apply.
+        &["-c", "-O1", "-Gy", "-Gw", "-GS-"]
+    } else {
+        &["-c", "-Os", "-ffunction-sections", "-fdata-sections", "-fno-unwind-tables",
+          "-fno-asynchronous-unwind-tables", "-fno-stack-protector", "-fPIC", "-std=gnu11"]
+    }
+}
+
+/// C11-atomics flags required by the selected C driver.
 ///
 /// Measured 2026-09-06 (cl 19.44.35207, MSVC 2022 14.44): without BOTH
 /// `-std:c11` and `-experimental:c11atomics`, cl.exe stops at
 /// `fatal error C1189: "C atomics require C11 or later"` inside
 /// `<vcruntime_c11_stdatomic.h>` before it ever reaches a runtime source, so
 /// `runtime.c` / `runtime_native.c` cannot compile at all. With both, they
-/// compile clean (the GNU-shaped `-f*` / `-std=gnu11` flags around them are
-/// merely ignored with `warning D9002`). clang-cl 18.1.8 accepts both too --
-/// it needs neither, and reports `-experimental:c11atomics` as unused -- so
-/// one flag set covers both MSVC drivers.
+/// compile clean. clang-cl needs C11 mode, but reports the cl.exe-only
+/// experimental flag as unused, so keep that switch exclusive to cl.exe.
 ///
 /// Gated on the compiler BINARY, not on `LinkerFlavor::Msvc`: that flavor can
 /// also resolve to plain `clang` (see `MSVC_C_COMPILERS` in `cc_detect`),
 /// whose GNU driver rejects `-std:c11`. Every gcc/clang lane on Linux/macOS
 /// gets an empty slice, so their argument vectors stay byte-identical.
 fn msvc_c11_atomics_flags(cc: &str) -> &'static [&'static str] {
-    let base = Path::new(cc).file_name().and_then(|n| n.to_str()).unwrap_or(cc);
-    if simple_common::platform::cc_detect::is_msvc_compiler(cc) || base.contains("clang-cl") {
+    let normalized = cc.replace('\\', "/");
+    let base = normalized.rsplit('/').next().unwrap_or(cc);
+    if matches!(base.to_ascii_lowercase().as_str(), "cl" | "cl.exe") {
         &["-std:c11", "-experimental:c11atomics"]
+    } else if msvc_style_c_driver(cc) {
+        &["-std:c11"]
     } else {
         &[]
     }
@@ -774,7 +793,7 @@ fn build_c_runtime_library(
     // successfully while no .obj appears at the requested path, and the
     // failure surfaces much later and far from its cause, at the archive
     // step: `llvm-ar: runtime_native.obj: no such file or directory`.
-    let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+    let msvc = msvc_style_c_driver(&cc);
     let sqlite_include = if include_stage4_hosted { stage_windows_sqlite_header_include(build_dir) } else { None };
     // Host C translation units compile independently; run them across the
     // rayon pool (sized by --threads, default = host parallelism) instead of
@@ -796,28 +815,7 @@ fn build_c_runtime_library(
                         command.arg(format!("-I{}", include.display()));
                     }
                 }
-                if msvc {
-                    command
-                        .arg("-c")
-                        .arg("-O1")   // -Os: optimise for size
-                        .arg("-Gy")   // -ffunction-sections
-                        .arg("-Gw")   // -fdata-sections
-                        .arg("-GS-"); // -fno-stack-protector
-                    // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
-                    // code is position-independent by construction and SEH unwind data
-                    // is not optional there.
-                } else {
-                    command
-                        .arg("-c")
-                        .arg("-Os")
-                        .arg("-ffunction-sections")
-                        .arg("-fdata-sections")
-                        .arg("-fno-unwind-tables")
-                        .arg("-fno-asynchronous-unwind-tables")
-                        .arg("-fno-stack-protector")
-                        .arg("-fPIC")
-                        .arg("-std=gnu11");
-                }
+                command.args(core_c_codegen_flags(&cc));
                 if let Some(define) = piped_observer.c_define() {
                     command.arg(define);
                 }
@@ -986,33 +984,12 @@ fn build_sqlite_runtime_object_with_include(build_dir: &Path, sqlite_include: Op
     // archive step failed with `llvm-ar: runtime_native.obj: no such file or
     // directory` AFTER every translation unit had compiled successfully. Give
     // MSVC its own spelling of the same intent; the GNU branch is unchanged.
-    let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+    let msvc = msvc_style_c_driver(&cc);
     let mut command = std::process::Command::new(&cc);
     if let Some(include) = sqlite_include {
         command.arg(format!("-I{}", include.display()));
     }
-    if msvc {
-        command
-            .arg("-c")
-            .arg("-O1")   // -Os: optimise for size
-            .arg("-Gy")   // -ffunction-sections
-            .arg("-Gw")   // -fdata-sections
-            .arg("-GS-"); // -fno-stack-protector
-        // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
-        // code is position-independent by construction, and SEH unwind data is
-        // not optional there.
-    } else {
-        command
-            .arg("-c")
-            .arg("-Os")
-            .arg("-ffunction-sections")
-            .arg("-fdata-sections")
-            .arg("-fno-unwind-tables")
-            .arg("-fno-asynchronous-unwind-tables")
-            .arg("-fno-stack-protector")
-            .arg("-fPIC")
-            .arg("-std=gnu11");
-    }
+    command.args(core_c_codegen_flags(&cc));
     let status = command
         .args(msvc_c11_atomics_flags(&cc))
         .arg("-DSIMPLE_CORE_C_STANDALONE=1")
