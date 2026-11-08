@@ -24,12 +24,53 @@ describe "MIR local-symbol index is mirrored into local_map":
         expect(body.len() > 0).to_equal(true)
         expect(body).to_contain("self.local_map[symbol_id] = local")
 
-    it "find_local falls back to local_map after an index miss":
+    it "find_local consults local_map BEFORE the hashed [i64] index":
+        # 2026-11-08: a mirror consulted only after an index MISS cannot catch
+        # an index HIT that is a silent alias (ids read back decoded twice,
+        # 8 -> 1, so `local_symbol_ids[slot] == symbol_id` matches the wrong
+        # binding). The mirror is written by every bind_local, so it is
+        # authoritative and must be asked first.
         val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
         val body = fn_body(src, "fn find_local(symbol_id: i64) -> LocalId:", "fn hir_type_mentions_type_param(")
         expect(body.len() > 0).to_equal(true)
-        expect(body).to_contain("if self.local_map.has(symbol_id):")
-        expect(body).to_contain("return self.local_map[symbol_id]")
+        val mirror_at = body.index_of("if self.local_map.has(symbol_id):")
+        val index_at = body.index_of("self.local_symbol_slot(symbol_id)")
+        expect(mirror_at >= 0).to_equal(true)
+        expect(index_at >= 0).to_equal(true)
+        expect(mirror_at < index_at).to_equal(true)
+        expect(body).to_contain("@workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03")
+
+    it "find_local binds the mirrored LocalId to a typed local (no struct bracket-read in return position)":
+        val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
+        val body = fn_body(src, "fn find_local(symbol_id: i64) -> LocalId:", "fn hir_type_mentions_type_param(")
+        expect(body).to_contain("val mirrored: LocalId = self.local_map[symbol_id]")
+        expect(body.contains("return self.local_map[symbol_id]")).to_equal(false)
+
+    it "a rollback tombstone (id < 0) in the mirror falls through to the index":
+        val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
+        val body = fn_body(src, "fn find_local(symbol_id: i64) -> LocalId:", "fn mirror_binding(")
+        expect(body).to_contain("if mirrored.id >= 0:")
+        expect(src).to_contain("fn mirror_binding(symbol_id: i64) -> LocalId:")
+        expect(src).to_contain("me restore_mirror_bindings(syms: [i64], prevs: [LocalId]):")
+
+    it "every wholesale array rollback site rolls the mirror back too":
+        # With the mirror consulted first, the overlay/param/comprehension
+        # bindings that bind_local writes into local_map inside a rollback
+        # window must be restored with the arrays, or the enclosing scope
+        # would keep seeing the inner binding after the window closes.
+        val calls = file_read("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
+        val named_lambda = fn_body(calls, "me try_inline_lambda_call(symbol: SymbolId, args: [HirCallArg]) -> LocalId?:", "me lower_inline_lambda_with_locals(")
+        val inline_lambda = fn_body(calls, "me lower_inline_lambda_with_locals(", "me lower_iife_call(")
+        val extras = file_read("src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl")
+        val comprehension = fn_body(extras, "# The comprehension variable is scoped to the comprehension.", "var value_array_hir: HirType? = nil")
+        for body in [named_lambda, inline_lambda, comprehension]:
+            expect(body.len() > 0).to_equal(true)
+            expect(body).to_contain("@workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03")
+            expect(body).to_contain("self.mirror_binding(")
+            val restore_at = body.index_of("self.restore_mirror_bindings(rollback_syms, rollback_prev)")
+            val arrays_at = body.index_of("self.local_symbol_index_slots = saved_index_slots")
+            expect(arrays_at >= 0).to_equal(true)
+            expect(restore_at > arrays_at).to_equal(true)
 
     it "local_map is still reset together with the index at function start":
         val src = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
