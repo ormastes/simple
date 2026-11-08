@@ -72,7 +72,8 @@ U64-versus-I64 policy remain unchanged. In-range literal wrapping and broader
 mixed-promotion residuals remain open; this is not the complete broad bug.
 
 The new narrow SSA values also exposed signed-default widening at LLVM call,
-aggregate field/global stores, raw GEP-index and SSA-phi consumers. The candidate threads each
+aggregate field/global stores, raw GEP/offset indices, unary operands, switch/
+exception carriers and SSA-phi consumers. The candidate threads each
 actual operand's unsigned metadata through existing numeric conversion helpers.
 Field storage retains its verbatim/no-sticky-value-map contract, signed operands
 still sign-extend and pointers keep their existing representation.
@@ -92,12 +93,12 @@ operators, and negative wider/signed/nonarithmetic controls. Native regression:
 operation to i64 before returning and checks nine overflow results, a mixed-width control, comparison bounds and
 negative peers, chained wrapping, and implicit return/let/call/field/index/text
 consumers, signed call controls, negative-peer division/remainder and branch
-joins and global stores (37 checks). Both are **UNRUN**, because no admitted full test CLI is
+joins, global stores and unary/match consumers (40 checks). Both are **UNRUN**, because no admitted full test CLI is
 available and disk capacity precludes a new build. Existing green evidence is
 not rerun or borrowed as native qualification of this patch.
 
 Required admission: current-source core/compiler/lib/MCP/LSP checks, executable
-MIR spec, LLVM and Cranelift fixture compilation/execution with exact37-check
+MIR spec, LLVM and Cranelift fixture compilation/execution with exact40-check
 stdout, and an intentional wrong-expectation negative control. Retain source,
 producer/runtime/tool identities and actual exit status. Keep status
 `fix-implemented-verification-pending`; no fixed/done promotion is justified.
@@ -108,7 +109,8 @@ also found unsigned-blind implicit consumers. The expanded repair and tests
 address these findings; no second review or runtime PASS is implied here.
 `test/01_unit/compiler/backend/narrow_unsigned_consumer_widening_spec.spl`
 executes actual LLVM owners for normal/terminator/indirect calls, verbatim field
-storage, both global-store routes, raw GEP indexing and SSA joins, with signed controls and all three
+storage, both global-store routes, raw GEP/offset indexing, unary/switch/exception
+carriers and SSA joins, with signed controls and all three
 narrow widths. It remains UNRUN. The SSA transform's real `ssa_phi_instruction`
 producer emits incoming locals without conversion; the backend therefore owns
 widening incoming scalar values to its declared phi carrier.

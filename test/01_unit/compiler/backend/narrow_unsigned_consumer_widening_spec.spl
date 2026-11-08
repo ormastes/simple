@@ -7,7 +7,7 @@ use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, LocalId, MirConstValue}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_graph.{MirInst, MirBlock}
-use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator, BlockId, mir_operand_copy, mir_operand_const_int}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator, BlockId, SwitchCase, MirBinOp, MirUnaryOp, mir_operand_copy, mir_operand_const_int}
 use compiler.backend._MirToLlvm.core_codegen.*
 use compiler.backend._MirToLlvm.aggregate_intrinsics.*
 
@@ -70,6 +70,38 @@ fn narrow_consumer_global_ir(width: i64, unsigned: bool, indexed: bool) -> text:
         translator.translate_store_global(SymbolId(id: 77), source)
     translator.builder.build()
 
+fn narrow_consumer_unary_ir(width: i64, unsigned: bool, op: MirUnaryOp) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    translator.local_types[1] = "i64"
+    translator.translate_unaryop(LocalId(id: 1), op, mir_operand_copy(LocalId(id: 0)))
+    translator.builder.build()
+
+fn narrow_consumer_offset_ir(width: i64, unsigned: bool) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    translator.local_types[1] = "ptr"
+    translator.ptr_locals[1] = true
+    translator.defined_locals[1] = true
+    translator.local_types[2] = "ptr"
+    translator.translate_binop(LocalId(id: 2), MirBinOp.Offset,
+        mir_operand_copy(LocalId(id: 1)), mir_operand_copy(LocalId(id: 0)))
+    translator.builder.build()
+
+fn narrow_consumer_terminator_ir(width: i64, unsigned: bool, route: text) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    # These are target-IR tests, independent of the machine running SSpec.
+    translator.target_arch = "x86_64"
+    translator.target_os = "linux"
+    val source = mir_operand_copy(LocalId(id: 0))
+    val terminator = if route == "switch":
+        MirTerminator.Switch(source, [SwitchCase(value: 200, target: BlockId(id: 1))], BlockId(id: 2))
+    elif route == "throw": MirTerminator.Throw(source, mir_operand_const_int(0))
+    else: MirTerminator.Resume(source, mir_operand_const_int(0))
+    val blocks = [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [], terminator: terminator),
+        MirBlock(id: BlockId(id: 1), label: Some("case"), instructions: [], terminator: MirTerminator.Ret(nil)),
+        MirBlock(id: BlockId(id: 2), label: Some("default"), instructions: [], terminator: MirTerminator.Ret(nil))]
+    translator.translate_terminator_at(blocks, 0, "void", false, -1)
+    translator.builder.build()
+
 fn narrow_consumer_phi_ir(width: i64, unsigned: bool) -> text:
     var translator = narrow_consumer_translator(width, unsigned)
     translator.local_types[1] = "i64"
@@ -129,3 +161,17 @@ describe "narrow unsigned consumers preserve source signedness":
                 expect(signed_ir).to_contain("sext i{width} %l0 to i64")
                 expect(unsigned_ir).to_contain("store i64")
                 expect(signed_ir).to_contain("store i64")
+
+    it "preserves source signedness at unary and pointer-offset consumers":
+        for width in [8, 16, 32]:
+            for op in [MirUnaryOp.Neg, MirUnaryOp.BitNot]:
+                expect(narrow_consumer_unary_ir(width, true, op)).to_contain("zext i{width} %l0 to i64")
+                expect(narrow_consumer_unary_ir(width, false, op)).to_contain("sext i{width} %l0 to i64")
+            expect(narrow_consumer_offset_ir(width, true)).to_contain("zext i{width} %l0 to i64")
+            expect(narrow_consumer_offset_ir(width, false)).to_contain("sext i{width} %l0 to i64")
+
+    it "preserves switch discriminants and exception payload carriers":
+        for width in [8, 16, 32]:
+            for route in ["switch", "throw", "resume"]:
+                expect(narrow_consumer_terminator_ir(width, true, route)).to_contain("zext i{width} %l0 to i64")
+                expect(narrow_consumer_terminator_ir(width, false, route)).to_contain("sext i{width} %l0 to i64")
