@@ -1,6 +1,8 @@
 # Driver action-graph publication still takes a file lock
 
-Status: open (follow-up from PR #6669, lockless SCV refresh).
+Status: fix-implemented-verification-pending (original lock removal and pointer retry source present; runtime qualification pending).
+
+## Historical observation (2026-11-04)
 
 `src/compiler/80.driver/action_graph/persisted_graph.spl`
 (`persisted_graph_publish_v1`) takes `{root}/publication.lock` with a 5 s
@@ -63,7 +65,9 @@ No admitted full-CLI self-hosted runtime was available in this lane, so no
 Simple test/check/build, interpreter/native qualification, or pass count is
 claimed. Required verification includes the focused lockless publication and
 host-write specs plus compiler/core/MCP checks under the repo verification
-policy before landing. The original lock-removal source was already present;
+policy before closure or runtime qualification. The user authorized landing
+reviewed source with these checks still pending. The original lock-removal
+source was already present;
 this follow-up does not newly claim that repair.
 
 ### Review context and additional regression coverage

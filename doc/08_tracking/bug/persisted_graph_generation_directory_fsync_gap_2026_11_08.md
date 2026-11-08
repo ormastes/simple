@@ -18,3 +18,9 @@ provider contract for `file_publish_noreplace_raw` and directory fsync on
 each supported host. Verify write ordering and failure propagation with
 controlled failure/crash injection, and retain a real reopen/read result.
 No runtime tests, publication, or pass count is claimed here.
+
+A related pre-existing retry ordering gap also warrants verification: if the
+CURRENT rename succeeds but the following root-directory fsync fails, a retry
+can see CURRENT already equal to the generation and return `ok` without
+retrying that directory fsync. Neither this finding nor the generations-
+directory gap is repaired by the pointer retry change.
