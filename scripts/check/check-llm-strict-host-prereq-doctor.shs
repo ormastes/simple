@@ -18,6 +18,17 @@ TORCH_BRIDGE_ENV="$TORCH_BRIDGE_BUILD_DIR/evidence.env"
 BASE_MODEL="${LLM_VLLM_BASE_MODEL:-${BASE_MODEL:-base-model}}"
 ENDPOINT="${LLM_VLLM_ENDPOINT:-${ENDPOINT:-http://127.0.0.1:8000/v1}}"
 
+# Any abort before the verdict line is an internal error, not a silent pass.
+doctor_verdict_emitted=0
+trap '
+    if [ "$doctor_verdict_emitted" -ne 1 ]; then
+        printf "%s\n" "STATUS: ERROR llm-strict-host-prereq-doctor reason=internal_error_before_verdict" >&2
+        exit 2
+    fi
+' EXIT
+
+python3_path="$(command -v python3 2>/dev/null || true)"
+
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH" "$SURFACE_MANIFEST" \
     "$PYTHON_VLLM_LOG" "$PYTHON_TORCH_LOG" "$SYSTEM_LIBTORCH_LOG" "$GPU_LOG" \
@@ -113,7 +124,8 @@ append_gate() {
     blocked_count=$((blocked_count + 1))
 }
 
-python3 - >"$PYTHON_VLLM_LOG" <<'PY'
+if [ -n "$python3_path" ]; then
+    if ! "$python3_path" - >"$PYTHON_VLLM_LOG" <<'PY'
 import importlib.util
 try:
     from importlib import metadata
@@ -135,8 +147,19 @@ else:
     print("python_vllm_origin=missing")
     print("python_vllm_version=missing")
 PY
+    then
+        printf '%s\n' "python_probe=error: python3 exited non-zero during vllm probe" >>"$PYTHON_VLLM_LOG"
+    fi
+else
+    printf '%s\n' \
+        "python_vllm_module_status=missing" \
+        "python_vllm_origin=missing" \
+        "python_vllm_version=missing" \
+        "python_probe=skipped: python3 command not found" >"$PYTHON_VLLM_LOG"
+fi
 
-python3 - >"$PYTHON_TORCH_LOG" <<'PY'
+if [ -n "$python3_path" ]; then
+    if ! "$python3_path" - >"$PYTHON_TORCH_LOG" <<'PY'
 import importlib.util
 spec = importlib.util.find_spec("torch")
 if not spec:
@@ -159,12 +182,33 @@ except Exception as exc:
     print("python_torch_cuda_device_count=0")
     print(f"python_torch_error={type(exc).__name__}")
 PY
+    then
+        printf '%s\n' "python_probe=error: python3 exited non-zero during torch probe" >>"$PYTHON_TORCH_LOG"
+    fi
+else
+    printf '%s\n' \
+        "python_torch_module_status=missing" \
+        "python_torch_version=missing" \
+        "python_torch_cuda_available=missing" \
+        "python_torch_cuda_device_count=0" \
+        "python_probe=skipped: python3 command not found" >"$PYTHON_TORCH_LOG"
+fi
 
 if command -v nvidia-smi >/dev/null 2>&1; then
-    if timeout 3 nvidia-smi --query-gpu=name --format=csv,noheader >"$GPU_LOG" 2>&1; then
-        gpu_status="available"
+    # `timeout` may be absent on minimal images; fall back to a direct query so
+    # a present GPU is not misreported as missing.
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 3 nvidia-smi --query-gpu=name --format=csv,noheader >"$GPU_LOG" 2>&1; then
+            gpu_status="available"
+        else
+            gpu_status="missing"
+        fi
     else
-        gpu_status="missing"
+        if nvidia-smi --query-gpu=name --format=csv,noheader >"$GPU_LOG" 2>&1; then
+            gpu_status="available"
+        else
+            gpu_status="missing"
+        fi
     fi
     nvidia_smi_path="$(command -v nvidia-smi)"
 else
@@ -241,6 +285,9 @@ fi
 python_vllm_module_status="$(value_for python_vllm_module_status "$PYTHON_VLLM_LOG")"
 python_vllm_origin="$(value_for python_vllm_origin "$PYTHON_VLLM_LOG")"
 python_vllm_version="$(value_for python_vllm_version "$PYTHON_VLLM_LOG")"
+python_vllm_module_status="${python_vllm_module_status:-missing}"
+python_vllm_origin="${python_vllm_origin:-missing}"
+python_vllm_version="${python_vllm_version:-missing}"
 if [ "$vllm_command_status" = "available" ] &&
     [ "$python_vllm_module_status" = "available" ] &&
     [ "$gpu_status" = "available" ] &&
@@ -311,6 +358,10 @@ python_torch_version="$(value_for python_torch_version "$PYTHON_TORCH_LOG")"
 python_torch_cuda_available="$(value_for python_torch_cuda_available "$PYTHON_TORCH_LOG")"
 python_torch_cuda_device_count="$(value_for python_torch_cuda_device_count "$PYTHON_TORCH_LOG")"
 python_torch_error="$(value_for python_torch_error "$PYTHON_TORCH_LOG")"
+python_torch_module_status="${python_torch_module_status:-missing}"
+python_torch_version="${python_torch_version:-missing}"
+python_torch_cuda_available="${python_torch_cuda_available:-false}"
+python_torch_cuda_device_count="${python_torch_cuda_device_count:-0}"
 python_torch_error="${python_torch_error:-none}"
 if BUILD_DIR="$TORCH_BRIDGE_BUILD_DIR" REPORT_PATH="$TORCH_BRIDGE_BUILD_DIR/report.md" \
     sh scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs >"$TORCH_BRIDGE_LOG" 2>&1; then
@@ -387,12 +438,34 @@ primary_blocked_gate="none"
 [ "$torch_prereq_status" = "ready" ] || append_gate "torch_libtorch"
 [ "$finetune_prereq_status" = "ready" ] || append_gate "finetune_retry"
 
+# Specific per-gate reasons so each remaining blocker names its missing prereqs.
+dashboard_blocked_reason="none"
+if [ "$dashboard_prereq_status" != "ready" ]; then
+    dashboard_blocked_reason="base_url=$dashboard_base_url_status, auth_source=$auth_source"
+fi
+vllm_blocked_reason="none"
+if [ "$vllm_prereq_status" != "ready" ]; then
+    vllm_blocked_reason="vllm_command=$vllm_command_status, python_vllm_module=$python_vllm_module_status, local_gpu=$gpu_status, base_model=$vllm_base_model_status, endpoint=$vllm_endpoint_status"
+fi
+slang_blocked_reason="none"
+if [ "$slang_prereq_status" != "ready" ]; then
+    slang_blocked_reason="read_range=$slang_read_range_status, pinned_buffer=$slang_pinned_buffer_status, device_staging=$slang_device_staging_status, capability_source=$slang_capability_source_status, capability_evidence=$slang_capability_evidence_status"
+fi
+torch_blocked_reason="none"
+if [ "$torch_prereq_status" != "ready" ]; then
+    torch_blocked_reason="python_torch_module=$python_torch_module_status, torch_cuda_available=$python_torch_cuda_available, bridge_status=$torch_bridge_status, bridge_output=$torch_bridge_output_status"
+fi
+finetune_blocked_reason="none"
+if [ "$finetune_prereq_status" != "ready" ]; then
+    finetune_blocked_reason="retry5_cache_manifest=$retry5_cache_manifest_status, retry6_model_manifest=$retry6_model_manifest_status, retry6_eval_result=$retry6_eval_result_status, retry7_attempt=$retry7_attempt_status"
+fi
+
 if [ "$blocked_count" -eq 0 ]; then
     status="pass"
     reason="all_prereqs_ready"
     next_action="run strict evidence wrappers"
 else
-    status="warn"
+    status="fail"
     reason="strict_host_prereqs_missing"
     next_action="provide blocked host prerequisites, then rerun strict evidence wrappers"
 fi
@@ -450,6 +523,11 @@ surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
     printf '%s\n' "llm_strict_host_prereq_doctor_blocked_gate_count=$blocked_count"
     printf '%s\n' "llm_strict_host_prereq_doctor_blocked_gates=${blocked_gates:-none}"
     printf '%s\n' "llm_strict_host_prereq_doctor_primary_blocked_gate=$primary_blocked_gate"
+    printf '%s\n' "llm_strict_host_prereq_doctor_dashboard_blocked_reason=$dashboard_blocked_reason"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_blocked_reason=$vllm_blocked_reason"
+    printf '%s\n' "llm_strict_host_prereq_doctor_slang_blocked_reason=$slang_blocked_reason"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_blocked_reason=$torch_blocked_reason"
+    printf '%s\n' "llm_strict_host_prereq_doctor_finetune_blocked_reason=$finetune_blocked_reason"
     printf '%s\n' "llm_strict_host_prereq_doctor_dashboard_status=$dashboard_prereq_status"
     printf '%s\n' "llm_strict_host_prereq_doctor_dashboard_base_url_status=$dashboard_base_url_status"
     printf '%s\n' "llm_strict_host_prereq_doctor_dashboard_auth_source=$auth_source"
@@ -554,6 +632,11 @@ surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
     printf '%s\n' "- torch_libtorch: \`$torch_prereq_status\`"
     printf '%s\n' "- finetune_retry: \`$finetune_prereq_status\`"
     printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
+    printf '%s\n' "- dashboard_blocked_reason: \`$dashboard_blocked_reason\`"
+    printf '%s\n' "- vllm_blocked_reason: \`$vllm_blocked_reason\`"
+    printf '%s\n' "- slang_blocked_reason: \`$slang_blocked_reason\`"
+    printf '%s\n' "- torch_blocked_reason: \`$torch_blocked_reason\`"
+    printf '%s\n' "- finetune_blocked_reason: \`$finetune_blocked_reason\`"
     printf '%s\n' "- dashboard_base_url: \`$dashboard_base_url_status\`"
     printf '%s\n' "- dashboard_auth_source: \`$auth_source\`"
     printf '%s\n' "- dashboard_next_action: \`$dashboard_next_action\`"
@@ -619,4 +702,11 @@ surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
     printf '%s\n' "- env: \`$OUT_ENV\`"
 } >"$REPORT_PATH"
 
-printf '%s\n' "STATUS: $(printf '%s' "$status" | tr '[:lower:]' '[:upper:]') llm-strict-host-prereq-doctor blocked_gate_count=$blocked_count blocked_gates=${blocked_gates:-none}"
+doctor_verdict_emitted=1
+if [ "$status" = "pass" ]; then
+    verdict="PASS"
+else
+    verdict="FAIL"
+fi
+printf '%s\n' "STATUS: $verdict llm-strict-host-prereq-doctor blocked_gate_count=$blocked_count blocked_gates=${blocked_gates:-none}"
+exit 0
