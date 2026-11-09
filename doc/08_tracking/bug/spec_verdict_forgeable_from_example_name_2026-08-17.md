@@ -15,6 +15,24 @@ optional trailing `(NNms)`). Verified: 11/11 `parse_test_output` unit tests
 debug binary — the original probe reports `1 total, 1 passed, 0 failed`
 (was `33 total, 1 passed, 32 failed`). Deployed-seed redeploy verification
 pending. The "What is NOT fixed" section below is retained as history.
+
+**Fresh-seed verification 2026-11-09 (phase-2 test-runner lane, worktree
+`build/agent-worktrees/boot-t2` @ `origin/release/1.0.0` `8f7ca1581c1`):** the
+Rust seed was rebuilt from HEAD (`cargo build --release --workspace`, 1m22s,
+binary sha256 `9e0f01c8483d…`, `build-commit: 8f7ca1581c1f…`). On that fresh
+binary: `cargo test --release -p simple-driver --lib parse_test_output` =
+**11 passed; 0 failed** (11/11), `--lib result_cache` = **10 passed; 0 failed**
+(cwd-independent source-root stamp resolution, PRs #7992/#8009). End-to-end on
+the fresh binary the original exploit-shape probe (`use std.spipe.*` +
+`it "registers each example separately, not as one synthetic failure"` with a
+passing body) reports `Results: 1 total, 1 passed, 0 failed` / `PASS` — verdict
+correct, exploit closed. Contrast on the still-committed Nov-5 seed
+(`src/compiler_rust/target/bootstrap/simple`, 2026-11-05 18:12, predates the
+fix): the same probe and a 3-example variant ALSO report correct tallies
+(`1/1/0`, `3/3/0`) in this environment — the historical `33/1/32` inflation
+did not reproduce on the Nov-5 binary, so end-to-end both seeds agree; the
+landed delta is the strict parser plus the 11 unit regressions. Evidence:
+`build/agent-worktrees/boot-t2/out/forge-probe-evidence.txt`.
 **Found:** 2026-08-17, lane-1 partial-fix sweep, while writing the detection
 spec for `feature_block_not_a_bdd_keyword_2026-08-04.md`.
 **Severity:** HIGH — this is a test-verdict integrity defect. The repo has been

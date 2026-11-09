@@ -92,9 +92,11 @@ pub(crate) fn module_has_user_byte_len(module: &Module<'static>) -> bool {
 
 /// A bare `byte_len` redirect needs a text-or-erased receiver; anything else
 /// falls through to normal resolution instead of failing the build.
+/// Legacy MIR can carry an unresolved type here. Recognize that existing
+/// boundary input through `is_known`; this does not create an inference fallback.
 pub(crate) fn byte_len_receiver_is_text_or_erased(ty: Option<crate::hir::TypeId>) -> bool {
     ty.map_or(true, |t| {
-        t == crate::hir::TypeId::STRING || t == crate::hir::TypeId::ANY || t == crate::hir::TypeId::UNKNOWN
+        t == crate::hir::TypeId::STRING || t == crate::hir::TypeId::ANY || !t.is_known()
     })
 }
 
