@@ -523,7 +523,8 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("len string branch", &e))?;
         builder.position_at_end(string_cp_block);
         let string_cp_fn = {
-            let module = self.module.borrow();
+            let module_ref = self.module.borrow();
+            let module = module_ref.as_ref().unwrap();
             module.get_function("rt_string_char_count").unwrap_or_else(|| {
                 let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                 module.add_function("rt_string_char_count", fn_type, None)
