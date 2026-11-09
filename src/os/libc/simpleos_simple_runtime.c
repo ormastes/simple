@@ -227,4 +227,8 @@ spl_i64 rt_pool_safepoint(void) {
 
 void __simple_runtime_init(void) {}
 void __simple_runtime_shutdown(void) {}
-void __simple_call_module_inits(void) {}
+/* WEAK: the native linker emits the strong aggregator (linker.rs generate_init_caller);
+ * a strong empty stub here either duplicate-symbol-fails that link or, when it
+ * wins, silently skips every module-global initializer
+ * (bug simpleos_freestanding_nil_array_init_optimizer_guard_fold). */
+__attribute__((weak)) void __simple_call_module_inits(void) {}
