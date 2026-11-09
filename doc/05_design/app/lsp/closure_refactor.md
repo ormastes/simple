@@ -3,7 +3,7 @@
 Status: design + first implementation (2026-11-04). Governs `simple fix`,
 `simple code refactor|ast`, LSP `textDocument/codeAction` + `simple/refactor/closure`
 + `simple/ast/views`, and the LSP-MCP bridge tools. Decisions it implements:
-EDIT-01..03, MIG-01, ERR-01 (absence is `nil`, never `None`), rev-3 §8-§14, §17.
+EDIT-01..03, MIG-01, ERR-01 (absence is `None` in safe code; `nil` only in `unsafe:`), rev-3 §8-§14, §17.
 
 ## 1. Inventory of today's fix paths (what the core replaces, not wraps)
 

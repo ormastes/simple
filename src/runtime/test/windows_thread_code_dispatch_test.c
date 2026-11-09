@@ -14,6 +14,13 @@
 #include <assert.h>
 #include "../runtime_thread.c"
 
+/* No registered runtime closures in this regression: the registry answers
+ * "not a closure" for every word (runtime_native.c contract), so dispatch
+ * falls through to the raw-address / record paths under test. */
+int64_t rt_closure_func_ptr(int64_t closure) { (void)closure; return 0; }
+int64_t rt_closure_retain(int64_t closure) { (void)closure; return 0; }
+int64_t rt_closure_release(int64_t closure) { (void)closure; return 0; }
+
 static int64_t __attribute__((aligned(16))) raw_worker(int64_t data) {
     return data + 8;
 }

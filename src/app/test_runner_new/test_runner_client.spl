@@ -4,7 +4,7 @@ use std.sffi.cli_args.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{env_get, env_set, host_os}
 use app.io.cli_ops.{cli_current_exe_path}
-use app.test_runner_new.client_arg_shape.{client_flag_consumes_value, client_select_tagged}
+use app.test_runner_new.client_arg_shape.{client_flag_consumes_value, client_select_tagged, client_dropped_execution_flags}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs, resolve_timeout_secs, timeout_value_is_well_formed}
 use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests, daemon_claim_wait_expired, daemon_platform_bypass}
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
@@ -801,6 +801,20 @@ fn main() -> i64:
     # A flag that is not honoured is rejected, like --resume above.
     if client_options.coverage:
         eprint "ERROR: --coverage needs a directory target (the instrumented coverage build runs in the directory lane); run: simple test <dir> --coverage"
+        return 2
+    # --mode=<compiled lane> / --compile / --native-backend=<b>: neither lane
+    # of this client can honour them — the daemon request carries only a path,
+    # and the direct lane's inner runner (test_runner_single.spl) always
+    # interprets — so a flag that is not honoured is rejected here, naming
+    # every dropped flag (same rule as --coverage/--resume above). Forwarding
+    # needs compiled-lane support in the single runner first; until that lands
+    # the refusal is the fail-closed half. The previous behaviour silently ran
+    # the tagged interpreter in ~31 ms and reported PASS for a lane that never
+    # ran (fail-open evidence collection).
+    # Bug: test_runner_direct_lane_drops_mode_backend_flags_2026_11_09.
+    val dropped_exec_flags = client_dropped_execution_flags(cleaned)
+    if dropped_exec_flags.len() > 0:
+        eprint "ERROR: test-runner: {dropped_exec_flags.join(", ")}: this single-spec lane always executes the interpreter (the daemon request carries only a path and the direct child is the interpreter-only single lane); compiled lanes run via the directory runner: simple test <dir> {dropped_exec_flags.join(" ")} — refusing to run rather than silently downgrade"
         return 2
     if client_options.format == "doc":
         print "note: --format doc: spipe doc generation runs in the directory lane only; this single-spec run prints text"
