@@ -797,6 +797,31 @@ fn native_words_readable(_addr: usize, _words: usize) -> Option<bool> {
 unsafe fn native_callable(kind: i64, closure_arg: u64) -> Option<NativeCallable> {
     let (payload, raw_worker_args) = native_worker_closure_word(kind, closure_arg)?;
 
+    // Runtime-facing closure convention (seed codegen, 2026-08-21): a JIT
+    // closure is a registered `HeapObjectType::Closure` whose word 0 is the
+    // HeapHeader, not an entry. Its `func_ptr` is the `$boxed` entry
+    // `extern "C" fn(closure: RuntimeValue, args: RuntimeValue..)`, so the
+    // tagged closure word itself is the hidden first argument and worker
+    // arguments stay tagged. Registry-validated, so a native record whose
+    // word 0 happens to look like a header is never misread.
+    // bug: seed_jit_spawned_thread_never_runs_join_segv_2026-11-09
+    if kind == RT_WORKER_CLOSURE_VALUE && closure_arg & 0x7 == 0x1 {
+        let closure_value = RuntimeValue(closure_arg);
+        if let Some(clos) =
+            crate::value::heap::get_typed_ptr::<crate::value::RuntimeClosure>(closure_value, crate::value::HeapObjectType::Closure)
+        {
+            let entry = (*clos).func_ptr as usize;
+            if entry < 4096 {
+                return None;
+            }
+            return Some(NativeCallable::ClosureRecord {
+                entry,
+                closure_ptr: closure_arg,
+                raw_worker_args: false,
+            });
+        }
+    }
+
     let payload_addr = payload as usize;
     if native_address_is_code(payload_addr) {
         return Some(NativeCallable::DirectFunction {
