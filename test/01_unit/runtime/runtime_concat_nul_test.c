@@ -1,7 +1,15 @@
 /* Link against the production runtime_native.c, not a replacement concat. */
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* Selfcheck probes own their spl_panic (sibling pattern: rt_text_clone_contract_selfcheck.c
+ * et al.); runtime_native.c references it from rt_core_concat_bytes_v1. */
+void spl_panic(const char* message) {
+    fprintf(stderr, "PANIC: %s\n", message ? message : "");
+    exit(101);
+}
 
 extern int64_t rt_string_new(const uint8_t*, uint64_t);
 extern int64_t rt_string_len(int64_t);
