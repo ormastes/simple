@@ -32,14 +32,14 @@ fn native_result_tuple_integer_type(bits: i64, signed: bool) -> MirType?:
             case 16: Some(MirType(kind: MirTypeKind.I16))
             case 32: Some(MirType(kind: MirTypeKind.I32))
             case 64: Some(MirType(kind: MirTypeKind.I64))
-            case _: nil
+            case _: None
     else:
         match bits:
             case 8: Some(MirType(kind: MirTypeKind.U8))
             case 16: Some(MirType(kind: MirTypeKind.U16))
             case 32: Some(MirType(kind: MirTypeKind.U32))
             case 64: Some(MirType(kind: MirTypeKind.U64))
-            case _: nil
+            case _: None
 
 fn wrapper_native_tuple_field_type(type_: HirType) -> MirType?:
     match type_.kind:
@@ -50,33 +50,33 @@ fn wrapper_native_tuple_field_type(type_: HirType) -> MirType?:
         case HirTypeKind.Bool: Some(MirType.bool())
         case HirTypeKind.Float(slot_float_bits):
             if slot_float_bits == 64: return Some(MirType.f64())
-            nil
+            None
         case HirTypeKind.Tuple(_): wrapper_native_tuple_payload_type(type_)
         case HirTypeKind.Array(element, size):
             if val field_element = wrapper_native_tuple_field_type(element):
                 Some(MirType(kind: MirTypeKind.Array(field_element, size ?? 0)))
             else:
-                nil
+                None
         case HirTypeKind.Slice(element):
             if val field_element = wrapper_native_tuple_field_type(element):
                 Some(MirType(kind: MirTypeKind.Slice(field_element)))
             else:
-                nil
-        case _: nil
+                None
+        case _: None
 
 fn wrapper_native_tuple_payload_type(type_: HirType) -> MirType?:
     match type_.kind:
         case HirTypeKind.Tuple(elements):
             if elements.len() == 0:
-                return nil
+                return None
             var fields: [MirType] = []
             for element in elements:
                 if val field_type = wrapper_native_tuple_field_type(element):
                     fields = fields.push(field_type)
                 else:
-                    return nil
+                    return None
             Some(MirType(kind: MirTypeKind.Tuple(fields)))
-        case _: nil
+        case _: None
 
 fn result_tuple_kind_label(type_: HirType) -> text:
     match type_.kind:
@@ -101,23 +101,23 @@ impl MirLowering:
         # Non-tuple fields retain the existing wrapper admission policy.
         match type_.kind:
             case HirTypeKind.Tuple(elements):
-                if elements.len() == 0: return nil
+                if elements.len() == 0: return None
                 var fields: [MirType] = []
                 for element in elements:
                     match element.kind:
                         case HirTypeKind.Tuple(_):
                             if val nested = self.wrapper_owned_native_tuple_payload_type(element):
                                 fields.push(nested)
-                            else: return nil
+                            else: return None
                         case HirTypeKind.Named(_, _):
-                            if self.result_try_tuple_nominal_owner(element, false) == "": return nil
+                            if self.result_try_tuple_nominal_owner(element, false) == "": return None
                             fields.push(self.lower_type(element))
                         case _:
                             if val existing_field = wrapper_native_tuple_field_type(element):
                                 fields.push(existing_field)
-                            else: return nil
+                            else: return None
                 Some(MirType(kind: MirTypeKind.Tuple(fields)))
-            case _: nil
+            case _: None
 
     me result_try_tuple_nominal_owner(type_: HirType, record: bool) -> text:
         # These IDs come from a consumer-owned, relocated callable signature.
@@ -163,31 +163,31 @@ impl MirLowering:
             case HirTypeKind.Bool: Some(MirType.bool())
             case HirTypeKind.Float(slot_float_bits):
                 if slot_float_bits == 64: return Some(MirType.f64())
-                nil
+                None
             case HirTypeKind.Str: Some(self.lower_type(type_))
             # `[[text]]`: each element is itself one runtime-array handle.
             # Same unsized-only contract as the tuple slot itself. Array
             # element context only (allow_struct): dictionary value projection
             # of nested collections is not proven here.
             case HirTypeKind.Array(inner, size):
-                if not allow_struct or size != nil: return nil
+                if not allow_struct or size != None: return None
                 if val lowered_inner = self.result_try_tuple_collection_element(inner, true):
                     Some(MirType(kind: MirTypeKind.Array(lowered_inner, 0)))
-                else: nil
+                else: None
             case HirTypeKind.Named(symbol, _):
                 # `[Enum]`: a proven native enum owner is one boxed
                 # rt_enum_new handle per element, exactly like the tuple slot's
                 # own enum arm. Array element context only, as above.
                 if allow_struct and self.result_try_tuple_nominal_owner(type_, false) != "":
                     return Some(self.lower_type(type_))
-                if not self.symbols.symbols.has(symbol.id): return nil
+                if not self.symbols.symbols.has(symbol.id): return None
                 val declaration: HirSymbol = self.symbols.symbols[symbol.id]
                 # Dict<Struct> currently loses its full owner in dictionary
                 # value projection. Do not admit that unproven route here.
-                if not allow_struct and declaration.kind != SymbolKind.Class: return nil
-                if self.result_try_tuple_nominal_owner(type_, true) == "": return nil
+                if not allow_struct and declaration.kind != SymbolKind.Class: return None
+                if self.result_try_tuple_nominal_owner(type_, true) == "": return None
                 Some(self.lower_type(type_))
-            case _: nil
+            case _: None
 
     me result_try_tuple_field_type(type_: HirType) -> MirType?:
         match type_.kind:
@@ -198,7 +198,7 @@ impl MirLowering:
             case HirTypeKind.Bool: Some(MirType.bool())
             case HirTypeKind.Float(slot_float_bits):
                 if slot_float_bits == 64: return Some(MirType.f64())
-                nil
+                None
             case HirTypeKind.Tuple(_): self.result_try_tuple_payload_type(type_)
             # A text slot is one native word holding the runtime string
             # pointer (mir_type_is_str: the backend materializes both text MIR
@@ -210,36 +210,36 @@ impl MirLowering:
                 # Proven enum owners, then proven record owners: both are one
                 # heap-handle word in the native slot, and both owners are
                 # validated against the current declaration table.
-                if self.result_try_tuple_nominal_owner(type_, false) == "" and self.result_try_tuple_nominal_owner(type_, true) == "": return nil
+                if self.result_try_tuple_nominal_owner(type_, false) == "" and self.result_try_tuple_nominal_owner(type_, true) == "": return None
                 Some(self.lower_type(type_))
             case HirTypeKind.Array(element, size):
                 # Only the unsized runtime-array contract is admitted here.
                 # Fixed arrays and slices need their own carrier proof.
-                if size != nil: return nil
+                if size != None: return None
                 if val lowered = self.result_try_tuple_collection_element(element, true):
                     Some(MirType(kind: MirTypeKind.Array(lowered, 0)))
-                else: nil
+                else: None
             case HirTypeKind.Dict(key, value):
                 # The observed parser contract is Dict<text, SdnSpan>. Keep
                 # other key representations outside this bounded admission.
-                if key.kind != HirTypeKind.Str: return nil
+                if key.kind != HirTypeKind.Str: return None
                 if val lowered = self.result_try_tuple_collection_element(value, false):
                     Some(MirType(kind: MirTypeKind.Dict(self.lower_type(key), lowered)))
-                else: nil
-            case _: nil
+                else: None
+            case _: None
 
     me result_try_tuple_payload_type(type_: HirType) -> MirType?:
         match type_.kind:
             case HirTypeKind.Tuple(elements):
-                if elements.len() == 0: return nil
+                if elements.len() == 0: return None
                 var fields: [MirType] = []
                 for element in elements:
                     if val field = self.result_try_tuple_field_type(element):
                         fields.push(field)
                     else:
-                        return nil
+                        return None
                 Some(MirType(kind: MirTypeKind.Tuple(fields)))
-            case _: nil
+            case _: None
 
     me result_tuple_rejected_element(type_: HirType) -> text:
         """Name the first slot result_try_tuple_field_type rejects, so the
@@ -248,7 +248,7 @@ impl MirLowering:
             case HirTypeKind.Tuple(elements):
                 var index = 0
                 for element in elements:
-                    if self.result_try_tuple_field_type(element) == nil:
+                    if self.result_try_tuple_field_type(element) == None:
                         return "slot {index} is {result_tuple_kind_label(element)}"
                     index = index + 1
                 return "all slots admitted"
@@ -333,19 +333,19 @@ impl MirLowering:
         # Caller admits literal tuple fields only. Declared Optional<Tuple>
         # provenance, never the MIR Optional envelope, authorizes this path.
         val declared = self.receiver_declared_or_result_type(base, raw)
-        if declared == nil: return nil
-        var payload: HirType? = nil
+        if declared == None: return None
+        var payload: HirType? = None
         if val found = declared:
             match found.kind:
                 case HirTypeKind.Optional(inner):
                     match inner.kind:
                         case HirTypeKind.Tuple(_): payload = Some(inner)
-                        case _: return nil
-                case _: return nil
+                        case _: return None
+                case _: return None
         if val tuple_payload = payload:
-            if self.result_try_tuple_payload_type(tuple_payload) == nil:
+            if self.result_try_tuple_payload_type(tuple_payload) == None:
                 self.error_fatal("unsupported optional tuple payload element type: {self.result_tuple_rejected_element(tuple_payload)}", Some(base.span))
-                return nil
+                return None
             # Flat HIR has no dominating-guard proof. Like optional text
             # receivers, check the current value before extraction. Unlike
             # that older helper, the panic block cannot reach the payload.
@@ -373,7 +373,7 @@ impl MirLowering:
             self.builder = b
             val extracted = self.option_payload_or_self(raw)
             return Some(self.recover_optional_tuple_payload(extracted, tuple_payload))
-        nil
+        None
 
     me is_plain_native_tuple_payload(local: LocalId) -> bool:
         # Historical second `!` is identity on an already recovered tuple.
