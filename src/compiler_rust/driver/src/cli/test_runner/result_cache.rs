@@ -11,6 +11,11 @@ use std::path::{Component, Path, PathBuf};
 
 const CACHE_PATH: &str = ".simple/test-result-cache-rs.txt";
 
+/// Env override for the repository root whose `src/` tree the cache stamp covers.
+const SOURCE_ROOT_ENV: &str = "SIMPLE_SOURCE_ROOT";
+/// Marker file proving a directory is the Simple repository root.
+const ROOT_MARKER: &str = "release/version.sdn";
+
 #[derive(Clone)]
 pub struct CachedResult {
     pub mtime: u64,
@@ -76,10 +81,17 @@ impl ResultCache {
                 }
             }
         }
-        ResultCache {
-            entries,
-            stamp: source_tree_stamp(Path::new("src"), std::env::current_exe().ok().as_deref()),
-        }
+        // Miss-safe per OPUS-REVIEW (PR #7949): the stamp must be computed
+        // from a cwd-independent source root. If no root can be resolved,
+        // use stamp 0 so no cached entry ever matches (never serve a stale
+        // PASS).
+        let stamp = match resolve_source_root() {
+            Some(root) => {
+                source_tree_stamp(&root.join("src"), std::env::current_exe().ok().as_deref())
+            }
+            None => 0,
+        };
+        ResultCache { entries, stamp }
     }
 
     /// Check if a test file is unchanged. Returns cached result if fresh.
@@ -222,6 +234,43 @@ fn source_tree_stamp(root: &Path, exe: Option<&Path>) -> u64 {
     }
 }
 
+/// Resolve the repository root whose `src/` tree the cache stamp covers.
+///
+/// The stamp must not depend on the process cwd (OPUS-REVIEW, PR #7949):
+/// running the test runner from any directory must still stamp the real
+/// source tree, otherwise source edits never invalidate cached verdicts and
+/// a stale PASS can be served. Resolution order: `SIMPLE_SOURCE_ROOT` env
+/// override (only if it carries the root marker), then walking up from the
+/// runner executable's canonicalized path, then walking up from the cwd.
+/// Returns `None` when no root is found; callers must treat that as "never
+/// serve cached results".
+fn resolve_source_root() -> Option<PathBuf> {
+    let has_marker = |dir: &Path| dir.join(ROOT_MARKER).is_file();
+    if let Ok(override_root) = std::env::var(SOURCE_ROOT_ENV) {
+        let dir = PathBuf::from(override_root);
+        if has_marker(&dir) {
+            return Some(dir);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Ok(canonical_exe) = exe.canonicalize() {
+            for ancestor in canonical_exe.ancestors() {
+                if has_marker(ancestor) {
+                    return Some(ancestor.to_path_buf());
+                }
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for ancestor in cwd.ancestors() {
+            if has_marker(ancestor) {
+                return Some(ancestor.to_path_buf());
+            }
+        }
+    }
+    None
+}
+
 fn cache_key(path: &Path) -> String {
     let normalized = normalize_path(path);
     normalized.to_string_lossy().replace('\\', "/")
@@ -262,8 +311,18 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_key, source_tree_stamp};
+    use super::{cache_key, source_tree_stamp, ResultCache, SOURCE_ROOT_ENV};
     use std::path::Path;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate the process cwd or the source-root env
+    /// override (both are process-global state). Poison-resilient: a failing
+    /// assert must not cascade into the sibling test.
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_cwd() -> std::sync::MutexGuard<'static, ()> {
+        CWD_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// Repro for bug simple_test_default_runner_silent_vacuous_pass_2026-09-06
     /// defect 2: editing an IMPORTED module (spec file untouched) must change
@@ -295,10 +354,94 @@ mod tests {
 
     #[test]
     fn cache_key_normalizes_repo_absolute_paths_to_relative() {
+        let _g = lock_cwd();
         let rel = Path::new("src/compiler_rust/driver/src/cli/test_runner/result_cache.rs");
         let abs = std::env::current_dir().unwrap().join(rel);
 
         assert_eq!(cache_key(rel), cache_key(&abs));
         assert!(cache_key(rel).contains('/'));
+    }
+
+    /// Repro for OPUS-REVIEW on PR #7949: `ResultCache::load` stamped
+    /// `Path::new("src")` relative to the cwd, so running from a directory
+    /// with no `./src` made the stamp depend only on the runner exe — source
+    /// edits never invalidated, and a stale PASS could be served. The stamp
+    /// must be computed from a cwd-independent source root.
+    #[test]
+    fn stamp_invalidates_source_edit_from_foreign_cwd() {
+        let _g = lock_cwd();
+        let tmp = std::env::temp_dir().join(format!("rc_cwd_{}", std::process::id()));
+        let fake_root = tmp.join("repo");
+        let foreign = tmp.join("elsewhere");
+        std::fs::create_dir_all(fake_root.join("src")).unwrap();
+        std::fs::create_dir_all(fake_root.join("release")).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(fake_root.join("release/version.sdn"), "version: 0.0.0\n").unwrap();
+        std::fs::write(fake_root.join("src/a.spl"), "fn a() -> i64: 1\n").unwrap();
+        let had_override = std::env::var_os(SOURCE_ROOT_ENV);
+        std::env::set_var(SOURCE_ROOT_ENV, &fake_root);
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&foreign).unwrap();
+        let c1 = ResultCache::load();
+        assert_ne!(c1.stamp, 0, "stamp must cover the source tree from any cwd");
+        std::fs::write(fake_root.join("src/a.spl"), "fn a() -> i64: 2\n").unwrap();
+        let c2 = ResultCache::load();
+        std::env::set_current_dir(&orig).unwrap();
+        match had_override {
+            Some(v) => std::env::set_var(SOURCE_ROOT_ENV, v),
+            None => std::env::remove_var(SOURCE_ROOT_ENV),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_ne!(
+            c1.stamp, c2.stamp,
+            "source edit must invalidate the stamp even when run from a foreign cwd (stale PASS otherwise)"
+        );
+    }
+
+    /// The resolved source root must not depend on the process cwd. Uses the
+    /// `SIMPLE_SOURCE_ROOT` override so the assertion holds no matter where
+    /// the test binary itself lives (it may be outside the repo, e.g. under
+    /// a scratch CARGO_TARGET_DIR).
+    #[test]
+    fn source_root_resolution_is_cwd_independent() {
+        let _g = lock_cwd();
+        let tmp = std::env::temp_dir().join(format!("rc_root_{}", std::process::id()));
+        let fake_root = tmp.join("repo");
+        let foreign = tmp.join("elsewhere");
+        std::fs::create_dir_all(fake_root.join("src")).unwrap();
+        std::fs::create_dir_all(fake_root.join("release")).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(fake_root.join("release/version.sdn"), "version: 0.0.0\n").unwrap();
+        let had_override = std::env::var_os(SOURCE_ROOT_ENV);
+        std::env::set_var(SOURCE_ROOT_ENV, &fake_root);
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&foreign).unwrap();
+        let resolved = super::resolve_source_root();
+        std::env::set_current_dir(&orig).unwrap();
+        match had_override {
+            Some(v) => std::env::set_var(SOURCE_ROOT_ENV, v),
+            None => std::env::remove_var(SOURCE_ROOT_ENV),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(
+            resolved.as_deref(),
+            Some(fake_root.as_path()),
+            "source root must resolve identically from a foreign cwd"
+        );
+    }
+
+    /// Default resolution (no env override) must still find the real repo
+    /// root from the normal test cwd, via the exe-path or cwd walk.
+    #[test]
+    fn source_root_resolution_finds_real_root_without_override() {
+        let _g = lock_cwd();
+        let had_override = std::env::var_os(SOURCE_ROOT_ENV);
+        std::env::remove_var(SOURCE_ROOT_ENV);
+        let root = super::resolve_source_root().expect("must resolve the real repo root");
+        match had_override {
+            Some(v) => std::env::set_var(SOURCE_ROOT_ENV, v),
+            None => std::env::remove_var(SOURCE_ROOT_ENV),
+        }
+        assert!(root.join("src").is_dir(), "resolved root must contain src/");
     }
 }

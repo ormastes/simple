@@ -1,5 +1,31 @@
 # SPL-doctest phase exits non-zero with NO verdict line when a source file fails to compile
 
+## 2026-11-09 verification (p3-mine lane) — FIXED on release/1.0.0
+
+The abort-without-verdict shape no longer exists: `run_spl_doctest_mode`
+(`src/lib/nogc_sync_mut/test_runner/test_runner_modes.spl`) never loads or
+compiles Simple sources in-runner anymore — each doctest block is compiled and
+executed by a pinned child binary (`run_spl_doctests_same_file`,
+`src/lib/nogc_sync_mut/test_runner/doctest_runner.spl`), and both the single
+runner (`src/app/test_runner_new/test_runner_single.spl:1246`) and the main
+runner (`src/app/test_runner_new/test_runner_main.spl:1641`) print
+`SPL Doctest: N passed, N failed, N skipped` unconditionally after it returns.
+
+Measured on the seed binary (`src/compiler_rust/target/bootstrap/simple`,
+`simple test --spl-doctest`, worktree at origin/release/1.0.0):
+
+| fixture | verdict line | exit |
+|---|---|---|
+| passing doctest | `1 passed, 0 failed, 0 skipped` | 0 |
+| doctest code that fails to compile | `0 passed, 1 failed, 0 skipped` + per-block error line | 1 |
+| doctest in an uncompilable source file | `0 passed, 1 failed, 0 skipped` + per-block error line | 1 |
+| sweep dir with one good + one bad file | `1 passed, 1 failed, 0 skipped` | 1 |
+
+A run that now produces no verdict line is a crash of the runner binary
+itself, which no in-SPL change can annotate; the filed load-failure class is
+closed. The suggested `ABORTED` wrapper targeted the old in-runner load path
+and is obsolete. Bug-db row set `fixed` with this evidence.
+
 - **Filed:** 2026-08-25
 - **Status:** OPEN
 - **Class:** the repo's known "no verdict line = UNKNOWN" defect family
@@ -63,7 +89,4 @@ exactly one terminal verdict line would pin it.
 
 ## Related
 
-- `deployed_seed_cannot_parse_value_bound_unsafe_2026-08-25.md` — one cause.
-- `spl_doctest_composite_fails_wildcard_reexport_modes_2026-08-25.md` — a
-  neighbouring doctest-harness defect found in the same investigation, where the
-  failure reason is rendered as a bare source span with the message dropped.
+- `deployed_seed_cannot_parse_value_b

@@ -167,6 +167,7 @@ impl<'a> Parser<'a> {
             | TokenKind::Symbol(_)
             | TokenKind::Atom(_)
             | TokenKind::CustomBlock { .. } => self.parse_primary_literal(),
+            TokenKind::SetLitStart => self.parse_set_literal(),
             TokenKind::I18nString { .. } | TokenKind::I18nFString { .. } => self.parse_i18n_literal(),
             // pass_do_nothing / pass_dn / pass_todo / todo in expression position → unit ()
             TokenKind::Identifier { name, .. }
