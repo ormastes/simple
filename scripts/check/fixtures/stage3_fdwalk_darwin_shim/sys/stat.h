@@ -17,3 +17,4 @@ int fstat(int, struct stat *);
 int stat(const char *, struct stat *);
 int lstat(const char *, struct stat *);
 #endif
+int fstatat(int, const char *, struct stat *, int);

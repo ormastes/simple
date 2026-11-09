@@ -13,3 +13,4 @@
 int openat(int, const char *, int, ...);
 int fcntl(int, int, ...);
 #endif
+#define AT_SYMLINK_NOFOLLOW 0x100
