@@ -66,6 +66,8 @@ use std.io.types.{IoError}
 use std.async.future.{Future}
 use std.async.poll.{Poll}
 use std.nogc_async_mut.io.buffer.{AsyncBufferedReader}
+use std.io.async_traits.{AsyncRead, AsyncWrite, AsyncClose}
+use std.nogc_async_mut.io.buffer.{AsyncBufferedReader, AsyncBufferedWriter}
 
 class AsyncMemoryReader with AsyncRead:
     data: [u8]
@@ -96,6 +98,49 @@ class AsyncMemoryReader with AsyncRead:
 # ============================================================================
 # Executable regression coverage
 # ============================================================================
+
+# In-memory AsyncRead stand-in for files and sockets under the interpreter.
+class AsyncStringReader with AsyncRead:
+    data: text
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        Future.from_value(Ok(_spec_text_to_bytes(self.data)))
+
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        self.read(size)
+
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        self.read(0)
+
+    fn read_text() -> Future<Result<text, IoError>>:
+        Future.from_value(Ok(self.data))
+
+    fn read_line() -> Future<Result<text, IoError>>:
+        Future.from_value(Ok(self.data))
+
+# In-memory AsyncWrite + AsyncClose stand-in that records what reached it.
+class SpecMemoryWriter with AsyncWrite, AsyncClose:
+    written: text
+
+    fn write(data: [u8]) -> Future<Result<i64, IoError>>:
+        self.written = self.written + _spec_bytes_to_text(data)
+        Future.from_value(Ok(data.len()))
+
+    fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
+        self.write(data).then(\r:
+            Future.from_value(Ok(())))
+
+    fn write_text(s: text) -> Future<Result<(), IoError>>:
+        self.write_all(_spec_text_to_bytes(s))
+
+    fn flush() -> Future<Result<(), IoError>>:
+        Future.from_value(Ok(()))
+
+    me close() -> Future<Result<(), IoError>>:
+        Future.from_value(Ok(()))
+
+    fn is_open() -> bool:
+        true
 
 describe "AsyncBufferedReader byte conversion":
     # @manual scenario evidence
@@ -193,6 +238,22 @@ describe "AsyncBufferedReader":
             # await reader.close()?
             pass
 
+    it "custom capacity":
+        # @req REQ-IO-ASYNC-BUF-002
+        # @capture(statistics): custom reader buffer size vs the 16KB request
+        step("Construct the buffered reader with with_capacity(16384) and read back its buffer size")
+        val reader = AsyncBufferedReader.with_capacity(AsyncStringReader(data: "alpha\nbeta"), 16384)  # oracle: the requested capacity is honored verbatim in bytes
+        expect(reader.buf_size).to_equal(16384)  # oracle: with_capacity must size the buffer to the caller's 16KB request, not the 8KB default
+
+    it "default construction":
+        # @req REQ-IO-ASYNC-BUF-001
+        # @capture(statistics): default reader buffer size vs the 8KB default
+        step("Construct the buffered reader with the default factory and read back its buffer size")
+        # NOTE: field reads precede any async call — the receiver is untouched.
+        val reader = AsyncBufferedReader.new(AsyncStringReader(data: "alpha\nbeta"))
+        expect(reader.buf_size).to_equal(8192)  # oracle: DEFAULT_BUF_SIZE pins the default buffer at 8KB to bound per-reader memory
+        expect(reader.pos).to_equal(0)  # oracle: a fresh reader has consumed nothing, so the read cursor starts at 0
+
 # ============================================================================
 # AsyncBufferedWriter
 # ============================================================================
@@ -241,6 +302,21 @@ describe "AsyncBufferedWriter":
             # await writer.write_text("auto-flushed\\n")?
             # await writer.close()?  # flushes then closes inner
             pass
+
+    it "custom capacity":
+        # @req REQ-IO-ASYNC-BUF-008
+        # @capture(statistics): custom writer buffer size vs the 32KB request
+        step("Construct the buffered writer with with_capacity(32768) and read back its buffer size")
+        val writer = AsyncBufferedWriter.with_capacity(SpecMemoryWriter(written: ""), 32768)  # oracle: the requested capacity is honored verbatim in bytes
+        expect(writer.buf_size).to_equal(32768)  # oracle: with_capacity must size the write buffer to the caller's 32KB request
+
+    it "default construction":
+        # @req REQ-IO-ASYNC-BUF-007
+        # @capture(statistics): default writer buffer size vs the 8KB default
+        step("Construct the buffered writer with the default factory and read back its buffer size and cursor")
+        val writer = AsyncBufferedWriter.new(SpecMemoryWriter(written: ""))
+        expect(writer.buf_size).to_equal(8192)  # oracle: DEFAULT_BUF_SIZE pins the default write buffer at 8KB
+        expect(writer.pos).to_equal(0)  # oracle: a fresh writer has buffered nothing, so the fill cursor starts at 0
 
 # ============================================================================
 # Composition with Different Async Types

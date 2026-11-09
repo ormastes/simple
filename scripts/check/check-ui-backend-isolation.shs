@@ -21,11 +21,12 @@
 # baseline, 12948 sites), so the two gates overlapped and this one failed on
 # file I/O it was never written to police. Narrowing the scope keeps the
 # rendering rule intact and fully enforced on the code it names in its title.
-# Fixtures: --selftest (non-UI file with rt_file_read_text must NOT be flagged;
-# UI file with an rt_* extern MUST be).
+# Fixtures: --selftest (a local Simple rt_* definition/call must NOT be flagged;
+# an rt_* extern declaration/call MUST be).
 # Violation classes:
-#   (a) rt_[a-z0-9_]* USED AS CODE — an `extern fn rt_*` declaration, or a
-#       `rt_*(` call. A bare token is NOT enough (see "Why decl-or-call" below).
+#   (a) rt_[a-z0-9_]* USED AS CODE with an extern owner — an `extern fn rt_*`
+#       declaration, or a `rt_*(` call whose symbol is declared extern in the
+#       source tree. A bare token or local Simple function is NOT enough.
 #   (b) MetalBackend(/VulkanBackend(/DirectXBackend(/SoftwareBackend( — direct
 #       backend-class construction (should go through Engine2D.create_* instead)
 #
@@ -45,8 +46,8 @@
 # Requiring decl-or-call form and ignoring `#`-comment tails removes 63 such
 # files repo-wide (545 -> 482) without dropping a single real declaration or
 # call — every eliminated file was re-read by hand and contained prose only.
-# This makes the gate STRICTER per finding, not weaker: it still fires on every
-# `extern fn rt_*` and every `rt_*(` call site.
+# The extern-owner filter (2026-11-08) also rejects local Simple rt_* functions
+# while preserving every extern declaration and every call to an extern symbol.
 #
 # Existing debt is baselined in ui_backend_isolation_baseline.txt (one
 # "CATEGORY:path" entry per line). The gate RATCHETS: a violating file already
@@ -116,11 +117,50 @@ code_only() {
     }'
 }
 
+run_selftest() {
+    _st_dir=$(mktemp -d) || return 2
+    mkdir -p "$_st_dir/ui" || { rm -rf "$_st_dir"; return 2; }
+    printf 'pub fn rt_selftest_local() -> i64:\n    1\nfn call_local() -> i64:\n    rt_selftest_local()\n' > "$_st_dir/ui/local.spl"
+    if _st_local_output=$(sh "$0" --scan-dir "$_st_dir" 2>&1); then
+        _st_local_rc=0
+    else
+        _st_local_rc=$?
+    fi
+    printf 'extern fn rt_selftest_backend() -> i64\nfn call_backend() -> i64:\n    rt_selftest_backend()\n' > "$_st_dir/ui/local.spl"
+    if _st_backend_output=$(sh "$0" --scan-dir "$_st_dir" 2>&1); then
+        _st_backend_rc=0
+    else
+        _st_backend_rc=$?
+    fi
+    rm -rf "$_st_dir"
+    _st_failed=0
+    if [ "$_st_local_rc" -ne 0 ]; then
+        echo "selftest: local Simple rt_* definition/call must PASS, got rc=$_st_local_rc output='$_st_local_output'" >&2
+        _st_failed=1
+    fi
+    if [ "$_st_backend_rc" -ne 1 ]; then
+        echo "selftest: extern backend declaration/call must FAIL, got rc=$_st_backend_rc output='$_st_backend_output'" >&2
+        _st_failed=1
+    else
+        case "$_st_backend_output" in
+            *ui_backend_isolation_new_violation=RT:*) : ;;
+            *) echo "selftest: extern fixture did not report an RT violation: '$_st_backend_output'" >&2; _st_failed=1 ;;
+        esac
+    fi
+    [ "$_st_failed" -eq 0 ] || return 1
+    echo "check-ui-backend-isolation: selftest 2/2 fixtures correct"
+}
+
 UPDATE_BASELINE=0
 SCAN_DIR_OVERRIDE=""
+SELFTEST=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --selftest)
+            SELFTEST=1
+            shift
+            ;;
         --update-baseline)
             UPDATE_BASELINE=1
             shift
@@ -140,6 +180,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+if [ "$SELFTEST" -eq 1 ]; then
+    run_selftest || exit $?
+    exit 0
+fi
+
 if [ -n "$SCAN_DIR_OVERRIDE" ]; then
     set -- "$SCAN_DIR_OVERRIDE"
 else
@@ -149,7 +194,9 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
+raw_rt_hits="$tmp_dir/raw_rt_hits.txt"
 rt_hits="$tmp_dir/rt_hits.txt"
+extern_rt_symbols="$tmp_dir/extern_rt_symbols.txt"
 backend_hits="$tmp_dir/backend_hits.txt"
 current="$tmp_dir/current.txt"
 
@@ -169,7 +216,7 @@ if command -v rg >/dev/null 2>&1; then
     # files (`*/ui/*/*.spl` in sh) -- that silently narrowed the scan.
     set -f
     # shellcheck disable=SC2086
-    rg -n $UI_INCLUDE_GLOBS $EXCLUDE_GLOBS -e "$RT_PATTERN" "$@" 2>/dev/null | code_only "$CODE_RT_RE" >"$rt_hits" || true
+    rg -n $UI_INCLUDE_GLOBS $EXCLUDE_GLOBS -e "$RT_PATTERN" "$@" 2>/dev/null | code_only "$CODE_RT_RE" >"$raw_rt_hits" || true
     # shellcheck disable=SC2086
     rg -n $UI_INCLUDE_GLOBS $EXCLUDE_GLOBS -e "$BACKEND_PATTERN" "$@" 2>/dev/null | code_only "$CODE_BACKEND_RE" >"$backend_hits" || true
     set +f
@@ -178,10 +225,57 @@ else
     find "$@" -type f -name '*.spl' 2>/dev/null | sed 's#^\./##' \
         | grep -E "$UI_INCLUDE_RE" | grep -Ev "$UI_EXCLUDE_RE" >"$ui_files" || true
     if [ -s "$ui_files" ]; then
-        tr '\n' '\0' <"$ui_files" | xargs -0 grep -n -H -E -e "$CODE_RT_RE" 2>/dev/null | code_only "$CODE_RT_RE" >"$rt_hits" || true
+        tr '\n' '\0' <"$ui_files" | xargs -0 grep -n -H -E -e "$CODE_RT_RE" 2>/dev/null | code_only "$CODE_RT_RE" >"$raw_rt_hits" || true
         tr '\n' '\0' <"$ui_files" | xargs -0 grep -n -H -E -e "$CODE_BACKEND_RE" 2>/dev/null | code_only "$CODE_BACKEND_RE" >"$backend_hits" || true
     fi
 fi
+
+# An rt_* call is a backend bypass only when an extern declaration owns the
+# symbol. Index declarations from the source tree and any fixture scan root;
+# local Simple definitions and calls with the same spelling are not backend
+# primitives. Strip comments here too so a comment cannot supply a declaration.
+find src "$@" -type f -name '*.spl' ! -path '*/vendor/*' ! -path '*/node_modules/*' -print0 2>/dev/null \
+    | xargs -0 awk '{
+        code = ""
+        inq = 0
+        n = length($0)
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1)
+            if (c == "\"") { inq = 1 - inq }
+            if (c == "#" && inq == 0) { break }
+            code = code c
+        }
+        if (match(code, /extern[[:blank:]]+fn[[:blank:]]+rt_[a-z0-9_]+/)) {
+            symbol = substr(code, RSTART, RLENGTH)
+            sub(/^extern[[:blank:]]+fn[[:blank:]]+/, "", symbol)
+            print symbol
+        }
+    }' | sort -u >"$extern_rt_symbols"
+
+# Keep only candidate lines containing at least one call to an indexed extern.
+awk -v symbols="$extern_rt_symbols" '
+    BEGIN { while ((getline symbol < symbols) > 0) backed[symbol] = 1 }
+    {
+        orig = $0
+        rest = orig
+        sub(/^[^:]*:[0-9]+:/, "", rest)
+        code = ""
+        inq = 0
+        n = length(rest)
+        for (i = 1; i <= n; i++) {
+            c = substr(rest, i, 1)
+            if (c == "\"") { inq = 1 - inq }
+            if (c == "#" && inq == 0) { break }
+            code = code c
+        }
+        while (match(code, /rt_[a-z0-9_]+[[:blank:]]*[(]/)) {
+            symbol = substr(code, RSTART, RLENGTH)
+            sub(/[[:blank:]]*[(]$/, "", symbol)
+            if (symbol in backed) { print orig; next }
+            code = substr(code, RSTART + RLENGTH)
+        }
+    }
+' "$raw_rt_hits" >"$rt_hits"
 
 : >"$current"
 cut -d: -f1 "$rt_hits" | sort -u | sed '/^$/d;s/^/RT:/' >>"$current"

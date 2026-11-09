@@ -4,6 +4,8 @@
 # **Category:** Compiler | Frontend | Parser
 # **Status:** Implemented
 
+use std.spec.step
+
 fn check(condition: bool):
     expect(condition).to_equal(true)
 
@@ -226,6 +228,58 @@ describe "Parse Declarations":
             "{prefix}, {name}!"
         check(greet("World") == "Hello, World!")
         check(greet("World", "Hi") == "Hi, World!")
+
+    it "parse enum with pipe-separated variants on one line":
+        # @req REQ-COMPILER-FRONTEND-003
+        # @capture(bit_table): pipe-separated enum variant parse verdict
+        step("Parse a one-line pipe-separated enum and match on a variant")
+        # Regression: src/os/drivers/input/ps2_keyboard.spl declares enum
+        # variants pipe-separated on a single line (e.g. `Escape | F1 | F2`)
+        # instead of one-per-line. The enum-variant-list loop must accept
+        # `|` as a pure separator between variant names.
+        enum Key:
+            Escape | F1 | F2
+            Up | Down
+        val k = Key.F1
+        val is_f1 = match k:
+            Key.Escape: false
+            Key.F1: true
+            Key.F2: false
+            Key.Up: false
+            Key.Down: false
+        check(is_f1)
+
+    it "parse function with 'on' as a bool parameter name (soft keyword, not reserved)":
+        # @req REQ-COMPILER-FRONTEND-003
+        # @capture(bit_table): on-parameter parse verdict
+        step("Parse a function using on as a plain bool parameter name")
+        step("Verify: parse function with 'on' as a bool parameter name (soft keyword, not reserved)")
+        # Regression: `on` used to be a hard-reserved lexer keyword (for the
+        # `on pc{...} use handler form` AOP advice decl), which broke any
+        # function using it as a plain boolean-toggle parameter name -- the
+        # whole file failed with "expected pointcut expression 'pc{...}',
+        # found Newline", a diagnostic that names neither the offending line
+        # nor the identifier. `on` must remain usable as a plain
+        # parameter/variable name outside the `on pc{...}` advice shape.
+        # See doc/08_tracking/bug/aop_on_hard_keyword_blocks_identifier_2026-07-25.md
+        fn showcase_trace(on: bool, stage: text) -> bool:
+            on
+        check(showcase_trace(true, "x") == true)
+        check(showcase_trace(false, "x") == false)
+
+    it "parse function literally named cli (soft keyword, not reserved)":
+        # @req REQ-COMPILER-FRONTEND-003
+        # @capture(bit_table): cli-identifier parse verdict
+        step("Parse and call a function literally named cli")
+        # Regression: `cli` used to be a hard-reserved lexer keyword (for the
+        # `cli Name:` declarative arg-parsing block), which broke any
+        # identifier named `cli` -- e.g. the x86 interrupt-disable wrapper
+        # `fn cli(): ...` in src/os/kernel/boot/cpu.spl failed to parse with
+        # "expected Ident, got cli 'cli'". `cli` must remain usable as a
+        # plain function/variable name outside the `cli Name:` block shape.
+        fn cli() -> i64:
+            42
+        check(cli() == 42)
 
 describe "Parser Bootstrap Compatibility":
     it "keeps driver process-result tuples positional for bootstrap parser":

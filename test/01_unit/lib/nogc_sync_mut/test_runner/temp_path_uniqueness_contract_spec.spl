@@ -1,18 +1,57 @@
 use std.spec
 use std.io_runtime.{file_read}
+use std.common.test_runner.wrapper_filename.{coverage_wrapper_filename, spipe_wrapper_filename}
 
-describe "test-runner generated temp paths are per-process unique":
-    it "embeds the pid in the coverage wrapper temp path":
-        val source = file_read(
-            "src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl")
-        expect(source).to_contain(
-            "\"/simple_cov_\" + getpid().to_text() + \"_\" + base")
+describe "test-runner generated wrapper basenames":
+    it "keeps coverage spec classification without embedding an authored path":
+        val nonce = "0123456789abcdef0123456789abcdef"
+        expect(coverage_wrapper_filename(17, nonce, true).unwrap()).to_equal(
+            "simple_cov_17_0123456789abcdef0123456789abcdef_spec.spl")
+        expect(coverage_wrapper_filename(17, nonce, false).unwrap()).to_equal(
+            "simple_cov_17_0123456789abcdef0123456789abcdef.spl")
 
-    it "embeds the pid in the native spipe_wrapped temp path":
-        val source = file_read(
-            "src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl")
-        expect(source).to_contain(
-            "\"/spipe_wrapped_\" + getpid().to_text() + \"_\"")
+    it "retains the native prefix pid nonce and suffix":
+        expect(spipe_wrapper_filename(17, "0123456789abcdef0123456789abcdef").unwrap()).to_equal(
+            "spipe_wrapped_17_0123456789abcdef0123456789abcdef_native.spl")
+
+    it "bounds ASCII filename bytes even at the maximum signed process id":
+        val nonce = "0123456789abcdef0123456789abcdef"
+        val coverage = coverage_wrapper_filename(9223372036854775807, nonce, true).unwrap()
+        val native = spipe_wrapper_filename(9223372036854775807, nonce).unwrap()
+        expect(coverage).to_start_with("simple_cov_9223372036854775807_")
+        expect(native).to_start_with("spipe_wrapped_9223372036854775807_")
+        expect(coverage.len()).to_be_less_than(128)
+        expect(native.len()).to_be_less_than(128)
+
+    it "separates processes and invocations instead of reusing path based names":
+        val first = "0123456789abcdef0123456789abcdef"
+        val second = "fedcba9876543210fedcba9876543210"
+        expect(spipe_wrapper_filename(17, first).unwrap() == spipe_wrapper_filename(18, first).unwrap()).to_equal(false)
+        expect(spipe_wrapper_filename(17, first).unwrap() == spipe_wrapper_filename(17, second).unwrap()).to_equal(false)
+        expect(coverage_wrapper_filename(17, first, true).unwrap() == coverage_wrapper_filename(17, second, true).unwrap()).to_equal(false)
+
+    it "rejects missing short and overlong nonces rather than using a shared fallback":
+        for nonce in ["", "0123456789abcdef0123456789abcde", "0123456789abcdef0123456789abcdef0"]:
+            expect(coverage_wrapper_filename(17, nonce, true).is_err()).to_equal(true)
+            expect(spipe_wrapper_filename(17, nonce).is_err()).to_equal(true)
+
+    it "rejects separators and nonhex bytes in otherwise correctly sized nonces":
+        for nonce in ["/123456789abcdef0123456789abcdef", "\\123456789abcdef0123456789abcdef", "z123456789abcdef0123456789abcdef"]:
+            expect(coverage_wrapper_filename(17, nonce, true).is_err()).to_equal(true)
+            expect(spipe_wrapper_filename(17, nonce).is_err()).to_equal(true)
+
+    it "rejects zero and negative process ids":
+        val nonce = "0123456789abcdef0123456789abcdef"
+        for process_id in [0, -1]:
+            expect(coverage_wrapper_filename(process_id, nonce, true).is_err()).to_equal(true)
+            expect(spipe_wrapper_filename(process_id, nonce).is_err()).to_equal(true)
+
+    it "distinguishes unavailable entropy from an invalid invocation token":
+        val nonce = "0123456789abcdef0123456789abcdef"
+        expect(coverage_wrapper_filename(17, nil, true).unwrap_err()).to_equal("coverage wrapper entropy unavailable before test execution")
+        expect(spipe_wrapper_filename(17, nil).unwrap_err()).to_equal("native wrapper entropy unavailable before test execution")
+        expect(coverage_wrapper_filename(0, nonce, true).unwrap_err()).to_equal("coverage wrapper invocation filename rejected before test execution")
+        expect(spipe_wrapper_filename(0, nonce).unwrap_err()).to_equal("native wrapper invocation filename rejected before test execution")
 
     it "embeds the pid in the interpreter result-wrapper temp path":
         val source = file_read(

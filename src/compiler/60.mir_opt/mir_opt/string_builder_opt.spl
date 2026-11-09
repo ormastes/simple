@@ -1,255 +1,350 @@
-# String Builder Detection
+# String Builder Rewrite (bug c_runtime_string_concat_quadratic_2026-08-22)
 #
-# Detects loop pattern:
-#   var result = ""
-#   while ...:
-#       result = result + ch
+# `rt_strcat_tagged` copies both operands on every call, so a loop that
+# accumulates `s = s + x` / `s += x` is O(n^2). MIR lowers both source forms
+# to the same pair:
 #
-# Transforms to:
-#   var parts: [text] = []
-#   while ...:
-#       parts.push(ch)
-#   result = parts.join("")
+#   tmp = call rt_strcat_tagged(s, x)
+#   s   = copy tmp
 #
-# This avoids O(n²) string concatenation by accumulating into an array
-# and joining once at the end.
+# When it is provably safe, this pass rewrites the loop to the runtime
+# builder (`std.common.string_builder.RtStringBuilder`'s externs):
+#
+#   preheader:  sb = call rt_string_builder_new()
+#               call rt_string_builder_push(sb, s)      # keep s's prior value
+#   loop:       call rt_string_builder_push(sb, x)      # per append
+#   each exit:  s = call rt_string_builder_finish(sb)   # consumes the handle
+#
+# Safety conditions (any failure leaves the function unchanged):
+#   1. Inside the loop, `s` is referenced ONLY as the first argument of the
+#      concat and as the destination of its copy-back -- no other read,
+#      write or alias (including the loop condition and `s = s + s`).
+#   2. The concat temp is referenced nowhere else in the function.
+#   3. The loop header has exactly one predecessor outside the loop, and it
+#      ends in `goto header` (a dedicated preheader).
+#   4. Every exit block has only loop predecessors, and every loop block ends
+#      in goto/if/switch/unreachable/abort (no return, throw or call
+#      terminator escapes with the handle live).
+#   5. Any instruction kind this pass does not model counts as a use of `s`.
+#
+# Opt-in (SIMPLE_MIR_STRING_BUILDER_OPT=1) until the rewrite is verified on
+# the native lane; see the bug record.
 
-use compiler.mir.mir_data.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions (MirModule, MirFunction, MirBlock)
 use compiler.mir_opt.loop_detect (LoopInfo, LoopDetector)
+use std.io_runtime.{env_get_opt}
 
-# ============================================================================
-# String Builder Detection Pass
-# ============================================================================
+val SB_CONCAT_FN: text = "rt_strcat_tagged"
+val SB_NEW_FN: text = "rt_string_builder_new"
+val SB_PUSH_FN: text = "rt_string_builder_push"
+val SB_FINISH_FN: text = "rt_string_builder_finish"
 
 class StringBuilderOpt:
     detector: LoopDetector
     transforms_applied: i64
-    next_local_id: i64
 
 impl StringBuilderOpt:
     static fn new() -> StringBuilderOpt:
-        StringBuilderOpt(
-            detector: LoopDetector.new(),
-            transforms_applied: 0,
-            next_local_id: 800000
-        )
+        StringBuilderOpt(detector: LoopDetector.new(), transforms_applied: 0)
 
     me optimize_function(func: MirFunction) -> MirFunction:
         self.detector.detect_loops(func)
-
-        if self.detector.loops.len() == 0:
-            return func
-
-        var optimized_blocks = func.blocks
-
+        var current = func
         for loop_info in self.detector.loops:
-            optimized_blocks = self.try_transform_loop(optimized_blocks, loop_info, func)
+            current = self.try_transform_loop(current, loop_info)
+        current
 
-        MirFunction(..func, blocks: optimized_blocks)
-
-    me try_transform_loop(blocks: [MirBlock], loop_info: LoopInfo, func: MirFunction) -> [MirBlock]:
-        """
-        Try to detect and transform string concat accumulation in a loop.
-
-        Looks for:
-        1. A local initialized to "" before the loop
-        2. Inside the loop body: BinOp(tmp, Add, Copy(str_var), suffix) + Copy(str_var, tmp)
-        3. No other writes to str_var inside the loop
-
-        If found, transforms to push+join pattern.
-        """
-        # Build loop block set
-        var loop_set = {}
+    me try_transform_loop(func: MirFunction, loop_info: LoopInfo) -> MirFunction:
+        var loop_set: Dict<i64, bool> = {}
         loop_set[loop_info.header.id] = true
         for bid in loop_info.body:
             loop_set[bid.id] = true
 
-        # Find string concat patterns inside loop
-        val candidate = self.find_str_concat_candidate(blocks, loop_set, func)
-        if val info = candidate:
-            # Verify the candidate: str_var must be initialized to "" before loop,
-            # and only written by the concat pattern inside the loop
-            if not self.verify_candidate(blocks, loop_set, info, func):
-                return blocks
-
+        val candidate = self.find_candidate(func, loop_set)
+        if val c = candidate:
+            if not self.loop_is_safe(func, loop_set, c):
+                return func
+            val preheader = self.unique_preheader(func, loop_set, loop_info.header)
+            if preheader < 0:
+                return func
+            val exits = self.exit_blocks(func, loop_set)
+            if exits.len() == 0:
+                return func
             self.transforms_applied = self.transforms_applied + 1
+            return self.apply(func, loop_set, c, preheader, exits)
+        func
 
-            # Allocate a new local for the parts array
-            val parts_local = LocalId(id: self.next_local_id)
-            self.next_local_id = self.next_local_id + 1
-
-            # Transform:
-            # Before loop: initialize parts = []
-            # Inside loop: replace concat+copy with parts.push(suffix)
-            # After loop: result = parts.join("")
-            self.apply_transform(blocks, loop_set, info, parts_local)
-        else:
-            blocks
-
-    fn find_str_concat_candidate(blocks: [MirBlock], loop_set: Dict<i64, bool>, func: MirFunction) -> StrConcatCandidate?:
-        """Find a string variable being concatenated in a loop."""
-        for block in blocks:
+    # First `tmp = rt_strcat_tagged(Copy(s), x); s = tmp` pair in the loop on a
+    # str-typed `s`.
+    fn find_candidate(func: MirFunction, loop_set: Dict<i64, bool>) -> SbCandidate?:
+        for block in func.blocks:
             if not loop_set.has(block.id.id):
                 continue
-
             val insts = block.instructions
             var i = 0
             while i + 1 < insts.len():
-                # Look for: BinOp(tmp, Add, Copy(str_var), suffix) + Copy(str_var, tmp)
-                match insts[i].kind:
-                    case BinOp(tmp_dest, op, left, right):
-                        match op:
-                            case Add:
-                                val str_local = self.operand_local_id(left)
-                                if val str_var = str_local:
-                                    if not self.local_is_text(str_var, func):
-                                        i = i + 1
-                                        continue
-                                    match insts[i + 1].kind:
-                                        case Copy(copy_dest, copy_src):
-                                            if copy_src.id == tmp_dest.id and copy_dest.id == str_var.id:
-                                                return StrConcatCandidate(
-                                                    str_var: str_var,
-                                                    suffix_operand: right,
-                                                    block_id: block.id,
-                                                    inst_index: i
-                                                )
-                                        case _:
-                                            val non_copy_followup = true
-                            case _:
-                                val non_add_op = true
-                    case _:
-                        val non_binop_inst = true
+                val pair = sb_match_concat_pair(insts[i], insts[i + 1])
+                if val p = pair:
+                    if sb_local_is_str(func, p.s_id):
+                        return Some(p)
                 i = i + 1
         nil
 
-    fn verify_candidate(blocks: [MirBlock], loop_set: Dict<i64, bool>, info: StrConcatCandidate, func: MirFunction) -> bool:
-        """Verify that str_var is initialized to "" before loop and only written by concat inside."""
-        val target_id = info.str_var.id
+    fn loop_is_safe(func: MirFunction, loop_set: Dict<i64, bool>, c: SbCandidate) -> bool:
+        for block in func.blocks:
+            val in_loop = loop_set.has(block.id.id)
+            val insts = block.instructions
+            var i = 0
+            while i < insts.len():
+                # A concat pair for s in the loop is the sanctioned use.
+                if in_loop and i + 1 < insts.len():
+                    val pair = sb_match_concat_pair(insts[i], insts[i + 1])
+                    if val p = pair:
+                        if p.s_id == c.s_id:
+                            if sb_operand_mentions(p.suffix, c.s_id):
+                                return false
+                            if not self.temp_is_private(func, p.tmp_id, block.id.id, i):
+                                return false
+                            i = i + 2
+                            continue
+                if in_loop and sb_inst_mentions(insts[i], c.s_id):
+                    return false
+                i = i + 1
+            if in_loop:
+                if not sb_terminator_safe_in_loop(block.terminator):
+                    return false
+                if sb_terminator_mentions(block.terminator, c.s_id):
+                    return false
+        true
 
-        # Check that str_var is initialized to "" in some block before the loop
-        var found_init = false
-        for block in blocks:
+    # The concat temp is defined by the pair at (block_id, index) and read only
+    # by its copy-back; nothing else in the function may reference it.
+    fn temp_is_private(func: MirFunction, tmp_id: i64, block_id: i64, index: i64) -> bool:
+        for block in func.blocks:
+            var i = 0
+            for inst in block.instructions:
+                val is_pair = block.id.id == block_id and (i == index or i == index + 1)
+                if not is_pair and sb_inst_mentions(inst, tmp_id):
+                    return false
+                i = i + 1
+            if sb_terminator_mentions(block.terminator, tmp_id):
+                return false
+        true
+
+    fn unique_preheader(func: MirFunction, loop_set: Dict<i64, bool>, header: BlockId) -> i64:
+        var found = -1
+        for block in func.blocks:
             if loop_set.has(block.id.id):
                 continue
-            for inst in block.instructions:
-                match inst.kind:
-                    case Const(dest, value, _):
-                        if dest.id == target_id:
-                            match value:
-                                case Str(s):
-                                    if s == "":
-                                        found_init = true
-                                case _:
-                                    val non_empty_string_const = true
-                    case _:
-                        val non_const_inst = true
+            for succ in sb_successors(block.terminator):
+                if succ == header.id:
+                    if found >= 0:
+                        return -1
+                    found = block.id.id
+        if found < 0:
+            return -1
+        for block in func.blocks:
+            if block.id.id == found:
+                match block.terminator:
+                    case Goto(_): return found
+                    case _: return -1
+        -1
 
-        if not found_init:
-            return false
-
-        # Check no other writes to str_var inside the loop (besides the concat pattern)
-        var write_count = 0
-        for block in blocks:
+    fn exit_blocks(func: MirFunction, loop_set: Dict<i64, bool>) -> [i64]:
+        var exits: [i64] = []
+        for block in func.blocks:
             if not loop_set.has(block.id.id):
                 continue
-            for inst in block.instructions:
-                val dest = self.inst_dest(inst)
-                if val write_dest = dest:
-                    if write_dest.id == target_id:
-                        write_count = write_count + 1
+            for succ in sb_successors(block.terminator):
+                if not loop_set.has(succ) and not exits.contains(succ):
+                    exits.push(succ)
+        # Every exit must be entered only from inside the loop.
+        for block in func.blocks:
+            if loop_set.has(block.id.id):
+                continue
+            for succ in sb_successors(block.terminator):
+                if exits.contains(succ):
+                    return []
+        if func.entry_block.id >= 0 and exits.contains(func.entry_block.id):
+            return []
+        exits
 
-        # The concat pattern writes str_var twice: once in BinOp (tmp), once in Copy
-        # Actually the Copy is the only write to str_var (BinOp writes to tmp)
-        # So we expect exactly 1 write to str_var in the loop
-        write_count <= 1
-
-    me apply_transform(blocks: [MirBlock], loop_set: Dict<i64, bool>, info: StrConcatCandidate, parts_local: LocalId) -> [MirBlock]:
-        """Apply the string builder transformation."""
-        var new_blocks: [MirBlock] = []
-
-        for block in blocks:
-            if block.id.id == info.block_id.id:
-                # This block contains the concat pattern — replace with push
-                val transformed = self.transform_concat_block(block, info, parts_local)
-                new_blocks.push(transformed)
-            else:
-                new_blocks.push(block)
-
-        new_blocks
-
-    fn transform_concat_block(block: MirBlock, info: StrConcatCandidate, parts_local: LocalId) -> MirBlock:
-        """Replace concat+copy with parts.push(suffix)."""
-        var new_insts: [MirInst] = []
-        val insts = block.instructions
-        var i = 0
-
-        while i < insts.len():
-            if i == info.inst_index and i + 1 < insts.len():
-                # Replace 2-instruction concat pattern with push call
-                val push_func = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("push"),
-                    MirType.unit()
-                ))
-                val parts_op = MirOperand(kind: MirOperandKind.Copy(parts_local))
-                new_insts.push(MirInst(
-                    kind: MirInstKind.Call(None, push_func, [parts_op, info.suffix_operand]),
-                    span: insts[i].span
-                ))
-                i = i + 2  # Skip both concat instructions
-            else:
-                new_insts.push(insts[i])
-                i = i + 1
-
-        MirBlock(
-            id: block.id,
-            label: block.label,
-            instructions: new_insts,
-            terminator: block.terminator
-        )
-
-    fn operand_local_id(op: MirOperand) -> LocalId?:
-        match op.kind:
-            case Copy(local): local
-            case Move(local): local
-            case _: nil
-
-    fn local_is_text(local_id: LocalId, func: MirFunction) -> bool:
+    me apply(func: MirFunction, loop_set: Dict<i64, bool>, c: SbCandidate, preheader: i64, exits: [i64]) -> MirFunction:
+        var max_id = 0
         for loc in func.locals:
-            if loc.id.id == local_id.id:
-                match loc.type_.kind:
-                    case Ptr(pointee, _):
-                        match pointee.kind:
-                            case I8: return true
-                            case _: return false
-                    case _: return false
-        false
+            if loc.id.id > max_id:
+                max_id = loc.id.id
+        val sb_id = LocalId(id: max_id + 1)
+        var locals = func.locals
+        locals.push(MirLocal(id: sb_id, name: Some("__sb_{c.s_id}"), type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false))
 
-    fn inst_dest(inst: MirInst) -> LocalId?:
-        match inst.kind:
-            case Const(dest, _, _): dest
-            case BinOp(dest, _, _, _): dest
-            case UnaryOp(dest, _, _): dest
-            case Copy(dest, _): dest
-            case Call(dest, _, _): dest
-            case Aggregate(dest, _, _): dest
-            case _: nil
+        val sb_op = MirOperand(kind: MirOperandKind.Copy(sb_id))
+        val s_local = LocalId(id: c.s_id)
+        var blocks: [MirBlock] = []
+        for block in func.blocks:
+            var insts: [MirInst] = []
+            val bid = block.id.id
+            if exits.contains(bid):
+                insts.push(MirInst(kind: MirInstKind.Call(Some(s_local), sb_fn_operand(SB_FINISH_FN, sb_str_type()), [sb_op]), span: nil))
+            val src = block.instructions
+            var i = 0
+            while i < src.len():
+                if loop_set.has(bid) and i + 1 < src.len():
+                    val pair = sb_match_concat_pair(src[i], src[i + 1])
+                    if val p = pair:
+                        if p.s_id == c.s_id:
+                            insts.push(MirInst(kind: MirInstKind.Call(nil, sb_fn_operand(SB_PUSH_FN, MirType.i64()), [sb_op, p.suffix]), span: src[i].span))
+                            i = i + 2
+                            continue
+                insts.push(src[i])
+                i = i + 1
+            if bid == preheader:
+                insts.push(MirInst(kind: MirInstKind.Call(Some(sb_id), sb_fn_operand(SB_NEW_FN, MirType.i64()), []), span: nil))
+                insts.push(MirInst(kind: MirInstKind.Call(nil, sb_fn_operand(SB_PUSH_FN, MirType.i64()), [sb_op, MirOperand(kind: MirOperandKind.Copy(s_local))]), span: nil))
+            blocks.push(MirBlock(id: block.id, label: block.label, instructions: insts, terminator: block.terminator))
+        MirFunction(..func, locals: locals, blocks: blocks)
 
     fn stats_summary() -> text:
         "StringBuilderOpt: {self.transforms_applied} loops transformed"
 
+struct SbCandidate:
+    s_id: i64
+    tmp_id: i64
+    suffix: MirOperand
+
 # ============================================================================
-# Candidate Info
+# Helpers (free functions so the safety proof is testable in isolation)
 # ============================================================================
 
-struct StrConcatCandidate:
-    """Info about a string concat accumulation pattern found in a loop."""
-    str_var: LocalId
-    suffix_operand: MirOperand
-    block_id: BlockId
-    inst_index: i64
+fn sb_str_type() -> MirType:
+    MirType(kind: MirTypeKind.Opaque("str"))
+
+fn sb_fn_operand(name: text, ret: MirType) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: ret, is_variadic: false)))))
+
+fn sb_callee_name(op: MirOperand) -> text:
+    match op.kind:
+        case Const(value, _):
+            match value:
+                case Str(name): name
+                case _: ""
+        case _: ""
+
+fn sb_operand_local(op: MirOperand) -> i64:
+    match op.kind:
+        case Copy(local): local.id
+        case Move(local): local.id
+        case _: -1
+
+fn sb_match_concat_pair(first: MirInst, second: MirInst) -> SbCandidate?:
+    match first.kind:
+        case Call(dest, func, args):
+            if sb_callee_name(func) != SB_CONCAT_FN or args.len() != 2:
+                return nil
+            if val tmp = dest:
+                val s_id = sb_operand_local(args[0])
+                if s_id < 0 or s_id == tmp.id:
+                    return nil
+                match second.kind:
+                    case Copy(cd, cs):
+                        if cd.id == s_id and cs.id == tmp.id:
+                            return Some(SbCandidate(s_id: s_id, tmp_id: tmp.id, suffix: args[1]))
+                    case Move(md, ms):
+                        if md.id == s_id and ms.id == tmp.id:
+                            return Some(SbCandidate(s_id: s_id, tmp_id: tmp.id, suffix: args[1]))
+                    case _: return nil
+            return nil
+        case _: return nil
+    nil
+
+fn sb_local_is_str(func: MirFunction, id: i64) -> bool:
+    for loc in func.locals:
+        if loc.id.id == id:
+            match loc.type_.kind:
+                case Opaque(name): return name == "str"
+                case _: return false
+    false
+
+fn sb_operand_mentions(op: MirOperand, id: i64) -> bool:
+    sb_operand_local(op) == id
+
+fn sb_any_mentions(ops: [MirOperand], id: i64) -> bool:
+    for op in ops:
+        if sb_operand_mentions(op, id):
+            return true
+    false
+
+fn sb_opt_dest_is(dest: LocalId?, id: i64) -> bool:
+    if val d = dest:
+        return d.id == id
+    false
+
+# Conservative: an instruction kind not modelled here counts as a use.
+fn sb_inst_mentions(inst: MirInst, id: i64) -> bool:
+    match inst.kind:
+        case Const(dest, _, _): dest.id == id
+        case Copy(dest, src): dest.id == id or src.id == id
+        case Move(dest, src): dest.id == id or src.id == id
+        case BinOp(dest, _, l, r): dest.id == id or sb_operand_mentions(l, id) or sb_operand_mentions(r, id)
+        case CheckedBinOp(dest, _, l, r): dest.id == id or sb_operand_mentions(l, id) or sb_operand_mentions(r, id)
+        case UnaryOp(dest, _, o): dest.id == id or sb_operand_mentions(o, id)
+        case Cast(dest, o, _): dest.id == id or sb_operand_mentions(o, id)
+        case Bitcast(dest, o, _): dest.id == id or sb_operand_mentions(o, id)
+        case Load(dest, p): dest.id == id or sb_operand_mentions(p, id)
+        case Store(p, v): sb_operand_mentions(p, id) or sb_operand_mentions(v, id)
+        case GetField(dest, b, _): dest.id == id or sb_operand_mentions(b, id)
+        case SetField(b, _, v): sb_operand_mentions(b, id) or sb_operand_mentions(v, id)
+        case Aggregate(dest, _, ops): dest.id == id or sb_any_mentions(ops, id)
+        case GetElementPtr(dest, b, idx): dest.id == id or sb_operand_mentions(b, id) or sb_any_mentions(idx, id)
+        case Call(dest, f, args): sb_opt_dest_is(dest, id) or sb_operand_mentions(f, id) or sb_any_mentions(args, id)
+        case CallIndirect(dest, p, args, _): sb_opt_dest_is(dest, id) or sb_operand_mentions(p, id) or sb_any_mentions(args, id)
+        case Intrinsic(dest, _, args): sb_opt_dest_is(dest, id) or sb_any_mentions(args, id)
+        case Drop(local): local.id == id
+        case DebugValue(local, _): local.id == id
+        case _: true
+
+fn sb_terminator_mentions(term: MirTerminator, id: i64) -> bool:
+    match term:
+        case Goto(_): false
+        case Unreachable: false
+        case Abort(_): false
+        case If(cond, _, _): sb_operand_mentions(cond, id)
+        case Switch(value, _, _): sb_operand_mentions(value, id)
+        case Ret(value):
+            if val v = value:
+                return sb_operand_mentions(v, id)
+            false
+        case _: true
+
+# Loop blocks must not leave the function with the builder handle live.
+fn sb_terminator_safe_in_loop(term: MirTerminator) -> bool:
+    match term:
+        case Goto(_): true
+        case If(_, _, _): true
+        case Switch(_, _, _): true
+        case Unreachable: true
+        case Abort(_): true
+        case _: false
+
+fn sb_successors(term: MirTerminator) -> [i64]:
+    match term:
+        case Goto(t): [t.id]
+        case If(_, a, b): [a.id, b.id]
+        case Switch(_, cases, d):
+            var out: [i64] = []
+            for sc in cases:
+                out.push(sc.target.id)
+            out.push(d.id)
+            out
+        case _: []
+
+fn string_builder_opt_enabled_for(raw: text) -> bool:
+    raw == "1"
+
+fn string_builder_opt_enabled() -> bool:
+    string_builder_opt_enabled_for(env_get_opt("SIMPLE_MIR_STRING_BUILDER_OPT") ?? "")
 
 # ============================================================================
 # Factory Functions
@@ -259,8 +354,7 @@ fn create_string_builder_opt_pass() -> StringBuilderOpt:
     StringBuilderOpt.new()
 
 fn string_builder_opt_run_on_function(sb_pass: StringBuilderOpt, func: MirFunction) -> MirFunction:
-    func
-
-# ============================================================================
-# Exports
-# ============================================================================
+    if not string_builder_opt_enabled():
+        return func
+    var p = sb_pass
+    p.optimize_function(func)

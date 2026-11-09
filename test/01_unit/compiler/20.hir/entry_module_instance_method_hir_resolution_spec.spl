@@ -1,0 +1,157 @@
+# Purpose and audience: compiler engineers owning HIR method resolution and
+# the native entry-module lowering path.
+# @req REQ-SSPEC-COMPILER
+"""
+# HIR resolves an entry module's OWN instance methods on a declared-type local
+
+Repro + prevention for native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17.
+
+HIR lowering only resolved STATIC methods (`declared_static_method_resolution`)
+and handed every instance call (`w.bump(1)`) to MIR as `MethodResolution.Unresolved`,
+so native builds depended entirely on MIR's Unresolved-owner recovery -- the
+region the frozen stage2 miscompiles (`unresolved method call: bump`, and on
+s3_fable64 `unresolved method call: get ... struct_method_syms=yes ... route=runtime-fallback`).
+
+After the fix the HIR MethodCall arms resolve a local/parameter receiver whose
+declared type is a Struct/Class that declares the method through the scalar
+owner-qualified registry (`record_instance_method_scalar_raw`), so MIR takes the
+plain `InstanceMethod` arm and never enters the recovery.
+Native repro: test/fixtures/compiler/native_entry_own_class_methods/.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+
+use std.spec.{describe, it, expect, step}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+val helper_src = "pub fn helper_value() -> i64:\n    41\n"
+
+val class_body = "class Widget:\n    n: i64\n\n    me bump(k: i64):\n        self.n = self.n + k\n\n    fn peek() -> i64:\n        self.n\n\n    static fn stat(a: i64) -> i64:\n        a\n\nclass Other:\n    m: i64\n\n    me bump(k: i64):\n        self.m = self.m + k\n\n"
+
+val main_body = "fn main():\n    var w = Widget(n: helper_value())\n    w.bump(1)\n    val p = w.peek()\n    val s = Widget.stat(2)\n    w.nope_missing(1)\n"
+
+fn entry_src() -> text:
+    "use lib.helper.\{helper_value\}\n\n" + class_body + main_body
+
+struct ResolvedCall:
+    method: text
+    tag: text
+    owner_raw: i64
+    method_raw: i64
+
+fn resolution_of(expr: HirExpr) -> ResolvedCall?:
+    match expr.kind:
+        case HirExprKind.MethodCall(_, method, _, resolution):
+            match resolution:
+                case MethodResolution.InstanceMethod(type_id, method_id):
+                    return ResolvedCall(method: method, tag: "instance", owner_raw: type_id.id, method_raw: method_id.id)
+                case MethodResolution.StaticMethod(type_id, method_id):
+                    return ResolvedCall(method: method, tag: "static", owner_raw: type_id.id, method_raw: method_id.id)
+                case MethodResolution.Unresolved:
+                    return ResolvedCall(method: method, tag: "unresolved", owner_raw: -1, method_raw: -1)
+                case _:
+                    return ResolvedCall(method: method, tag: "other", owner_raw: -1, method_raw: -1)
+        case _: ()
+    nil
+
+fn collect_calls(block: HirBlock) -> [ResolvedCall]:
+    var found: [ResolvedCall] = []
+    for stmt in block.stmts:
+        val typed_stmt: HirStmt = stmt
+        match typed_stmt.kind:
+            case HirStmtKind.Expr(expr):
+                if val call = resolution_of(expr):
+                    found = found.push(call)
+            case HirStmtKind.Let(_, _, init):
+                if val call = resolution_of(init):
+                    found = found.push(call)
+            case _: ()
+    if block.has:
+        if val tail = resolution_of(block.value):
+            found = found.push(tail)
+    found
+
+struct LoweredEntry:
+    calls: [ResolvedCall]
+    widget_raw: i64
+    other_raw: i64
+    bump_method_name: text
+    errors: text
+
+fn lower_entry() -> LoweredEntry:
+    val log = Logger(level: 0)
+    val main_src = entry_src()
+    val helper_ast = parse_full_frontend(helper_src, "lib/helper.spl", "lib.helper", log)
+    val main_ast = parse_full_frontend(main_src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.helper"] = helper_ast
+    modules["app.main"] = main_ast
+    val sources = [SourceFile(path: "lib/helper.spl", content: helper_src, module_name: "lib.helper"), SourceFile(path: "app/main.spl", content: main_src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var main_lowering = hirlowering_for_module("app.main", surfaces)
+    val main_hir = main_lowering.lower_module(main_ast)
+    var calls: [ResolvedCall] = []
+    for fn_entry in main_hir.functions.values():
+        val f: HirFunction = fn_entry
+        if f.name == "main":
+            calls = collect_calls(f.body)
+    var errors = ""
+    for e in main_lowering.errors:
+        errors = errors + e.message + "\n"
+    var bump_method_name = ""
+    for call in calls:
+        val typed_call: ResolvedCall = call
+        if typed_call.method == "bump" and typed_call.method_raw >= 0:
+            bump_method_name = main_hir.symbols.symbol_name_scalar_raw(typed_call.method_raw)
+    LoweredEntry(
+        calls: calls,
+        widget_raw: main_hir.symbols.lookup_or_invalid("Widget").id,
+        other_raw: main_hir.symbols.lookup_or_invalid("Other").id,
+        bump_method_name: bump_method_name,
+        errors: errors)
+
+fn call_named(entry: LoweredEntry, method: text) -> ResolvedCall:
+    for call in entry.calls:
+        val typed_call: ResolvedCall = call
+        if typed_call.method == method:
+            return typed_call
+    ResolvedCall(method: method, tag: "missing", owner_raw: -1, method_raw: -1)
+
+describe "HIR instance-method resolution for an entry module's own class":
+    it "resolves a `me` method on a declared-type local as InstanceMethod":
+        step("Known-bad before the fix: HIR left `w.bump(1)` Unresolved for MIR recovery")
+        val entry = lower_entry()
+        val bump = call_named(entry, "bump")
+        expect(bump.tag).to_equal("instance")
+        expect(bump.method_raw >= 0).to_equal(true)
+
+    it "resolves a plain `fn` instance method used as a let initializer":
+        val entry = lower_entry()
+        expect(call_named(entry, "peek").tag).to_equal("instance")
+
+    it "binds the InstanceMethod owner to Widget, not the same-leaf-name Other.bump":
+        step("Prevention: owner-qualified registry, never a leaf-name match")
+        val entry = lower_entry()
+        val bump = call_named(entry, "bump")
+        expect(entry.widget_raw >= 0).to_equal(true)
+        expect(entry.other_raw >= 0).to_equal(true)
+        expect(bump.owner_raw).to_equal(entry.widget_raw)
+        expect(bump.owner_raw == entry.other_raw).to_equal(false)
+        # The owner-qualified method symbol is `<module>.<Owner>::<method>`.
+        expect(entry.bump_method_name.replace("::", ".")).to_equal("app.main.Widget.bump")
+
+    it "keeps static methods on the static arm and leaves an undeclared method Unresolved":
+        step("Non-vacuity: the new arm must not invent resolutions")
+        val entry = lower_entry()
+        expect(call_named(entry, "stat").tag).to_equal("static")
+        expect(call_named(entry, "nope_missing").tag).to_equal("unresolved")

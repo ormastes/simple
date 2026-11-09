@@ -1355,10 +1355,66 @@ pub fn rt_is_present(value: i64) -> i8:
     # "0 is falsy" landmine.
     return 1
 
+# ADR-005 item 5: the user-facing text unit is the CODE POINT. rt_string_len
+# stays the BYTE primitive; rt_len's text arm, rt_slice and the find family
+# route through these helpers. Twins of runtime_native.c's spl_text_cp_len_bytes
+# / spl_text_byte_to_cp / spl_text_cp_to_byte. ASCII fast path: a high-bit scan,
+# then byte == code point.
+fn text_bytes_ascii(data: i64, len: i64) -> i64:
+    var i = 0
+    while i < len:
+        if _sffi_core_string_spl_load_u8(data, i) > 127:
+            return 0
+        i = i + 1
+    return 1
+
+fn text_cp_len_bytes(data: i64, len: i64) -> i64:
+    if text_bytes_ascii(data, len) > 0:
+        return len
+    var n = 0
+    var i = 0
+    while i < len:
+        if (_sffi_core_string_spl_load_u8(data, i) & 192) != 128:
+            n = n + 1
+        i = i + 1
+    return n
+
+# Byte width of the UTF-8 sequence starting at `i`, clamped to the remaining
+# bytes (twin of runtime_native.c rt_utf8_width).
+fn utf8_width_at(data: i64, i: i64, len: i64) -> i64:
+    val lead = _sffi_core_string_spl_load_u8(data, i)
+    if lead >= 194 and lead <= 223 and i + 2 <= len:
+        return 2
+    if lead >= 224 and lead <= 239 and i + 3 <= len:
+        return 3
+    if lead >= 240 and lead <= 244 and i + 4 <= len:
+        return 4
+    return 1
+
+# Code-point index of byte offset `byte` (a char boundary).
+fn text_byte_to_cp(data: i64, len: i64, byte: i64) -> i64:
+    val bound = if byte > len: len else: byte
+    return text_cp_len_bytes(data, bound)
+
+# Byte offset of code-point index `cp`; `len` past the end.
+fn text_cp_to_byte(data: i64, len: i64, cp: i64) -> i64:
+    if text_bytes_ascii(data, len) > 0:
+        return if cp < len: cp else: len
+    var seen = 0
+    var i = 0
+    while i < len:
+        if (_sffi_core_string_spl_load_u8(data, i) & 192) != 128:
+            if seen == cp:
+                return i
+            seen = seen + 1
+        i = i + 1
+    return len
+
 pub fn rt_len(value: i64) -> i64:
     val ptr = string_ptr(value)
     if ptr > 0:
-        return string_len_ptr(ptr)
+        # User-facing `.len()` on text counts code points (ADR-005 item 5).
+        return text_cp_len_bytes(string_data_ptr_value(ptr), string_len_ptr(ptr))
     if (value & 7) == 1 and value > 4095:
         val kind = _sffi_core_string_spl_load_u8(value & -8, 0)
         if kind == 2:
@@ -1629,7 +1685,13 @@ pub fn rt_slice(value: i64, start: i64, end: i64, step: i64) -> i64:
             array_i = array_i + step
         _sffi_core_string_spl_store_i64(out_ptr, 8, out_i)
         return out
-    val len = string_len_ptr(ptr)
+    # Indices are CODE POINTS (ADR-005 item 5), the unit len(), s[i] and
+    # index_of use. ASCII text keeps byte == code point (one scan), so the raw
+    # copy below is unchanged for it.
+    val data = string_data_ptr_value(ptr)
+    val byte_len = string_len_ptr(ptr)
+    val ascii = text_bytes_ascii(data, byte_len)
+    var len = if ascii > 0: byte_len else: text_cp_len_bytes(data, byte_len)
     var begin = start
     var finish = end
     var stride = step
@@ -1648,24 +1710,42 @@ pub fn rt_slice(value: i64, start: i64, end: i64, step: i64) -> i64:
     if finish > len:
         finish = len
     if stride > 1:
+        # Walk code points from `begin`, taking every `stride`-th one.
+        val b = if ascii > 0: begin else: text_cp_to_byte(data, byte_len, begin)
+        val bend = if ascii > 0: finish else: text_cp_to_byte(data, byte_len, finish)
         var out_len = 0
-        var i = begin
-        while i < finish:
-            out_len = out_len + 1
-            i = i + stride
+        var k = 0
+        var i = b
+        while i < bend:
+            val w = if ascii > 0: 1 else: utf8_width_at(data, i, byte_len)
+            if k % stride == 0:
+                out_len = out_len + w
+            k = k + 1
+            i = i + w
         val out = alloc_string(out_len)
         val out_ptr = string_ptr(out)
         if out_ptr < 1:
             return 3
         var out_i = 0
-        i = begin
-        while i < finish:
-            _sffi_core_string_spl_store_u8(string_data_ptr_value(out_ptr), out_i, _sffi_core_string_spl_load_u8(string_data_ptr_value(ptr), i))
-            out_i = out_i + 1
-            i = i + stride
+        k = 0
+        i = b
+        while i < bend:
+            val w = if ascii > 0: 1 else: utf8_width_at(data, i, byte_len)
+            if k % stride == 0:
+                var j = 0
+                while j < w:
+                    _sffi_core_string_spl_store_u8(string_data_ptr_value(out_ptr), out_i + j, _sffi_core_string_spl_load_u8(data, i + j))
+                    j = j + 1
+                out_i = out_i + w
+            k = k + 1
+            i = i + w
         return out
-    _sffi_core_string_rt_text_slice_audit_note_range(string_data_ptr_value(ptr), len, begin, finish)
-    return rt_string_new(string_data_ptr_value(ptr) + begin, finish - begin)
+    if ascii < 1:
+        begin = text_cp_to_byte(data, byte_len, begin)
+        finish = text_cp_to_byte(data, byte_len, finish)
+        len = byte_len
+    _sffi_core_string_rt_text_slice_audit_note_range(data, len, begin, finish)
+    return rt_string_new(data + begin, finish - begin)
 
 pub fn rt_string_starts_with(value: i64, prefix: i64) -> i64:
     val ptr = string_ptr(value)
@@ -2197,11 +2277,12 @@ pub fn rt_string_find(value: i64, needle: i64) -> i64:
         return 0
     if needle_len > len:
         return -1
+    # CODE-POINT index (ADR-005 item 5), so it composes with len()/slice().
     var i = 0
     while i + needle_len <= len:
         val cmp = _sffi_core_string_memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
         if cmp > -1 and cmp < 1:
-            return i
+            return text_byte_to_cp(string_data_ptr_value(ptr), len, i)
         i = i + 1
     return -1
 
@@ -2222,19 +2303,22 @@ pub fn rt_text_find(value: i64, needle: i64, start: i64) -> i64:
     val s_start = if start < 0: 0 else: start
     val len = string_len_ptr(ptr)
     val needle_len = string_len_ptr(needle_ptr)
+    # `start` and the answer are CODE-POINT indices (ADR-005 item 5).
+    val data = string_data_ptr_value(ptr)
+    val cp_len = text_cp_len_bytes(data, len)
     if needle_len < 1:
-        return if s_start < len: s_start else: len
-    if s_start >= len or needle_len > len:
+        return if s_start < cp_len: s_start else: cp_len
+    if s_start >= cp_len or needle_len > len:
         return -1
-    var i = s_start
+    var i = text_cp_to_byte(data, len, s_start)
     while i + needle_len <= len:
-        val cmp = _sffi_core_string_memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
+        val cmp = _sffi_core_string_memcmp(data + i, string_data_ptr_value(needle_ptr), needle_len)
         if cmp > -1 and cmp < 1:
-            return i
+            return text_byte_to_cp(data, len, i)
         i = i + 1
     -1
 
-# rt_string_rfind — return byte-offset of last occurrence of needle, or -1.
+# rt_string_rfind — code-point index of the last occurrence of needle, or -1.
 pub fn rt_string_rfind(value: i64, needle: i64) -> i64:
     val ptr = string_ptr(value)
     val needle_ptr = string_ptr(needle)
@@ -2242,15 +2326,16 @@ pub fn rt_string_rfind(value: i64, needle: i64) -> i64:
         return -1
     val len = string_len_ptr(ptr)
     val needle_len = string_len_ptr(needle_ptr)
+    # CODE-POINT index (ADR-005 item 5), like index_of / find.
     if needle_len < 1:
-        return len
+        return text_cp_len_bytes(string_data_ptr_value(ptr), len)
     if needle_len > len:
         return -1
     var i = len - needle_len
     while i >= 0:
         val cmp = _sffi_core_string_memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
         if cmp > -1 and cmp < 1:
-            return i
+            return text_byte_to_cp(string_data_ptr_value(ptr), len, i)
         i = i - 1
     return -1
 

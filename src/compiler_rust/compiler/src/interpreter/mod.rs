@@ -204,7 +204,7 @@ pub(crate) use module_cache::{
 
 // Module loading and resolution
 #[path = "../interpreter_module/mod.rs"]
-mod interpreter_module;
+pub(crate) mod interpreter_module;
 pub use interpreter_module::print_resolve_stats;
 use interpreter_module::{
     evaluate_module_exports, get_import_alias, load_and_merge_module, merge_module_definitions, resolve_module_path,
@@ -230,7 +230,7 @@ mod interpreter_method;
 use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_update};
 pub(crate) use interpreter_method::{
     evaluate_call_args, find_and_exec_method_with_self, find_and_exec_method_with_self_owned,
-    exec_resolved_method_with_self_owned_values, resolve_object_method, ResolvedMethod, shared_text_is_ascii,
+    exec_resolved_method_with_self_owned_values, resolve_object_method, ResolvedMethod, shared_text_is_ascii, text_byte_to_cp, text_cp_len, text_cp_to_byte,
 };
 pub(crate) use interpreter_method::{lookup_class_method_index, lookup_impl_method_index};
 use interpreter_method::{evaluate_negated_bdd_matcher, is_argless_bdd_matcher, peel_bdd_matcher_receiver};

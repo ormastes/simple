@@ -1,0 +1,96 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Typed Result local match keeps its declared enum owner
+
+Bug `phase3_result_local_match_owner_2026_10_26`: a bare `Ok`/`Err` arm over an
+explicitly typed `Result<T, E>` local (bound from a method, trait dispatch, or
+generic free call) must be owned by the local's declared Result, even when a
+user enum also declares `Ok`/`Err`. It must never report "bare variant 'Ok' is
+ambiguous" nor borrow the colliding enum.
+"""
+
+# @tag: unit, compiler, mir, enum, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val data_source = "pub enum OtherVerdict:\n    Ok(n: i64)\n    Err(s: text)\n\npub trait Source:\n    fn fetch() -> Result<i64, text>\n\npub class Box:\n    v: i64\n    fn get() -> Result<i64, text>:\n        if self.v < 0:\n            return Err(\"neg\")\n        Ok(self.v)\n\nimpl Source for Box:\n    fn fetch() -> Result<i64, text>:\n        Ok(self.v)\n\npub fn wrap<T>(x: T) -> Result<T, text>:\n    Ok(x)\n"
+
+fn lower_consumer_mir(body: text) -> (MirModule, text):
+    val consumer_source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    val sources = [SourceFile(path: "lib/data.spl", content: data_source, module_name: "lib.data")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module("lib.data", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["data_hir"] = data_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        # The no-default enum match diagnostic is a staged non-fatal warning
+        # (error-severity only after phase 3); not what this spec asserts.
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        out = out + "mir: " + e.message + "\n"
+    print "errors: [{out}]"
+    (mir, out)
+
+fn variant_tests_in(mir: MirModule, name: text) -> i64:
+    var found = false
+    var variant_tests = 0
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with(".{name}"):
+            found = true
+            for block in function.blocks:
+                if (block.label ?? "").contains("ematch_arm"):
+                    variant_tests = variant_tests + 1
+    expect(found).to_equal(true)
+    variant_tests
+
+
+fn owner_errors(out: text) -> bool:
+    out.contains("ambiguous") or out.contains("known non-enum type") or out.contains("OtherVerdict")
+
+describe "typed Result local subject owns bare Ok/Err over a colliding enum":
+    it "concrete method call result bound to a typed local":
+        val (mir, out) = lower_consumer_mir("fn probe(b: Box) -> i64:\n    val r: Result<i64, text> = b.get()\n    match r:\n        Ok(v): v\n        Err(e): -1\n")
+        expect(owner_errors(out)).to_equal(false)
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "trait dispatch result bound to a typed local":
+        val (mir, out) = lower_consumer_mir("fn probe(s: Source) -> i64:\n    val r: Result<i64, text> = s.fetch()\n    match r:\n        Ok(v): v\n        Err(e): -2\n")
+        expect(owner_errors(out)).to_equal(false)
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "generic free call result bound to a typed local":
+        val (mir, out) = lower_consumer_mir("fn probe() -> i64:\n    val r: Result<i64, text> = wrap(7)\n    match r:\n        Ok(v): v\n        Err(e): -3\n")
+        expect(owner_errors(out)).to_equal(false)
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "the colliding user enum still owns its own Ok/Err (prevention)":
+        val (mir, out) = lower_consumer_mir("fn probe(o: OtherVerdict) -> i64:\n    match o:\n        OtherVerdict.Ok(n): n\n        OtherVerdict.Err(s): -4\n")
+        expect(out.contains("ambiguous")).to_equal(false)
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)

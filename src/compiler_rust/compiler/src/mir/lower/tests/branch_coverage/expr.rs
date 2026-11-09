@@ -422,12 +422,19 @@ fn optional_field_unwrap_lowers_to_enum_payload_not_named_method() {
         )),
         "optional field unwrap should not lower to a named method dispatch"
     );
+    // A `text?` unwrap is lowered in HIR straight to the checked builtin
+    // (stage2_new3_native_build_worker_av_c01_2026-11-07) so the result stays
+    // typed STRING; every other flat-nullable stays on the bare dispatch.
+    // Both end in the same runtime helper.
     assert!(
         has_inst(&mir, |i| matches!(
             i,
             MirInst::MethodCallStatic { func_name, .. } if func_name == "unwrap"
+        )) || has_inst(&mir, |i| matches!(
+            i,
+            MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_unwrap_or_trap")
         )),
-        "optional field unwrap must stay on the bare erased dispatch that codegen maps to rt_unwrap_or_trap"
+        "optional field unwrap must reach rt_unwrap_or_trap (bare erased dispatch or direct checked builtin)"
     );
 }
 

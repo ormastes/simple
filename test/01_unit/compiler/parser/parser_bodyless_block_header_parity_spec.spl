@@ -1,0 +1,92 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+"""
+## Purpose and audience
+
+Purpose: a block header (`if`/`while`/`for`) whose body is missing and whose
+next line dedents is a parse error on the pure-Simple front end, while a real
+body stays legal. (An empty trailing `case nil:` arm is a seed-only leniency the
+pure-Simple front end does not share; it is out of scope here.)
+Audience: engineers confirming seed/native-build parser parity still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/parser/parser_bodyless_block_header_parity_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+The Rust seed side of the same contract is pinned by
+`src/compiler_rust/parser/tests/bodyless_condition_block_gate.rs`.
+"""
+
+# @manual: primary
+
+"""
+Regression coverage for seed_accepts_bodyless_if_native_build_rejects_2026-08-22.
+
+The seed used to accept a bodyless `if cond:` followed by a Dedent as an empty
+no-op block while the pure-Simple front end rejected it. Both must reject it;
+Simple has `pass` for a deliberate no-op. The fixtures are the shapes recorded
+in the bug document.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.core.parser.{parse_module, parser_has_errors, parser_set_had_error}
+
+
+fn parses_clean(name: text, source: text) -> bool:
+    parser_set_had_error(false)
+    parse_module(source, name)
+    not parser_has_errors()
+
+fn shape_a() -> text:
+    "class Probe:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "impl Probe:\n" +
+    "    me first():\n" +
+    "        self.n = 1\n" +
+    "        if self.n > 0:\n" +
+    "\n" +
+    "    me second() -> i64:\n" +
+    "        self.n\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    var p = Probe(n: 0)\n" +
+    "    p.first()\n" +
+    "    print p.second()\n" +
+    "    0\n"
+
+describe "bodyless block header parity (pure-Simple front end)":
+    # @manual scenario evidence
+    it "rejects a bodyless if whose next line dedents (shape A)":
+        # @req REQ-SSPEC-UNIT
+        step("rejects a bodyless if whose next line dedents (shape A)")
+        expect(parses_clean("shapeA.spl", shape_a())).to_equal(false)
+
+    it "rejects a bodyless if at end of file":
+        step("rejects a bodyless if at end of file")
+        expect(parses_clean("bodyless_eof.spl", "fn probe(flag: bool):\n    if flag:\n")).to_equal(false)
+
+    it "rejects bodyless while and for headers":
+        step("rejects bodyless while and for headers")
+        expect(parses_clean("bodyless_while.spl", "fn probe(flag: bool):\n    while flag:\n\n    pass\n")).to_equal(false)
+        expect(parses_clean("bodyless_for.spl", "fn probe(xs: [i64]):\n    for x in xs:\n\n    pass\n")).to_equal(false)
+
+    it "accepts the same method with a real body (control)":
+        step("accepts the same method with a real body (control)")
+        val source = "class Probe:\n" +
+            "    n: i64\n" +
+            "\n" +
+            "impl Probe:\n" +
+            "    me first():\n" +
+            "        self.n = 1\n" +
+            "        if self.n > 0:\n" +
+            "            self.n = 2\n" +
+            "\n" +
+            "    me second() -> i64:\n" +
+            "        self.n\n"
+        expect(parses_clean("control.spl", source)).to_equal(true)

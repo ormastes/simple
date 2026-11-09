@@ -72,3 +72,48 @@ the 2026-11-07 release seed: `byte_len()` prints 9 and `n == 9` is true).
 Rollout: (A) docs, (B) byte-offset callers -> `byte_len()` + pure-Simple MIR
 `byte_len`/`char_count` arms, (C) flip in interpreter + JIT + MIR together with
 specs, (D) Phase 3 self-hosted verification.
+
+## 2026-11-09 — native/JIT lane flipped (row text_len_bytes_vs_codepoint_index_bound_disagree_2026_11_03)
+
+PR #7877 flipped the seed interpreter (and, observed in its spec, `substring` /
+`slice(a, b)` too: they index by code point, superseding the "stay byte-offset"
+wording above). This change flips the native/JIT lane to match, in both runtimes
+and the pure-Simple twin, with parity:
+
+- **Byte primitive unchanged:** `rt_string_len` stays bytes. It is the `(data,
+  len)` text extern ABI pair, the `byte_len()` route and has ~300 internal
+  callers; changing it would have been a silent ABI break.
+- **Code-point surface:** `rt_string_char_count` (now the lowering target of a
+  user-facing text `.len()`, with `rt_string_len`'s raw-pointer receiver
+  fallback), `rt_len`'s text arm, `rt_slice`'s text arm (indices in code points,
+  stride walks code points), `rt_string_find` / `rt_string_index_of` /
+  `rt_text_find` (`start` and result in code points) / `rt_string_rfind`.
+  Rust runtime `collections.rs`, C runtime `runtime_native.c`, twin
+  `simple_core/core_string.spl`, and the interpreter extern emulations
+  `interpreter_extern/sffi_string.rs` (`rt_string_find_fn` / `rt_string_rfind_fn`).
+- **Codegen:** Cranelift `inline_runtime_len_value` (the inlined `rt_len`) and
+  the typed `String.len` arm call `rt_string_char_count` for text; the LLVM
+  `compile_inline_len` string arm does the same; pure-Simple MIR text `.len()` /
+  `.len` field / `s[i]` bound lowerings emit `rt_string_char_count` instead of
+  `rt_string_len` (the `byte_len` arm keeps `rt_string_len`).
+- **ASCII fast path + memo:** one word-wise high-bit scan; the result is cached
+  in the string header (`RT_STRING_FLAG_ASCII` Rust, new
+  `RT_CORE_STRING_FLAG_ASCII` C) so ASCII text answers `len()` in O(1) after the
+  first call. Non-ASCII text pays an O(n) code-point count per `len()` (the
+  twin has the fast path but no memo bit).
+- **Perf (C, clang -O2, 2M iters):** ASCII 64 B `rt_len` 13.5 -> 13.1 ns,
+  ASCII 1 KiB 13.2 -> 12.5 ns, UTF-8 64 B 15.9 -> 46.8 ns; `rt_string_char_count`
+  ASCII 1 KiB 5127 -> 14 ns; `rt_slice(2,10)` 221 -> 200 ns (ASCII 64 B).
+  JIT (`run`, 2M `.len()` on a 64 B literal): see the PR body for the memoized
+  numbers; the pre-memo build measured 6 -> 33 ns (ASCII) and 7 -> 153 ns
+  (UTF-8) per call.
+- **Evidence:** `src/runtime/test/rt_text_len_slice_codepoint_selfcheck.c` (55
+  checks; FAILs check 2 `rt_len == 5` on the pristine runtime), Rust
+  `text_len_slice_codepoint_tests` (4 tests), and
+  `test/01_unit/language/text_index_branches/text_len_slice_native_adr005_spec.spl`
+  (8 of 11 examples red on the 2026-11-08 release seed, green on the rebuilt
+  seed).
+- **Left open:** baremetal C cores (`examples/09_embedded/.../baremetal_*`) do
+  not define `rt_string_char_count`, so the Cranelift inline keeps the byte load
+  there (`string_cp_len_ref` returns `None` when `ctx.baremetal`); Phase 3
+  self-hosted verification (stage2/stage3 compile the pure-Simple MIR change).

@@ -1,0 +1,62 @@
+# @req The two `src/os/apps/dbd/` shapes the 2026-09-01 arm64 engine2d lane
+# reported as `GlobalLoad: unresolved identifier` must compile and run:
+#   (a) a nested field READ through explicit `self` inside a self-less
+#       `pub fn ready()` method (dbd_provisioning.spl:169-172), and
+#   (b) a `static fn new()` call on a class imported by `use` from another
+#       module, inside a static constructor (dbd.spl:208).
+# The negative half of (a) -- a BARE `provider.configured` with no `self.`
+# must be REJECTED, because "implicit self" means the `self` PARAMETER is
+# implicit, never the field receiver -- cannot live in a spec (it would reject
+# this file). It is pinned by scripts/check/check-implicit-self-field-assignment.shs
+# (READ probes added with this spec) alongside the assignment probes.
+#
+# doc/08_tracking/bug/arm64_desktop_engine2d_seed_codegen_dbd_unresolved_global_2026-09-01.md
+use std.spec
+use bugs.dbd_transaction_owner_shape_helper.ShapeTransactionOwnerV1
+
+class ShapeCredentialProvider:
+    configured: bool
+
+    static fn new() -> ShapeCredentialProvider:
+        ShapeCredentialProvider(configured: false)
+
+    me configure():
+        self.configured = true
+
+class ShapeProvisioningOwnerV1:
+    admitted: bool
+    provider: ShapeCredentialProvider
+
+    static fn new() -> ShapeProvisioningOwnerV1:
+        ShapeProvisioningOwnerV1(admitted: false, provider: ShapeCredentialProvider.new())
+
+    me admit():
+        self.admitted = true
+        self.provider.configure()
+
+    # dbd_provisioning.spl:169 shape: self-less `pub fn`, nested field read.
+    pub fn ready() -> bool:
+        self.admitted and self.provider.configured
+
+class ShapeLiveClientSessionV1:
+    budget: i64
+    transaction: ShapeTransactionOwnerV1
+
+    # dbd.spl:199-209 shape: static call on an imported class in a constructor.
+    static fn create(budget: i64) -> ShapeLiveClientSessionV1:
+        ShapeLiveClientSessionV1(
+            budget: budget,
+            transaction: ShapeTransactionOwnerV1.new()
+        )
+
+describe "dbd shapes: explicit-self nested read and imported static call":
+    it "a self-less pub fn reads a nested field through explicit self":
+        var owner = ShapeProvisioningOwnerV1.new()
+        expect(owner.ready()).to_equal(false)
+        owner.admit()
+        expect(owner.ready()).to_equal(true)
+
+    it "a static constructor calls static new() on a use-imported class":
+        val session = ShapeLiveClientSessionV1.create(3)
+        expect(session.budget).to_equal(3)
+        expect(session.transaction.pending).to_equal(7)

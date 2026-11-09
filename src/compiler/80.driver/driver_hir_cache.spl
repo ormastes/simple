@@ -426,10 +426,19 @@ fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "", 
         return nil
     val decoded = hir_cache_load_in_owned_scope(key, parser_binding, source_path, library_mode)
     val paused = transient_scope_pause()
+    # `HirModule?` is Option<struct>: in native code its `nil` is a heap-boxed
+    # None enum, and the owned loader allocates that box INSIDE this scope, so
+    # scope end frees it. Returning `decoded` on a miss handed the caller a
+    # dangling box: `loaded == nil` read freed memory (false), `.unwrap()` +
+    # `module.path = ...` wrote into it, and the Windows heap reported
+    # c0000374 at the next malloc (bug
+    # stage3_native_build_heap_corruption_c0000374_2026_11_08). Decide hit-ness
+    # while the box is still live and return a fresh `nil` after the scope.
+    val hit = decoded != nil
     # A miss has no graph to promote: the runtime correctly rejects nil roots.
     # The owned loader only replaces the persistent warning root on a hit.
     var promoted = true
-    if paused and decoded != nil:
+    if paused and hit:
         # Cycle-137 REVERT of the cycle-136 deep-promotion block: the
         # runtime's rt_transient_heap_promote is a RECURSIVE plan walker
         # (runtime_native.c:2776) -- RAW structs scan every word for children,
@@ -445,6 +454,8 @@ fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "", 
     val ended = transient_scope_end()
     if not paused or not promoted or not ended:
         panic("HIR cache decode scope ownership failed")
+    if not hit:
+        return nil
     decoded
 
 # HIR shard transactions already own the decode's scratch lifetime. They retain

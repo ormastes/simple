@@ -380,9 +380,62 @@ impl Lowerer {
         let expr_hir = Box::new(self.lower_expr(expr, ctx)?);
         let target = self.resolve_type(target_type)?;
 
+        // `T? as <numeric>` outside `unsafe` is a type error, never a value.
+        // Both engines produced a silent wrong number for it: the interpreter
+        // cast the boxed `Option.Some` payload to its variant ORDINAL (0) and
+        // the JIT reinterpreted the heap word. Per nil-only-in-unsafe
+        // (ERR-01) an optional must be narrowed with `?? default`, `if val`,
+        // or `match` before it is used as `T`. The message carries the
+        // `SIMPLE_JIT_STRICT:` marker so the driver's JIT catch site cannot
+        // launder it into an interpreter fallback (exec_core.rs
+        // `jit_failure_must_propagate`).
+        // Bug: optional_as_cast_yields_zero_2026_11_09.
+        if ctx.unsafe_depth == 0 && Self::is_numeric_type_id(target) && self.is_optional_source_type(expr_hir.ty) {
+            return Err(LowerError::OptionalCast {
+                target: self.type_display_name(target),
+            });
+        }
+
         Ok(HirExpr {
             kind: HirExprKind::Cast { expr: expr_hir, target },
             ty: target,
         })
+    }
+
+    /// Primitive int / float target of an `as` cast.
+    fn is_numeric_type_id(ty: TypeId) -> bool {
+        matches!(
+            ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+        )
+    }
+
+    /// `T?` in either of its two HIR spellings: the registry's optional id
+    /// (`register_optional`, from `T?`) or the builtin `Option<T>` enum.
+    fn is_optional_source_type(&self, ty: TypeId) -> bool {
+        if self.module.types.optional_inner(ty).is_some() {
+            return true;
+        }
+        matches!(self.module.types.get(ty), Some(HirType::Enum { name, .. }) if name == "Option")
+    }
+
+    fn type_display_name(&self, ty: TypeId) -> String {
+        match self.module.types.get(ty) {
+            Some(HirType::Int { bits, signedness }) => {
+                format!("{}{bits}", if matches!(signedness, Signedness::Signed) { "i" } else { "u" })
+            }
+            Some(HirType::Float { bits }) => format!("f{bits}"),
+            Some(other) => format!("{other:?}"),
+            None => format!("{ty:?}"),
+        }
     }
 }

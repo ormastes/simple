@@ -4,8 +4,20 @@
 - **Severity:** high — silent wrong answer. `.len()`/`.is_empty()` on an untyped/ANY-erased
   closure returns a plausible non-negative integer instead of the `rt_len` contract's `-1`.
   No diagnostic, no crash.
-- **Status:** OPEN — **REAL** (source-confirmed defect; runtime hit not executed, see
-  "What was NOT established")
+- **Status:** FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
+
+Resolution: the C and hosted Rust heap tags now agree (`dict = 0x03`,
+`closure = 0x06`), with compile-time tag and `RtCoreDict` offset assertions.
+`RtCoreDict` uses `len@8`/`cap@16`, matching hosted `RuntimeDict`; Cranelift's
+special tag-6/offset-16 branch is removed, so closures return `-1` and both
+runtime dict shapes read length from offset 8. Added hosted and RtCore-shaped
+closure/dict regressions in `fam_abi_tests.rs`.
+
+Verification: `cc -std=gnu11 -I. -fsyntax-only runtime_native.c`, the existing
+core-C `rt_dict_scope_read_selfcheck`, an ASan RtCore closure/dict/array/string
+selfcheck, and `cargo check -p simple-compiler --lib` all pass. The focused
+Rust test target remains blocked by unrelated existing test-code errors, so
+the new Rust regressions are not claimed as executed.
 - **Component:** Rust seed, Cranelift backend —
   `src/compiler_rust/compiler/src/codegen/instr/helpers.rs`
 - **Verified against:** `origin/main` @ `4699194f81e` (2026-09-06), read-only worktree.
