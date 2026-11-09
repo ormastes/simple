@@ -4,7 +4,12 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: open
+- Status: fixed (2026-11-09) — duplicate of
+  `browser_engine_table_layout_cells_stacked_vertically_2026-08-19`, which
+  landed the table formatting context. Verified on release/1.0.0 with
+  `test/02_integration/rendering/table_row_horizontal_layout_spec.spl`
+  (seed interpreter, 2/2 PASS): a `<tr>` with two `<td>`s renders as one
+  text line with the second cell's ink right of the first.
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
   (`tag_defaults` treats `table`/`tr`/`td`/`th` as plain `display:block`;
   `layout_table.spl` exists but is not wired into this renderer's flow)
