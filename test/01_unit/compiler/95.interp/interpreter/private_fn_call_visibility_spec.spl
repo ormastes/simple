@@ -1,0 +1,45 @@
+# Bug: interp_private_names_leak_across_modules_2026-11-05 (call-time leg)
+#
+# The interpreter resolved unqualified calls through a process-wide function
+# table, so a bare (private) `fn` of one module was callable from a module in a
+# DIFFERENT directory via a glob import or with no import at all. That call is
+# now a hard error; `pub` fns and same-directory siblings stay legal.
+# Needs the fixed seed: SIMPLE_BINARY=<seed built from this tree>.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, mkdir_p}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn fixture_root(tag: text) -> text:
+    val root = get_temp_dir().replace("\\", "/") + "/priv_call_" + tag
+    val _ = mkdir_p(root + "/app/sub")
+    val _o = mkdir_p(root + "/app/other")
+    root
+
+fn run_fixture(tag: text, lib_src: text, caller_src: text) -> (text, text, i64):
+    val root = fixture_root(tag)
+    val _a = write_file(root + "/app/sub/lib_mod.spl", lib_src)
+    val _b = write_file(root + "/app/other/caller.spl", caller_src)
+    val _m = write_file(root + "/app/main.spl", "use app.sub.lib_mod.*\nuse app.other.caller.*\nprint call_it()\n")
+    process_run_timeout(binary(), [root + "/app/main.spl"], 300000)
+
+describe "private fn call visibility across directories":
+    it "rejects a call that reaches a private fn of another directory":
+        val (out, err, rc) = run_fixture("priv", "fn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n", "pub fn call_it() -> i64:\n    secret_helper()\n")
+        expect(rc != 0).to_equal(true)
+        expect((out + err).contains("private fn `secret_helper`")).to_equal(true)
+
+    it "still allows a pub fn of another directory":
+        val (out, err, rc) = run_fixture("pub", "pub fn secret_helper() -> i64:\n    42\n", "pub fn call_it() -> i64:\n    secret_helper()\n")
+        expect(rc).to_equal(0)
+        expect(out.contains("42")).to_equal(true)
+
+    it "still allows a module to call its own private helper":
+        val (out, err, rc) = run_fixture("own", "fn inner() -> i64:\n    42\npub fn secret_helper() -> i64:\n    inner()\n", "pub fn call_it() -> i64:\n    secret_helper()\n")
+        expect(rc).to_equal(0)
+        expect(out.contains("42")).to_equal(true)
