@@ -37,3 +37,6 @@ dormant method is not widened into the current Stage 3 blocker fix.
   conversion and do not patch callers with explicit returns.
 - Use an admitted pure-Simple compiler/runtime for acceptance. Rust-seed
   behavior is diagnostic only.
+
+## 2026-11-09 resolution
+Dormant MIR `lower_bootstrap_flat_function` deleted (no callers; the `bootstrap-flat` path is `lower_module`, which uses `lower_function`). Removes the `result ?? LocalId(id: 0)` hazard. Verification pending native re-run.
