@@ -1,10 +1,12 @@
 # HIR rejects `return ()` in a `fn main():` that declares no return type
 
 - **Date:** 2026-09-01
-- **Status:** OPEN — measured, not fixed. Filed rather than worked around, per
-  CLAUDE.md ("when a short, safe grammar or compact expression form fails ...
-  fix it or record a concrete bug/feature request instead of silently
-  normalizing the workaround").
+- **Status:** CLOSED 2026-11-09 (stale) — FIXED by `8a4fe2ae2b3` (fix(hir):
+  untyped fns infer return type from tail value, 2026-11-06, merged on
+  release/1.0.0). The doc repro `fn main(): print("hello"); return ()` now
+  lowers with zero HIR errors; guard spec
+  `test/01_unit/compiler/hir/return_unit_in_untyped_main_spec.spl` 1/1 PASS on
+  the seed interpreter at release/1.0.0 HEAD 2026-11-09.
 - **Found by:** goal item 2, x86_64 WM host-Vulkan lane, while re-measuring
   `hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md`.
 
