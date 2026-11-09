@@ -8,17 +8,20 @@
 # Exit codes:
 #   0 = all non-closed bugs have difficulty rows
 #   1 = one or more non-closed bugs missing difficulty rows
-#   2 = error (file not found, parse error, etc.)
+#   2 = error (file not found, parse error, nothing checked)
 
 set -u
 
 _db="doc/08_tracking/bug/bug_db.sdn"
 
 # Verify file exists
-[ -f "$_db" ] || { echo "ERROR: $_db not found" >&2; exit 2; }
+if [ ! -f "$_db" ]; then
+    echo "ERROR — nothing was checked: $_db not found"
+    exit 2
+fi
 
 # Extract all non-closed bug IDs from both tables
-_non_closed=$(
+if ! _non_closed=$(
     awk -F',' '
     /^bugs_active \|/ || /^bugs \|/ {
         in_table = 1
@@ -42,10 +45,13 @@ _non_closed=$(
         }
     }
     ' "$_db" | sort -u
-)
+); then
+    echo "ERROR — nothing was checked: could not parse $_db bug tables"
+    exit 2
+fi
 
 # Extract all bug IDs that have difficulty rows
-_with_difficulty=$(
+if ! _with_difficulty=$(
     awk -F',' '
     /^bug_difficulty \|/ {
         in_table = 1
@@ -61,7 +67,16 @@ _with_difficulty=$(
         print id
     }
     ' "$_db" | sort -u
-)
+); then
+    echo "ERROR — nothing was checked: could not parse $_db bug_difficulty table"
+    exit 2
+fi
+
+# A parse that finds zero non-closed bugs means the scan was vacuous.
+if [ -z "$_non_closed" ]; then
+    echo "ERROR — nothing was checked: no non-closed bug rows parsed from $_db"
+    exit 2
+fi
 
 # Find non-closed bugs without difficulty rows
 _missing=$(
@@ -72,14 +87,14 @@ _missing=$(
     done
 )
 
-# Report
+# Report; the verdict is always the last stdout line.
+_nc_count=$(printf '%s\n' "$_non_closed" | sed '/^$/d' | wc -l | tr -d ' ')
 if [ -z "$_missing" ]; then
-    _count=$(echo "$_non_closed" | wc -l)
-    echo "PASS: all $_count non-closed bugs have difficulty rows"
+    echo "PASS — all $_nc_count non-closed bugs have difficulty rows"
     exit 0
 else
-    _count=$(echo "$_missing" | wc -l)
-    echo "FAIL: $_count non-closed bugs missing difficulty rows:"
-    echo "$_missing" | sed 's/^/  /'
+    _miss_count=$(printf '%s\n' "$_missing" | sed '/^$/d' | wc -l | tr -d ' ')
+    printf '%s\n' "$_missing" | sed 's/^/  /'
+    echo "FAIL — $_miss_count of $_nc_count non-closed bugs missing difficulty rows (listed above)"
     exit 1
 fi

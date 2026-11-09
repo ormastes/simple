@@ -25,11 +25,11 @@ while [ $# -gt 0 ]; do
     --baseline) BASELINE=$2; shift 2;;
     --generate-baseline) GEN=1; shift;;
     --selftest) SELFTEST_ONLY=1; shift;;
-    *) echo "ERROR - unknown argument $1"; exit 2;;
+    *) echo "ERROR — unknown argument $1"; exit 2;;
   esac
 done
 
-TMPD=$(mktemp -d)
+TMPD=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 trap 'rm -rf "$TMPD"' EXIT INT TERM
 
 # scan DIR: first line "#split_types N", then "file|Type.method|definers" lines.
@@ -131,32 +131,32 @@ selftest() {
   printf 'use fx.neg.provider.*\nfn run(d: Driver):\n    d.special_stage()\n' > "$fx/neg/caller.spl"
   printf 'struct Solo:\n    n: i64\nimpl Solo:\n    me only():\n        self.n = 1\nfn run(s: Solo):\n    s.only()\n' > "$fx/none/solo.spl"
   p=$(scan "$fx/pos")
-  echo "$p" | grep -q 'caller.spl|Driver.special_stage|' || { echo "ERROR - selftest: positive fixture not flagged"; return 1; }
+  echo "$p" | grep -q 'caller.spl|Driver.special_stage|' || { echo "ERROR — selftest: positive fixture not flagged"; return 1; }
   n=$(scan "$fx/neg")
-  echo "$n" | grep -q '|' && { echo "ERROR - selftest: negative fixture flagged"; return 1; }
+  echo "$n" | grep -q '|' && { echo "ERROR — selftest: negative fixture flagged"; return 1; }
   z=$(scan "$fx/none")
-  echo "$z" | grep -q '^#split_types 0' || { echo "ERROR - selftest: single-file impl counted as split"; return 1; }
+  echo "$z" | grep -q '^#split_types 0' || { echo "ERROR — selftest: single-file impl counted as split"; return 1; }
   echo "selftest: 3 fixtures passed"
   return 0
 }
 
-selftest || exit 2
-if [ "$SELFTEST_ONLY" = 1 ]; then echo "PASS - selftest only"; exit 0; fi
-[ -d "$ROOT_DIR" ] || { echo "ERROR - nothing was checked (root $ROOT_DIR missing)"; exit 2; }
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+if [ "$SELFTEST_ONLY" = 1 ]; then echo "PASS — selftest only, 3 fixtures"; exit 0; fi
+[ -d "$ROOT_DIR" ] || { echo "ERROR — nothing was checked (root $ROOT_DIR missing)"; exit 2; }
 out=$(scan "$ROOT_DIR")
 nsplit=$(echo "$out" | sed -n 's/^#split_types //p')
-[ "${nsplit:-0}" -gt 0 ] || { echo "ERROR - nothing was checked (0 split-impl types under $ROOT_DIR)"; exit 2; }
+[ "${nsplit:-0}" -gt 0 ] || { echo "ERROR — nothing was checked (0 split-impl types under $ROOT_DIR)"; exit 2; }
 viol=$(echo "$out" | grep -v '^#' | grep -v '^$' || true)
 total=$(printf '%s\n' "$viol" | grep -vc '^$' || true)
 if [ "$GEN" = 1 ]; then
   printf '%s\n' "$viol" | grep -v '^$' | cut -d'|' -f1,2 > "$BASELINE"
-  echo "PASS - baseline written: $total entr(ies), $nsplit split type(s)"; exit 0
+  echo "PASS — baseline written: $total entr(ies), $nsplit split type(s)"; exit 0
 fi
 [ -f "$BASELINE" ] || : > "$BASELINE"
 newv=$(printf '%s\n' "$viol" | grep -v '^$' | while IFS= read -r l; do
   k=$(echo "$l" | cut -d'|' -f1,2); grep -qxF "$k" "$BASELINE" || echo "$l"; done)
 if [ -n "$newv" ]; then
   printf '%s\n' "$newv"
-  echo "FAIL - $(printf '%s\n' "$newv" | wc -l | tr -d ' ') new unimported split-impl call(s) ($total total, $nsplit split types)"; exit 1
+  echo "FAIL — $(printf '%s\n' "$newv" | wc -l | tr -d ' ') new unimported split-impl call(s) ($total total, $nsplit split types)"; exit 1
 fi
-echo "PASS - $nsplit split type(s) checked, $total baselined, 0 new"; exit 0
+echo "PASS — $nsplit split type(s) checked, $total baselined, 0 new"; exit 0
