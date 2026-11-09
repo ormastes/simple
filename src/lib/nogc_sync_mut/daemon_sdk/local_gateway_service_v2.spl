@@ -48,8 +48,8 @@ struct GatewayLaneCloseV2:
 
 fn gateway_lane_v2(capacity: i64) -> LocalGatewayLaneV2:
     var connections: [LocalGatewayConnectionV1?] = []
-    for index in 0..capacity: connections = connections.push(nil)
-    LocalGatewayLaneV2(listener: nil, connections: connections, cursor: 0)
+    for index in 0..capacity: connections = connections.push(None)
+    LocalGatewayLaneV2(listener: None, connections: connections, cursor: 0)
 
 # The returned service always retains the domain and every acquired listener,
 # including a partially failed open. Native listen independently verifies EUID.
@@ -67,12 +67,12 @@ pub fn local_gateway_service_open_v2<T>(owner: T, config: LocalGatewayServiceCon
     # Control opens first; ordinary admission cannot consume its listener slot.
     val control = local_unix_listen_v1(config.control_path, config.service_uid, config.control_connections)
     service.control.listener = control.owner
-    if control.error != "" or control.owner == nil:
+    if control.error != "" or control.owner == None:
         service.error = if control.error == "": "gateway-control-listener-unavailable" else: control.error
         return service
     val work = local_unix_listen_v1(config.work_path, config.service_uid, config.work_connections)
     service.work.listener = work.owner
-    if work.error != "" or work.owner == nil:
+    if work.error != "" or work.owner == None:
         service.error = if work.error == "": "gateway-work-listener-unavailable" else: work.error
         return service
     service.phase = 1
@@ -91,13 +91,13 @@ fn gateway_lane_step_v2<T>(owner: T, lane: LocalGatewayLaneV2, config: LocalGate
         handler: fn(T, LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<T>) -> GatewayLaneTurnV2<T>:
     var current = lane
     var current_owner = owner
-    if current.connections.len() == 0 or current.listener == nil:
+    if current.connections.len() == 0 or current.listener == None:
         return GatewayLaneTurnV2(current_owner, current, false, "gateway-lane-unavailable")
     if current.cursor < 0 or current.cursor >= current.connections.len():
         return GatewayLaneTurnV2(current_owner, current, false, "gateway-lane-cursor")
     val index = current.cursor
     current.cursor = (current.cursor + 1) % current.connections.len()
-    if current.connections[index] == nil:
+    if current.connections[index] == None:
         val accepted = local_gateway_accept_v1(current.listener.unwrap(), config.client_uid, config.request_timeout_ms)
         current.listener = Some(accepted.listener)
         current.connections[index] = accepted.connection
@@ -110,7 +110,7 @@ fn gateway_lane_step_v2<T>(owner: T, lane: LocalGatewayLaneV2, config: LocalGate
         val received = local_gateway_receive_v2(connection)
         connection = received.connection
         error = received.error
-        if received.request != nil:
+        if received.request != None:
             val request = received.request.unwrap()
             match classify(current_owner, request):
                 case Err(reason):
@@ -134,7 +134,7 @@ fn gateway_lane_step_v2<T>(owner: T, lane: LocalGatewayLaneV2, config: LocalGate
         val published = local_gateway_publish_v2(connection)
         connection = published.connection
         error = published.error
-    elif connection.phase == 4 and connection.response != nil:
+    elif connection.phase == 4 and connection.response != None:
         # The caller must account for a failed publication before explicitly
         # disposing its response/possibly staged byte descriptor. Never turn a
         # send failure into an implicit retry or discard of the domain owner.
@@ -143,10 +143,10 @@ fn gateway_lane_step_v2<T>(owner: T, lane: LocalGatewayLaneV2, config: LocalGate
         # Closed/blocked request slots are reusable only after native disposal.
         # A failed receipt or retained close owner continues occupying its slot.
         val closed = local_unix_close_v1(connection.native)
-        if closed.owner != nil:
+        if closed.owner != None:
             connection.native = closed.owner.unwrap()
-        if closed.closed and closed.owner == nil:
-            current.connections[index] = nil
+        if closed.closed and closed.owner == None:
+            current.connections[index] = None
             return GatewayLaneTurnV2(current_owner, current, false, closed.error)
         error = if closed.error == "": "gateway-connection-close-unconfirmed" else: closed.error
     current.connections[index] = Some(connection)
@@ -161,16 +161,16 @@ pub fn local_gateway_service_discard_failed_v2<T>(service: LocalGatewayServiceV2
     var lane = if control_lane: current.control else: current.work
     if slot_index < 0 or slot_index >= lane.connections.len() or expected_connection_token <= 0:
         return LocalGatewayServiceTurnV2(current, 0, 0, "gateway-failed-selector")
-    if lane.connections[slot_index] == nil:
+    if lane.connections[slot_index] == None:
         return LocalGatewayServiceTurnV2(current, 0, 0, "gateway-failed-selector")
     var connection = lane.connections[slot_index].unwrap()
     if (connection.native.token != expected_connection_token or connection.phase != 4 or
-            connection.response == nil):
+            connection.response == None):
         return LocalGatewayServiceTurnV2(current, 0, 0, "gateway-failed-selector")
     val closed = local_unix_close_v1(connection.native)
-    if closed.closed and closed.owner == nil:
-        lane.connections[slot_index] = nil
-    elif closed.owner != nil:
+    if closed.closed and closed.owner == None:
+        lane.connections[slot_index] = None
+    elif closed.owner != None:
         connection.native = closed.owner.unwrap()
         lane.connections[slot_index] = Some(connection)
     if control_lane: current.control = lane
@@ -204,20 +204,20 @@ fn gateway_lane_close_v2(lane: LocalGatewayLaneV2) -> GatewayLaneCloseV2:
     var current = lane
     var complete = true
     var error = ""
-    if current.listener != nil:
+    if current.listener != None:
         val closed = local_unix_listener_close_v1(current.listener.unwrap())
         current.listener = closed.owner
-        if not closed.closed or closed.owner != nil: complete = false
+        if not closed.closed or closed.owner != None: complete = false
         if closed.error != "": error = closed.error
     for index in 0..current.connections.len():
-        if current.connections[index] != nil:
+        if current.connections[index] != None:
             var connection = current.connections[index].unwrap()
             val closed = local_unix_close_v1(connection.native)
-            if closed.closed and closed.owner == nil:
-                current.connections[index] = nil
+            if closed.closed and closed.owner == None:
+                current.connections[index] = None
             else:
                 complete = false
-                if closed.owner != nil: connection.native = closed.owner.unwrap()
+                if closed.owner != None: connection.native = closed.owner.unwrap()
                 current.connections[index] = Some(connection)
             if closed.error != "": error = closed.error
     GatewayLaneCloseV2(current, complete, error)
