@@ -189,10 +189,12 @@ with a last-use/escape check emitting `rt_string_append_owned`, or option 2
 builder-loop lowering), not a runtime bug fix. Per this lane's mandate, no
 risky runtime hack was landed. Side observation (unrelated, not fixed here):
 `scripts/check/check-runtime-concat-nul.shs` does not actually run at this
-commit — its compile step fails at link (`mold: undefined symbol: spl_panic`;
-`spl_panic` lives in `runtime.c`, which the script does not link), and the
-script nonetheless exited 0 with no test output, so the selftest silently
-never executes.
+commit — its compile step fails at link (`undefined symbol: spl_panic`,
+referenced from `rt_core_concat_bytes_v1`; `spl_panic` lives in `runtime.c`,
+which the script does not link). The failure IS fail-closed (direct
+`sh scripts/check/check-runtime-concat-nul.shs` exits 1, measured 2026-11-09),
+so the check is RED rather than silently green — but as wired it tests
+nothing until the link line gains `runtime.c` or a stub.
 
 
 ## 2026-11-07 — owner decision: diagnose + builder (part A+B landed, C pending)
