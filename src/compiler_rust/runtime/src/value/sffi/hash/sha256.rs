@@ -56,7 +56,7 @@ fn vec_to_runtime_byte_array(bytes: &[u8]) -> RuntimeValue {
 
 #[no_mangle]
 pub extern "C" fn rt_sha256_new() -> i64 {
-    let Ok(handle) = SHA256_COUNTER.fetch_update(
+    let Ok(handle) = simple_common::atomic_update::update_i64(&SHA256_COUNTER,
         std::sync::atomic::Ordering::SeqCst,
         std::sync::atomic::Ordering::SeqCst,
         |current| current.checked_add(1),

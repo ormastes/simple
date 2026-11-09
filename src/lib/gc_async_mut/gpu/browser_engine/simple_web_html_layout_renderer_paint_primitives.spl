@@ -1187,8 +1187,15 @@ fn fb_text_underline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32,
         return out
     fb_rect_clip(out, fbw, fbh, x, y, w, line_h, color, clip)
 
-fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32, italic: bool, clip: ClipRect) -> [u32]:
+# `bold` is deterministic fake-bold: the font stack has no bold face for the
+# bundled/generic families on this host (browser_platform_*_bold_faces are
+# macOS-only), so weight synthesis extends every inked pixel block by one
+# extra column on the right edge — the same synthesis idiom as the per-row
+# italic shift above. Recorded in
+# test/02_integration/rendering/font_weight_bold_raster_spec.spl.
+fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32, italic: bool, bold: bool, clip: ClipRect) -> [u32]:
     var out = fb
+    val block_w = if bold: scale + 1 else: scale
     var ry = 0
     while ry < 7:
         val bits = glyph_row_bits(gi, ry)
@@ -1205,7 +1212,7 @@ fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: 
                     if yy >= 0 and yy < fbh and yy >= clip.y0 and yy < clip.y1:
                         val row = yy * fbw
                         var dx = 0
-                        while dx < scale:
+                        while dx < block_w:
                             val xx = bx0 + dx
                             if xx >= 0 and xx < fbw and xx >= clip.x0 and xx < clip.x1:
                                 out[row + xx] = color
@@ -1215,7 +1222,7 @@ fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: 
         ry = ry + 1
     out
 
-fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, scale: i32, advance: i32, space_advance: i32, italic: bool, clip: ClipRect) -> [u32]:
+fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, scale: i32, advance: i32, space_advance: i32, italic: bool, bold: bool, clip: ClipRect) -> [u32]:
     var out = fb
     val glyph_h = 7 * scale
     if y >= fbh or y >= clip.y1 or y + glyph_h <= 0 or y + glyph_h <= clip.y0:
@@ -1244,7 +1251,7 @@ fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32,
             val code = s.char_code_at(ci)
             val gi = glyph_index_for_char_code(code)
             if gi >= 0 and gi != 36:
-                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
+                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, bold, clip)
             cx = cx + if code == 32: space_advance else: advance
             ci = ci + 1
         i = i + 1
@@ -1256,9 +1263,9 @@ fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32,
 # estimate. `by` must carry one entry per byte of `s`; when it does not, this
 # falls back to the flat stepping so the width call and the glyph walk stay in
 # agreement.
-fn fb_text_thin_scaled_clip_range_adv(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, scale: i32, advance: i32, space_advance: i32, italic: bool, clip: ClipRect, by: [i32]) -> [u32]:
+fn fb_text_thin_scaled_clip_range_adv(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, scale: i32, advance: i32, space_advance: i32, italic: bool, bold: bool, clip: ClipRect, by: [i32]) -> [u32]:
     if by.len() != s.len():
-        return fb_text_thin_scaled_clip_range(fb, fbw, fbh, x, y, s, start, endv, color, scale, advance, space_advance, italic, clip)
+        return fb_text_thin_scaled_clip_range(fb, fbw, fbh, x, y, s, start, endv, color, scale, advance, space_advance, italic, bold, clip)
     var out = fb
     val glyph_h = 7 * scale
     if y >= fbh or y >= clip.y1 or y + glyph_h <= 0 or y + glyph_h <= clip.y0:
@@ -1285,7 +1292,7 @@ fn fb_text_thin_scaled_clip_range_adv(fb: [u32], fbw: i32, fbh: i32, x: i32, y: 
             val code = s.char_code_at(ci)
             val gi = glyph_index_for_char_code(code)
             if gi >= 0 and gi != 36:
-                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
+                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, bold, clip)
             ci = ci + 1
         cx = cx + by[i]
         i = i + 1

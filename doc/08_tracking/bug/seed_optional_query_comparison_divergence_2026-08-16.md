@@ -216,3 +216,24 @@ Evidence: `simple run` on a `fn main()` repro (`e=bf().?` ...): before (bin/simp
 `bt().? == true` false, `ki() == 5` false, `bf() == false` false; after (rebuilt seed) all true, while
 `bf().? == true` false, `bn().? == false` false, `bn().? != true` true, `bn().? == nil` true, `ki().? == false` false.
 HIR red->green: `optional_scalar_eq_raw_scalar_uses_tagged_equality` fails without the fix, passes with it.
+
+## 2026-11-09 (follow-up) — Part A seed fix (owner decision), Part C split
+
+Owner decision (memory owner-decisions-20261106 item 14): the seed treats
+`x.? == true` / `x.? == false` nil-safely, matching pure Simple.
+
+- **Pure-Simple reference** (native stage2 `stage2_new4.exe` probe): nil `text?`
+  -> neither literal; present `text?` -> neither; `bool?` false -> `== false`;
+  `bool?` true -> `== true`; nil `bool?` -> neither.
+- **Seed divergence found**: the interpreter already matched; the default
+  `simple run` engine (JIT lane, HIR->MIR->Cranelift) answered false for BOTH
+  literals on a `bool?` receiver (`SIMPLE_EXECUTION_MODE=interpret` true vs
+  `jit` false on the same file).
+- **Fix**: `src/compiler_rust/compiler/src/hir/lower/expr/operators.rs`
+  `lower_exists_check_bool_compare` — `x.? ==/!= <bool literal>` lowers to
+  `rt_is_present(x) and rt_unwrap_or_self(x) ==/!= literal` on tagged words.
+- **Tests**: `compiler/tests/exists_check_bool_compare_jit.rs` (JIT red 3072 vs
+  expected 6288 before the fix, green after; interpreter green both) and
+  `seed_semantic_divergences.rs::dot_query_bool_comparison_matches_pure_simple`.
+- **Part C** split to `seed_semantic_error_missing_position_2026-11-09.md`.
+- Status: fix-implemented-verification-pending.

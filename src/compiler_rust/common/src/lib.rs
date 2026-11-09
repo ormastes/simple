@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+pub mod atomic_update;
 pub mod config_env;
 pub use config_env::ConfigEnv;
 

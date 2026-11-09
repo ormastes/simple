@@ -1,38 +1,47 @@
 #!/bin/sh
 # Cycle 9 fixture: no compiler and no repeated materialization/publication suite.
-set -eu
+set -u
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/qualification-state.XXXXXX")
-temporary=$(CDPATH= cd -- "$temporary" && pwd -P)
+
+fail() { echo "FAIL — $*" ; exit 1; }
+err() { echo "ERROR — nothing was checked: $*" ; exit 2; }
+
+command -v git >/dev/null 2>&1 || err "git not available"
+command -v python3 >/dev/null 2>&1 || err "python3 not available"
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/qualification-state.XXXXXX") || err "mktemp failed"
+temporary=$(CDPATH= cd -- "$temporary" && pwd -P) || err "mktemp path unusable"
 trap 'chmod -R u+w "$temporary"; rm -rf "$temporary"' EXIT HUP INT TERM
 repository=$temporary/source
-git -c init.defaultBranch=fixture init --quiet --template= "$repository"
+git -c init.defaultBranch=fixture init --quiet --template= "$repository" || err "fixture git init failed"
 mkdir -p "$repository/src" "$repository/.simple"
 printf 'committed source\n' >"$repository/src/input.spl"
 printf 'immutable config\n' >"$repository/.simple/config.sdn"
 printf '/build/\n/.simple/workarounds.d/\n' >"$repository/.gitignore"
-git -C "$repository" add .
+git -C "$repository" add . || err "fixture git add failed"
 git -C "$repository" -c user.name=Fixture -c user.email=fixture@example.invalid \
-    -c commit.gpgsign=false -c core.hooksPath=/dev/null commit --quiet -m fixture
-commit=$(git -C "$repository" rev-parse HEAD)
-git -C "$repository" ls-files --stage >"$temporary/expected-index"
+    -c commit.gpgsign=false -c core.hooksPath=/dev/null commit --quiet -m fixture \
+    || err "fixture git commit failed"
+commit=$(git -C "$repository" rev-parse HEAD) || err "fixture rev-parse failed"
+git -C "$repository" ls-files --stage >"$temporary/expected-index" || err "fixture ls-files failed"
 cp "$repository/.git/index" "$temporary/source-index"
 cp "$repository/.git/HEAD" "$temporary/source-head"
 cp "$repository/.git/config" "$temporary/source-config"
 fixture=$temporary/controls
-sh "$root/scripts/bootstrap/lib/materialize-committed-controls.shs" "$repository" "$commit" "$fixture"
-sh "$root/scripts/bootstrap/lib/seal-requalification-controls.shs" "$fixture"
+sh "$root/scripts/bootstrap/lib/materialize-committed-controls.shs" "$repository" "$commit" "$fixture" \
+    || err "materialize-committed-controls failed on a valid fixture"
+sh "$root/scripts/bootstrap/lib/seal-requalification-controls.shs" "$fixture" \
+    || err "seal-requalification-controls failed on a valid fixture"
 checks=0
-check() { "$@" || { echo "FAIL: $*" >&2; exit 1; }; checks=$((checks + 1)); }
+check() { "$@" || fail "$*"; checks=$((checks + 1)); }
 check test "$(git -C "$fixture" --no-optional-locks rev-parse HEAD)" = "$commit"
 check test "$(cat "$fixture/.git/HEAD")" = "$commit"
 check test "$(git -C "$fixture" rev-parse --show-toplevel)" = "$fixture"
-git -C "$fixture" --no-optional-locks ls-files --stage >"$temporary/actual-index"
+git -C "$fixture" --no-optional-locks ls-files --stage >"$temporary/actual-index" || fail "fixture ls-files after seal"
 check cmp "$temporary/expected-index" "$temporary/actual-index"
 cp "$fixture/.git/index" "$temporary/private-index"
-status=$(git -C "$fixture" --no-optional-locks status --porcelain=v1 -z --untracked-files=all)
+status=$(git -C "$fixture" --no-optional-locks status --porcelain=v1 -z --untracked-files=all) || fail "fixture status after seal"
 check test -z "$status"
-status=$(git -C "$fixture" status --porcelain=v1 -z --untracked-files=all)
+status=$(git -C "$fixture" status --porcelain=v1 -z --untracked-files=all) || fail "fixture status"
 check test -z "$status"
 check cmp "$temporary/private-index" "$fixture/.git/index"
 # The workaround mkdir facade treats an existing directory as success.
@@ -42,35 +51,37 @@ printf 'fragment\n' >"$fixture/.simple/workarounds.d/.stage.tmp"
 mv "$fixture/.simple/workarounds.d/.stage.tmp" "$fixture/.simple/workarounds.d/fragment.sdn"
 check test -f "$fixture/build/scv/generated"
 check test -f "$fixture/.simple/workarounds.d/fragment.sdn"
-status=$(git -C "$fixture" --no-optional-locks status --porcelain=v1 -z --untracked-files=all)
+status=$(git -C "$fixture" --no-optional-locks status --porcelain=v1 -z --untracked-files=all) || fail "fixture status after workaround writes"
 check test -z "$status"
 check cmp "$repository/.simple/config.sdn" "$fixture/.simple/config.sdn"
 check cmp "$repository/.git/index" "$temporary/source-index"
 check cmp "$repository/.git/HEAD" "$temporary/source-head"
 check cmp "$repository/.git/config" "$temporary/source-config"
-python3 - "$fixture" <<'PY'
+python3 - "$fixture" <<'PY' || fail "authority mode seal violated"
 import pathlib,stat,sys
 root=pathlib.Path(sys.argv[1]); allowed={'build/scv','.simple/workarounds.d'}
 for p in [root,*root.rglob('*')]:
     relative=p.relative_to(root).as_posix()
     if relative.startswith('build/scv/') or relative.startswith('.simple/workarounds.d/'): continue
     assert bool(p.stat().st_mode & stat.S_IWUSR)==(relative in allowed), relative
-print('PASS: authority modes sealed; only generated leaves writable')
 PY
 checks=$((checks + 1))
 for variant in symlink tracked; do
     bad=$temporary/$variant
-    sh "$root/scripts/bootstrap/lib/materialize-committed-controls.shs" "$repository" "$commit" "$bad"
+    sh "$root/scripts/bootstrap/lib/materialize-committed-controls.shs" "$repository" "$commit" "$bad" \
+        || err "materialize-committed-controls failed on $variant fixture"
     if [ "$variant" = symlink ]; then
         ln -s ../src "$bad/.simple/workarounds.d"
     else
         mkdir "$bad/.simple/workarounds.d"
         printf 'tracked\n' >"$bad/.simple/workarounds.d/owned.sdn"
-        git -C "$bad" add -f .simple/workarounds.d/owned.sdn
+        git -C "$bad" add -f .simple/workarounds.d/owned.sdn || err "git add on $variant fixture failed"
     fi
     if sh "$root/scripts/bootstrap/lib/seal-requalification-controls.shs" "$bad"; then
-        echo "FAIL: $variant generated authority accepted" >&2; exit 1
+        fail "$variant generated authority accepted"
     fi
     checks=$((checks + 1))
 done
-echo "PASS: $checks qualification control-state assertions; no compiler executed"
+[ "$checks" -gt 0 ] || err "no assertions ran"
+echo "PASS — $checks qualification control-state assertions; no compiler executed"
+exit 0

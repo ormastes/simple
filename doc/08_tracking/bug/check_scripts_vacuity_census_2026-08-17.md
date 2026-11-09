@@ -271,3 +271,59 @@ Remaining backlog: 72 of the 245 wired gate scripts (80 minus these 8; the
 GPU/CPU-backend `SKIP_UNAVAILABLE` policy question remains open; gates
 needing binaries, GPU, QEMU, rustc, lake, or an admitted Stage-2 compiler
 stay in the backlog per lane policy.
+
+## 2026-11-09 wave 5 (work/p3-gate-oracle5-20261109)
+
+Backlog re-derived from the live tree first: 245 unique wired gate scripts,
+72 non-conforming at wave-5 start (unchanged from wave 4 — waves 1–4 all
+merged, 31 scripts fixed; the re-derivation reproduced the wave-4 count
+exactly).
+
+Eight more wired gates were made verdict-conforming in this pass. Each was
+verified with a clean-tree run (PASS where green on this host, rc=0, verdict
+last stdout line), a sabotage fixture (named FAIL, rc=1), and a
+missing-input/unavailable-tool fixture (named ERROR, rc=2) where applicable;
+`sh -n` and `bash -n` clean on all eight. No gate's actual checks were
+weakened:
+
+- `check-bug-difficulty-coverage.shs` — colon-style `PASS:`/`FAIL:` with the
+  findings printed after the verdict line, ERROR to stderr, mute `exit 2` on
+  a missing db, awk/grep exit statuses unreadable through pipes, and no
+  vacuity guard for a parse that finds zero non-closed bugs; now em-dash
+  verdict as the last stdout line (findings first), ERROR on missing db /
+  awk failure / zero parsed rows, exit 0/1/2. NOTE: honestly RED on this
+  host before and after: 830 of 1230 non-closed bugs lack difficulty rows —
+  the check itself is untouched, the run now fails closed with a named FAIL.
+- `check-requalification-control-state.shs` — colon-style PASS and `set -eu`
+  mute aborts (mktemp, git init/commit, python3, fixture materialize/seal)
+  plus FAIL to stderr; every exit path now names a verdict, missing
+  tools/fixture failures are ERROR, `PASS — 18 qualification control-state
+  assertions`.
+- `check-llm-strict-host-prereq-doctor-contract.shs` —
+  `STATUS: PASS`/`STATUS: FAIL` machine lines (the FAIL path ended stdout
+  with a non-conforming line and never emitted `FAIL —`), hyphen-style
+  verdicts, and an ERROR that went to stderr only; now the em-dash verdict
+  is always the last stdout line (env evidence file unchanged), the mkdir
+  mute abort names an ERROR, vacuity floor intact.
+- `check-llm-finetune-setup-contract.shs` — same shape (34 contract cases);
+  verdict block conformed, mkdir mute abort named ERROR.
+- `check-llm-runtime-slang-setup-contract.shs` — same shape (41 cases).
+- `check-llm-runtime-torch-setup-contract.shs` — same shape (33 cases).
+- `check-shs-path-conversion-equivalence.shs` — hyphen-style verdicts
+  converted to em-dash; exit statuses were already read directly (never
+  through pipes) and the zero-assertion ERROR already existed, so only the
+  verdict separator changed. Verified: sabotaged classifier selftest →
+  `FAIL —` rc=1; unwritable TMPDIR → `ERROR —` rc=2; clean PASS — 2
+  assertions (execution half honestly not-run: no cygpath on Linux).
+- `check-split-impl-import-visibility.shs` — hyphen-style verdicts, an
+  unchecked `mktemp -d`, and a mute `selftest || exit 2`; now em-dash
+  verdicts, mktemp/selftest failures name ERROR, `--selftest` prints
+  `PASS — selftest only, 3 fixtures`. NOTE: honestly RED on this host before
+  and after: 6 new unimported split-impl calls vs the frozen baseline
+  (105 total across 72 split types) — the check itself is untouched, the run
+  now fails closed with a named FAIL.
+
+Remaining backlog: 64 of the 245 wired gate scripts (72 minus these 8). The
+GPU/CPU-backend `SKIP_UNAVAILABLE` policy question remains open; gates
+needing binaries, GPU, QEMU, rustc, lake, or an admitted Stage-2 compiler
+stay in the backlog per lane policy.
