@@ -17,6 +17,7 @@ use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
+use compiler.hir.hir.*
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 
@@ -58,6 +59,80 @@ describe "tuple-array element locals":
 
     it "lowers the extracted text locals as str, not as integers":
         val kinds = local_kinds(body(false, "h"), "h")
+        var strs = 0
+        for k in kinds:
+            if k == "MirTypeKind::Opaque(str)":
+                strs = strs + 1
+        expect(strs >= 4).to_equal(true)
+
+# The url.spl site that reproduced the bug used BRACKET indexing on the tuple
+# local (`param[0]`), not `param.0`. HIR typed `base[i]` only for Array/Slice/
+# Dict bases, so `param[0]` on a `(text, text)` local carried no `type_` at
+# all; MIR recovered the element type from the tuple base on its own, so the
+# MIR locals below must be str for BOTH forms, and the HIR index expression
+# must carry the element type too (the HIR cases were red before the fix).
+fn bracket_body(annotated: bool, name: text) -> text:
+    val p = if annotated: "param: (text, text)" else: "param"
+    val n = if annotated: "name: text" else: "name"
+    val v = if annotated: "value: text" else: "value"
+    "fn {name}(params: [(text, text)]) -> text:\n    var out = \"\"\n    var i = 0\n    while i < params.len():\n        val {p} = params[i]\n        val {n} = param[0]\n        val {v} = param[1]\n        out = out + name + \"=\" + value\n        i = i + 1\n    out\n"
+
+fn hir_index_init_types(src: text, target: text) -> {text: text}:
+    """`{local_name: "<has_type_>:<HirTypeKind>"}` for every Let whose init is Index."""
+    val file = "testdata/tuple_array_local_text_spec.spl"
+    val parsed = parse_full_frontend(src, file, "tuple_array_local_text_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var out: {text: text} = {}
+    for function in hir.functions.values():
+        if not (function.name == target or function.name.ends_with("." + target)):
+            continue
+        for stmt in function.body.stmts:
+            match stmt.kind:
+                case HirStmtKind.Let(symbol, _, init):
+                    match init.kind:
+                        case HirExprKind.Index(_, _):
+                            val local_name = if val sym = hir.symbols.get_symbol(symbol): sym.name else: "?"
+                            val shown = if init.has_type_:
+                                if val t = init.type_: "typed:{t.kind}" else: "typed:nil"
+                            else:
+                                "untyped"
+                            out[local_name] = shown
+                        case _: ()
+                case _: ()
+    out
+
+describe "tuple-array element locals via bracket index (HIR)":
+    it "types `param[0]` / `param[1]` on an inferred (text, text) local as Str":
+        val src = "fn bi(params: [(text, text)]) -> text:\n    val param = params[0]\n    val name = param[0]\n    val value = param[1]\n    name + value\n"
+        val types = hir_index_init_types(src, "bi")
+        val param_type = types["param"] ?? "missing"
+        expect(param_type.starts_with("typed:HirTypeKind::Tuple(")).to_equal(true)
+        expect(param_type.contains("HirTypeKind::Str")).to_equal(true)
+        expect(types["name"]).to_equal("typed:HirTypeKind::Str")
+        expect(types["value"]).to_equal("typed:HirTypeKind::Str")
+
+    it "leaves a non-literal tuple index untyped (mixed tuple has no single element type)":
+        val src = "fn bj(t: (text, i64), k: i64) -> i64:\n    val x = t[k]\n    0\n"
+        val types = hir_index_init_types(src, "bj")
+        expect(types["x"]).to_equal("untyped")
+
+describe "tuple-array element locals via bracket index (MIR)":
+    it "lowers the implicit bracket form to exactly the annotated form's local types":
+        val implicit = local_kinds(bracket_body(false, "bf"), "bf")
+        val explicit = local_kinds(bracket_body(true, "bg"), "bg")
+        expect(implicit.len() > 10).to_equal(true)
+        expect(implicit.len()).to_equal(explicit.len())
+        var diffs = 0
+        var k = 0
+        while k < implicit.len() and k < explicit.len():
+            if implicit[k] != explicit[k]:
+                diffs = diffs + 1
+            k = k + 1
+        expect(diffs).to_equal(0)
+
+    it "lowers the bracket-extracted text locals as str":
+        val kinds = local_kinds(bracket_body(false, "bh"), "bh")
         var strs = 0
         for k in kinds:
             if k == "MirTypeKind::Opaque(str)":
