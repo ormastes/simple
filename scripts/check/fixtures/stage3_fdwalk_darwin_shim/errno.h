@@ -3,6 +3,7 @@
 extern int errno;
 #define EINTR 4
 #define ENOENT 2
+#define ENOTDIR 20
 #define ELOOP 62
 #define EMLINK 31
 #endif

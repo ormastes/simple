@@ -16,5 +16,9 @@ struct stat { dev_t st_dev; ino_t st_ino; mode_t st_mode; nlink_t st_nlink; off_
 int fstat(int, struct stat *);
 int stat(const char *, struct stat *);
 int lstat(const char *, struct stat *);
+/* Darwin declares fstatat and the AT_* flags in <sys/stat.h> (not <fcntl.h>);
+ * stage3_fdwalk.c uses the no-follow probe to classify ENOTDIR components. */
+#define AT_SYMLINK_NOFOLLOW 0x20
+int fstatat(int, const char *, struct stat *, int);
 #endif
 int fstatat(int, const char *, struct stat *, int);
