@@ -198,3 +198,18 @@ build `ring`. See
 
 Diagnosis helper for future sessions (no elevation needed, changes nothing):
 `sh scripts/setup/windows-symlink-privilege.shs check`.
+
+## Resolution 2026-11-09 (owner decision: no privilege dependency)
+
+Premise is stale: the shell helper (`bootstrap_stage3_create_compatibility_link`)
+and the perl publish helper (`scripts/check/lib/bootstrap-authority-generation-publish.pl`)
+both create the directory pointer as an NTFS junction on Windows
+(`mklink /J`, verified as a reparse point resolving to the exact target before
+the atomic rename). No symlink privilege is needed; the pointer is
+directory-only, so no file copy/pointer fallback applies. The remaining
+`winsymlinks:nativestrict` env only wraps the perl helper, which no longer
+calls symlink() on Windows. Reproduced on Windows 11 (MINGW64): a poisoned
+`ln` returning EPERM is never touched. Regression:
+`sh scripts/check/check-bootstrap-compat-link-no-privilege.shs` ->
+`PASS - 1 compatibility pointer created without symlink privilege ...`.
+Status: fix-implemented-verification-pending.
