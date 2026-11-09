@@ -1895,13 +1895,13 @@ pub(crate) fn evaluate_method_call(
 
         if !type_names.is_empty() {
             // Search TRAIT_IMPLS for a method matching this type
-            let trait_method: Option<Arc<FunctionDef>> = TRAIT_IMPLS.with(|cell| {
+            let trait_method: Option<(Arc<FunctionDef>, String)> = TRAIT_IMPLS.with(|cell| {
                 let trait_impls = cell.borrow();
                 for type_alias in type_names {
                     for ((_trait_name, impl_type), methods) in trait_impls.iter() {
                         if impl_type == type_alias {
                             if let Some(func) = methods.iter().find(|m| m.name == method) {
-                                return Some(func.clone());
+                                return Some((func.clone(), impl_type.clone()));
                             }
                         }
                     }
@@ -1909,12 +1909,11 @@ pub(crate) fn evaluate_method_call(
                 None
             });
 
-            if let Some(func) = trait_method {
+            if let Some((func, impl_type)) = trait_method {
                 // For built-in types, set self to the value directly (like enum methods)
                 let mut self_fields = HashMap::new();
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
-                let type_name = type_names[0];
                 return exec_function(
                     &func,
                     args,
@@ -1923,7 +1922,9 @@ pub(crate) fn evaluate_method_call(
                     classes,
                     enums,
                     impl_methods,
-                    Some((type_name, &self_fields)),
+                    // Fallback search may choose an i64 impl for a narrow
+                    // receiver. Its self type is that actual impl owner.
+                    Some((&impl_type, &self_fields)),
                 );
             }
 

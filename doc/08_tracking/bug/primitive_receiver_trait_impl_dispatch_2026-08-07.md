@@ -1,5 +1,32 @@
 # Trait `impl` blocks on PRIMITIVE Self types are honoured only by the interpreter
 
+## 2026-11-10 — nested narrow `self` interpreter component verified
+
+Nested trait calls from an i8/i16/i32 impl lost the declared width when binding
+`self`, so the inner call selected i64. Both function-entry paths now preserve
+the selected impl's width, including an explicitly spelled untyped self
+parameter. Fallback dispatch retains the actual matched impl owner: an i64
+implementation selected for a narrow receiver must still receive i64 self.
+
+The unchanged `primitive_trait_impl_self_width` Rust integration target ran
+against release base `5c089d25fa64`: baseline **2 executed, 1 passed/1 expected
+failure** (nested case returned 1 instead of 0); candidate **2 executed, 2
+passed, 0 ignored/filtered**. The second case preserves i64 fallback and direct
+narrow dispatch; the first also checks arithmetic/text conversion. These call
+the real Rust interpreter owners directly, not a normal-tool Rust-seed CLI.
+
+Both 8,000,000 KiB / 1800-second guarded runs ended quiescent. Actual baseline
+and candidate executable bytes, source/fixture snapshots, and receipts are
+retained outside the writable Cargo target. See the adjacent
+[component receipt](primitive_receiver_trait_impl_dispatch_component_2026-11-10.sdn).
+The final PR omits only a new, uncompiled `cfg(test)` mapping mirror from the
+executed source; production code and the two-test fixture are unchanged. The
+receipt distinguishes executed and final whole-file hashes.
+
+This verifies only nested narrow-self seed-interpreter dispatch. JIT/native,
+non-identifier receiver shapes, broader compiler/core/MCP qualification and
+self-hosted CLI admission remain outside this result; the family stays open.
+
 - **Status (2026-11-05):** seed INTERPRETER dispatch FIXED for cast, bare
   `val y: i32`, `val w = x as i32`, `fn f(x: i32)` receivers, scoped to the
   binding (see the two 2026-11-04/05 sections at the end of this file);
