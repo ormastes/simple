@@ -564,10 +564,12 @@ val upper = {k.upper(): v for k, v in data}
 
 ## Optional & Null Handling
 
+**Rule:** `nil` is not allowed in safe compiled code. Handle `T?` only via `None`, `.?`, `??`, `if val`, or `match`; `nil` is allowed only inside `unsafe:` blocks and interpreted scripts.
+
 ### Safe Navigation (`?.`)
 
 ```text
-# Returns nil if any part is nil
+# Returns None if any part is None
 user?.address?.city
 user?.profile?.settings?.theme
 
@@ -593,22 +595,22 @@ val city = user?.address?.city ?? "N/A"
 ### Combining `?.` and `??`
 
 ```text
-# Complete nil-safe access with default
+# Complete None-safe access with default
 val display = user?.profile?.display_name ?? user?.name ?? "Anonymous"
 ```
 
 ### Existence Check (`.?`) — Returns `T?`
 
-The `.?` operator checks if a value is **present** (not nil AND not empty).
-It returns `T?` — the value itself if present, `nil` if absent. This enables
+The `.?` operator checks if a value is **present** (not None AND not empty).
+It returns `T?` — the value itself if present, `None` if absent. This enables
 pattern binding with `if val`:
 
 ```text
-# Returns T? (value if present, nil if absent)
+# Returns T? (value if present, None if absent)
 opt.?                         # T?:    pass-through (already optional)
-list.?                        # [T]?:  Some(list) if non-empty, nil if []
-dict.?                        # {K:V}?: Some(dict) if non-empty, nil if {}
-str.?                         # text?: Some(str) if non-empty, nil if ""
+list.?                        # [T]?:  Some(list) if non-empty, None if []
+dict.?                        # {K:V}?: Some(dict) if non-empty, None if {}
+str.?                         # text?: Some(str) if non-empty, None if ""
 num.?                         # i64?:  Some(num) — primitives always present
 flag.?                        # bool?: Some(flag) — primitives always present
 
@@ -620,7 +622,7 @@ if val name = input.?:
 val host = config_host.? ?? env_host.? ?? "localhost"
 
 # Still works in boolean context (truthiness of T?)
-if str.?:                     # truthy if non-nil, non-empty
+if str.?:                     # truthy if non-None, non-empty
     use(str)
 ```
 
@@ -629,13 +631,13 @@ if str.?:                     # truthy if non-nil, non-empty
 Named alternatives to `.?` for text, providing readable presence checks:
 
 ```text
-# Returns text? — value if non-empty, nil if empty
+# Returns text? — value if non-empty, None if empty
 presence("hello")             # "hello" (text?)
-presence("")                  # nil
+presence("")                  # None
 
 # Returns text? — value if non-blank, nil if empty/whitespace
 presence_trimmed("hello")     # "hello" (text?)
-presence_trimmed("  ")        # nil
+presence_trimmed("  ")        # None
 
 # Pattern binding
 if val name = input.presence:
