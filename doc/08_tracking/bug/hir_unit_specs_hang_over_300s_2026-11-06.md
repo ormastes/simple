@@ -31,3 +31,17 @@ Still open. The bare-path scan hang in `module_path_naming.spl` is worked around
 `byte_len` bindings; root cause is `seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09`.
 The spec file is still slow and 4 scenarios still fail, so this row is not resolved. Known twin:
 `src/compiler/bootstrap_admission/stage2_module_path_naming.spl` keeps the untyped form.
+
+## 2026-11-09 root cause + fix (hang) — fix-implemented-verification-pending
+Root cause: the pure-Simple bitfield parser (`_ParserDecls/bitfield_aop_arch_decls.spl`)
+did not accept the seed's bare bit-width field form `mode: 4`
+(`compiler_rust/parser/src/types_def/bitfield.rs` parses an integer width). The IntLit was
+never consumed, so the field loop re-reported the same parser errors forever — the
+"changes for bitfield widths" scenario never returned (probe: a single
+`parse_module_silent_checked("bitfield Flags(u32):\n    mode: 4\n ...")` hit the 400 s
+watchdog; `mode: u4` parses in seconds). Fix: accept `name: N` as `uN`, plus a
+forward-progress guard in the field loop. New `test/01_unit/compiler/parser/bitfield_bare_width_spec.spl` 4/4.
+`module_surface_semantic_projection_spec` now finishes in ~72 s (was >3600 s, killed):
+12 executed, 7 passed, 5 failed — sort-comparator hoist, field defaults/array-size,
+export route, unresolved imports, bitfield widths/extend payload. Those are semantic-identity
+assertion failures, not hangs; tracked as the remaining work on this row.

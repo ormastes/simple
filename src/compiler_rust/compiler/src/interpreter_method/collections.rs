@@ -462,12 +462,16 @@ pub fn handle_array_methods(
         "is_empty" => Value::Bool(arr.is_empty()),
         "first" => arr.first().cloned().unwrap_or(Value::Nil),
         "last" => arr.last().cloned().unwrap_or(Value::Nil),
-        "get" => {
-            let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            arr.get(idx).cloned().unwrap_or(Value::Nil)
-        }
-        // Array `at`: bounds-checked element access returning a real
+        // Array `get` / `at`: bounds-checked element access returning a real
         // `Option` -- `Value::some(elem)` in range, `Value::none()` otherwise.
+        //
+        // Owner decision (2026-11-09, array_get_contract_drift_crypto_2026-10-18):
+        // `a.get(i)` returns `T?` on EVERY lane; `a[i]` is the direct form.
+        // `get` used to return the bare element here (and `nil` out of range),
+        // read its index through `eval_arg_usize` -- so `get(-1)` saturated to
+        // `get(0)` and answered the FIRST element -- while the native lane
+        // already typed it `Optional(elem)`. That drift is what broke crypto's
+        // nested-limb helpers under native codegen.
         //
         // Until this arm existed the seed had NO array `at` at all: the only
         // `at` binding was the *text* one (`"char_at" | "at" =>
@@ -486,10 +490,10 @@ pub fn handle_array_methods(
         // returning the element directly trades a loud missing-method error for
         // a loud missing-pattern one.
         //
-        // The index is read as *signed* on purpose. The `get` arm above uses
-        // `eval_arg_usize`, which cannot represent `at(-1)`; a negative index
-        // must resolve to `None`, not wrap around to a huge positive one.
-        "at" => {
+        // The index is read as *signed* on purpose: `eval_arg_usize` cannot
+        // represent `at(-1)`; a negative index must resolve to `None`, not
+        // wrap (or saturate) to another element.
+        "get" | "at" => {
             let idx_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match idx_val {
                 Value::Int(idx) if idx >= 0 && (idx as usize) < arr.len() => Value::some(arr[idx as usize].clone()),

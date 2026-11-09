@@ -2710,7 +2710,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "rfind" | "last_index_of" => "rt_string_rfind",
         "to_string" | "to_text" | "str" => "rt_to_string",
         // Dict/collection methods
-        "get" => "rt_index_get",
+        "get" => "rt_get",
         // Receiver-dispatched. This table is keyed on the METHOD NAME ALONE and
         // carries no receiver type, so mapping `remove` straight to
         // `rt_dict_remove` made EVERY array `.remove(i)` a silent no-op that
@@ -2812,7 +2812,7 @@ fn try_compile_builtin_method_call<M: Module>(
     // doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
     let box_dict_key = matches!(
         runtime_func,
-        "rt_index_get" | "rt_dict_remove" | "rt_collection_remove" | "rt_contains" | "rt_unwrap_or_value"
+        "rt_index_get" | "rt_get" | "rt_dict_remove" | "rt_collection_remove" | "rt_contains" | "rt_unwrap_or_value"
     );
     let key_is_int = matches!(
         ctx.vreg_types.get(args.first().unwrap_or(&receiver)).copied(),

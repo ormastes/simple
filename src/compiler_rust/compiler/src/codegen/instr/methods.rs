@@ -370,7 +370,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
         ("Array", "get") | ("array", "get") => {
             let idx_val = ctx.get_vreg(&args[0])?;
             let wrapped_idx = wrap_value(ctx, builder, args[0], idx_val);
-            Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_idx))
+            Some(call_runtime_2(ctx, builder, "rt_get", receiver_val, wrapped_idx))
         }
         ("Array", "set") | ("array", "set") => {
             let idx_val = ctx.get_vreg(&args[0])?;

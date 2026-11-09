@@ -1,0 +1,87 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.string_interpolation_expand.{parse_string_interpolation_regions, decode_interpolation_brace_escapes, interp_brace_warnings_reset, interp_brace_warning_count, interp_brace_warning_at}
+
+# Bug: interp_brace_literal_collides_with_string_interpolation_2026-07-03
+# Contract (seed parity, parser/src/lexer/strings.rs): inside a double-quoted
+# literal `{expr}` interpolates, `{{` is a literal `{`, `}}` is a literal `}`.
+# A `{...}` that is not a valid interpolation keeps its verbatim-literal value
+# and records warning W-STR-BRACE-001 carrying the `{{`/`}}` hint (staged;
+# ratchet bug string_interp_malformed_brace_warning_to_error_2026-11-09).
+#
+# Fixtures are BUILT BY CONCATENATION: braces written inline in a spec string
+# would interpolate at run time -- the collision under test.
+
+val LB = "{"
+val RB = "}"
+val LL = LB + LB
+val RR = RB + RB
+
+fn warm(tag: text):
+    val module = parse_and_build_module("fn " + tag + "() -> i64:\n    1\n", tag + ".spl")
+    expect(module.functions.contains(tag)).to_equal(true)
+
+fn part_count(value: text) -> i64:
+    val (_rewritten, parts) = parse_string_interpolation_regions(value)
+    parts.len()
+
+describe "string interpolation brace escape parity":
+    # @manual scenario evidence
+    it "interpolates a single placeholder":
+        # @req REQ-SSPEC-COMPILER
+        step("interpolates a single placeholder")
+        warm("warm_brace_a")
+        interp_brace_warnings_reset()
+        expect(part_count(LB + "x" + RB)).to_equal(1)
+        expect(interp_brace_warning_count()).to_equal(0)
+
+    it "treats doubled braces as literal text":
+        # @req REQ-SSPEC-COMPILER
+        step("treats doubled braces as literal text")
+        warm("warm_brace_b")
+        interp_brace_warnings_reset()
+        expect(part_count(LL + "x" + RR)).to_equal(0)
+        expect(part_count(LL + RR)).to_equal(0)
+        expect(part_count("a " + LL + " b " + RR)).to_equal(0)
+        expect(decode_interpolation_brace_escapes(LL + "x" + RR)).to_equal(LB + "x" + RB)
+        expect(decode_interpolation_brace_escapes(LL + RR)).to_equal(LB + RB)
+        expect(interp_brace_warning_count()).to_equal(0)
+
+    it "keeps escapes and placeholders apart when adjacent":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps escapes and placeholders apart when adjacent")
+        warm("warm_brace_c")
+        interp_brace_warnings_reset()
+        expect(part_count(LL + " " + LB + "x" + RB + " " + RR)).to_equal(1)
+        expect(part_count(LL + LB + "x" + RB + RR)).to_equal(1)
+        expect(part_count("css " + LL + "margin:0" + RR + " then " + LB + "name" + RB)).to_equal(1)
+        expect(part_count("a " + LL + " b " + RR + " " + LB + "name" + RB + " c")).to_equal(1)
+        expect(part_count("N1:" + LL + " " + LB + "inner" + RB + " " + RR + "|END")).to_equal(1)
+        expect(interp_brace_warning_count()).to_equal(0)
+
+    it "warns W-STR-BRACE-001 for a non-expression region and keeps it literal":
+        # @req REQ-SSPEC-COMPILER
+        step("warns W-STR-BRACE-001 for a non-expression region and keeps it literal")
+        warm("warm_brace_d")
+        interp_brace_warnings_reset()
+        val src = "a " + LB + " b c " + RB + " " + LB + "name" + RB
+        val (rewritten, parts) = parse_string_interpolation_regions(src)
+        expect(parts.len()).to_equal(1)
+        expect(decode_interpolation_brace_escapes(rewritten)).to_equal("a " + LB + " b c " + RB + " " + LB + "name" + RB)
+        expect(interp_brace_warning_count()).to_equal(1)
+        expect(interp_brace_warning_at(0).contains("W-STR-BRACE-001")).to_equal(true)
+        expect(interp_brace_warning_at(0).contains(LL)).to_equal(true)
+
+    it "warns for an unbalanced opening brace and keeps the string literal":
+        # @req REQ-SSPEC-COMPILER
+        step("warns for an unbalanced opening brace and keeps the string literal")
+        warm("warm_brace_e")
+        interp_brace_warnings_reset()
+        expect(part_count("x " + LB + " y")).to_equal(0)
+        expect(interp_brace_warning_count()).to_equal(1)
+        expect(interp_brace_warning_at(0).contains("W-STR-BRACE-001")).to_equal(true)

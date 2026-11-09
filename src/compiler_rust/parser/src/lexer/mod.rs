@@ -4,7 +4,7 @@ mod i18n;
 mod identifiers;
 mod indentation;
 pub mod numbers;
-mod strings;
+pub(crate) mod strings;
 
 pub use crate::token::{NamePattern, NumericSuffix};
 pub use numbers::{lookup_seed_unit, SEED_UNITS};
@@ -35,6 +35,9 @@ pub struct Lexer<'a> {
     line_mask: Option<std::sync::Arc<crate::cond_compile::LineMask>>,
     /// Diagnostics from conditional-compilation evaluation (unsupported atoms etc.).
     pub cond_diagnostics: Vec<String>,
+    /// `W-STR-BRACE-001` warnings: a `{` in a string literal that is not a valid
+    /// interpolation and fell back to literal text (drained by the parser into hints).
+    pub brace_warnings: Vec<String>,
     /// `false` when the directives are unbalanced (stray `@elif`/`@else`/
     /// `@end`, unclosed `@when`): the parser fails closed on this.
     pub cond_balanced: bool,
@@ -71,6 +74,7 @@ impl<'a> Lexer<'a> {
         Self {
             line_mask,
             cond_diagnostics,
+            brace_warnings: Vec::new(),
             cond_balanced,
             source,
             chars: source.char_indices().peekable(),
@@ -106,6 +110,7 @@ impl<'a> Lexer<'a> {
             pending_tokens: Vec::new(),
             line_mask: None,
             cond_diagnostics: Vec::new(),
+            brace_warnings: Vec::new(),
             cond_balanced: true,
             at_line_start: false, // Don't treat leading whitespace as indentation
             bracket_depth: 0,

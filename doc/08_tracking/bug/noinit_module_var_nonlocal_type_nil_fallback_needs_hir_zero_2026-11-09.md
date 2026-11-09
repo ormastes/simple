@@ -45,3 +45,16 @@ zero-filled (0 / false / 0.0 / "" / [] / nested enum first variant / nested clas
   0/5 on the deployed seed -> 5/5 on the rebuilt seed;
   `test/01_unit/compiler/parser/module_noinit_enum_class_zero_spec.spl` 1/4 -> 4/4.
 - Kernel/noalloc gate (`set_noinit_kernel_module_v1`) unchanged.
+
+## 2026-11-09 fix (later-declared types) — fix-implemented-verification-pending
+Initializer-less module vars whose struct/class/enum is declared LATER in the same
+module are now queued (`noinit_pending_push_v1`) and resolved at end of module
+parse (`noinit_pending_resolve_v1`, called at EOF in `parse_module_body`) through
+the same `struct_zero_expr_v1` used for earlier declarations (struct/class -> zero
+literal, enum -> first variant, payload first variant -> error). New setter
+`decl_set_var_init` replaces the nil placeholder. Kernel/noalloc modules are unchanged
+(not queued). Evidence: `module_noinit_zero_default_spec` red 10/15 on base -> green
+15/15; `module_noinit_named_nil_parity_spec` 9/11 both before and after (2 pre-existing
+failures, unrelated; forward-struct case updated to expect the zero literal).
+Remaining (keeps this row open): types NOT declared in this module (imported) still
+take the nil fallback — needs a HIR pass after name resolution; kernel static-zero proof.

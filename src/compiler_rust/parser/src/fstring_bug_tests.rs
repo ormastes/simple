@@ -60,6 +60,13 @@ fn sample(version, serialized):
     #[test]
     fn test_literal_brace_in_string() {
         let source = r#"val x = "{v: ""#;
+        let mut warn_lexer = Lexer::new(source);
+        let _ = warn_lexer.tokenize();
+        assert!(
+            warn_lexer.brace_warnings.iter().any(|w| w.contains("W-STR-BRACE-001") && w.contains("`{{`")),
+            "unmatched brace must warn with the escape hint: {:?}",
+            warn_lexer.brace_warnings
+        );
         let errors = find_errors(source);
         assert!(
             errors.is_empty(),
