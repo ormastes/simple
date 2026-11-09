@@ -1,0 +1,83 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+#
+# Seed regression guard for bug jit_co_compiled_definition_ambiguity_debt_2026-09-15
+# (owner decision 2026-11-09): a bare call to a free function that several
+# co-compiled modules define, from a module that neither defines nor imports
+# it, is a COMPILE ERROR naming the symbol and the candidate modules -- not a
+# silent dispatch to whichever definition kept the bare name (the entry
+# module's, else the LAST loaded).
+#
+# Pre-fix the first fixture compiled cleanly and printed `got=222` (m2's body,
+# loaded last); swapping the two `use` lines flipped it to 111.
+#
+# @cover src/compiler_rust/compiler/src/hir/lower/lowerer.rs
+# @cover src/compiler_rust/compiler/src/hir/lower/expr/mod.rs
+
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_write, file_delete, file_exists, dir_create_all, shell, env_get}
+
+extern fn rt_path_absolute(path: text) -> text?
+
+fn _amb_seed_bin() -> text:
+    val override_bin = env_get("SIMPLE_BIN") ?? ""
+    if override_bin != "":
+        return override_bin
+    rt_path_absolute("src/compiler_rust/target/bootstrap/simple") ?? ""
+
+fn _amb_tmp_root() -> text:
+    val t = env_get("TEMP") ?? ""
+    if t != "":
+        return t.replace("\\", "/")
+    "/tmp"
+
+fn _amb_m1() -> text:
+    "fn pick(x: i64) -> i64:\n    return 111\n\nfn m1_tag() -> i64:\n    return 1\n"
+
+fn _amb_m2() -> text:
+    "fn pick(x: i64) -> i64:\n    return 222\n\nfn m2_tag() -> i64:\n    return 2\n"
+
+describe "seed: ambiguous co-compiled free-function call is a compile error":
+    # @manual scenario evidence
+    it "refuses a bare call that neither import selects, naming the symbol and both modules":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a bare call that neither import selects")
+        val seed = _amb_seed_bin()
+        if file_exists(seed):
+            val dir = _amb_tmp_root() + "/ambiguous_co_compiled_call_error"
+            dir_create_all(dir + "/mods")
+            file_write(dir + "/mods/m1.spl", _amb_m1())
+            file_write(dir + "/mods/m2.spl", _amb_m2())
+            # Both modules are co-compiled (each contributes a tag), but
+            # `pick` itself is imported from NEITHER.
+            file_write(dir + "/main.spl", "use mods.m1.{{m1_tag}}\nuse mods.m2.{{m2_tag}}\n\nfn main() -> i64:\n    val got = pick(7)\n    print(\"got=\" + got.to_text() + \" tags=\" + m1_tag().to_text() + m2_tag().to_text())\n    return 0\n")
+            file_delete(dir + "/main.smf")
+
+            val compiled = shell("cd {dir} && SIMPLE_RUST_SEED_WARNING=0 {seed} compile main.spl -o main.smf 2>&1")
+            expect(compiled.exit_code).to_not_equal(0)
+            val out = compiled.stdout + compiled.stderr
+            expect(out).to_contain("ambiguous call to `pick`")
+            expect(out).to_contain("m1.spl")
+            expect(out).to_contain("m2.spl")
+            expect(out).to_contain("compiler_cross_module_private_symbol_collision")
+
+    # @manual scenario evidence
+    it "a selective import of the intended definition qualifies the call and compiles":
+        # @req REQ-SSPEC-COMPILER
+        step("a selective import qualifies the call")
+        val seed = _amb_seed_bin()
+        if file_exists(seed):
+            val dir = _amb_tmp_root() + "/ambiguous_co_compiled_call_qualified"
+            dir_create_all(dir + "/mods")
+            file_write(dir + "/mods/m1.spl", _amb_m1())
+            file_write(dir + "/mods/m2.spl", _amb_m2())
+            # m2 is loaded LAST; selecting m1's `pick` must still reach 111.
+            file_write(dir + "/main.spl", "use mods.m1.{{pick, m1_tag}}\nuse mods.m2.{{m2_tag}}\n\nfn main() -> i64:\n    val got = pick(7)\n    print(\"got=\" + got.to_text() + \" tags=\" + m1_tag().to_text() + m2_tag().to_text())\n    if got == 111:\n        print(\"PASS\")\n        return 0\n    print(\"FAIL\")\n    return 1\n")
+            file_delete(dir + "/main.smf")
+
+            val compiled = shell("cd {dir} && SIMPLE_RUST_SEED_WARNING=0 {seed} compile main.spl -o main.smf 2>&1")
+            expect(compiled.exit_code).to_equal(0)
+            val ran = shell("cd {dir} && SIMPLE_RUST_SEED_WARNING=0 {seed} main.smf 2>&1")
+            expect(ran.stdout).to_contain("got=111")
+            expect(ran.stdout).to_contain("PASS")
