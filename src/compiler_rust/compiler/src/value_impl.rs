@@ -119,6 +119,7 @@ impl Value {
             Value::Nil => Ok(0),
             other => {
                 let actual_type = self.type_name();
+                report_conversion_failure("int", other);
                 if std::env::var("SIMPLE_DEBUG_AS_INT_BT").is_ok() {
                     if let Value::Function { name, .. } = other {
                         eprintln!(
@@ -166,6 +167,7 @@ impl Value {
             Value::Nil => Ok(0.0),
             other => {
                 let actual_type = self.type_name();
+                report_conversion_failure("float", other);
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
                     .with_help(format!("expected float type, got {}", actual_type));
@@ -1070,4 +1072,25 @@ mod dict_key_string_tests {
         ba.insert("a".to_string(), Value::Int(1));
         assert_eq!(Value::Dict(Arc::new(ab)).to_key_string(), Value::Dict(Arc::new(ba)).to_key_string());
     }
+}
+
+/// Attribution for a failed scalar conversion (`cannot convert <ty> to int|float`).
+/// The bare error names neither the value nor the interpreted frame, so a
+/// native-build failure after a clean HIR could not be located
+/// (doc/08_tracking/bug/native_build_enum_to_int_mismatch_after_hir_2026-09-01.md).
+/// Error path only; gated so default output is unchanged. The interpreted call
+/// stack is populated under the same gate (`DEBUG_CALL_STACK`).
+fn report_conversion_failure(target: &str, value: &Value) {
+    if !crate::interpreter::field_access_debug_enabled() {
+        return;
+    }
+    let stack = crate::interpreter::debug_call_stack_snapshot();
+    let start = stack.len().saturating_sub(12);
+    eprintln!(
+        "[conversion-error] target={} value_type={} value={} stack={}",
+        target,
+        value.type_name(),
+        value.to_debug_string().chars().take(500).collect::<String>(),
+        stack[start..].join(" -> ")
+    );
 }
