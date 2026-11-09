@@ -147,3 +147,13 @@ The registry-corruption defect does not reproduce at current source. Not
 claimed: the probe build did not complete within the window (it is slow, not
 failed); the stage2 compiler-test matrix end-to-end result remains the
 final acceptance for running the suite under stage 2.
+
+## 2026-11-09 — location diagnostic landed (fix-implemented-verification-pending)
+
+`bail_unknown_method!` (`src/compiler_rust/compiler/src/interpreter/error_macros.rs`)
+now attaches `while evaluating module: <file>` (and sets the error's file) on
+every unknown-method error, and with `SIMPLE_BOOTSTRAP_DIAG=1` adds the 12
+innermost interpreted functions as a note plus an `[unknown-method]` stderr
+line. Next aarch64 Linux run: rerun the failing `native-build` with
+`SIMPLE_BOOTSTRAP_DIAG=1` and record the module + call stack here. cargo not
+run on Windows (disk < 30 GB); needs a seed rebuild to take effect.

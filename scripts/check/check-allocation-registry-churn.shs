@@ -1,25 +1,39 @@
 #!/bin/sh
 # Clang C only. Prove table-byte boundedness with the two production owners.
-set -eu
+#
+# Verdict convention (repo guard standard):
+#   PASS — 2 registry-churn probe(s) checked ... (exit 0)
+#   FAIL — <what broke>                          (exit 1)
+#   ERROR — nothing was checked (<reason>)       (exit 2)
+set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 OUT=${SIMPLE_REGISTRY_CHURN_OUTPUT:-"$ROOT/build/native_probe/allocation-registry-churn"}
 CC=${CC:-clang}
-mkdir -p "$OUT"
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (clang '$CC' not found)"; exit 2; }
+mkdir -p "$OUT" || { echo "ERROR — nothing was checked (cannot create $OUT)"; exit 2; }
 case "$(uname -s)" in
     Linux) discard='-Wl,--gc-sections' ;;
     Darwin) discard='-Wl,-dead_strip' ;;
-    *) echo 'ERROR: this runner needs Linux or macOS; use clang-cl for the Windows fixture'; exit 2 ;;
+    *) echo 'ERROR — nothing was checked (this runner needs Linux or macOS; use clang-cl for the Windows fixture)'; exit 2 ;;
 esac
+checked=0
 for provider in native memory; do
     define=
     [ "$provider" != memory ] || define=-DRT_REGISTRY_MEMORY_PROVIDER
     # shellcheck disable=SC2086
-    "$CC" -std=gnu11 -O1 -ffunction-sections -fdata-sections $define \
+    if ! "$CC" -std=gnu11 -O1 -ffunction-sections -fdata-sections $define \
         "$ROOT/src/runtime/test/rt_allocation_registry_churn_selfcheck.c" \
-        $discard -pthread -lm -o "$OUT/$provider" >"$OUT/$provider.build.log" 2>&1
-    "$OUT/$provider" >"$OUT/$provider.run.log" 2>&1 || {
-        cat "$OUT/$provider.run.log"
+        $discard -pthread -lm -o "$OUT/$provider" >"$OUT/$provider.build.log" 2>&1; then
+        echo "FAIL — registry-churn probe '$provider' did not compile (clang=$CC; log $OUT/$provider.build.log)" >&2
         exit 1
-    }
+    fi
+    if ! "$OUT/$provider" >"$OUT/$provider.run.log" 2>&1; then
+        cat "$OUT/$provider.run.log" >&2
+        echo "FAIL — registry-churn probe '$provider' failed (table-byte boundedness broken; see probe output above)" >&2
+        exit 1
+    fi
     cat "$OUT/$provider.run.log"
+    checked=$((checked + 1))
 done
+echo "PASS — $checked registry-churn probe(s) checked (native + memory providers; table-byte boundedness holds)"
+exit 0

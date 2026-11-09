@@ -1,0 +1,73 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# Reproduce spec for: browser_engine_table_row_horizontal_layout_2026-07-11 —
+# <tr> children must flow horizontally (one shared line) instead of stacking
+# vertically like block boxes. Minimal repro from the bug document:
+#   <table><tr><td>A</td><td>B</td></tr></table>
+# Chrome: "A B" on one line. Defect: "A" above "B" (two lines).
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
+
+val W = 200
+val H = 120
+
+fn is_ink(p: u32) -> bool:
+    (p & 0x00FFFFFFu32) != 0x00FFFFFFu32
+
+fn line_band_count(px: [u32], w: i32, h: i32) -> i32:
+    # Count contiguous vertical bands of rows that contain any ink pixel.
+    var bands = 0
+    var in_band = false
+    var y = 0
+    while y < h:
+        var row_has_ink = false
+        var x = 0
+        while x < w:
+            if is_ink(px[y * w + x]):
+                row_has_ink = true
+            x = x + 1
+        if row_has_ink and not in_band:
+            bands = bands + 1
+            in_band = true
+        elif not row_has_ink:
+            in_band = false
+        y = y + 1
+    bands
+
+fn max_ink_x(px: [u32], w: i32, h: i32) -> i32:
+    var max_x = -1
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            if is_ink(px[y * w + x]) and x > max_x:
+                max_x = x
+            x = x + 1
+        y = y + 1
+    max_x
+
+describe "table row lays cells horizontally":
+    it "places <tr> cells side by side on one line, not stacked":
+        step("two <td> cells in one <tr> render on a single text line")
+        val px = simple_web_layout_render_html_software_pixels(
+            "<html><body style=\"margin:0\"><table><tr><td>A</td><td>B</td></tr></table></body></html>",
+            W, H, 600000)
+        expect(px.len()).to_equal(W * H)
+        # Horizontal flow: both cells share one line band.
+        expect(line_band_count(px, W, H)).to_equal(1)
+        # The second cell's ink sits to the right of the first (past the
+        # ~10px "A" glyph at x 2..10), proving cells advanced along the x axis.
+        expect(max_ink_x(px, W, H) > 10).to_equal(true)
+
+    it "keeps two stacked <tr> rows on separate lines":
+        step("two <tr> rows render as two separate line bands")
+        val px = simple_web_layout_render_html_software_pixels(
+            "<html><body style=\"margin:0\"><table><tr><td>A</td></tr><tr><td>B</td></tr></table></body></html>",
+            W, H, 600000)
+        expect(px.len()).to_equal(W * H)
+        expect(line_band_count(px, W, H)).to_equal(2)

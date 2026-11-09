@@ -118,3 +118,14 @@ Both defects were hit while producing the executable proofs recorded in
 `interp_scope_slot_reuse_stale_bucket_heads_2026-09-06.md`. Every measurement in
 those records therefore states its lane as
 `SIMPLE_TEST_RUNNER_RUST=1 bin/simple test` and `touch`es the spec first.
+
+## Defect 2 fix (2026-11-09) — fix-implemented-verification-pending
+
+`result_cache.rs` now keys each cached verdict on a `source_tree_stamp`
+(FNV-1a over path+mtime(ns)+size of every `.spl`/`.sdn` under `src/`,
+excluding `compiler_rust`/`vendor`, plus the runner exe's mtime+size), stored
+as an 8th column. A cached PASS replays only when the spec AND the stamp
+match; legacy rows (no column) never match. Conservative: any source/runner
+change re-runs everything — no stale PASS. Repro/prevention cargo tests:
+`stamp_changes_when_imported_module_changes`, `empty_tree_without_exe_never_matches`.
+cargo not run (disk < 30 GB). Defect 1 not reproduced on Windows seed (see claim notes).
