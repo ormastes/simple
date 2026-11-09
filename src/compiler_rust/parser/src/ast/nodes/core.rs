@@ -112,6 +112,91 @@ pub enum Node {
     Extend(ExtendBlock),
 }
 
+impl Node {
+    /// Source span of the node, when the variant's payload carries one.
+    ///
+    /// Covers the executable statement variants (the ones whose evaluation
+    /// can raise semantic errors); declaration-only variants return `None`
+    /// for now. Expression-position statements (`Node::Expression`) have no
+    /// span because the `Expr` enum carries no position information.
+    /// Consumed by the interpreter to attach `file:line:col` to semantic
+    /// errors (bug row: seed_semantic_error_missing_position_2026-11-09).
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            Node::Function(n) => Some(n.span),
+            Node::Struct(n) => Some(n.span),
+            Node::Bitfield(n) => Some(n.span),
+            Node::Class(n) => Some(n.span),
+            Node::Enum(n) => Some(n.span),
+            Node::Trait(n) => Some(n.span),
+            Node::Impl(n) => Some(n.span),
+            Node::InterfaceBinding(n) => Some(n.span),
+            Node::Mixin(n) => Some(n.span),
+            Node::Actor(n) => Some(n.span),
+            Node::TypeAlias(n) => Some(n.span),
+            Node::ClassAlias(n) => Some(n.span),
+            Node::FunctionAlias(n) => Some(n.span),
+            Node::Extern(n) => Some(n.span),
+            Node::ExternClass(n) => Some(n.span),
+            Node::Macro(n) => Some(n.span),
+            Node::Unit(n) => Some(n.span),
+            Node::UnitFamily(n) => Some(n.span),
+            Node::CompoundUnit(n) => Some(n.span),
+            Node::HandlePool(n) => Some(n.span),
+            Node::LiteralFunction(n) => Some(n.span),
+            Node::DomainBlock(n) => Some(n.span),
+            Node::ModDecl(n) => Some(n.span),
+            Node::UseStmt(n) => Some(n.span),
+            Node::MultiUse(n) => Some(n.span),
+            Node::CommonUseStmt(n) => Some(n.span),
+            Node::ExportUseStmt(n) => Some(n.span),
+            Node::StructuredExportStmt(n) => Some(n.span),
+            Node::AutoImportStmt(n) => Some(n.span),
+            Node::RequiresCapabilities(n) => Some(n.span),
+            Node::AopAdvice(n) => Some(n.span),
+            Node::DiBinding(n) => Some(n.span),
+            Node::InjectGraph(n) => Some(n.span),
+            Node::SecurityPolicy(n) => Some(n.span),
+            Node::SecurityGate(n) => Some(n.span),
+            Node::SandboxPolicy(n) => Some(n.span),
+            Node::CapabilityPolicy(n) => Some(n.span),
+            Node::UiPolicy(n) => Some(n.span),
+            Node::ArchitectureRule(n) => Some(n.span),
+            Node::MockDecl(n) => Some(n.span),
+            Node::Let(n) => Some(n.span),
+            Node::Const(n) => Some(n.span),
+            Node::Static(n) => Some(n.span),
+            Node::Assignment(n) => Some(n.span),
+            Node::Return(n) => Some(n.span),
+            Node::If(n) => Some(n.span),
+            Node::Match(n) => Some(n.span),
+            Node::For(n) => Some(n.span),
+            Node::While(n) => Some(n.span),
+            Node::Loop(n) => Some(n.span),
+            Node::Break(n) => Some(n.span),
+            Node::Continue(n) => Some(n.span),
+            Node::Pass(n) => Some(n.span),
+            Node::Skip(n) => Some(n.span),
+            Node::Defer(n) => Some(n.span),
+            Node::ErrDefer(n) => Some(n.span),
+            Node::Guard(n) => Some(n.span),
+            Node::Assert(n) => Some(n.span),
+            Node::Assume(n) => Some(n.span),
+            Node::Admit(n) => Some(n.span),
+            Node::ProofHint(n) => Some(n.span),
+            Node::Calc(n) => Some(n.span),
+            Node::Context(n) => Some(n.span),
+            Node::With(n) => Some(n.span),
+            Node::InlineAsm(n) => Some(n.span),
+            Node::Newtype(n) => Some(n.span),
+            Node::Extend(n) => Some(n.span),
+            // `Expr` carries no span information.
+            Node::Expression(_) => None,
+            Node::LeanBlock(_) => None,
+        }
+    }
+}
+
 /// Decorator applied to a function: @decorator or @decorator(args)
 /// Args support named arguments: @bounds(default="return", strict=true)
 #[derive(Debug, Clone, PartialEq)]
