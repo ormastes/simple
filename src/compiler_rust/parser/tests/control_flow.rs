@@ -718,3 +718,67 @@ fn parse_inline_elif_return_body_statement() {
         else_stmts[0]
     );
 }
+
+// README.md:442 "preferred arrow syntax": several consecutive `| Pat -> expr`
+// arms. Bug: readme_arrow_match_arm_syntax_does_not_parse_2026-09-19.
+#[test]
+fn parse_readme_arrow_match_arms_four_consecutive_arms_stmt_position() {
+    let items = parse(
+        r#"fn perimeter(s: Shape) -> f64:
+    match s:
+        | Circle(r) -> 2.0 * 3.14159 * r
+        | Rectangle(w, h) -> 2.0 * (w + h)
+        | Square(side) -> 4.0 * side
+        | Triangle(a, b, c) -> a + b + c
+"#,
+    );
+    let Node::Function(f) = &items[0] else {
+        panic!("expected function, got {:?}", items[0])
+    };
+    let Node::Match(m) = &f.body.statements[0] else {
+        panic!("expected match, got {:?}", f.body.statements[0])
+    };
+    assert_eq!(m.arms.len(), 4, "each `| Pat -> expr` line is one arm");
+    for arm in &m.arms {
+        assert_eq!(arm.body.statements.len(), 1, "arrow arm body is one expression");
+        assert!(arm.guard.is_none());
+    }
+}
+
+#[test]
+fn parse_readme_arrow_match_arms_expr_position_equivalent_to_case_form() {
+    let arrow = parse(
+        r#"val p = match s:
+    | Circle(r) -> 2.0 * 3.14159 * r
+    | Square(side) -> 4.0 * side
+"#,
+    );
+    let case = parse(
+        r#"val p = match s:
+    case Circle(r): 2.0 * 3.14159 * r
+    case Square(side): 4.0 * side
+"#,
+    );
+    // Spans differ by column; the structural rendering must not.
+    let strip = |s: String| -> String {
+        let re = regex_lite_strip_spans(&s);
+        re
+    };
+    assert_eq!(strip(format!("{arrow:?}")), strip(format!("{case:?}")));
+}
+
+/// Remove `Span { .. }` renderings from a Debug string so two parses that
+/// differ only in source position compare equal.
+fn regex_lite_strip_spans(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("Span {") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i..];
+        let end = after.find('}').map(|e| e + 1).unwrap_or(after.len());
+        out.push_str("Span");
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
