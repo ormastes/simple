@@ -1,0 +1,86 @@
+"""
+# Ambiguous co-compiled free-function call is an error, not a last-write-wins pick
+
+Owner decision 2026-11-09 for bug
+`jit_co_compiled_definition_ambiguity_debt_2026-09-15`: when several
+co-compiled modules define the same free function and the CALLER neither
+defines it nor imports it (no owned definition, no selective-import route),
+the call is a compile error requiring qualification -- never the flat
+bare-name table's last-registered definition.
+
+Before this change `func_flat_lookup_for_caller` returned that flat pick (the
+module registered LAST), so the same source dispatched to a different body
+depending only on `use` ordering -- the dispatch skew behind
+`format_size` ("1.5 KB" vs "1.5 KiB"), `process_run`, `fill_series_spec`
+and the other instances listed in the bug record.
+
+Drives the resolver directly (same technique as
+`cross_module_owned_fn_resolution_spec.spl`).
+"""
+
+use compiler.core.ast.{ast_reset, decl_fn}
+use compiler.core.interpreter.eval_tables.{
+    func_table_reset,
+    func_table_register,
+    func_table_lookup,
+    func_table_register_owned,
+    func_import_binding_register,
+    func_import_binding_reset,
+    func_resolve_for_caller,
+    func_flat_lookup_for_caller,
+    func_owners_of,
+    func_ambiguous_call_message,
+    FUNC_LOOKUP_AMBIGUOUS
+}
+
+val MOD_A: text = "src/fixture/mod_a.spl"
+val MOD_B: text = "src/fixture/mod_b.spl"
+val CALLER: text = "src/fixture/caller.spl"
+
+fn setup_two_owners() -> (i64, i64):
+    ast_reset()
+    func_table_reset()
+    func_import_binding_reset()
+    val did_a = decl_fn("format_size", [], [], 0, [], 0, [], 0)
+    val did_b = decl_fn("format_size", [], [], 0, [], 0, [], 0)
+    func_table_register("format_size", did_a)
+    func_table_register_owned(MOD_A, "format_size", did_a)
+    func_table_register("format_size", did_b)
+    func_table_register_owned(MOD_B, "format_size", did_b)
+    (did_a, did_b)
+
+describe "ambiguous co-compiled free-function call":
+    it "the flat table alone still holds the last-registered definition (the hazard)":
+        val pair = setup_two_owners()
+        expect(func_table_lookup("format_size")).to_equal(pair.1)
+
+    it "a caller with no owned definition and no import route gets AMBIGUOUS, not the flat pick":
+        setup_two_owners()
+        expect(func_resolve_for_caller(CALLER, "format_size")).to_equal(-1)
+        expect(func_flat_lookup_for_caller(CALLER, "format_size")).to_equal(FUNC_LOOKUP_AMBIGUOUS)
+        expect(FUNC_LOOKUP_AMBIGUOUS).to_equal(-2)
+
+    it "a selective import of the intended module resolves the call":
+        val pair = setup_two_owners()
+        func_import_binding_register(CALLER, "format_size", MOD_A)
+        expect(func_resolve_for_caller(CALLER, "format_size")).to_equal(pair.0)
+
+    it "a single-owner name still resolves through the flat table":
+        ast_reset()
+        func_table_reset()
+        func_import_binding_reset()
+        val did = decl_fn("only_here", [], [], 0, [], 0, [], 0)
+        func_table_register("only_here", did)
+        func_table_register_owned(MOD_A, "only_here", did)
+        expect(func_flat_lookup_for_caller(CALLER, "only_here")).to_equal(did)
+
+    it "the diagnostic names the symbol, every owner module and the caller":
+        setup_two_owners()
+        val owners = func_owners_of("format_size")
+        expect(owners.len()).to_equal(2)
+        val msg = func_ambiguous_call_message(CALLER, "format_size", owners)
+        expect(msg).to_contain("ambiguous call to 'format_size'")
+        expect(msg).to_contain(MOD_A)
+        expect(msg).to_contain(MOD_B)
+        expect(msg).to_contain(CALLER)
+        expect(msg).to_contain("compiler_cross_module_private_symbol_collision")

@@ -89,6 +89,13 @@ pub enum LowerError {
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
 
+    /// A bare free-function reference that several co-compiled modules define
+    /// and that the referencing module neither defines nor imports. Owner
+    /// decision 2026-11-09 (`jit_co_compiled_definition_ambiguity_debt_2026-09-15`):
+    /// a compile error requiring qualification, never a last-definition fallback.
+    #[error("{0}")]
+    AmbiguousCallable(String),
+
     /// E1034: a `use` names a module that does not exist anywhere on the
     /// resolution path.
     ///

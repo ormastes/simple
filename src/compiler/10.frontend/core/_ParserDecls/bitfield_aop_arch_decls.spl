@@ -122,6 +122,9 @@ fn parse_bitfield_decl() -> i64:
     var used_bits: i64 = 0
 
     var bf_i: i64 = 0 - 1
+    var bf_prev_kind: i64 = 0 - 1
+    var bf_prev_line: i64 = 0 - 1
+    var bf_prev_col: i64 = 0 - 1
     while true:
         bf_i = bf_i + 1
         parser_skip_newlines()
@@ -137,6 +140,16 @@ fn parse_bitfield_decl() -> i64:
             parser_skip_newlines_and_semicolons()
             continue
 
+        # Forward-progress guard: a malformed field that no arm consumes must
+        # not re-report the same error forever (hung module_surface spec,
+        # bug hir_unit_specs_hang_over_300s_2026-11-06).
+        if par_kind_get() == bf_prev_kind and par_line_get() == bf_prev_line and par_col_get() == bf_prev_col:
+            parser_error("bitfield '" + bf_name + "': parser made no forward progress at this field; aborting bitfield body")
+            break
+        bf_prev_kind = par_kind_get()
+        bf_prev_line = par_line_get()
+        bf_prev_col = par_col_get()
+
         # Field: name: type  OR  _: uN (reserved)
         val field_name = par_text_get()
         val is_underscore: bool = par_kind_get() == 169
@@ -145,8 +158,15 @@ fn parse_bitfield_decl() -> i64:
         else:
             parser_expect(6)
         parser_expect(161)
-        val field_type_name = par_text_get()
-        var field_type = parser_parse_type()
+        var field_type_name = par_text_get()
+        var field_type = TYPE_VOID
+        if par_kind_get() == TOK_INT_LIT:
+            # `name: N` bare bit width (seed parser parity, types_def/bitfield.rs):
+            # an unsigned N-bit field, same as `name: uN`.
+            field_type_name = "u" + field_type_name
+            parser_advance()
+        else:
+            field_type = parser_parse_type()
         val bit_count = bitfield_field_bits_from_name(field_type_name)
         if bit_count == 0:
             parser_error("bitfield field type must be bool, uN, or iN")

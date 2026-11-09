@@ -906,7 +906,14 @@ fn execute_test_files(
     let mut total_cached = 0;
 
     // Load result cache for incremental test runs (skip unchanged files)
-    let mut result_cache = super::result_cache::ResultCache::load();
+    // Run inputs (every flag except the file selection) are part of the key,
+    // so a PASS from one mode/backend is never replayed in another.
+    let run_key = {
+        let mut keyed = options.clone();
+        keyed.path = None;
+        format!("{:?}", keyed)
+    };
+    let mut result_cache = super::result_cache::ResultCache::load(&run_key);
     let use_cache = !options.force_rebuild && !options.clean && !options.coverage && !options.no_cache;
 
     // Performance warning for listing with filters (scans many files)
