@@ -719,7 +719,7 @@ impl NativeProjectBuilder {
         }
     }
 
-    fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
+    pub(crate) fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
         let output = nm_command()?
             .arg("-g")
             .arg("-p")
