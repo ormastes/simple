@@ -121,8 +121,15 @@ fi
 # 2. Registered symbols.
 #
 # Evidence that a symbol actually resolves:
-#   - C/H/Rust (comments stripped): a definition or call `sym(`, or a
-#     registration-table string "sym"
+#   - C/H/Rust (comments stripped): a definition or call `sym(`, a
+#     registration-table string "sym", or a host-binding dispatch key
+#     `sym: (` — the object-literal-key form used by the embedded JS/wasm
+#     host-binding table in src/compiler_rust/driver/src/cli/vscode.rs
+#     (e.g. `vscode_window_show_message: (messagePtr, messageType) =>`).
+#     That table IS the registration mechanism for the seed std's vscode_*
+#     wasm externs; missing it scored genuinely bound host functions as
+#     unregistered. The pattern requires the colon to be followed by `(`, so
+#     Rust/C struct-literal fields (`field: value`) do not match.
 #   - .spl: a quoted registration-table entry "sym"
 #
 # Deliberately NOT counted:
@@ -137,7 +144,9 @@ fi
   grep -rhFf "$cand" --include='*.c' --include='*.h' --include='*.rs' \
        --exclude-dir=vendor --exclude-dir=target src 2>/dev/null \
     | sed -e 's://.*::' | grep -v '^[[:space:]]*[*/]' \
-    | grep -oE '[A-Za-z_][A-Za-z0-9_]*\(|"[A-Za-z_][A-Za-z0-9_]*"' | tr -d '"('
+    | grep -oE '[A-Za-z_][A-Za-z0-9_]*\(|"[A-Za-z_][A-Za-z0-9_]*"|[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*\(' \
+    | sed 's/[[:space:]]*:[[:space:]]*($//' \
+    | tr -d '"('
   grep -rhFf "$cand" --include='*.spl' --exclude-dir=vendor src test 2>/dev/null \
     | grep -v '@extern' \
     | grep -oE '"[A-Za-z_][A-Za-z0-9_]*"' | tr -d '"'
@@ -164,6 +173,21 @@ if ! grep -qx 'rt_array_len' "$cand"; then
   echo "declaration extractor did not collect it. The bare-form scan is broken --"
   echo "this is the exact blind spot that hid rt_smf_reader_open. Fix the"
   echo "extractor; do not delete this control."
+  exit 1
+fi
+
+# PER-FORM CONTROL (dispatch-key path). vscode_window_show_message is
+# registered ONLY as a host-binding dispatch key 'vscode_window_show_message: ('
+# in src/compiler_rust/driver/src/cli/vscode.rs -- its .spl declaration lines
+# carry no quoted registration string, so it reaches $reg solely through the
+# 'sym: (' evidence form. If this trips, the dispatch-key detector is broken
+# and every seed-std vscode_* wasm binding is scored unregistered again.
+if ! grep -qx 'vscode_window_show_message' "$reg"; then
+  echo "extern_registration_ok=false"
+  echo "SELF-TEST FAILED: vscode_window_show_message is bound in the vscode.rs"
+  echo "wasm host dispatch table but the detector did not find it. The"
+  echo "dispatch-key (sym-open-paren) registration scan is broken. Fix the"
+  echo "detector; do not delete this control."
   exit 1
 fi
 
