@@ -50,6 +50,13 @@ impl<'a> super::Lexer<'a> {
             }
         }
 
+        // Set literal prefix: `s{` (no whitespace between). A plain `s`
+        // identifier followed by anything else lexes as before.
+        if name == "s" && self.check('{') {
+            self.advance(); // consume '{'
+            return TokenKind::SetLitStart;
+        }
+
         // Check for i18n pattern: Name_"..." (identifier ending with _ followed by ")
         // The identifier must end with _ and be immediately followed by "
         if name.ends_with('_') && self.check('"') {

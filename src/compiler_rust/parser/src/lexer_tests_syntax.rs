@@ -218,3 +218,16 @@ fn test_nested_indent() {
     );
 }
 
+
+// `s{` set-literal opener (bug set_literal_s_brace_unparsed_2026-09-06).
+#[test]
+fn test_set_literal_prefix_tokenizes_only_when_adjacent() {
+    assert_eq!(
+        tokenize("s{1}"),
+        vec![TokenKind::SetLitStart, TokenKind::Integer(1), TokenKind::RBrace, TokenKind::Eof]
+    );
+    // A plain identifier `s` keeps lexing as an identifier.
+    assert!(matches!(tokenize("s + 1")[0], TokenKind::Identifier { .. }));
+    assert!(matches!(tokenize("s {")[0], TokenKind::Identifier { .. }));
+    assert!(matches!(tokenize("sx{")[0], TokenKind::Identifier { .. }));
+}
