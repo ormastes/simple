@@ -154,3 +154,24 @@ Files changed (worktree branch `work/libbug-linux-presandbox-20261105`):
 macOS/Windows remain fail-closed and untouched: `rt_browser_renderer_sandbox_enter`
 still returns false off Linux and the preinit marker is never set without
 the broker-fixed argv + empty environment.
+
+## 2026-11-09 verification (aarch64 Linux, worktree lane)
+
+Re-checked on release/1.0.0 (`eee4ddede18`): the gap is already closed; no
+source change was made. The pre-exec child window of
+`rt_process_spawn_piped_argv` (runtime_process.c:2472-2541) performs only
+async-signal-safe calls between fork and exec (setpgid, prctl via
+`rt_child_set_pdeathsig`, open, dup2, close_range/close, signal, chdir,
+execve/fexecve); a static census found no malloc/stdio/env mutation in the
+window. Stage-one sandboxing is installed by the ELF preinit callback
+(`browser_renderer_preinit`, runtime_process.c:3801; `.preinit_array` entry
+:3845), and stage two requires the preinit marker (:4025). The evidence gate
+repair (PR #6792, c8c559fb343) is merged on release/1.0.0.
+
+Green on this host: `sh test/01_unit/runtime/run_process_piped_write_test.shs`
+exit 0 (compiled with clang; host gcc 13 `-Werror` rejects two pre-existing
+warnings at runtime_process.c:4657 and :2715 — toolchain strictness, not the
+sandbox), and `check-browser-renderer-sandbox-seccomp.shs` PASS 8/8.
+
+Still pending per this doc: installed pure-Simple renderer READY/frame
+evidence. Bug row moved to fix-implemented-verification-pending.
