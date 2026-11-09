@@ -1,4 +1,18 @@
 # ROOT CAUSE FOUND: `u8.to_i64()` mis-dispatches to `VfsFileSize.to_i64()` (method-name collision)
+
+**Status:** OPEN
+**Reconciled:** 2026-11-09
+
+## Corrective review of PR #8095
+
+The shard closure in PR #8095 relied on the September 16 normalization banner
+below. It missed the newer November 4 investigation and November 5 `mirp2-G`
+report, which explicitly leave the frontend method-name collision open and
+require an HIR method-resolution regression plus native evidence from the
+full freestanding closure. The shard is reopened without changing its
+severity or other bug-row fields. Historical entries are preserved; this
+correction supplies no new runtime result and makes no fix claim.
+
 ## Closed 2026-09-16 — ...init.VfsFileSize`, so `.to_i64()` resolved to the primitive conversion. The full sshd/OS c
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
