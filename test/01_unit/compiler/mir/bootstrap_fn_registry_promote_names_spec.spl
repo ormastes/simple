@@ -1,23 +1,26 @@
 # stage2_receiver_bootstrap_fn_registry_promotion_failed_2026-09-13: a failed
-# `_bootstrap_fn_*` promotion must name WHICH registry failed instead of the
-# bare "bootstrap fn registry promotion failed".
+# `_bootstrap_fn_*` promotion must name WHICH registry failed. A failing verdict
+# is injected through bootstrap_fn_note_promote_result_v1 (the single recorder
+# every promote goes through).
 use std.spec.*
 use compiler.mir.mir_data.*
 
-extern fn rt_file_read_text(path: text) -> text?
-
 describe "bootstrap fn registry promote failure names":
-    it "reports no failed registries before any promotion fails":
+    it "names the injected failing registry in the error":
+        bootstrap_fn_registries_failed_names_reset_v1()
+        val kept = bootstrap_fn_note_promote_result_v1("_bootstrap_fn_ret_shapes", true)
+        val failed = bootstrap_fn_note_promote_result_v1("_bootstrap_fn_param_defaults", false)
+        expect(kept).to_equal(true)
+        expect(failed).to_equal(false)
+        val msg = bootstrap_fn_registry_promotion_error_v1("m.x")
+        expect(msg.contains("_bootstrap_fn_param_defaults")).to_equal(true)
+        expect(msg.contains("_bootstrap_fn_ret_shapes")).to_equal(false)
+        expect(msg.contains("m.x")).to_equal(true)
+
+    it "lists every failing registry and resets":
+        bootstrap_fn_registries_failed_names_reset_v1()
+        val a = bootstrap_fn_note_promote_result_v1("r1", false)
+        val b = bootstrap_fn_note_promote_result_v1("r2", false)
+        expect(bootstrap_fn_registries_failed_names_v1()).to_equal("r1,r2")
+        bootstrap_fn_registries_failed_names_reset_v1()
         expect(bootstrap_fn_registries_failed_names_v1()).to_equal("")
-
-    it "never calls the raw promote for a registry without a name":
-        val lines = (rt_file_read_text("src/compiler/50.mir/mir_data.spl") ?? "").split("\n")
-        var raw = 0
-        for line in lines:
-            if line.contains("_promote_bootstrap_registry(") and not line.trim().starts_with("fn ") and not line.contains("val promoted ="):
-                raw = raw + 1
-        expect(raw).to_equal(0)
-
-    it "includes the failed names in the lowering error":
-        val src = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
-        expect(src.contains("failed registries [{bootstrap_fn_registries_failed_names_v1()}]")).to_equal(true)
