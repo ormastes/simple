@@ -51,26 +51,18 @@ use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 use std.io_runtime.{env_get_opt}
+use compiler.common.value_access.{compiler_value_discriminant, compiler_value_payload, compiler_value_tuple_at}
 
-# std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
-# cannot resolve it — declare the runtime extern directly.
-@unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
-extern fn rt_enum_discriminant<T>(value: T) -> i64
-@unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
-extern fn rt_enum_payload<T>(value: T) -> i64
-@unsafe(reason: "raw tagged-tuple indexed borrowed value projection ABI", capabilities: [ffi])
-# T must match the selected variant slot; the borrowed owner must remain live.
-extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?
-
+# Raw tagged-enum / tuple projections, routed through the canonical runtime
+# value-accessor owner (compiler.common.value_access); this module declares no
+# runtime extern of its own.
 @always_inline
 fn _sffi_enum_discriminant<T>(value: T) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_enum_discriminant(value)
+    compiler_value_discriminant<T>(value)
 
 @always_inline
 fn _sffi_enum_payload<T>(value: T) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_enum_payload(value)
+    compiler_value_payload<T, i64>(value)
 
 @always_inline
 # Returns nil for an absent optional payload slot (e.g. HirExprKind.If's
@@ -79,8 +71,7 @@ fn _sffi_enum_payload<T>(value: T) -> i64:
 # non-optional return contract` semantic error, so ANY `if` without an
 # `else` failed native-build in the pure-Simple MIR lowerer.
 fn _sffi_tuple_get<T>(tuple: i64, index: i64) -> T?:
-    unsafe(capabilities: [ffi]):
-        rt_tuple_get<T>(tuple, index)
+    compiler_value_tuple_at<T>(tuple, index)
 
 # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=binding the T? result of _sffi_tuple_get to a non-optional local keeps the Option transport word on stage3 (c03: garbage Index child handle in lower_expr_impl); required payload slots read through this non-optional form
 @always_inline
@@ -4128,9 +4119,9 @@ impl MirLowering:
         var typed_u64_runtime_read = false
         if runtime_array:
             val result_kind: MirTypeKind = result_type.kind
-            typed_u8_runtime_read = rt_enum_discriminant(result_kind) == rt_enum_discriminant(MirTypeKind.U8)
-            typed_u32_runtime_read = rt_enum_discriminant(result_kind) == rt_enum_discriminant(MirTypeKind.U32)
-            typed_u64_runtime_read = rt_enum_discriminant(result_kind) == rt_enum_discriminant(MirTypeKind.U64)
+            typed_u8_runtime_read = _sffi_enum_discriminant(result_kind) == _sffi_enum_discriminant(MirTypeKind.U8)
+            typed_u32_runtime_read = _sffi_enum_discriminant(result_kind) == _sffi_enum_discriminant(MirTypeKind.U32)
+            typed_u64_runtime_read = _sffi_enum_discriminant(result_kind) == _sffi_enum_discriminant(MirTypeKind.U64)
         # Unsafe `Any` read: the receiver is an erased runtime value that may
         # hold a byte-packed `[u8]`, whose slots are raw octets. A raw GEP+load
         # (or rt_array_get under SIMPLE_BOOTSTRAP) misreads them, so go through
@@ -6365,7 +6356,7 @@ impl MirLowering:
         # local tags keyed on it) never resolved, and the emitted IR referenced
         # undefined `%lN` values (llc "defined with type 'ptr' but expected
         # 'i64'" on the dict probe). Confirmed by disc trace: a NamedVar base
-        # reached `case Index` with rt_enum_discriminant(base.kind) equal to the
+        # reached `case Index` with the discriminant of base.kind equal to the
         # NamedVar exemplar disc while the NamedVar match arm never fired.
         val var_pre_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Var(SymbolId(id: -1)))
         if expr_disc == var_pre_disc:
