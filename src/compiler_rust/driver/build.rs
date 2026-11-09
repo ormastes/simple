@@ -43,7 +43,28 @@ fn main() {
     }
 
     // Record the commit the seed was built from so AOT gates can check freshness.
-    println!("cargo:rerun-if-changed={}", project_root.join(".git/HEAD").display());
+    // Watch the RESOLVED ref storage, not just .git/HEAD: a new commit on the
+    // same branch moves the ref (and packed-refs), not HEAD, and in a linked
+    // worktree .git is a file so the real gitdir lives elsewhere
+    // (OPUS-REVIEW on the seed-freshness gate, 2026-11-09).
+    for rel in ["HEAD", "packed-refs"] {
+        if let Some(path) = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", rel])
+            .current_dir(&project_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        {
+            let watched = std::path::PathBuf::from(&path);
+            let watched = if watched.is_absolute() {
+                watched
+            } else {
+                project_root.join(watched)
+            };
+            println!("cargo:rerun-if-changed={}", watched.display());
+        }
+    }
     let commit = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(project_root)

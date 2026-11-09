@@ -42,6 +42,21 @@ seed_freshness_require() {
     return 1
 }
 
+# seed_freshness_require_compiled_bin <bin> [repo_dir]
+# Hard freshness require ONLY for binaries that embed a build commit (the
+# Rust seed). A self-hosted release binary (bin/release/<triple>/simple) does
+# not print build-commit: and is built from HEAD by the very lane that runs
+# it, so freshness is by construction — requiring it there would fail closed
+# permanently (OPUS-REVIEW on the seed-freshness gate, 2026-11-09).
+seed_freshness_require_compiled_bin() {
+    _bin="$1"; _repo="${2:-.}"
+    if ! "$_bin" --version 2>&1 | grep -q '^build-commit:'; then
+        echo "seed-freshness: SKIP - $_bin prints no build-commit: line (self-hosted binary; this lane builds it from HEAD, freshness by construction)" >&2
+        return 0
+    fi
+    seed_freshness_require "$_bin" "$_repo"
+}
+
 seed_freshness_selftest() {
     _t=$(mktemp -d) || return 2
     git init -q "$_t" && git -C "$_t" -c user.email=a@b -c user.name=t commit -q --allow-empty -m c0 || return 2
@@ -59,8 +74,11 @@ seed_freshness_selftest() {
     seed_freshness_require "$_t/fakeseed" "$_t" 2>/dev/null && { echo "FAIL require stale passed"; _f=1; }
     SIMPLE_SEED_STALE_OVERRIDE=selftest seed_freshness_require "$_t/fakeseed" "$_t" 2>/dev/null || { echo "FAIL override"; _f=1; }
     [ -s "$_t/build/seed-freshness-overrides.log" ] || { echo "FAIL override unrecorded"; _f=1; }
+    printf '#!/bin/sh\necho "Simple Language v0.0.0"\n' > "$_t/nocommitseed"; chmod +x "$_t/nocommitseed"
+    seed_freshness_require_compiled_bin "$_t/nocommitseed" "$_t" 2>/dev/null || { echo "FAIL compiled_bin skip for non-seed"; _f=1; }
+    seed_freshness_require_compiled_bin "$_t/fakeseed" "$_t" 2>/dev/null && { echo "FAIL compiled_bin stale passed"; _f=1; }
     rm -rf "$_t"
-    if [ "$_f" -eq 0 ]; then echo "PASS - 7 selftest check(s)"; return 0; fi
+    if [ "$_f" -eq 0 ]; then echo "PASS - 9 selftest check(s)"; return 0; fi
     echo "FAIL - selftest"; return 1
 }
 
