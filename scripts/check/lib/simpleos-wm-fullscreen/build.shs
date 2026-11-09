@@ -28,6 +28,14 @@ wm_native_build_with_progress() {
                 printf '[WM-BUILD] %s native-build active attempt=%s log_bytes=%s\n' \
                     "$(date -u +%FT%TZ)" "$KERNEL_BUILD_ATTEMPTS" \
                     "$(wc -c <"$wm_build_log")" >&2
+                # Silence is the failure mode of
+                # doc/08_tracking/bug/simpleos_harness_silent_native_build_2026-07-26.md:
+                # a live child with a 0-byte log means the trace gates produced
+                # nothing, so say so instead of looking healthy.
+                if [ ! -s "$wm_build_log" ]; then
+                    printf '[WM-BUILD] WARNING attempt=%s native-build log is 0 bytes (silent build; trace gates produced no output)\n' \
+                        "$KERNEL_BUILD_ATTEMPTS" >&2
+                fi
                 wm_elapsed=0
             fi
         done
@@ -139,6 +147,13 @@ SPL
         --linker-script "$LINKER_SCRIPT"
     build_code=$?
     set -e
+    # A build whose log is completely empty produced no evidence that it did
+    # anything (the silent native-build mode); surface it on every attempt
+    # instead of letting a silent success look like a healthy one.
+    if [ ! -s "$BUILD_DIR/native-build.out" ]; then
+        printf '[WM-BUILD] WARNING attempt=%s native-build produced zero output (log: %s); see doc/08_tracking/bug/simpleos_harness_silent_native_build_2026-07-26.md\n' \
+            "$KERNEL_BUILD_ATTEMPTS" "$BUILD_DIR/native-build.out" >&2
+    fi
     if [ "$build_code" -eq 124 ] || [ "$build_code" -eq 137 ]; then
         rm -f "$KERNEL_CANDIDATE"
         KERNEL_BUILD_STATUS=timeout-cache-preserved
