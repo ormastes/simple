@@ -1,0 +1,113 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: class-field `self.<f>[k]` on `Dict<K, [V]>` decodes as an array
+
+A class-field Dict projection temp is builder-typed with the ERASED
+`Dict(K, i64)`, so without consulting the HIR value type the index read took
+`decode_runtime_value`'s integer arm and emitted `raw >> 3` (or, for i64, called `rt_value_as_int_wide`) on an
+ARRAY HANDLE -- the native mis-read class behind
+bug class_field_array_dict_bracket_reads_native_unsafe_2026-11-06.
+
+With the declared HIR value type honoured, the read must lower to the array
+passthrough arm: `rt_dict_get` followed by a plain copy, with neither `Shr`
+nor `rt_value_as_int_wide`.
+A scalar `Dict<K, i64>` field keeps its integer decode (`rt_value_as_int_wide`).
+"""
+
+# @tag: unit, compiler, mir, dict
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct ReadShape:
+    callees: [text]
+    shr_count: i64
+    int_decode: bool
+
+fn contains(lst: [text], item: text) -> bool:
+    for x in lst:
+        if x == item:
+            return true
+    false
+
+fn shape_of(src: text, target: text) -> ReadShape:
+    val file = "testdata/class_field_array_dict_index_read_spec.spl"
+    val parsed = parse_full_frontend(src, file, "class_field_array_dict_index_read_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    var shr_count = 0
+    for function in mir.functions.values():
+        if not (function.name == target or function.name.ends_with("." + target)):
+            continue
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case MirInstKind.BinOp(_, op, _, _):
+                        match op:
+                            case MirBinOp.Shr: shr_count = shr_count + 1
+                            case _: pass
+                    case _: pass
+    ReadShape(callees: callees, shr_count: shr_count, int_decode: shr_count > 0 or contains(callees, "rt_value_as_int_wide"))
+
+val ARRAY_OWNER = "class ArrayDictOwner:\n    rows: Dict<i64, [i64]>\n\n    fn read(key: i64) -> [i64]:\n        self.rows[key]\n"
+val SCALAR_OWNER = "class ScalarDictOwner:\n    rows: Dict<i64, i64>\n\n    fn read(key: i64) -> i64:\n        self.rows[key]\n"
+
+describe "class-field Dict<K, [V]> bracket read lowering":
+    it "reads self.rows[key] through rt_dict_get without any integer decode":
+        step("lower a class method returning self.rows[key] where rows: Dict<i64, [i64]>")
+        val shape = shape_of(ARRAY_OWNER, "read")
+        expect(contains(shape.callees, "rt_dict_get")).to_equal(true)
+        expect(shape.int_decode).to_equal(false)
+
+    it "keeps the integer decode for a scalar Dict<i64, i64> field (control)":
+        step("lower the same shape with a scalar value type")
+        val shape = shape_of(SCALAR_OWNER, "read")
+        expect(contains(shape.callees, "rt_dict_get")).to_equal(true)
+        expect(shape.int_decode).to_equal(true)
+
+    it "lowers a local Dict<i64, [i64]> read without a shift (control)":
+        step("lower a free fn indexing a local array-valued dict")
+        val shape = shape_of("fn f(d: Dict<i64, [i64]>, k: i64) -> [i64]\n    d[k]\n", "f")
+        expect(contains(shape.callees, "rt_dict_get")).to_equal(true)
+        expect(shape.int_decode).to_equal(false)
+
+    it "reads a brace-shorthand `d: {i64: [i64]}` field without an integer decode":
+        step("lower the documented native repro declaration shape")
+        val shape = shape_of("class O:\n    d: {i64: [i64]}\n\n    fn read(key: i64) -> [i64]:\n        self.d[key]\n", "read")
+        expect(contains(shape.callees, "rt_dict_get")).to_equal(true)
+        expect(shape.int_decode).to_equal(false)
+
+    it "reads back a typed array right after a same-scope insert (me method)":
+        step("lower `self.d[k] = v` followed by `val readback: [i64] = self.d[k]`")
+        val shape = shape_of("class O:\n    d: {i64: [i64]}\n\n    me put(k: i64, v: [i64]) -> i64:\n        self.d[k] = v\n        val readback: [i64] = self.d[k]\n        readback.len()\n", "put")
+        expect(contains(shape.callees, "rt_dict_get")).to_equal(true)
+        expect(shape.int_decode).to_equal(false)
+
+    it "reads a struct-valued array through a nested key expression":
+        step("lower `self.d[s.id]` on Dict<i64, [S]> (the #7170 call-site shape)")
+        val shape = shape_of("struct S:\n    id: i64\n\nclass O:\n    d: Dict<i64, [S]>\n\n    fn read(s: S) -> [S]:\n        self.d[s.id]\n", "read")
+        expect(contains(shape.callees, "rt_dict_get")).to_equal(true)
+        expect(shape.int_decode).to_equal(false)
+
+    it "iterates and indexes the read array without decoding the dict value as an integer":
+        step("lower `for v in self.rows[key]` and `self.rows[key][0]` over [text] values")
+        val loop_shape = shape_of("class O:\n    rows: Dict<text, [text]>\n\n    fn total(key: text) -> i64:\n        var t = 0\n        for v in self.rows[key]:\n            t = t + v.len()\n        t\n", "total")
+        expect(contains(loop_shape.callees, "rt_dict_get")).to_equal(true)
+        expect(loop_shape.int_decode).to_equal(false)
+        val chain_shape = shape_of("class O:\n    rows: Dict<text, [text]>\n\n    fn first(key: text) -> text:\n        self.rows[key][0]\n", "first")
+        expect(contains(chain_shape.callees, "rt_dict_get")).to_equal(true)
+        expect(chain_shape.int_decode).to_equal(false)

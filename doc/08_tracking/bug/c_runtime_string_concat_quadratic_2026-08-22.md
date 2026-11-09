@@ -156,3 +156,75 @@ ownership proof is an aliasing bug, which is strictly worse than quadratic.
 No regression gate was added, because no fix landed — a gate here would pin
 nothing.
 
+## 2026-11-09 re-verification on `origin/release/1.0.0` 7f5215f074f (still OPEN, no runtime patch)
+
+Third-lane re-measurement, same interposition method as 2026-08-24, against
+`runtime_native.c` compiled FRESH from `origin/release/1.0.0` (`gcc -O2`,
+aarch64, probe links the real `rt_string_concat`; scratch tool, not committed):
+
+| N single-char appends | wall | malloc'd bytes | mallocs |
+|---|---|---|---|
+| 50,000 | 0.394 s | 1,250,875,000 | 50,000 |
+| 100,000 | 1.469 s | 5,001,750,000 | 100,000 |
+
+2x N → 3.73x wall and exactly 4.00x malloc'd bytes: still quadratic, byte
+counts still match `sum(sizeof(RtCoreString)+len+1)` exactly (one fresh
+`malloc` + two `memcpy` per call, no capacity). The ownership contract was
+also re-verified empirically this run: after `s = s + "b"`, a second holder
+`val t = s` still observes the OLD bytes (`t` == "a"), so any in-place append
+would be a live aliasing bug, exactly as the 2026-08-22/24 design stops
+concluded. The `reserved` word remains fully occupied
+(`SHARED|TRANSIENT|SESSION|ASCII` = 1|2|4|8), so the stale option-1 capacity
+encoding has even less room than before.
+
+Call-site audit at this commit: `rt_string_concat` has exactly four inbound
+sites — `rt_any_add`, `rt_tagged_add`, `rt_push` (`+=` receiver), and the
+definition itself. There is **no runtime-internal concat-in-a-loop site**, so
+the "switch internal loop sites onto `RtStringBuilder`" fallback fixes nothing
+either; the builder stays reachable only from `rt_to_string` formatting and
+`std.common.string_builder`.
+
+**Conclusion:** a correct fix remains a compiler/MIR lowering feature (option 1
+with a last-use/escape check emitting `rt_string_append_owned`, or option 2
+builder-loop lowering), not a runtime bug fix. Per this lane's mandate, no
+risky runtime hack was landed. Side observation (unrelated, not fixed here):
+`scripts/check/check-runtime-concat-nul.shs` does not actually run at this
+commit — its compile step fails at link (`undefined symbol: spl_panic`,
+referenced from `rt_core_concat_bytes_v1`; `spl_panic` lives in `runtime.c`,
+which the script does not link). The failure IS fail-closed (direct
+`sh scripts/check/check-runtime-concat-nul.shs` exits 1, measured 2026-11-09),
+so the check is RED rather than silently green — but as wired it tests
+nothing until the link line gains `runtime.c` or a stub.
+
+
+## 2026-11-07 — owner decision: diagnose + builder (part A+B landed, C pending)
+
+- **Builder that already exists (A):** `std.common.string_builder`
+  (`src/lib/common/string_builder.spl`): `StringBuilder` (parts array,
+  `push`/`push_line`/`to_text`/`build`), free constructors `string_builder()` /
+  `string_builder_from(s)`, and `RtStringBuilder` backed by the runtime
+  `rt_string_builder_new/push/len/finish/free` externs
+  (`src/compiler_rust/runtime/src/value/string_builder.rs`, `src/runtime/runtime.h`).
+- **Diagnostic (B):** lint `COLL006` (`src/compiler/35.semantics/lint/collection_patterns.spl`)
+  fires on `s = s + x`, `s = x + s` and `s += x` inside a loop when `s` is plain
+  text. Severity is `WARN`, escalated to `ERROR` under the robust/critical/verified
+  safety profiles (`coll006_severity_for_profile`, same rung as
+  `E-MIR-EMPTY-ARRAY-ELEM`); `simple lint` prints `error[COLL006]` then. It never
+  fires on a builder/buffer target (explicit non-text type or a builder/buffer
+  constructor initializer). Fixed a false negative on the way: statement-level
+  `s = s + x` (STMT_ASSIGN stores target/value separately) never matched.
+  Specs: `test/01_unit/app/lint_spec.spl` "COLL006 scope and robust escalation".
+- **Optimization (C):** implemented in `src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl`
+  (it replaces the earlier dead stub). The pass matches the lowered pair `tmp = rt_strcat_tagged(s, x); s = tmp`,
+  which is what both `s = s + x` and `s += x` lower to (`lower_compound_combine`). It rewrites that pair to
+  `sb = rt_string_builder_new(); push(sb, s)` in the preheader, `push(sb, x)` in the loop and
+  `s = rt_string_builder_finish(sb)` at every exit. It applies only when all of these hold:
+  `s` is a str-typed local referenced in the loop only by the concat pair; the temp is private;
+  there is a dedicated preheader; the exits have only loop predecessors; and no
+  return/throw/call-terminator leaves the loop. Unknown instruction kinds count as uses.
+  The pass is **opt-in** (`SIMPLE_MIR_STRING_BUILDER_OPT=1`) until native verification.
+  Specs: `test/01_unit/compiler/60.mir_opt/string_builder_opt_spec.spl` (MIR shape, 10 cases) and
+  `string_builder_append_behavior_spec.spl` (equality with the concat loop, and builder scaling
+  at N=10k/40k/160k measured 110.9 ms / 399 ms / 1,798 ms on the seed interpreter, i.e. linear).
+  Status: **fix-implemented-verification-pending**. Still to do: a native-lane run with the opt-in flag,
+  then default-on.

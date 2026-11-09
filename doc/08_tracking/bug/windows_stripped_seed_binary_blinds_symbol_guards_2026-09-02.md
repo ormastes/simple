@@ -85,3 +85,10 @@ push-blocking without a documented host requirement.
 
 Every change made today is a no-op on Linux and macOS: the added non-vacuity
 floor is unreachable where a symbol table exists, and no Unix branch was edited.
+
+## Fix 2026-11-09 (owner decision: census reads PE exports)
+
+`census_collect_primary` (scripts/check/lib/extern-census-symbol-sources.shs) now falls back, for a
+Windows PE with no COFF symbol table, to `llvm-readobj --coff-exports` named exports (logged, floor
+still enforced, ordinal-only skipped). Parser fixture: `sh scripts/check/extern-backing-census.shs --selftest`.
+Status: fix-implemented-verification-pending (Windows stripped-exe run still to be observed).

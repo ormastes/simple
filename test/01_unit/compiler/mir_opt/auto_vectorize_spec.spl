@@ -36,6 +36,8 @@ use compiler.mir_opt.auto_vectorize_codegen.{VectorizeContext, create_alignment_
 use compiler.mir_opt.auto_vectorize.{rewrite_elementwise_add}
 use compiler.mir_opt.auto_vectorize.{rewrite_elementwise_add_guarded}
 use compiler.mir_opt.auto_vectorize_types.{VectorLoopInfo}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirLocal, LocalKind}
+use compiler.mir_opt.auto_vectorize_types.{LoopInfo}
 
 # ============================================================================
 # Helpers — minimal MIR construction for tests
@@ -2169,3 +2171,38 @@ describe "a lowered while loop — the shape the compiler really emits":
                 bad.push(n)
             n = n + 1
         expect(bad.len()).to_equal(0)
+
+describe "AutoVectorize N1-rewrite — refuses dynamic trip count (trip_count=-1)":
+
+    it "trip-count=-1 (dynamic) returns function unchanged (same block count)":
+        val orig_block = make_elementwise_block_add()
+        val func       = make_test_mir_function([orig_block], false)
+        val recipe     = make_elementwise_add_recipe_dynamic_n()
+        val result     = rewrite_elementwise_add(recipe, func)
+        expect(result.blocks.len()).to_equal(func.blocks.len())
+
+describe "AutoVectorize N1-rewrite — accepts misaligned trip count (6 % 4 != 0) with peel body (Wave L3b)":
+
+    it "trip-count=6 misaligned with VF=4 rewrites function (block count increases)":
+        val orig_block = make_elementwise_block_add()
+        val func       = make_test_mir_function([orig_block], false)
+        val recipe     = VectorRecipe(
+            kind:             VectorRecipeKind.Elementwise,
+            header_block:     make_block_id(1),
+            induction_var:    make_local(4),
+            trip_count:       6,
+            element_type:     "i32",
+            vector_width:     4,
+            op_name:          "add_elementwise",
+            note:             "misaligned",
+            input_bases:      [make_local(10), make_local(11)],
+            output_base:      Some(make_local(12)),
+            accumulator:      nil,
+            chunk_width:      4,
+            index_locals:     [make_local(4)],
+            store_value:      nil,
+            induction_update: make_local(4)
+        )
+        val result = rewrite_elementwise_add(recipe, func)
+        # Was 1 scalar block; now replaced with 3 new blocks (align + vec + peel).
+        expect(result.blocks.len() > func.blocks.len()).to_equal(true)

@@ -104,3 +104,49 @@ The lowering itself. `.unwrap()` on a raw-form optional should route through
 `??` double-evaluation must be settled first, since the two interact. Any such
 change lands in the seed's Rust HIR lowering AND the pure-Simple MIR lowering
 together, which is out of scope for a bootstrap-unblocking lane.
+
+## Fix implemented 2026-11-09 (verification pending)
+
+**Checked against current policy/design: still valid, re-scoped.** Two of the
+three defects above were already fixed on `release/1.0.0` by sibling lanes and
+are pinned here rather than re-fixed:
+
+- the nil payload: `.unwrap()` no longer lowers to `rt_enum_payload` on either
+  backend; the untyped fallback is `rt_unwrap_or_trap`
+  (`codegen/instr/closures_structs.rs`, `codegen/llvm/emitter.rs`), which
+  passes a raw present value through and traps on raw nil
+  (`unwrap_family_treats_flat_nil_as_present_2026-09-13`);
+- `??` double evaluation: `lower_coalesce` binds its subject to one
+  `$coalesce_subject` local (`compiler/tests/coalesce_single_evaluation.rs`).
+
+What remained, and what this change fixes, is the typing half of the design
+"`pop()` is `T?`, `.unwrap()` on it is the checked unwrap":
+
+- **Seed (Rust HIR):** `pop`/`first`/`last`/`get`/`min`/`max`/`remove` are
+  deliberately typed bare `T` by the method result-type table
+  (`doc/03_plan/compiler/type_system/seed_hirtype_optional_plan.md` — 547
+  direct `.pop()` consumers rely on that today, so retyping them to `T?`
+  wholesale is the staged root fix, not this lane). `.unwrap()` on such a
+  receiver therefore fell through to dynamic dispatch typed `ANY`. It now
+  lowers to `BuiltinCall rt_unwrap_or_trap` typed as the element
+  (`hir/lower/expr/mod.rs`, `"unwrap"` arm), so the checked helper runs and
+  MIR's name-keyed unbox decodes scalars — the same staging `lower_coalesce`
+  already uses for these accessors.
+- **Pure-Simple MIR:** already consistent — `pop()` builds a typed Option
+  before `rt_array_pop` (`method_calls_literals.spl`), `.unwrap()` branches on
+  `rt_is_some` and panics on nil, `??` lowers its operand once
+  (`expr_dispatch.spl`). Pinned by a new MIR-level spec.
+
+Tests (TDD — the cargo test was RED before the seed change):
+
+- `src/compiler_rust/compiler/tests/pop_unwrap_checked.rs` (MIR: one
+  `rt_unwrap_or_trap`, no dynamic `unwrap`; producer called once under
+  `.unwrap()` and `??`; JIT fixture executes).
+- `test/fixtures/compiler/pop_unwrap_checked.spl` (executable oracle).
+- `test/01_unit/compiler/mir/pop_unwrap_checked_lowering_spec.spl`
+  (pure-Simple: one `rt_array_pop`, one `rt_is_some`, `rt_panic`, no
+  `rt_enum_payload`; `??` single pop; tuple payload; executed semantics).
+
+The `topological_order` index-read form is retained (now tagged
+`@workaround`) until a Stage-2 LLVM-lane build confirms the lowering end to
+end; its comment was stale and is corrected.
