@@ -73,3 +73,56 @@ remains **UNPROVEN**. No boot was attempted.
 (`NVIDIA TITAN RTX`, `apiVersion 1.4.312`, `driverName NVIDIA`).
 The gate's own `--selftest` is green with the fresh seed:
 `PASS — 25 selftest fixture(s) checked, ... renderer=n/a`.
+
+## Closure (2026-11-09): premise stale — (a) is not a compiler gap, (b) no longer reproduces
+
+Re-examined against the canonical language rule before touching the seed.
+
+**(a) `provider.configured` without `self.` is INVALID Simple, not valid
+Simple.** "Implicit self" means the `self` *parameter* is implicit; the field
+receiver is never implicit. Sources of truth, all agreeing:
+
+- `doc/07_guide/language/coding_style.md` — `this.x` -> `self.x (implicit
+  self)`; "`self.x` works, but `self` parameter is implicit"; rule 3 "In
+  methods, do not write `self` as a parameter."
+- Pure-Simple HIR lowering,
+  `src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl:326-346`:
+  a non-static method gets exactly one injected symbol, `self`. Field names
+  are never injected into the method scope, so a bare `provider` is an
+  unresolved name in the self-hosted compiler too — the seed's
+  `variable provider not found` / `GlobalLoad: unresolved identifier` IS parity.
+- The already-landed contract for the assignment form:
+  `scripts/check/check-implicit-self-field-assignment.shs` records "the chosen
+  fix direction is a hard error, not implicit-self resolution" and pins it on
+  both engines; `test/01_unit/compiler/hir/implicit_self_field_hir_probe_spec.spl`
+  pins the self-hosted lowering hard-error.
+- The source was fixed where the defect actually was: `dbd_provisioning.spl`
+  now reads `self.provider.configured` in `pub fn ready()` (`:169-172`) and
+  `boot_owner.provider.configured` in `admit_boot_owner` (`:139`); no bare
+  `provider` remains (landed with 711c590347f).
+
+Measured on the current seed (`bin/simple.exe`, release/1.0.0 at 27e65c24371):
+the bare-read probe is rejected on BOTH engines with a diagnostic naming
+`provider`; the explicit `self.provider.configured` probe runs and prints
+`true` on both. The guard above grew READ probes (`interpreter/read`,
+`jit/read`) so a future compiler that silently *accepts* a bare field read is
+caught as a contract drift, the same way a silently-accepted bare write is.
+
+**(b) `DbdTransactionOwnerV1.new()` on a `use`-imported class** does not
+reproduce on the current seed: a two-module repro (class exported from module
+A with `static fn new()`, called inside a `static fn create()` constructor in
+module B that imports it) prints the field value under both
+`SIMPLE_EXECUTION_MODE=interpreter` and `=jit` with no `jit-compile-error`
+demotion. Pinned by
+`test/01_unit/bugs/dbd_implicit_self_read_and_imported_static_call_spec.spl`
+(+ `dbd_transaction_owner_shape_helper.spl`), which mirrors both dbd shapes
+exactly (self-less `pub fn ready()` nested read; imported static call in a
+static constructor): 2 examples, 0 failures.
+
+Not re-run here: the full arm64 engine2d media phase (needs the aarch64
+sysroot + QEMU lane on a Linux host). If that lane still fails on the dbd
+bodies, it is a different defect and should be filed with its current output.
+
+Status: **closed** (stale premise, evidence above). No seed change was made or
+needed; changing the seed to resolve bare fields would have BROKEN parity with
+the self-hosted compiler and the recorded contract.
