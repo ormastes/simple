@@ -45,3 +45,15 @@ zero-filled (0 / false / 0.0 / "" / [] / nested enum first variant / nested clas
   0/5 on the deployed seed -> 5/5 on the rebuilt seed;
   `test/01_unit/compiler/parser/module_noinit_enum_class_zero_spec.spl` 1/4 -> 4/4.
 - Kernel/noalloc gate (`set_noinit_kernel_module_v1`) unchanged.
+
+## Fix 2026-11-09 (owner decision item 14) — fix-implemented-verification-pending
+No HIR zero pass: the compiler (flat parser) now reports `explicit initializer required for module-level
+var '<name>'` for a no-init module var of class or enum type (all modes), and for any named type it
+cannot zero (imported, later-declared, `any`, and every named type in kernel/noalloc modules). The nil
+fallback is gone. A struct declared earlier still zero-initializes (item 8); robust mode still rejects
+every no-init var. The seed interpreter keeps its first-variant / default-construction default (#7965).
+Classes are recognised through a `classdecl:<name>|` marker in the parser's ENUM_ATTRIBUTES pool.
+src/ site given an explicit initializer: `src/os/kernel/interrupts/gdt.spl` (`tss`, `gdt_pointer`).
+Not changed: fixed-size ARRAYS of an unzeroable named element in kernel/noalloc modules keep the
+zero-BSS nil slots (`riscv/startup.spl`, `riscv32/startup.spl` `trap_frames`); native static-zero
+proof is deferred to stage3 verification.

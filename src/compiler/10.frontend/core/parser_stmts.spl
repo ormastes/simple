@@ -43,7 +43,7 @@ use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_TUPLE, EXPR_UNIT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_FIELD_ACCESS}
 use compiler.core.ast.{decl_get_fields, decl_get_field_types, decl_get_field_defaults, DECL_STRUCT, expr_struct_lit, expr_array_lit, expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
-use compiler.core.ast.{expr_int_lit, expr_float_lit, decl_get_field_bits, DECL_ENUM}
+use compiler.core.ast.{expr_int_lit, expr_float_lit, DECL_ENUM}
 use compiler.core.ast.{expr_array_repeat}
 use compiler.core.ast_expr.{expr_mark_colon_block}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
@@ -2947,10 +2947,10 @@ fn set_noinit_robust_mode_v1(on: bool):
 fn noinit_robust_mode_v1() -> bool:
     noinit_robust_mode_state_v1
 
-# Kernel / baremetal / noalloc modules keep the nil (zero BSS) global for a
-# no-initializer named type: a struct-literal initializer could need runtime
-# init or the heap before the allocator exists (src/os/kernel/interrupts/gdt.spl).
-# Gap recorded in noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09.
+# Kernel / baremetal / noalloc modules never get a synthesized struct-literal
+# zero (it could need runtime init or the heap before the allocator exists):
+# a no-initializer named-type var there is an "explicit initializer required"
+# error (owner decision item 14), so the author picks the static value.
 var noinit_kernel_module_state_v1: bool = false
 
 fn set_noinit_kernel_module_v1(on: bool):
@@ -2982,23 +2982,14 @@ fn struct_zero_expr_v1(type_tag: i64, depth: i64) -> i64:
             found_enum = d
         di = di + 1
     if found < 0 and found_enum >= 0:
-        # Enum declared earlier (owner decision 2026-11-09 item 14): the
-        # default is the FIRST variant, `E.First`. A payload-carrying first
-        # variant has no safe default; nil is only allowed in unsafe.
-        val variants = decl_get_fields(found_enum)
-        val payload_counts = decl_get_field_bits(found_enum)
-        if variants.len() == 0:
-            parser_error("no default value for enum {sname}: it has no variants; add an explicit initializer")
-            return -1
-        if payload_counts.len() > 0 and payload_counts[0] > 0:
-            parser_error("no default value for enum {sname}: first variant {variants[0]} carries a payload; add an explicit initializer")
-            return -1
-        return expr_field_access(expr_ident(sname, 0), variants[0], 0)
+        # Owner decision 2026-11-09 item 14: the compiler has no default for
+        # an enum; an initializer-less enum var/field needs an explicit one.
+        parser_error("explicit initializer required: enum {sname} has no compiler default")
+        return -1
     if found < 0:
-        # Not a struct/class/enum declared earlier in this module (imported or
-        # later-declared type): caller keeps the existing nil-until-assignment
-        # contract; the seed interpreter defaults these (bug
-        # noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09).
+        # Not a struct declared earlier in this module (imported or
+        # later-declared type): the caller reports "explicit initializer
+        # required" (no nil fallback; nil only exists inside unsafe).
         return -2
     val names = decl_get_fields(found)
     val types = decl_get_field_types(found)

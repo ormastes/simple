@@ -90,51 +90,17 @@ describe "bare named module globals preserve explicit nil semantics":
         step("Parse the bare and explicit nil declarations in the same module")
         named_parity_expect_ast(named_parity_source(), "ExactNamedParity", EXPR_STRUCT_LIT)
 
-    it "retains forward unknown and any annotations exactly like explicit nil":
-        step("Leave named resolution to the existing downstream type owner")
-        named_parity_expect_ast("var implicit_slot: ForwardNamedParity\nvar explicit_slot: ForwardNamedParity = nil\nstruct ForwardNamedParity:\n    value: i64\n", "ForwardNamedParity")
-        named_parity_expect_ast("var implicit_slot: UnknownNamedParity\nvar explicit_slot: UnknownNamedParity = nil\n", "UnknownNamedParity")
-        named_parity_expect_ast("var implicit_slot: any\nvar explicit_slot: any = nil\n", "Any")
-
-    it "preserves downstream resolution and error parity for forward unknown and any names":
-        step("Lower both spellings through the existing full frontend and HIR provider")
-        val templates = ["var slot: ForwardHirNamedParityINIT\nstruct ForwardHirNamedParity:\n    value: i64\nfn assign_and_read() -> i64:\n    slot = ForwardHirNamedParity(value: 7)\n    slot.value\n", "var slot: UnknownHirNamedParityINIT\nfn read_slot() -> UnknownHirNamedParity:\n    slot\n", "var slot: anyINIT\nfn read_slot() -> any:\n    slot\n"]
-        for template in templates:
-            val implicit_source = template.replace("INIT", "")
-            val explicit_source = template.replace("INIT", " = nil")
-            val implicit_parsed = parse_full_frontend(implicit_source, "named_nil_hir_parity.spl", "named_nil_hir_parity", Logger(level: 0))
-            var implicit_lowering = HirLowering.with_filename("named_nil_hir_parity.spl")
-            val implicit_hir = implicit_lowering.lower_module(implicit_parsed)
-            val implicit_constant_count = implicit_hir.constants.len()
-            var implicit_errors: [text] = []
-            for error in implicit_lowering.errors:
-                implicit_errors.push(error.message)
-            val explicit_parsed = parse_full_frontend(explicit_source, "named_nil_hir_parity.spl", "named_nil_hir_parity", Logger(level: 0))
-            var explicit_lowering = HirLowering.with_filename("named_nil_hir_parity.spl")
-            val explicit_hir = explicit_lowering.lower_module(explicit_parsed)
-            var explicit_errors: [text] = []
-            for error in explicit_lowering.errors:
-                explicit_errors.push(error.message)
-            expect(implicit_errors).to_equal(explicit_errors)
-            expect(implicit_constant_count).to_equal(explicit_hir.constants.len())
+    it "rejects bare forward, unknown and any annotations: explicit initializer required (owner decision item 14)":
+        step("No nil fallback: a named type the parser cannot zero needs an explicit initializer")
+        expect(parse_module_silent_checked("var implicit_slot: ForwardNamedParity\nstruct ForwardNamedParity:\n    value: i64\n", "named_forward.spl")).to_equal(true)
+        expect(parse_module_silent_checked("var implicit_slot: UnknownNamedParity\n", "named_unknown.spl")).to_equal(true)
+        expect(parse_module_silent_checked("var implicit_slot: any\n", "named_any.spl")).to_equal(true)
 
     it "admits a bare named declaration at EOF and a semicolon boundary":
         step("Parse the two actual declaration-end token forms")
         val prefix = "struct BoundaryNamedParity:\n    value: i64\n"
         expect(parse_module_silent_checked(prefix + "var eof_slot: BoundaryNamedParity", "named_nil_eof.spl")).to_equal(false)
         expect(parse_module_silent_checked(prefix + "var semi_slot: BoundaryNamedParity;\n", "named_nil_semicolon.spl")).to_equal(false)
-
-    it "accepts a nil initializer allocated in expression arena slot zero":
-        step("Keep allocation index zero distinct from unsupported type admission")
-        expect(parse_module_silent_checked("var implicit_slot: FirstExprNamedParity\n", "named_nil_first_expr.spl")).to_equal(false)
-        val declaration = named_parity_find_decl("implicit_slot")
-        expect(declaration).to_be_greater_than(-1)
-        if declaration >= 0:
-            val body = decl_get_body(declaration)
-            expect(body.len()).to_equal(1)
-            if body.len() == 1:
-                expect(body[0]).to_equal(0)
-                expect(expr_get_tag(body[0])).to_equal(EXPR_NIL_LIT)
 
     it "retains one owner-qualified global and matching initializer assign and read operands":
         step("Lower both source spellings through the actual frontend HIR and MIR providers")
