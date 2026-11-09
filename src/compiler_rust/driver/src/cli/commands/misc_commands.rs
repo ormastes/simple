@@ -829,6 +829,16 @@ struct StageResult {
     size: u64,
     hash: String,
 }
+/// Per-stage native-build worker budget in seconds. Overridable with
+/// `SIMPLE_BOOTSTRAP_TIMEOUT` (positive integer); default 180.
+fn bootstrap_timeout_secs() -> u64 {
+    parse_bootstrap_timeout(std::env::var("SIMPLE_BOOTSTRAP_TIMEOUT").ok().as_deref())
+}
+
+fn parse_bootstrap_timeout(raw: Option<&str>) -> u64 {
+    raw.and_then(|s| s.trim().parse::<u64>().ok()).filter(|n| *n > 0).unwrap_or(180)
+}
+
 
 /// Native-build worker count for a bootstrap stage.
 ///
@@ -899,7 +909,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) ->
             .arg("--threads")
             .arg(bootstrap_threads().to_string())
             .arg("--timeout")
-            .arg("180")
+            .arg(bootstrap_timeout_secs().to_string())
             .arg("-o")
             .arg(output);
         cmd.env("SIMPLE_BOOTSTRAP", "1");
@@ -908,8 +918,8 @@ fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) ->
             cmd.env("SIMPLE_RUNTIME_PATH", rtp);
         }
         println!(
-            "  Running: {} native-build --source src/app --entry-closure --strip --threads {} --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {}",
-            compiler, bootstrap_threads(), output
+            "  Running: {} native-build --source src/app --entry-closure --strip --threads {} --timeout {} --entry src/app/cli/bootstrap_main.spl -o {}",
+            compiler, bootstrap_threads(), bootstrap_timeout_secs(), output
         );
     } else {
         cmd.arg("native-build")
@@ -922,7 +932,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) ->
             .arg("--threads")
             .arg(bootstrap_threads().to_string())
             .arg("--timeout")
-            .arg("180")
+            .arg(bootstrap_timeout_secs().to_string())
             .arg("-o")
             .arg(output);
         // The self-hosted native-build lane only accepts the pure-Simple LLVM
@@ -949,8 +959,8 @@ fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) ->
         };
         cmd.arg(format!("--backend={}", sh_backend));
         println!(
-            "  Running: {} native-build --source src/app --entry-closure --strip --threads {} --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {} --backend={}",
-            compiler, bootstrap_threads(), output, sh_backend
+            "  Running: {} native-build --source src/app --entry-closure --strip --threads {} --timeout {} --entry src/app/cli/bootstrap_main.spl -o {} --backend={}",
+            compiler, bootstrap_threads(), bootstrap_timeout_secs(), output, sh_backend
         );
     }
 
@@ -1398,5 +1408,29 @@ mod bootstrap_determinism_tests {
             "an empty closure must fingerprint to zero files"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_timeout_tests {
+    //! `seed_bootstrap_compile_stage_hardcoded_180s_timeout_2026-08-18`: the
+    //! per-stage native-build budget was a literal 180.
+    use super::parse_bootstrap_timeout;
+
+    #[test]
+    fn default_is_180() {
+        assert_eq!(parse_bootstrap_timeout(None), 180);
+    }
+
+    #[test]
+    fn override_is_honoured() {
+        assert_eq!(parse_bootstrap_timeout(Some("900")), 900);
+        assert_eq!(parse_bootstrap_timeout(Some(" 60 ")), 60);
+    }
+
+    #[test]
+    fn invalid_or_zero_falls_back() {
+        assert_eq!(parse_bootstrap_timeout(Some("0")), 180);
+        assert_eq!(parse_bootstrap_timeout(Some("abc")), 180);
     }
 }
