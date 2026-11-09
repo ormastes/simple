@@ -3,19 +3,7 @@
 
 #[cfg(windows)]
 mod windows {
-    #[repr(C)]
-    #[derive(Default)]
-    struct MemoryStatus {
-        length: u32,
-        load: u32,
-        total_physical: u64,
-        available_physical: u64,
-        total_page_file: u64,
-        available_page_file: u64,
-        total_virtual: u64,
-        available_virtual: u64,
-        available_extended_virtual: u64,
-    }
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
     #[repr(C)]
     #[derive(Default)]
@@ -38,23 +26,22 @@ mod windows {
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn GlobalMemoryStatusEx(status: *mut MemoryStatus) -> i32;
         fn K32GetPerformanceInfo(info: *mut PerformanceInfo, size: u32) -> i32;
         fn GetDiskFreeSpaceExW(path: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
     }
 
     pub fn memory_headroom() -> i64 {
-        let mut status = MemoryStatus {
-            length: std::mem::size_of::<MemoryStatus>() as u32,
-            ..Default::default()
+        let mut status = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..unsafe { std::mem::zeroed() }
         };
         if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
             return 0;
         }
-        if status.available_physical > i64::MAX as u64 || status.available_page_file > i64::MAX as u64 {
+        if status.ullAvailPhys > i64::MAX as u64 || status.ullAvailPageFile > i64::MAX as u64 {
             return 0;
         }
-        status.available_physical.min(status.available_page_file) as i64
+        status.ullAvailPhys.min(status.ullAvailPageFile) as i64
     }
 
     pub fn commit_headroom() -> i64 {
