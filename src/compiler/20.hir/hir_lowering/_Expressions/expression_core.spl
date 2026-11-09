@@ -1060,10 +1060,34 @@ impl HirLowering:
                         # HirType clone in `lower_hir_block`'s HirBlock
                         # construction and SIGSEGVs.
                         # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=stage2 loads type_ even when has_type_ is false (placeholder packed span AV); has_type_ alone is the authoritative presence bit
+                        # A Var/NamedVar base (a parameter or an inferred
+                        # local such as `val param = params[i]`) carries no
+                        # `type_` on the expression itself; its declared or
+                        # inferred type lives in the symbol table (same
+                        # fallback as declared_exists_check_type). Without it
+                        # `params[i]` and `param[0]` both lowered untyped
+                        # (bug native_tuple_array_local_text_provenance_2026-10-30).
+                        var index_base_type: HirType? = nil
                         if lowered_base.has_type_:
-                            val base_type = lowered_base.type_ ?? HirType(kind: HirTypeKind.Error, span: e.span)
+                            index_base_type = lowered_base.type_
+                        else:
+                            val index_base_symbol = _hir_expr_symbol_or_invalid(lowered_base.kind)
+                            if index_base_symbol.is_valid():
+                                index_base_type = self.symbols.get_symbol_type_raw(index_base_symbol.id)
+                        # `xs[1..]` is a sub-array, not an element: a range
+                        # index never names the element type.
+                        val index_is_range = match lowered_index.kind:
+                            case HirExprKind.Range(_, _, _, _): true
+                            case _: false
+                        if val base_type = index_base_type:
                             match base_type.kind:
                                 case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                                    if index_is_range:
+                                        return HirExpr(
+                                            kind: HirExprKind.Index(lowered_base, lowered_index),
+                                            has_type_: false,
+                                            type_: nil,
+                                            span: e.span)
                                     return HirExpr(
                                         kind: HirExprKind.Index(lowered_base, lowered_index),
                                         has_type_: true,
@@ -1075,6 +1099,19 @@ impl HirLowering:
                                         has_type_: true,
                                         type_: value,
                                         span: e.span)
+                                case HirTypeKind.Tuple(tuple_elements):
+                                    # `t[0]` on a tuple: only a literal slot
+                                    # names one element type; a runtime index
+                                    # over a mixed tuple stays untyped.
+                                    match lowered_index.kind:
+                                        case HirExprKind.IntLit(tuple_slot, _):
+                                            if tuple_slot >= 0 and tuple_slot < tuple_elements.len():
+                                                return HirExpr(
+                                                    kind: HirExprKind.Index(lowered_base, lowered_index),
+                                                    has_type_: true,
+                                                    type_: tuple_elements[tuple_slot],
+                                                    span: e.span)
+                                        case _: ()
                                 case _: ()
                         HirExprKind.Index(lowered_base, lowered_index)
 

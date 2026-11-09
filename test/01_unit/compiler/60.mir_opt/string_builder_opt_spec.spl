@@ -1,0 +1,221 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR string-builder rewrite (bug c_runtime_string_concat_quadratic_2026-08-22)
+
+Owner decision 2026-11-07, part C. A local text `s` that is only appended
+inside a loop (`s = s + x` / `s += x`, both lowered to
+`tmp = rt_strcat_tagged(s, x); s = tmp`) is rewritten to
+`sb = rt_string_builder_new(); rt_string_builder_push(sb, s)` in the
+preheader, `rt_string_builder_push(sb, x)` in the loop, and
+`s = rt_string_builder_finish(sb)` at every loop exit. The rewrite applies
+only when it is provably safe; every unsafe shape below must stay unchanged.
+
+Hand-built MIR, one fixture per safety condition.
+"""
+
+# @tag: unit, compiler, mir_opt
+
+use std.spec
+use std.spec.step
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir_opt.string_builder_opt.{StringBuilderOpt, string_builder_opt_run_on_function, string_builder_opt_enabled_for}
+
+val S_ID: i64 = 1
+val X_ID: i64 = 2
+val TMP_ID: i64 = 3
+val COND_ID: i64 = 4
+
+fn span_at(line: i64) -> Span:
+    Span(start: 0, end: 0, line: line, col: 1, file: "fixture/sb_opt.spl", length: 0)
+
+fn str_t() -> MirType:
+    MirType(kind: MirTypeKind.Opaque("str"))
+
+fn bool_t() -> MirType:
+    MirType(kind: MirTypeKind.Bool)
+
+fn copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+
+fn fn_const(name: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: str_t(), is_variadic: false)))))
+
+fn local(id: i64, t: MirType, k: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some("l{id}"), type_: t, kind: k, is_ghost: false)
+
+fn inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: Some(span_at(1)))
+
+fn block(id: i64, instructions: [MirInst], term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId(id: id), label: Some("b{id}"), instructions: instructions, terminator: term)
+
+fn mk_fn(blocks: [MirBlock]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 900), name: "joiner",
+        signature: MirSignature(params: [str_t()], return_type: str_t(), is_variadic: false, params_known: true),
+        locals: [local(S_ID, str_t(), LocalKind.Var), local(X_ID, str_t(), LocalKind.Arg(0)),
+                 local(TMP_ID, str_t(), LocalKind.Temp), local(COND_ID, bool_t(), LocalKind.Temp)],
+        blocks: blocks,
+        entry_block: BlockId(id: 0), span: span_at(1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false,
+        unroll_factor: 0, pipeline_ii: 0, memory_banks: 0
+    )
+
+fn init_s() -> MirInst:
+    inst(MirInstKind.Const(LocalId(id: S_ID), MirConstValue.Str(""), str_t()))
+
+fn concat_pair() -> [MirInst]:
+    [inst(MirInstKind.Call(Some(LocalId(id: TMP_ID)), fn_const("rt_strcat_tagged"), [copy(S_ID), copy(X_ID)])),
+     inst(MirInstKind.Copy(LocalId(id: S_ID), LocalId(id: TMP_ID)))]
+
+fn cond_inst() -> MirInst:
+    inst(MirInstKind.Const(LocalId(id: COND_ID), MirConstValue.Bool(true), bool_t()))
+
+fn loop_if() -> MirTerminator:
+    MirTerminator.If(copy(COND_ID), BlockId(id: 2), BlockId(id: 3))
+
+# b0 preheader -> b1 header -(cond)-> b2 body -> b1 ; b1 -> b3 exit (ret s)
+fn canonical_loop(body_insts: [MirInst], header_insts: [MirInst]) -> MirFunction:
+    mk_fn([
+        block(0, [init_s()], MirTerminator.Goto(BlockId(id: 1))),
+        block(1, header_insts, loop_if()),
+        block(2, body_insts, MirTerminator.Goto(BlockId(id: 1))),
+        block(3, [], MirTerminator.Ret(Some(copy(S_ID))))
+    ])
+
+fn call_names(b: MirBlock) -> [text]:
+    var names: [text] = []
+    for i in b.instructions:
+        match i.kind:
+            case Call(_, func, _):
+                match func.kind:
+                    case Const(value, _):
+                        match value:
+                            case Str(name): names.push(name)
+                            case _: names.push("?")
+                    case _: names.push("?")
+            case _: names.push("-")
+    names
+
+fn run(f: MirFunction) -> MirFunction:
+    var p = StringBuilderOpt.new()
+    p.optimize_function(f)
+
+fn find_block(f: MirFunction, id: i64) -> MirBlock:
+    for b in f.blocks:
+        if b.id.id == id:
+            return b
+    f.blocks[0]
+
+describe "StringBuilderOpt rewrites a provably-safe loop append":
+    it "rewrites s = s + x in a loop into builder new/push/finish":
+        # @req REQ-COMP-MIROPT-SBOPT-001
+        # @capture(statistics): call names per block after the rewrite
+        step("Verify: preheader creates the builder, body pushes, exit finishes")
+        val out = run(canonical_loop(concat_pair(), [cond_inst()]))
+        expect(call_names(find_block(out, 0))).to_equal(["-", "rt_string_builder_new", "rt_string_builder_push"])  # oracle: builder seeded with s
+        expect(call_names(find_block(out, 2))).to_equal(["rt_string_builder_push"])  # oracle: concat pair replaced
+        expect(call_names(find_block(out, 3))).to_equal(["rt_string_builder_finish"])  # oracle: s materialized at exit
+        match find_block(out, 3).instructions[0].kind:
+            case Call(dest, _, _):
+                expect(dest.?).to_equal(true)  # oracle: finish writes back into s
+                expect(dest.unwrap().id).to_equal(S_ID)  # oracle: same local as before
+            case _:
+                expect("not a call").to_equal("call")  # oracle: exit must start with finish
+
+    it "adds exactly one i64 builder local":
+        # @req REQ-COMP-MIROPT-SBOPT-001
+        # @capture(statistics): local count before/after
+        step("Verify: one new local of type i64")
+        val before = canonical_loop(concat_pair(), [cond_inst()])
+        val out = run(before)
+        expect(out.locals.len()).to_equal(before.locals.len() + 1)  # oracle: one handle local
+        match out.locals[out.locals.len() - 1].type_.kind:
+            case I64: expect(true).to_equal(true)  # oracle: handle is i64
+            case _: expect("non-i64").to_equal("i64")  # oracle: handle must be i64
+
+describe "StringBuilderOpt leaves unsafe shapes unchanged":
+    it "does not rewrite when s is read inside the loop":
+        # @req REQ-COMP-MIROPT-SBOPT-002
+        # @capture(statistics): body call names when s is also read
+        step("Verify: a read of s in the body blocks the rewrite")
+        var body = concat_pair()
+        body.push(inst(MirInstKind.Call(None, fn_const("print"), [copy(S_ID)])))
+        val out = run(canonical_loop(body, [cond_inst()]))
+        expect(call_names(find_block(out, 2))).to_equal(["rt_strcat_tagged", "-", "print"])  # oracle: unchanged
+
+    it "does not rewrite when the loop condition reads s":
+        # @req REQ-COMP-MIROPT-SBOPT-002
+        # @capture(statistics): header reads s
+        step("Verify: a header read of s blocks the rewrite")
+        val header = [inst(MirInstKind.Call(Some(LocalId(id: COND_ID)), fn_const("rt_string_len"), [copy(S_ID)]))]
+        val out = run(canonical_loop(concat_pair(), header))
+        expect(call_names(find_block(out, 2))).to_equal(["rt_strcat_tagged", "-"])  # oracle: unchanged
+
+    it "does not rewrite when the concat temp is used elsewhere":
+        # @req REQ-COMP-MIROPT-SBOPT-002
+        # @capture(statistics): temp alias
+        step("Verify: aliasing the concat result blocks the rewrite")
+        var body = concat_pair()
+        body.push(inst(MirInstKind.Call(None, fn_const("keep"), [copy(TMP_ID)])))
+        val out = run(canonical_loop(body, [cond_inst()]))
+        expect(call_names(find_block(out, 2))).to_equal(["rt_strcat_tagged", "-", "keep"])  # oracle: unchanged
+
+    it "does not rewrite when s is aliased by another copy in the loop":
+        # @req REQ-COMP-MIROPT-SBOPT-002
+        # @capture(statistics): t = s alias
+        step("Verify: t = s inside the loop blocks the rewrite")
+        var body = concat_pair()
+        body.push(inst(MirInstKind.Copy(LocalId(id: COND_ID), LocalId(id: S_ID))))
+        val out = run(canonical_loop(body, [cond_inst()]))
+        expect(call_names(find_block(out, 2))[0]).to_equal("rt_strcat_tagged")  # oracle: unchanged
+
+    it "does not rewrite when the appended value is s itself":
+        # @req REQ-COMP-MIROPT-SBOPT-002
+        # @capture(statistics): s = s + s
+        step("Verify: s = s + s (doubling) is not an append of an independent value")
+        val body = [inst(MirInstKind.Call(Some(LocalId(id: TMP_ID)), fn_const("rt_strcat_tagged"), [copy(S_ID), copy(S_ID)])),
+                    inst(MirInstKind.Copy(LocalId(id: S_ID), LocalId(id: TMP_ID)))]
+        val out = run(canonical_loop(body, [cond_inst()]))
+        expect(call_names(find_block(out, 2))[0]).to_equal("rt_strcat_tagged")  # oracle: unchanged
+
+    it "does not rewrite when the exit block is reachable from outside the loop":
+        # @req REQ-COMP-MIROPT-SBOPT-002
+        # @capture(statistics): exit with an outside predecessor
+        step("Verify: an exit with a non-loop predecessor blocks the rewrite")
+        val f = mk_fn([
+            block(0, [init_s(), cond_inst()], MirTerminator.If(copy(COND_ID), BlockId(id: 1), BlockId(id: 3))),
+            block(1, [cond_inst()], loop_if()),
+            block(2, concat_pair(), MirTerminator.Goto(BlockId(id: 1))),
+            block(3, [], MirTerminator.Ret(Some(copy(S_ID))))
+        ])
+        val out = run(f)
+        expect(call_names(find_block(out, 2))[0]).to_equal("rt_strcat_tagged")  # oracle: unchanged
+
+    it "does not rewrite a concat outside any loop":
+        # @req REQ-COMP-MIROPT-SBOPT-002
+        # @capture(statistics): straight-line concat
+        step("Verify: no loop, no rewrite")
+        var insts = [init_s()]
+        for i in concat_pair():
+            insts.push(i)
+        val f = mk_fn([block(0, insts, MirTerminator.Ret(Some(copy(S_ID))))])
+        val out = run(f)
+        expect(call_names(find_block(out, 0))).to_equal(["-", "rt_strcat_tagged", "-"])  # oracle: unchanged
+
+describe "StringBuilderOpt pipeline gate":
+    it "is opt-in until native verification lands":
+        # @req REQ-COMP-MIROPT-SBOPT-003
+        # @capture(statistics): gate values
+        step("Verify: SIMPLE_MIR_STRING_BUILDER_OPT=1 enables, anything else disables")
+        expect(string_builder_opt_enabled_for("1")).to_equal(true)  # oracle: explicit opt-in
+        expect(string_builder_opt_enabled_for("")).to_equal(false)  # oracle: default off
+        expect(string_builder_opt_enabled_for("0")).to_equal(false)  # oracle: explicit off
