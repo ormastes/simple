@@ -6221,6 +6221,18 @@ pub extern "C" fn rt_string_to_lower(string: RuntimeValue) -> RuntimeValue {
 }
 
 /// Convert a string to an integer, returns 0 on failure
+///
+/// Single-character fallback: `for ch in text` yields one-character strings,
+/// and the interpreter arm (`interpreter_method/string.rs`,
+/// `"to_int" | "to_i64" | "to_i32" | "to_i16" | "to_i8"`, fixed 2026-08-26 in
+/// 8d100a8aa81) returns that character's CODEPOINT when the parse fails. This
+/// runtime entry is what the JIT/native lanes dispatch for the same methods,
+/// so it must answer identically — before this fallback every
+/// `ch.to_i32()`-per-character checksum folded 0 for every non-digit character
+/// under the default (JIT) execution mode while the interpreter folded the
+/// codepoint. Multi-character non-numeric text still yields 0, exactly as the
+/// interpreter. Bug row:
+/// jit_to_i32_returns_zero_and_leaks_mistagged_value_2026-08-26.md
 #[no_mangle]
 pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     let len = rt_string_len(string);
@@ -6230,7 +6242,16 @@ pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     let data = rt_string_data(string);
     unsafe {
         let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
-        s.trim().parse::<i64>().unwrap_or(0)
+        match s.trim().parse::<i64>() {
+            Ok(n) => n,
+            Err(_) => {
+                let mut chars = s.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(only), None) => only as i64,
+                    _ => 0,
+                }
+            }
+        }
     }
 }
 
@@ -9902,5 +9923,39 @@ mod text_len_memo_concurrency_tests {
             assert!(header_flag_is_set(RuntimeValue::from_raw(ascii).as_heap_ptr(), RT_STRING_FLAG_ASCII));
             assert!(!header_flag_is_set(RuntimeValue::from_raw(utf).as_heap_ptr(), RT_STRING_FLAG_ASCII));
         }
+    }
+}
+
+
+#[cfg(test)]
+mod string_to_int_single_char_fallback_tests {
+    use super::*;
+
+    fn s(src: &str) -> RuntimeValue {
+        rt_string_new(src.as_ptr(), src.len() as u64)
+    }
+
+    // Bug row: jit_to_i32_returns_zero_and_leaks_mistagged_value_2026-08-26.
+    // The interpreter arm (interpreter_method/string.rs, fixed 2026-08-26 in
+    // 8d100a8aa81) returns the character CODEPOINT for a single non-numeric
+    // character; `rt_string_to_int` is the JIT/native dispatch target for the
+    // same `to_int`/`to_i64`/`to_i32`/`to_i16`/`to_i8` family and must
+    // answer identically or per-character checksum loops degenerate under the
+    // default JIT execution mode.
+    #[test]
+    fn single_non_numeric_char_yields_codepoint_not_zero() {
+        assert_eq!(rt_string_to_int(s("h")), 104);
+        assert_eq!(rt_string_to_int(s("e")), 101);
+        assert_eq!(rt_string_to_int(s("z")), 122);
+        assert_eq!(rt_string_to_int(s("한")), '한' as i64);
+    }
+
+    #[test]
+    fn numeric_strings_still_parse_and_multi_char_non_numeric_is_zero() {
+        assert_eq!(rt_string_to_int(s("42")), 42);
+        assert_eq!(rt_string_to_int(s("  -7  ")), -7);
+        assert_eq!(rt_string_to_int(s("ab")), 0);
+        assert_eq!(rt_string_to_int(s("")), 0);
+        assert_eq!(rt_string_to_int(s("5a")), 0);
     }
 }
