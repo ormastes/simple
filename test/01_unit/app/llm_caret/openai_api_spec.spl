@@ -9,6 +9,92 @@ use app.llm_caret.openai_api.*
 fn count_openai_source_occurrences(source: text, needle: text) -> i64:
     source.split(needle).len() - 1
 
+# Inline helpers
+fn _LB() -> text:
+    "{(123 as char)}"
+
+fn _RB() -> text:
+    "{(125 as char)}"
+
+fn _Q() -> text:
+    "\""
+
+fn build_openai_headers(api_key: text) -> text:
+    var h = "Authorization: Bearer " + api_key + "\n"
+    h = h + "Content-Type: application/json"
+    h
+
+fn build_openai_messages_json(roles: [text], contents: [text]) -> text:
+    var items: [text] = []
+    var i = 0
+    while i < roles.len():
+        var msg = _LB()
+        msg = msg + _Q() + "role" + _Q() + ":" + _Q() + roles[i] + _Q() + ","
+        var c = ""
+        if i < contents.len():
+            c = contents[i]
+        msg = msg + _Q() + "content" + _Q() + ":" + _Q() + _escape_json(c) + _Q()
+        msg = msg + _RB()
+        items = items + [msg]
+        i = i + 1
+    var result = "["
+    var j = 0
+    for item in items:
+        if j > 0:
+            result = result + ","
+        result = result + item
+        j = j + 1
+    result = result + "]"
+    result
+
+fn parse_openai_response(raw: text) -> OpenAIResponse:
+    if raw.trim() == "":
+        return OpenAIResponse(
+            content: "",
+            model: "",
+            finish_reason: "",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            error: "empty response",
+            is_error: true,
+            raw: ""
+        )
+    val error_msg = _extract_json_string(raw, "message")
+    val has_content = _extract_json_string(raw, "content")
+    if error_msg != "" and has_content == "":
+        return OpenAIResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            error: error_msg,
+            is_error: true,
+            raw: raw
+        )
+    val content_text = _extract_json_string(raw, "content")
+    val model_val = _extract_json_string(raw, "model")
+    val finish = _extract_json_string(raw, "finish_reason")
+    val p_tok = _extract_json_int(raw, "prompt_tokens")
+    val c_tok = _extract_json_int(raw, "completion_tokens")
+    val t_tok = _extract_json_int(raw, "total_tokens")
+    var final_finish = finish
+    if final_finish == "":
+        final_finish = "stop"
+    OpenAIResponse(
+        content: content_text,
+        model: model_val,
+        finish_reason: final_finish,
+        prompt_tokens: p_tok,
+        completion_tokens: c_tok,
+        total_tokens: t_tok,
+        error: "",
+        is_error: false,
+        raw: raw
+    )
+
 describe "LLM Caret OpenAI API exchange":
     describe "request construction":
         it "should build the exact production request":
@@ -115,3 +201,101 @@ describe "LLM Caret OpenAI API exchange":
             expect(retryCallbackPosition).to_be_greater_than(retryPosition)
             expect(source).to_contain("val result = http_request_raw_timeout(request.method, request.url, request.headers, request.body, remaining_ms)")
             expect(completePosition).to_be_greater_than(retryCallbackPosition)
+
+describe "build_openai_body":
+
+    it "includes messages":
+        val msgs = build_openai_messages_json(["user"], ["Hello"])
+        val body = build_openai_body("", msgs, 0, -1.0)
+        expect(body).to_contain("messages")
+        expect(body).to_contain("Hello")
+
+    it "includes max_tokens when set":
+        val body = build_openai_body("", "[]", 2048, -1.0)
+        expect(body).to_contain("2048")
+
+    it "omits max_tokens when zero":
+        val body = build_openai_body("", "[]", 0, -1.0)
+        expect(body).to_contain("model")
+
+    it "includes temperature when non-negative":
+        val body = build_openai_body("", "[]", 0, 0.7)
+        expect(body).to_contain("temperature")
+
+    it "omits temperature when negative":
+        val body = build_openai_body("", "[]", 0, -1.0)
+        expect(body).to_contain("model")
+
+describe "build_openai_headers":
+
+    it "includes bearer token":
+        val h = build_openai_headers("sk-test")
+        expect(h).to_contain("Authorization: Bearer sk-test")
+
+    it "includes content type":
+        val h = build_openai_headers("key")
+        expect(h).to_contain("Content-Type: application/json")
+
+describe "build_openai_messages_json":
+
+    it "builds single message":
+        val json = build_openai_messages_json(["user"], ["Hello"])
+        expect(json).to_start_with("[")
+        expect(json).to_end_with("]")
+        expect(json).to_contain("user")
+        expect(json).to_contain("Hello")
+
+    it "builds multi-turn conversation":
+        val json = build_openai_messages_json(["user", "assistant", "user"], ["Hi", "Hello!", "How are you?"])
+        expect(json).to_contain("user")
+        expect(json).to_contain("assistant")
+        expect(json).to_contain("Hi")
+        expect(json).to_contain("Hello!")
+        expect(json).to_contain("How are you?")
+
+describe "parse_openai_response":
+
+    it "parses success response":
+        var raw = _LB()
+        raw = raw + _Q() + "content" + _Q() + ":" + _Q() + "Hi there!" + _Q() + ","
+        raw = raw + _Q() + "model" + _Q() + ":" + _Q() + "gpt-4o" + _Q() + ","
+        raw = raw + _Q() + "finish_reason" + _Q() + ":" + _Q() + "stop" + _Q() + ","
+        raw = raw + _Q() + "prompt_tokens" + _Q() + ":50,"
+        raw = raw + _Q() + "completion_tokens" + _Q() + ":25,"
+        raw = raw + _Q() + "total_tokens" + _Q() + ":75"
+        raw = raw + _RB()
+        val resp = parse_openai_response(raw)
+        expect(resp.content).to_equal("Hi there!")
+        expect(resp.model).to_equal("gpt-4o")
+        expect(resp.finish_reason).to_equal("stop")
+        expect(resp.prompt_tokens).to_equal(50)
+        expect(resp.completion_tokens).to_equal(25)
+        expect(resp.total_tokens).to_equal(75)
+        expect(resp.is_error).to_equal(false)
+
+    it "handles empty response":
+        val resp = parse_openai_response("")
+        expect(resp.is_error).to_equal(true)
+        expect(resp.error).to_equal("empty response")
+
+    it "defaults finish reason to stop":
+        var raw = _LB()
+        raw = raw + _Q() + "content" + _Q() + ":" + _Q() + "Hello" + _Q()
+        raw = raw + _RB()
+        val resp = parse_openai_response(raw)
+        expect(resp.finish_reason).to_equal("stop")
+
+    it "preserves raw response":
+        var raw = _LB()
+        raw = raw + _Q() + "content" + _Q() + ":" + _Q() + "test" + _Q()
+        raw = raw + _RB()
+        val resp = parse_openai_response(raw)
+        expect(resp.raw).to_equal(raw)
+
+    it "handles zero token counts":
+        var raw = _LB()
+        raw = raw + _Q() + "content" + _Q() + ":" + _Q() + "Hi" + _Q()
+        raw = raw + _RB()
+        val resp = parse_openai_response(raw)
+        expect(resp.prompt_tokens).to_equal(0)
+        expect(resp.completion_tokens).to_equal(0)
