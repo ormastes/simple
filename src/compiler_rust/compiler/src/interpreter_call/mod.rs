@@ -241,6 +241,52 @@ fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
 
 /// Every registered definition of `name`: the overload set plus the flat-map
 /// entry (which is not always in the overload set).
+/// Conservative return metadata for a named call, without evaluating its arguments.
+/// Unknown/ambiguous bindings must retain ordinary runtime integer dispatch.
+pub(crate) fn declared_signed_call_return_width(
+    name: &str,
+    env: &Env,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> Option<u8> {
+    if super::interpreter_eval::PRELUDE_UNSHADOWABLE.contains(&name)
+        || env.get(&crate::decorator_apply::decorated_fn_key(name)).is_some()
+    {
+        return None;
+    }
+    let width = |def: &FunctionDef| {
+        if !def.generic_params.is_empty() || !def.decorators.is_empty() {
+            return None;
+        }
+        match def.return_type.as_ref()? {
+            Type::Simple(t) => match t.as_str() {
+                "i8" => Some(8),
+                "i16" => Some(16),
+                "i32" => Some(32),
+                "i64" => Some(64),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    if env.is_local(name) {
+        return match env.get(name) {
+            Some(Value::Function { def, .. }) => width(def),
+            _ => None,
+        };
+    }
+    let candidates = all_candidates(name, functions);
+    if candidates.len() != 1 {
+        return None;
+    }
+    if let Some(bound) = env.get(name) {
+        match bound {
+            Value::Function { def, .. } if Arc::ptr_eq(def, &candidates[0]) => {}
+            _ => return None,
+        }
+    }
+    width(&candidates[0])
+}
+
 fn all_candidates(name: &str, functions: &HashMap<String, Arc<FunctionDef>>) -> Vec<Arc<FunctionDef>> {
     let mut out = FUNCTION_OVERLOADS
         .with(|cell| cell.borrow().get(name).cloned())
