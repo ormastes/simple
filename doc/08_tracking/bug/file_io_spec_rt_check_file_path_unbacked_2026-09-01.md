@@ -69,3 +69,12 @@ B=src/compiler_rust/target/release/simple.exe
 SIMPLE_BINARY="$B" "$B" test test/01_unit/lib/std/file/file_io_spec.spl
 ```
 
+
+## Closed 2026-11-09 (verification-only, lane p3-subj7)
+
+`rt_check_file_path` no longer exists anywhere in `src/` — the file module's
+`check_file_path` now calls the backed primitive `rt_file_exists`
+(`src/compiler_rust/lib/std/src/file/__init__.spl`), so the unbacked-extern
+defect class is gone. `test/01_unit/lib/std/file/file_io_spec.spl` passes 4/4
+with the seed interpreter (`--mode=interpreter --clean`) on
+origin/release/1.0.0 (worktree @54181f128ea). No source change in this closure.

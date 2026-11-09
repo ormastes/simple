@@ -70,3 +70,15 @@ no blocking sync wrappers).
   `rt_io_tcp_probe_peer`) outside this bug's scope. The
   `async_handler_lifecycle` module pinned by
   `async_handler_lifecycle_spec.spl` is still absent (0 executed).
+
+## Closed 2026-11-09 (verification-only, lane p3-subj7)
+
+Both pinned contract specs pass with the seed interpreter on
+origin/release/1.0.0 (worktree @54181f128ea), matching the 2026-11-05
+resolution note: `async_handler_registry_spec.spl` 2/2,
+`async_ssr_disconnect_safety_contract_spec.spl` 3/3
+(`--mode=interpreter --clean --timeout 120 --sequential`).
+Neighbours green: worker_async_fd_registry 1/1, async_dynamic_dispatch 6/6.
+Follow-up rows tracked separately (worker_spl_facade_split,
+async_handler_lifecycle) remain open and were not touched. No source change
+in this closure.
