@@ -177,20 +177,6 @@ impl Lowerer {
         }
     }
 
-    /// Inner scalar of a tagged optional scalar slot (`bool?`, `i64?`, ...:
-    /// `Pointer<T>` holding a tagged word), including `bool` which
-    /// `optional_boxint_scalar_inner` leaves out.
-    pub(in crate::hir::lower) fn optional_tagged_scalar_inner(&self, ty: TypeId) -> Option<TypeId> {
-        match self.module.types.get(ty) {
-            Some(HirType::Pointer {
-                kind: PointerKind::Shared,
-                inner,
-                ..
-            }) if *inner == TypeId::BOOL => Some(*inner),
-            _ => self.optional_boxint_scalar_inner(ty),
-        }
-    }
-
     /// Lower an expression that is about to be tested for ABSENCE (`??`,
     /// `if val`, `match Some(..)`), keeping genuinely-optional array accessors
     /// in their tagged `T?` form.
