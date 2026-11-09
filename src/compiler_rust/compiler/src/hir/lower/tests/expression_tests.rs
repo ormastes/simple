@@ -1994,3 +1994,32 @@ fn llvm_pipeline_optional_destination_keeps_narrow_unsafe_boundary() {
     );
     assert!(plugin.contains("ctx, mod_, builder, tm, raw_dest_opt, func as i64, call_args as i64,"));
 }
+
+#[test]
+fn string_receiver_to_i32_family_result_is_typed_not_any() {
+    // Bug row: jit_to_i32_returns_zero_and_leaks_mistagged_value_2026-08-26.
+    // The HIR string-receiver result-type table typed `to_int`/`to_i64` but
+    // omitted `to_i8`/`to_i16`/`to_i32`, so those calls fell through to
+    // generic dynamic dispatch typed `TypeId::ANY`. MIR print-lowering only
+    // BoxInts args with a known int type, so the raw narrowed word reached
+    // `rt_println_value` and was decoded by bit pattern (`"42".to_i32()`
+    // printed the f64 denormal of bit pattern 42).
+    let module = parse_and_lower(
+        "fn f():\n    val a = \"42\".to_i32()\n    val b = \"7\".to_i16()\n    val c = \"9\".to_i8()\n    val d = \"42\".to_i64()\n",
+    )
+    .unwrap();
+    let func = module.functions.iter().find(|f| f.name == "f").unwrap();
+    let tys: Vec<TypeId> = func
+        .body
+        .iter()
+        .filter_map(|s| match s {
+            HirStmt::Let { value: Some(v), .. } => Some(v.ty),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tys,
+        vec![TypeId::I32, TypeId::I16, TypeId::I8, TypeId::I64],
+        "string-receiver to_i32/to_i16/to_i8 must infer their widths like to_i64"
+    );
+}
