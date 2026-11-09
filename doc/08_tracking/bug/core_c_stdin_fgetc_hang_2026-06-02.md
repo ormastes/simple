@@ -1,6 +1,27 @@
 # core-c MCP stdin hang — C runtime stdin_read_char uses fgetc (2026-06-02) — FIXED (worked around)
 
-Status: OPEN (re-triaged 2026-09-13 — the documented fix is NOT in the tree; see below)
+Status: FIXED on release/1.0.0 (verified 2026-11-09) — see addendum below
+
+## 2026-11-09 verification — fixed on release/1.0.0
+
+- **measured** `src/runtime/runtime_native.c:3955-3960` `stdin_read_char` no
+  longer uses `fgetc`; it reads via `stdin_raw_byte` (raw `read(0, buf, 1)`,
+  EINTR-retried), and all four stdin readers share that raw fd-0 byte reader.
+- **measured** fixing commits `ea2afa2f689` ("stdin_read_char uses raw read(0)
+  instead of fgetc") and `1b7d3a320e2` ("route all four stdin readers through
+  one raw fd-0 byte reader") are ancestors of `origin/release/1.0.0`.
+- **measured** host C repro (`build/p3-stdin-repro` in worktree
+  `build/agent-worktrees/p3-stdin`): RED — the old `fgetc`-based loop under
+  weak-stub semantics (never EOF) spins forever, killed by a 5 s watchdog
+  (exit 124). GREEN — functions extracted live from `runtime_native.c` deliver
+  pipe bytes then return the empty string at EOF, so the
+  `while ch != ""` loop terminates; in-tree
+  `src/runtime/test/rt_stdin_read_char_raw_selfcheck.c` PASS;
+  `cc -fsyntax-only runtime_native.c` clean.
+- **not verified here** the original macOS ARM64 core-c minimal-link
+  reproduction (no macOS host); the weak-stub failure mode is simulated at the
+  C level. `json_helpers.spl` still calls the C `stdin_read_char`, which is
+  now the raw-read implementation.
 
 ## Re-triage 2026-09-13 — reopened: the pure-Simple `mcp_read_char()` workaround is absent
 
