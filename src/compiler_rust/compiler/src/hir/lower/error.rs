@@ -49,6 +49,16 @@ pub enum LowerError {
     #[error("Parameter '{param}' in function '{function}' requires explicit type annotation")]
     MissingParameterType { param: String, function: String },
 
+    /// `T? as <numeric>` outside `unsafe`. The `SIMPLE_JIT_STRICT:` marker
+    /// is load-bearing: the driver's JIT catch site propagates only errors
+    /// carrying it and demotes everything else to the interpreter, which
+    /// would silently run the cast that this error exists to forbid.
+    #[error(
+        "SIMPLE_JIT_STRICT: cannot cast an optional `T?` to `{target}` with `as` outside `unsafe` \
+         (nil-only-in-unsafe, ERR-01); narrow it first with `?? <default>`, `if val x = ...`, or `match`"
+    )]
+    OptionalCast { target: String },
+
     #[error("Cannot infer element type of empty array - use explicit annotation")]
     EmptyArrayNeedsType,
 

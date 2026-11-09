@@ -14,6 +14,7 @@ use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
+use std.nogc_sync_mut.sffi.transient.{transient_promote}
 
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text?  # nil when unset; callers here use `?? ""` because unset == empty is the intended semantics
@@ -51,6 +52,16 @@ pub fn llvm_bootstrap_string_globals_text() -> text:
         panic("compile error: could not finish LLVM bootstrap string globals")
     _llvm_bootstrap_string_globals_text_cache = out
     out
+
+# Owned lifetime for the cache across a transient codegen scope (bug
+# llvm_bootstrap_string_cache_scope_escape_2026_10_25). The caller must have
+# PAUSED its scope. Finishes any open builder into the cache, then promotes the
+# cache root so it outlives scope end; the accessor contract is unchanged.
+pub fn llvm_bootstrap_string_globals_retain_for_scope() -> bool:
+    val _finished = llvm_bootstrap_string_globals_text()
+    if _llvm_bootstrap_string_globals_text_cache == "":
+        return true
+    transient_promote(_llvm_bootstrap_string_globals_text_cache)
 
 pub fn llvm_bootstrap_string_globals_add(decl: text):
     if _llvm_bootstrap_string_globals_handle == 0:

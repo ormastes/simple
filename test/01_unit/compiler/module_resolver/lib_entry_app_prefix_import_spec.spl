@@ -1,0 +1,94 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: a `src/lib/<pkg>/**` ENTRY file can import `app.*` when `<pkg>` carries
+its own nested `src/` directory.  Audience: engineers maintaining module-root
+selection in the seed resolver.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/module_resolver/lib_entry_app_prefix_import_spec.spl`.
+2. Set `SIMPLE_BIN` to target a specific binary; default `bin/simple`.
+
+## Compatibility and limitations
+
+Spawns the compiler binary on a throw-away fixture workspace under build/tmp/.
+"""
+
+"""
+Reproducer for
+doc/08_tracking/bug/lib_entry_file_cannot_resolve_app_prefix_imports_2026-08-17.md
+
+`src/lib/nogc_sync_mut/` has a nested `src/` (`src/lib/nogc_sync_mut/src/`), so
+the seed's `find_project_root` -- "nearest ancestor with a `src/` dir" -- stopped
+at the PACKAGE for any entry file under it, making `source_root` =
+`src/lib/nogc_sync_mut/src` and `use app.test_daemon.session_types` fail with
+E1034 (`module path segment 'app' not found`).  The same file imported from an
+`src/app/**` entry resolved fine.  A `src/`-bearing dir that itself lives under
+the enclosing workspace's `src/` tree is a nested library package, not a
+project; the workspace root is the module root.
+"""
+use std.spec.step
+use std.spec.*
+use std.io.{process_run, env_get}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn fixture_root() -> text:
+    # Relative to the repo cwd (sh and the compiler child agree on it); the
+    # fixture carries its own `.git` marker so it is its own workspace boundary.
+    "build/tmp/simple_lib_entry_app_prefix_fixture"
+
+fn entry_source() -> text:
+    # Explicit-item import `use app.daemon.session.{daemon_marker}` -- the shape
+    # of the real repro. (A wildcard import takes a different, lenient path and
+    # does NOT reproduce.) Braces are emitted as printf octal escapes so the
+    # Simple string literal does not read them as interpolation.
+    "use app.daemon.session.\\173daemon_marker\\175\\n\\nfn main():\\n    print(daemon_marker())\\n"
+
+fn setup_fixture():
+    val f = fixture_root()
+    val sh = "rm -rf " + f + " && mkdir -p " + f + "/src/app/daemon " + f + "/src/lib/pkg/src/app " + f + "/src/lib/pkg/runner"
+        + " && printf 'gitdir: nowhere\\n' > " + f + "/.git"
+        + " && printf 'fn daemon_marker() -> text:\\n    \"DAEMON_RESOLVED\"\\n' > " + f + "/src/app/daemon/session.spl"
+        + " && : > " + f + "/src/lib/pkg/src/__init__.spl"
+        + " && printf '" + entry_source() + "' > " + f + "/src/lib/pkg/runner/main.spl"
+        + " && printf '" + entry_source() + "' > " + f + "/src/app/daemon/entry.spl"
+    process_run("sh", ["-c", sh])
+
+fn run_entry(rel: text) -> text:
+    # The test runner exports SIMPLE_EXECUTION_MODE=interpret for spec
+    # processes; the bug is on the default HIR/run lane (the interpreter lane
+    # climbs ancestors and masks it), so the child runs with the runner's mode
+    # variables unset.
+    val cmd = "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE " + simple_binary() + " run " + fixture_root() + "/" + rel
+    val (stdout, stderr, _code) = process_run("sh", ["-c", cmd])
+    stdout + stderr
+
+describe "a src/lib/<pkg>/** entry file resolves app.* against the workspace src/":
+    # @manual scenario evidence
+
+    it "control: an src/app/** entry resolves app.*":
+        # @req REQ-SSPEC-COMPILER
+        step("Verify: src/app entry prints the imported marker")
+        setup_fixture()
+        val out = run_entry("src/app/daemon/entry.spl")
+        expect(out).to_contain("DAEMON_RESOLVED")
+        expect(out).not_to_contain("E1034")
+
+    it "lib entry under a package with its own nested src/ resolves app.*":
+        # @req REQ-SSPEC-COMPILER
+        step("Verify: src/lib/pkg/runner/main.spl prints the imported marker")
+        setup_fixture()
+        val out = run_entry("src/lib/pkg/runner/main.spl")
+        # Pre-fix: `cannot resolve import: module path segment 'app' not found` (E1034)
+        expect(out).not_to_contain("E1034")
+        expect(out).to_contain("DAEMON_RESOLVED")

@@ -2,7 +2,16 @@
 
 Date: 2026-08-08
 Component: `src/os/compositor/wm_action_lifecycle.spl`
-Status: open (filed, not fixed — currently dead code, see "Reachability" below)
+Status: CLOSED (2026-11-08 revalidated)
+
+Resolution: `0f02d88ae9c` added the maximize/restore geometry state and the
+function-level regression described below. Current source retains the complete
+fix in `wm_action_lifecycle.spl:459-486`, carries all five fields through both
+host lifecycle conversions, and retains the direct-`WmAction` roundtrip spec at
+`wm_action_applier_spec.spl:386-433` plus repeated-maximize coverage in
+`compositor_spec.spl:146-164`. A fresh test run was not available in the sparse
+review lane; this closure is based on the landed fix and current-source/spec
+inspection, not a claimed 2026-11-08 test pass.
 
 ## Summary
 

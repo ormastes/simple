@@ -1,0 +1,158 @@
+"""
+Purpose: preserve do-block statements and tail values through the real flat bridge.
+Run: bin/simple test test/01_unit/compiler/frontend/flat_ast_do_block_bridge_spec.spl
+The raw-node cases isolate tag44 conversion; parsed cases also cover the actual parser route.
+Execution evidence is required before this spec can qualify a compiler producer.
+"""
+# @req REQ-COMPILER-FRONTEND-001
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+
+use std.spec.*
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{expr_int_lit, expr_bool_lit, expr_block, expr_do_block, expr_if_expr, expr_lambda, expr_get_tag, expr_get_str, EXPR_DO_BLOCK}
+use compiler.core.ast_stmt.{stmt_expr_stmt}
+use compiler.core.parser.{parser_has_errors, parser_set_had_error, parser_init_with_path}
+use compiler.core.parser_expr.{parse_expr}
+use compiler.frontend.flat_ast_bridge.{convert_flat_expr, parse_and_build_module}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+fn cdb_block(expr: Expr) -> Block:
+    match expr.kind:
+        case ExprKind.Block(block): return block
+        case _: panic("flat block was discarded or converted to another expression")
+
+fn cdb_int(stmt: Stmt) -> i64:
+    match stmt.kind:
+        case StmtKind.Expr(expr):
+            match expr.kind:
+                case ExprKind.IntLit(value): return value
+                case _: panic("flat block statement lost its integer expression")
+        case _: panic("flat block lost its expression statement")
+
+fn cdb_reset():
+    ast_reset()
+    parser_set_had_error(false)
+
+fn cdb_parsed_body(source: text) -> Block:
+    cdb_reset()
+    val parsed = parse_and_build_module(source, "do_block_bridge.spl")
+    expect(parser_has_errors()).to_equal(false)
+    val function = parsed.functions["sample"]
+    expect(function.body.stmts.len()).to_equal(1)
+    match function.body.stmts[0].kind:
+        case StmtKind.Expr(expr): return cdb_block(expr)
+        case _: panic("parsed do expression disappeared")
+
+describe "flat bridge preserves do block bodies":
+    it "converts an empty do block without recursion or an unsupported tag error":
+        step("Convert a real empty EXPR_DO_BLOCK node")
+        cdb_reset()
+        val body = cdb_block(convert_flat_expr(expr_do_block([], 0)))
+        expect(body.stmts.len()).to_equal(0)
+        expect(parser_has_errors()).to_equal(false)
+
+    it "preserves a single expression as the do block tail":
+        step("Require the literal stored in STMTS to survive bridge conversion")
+        cdb_reset()
+        val node = expr_do_block([stmt_expr_stmt(expr_int_lit(37, 0), 0)], 0)
+        val body = cdb_block(convert_flat_expr(node))
+        expect(body.stmts.len()).to_equal(1)
+        expect(cdb_int(body.stmts[0])).to_equal(37)
+        expect(parser_has_errors()).to_equal(false)
+
+    it "preserves statement order and a nested do block tail":
+        step("Walk nested real block output rather than searching source text")
+        cdb_reset()
+        val inner = expr_do_block([stmt_expr_stmt(expr_int_lit(29, 0), 0)], 0)
+        val outer = expr_do_block([stmt_expr_stmt(expr_int_lit(11, 0), 0), stmt_expr_stmt(inner, 0)], 0)
+        val body = cdb_block(convert_flat_expr(outer))
+        expect(body.stmts.len()).to_equal(2)
+        expect(cdb_int(body.stmts[0])).to_equal(11)
+        match body.stmts[1].kind:
+            case StmtKind.Expr(expr):
+                val nested = cdb_block(expr)
+                expect(nested.stmts.len()).to_equal(1)
+                expect(cdb_int(nested.stmts[0])).to_equal(29)
+            case _: fail("nested block expression was discarded")
+        expect(parser_has_errors()).to_equal(false)
+
+    it "keeps the separate EXPR_BLOCK tail after existing statements":
+        step("Protect the ordinary block route while sharing its helper with do blocks")
+        cdb_reset()
+        val first = stmt_expr_stmt(expr_int_lit(5, 0), 0)
+        val node = expr_block([first], expr_int_lit(19, 0), 0)
+        val body = cdb_block(convert_flat_expr(node))
+        expect(body.stmts.len()).to_equal(2)
+        expect(cdb_int(body.stmts[0])).to_equal(5)
+        expect(cdb_int(body.stmts[1])).to_equal(19)
+        expect(parser_has_errors()).to_equal(false)
+
+    it "bridges parsed do bodies with ordered statements":
+        step("Exercise the production parser branch that emits EXPR_DO_BLOCK")
+        val body = cdb_parsed_body("fn sample():\n    do:\n        7\n        43\n")
+        expect(body.stmts.len()).to_equal(2)
+        expect(cdb_int(body.stmts[0])).to_equal(7)
+        expect(cdb_int(body.stmts[1])).to_equal(43)
+
+    it "preserves do blocks in both expression-if branches":
+        step("Exercise the helper directly from EXPR_IF with nonempty then and else blocks")
+        cdb_reset()
+        val yes = expr_do_block([stmt_expr_stmt(expr_int_lit(17, 0), 0)], 0)
+        val no = expr_do_block([stmt_expr_stmt(expr_int_lit(31, 0), 0)], 0)
+        val tree = convert_flat_expr(expr_if_expr(expr_bool_lit(1, 0), yes, no, 0))
+        match tree.kind:
+            case ExprKind.IfChain(arms, otherwise):
+                expect(arms.len()).to_equal(1)
+                expect(arms[0].then_.stmts.len()).to_equal(1)
+                expect(cdb_int(arms[0].then_.stmts[0])).to_equal(17)
+                val else_body = otherwise ?? panic("lost do-block else branch")
+                expect(else_body.stmts.len()).to_equal(1)
+                expect(cdb_int(else_body.stmts[0])).to_equal(31)
+            case _: fail("expression-if lost its branch structure")
+        expect(parser_has_errors()).to_equal(false)
+
+    it "preserves do block bodies reached through lambda conversion":
+        step("Exercise the EXPR_LAMBDA fallback into the shared do-block converter")
+        cdb_reset()
+        val body = expr_do_block([stmt_expr_stmt(expr_int_lit(53, 0), 0)], 0)
+        match convert_flat_expr(expr_lambda([], [body], 0)).kind:
+            case ExprKind.Lambda(params, converted):
+                expect(params.len()).to_equal(0)
+                val block = cdb_block(converted)
+                expect(block.stmts.len()).to_equal(1)
+                expect(cdb_int(block.stmts[0])).to_equal(53)
+            case _: fail("lambda expression was discarded")
+        expect(parser_has_errors()).to_equal(false)
+
+    it "extracts the final do expression as the real HIR block value":
+        step("Lower a typed function so the actual HIR tail extraction runs")
+        cdb_reset()
+        val parsed = parse_and_build_module("fn sample() -> i64:\n    do:\n        7\n        43\n", "do_block_tail.spl")
+        expect(parser_has_errors()).to_equal(false)
+        var lowering = HirLowering.with_filename("do_block_tail.spl")
+        lowering.use_explicit_semantic_policy()
+        lowering.declare_module_symbols(parsed)
+        val function = lowering.lower_function(parsed.functions["sample"])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(function.body.has).to_equal(true)
+        match function.body.value.kind:
+            case HirExprKind.Block(block):
+                expect(block.has).to_equal(true)
+                match block.value.kind:
+                    case HirExprKind.IntLit(value, _): expect(value).to_equal(43)
+                    case _: fail("do-block tail did not become its HIR value")
+            case _: fail("function tail lost its do block")
+
+    it "preserves ce builder identity without rejecting shared parser consumers":
+        step("Check the real flat parser succeeds and leaves the builder name in S")
+        parser_init_with_path("ce builder:\n    1\n", "ce_builder_owner.spl")
+        val node = parse_expr()
+        expect(parser_has_errors()).to_equal(false)
+        expect(expr_get_tag(node)).to_equal(EXPR_DO_BLOCK)
+        expect(expr_get_str(node)).to_equal("builder")
+        val rejected = convert_flat_expr(node)
+        expect(parser_has_errors()).to_equal(true)

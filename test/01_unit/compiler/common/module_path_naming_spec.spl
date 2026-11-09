@@ -7,7 +7,10 @@
 use std.spec.step
 
 use std.spec.{describe, it, expect}
-use compiler.common.module_path_naming.{module_logical_name_from_path, module_source_relative_path, module_relative_name_from_path}
+use compiler.common.module_path_naming.{module_logical_name_from_path, module_source_relative_path, module_relative_name_from_path, _module_path_naming_text_index_of}
+use std.io_runtime.{time_now_monotonic_ms}
+
+extern fn rt_file_read_text(path: text) -> text?
 
 
 
@@ -174,3 +177,32 @@ describe "module_logical_name_from_path across src/, examples/ and test/ roots":
         val c = module_logical_name_from_path("test/x/main.spl")
         expect(a != b and b != c and a != c).to_equal(true)
         expect(a.len() > 0 and b.len() > 0 and c.len() > 0).to_equal(true)
+
+    it "terminates for a bare filename with no repo anchor (hang regression, bug hir_unit_specs_hang_over_300s_2026-11-06)":
+        # @req REQ-SSPEC-UNIT
+        step("bare filename resolves within a 5 s budget")
+        val started = time_now_monotonic_ms()
+        val rel = module_source_relative_path("semantic_surface.spl")
+        val name = module_logical_name_from_path("semantic_surface.spl")
+        val elapsed = time_now_monotonic_ms() - started
+        expect(rel).to_equal("semantic_surface.spl")
+        expect(name).to_equal("semantic_surface")
+        expect(elapsed < 5000).to_equal(true)
+
+    it "text index scan returns -1 for an absent needle within budget (bug seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09)":
+        # @req REQ-SSPEC-UNIT
+        step("scan of a bare filename for /examples/ terminates")
+        val started = time_now_monotonic_ms()
+        val idx = _module_path_naming_text_index_of("a.spl", "/examples/")
+        val idx2 = _module_path_naming_text_index_of("semantic_surface.spl", "/")
+        val elapsed = time_now_monotonic_ms() - started
+        expect(idx).to_equal(-1)
+        expect(idx2).to_equal(-1)
+        expect(elapsed < 5000).to_equal(true)
+
+    it "pins byte_len bindings to i64 in the scan helper (static pin; seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09)":
+        # @req REQ-SSPEC-UNIT
+        step("module_path_naming.spl keeps typed byte_len bindings")
+        val src = rt_file_read_text("src/compiler/00.common/module_path_naming.spl") ?? ""
+        expect(src.contains("val value_len: i64 = value.byte_len()")).to_equal(true)
+        expect(src.contains("val needle_len: i64 = needle.byte_len()")).to_equal(true)

@@ -852,3 +852,48 @@ fn ambiguous_wildcard_variant_owner_picks_smallest_name_deterministically() {
          first-match"
     );
 }
+
+/// Regression: `text?` force-unwrap must keep the STRING type.
+///
+/// Incident 2026-11-07 (`stage2_new3_native_build_worker_av_c01_2026-11-07`):
+/// `incremental_fingerprint_digest_valid_v1(digest_opt: text?)` did
+/// `val digest = digest_opt.unwrap()` and then `digest.byte_at(index)`. The
+/// unwrap result was typed ANY, so MIR could not route `byte_at` to
+/// `rt_string_byte_at` and left a name-dispatched method call that the LLVM
+/// suffix-match fallback bound to the unrelated
+/// `StrictSdnReaderV1.byte_at(offset)` (same leaf, same arity). The rebuilt
+/// stage2 then AV'd (0xC0000005, read at 0x48) inside that method on every
+/// native-build, before compiling a single module.
+#[test]
+fn stage2_text_optional_unwrap_keeps_string_type_for_byte_at() {
+    let source = concat!(
+        "class Decoy:\n    bytes: [u8]\n\n    fn byte_at(offset: i64) -> i64:\n        self.bytes[offset].to_i64()\n\n",
+        "fn digest_valid(digest_opt: text?) -> bool:\n",
+        "    if digest_opt == nil: return false\n",
+        "    val digest = digest_opt.unwrap()\n",
+        "    if digest.len() != 64: return false\n",
+        "    for index in 0..64:\n",
+        "        val byte = digest.byte_at(index) as i64\n",
+        "        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):\n",
+        "            return false\n",
+        "    true\n",
+    );
+    let module = parse_and_lower(source).expect("text? unwrap lowering");
+    let function = module.functions.iter().find(|f| f.name == "digest_valid").unwrap();
+    let digest = function
+        .locals
+        .iter()
+        .find(|local| local.name == "digest")
+        .expect("`digest` local");
+    assert_eq!(
+        digest.ty,
+        TypeId::STRING,
+        "`text?`.unwrap() must be typed STRING, got {:?}",
+        module.types.get(digest.ty)
+    );
+    let body = format!("{:?}", function.body);
+    assert!(
+        !body.contains("method: \"unwrap\""),
+        "unwrap on a nullable text must lower to a builtin, not a name-dispatched method: {body}"
+    );
+}

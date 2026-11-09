@@ -1,0 +1,122 @@
+use std.spec
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable, HirSymbol, SymbolKind, ScopeId}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirField}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.mir_class_identity_raw
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+# Bug runner_callback_field_owner_2026_10_11: `(port.execute_fn)(x)` is a
+# Call whose callee is a Field projection. The projected callable local can
+# reach lower_call_with_value without a retained HIR type (entry-closure /
+# loop-binding shapes), and enum_match_expr_type has no Field arm, so the
+# declared `fn(..) -> Record` signature that receiver_declared_type DID
+# recover was dropped on the floor: the call either failed with "indirect
+# callable lacks a proven function signature" or ran through the legacy
+# word-ABI path with no return owner, and `.status` on the result was
+# unresolved. The declared field signature must drive the indirect call.
+
+fn cfo_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn cfo_symbol(id: i64, name: text, kind: SymbolKind, module_name: text?, type_: HirType?) -> HirSymbol:
+    HirSymbol(id: SymbolId(id: id), name: name, kind: kind, type_: type_,
+        scope: ScopeId(id: 0), span: Span.empty(), visibility: Visibility.Public,
+        is_public: true, is_mutable: false, defining_module: module_name)
+
+fn cfo_field(name: text, type_: HirType) -> HirField:
+    val placeholder = HirExpr(kind: HirExprKind.IntLit(0), has_type_: false,
+        type_: cfo_type(HirTypeKind.Error), span: Span.empty())
+    HirField(symbol: SymbolId(id: 9), name: name, type_: type_,
+        has_default: false, default: placeholder, visibility: Visibility.Public,
+        is_public: true, is_volatile: false, has_bits_attr: false, bits_width: 0,
+        has_fixed_address: false, fixed_address: 0, span: Span.empty())
+
+struct CfoHarness:
+    lowering: MirLowering
+    port_key: text
+    reply_key: text
+    callee: HirExpr
+
+fn cfo_harness(return_type: HirType) -> CfoHarness:
+    var symbols = SymbolTable.new()
+    val port_type = cfo_type(HirTypeKind.Named(SymbolId(id: 8), []))
+    symbols.register_preserved_symbol(cfo_symbol(7, "Reply", SymbolKind.Struct, Some("src/provider.spl"), nil))
+    symbols.register_preserved_symbol(cfo_symbol(8, "Port", SymbolKind.Struct, Some("src/provider.spl"), nil))
+    symbols.register_preserved_symbol(cfo_symbol(20, "port", SymbolKind.Parameter, nil, Some(port_type)))
+    symbols.register_preserved_symbol(cfo_symbol(21, "value", SymbolKind.Parameter, nil, Some(cfo_type(HirTypeKind.Int(64, true)))))
+    val signature = cfo_type(HirTypeKind.Function([cfo_type(HirTypeKind.Int(64, true))], return_type, []))
+    var lowering = MirLowering.new(symbols)
+    val reply_key = lowering.declared_struct_layout_key(lowering.composite_layout_key(cfo_symbol(7, "Reply", SymbolKind.Struct, Some("src/provider.spl"), nil)))
+    lowering.struct_field_order[reply_key] = ["status", "stdout", "stderr"]
+    val port_key = mir_class_identity_raw(symbols, 8)
+    lowering.register_composite_field_metadata(port_key, [cfo_field("available_fn", cfo_type(HirTypeKind.Function([], cfo_type(HirTypeKind.Bool), []))), cfo_field("execute_fn", signature)], symbols, true)
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 90), "probe", MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    val port_local = builder.new_temp(MirType.i64())
+    lowering.builder = builder
+    lowering.bind_local(20, port_local)
+    lowering.remember_local_hir_type(port_local.id, port_type, 0, 0)
+    var arg_builder = lowering.builder
+    val arg_local = arg_builder.new_temp(MirType.i64())
+    lowering.builder = arg_builder
+    lowering.bind_local(21, arg_local)
+    lowering.remember_local_hir_type(arg_local.id, cfo_type(HirTypeKind.Int(64, true)), 0, 0)
+    val base = HirExpr(kind: HirExprKind.Var(SymbolId(id: 20)), has_type_: true,
+        type_: port_type, span: Span.empty())
+    # The entry path leaves the projection itself untyped.
+    val callee = HirExpr(kind: HirExprKind.Field(base, "execute_fn", nil), has_type_: false,
+        type_: cfo_type(HirTypeKind.Error), span: Span.empty())
+    CfoHarness(lowering: lowering, port_key: port_key, reply_key: reply_key, callee: callee)
+
+fn cfo_arg() -> HirCallArg:
+    HirCallArg(value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 21)), has_type_: true,
+        type_: cfo_type(HirTypeKind.Int(64, true)), span: Span.empty()), has_name: false, name: "", span: Span.empty())
+
+describe "explicit callback field call keeps the declared return owner":
+    it "recovers the declared field signature for an untyped projected callee":
+        var harness = cfo_harness(cfo_type(HirTypeKind.Named(SymbolId(id: 7), [])))
+        var lowering = harness.lowering
+        val declared = lowering.receiver_declared_type(harness.callee)
+        expect(declared.?).to_equal(true)
+        var builder = lowering.builder
+        val projected = builder.new_temp(MirType.i64())
+        lowering.builder = builder
+        val result = lowering.lower_call_with_value(harness.callee, [cfo_arg()], Some(projected))
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.struct_value_syms.get(result.id) ?? "").to_equal(harness.reply_key)
+        val retained = lowering.find_local_hir_type(result.id)
+        expect(retained.?).to_equal(true)
+        if val type_ = retained:
+            var owner = -1
+            match type_.kind:
+                case HirTypeKind.Named(symbol, _): owner = symbol.id
+                case _: ()
+            expect(owner).to_equal(7)
+
+    it "keeps a scalar declared return without inventing a record owner":
+        var harness = cfo_harness(cfo_type(HirTypeKind.Bool))
+        var lowering = harness.lowering
+        var builder = lowering.builder
+        val projected = builder.new_temp(MirType.i64())
+        lowering.builder = builder
+        val result = lowering.lower_call_with_value(harness.callee, [cfo_arg()], Some(projected))
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.struct_value_syms.contains(result.id)).to_equal(false)
+        val actual = lowering.local_mir_type_of(result)
+        expect(actual.?).to_equal(true)
+        if val type_ = actual:
+            expect(type_.kind).to_equal(MirTypeKind.Bool)
+
+    it "still rejects an arity mismatch against the declared field signature":
+        var harness = cfo_harness(cfo_type(HirTypeKind.Named(SymbolId(id: 7), [])))
+        var lowering = harness.lowering
+        var builder = lowering.builder
+        val projected = builder.new_temp(MirType.i64())
+        lowering.builder = builder
+        lowering.lower_call_with_value(harness.callee, [], Some(projected))
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("argument count differs")

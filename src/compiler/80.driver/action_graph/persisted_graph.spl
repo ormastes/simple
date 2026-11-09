@@ -123,6 +123,12 @@ fn persisted_graph_load_current_v1(root: text) -> Result<PersistedBuildGraphV1, 
         return Err("current-generation-mismatch")
     Ok(graph)
 
+# Durability barrier for a directory entry (rename/create). POSIX: fsync(dirfd);
+# Windows: FlushFileBuffers on a FILE_FLAG_BACKUP_SEMANTICS directory handle,
+# which rt_file_fsync opens. Returns false when the sync cannot be proven.
+fn persisted_graph_sync_dir_v1(path: text) -> bool:
+    rt_file_exists(path) and rt_file_fsync(path)
+
 fn persisted_graph_publish_v1(root: text, graph: PersistedBuildGraphV1) -> text:
     val encoded = persisted_graph_encode_v1(graph)
     if root == "" or encoded == "":
@@ -157,6 +163,12 @@ fn persisted_graph_publish_v1(root: text, graph: PersistedBuildGraphV1) -> text:
             val raced = rt_file_read_regular_no_follow_bounded(generation_path, BUILD_GRAPH_MAX_BYTES_V1)
             if raced == nil or raced! != encoded:
                 return "generation-conflict"
+    # The generation directory entry (new, raced-in, or left by an earlier
+    # attempt) must be durable BEFORE CURRENT may name it, else a crash can
+    # keep CURRENT and lose the entry it points at.
+    if not persisted_graph_sync_dir_v1("{root}/generations"):
+        rt_file_delete(staged_path)
+        return "generation-write-failed"
     val current_stage = "{root}/CURRENT.tmp.{rt_getpid()}"
     if not file_write_exact(current_stage, graph.generation) or not rt_file_fsync(current_stage):
         rt_file_delete(current_stage)
@@ -169,9 +181,13 @@ fn persisted_graph_publish_v1(root: text, graph: PersistedBuildGraphV1) -> text:
     if current != graph.parent_generation:
         rt_file_delete(current_stage)
         if current == graph.generation:
+            # A prior attempt may have renamed CURRENT but failed the root sync;
+            # never report ok without making that rename durable.
+            if not persisted_graph_sync_dir_v1(root):
+                return "current-write-failed"
             return "ok"
         return "parent-generation-changed"
-    if not rt_file_rename(current_stage, "{root}/CURRENT") or not rt_file_fsync(root):
+    if not rt_file_rename(current_stage, "{root}/CURRENT") or not persisted_graph_sync_dir_v1(root):
         rt_file_delete(current_stage)
         return "current-write-failed"
     "ok"
@@ -179,4 +195,4 @@ fn persisted_graph_publish_v1(root: text, graph: PersistedBuildGraphV1) -> text:
 export PersistedBuildGraphV1
 export persisted_graph_validate_v1, persisted_graph_digest_v1
 export persisted_graph_encode_v1, persisted_graph_decode_v1
-export persisted_graph_load_current_v1, persisted_graph_publish_v1
+export persisted_graph_load_current_v1, persisted_graph_publish_v1, persisted_graph_sync_dir_v1

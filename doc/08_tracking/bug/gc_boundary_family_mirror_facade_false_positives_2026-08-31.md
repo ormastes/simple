@@ -1,8 +1,17 @@
 # gc-warning: family-mirror re-export shims reported as layering violations
 
 - Filed: 2026-08-31
-- Status: PARTIALLY FIXED (pure-Simple rule fixed; seed emitter unfixed — see "Seed half")
+- Status: FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
 - Component: `35.semantics/gc_boundary_check.spl`, seed `interpreter_module/{module_loader,path_resolution}.rs`
+
+Seed-half resolution: `path_resolution.rs` now normalizes native and mixed
+Windows separators before own-family matching. `module_loader.rs` exempts
+structural family-mirror facades only for `higher_layer_runtime_family`;
+non-mirror async-to-sync, GC, and no-alloc violations remain enforced. Focused
+Rust regressions cover all four cases. `cargo check -p simple-compiler --lib`
+passes. The focused test target remains unexecuted because unrelated existing
+test-code errors (`E0433`, `E0283`, `E0624`) stop `cargo test`; no focused-test
+pass is claimed.
 
 ## Symptom (measured)
 
@@ -83,30 +92,23 @@ no-alloc boundary still hard-fails, because those rules constrain what the
 forwarded-to code may *do*, not where it *sits*. Pinned by two new sdoctests on
 `check_gc_boundary_imports` (mirror exempt; non-mirror async->sync still fires).
 
-## Seed half — NOT fixed, patches recorded
+## Seed half — implemented 2026-11-08
 
-The 30 warnings observed above are emitted by the **Rust seed**
-(`module_loader.rs:197`), whose family table is a hardcoded enum with no config
-read, so there is no data-driven exemption. This session was barred from running
-cargo, and landing unbuilt seed edits is what `check-seed-builds-push.shs`
-exists to stop. Recorded rather than applied:
+1. `path_resolution.rs` `preferred_stdlib_variant` normalizes separators only
+   on Windows, so mixed-separator own-family matching works without changing
+   POSIX backslash filename-byte semantics. The POSIX regression is retained.
+2. `module_loader.rs` `gc_boundary_warning_message` ports the structural
+   `is_family_mirror_facade` comparison with the same platform-aware separator
+   handling. The exemption applies only to `higher_layer_runtime_family`;
+   genuine async-to-sync, GC, and no-alloc violations remain active.
 
-1. `path_resolution.rs` `preferred_stdlib_variant` — normalize separators before
-   matching, so the own-family preference works on Windows:
+Focused Rust regressions cover mirror exemption, non-mirror warnings,
+resource-boundary preservation, mixed Windows separators, and POSIX filename
+bytes. `cargo check -p simple-compiler --lib` passes. The focused test target
+is blocked by unrelated existing test-code errors (`E0433`, `E0283`, `E0624`),
+so these new tests are not claimed as executed.
 
-        let base = base_dir.to_string_lossy().replace('\', "/");
-
-   (markers stay as-is). This removes the round trip at its source and is the
-   higher-value half — it also fixes silently resolving to the wrong family.
-
-2. `module_loader.rs` `gc_boundary_warning_message` — port
-   `is_family_mirror_facade`: after computing both families, return `None` when
-   the two paths are equal with their family component stripped and the reason
-   is `higher_layer_runtime_family`.
-
-Until a seed is rebuilt, the observed count stays 30.
-
-## Verification
+## Historical pure-Simple verification
 
 | | before | after |
 |---|---|---|

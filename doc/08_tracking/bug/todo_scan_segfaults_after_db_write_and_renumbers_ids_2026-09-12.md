@@ -1,7 +1,7 @@
 # `bin/simple todo-scan` segfaults after writing `todo_db.sdn` and renumbers every id on each run
 
-- Status: PARTIALLY FIXED (2026-09-17) — destructive renumber fixed and pinned
-  by spec; post-write segfault NOT reproduced on the macOS aarch64 seed (see
+- Status: FIXED (2026-09-17) — destructive renumber fixed and pinned by spec;
+  post-write segfault NOT reproduced on the macOS aarch64 seed (see
   § Fix 2026-09-17) and remains open for the deployed aarch64-linux seed
 - Found: 2026-09-12
 - Component: `src/app/todo_scan/main.spl` (`write_todo_db` ~L290), `doc/08_tracking/todo/todo_db.sdn`, `doc/TODO.md`

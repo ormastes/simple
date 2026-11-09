@@ -1,6 +1,6 @@
 #!/bin/sh
 # check-sdn-row-shape.shs — every row of a table-style SDN file (bug_db.sdn) must
-# have the header's column count and exactly ONE row terminator.
+# belong to a header-led blank-line chunk and have ONE row terminator.
 #
 # WHY: PR #6633 landed bug_db.sdn rows FUSED (two versions of one row spliced into
 # one line, the id repeated 8 times). The CRC seal cannot see that: the seal is
@@ -12,6 +12,8 @@
 #      Only for TEXT ids: a purely numeric id (test_db.sdn `tests`/`suites`) is a
 #      surrogate key and legitimately recurs as a foreign key in the same row
 #      (`    7, 7, 7, 859, ...`) — flagging it made every test_db.sdn touch FAIL.
+#   4. a literal blank line ends a table, matching SdnDatabase.load. Rows in
+#      a later headerless chunk would be silently ignored by the loader.
 # --range <base>..<head> FAILs only on malformed rows NEW at <head> versus the same
 # file at <base>; a pre-existing malformed row on the base line (e.g. a release
 # line whose own data diverges from main) is reported but is not this push's.
@@ -23,9 +25,18 @@ set -u
 scan() {
     awk '
     function fail(msg) { bad++; if (lim == 0 || bad <= lim) print "  line " NR ": " msg }
-    /^[a-z_]+ \|.*\|$/ {
-        t = $1; hdr = $0; sub(/^[^|]*\|/, "", hdr); sub(/\|$/, "", hdr)
+    /^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*[|][^|]+[|][ \t\r]*$/ {
+        t = $0; sub(/[ \t]*[|].*$/, "", t); sub(/^[ \t]+/, "", t)
+        if (cur != "") fail("table " t ": second header in blank-line chunk")
+        hdr = $0; sub(/^[^|]*\|/, "", hdr); sub(/\|[ \t\r]*$/, "", hdr)
         ncol[t] = gsub(/,/, ",", hdr) + 1; cur = t; next
+    }
+    /^$/ { cur = ""; next }
+    /^[ \t]*[A-Za-z0-9_.\/:+-]+[ \t]*,/ && cur == "" {
+        n++
+        id = $0; sub(/^[ \t]+/, "", id); sub(/,.*/, "", id)
+        fail("orphan row " id ": no table header in blank-line chunk")
+        next
     }
     /^    / && cur != "" {
         n++
@@ -140,6 +151,11 @@ selftest() {
     printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n%s\n' "$fused" > "$d/fused.sdn"
     printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    a_1, P2, open, "t", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true, extra\n' > "$d/wide.sdn"
     printf 'tests |test_id, suite_id, name_str, valid|\n    7, 7, 7, true\n' > "$d/numid.sdn"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n%s\n\n%s\n' "$good" "$good" > "$d/orphan.sdn"
+    printf '%s\n' "$good" > "$d/headerless.sdn"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n%s\n \n%s\n' "$good" "$good" > "$d/spaced.sdn"
+    printf 'A prose section, with commas, is not a data record.\n\nBugRows2|id, status| \r\n    row_1, open\n' > "$d/prose-header.sdn"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n%s\nOther2|id, status|\n    row_1, open\n' "$good" > "$d/second-header.sdn"
     : > "$d/empty.sdn"
     scan "$d/ok.sdn" >/dev/null; r1=$?
     scan "$d/fused.sdn" >/dev/null; r2=$?
@@ -147,9 +163,14 @@ selftest() {
     scan "$d/empty.sdn" >/dev/null; r4=$?
     scan "$d/numid.sdn" >/dev/null; r5=$?
     ( range_selftest "$d" ); r6=$?
+    scan "$d/orphan.sdn" >/dev/null; r7=$?
+    scan "$d/headerless.sdn" >/dev/null; r8=$?
+    scan "$d/spaced.sdn" >/dev/null; r9=$?
+    scan "$d/prose-header.sdn" >/dev/null; r10=$?
+    scan "$d/second-header.sdn" >/dev/null; r11=$?
     rm -rf "$d"
-    if [ "$r1" = 0 ] && [ "$r2" = 1 ] && [ "$r3" = 1 ] && [ "$r4" = 2 ] && [ "$r5" = 0 ] && [ "$r6" = 0 ]; then return 0; fi
-    echo "selftest FAILED: ok=$r1 fused=$r2 wide=$r3 empty=$r4 numid=$r5 range=$r6" >&2; return 1
+    if [ "$r1" = 0 ] && [ "$r2" = 1 ] && [ "$r3" = 1 ] && [ "$r4" = 2 ] && [ "$r5" = 0 ] && [ "$r6" = 0 ] && [ "$r7" = 1 ] && [ "$r8" = 1 ] && [ "$r9" = 0 ] && [ "$r10" = 0 ] && [ "$r11" = 1 ]; then return 0; fi
+    echo "selftest FAILED: ok=$r1 fused=$r2 wide=$r3 empty=$r4 numid=$r5 range=$r6 orphan=$r7 headerless=$r8 spaced=$r9 prose_header=$r10 second_header=$r11" >&2; return 1
 }
 
 FILE=doc/08_tracking/bug/bug_db.sdn
@@ -169,6 +190,6 @@ if [ "$RANGE" != "" ]; then
     range_check "$RANGE"; exit $?
 fi
 selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
-if [ "$RUN_SELFTEST_ONLY" = 1 ]; then echo "PASS — selftest 7 fixtures"; exit 0; fi
+if [ "$RUN_SELFTEST_ONLY" = 1 ]; then echo "PASS — selftest 12 fixtures"; exit 0; fi
 [ -f "$FILE" ] || { echo "ERROR — nothing was checked ($FILE missing)"; exit 2; }
 scan "$FILE"

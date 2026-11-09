@@ -99,13 +99,14 @@ selftest_only=0
 self_path=$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")
 
 # --------------------------------------------------------------------------
-# Self-check. Three fixture repos, each a throwaway git repo scanned by THIS
+# Self-check. Four fixture repos, each a throwaway git repo scanned by THIS
 # script through its normal entry point, so neutering any branch above turns
 # the selftest red.
 #   1. clean tree                -> must PASS, exit 0, count > 0
 #   2. one dangling self.method  -> must FAIL, exit 1
 #   3. fixture 2 plus ONE tracked .spl disappearing before index (incident replay)
 #                                -> must ERROR, exit 2 (never PASS)
+#   4. export-use alias + consumer -> must PASS (the alias is a definition)
 # --------------------------------------------------------------------------
 selftest_repo() {
     _st_dir=$1
@@ -131,6 +132,19 @@ run_selftest() {
     case "$_st_rc:$_st_out" in
         0:*PASS\ --\ [1-9]*) : ;;
         *) echo "selftest: FIXTURE 1 (clean) expected exit 0 and a PASS with a nonzero count, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
+    esac
+
+    # Fixture 4 (kept beside clean because both must PASS) -- an export-use
+    # alias is a definition contributed by the re-exporting module.
+    selftest_repo "$_st_root/alias" || { echo "selftest: cannot build fixture 4" >&2; rm -rf "$_st_root"; return 2; }
+    printf 'export use lib.alpha.{alpha as AliasAlpha}\n' > "$_st_root/alias/src/lib/reexport.spl"
+    printf 'use lib.reexport.{AliasAlpha}\nfn use_alias():\n    AliasAlpha()\n' > "$_st_root/alias/src/lib/consumer.spl"
+    ( cd "$_st_root/alias" && git add -A && git commit -qm alias ) >/dev/null 2>&1
+    _st_out=$( cd "$_st_root/alias" && DANGLING_REF_SELFTEST_CHILD=1 sh "$self_path" --quiet 2>/dev/null )
+    _st_rc=$?
+    case "$_st_rc:$_st_out" in
+        0:*PASS\ --\ [1-9]*) : ;;
+        *) echo "selftest: FIXTURE 4 (export-use alias) expected exit 0 and PASS, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
     esac
 
     # Fixture 2 -- a genuine dangling reference must be reported.
@@ -219,7 +233,7 @@ done
 if [ "${DANGLING_REF_SELFTEST_CHILD:-0}" != 1 ]; then
     run_selftest || exit 2
 fi
-[ "$selftest_only" -eq 1 ] && { echo "check-dangling-references: selftest 3/3 fixtures correct"; exit 0; }
+[ "$selftest_only" -eq 1 ] && { echo "check-dangling-references: selftest 4/4 fixtures correct"; exit 0; }
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
     echo "check-dangling-references: ERROR -- nothing was checked: not inside a git repository"

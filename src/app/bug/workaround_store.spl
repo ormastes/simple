@@ -14,9 +14,10 @@ use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink, empty_workaround_
 use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read, workaround_host_read_bytes,
     workaround_host_exists, workaround_host_stage, workaround_host_publish_noreplace,
     workaround_host_modified_time, workaround_host_remove, workaround_host_list,
-    workaround_host_mkdir, workaround_host_cwd, workaround_host_process,
+    workaround_host_mkdir, workaround_host_cwd, workaround_host_process, workaround_host_env,
     workaround_host_now_micros, workaround_host_pid}
 use std.common.crypto.sha256.{sha256_text}
+use std.convert.{try_parse_int}
 
 val WORKAROUND_FRAGMENT_MIN_AGE_S: i64 = 600
 val WORKAROUND_FRAGMENT_COMPACT_AT: i64 = 32
@@ -199,12 +200,47 @@ fn workaround_tracked_paths(output: text) -> Result<[text], text>:
             seen[path] = true
     Ok(paths)
 
+val WORKAROUND_GIT_DEFAULT_TIMEOUT_MS: i64 = 120000
+val WORKAROUND_GIT_DEFAULT_MAX_BYTES: i64 = 67108864
+
+# Env overrides: a positive integer wins, anything else falls back to default.
+fn workaround_limit_from_env(raw: text, default_value: i64) -> i64:
+    val parsed = try_parse_int(raw.trim())
+    if parsed == nil: return default_value
+    val n: i64 = parsed ?? default_value
+    if n <= 0: return default_value
+    n
+
+# Discovery only needs source files, and must never walk build caches,
+# vendored trees, worktrees or the index itself.
+fn workaround_source_pathspecs() -> [text]:
+    var specs: [text] = ["--"]
+    for suffix in [".spl", ".c", ".h", ".rs", ".sh", ".shs", ".ps1", ".py", ".js", ".ts", ".cpp", ".hpp"]:
+        specs.push("*" + suffix)
+    for dir in ["build", ".simple", ".worktrees", "src/compiler_rust/vendor", "src/runtime/vendor"]:
+        specs.push(":(exclude)" + dir)
+    specs
+
+fn workaround_fullscan_args() -> [text]:
+    var args = ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+    for spec in workaround_source_pathspecs(): args.push(spec)
+    args
+
+fn workaround_status_args() -> [text]:
+    var args = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+    for spec in workaround_source_pathspecs(): args.push(spec)
+    args
+
 fn workaround_git(root: text, args: [text]) -> Result<text, text>:
     var invocation = ["-C", root]
     for arg in args: invocation.push(arg)
-    val (out, err, code) = workaround_host_process("git", invocation, 30000, 16777216)
-    if code != 0: return Err("workaround Git failed ({code}): {err}")
-    if out.len() >= 16777216: return Err("workaround Git output exceeded bound")
+    val timeout_ms = workaround_limit_from_env(workaround_host_env("SIMPLE_WORKAROUND_GIT_TIMEOUT_MS"), WORKAROUND_GIT_DEFAULT_TIMEOUT_MS)
+    val max_bytes = workaround_limit_from_env(workaround_host_env("SIMPLE_WORKAROUND_GIT_MAX_BYTES"), WORKAROUND_GIT_DEFAULT_MAX_BYTES)
+    val (out, err, code) = workaround_host_process("git", invocation, timeout_ms, max_bytes)
+    if code != 0:
+        return Err("workaround Git failed ({code}): {err} (limits: timeout {timeout_ms}ms, output {max_bytes} bytes; raise SIMPLE_WORKAROUND_GIT_TIMEOUT_MS / SIMPLE_WORKAROUND_GIT_MAX_BYTES)")
+    if out.len() >= max_bytes:
+        return Err("workaround Git output exceeded bound {max_bytes} bytes; raise SIMPLE_WORKAROUND_GIT_MAX_BYTES")
     Ok(out)
 
 fn workaround_index_present(root: text) -> bool:
@@ -461,13 +497,13 @@ fn workaround_refresh_discover(root: text, fullscan: bool, known_paths: [text]) 
     var discovered = known_paths
     if fullscan:
         # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 ef0681fc0e1 decodes a `?`-unwrapped Result<text,_> payload as an i64 local (handle rendered as digits / compared as int); bind through a typed match
-        val trytext_77: text = match workaround_git(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"] ):
+        val trytext_77: text = match workaround_git(root, workaround_fullscan_args()):
             case Ok(v): v
             case Err(e): return Err(e)
         discovered = workaround_tracked_paths(trytext_77)?
     elif known_paths.len() == 0:
         # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 ef0681fc0e1 decodes a `?`-unwrapped Result<text,_> payload as an i64 local (handle rendered as digits / compared as int); bind through a typed match
-        val trytext_78: text = match workaround_git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"] ):
+        val trytext_78: text = match workaround_git(root, workaround_status_args()):
             case Ok(v): v
             case Err(e): return Err(e)
         discovered = workaround_status_paths(trytext_78)?

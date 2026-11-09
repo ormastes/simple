@@ -70,6 +70,34 @@ fn module_has_method_leaf(module: &Module<'static>, leaf: &str) -> bool {
     false
 }
 
+
+/// Does the module define or declare a USER `byte_len` (free function or a
+/// non-text-owner method)? Text-owner spellings (`str.byte_len`, ...) are the
+/// builtin itself and do not count. A bare `byte_len` may only be rebound to
+/// `rt_string_len` when this is false, mirroring the #7873 owner gate:
+/// `src/os/kernel/loader/byte_utils.spl` defines `fn byte_len(data: [u8])`.
+#[cfg(feature = "llvm")]
+pub(crate) fn module_has_user_byte_len(module: &Module<'static>) -> bool {
+    let mut func_opt = module.get_first_function();
+    while let Some(f) = func_opt {
+        let name = f.get_name().to_string_lossy().into_owned();
+        let leaf_hit = name == "byte_len" || name.ends_with(".byte_len") || name.ends_with("_dot_byte_len");
+        if leaf_hit && super::super::resolved_text_runtime_method(&name) != Some("rt_string_len") {
+            return true;
+        }
+        func_opt = f.get_next_function();
+    }
+    false
+}
+
+/// A bare `byte_len` redirect needs a text-or-erased receiver; anything else
+/// falls through to normal resolution instead of failing the build.
+pub(crate) fn byte_len_receiver_is_text_or_erased(ty: Option<crate::hir::TypeId>) -> bool {
+    ty.map_or(true, |t| {
+        t == crate::hir::TypeId::STRING || t == crate::hir::TypeId::ANY || t == crate::hir::TypeId::UNKNOWN
+    })
+}
+
 fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
     match rt_name {
         "rt_len"
@@ -448,7 +476,7 @@ impl LlvmBackend {
         // The freestanding/kernel runtime (riscv64-unknown-none, etc.) tags strings
         // with a single-byte object_type == RT_HEAP_STRING (0x01) instead of the
         // hosted 4-byte "STR1" magic (0x53545231). No hosted heap kind uses byte0 == 1
-        // (STRING=0x31, ARRAY=0x02, ENUM=0x04, DICT=0x06), so this extra check is safe
+        // (STRING=0x31, ARRAY=0x02, ENUM=0x04, DICT=0x03), so this extra check is safe
         // on both tiers and lets text.len() reach the len load instead of returning -1.
         let is_string_byte = builder
             .build_int_compare(
@@ -475,12 +503,46 @@ impl LlvmBackend {
         } else {
             len_block
         };
+        let collection_block = self.context_ref().append_basic_block(function, "len_collection");
         builder
-            .build_conditional_branch(is_collection, kind_block, done_block)
+            .build_conditional_branch(is_collection, collection_block, done_block)
             .map_err(|e| crate::error::factory::llvm_build_failed("len type branch", &e))?;
         let type_loaded_block = builder
             .get_insert_block()
             .ok_or_else(|| CompileError::semantic("LLVM len type block missing".to_string()))?;
+
+        // Text: a user-facing `.len()` counts CODE POINTS (ADR-005 item 5), so
+        // the string arm calls rt_string_char_count (ASCII fast path inside)
+        // instead of loading the offset-8 BYTE length; arrays keep the inline
+        // element-count load. Bug:
+        // text_len_bytes_vs_codepoint_index_bound_disagree_2026_11_03.
+        let string_cp_block = self.context_ref().append_basic_block(function, "len_string_cp");
+        builder.position_at_end(collection_block);
+        builder
+            .build_conditional_branch(is_string_any, string_cp_block, kind_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("len string branch", &e))?;
+        builder.position_at_end(string_cp_block);
+        let string_cp_fn = {
+            let module = self.module.borrow();
+            module.get_function("rt_string_char_count").unwrap_or_else(|| {
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                module.add_function("rt_string_char_count", fn_type, None)
+            })
+        };
+        let string_cp_call = builder
+            .build_call(string_cp_fn, &[value.into()], "len_string_cp_call")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_char_count", &e))?;
+        let string_cp_len = string_cp_call
+            .try_as_basic_value()
+            .basic()
+            .unwrap_or_else(|| invalid.into())
+            .into_int_value();
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("len string cp done branch", &e))?;
+        let string_cp_loaded_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM len string cp block missing".to_string()))?;
 
         // FAM dispatch: arrays take the u32 load, strings the u64 load.
         let array_len_block = if fam_arrays {
@@ -542,6 +604,7 @@ impl LlvmBackend {
             phi.add_incoming(&[
                 (&invalid, current_block),
                 (&invalid, type_loaded_block),
+                (&string_cp_len, string_cp_loaded_block),
                 (&len, len_loaded_block),
                 (&array_len, array_len_loaded_block),
             ]);
@@ -556,6 +619,7 @@ impl LlvmBackend {
         phi.add_incoming(&[
             (&invalid, current_block),
             (&invalid, type_loaded_block),
+            (&string_cp_len, string_cp_loaded_block),
             (&len, len_loaded_block),
         ]);
         vreg_map.insert(dest, phi.as_basic_value());
@@ -2122,6 +2186,16 @@ impl LlvmBackend {
         // we must map these to rt_* functions. The first arg is the receiver.
         let bare_rt_redirect: Option<&str> = match func_name_raw {
             // String methods (all verified as T symbols in runtime)
+            // Bare `byte_len` is the text byte-length builtin ONLY when the module
+            // defines no user `byte_len` (src/os/kernel/loader/byte_utils.spl does)
+            // and the single receiver is text-or-erased; else normal resolution.
+            "byte_len"
+                if !module_has_user_byte_len(module)
+                    && args.len() == 1
+                    && byte_len_receiver_is_text_or_erased(vreg_types.get(&args[0]).copied()) =>
+            {
+                Some("rt_string_len")
+            }
             "starts_with" => Some("rt_string_starts_with"),
             "ends_with" => Some("rt_string_ends_with"),
             "contains" => Some("rt_contains"),
@@ -2185,7 +2259,9 @@ impl LlvmBackend {
                     return Err(CompileError::semantic("text.byte_len expects one receiver and no arguments"));
                 }
                 if vreg_types.get(&args[0]).is_some_and(|ty| {
-                    *ty != crate::hir::TypeId::STRING && *ty != crate::hir::TypeId::ANY
+                    *ty != crate::hir::TypeId::STRING
+                        && *ty != crate::hir::TypeId::ANY
+                        && *ty != crate::hir::TypeId::UNKNOWN
                 }) {
                     return Err(CompileError::semantic("text.byte_len requires a text receiver"));
                 }

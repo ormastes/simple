@@ -1,7 +1,10 @@
 # trace query prints TRACE-LEGACY-ROW / TRACE-AUTHORITY-CONFLICT diagnostics on stdout
 
 - **Filed:** 2026-11-06 (libbug coordinator, Astra review of PRs #7202/#7206)
-- **Status:** open (P3)
+- **Status:** fixed (P3), 2026-11-08. The previously landed r12 repair has green
+  trace-spec evidence; current source routes all non-SDN diagnostic batches to
+  stderr. A fresh direct-query attempt was blocked before execution by the
+  unrelated `windows_redirected_process.spl` parser defect.
 - **Symptom:** `simple run src/app/traceability/query_main.spl refs ...` appends per-row
   diagnostics (8 `TRACE-LEGACY-ROW: row has N fields, expected 10` for malformed bug_db rows,
   `TRACE-AUTHORITY-CONFLICT` lines) to stdout after the table, mixing them with the result an

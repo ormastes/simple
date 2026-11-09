@@ -46,6 +46,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_secure_staging.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_shared_parse_cell_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_bootstrap_linux_provider.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_bootstrap_process_bridge_unavailable.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
@@ -473,6 +474,16 @@ fn compile_c_runtime_sources() {
         c_sources.push("runtime_bootstrap_linux_provider.c");
     }
     let linux_uring = target_os == "linux";
+    // runtime_socket_nonblock.c (via runtime_local_unix_transfer_v1.h) and
+    // runtime_process_owned.c (via runtime_linux_group_owner_impl.h) call five
+    // Linux-only process-bridge symbols owned by runtime_process.c, which this
+    // crate cannot compile (Rust-owned rt_process_* collisions). The seed has no
+    // piped-process registry, so this TU answers each bridge with the owner's
+    // own no-slot/unsupported code. Without it the Linux seed fails to LINK
+    // (release.yml run 42457312983, 2026-11-08). Empty TU off Linux.
+    if linux_uring {
+        c_sources.push("runtime_bootstrap_process_bridge_unavailable.c");
+    }
     if linux_uring {
         c_sources.push("platform/async_driver.c");
         c_sources.push("platform/async_linux_uring.c");

@@ -1,6 +1,6 @@
 # enum_payload_type_mismatch_tuple_pattern_binders
 
-Status: workaround applied, root fix open. Phase-3 run-11 (8ab7cd693d8) MIR stage.
+Status: fix-implemented-verification-pending (root fix: MIR keeps the declared slot type for enum-slot extraction in tuple-subject patterns; spec test/01_unit/compiler/50.mir/enum_tuple_pattern_binder_payload_typing_spec.spl). Workaround stays until stage3 native verification. Phase-3 run-11 (8ab7cd693d8) MIR stage.
 
 Symptom: HirTypeKind.Function/Layer/Tensor/Tuple payload mismatch in type_infer/inference_control.spl (infer_compose/parallel/layer_connect/matmul/broadcast_op) plus for-in over I64: binders from tuple-pattern 'case (Function(a,b,_), Function(c,d,_))' carry no static type.
 

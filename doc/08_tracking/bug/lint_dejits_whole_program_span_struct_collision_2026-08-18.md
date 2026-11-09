@@ -5,7 +5,14 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-18
-- Status: **OPEN (Cause 1) — Cause 2 (same-named struct de-JIT) FIXED 2026-10-19, see end**
+- Status: **OPEN (2026-11-08 revalidated)** — Cause 2 was fixed by the
+  module-qualified HIR struct identity work on 2026-10-19 (below). The original
+  CLI-substring gate was replaced by `cd1af4f68de` with a real argv-capability
+  check, but the titled whole-program lint de-JIT remains: current
+  `exec_core.rs` deliberately returns `lint-jit-parity-unproven` before that
+  check because the lint JIT lane has produced false-clean results. The record
+  stays open for a verified lint JIT parity fix; no lint behavior was changed
+  in this batch.
 - Supersedes the "superlinearity not located" section of
   `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`.
 - Binary identity for every number below:

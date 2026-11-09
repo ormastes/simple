@@ -1,0 +1,170 @@
+"""
+Generated wrapper files through their real production owners. These scenarios
+generate and read source; they do not compile or execute the generated program.
+Execution and generated documentation remain pending a qualified test runtime.
+"""
+use std.spec.{describe, it, expect}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_executor_parsing.{build_coverage_wrapper, build_coverage_wrapper_checked}
+use std.test_runner.test_runner_execute.{preprocess_spipe_file, preprocess_spipe_file_checked, prepare_native_generated_source}
+use std.common.test_runner.wrapper_filename.{coverage_wrapper_filename}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_create_exclusive}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use std.nogc_sync_mut.env.variables.{env_unset}
+use nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_temp_dir}
+use std.io_runtime.{file_read, getpid, dir_create, dir_list, dir_remove_all, env_get_opt}
+
+fn long_wrapper_source_path() -> text:
+    var path = "C:\\source\\"
+    for index in 0..40:
+        path = path + "nested-authored-module/"
+    path + "positive_spec.spl"
+
+fn wrapper_basename(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    val slash = normalized.last_index_of("/")
+    if slash < 0: normalized else: normalized[slash + 1:]
+
+fn create_wrapper_owner_fixture(payload: text) -> text:
+    val nonce = random_hex(16)
+    if nonce == nil: return ""
+    val path = sosix_test_temp_dir() + "/name_max_fixture_" + getpid().to_text() + "_" + nonce.unwrap() + ".spl"
+    if not file_create_exclusive(path, payload): return ""
+    path
+
+fn restore_wrapper_temp_env(tmpdir: text?, temp: text?):
+    if tmpdir == nil: env_unset("TMPDIR")
+    else: env_set("TMPDIR", tmpdir.unwrap())
+    if temp == nil: env_unset("TEMP")
+    else: env_set("TEMP", temp.unwrap())
+
+describe "bounded wrapper filenames through production owners":
+    it "creates distinct coverage files for long source paths and preserves source bytes":
+        var options = parse_test_args([])
+        options.coverage = true
+        val authored_source = "print \"name-max-owner-payload\"\n"
+        val original = long_wrapper_source_path()
+        val first = build_coverage_wrapper(original, options, authored_source)
+        val second = build_coverage_wrapper(original, options, authored_source)
+        val first_payload = file_read(first.0)
+        val second_payload = file_read(second.0)
+        val first_cleaned = if first.1 != "": file_delete(first.1) else: false
+        val second_cleaned = if second.1 != "": file_delete(second.1) else: false
+        expect(first.0 == "").to_equal(false)
+        expect(second.0 == "").to_equal(false)
+        expect(first.0 == second.0).to_equal(false)
+        expect(first.1).to_equal(first.0)
+        expect(second.1).to_equal(second.0)
+        val first_name = wrapper_basename(first.0)
+        expect(first_name).to_start_with("simple_cov_")
+        expect(first_name).to_end_with("_spec.spl")
+        expect(first_name.len()).to_be_less_than(128)
+        expect(first_payload).to_contain(authored_source)
+        expect(second_payload).to_contain(authored_source)
+        expect(first_cleaned).to_equal(true)
+        expect(second_cleaned).to_equal(true)
+
+    it "creates a native completion wrapper without flattening a long coverage path":
+        val original = long_wrapper_source_path()
+        val authored_source = "val payload = 7\nprint payload\n"
+        val wrapped = preprocess_spipe_file(original, true, true, "plain", authored_source)
+        val payload = file_read(wrapped)
+        val cleaned = if wrapped != "": file_delete(wrapped) else: false
+        expect(wrapped == "").to_equal(false)
+        val filename = wrapper_basename(wrapped)
+        expect(filename).to_start_with("spipe_wrapped_")
+        expect(filename).to_end_with("_native.spl")
+        expect(filename.len()).to_be_less_than(128)
+        expect(payload).to_contain("val payload = 7")
+        expect(cleaned).to_equal(true)
+
+    it "bounds the native framework branch without completion evidence":
+        val wrapped = preprocess_spipe_file(long_wrapper_source_path(), true, false, "", "print 7\n")
+        val payload = file_read(wrapped)
+        val cleaned = if wrapped != "": file_delete(wrapped) else: false
+        expect(wrapped == "").to_equal(false)
+        expect(wrapper_basename(wrapped).len()).to_be_less_than(128)
+        expect(payload).to_contain("print 7")
+        expect(cleaned).to_equal(true)
+
+    it "bounds the legacy SMF preprocessing branch":
+        val wrapped = preprocess_spipe_file(long_wrapper_source_path(), false, false, "", "print 7\n")
+        val payload = file_read(wrapped)
+        val cleaned = if wrapped != "": file_delete(wrapped) else: false
+        expect(wrapped == "").to_equal(false)
+        expect(wrapper_basename(wrapped)).to_start_with("spipe_wrapped_")
+        expect(wrapper_basename(wrapped).len()).to_be_less_than(128)
+        expect(payload).to_contain("print 7")
+        expect(cleaned).to_equal(true)
+
+    it "refuses coverage and every preprocessing write into a non-directory without touching authored source":
+        val authored = "print 7\n"
+        val fixture = create_wrapper_owner_fixture(authored)
+        assert(fixture != "")
+        val old_tmpdir = env_get_opt("TMPDIR")
+        val old_temp = env_get_opt("TEMP")
+        env_set("TMPDIR", fixture)
+        env_set("TEMP", fixture)
+        var options = parse_test_args([])
+        options.coverage = true
+        val coverage = build_coverage_wrapper(fixture, options, authored)
+        val checked_coverage = build_coverage_wrapper_checked(fixture, options, authored)
+        val prepared = prepare_native_generated_source(fixture, options, authored, true, "plain")
+        val completion = preprocess_spipe_file_checked(fixture, true, true, "plain", authored)
+        val framework = preprocess_spipe_file_checked(fixture + "_spec.spl", true, false, "", authored)
+        val legacy = preprocess_spipe_file_checked(fixture + "_spec.spl", false, false, "", authored)
+        restore_wrapper_temp_env(old_tmpdir, old_temp)
+        val remaining_source = file_read(fixture)
+        val cleaned = file_delete(fixture)
+        expect(coverage).to_equal(("", ""))
+        expect(checked_coverage.unwrap_err()).to_start_with("coverage wrapper exclusive create refused: ")
+        expect(prepared.is_err()).to_equal(true)
+        expect(prepared.unwrap_err()).to_start_with("coverage wrapper exclusive create refused: ")
+        expect(completion.unwrap_err()).to_start_with("native wrapper exclusive create refused: ")
+        expect(framework.unwrap_err()).to_start_with("native wrapper exclusive create refused: ")
+        expect(legacy.unwrap_err()).to_start_with("native wrapper exclusive create refused: ")
+        expect(remaining_source).to_equal(authored)
+        expect(cleaned).to_equal(true)
+
+    it "cleans the owned coverage file after a source rejection and preserves the authored file":
+        val authored = "fn main():\n    print 7\n"
+        val fixture = create_wrapper_owner_fixture(authored)
+        assert(fixture != "")
+        val owned_directory = fixture + "_generated"
+        val created = dir_create(owned_directory, false)
+        if not created:
+            file_delete(fixture)
+        assert(created)
+        val old_tmpdir = env_get_opt("TMPDIR")
+        val old_temp = env_get_opt("TEMP")
+        env_set("TMPDIR", owned_directory)
+        env_set("TEMP", owned_directory)
+        var options = parse_test_args([])
+        options.coverage = true
+        val prepared = prepare_native_generated_source(fixture, options, authored, true, "spec")
+        restore_wrapper_temp_env(old_tmpdir, old_temp)
+        val generated_entries = dir_list(owned_directory)
+        val remaining_source = file_read(fixture)
+        val directory_cleaned = dir_remove_all(owned_directory)
+        val fixture_cleaned = file_delete(fixture)
+        expect(prepared.is_err()).to_equal(true)
+        expect(prepared.unwrap_err()).to_start_with("native preprocessing source rejected: ")
+        expect(prepared.unwrap_err()).to_contain("source defines main")
+        expect(generated_entries.len()).to_equal(0)
+        expect(directory_cleaned).to_equal(true)
+        expect(remaining_source).to_equal(authored)
+        expect(fixture_cleaned).to_equal(true)
+
+    it "refuses a bounded coverage-name collision through the actual exclusive-create provider":
+        val nonce = random_hex(16)
+        assert(nonce != nil)
+        val path = sosix_test_temp_dir() + "/" + coverage_wrapper_filename(getpid(), nonce, true).unwrap()
+        val created = file_create_exclusive(path, "first payload")
+        assert(created)
+        val replaced = file_create_exclusive(path, "must not replace")
+        val payload = file_read(path)
+        val cleaned = file_delete(path)
+        expect(replaced).to_equal(false)
+        expect(payload).to_equal("first payload")
+        expect(cleaned).to_equal(true)
