@@ -328,10 +328,20 @@ static int walk_from(int dir_fd, const char *rel) {
         int next = openat(current, name, flags);
         if (next < 0) {
             int err = errno;
+            /* Darwin checks the O_DIRECTORY type before O_NOFOLLOW and reports
+             * ENOTDIR for a symlink component (Linux reports ELOOP); a
+             * no-follow fstatat distinguishes that from a regular-file
+             * component, which stays OPEN_FAILED. */
+            int symlink = 0;
+            if (err == ENOTDIR) {
+                struct stat lst;
+                symlink = fstatat(current, name, &lst, AT_SYMLINK_NOFOLLOW) == 0
+                    && S_ISLNK(lst.st_mode);
+            }
             close(current);
             if (err == ENOENT) return -FDWALK_MISSING;
             /* O_NOFOLLOW on a symlink: ELOOP (Linux, Darwin); some BSDs EMLINK */
-            if (err == ELOOP || err == EMLINK) return -FDWALK_SYMLINK;
+            if (err == ELOOP || err == EMLINK || symlink) return -FDWALK_SYMLINK;
             return -FDWALK_OPEN_FAILED;
         }
         close(current);

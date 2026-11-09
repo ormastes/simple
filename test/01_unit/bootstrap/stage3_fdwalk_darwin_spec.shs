@@ -21,7 +21,9 @@
 #   X2 exec of a held executable whose path was REPLACED (mv another file over
 #      it) is refused with 71 — the TOCTOU case the helper exists for
 #   X3 exec of a held executable that was unlinked is refused with 71
-#   X4 exec of a held executable whose path became a symlink is refused (71)
+#   X4 exec of a held executable whose path became a symlink is identity-
+#      preserving: refused (71), admitted same-inode (0), or the kernel kills
+#      the exec by signal (>=128, e.g. host kill of renamed-victim exec)
 #   X5 --sha256 mismatch is refused (70) before any exec attempt
 #   X6 the helper's own --selftest passes (shared twin vectors)
 #   X7 the Perl runner's Darwin preamble admits the helper by fd + sha256 and
@@ -104,15 +106,20 @@ rm -f "$work/victim3"
 exec 8<&-
 
 # X4: path became a symlink
+# Observed 2026-11-09 on aarch64-apple-darwin (first native run): a THIRD
+# outcome exists — execve of the renamed victim can die by SIGNAL (rc 137 =
+# SIGKILL) when the host kills execs of copied/renamed system binaries
+# (reproduced with a bare `cp /bin/sh /tmp/x && mv /tmp/x /tmp/y && /tmp/y`,
+# no helper involved). All three outcomes preserve identity: 0 = F_GETPATH
+# followed the rename and the same inode was admitted; 71 = refused by the
+# verify-by-fd verdict; >=128 = the kernel killed the exec, so nothing ran.
 cp /bin/sh "$work/victim4" && chmod 0700 "$work/victim4"
 exec 9<"$work/victim4"
 mv "$work/victim4" "$work/victim4.real" && ln -s victim4.real "$work/victim4"
-"$helper" exec --exec-fd 9 -- sh -c 'echo must-not-run' >/dev/null 2>"$work/x4.err"; rc=$?
-# Either the vnode's F_GETPATH now names victim4.real (admit would be CORRECT:
-# same inode) or names victim4 (a symlink -> refused). Both preserve identity;
-# record which happened rather than guessing.
+"$helper" exec --exec-fd 9 -- sh -c 'echo must-not-run' >"$work/x4.out" 2>"$work/x4.err"; rc=$?
 if [ "$rc" -eq 0 ]; then echo 'NOTE X4: F_GETPATH followed the rename; same inode admitted'; fi
-[ "$rc" -eq 0 ] || [ "$rc" -eq 71 ]; record X4-symlinked-path-identity-preserved $?
+if [ "$rc" -ge 128 ]; then echo "NOTE X4: exec died by signal (rc=$rc), e.g. host kill of renamed-victim exec; nothing ran"; fi
+[ "$rc" -eq 0 ] || [ "$rc" -eq 71 ] || [ "$rc" -ge 128 ]; record X4-symlinked-path-identity-preserved $?
 exec 9<&-
 
 # X5: sha mismatch refused before exec
