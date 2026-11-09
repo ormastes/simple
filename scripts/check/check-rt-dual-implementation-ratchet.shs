@@ -124,8 +124,11 @@ extract_lanes() {
     : > "$el_out/c_syms.txt"
     : > "$el_out/rust_syms.txt"
 
-    # C lane: `rt_NAME(...) {` definitions in owned C sources. Vendored runtime
-    # source is excluded per CLAUDE.md's Owned-Code Scope.
+    # C lane: `rt_NAME(...) {` definitions in owned C sources and headers.
+    # Header implementation units are part of the same source lane at BASE
+    # and HEAD; adding a .c platform fallback to one is not a new primitive.
+    # Prototypes still do not count. Third-party sources/headers are excluded
+    # per CLAUDE.md's Owned-Code Scope, not admitted through this widening.
     if [ -d "$el_root/src/runtime" ]; then
         # Lexical definitions, not physical lines. Do not evaluate #if/TEST
         # conditions: this remains a source census, not a preprocessed build.
@@ -137,8 +140,9 @@ my %symbols;
 my $limit = 16 * 1024 * 1024;
 find({ no_chdir => 1, wanted => sub {
     if (-d $_ && /(?:^|\/)vendor$/) { $File::Find::prune = 1; return; }
-    return unless /\.c$/ && -f $_;
+    return unless /\.(?:c|h)$/ && -f $_;
     my $path = $_;
+    return if grep { $path eq "$ARGV[0]/$_" } qw(miniaudio.h stb_image.h stb_truetype.h);
     open my $fh, '<', $path or die "C extractor open $path: $!\n";
     my $source = '';
     while (length($source) <= $limit) {
@@ -848,6 +852,85 @@ RUST
     if ! grep -qx 'rt_provider_crate_only' "$st_dir/w11/rust_syms.txt" \
        || ! grep -qx 'rt_loader_crate_only' "$st_dir/w11/rust_syms.txt"; then
         echo "selftest: FAILED — provider-crate rt_* invisible to the Rust lane, got [$(cat "$st_dir/w11/rust_syms.txt")]"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Owned headers may carry real definitions, not just declarations. Keep
+    # prototypes, calls, comments and third-party runtime headers excluded.
+    mkfixture header_definitions
+    mkdir -p "$st_dir/header_definitions/src/runtime/vendor"
+    cat > "$st_dir/header_definitions/src/runtime/owned_impl.h" <<'C'
+#if defined(__linux__)
+int64_t
+rt_header_existing(void)
+{ return 3; }
+#endif
+int64_t rt_header_prototype_only(void);
+/* int64_t rt_header_comment(void) { return 0; } */
+static inline int helper(void) { return rt_header_call_only(); }
+C
+    for third_party in miniaudio.h stb_image.h stb_truetype.h vendor/third_party.h; do
+        printf 'int64_t rt_third_party(void) { return 0; }\n' \
+            > "$st_dir/header_definitions/src/runtime/$third_party"
+    done
+    mkdir -p "$st_dir/header_definitions_out"
+    extract_lanes "$st_dir/header_definitions" "$st_dir/header_definitions_out" \
+        || { rm -rf "$st_dir"; return 1; }
+    printf '%s\n' rt_conly rt_header_existing rt_shared > "$st_dir/header_expected"
+    if ! cmp -s "$st_dir/header_expected" "$st_dir/header_definitions_out/c_syms.txt"; then
+        echo 'selftest: FAILED owned header definitions/prototypes/third-party exclusion'
+        cat "$st_dir/header_definitions_out/c_syms.txt"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Real committed-content delta scans must recognize the same owned header
+    # definition at BASE and HEAD. A new platform fallback is not a new API.
+    mkfixture header_delta
+    ( cd "$st_dir/header_delta" && git init -q . \
+      && git config user.email selftest@example.com && git config user.name selftest ) >/dev/null 2>&1
+    mkdir -p "$st_dir/header_delta/scripts/check"
+    cp "$st_dir/base_ok.txt" "$st_dir/header_delta/scripts/check/rt_dual_implementation_baseline.txt"
+    printf '#if defined(__linux__)\nint64_t rt_header_existing(void) { return 3; }\n#endif\n' \
+        > "$st_dir/header_delta/src/runtime/owned_impl.h"
+    printf 'int64_t rt_header_prototype_only(void);\n' \
+        > "$st_dir/header_delta/src/runtime/owned_api.h"
+    ( cd "$st_dir/header_delta" && git add -A && git commit -q -m header-base ) >/dev/null 2>&1
+    st_header_base=$(cd "$st_dir/header_delta" && git rev-parse HEAD)
+    printf '#if !defined(__linux__)\nint64_t rt_header_existing(void) { return 3; }\n#endif\n' \
+        > "$st_dir/header_delta/src/runtime/fallback.c"
+    ( cd "$st_dir/header_delta" && git add -A && git commit -q -m platform-fallback ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh "$SELF" \
+        --root "$st_dir/header_delta" --rev HEAD --baseline-rev "$st_header_base" 2>&1)
+    st_rc=$?
+    if [ "$st_rc" -ne 0 ] || ! printf '%s\n' "$st_out" | tail -1 | grep -q '^PASS .* 0 new '; then
+        echo "selftest: FAILED existing header definition classified NEW after platform fallback: $st_out"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # A BASE header prototype must not mask a genuinely new implementation.
+    printf 'int64_t rt_header_prototype_only(void) { return 4; }\n' \
+        > "$st_dir/header_delta/src/runtime/prototype_became_definition.c"
+    ( cd "$st_dir/header_delta" && git add -A && git commit -q -m implement-prototype ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh "$SELF" \
+        --root "$st_dir/header_delta" --rev HEAD --baseline-rev HEAD~1 2>&1)
+    st_rc=$?
+    if [ "$st_rc" -ne 1 ] || ! printf '%s\n' "$st_out" | grep -qx '  rt_header_prototype_only'; then
+        echo "selftest: FAILED header prototype concealed new single-lane definition: $st_out"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    printf 'int64_t rt_unpaired_new_c(void) { return 5; }\n' \
+        > "$st_dir/header_delta/src/runtime/new.c"
+    ( cd "$st_dir/header_delta" && git add -A && git commit -q -m new-unpaired-c ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh "$SELF" \
+        --root "$st_dir/header_delta" --rev HEAD --baseline-rev HEAD~1 2>&1)
+    st_rc=$?
+    if [ "$st_rc" -ne 1 ] || ! printf '%s\n' "$st_out" | grep -qx '  rt_unpaired_new_c'; then
+        echo "selftest: FAILED new unpaired C definition escaped ratchet: $st_out"
         rm -rf "$st_dir"; return 1
     fi
     st_n=$((st_n + 1))
