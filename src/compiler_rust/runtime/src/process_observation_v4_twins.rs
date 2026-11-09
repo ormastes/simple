@@ -55,10 +55,7 @@ unsafe fn rt_process_observation_v4_capabilities_value() -> *mut c_void {
 /// implementation at line 2483). Sentinel: 0 — the exact value the C
 /// non-unix branch returns (`(void)path_data; (void)path_len; return 0;`).
 #[cfg(test)]
-unsafe fn rt_process_observation_v4_pin_cwd_value(
-    _path_data: *const u8,
-    _path_len: u64,
-) -> i64 {
+unsafe fn rt_process_observation_v4_pin_cwd_value(_path_data: *const u8, _path_len: u64) -> i64 {
     0
 }
 
@@ -99,10 +96,7 @@ unsafe fn rt_process_observation_v4_start_value(_binding: *mut c_void) -> *mut c
 /// implementation at line 3558). Rust sentinel: null pointer — fail-closed
 /// twin; no Rust SplArray provider yet.
 #[cfg(test)]
-unsafe fn rt_process_observation_v4_poll_value(
-    _ticket: *mut c_void,
-    _wait_ns: i64,
-) -> *mut c_void {
+unsafe fn rt_process_observation_v4_poll_value(_ticket: *mut c_void, _wait_ns: i64) -> *mut c_void {
     std::ptr::null_mut()
 }
 
@@ -111,10 +105,7 @@ unsafe fn rt_process_observation_v4_poll_value(
 /// implementation at line 3577). Rust sentinel: null pointer — fail-closed
 /// twin; no Rust SplArray provider yet.
 #[cfg(test)]
-unsafe fn rt_process_observation_v4_cancel_value(
-    _ticket: *mut c_void,
-    _wait_ns: i64,
-) -> *mut c_void {
+unsafe fn rt_process_observation_v4_cancel_value(_ticket: *mut c_void, _wait_ns: i64) -> *mut c_void {
     std::ptr::null_mut()
 }
 
@@ -123,10 +114,7 @@ unsafe fn rt_process_observation_v4_cancel_value(
 /// implementation at line 3594). Rust sentinel: null pointer — fail-closed
 /// twin; no Rust SplArray provider yet.
 #[cfg(test)]
-unsafe fn rt_process_observation_v4_collect_value(
-    _ticket: *mut c_void,
-    _wait_ns: i64,
-) -> *mut c_void {
+unsafe fn rt_process_observation_v4_collect_value(_ticket: *mut c_void, _wait_ns: i64) -> *mut c_void {
     std::ptr::null_mut()
 }
 
@@ -135,10 +123,7 @@ unsafe fn rt_process_observation_v4_collect_value(
 /// implementation at line 3621). Rust sentinel: null pointer — fail-closed
 /// twin; no Rust SplArray provider yet.
 #[cfg(test)]
-unsafe fn rt_process_observation_v4_ack_collect_value(
-    _ticket: *mut c_void,
-    _digest: *mut c_void,
-) -> *mut c_void {
+unsafe fn rt_process_observation_v4_ack_collect_value(_ticket: *mut c_void, _digest: *mut c_void) -> *mut c_void {
     std::ptr::null_mut()
 }
 

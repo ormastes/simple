@@ -245,33 +245,35 @@ impl WindowManager {
         });
 
         // Run event loop
-        let _ = event_loop.run_app(&mut WindowEventHandler(move |event: Event<UserEvent>, target: &winit::event_loop::ActiveEventLoop| match event {
-            Event::UserEvent(UserEvent::Request(request)) => {
-                Self::handle_request(request, &windows, &instance, target);
-            }
+        let _ = event_loop.run_app(&mut WindowEventHandler(
+            move |event: Event<UserEvent>, target: &winit::event_loop::ActiveEventLoop| match event {
+                Event::UserEvent(UserEvent::Request(request)) => {
+                    Self::handle_request(request, &windows, &instance, target);
+                }
 
-            Event::WindowEvent {
-                window_id,
-                event: win_event,
-            } => {
-                let windows_lock = windows.lock();
-                let window_handle = windows_lock
-                    .iter()
-                    .find(|(_, state)| state.window.id() == window_id)
-                    .map(|(handle, _)| *handle);
-                drop(windows_lock);
+                Event::WindowEvent {
+                    window_id,
+                    event: win_event,
+                } => {
+                    let windows_lock = windows.lock();
+                    let window_handle = windows_lock
+                        .iter()
+                        .find(|(_, state)| state.window.id() == window_id)
+                        .map(|(handle, _)| *handle);
+                    drop(windows_lock);
 
-                if let Some(handle) = window_handle {
-                    if let Some(event) = Self::convert_window_event(handle, win_event) {
-                        let _ = event_sender.send(event);
+                    if let Some(handle) = window_handle {
+                        if let Some(event) = Self::convert_window_event(handle, win_event) {
+                            let _ = event_sender.send(event);
+                        }
                     }
                 }
-            }
 
-            Event::AboutToWait => {}
+                Event::AboutToWait => {}
 
-            _ => {}
-        }));
+                _ => {}
+            },
+        ));
 
         tracing::info!("Event loop thread exiting");
     }

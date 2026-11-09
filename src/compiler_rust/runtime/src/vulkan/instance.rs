@@ -136,10 +136,7 @@ impl VulkanInstance {
         {
             layer_names_raw = vec![];
         }
-        let layer_names: Vec<*const c_char> = layer_names_raw
-            .iter()
-            .map(|name| name.as_ptr())
-            .collect();
+        let layer_names: Vec<*const c_char> = layer_names_raw.iter().map(|name| name.as_ptr()).collect();
 
         // Required extensions
         let mut extension_names_raw = vec![];
