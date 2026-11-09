@@ -91,3 +91,6 @@ compile and execute rather than merely receive a safer error. All authored
 compiler regressions remain UNRUN under the exhausted shared diagnostic budget.
 
 See also stage3_native_build_heap_corruption_c0000374_2026_11_08 (2026-11-08: stage3 s3_fable64b.exe heap-corrupts on hello world, blocks retest).
+
+## 2026-11-09 — resolved-disappeared (native)
+Native re-run 2026-11-09 with the current self-hosted stage2 `C:/dev/p3new/stage2new/stage2_new4.exe` (`native-build --entry-closure`, llvm, x86_64-pc-windows-gnu, core-c-bootstrap, SIMPLE_HIR_CACHE=0, clean sparse worktree of origin/release/1.0.0 @1cc167e37fd): the original fixture `test/fixtures/compiler/phase2_result_byte_codec/result_payload.spl` (unchanged) builds, links and runs: `RESULT rc=0 stdout=[PASS Result byte-array and codec payload: 3 assertions]` (build 353 s, peak 0.96 GB). The crash belonged to the old phase2 producer. Side finding: the Nov-4 Rust seed `bin/simple.exe run` exits 139 on ANY passing `assert(...)` in a plain `fn main` (JIT path) — seed is stale vs release; not this bug.

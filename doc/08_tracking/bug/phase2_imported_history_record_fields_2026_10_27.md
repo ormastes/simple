@@ -44,3 +44,6 @@ forwarding precedence and fresh-array ownership changes are reasonable in their
 respective scopes, but do not establish this old producer's field-read behavior.
 They remain upstream; no duplicate cherry-picks or global compiler flags were
 used. Compiler-source changes do not alter this immutable Phase2 executable.
+
+## 2026-11-09 — resolved-disappeared (native)
+Native re-run 2026-11-09 with the current self-hosted stage2 `C:/dev/p3new/stage2new/stage2_new4.exe` (`native-build --entry-closure`, llvm, x86_64-pc-windows-gnu, core-c-bootstrap, SIMPLE_HIR_CACHE=0, clean sparse worktree of origin/release/1.0.0 @1cc167e37fd): two-module reproducer `test/fixtures/compiler/phase2_native_repro/imported_history_fields.spl` (5-text-field record declared in an imported module, 500-entry array built there, `items[499]` indexed in the importer) reads every distinct field: `RESULT rc=0 stdout=[cmd=cmd-499 result=value-499 session=session core=core req=request-499|PASS imported indexed fields]`. The owner-view workaround (`t32_history_fields`) may now be retired in a separate change.
