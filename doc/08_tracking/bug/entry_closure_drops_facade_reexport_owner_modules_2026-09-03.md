@@ -133,3 +133,27 @@ interpreter. FIXED in
 `jit_pipeline_loader_skips_plain_package_init_under_numbered_layer_2026-10-30.md`.
 The Simple-written driver's phase-1 closure walk described above is separate
 and still open.
+
+## Re-verified 2026-11-09 (never-touched-p3 lane) — premise fixed in source
+
+Both dropped edges are now followed by the phase-1 driver walk:
+`driver_source_pipeline_loading.spl:1070` calls `driver_closure_import_specs_v1`,
+which (`driver_entry_closure_core.spl` `driver_closure_import_specs_finish_v1`)
+appends every `.sibling` edge from `_driver_entry_sibling_module_paths` — both
+`export X.*` and `# Re-exported from X.spl` — and only when the owner file
+exists (the mandatory "hint, never add_error" guard). Landed via
+`7d8820319a2`, `5334d6c7b3d`, `4a5b072e594`.
+
+Evidence:
+- `test/01_unit/compiler/driver/generated_facade_origin_closure_spec.spl`:
+  `Results: 6 total, 6 passed, 0 failed` (seed, worktree at origin/release/1.0.0).
+- Native repro with the self-hosted stage2 (`stage2_new4.exe`, `native-build
+  --entry-closure`) on the exact 7-line `std.json` program above: phase-1 now
+  loads 44 sources / parses 20 (was `parse 2/2`), including all 11
+  `src/lib/common/json/*.spl` owners; zero `unresolved name` and zero
+  `invalid export origin` errors; HIR passes. The build still fails later, in
+  MIR, on an unrelated defect in `lib.common.json.utilities` (`for-in over
+  non-array iterables` / `unresolved method call: keys` on an `Any`-typed
+  dict) — a different bug, not a closure defect.
+
+Status: fix-implemented-verification-pending.

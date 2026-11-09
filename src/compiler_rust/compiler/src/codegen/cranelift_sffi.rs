@@ -2503,70 +2503,114 @@ mod tests {
 
     #[test]
     fn test_configured_fma_isa_lowers_a_real_function() {
-        use object::{Object, ObjectSection};
+        use object::{Object, ObjectSection, ObjectSymbol};
 
-        unsafe {
-            let name = "configured_fma";
-            let target = "x86_64-unknown-linux-gnu";
-            let cpu = "generic";
-            let feature = "fma";
-            let module = spl_cranelift_new_aot_module_config_v2(
-                name.as_ptr() as i64,
-                name.len() as i64,
-                target.as_ptr() as i64,
-                target.len() as i64,
-                cpu.as_ptr() as i64,
-                cpu.len() as i64,
-                2,
-                feature.as_ptr() as i64,
-                feature.len() as i64,
-            );
-            assert!(module > 0);
-            assert_eq!(
-                spl_cranelift_aot_isa_feature_v2(module, feature.as_ptr() as i64, feature.len() as i64),
-                1
-            );
-            {
-                let mut modules = AOT_MODULES.lock().unwrap();
-                let object_module = &mut modules.get_mut(&module).unwrap().module;
-                let mut signature = object_module.make_signature();
-                for _ in 0..3 {
-                    signature.params.push(AbiParam::new(types::F64));
+        for enabled in [true, false] {
+            unsafe {
+                let name = "configured_fma";
+                let target = "x86_64-unknown-linux-gnu";
+                let cpu = "generic";
+                let feature = if enabled { "fma" } else { "" };
+                let queried_feature = "fma";
+                let module = spl_cranelift_new_aot_module_config_v2(
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    target.as_ptr() as i64,
+                    target.len() as i64,
+                    cpu.as_ptr() as i64,
+                    cpu.len() as i64,
+                    2,
+                    feature.as_ptr() as i64,
+                    feature.len() as i64,
+                );
+                assert!(module > 0);
+                assert_eq!(
+                    spl_cranelift_aot_isa_feature_v2(module, queried_feature.as_ptr() as i64, queried_feature.len() as i64),
+                    i64::from(enabled)
+                );
+                {
+                    let mut modules = AOT_MODULES.lock().unwrap();
+                    let object_module = &mut modules.get_mut(&module).unwrap().module;
+                    let mut signature = object_module.make_signature();
+                    for _ in 0..3 {
+                        signature.params.push(AbiParam::new(types::F64));
+                    }
+                    signature.returns.push(AbiParam::new(types::F64));
+                    let func_id = object_module
+                        .declare_function("fma_probe", Linkage::Export, &signature)
+                        .unwrap();
+                    let mut context = object_module.make_context();
+                    context.func.signature = signature;
+                    let mut builder_context = FunctionBuilderContext::new();
+                    let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+                    let entry = builder.create_block();
+                    builder.append_block_params_for_function_params(entry);
+                    builder.switch_to_block(entry);
+                    builder.seal_block(entry);
+                    let arg0 = builder.block_params(entry)[0];
+                    let arg1 = builder.block_params(entry)[1];
+                    let arg2 = builder.block_params(entry)[2];
+                    let result = builder.ins().fma(arg0, arg1, arg2);
+                    builder.ins().return_(&[result]);
+                    builder.finalize();
+                    object_module.define_function(func_id, &mut context).unwrap();
+                    object_module.clear_context(&mut context);
                 }
-                signature.returns.push(AbiParam::new(types::F64));
-                let func_id = object_module
-                    .declare_function("fma_probe", Linkage::Export, &signature)
+                let temp_dir = tempfile::tempdir().unwrap();
+                let path = temp_dir.path().join("fma.o");
+                let path = path.to_string_lossy();
+                assert!(rt_cranelift_emit_object_raw(
+                    module,
+                    path.as_ptr() as i64,
+                    path.len() as i64
+                ));
+                let bytes = std::fs::read(path.as_ref()).unwrap();
+                let object = object::File::parse(bytes.as_slice()).unwrap();
+                assert_eq!(object.architecture(), object::Architecture::X86_64);
+                assert_eq!(object.format(), object::BinaryFormat::Elf);
+                // ObjectModule may combine functions in .text. The function symbol,
+                // its section and its byte range define the contract, not a section name.
+                let symbol = object
+                    .symbols()
+                    .find(|symbol| symbol.name() == Ok("fma_probe"))
                     .unwrap();
-                let mut context = object_module.make_context();
-                context.func.signature = signature;
-                let mut builder_context = FunctionBuilderContext::new();
-                let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
-                let entry = builder.create_block();
-                builder.append_block_params_for_function_params(entry);
-                builder.switch_to_block(entry);
-                builder.seal_block(entry);
-                let arg0 = builder.block_params(entry)[0];
-                let arg1 = builder.block_params(entry)[1];
-                let arg2 = builder.block_params(entry)[2];
-                let result = builder.ins().fma(arg0, arg1, arg2);
-                builder.ins().return_(&[result]);
-                builder.finalize();
-                object_module.define_function(func_id, &mut context).unwrap();
-                object_module.clear_context(&mut context);
+                assert!(symbol.is_definition());
+                assert_eq!(symbol.kind(), object::SymbolKind::Text);
+                assert!(symbol.size() > 0);
+                let section = object.section_by_index(symbol.section_index().unwrap()).unwrap();
+                assert_eq!(section.kind(), object::SectionKind::Text);
+                let start = symbol.address().checked_sub(section.address()).unwrap();
+                let end = start.checked_add(symbol.size()).unwrap();
+                let code = section
+                    .data()
+                    .unwrap()
+                    .get(usize::try_from(start).unwrap()..usize::try_from(end).unwrap())
+                    .unwrap();
+                // VEX.128.66.0F38.W1 VFMADD{132,213,231}SD, including ModRM.
+                let native_fma = code.windows(5).any(|bytes| {
+                    bytes[0] == 0xc4
+                        && bytes[1] & 0x1f == 2
+                        && bytes[2] & 0x87 == 0x81
+                        && matches!(bytes[3], 0x99 | 0xa9 | 0xb9)
+                });
+                assert_eq!(
+                    native_fma, enabled,
+                    "feature request must control emitted FMA instructions"
+                );
+                let fma_libcall = section.relocations().any(|(offset, relocation)| {
+                    if !(start..end).contains(&offset) {
+                        return false;
+                    }
+                    let object::RelocationTarget::Symbol(index) = relocation.target() else {
+                        return false;
+                    };
+                    object.symbol_by_index(index).unwrap().name() == Ok("fma")
+                });
+                assert_eq!(
+                    fma_libcall, !enabled,
+                    "generic ISA must retain the fused-operation libcall"
+                );
             }
-            let temp_dir = tempfile::tempdir().unwrap();
-            let path = temp_dir.path().join("fma.o");
-            let path = path.to_string_lossy();
-            assert!(rt_cranelift_emit_object_raw(
-                module,
-                path.as_ptr() as i64,
-                path.len() as i64
-            ));
-            let bytes = std::fs::read(path.as_ref()).unwrap();
-            let object = object::File::parse(bytes.as_slice()).unwrap();
-            assert!(object
-                .sections()
-                .any(|section| { section.name().unwrap_or("").contains("fma_probe") && section.size() > 0 }));
         }
     }
 

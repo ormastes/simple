@@ -73,3 +73,32 @@ the correct route, not a relaxation.
 owns the admission chain, not to a diagnostic lane. Recorded here with the measurement instead of
 applied.
 
+
+## Closure evidence 2026-11-09 (p3-subj6 lane, worktree of origin/release/1.0.0)
+
+The env fix from "Fix direction" has landed on this branch in all three callers,
+in both the args-digest vector and the transcribed invocation:
+`bootstrap-from-scratch.sh` (stage3 args + Stage-3 transcript), `resume-stage3-from-admitted.sh`
+(args; transcript now lives in `scripts/bootstrap/lib/stage3-native-build-worker.sh`),
+and `bootstrap-stage3-candidate-builder.shs` (both). The pin check
+`scripts/check/check-bootstrap-stage3-package-index-cold-init.shs` is the
+executable contract; on this branch it was RED for extraction drift, not for a
+missing knob:
+
+- RED (reproduced): `ERROR — nothing was checked (resume-stage3-transcript
+  extracted an empty block ...)` — resume-stage3-from-admitted.sh now launches
+  Stage 3 via the cgroup worker and no longer calls
+  `bootstrap_stage3_run_transcribed` itself; a second drifted block
+  (manifest-verify-transcript) matched a literal `$` at end of line (written
+  `\$` instead of `\\$`) and also extracted empty.
+- Fix: repointed the resume-transcript block at the worker script
+  (`/^bootstrap_stage3_run_transcribed "\$transcript"/,/src\/app\/cli\/bootstrap_main\.spl$/`)
+  and anchored the manifest-verify-transcript block at the Stage-3 verification
+  (`/bootstrap_stage3_stage2_executable_authority=\$(/,/src\/app\/cli\/bootstrap_main\.spl/`).
+- GREEN (executed): `sh scripts/check/check-bootstrap-stage3-package-index-cold-init.shs`
+  -> `PASS — 9 block(s) checked, all declare SIMPLE_PACKAGE_INDEX_COLD_INIT=1`.
+
+Note: the original caution that this changes the Stage-3 args hash bound by
+admission receipts still stands for lanes with pre-existing receipts; this
+closure only certifies that current-tree callers consistently declare the
+cold-init route and that the pin check guarding it is green again.

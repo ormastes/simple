@@ -1951,20 +1951,35 @@ fn optional_as_numeric_cast_is_rejected_outside_unsafe() {
 // its payload. Compile its actual production cast through the strict HIR owner.
 #[test]
 fn llvm_pipeline_optional_destination_keeps_narrow_unsafe_boundary() {
-    let plugin = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins/backend_llvm_lib/llvm_lib_translate_expr.spl")).replace("\r\n", "\n");
+    let plugin = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/backend_llvm_lib/llvm_lib_translate_expr.spl"
+    ))
+    .replace("\r\n", "\n");
     let marker = "            val raw_dest_opt = unsafe(capabilities: [ffi]):\n";
     let start = plugin.find(marker).expect("PipelineOp raw destination boundary");
-    let block = plugin[start..].lines().take(2)
+    let block = plugin[start..]
+        .lines()
+        .take(2)
         .map(|line| line.strip_prefix("        ").expect("match-arm indentation"))
-        .collect::<Vec<_>>().join("\n");
+        .collect::<Vec<_>>()
+        .join("\n");
     let fixture = format!("fn pipeline(dest_opt: i64?) -> i64:\n{block}\n    raw_dest_opt\n");
     let module = parse_and_lower(&fixture).expect("production raw Option cast must lower");
-    let function = module.functions.iter().find(|function| function.name == "pipeline").unwrap();
+    let function = module
+        .functions
+        .iter()
+        .find(|function| function.name == "pipeline")
+        .unwrap();
     let HirStmt::Let { value: Some(value), .. } = &function.body[0] else {
         panic!("expected raw destination binding");
     };
     assert_eq!(value.ty, TypeId::I64);
-    let HirExprKind::UnsafeBlock { capabilities, statements } = &value.kind else {
+    let HirExprKind::UnsafeBlock {
+        capabilities,
+        statements,
+    } = &value.kind
+    else {
         panic!("raw conversion must retain its unsafe boundary");
     };
     assert_eq!(capabilities, &["ffi"]);
@@ -1973,6 +1988,38 @@ fn llvm_pipeline_optional_destination_keeps_narrow_unsafe_boundary() {
     let error = parse_and_lower(original).expect_err("original safe optional cast must fail");
     assert!(format!("{error}").contains("SIMPLE_JIT_STRICT:"));
     let escaped = format!("fn pipeline(dest_opt: i64?) -> i64:\n{block}\n    dest_opt as i64\n");
-    assert!(parse_and_lower(&escaped).is_err(), "unsafe scope must not leak to the next cast");
+    assert!(
+        parse_and_lower(&escaped).is_err(),
+        "unsafe scope must not leak to the next cast"
+    );
     assert!(plugin.contains("ctx, mod_, builder, tm, raw_dest_opt, func as i64, call_args as i64,"));
+}
+
+#[test]
+fn string_receiver_to_i32_family_result_is_typed_not_any() {
+    // Bug row: jit_to_i32_returns_zero_and_leaks_mistagged_value_2026-08-26.
+    // The HIR string-receiver result-type table typed `to_int`/`to_i64` but
+    // omitted `to_i8`/`to_i16`/`to_i32`, so those calls fell through to
+    // generic dynamic dispatch typed `TypeId::ANY`. MIR print-lowering only
+    // BoxInts args with a known int type, so the raw narrowed word reached
+    // `rt_println_value` and was decoded by bit pattern (`"42".to_i32()`
+    // printed the f64 denormal of bit pattern 42).
+    let module = parse_and_lower(
+        "fn f():\n    val a = \"42\".to_i32()\n    val b = \"7\".to_i16()\n    val c = \"9\".to_i8()\n    val d = \"42\".to_i64()\n",
+    )
+    .unwrap();
+    let func = module.functions.iter().find(|f| f.name == "f").unwrap();
+    let tys: Vec<TypeId> = func
+        .body
+        .iter()
+        .filter_map(|s| match s {
+            HirStmt::Let { value: Some(v), .. } => Some(v.ty),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tys,
+        vec![TypeId::I32, TypeId::I16, TypeId::I8, TypeId::I64],
+        "string-receiver to_i32/to_i16/to_i8 must infer their widths like to_i64"
+    );
 }

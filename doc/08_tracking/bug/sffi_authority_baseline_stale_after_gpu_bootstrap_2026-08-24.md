@@ -48,3 +48,29 @@ gate green.
 The Stage-4 wiring spec's direct runtime reads remain separate uncounted debt
 and should migrate to the canonical file facade independently.
 
+
+## Resolution 2026-11-09 (p3-subj6 lane, worktree of origin/release/1.0.0)
+
+Root cause of the "stale baseline" proven: snapshot commit `4edef8fab8e` ("feat:
+snapshot current development state", the GPU/bootstrap sync) rewrote
+`scripts/audit/sffi-call-authority-census.shs` back to a pre-2026-08-24 variant,
+dropping three scanner capabilities (prose masking of strings/docstrings,
+wildcard `use ...sffi...*` inventory, multiline-signature body scanning) and
+deleting `scripts/audit/baselines/sffi-call-authority-v1.tsv`, while leaving the
+selftest that encodes the mature behavior. Measured on this tree: the selftest
+died at `cp: cannot stat ... sffi-call-authority-v1.tsv`; past that, the
+regressed scanner counted docstring/string mentions as raw calls and silently
+skipped multiline-header bodies.
+
+Fix: restored the scanner, selftest, and baseline from `4edef8fab8e^` (the last
+mature state; identical lineage, no behavior invented). Executed evidence:
+
+- `sh scripts/audit/sffi-call-authority-census-selftest.shs` -> `sffi call authority census selftest: PASS` (was: ERROR, cp failure / assertion mismatch).
+- `sh scripts/audit/sffi-call-authority-census.shs` -> PASS, `missing_authority_call_sites=15489` against the committed ratchet 19412. The baseline was NOT increased; the differing rows were identified instead:
+  - 54 rows the regressed scanner emitted are prose/multiline-header artifacts (e.g. `src/app/office/interactive.spl` `rt_terminal_enable_raw_mode` at 467/569) — reviewed, correctly absent under the mature scanner.
+  - 625 rows only the mature scanner emits are real wildcard-SFFI-import call sites (top: `src/lib/nogc_sync_mut/spec/evidence/counterpart/host_vulkan_lavapipe_provider.spl` 66, `src/lib/nogc_async_mut/cuda/mod.spl` 62, `src/os/tls13/_Tls13/handshake.spl` 52) — reviewed, correctly present.
+
+This also explains the original +1 (19503 vs 19504): the two measurements came
+from different scanner identities across the sync, not from a new unscoped call
+site. No Simple source was scoped or changed; only the audit script and its
+deleted baseline were restored.

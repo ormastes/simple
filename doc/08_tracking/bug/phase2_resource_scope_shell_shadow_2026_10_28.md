@@ -1,7 +1,9 @@
 # Cached phase2 resolves the resource-scope shell local as a function
 
 Canonical ID: `phase2_resource_scope_shell_shadow_2026_10_28`
-Status: OPEN; source workaround active; authoritative DB reconciliation pending.
+Status: FIX IMPLEMENTED, VERIFICATION PENDING (T0 hosted); source workaround
+still active pending original-name native retirement; authoritative DB row
+updated 2026-11-09.
 Owner: compiler local-name/function-value resolution; next admitted compiler rebuild.
 
 After PR #5170 repaired capture pointer/length transport, the native runner still
@@ -85,3 +87,58 @@ was not run (single-shard s3 path has an open heap-corruption crash).
 
 ## 2026-11-09 — resolved-disappeared (native)
 Native re-run 2026-11-09 with the current self-hosted stage2 `C:/dev/p3new/stage2new/stage2_new4.exe` (`native-build --entry-closure`, llvm, x86_64-pc-windows-gnu, core-c-bootstrap, SIMPLE_HIR_CACHE=0, clean sparse worktree of origin/release/1.0.0 @1cc167e37fd): original-name reproducer (`test/fixtures/compiler/phase2_native_repro/shell_shadow.spl`: global `fn shell`, a `for shell in candidates` loop local and a `val shell = ...` local in a limit-shaped helper) runs correctly: `RESULT rc=0 stdout=[a=/bin/bash#3|PASS shell shadow]`. The source workaround renames (`limit_shell_path`, `candidate_shell_path`) may now be retired in a separate change.
+
+## Fix verification — 2026-11-09 (T0 hosted)
+
+No compiler source change was required: both owners are already correct at
+HEAD (`4648b81b549`):
+
+- Pure-Simple compiler: HIR lowering binds every in-scope `shell` reference
+  to the local's own symbol (spec 3/3 green), and MIR lowering consults
+  `find_local` before `try_lower_function_value` in every Var/NamedVar
+  dispatch and function-value path (`expr_dispatch.spl`, pre-dispatch arms and
+  `case Var`/`case NamedVar`), so a bound local can never fall through to the
+  same-named function (spec 5/5 green; native re-run above green).
+- Seed interpreter: `evaluate_call` (src/compiler_rust/compiler/src/
+  interpreter_call/mod.rs) previously reached Priority-4 import binding /
+  Priority-5 flat `functions` map before any block-scope binding, so a
+  function-typed block local called as a callee dispatched to the same-named
+  module-level function — the exact "local resolves as function" failure.
+  Fixed by `7a60d8bb19f` (2026-11-06, "fn-valued locals shadow imported
+  functions", Priority 3.9 lexical callable locals). The released seed binary
+  (`release100-7a0e6fe516f-20261031`) predates that commit.
+
+Evidence (T0 hosted probes, cwd = worktree):
+
+- `bin/simple run test/fixtures/compiler/phase2_native_repro/shell_shadow.spl
+  --mode=interpreter` and without `--mode=interpreter`: `a=/bin/bash#3`,
+  `PASS shell shadow`, rc=0 (seed provenance: Rust bootstrap seed
+  `release100-7a0e6fe516f-20261031`).
+- New regression spec
+  `test/01_unit/interpreter/resource_scope_shell_shadow_runtime_spec.spl`
+  (6 examples: val-local as command text at module-fn scope and inside a spec
+  block closure, for-loop local, bare-local branch, global still callable by
+  name inside a spec block, function-typed local as callee):
+  - current sources (seed rebuilt from this tree): 6/6 GREEN,
+    `SPEC FILE VERDICT ... outcome=OK ... passed=6 failed=0`;
+  - released pre-fix seed: 5/6, the callee case fails with the local
+    resolving to the module-level function (`expected ran:ls to equal
+    local:ls`) — the tracked defect class, caught by the new spec.
+- `simple test <spec> --mode=interpreter` is not usable on this host
+  (pre-existing: light daemon requires Linux /proc on macOS, then a
+  `byte_len` semantic error in the runner on every spec, including previously
+  green ones); the spec was executed via `simple run`, which drives the same
+  spec harness and prints the standard SPEC FILE VERDICT line.
+
+Honest limits:
+
+- Verification tier is T0 hosted only; the native lane was not re-run in this
+  change (prior native re-run above stands).
+- The `resource_scope.spl` workaround renames remain in place; retirement is
+  a separate change with its own native regression.
+- Adjacent, out-of-scope gap observed while probing: inside a spec module, a
+  bare-identifier VALUE read of a top-level function loses to a
+  transitively-imported std function of the same name (module-global
+  preference on the identifier-read path), while the callee ladder binds the
+  module's own definition. Not the local-vs-function defect this bug tracks;
+  no spec pins it here.

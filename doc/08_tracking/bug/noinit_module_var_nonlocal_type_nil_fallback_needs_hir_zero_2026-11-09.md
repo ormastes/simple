@@ -46,15 +46,19 @@ zero-filled (0 / false / 0.0 / "" / [] / nested enum first variant / nested clas
   `test/01_unit/compiler/parser/module_noinit_enum_class_zero_spec.spl` 1/4 -> 4/4.
 - Kernel/noalloc gate (`set_noinit_kernel_module_v1`) unchanged.
 
-## 2026-11-09 fix (later-declared types) — fix-implemented-verification-pending
-Initializer-less module vars whose struct/class/enum is declared LATER in the same
-module are now queued (`noinit_pending_push_v1`) and resolved at end of module
-parse (`noinit_pending_resolve_v1`, called at EOF in `parse_module_body`) through
-the same `struct_zero_expr_v1` used for earlier declarations (struct/class -> zero
-literal, enum -> first variant, payload first variant -> error). New setter
-`decl_set_var_init` replaces the nil placeholder. Kernel/noalloc modules are unchanged
-(not queued). Evidence: `module_noinit_zero_default_spec` red 10/15 on base -> green
-15/15; `module_noinit_named_nil_parity_spec` 9/11 both before and after (2 pre-existing
-failures, unrelated; forward-struct case updated to expect the zero literal).
-Remaining (keeps this row open): types NOT declared in this module (imported) still
-take the nil fallback — needs a HIR pass after name resolution; kernel static-zero proof.
+## 2026-11-09 fix (later-declared types) — superseded
+An earlier fix deferred no-init named variables until the end of the module,
+zero-initializing later-declared structs and defaulting classes and enums. The
+owner decision below supersedes that behavior and removes the deferred pass.
+
+## Fix 2026-11-09 (owner decision item 14) — fix-implemented-verification-pending
+No HIR zero pass: the compiler (flat parser) now reports `explicit initializer required for module-level
+var '<name>'` for a no-init module var of class or enum type (all modes), and for any named type it
+cannot zero (imported, later-declared, `any`, and every named type in kernel/noalloc modules). The nil
+fallback is gone. A struct declared earlier still zero-initializes (item 8); robust mode still rejects
+every no-init var. The seed interpreter keeps its first-variant / default-construction default (#7965).
+Classes are recognised through a `classdecl:<name>|` marker in the parser's ENUM_ATTRIBUTES pool.
+src/ site given an explicit initializer: `src/os/kernel/interrupts/gdt.spl` (`tss`, `gdt_pointer`).
+Not changed: fixed-size ARRAYS of an unzeroable named element in kernel/noalloc modules keep the
+zero-BSS nil slots (`riscv/startup.spl`, `riscv32/startup.spl` `trap_frames`); native static-zero
+proof is deferred to stage3 verification.
