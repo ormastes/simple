@@ -830,6 +830,39 @@ struct StageResult {
     hash: String,
 }
 
+/// Per-stage native-build budget in seconds for the seed's ad-hoc bootstrap
+/// pipeline. Was a hardcoded literal 180 (bug
+/// seed_bootstrap_compile_stage_hardcoded_180s_timeout_2026-08-18); now
+/// `SIMPLE_BOOTSTRAP_STAGE_TIMEOUT` overrides it, defaulting to 7200 (the
+/// native-build default budget used by the canonical bootstrap lane).
+fn bootstrap_stage_timeout() -> String {
+    parse_stage_timeout(std::env::var("SIMPLE_BOOTSTRAP_STAGE_TIMEOUT").ok().as_deref())
+}
+
+fn parse_stage_timeout(raw: Option<&str>) -> String {
+    match raw.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(n) if n > 0 => n.to_string(),
+        _ => "7200".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod stage_timeout_tests {
+    use super::parse_stage_timeout;
+
+    #[test]
+    fn default_is_not_180() {
+        assert_eq!(parse_stage_timeout(None), "7200");
+    }
+
+    #[test]
+    fn override_and_invalid() {
+        assert_eq!(parse_stage_timeout(Some("900")), "900");
+        assert_eq!(parse_stage_timeout(Some("0")), "7200");
+        assert_eq!(parse_stage_timeout(Some("abc")), "7200");
+    }
+}
+
 /// Native-build worker count for a bootstrap stage.
 ///
 /// `SIMPLE_BOOTSTRAP_THREADS=<n>` overrides (n=1 restores the old serial
@@ -899,7 +932,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) ->
             .arg("--threads")
             .arg(bootstrap_threads().to_string())
             .arg("--timeout")
-            .arg("180")
+            .arg(bootstrap_stage_timeout())
             .arg("-o")
             .arg(output);
         cmd.env("SIMPLE_BOOTSTRAP", "1");
@@ -908,8 +941,8 @@ fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) ->
             cmd.env("SIMPLE_RUNTIME_PATH", rtp);
         }
         println!(
-            "  Running: {} native-build --source src/app --entry-closure --strip --threads {} --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {}",
-            compiler, bootstrap_threads(), output
+            "  Running: {} native-build --source src/app --entry-closure --strip --threads {} --timeout {} --entry src/app/cli/bootstrap_main.spl -o {}",
+            compiler, bootstrap_threads(), bootstrap_stage_timeout(), output
         );
     } else {
         cmd.arg("native-build")
@@ -922,7 +955,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) ->
             .arg("--threads")
             .arg(bootstrap_threads().to_string())
             .arg("--timeout")
-            .arg("180")
+            .arg(bootstrap_stage_timeout())
             .arg("-o")
             .arg(output);
         // The self-hosted native-build lane only accepts the pure-Simple LLVM
@@ -949,8 +982,8 @@ fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) ->
         };
         cmd.arg(format!("--backend={}", sh_backend));
         println!(
-            "  Running: {} native-build --source src/app --entry-closure --strip --threads {} --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {} --backend={}",
-            compiler, bootstrap_threads(), output, sh_backend
+            "  Running: {} native-build --source src/app --entry-closure --strip --threads {} --timeout {} --entry src/app/cli/bootstrap_main.spl -o {} --backend={}",
+            compiler, bootstrap_threads(), bootstrap_stage_timeout(), output, sh_backend
         );
     }
 
