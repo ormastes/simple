@@ -2,7 +2,7 @@
 
 - **ID:** `native_option_int_sink_miss_and_payload_three_2026-11-07`
 - **Severity:** P1 (silent wrong value)
-- **Status:** Defect 1 open (proposal only, semantics change, not implemented); Defect 2 fixed in source (MIR, 2026-11-07), native confirmation pending a Stage 2 rebuild
+- **Status:** Defect 1 fixed in source (MIR, rt_unwrap_or_trap at scalar sinks, 2026-11-07), native confirmation pending; Defect 2 fixed in source (MIR, 2026-11-07), native confirmation pending a Stage 2 rebuild
 - **Layer:** `src/compiler/50.mir` integer sinks + runtime `rt_unwrap_or_self`
 - **Follow-up of:** `native_list_any_get_i64_sink_returns_option_handle_2026-11-07`
 
@@ -94,3 +94,17 @@ for the array get/at/first/last producer. Other `Optional(Any)` producers
 (`any?` params, tagged raw-probe dict reads) carry a tagged word, so the sink
 returns the tagged word rather than the value. The limit is documented in the
 helper's docstring.
+
+## Defect 1 fix (2026-11-07, lane u-optsink)
+
+`option_payload_for_int_sink` now unwraps through `rt_unwrap_or_trap` for
+both the typed scalar and the `Optional(Any)` inner (new
+`option_scalar_payload_via(local, symbol)`). `option_scalar_payload_of`
+keeps `rt_unwrap_or_self`, because its Eq / arithmetic callers read the
+payload even on None (`lower_scalar_optional_eq_*` mask it with
+`rt_is_some`/`rt_is_none`). `rt_unwrap_or_trap` is backed on the C runtime
+(`runtime_native.c`) and the Rust seed (`objects.rs`).
+Spec: `test/01_unit/compiler/mir/option_int_sink_miss_traps_spec.spl` (red
+2/3 before, green after); `list_any_get_scalar_sink_unwrap_spec.spl` updated
+to the trap symbol. Still required: a Stage 2 native run showing a MISS into
+`-> i64` aborts with ".unwrap() called on None".
