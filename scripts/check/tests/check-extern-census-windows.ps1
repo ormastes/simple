@@ -56,10 +56,9 @@ test "$(census_select_binary "$W/selected release")" = "$W/full.exe"
 unset SIMPLE_BIN
 "$EXTERN_CENSUS_READOBJ" --coff-exports "$W/stripped.exe" > "$W/stripped-exports.txt"
 test "$(grep -c '  Name: rt_census_export_' "$W/stripped-exports.txt")" -eq 150
-if census_collect_primary "$W/stripped.exe" "$W/stripped-symbols.txt" "$W" 2> "$W/stripped-error.log"; then
-    echo 'stripped PE wrongly accepted from exports' >&2; exit 1
-fi
-grep -q 'symbol table\|defined symbol' "$W/stripped-error.log"
+census_collect_primary "$W/stripped.exe" "$W/stripped-symbols.txt" "$W" 2> "$W/stripped-error.log"
+grep -q 'PE export table' "$W/stripped-error.log"
+grep -qx rt_census_export_1 "$W/stripped-symbols.txt"
 # A producer can emit plausible partial output before failing. Its status
 # remains authoritative even when the symbol count exceeds the floor.
 cat > "$W/failing-nm.sh" <<'TOOL'

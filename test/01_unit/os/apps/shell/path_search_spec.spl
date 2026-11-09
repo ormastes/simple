@@ -127,3 +127,15 @@ describe "SimpleOS shell PATH discovery":
         val retained = launcher_command_resolution_candidates_with_dirs("tool", "/", ["/usr/bin", "/bin"])
         expect(raw[2]).to_equal(retained[2])  # oracle: clean PATH dirs produce identical candidates at both entry points
         expect(raw[3]).to_equal(retained[3])  # oracle: candidate ordering is identical at both entry points
+
+    it "uses metadata lookup and leaves executable reads to the authenticated loader":
+        # @req REQ-SHELL-PATH-003
+        # @capture(statistics): loader-boundary source contract verdicts retained as evidence
+        step("Pin the no-full-file-read source contract")
+        val shipped_path_search_source = rt_file_read_text("src/os/apps/shell/path_search.spl") ?? ""
+        val keeps_vfs_exists_probe = shipped_path_search_source.contains("g_vfs_file_exists(candidate)")
+        val keeps_loader_owned_reads = shipped_path_search_source.contains("fs_exec_read_executable_bytes")
+        val keeps_full_file_reads_out = shipped_path_search_source.contains("g_vfs_read_file")
+        expect(keeps_vfs_exists_probe).to_equal(true)  # oracle: resolution probes existence only through the vfs metadata call
+        expect(keeps_loader_owned_reads).to_equal(false)  # oracle: path search must not read executable bytes itself
+        expect(keeps_full_file_reads_out).to_equal(false)  # oracle: path search must not pull whole files through the vfs

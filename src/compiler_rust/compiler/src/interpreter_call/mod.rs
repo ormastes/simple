@@ -20,7 +20,7 @@ pub(crate) use core::{
     bind_args, bind_args_with_injected, bind_args_with_values, bind_args_with_values_named, name_callee,
     captured_env_with_live_globals, exec_function, exec_function_with_bound_args, exec_function_with_captured_env,
     exec_function_with_values, exec_function_with_values_and_self, exec_lambda, write_back_borrow_arguments, execute_function_body,
-    instantiate_class, publish_and_repoint, publish_before_block_clone, publish_live_bound_globals, refresh_live_bound_globals,
+    instantiate_class, noinit_named_type_default, publish_and_repoint, publish_before_block_clone, publish_live_bound_globals, refresh_live_bound_globals,
     sync_live_bound_globals, sync_owned_captured_globals, ProceedContext, IN_NEW_METHOD,
 };
 pub(crate) use core::function_exec::merge_shared_collection_fields;
@@ -203,6 +203,17 @@ fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
         println!("[overload]   -> score={score}");
     }
     Some(score)
+}
+
+/// Reject a call that reaches a private top-level `fn` of another directory.
+fn gate_private_call(name: &str, func: &Arc<FunctionDef>) -> Result<(), CompileError> {
+    if !matches!(func.visibility, simple_parser::ast::Visibility::Private) {
+        return Ok(());
+    }
+    if let (Some(owner), Some(cur)) = (function_module_owner(func), CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())) {
+        crate::interpreter::interpreter_module::check_private_call_visibility(name, &owner, &cur)?;
+    }
+    Ok(())
 }
 
 /// Identity-keyed lookup into `FUNCTION_MODULE_OWNER` (see its doc comment):
@@ -888,6 +899,7 @@ pub(crate) fn evaluate_call(
                     })
                 });
                 if let Some(func) = selected {
+                    gate_private_call(name, &func)?;
                     if debug_dupdispatch() {
                         eprintln!(
                             "[dupdispatch] P4-overload name={name} owner={:?} current={:?}",
@@ -983,6 +995,7 @@ pub(crate) fn evaluate_call(
         phase_end(&pc::EVALCALL_NS_P49_ENV_SHADOW, t);
         // Priority 5: Check regular functions (user-defined) — most common case
         if let Some(func) = functions.get(name).cloned() {
+            gate_private_call(name, &func)?;
             let t = phase_start();
             let _flat_exec = PhaseGuard(&pc::EVALCALL_NS_P5_FLAT_EXEC, t);
             if debug_dupdispatch() {

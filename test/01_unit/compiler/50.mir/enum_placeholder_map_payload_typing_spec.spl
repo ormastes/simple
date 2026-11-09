@@ -1,0 +1,38 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Regression for enum_payload_type_mismatch_untyped_map_2026-10-24.
+"""
+## Purpose and audience
+Purpose: Prove an enum payload built from a placeholder-lambda .map projection keeps its [T] type.
+Audience: COMP maintainers who read this spec to confirm the behavior still holds.
+"""
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn bind_diagnostics(source: text) -> text:
+    val filename = "enum_placeholder_map.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors = errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors = errors.push("MIR: " + error.message)
+    errors.join("\n")
+
+val BIND_PRELUDE = "struct Ty:\n    id: i64\nenum Kind:\n    Fn([Ty], Ty, i64)\n    Other\n"
+
+describe "enum payload typing":
+    it "types a placeholder-lambda map result as the projected element array":
+        step("params.map(_.ty) feeds an enum payload of [Ty]")
+        val source = BIND_PRELUDE + "struct Param:\n    ty: Ty\nstruct Fun:\n    params: [Param]\n    ret: Ty\nfn bounds(f: Fun) -> Kind:\n    Kind.Fn(f.params.map(_.ty), f.ret, 0)\n"
+        expect(bind_diagnostics(source)).to_equal("")

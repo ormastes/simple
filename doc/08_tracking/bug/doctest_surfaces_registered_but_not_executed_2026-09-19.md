@@ -1,7 +1,7 @@
 # BUG: the markdown and comment doctest surfaces are wired but effectively execute nothing
 
 - **id:** doctest_surfaces_registered_but_not_executed_2026-09-19
-- **status:** OPEN — measured, not fixed
+- **status:** fix-implemented-verification-pending (2026-11-09: config/sdoctest.sdn `sdoctest: path_runs: include|exclude`; include widens an implicit path-scoped run to the configured sources, default exclude; explicit --sdoctest and .md targets stay narrow)
 - **severity:** P2 — a whole declared test surface is inert; no wrong answers, but 1,632 markdown examples and 89 comment examples are unverified while appearing to be "part of the maintained test surface"
 - **found:** 2026-09-19, while running the four test surfaces end to end
 

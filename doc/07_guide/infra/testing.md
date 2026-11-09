@@ -1157,6 +1157,21 @@ bin/simple test test/03_system/gui/ui/shared_ui_contract_spec.spl --tag slow
 
 ---
 
+## Markdown Doctests on Path Runs
+
+`config/sdoctest.sdn` controls whether a path-scoped `bin/simple test <path>`
+also executes the configured markdown corpus (`sources:`):
+
+```
+sdoctest:
+  path_runs: include   # include | exclude (default exclude)
+```
+
+- `exclude` (default): only markdown under `<path>` is discovered.
+- `include`: files under `<path>` plus every configured source, deduplicated.
+- An explicit `--sdoctest` run or a `.md` target always stays narrow.
+- Per-file `ignore:` paths/tags in the same config still apply.
+
 ## Best Practices
 
 ### Do

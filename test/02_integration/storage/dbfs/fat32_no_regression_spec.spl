@@ -17,6 +17,8 @@ use std.fs_driver.types.{OpenFlags, MountOptions, ExecuteTrust}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.mount_table.{MountTable}
 use std.db.dbfs_driver.{DbFsDriver}
+use std.io_runtime.{read_file}
+use std.fs_driver.types.{OpenFlags, MountOptions}
 
 class MockFat32BlockDevice:
     sector: [u8]
@@ -113,6 +115,22 @@ describe "FAT32 hosted seam — mount table registration":
         table.close(opened).unwrap()
         table.unlink("/boot/NEW.BIN").unwrap()
         expect(table.stat("/boot/NEW.BIN").is_err()).to_equal(true)
+
+    it "stays on the shared FsFat32Driver surface":
+        # @req REQ-SSPEC-INTEGRATION
+        step("stays on the shared FsFat32Driver surface")
+        val source = read_file("test/integration/storage/dbfs/fat32_no_regression_spec.spl")
+        val legacy_type = "Fat32" + "Driver"
+        # Built by concatenation, not one literal: this file scans its OWN source,
+        # so a single unsplit string naming the forbidden import would always be
+        # found (inside this very check), making the assertion unsatisfiable by
+        # construction. See .claude/rules/testing.md, section F3.
+        val legacy_module_import = "use os.services" + ".fat32" + ".fat32"
+        assert_equal(source.contains(legacy_module_import), false)
+        assert_equal(source.contains(" " + legacy_type + ".new("), false)
+        assert_equal(source.contains("=" + legacy_type + ".new("), false)
+        assert_equal(source.contains("(" + legacy_type + ".new("), false)
+        assert_equal(source.contains("FsFat32Driver.new("), true)
 
 describe "FAT32 hosted seam — DBFS co-existence":
     it "FAT32 and DBFS can both be mounted simultaneously":

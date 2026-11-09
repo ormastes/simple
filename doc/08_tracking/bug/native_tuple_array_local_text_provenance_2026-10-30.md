@@ -58,3 +58,37 @@ producer-bound fix passes the native fixture.
 ## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
 
 test/01_unit/compiler/50.mir/tuple_array_local_text_provenance_spec.spl: MIR local types of implicit and annotated forms are identical and str, so the loss is after MIR (codegen). Native repro: remove the explicit annotations in lib/nogc_sync_mut/http/url.spl build_query_string and run the url query contract fixture.
+
+## Fix (2026-11-09, work/tuple-array-text-prov) — fix-implemented-verification-pending
+
+The url.spl site indexes the tuple local with BRACKETS (`param[0]`), not
+`param.0`; the round-15 spec exercised only the `.0` form.
+
+Root cause (HIR): `lower_hir_expr`'s `ExprKind.Index` arm
+(`src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl`) typed
+`base[i]` only when the lowered base expression itself carried `type_`
+(Array/Slice/Dict). A `Var`/`NamedVar` base — a parameter such as `params` or
+an inferred local such as `val param = params[i]` — carries no expression
+`type_`; its type lives in the symbol table. So `params[i]`, `param[0]` and
+`param[1]` all lowered with `has_type_: false`, and there was no
+`HirTypeKind.Tuple` arm at all, so even a typed tuple base yielded an untyped
+index. The MIR lowering recovered the element type independently (MIR locals
+were already `str` for both forms), which is why the round-15 MIR-only check
+was green while the HIR carried no text type for the extracted locals.
+
+Fix: fall back to the base symbol's declared/inferred type (same fallback as
+`declared_exists_check_type`), add a `Tuple` arm for a literal slot index
+(`t[0]`), and leave range indexes (`xs[1..]`) and non-literal tuple indexes
+untyped.
+
+Red/green: `test/01_unit/compiler/50.mir/tuple_array_local_text_provenance_spec.spl`
+"(HIR)" cases — before: `expected untyped to equal typed:HirTypeKind::Str`
+(x2) and `param` untyped; after: 6/6 pass. MIR cases for the bracket form
+(locals identical to annotated form, extracted locals `Opaque(str)`) are green
+before and after (prevention).
+
+Workaround in `src/lib/nogc_sync_mut/http/url.spl:51` is KEPT (tagged): the
+spec proves the HIR/MIR type is now carried, but the native symptom was
+recorded on an admitted Stage 2 producer and must be re-verified natively
+(`test/fixtures/url_query_contract/main.spl` with the annotations removed) by
+a producer built from this fix before the annotations are dropped.

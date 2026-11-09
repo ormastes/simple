@@ -1,26 +1,40 @@
 #!/bin/sh
 # Read-only registration audit. Lifecycle values are never rewritten.
-# Exit 0: complete scan with no findings; 1: findings; 2: incomplete scan.
-set -eu
+#
+# Verdict convention (repo guard standard), last line of stdout:
+#   PASS — rows=<n> documents=<n> explicit-unresolved=<n> findings=0 checked   (exit 0)
+#   FAIL — rows=<n> documents=<n> findings=<k> checked; finding lines above     (exit 1)
+#   ERROR — nothing was checked (<reason>)                                     (exit 2)
+# An incomplete scan (0 rows, 0 documents, or an unreadable document) is
+# ERROR, never a pass.
+set -u
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 root=$repo
 case "${1:-}" in
     --selftest) exec sh "$repo/test/01_unit/scripts/tracking_doc_registration_test.shs" ;;
-    --root) [ "$#" -eq 2 ] || exit 2; root=$2 ;;
+    --root) [ "$#" -eq 2 ] || { echo "ERROR — nothing was checked (--root needs exactly one value)"; exit 2; }; root=$2 ;;
     '') ;;
-    *) echo 'usage: check-tracking-doc-registration.shs [--root DIR|--selftest]' >&2; exit 2 ;;
+    *) echo "ERROR — nothing was checked (usage: check-tracking-doc-registration.shs [--root DIR|--selftest])"; exit 2 ;;
 esac
-root=$(CDPATH= cd -- "$root" && pwd) || exit 2
+root=$(CDPATH= cd -- "$root" && pwd) || { echo "ERROR — nothing was checked (root $root unreadable)"; exit 2; }
 bug="$root/doc/08_tracking/bug"
 todo="$root/doc/08_tracking/todo"
 for needed in "$bug/bug_db.sdn" "$todo/todo_db.sdn"; do
-    [ -f "$needed" ] || { echo "ERROR missing-db $needed"; exit 2; }
+    [ -f "$needed" ] || { echo "ERROR — nothing was checked (missing db $needed)"; exit 2; }
 done
-files=$(mktemp)
-trap 'rm -f "$files"' EXIT HUP INT TERM
-find "$bug" "$todo" -type f -name '*.md' -print > "$files" || exit 2
-LC_ALL=C sort -o "$files" "$files"
-LC_ALL=C awk -v root="$root" -v bugdb="$bug/bug_db.sdn" -v tododb="$todo/todo_db.sdn" '
+# Sharded bug DB: read the merged view (legacy + $bug/db/*.sdn shards).
+bugdb_view="$bug/bug_db.sdn"
+tmp_view=""
+if [ -d "$bug/db" ]; then
+    bugdb_view=$(mktemp) || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
+    tmp_view=$bugdb_view
+    sh "$(dirname "$0")/bug-db-shard.shs" merged "$bug/bug_db.sdn" > "$bugdb_view" || { echo "ERROR — nothing was checked (bug-db-shard merge failed)"; exit 2; }
+fi
+files=$(mktemp) || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
+trap 'rm -f "$files" $tmp_view' EXIT HUP INT TERM
+find "$bug" "$todo" -type f -name '*.md' -print > "$files" || { echo "ERROR — nothing was checked (find failed)"; exit 2; }
+LC_ALL=C sort -o "$files" "$files" || { echo "ERROR — nothing was checked (sort failed)"; exit 2; }
+LC_ALL=C awk -v root="$root" -v bugdb="$bugdb_view" -v tododb="$todo/todo_db.sdn" '
 BEGIN {
     # Explicit document aliases only. Date punctuation is not a general alias:
     # these three documents were reviewed against the older authoritative row.
@@ -151,9 +165,17 @@ END {
     for (id in bugs) if (!(id in documents))
         finding("bug-row-without-exact-document",id,"review source-only record or author an explicit document mapping; do not infer closure")
     if (!rows || !docs || incomplete) {
-        print "ERROR incomplete-scan rows=" rows+0 " documents=" docs+0
+        print "ERROR — nothing was checked (incomplete scan rows=" rows+0 " documents=" docs+0 ")"
         exit 2
     }
-    print (findings ? "FAIL" : "PASS") " rows=" rows " documents=" docs " explicit-unresolved=" explicit+0 " findings=" findings+0
+    print (findings ? "FAIL — " : "PASS — ") "rows=" rows " documents=" docs " explicit-unresolved=" explicit+0 " findings=" findings+0 " checked"
     exit findings ? 1 : 0
-}' "$bug/bug_db.sdn" "$todo/todo_db.sdn" "$files"
+}' "$bugdb_view" "$todo/todo_db.sdn" "$files" || _audit_rc=$?
+_audit_rc=${_audit_rc:-0}
+# Engine-level failure (awk missing/crashed) is ERROR; the audit's own 0/1/2
+# verdict propagates unchanged.
+if [ "$_audit_rc" -ge 126 ]; then
+    echo "ERROR — nothing was checked (audit engine rc=$_audit_rc)"
+    exit 2
+fi
+exit "$_audit_rc"

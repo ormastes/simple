@@ -1,17 +1,29 @@
 #!/bin/sh
 set -eu
 
+# MIR method lowering must not own any runtime value-accessor ABI itself:
+# the raw discriminant read is routed through the canonical owner
+# compiler.common.value_access (owner decision 2026-11-09, no exception —
+# doc/08_tracking/bug/value_access_ownership_spec_never_executes_2026-09-18.md).
 module=src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+owner=src/compiler/00.common/value_access.spl
 
-if rg -q '^extern fn rt_(dict_contains|env_get)\(' "$module"; then
+count() { grep -cE "$1" "$2" || true; }
+
+if grep -qE '^extern fn rt_(dict_contains|env_get)\(' "$module"; then
     echo "MIR method lowering must not retain dead dictionary or duplicate environment authority" >&2
     exit 1
 fi
-test "$(rg -c '^extern fn rt_enum_discriminant\(' "$module")" -eq 1
-test "$(rg -c '^[[:space:]]+rt_enum_discriminant\(' "$module")" -eq 1
-test "$(rg -c 'unsafe\(capabilities: \[ffi\]\):' "$module")" -eq 1
-test "$(rg -c '_sffi_method_hir_type_discriminant\(' "$module")" -eq 3
-test "$(rg -c 'env_get_opt\(' "$module")" -eq 2
-test "$(rg -c 'mir_dict_elem_trace_on\(' "$module")" -eq 4
-test "$(rg -c 'mir_conv_log_on\(' "$module")" -eq 6
-test "$(rg -c '^var mir_(dict_elem_trace|conv_log)_state: i64 = -1$' "$module")" -eq 2
+test "$(count '^extern fn rt_enum_discriminant' "$module")" -eq 0
+test "$(count 'rt_enum_discriminant\(' "$module")" -eq 0
+test "$(count 'unsafe\(capabilities: \[ffi\]\):' "$module")" -eq 0
+test "$(count '^use compiler\.common\.value_access\.\{compiler_value_discriminant\}$' "$module")" -eq 1
+test "$(count '_sffi_method_hir_type_discriminant\(' "$module")" -eq 8
+test "$(count 'env_get_opt\(' "$module")" -eq 2
+test "$(count 'mir_dict_elem_trace_on\(' "$module")" -eq 4
+test "$(count 'mir_conv_log_on\(' "$module")" -eq 6
+test "$(count '^var mir_(dict_elem_trace|conv_log)_state: i64 = -1$' "$module")" -eq 2
+# The owner declares each accessor exactly once.
+test "$(count '^extern fn rt_enum_discriminant<' "$owner")" -eq 1
+test "$(count '^extern fn rt_enum_payload<' "$owner")" -eq 1
+test "$(count '^extern fn rt_tuple_get<' "$owner")" -eq 1

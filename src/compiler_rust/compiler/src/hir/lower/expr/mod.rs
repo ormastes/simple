@@ -1843,6 +1843,40 @@ impl Lowerer {
                             ty: payload_ty,
                         }));
                     }
+                    // Slot-yielding array accessor typed bare `T`. The result
+                    // type table below deliberately types `[T].pop/first/last/
+                    // remove` as the element (seed_hirtype_optional_plan.md),
+                    // although the runtime value is a flat-nullable `T?`. Left
+                    // here, `.unwrap()` fell through to dynamic dispatch typed
+                    // ANY: no checked helper in MIR and no scalar unbox, so
+                    // `xs.pop().unwrap()` was wrong on the JIT and nil-bound in
+                    // the Stage-2 LLVM lane. Lower it to the CHECKED unwrap typed
+                    // `T` — the same staging `lower_coalesce` uses for these
+                    // accessors — mirroring the pure-Simple MIR checked unwrap
+                    // (`rt_is_some` + panic). MIR defers the accessor's scalar
+                    // unbox past the helper (`defer_accessor_unbox`).
+                    // `get`/`min`/`max` and dict accessors stay on the staged
+                    // plan: they have no shared typed-unbox site to defer.
+                    // doc/08_tracking/bug/stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md
+                    if let HirExprKind::MethodCall { receiver: collection, method: accessor, args: accessor_args, .. } = &receiver.kind {
+                        let collection_shape = matches!(
+                            self.module.types.get(collection.ty),
+                            Some(HirType::Array { .. })
+                        );
+                        if collection_shape
+                            && receiver.ty != TypeId::ANY
+                            && ((accessor_args.is_empty() && matches!(accessor.as_str(), "pop" | "first" | "last"))
+                                || (accessor_args.len() == 1 && accessor == "remove"))
+                        {
+                            return Ok(Some(HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_unwrap_or_trap".to_string(),
+                                    args: vec![receiver.clone()],
+                                },
+                                ty: receiver.ty,
+                            }));
+                        }
+                    }
                 }
                 "unwrap_err" => {
                     if let Some(payload_ty) = self.enum_variant_payload_type_for_builtin_method(receiver.ty, "Err") {
