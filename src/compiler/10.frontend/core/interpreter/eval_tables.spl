@@ -364,6 +364,34 @@ fn func_resolve_module_member_for_caller(
         return -1
     func_resolve_for_caller_depth(owner, member, 0)
 
+# Result of `func_flat_lookup_for_caller` when `name` has co-compiled
+# definitions in several owner modules and the caller selects none of them.
+# Owner decision 2026-11-09 (bug jit_co_compiled_definition_ambiguity_debt_2026-09-15):
+# that is a compile error requiring qualification, never the flat table's
+# last-write-wins pick. Callers turn it into `eval_set_error`.
+val FUNC_LOOKUP_AMBIGUOUS: i64 = -2
+
+# Distinct owner modules that registered a definition of `name`
+# (`func_table_register_owned`), in registration order.
+fn func_owners_of(name: text) -> [text]:
+    var owners: [text] = []
+    var i = 0
+    while i < fto_names.len():
+        if fto_names[i] == name:
+            var seen = false
+            var j = 0
+            while j < owners.len():
+                if owners[j] == fto_owners[i]:
+                    seen = true
+                j = j + 1
+            if not seen:
+                owners.push(fto_owners[i])
+        i = i + 1
+    owners
+
+fn func_ambiguous_call_message(caller: text, name: text, owners: [text]) -> text:
+    "ambiguous call to '{name}': {owners.len()} co-compiled definitions ({owners.join(\", \")}) and '{caller}' neither defines nor imports it, so no definition can be selected. Qualify the reference with a selective import (use <module>.{{{name}}}) naming the intended definition, or rename the duplicate definitions to unique names. [compiler_cross_module_private_symbol_collision]"
+
 fn func_flat_lookup_for_caller(caller: text, name: text) -> i64:
     val candidate = func_table_lookup(name)
     if candidate < 0:
@@ -374,6 +402,12 @@ fn func_flat_lookup_for_caller(caller: text, name: text) -> i64:
            func_resolve_for_caller_depth(fmn_owners[i], name, 0) == candidate:
             return -1
         i = i + 1
+    # The caller reached this legacy flat lookup because
+    # `func_resolve_for_caller` found no owned definition and no import route.
+    # With a single owner the flat pick IS that owner's definition; with
+    # several it is whichever registered last -- ambiguous, so refuse.
+    if func_owners_of(name).len() >= 2:
+        return FUNC_LOOKUP_AMBIGUOUS
     candidate
 
 fn func_import_binding_names(name: text) -> (text, text):

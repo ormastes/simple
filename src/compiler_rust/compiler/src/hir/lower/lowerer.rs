@@ -1138,25 +1138,94 @@ impl Lowerer {
     ///    module other than the importer (an import never names the importer's
     ///    own function; this is the `fn f(): g()` recursion trap).
     pub(super) fn resolve_flatten_owned_callable(&self, name: &str) -> Option<String> {
-        if self.flatten_fn_owners.is_empty() {
+        match self.flatten_owned_callable(name) {
+            FlattenCallable::Resolved(symbol) if symbol != name => Some(symbol),
+            _ => None,
+        }
+    }
+
+    /// Owner decision 2026-11-09 (bug
+    /// `jit_co_compiled_definition_ambiguity_debt_2026-09-15`): a bare callable
+    /// `name` that several co-compiled modules define, referenced from a module
+    /// that neither defines it nor imports it (selectively, through a re-export
+    /// facade, or through exactly one glob source that declares it), is a
+    /// COMPILE ERROR. It used to fall back to whichever definition kept the
+    /// bare name -- the entry module's, else the LAST one loaded -- a silent
+    /// wrong dispatch that depended only on `use` ordering. Returns the
+    /// diagnostic text, or `None` when the reference is unambiguous.
+    pub(super) fn flatten_ambiguous_callable(&self, name: &str) -> Option<String> {
+        let FlattenCallable::Ambiguous(owners) = self.flatten_owned_callable(name) else {
             return None;
+        };
+        let importer = self.current_function_owner.as_deref().unwrap_or("<entry file>");
+        Some(format!(
+            "ambiguous call to `{name}`: {} co-compiled definitions ({}) and `{importer}` neither \
+             defines nor imports it, so no definition can be selected. Qualify the reference with \
+             a selective import (`use <module>.{{{name}}}`) naming the intended definition, or \
+             rename the duplicate definitions to unique names. \
+             [compiler_cross_module_private_symbol_collision]",
+            owners.len(),
+            owners.join(", "),
+        ))
+    }
+
+    /// Shared resolution behind `resolve_flatten_owned_callable` and
+    /// `flatten_ambiguous_callable`, in priority order:
+    ///
+    /// 1. the current module defines a colliding `name` -> its own definition;
+    /// 2. the current module imports `name` (possibly as an alias) -> the
+    ///    definition in the module that import names (re-exports followed);
+    /// 3. exactly one of the current module's glob sources (`use m.*`)
+    ///    declares `name` -> that definition;
+    /// 4. `name` is a function alias of a colliding name -> a definition from a
+    ///    module other than the importer (an import never names the importer's
+    ///    own function; this is the `fn f(): g()` recursion trap);
+    /// 5. otherwise a colliding `name` is `Ambiguous` (owner list for the
+    ///    diagnostic) and a non-colliding one is `NotCollision`.
+    fn flatten_owned_callable(&self, name: &str) -> FlattenCallable {
+        if self.flatten_fn_owners.is_empty() {
+            return FlattenCallable::NotCollision;
         }
         let current = self.current_function_owner.as_deref();
-        let resolved = if self.flatten_is_collision(name) && self.flatten_owner_defines(current, name) {
-            Some(self.flatten_emitted_symbol(current, name))
-        } else if let Some((source_owner, source_name)) = self
-            // Untagged (entry-module) callers record their imports under the
-            // `<entry>` importer, exactly like `resolve_flatten_owned_global`.
+        // Untagged (entry-module) callers record their imports under the
+        // `<entry>` importer, exactly like `resolve_flatten_owned_global`.
+        let importer = current.unwrap_or("<entry>");
+        if self.flatten_is_collision(name) && self.flatten_owner_defines(current, name) {
+            return FlattenCallable::Resolved(self.flatten_emitted_symbol(current, name));
+        }
+        if let Some((source_owner, source_name)) = self
             .flatten_owner_import_bindings
-            .get(current.unwrap_or("<entry>"))
+            .get(importer)
             .and_then(|bindings| bindings.get(name))
             .and_then(|(source_owner, source_name)| {
-                self.flatten_reexport_definer(current.unwrap_or("<entry>"), source_owner, source_name)
+                self.flatten_reexport_definer(importer, source_owner, source_name)
             })
         {
-            Some(self.flatten_emitted_symbol(Some(&source_owner), &source_name))
-        } else if !self.flatten_fn_owners.contains_key(name) {
-            self.resolve_function_alias(name)
+            return FlattenCallable::Resolved(self.flatten_emitted_symbol(Some(&source_owner), &source_name));
+        }
+        if self.flatten_is_collision(name) {
+            let mut declarers: Vec<(String, String)> = Vec::new();
+            for glob_owner in self.flatten_owner_glob_sources.get(importer).into_iter().flatten() {
+                if let Some(declarer) = self.flatten_reexport_definer(importer, glob_owner, name) {
+                    if !declarers.contains(&declarer) {
+                        declarers.push(declarer);
+                    }
+                }
+            }
+            if let [(owner, source_name)] = declarers.as_slice() {
+                return FlattenCallable::Resolved(self.flatten_emitted_symbol(Some(owner), source_name));
+            }
+            let mut owners: Vec<String> = self.flatten_fn_owners[name]
+                .iter()
+                .map(|owner| owner.clone().unwrap_or_else(|| "<entry file>".to_string()))
+                .collect();
+            owners.sort();
+            owners.dedup();
+            return FlattenCallable::Ambiguous(owners);
+        }
+        if !self.flatten_fn_owners.contains_key(name) {
+            if let Some(symbol) = self
+                .resolve_function_alias(name)
                 .filter(|original| *original != name && self.flatten_is_collision(original))
                 .and_then(|original| {
                     let owners = &self.flatten_fn_owners[original];
@@ -1166,10 +1235,11 @@ impl Lowerer {
                         .find(|owner| owner.is_some() && owner.as_deref() != current)
                         .map(|owner| self.flatten_emitted_symbol(owner.as_deref(), original))
                 })
-        } else {
-            None
-        };
-        resolved.filter(|symbol| symbol != name)
+            {
+                return FlattenCallable::Resolved(symbol);
+            }
+        }
+        FlattenCallable::NotCollision
     }
 
     /// Owner-exact symbol for a bare module-global `name` referenced from the
@@ -1304,4 +1374,15 @@ impl Default for Lowerer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Outcome of resolving a bare callable name inside a flattened unit; see
+/// `Lowerer::flatten_owned_callable`.
+pub(super) enum FlattenCallable {
+    /// Not a cross-module collision (or not a flattened unit): bare lookup.
+    NotCollision,
+    /// The owner-exact symbol the reference must bind to.
+    Resolved(String),
+    /// Several modules define the name and nothing selects one; the owners.
+    Ambiguous(Vec<String>),
 }
