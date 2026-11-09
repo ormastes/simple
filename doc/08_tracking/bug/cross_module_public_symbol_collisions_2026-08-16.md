@@ -154,3 +154,25 @@ separate `_has` defect tracked in
 `private_helper_name_collision_across_modules_has_2026-08-17.md`; it is quoted
 here only to show this change introduced no new failure, and it is **not** a
 pass for anything on this record.
+
+## Re-verification 2026-11-09 (reassign-p3-A, executed on Windows seed `bin/simple.exe`)
+
+`bin/simple test test/01_unit/app/build/private_helper_name_collision_spec.spl`
+on origin/release/1.0.0: 24 distinct differing-signature `public function`
+rows. Of the original filing only `shell` (3 defs: ProcessResult x2 vs app
+tuple), `compile_native` and `dir_remove_all` remain; the rest of the table
+is gone. New rows (not in the original filing) include `env_get`(5),
+`dir_list`, `join_path`, `detect_arch`, `atomic_bool_new`, `format_hex`, ...
+plus a 78-name SAME-signature warning.
+
+Fixed in this pass (warning lines for both rows absent after the change):
+- `compile_native` (app source-file driver) -> `compile_native_source`
+  (`src/app/compile/native.spl`, export in `__init__.spl`, lazy import in
+  `_CliCompile/compile_opt_and_driver.spl`).
+- `dir_remove_all` in `src/app/io/dir_ops.spl` now `-> bool` like std; its
+  `== 0` caller (`dir_remove`) updated. A bool fallback hit made
+  `dir_remove_all(p) == 0` false on success.
+Pin: `test/01_unit/app/build/cross_module_public_symbol_collision_rows_spec.spl`
+(red 0/2 on base, green 2/2).
+
+Still open: `shell` (app tuple API, many callers) and the new rows above.

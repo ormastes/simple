@@ -4,6 +4,7 @@
 # Delegates to existing LLVM IR generation and llc compilation pipeline.
 
 use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.mir_lowering.{bootstrap_llvm_name_index_ensure}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget,
     BackendCompileOptions, CompileError, CompiledModule,
     compileerror_backend_error}
@@ -38,7 +39,7 @@ pub fn llvm_codegen_target_config_for(options: BackendCompileOptions, bare_metal
 fn llvm_codegen_translator_for(module_name: text, target: CodegenTarget, bare_metal: bool) -> MirToLlvm:
     if bare_metal:
         return MirToLlvm.create_baremetal(module_name, target, nil)
-    MirToLlvm.create(module_name, target, nil)
+    MirToLlvm.create(module_name, target, None)
 
 fn llvm_codegen_retained_translator_for(
     module_name: text, target: CodegenTarget, config: LlvmTargetConfig,
@@ -179,6 +180,13 @@ pub fn llvm_compile_module_direct_to_path(
         val warm_llc = find_llc()
         if warm_llc == "":
             val _warm_clang = find_clang()
+        # The bootstrap LLVM name index (bootstrap_globals.spl) is a set of
+        # module-global [i64] tables built lazily on the first lookup and
+        # trusted while (epoch, function count) is unchanged. Built inside the
+        # scope below, scope end frees them and the NEXT module's lookup reads
+        # a freed array ("rejected invalid array handle", caller
+        # bootstrap_llvm_exact_function_index). Warm it before the scope.
+        bootstrap_llvm_name_index_ensure()
     if scoped and (transient_array_scope_state_v1() != 0 or not transient_scope_begin()):
         eprint("[codegen-scope] WARNING LLVM codegen scope refused; compiling UNSCOPED: module={module.name}")
         scoped = false
