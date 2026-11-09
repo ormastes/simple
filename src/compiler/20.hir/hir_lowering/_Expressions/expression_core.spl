@@ -451,6 +451,54 @@ impl HirLowering:
                 return self.struct_type_param_names_by_name[owner_name]
         empty
 
+    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=take the kind, never a by-value HirExpr (frozen stage2 prologue copy fault)
+    me instantiated_method_call_return_kind(kind: HirExprKind) -> HirType?:
+        # Bug generic_method_return_subst_2026_11_09: method-call sibling of
+        # instantiate_field_type_for_base. `b.poll()` on `b: Box<text?>` must
+        # see the declared `Poll<T>` as `Poll<text?>`, or `match b.poll():
+        # case Poll.Ready(v)` has no subject owner. Substitute only with a
+        # fully resolved, declaration-ordered argument list; otherwise leave
+        # the call untyped (the pre-existing behaviour).
+        match kind:
+            case HirExprKind.MethodCall(receiver, method, _, _):
+                var receiver_type: HirType? = nil
+                if receiver.has_type_:
+                    receiver_type = receiver.type_
+                else:
+                    val receiver_symbol = _hir_expr_symbol_or_invalid(receiver.kind)
+                    if not receiver_symbol.is_valid():
+                        return nil
+                    receiver_type = self.symbols.get_symbol_type_raw(receiver_symbol.id)
+                if val owner_type = receiver_type:
+                    match owner_type.kind:
+                        case HirTypeKind.Named(owner, arguments):
+                            if arguments.len() == 0:
+                                return nil
+                            val names = self.owner_type_param_names_raw(owner.id)
+                            if names.len() != arguments.len():
+                                return nil
+                            if val declared = self.class_method_return_type_raw(owner.id, method):
+                                val substituted = substitute_declared_pattern_type(declared, names, arguments)
+                                match substituted.kind:
+                                    case HirTypeKind.Error: return nil
+                                    case _: return Some(substituted)
+                        case _: ()
+            case _: ()
+        nil
+
+    me class_method_return_type_raw(raw_owner_symbol_id: i64, method: text) -> HirType?:
+        # Same key order as owner_type_param_names_raw: module-qualified first.
+        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+            val owner_name: text = owner_symbol.name
+            if val owner_module = owner_symbol.defining_module:
+                val canonical_key: text = owner_module + "." + owner_name + "::" + method
+                if self.class_method_return_types_by_name.has(canonical_key):
+                    return Some(self.class_method_return_types_by_name[canonical_key])
+            val bare_key: text = owner_name + "::" + method
+            if self.class_method_return_types_by_name.has(bare_key):
+                return Some(self.class_method_return_types_by_name[bare_key])
+        nil
+
     me lower_hir_expr(e: Expr) -> HirExpr:
         if e == nil:
             val missing_span = Span.empty()

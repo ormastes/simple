@@ -200,6 +200,7 @@ pub(crate) fn exec_block(
     let shadows = capture_block_scope_shadows(block, env);
 
     for stmt in &block.statements {
+        super::interpreter_state::set_current_node_span(stmt.span().map(Into::into));
         match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
             Control::Next => {}
             flow @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
@@ -323,6 +324,7 @@ pub(crate) fn exec_block_fn(
     let mut last_expr_value: Option<Value> = None;
 
     for (i, stmt) in block.statements.iter().enumerate() {
+        super::interpreter_state::set_current_node_span(stmt.span().map(Into::into));
         // For the last statement, if it's an expression, capture its value
         let is_last = i == len - 1;
         if is_last {

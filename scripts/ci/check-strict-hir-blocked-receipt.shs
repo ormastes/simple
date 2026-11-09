@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/strict-hir-blocked.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+helper="$root/scripts/ci/record-strict-hir-blocked.shs"
+passed=0
+for outcome in failure skipped cancelled; do
+  bash "$helper" "$work/$outcome" "$outcome" >"$work/$outcome.log"
+  grep -qx 'status: BLOCKED' "$work/$outcome/result.sdn"
+  grep -qx 'verified_passed_tests: 0' "$work/$outcome/result.sdn"
+  grep -qx 'execution_attempted: 0' "$work/$outcome/result.sdn"
+  grep -qx 'unit_exit_status: not-run' "$work/$outcome/result.sdn"
+  grep -qx "prerequisite_outcome: $outcome" "$work/$outcome/result.sdn"
+  passed=$((passed + 1))
+done
+if bash "$helper" "$work/success" success >"$work/success.log" 2>&1; then exit 1; fi
+[ ! -e "$work/success/result.sdn" ]
+passed=$((passed + 1))
+if GITHUB_SHA=invalid-source-pin bash "$helper" "$work/pin" failure >"$work/pin.log" 2>&1; then exit 1; fi
+[ ! -e "$work/pin/result.sdn" ]
+passed=$((passed + 1))
+cp "$work/failure/result.sdn" "$work/before.sdn"
+if bash "$helper" "$work/failure" failure >"$work/collision.log" 2>&1; then exit 1; fi
+cmp "$work/before.sdn" "$work/failure/result.sdn"
+passed=$((passed + 1))
+printf 'PASS: blocked HIR receipt %s fixtures; no unit pass fabricated\n' "$passed"

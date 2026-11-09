@@ -1,0 +1,33 @@
+"""Regression: implicit `self` field READ inside a plain `fn` method must resolve.
+
+Bug: doc/08_tracking/bug/implicit_self_field_read_unresolved_in_plain_fn_method_2026-09-03.md
+A plain (non-`me`) instance method reading a field bare (`kind`) must resolve
+the field on the receiver, exactly like the `me`-method form does.
+"""
+
+use std.spec.{describe, expect, it, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+describe "implicit self field read in plain fn method":
+    it "resolves a bare field read on the receiver in a plain fn method":
+        step("Lower a class whose plain fn method reads `kind` bare")
+        val prior_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val source = "class Box:\n    kind: text\n\n    fn code() -> i64:\n        if kind == \"a\":\n            4\n        else:\n            1\n"
+        val parsed = parse_full_frontend(source, "box_code.spl", "box_code", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("box_code.spl")
+        val _hir = hir_lowering.lower_module(parsed)
+
+        if val prior_value = prior_bootstrap:
+            rt_env_set("SIMPLE_BOOTSTRAP", prior_value)
+        else:
+            rt_env_remove("SIMPLE_BOOTSTRAP")
+
+        step("Require the bare `kind` read to resolve with no lowering errors")
+        expect(hir_lowering.errors.len()).to_equal(0)

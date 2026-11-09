@@ -64,3 +64,12 @@ The staged-budget change (style ≤70% of total budget) reduced the quota test's
 
 Follow-ups to consider (do not implement): (a) raise the quota test's budget or lower its junk-rule count so intent (rule quota, not wall clock) is tested with margin; (b) reduce per-rule preprocessing cost (memoize specificity parsing); (c) count rule preprocessing against its own guarded sub-slice so a preprocessing overrun degrades earlier and cheaper.
 
+
+## Closed 2026-11-09 (lane-p2-3) — non-essential perf, moved to source TODO
+
+Checked against current policy: owner rule 2026-11-02 says perf bugs that do
+not block phase 3 become a TODO, with no implementation now. The perf gap
+(~176s interpreted, cascade-dominated) is unchanged. It is tracked by
+`TODO(browser_engine_wikipedia_render_perf_2026-07-11)` at `compute_styles` in
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl`.
+The degraded-output honesty fix stays landed.
