@@ -37,3 +37,14 @@ Fix is in source (early Let uses `copy_local_hir_type_metadata`, `mir_lowering_s
 `test/helpers/lowering_harness.spl` exists on release/1.0.0 (and main) and exports `expect_lowered_mir_functions`.
 The 2026-11-07 reopen came from a checkout without `test/helpers/`. Measured result:
 `bin/simple test test/01_unit/compiler/mir/early_let_receiver_metadata_spec.spl` gives 3 total, 3 passed, 0 failed.
+
+**Verified 2026-11-07 (lane u-earlylet):** `test.helpers.lowering_harness` is
+present on origin/release/1.0.0 (not missing). The early-Let arm in
+`src/compiler/50.mir/mir_lowering_stmts.spl` (~1713-1733) already uses
+`copy_local_hir_type_metadata(init_local.id, local.id)` instead of passing a
+returned HirType aggregate. `early_let_receiver_metadata_spec.spl` passes 5/5
+under the deployed `bin/simple.exe` (interpreter lane): the 3 original cases
+plus 2 prevention cases (Dict receiver rebinding, untyped rebind of a typed text
+binding). A fails-before-fix replay was not produced: the defect is a staged
+native ABI corruption that the interpreter lane cannot exhibit, and native
+stage3 builds were out of scope. Native/compiled verification remains pending.
