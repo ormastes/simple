@@ -24,6 +24,24 @@ use std::time::Instant;
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
+/// Primitive trait methods receive the runtime value directly, like enum
+/// methods. Preserve the selected impl's signed width on the implicit binding
+/// so another trait call on `self` does not collapse back to the i64 impl.
+fn bind_direct_method_self(env: &mut Env, owner: &str, value: Value) {
+    let width = if matches!(&value, Value::Int(_)) {
+        match owner {
+            "i8" => Some(8),
+            "i16" => Some(16),
+            "i32" => Some(32),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    env.insert("self".into(), value);
+    env.set_declared_int_width("self", width);
+}
+
 /// Origin of the value presented to the SFFI v2 return-contract boundary.
 /// Keeping this separate from `Value` prevents fallthrough from first being
 /// laundered into `Value::Nil` (and then into `Option::None`).
@@ -757,10 +775,17 @@ pub(crate) fn execute_function_body(
     });
 
     for param in &func.params {
+        // An explicitly spelled but untyped self parameter still derives its
+        // type from the selected impl, not from the widthless runtime Int.
+        let implicit_self_width = if param.name == "self" && param.ty.is_none() {
+            local_env.declared_int_width("self")
+        } else {
+            None
+        };
         local_env.mark_local(param.name.clone());
         // `fn f(x: i32)`: the parameter's declared narrow width is its static
         // receiver type for `x.m()` trait dispatch (see `CowEnv::declared_int_widths`).
-        if let Some(width) = Env::narrow_signed_width_of(param.ty.as_ref()) {
+        if let Some(width) = Env::narrow_signed_width_of(param.ty.as_ref()).or(implicit_self_width) {
             local_env.set_declared_int_width(&param.name, Some(width));
         }
         if param_is_borrow_mut(param) {
@@ -1056,7 +1081,7 @@ pub(crate) fn exec_function_with_values_and_self(
             // Check if this is an enum method (fields contains just "self")
             if fields.len() == 1 && fields.contains_key("self") {
                 // For enum methods, self should be the enum value directly
-                local_env.insert("self".into(), fields.get("self").unwrap().clone());
+                bind_direct_method_self(&mut local_env, class_name, fields.get("self").unwrap().clone());
             } else {
                 // For class methods, self is an Object — Arc::clone is O(1)
                 local_env.insert(
@@ -2382,7 +2407,7 @@ fn exec_function_inner(
         if fields.len() == 1 && fields.contains_key("self") {
             // For enum methods, self should be the enum value directly, not wrapped in Object
             let self_val = fields.get("self").unwrap().clone();
-            local_env.insert("self".into(), self_val);
+            bind_direct_method_self(&mut local_env, class_name, self_val);
         } else {
             // For class methods, self is an Object — Arc::clone is O(1)
             local_env.insert(
