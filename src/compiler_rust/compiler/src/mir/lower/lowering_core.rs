@@ -1966,6 +1966,28 @@ impl<'a> MirLowerer<'a> {
         self.extern_fn_name_set = hir.extern_fn_names.iter().cloned().collect();
         {
             let mut sigs_by_name: HashMap<&str, Vec<Vec<TypeId>>> = HashMap::new();
+            let mut returns_by_signature: HashMap<(&str, Vec<TypeId>), TypeId> = HashMap::new();
+            // Only canonical concrete primitives have globally meaningful
+            // TypeId inequality. Separately registered aggregates can be
+            // structurally equivalent, and nominal types need owner evidence.
+            let concrete_primitive = |ty| {
+                matches!(
+                    ty,
+                    TypeId::BOOL
+                        | TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::F32
+                        | TypeId::F64
+                        | TypeId::STRING
+                        | TypeId::CHAR
+                )
+            };
             let mut order: Vec<&str> = Vec::new();
             for func in &hir.functions {
                 // Free functions only — methods are `Type.method`-qualified and
@@ -1981,6 +2003,24 @@ impl<'a> MirLowerer<'a> {
                     continue;
                 }
                 let sig: Vec<TypeId> = func.params.iter().filter(|p| p.name != "self").map(|p| p.ty).collect();
+                // Argument-only dispatch cannot distinguish proven distinct
+                // primitive returns. Unknown/dynamic/bottom, structural and
+                // nominal IDs deliberately do not enter this proof table.
+                if concrete_primitive(func.return_type) {
+                    if let Some(previous_return) =
+                        returns_by_signature.insert((func.name.as_str(), sig.clone()), func.return_type)
+                    {
+                        if previous_return != func.return_type {
+                            return Err(MirLowerError::Unsupported(format!(
+                                "ambiguous co-compiled definitions of `{}`: identical parameter types \
+                                 have different primitive return types ({previous_return:?} vs {:?}). \
+                                 Rename the definitions to unique names. \
+                                 [compiler_cross_module_private_symbol_collision]",
+                                func.name, func.return_type,
+                            )));
+                        }
+                    }
+                }
                 let entry = sigs_by_name.entry(func.name.as_str()).or_default();
                 if entry.is_empty() {
                     order.push(func.name.as_str());

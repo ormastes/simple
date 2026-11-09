@@ -1,5 +1,60 @@
 # private-symbol collision: sshd's four names — enumeration + mis-dispatch verdict
 
+## 2026-11-10 verified component repair — primitive return-only refusal
+
+**General C1 remains OPEN.** The Rust MIR signature collector now rejects
+co-compiled bare free functions whose identical parameter TypeIds have proven
+distinct canonical primitive returns, before either body can silently replace
+the other. This applies to public/private bare functions; methods keep their
+existing path. The diagnostic asks for unique definition names rather than
+selecting an arbitrary body. Argument-distinct mangling and identical-signature
+compatibility remain unchanged. C2's existing ambiguous-argument refusal is
+unchanged by this repair.
+
+Raw TypeId inequality does not prove that independently registered structural
+returns differ. The new refusal therefore excludes structural, nominal,
+refined, dynamic, bottom and unresolved return types. No shape-based nominal
+equivalence or general private-symbol isolation is claimed. The historical
+C1/C2 statements below describe earlier source, not completion of those gaps.
+
+The real Rust owner integration target `return_only_collision` constructs HIR
+fixtures and calls the production MIR lowerer. Its five unchanged tests cover
+primitive return-only refusal, identical-signature compatibility,
+parameter-distinct mangling and independently registered equivalent array and
+tuple returns. They model the flattened-name boundary; they do not exercise a
+complete cross-module import/JIT/native application pipeline.
+
+Actual execution on source `aedc3c43d6f1f562a1bfb3cb7370b6ae0072850f`, target
+`x86_64-pc-windows-gnullvm`, package `simple-compiler`, no default features:
+
+| Observation | Executed | Passed | Failed | Rust test exit |
+|---|---:|---:|---:|---:|
+| Pristine owner | 5 | 4 | 1 expected | 101 |
+| Reviewed primitive refusal | 5 | 5 | 0 | 0 |
+
+Only `return_only_collision_is_rejected_before_last_write_wins` failed on the
+baseline at its `return-only collision must fail` assertion. Both phases built
+the actual integration binary, selected it from Cargo JSON and listed exactly
+the five named tests; none were ignored/measured/filtered. The owned watchdog
+reported complete/exit0, RSS enforcement at 8,000,000 KiB and quiescent=1 for
+both phases. Sampled peak RSS was 3,156,604 KiB baseline and 3,145,612 KiB fixed.
+No Rust-seed Simple CLI fallback or test rerun supplied these observations.
+
+Exact public identities (SHA-256):
+
+- Baseline owner: `ff2cd0323dbbe46273c3b7994ef0fc3092b88879c01647d88e2deb095be355a1`.
+- Fixed raw LF owner: `8a3f5781b1ad5940445115c2be869a43250f6c631ea59622b72e5b6e1e8abdea`.
+- Unchanged five-test fixture: `083fe506a8c9e63fc1df68e485b88b276879d292c910c5d8c943abe72ee6b727`.
+- Preserved baseline executable: `38f41232aad75cc04777e99284db6f6153a6c1dd71c827ad576fbde396e8fe49`.
+- Preserved fixed executable: `0a9c63bf23004bf6be5f50a070001609bb707206daea7052e7a5c802e1fc2fa3`.
+
+Baseline/fixed inputs, actual executables, raw test logs and opaque linker
+captures are retained locally; private environments/captures are not published.
+Two prelaunch harness failures remain recorded and are not compiler test
+failures or passes. Independent Astra source, baseline and terminal component
+reviews passed. This is component evidence for the scoped refusal, not a
+self-hosted CLI admission, MCP smoke, full-suite or complete C1 qualification.
+
 - **ID:** private_symbol_collision_sshd_four_names_2026-07-28
 - **Date:** 2026-07-28
 - **Status:** PARTIALLY FIXED 2026-08-09 (source-side renames landed; compiler-side
