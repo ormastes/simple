@@ -37,6 +37,17 @@ ROOT=$(cd "$HERE/../.." && pwd)
 DB="${BUG_CLAIM_DB:-$ROOT/doc/08_tracking/bug/bug_db.sdn}"
 RESEAL="$HERE/reseal-sdn-crc32.shs"
 . "$HERE/sdn-seal-lib.shs"
+# Sharded bug DB (doc/05_design/infra/tracking/bug_db_shards.md): when a db/
+# directory sits next to the legacy file, every command works on the merged
+# view and commit_db publishes one sealed shard per changed bug; the legacy
+# file is frozen. Fixtures without db/ keep the single-file behaviour.
+LEGACY_DB="$DB"; SHARD_MODE=0; MERGED_DB=""
+if [ -f "$DB" ] && [ -d "$(dirname "$DB")/db" ]; then
+    SHARD_MODE=1; MERGED_DB=$(mktemp) || die "mktemp failed"
+    sh "$HERE/bug-db-shard.shs" merged "$LEGACY_DB" > "$MERGED_DB" || die "cannot build the merged bug DB view"
+    DB="$MERGED_DB"
+    trap 'rm -f "$MERGED_DB" "$MERGED_DB.before" 2>/dev/null' EXIT
+fi
 TABLE_HDR='bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|'
 CLOSED_RE='^(closed|fixed|invalid|resolved-|wontfix|cannot_reproduce|documented)'
 
@@ -413,12 +424,13 @@ refuse_held() { # prints holder info, exit 3
 # Writers run on a private copy ($DB.work) and publish it with one mv after the
 # reseal, so a failed edit/reseal never leaves a half-written database.
 REAL_DB="$DB"
-LOCKDIR="$REAL_DB.lock"
+LOCKDIR="$LEGACY_DB.lock"
 WORK_DB="$REAL_DB.work.$$"
 LOCK_OWNER_FILE=''
 owns_lock() { [ -n "$LOCK_OWNER_FILE" ] && [ -f "$LOCK_OWNER_FILE" ]; }
 cleanup() {
     rm -f "$WORK_DB" "$WORK_DB".edit.* 2>/dev/null
+    [ -n "$MERGED_DB" ] && rm -f "$MERGED_DB" "$MERGED_DB.before" 2>/dev/null
     # Only the owner can remove its marker. A replacement lock has a different
     # mktemp token, so an old owner's cleanup cannot remove its directory.
     if owns_lock && rm "$LOCK_OWNER_FILE" 2>/dev/null; then
@@ -451,11 +463,26 @@ lock() {
     LOCK_OWNER_FILE=$(mktemp "$LOCKDIR/owner.$$.XXXXXXXX") || die "cannot mark lock ownership for $REAL_DB"
     trap cleanup EXIT
     trap 'exit 130' INT TERM
+    if [ "$SHARD_MODE" = 1 ]; then
+        # the lock is held: rebuild the merged view so edits start from the
+        # shards as they are NOW, not as they were at startup
+        sh "$HERE/bug-db-shard.shs" merged "$LEGACY_DB" > "$REAL_DB" || die "cannot rebuild the merged bug DB view"
+        cp "$REAL_DB" "$REAL_DB.before" || die "cannot snapshot $REAL_DB"
+    fi
     cp "$REAL_DB" "$WORK_DB" || die "cannot copy $REAL_DB"
     DB="$WORK_DB"
 }
 commit_db() {
     owns_lock || die "lost lock ownership for $REAL_DB"
+    if [ "$SHARD_MODE" = 1 ]; then
+        # one sealed shard per bug whose rows changed; the legacy file is frozen
+        for _sid in $(sh "$HERE/bug-db-shard.shs" changed "$REAL_DB.before" "$WORK_DB"); do
+            sh "$HERE/bug-db-shard.shs" write "$_sid" "$WORK_DB" "$LEGACY_DB" >/dev/null || die "cannot write shard $_sid"
+        done
+        mv "$WORK_DB" "$REAL_DB" || die "cannot publish $REAL_DB"
+        DB="$REAL_DB"
+        return 0
+    fi
     # Sidecar seal: strip any legacy header, hash the work copy, create the new
     # .csm FIRST (a crash then leaves MERGED_UNSEALED, never MISSING), publish
     # with one mv, then prune the stale seals.

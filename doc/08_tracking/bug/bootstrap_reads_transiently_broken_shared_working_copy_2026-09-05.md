@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** fix-implemented-verification-pending (2026-11-09): bootstrap-from-scratch.sh re-execs from a pinned `git archive` snapshot (scripts/bootstrap/bootstrap-pin-archive.shs, --selftest); opt out SIMPLE_BOOTSTRAP_LIVE_TREE=1
 **Filed:** 2026-09-05
 **Host:** aarch64-unknown-linux-gnu
 **Severity:** medium-high — costs a full bootstrap lane, and the failure it
