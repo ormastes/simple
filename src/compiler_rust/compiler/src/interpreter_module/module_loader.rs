@@ -485,7 +485,26 @@ fn provided_names_registry() -> &'static std::sync::Mutex<HashMap<std::path::Pat
     REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+thread_local! {
+    /// Private top-level fn names per owning module. Thread-local (same scope as
+    /// `FUNCTION_MODULE_OWNER` / `CURRENT_EXEC_MODULE`, which the call-time gate
+    /// reads alongside it), so the per-call check takes NO lock.
+    static PRIVATE_FNS_BY_OWNER: std::cell::RefCell<HashMap<Arc<str>, Arc<std::collections::HashSet<String>>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn register_private_fns(owner: Arc<str>, names: Arc<std::collections::HashSet<String>>) {
+    PRIVATE_FNS_BY_OWNER.with(|reg| {
+        reg.borrow_mut().insert(owner, names);
+    });
+}
+
 fn record_provided_names(module_path: &Path, provided: ProvidedNames) {
+    if let Some(p) = provided.as_ref() {
+        if !p.private_fns.is_empty() {
+            register_private_fns(super::module_cache::module_owner_key(module_path), Arc::new(p.private_fns.clone()));
+        }
+    }
     if let Ok(mut registry) = provided_names_registry().lock() {
         registry.insert(module_path.to_path_buf(), provided);
     }
@@ -2772,5 +2791,99 @@ mod private_fn_visibility_tests {
             &provided_with_private(&[]),
         );
         assert!(public.is_ok());
+    }
+}
+
+/// Call-time visibility check (interp_private_names_leak_across_modules_2026-11-05).
+/// The interpreter resolves unqualified calls through the process-wide function
+/// table, so a private top-level `fn` of module `owner` is reachable from any
+/// loaded module (glob import, or no import at all). Reject such a call when the
+/// caller lives in a different directory and the (module, name) pair is not a
+/// frozen legacy pair in `scripts/check/private_import_baseline.txt`.
+/// Same-directory siblings keep the documented compatibility exception.
+/// Callers under `test/` are exempt (owner decision: white-box tests may use
+/// private names of the module they test); `src/**` callers stay strict.
+///
+/// Thread scope: the private-name registry is thread-local, so a module loaded
+/// on thread A and called from thread B finds no entry and the check is skipped
+/// (fails open, same as the pre-gate behaviour and as `FUNCTION_MODULE_OWNER`).
+fn is_test_caller(current: &str) -> bool {
+    let norm = current.replace('\\', "/");
+    let norm = norm.trim_start_matches("./");
+    norm.starts_with("test/") || norm.contains("/test/")
+}
+
+pub(crate) fn check_private_call_visibility(
+    name: &str,
+    owner: &Arc<str>,
+    current: &Arc<str>,
+) -> Result<(), CompileError> {
+    if owner == current || &**current == "<entry>" || is_test_caller(current) {
+        return Ok(());
+    }
+    let is_private = PRIVATE_FNS_BY_OWNER.with(|reg| reg.borrow().get(owner).is_some_and(|s| s.contains(name)));
+    if !is_private {
+        return Ok(());
+    }
+    let (owner_path, cur_path) = (Path::new(&**owner), Path::new(&**current));
+    if owner_path.parent() == cur_path.parent() {
+        return Ok(());
+    }
+    if private_import_is_baselined(owner_path, name) {
+        return Ok(());
+    }
+    Err(CompileError::semantic(format!(
+        "private fn `{name}` of module `{owner}` is not visible to {current}; mark it `pub` or `export` it"
+    )))
+}
+
+#[cfg(test)]
+mod private_call_visibility_tests {
+    use super::*;
+
+    fn register(owner: &str, name: &str) -> Arc<str> {
+        let owner: Arc<str> = Arc::from(owner);
+        register_private_fns(owner.clone(), Arc::new([name.to_string()].into_iter().collect()));
+        owner
+    }
+
+    #[test]
+    fn cross_directory_private_call_is_an_error() {
+        let owner = register("zz_fx/app/sub/lib_mod.spl", "secret_helper");
+        let cur: Arc<str> = Arc::from("zz_fx/app/other/caller.spl");
+        assert!(check_private_call_visibility("secret_helper", &owner, &cur).is_err());
+    }
+
+    #[test]
+    fn test_caller_is_exempt_but_src_caller_still_errors() {
+        let owner = register("zz_fx/src/app/cli/arch.spl", "_str_trim");
+        let test_cur: Arc<str> = Arc::from("test\\01_unit\\app\\arch_spec.spl");
+        assert!(check_private_call_visibility("_str_trim", &owner, &test_cur).is_ok());
+        let test_cur2: Arc<str> = Arc::from("test/01_unit/app/arch_spec.spl");
+        assert!(check_private_call_visibility("_str_trim", &owner, &test_cur2).is_ok());
+        let src_cur: Arc<str> = Arc::from("zz_fx/src/app/other/caller.spl");
+        assert!(check_private_call_visibility("_str_trim", &owner, &src_cur).is_err());
+        let testlike: Arc<str> = Arc::from("zz_fx/src/app/contest/caller.spl");
+        assert!(check_private_call_visibility("_str_trim", &owner, &testlike).is_err());
+    }
+
+    #[test]
+    fn registry_is_thread_local_so_cross_thread_call_fails_open() {
+        let owner = register("zz_fx/app/sub/xthread.spl", "secret_helper");
+        let cur: Arc<str> = Arc::from("zz_fx/app/other/caller.spl");
+        assert!(check_private_call_visibility("secret_helper", &owner, &cur).is_err());
+        let (o2, c2) = (owner.clone(), cur.clone());
+        let other_thread = std::thread::spawn(move || check_private_call_visibility("secret_helper", &o2, &c2).is_ok());
+        assert!(other_thread.join().unwrap(), "documented: unregistered on another thread => check skipped");
+    }
+
+    #[test]
+    fn same_directory_owner_itself_and_public_names_are_allowed() {
+        let owner = register("zz_fx/app/sub/lib2.spl", "secret_helper");
+        let sibling: Arc<str> = Arc::from("zz_fx/app/sub/other.spl");
+        assert!(check_private_call_visibility("secret_helper", &owner, &sibling).is_ok());
+        assert!(check_private_call_visibility("secret_helper", &owner, &owner).is_ok());
+        let far: Arc<str> = Arc::from("zz_fx/app/other/caller.spl");
+        assert!(check_private_call_visibility("open_api", &owner, &far).is_ok());
     }
 }

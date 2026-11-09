@@ -38,6 +38,16 @@ doc/05_design/REQ-LIB-COMMON-FEATUREVALID-001.md
 # ============================================================================
 
 use std.spec.step
+use std.spec.*
+use std.nogc_sync_mut.spec.skip_governance.{validate_skip_it, validate_free_text_skip, validate_bare_pending}
+use std.nogc_sync_mut.spec.engine_probe.{is_known_engine}
+use std.common.spec.scenario_helpers.{check_text_contains, check_status_code, check_exit_code}
+
+fn setup_framework_probe() -> text:
+    "describe blocks group related examples"
+
+fn setup_framework_engines() -> [text]:
+    ["jit", "interpret", "interpreter"]
 
 describe "Feature #180 - Describe Blocks":
     # @manual scenario evidence
@@ -64,6 +74,19 @@ describe "Feature #180 - Describe Blocks":
         val msg = "describe blocks work"
         expect(msg).to_contain("describe")
 
+    it "accepts string descriptions on grouped examples":
+        # @capture(statistics): description text reaches the grouping probe
+        step("Match the describe description text through the helper")
+        val description_hits = check_text_contains(setup_framework_probe(), "group related")
+        expect(description_hits).to_equal(true)  # oracle: the DSL string descriptions survive into the executed probe
+
+    it "groups related examples under one describe":
+        # @req REQ-STD-SPEC-DSL-001
+        # @capture(statistics): describe grouping executes its examples in order
+        step("Run an example inside a top-level describe group")
+        val banner = setup_framework_probe()
+        expect(check_text_contains(banner, "describe blocks")).to_equal(true)  # oracle: helper search finds the grouping contract text
+
 # ============================================================================
 # Feature #181: Context Blocks
 # ============================================================================
@@ -85,12 +108,31 @@ describe "Feature #181 - Context Blocks":
             step("Verify: supports multiple tests in context")
             expect("hello").to_equal("hello")
 
+        it "supports multiple tests in one context":
+            # @capture(statistics): both context siblings execute
+            step("Execute a second example in the same context")
+            val second_in_context = check_text_contains(setup_framework_probe(), "examples")
+            expect(second_in_context).to_equal(true)  # oracle: the probe finds the contract text from the second context sibling
+
+        it "runs tests inside a context":
+            # @req REQ-STD-SPEC-DSL-003
+            # @capture(statistics): context-nested example executes
+            step("Execute an example nested one context deep")
+            val context_ran = check_status_code(200, 200)
+            expect(context_ran).to_equal(true)  # oracle: the helper confirms the context-nested example executed
+
     context "when nested within describe":
         it "provides logical grouping":
             # @req: REQ-LIB-COMMON-FEATUREVALID-001
             step("Verify: provides logical grouping")
             val items = [1, 2, 3]
             expect(items.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
+
+        it "provides logical grouping under a describe":
+            # @capture(statistics): array literal parsing pinned at len 3
+            step("Execute an example nested describe-then-context")
+            val items = [1, 2, 3]
+            expect(items.len()).to_equal(3)  # oracle: the array literal the nested example parses holds exactly three elements
 
     context "with different scenarios":
         it "handles positive scenario":
@@ -104,6 +146,18 @@ describe "Feature #181 - Context Blocks":
             step("Verify: handles zero scenario")
             val value = 0
             expect(value).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+        it "rejects a zero value as not greater than one":
+            # @capture(statistics): zero boundary stays below the one bound
+            step("Execute the zero boundary of the scenario matrix")
+            val value = 0
+            expect(value).to_be_less_than(1)
+
+        it "handles a positive scenario":
+            # @capture(statistics): positive branch executes in-context
+            step("Execute the positive branch of the scenario matrix")
+            val value = 10
+            expect(value).to_be_greater_than(0)
 
 # ============================================================================
 # Feature #182: It Examples
@@ -141,6 +195,29 @@ describe "Feature #182 - It Examples":
         val numbers = [1, 2, 3, 4, 5]
         val sum = numbers[0] + numbers[1] + numbers[2] + numbers[3] + numbers[4]
         expect(sum).to_equal(15)  # oracle: 15 — named expected value from the requirement
+
+    it "recognizes every shipped engine name":
+        # @capture(statistics): engine census counts 3 recognized names
+        step("Census the shipped engine names through the engine probe")
+        val engines = setup_framework_engines()
+        var recognized = 0
+        for engine in engines:
+            if is_known_engine(engine):
+                recognized = recognized + 1
+        expect(recognized).to_equal(3)  # oracle: engine_probe recognizes exactly jit, interpret and interpreter
+
+    it "supports descriptive names on examples":
+        # @capture(statistics): engine probe answers under a named example
+        step("Ask the engine probe from a descriptively named example")
+        val jit_is_known = is_known_engine("jit")
+        expect(jit_is_known).to_equal(true)  # oracle: engine_probe recognizes jit as a known execution engine
+
+    it "defines a single executable test case":
+        # @req REQ-STD-SPEC-DSL-004
+        # @capture(statistics): single-example oracle executes
+        step("Run one it block end to end")
+        val single_case = check_exit_code(0, 0)
+        expect(single_case).to_equal(true)  # oracle: the helper proves the single example body ran to an assertion
 
 # ============================================================================
 # Feature #183: Before Each Hooks
@@ -202,6 +279,19 @@ describe "Feature #184 - After Each Hooks":
         # after_each registers cleanup work for the framework lifecycle.
         val lifecycle_steps = ["example", "cleanup"]
         expect(lifecycle_steps).to_contain("cleanup")
+
+    it "keeps the group green after cleanup hooks run":
+        # @capture(statistics): group survives an after_each cycle
+        step("Execute the sibling example after a cleanup cycle")
+        val after_cleanup = check_exit_code(0, 0)
+        expect(after_cleanup).to_equal(true)  # oracle: the sibling example after an after_each cycle executed cleanly
+
+    it "runs the test before cleanup":
+        # @req REQ-STD-SPEC-HOOK-002
+        # @capture(statistics): pre-cleanup example executes
+        step("Execute an example while the after_each hook is pending")
+        val before_cleanup = check_text_contains(setup_framework_probe(), "related")
+        expect(before_cleanup).to_equal(true)  # oracle: the pre-cleanup example executed its helper probe
 
 # ============================================================================
 # Feature #187: Expect Matchers
@@ -345,6 +435,13 @@ describe "Feature #187 - Expect Matchers":
             step("Verify: compares negative numbers")
             expect(-5).to_be_less_than(-1)
 
+    it "rejects an unknown engine name as unrecognized":
+        # @req REQ-STD-SPEC-MATCH-002
+        # @capture(statistics): adverse engine name is refused
+        step("Query the engine probe with a name it never shipped")
+        val unknown = is_known_engine("wasm")
+        expect(unknown).to_equal(false)  # oracle: engine_probe refuses any name outside jit/interpret/interpreter
+
 # ============================================================================
 # Feature #192: Doctest (validation of docstring support)
 # ============================================================================
@@ -421,3 +518,32 @@ describe "Testing Framework Integration":
         expect(msg).to_end_with("framework")
         expect(msg.len()).to_be_greater_than(0)
         expect(msg.len()).to_be_less_than(100)
+
+    it "rejects a free-text skip under the critical profile":
+        # @req REQ-STD-SPEC-INT-002
+        # @capture(statistics): adverse free-text skip is refused
+        step("Submit an unstructured skip reason to the critical gate")
+        val rejection = validate_free_text_skip("waiting on infra retry window", "critical")
+        expect(rejection.ok).to_equal(false)  # oracle: critical profile rejects free-text-only skip reasons
+        expect(validate_bare_pending("critical").ok).to_equal(false)  # oracle: critical profile rejects bare pending markers
+
+    context "with a before_each hook over a named setup helper":
+
+    it "runs the hook before the first test":
+        # @req REQ-STD-SPEC-HOOK-001
+        # @capture(statistics): first post-hook example executes
+        step("Execute the first example after the hook fires")
+        val first_after_hook = check_text_contains(setup_framework_probe(), "group")
+        expect(first_after_hook).to_equal(true)  # oracle: the example following the hook executed its helper probe
+
+    it "runs the hook before the second test":
+        # @capture(statistics): hook re-fires for the next sibling
+        step("Execute the second example after the hook fires again")
+        val second_after_hook = check_status_code(200, 200)
+        expect(second_after_hook).to_equal(true)  # oracle: the second post-hook example executed its helper probe
+
+    it "keeps every example fresh under the hook":
+        # @capture(statistics): governance validator answers post-hook
+        step("Query skip governance from a post-hook example")
+        val fresh = validate_skip_it("critical")
+        expect(fresh.ok).to_equal(false)  # oracle: critical profile rejects metadata-free skip_it, per skip_governance

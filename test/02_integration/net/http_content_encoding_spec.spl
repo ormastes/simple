@@ -22,6 +22,7 @@ use std.nogc_async_mut.http_server.compression.{
 use std.common.compress.{decompress_bytes}
 use std.nogc_sync_mut.compression.gzip.{gzip_decompress}
 use std.nogc_sync_mut.compression.zlib.{zlib_decompress}
+use std.common.compress.deflate.{deflate_decompress_eof}
 
 # ----------------------------------------------------------------------------
 # Module-level payload helpers — built outside it-blocks to avoid the
@@ -95,6 +96,37 @@ fn _http_content_encoding_get_header(headers: [(text, text)], name: text) -> tex
 # ----------------------------------------------------------------------------
 # Integration spec — all 12 cases in a single describe block
 # ----------------------------------------------------------------------------
+
+# 1 120 bytes of repetitive ASCII — well above the 256-byte minimum threshold.
+fn _make_payload() -> [u8]:
+    var bytes: [u8] = []
+    var i: i64 = 0
+    while i < 112:
+        bytes = bytes + [
+            0x61u8, 0x62u8, 0x63u8, 0x64u8, 0x65u8, 0x66u8, 0x67u8, 0x68u8,
+            0x69u8, 0x6au8
+        ]
+        i = i + 1
+    bytes
+
+fn _resp_with_byte_body(body_bytes: [u8]) -> HttpResponseData:
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [("Content-Type", "text/plain")],
+        body: "",
+        body_bytes: body_bytes,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn _get_header(headers: [(text, text)], name: text) -> text:
+    for h in headers:
+        if h.0.lower() == name.lower():
+            return h.1
+    ""
 
 describe "Phase 1 HTTP Content-Encoding integration":
     # @manual scenario evidence
@@ -299,3 +331,24 @@ describe "Phase 1 HTTP Content-Encoding integration":
         val resp3 = _http_content_encoding_byte_response(payload)
         val out3 = compress_response_for(resp3, accept)
         expect(_http_content_encoding_get_header(out3.headers, "content-encoding")).to_equal("gzip")
+
+    # 10. Pre-existing Content-Length is replaced with the compressed length.
+    it "Content-Length updated after successful compression":
+        # @req REQ-SSPEC-INTEGRATION
+        step("Content-Length updated after successful compression")
+        val payload = _make_payload()
+        val base = _resp_with_byte_body(payload)
+        val resp = HttpResponseData(
+            status: base.status,
+            reason: base.reason,
+            headers: [("Content-Type", "text/plain"), ("Content-Length", "1120")],
+            body: base.body,
+            body_bytes: base.body_bytes,
+            body_file: base.body_file,
+            body_offset: base.body_offset,
+            body_length: base.body_length,
+            chunked: base.chunked
+        )
+        val out = compress_response_for(resp, "zstd")
+        expect(_get_header(out.headers, "content-encoding")).to_equal("zstd")
+        expect(_get_header(out.headers, "content-length")).to_equal(out.body_bytes.len().to_string())

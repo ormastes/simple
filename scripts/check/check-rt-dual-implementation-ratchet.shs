@@ -31,6 +31,21 @@
 # here in reverse: a union would make every Rust-only symbol look dual-lane and
 # the guard would ratchet nothing.
 #
+# RUST LANE SCOPE (widened 2026-11-09, closes
+# doc/08_tracking/bug/rt_dual_ratchet_scan_scope_omits_native_all_2026-09-06.md).
+# The Rust lane is src/compiler_rust/runtime/src PLUS the two sibling provider
+# crates src/compiler_rust/native_all/src and src/compiler_rust/native_loader/src.
+# Before this widening the guard could not see rt_* definitions there at all:
+# a symbol whose only Rust implementation lived in a provider crate was either
+# misclassified (rt_phase_profile_record reported c-only, rt_hostname reported
+# c-only) or invisible (a NEW provider-only rt_* pushed no FAIL at all), and a
+# provider move out of runtime/src produced a phantom STALE row
+# (rt_mem_snapshot_record, PR #271). The widening is a deliberate, reviewed
+# baseline update, not a regeneration: two rows that are genuinely dual under
+# the widened scope (rt_hostname, rt_phase_profile_record) were removed and
+# eleven pre-existing provider-only symbols were admitted with per-symbol
+# justification in the baseline's 2026-11-09 annotation.
+#
 # Baseline: scripts/check/rt_dual_implementation_baseline.txt, lines
 #   <symbol>\t<c-only|rust-only>
 #
@@ -195,8 +210,13 @@ PERL
     # Rust lane: preserve the legacy `fn rt_*` census, except function items
     # carrying their own #[test]: test entrypoints are not runtime primitives.
     # Attribute ownership is per occurrence, never subtraction by symbol name.
+    # Scope (2026-11-09): runtime/src plus the native_all/native_loader provider
+    # crates — see the RUST LANE SCOPE header section.
     if [ -d "$el_root/src/compiler_rust/runtime/src" ]; then
-        find "$el_root/src/compiler_rust/runtime/src" -name '*.rs' \
+        find "$el_root/src/compiler_rust/runtime/src" \
+            "$el_root/src/compiler_rust/native_all/src" \
+            "$el_root/src/compiler_rust/native_loader/src" \
+            -name '*.rs' \
             -not -path '*/vendor/*' -not -name 'tests.rs' -print0 2>/dev/null \
             > "$el_out/rust_files.txt"
         perl - "$el_out/rust_files.txt" > "$el_out/rust_syms.txt" <<'PERL'
@@ -424,7 +444,12 @@ selftest() {
 
     mkfixture() {
         mf="$st_dir/$1"
-        mkdir -p "$mf/src/runtime" "$mf/src/compiler_rust/runtime/src"
+        mkdir -p "$mf/src/runtime" "$mf/src/compiler_rust/runtime/src" \
+            "$mf/src/compiler_rust/native_all/src" "$mf/src/compiler_rust/native_loader/src"
+        # git does not track empty dirs, and --rev archives name the provider
+        # crates explicitly since the 2026-11-09 scope widening.
+        : > "$mf/src/compiler_rust/native_all/src/.gitkeep"
+        : > "$mf/src/compiler_rust/native_loader/src/.gitkeep"
         printf 'int64_t rt_shared(int64_t a) { return a; }\nint64_t rt_conly(void) { return 1; }\n' \
             > "$mf/src/runtime/r.c"
         printf 'pub extern "C" fn rt_shared(a: i64) -> i64 { a }\npub fn rt_ronly() -> i64 { 2 }\n' \
@@ -806,6 +831,27 @@ RUST
     esac
     st_n=$((st_n + 1))
 
+    # Fixture 11: the Rust lane scope covers the native_all/native_loader
+    # provider crates (widened 2026-11-09). An rt_* defined ONLY in a provider
+    # crate must reach rust_syms.txt via the real extractor — the scope hole
+    # filed as rt_dual_ratchet_scan_scope_omits_native_all_2026-09-06.md
+    # silently missed exactly this shape of violation.
+    mkfixture f11
+    mkdir -p "$st_dir/f11/src/compiler_rust/native_all/src" \
+        "$st_dir/f11/src/compiler_rust/native_loader/src"
+    printf '#[no_mangle]\npub extern "C" fn rt_provider_crate_only() -> i64 { 3 }\n' \
+        > "$st_dir/f11/src/compiler_rust/native_all/src/provider.rs"
+    printf 'pub fn rt_loader_crate_only() -> i64 { 4 }\n' \
+        > "$st_dir/f11/src/compiler_rust/native_loader/src/loader.rs"
+    mkdir -p "$st_dir/w11"
+    extract_lanes "$st_dir/f11" "$st_dir/w11" || { rm -rf "$st_dir"; return 1; }
+    if ! grep -qx 'rt_provider_crate_only' "$st_dir/w11/rust_syms.txt" \
+       || ! grep -qx 'rt_loader_crate_only' "$st_dir/w11/rust_syms.txt"; then
+        echo "selftest: FAILED — provider-crate rt_* invisible to the Rust lane, got [$(cat "$st_dir/w11/rust_syms.txt")]"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
     rm -rf "$st_dir"
     echo "selftest: $st_n fixture(s) passed"
     return 0
@@ -862,6 +908,7 @@ if [ -n "$REV" ]; then
     # checkout that predates a baseline update) would silently decide the
     # result for content it does not describe.
     ( cd "$ROOT" && git archive "$REV" -- src/runtime src/compiler_rust/runtime \
+        src/compiler_rust/native_all src/compiler_rust/native_loader \
         scripts/check/rt_dual_implementation_baseline.txt ) 2>/dev/null \
         | tar -x -C "$WORK/rev" 2>/dev/null
     RC=$?
@@ -996,7 +1043,8 @@ if [ -n "$BASELINE_REV" ]; then
     CENSUS_KEY=""
     if [ "$CENSUS_DIR" != none ]; then
         CENSUS_KEY=$( {
-            ( cd "$ROOT" && git rev-parse "$BASELINE_REV:src/runtime" "$BASELINE_REV:src/compiler_rust/runtime" )
+            ( cd "$ROOT" && git rev-parse "$BASELINE_REV:src/runtime" "$BASELINE_REV:src/compiler_rust/runtime" \
+                "$BASELINE_REV:src/compiler_rust/native_all" "$BASELINE_REV:src/compiler_rust/native_loader" )
             sha256sum "$SELF" 2>/dev/null
         } 2>/dev/null | sha256sum | awk '{print $1}')
     fi
@@ -1005,7 +1053,8 @@ if [ -n "$BASELINE_REV" ]; then
         echo "note: base census for $BASELINE_REV read from the content-keyed cache" >&2
     else
         mkdir -p "$WORK/base"
-        ( cd "$ROOT" && git archive "$BASELINE_REV" -- src/runtime src/compiler_rust/runtime ) 2>/dev/null \
+        ( cd "$ROOT" && git archive "$BASELINE_REV" -- src/runtime src/compiler_rust/runtime \
+            src/compiler_rust/native_all src/compiler_rust/native_loader ) 2>/dev/null \
             | tar -x -C "$WORK/base" 2>/dev/null
         RC=$?
         if [ $RC -ne 0 ] || [ ! -d "$WORK/base/src" ]; then

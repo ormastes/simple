@@ -1,7 +1,7 @@
 # Six part-files under `_<Name>/` split directories are never imported, so nothing compiles them
 
 - **id:** orphaned_part_files_never_imported_2026-09-18
-- **status:** OPEN (one deleted; six remain, now ratcheted)
+- **status:** PARTIAL 2026-11-09: four more deleted (_scratch_ed/main.spl, the two gc_sync_mut/tls/_TlsUtilities facades, _initramfs_pack/archive.spl) with their baseline rows; `_CliCompile/native_build.spl` stays baselined because three specs read it as source (stage4_smoke_gate_spec, native_build_cache_plumbing_spec, fs_extern_optional_spec); `verifier_transactions.spl` is now imported by umbrella_admission.spl so it is no longer an orphan. `_initramfs_pack/support.spl` is now dead too (not flagged by the ratchet).
 - **severity:** P2 — dead source is cheap on its own, but it silently absorbs fixes,
   diverges from the live copy, and reads as authoritative to anyone grepping
 - **found:** 2026-09-18, while closing

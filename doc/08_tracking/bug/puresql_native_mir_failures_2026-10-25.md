@@ -94,3 +94,22 @@ is unresolved.
 ## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
 
 test/01_unit/compiler/50.mir/puresql_native_mir_causes_spec.spl: causes 1-3 shapes lower with 0 MIR errors in the seed-run self-hosted lowering (harness verified non-vacuous). Retiring the 9 workaround sites needs a Stage 2 native-build of pure_database.
+
+## Update 2026-11-09 (fix lane)
+
+MIR-level specs: `test/01_unit/compiler/mir/puresql_native_mir_causes_spec.spl`
+(frontend -> HIR -> MIR, asserts zero MIR errors).
+
+- Cause 1: spec GREEN on the current compiler source (fix already landed).
+- Cause 2: reproduced RED (`missing native trait implementation: <Trait> for ` with an
+  empty owner) for `if val Some(s) = r: Some(s) else: nil` as a function tail and for
+  `val s = h.reducer; Some(s)`. Root cause: the tail conversion of a value-position
+  `if`/match, and of a `Some(x)` whose payload binding is declared `Trait?`, searched for
+  a concrete implementation instead of treating an already-trait payload as identity.
+  Fixed in `native_trait_conversion.spl` (`native_trait_conditional_arms_already_trait`,
+  payload `Trait?` -> `Trait` narrowing in `native_trait_some_payload_word`). GREEN.
+- Cause 3: the documented shape did not reproduce at MIR level on current source
+  (spec GREEN); the tagged workaround is left in place pending native verification.
+
+Status: fix-implemented-verification-pending (native verification of the
+`_PureDatabaseReducerSlotV1` workaround removal is still required).

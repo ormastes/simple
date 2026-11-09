@@ -38,6 +38,7 @@ use std.http_server.types.{
     ServerConfig,
     PhaseResult
 }
+use std.http_server.csrf.{generate_csrf_token, validate_csrf_token, is_csrf_exempt_method, CsrfConfig, default_csrf_config}
 
 # ============================================================================
 # Helpers
@@ -110,6 +111,16 @@ describe "CSRF token generation":
         val config = CsrfConfig.default()
         val token = generate_csrf_token_with_timestamp(config, "session-abc", 1000000)
         expect(token).to_equal("")
+
+    it "generates tokens of sufficient length":
+        val token = generate_csrf_token()
+        val is_long_enough = token.len() >= 32
+        expect(is_long_enough).to_equal(true)
+
+    it "generates a non-empty token":
+        val token = generate_csrf_token()
+        val is_non_empty = token.len() > 0
+        expect(is_non_empty).to_equal(true)
 
 # ============================================================================
 # Test Group 2: Constant-time comparison (replaces phantom validate_csrf_token)
@@ -319,3 +330,45 @@ describe "CSRF header and cookie helpers":
         val headers = [("Content-Type", "application/json")]
         val result = get_cookie_value(headers, "csrf_token")
         expect(result).to_equal("")
+
+describe "CSRF token validation":
+
+    it "validates matching tokens":
+        val token = "abc123def456ghi789jkl012mno345pq"
+        val result = validate_csrf_token(token, token)
+        expect(result).to_equal(true)
+
+    it "rejects mismatched tokens":
+        # @req REQ-SSPEC-UNIT
+        step("rejects mismatched tokens")
+        val token_a = "abc123def456ghi789jkl012mno345pq"
+        val token_b = "zzz999yyy888xxx777www666vvv555uu"
+        val result = validate_csrf_token(token_a, token_b)
+        expect(result).to_equal(false)
+
+    it "rejects empty token against valid token":
+        val token = "abc123def456ghi789jkl012mno345pq"
+        val result = validate_csrf_token("", token)
+        expect(result).to_equal(false)
+
+describe "CSRF method exemptions":
+
+    it "exempts GET by default":
+        val result = is_csrf_exempt_method("GET")
+        expect(result).to_equal(true)
+
+    it "exempts HEAD by default":
+        val result = is_csrf_exempt_method("HEAD")
+        expect(result).to_equal(true)
+
+    it "exempts OPTIONS by default":
+        val result = is_csrf_exempt_method("OPTIONS")
+        expect(result).to_equal(true)
+
+    it "does not exempt POST":
+        val result = is_csrf_exempt_method("POST")
+        expect(result).to_equal(false)
+
+    it "does not exempt DELETE":
+        val result = is_csrf_exempt_method("DELETE")
+        expect(result).to_equal(false)

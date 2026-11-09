@@ -2993,6 +2993,12 @@ impl MirLowering:
                                 element = Some(dict_value)
                                 optional_read = true
                             case _: ()
+                elif get_method == "map" and get_args.len() == 1:
+                    # `xs.map(_.f)`: a placeholder-lambda field projection over a
+                    # declared `[T]` is `[type of T.f]` (bug
+                    # enum_payload_type_mismatch_untyped_map_2026-10-24).
+                    if val mapped = self.placeholder_projection_map_type(get_receiver, get_args[0].value):
+                        return Some(mapped)
             case _: ()
         if val element_type = element:
             match element_type.kind:
@@ -3002,6 +3008,37 @@ impl MirLowering:
                 return Some(HirType(kind: HirTypeKind.Optional(element_type), span: expr.span))
             return Some(element_type)
         nil
+
+    me placeholder_projection_map_type(receiver: HirExpr, mapper: HirExpr) -> HirType?:
+        """`[T]` receiver mapped by `|p| p.field` gives `[declared type of T.field]`;
+        nil for any other shape (no guessing)."""
+        val container = self.receiver_declared_type(receiver)
+        if container == nil: return nil
+        val container_type: HirType = container ?? receiver.type_
+        var element_type: HirType = container_type
+        match container_type.kind:
+            case HirTypeKind.Array(array_element, _): element_type = array_element
+            case HirTypeKind.Slice(slice_element): element_type = slice_element
+            case _: return nil
+        match mapper.kind:
+            case HirExprKind.Lambda(lambda_params, lambda_body, _):
+                if lambda_params.len() != 1: return nil
+                match lambda_body.kind:
+                    case HirExprKind.Field(field_base, field_name, _):
+                        match field_base.kind:
+                            case HirExprKind.Var(base_sym):
+                                if base_sym.id != lambda_params[0].symbol.id: return nil
+                            case HirExprKind.NamedVar(base_sym, _):
+                                if base_sym.id != lambda_params[0].symbol.id: return nil
+                            case _: return nil
+                        if val field_type = self.declared_field_hir_type_of_owner(element_type, field_name):
+                            match field_type.kind:
+                                case HirTypeKind.Any | HirTypeKind.Infer(_, _) | HirTypeKind.Error: return nil
+                                case _: ()
+                            return Some(HirType(kind: HirTypeKind.Array(field_type, None), span: receiver.span))
+                        return nil
+                    case _: return nil
+            case _: return nil
 
     me enum_match_ambiguity_subject_hint(scrutinee: HirExpr, subject_type: HirType?) -> text:
         """Describe unavailable enum ownership without guessing a variant owner."""
@@ -3889,6 +3926,27 @@ impl MirLowering:
         if expected_type == nil:
             return self.join_untyped_optional_arms(result, oj_arm_locals)
         result
+
+    me enum_slot_extraction_arms(arms: [HirMatchArm]) -> bool:
+        """True for the two-arm shape HIR `enum_payload_extract` builds:
+        `case V(.., __mp_enum_slot, ..): __mp_enum_slot` / `case _: nil`."""
+        if arms.len() != 2: return false
+        val miss: HirMatchArm = arms[1]
+        match miss.pattern.kind:
+            case HirPatternKind.Wildcard: ()
+            case _: return false
+        if not miss.body.has: return false
+        match miss.body.value.kind:
+            case HirExprKind.NilLit: ()
+            case _: return false
+        val hit: HirMatchArm = arms[0]
+        if not hit.body.has: return false
+        match hit.body.value.kind:
+            case HirExprKind.Var(slot_sym):
+                if val slot_def = self.symbols.get_symbol_raw(slot_sym.id):
+                    return slot_def.name == "__mp_enum_slot"
+                return false
+            case _: return false
 
     me bind_catch_all_arm(arm: HirMatchArm, scrut_local: LocalId):
         """`case x:` / `case x if c:` in an enum match binds x to the
@@ -5595,6 +5653,15 @@ impl MirLowering:
                     self.runtime_elem_value_type[result.id] = self.runtime_elem_value_type[first_arm.id]
         var joined_result = result
         if expected_type == nil:
+            # Enum-slot extraction idiom (HIR match_desugaring enum_payload_extract):
+            # the nil arm is unreachable, the hit arm yields the declared slot
+            # type T. Keep T instead of joining to T? so a binder in a
+            # tuple-subject pattern stays typed (bug
+            # enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24).
+            if self.enum_slot_extraction_arms(source_arms) and merged_arm_locals.len() > 0:
+                if val hit_type = self.find_local_hir_type(merged_arm_locals[0].id):
+                    self.remember_local_hir_type(result.id, hit_type, 0, 0)
+                    return result
             joined_result = self.join_untyped_optional_arms(result, merged_arm_locals)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)

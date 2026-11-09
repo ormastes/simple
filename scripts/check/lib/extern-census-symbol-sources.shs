@@ -23,6 +23,35 @@ census_select_binary() {
   fi
 }
 
+# Named exports from `llvm-readobj --coff-exports` output (ordinal-only skipped).
+census_parse_coff_exports() {
+  sed -n 's/^  Name: \([A-Za-z_][A-Za-z0-9_]*\)\r\{0,1\}$/\1/p' "$1" | LC_ALL=C sort -u
+}
+
+# Fixture: canned readobj output with 150 named exports + 1 ordinal-only.
+census_selftest() {
+  census_t=$(mktemp -d) || return 2
+  {
+    echo 'Export {'; echo '  Ordinal: 1'; echo '}'
+    i=0
+    while [ "$i" -lt 150 ]; do
+      printf 'Export {
+  Ordinal: %s
+  Name: rt_fixture_%s
+  RVA: 0x1000
+}
+' "$((i+2))" "$i"; i=$((i+1))
+    done
+  } > "$census_t/exp.txt"
+  census_n=$(census_parse_coff_exports "$census_t/exp.txt" | wc -l | tr -d ' ')
+  census_has=$(census_parse_coff_exports "$census_t/exp.txt" | grep -cx rt_fixture_7)
+  rm -rf "$census_t"
+  if [ "$census_n" -ne 150 ] || [ "$census_has" -ne 1 ]; then
+    echo "FAIL — PE export parser selftest: n=$census_n has=$census_has" >&2; return 1
+  fi
+  echo 'PASS — PE export parser selftest: 150 named exports parsed, ordinal-only skipped'
+}
+
 census_collect_primary() {
   census_binary=$1 census_output=$2 census_work=$3
   census_nm=${EXTERN_CENSUS_NM:-nm}
@@ -41,10 +70,22 @@ census_collect_primary() {
       echo 'ERROR — Windows COFF symbol table metadata could not be read.' >&2; return 2
     fi
     if ! grep -q '^Format: COFF-' "$census_work/primary-headers.txt" ||
-       ! grep -Eq 'SymbolCount: [1-9][0-9]*$' "$census_work/primary-headers.txt" ||
-       ! grep -Eq 'PointerToSymbolTable: 0x0*[1-9A-Fa-f][0-9A-Fa-f]*$' "$census_work/primary-headers.txt" ||
        ! grep -q 'IMAGE_FILE_EXECUTABLE_IMAGE' "$census_work/primary-headers.txt"; then
-      echo 'ERROR — Windows executable lacks a readable full COFF symbol table; exports are insufficient.' >&2; return 2
+      echo 'ERROR — Windows binary is not a readable PE executable.' >&2; return 2
+    fi
+    if ! grep -Eq 'SymbolCount: [1-9][0-9]*$' "$census_work/primary-headers.txt" ||
+       ! grep -Eq 'PointerToSymbolTable: 0x0*[1-9A-Fa-f][0-9A-Fa-f]*$' "$census_work/primary-headers.txt"; then
+      # Stripped PE (owner decision 2026-11-09): read the export table.
+      echo "census: $census_binary has no COFF symbol table; reading PE export table (llvm-readobj --coff-exports)" >&2
+      if ! "$census_readobj" --coff-exports "$census_binary" > "$census_work/primary-exports.txt" 2> "$census_work/primary-exports.err"; then
+        echo 'ERROR — Windows PE export table could not be read.' >&2; return 2
+      fi
+      census_parse_coff_exports "$census_work/primary-exports.txt" > "$census_output"
+      census_count=$(wc -l < "$census_output" | tr -d ' ')
+      if [ "$census_count" -lt "$census_floor" ]; then
+        echo "ERROR — $census_binary yielded $census_count PE export(s) (floor $census_floor); backing classification would be vacuous." >&2; return 2
+      fi
+      return 0
     fi
   fi
   # Check the producer itself, not the final status of a pipeline. Partial
