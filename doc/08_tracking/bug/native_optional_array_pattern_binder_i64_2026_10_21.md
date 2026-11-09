@@ -18,3 +18,13 @@ Stage3 repro (expected: no diff output, exit 0; then remove the matching `@worka
 ```
 bin/simple native-build --entry test/fixtures/compiler/n88b_native_producer_idioms_native.spl -o build/n88b_idioms.exe && build/n88b_idioms.exe | diff - test/fixtures/compiler/n88b_native_producer_idioms_native.spl.expected
 ```
+
+## Fixed in source (bd2af2006a0) - native evidence 2026-11-09
+`lower_for_iterator` peels `Optional(Array|Slice)` for the binder (#143,
+`fix(mir): for-in iterates Optional-array payload binders`, bd2af2006a0; spec
+`test/01_unit/compiler/50.mir/for_in_optional_array_payload_binder_spec.spl`).
+Native repro on the self-hosted stage2 `C:/dev/p3new/stage2new/stage2_new4.exe`
+(native-build of the fixture's `sum_binder`/`opt_array` idiom, unannotated
+`if val arr = a: for x in arr:`) prints `BINDER_6_0` (expected `BINDER_6_0`).
+Status fix-implemented-verification-pending; the `@workaround` annotation in
+incremental.spl is removed after a stage3 producer rebuild re-runs BuildCache.load.

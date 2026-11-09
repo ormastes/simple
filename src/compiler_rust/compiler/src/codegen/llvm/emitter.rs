@@ -362,7 +362,7 @@ impl LlvmEmitter<'_> {
             "find_str" => Some("rt_string_find"),
             "rfind" | "last_index_of" => Some("rt_string_rfind"),
             "slice" | "substring" => Some("rt_slice"),
-            "get" => Some("rt_index_get"),
+            "get" => Some("rt_get"),
             "keys" => Some("rt_dict_keys"),
             "values" => Some("rt_dict_values"),
             // `.unwrap()` must use the trap helper, NOT the raw payload reader.

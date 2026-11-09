@@ -109,6 +109,7 @@ mod node_exec;
 pub(crate) use node_exec::{
     coerce_to_declared_field_of, coerce_to_declared_type, coerce_let_value, coerce_to_declared_unsigned, exec_assignment,
     exec_augmented_assignment, exec_node, fixed_array_zero_element, record_let_declared_width,
+    noinit_named_type_default_decl as node_exec_noinit_named_type_default_decl,
 };
 
 // Block execution

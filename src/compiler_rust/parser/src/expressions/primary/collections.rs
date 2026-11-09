@@ -1,4 +1,4 @@
-use crate::ast::{Expr, LambdaParam, MoveMode, TupleExprField};
+use crate::ast::{Argument, Expr, LambdaParam, MoveMode, TupleExprField};
 use crate::error::ParseError;
 use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
@@ -180,6 +180,39 @@ impl<'a> Parser<'a> {
             move_mode: MoveMode::Copy,
             capture_all: false, // Fat arrow syntax doesn't auto-capture
         }))
+    }
+
+    /// `s{a, b, c}` set literal. Lowered at parse time to the existing Set
+    /// construction `Set.from([a, b, c])`, so no new AST/HIR/MIR node is
+    /// needed and the self-hosted parser produces the identical shape
+    /// (bug set_literal_s_brace_unparsed_2026-09-06, owner decision 2026-11-09).
+    pub(crate) fn parse_set_literal(&mut self) -> Result<Expr, ParseError> {
+        self.advance(); // consume `s{`
+        let mut elements = Vec::new();
+        loop {
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            if self.check(&TokenKind::RBrace) {
+                break;
+            }
+            elements.push(self.parse_expression()?);
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("Set".to_string())),
+            method: "from".to_string(),
+            args: vec![Argument::new(None, Expr::Array(elements))],
+            generic_args: Vec::new(),
+        })
     }
 
     fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {

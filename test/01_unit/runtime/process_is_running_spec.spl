@@ -15,6 +15,7 @@ Audience: compiler and tooling engineers who maintain this spec
 # @req: REQ-RUNTIME-ProcIsRunn-001
 
 use app.io.mod.{process_spawn_async, process_is_running, process_wait, process_kill, process_is_alive}
+use std.io.{file_read, process_run_timeout, process_spawn_async, process_is_running, process_wait, process_kill}
 
 describe "rt_process_is_running with async-spawned children":
     it "reports async-spawned child as running while alive":
@@ -74,3 +75,36 @@ describe "rt_process_is_running with async-spawned children":
     it "returns error for invalid wait pids":
         expect(process_wait(-1, 100)).to_equal(-1)
         expect(process_wait(0, 100)).to_equal(-1)
+
+    it "times out without the external GNU timeout command":
+        step("Verify: times out without the external GNU timeout command")
+        # @req: REQ-RUNTIME-ProcIsRunn-001
+        val src = file_read("src/lib/nogc_sync_mut/io/process_ops.spl")
+        val c_runtime = file_read("src/runtime/platform/unix_common.h")
+        val rust_runtime = file_read("src/compiler_rust/runtime/src/value/sffi/env_process.rs")
+        expect(src.contains("rt_process_run(\"timeout\"")).to_equal(false)
+        expect(src).to_contain("rt_process_spawn_async(\"/bin/sh\"")
+        expect(src).to_contain("rt_process_wait(pid, effective_timeout)")
+        expect(c_runtime).to_contain("if (kill((pid_t)pid, SIGKILL) != 0) return false")
+        expect(c_runtime).to_contain("waitpid((pid_t)pid, &status, 0)")
+        expect(c_runtime).to_contain("if (errno == ECHILD) break")
+        expect(rust_runtime).to_contain("let reaped = child.wait().is_ok()")
+
+        val (_stdout, stderr, exit_code) = process_run_timeout("sleep", ["2"], 50)
+        expect(exit_code).to_equal(-1)  # oracle: value fixed by the spec contract
+        expect(stderr).to_contain("[TIMEOUT:")
+
+    it "keeps invalid wait and kill pids behind facade guards":
+        step("Verify: keeps invalid wait and kill pids behind facade guards")
+        # @req: REQ-RUNTIME-ProcIsRunn-001
+        val src = file_read("src/lib/nogc_sync_mut/io/process_ops.spl")
+        expect(src).to_contain("fn process_wait(pid: i64, timeout_ms: i64) -> i64:")
+        expect(src).to_contain("if pid <= 0:")
+        expect(src).to_contain("return -1")
+        expect(src).to_contain("fn process_kill(pid: i64) -> bool:")
+        expect(src).to_contain("if pid <= 1:")
+        expect(src).to_contain("return false")
+
+        val wait_code = process_wait(0, 1)
+        expect(wait_code).to_equal(-1)  # oracle: value fixed by the spec contract
+        expect(process_kill(0)).to_equal(false)

@@ -1,0 +1,75 @@
+# @cover src/lib/nogc_sync_mut/http_server/server.spl 80%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Prevention test for bug seed_http_server_handle_connection_dispatch_2026-09-04:
+# the server's OWN accept loop (SimpleHttpServer.serve_loop, a `me` method
+# whose `self` was once bound to the flattened module dict) must accept a real
+# loopback TCP connection and dispatch it through the connection handler to
+# the router. Unlike http_dynamic_dispatch_live_socket_spec, this does not call
+# handle_connection_admitted directly: the request goes through serve_loop.
+
+use std.spec.step
+
+use std.spec.*
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.concurrent.thread.{thread_spawn_with_args, thread_sleep}
+
+val LOOP_MARKER = "SERVE-LOOP-DISPATCHED-57"
+
+fn loop_handler(req: HttpRequest) -> HttpResponse:
+    HttpResponse.ok("{LOOP_MARKER} path={req.path}")
+
+fn serve_on_thread(addr: text, server: SimpleHttpServer) -> i64:
+    """Bind on the worker thread itself (listener fds belong to the thread
+    that opened them under the interpreter) and run the production accept
+    loop there. Returns the thread handle (< 0 on spawn failure)."""
+    val h = thread_spawn_with_args(addr, server, \bind_addr, srv_arg:
+        var srv: SimpleHttpServer = srv_arg
+        match TcpListener.bind(bind_addr):
+            Err(_): 0
+            Ok(listener):
+                srv.running = true
+                srv.serve_loop(listener)
+                0
+    )
+    h.handle
+
+fn drive_serve_loop(port: i32, request_bytes: text) -> text:
+    """Start serve_loop on a background thread, send one request from a real
+    client socket over loopback, return the raw response ("" on failure)."""
+    val addr = "127.0.0.1:{port}"
+    var router = Router.new()
+    router.get("/api/loop", loop_handler)
+    val server = SimpleHttpServer.new("127.0.0.1", port, router)
+    if serve_on_thread(addr, server) < 0:
+        return ""
+    var wire = ""
+    var attempts = 0
+    while attempts < 100 and wire == "":
+        attempts = attempts + 1
+        match TcpStream.connect(addr):
+            Err(_): thread_sleep(50)
+            Ok(client):
+                if client.write_text_status(request_bytes):
+                    match client.read_text():
+                        Err(_): pass
+                        Ok(t): wire = t
+                val _ = client.close()
+                if wire == "":
+                    return ""
+    wire
+
+describe "sync http server — serve_loop dispatch over a live loopback socket":
+    # @manual scenario evidence
+    it "serve_loop accepts a real TCP request and dispatches it to the router":
+        # @req REQ-SSPEC-SYSTEM
+        step("serve_loop accepts a real TCP request and dispatches it to the router")
+        val wire = drive_serve_loop(47657, "GET /api/loop HTTP/1.1\r\nHost: loopback\r\nConnection: close\r\n\r\n")
+        expect(wire).to_contain("HTTP/1.1 200")
+        expect(wire).to_contain(LOOP_MARKER)
+        expect(wire).to_contain("path=/api/loop")

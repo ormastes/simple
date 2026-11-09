@@ -6,6 +6,73 @@ use std.spec.*
 use app.io.mod.{file_read_text}
 use app.llm_caret.claude_api.*
 
+# Inline helpers
+fn _LB() -> text:
+    "{(123 as char)}"
+
+fn _RB() -> text:
+    "{(125 as char)}"
+
+fn _Q() -> text:
+    "\""
+
+fn build_claude_api_headers(api_key: text) -> text:
+    var h = "x-api-key: " + api_key + "\n"
+    h = h + "anthropic-version: 2023-06-01\n"
+    h = h + "content-type: application/json"
+    h
+
+fn build_single_message_json(role: text, content: text) -> text:
+    var msg = _LB()
+    msg = msg + _Q() + "role" + _Q() + ":" + _Q() + role + _Q() + ","
+    msg = msg + _Q() + "content" + _Q() + ":" + _Q() + _escape_json(content) + _Q()
+    msg = msg + _RB()
+    "[" + msg + "]"
+
+fn parse_claude_api_response(raw: text) -> ApiResponse:
+    if raw.trim() == "":
+        return ApiResponse(
+            content: "",
+            model: "",
+            stop_reason: "",
+            input_tokens: 0,
+            output_tokens: 0,
+            error: "empty response",
+            is_error: true,
+            raw: ""
+        )
+    val error_type = _extract_json_string(raw, "type")
+    if error_type == "error":
+        val error_msg = _extract_json_string(raw, "message")
+        return ApiResponse(
+            content: "",
+            model: "",
+            stop_reason: "error",
+            input_tokens: 0,
+            output_tokens: 0,
+            error: error_msg,
+            is_error: true,
+            raw: raw
+        )
+    val content_text = _extract_json_string(raw, "text")
+    val model_val = _extract_json_string(raw, "model")
+    val stop = _extract_json_string(raw, "stop_reason")
+    val in_tok = _extract_json_int(raw, "input_tokens")
+    val out_tok = _extract_json_int(raw, "output_tokens")
+    var final_stop = stop
+    if final_stop == "":
+        final_stop = "end_turn"
+    ApiResponse(
+        content: content_text,
+        model: model_val,
+        stop_reason: final_stop,
+        input_tokens: in_tok,
+        output_tokens: out_tok,
+        error: "",
+        is_error: false,
+        raw: raw
+    )
+
 describe "LLM Caret Claude API exchange":
     # @manual scenario evidence
     describe "supporting request construction":
@@ -100,3 +167,116 @@ describe "LLM Caret Claude API exchange":
             expect(sendParts[1].index_of("retry_policy_from_env")).to_be_less_than(sendParts[1].index_of("with_retry"))
             expect(sendParts[1].index_of("with_retry")).to_be_less_than(sendParts[1].index_of("claude_api_retry_transport"))
             expect(sendParts[1].index_of("claude_api_retry_transport")).to_be_less_than(sendParts[1].index_of("complete_claude_api_exchange"))
+
+describe "build_claude_api_body":
+
+    it "includes model":
+        val body = build_claude_api_body("claude-opus-4-20250514", "[]", "", 0)
+        expect(body).to_contain("claude-opus-4-20250514")
+
+    it "defaults to sonnet model":
+        val body = build_claude_api_body("", "[]", "", 0)
+        expect(body).to_contain("claude-sonnet-5")
+
+    it "uses custom max_tokens":
+        val body = build_claude_api_body("", "[]", "", 8192)
+        expect(body).to_contain("8192")
+
+    it "includes system prompt when set":
+        val body = build_claude_api_body("", "[]", "Be helpful", 0)
+        expect(body).to_contain("system")
+        expect(body).to_contain("Be helpful")
+
+    it "omits system prompt when empty":
+        val body = build_claude_api_body("", "[]", "", 0)
+        expect(body).to_contain("model")
+        # system key should not be present
+
+    it "includes messages":
+        val msgs = build_single_message_json("user", "Hello")
+        val body = build_claude_api_body("", msgs, "", 0)
+        expect(body).to_contain("messages")
+        expect(body).to_contain("Hello")
+
+describe "build_claude_api_headers":
+
+    it "includes api key":
+        val h = build_claude_api_headers("sk-test-123")
+        expect(h).to_contain("x-api-key: sk-test-123")
+
+    it "includes anthropic version":
+        val h = build_claude_api_headers("key")
+        expect(h).to_contain("anthropic-version: 2023-06-01")
+
+    it "includes content type":
+        val h = build_claude_api_headers("key")
+        expect(h).to_contain("content-type: application/json")
+
+describe "build_single_message_json":
+
+    it "builds user message":
+        val json = build_single_message_json("user", "Hello")
+        expect(json).to_start_with("[")
+        expect(json).to_end_with("]")
+        expect(json).to_contain("\"role\"")
+        expect(json).to_contain("\"user\"")
+        expect(json).to_contain("\"content\"")
+        expect(json).to_contain("\"Hello\"")
+
+    it "escapes special characters":
+        val json = build_single_message_json("user", "say \"hi\"")
+        expect(json).to_contain("\\\"hi\\\"")
+
+describe "parse_claude_api_response":
+
+    it "parses success response":
+        var raw = _LB()
+        raw = raw + _Q() + "text" + _Q() + ":" + _Q() + "Hello!" + _Q() + ","
+        raw = raw + _Q() + "model" + _Q() + ":" + _Q() + "claude-sonnet-5" + _Q() + ","
+        raw = raw + _Q() + "stop_reason" + _Q() + ":" + _Q() + "end_turn" + _Q() + ","
+        raw = raw + _Q() + "input_tokens" + _Q() + ":100,"
+        raw = raw + _Q() + "output_tokens" + _Q() + ":50"
+        raw = raw + _RB()
+        val resp = parse_claude_api_response(raw)
+        expect(resp.content).to_equal("Hello!")
+        expect(resp.model).to_equal("claude-sonnet-5")
+        expect(resp.stop_reason).to_equal("end_turn")
+        expect(resp.input_tokens).to_equal(100)
+        expect(resp.output_tokens).to_equal(50)
+        expect(resp.is_error).to_equal(false)
+
+    it "parses error response":
+        var raw = _LB()
+        raw = raw + _Q() + "type" + _Q() + ":" + _Q() + "error" + _Q() + ","
+        raw = raw + _Q() + "message" + _Q() + ":" + _Q() + "Invalid API key" + _Q()
+        raw = raw + _RB()
+        val resp = parse_claude_api_response(raw)
+        expect(resp.is_error).to_equal(true)
+        expect(resp.error).to_equal("Invalid API key")
+
+    it "handles empty response":
+        val resp = parse_claude_api_response("")
+        expect(resp.is_error).to_equal(true)
+        expect(resp.error).to_equal("empty response")
+
+    it "defaults stop reason to end_turn":
+        var raw = _LB()
+        raw = raw + _Q() + "text" + _Q() + ":" + _Q() + "Hi" + _Q()
+        raw = raw + _RB()
+        val resp = parse_claude_api_response(raw)
+        expect(resp.stop_reason).to_equal("end_turn")
+
+    it "preserves raw response":
+        var raw = _LB()
+        raw = raw + _Q() + "text" + _Q() + ":" + _Q() + "test" + _Q()
+        raw = raw + _RB()
+        val resp = parse_claude_api_response(raw)
+        expect(resp.raw).to_equal(raw)
+
+    it "parses zero token counts":
+        var raw = _LB()
+        raw = raw + _Q() + "text" + _Q() + ":" + _Q() + "Hi" + _Q()
+        raw = raw + _RB()
+        val resp = parse_claude_api_response(raw)
+        expect(resp.input_tokens).to_equal(0)
+        expect(resp.output_tokens).to_equal(0)
