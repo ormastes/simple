@@ -111,8 +111,8 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         // `x.? == true` / `x.? == false` (and `!=`): owner decision
-        // 2026-11-09 — the seed evaluates these nil-safely, exactly like pure
-        // Simple. `.?` yields the payload or nil, so the comparison is
+        // 2026-11-09 — the seed evaluates these absence-safely, exactly like pure
+        // Simple. `.?` yields the payload or None, so the comparison is
         // "present AND payload == literal". The generic lowering below boxed
         // `.?`'s BOOL-typed merge and compared it with the raw literal, so a
         // `bool?` receiver answered false for both literals under the JIT
@@ -264,8 +264,8 @@ impl Lowerer {
         // `bool_false().? == false` and `ki() == 5` answer false under the JIT
         // while the interpreter answers true (it bridges `Some(x)` vs `x`).
         // Box the raw side into the tagged form and compare both as ANY via the
-        // runtime's tagged equality: absent (nil) never equals a boxed
-        // scalar, so `nil == false` stays false and `nil != true` stays true.
+        // runtime's tagged equality: absent (None) never equals a boxed
+        // scalar, so `None == false` stays false and `None != true` stays true.
         // Bug: doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md
         if matches!(op, ast::BinOp::Eq | ast::BinOp::NotEq) {
             let left_opt = self.optional_tagged_scalar_inner(left_hir.ty).is_some();
