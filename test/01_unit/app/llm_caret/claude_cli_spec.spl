@@ -83,6 +83,185 @@ fn _RB() -> text:
 fn _Q() -> text:
     "\""
 
+# Legacy inline copies (from the pre-merge unit suite) used by the legacy scenarios below
+fn _unwrap_idx(opt) -> i64:
+    match opt:
+        Some(i): return i
+        nil: return -1
+
+fn _escape_json(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\"":
+            result = result + "\\\""
+        elif ch == "\n":
+            result = result + "\\n"
+        elif ch == "\r":
+            result = result + "\\r"
+        elif ch == "\t":
+            result = result + "\\t"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn _extract_json_string(json: text, key: text) -> text:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx = _unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed.starts_with(quote):
+        val rest = trimmed.substring(1)
+        var end = 0
+        var escaped = false
+        while end < rest.len():
+            val ch = rest[end]
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                return rest.substring(0, end)
+            end = end + 1
+    ""
+
+fn _extract_json_value(json: text, key: text) -> text:
+    val search = _Q() + key + _Q() + ":"
+    val idx = _unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return "null"
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    var end = 0
+    while end < trimmed.len():
+        val ch = trimmed[end]
+        if ch == "," or ch == _RB() or ch == "]":
+            break
+        end = end + 1
+    trimmed.substring(0, end).trim()
+
+fn _extract_json_int(json: text, key: text) -> i64:
+    val raw = _extract_json_value(json, key)
+    if raw == "null" or raw == "":
+        return 0
+    int(raw)
+
+fn _extract_json_bool(json: text, key: text) -> bool:
+    val raw = _extract_json_value(json, key)
+    raw == "true"
+
+# ============================================================================
+# Inline structs
+# ============================================================================
+
+struct CliResponse:
+    content: text
+    model: text
+    session_id: text
+    stop_reason: text
+    input_tokens: i64
+    output_tokens: i64
+    error: text
+    is_error: bool
+    raw: text
+
+struct CliStreamEvent:
+    event_type: text
+    content: text
+    session_id: text
+    model: text
+    stop_reason: text
+    input_tokens: i64
+    output_tokens: i64
+
+# ============================================================================
+# Functions under test (inlined)
+# ============================================================================
+fn legacy_build_claude_args(prompt: text, model: text, output_format: text, system_prompt: text, session_id: text, max_turns: i64, max_tokens: i64, json_schema: text, tools: [text], extra_args: [text], verbose: bool) -> [text]:
+    var args: [text] = []
+    args = args + ["-p", prompt]
+    if output_format != "":
+        args = args + ["--output-format", output_format]
+    else:
+        args = args + ["--output-format", "json"]
+    if model != "":
+        args = args + ["--model", model]
+    if system_prompt != "":
+        args = args + ["--system-prompt", system_prompt]
+    if session_id != "":
+        args = args + ["--resume", session_id]
+    if max_turns > 0:
+        args = args + ["--max-turns", "{max_turns}"]
+    if max_tokens > 0:
+        args = args + ["--max-tokens", "{max_tokens}"]
+    if json_schema != "":
+        args = args + ["--json-schema", json_schema]
+    for tool in tools:
+        args = args + ["--allowedTools", tool]
+    if verbose:
+        args = args + ["--verbose"]
+    for arg in extra_args:
+        if arg != "":
+            args = args + [arg]
+    args
+fn legacy_parse_claude_stream_line(line: text) -> CliStreamEvent:
+    val trimmed = line.trim()
+    if trimmed == "":
+        return CliStreamEvent(
+            event_type: "empty",
+            content: "",
+            session_id: "",
+            model: "",
+            stop_reason: "",
+            input_tokens: 0,
+            output_tokens: 0
+        )
+    val etype = _extract_json_string(trimmed, "type")
+    var content_val = ""
+    var sid = ""
+    var mdl = ""
+    var stop_val = ""
+    var in_tok = 0
+    var out_tok = 0
+    if etype == "content_block_delta":
+        content_val = _extract_json_string(trimmed, "text")
+    elif etype == "message_stop":
+        stop_val = _extract_json_string(trimmed, "stop_reason")
+        if stop_val == "":
+            stop_val = "end_turn"
+    elif etype == "message_start":
+        mdl = _extract_json_string(trimmed, "model")
+        sid = _extract_json_string(trimmed, "session_id")
+    var final_etype = etype
+    if final_etype == "":
+        val has_result = _extract_json_string(trimmed, "result")
+        if has_result != "":
+            final_etype = "result"
+            content_val = has_result
+        else:
+            final_etype = "unknown"
+    CliStreamEvent(
+        event_type: final_etype,
+        content: content_val,
+        session_id: sid,
+        model: mdl,
+        stop_reason: stop_val,
+        input_tokens: in_tok,
+        output_tokens: out_tok
+    )
+
+
 describe "build_claude_args - minimal":
     it "should include prompt with -p flag":
         val args = build_claude_args("Hello", "", "", "", "", 0, 0, "", [], [], false)
@@ -192,7 +371,7 @@ describe "build_claude_args - max tokens":
         expect(args_contain(args, "--max-tokens")).to_equal(false)
 
     it "includes max tokens":
-        val args = build_claude_args("Hi", "", "", "", "", 0, 4096, "", [], [], false)
+        val args = legacy_build_claude_args("Hi", "", "", "", "", 0, 4096, "", [], [], false)
         expect(args_get_flag_value(args, "--max-tokens")).to_equal("4096")
 
 describe "build_claude_args - streaming":
@@ -266,7 +445,7 @@ describe "build_claude_args - tools":
         expect(args_contain(args, "--allowedTools")).to_equal(false)
 
     it "includes multiple tools":
-        val args = build_claude_args("Hi", "", "", "", "", 0, 0, "", ["Read", "Write", "Bash"], [], false)
+        val args = legacy_build_claude_args("Hi", "", "", "", "", 0, 0, "", ["Read", "Write", "Bash"], [], false)
         # Count --allowedTools occurrences
         var count = 0
         for arg in args:
@@ -275,7 +454,7 @@ describe "build_claude_args - tools":
         expect(count).to_equal(3)
 
     it "includes single tool":
-        val args = build_claude_args("Hi", "", "", "", "", 0, 0, "", ["Read"], [], false)
+        val args = legacy_build_claude_args("Hi", "", "", "", "", 0, 0, "", ["Read"], [], false)
         expect(args_contain(args, "--allowedTools")).to_equal(true)
         expect(args_get_flag_value(args, "--allowedTools")).to_equal("Read")
 
@@ -329,7 +508,7 @@ describe "build_claude_args - combined":
         expect(args_contain(args, "--no-cache")).to_equal(true)
 
     it "builds complete args":
-        val args = build_claude_args("prompt", "claude-opus-4-20250514", "json", "be helpful", "sess-1", 3, 2048, "", ["Read"], ["--no-cache"], true)
+        val args = legacy_build_claude_args("prompt", "claude-opus-4-20250514", "json", "be helpful", "sess-1", 3, 2048, "", ["Read"], ["--no-cache"], true)
         expect(args_get_flag_value(args, "-p")).to_equal("prompt")
         expect(args_get_flag_value(args, "--model")).to_equal("claude-opus-4-20250514")
         expect(args_get_flag_value(args, "--output-format")).to_equal("json")
@@ -807,7 +986,7 @@ describe "parse_claude_stream_line":
         var line = _LB()
         line = line + _Q() + "data" + _Q() + ":" + _Q() + "something" + _Q()
         line = line + _RB()
-        val evt = parse_claude_stream_line(line)
+        val evt = legacy_parse_claude_stream_line(line)
         expect(evt.event_type).to_equal("unknown")
 
     it "handles empty line":

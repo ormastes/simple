@@ -1,0 +1,86 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Untyped if/elif whose arms are all bare `Ok(..)` / `Err(..)` constructors
+
+Bug stage2_if_expr_result_join_untyped_match_payload_2026-11-07 (P2).
+`val r = if c: Ok(a) else: Err(b)` has no HIR expression type on the native
+path (no type inference runs), and both arms are untyped Result constructors,
+so the MIR merge slot stayed untyped. A later `match r: case Ok(x)` then
+reported "bare variant 'Ok' is ambiguous" whenever any other enum declares
+`Ok`/`Err`. Root fix: the merge join synthesises `Result<OkT, ErrT>` from the
+constructor payload types when every arm is an untyped Result constructor and
+the Ok payloads (and Err payloads) agree.
+"""
+
+# @tag: unit, compiler, mir, result
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+
+val data_source = "pub enum Collision:\n    Ok(code: i64)\n    Err(message: text)\n\npub struct TypedResult:\n    success: bool\n    code: [u8]\n    has_error: bool\n    error: text\n"
+
+fn lower_consumer_errors(body: text) -> text:
+    val consumer_source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    val sources = [SourceFile(path: "lib/data.spl", content: data_source, module_name: "lib.data")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module("lib.data", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["data_hir"] = data_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val _mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+val match_tail = "    match r:\n        case Ok(compiled):\n            compiled.len()\n        case Err(msg):\n            msg.len()\n"
+
+describe "untyped if Result constructor join":
+    it "an if/else of bare Ok/Err constructors owns its match arms":
+        expect(lower_consumer_errors("fn a(t: TypedResult) -> i64:\n    val r = if t.success:\n        Ok(t.code)\n    else:\n        Err(t.error)\n" + match_tail)).to_equal("")
+
+    it "a nested if inside the Err payload still joins":
+        expect(lower_consumer_errors("fn a(t: TypedResult) -> i64:\n    val r = if t.success:\n        Ok(t.code)\n    else:\n        Err(if t.has_error: t.error else: \"Unknown error\")\n" + match_tail)).to_equal("")
+
+    it "an elif chain of bare Ok/Err constructors owns its match arms":
+        expect(lower_consumer_errors("fn a(t: TypedResult) -> i64:\n    val r = if t.success:\n        Ok(t.code)\n    elif t.has_error:\n        Err(t.error)\n    else:\n        Err(\"Unknown error\")\n" + match_tail)).to_equal("")
+
+    it "the annotated control still lowers":
+        expect(lower_consumer_errors("fn a(t: TypedResult) -> i64:\n    val r: Result<[u8], text> = if t.success:\n        Ok(t.code)\n    else:\n        Err(t.error)\n" + match_tail)).to_equal("")
+
+    it "disagreeing Ok payloads stay unowned (no guessed join)":
+        val errors = lower_consumer_errors("fn a(t: TypedResult) -> i64:\n    val r = if t.success:\n        Ok(t.code)\n    elif t.has_error:\n        Ok(t.error)\n    else:\n        Err(t.error)\n" + match_tail)
+        expect(errors.contains("ambiguous")).to_equal(true)
+
+val local_decls = "enum LocalCollision:\n    Ok(code: i64)\n    Err(message: text)\n\nstruct LocalTyped:\n    success: bool\n    code: [u8]\n    has_error: bool\n    error: text\n\n"
+
+describe "untyped if Result constructor join over same-module declarations":
+    it "an if/else over a same-module struct parameter owns its match arms":
+        expect(lower_consumer_errors(local_decls + "fn a(t: LocalTyped) -> i64:\n    val r = if t.success:\n        Ok(t.code)\n    else:\n        Err(if t.has_error: t.error else: \"Unknown error\")\n" + match_tail)).to_equal("")
+
+    it "an elif chain over a same-module struct parameter owns its match arms":
+        expect(lower_consumer_errors(local_decls + "fn a(t: LocalTyped) -> i64:\n    val r = if t.success:\n        Ok(t.code)\n    elif t.has_error:\n        Err(t.error)\n    else:\n        Err(if t.has_error: t.error else: \"Unknown error\")\n" + match_tail)).to_equal("")

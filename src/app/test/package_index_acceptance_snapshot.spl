@@ -9,8 +9,9 @@ use std.scv.compile_source_inventory.{
     compile_source_inventory_apply_and_publish_v1
 }
 use app.io.mod.{dir_create, dir_exists, file_read, file_write, file_hash_sha256,
-    getpid, process_spawn_async, process_wait, process_is_running, process_run_timeout}
+    getpid, process_spawn_async, process_wait, process_run_timeout}
 use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io.process_ops.{process_exists}
 
 fn acceptance_snapshot_failure_v1(reason: text) -> PackageIndexBindingObservationV1:
     PackageIndexBindingObservationV1(false, reason, [])
@@ -114,25 +115,50 @@ fn package_index_acceptance_snapshot_v1(scenario: text, fixture_root: text) -> P
                 "unretained_snapshot_removed={next_removed}", "repeat_removals={second}"])
     return acceptance_snapshot_failure_v1("unsupported-snapshot-scenario")
 
+fn acceptance_snapshot_dead_pid_v1() -> i64:
+    # The recover probe is arbitrary-PID (process_exists). A reaped child is
+    # normally gone; if the host still reports it (e.g. a registry-held handle
+    # on Windows) fall back to a high PID that no live process holds.
+    val child = process_spawn_async("git", ["--version"])
+    if child > 0 and process_wait(child, 10000) == 0 and not process_exists(child):
+        return child
+    var candidate = 1073741820
+    var tries = 0
+    while tries < 64:
+        if not process_exists(candidate):
+            return candidate
+        candidate = candidate - 4
+        tries = tries + 1
+    0
+
 fn acceptance_snapshot_recovery_v1(root: text, snapshot: ScvCompileSnapshotV1) -> PackageIndexBindingObservationV1:
     val cache = "{root}/build/scv"
-    val child = process_spawn_async("git", ["--version"])
-    if child <= 0 or process_wait(child, 10000) != 0 or process_is_running(child):
+    val dead = acceptance_snapshot_dead_pid_v1()
+    if dead <= 0:
         return acceptance_snapshot_failure_v1("fixture-exited-owner-unavailable")
-    val abandoned = "{cache}/snapshots/.tmp.{child}.acceptance"
+    # A live process this process did NOT spawn (Windows System=4, Unix init=1):
+    # an owned-children-only probe reports it dead and deletes its staging.
+    val foreign = if process_exists(4): 4 else: if process_exists(1): 1 else: 0
+    if foreign <= 0:
+        return acceptance_snapshot_failure_v1("fixture-foreign-live-owner-unavailable")
+    val abandoned = "{cache}/snapshots/.tmp.{dead}.acceptance"
     val live = "{cache}/snapshots/.tmp.{getpid()}.acceptance"
+    val foreign_live = "{cache}/snapshots/.tmp.{foreign}.acceptance"
     if not dir_create(abandoned, true) or not dir_create(live, true) or
+            not dir_create(foreign_live, true) or
             not file_write("{abandoned}/partial", "incomplete"):
         return acceptance_snapshot_failure_v1("fixture-staging-failed")
     val removed = scv_compile_snapshot_recover_v1(cache)
     val abandoned_removed = not dir_exists(abandoned)
     val live_preserved = dir_exists(live)
+    val foreign_preserved = dir_exists(foreign_live)
     val retained = acceptance_snapshot_reopen_v1(root, snapshot).valid
     val second = scv_compile_snapshot_recover_v1(cache)
-    PackageIndexBindingObservationV1(removed == 1 and abandoned_removed and live_preserved and retained and second == 0,
+    PackageIndexBindingObservationV1(removed == 1 and abandoned_removed and live_preserved and foreign_preserved and
+            retained and second == 0,
         "owner-staging-recovery", ["abandoned_staging_removed={abandoned_removed}",
-            "live_staging_preserved={live_preserved}", "prior_snapshot_valid={retained}",
-            "repeat_removals={second}"])
+            "live_staging_preserved={live_preserved}", "foreign_live_staging_preserved={foreign_preserved}",
+            "prior_snapshot_valid={retained}", "repeat_removals={second}"])
 
 fn acceptance_snapshot_git_v1(root: text) -> PackageIndexBindingObservationV1:
     val (_, init_error, init_status) = process_run_timeout("git", ["-C", root, "init", "--quiet"], 10000)
