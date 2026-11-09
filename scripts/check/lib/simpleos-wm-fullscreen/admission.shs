@@ -493,6 +493,39 @@ marker_field() {
     printf '%s\n' "$1" | sed -n "s/.*$2=\\([^ ]*\\).*/\\1/p"
 }
 
+# Repo verdict convention (sibling check scripts, e.g. the KV260 gate): the
+# literal LAST line of output is the machine-readable verdict, and a run that
+# checked nothing is ERROR, never FAIL or PASS. checked=something here means
+# the gate produced kernel-source/artifact/QEMU evidence this run; wrapper,
+# font, and binary-admission plumbing alone do not count.
+simpleos_wm_checked_something() {
+    [ "${KERNEL_INPUT_COUNT:-0}" -gt 0 ] && return 0
+    [ "${KERNEL_BUILD_ATTEMPTS:-0}" -gt 0 ] && return 0
+    case "${KERNEL_BUILD_STATUS:-}" in
+        external-elf-validated) return 0 ;;
+    esac
+    [ "${disk_image_status:-}" = pass ] && return 0
+    [ "${browser_demo_build_status:-}" = pass ] && return 0
+    [ -f "${LAUNCH_OUT:-}" ] && return 0
+    [ -f "${SERIAL_LOG:-}" ] && return 0
+    return 1
+}
+
+# Print the final verdict as the last line and exit with its code. Never
+# returns: PASS -> 0, FAIL -> 1, ERROR (nothing checked) -> 2.
+simpleos_wm_final_verdict() {
+    if [ "$1" = pass ]; then
+        echo "STATUS: PASS simpleos-wm-fullscreen-evidence"
+        exit 0
+    fi
+    if simpleos_wm_checked_something; then
+        echo "STATUS: FAIL simpleos-wm-fullscreen-evidence reason=$1"
+        exit 1
+    fi
+    echo "STATUS: ERROR simpleos-wm-fullscreen-evidence reason=$1 checked=0"
+    exit 2
+}
+
 emit_failure() {
     reason="$1"
     {
@@ -520,6 +553,7 @@ emit_failure() {
         echo "simpleos_wm_fullscreen_kernel_build_status=$KERNEL_BUILD_STATUS"
         echo "simpleos_wm_fullscreen_kernel_build_attempts=$KERNEL_BUILD_ATTEMPTS"
         echo "simpleos_wm_fullscreen_native_build_timeout_seconds=$NATIVE_BUILD_TIMEOUT_SECONDS"
+        echo "simpleos_wm_fullscreen_native_build_log_bytes=$(file_byte_count "$BUILD_DIR/native-build.out")"
         echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
         echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
         echo "simpleos_wm_fullscreen_disk_image_provenance=$disk_image_provenance"
@@ -552,6 +586,7 @@ emit_failure() {
         echo "- disk image: $DISK_IMAGE ($disk_image_status, provenance=$disk_image_provenance, sha256=$DISK_IMAGE_SHA256)"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
+    simpleos_wm_final_verdict "$reason"
 }
 
 WRAPPER_SHA256="$(file_sha256 "$WRAPPER")"

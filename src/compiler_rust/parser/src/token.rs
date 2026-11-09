@@ -280,6 +280,11 @@ pub enum TokenKind {
     ElseColon, // else: (lazy fallback suffix)
     OrReturn,  // or_return: (unwrap or early return)
 
+    /// `s{` — set literal opener (`s{1, 2, 3}`). The lexer emits it only for
+    /// an `s` identifier IMMEDIATELY followed by `{`; the parser lowers the
+    /// literal to `Set.from([..])` (bug set_literal_s_brace_unparsed_2026-09-06).
+    SetLitStart,
+
     // Custom Blocks (#1090-1098)
     // DSL embedding blocks: kind{payload} where payload is captured raw
     CustomBlock {

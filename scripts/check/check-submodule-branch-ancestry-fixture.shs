@@ -1,55 +1,76 @@
 #!/bin/sh
 # Exercise the Git ancestry sequence used after an exact selected-pin fetch.
 # The file:// remote is a local transport fixture, not a Simple adapter test.
-set -eu
-
-fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/simple-submodule-ancestry.XXXXXX")
+# Verdict convention (guard-soundness wave 4): em-dash PASS —/FAIL —/ERROR —
+# verdicts, verdict is the last stdout line, exit 0/1/2.
+fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/simple-submodule-ancestry.XXXXXX") || {
+    echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+checks=0
 
-git init --quiet --initial-branch=main "$fixture_root/work"
-git -C "$fixture_root/work" config user.name Fixture
-git -C "$fixture_root/work" config user.email fixture@example.invalid
+g() { git "$@" || { echo "ERROR — nothing was checked (git $1 failed in fixture setup)"; exit 2; }; }
+expect() { # expect <description> <command...>
+    desc=$1; shift
+    if "$@"; then checks=$((checks + 1)); else
+        echo "FAIL — $desc"; exit 1
+    fi
+}
+
+g init --quiet --initial-branch=main "$fixture_root/work"
+g -C "$fixture_root/work" config user.name Fixture
+g -C "$fixture_root/work" config user.email fixture@example.invalid
 printf 'canary\n' > "$fixture_root/work/README.md"
-git -C "$fixture_root/work" add README.md
-git -C "$fixture_root/work" commit --quiet -m pin
-pin=$(git -C "$fixture_root/work" rev-parse HEAD)
+g -C "$fixture_root/work" add README.md
+g -C "$fixture_root/work" commit --quiet -m pin
+pin=$(git -C "$fixture_root/work" rev-parse HEAD) || { echo "ERROR — nothing was checked (rev-parse pin failed)"; exit 2; }
 printf 'tip\n' >> "$fixture_root/work/README.md"
-git -C "$fixture_root/work" commit --quiet -am tip
-tip=$(git -C "$fixture_root/work" rev-parse HEAD)
+g -C "$fixture_root/work" commit --quiet -am tip
+tip=$(git -C "$fixture_root/work" rev-parse HEAD) || { echo "ERROR — nothing was checked (rev-parse tip failed)"; exit 2; }
 
-git -C "$fixture_root/work" checkout --quiet --orphan unrelated
-git -C "$fixture_root/work" rm --quiet -rf .
+g -C "$fixture_root/work" checkout --quiet --orphan unrelated
+g -C "$fixture_root/work" rm --quiet -rf .
 printf 'unrelated\n' > "$fixture_root/work/README.md"
-git -C "$fixture_root/work" add README.md
-git -C "$fixture_root/work" commit --quiet -m unrelated
-unrelated=$(git -C "$fixture_root/work" rev-parse HEAD)
-git clone --quiet --bare "$fixture_root/work" "$fixture_root/remote.git"
-git --git-dir="$fixture_root/remote.git" config uploadpack.allowReachableSHA1InWant true
+g -C "$fixture_root/work" add README.md
+g -C "$fixture_root/work" commit --quiet -m unrelated
+unrelated=$(git -C "$fixture_root/work" rev-parse HEAD) || { echo "ERROR — nothing was checked (rev-parse unrelated failed)"; exit 2; }
+g -C "$fixture_root/work" clone --quiet --bare "$fixture_root/work" "$fixture_root/remote.git"
+g --git-dir="$fixture_root/remote.git" config uploadpack.allowReachableSHA1InWant true
 remote="file://$fixture_root/remote.git"
 
-git init --quiet --bare "$fixture_root/ancestor.git"
-git --git-dir="$fixture_root/ancestor.git" -c protocol.file.allow=always \
+g init --quiet --bare "$fixture_root/ancestor.git"
+g --git-dir="$fixture_root/ancestor.git" -c protocol.file.allow=always \
     fetch --quiet --no-tags --depth=1 "$remote" "$pin"
-actual_pin=$(git --git-dir="$fixture_root/ancestor.git" rev-parse 'FETCH_HEAD^{commit}')
-test "$actual_pin" = "$pin"
-test "$(git --git-dir="$fixture_root/ancestor.git" cat-file -t "$pin:README.md")" = blob
-git --git-dir="$fixture_root/ancestor.git" -c protocol.file.allow=always \
+actual_pin=$(git --git-dir="$fixture_root/ancestor.git" rev-parse 'FETCH_HEAD^{commit}') \
+    || { echo "ERROR — nothing was checked (rev-parse FETCH_HEAD failed)"; exit 2; }
+[ "$actual_pin" = "$pin" ] || { echo "FAIL — exact pin fetch resolved to $actual_pin, want $pin"; exit 1; }
+checks=$((checks + 1))
+expect "pin commit tree is readable" \
+    test "$(git --git-dir="$fixture_root/ancestor.git" cat-file -t "$pin:README.md")" = blob
+g --git-dir="$fixture_root/ancestor.git" -c protocol.file.allow=always \
     fetch --quiet --no-tags "$remote" refs/heads/main
-actual_tip=$(git --git-dir="$fixture_root/ancestor.git" rev-parse 'FETCH_HEAD^{commit}')
-test "$actual_tip" = "$tip"
-git --git-dir="$fixture_root/ancestor.git" merge-base --is-ancestor "$pin" "$actual_tip"
+actual_tip=$(git --git-dir="$fixture_root/ancestor.git" rev-parse 'FETCH_HEAD^{commit}') \
+    || { echo "ERROR — nothing was checked (rev-parse main FETCH_HEAD failed)"; exit 2; }
+[ "$actual_tip" = "$tip" ] || { echo "FAIL — main fetch resolved to $actual_tip, want $tip"; exit 1; }
+checks=$((checks + 1))
+expect "exact pin is an ancestor of the fetched tip" \
+    git --git-dir="$fixture_root/ancestor.git" merge-base --is-ancestor "$pin" "$actual_tip"
 
-git init --quiet --bare "$fixture_root/unrelated.git"
-git --git-dir="$fixture_root/unrelated.git" -c protocol.file.allow=always \
+g init --quiet --bare "$fixture_root/unrelated.git"
+g --git-dir="$fixture_root/unrelated.git" -c protocol.file.allow=always \
     fetch --quiet --no-tags --depth=1 "$remote" "$unrelated"
-test "$(git --git-dir="$fixture_root/unrelated.git" rev-parse 'FETCH_HEAD^{commit}')" = "$unrelated"
-git --git-dir="$fixture_root/unrelated.git" -c protocol.file.allow=always \
+expect "unrelated exact pin fetch resolved" \
+    test "$(git --git-dir="$fixture_root/unrelated.git" rev-parse 'FETCH_HEAD^{commit}')" = "$unrelated"
+g --git-dir="$fixture_root/unrelated.git" -c protocol.file.allow=always \
     fetch --quiet --no-tags "$remote" refs/heads/main
-actual_tip=$(git --git-dir="$fixture_root/unrelated.git" rev-parse 'FETCH_HEAD^{commit}')
-test "$actual_tip" = "$tip"
+actual_tip=$(git --git-dir="$fixture_root/unrelated.git" rev-parse 'FETCH_HEAD^{commit}') \
+    || { echo "ERROR — nothing was checked (rev-parse unrelated main FETCH_HEAD failed)"; exit 2; }
+[ "$actual_tip" = "$tip" ] || { echo "FAIL — unrelated main fetch resolved to $actual_tip, want $tip"; exit 1; }
+checks=$((checks + 1))
 if git --git-dir="$fixture_root/unrelated.git" merge-base --is-ancestor "$unrelated" "$actual_tip"; then
-    echo 'FAIL: unrelated exact pin passed ancestry' >&2
+    echo "FAIL — unrelated exact pin passed ancestry"
     exit 1
 fi
+checks=$((checks + 1))
 
-echo 'PASS: shallow exact ancestor accepted; unrelated exact pin rejected'
+[ "$checks" -gt 0 ] || { echo "ERROR — nothing was checked (0 ancestry checks ran)"; exit 2; }
+echo "PASS — $checks shallow-ancestry checks (exact ancestor accepted, unrelated pin rejected)"

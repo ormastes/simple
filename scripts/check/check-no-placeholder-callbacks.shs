@@ -11,13 +11,6 @@
 
 PAT='[(,] *_[0-9]+ *[,)]'
 
-# scan_dir DIR -> prints offending file:line:text; returns 0 always
-scan_dir() {
-    grep -rnE --include='*.spl' -- "$PAT" "$1" 2>/dev/null \
-        | grep -v 'placeholder_lambda' \
-        | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#'
-}
-
 count_files() {
     find "$1" -name '*.spl' 2>/dev/null | wc -l | tr -d ' '
 }
@@ -25,27 +18,33 @@ count_files() {
 run_scan() {
     dir=$1
     if [ ! -d "$dir" ]; then
-        echo "ERROR - nothing was checked ($dir is not a directory)"
+        echo "ERROR — nothing was checked ($dir is not a directory)"
         return 2
     fi
     n=$(count_files "$dir")
     if [ "$n" -le 0 ]; then
-        echo "ERROR - nothing was checked (0 .spl files under $dir)"
+        echo "ERROR — nothing was checked (0 .spl files under $dir)"
         return 2
     fi
-    hits=$(scan_dir "$dir")
+    raw=$(grep -rnE --include='*.spl' -- "$PAT" "$dir" 2>/dev/null); grc=$?
+    if [ "$grc" -gt 1 ]; then
+        echo "ERROR — nothing was checked (grep rc=$grc scanning $dir)"
+        return 2
+    fi
+    hits=$(printf '%s\n' "$raw" | grep -v 'placeholder_lambda' \
+        | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#')
     if [ -n "$hits" ]; then
         echo "$hits"
         k=$(printf '%s\n' "$hits" | wc -l | tr -d ' ')
-        echo "FAIL - $n file(s) scanned, $k numbered-placeholder call argument(s)"
+        echo "FAIL — $n file(s) scanned, $k numbered-placeholder call argument(s)"
         return 1
     fi
-    echo "PASS - $n file(s) scanned, 0 numbered-placeholder call arguments"
+    echo "PASS — $n file(s) scanned, 0 numbered-placeholder call arguments"
     return 0
 }
 
 selftest() {
-    tmp=$(mktemp -d 2>/dev/null) || { echo "ERROR - selftest: mktemp failed"; return 2; }
+    tmp=$(mktemp -d 2>/dev/null) || { echo "ERROR — selftest: mktemp failed"; return 2; }
     mkdir -p "$tmp/good" "$tmp/bad" "$tmp/empty"
     cat > "$tmp/good/a.spl" <<'SPL'
 # build(compile(a, _1)) in a comment is ignored
@@ -56,13 +55,13 @@ SPL
     printf 'val r = builder.build(compile(a, b, _1))\n' > "$tmp/bad/a.spl"
     printf 'val r = run(x, _1, _2, _3)\n' > "$tmp/bad/b.spl"
     out=$(run_scan "$tmp/good" 2>&1); rc=$?
-    [ "$rc" -eq 0 ] || { echo "$out"; echo "ERROR - selftest: good fixture rc=$rc"; rm -rf "$tmp"; return 2; }
+    [ "$rc" -eq 0 ] || { echo "$out"; echo "ERROR — selftest: good fixture rc=$rc"; rm -rf "$tmp"; return 2; }
     out=$(run_scan "$tmp/bad" 2>&1); rc=$?
-    [ "$rc" -eq 1 ] || { echo "$out"; echo "ERROR - selftest: bad fixture rc=$rc"; rm -rf "$tmp"; return 2; }
+    [ "$rc" -eq 1 ] || { echo "$out"; echo "ERROR — selftest: bad fixture rc=$rc"; rm -rf "$tmp"; return 2; }
     k=$(printf '%s\n' "$out" | grep -c '^FAIL.* 2 numbered')
-    [ "$k" -eq 1 ] || { echo "$out"; echo "ERROR - selftest: bad fixture did not report 2 hits"; rm -rf "$tmp"; return 2; }
+    [ "$k" -eq 1 ] || { echo "$out"; echo "ERROR — selftest: bad fixture did not report 2 hits"; rm -rf "$tmp"; return 2; }
     out=$(run_scan "$tmp/empty" 2>&1); rc=$?
-    [ "$rc" -eq 2 ] || { echo "$out"; echo "ERROR - selftest: empty fixture rc=$rc"; rm -rf "$tmp"; return 2; }
+    [ "$rc" -eq 2 ] || { echo "$out"; echo "ERROR — selftest: empty fixture rc=$rc"; rm -rf "$tmp"; return 2; }
     rm -rf "$tmp"
     return 0
 }
@@ -73,14 +72,14 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --root) root=$2; shift 2 ;;
         --selftest) mode=selftest; shift ;;
-        *) echo "ERROR - unknown argument $1"; exit 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
     esac
 done
 
 selftest; rc=$?
 if [ "$rc" -ne 0 ]; then exit 2; fi
 if [ "$mode" = selftest ]; then
-    echo "PASS - selftest (good, bad, empty fixtures)"
+    echo "PASS — selftest (good, bad, empty fixtures)"
     exit 0
 fi
 run_scan "$root"; exit $?

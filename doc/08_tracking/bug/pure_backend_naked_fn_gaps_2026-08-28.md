@@ -31,3 +31,15 @@ Source: $SCRATCHPAD/hal/VERIFY_impl_A.md (commit 644292b2e6a).
 require byte counts (`@align(4)`) in twins. Until decided, riscv twins must
 write the byte count explicitly. Source: $SCRATCHPAD/hal/VERIFY_batch1.md.
 
+
+## Fix implemented 2026-11-09 — verification pending (native)
+- **D1:** pure backend `translate_naked_body` (`_MirToLlvm/core_codegen.spl`) ports the
+  seed's `compile_naked_function`: exactly one raw asm block, no operands/clobbers,
+  `Ret(nil)`/`Unreachable` only; else `E-NAKED-BODY` / `E-NAKED-CLOBBER` codegen error
+  (fail-closed module). The generic block translator is never run for `@naked`, so no
+  local/param allocas. Spec: `test/01_unit/compiler/backend/naked_no_prologue_spec.spl`
+  (RED 7/11 before, GREEN 11/11 after).
+- **D2 (owner: keep conservative):** a raw asm block with no operands and no explicit
+  clobbers gets `~{memory}` (opt out with `options(nomem)`) — pure backend now matches the seed.
+- **R1 (owner: honor @align as byte count):** `@align(n)` is emitted as LLVM `align n` bytes,
+  never p2align; riscv twins write the byte count (`@align(4)`).

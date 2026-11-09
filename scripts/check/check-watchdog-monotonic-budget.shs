@@ -4,20 +4,25 @@
 # them against independent fake monotonic/civil clocks. Never runs the watchdog
 # main or a workload. Replaces check-watchdog-monotonic-budget.py (no Python).
 # Usage: sh check-watchdog-monotonic-budget.shs [watchdog.pl]
+# Verdict convention (guard-soundness wave 4): em-dash PASS —/FAIL —/ERROR —
+# verdicts, verdict is the last stdout line, exit 0/1/2.
 here=$(cd "$(dirname "$0")" && pwd -P)
 target=${1:-$here/../resource/process-tree-rss-watchdog.pl}
-[ -f "$target" ] || { echo "ERROR - nothing was checked: $target missing" >&2; exit 2; }
-command -v perl >/dev/null 2>&1 || { echo "ERROR - nothing was checked: perl missing" >&2; exit 2; }
+[ -f "$target" ] || { echo "ERROR — nothing was checked: $target missing"; exit 2; }
+command -v perl >/dev/null 2>&1 || { echo "ERROR — nothing was checked: perl missing"; exit 2; }
 WATCHDOG_PL=$target exec perl -e '
 use strict; use warnings;
+sub gate_fail { print "FAIL — $_[0]\n"; exit 1 }
+sub gate_error { print "ERROR — nothing was checked: $_[0]\n"; exit 2 }
 my $p = $ENV{WATCHDOG_PL};
-open(my $fh, "<", $p) or die "cannot read $p\n"; local $/; my $s = <$fh>; close $fh;
-sub grab { my ($re,$n)=@_; $s =~ $re or die "FAIL - contract expression not found: $n\n"; return defined($1) ? $1 : $&; }
+open(my $fh, "<", $p) or gate_error("cannot read $p: $!");
+local $/; my $s = <$fh>; close $fh;
+sub grab { my ($re,$n)=@_; $s =~ $re or gate_fail("contract expression not found: $n"); return defined($1) ? $1 : $&; }
 my $helper = grab(qr/^(sub monotonic_time \{[^\n]+\})/m, "monotonic_time");
 my $startup_helper = grab(qr/^(sub checked_monotonic_startup_time \{[^\n]+\})/m, "checked_monotonic_startup_time");
 my $startup = grab(qr/^(my \$started = checked_monotonic_startup_time\(\);)$/m, "startup");
-my $si = index($s, $startup); $s =~ /\bfork\s*\(/ or die "FAIL - no fork site\n";
-die "FAIL - checked startup must precede every fork site\n" unless $si < $-[0];
+my $si = index($s, $startup); $s =~ /\bfork\s*\(/ or gate_fail("no fork site");
+gate_fail("checked startup must precede every fork site") unless $si < $-[0];
 my $timeout = grab(qr/if \((\$opt\{\x27timeout-seconds\x27\} && monotonic_time\(\) - \$started >= \$opt\{\x27timeout-seconds\x27\})\)/, "timeout");
 my $grace = grab(qr/while \((monotonic_time\(\) < \$grace_end)\)/, "grace");
 my $duration = grab(qr/my \$duration_ms = (\(monotonic_time\(\) - \$sample_started_at\) \* 1000);/, "duration");
@@ -53,5 +58,24 @@ ok(!\$u && \$ue =~ /CLOCK_MONOTONIC unavailable before workload/,\x27undefined s
 ok(!\$t && \$te =~ /provider failure/,\x27startup provider exception propagates\x27);
 \$provider_throw=0;\$mono=0;is(checked_monotonic_startup_time(),0,\x27zero monotonic startup accepted\x27);
 };
-eval $prog; die $@ if $@;
+eval $prog;
+if ($@) { chomp(my $e = $@); print "ERROR — contract harness error: $e\n"; exit 2 }
+my $tb = Test::More->builder;
+$tb->no_ending(1);
+my ($npass, $nfail) = (0, 0);
+if (eval { require Test2::API; 1 }) {
+    my $hub = Test2::API::test2_stack()->top;
+    $npass = $hub->count - $hub->failed;
+    $nfail = $hub->failed;
+} else {
+    $npass = $tb->{Pass} || 0;
+    $nfail = $tb->{Fail} || 0;
+}
+gate_error("0 contract checks ran") if $npass + $nfail == 0;
+if ($nfail > 0 || !eval { $tb->is_passing }) {
+    print "FAIL — monotonic-clock contract: $nfail of ", $npass + $nfail, " checks did not pass\n";
+    exit 1;
+}
+print "PASS — $npass monotonic-clock contract checks passed\n";
+exit 0;
 '

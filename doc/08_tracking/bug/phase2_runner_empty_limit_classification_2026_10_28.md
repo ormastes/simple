@@ -115,3 +115,6 @@ Interpreter regression spec (original, typed, Err branch, and the similar
 `Option<(T, text)>` pattern): `test/01_unit/lib/test_runner/result_tuple_match_child_fields_spec.spl`
 — 4/4 pass on `bin/simple.exe`. Retirement criterion unchanged: the
 `wrunner_tm2`/`wrunner_tm3` shapes must build and pass natively.
+
+## Opus rerun 2026-11-09
+Root cause in source: wrapper match `case Ok((run, path))` on a tuple with a text slot was rejected by the narrow wrapper classifier and bound no field (garbage words). Fixed by 11192da46b4 (match Result/Option tuple binders use unwrap/? slot admission). New pin `test/01_unit/compiler/mir/result_tuple_record_text_spec.spl` lowers the exact `Result<(Record, text), text>` producer+consumer and asserts both use the same `(Struct, Opaque(str))` tuple: RED with switch_operators_calls.spl at 11192da46b4~1, GREEN at HEAD. The `lower_type` Str->Tuple(Ptr,U64) lead does not reach this path (both sides lower to Opaque(str)). Status fix-implemented-verification-pending; native retirement of the workaround still requires a producer rebuild.

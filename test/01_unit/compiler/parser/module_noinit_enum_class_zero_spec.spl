@@ -1,0 +1,47 @@
+# @req bug noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09
+# Flat parser half of owner decision 2026-11-09 (item 14): a module var of an
+# enum type declared earlier in the module defaults to the FIRST variant
+# (`E.First`, an EXPR_FIELD_ACCESS on the enum name), a class to its zero
+# literal with `text` fields "" and enum fields first-variant; robust mode
+# still rejects every initializer-less module var (compile path).
+use std.spec
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.core.ast.{module_decl_count_get, module_decl_at, decl_get_name, decl_get_body}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_args, expr_get_str, EXPR_STRUCT_LIT, EXPR_FIELD_ACCESS, EXPR_NIL_LIT}
+use compiler.frontend.core.parser_stmts.{set_noinit_robust_mode_v1}
+
+fn ec_body(name: text) -> i64:
+    var i = 0
+    while i < module_decl_count_get():
+        val d = module_decl_at(i)
+        if decl_get_name(d) == name:
+            val b = decl_get_body(d)
+            if b.len() == 1:
+                return b[0]
+        i = i + 1
+    -1
+
+describe "module var without initializer: enum and class (flat parser)":
+    it "enum var defaults to the first variant":
+        val src = "enum Light:\n    Red\n    Green\nvar light: Light\n"
+        expect(parse_module_silent_checked(src, "ec1.spl")).to_equal(false)
+        val body = ec_body("light")
+        expect(expr_get_tag(body)).to_equal(EXPR_FIELD_ACCESS)
+        expect(expr_get_str(body)).to_equal("Red")
+    it "class var with text and enum fields zero-initializes (\"\" / first variant), not nil":
+        val src = "enum Mode:\n    Off\n    On\nclass Counter:\n    count: i64\n    label: text\n    mode: Mode\nvar counter: Counter\n"
+        expect(parse_module_silent_checked(src, "ec2.spl")).to_equal(false)
+        val body = ec_body("counter")
+        expect(expr_get_tag(body)).to_equal(EXPR_STRUCT_LIT)
+        val entries = expr_get_args(body)
+        expect(entries.len()).to_equal(3)
+    it "errors when the first enum variant carries a payload (no safe default)":
+        val src = "enum Shape:\n    Circle(r: i64)\n    Dot\nvar s: Shape\n"
+        expect(parse_module_silent_checked(src, "ec3.spl")).to_equal(true)
+    it "robust mode rejects a no-init enum or class module var":
+        set_noinit_robust_mode_v1(true)
+        val e1 = parse_module_silent_checked("enum L:\n    A\nvar l: L\n", "ec4.spl")
+        val e2 = parse_module_silent_checked("class C:\n    n: i64\nvar c: C\n", "ec5.spl")
+        set_noinit_robust_mode_v1(false)
+        expect(e1).to_equal(true)
+        expect(e2).to_equal(true)

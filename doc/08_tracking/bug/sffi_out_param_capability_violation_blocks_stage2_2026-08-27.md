@@ -73,3 +73,20 @@ same shape as the 2026-08-11 seed incident, one layer up.
 Option 2 is proven to build. Option 1 preserves the perf intent but is unproven
 — do not assume it type-checks without running a full Stage-2 build.
 
+
+## Re-verified 2026-11-09 — STALE on release/1.0.0 (`27e65c24371`-era tip)
+
+`dynamic.spl` was restructured (`bb3f6ab8ab2`: the out-param calls are now
+`unsafe:`-wrapped `&mut` borrows to `spl_wffi_try_call_i64_out` /
+`spl_dlopen_checked` / `spl_dlsym_checked`). Seed Rust native-build path
+(`SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_HIR_CACHE=0 bin/simple.exe native-build`,
+which is the only lane that runs `hir/capability.rs`) over a minimal entry
+`use std.nogc_sync_mut.sffi.dynamic.*` in a fresh origin/release/1.0.0 worktree:
+
+    [native-rust-trace] discover visit ...\src\lib\nogc_sync_mut\sffi\dynamic.spl
+    [native-build] compiled=75 reused=0 failed=0
+
+No `Capability error` / `Aliasing violation`. (The run then stops at link on
+missing runtime archive symbols in the sparse worktree — unrelated to HIR.)
+Not run: stage2_new4.exe (the pure-Simple lane has no `capability.rs`).
+Recommend status: closed-stale.

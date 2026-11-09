@@ -502,6 +502,13 @@ impl Lowerer {
                 kind: HirExprKind::Global(symbol),
                 ty,
             })
+        } else if let Some(message) = self.flatten_ambiguous_callable(name) {
+            // Cross-module collision that no rule above selects a definition
+            // for. Owner decision 2026-11-09: a compile error requiring
+            // qualification, never a fall-through to the bare name (= whichever
+            // definition happened to keep it). See
+            // doc/08_tracking/bug/jit_co_compiled_definition_ambiguity_debt_2026-09-15.md
+            Err(LowerError::AmbiguousCallable(message))
         } else if let Some((source, ty)) = self.resolve_import_alias(name).map(str::to_string).and_then(|source| {
             // Selective-import alias (`use m.{f as g}`): module flattening merged
             // the imported symbol in under its ORIGINAL name, so `g` names
@@ -2257,7 +2264,12 @@ impl Lowerer {
                 // bound `v = 80` (10 << 3) instead of `10`.
                 //
                 // See doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
-                "at" => {
+                //
+                // `get` joins `at` here (owner decision 2026-11-09,
+                // array_get_contract_drift_crypto_2026-10-18): `a.get(i)` is `T?`
+                // on every lane, `a[i]` the direct form. Typing `get` as bare
+                // `T` is what let the JIT bind the raw element against `Some(v)`.
+                "at" | "get" => {
                     let element_ty = match self.module.types.get(receiver.ty) {
                         Some(HirType::Array { element, .. }) => Some(*element),
                         _ => None,
@@ -2271,7 +2283,7 @@ impl Lowerer {
                         None => Some(TypeId::ANY),
                     }
                 }
-                "first" | "last" | "get" | "max" | "min" => {
+                "first" | "last" | "max" | "min" => {
                     // Returns element type (or Option<element>)
                     if let Some(HirType::Array { element, .. }) = self.module.types.get(receiver.ty) {
                         Some(*element)
