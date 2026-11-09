@@ -348,3 +348,59 @@ fn parse_array_repeat_vs_regular_array() {
     // Regular array: multiple elements
     parse_ok("val b = [0, 0, 0]");
 }
+
+// `s{a, b, c}` set literal lowers to `Set.from([a, b, c])`
+// (bug set_literal_s_brace_unparsed_2026-09-06, owner decision 2026-11-09).
+#[test]
+fn set_literal_lowers_to_set_from_array() {
+    let items = parse("val nums = s{1, 2, 3}");
+    let Node::Let(l) = &items[0] else { panic!("expected let, got {:?}", items[0]) };
+    let Expr::MethodCall { receiver, method, args, .. } = l.value.as_ref().unwrap() else {
+        panic!("expected method call, got {:?}", l.value)
+    };
+    assert_eq!(**receiver, Expr::Identifier("Set".to_string()));
+    assert_eq!(method, "from");
+    assert_eq!(args.len(), 1);
+    let Expr::Array(elems) = &args[0].value else { panic!("expected array arg") };
+    assert_eq!(elems.len(), 3);
+}
+
+#[test]
+fn set_literal_is_identical_to_explicit_set_from() {
+    // Spans differ by source position; the structure must not.
+    let sugar = strip_spans(&format!("{:?}", parse("val a = s{1, 2, 3}")));
+    let explicit = strip_spans(&format!("{:?}", parse("val a = Set.from([1, 2, 3])")));
+    assert_eq!(sugar, explicit);
+}
+
+/// Remove `Span { .. }` renderings from a Debug string.
+fn strip_spans(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("Span {") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i..];
+        let end = after.find('}').map(|e| e + 1).unwrap_or(after.len());
+        out.push_str("Span");
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[test]
+fn set_literal_empty_and_multiline_and_trailing_comma() {
+    parse_ok("val e = s{}");
+    let items = parse("val a = s{\n    \"x\",\n    \"y\",\n}");
+    let Node::Let(l) = &items[0] else { panic!() };
+    let Expr::MethodCall { args, .. } = l.value.as_ref().unwrap() else { panic!() };
+    let Expr::Array(elems) = &args[0].value else { panic!() };
+    assert_eq!(elems.len(), 2);
+}
+
+#[test]
+fn plain_s_identifier_is_untouched() {
+    let items = parse("val t = s + 1");
+    let Node::Let(l) = &items[0] else { panic!() };
+    assert!(matches!(l.value, Some(Expr::Binary { .. })), "got {:?}", l.value);
+}
