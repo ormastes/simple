@@ -247,6 +247,18 @@ for f in $files; do
         echo "ERROR — nothing was checked (file not found: $f)"
         exit 2
     fi
+    # Sharded bug DB: scan the merged view and fail on any shard whose row
+    # ids do not match its file stem (a duplicate/misplaced bug across shards).
+    case "$f" in
+        */bug_db.sdn)
+            if [ -d "$(dirname "$f")/db" ]; then
+                shard_verdict=$(sh "$(dirname "$0")/bug-db-shard.shs" check "$f" | tail -n 1)
+                case "$shard_verdict" in PASS*) ;; *) echo "FAIL — bug shards: $shard_verdict"; exit 1 ;; esac
+                merged_view=$(mktemp); sh "$(dirname "$0")/bug-db-shard.shs" merged "$f" > "$merged_view" || exit 2
+                scan_file "$merged_view" >> "$rows_file"; rm -f "$merged_view"
+                checked_files=$((checked_files + 1)); continue
+            fi ;;
+    esac
     scan_file "$f" >> "$rows_file"
     checked_files=$((checked_files + 1))
 done
