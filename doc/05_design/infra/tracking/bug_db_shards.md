@@ -50,6 +50,15 @@ rewinds, duplicate rows and a serialized landing bottleneck.
   shard dir, only-touched-shard written + legacy byte-identical, two branches
   via disjoint files, duplicate id across shards rejected).
 
+## Counting bugs
+
+Count open bugs ONLY via `sh scripts/check/bug-db-shard.shs merged`; it unions both
+tables (`bugs_active` and the legacy `bugs`, shards applied). The tally form is
+`sh scripts/check/bug-db-shard.shs count`, which prints `<table> <severity> <status> <n>`
+plus `TOTAL` rows across both tables. Counting `bugs_active` alone undercounted
+open P2 on 2026-11-09 (31 vs 164). New still-real rows belong in `bugs_active`;
+the legacy `bugs` table is being drained to closed history.
+
 ## Not changed (named gaps)
 * `src/app/bug_gen/main.spl`, `src/app/tracking/main.spl`, `src/app/stats/*`,
   `src/compiler/90.tools/stats/*` and the Rust seed `driver/src/bug_db.rs` read
