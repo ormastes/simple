@@ -96,3 +96,25 @@ so no scope-stamped array is stored in it.
 
 `pending_defer_state_take` still does `g_pending_defers = []`; it is safe only
 while it is never called inside a transient scope.
+
+## Residual after #7506 (vbmm3 lane, 2026-11-07)
+
+Leaf 61 (`s3_fable61`) shows 0 invalid-array-handle lines, but vb_mm1 still fails with
+`unresolved method call get ... struct_method_syms=yes lookup_method_in_type=no`, and probe
+vbx_a fails with E-RTI-006 "two rows for callee 'main'" whose stored owner text is the bytes of
+the next `log_build_progress` line (`build] phase=mir state=running unit_kind=modules ...`).
+
+Root cause: the leaf fold base (`25fede3cb71`) predates `d05dc7079db`. `MirLowering.rti` is a
+class created before the scoped struct prescan (`driver_pipeline_lowering.spl:1252`), so promoting
+`[self.rti]` does not walk its Dict children; `rows_by_module` / `rows_by_key` / `aliases` were
+filled by `prescan_module_functions_v1` inside that scope and freed by
+`driver_mir_inventory_scope_end_v1`. Release already carries `d05dc7079db`; the leaf needs the
+three-root fold `C:/dev/p3new/s3new/p63_vbmm1.diff`.
+
+Sibling audit (same class, release): `provider_default_literal_consts_v1` / `_owners_v1` are
+filled inside a module scope (provider_metadata.spl:545-567), never refilled because the owners
+set says done, and were not promote roots. Added. The only class-typed MirLowering fields are
+`rti` and `symbols`; every child of both is now a root (gated by
+`test/01_unit/compiler/mir/transient_owner_promotes_every_field_spec.spl`, which was red on
+release before this fix and green after). `struct_method_syms` is retired and rebuilt per module
+inside the module scope, so it is not a cross-scope survivor.

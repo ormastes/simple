@@ -125,3 +125,60 @@ describe "MirLowering transient owner promotion of rti children":
             if not owner_source2.contains("promote_and_release_transient_owner_roots([self.rti.{field}])"):
                 missing = missing.push(field)
         expect(missing).to_equal([])
+
+# Regression for doc/08_tracking/bug/native_method_call_hir_lowering_invalid_array_handle_2026-11-07.md
+# (vbmm3 lane): the leaf-61 compiler lacked the rti-children roots above, so
+# rti.rows_by_key's owner texts registered by the scoped struct prescan were
+# freed at the phase scope end and reused by the next log_build_progress line
+# (E-RTI-006 "two rows for callee 'main' ... build] phase=mir state=running").
+# The same audit found provider_default_literal_consts_v1/_owners_v1, filled in a
+# module scope and never refilled (owners-set gate), missing from the roots.
+fn class_fields_of(source: text, class_name: text) -> [text]:
+    var fields: [text] = []
+    var in_class = false
+    for line in source.split("\n"):
+        if line.starts_with("class {class_name}:"):
+            in_class = true
+            continue
+        if not in_class:
+            continue
+        if line.len() > 0 and not line.starts_with(" "):
+            break
+        if not line.starts_with("    ") or line.starts_with("     "):
+            continue
+        val body = line.substring(4, line.len())
+        if body.starts_with("#") or body.starts_with("fn ") or body.starts_with("me ") or body.starts_with("\"\"\""):
+            continue
+        val colon = body.index_of(":")
+        if colon <= 0:
+            continue
+        val name = body.substring(0, colon)
+        if name.contains(" ") or name.contains("("):
+            continue
+        fields = fields.push(name)
+    fields
+
+describe "MirLowering transient owner promotion of class-typed field children":
+    val types_source3 = rt_file_read_text("src/compiler/50.mir/mir_lowering_types.spl") ?? ""
+    val owner_source3 = promote_transient_owner_body(rt_file_read_text("src/compiler/50.mir/_MirLowering/transient_owner.spl") ?? "")
+    val hir_types_source = rt_file_read_text("src/compiler/20.hir/hir_types.spl") ?? ""
+    val rti_source3 = rt_file_read_text("src/compiler/20.hir/return_type_interface_v1.spl") ?? ""
+
+    it "promotes the provider default-literal memo roots":
+        expect(owner_source3.contains("promote_and_release_transient_owner_roots([self.provider_default_literal_consts_v1])")).to_equal(true)
+        expect(owner_source3.contains("promote_and_release_transient_owner_roots([self.provider_default_literal_owners_v1])")).to_equal(true)
+
+    it "enumerates every child of each class-typed MirLowering field":
+        # A class field created before the scope is not walked as one root;
+        # each of its collection children must be its own root.
+        expect(types_source3.contains("    rti: ReturnTypeInterfaceTable")).to_equal(true)
+        expect(types_source3.contains("    symbols: SymbolTable")).to_equal(true)
+        var missing: [text] = []
+        for child in class_fields_of(hir_types_source, "SymbolTable"):
+            if not owner_source3.contains("promote_and_release_transient_owner_roots([self.symbols.{child}])"):
+                missing = missing.push("symbols.{child}")
+        for child in class_fields_of(rti_source3, "ReturnTypeInterfaceTable"):
+            if not owner_source3.contains("promote_and_release_transient_owner_roots([self.rti.{child}])"):
+                missing = missing.push("rti.{child}")
+        expect(class_fields_of(hir_types_source, "SymbolTable").len()).to_be_greater_than(5)
+        expect(missing).to_equal([])
