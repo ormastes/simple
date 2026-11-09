@@ -6673,6 +6673,49 @@ static SplArray* group_stream_unavailable_v2(int count) {
     }
     return values;
 }
+SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len) {
+    (void)path; (void)path_len;
+    return group_stream_unavailable_v2(3);
+}
+SplArray* rt_linux_group_parent_acquire_v1(const char* attempt, uint64_t attempt_len,
+        const char* identity, uint64_t identity_len) {
+    (void)attempt; (void)attempt_len; (void)identity; (void)identity_len;
+    return group_stream_unavailable_v2(4);
+}
+SplArray* rt_linux_group_parent_acquire_at_v2(const char* path, uint64_t path_len,
+        const char* attempt, uint64_t attempt_len, const char* identity, uint64_t identity_len) {
+    (void)path; (void)path_len; (void)attempt; (void)attempt_len;
+    (void)identity; (void)identity_len;
+    return group_stream_unavailable_v2(4);
+}
+int64_t rt_linux_group_parent_release_v1(int64_t token) {
+    (void)token; return ENOTSUP;
+}
+SplArray* rt_linux_group_launch_broker_v1(const char* program, uint64_t program_len,
+        const char* digest, uint64_t digest_len, SplArray* args) {
+    (void)program; (void)program_len; (void)digest; (void)digest_len; (void)args;
+    return group_stream_unavailable_v2(2);
+}
+SplArray* rt_linux_group_start_v1(const char* program, uint64_t program_len,
+        const char* digest, uint64_t digest_len, SplArray* args, SplArray* environment,
+        const char* directory, uint64_t directory_len, const char* root, uint64_t root_len,
+        const char* identity, uint64_t identity_len, int64_t memory_limit, int64_t timeout_ms,
+        const char* stdout_path, uint64_t stdout_len, const char* stderr_path, uint64_t stderr_len) {
+    (void)program; (void)program_len; (void)digest; (void)digest_len; (void)args; (void)environment;
+    (void)directory; (void)directory_len; (void)root; (void)root_len; (void)identity; (void)identity_len;
+    (void)memory_limit; (void)timeout_ms; (void)stdout_path; (void)stdout_len;
+    (void)stderr_path; (void)stderr_len;
+    return group_stream_unavailable_v2(2);
+}
+SplArray* rt_linux_group_poll_v1(int64_t token) {
+    (void)token; return group_stream_unavailable_v2(10);
+}
+int64_t rt_linux_group_cancel_v1(int64_t token) {
+    (void)token; return ENOTSUP;
+}
+SplArray* rt_linux_group_collect_v1(int64_t token) {
+    (void)token; return group_stream_unavailable_v2(10);
+}
 int64_t rt_linux_group_stream_admit_profiled_v3(const char*d,int64_t dn,const char*b,int64_t bn,
         const char*p,int64_t pn,SplArray*w) {
     (void)d;(void)dn;(void)b;(void)bn;(void)p;(void)pn;(void)w;return ENOTSUP;
