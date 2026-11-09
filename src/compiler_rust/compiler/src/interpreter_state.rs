@@ -294,6 +294,13 @@ thread_local! {
     pub(crate) static DEBUG_CALL_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Current file being evaluated (for module resolution)
     pub(crate) static CURRENT_FILE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Span of the module-level node currently being evaluated by the
+    /// interpreter. Set at each statement-execution loop head so semantic
+    /// errors raised deep in expression evaluation can still be reported with
+    /// the enclosing statement's file:line:col (bug row:
+    /// seed_semantic_error_missing_position_2026-11-09). `Expr` itself
+    /// carries no span, so statement granularity is the finest available.
+    pub(crate) static CURRENT_NODE_SPAN: RefCell<Option<simple_parser::Span>> = const { RefCell::new(None) };
     /// Interface bindings for static polymorphism (trait_name -> impl_type_name)
     /// When a binding exists, method calls on trait objects use static dispatch
     /// to the bound implementation type.
@@ -921,6 +928,18 @@ pub fn set_current_file(path: Option<PathBuf>) {
 /// Get the current file being evaluated
 pub fn get_current_file() -> Option<PathBuf> {
     CURRENT_FILE.with(|cell| cell.borrow().clone())
+}
+
+/// Set the span of the node currently being evaluated (statement granularity).
+pub fn set_current_node_span(span: Option<simple_parser::Span>) {
+    CURRENT_NODE_SPAN.with(|cell| {
+        *cell.borrow_mut() = span;
+    });
+}
+
+/// Span of the node currently being evaluated, if the executing lane set one.
+pub fn get_current_node_span() -> Option<simple_parser::Span> {
+    CURRENT_NODE_SPAN.with(|cell| cell.borrow().clone())
 }
 
 //==============================================================================
