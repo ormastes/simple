@@ -1,15 +1,21 @@
 #!/bin/sh
 # Focused receipt graph test; synthetic bytes are never admitted as a compiler.
-set -eu
+# Verdict convention (guard-soundness wave 4): em-dash PASS —/FAIL —/ERROR —
+# verdicts, verdict is the last stdout line, exit 0/1/2.
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+for lib in "$BOOTSTRAP_STAGE3_FACADE_PATH" "$STAGE4_PROVENANCE_HELPER_PATH" \
+    "$root/scripts/bootstrap/resume-stage4-from-admitted.sh"; do
+    [ -f "$lib" ] || { echo "ERROR — nothing was checked ($lib missing)"; exit 2; }
+done
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 . "$STAGE4_PROVENANCE_HELPER_PATH"
 . "$root/scripts/bootstrap/resume-stage4-from-admitted.sh"
 
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage4-receipt-test.XXXXXX")
-scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage4-receipt-test.XXXXXX") || {
+    echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P) || { echo "ERROR — nothing was checked (scratch resolution failed)"; exit 2; }
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 output_dir="$scratch/output"
 PLATFORM=receipt-fixture
@@ -19,7 +25,8 @@ printf 'immutable producer\n' >"$output_dir/stage3/$PLATFORM/parent"
 full_bin="$output_dir/full/$PLATFORM/simple"
 printf 'synthetic artifact, never executed\n' >"$full_bin"
 resume_stage4_before="$output_dir/stage4-continuation-before.sha256"
-resume_stage4_snapshot "$resume_stage4_before" "$output_dir" "$PLATFORM"
+resume_stage4_snapshot "$resume_stage4_before" "$output_dir" "$PLATFORM" || {
+    echo "ERROR — nothing was checked (resume_stage4_snapshot failed)"; exit 2; }
 resume_stage4_admission="$output_dir/stage4-continuation-admission.env"
 resume_stage4_receipt="$output_dir/stage4-continuation.env"
 {
@@ -43,19 +50,25 @@ cp "${full_bin}.provenance.env" "$scratch/provenance.original"
 cp "$full_bin" "$scratch/artifact.original"
 SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE=1
 deploy=0
+checks=0
 
 # Execute the production finalizer, including both immutable parent snapshots.
-resume_stage4_finalize
-cmp "$resume_stage4_admission" "$scratch/admission.original"
-cmp "${full_bin}.provenance.env" "$scratch/provenance.original"
-stage4_verify_continuation_completion "$resume_stage4_receipt"
+resume_stage4_finalize || { echo "FAIL — resume_stage4_finalize refused the valid fixture"; exit 1; }
+cmp "$resume_stage4_admission" "$scratch/admission.original" || {
+    echo "FAIL — finalizer mutated the admission file"; exit 1; }
+cmp "${full_bin}.provenance.env" "$scratch/provenance.original" || {
+    echo "FAIL — finalizer mutated the provenance env"; exit 1; }
+stage4_verify_continuation_completion "$resume_stage4_receipt" || {
+    echo "FAIL — completion receipt rejected for the valid fixture"; exit 1; }
+checks=$((checks + 1))
 cp "$resume_stage4_receipt" "$scratch/completion.original"
 
 reject_completion() {
   if stage4_verify_continuation_completion "$resume_stage4_receipt"; then
-    echo "FAIL: accepted $1" >&2
+    echo "FAIL — accepted $1"
     exit 1
   fi
+  checks=$((checks + 1))
 }
 printf 'mutation=true\n' >>"$resume_stage4_admission"
 reject_completion changed-admission
@@ -90,8 +103,11 @@ cp "$scratch/completion.original" "$resume_stage4_receipt"
 
 # Existing output must never be silently replaced on a duplicate finalization.
 if (resume_stage4_finalize); then
-  echo 'FAIL: duplicate completion overwritten' >&2
+  echo "FAIL — duplicate completion overwritten"
   exit 1
 fi
-cmp "$resume_stage4_receipt" "$scratch/completion.original"
-echo 'stage4-continuation-receipt-graph: PASS (finalize + 16 rejection cases; no runtime admission)'
+checks=$((checks + 1))
+cmp "$resume_stage4_receipt" "$scratch/completion.original" || {
+    echo "FAIL — duplicate finalization mutated the completion receipt"; exit 1; }
+[ "$checks" -gt 0 ] || { echo "ERROR — nothing was checked (0 receipt cases ran)"; exit 2; }
+echo "PASS — $checks stage4 receipt-graph checks (finalize + rejections); no runtime admission"

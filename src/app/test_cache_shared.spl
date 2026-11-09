@@ -4,7 +4,8 @@
 # Used by test_runner_new/test_result_cache.spl, test_daemon/cache.spl,
 # test_incremental_state_shared.spl, and test_runner_files.spl.
 
-use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_stat}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_stat, file_rename}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
 
 # ============================================================================
@@ -101,7 +102,10 @@ fn shared_cache_save(entries: {text: TestCacheEntry}, cache_path: text):
         val e = entries[key]
         val line = "{e.test_path}|{e.dep_hash}|{e.result_status}|{e.passed}|{e.failed}|{e.skipped}|{e.duration_ms}"
         lines = lines.push(line)
-    file_write(cache_path, lines.join("\n"))
+    # Atomic: unique temp file + rename, so concurrent runners never tear the file.
+    val tmp = "{cache_path}.tmp.{getpid()}"
+    if file_write(tmp, lines.join("\n")):
+        file_rename(tmp, cache_path)
 
 fn shared_cache_load_entries(cache_path: text) -> {text: TestCacheEntry}:
     """Load entries from a cache file. Returns empty dict on any error."""

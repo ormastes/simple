@@ -1,11 +1,16 @@
 #!/bin/sh
 # Focused fixture only: no compiler/build/qualification execution.
-set -eu
+# Verdict convention (guard-soundness wave 4): em-dash PASS —/FAIL —/ERROR —
+# verdicts, verdict is the last stdout line, exit 0/1/2.
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/committed-controls-test.XXXXXX")
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/committed-controls-test.XXXXXX") || {
+    echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+[ -f "$root/scripts/bootstrap/lib/materialize-committed-controls.shs" ] || {
+    echo "ERROR — nothing was checked (materialize-committed-controls.shs missing)"; exit 2; }
 repository=$temporary/source
-git -c init.defaultBranch=fixture init --quiet --template= "$repository"
+git -c init.defaultBranch=fixture init --quiet --template= "$repository" || {
+    echo "ERROR — nothing was checked (fixture git init failed)"; exit 2; }
 mkdir -p "$repository/scripts/build/deep" "$repository/nested" "$repository/.git/info"
 printf '%s\n' 'scripts/build export-ignore' '*.txt export-subst' >"$repository/.gitattributes"
 printf '%s\n' '* export-ignore export-subst' >"$repository/scripts/build/.gitattributes"
@@ -15,18 +20,21 @@ chmod 755 "$repository/scripts/build/deep/control.shs"
 printf '%s\n' '$Format:%H$' >"$repository/nested/version.txt"
 printf 'literal\r\nbytes\000end\n' >"$repository/binary.dat"
 ln -s ../nested/version.txt "$repository/scripts/version-link"
-git -C "$repository" add .
-git -C "$repository" -c user.name=Fixture -c user.email=fixture@example.invalid commit --quiet -m fixture
-commit=$(git -C "$repository" rev-parse HEAD)
+git -C "$repository" add . || { echo "ERROR — nothing was checked (fixture git add failed)"; exit 2; }
+git -C "$repository" -c user.name=Fixture -c user.email=fixture@example.invalid commit --quiet -m fixture \
+    || { echo "ERROR — nothing was checked (fixture git commit failed)"; exit 2; }
+commit=$(git -C "$repository" rev-parse HEAD) || {
+    echo "ERROR — nothing was checked (fixture rev-parse failed)"; exit 2; }
 # Source-local overrides and dirty contents must neither leak nor be edited.
 printf '%s\n' '* export-ignore export-subst' >"$repository/.git/info/attributes"
 cp "$repository/.git/info/attributes" "$temporary/original-attributes"
 printf 'dirty working bytes\n' >"$repository/nested/version.txt"
 printf 'untracked\n' >"$repository/untracked.txt"
 sh "$root/scripts/bootstrap/lib/materialize-committed-controls.shs" \
-    "$repository" "$commit" "$temporary/result"
+    "$repository" "$commit" "$temporary/result" || {
+    echo "FAIL — materialize-committed-controls.shs refused a valid fixture (rc=$?)"; exit 1; }
 checks=0
-check() { "$@" || { echo "FAIL: $*" >&2; exit 1; }; checks=$((checks + 1)); }
+check() { "$@" || { echo "FAIL — $*"; exit 1; }; checks=$((checks + 1)); }
 check test -f "$temporary/result/scripts/build/deep/control.shs"
 check test -f "$temporary/result/scripts/build/.gitattributes"
 check test -x "$temporary/result/scripts/build/deep/control.shs"
@@ -35,15 +43,18 @@ check test "$(readlink "$temporary/result/scripts/version-link")" = ../nested/ve
 check test ! -e "$temporary/result/untracked.txt"
 check cmp "$repository/.git/info/attributes" "$temporary/original-attributes"
 for path in .gitattributes scripts/build/.gitattributes scripts/build/deep/control.shs nested/.gitattributes nested/version.txt binary.dat; do
-    git -C "$repository" show "$commit:$path" >"$temporary/blob"
+    git -C "$repository" show "$commit:$path" >"$temporary/blob" \
+        || { echo "ERROR — nothing was checked (git show $path failed)"; exit 2; }
     check cmp "$temporary/blob" "$temporary/result/$path"
 done
 # Output reuse refuses without modifying the existing materialized file.
 if sh "$root/scripts/bootstrap/lib/materialize-committed-controls.shs" \
     "$repository" "$commit" "$temporary/result"; then
-    echo 'FAIL: reused output accepted' >&2; exit 1
+    echo "FAIL — reused output accepted"; exit 1
 fi
 checks=$((checks + 1))
-git -C "$repository" show "$commit:nested/version.txt" >"$temporary/blob"
+git -C "$repository" show "$commit:nested/version.txt" >"$temporary/blob" \
+    || { echo "ERROR — nothing was checked (git show nested/version.txt failed)"; exit 2; }
 check cmp "$temporary/blob" "$temporary/result/nested/version.txt"
-echo "PASS: $checks committed materialization assertions; no compiler executed"
+[ "$checks" -gt 0 ] || { echo "ERROR — nothing was checked (0 assertions ran)"; exit 2; }
+echo "PASS — $checks committed materialization assertions checked; no compiler executed"

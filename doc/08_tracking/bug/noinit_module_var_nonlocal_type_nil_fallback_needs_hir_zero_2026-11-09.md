@@ -46,6 +46,11 @@ zero-filled (0 / false / 0.0 / "" / [] / nested enum first variant / nested clas
   `test/01_unit/compiler/parser/module_noinit_enum_class_zero_spec.spl` 1/4 -> 4/4.
 - Kernel/noalloc gate (`set_noinit_kernel_module_v1`) unchanged.
 
+## 2026-11-09 fix (later-declared types) — superseded
+An earlier fix deferred no-init named variables until the end of the module,
+zero-initializing later-declared structs and defaulting classes and enums. The
+owner decision below supersedes that behavior and removes the deferred pass.
+
 ## Fix 2026-11-09 (owner decision item 14) — fix-implemented-verification-pending
 No HIR zero pass: the compiler (flat parser) now reports `explicit initializer required for module-level
 var '<name>'` for a no-init module var of class or enum type (all modes), and for any named type it

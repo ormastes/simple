@@ -824,6 +824,41 @@ pub(super) fn eval_call_expr(
                         ctx = ctx.with_note(format!("available fields: {}", fields_list));
                     }
 
+                    // Discriminate stale-construction vs bare-name class collision: compare the
+                    // instance against the registry's CURRENT definition. Gated by the same
+                    // field-access debug switch as the value_impl.rs conversion hook
+                    // (SIMPLE_DEBUG_FIELD_ACCESS / SIMPLE_BOOTSTRAP_DIAG), so default E1012
+                    // output is unchanged.
+                    // bug: native_build_class_surface_misses_newly_added_field_2026-08-17
+                    if crate::interpreter::field_access_debug_enabled() {
+                        let registry_verdict = match classes.get(class.as_str()) {
+                            None => "registry has no class of this name".to_string(),
+                            Some(def) => {
+                                let def_has_field = def.fields.iter().any(|f| f.name == *field);
+                                let shared = def
+                                    .fields
+                                    .iter()
+                                    .filter(|f| fields.contains_key(f.name.as_str()))
+                                    .count();
+                                let kind = if def_has_field && shared + 1 >= def.fields.len() {
+                                    "stale-construction (registry def has the field; instance built from an older def)"
+                                } else if def_has_field {
+                                    "collision (registry def has the field but a different field set)"
+                                } else {
+                                    "registry def also lacks the field"
+                                };
+                                format!(
+                                    "{}: instance_fields={} registry_fields={} shared={}",
+                                    kind,
+                                    fields.len(),
+                                    def.fields.len(),
+                                    shared
+                                )
+                            }
+                        };
+                        ctx = ctx.with_note(format!("class registry: {}", registry_verdict));
+                    }
+
                     if std::env::var("SIMPLE_DBG_COLLISION").is_ok() {
                         let recv_desc = match receiver.as_ref() {
                             Expr::Identifier(n) => format!("Ident({})", n),

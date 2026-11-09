@@ -29,6 +29,73 @@ impl Lowerer {
         )
     }
 
+    /// Lower `subject.? == literal` / `!=` (literal a bool) as
+    /// `rt_is_present(s) and rt_unwrap_or_self(s) == literal` on tagged words,
+    /// negated for `!=`. Absent (nil / None / empty) never equals either
+    /// literal, which is the pure-Simple result.
+    fn lower_exists_check_bool_compare(
+        &mut self,
+        op: &ast::BinOp,
+        subject: &Expr,
+        literal: bool,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let subject_hir = self.lower_expr(subject, ctx)?;
+        let subject_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, subject_hir);
+        let subject_idx = ctx.locals.len();
+        ctx.add_local("$exists_bool_cmp_subject".to_string(), TypeId::ANY, ast::Mutability::Immutable);
+        let local = || HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: TypeId::ANY,
+        };
+        let literal_tagged = self.box_scalar_into_tagged_result(
+            TypeId::ANY,
+            HirExpr {
+                kind: HirExprKind::Bool(literal),
+                ty: TypeId::BOOL,
+            },
+        );
+        let is_present = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_is_present".to_string(),
+                args: vec![local()],
+            },
+            ty: TypeId::BOOL,
+        };
+        let compare = HirExpr {
+            kind: HirExprKind::Binary {
+                op: (*op).into(),
+                left: Box::new(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_unwrap_or_self".to_string(),
+                        args: vec![local()],
+                    },
+                    ty: TypeId::ANY,
+                }),
+                right: Box::new(literal_tagged),
+            },
+            ty: TypeId::BOOL,
+        };
+        Ok(HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: subject_idx,
+                value: Box::new(subject_tagged),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(is_present),
+                        then_branch: Box::new(compare),
+                        else_branch: Some(Box::new(HirExpr {
+                            kind: HirExprKind::Bool(matches!(op, ast::BinOp::NotEq)),
+                            ty: TypeId::BOOL,
+                        })),
+                    },
+                    ty: TypeId::BOOL,
+                }),
+            },
+            ty: TypeId::BOOL,
+        })
+    }
+
     fn is_int_scalar(ty: TypeId) -> bool {
         matches!(
             ty,
@@ -43,6 +110,26 @@ impl Lowerer {
         right: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        // `x.? == true` / `x.? == false` (and `!=`): owner decision
+        // 2026-11-09 — the seed evaluates these absence-safely, exactly like pure
+        // Simple. `.?` yields the payload or None, so the comparison is
+        // "present AND payload == literal". The generic lowering below boxed
+        // `.?`'s BOOL-typed merge and compared it with the raw literal, so a
+        // `bool?` receiver answered false for both literals under the JIT
+        // (interpreter: correct). Bug:
+        // doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md
+        if matches!(op, ast::BinOp::Eq | ast::BinOp::NotEq) {
+            let exists_vs_bool = match (left, right) {
+                (Expr::ExistsCheck(inner), Expr::Bool(b)) | (Expr::Bool(b), Expr::ExistsCheck(inner)) => {
+                    Some((inner.as_ref(), *b))
+                }
+                _ => None,
+            };
+            if let Some((inner, literal)) = exists_vs_bool {
+                return self.lower_exists_check_bool_compare(op, inner, literal, ctx);
+            }
+        }
+
         let left_hir = Box::new(self.lower_expr(left, ctx)?);
         let right_hir = Box::new(self.lower_expr(right, ctx)?);
 
@@ -168,6 +255,47 @@ impl Lowerer {
                 },
                 ty: TypeId::BOOL,
             });
+        }
+
+        // `opt == scalar` / `opt != scalar` where one side is an optional
+        // scalar (`bool?`/`i64?`, a tagged `Pointer<T>` slot, also what `.?`
+        // yields in value position) and the other a RAW scalar of the same
+        // width class. Comparing the tagged word against the raw one made
+        // `bool_false().? == false` and `ki() == 5` answer false under the JIT
+        // while the interpreter answers true (it bridges `Some(x)` vs `x`).
+        // Box the raw side into the tagged form and compare both as ANY via the
+        // runtime's tagged equality: absent (None) never equals a boxed
+        // scalar, so `None == false` stays false and `None != true` stays true.
+        // Bug: doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md
+        if matches!(op, ast::BinOp::Eq | ast::BinOp::NotEq) {
+            let left_opt = self.optional_tagged_scalar_inner(left_hir.ty).is_some();
+            let right_opt = self.optional_tagged_scalar_inner(right_hir.ty).is_some();
+            if left_opt != right_opt {
+                let raw_ty = if left_opt {
+                    right_hir.ty
+                } else {
+                    left_hir.ty
+                };
+                if raw_ty == TypeId::BOOL || Self::is_int_scalar(raw_ty) {
+                    let normalize = |e: HirExpr| HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![e],
+                        },
+                        ty: TypeId::ANY,
+                    };
+                    let left_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, *left_hir);
+                    let right_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, *right_hir);
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: (*op).into(),
+                            left: Box::new(normalize(left_tagged)),
+                            right: Box::new(normalize(right_tagged)),
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
+            }
         }
 
         // Type is determined by operands

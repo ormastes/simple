@@ -1,6 +1,40 @@
 # Array get contract drift exposed by crypto nested access
 
-Status: OPEN. Native evidence reproduced; proposed source repair UNRUN.
+Status: fix-implemented-verification-pending (2026-11-09).
+
+## Resolution (2026-11-09)
+
+Owner decision (settled): `a.get(i)` returns `T?` on EVERY lane -- Rust seed
+interpreter, JIT, self-hosted compiler and native -- `Some(elem)` in range and
+`None` otherwise (including negative indices). `a[i]` stays the direct-element
+form. `.get(i)` and `.at(i)` are now the same operation.
+
+Root cause in the seed: `interpreter_method/collections.rs` returned the bare
+element (and `nil` out of range) from array `get`, reading the index through
+`eval_arg_usize`, which SATURATES negatives to 0 -- so `get(-1)` answered the
+first element. The JIT/LLVM codegens routed `get` to `rt_index_get`, the raw
+`[i]` helper. The native lane already typed `get` as `Optional(elem)`, which is
+the drift the crypto helpers tripped over.
+
+Fix:
+- seed interpreter: array `"get" | "at"` share the signed, Option-returning arm;
+- new receiver-dispatched runtime entry `rt_get` (Rust `runtime/src/value/collections.rs`
+  and C `src/runtime/runtime_native.c` twin): array -> `rt_array_at` (Option),
+  every other receiver -> `rt_index_get` unchanged (dict/tuple/text `get` intact);
+  `"get"` now maps to `rt_get` in the Cranelift and LLVM method tables and
+  `rt_get` is added to their tagged-key boxing lists and `runtime_sffi.rs`;
+- obsoleted direct-get specs explicitly: `module_var_array_get_method_spec.spl`
+  (now Some/None), `test/fixtures/compiler/nested_array_get_contract_probe.spl`
+  and `crypto_nested_get_contract_spec.spl` (unwrap or index);
+- new contract spec `test/01_unit/lib/common/array_get_option_spec.spl`
+  (Some/None, negative, empty, nested row, `[i]`/`.at` agreement);
+- crypto indexing is now the canonical form, so the six `@workaround` tags in
+  `src/os/crypto/curve25519_bigint.spl` and two in its unit spec are retired;
+  `src/app/cli/debug_ui.spl` loop-bounded reads moved to `[i]`.
+
+The original analysis is kept below for history.
+
+Status (historical): OPEN. Native evidence reproduced; proposed source repair UNRUN.
 
 Campaign retry3, target 4bbc6fe91ae, admitted compiler SHA prefix 70194:
 `module_compile_object.log` in
