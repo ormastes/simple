@@ -1,37 +1,50 @@
 #!/bin/sh
 # Exercise the production filesystem resolver without invoking rustup/Cargo.
-set -eu
+# Verdict convention (guard-soundness wave 4): em-dash PASS —/FAIL —/ERROR —
+# verdicts, verdict is the last stdout line, exit 0/1/2.
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
-work=$(mktemp -d "${TMPDIR:-/tmp}/channel-host-check.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/channel-host-check.XXXXXX") || {
+    echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 awk '/^bootstrap_stage3_channel_toolchain_host\(\)/{copy=1} copy{print} copy && /^\)/{exit}' \
-    "$root/scripts/check/lib/bootstrap-stage3/authority.shs" >"$work/owner.sh"
+    "$root/scripts/check/lib/bootstrap-stage3/authority.shs" >"$work/owner.sh" || {
+    echo "ERROR — nothing was checked (owner extraction awk failed)"; exit 2; }
+[ -s "$work/owner.sh" ] || {
+    echo "ERROR — nothing was checked (bootstrap_stage3_channel_toolchain_host not found in authority.shs)"; exit 2; }
 . "$work/owner.sh"
+
+expect_eq() { # expect_eq <actual> <want> <case name>
+    [ "$1" = "$2" ] || { echo "FAIL — $3: got '$1', want '$2'"; exit 1; }
+}
+expect_reject() { # expect_reject <case name> <command...>
+    name=$1; shift
+    if "$@"; then
+        echo "FAIL — $name: rejection case was accepted"; exit 1
+    fi
+}
+
 channel=nightly-2026-09-15
 mkdir -p "$work/home/toolchains/$channel-x86_64-pc-windows-msvc"
 actual=$(bootstrap_stage3_channel_toolchain_host "$work/home" "$channel")
-[ "$actual" = x86_64-pc-windows-msvc ]
+expect_eq "$actual" x86_64-pc-windows-msvc "unique host selection"
 mkdir -p "$work/home/toolchains/$channel-x86_64-pc-windows-gnullvm"
-if bootstrap_stage3_channel_toolchain_host "$work/home" "$channel"; then
-    echo 'FAIL: ambiguous unselected host accepted' >&2; exit 1
-fi
+expect_reject "ambiguous unselected host accepted" \
+    bootstrap_stage3_channel_toolchain_host "$work/home" "$channel"
 for default in stable-x86_64-pc-windows-msvc nightly-2026-08-01-x86_64-pc-windows-msvc; do
     actual=$(bootstrap_stage3_channel_toolchain_host "$work/home" "$channel" "$default")
-    [ "$actual" = x86_64-pc-windows-msvc ]
+    expect_eq "$actual" x86_64-pc-windows-msvc "disambiguated host via default $default"
 done
 actual=$(bootstrap_stage3_channel_toolchain_host "$work/home" "$channel" stable-x86_64-pc-windows-gnullvm)
-[ "$actual" = x86_64-pc-windows-gnullvm ]
+expect_eq "$actual" x86_64-pc-windows-gnullvm "explicit GNU host selection"
 for default in stable stable-aarch64-pc-windows-msvc stable-x86_64-pc-windows-msvc-extra; do
-    if bootstrap_stage3_channel_toolchain_host "$work/home" "$channel" "$default"; then
-        echo 'FAIL: missing or malformed selected host accepted' >&2; exit 1
-    fi
+    expect_reject "missing or malformed selected host accepted ($default)" \
+        bootstrap_stage3_channel_toolchain_host "$work/home" "$channel" "$default"
 done
 mkdir -p "$work/real-host"
 ln -s "$work/real-host" "$work/home/toolchains/$channel-aarch64-pc-windows-msvc"
-if bootstrap_stage3_channel_toolchain_host "$work/home" "$channel" stable-aarch64-pc-windows-msvc; then
-    echo 'FAIL: symlink host accepted' >&2; exit 1
-fi
-echo 'PASS: unique, ambiguous, selected MSVC/GNU, dated, missing and symlink host cases'
+expect_reject "symlink host accepted" \
+    bootstrap_stage3_channel_toolchain_host "$work/home" "$channel" stable-aarch64-pc-windows-msvc
+echo 'PASS — 8 filesystem host-selection cases checked'
 
 # Integrate the real settings parser, installed-directory validation and result
 # rendering. Only compiler metadata execution is replaced with fixture output.
@@ -55,16 +68,16 @@ settings="$fixture/.rustup/settings.toml"
 printf 'default_toolchain = "stable-%s"\n' "$host" >"$settings"
 actual=$(bootstrap_stage3_installed_rust_toolchain \
     "$fixture/.cargo/bin/rustc.exe" "$channel" "$PATH" "$root")
-printf '%s\n' "$actual" | grep -Fx "rust-host=$host" >/dev/null
-printf '%s\n' "$actual" | grep -Fx "rust-toolchain-name=$channel-$host" >/dev/null
+printf '%s\n' "$actual" | grep -Fx "rust-host=$host" >/dev/null || {
+    echo "FAIL — integrated settings selection: rust-host line missing (got: $actual)"; exit 1; }
+printf '%s\n' "$actual" | grep -Fx "rust-toolchain-name=$channel-$host" >/dev/null || {
+    echo "FAIL — integrated settings selection: rust-toolchain-name line missing (got: $actual)"; exit 1; }
 printf 'default_toolchain = "stable-%s"\n' "$host" >>"$settings"
-if bootstrap_stage3_installed_rust_toolchain \
-    "$fixture/.cargo/bin/rustc.exe" "$channel" "$PATH" "$root"; then
-    echo 'FAIL: duplicate settings accepted' >&2; exit 1
-fi
+expect_reject "duplicate settings accepted" \
+    bootstrap_stage3_installed_rust_toolchain \
+    "$fixture/.cargo/bin/rustc.exe" "$channel" "$PATH" "$root"
 printf 'default_toolchain = "stable"\n' >"$settings"
-if bootstrap_stage3_installed_rust_toolchain \
-    "$fixture/.cargo/bin/rustc.exe" "$channel" "$PATH" "$root"; then
-    echo 'FAIL: malformed settings accepted' >&2; exit 1
-fi
-echo 'PASS: integrated settings selection and duplicate/malformed rejection (metadata fixture)'
+expect_reject "malformed settings accepted" \
+    bootstrap_stage3_installed_rust_toolchain \
+    "$fixture/.cargo/bin/rustc.exe" "$channel" "$PATH" "$root"
+echo 'PASS — 4 integrated settings-selection cases checked'
