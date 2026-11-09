@@ -1,3 +1,19 @@
+## 2026-11-09 enforced comparison failure handling
+
+The benchmark harness previously returned success after failed native
+compilation even with `SIMPLE_CTYPE_BENCH_ENFORCE=1`: the interpreter-only branch
+skipped all native/C floor checks. Both canonical and legacy entrypoints now
+reject native compilation failure in enforcing mode and retain the original
+warn-only behavior in non-enforcing mode.
+
+The regression executes the actual harness with controlled fixture commands:
+enforced native-build failure, optional native-build failure, successful native
+comparison, enforced low-ratio rejection, and optional low-ratio warning. The
+unmodified owner returned exit 0 for the first case, so the regression rejected
+it. Fixture command output is orchestration evidence only; no native compiler
+or throughput qualification is claimed. The broader performance and static-data
+correctness bug remains open.
+
 ## Triaged 2026-09-13 — LEFT OPEN, not measurable on this host
 
 Reviewed in the 2026-05-and-earlier tracking sweep. Kept open deliberately: the

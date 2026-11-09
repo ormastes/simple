@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Orchestration controls only: fixture output is not compiler/performance evidence.
+set -euo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/ctype-enforcement.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+owner=test/05_perf/ctype/run_ctype_benchmarks.shs
+cmp "$root/$owner" "$root/test/perf/ctype/run_ctype_benchmarks.shs" || {
+    echo 'FAIL: canonical and legacy ctype harnesses disagree' >&2; exit 1;
+}
+mkdir -p "$work/test/05_perf/ctype" "$work/bin"
+cp "$root/$owner" "$work/$owner"
+cat > "$work/bin/result" <<'SH'
+#!/bin/sh
+for name in is_digit is_upper is_lower is_alpha is_alnum is_xdigit is_space to_lower to_upper; do
+    printf '[ctypebench] bench=%s ops_per_ms=%s checksum=%s\n' "$name" "${FIXTURE_OPS:-100}" "${FIXTURE_SUM:-10}"
+done
+SH
+cat > "$work/bin/gcc" <<'SH'
+#!/bin/sh
+[ "$1" = -O2 ] && [ "$2" = -o ] || exit 94
+cp "$FIXTURE_ROOT/bin/result" "$3"
+chmod +x "$3"
+SH
+cat > "$work/bin/simple" <<'SH'
+#!/bin/sh
+case "$1" in
+    run) exec "$FIXTURE_ROOT/bin/result" ;;
+    native-build)
+        [ "$FIXTURE_BUILD" = pass ] || { echo 'fixture compile rejection' >&2; exit 23; }
+        shift
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = -o ]; then
+                cp "$FIXTURE_ROOT/bin/result" "$2"
+                chmod +x "$2"
+                exit 0
+            fi
+            shift
+        done
+        exit 95 ;;
+    *) exit 96 ;;
+esac
+SH
+chmod +x "$work/bin/result" "$work/bin/gcc" "$work/bin/simple"
+passed=0
+run_case() {
+    local label=$1 enforce=$2 build=$3 ops=$4 expected=$5 marker=$6
+    local result=0
+    PATH="$work/bin:$PATH" FIXTURE_ROOT="$work" FIXTURE_BUILD="$build" \
+        FIXTURE_OPS="$ops" SIMPLE_BIN="$work/bin/simple" \
+        SIMPLE_CTYPE_BENCH_ENFORCE="$enforce" SIMPLE_CTYPE_BENCH_SAMPLES=1 \
+        SIMPLE_CTYPE_BENCH_MIN_RATIO=0.50 SIMPLE_CTYPE_BENCH_CLEAN=0 \
+        bash "$work/$owner" >"$work/output" 2>&1 || result=$?
+    [ "$result" -eq "$expected" ] || {
+        cat "$work/output" >&2; echo "FAIL: $label exit=$result expected=$expected" >&2; exit 1;
+    }
+    grep -Fq "$marker" "$work/output" || {
+        cat "$work/output" >&2; echo "FAIL: $label missing diagnostic" >&2; exit 1;
+    }
+    passed=$((passed + 1))
+}
+run_case enforced-build-failure 1 fail 100 1 '[ctypebench-error] native compilation required for enforced comparison'
+run_case optional-build-failure 0 fail 100 0 '[ctypebench-note] simple_native_compile=failed (interpreter-only comparison)'
+run_case enforced-native-success 1 pass 100 0 '[ctypebench] Simple native done.'
+# The C fixture stays at 100 while only the native executable reports 25.
+cat > "$work/bin/native-result" <<'SH'
+#!/bin/sh
+FIXTURE_OPS=25 exec "$FIXTURE_ROOT/bin/result"
+SH
+chmod +x "$work/bin/native-result"
+sed 's@cp "$FIXTURE_ROOT/bin/result" "$2"@cp "$FIXTURE_ROOT/bin/native-result" "$2"@' \
+    "$work/bin/simple" > "$work/bin/simple.tmp"
+mv "$work/bin/simple.tmp" "$work/bin/simple"
+chmod +x "$work/bin/simple"
+run_case enforced-low-ratio 1 pass 100 1 '[ctypebench-error] ratio floor failed'
+run_case optional-low-ratio 0 pass 100 0 'below=0.50x'
+echo "PASS: ctype benchmark enforcement ($passed orchestration controls); native performance NOT_RUN"
