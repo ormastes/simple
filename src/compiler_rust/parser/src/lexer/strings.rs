@@ -1,7 +1,21 @@
 use super::escapes::EscapeResult;
 use crate::token::TokenKind;
 
+/// Diagnostic code for a `{...}` in a string literal that is not a valid
+/// interpolation and fell back to literal text. Staged as a warning; ratchet to
+/// an error by changing `warn_brace` (follow-up bug
+/// `string_interp_malformed_brace_warning_to_error_2026-11-09`).
+pub(crate) const BRACE_WARNING_CODE: &str = "W-STR-BRACE-001";
+pub(crate) const BRACE_ESCAPE_HINT: &str = "use `{{` for a literal `{` and `}}` for a literal `}` inside a string";
+
 impl<'a> super::Lexer<'a> {
+    fn warn_brace(&mut self, what: &str) {
+        self.brace_warnings.push(format!(
+            "{BRACE_WARNING_CODE}: {what} in string literal at line {} column {} is kept as literal text; {BRACE_ESCAPE_HINT}",
+            self.line, self.column
+        ));
+    }
+
     /// Dispatch for a single-quoted literal after the opening quote has been
     /// consumed: legacy raw string (gate OFF) or ADR-005 char literal (gate ON).
     pub(super) fn scan_single_quoted(&mut self) -> TokenKind {
@@ -308,6 +322,7 @@ impl<'a> super::Lexer<'a> {
                 // This handles JSON patterns like {\"key\": \"value\"}
                 // where { is followed by an escape sequence
                 if self.check('\\') {
+                    self.warn_brace("`{` followed by an escape");
                     current_literal.push('{');
                     current_literal_raw.push('{');
                     continue;
@@ -316,6 +331,7 @@ impl<'a> super::Lexer<'a> {
                 // This handles patterns like '{' in "expected '{' after 'loss'"
                 // where the user wants literal braces in the string
                 if self.check('\'') || self.check('"') {
+                    self.warn_brace("`{` followed by a quote");
                     current_literal.push('{');
                     current_literal_raw.push('{');
                     continue;
@@ -508,6 +524,7 @@ impl<'a> super::Lexer<'a> {
                 // and treat the { as a literal character
                 if expr_failed || brace_depth != 0 {
                     *self = saved_state;
+                    self.warn_brace("unmatched or malformed `{`");
                     parts.truncate(saved_parts_len);
                     current_literal = saved_literal;
                     current_literal_raw = saved_literal_raw;
@@ -518,6 +535,7 @@ impl<'a> super::Lexer<'a> {
                 // If expression is empty (just "{}"), treat as literal "{}"
                 // This allows strings like "m{} block" without escaping
                 if expr.trim().is_empty() {
+                    self.warn_brace("empty `{}`");
                     current_literal.push_str("{}");
                     current_literal_raw.push_str("{}");
                 } else {

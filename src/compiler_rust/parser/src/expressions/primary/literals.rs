@@ -17,6 +17,16 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn push_brace_warning(&mut self, message: String) {
+        self.error_hints.push(crate::error_recovery::ErrorHint {
+            level: crate::error_recovery::ErrorHintLevel::Warning,
+            message,
+            span: self.previous.span,
+            suggestion: Some("{{ and }}".to_string()),
+            help: None,
+        });
+    }
+
     pub(super) fn parse_primary_literal(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind.clone() {
             TokenKind::Integer(n) => {
@@ -93,6 +103,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.reject_detached_path_suffix()?;
                 let mut result_parts = Vec::new();
+                let mut bad_holes: Vec<String> = Vec::new();
                 let parse_complete_expr = |source: &str| {
                     let mut parser = Parser::new_expression(source);
                     match parser.parse_expression() {
@@ -110,6 +121,7 @@ impl<'a> Parser<'a> {
                                 result_parts.push(FStringPart::Expr(expr));
                             } else {
                                 // Keep brace-bearing regex/CSS text compatible.
+                                bad_holes.push(expr_str.clone());
                                 literalize_braced(&expr_str, &mut result_parts, &parse_complete_expr);
                             }
                         }
@@ -124,11 +136,24 @@ impl<'a> Parser<'a> {
                                 if let Some(expr) = parse_complete_expr(&complete) {
                                     result_parts.push(FStringPart::Expr(expr));
                                 } else {
+                                    bad_holes.push(complete.clone());
                                     literalize_braced(&complete, &mut result_parts, &parse_complete_expr);
                                 }
                             }
                         }
                     }
+                }
+                for hole in bad_holes {
+                    self.push_brace_warning(format!(
+                        "{}: `{{{}}}` in string literal is not a valid interpolation expression and is kept as literal text; {}",
+                        crate::lexer::strings::BRACE_WARNING_CODE,
+                        hole,
+                        crate::lexer::strings::BRACE_ESCAPE_HINT
+                    ));
+                }
+                let lexed: Vec<String> = std::mem::take(&mut self.lexer.brace_warnings);
+                for msg in lexed {
+                    self.push_brace_warning(msg);
                 }
                 // Extract const_keys from placeholders and create TypeMeta
                 let const_keys = extract_fstring_keys(&result_parts);
