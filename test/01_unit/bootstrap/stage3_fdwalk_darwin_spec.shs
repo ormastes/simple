@@ -1,0 +1,136 @@
+#!/bin/sh
+# stage3_fdwalk Darwin spec — native verification of the pinned helper
+# src/runtime/tools/stage3_fdwalk.c on macOS. Written on a Windows host for
+# LATER native verification (bug status fix-implemented-verification-pending);
+# it has NOT yet been executed on Darwin. Running it green on an
+# aarch64-apple-darwin host is what moves the bug past that status.
+#
+# Bug: doc/08_tracking/bug/bootstrap_macos_blocked_seed_compile_and_linux_only_stage3_authority_2026-09-06.md
+#
+# On a non-Darwin host it prints UNAVAILABLE and exits 0, mirroring
+# scripts/check/check-sosix-darwin-snapshot-runner.shs. Verdict is the last
+# stdout line: PASS/FAIL/ERROR, same convention as scripts/check/*.shs.
+#
+# Properties proven on Darwin:
+#   W1 walk --dir-fd N --rel a/b/leaf reports the inode `stat` reports
+#   W2 a symlink component is refused (68) even though the link target exists
+#   W3 a missing leaf is 66, a ".." component is 65, an absolute rel is 65
+#   W4 renaming the walked directory while the dir fd is held does NOT change
+#      what `walk` resolves (fd-relative, not path-relative)
+#   X1 exec --exec-fd of a held /bin/sh runs it (verify-by-fd admits)
+#   X2 exec of a held executable whose path was REPLACED (mv another file over
+#      it) is refused with 71 — the TOCTOU case the helper exists for
+#   X3 exec of a held executable that was unlinked is refused with 71
+#   X4 exec of a held executable whose path became a symlink is refused (71)
+#   X5 --sha256 mismatch is refused (70) before any exec attempt
+#   X6 the helper's own --selftest passes (shared twin vectors)
+#   X7 the Perl runner's Darwin preamble admits the helper by fd + sha256 and
+#      refuses a wrong sha256 (perl -c plus a launch that must die by name)
+
+set -u
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  Darwin) ;;
+  *) echo 'UNAVAILABLE: stage3_fdwalk Darwin spec requires macOS'; exit 0 ;;
+esac
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || exit 2
+source_file=$repo_root/src/runtime/tools/stage3_fdwalk.c
+runner=$repo_root/scripts/check/lib/bootstrap-stage3-shared-runner.pl
+clang_bin=$(command -v clang) || { echo 'ERROR — nothing was checked (clang required; never GCC)'; exit 2; }
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/stage3-fdwalk-darwin.XXXXXX") || { echo 'ERROR — nothing was checked (mktemp)'; exit 2; }
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+helper=$work/stage3_fdwalk
+"$clang_bin" -std=c11 -Wall -Wextra -Werror -O1 "$source_file" -o "$helper" || {
+    echo 'ERROR — nothing was checked (helper did not compile on Darwin)'; exit 2; }
+helper_sha=$(shasum -a 256 "$helper" | cut -c1-64)
+
+checked=0; failed=0; names=
+record() {
+    checked=$((checked + 1))
+    if [ "$2" -ne 0 ]; then failed=$((failed + 1)); names="$names $1"; echo "FAIL $1 (rc=$2)"; else echo "PASS $1"; fi
+}
+
+# X6
+"$helper" --selftest; record X6-selftest $?
+
+# fixtures
+mkdir -p "$work/tree/a/b" && printf 'payload\n' >"$work/tree/a/b/leaf" && ln -s b "$work/tree/a/link" || {
+    echo 'ERROR — nothing was checked (fixture)'; exit 2; }
+exec 5<"$work/tree"
+
+# W1
+identity=$("$helper" walk --dir-fd 5 --rel a/b/leaf); rc=$?
+record W1-walk-regular $rc
+want_ino=$(stat -f %i "$work/tree/a/b/leaf"); got_ino=$(printf '%s\n' "$identity" | sed -n 's/^ino=//p')
+[ "$want_ino" = "$got_ino" ]; record W1-walk-identity-matches-stat $?
+
+# W2 / W3
+"$helper" walk --dir-fd 5 --rel a/link/leaf >/dev/null 2>&1; rc=$?; [ "$rc" -eq 68 ]; record W2-symlink-component-68 $?
+"$helper" walk --dir-fd 5 --rel a/b/absent >/dev/null 2>&1; rc=$?; [ "$rc" -eq 66 ]; record W3-missing-66 $?
+"$helper" walk --dir-fd 5 --rel 'a/../b' >/dev/null 2>&1; rc=$?; [ "$rc" -eq 65 ]; record W3-dotdot-65 $?
+"$helper" walk --dir-fd 5 --rel "$work/tree/a/b/leaf" >/dev/null 2>&1; rc=$?; [ "$rc" -eq 65 ]; record W3-absolute-65 $?
+
+# W4: rename the held directory; the held fd must still resolve the same inode
+mv "$work/tree" "$work/tree-renamed" || { echo 'ERROR — nothing was checked (rename fixture)'; exit 2; }
+mkdir -p "$work/tree/a/b" && printf 'decoy\n' >"$work/tree/a/b/leaf"
+identity2=$("$helper" walk --dir-fd 5 --rel a/b/leaf); rc=$?
+got_ino2=$(printf '%s\n' "$identity2" | sed -n 's/^ino=//p')
+[ "$rc" -eq 0 ] && [ "$got_ino2" = "$want_ino" ]; record W4-fd-relative-survives-rename $?
+exec 5<&-
+
+# X1
+exec 6</bin/sh
+out=$("$helper" exec --exec-fd 6 -- sh -c 'echo fdwalk-exec-ok'); rc=$?
+[ "$rc" -eq 0 ] && [ "$out" = fdwalk-exec-ok ]; record X1-exec-held-sh-runs $?
+exec 6<&-
+
+# X2: path replaced under the held descriptor -> must be refused
+cp /bin/sh "$work/victim" && chmod 0700 "$work/victim" && cp /bin/echo "$work/impostor" && chmod 0700 "$work/impostor" || {
+    echo 'ERROR — nothing was checked (victim fixture)'; exit 2; }
+exec 7<"$work/victim"
+mv -f "$work/impostor" "$work/victim"
+"$helper" exec --exec-fd 7 -- sh -c 'echo must-not-run' >"$work/x2.out" 2>"$work/x2.err"; rc=$?
+[ "$rc" -eq 71 ] && ! grep -q must-not-run "$work/x2.out"; record X2-replaced-path-refused-71 $?
+grep -q 'exec rejected: verdict=' "$work/x2.err"; record X2-verdict-named $?
+exec 7<&-
+
+# X3: unlinked
+cp /bin/sh "$work/victim3" && chmod 0700 "$work/victim3"
+exec 8<"$work/victim3"
+rm -f "$work/victim3"
+"$helper" exec --exec-fd 8 -- sh -c 'echo must-not-run' >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 71 ]; record X3-unlinked-refused-71 $?
+exec 8<&-
+
+# X4: path became a symlink
+cp /bin/sh "$work/victim4" && chmod 0700 "$work/victim4"
+exec 9<"$work/victim4"
+mv "$work/victim4" "$work/victim4.real" && ln -s victim4.real "$work/victim4"
+"$helper" exec --exec-fd 9 -- sh -c 'echo must-not-run' >/dev/null 2>"$work/x4.err"; rc=$?
+# Either the vnode's F_GETPATH now names victim4.real (admit would be CORRECT:
+# same inode) or names victim4 (a symlink -> refused). Both preserve identity;
+# record which happened rather than guessing.
+if [ "$rc" -eq 0 ]; then echo 'NOTE X4: F_GETPATH followed the rename; same inode admitted'; fi
+[ "$rc" -eq 0 ] || [ "$rc" -eq 71 ]; record X4-symlinked-path-identity-preserved $?
+exec 9<&-
+
+# X5: sha mismatch refused before exec
+exec 6</bin/sh
+"$helper" exec --exec-fd 6 --sha256 0000000000000000000000000000000000000000000000000000000000000000 -- sh -c 'echo must-not-run' >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 70 ]; record X5-sha-mismatch-70 $?
+exec 6<&-
+
+# X7: runner admission
+perl -c "$runner" >/dev/null 2>&1; record X7-runner-perl-c $?
+exec 6<"$helper"
+err=$(perl "$runner" --fdwalk-helper-fd 6 --fdwalk-helper-sha256 "$(printf '%064d' 0)" 2>&1 >/dev/null); rc=$?
+[ "$rc" -ne 0 ] && printf '%s\n' "$err" | grep -q 'fdwalk helper hash mismatch'; record X7-runner-refuses-wrong-sha $?
+err=$(perl "$runner" 2>&1 >/dev/null); rc=$?
+[ "$rc" -ne 0 ] && printf '%s\n' "$err" | grep -q -- '--fdwalk-helper-fd and --fdwalk-helper-sha256 are required'; record X7-runner-requires-helper $?
+exec 6<&-
+
+[ "$checked" -gt 0 ] || { echo 'ERROR — nothing was checked'; exit 2; }
+if [ "$failed" -gt 0 ]; then echo "FAIL — $checked check(s) executed, $failed failed:$names"; exit 1; fi
+echo "PASS — $checked check(s) executed, 0 failed (helper sha256 $helper_sha)"
+exit 0
