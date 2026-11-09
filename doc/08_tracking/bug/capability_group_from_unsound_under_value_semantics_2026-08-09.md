@@ -124,3 +124,14 @@ lane; a `.from()` group over a **class** acquisition is sound. The hazard
 survives only for a group shaped around a **struct** value. Remaining item is
 unchanged: the P0 `.from()` desugar (feature work). Coordinator owns the
 bug_db status change.
+
+## Closed 2026-11-09 (lane-p2-3) — closed-obsolete
+
+Checked against current policy/design: obsolete because owner decision
+2026-11-06 makes `class` a reference type on every lane. Release source
+`src/compiler_rust/compiler/src/value.rs:3469` defaults `SIMPLE_INTERP_CLASS_REF`
+to on. Probe (`var b = a; a.bump()`): JIT `a=1 b=1`; interpreter with the flag
+on `a=1 b=1`. (The shared `bin/simple.exe` was built 2026-11-04 16:58, before
+`6c7b4db3d39` landed at 17:49, so it still shows `b=0` with no flag set.) The
+remaining `.from()` single-accessor desugar is feature work. It is tracked by a
+`TODO` marker in `src/compiler/35.semantics/lint/dynamic_capability_acquire.spl`.

@@ -1,0 +1,57 @@
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# Bug me_method_receiver_field_write_lost_native_2026-11-09
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+
+fn me_lower(source: text) -> MirModule:
+    val logger = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/mewb.spl", "app.mewb", logger)
+    var modules: Dict<text, ParserModule> = {}
+    modules["app.mewb"] = ast
+    val surfaces = module_surfaces_from_modules(modules, [SourceFile(path: "app/mewb.spl", content: source, module_name: "app.mewb")]).unwrap()
+    var hl = hirlowering_for_module("app/mewb.spl", surfaces)
+    val hir = hl.lower_module(ast)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir, [], true)
+
+fn inst_kinds(module: MirModule, suffix: text) -> [text]:
+    var out: [text] = []
+    for function in module.functions.values():
+        if not function.name.ends_with(suffix): continue
+        for block in function.blocks:
+            for instruction in block.instructions:
+                val s = "{instruction.kind}"
+                val cut = s.index_of("(") ?? s.len()
+                out.push(s[0:cut])
+    out
+
+fn has_kind(kinds: [text], k: text) -> bool:
+    for x in kinds:
+        if x.ends_with(k): return true
+    false
+
+describe "me method receiver field write":
+    it "class me method stores self.field through SetField":
+        val m = me_lower("class Box:\n    n: i64\n\n    me bump(s: text):\n        self.n = self.n + s.len()\n")
+        val kinds = inst_kinds(m, "Box.bump")
+
+        expect(has_kind(kinds, "SetField")).to_be(true)
+
+    it "struct me method stores self.field through SetField":
+        val m = me_lower("struct Cell:\n    n: i64\n\n    me bump(s: text):\n        self.n = self.n + s.len()\n")
+        val kinds = inst_kinds(m, "Cell.bump")
+
+        expect(has_kind(kinds, "SetField")).to_be(true)
+
+    it "nested receiver field (self.inner.n) is stored back through SetField":
+        val m = me_lower("class Box:\n    n: i64\n\nclass Holder:\n    inner: Box\n\n    me bump(s: text):\n        self.inner.n = self.inner.n + s.len()\n")
+        val kinds = inst_kinds(m, "Holder.bump")
+        expect(has_kind(kinds, "SetField")).to_be(true)

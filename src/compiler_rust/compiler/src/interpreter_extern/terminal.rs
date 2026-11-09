@@ -229,7 +229,7 @@ pub fn rt_signal_install(args: &[Value]) -> Result<Value, CompileError> {
     {
         let ok = unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
-            sa.sa_sigaction = rt_signal_handler as usize;
+            sa.sa_sigaction = rt_signal_handler as *const () as usize;
             libc::sigemptyset(&mut sa.sa_mask);
             sa.sa_flags = libc::SA_RESTART;
             libc::sigaction(signal_num as libc::c_int, &sa, std::ptr::null_mut()) == 0
