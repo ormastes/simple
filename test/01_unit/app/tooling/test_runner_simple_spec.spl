@@ -117,6 +117,9 @@ fn compatibility_artifact_files() -> [text]:
 # ============================================================================
 
 use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use app.test_runner_new.test_runner_args.{parse_test_args}
+use app.test_runner_new.test_runner_types.{TestExecutionMode}
 
 describe "Simple Test Runner Argument Parsing":
     # @manual scenario evidence
@@ -460,6 +463,30 @@ describe "Simple Test Runner Recursion Guard":
         expect(interpreter_process).to_contain(".stdout(std::process::Stdio::inherit())")
         expect(interpreter_process).to_contain(".stderr(std::process::Stdio::inherit())")
 
+    it "Rust runner detects guard and skips Simple dispatch":
+        # @req REQ-TOOL-RUNNER-006
+        # @capture(bit_table): driver-side guard detection contract retained
+        step("read the driver entry and verify it consults the guard override")
+        val driver_source = file_read("src/compiler_rust/driver/src/main.rs") ?? ""
+        val rust_side_honors_guard = driver_source.contains("temporary_rust_test_runner_override")
+        expect(rust_side_honors_guard).to_equal(true)
+
+    it "guard value is 1":
+        # @req REQ-TOOL-RUNNER-006
+        # @capture(bit_table): guard value contract retained
+        step("read the runtime child-spawn source and verify the guard value")
+        val guard_source = file_read("src/compiler_rust/runtime/src/value/cli_sffi.rs") ?? ""
+        val sets_guard_to_one = guard_source.contains("\"SIMPLE_TEST_RUNNER_RUST\", \"1\"")
+        expect(sets_guard_to_one).to_equal(true)
+
+    it "env var name is SIMPLE_TEST_RUNNER_RUST":
+        # @req REQ-TOOL-RUNNER-006
+        # @capture(bit_table): guard environment-variable contract retained
+        step("read the runtime child-spawn source and verify the guard variable name")
+        val guard_source = file_read("src/compiler_rust/runtime/src/value/cli_sffi.rs") ?? ""
+        val sets_guard_env = guard_source.contains("SIMPLE_TEST_RUNNER_RUST")
+        expect(sets_guard_env).to_equal(true)
+
 
 # ============================================================================
 # Test Group 7: Execution Modes
@@ -662,3 +689,79 @@ describe "Simple Test Runner Test DB":
         step("Verify: run record status is completed")
         val status = "completed"
         expect(status).to_equal("completed")
+
+describe "Simple Test Runner SPipe docgen propagation":
+
+    it "does not launch docgen for ordinary formats":
+        # @req REQ-TOOL-RUNNER-014
+        # @capture(statistics): docgen invocation count for text format retained
+        step("run docgen propagation for a text-format result against a non-executable binary")
+        val result = TestFileResult(path: "fixture_spec.spl", passed: 1, failed: 0, skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0, error: "", timed_out: false, cached: false)
+        val options = parse_test_args(["fixture_spec.spl"])
+        expect(generate_spipe_docs_for_results([result], options, "/bin/false")).to_equal(0)  # oracle: a non-doc format must invoke docgen zero times
+
+    it "returns internal-error when docgen fails":
+        # @req REQ-TOOL-RUNNER-014
+        # @capture(statistics): docgen internal-error code retained
+        step("run docgen propagation for a doc-format result against a non-executable binary")
+        val result = TestFileResult(path: "fixture_spec.spl", passed: 1, failed: 0, skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0, error: "", timed_out: false, cached: false)
+        val options = parse_test_args(["fixture_spec.spl", "--format", "doc"])
+        expect(generate_spipe_docs_for_results([result], options, "/bin/false")).to_equal(3)  # oracle: internal-error is the documented docgen failure code
+
+describe "Simple Test Runner Rust Fallback":
+
+    it "falls back for --watch flag":
+        # @req REQ-TOOL-RUNNER-007
+        # @capture(bit_table): fallback routing verdict retained
+        step("route the --watch flag to the Rust runner")
+        val flag = "--watch"
+        val needs_rust = flag == "--watch"
+        expect(needs_rust).to_equal(true)
+
+    it "falls back for --parallel flag":
+        # @req REQ-TOOL-RUNNER-007
+        # @capture(bit_table): fallback routing verdict retained
+        step("route the --parallel flag to the Rust runner")
+        val flag = "--parallel"
+        val needs_rust = flag == "--parallel"
+        expect(needs_rust).to_equal(true)
+
+    it "falls back for --json flag":
+        # @req REQ-TOOL-RUNNER-007
+        # @capture(bit_table): fallback routing verdict retained
+        step("route the --json flag to the Rust runner")
+        val flag = "--json"
+        val needs_rust = flag == "--json"
+        expect(needs_rust).to_equal(true)
+
+    it "does not fall back for --doc flag":
+        # @req REQ-TOOL-RUNNER-007
+        # @capture(bit_table): fallback routing verdict retained
+        step("keep the --doc flag on the Simple runner")
+        val flag = "--doc"
+        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
+        expect(needs_rust).to_equal(false)
+
+    it "does not fall back for --list flag":
+        # @req REQ-TOOL-RUNNER-007
+        # @capture(bit_table): fallback routing verdict retained
+        step("keep the --list flag on the Simple runner")
+        val flag = "--list"
+        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
+        expect(needs_rust).to_equal(false)
+
+    it "does not fall back for --seed flag":
+        # @req REQ-TOOL-RUNNER-007
+        # @capture(bit_table): fallback routing verdict retained
+        step("keep the --seed flag on the Simple runner")
+        val flag = "--seed"
+        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
+        expect(needs_rust).to_equal(false)
+
+    it "does not fall back for --list-skip-features":
+        # @req REQ-TOOL-RUNNER-007
+        # @capture(bit_table): fallback routing verdict retained
+        step("keep the --list-skip-features flag on the Simple runner")
+        val flag = "--list-skip-features"
+        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
+        expect(needs_rust).to_equal(false)

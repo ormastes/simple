@@ -558,3 +558,115 @@ mod tests {
         }
     }
 }
+
+/// Default value for an initializer-less module `var`/`val` of a named type
+/// (owner decision 2026-11-09, bug
+/// noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09):
+/// an enum defaults to its FIRST variant, a class/struct to its default
+/// construction with every undefaulted field zero-filled (scalars 0/false/0.0,
+/// `text` "", arrays empty, nested enum/class recursively). `None` when the
+/// type is not a known class or enum (the caller keeps its existing contract)
+/// or the first enum variant carries a payload (no safe default exists).
+pub(crate) fn noinit_named_type_default(
+    ty: &Type,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<Value> {
+    noinit_named_type_default_depth(ty, env, functions, classes, enums, impl_methods, 0)
+}
+
+fn noinit_named_type_default_depth(
+    ty: &Type,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    depth: usize,
+) -> Option<Value> {
+    if depth > 8 {
+        return None;
+    }
+    let name = match ty {
+        Type::Simple(name) => name.as_str(),
+        Type::Generic { name, .. } => name.as_str(),
+        _ => return None,
+    };
+    if let Some(enum_def) = enums.get(name) {
+        let first = enum_def.variants.first()?;
+        if first.fields.as_ref().is_some_and(|f| !f.is_empty()) {
+            return None;
+        }
+        return Some(Value::Enum {
+            enum_name: enum_def.name.clone(),
+            variant: first.name.clone(),
+            payload: None,
+        });
+    }
+    let class_def = crate::interpreter::resolve_class_in_scope(classes, name).ok().flatten()?;
+    let value = instantiate_class(name, &[], env, functions, classes, enums, impl_methods).ok()?;
+    // Zero-fill the fields `instantiate_class` left nil (undefaulted fields of
+    // a non-value-type class), by declared field type.
+    let mut zero_fields: Vec<(String, Value)> = Vec::new();
+    for field in &class_def.fields {
+        if field.default.is_some() {
+            continue;
+        }
+        if let Some(z) = noinit_zero_for_type(&field.ty, env, functions, classes, enums, impl_methods, depth + 1) {
+            zero_fields.push((field.name.clone(), z));
+        }
+    }
+    match value {
+        Value::ClassInstance(instance) => {
+            for (fname, z) in zero_fields {
+                let is_nil = instance.with_fields(|f| matches!(f.get(&fname), Some(Value::Nil)));
+                if is_nil {
+                    instance.set_field(fname, z);
+                }
+            }
+            Some(Value::ClassInstance(instance))
+        }
+        Value::Object { class, fields } => {
+            let mut map: HashMap<String, Value> = fields.as_ref().clone();
+            for (fname, z) in zero_fields {
+                if matches!(map.get(&fname), Some(Value::Nil)) {
+                    map.insert(fname, z);
+                }
+            }
+            Some(Value::Object {
+                class,
+                fields: Arc::new(map),
+            })
+        }
+        other => Some(other),
+    }
+}
+
+fn noinit_zero_for_type(
+    ty: &Type,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    depth: usize,
+) -> Option<Value> {
+    match ty {
+        Type::Simple(name) => match name.as_str() {
+            "text" | "str" | "String" => Some(Value::text(String::new())),
+            _ => {
+                let scalar = undefaulted_field_fill(ty, true);
+                if !matches!(scalar, Value::Nil) {
+                    return Some(scalar);
+                }
+                noinit_named_type_default_depth(ty, env, functions, classes, enums, impl_methods, depth)
+            }
+        },
+        Type::Array { size: None, .. } => Some(Value::array(Vec::<Value>::new())),
+        Type::Generic { .. } => noinit_named_type_default_depth(ty, env, functions, classes, enums, impl_methods, depth),
+        _ => None,
+    }
+}

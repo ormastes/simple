@@ -27,10 +27,12 @@ artifact_class() {
     else echo NEITHER; fi
 }
 
-# source_scan ROOT -> prints offending file list (one per line); sets SRC_CHECKED
+# source_scan ROOT -> prints offending file list (one per line); sets SRC_CHECKED;
+# hard grep failure (rc > 1) sets SRC_GREP_RC so the caller can ERROR out
 source_scan() {
     root=$1
     SRC_CHECKED=0
+    SRC_GREP_RC=0
     set --
     for f in "$root"/src/runtime/*.c "$root"/src/runtime/*.h; do
         [ -f "$f" ] || continue
@@ -39,16 +41,24 @@ source_scan() {
     done
     SRC_CHECKED=$#
     if [ $# -gt 0 ]; then
-        grep -l -E "hash_variant_discriminant" "$@" 2>/dev/null | while read -r hit; do
-            echo "$hit: hashed discriminant in C runtime"
-        done
+        hits=$(grep -l -E "hash_variant_discriminant" "$@" 2>/dev/null); grc=$?
+        if [ "$grc" -gt 1 ]; then SRC_GREP_RC=$grc
+        elif [ -n "$hits" ]; then
+            printf '%s\n' "$hits" | while read -r hit; do
+                echo "$hit: hashed discriminant in C runtime"
+            done
+        fi
     fi
     rtdir="$root/src/compiler_rust/runtime/src"
     if [ -d "$rtdir" ]; then
         SRC_CHECKED=$((SRC_CHECKED + 1))
         # The Rust runtime must derive Err/None discriminants through the hash helper.
-        if ! grep -rq 'hash_variant_discriminant' "$rtdir"; then
-            echo "$rtdir: Rust runtime lost hash_variant_discriminant (convention changed; update the fence deliberately)"
+        if ! grep -rq 'hash_variant_discriminant' "$rtdir" 2>/dev/null; then
+            grc=$?
+            if [ "$grc" -gt 1 ]; then SRC_GREP_RC=$grc
+            else
+                echo "$rtdir: Rust runtime lost hash_variant_discriminant (convention changed; update the fence deliberately)"
+            fi
         fi
     fi
 }
@@ -79,27 +89,30 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --root) root=$2; shift 2 ;;
         --artifact) artifacts="$artifacts $2"; shift 2 ;;
-        --selftest-only) selftest && echo "PASS - selftest ok" && exit 0; echo "FAIL - selftest"; exit 1 ;;
-        *) echo "ERROR - nothing was checked (unknown arg $1)"; exit 2 ;;
+        --selftest-only) selftest; st_rc=$?; [ "$st_rc" -eq 0 ] && { echo "PASS — selftest ok"; exit 0; }; [ "$st_rc" -eq 2 ] && echo "ERROR — nothing was checked (selftest setup failed)" || echo "FAIL — selftest"; exit 1 ;;
+        *) echo "ERROR — nothing was checked (unknown arg $1)"; exit 2 ;;
     esac
 done
 
-if ! selftest; then echo "ERROR - nothing was checked (selftest failed)"; exit 2; fi
+if ! selftest; then echo "ERROR — nothing was checked (selftest failed)"; exit 2; fi
 
-scan_out=$(mktemp); source_scan "$root" > "$scan_out"; offenders=$(cat "$scan_out"); rm -f "$scan_out"
+scan_out=$(mktemp) || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
+source_scan "$root" > "$scan_out"
+[ "${SRC_GREP_RC:-0}" -le 1 ] || { echo "ERROR — nothing was checked (grep rc=$SRC_GREP_RC scanning sources)"; rm -f "$scan_out"; exit 2; }
+offenders=$(cat "$scan_out"); rm -f "$scan_out"
 checked=$SRC_CHECKED
 for a in $artifacts; do
-    [ -f "$a" ] || { echo "ERROR - nothing was checked (missing artifact $a)"; exit 2; }
+    [ -f "$a" ] || { echo "ERROR — nothing was checked (missing artifact $a)"; exit 2; }
     checked=$((checked + 1))
     cls=$(artifact_class "$a")
     [ "$cls" = MIXED ] && offenders="$offenders
 $a: embeds both C-runtime and Rust-runtime canaries (mixed discriminant conventions)"
 done
-if [ "$checked" -eq 0 ]; then echo "ERROR - nothing was checked (0 sources/artifacts)"; exit 2; fi
+if [ "$checked" -eq 0 ]; then echo "ERROR — nothing was checked (0 sources/artifacts)"; exit 2; fi
 if [ -n "$offenders" ]; then
     echo "$offenders"
-    echo "FAIL - $checked item(s) checked, mixed/changed enum discriminant convention"
+    echo "FAIL — $checked item(s) checked, mixed/changed enum discriminant convention"
     exit 1
 fi
-echo "PASS - $checked item(s) checked, enum discriminant conventions segregated"
+echo "PASS — $checked item(s) checked, enum discriminant conventions segregated"
 exit 0

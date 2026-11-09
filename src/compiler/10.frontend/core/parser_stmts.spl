@@ -43,7 +43,7 @@ use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_TUPLE, EXPR_UNIT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_FIELD_ACCESS}
 use compiler.core.ast.{decl_get_fields, decl_get_field_types, decl_get_field_defaults, DECL_STRUCT, expr_struct_lit, expr_array_lit, expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
-use compiler.core.ast.{expr_int_lit, expr_float_lit}
+use compiler.core.ast.{expr_int_lit, expr_float_lit, decl_get_field_bits, DECL_ENUM}
 use compiler.core.ast.{expr_array_repeat}
 use compiler.core.ast_expr.{expr_mark_colon_block}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
@@ -2973,14 +2973,32 @@ fn struct_zero_expr_v1(type_tag: i64, depth: i64) -> i64:
         return -1
     var di = 0
     var found = -1
+    var found_enum = -1
     while di < module_decl_count_get():
         val d = module_decl_at(di)
         if decl_get_tag(d) == DECL_STRUCT and decl_get_name(d) == sname:
             found = d
+        if decl_get_tag(d) == DECL_ENUM and decl_get_name(d) == sname:
+            found_enum = d
         di = di + 1
+    if found < 0 and found_enum >= 0:
+        # Enum declared earlier (owner decision 2026-11-09 item 14): the
+        # default is the FIRST variant, `E.First`. A payload-carrying first
+        # variant has no safe default; nil is only allowed in unsafe.
+        val variants = decl_get_fields(found_enum)
+        val payload_counts = decl_get_field_bits(found_enum)
+        if variants.len() == 0:
+            parser_error("no default value for enum {sname}: it has no variants; add an explicit initializer")
+            return -1
+        if payload_counts.len() > 0 and payload_counts[0] > 0:
+            parser_error("no default value for enum {sname}: first variant {variants[0]} carries a payload; add an explicit initializer")
+            return -1
+        return expr_field_access(expr_ident(sname, 0), variants[0], 0)
     if found < 0:
-        # Not a struct declared earlier in this module (class, enum, imported
-        # type): caller keeps the existing nil-until-assignment contract.
+        # Not a struct/class/enum declared earlier in this module (imported or
+        # later-declared type): caller keeps the existing nil-until-assignment
+        # contract; the seed interpreter defaults these (bug
+        # noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09).
         return -2
     val names = decl_get_fields(found)
     val types = decl_get_field_types(found)
@@ -2999,10 +3017,12 @@ fn struct_zero_expr_v1(type_tag: i64, depth: i64) -> i64:
                 v = expr_float_lit("0.0", 0)
             elif ft == TYPE_I64 or ft == TYPE_U8 or ft == TYPE_U16 or ft == TYPE_U32 or ft == TYPE_U64 or ft == TYPE_I8 or ft == TYPE_I16 or ft == TYPE_I32:
                 v = expr_int_lit(0, 0)
+            elif ft == TYPE_TEXT:
+                v = expr_string_lit("", 0)
             elif ft >= TYPE_NAMED_BASE:
                 v = struct_zero_expr_v1(ft, depth + 1)
                 if v == -2:
-                    parser_error("no safe zero value for field {sname}.{names[fi]}: its type is not a struct declared earlier; add an explicit initializer")
+                    parser_error("no safe zero value for field {sname}.{names[fi]}: its type is not a struct, class or enum declared earlier; add an explicit initializer")
                 if v < 0:
                     return -1
             else:

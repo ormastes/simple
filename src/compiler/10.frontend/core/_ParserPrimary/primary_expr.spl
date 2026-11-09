@@ -25,7 +25,7 @@ use compiler.core.tokens.{TOK_KW_ASM}
 use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_AMPERSAND, TOK_NOT, TOK_CARET}
 use compiler.core.tokens.{TOK_EQ, TOK_LT, TOK_GEQ}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
-use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
+use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE, TOK_SET_LIT_START}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_PIPE}
 use compiler.core.tokens.{TOK_ASSIGN}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF, TOK_ERROR}
@@ -1050,6 +1050,27 @@ fn parse_primary_expr() -> i64:
     if par_kind_get() == 169:
         parser_advance()
         return expr_ident("_", 0)
+
+    # `s{a, b, c}` set literal. Lowered at parse time to the existing Set
+    # construction `Set.from([a, b, c])` — identical shape to the Rust seed's
+    # parse_set_literal, so no new flat tag / HIR / MIR path is needed
+    # (bug set_literal_s_brace_unparsed_2026-09-06, owner decision 2026-11-09).
+    if par_kind_get() == TOK_SET_LIT_START:
+        parser_advance()
+        var set_elems: [i64] = []
+        while true:
+            parser_skip_newlines()
+            if par_kind_get() == TOK_RBRACE:
+                break
+            set_elems.push(parse_expr())
+            parser_skip_newlines()
+            if par_kind_get() == TOK_COMMA:
+                parser_advance()
+                continue
+            break
+        parser_expect(TOK_RBRACE)
+        val set_receiver = expr_ident("Set", 0)
+        return expr_method_call(set_receiver, "from", [expr_array_lit(set_elems, 0)], 0)
 
     # Dict literal, dict comprehension, or empty {}
     if par_kind_get() == 142:
