@@ -1,0 +1,38 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Regression for enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24.
+"""
+## Purpose and audience
+Purpose: Prove an enum payload built from tuple-pattern variant binders keeps the declared slot type.
+Audience: COMP maintainers who read this spec to confirm the behavior still holds.
+"""
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn bind_diagnostics(source: text) -> text:
+    val filename = "enum_tuple_binder.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors = errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors = errors.push("MIR: " + error.message)
+    errors.join("\n")
+
+val BIND_PRELUDE = "struct Ty:\n    id: i64\nenum Kind:\n    Fn([Ty], Ty, i64)\n    Other\n"
+
+describe "enum payload typing":
+    it "types tuple-pattern variant binders from the payload declaration":
+        step("case (Fn(a,b,_), Fn(c,d,_)) rebuilds Kind.Fn from binders")
+        val source = BIND_PRELUDE + "fn compose(f: Kind, g: Kind) -> Kind:\n    match (f, g):\n        case (Kind.Fn(a, b, _), Kind.Fn(c, d, _)):\n            Kind.Fn(a, d, 0)\n        case _:\n            Kind.Other\n"
+        expect(bind_diagnostics(source)).to_equal("")
