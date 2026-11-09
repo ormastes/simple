@@ -263,6 +263,12 @@ pub struct MirLowerer<'a> {
     pub(super) refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
     /// Reference to type registry for looking up unit type constraints
     pub(super) type_registry: Option<&'a crate::hir::TypeRegistry>,
+    /// Set while lowering the operand of a checked `rt_unwrap_or_trap` whose
+    /// operand is a slot-yielding array accessor (`first`/`last`/`pop`/
+    /// `remove`). The accessor then returns the RAW tagged slot so the checked
+    /// helper can test nil before the scalar unbox, which the builtin site
+    /// performs afterwards. Consumed (reset) by the accessor lowering.
+    pub(super) defer_accessor_unbox: bool,
     /// Locals whose DECLARED type is type-erased (unnamed / `Any`) but whose
     /// single reaching definition is a named CLASS type, recomputed per
     /// function by `compute_single_assignment_class_types`.
@@ -406,6 +412,7 @@ impl<'a> MirLowerer<'a> {
             contract_mode: ContractMode::All,
             refined_types: None,
             type_registry: None,
+            defer_accessor_unbox: false,
             erased_local_class_types: HashMap::new(),
             local_type_name_hints: HashMap::new(),
             local_trait_dispatch: HashMap::new(),
@@ -456,6 +463,7 @@ impl<'a> MirLowerer<'a> {
             contract_mode,
             refined_types: None,
             type_registry: None,
+            defer_accessor_unbox: false,
             erased_local_class_types: HashMap::new(),
             local_type_name_hints: HashMap::new(),
             local_trait_dispatch: HashMap::new(),

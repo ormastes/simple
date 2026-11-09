@@ -74,7 +74,7 @@ int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
 #if defined(_WIN32)
     HANDLE file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL); /* BACKUP_SEMANTICS: directory handles for dir fsync */
     free(path);
     if (file == INVALID_HANDLE_VALUE) return 0;
     int ok = FlushFileBuffers(file) != 0;

@@ -7,6 +7,7 @@ use compiler.tools.lint.main.{Linter, LintLevel}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{
     lint_riscv_rtl_debuggability, lint_riscv_rtl_debuggability_lines}
 use lib.hardware.fpga_linux.riscv_fpga_linux.{generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
+use hardware.fpga_linux.riscv_fpga_linux.{generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
 
 fn rtl_spec_shell(command: text) -> i64:
     val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
@@ -27,6 +28,10 @@ fn has_warn_code(results, code: text) -> bool:
 fn lint_core(path: text) -> any:
     var linter = Linter.new()
     linter.lint_source(path, read_generated_riscv_fpga_rtl_file(path))
+
+fn shell(command: text) -> i64:
+    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    code
 
 describe "RISC-V RTL debuggability lint":
     it "canonical-line entrypoint preserves complete warning order":
@@ -213,3 +218,40 @@ describe "RISC-V RTL debuggability lint":
         expect(rtl_spec_shell("rm -f '/tmp/riscv_rtl_debug_lint_runner_missing/rv64/rtl/tb_generated_rv64_fw_jump.vhd'")).to_equal(0)
         val results = lint_core("/tmp/riscv_rtl_debug_lint_runner_missing/rv64/rtl/simple_rv64gc_core.vhd")
         expect(has_code(results, "RTLDBG003")).to_equal(true)
+
+    it "accepts board boot products manifests with reordered acceptance markers and relaxed spacing":
+        expect(shell("rm -rf '/tmp/riscv_rtl_debug_lint_acceptance_reordered'")).to_equal(0)
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_acceptance_reordered")
+        expect(result.is_ok()).to_equal(true)
+        val board_products_path = "/tmp/riscv_rtl_debug_lint_acceptance_reordered/board_linux_boot_products.sdn"
+        val board_products = read_generated_riscv_fpga_rtl_file(board_products_path)
+        val broken = board_products.replace("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"", "expected_markers    =    \"init started | Freeing unused kernel memory | OF: fdt | Linux version | OpenSBI\"")
+        expect(rt_file_write_text(board_products_path, broken)).to_equal(true)
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_acceptance_reordered/rv64/rtl/simple_rv64gc_core.vhd")
+        expect(has_code(results, "RTLDBG003")).to_equal(false)
+
+    it "accepts sidecars with non-canonical whitespace":
+        expect(shell("rm -rf '/tmp/riscv_rtl_debug_lint_ws'")).to_equal(0)
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_ws")
+        expect(result.is_ok()).to_equal(true)
+        val sidecar_path = "/tmp/riscv_rtl_debug_lint_ws/rv64/rtl/simple_rv64gc_core.debug.json"
+        val sidecar = read_generated_riscv_fpga_rtl_file(sidecar_path)
+        var spaced = sidecar.replace("\"proofLane\":", "\"proofLane\" : ")
+        spaced = spaced.replace("\"debugOutputs\":", "\"debugOutputs\"  : ")
+        spaced = spaced.replace("\"runnerTestbenches\":", "\"runnerTestbenches\" : ")
+        expect(rt_file_write_text(sidecar_path, spaced)).to_equal(true)
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_ws/rv64/rtl/simple_rv64gc_core.vhd")
+        expect(has_code(results, "RTLDBG001")).to_equal(false)
+        expect(has_code(results, "RTLDBG002")).to_equal(false)
+
+    # @manual scenario evidence
+    it "accepts clean generated RV64 debug sidecars":
+        expect(shell("rm -rf '/tmp/riscv_rtl_debug_lint_clean'")).to_equal(0)
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_clean")
+        expect(result.is_ok()).to_equal(true)
+        val core_path = "/tmp/riscv_rtl_debug_lint_clean/rv64/rtl/simple_rv64gc_core.vhd"
+        val results = lint_core(core_path)
+        expect(has_code(results, "RTLDBG001")).to_equal(false)
+        expect(has_code(results, "RTLDBG002")).to_equal(false)
+        expect(has_code(results, "RTLDBG003")).to_equal(false)
+        expect(has_warn_code(results, "RTLDBG102")).to_equal(false)

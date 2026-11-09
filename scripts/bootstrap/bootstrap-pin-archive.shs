@@ -1,0 +1,52 @@
+#!/bin/sh
+# bootstrap-pin-archive.shs -- materialise a PINNED `git archive` snapshot of a
+# source commit so bootstrap-from-scratch.sh builds committed content, never the
+# live shared working copy (owner decision 2026-11-09, item 15).
+# Bug: doc/08_tracking/bug/bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md
+#
+# Usage:
+#   bootstrap-pin-archive.shs <repo> <rev> <dest-parent>   # prints snapshot dir on stdout
+#   bootstrap-pin-archive.shs --selftest
+# Snapshot dir = <dest-parent>/pinned-<sha12>; holds .bootstrap-pinned-sha.
+# Exit 2 = nothing built (bad rev / empty archive / extraction failure).
+set -u
+
+pin_archive() {
+    pa_repo=$1; pa_rev=$2; pa_parent=$3
+    pa_sha=$(git -C "$pa_repo" rev-parse --verify "${pa_rev}^{commit}" 2>/dev/null) || {
+        echo "ERROR — nothing was checked (cannot resolve rev '${pa_rev}')" >&2; return 2; }
+    pa_dir="${pa_parent}/pinned-$(echo "$pa_sha" | cut -c1-12)"
+    rm -rf "$pa_dir.tmp"; mkdir -p "$pa_dir.tmp" || return 2
+    # Extract to a temp dir then rename: a half-extracted tree is never visible.
+    git -C "$pa_repo" archive --format=tar "$pa_sha" | tar -x -C "$pa_dir.tmp" || {
+        rm -rf "$pa_dir.tmp"; echo "ERROR — git archive extraction failed" >&2; return 2; }
+    pa_n=$(find "$pa_dir.tmp" -type f | wc -l)
+    [ "$pa_n" -gt 0 ] || { rm -rf "$pa_dir.tmp"; echo "ERROR — empty archive for ${pa_sha}" >&2; return 2; }
+    printf '%s\n' "$pa_sha" > "$pa_dir.tmp/.bootstrap-pinned-sha"
+    rm -rf "$pa_dir"; mv "$pa_dir.tmp" "$pa_dir" || return 2
+    echo "pinned-archive: ${pa_sha} (${pa_n} files) -> ${pa_dir}" >&2
+    printf '%s\n' "$pa_dir"
+}
+
+selftest() {
+    st=$(mktemp -d) || return 2; fail=0
+    git init -q "$st/r" && ( cd "$st/r" && git config user.email t@t && git config user.name t \
+        && mkdir -p src && printf 'committed\n' > src/a.spl && git add -A && git commit -qm c1 )
+    d=$(pin_archive "$st/r" HEAD "$st/out" 2>/dev/null) || { echo "selftest FAIL: pin failed"; fail=1; }
+    # Mutate the live tree AFTER pinning: torn content + new file.
+    printf '<<<<<<< HEAD\n' > "$st/r/src/a.spl"; printf x > "$st/r/src/new.spl"
+    [ "$(cat "$d/src/a.spl" 2>/dev/null)" = committed ] || { echo "selftest FAIL: live edit visible"; fail=1; }
+    [ -e "$d/src/new.spl" ] && { echo "selftest FAIL: new file visible"; fail=1; }
+    [ -e "$d/.git" ] && { echo "selftest FAIL: .git leaked"; fail=1; }
+    [ "$(cat "$d/.bootstrap-pinned-sha" 2>/dev/null)" = "$(git -C "$st/r" rev-parse HEAD)" ] || { echo "selftest FAIL: sha marker"; fail=1; }
+    pin_archive "$st/r" no-such-rev "$st/out" >/dev/null 2>&1; [ $? -eq 2 ] || { echo "selftest FAIL: bad rev not exit 2"; fail=1; }
+    rm -rf "$st"
+    [ "$fail" -eq 0 ] && { echo "PASS — 5 selftest assertion(s) checked, pinned archive isolates build from live edits"; return 0; }
+    echo "FAIL — selftest"; return 1
+}
+
+case "${1:-}" in
+    --selftest) selftest; exit $? ;;
+    "") echo "usage: $0 <repo> <rev> <dest-parent> | --selftest" >&2; exit 2 ;;
+    *) pin_archive "${1}" "${2:?rev}" "${3:?dest-parent}"; exit $? ;;
+esac
