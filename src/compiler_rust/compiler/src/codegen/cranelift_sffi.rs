@@ -1563,6 +1563,17 @@ pub extern "C" fn rt_cranelift_call_args_clear(ctx: i64) {
     }
 }
 
+/// Diagnostic for a first-probe miss in `rt_cranelift_function_addr_in_func`.
+/// A miss is expected for a function value naming a function defined in
+/// another module: the caller declares the import and retries, so the miss is
+/// recovered and stays silent unless SIMPLE_CRANELIFT_SFFI_DEBUG=1 is set
+/// (doc/08_tracking/bug/cranelift_function_addr_probe_miss_diagnostic_2026-11-06.md).
+fn report_function_addr_probe_miss(name: &str) {
+    if std::env::var_os("SIMPLE_CRANELIFT_SFFI_DEBUG").is_some() {
+        eprintln!("cranelift: function address missing declaration {name}");
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_function_addr_in_func(ctx: i64, name_ptr: i64, name_len: i64) -> i64 {
     let name = string_from_ptr(name_ptr, name_len);
@@ -1575,7 +1586,7 @@ pub unsafe extern "C" fn rt_cranelift_function_addr_in_func(ctx: i64, name_ptr: 
             return 0;
         };
         let Some(&func_id) = module.func_ids.get(&name) else {
-            eprintln!("cranelift: function address missing declaration {name}");
+            report_function_addr_probe_miss(&name);
             return 0;
         };
         module.module.declare_func_in_func(func_id, builder.func)
@@ -1585,7 +1596,7 @@ pub unsafe extern "C" fn rt_cranelift_function_addr_in_func(ctx: i64, name_ptr: 
             return 0;
         };
         let Some(&func_id) = module.func_ids.get(&name) else {
-            eprintln!("cranelift: function address missing declaration {name}");
+            report_function_addr_probe_miss(&name);
             return 0;
         };
         module.module.declare_func_in_func(func_id, builder.func)
