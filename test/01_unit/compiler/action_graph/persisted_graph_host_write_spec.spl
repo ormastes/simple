@@ -7,7 +7,7 @@ use std.io_runtime.{cwd_process, dir_remove_all, file_read_result}
 use compiler.driver.action_graph.persisted_graph.{
     PersistedBuildGraphV1, persisted_graph_digest_v1,
     persisted_graph_encode_v1, persisted_graph_load_current_v1,
-    persisted_graph_publish_v1
+    persisted_graph_publish_v1, persisted_graph_sync_dir_v1
 }
 
 describe "compiler build graph host publication":
@@ -27,4 +27,22 @@ describe "compiler build graph host publication":
 
         step("Load the graph from the published generation")
         expect(persisted_graph_load_current_v1(root).unwrap().generation).to_equal(generation)
+        dir_remove_all(root)
+
+describe "compiler build graph directory durability":
+    it "fsyncs directories through the same provider used for the generations dir":
+        # @req REQ-SSPEC-UNIT
+        val root = cwd_process() + "/build/test/persisted-graph-dir-sync"
+        dir_remove_all(root)
+        val provisional = PersistedBuildGraphV1("seed", "", "snapshot-dir", [])
+        val generation = persisted_graph_digest_v1(provisional)
+        val graph = PersistedBuildGraphV1(generation, "", "snapshot-dir", [])
+
+        step("Directory sync succeeds for an existing directory and fails for a missing one")
+        expect(persisted_graph_publish_v1(root, graph)).to_equal("ok")
+        expect(persisted_graph_sync_dir_v1(root + "/generations")).to_equal(true)
+        expect(persisted_graph_sync_dir_v1(root + "/no-such-dir")).to_equal(false)
+
+        step("A retry after CURRENT already names the generation re-syncs the root and stays ok")
+        expect(persisted_graph_publish_v1(root, graph)).to_equal("ok")
         dir_remove_all(root)

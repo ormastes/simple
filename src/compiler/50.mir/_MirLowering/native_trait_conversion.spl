@@ -45,6 +45,8 @@ impl MirLowering:
                     # rejected `Concrete?`. Statically Some, so take its
                     # payload word and convert THAT, typed by the `Some`
                     # argument, to the trait object before re-wrapping.
+                    if self.native_trait_conditional_arms_already_trait(value, inner):
+                        return self.ensure_option_handle(local, expected)
                     val some_argument = self.native_trait_some_argument(value)
                     if val existing = self.native_trait_declared_source_type(local, value):
                         match existing.kind:
@@ -287,6 +289,18 @@ impl MirLowering:
                     val provenance = self.struct_value_syms.get(argument_local.id) ?? ""
                     if provenance != "":
                         self.struct_value_syms[payload.id] = provenance
+        # `Some(s)` with `s` bound from a `Trait?` (`if val Some(s) = r`): the
+        # binding is declared `Trait?` but is statically present here, so the
+        # payload word is the trait object itself -- identity, not a concrete
+        # implementation search with an empty owner
+        # (puresql_native_mir_failures_2026_10_25 cause 2).
+        if payload_type != nil:
+            val declared_payload: HirType = payload_type
+            match declared_payload.kind:
+                case HirTypeKind.Optional(trait_payload):
+                    if self.native_trait_owner_for_type(trait_payload) != "":
+                        payload_type = Some(trait_payload)
+                case _: ()
         if val known = payload_type:
             self.remember_local_hir_type(payload.id, known, 0, 0)
         payload
@@ -557,3 +571,66 @@ impl MirLowering:
         self.builder = builder
         self.error_fatal("native trait copy thunk lacks its required result", nil)
         local
+
+    me native_trait_conditional_arms_already_trait(value: HirExpr, inner: HirType) -> bool:
+        """A value-position `if`/`else` whose every arm is `nil` or `Some(x)`
+        with `x` already declared as the target trait (or `Trait?`, narrowed
+        by `if val Some(x) = ...`). The arms were lowered individually, so the
+        joined Option handle already holds trait objects: converting it again
+        would search for an implementation with an empty concrete owner
+        (puresql_native_mir_failures_2026_10_25 cause 2)."""
+        match value.kind:
+            case HirExprKind.If(_, then_block, else_block):
+                if not else_block.?:
+                    return false
+                val else_present: HirBlock = else_block
+                return self.native_trait_arm_is_trait_or_nil(then_block, inner, false) and self.native_trait_arm_is_trait_or_nil(else_present, inner, false)
+            case HirExprKind.MatchCase(scrutinee, arms):
+                # `if val Some(x) = opt: Some(x) else: nil` desugars to a match
+                # over `opt`, whose declared type must be `Trait?`.
+                val scrutinee_type = self.receiver_declared_type(scrutinee)
+                if scrutinee_type == nil:
+                    return false
+                val declared_scrutinee: HirType = scrutinee_type
+                match declared_scrutinee.kind:
+                    case HirTypeKind.Optional(scrutinee_inner):
+                        if self.native_trait_owner_for_type(scrutinee_inner) != self.native_trait_owner_for_type(inner):
+                            return false
+                    case _: return false
+                if arms.len() == 0:
+                    return false
+                for arm in arms:
+                    var arm_is_some = false
+                    match arm.pattern.kind:
+                        case HirPatternKind.Enum(_, variant, _): arm_is_some = variant == "Some"
+                        case _: ()
+                    if not self.native_trait_arm_is_trait_or_nil(arm.body, inner, arm_is_some):
+                        return false
+                true
+            case _: false
+
+    me native_trait_arm_is_trait_or_nil(block: HirBlock, inner: HirType, bound_by_some_pattern: bool) -> bool:
+        if not block.has:
+            return false
+        match block.value.kind:
+            case HirExprKind.NilLit: return true
+            case _: ()
+        val argument = self.native_trait_some_argument(block.value)
+        if argument == nil:
+            return false
+        val some_argument: HirExpr = argument
+        var declared: HirType? = nil
+        match some_argument.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                declared = self.native_trait_declared_binding_type(symbol)
+            case _: ()
+        if declared == nil:
+            return bound_by_some_pattern and (match some_argument.kind:
+                case HirExprKind.Var(_) | HirExprKind.NamedVar(_, _): true
+                case _: false)
+        val declared_type: HirType = declared
+        val owner = self.native_trait_owner_for_type(inner)
+        match declared_type.kind:
+            case HirTypeKind.Optional(declared_inner):
+                return self.native_trait_owner_for_type(declared_inner) == owner
+            case _: return self.native_trait_owner_for_type(declared_type) == owner
