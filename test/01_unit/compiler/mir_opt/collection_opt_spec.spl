@@ -961,3 +961,69 @@ describe "MIR Collection Optimization":
         expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_array_new_with_cap" call(s)
         expect(_co_count_named_call(block, "rt_typed_words_u64_store_known_data_at")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_typed_words_u64_store_known_data_at" call(s)
         expect(opt.dead_append_arrays_elided).to_equal(1)  # oracle: pass counter pins 1 elided dead capacity array(s)
+
+    it "reuses repeated pure set membership query results in a block":
+        # @req REQ-MIR-COLLOPT-005
+        # @capture(bit_table): outcome of "reuses repeated pure set membership query results in a block"
+        step("Reuses repeated pure set membership query results in a block")
+        val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val contains2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([contains1, cmp, contains2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "contains")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "contains" call(s)
+        expect(opt.pure_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated pure query read(s)
+
+    it "reuses repeated pure has membership query results in a block":
+        # @req REQ-MIR-COLLOPT-004
+        # @capture(bit_table): outcome of "reuses repeated pure has membership query results in a block"
+        step("Reuses repeated pure has membership query results in a block")
+        val has1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("has"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val has2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("has"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([has1, cmp, has2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "has")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "has" call(s)
+        expect(opt.pure_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated pure query read(s)
+
+    it "reuses repeated pure set relationship query results in a block":
+        # @req REQ-MIR-COLLOPT-003
+        # @capture(bit_table): outcome of "reuses repeated pure set relationship query results in a block"
+        step("Reuses repeated pure set relationship query results in a block")
+        val subset1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("is_subset"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val subset2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("is_subset"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val disjoint1 = MirInst(kind: MirInstKind.Call(_co_lid(12), _co_func("is_disjoint"), [_co_copy(1), _co_copy(4)]), span: nil)
+        val disjoint2 = MirInst(kind: MirInstKind.Call(_co_lid(13), _co_func("is_disjoint"), [_co_copy(1), _co_copy(4)]), span: nil)
+        val func = _co_function([_co_block([subset1, cmp, subset2, disjoint1, disjoint2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "is_subset")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "is_subset" call(s)
+        expect(_co_count_named_call(block, "is_disjoint")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "is_disjoint" call(s)
+        expect(opt.pure_queries_reused).to_equal(2)  # oracle: pass counter pins 2 deduplicated pure query read(s)
+
+    it "treats set membership tests as pure hoistable collection queries":
+        # @req REQ-MIR-COLLOPT-002
+        # @capture(bit_table): outcome of "treats set membership tests as pure hoistable collection queries"
+        step("Treats set membership tests as pure hoistable collection queries")
+        var opt = create_collection_opt_pass()
+
+        expect(opt.is_pure_method("contains")).to_equal(true)
+        expect(opt.is_pure_method("has")).to_equal(true)
+        expect(opt.is_pure_method("size")).to_equal(true)
+        expect(opt.is_pure_method("contains_key")).to_equal(true)
+        expect(opt.is_pure_method("is_subset")).to_equal(true)
+        expect(opt.is_pure_method("is_superset")).to_equal(true)
+        expect(opt.is_pure_method("is_disjoint")).to_equal(true)
+        expect(opt.is_pure_method("insert")).to_equal(false)

@@ -1760,6 +1760,11 @@ impl<'a> MirLowerer<'a> {
                     } else {
                         vec![receiver_reg]
                     };
+                    // A checked `.unwrap()` wrapping this accessor must see the
+                    // RAW slot: unboxing first turns an absent nil (word 3) into
+                    // the native 3 and a present native 3 into a nil, so the
+                    // unbox is deferred to the `rt_unwrap_or_trap` builtin site.
+                    let defer_unbox = std::mem::replace(&mut self.defer_accessor_unbox, false);
                     return self.with_func(|func, current_block| {
                         let raw_result = func.new_vreg();
                         let unboxed = func.new_vreg();
@@ -1769,6 +1774,9 @@ impl<'a> MirLowerer<'a> {
                             target: crate::mir::effects::CallTarget::from_name(rt_name),
                             args: call_args,
                         });
+                        if defer_unbox {
+                            return raw_result;
+                        }
                         if needs_int_unbox {
                             block.instructions.push(MirInst::UnboxInt {
                                 dest: unboxed,

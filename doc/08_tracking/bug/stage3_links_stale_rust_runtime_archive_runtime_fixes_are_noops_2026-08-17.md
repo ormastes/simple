@@ -96,3 +96,6 @@ That commit, not `rt_clear`, is where both the error delta and the SEGV live.
 `simple-main` is `b59d82fc33dfb81b` (02:15), while the snapshot admitted
 `18b81b76b35946f4` copied at 13:29 — different files, both pre-fix. mtime says
 "13:29" and is misleading; the disassembly is the only reliable signal.
+
+## 2026-11-09 fix
+`bootstrap-from-scratch.sh` now exits 1 when the Rust seed/runtime stamp is stale and --full-bootstrap is not set (override: SIMPLE_ALLOW_STALE_RUST_SEED=1, loud warning). Verified: bash -n only; native re-run pending.

@@ -1,6 +1,6 @@
 # enum_payload_type_mismatch_untyped_map
 
-Status: workaround applied, root fix open. Run-11 MIR.
+Status: fix-implemented-verification-pending (root fix: MIR types `xs.map(_.f)` over a declared [T] as [T.f]; spec test/01_unit/compiler/50.mir/enum_placeholder_map_payload_typing_spec.spl). Workaround stays until stage3 native verification. Run-11 MIR.
 
 Symptom: HirTypeKind.Function payload mismatch at 0 (type_infer/traits collect_function_bounds_from_module): hir_fn.params.map(_.type_) has no resolved [HirType] type.
 

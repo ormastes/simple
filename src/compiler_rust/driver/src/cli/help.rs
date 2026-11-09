@@ -362,6 +362,7 @@ mod tests {
 
 pub fn print_version() {
     println!("Simple Language v{}", VERSION);
+    println!("build-commit: {}", option_env!("SIMPLE_BUILD_COMMIT").filter(|c| !c.is_empty()).unwrap_or("unknown"));
 }
 
 pub fn version() -> &'static str {

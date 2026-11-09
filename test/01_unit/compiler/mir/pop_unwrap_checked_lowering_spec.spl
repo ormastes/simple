@@ -1,0 +1,103 @@
+"""
+## Purpose and audience
+Purpose: Pin that `Array.pop()` is an Option producer and that `.unwrap()` / `??`
+on it lower to the checked, single-evaluation forms in pure-Simple MIR.
+Audience: compiler engineers keeping seed and self-hosted lowering in parity.
+"""
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# Regression: doc/08_tracking/bug/stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md
+# Seed twin: src/compiler_rust/compiler/tests/pop_unwrap_checked.rs
+# @manual_section: pop-unwrap-checked-lowering
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "pop_unwrap_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + serialize_mir_function(function)
+    result
+
+fn count(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+describe "Array.pop unwrap lowering", tag: ["only-compiled"]:
+    it "lowers pop().unwrap() to one pop and a checked unwrap":
+        # @req REQ-COMPILER-MIR-001
+        # @capture(protocol_json): serialized MIR of pop().unwrap()
+        step("Verify pop runs once and unwrap branches on rt_is_some with a nil panic")
+        val mir = lower_function(
+            "fn take(xs: [i64]) -> i64:\n    var ys = xs\n    ys.pop().unwrap()\n",
+            "take"
+        )
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(count(mir, "rt_array_pop")).to_equal(1)  # oracle: the element leaves the array exactly once
+        expect(count(mir, "rt_is_some")).to_equal(1)  # oracle: presence is tested, never truthiness
+        expect(mir).to_contain("rt_panic")  # oracle: a nil Option traps instead of yielding nil
+        expect(mir).to_contain("\"label\":\"unwrap_none\"")
+        expect(mir.contains("rt_enum_payload\"")).to_equal(false)  # oracle: no unchecked payload read of a raw pop result
+
+    it "lowers pop() ?? default with a single pop":
+        # @req REQ-COMPILER-MIR-002
+        # @capture(protocol_json): serialized MIR of pop() ?? default
+        step("Verify the coalesce operand is lowered once into a local")
+        val mir = lower_function(
+            "fn take_or(xs: [i64]) -> i64:\n    var ys = xs\n    ys.pop() ?? -1\n",
+            "take_or"
+        )
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(count(mir, "rt_array_pop")).to_equal(1)  # oracle: `??` does not evaluate its left operand twice
+        expect(count(mir, "rt_is_some")).to_equal(1)
+
+    it "keeps tuple element pop().unwrap() on the checked path":
+        # @capture(protocol_json): serialized MIR of a tuple-element pop
+        step("Verify a tuple payload is recovered after the presence check")
+        val mir = lower_function(
+            "fn take_pair(xs: [(i64, bool)]) -> i64:\n    var ys = xs\n    val (n, f) = ys.pop().unwrap()\n    n\n",
+            "take_pair"
+        )
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(count(mir, "rt_array_pop")).to_equal(1)
+        expect(count(mir, "rt_is_some")).to_equal(1)
+        expect(mir).to_contain("rt_panic")
+
+describe "Array.pop executed semantics", tag: ["only-compiled"]:
+    it "unwraps the popped element and ?? consumes one element":
+        # @capture(statistics): pop/unwrap/coalesce census
+        step("Verify values and lengths after each pop form")
+        var xs: [i64] = [7, 8, 9]
+        expect(xs.pop().unwrap()).to_equal(9)
+        expect(xs.len()).to_equal(2)
+        expect(xs.pop() ?? -1).to_equal(8)  # oracle: one element leaves per `??`
+        expect(xs.len()).to_equal(1)
+        expect(xs.pop() ?? -1).to_equal(7)
+        expect(xs.pop() ?? -1).to_equal(-1)  # oracle: empty pop is absence, not a raw sentinel
+        expect(xs.len()).to_equal(0)
+
+    it "destructures a popped tuple through unwrap":
+        step("Verify tuple fields survive pop().unwrap()")
+        var pairs: [(i64, bool)] = [(7, true), (8, false)]
+        val (n, f) = pairs.pop().unwrap()
+        expect(n).to_equal(8)
+        expect(f).to_equal(false)
+        expect(pairs.len()).to_equal(1)
