@@ -1,0 +1,121 @@
+# Census of undefined field reads (W-HIR-FIELD-001) WITH the full module graph.
+#
+# Removal prerequisite for the SIMPLE_STRICT_FIELD_FORWARDING opt-in workaround
+# (doc/08_tracking/bug/strict_field_forwarding_opt_in_workaround_2026-10-27.md).
+# The 2026-10-27 census lowered each file ALONE, so every read on an imported
+# owner had owner_id < 0 and was never checked: a lower bound only. This driver
+# parses every file under the roots, builds module surfaces over ALL of them
+# (module_surfaces_from_modules -- the same imported-type tables the driver
+# uses), then lowers each module against those surfaces, so cross-file owners
+# are checked too. It needs no seed `test` run and no deployed full CLI.
+#
+# Usage:
+#   bin/simple run scripts/check/census-undefined-field-reads.spl [roots...]
+#   bin/simple run scripts/check/census-undefined-field-reads.spl --selftest
+# Default root: src/compiler.
+#
+#   REPORT -- <n> file(s) lowered, <m> undefined field read(s)   (exit 0)
+#   ERROR  -- nothing was lowered / control failed              (exit 2)
+#
+# The positive control (an undefined field read on a struct IMPORTED from a
+# second module) runs before every scan and is fatal: a 0 from a census whose
+# cross-file check never fired would be indistinguishable from a clean tree.
+
+use std.nogc_sync_mut.io_runtime.{file_read, dir_walk, dir_exists, get_args, exit}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.driver.driver_source_loading.{_driver_module_name_from_path}
+
+val FIELD_CODE = "[W-HIR-FIELD-001]"
+
+struct CensusResult:
+    lowered: i64
+    findings: [text]
+    error: text
+
+fn census(paths: [text], contents: [text], names: [text]) -> CensusResult:
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var i = 0
+    while i < paths.len():
+        modules[names[i]] = parse_full_frontend(contents[i], paths[i], names[i], log)
+        sources.push(SourceFile(path: paths[i], content: contents[i], module_name: names[i]))
+        i = i + 1
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    if surfaces_result.is_err():
+        return CensusResult(lowered: 0, findings: [], error: "module surfaces failed")
+    val surfaces = surfaces_result.unwrap()
+    var findings: [text] = []
+    var lowered = 0
+    i = 0
+    while i < paths.len():
+        var lowering = hirlowering_for_module(names[i], surfaces)
+        lowering.lower_module(modules[names[i]])
+        lowered = lowered + 1
+        for e in lowering.errors:
+            if e.message.contains(FIELD_CODE):
+                findings.push(e.message)
+        i = i + 1
+    CensusResult(lowered: lowered, findings: findings, error: "")
+
+fn selftest() -> bool:
+    # Positive: undefined field on an IMPORTED owner must be reported.
+    # Negative: a defined field on the same owner must not be.
+    val a = "pub struct CfPoint:\n    x: i64\n"
+    val head = 'use app.cfa.{CfPoint}' + "\n"
+    val bad = head + "fn read(p: CfPoint) -> i64:\n    p.nope\n"
+    val good = head + "fn read(p: CfPoint) -> i64:\n    p.x\n"
+    val r = census(["app/cfa.spl", "app/cfb.spl"], [a, bad], ["app.cfa", "app.cfb"])
+    val n = census(["app/cfa.spl", "app/cfb.spl"], [a, good], ["app.cfa", "app.cfb"])
+    r.error == "" and r.lowered == 2 and r.findings.len() >= 1 and n.error == "" and n.findings.len() == 0
+
+fn should_scan(path: text) -> bool:
+    path.ends_with(".spl") and not path.contains("/vendor/") and not path.contains("/generated/")
+
+fn main() -> i64:
+    if not selftest():
+        print("ERROR -- positive control failed: an imported-owner undefined field read was not reported")
+        exit(2)
+    val args = get_args()
+    var roots: [text] = []
+    var selftest_only = false
+    var ai = 1
+    while ai < args.len():
+        val a = args[ai]
+        if a == "--selftest":
+            selftest_only = true
+        elif not a.ends_with(".spl"):
+            roots.push(a)
+        ai = ai + 1
+    if selftest_only:
+        print("PASS -- selftest: imported-owner undefined field read reported")
+        return 0
+    if roots.len() == 0:
+        roots = ["src/compiler"]
+    var paths: [text] = []
+    var contents: [text] = []
+    var names: [text] = []
+    for root in roots:
+        if dir_exists(root):
+            for p in dir_walk(root):
+                if should_scan(p):
+                    paths.push(p)
+                    contents.push(file_read(p))
+                    names.push(_driver_module_name_from_path(p))
+    if paths.len() == 0:
+        print("ERROR -- nothing was lowered")
+        exit(2)
+    val r = census(paths, contents, names)
+    if r.error != "" or r.lowered == 0:
+        print("ERROR -- nothing was lowered ({r.error})")
+        exit(2)
+    for f in r.findings:
+        print(f)
+    print("REPORT -- {r.lowered} file(s) lowered, {r.findings.len()} undefined field read(s)")
+    0

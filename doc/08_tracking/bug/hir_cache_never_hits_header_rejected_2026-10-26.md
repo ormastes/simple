@@ -66,3 +66,15 @@ is reverted. The orchestrator publishes the scope once and every shard child
 inherits it, so an uncacheable token is still shared by one build; across runs it
 already fails closed as a `header` miss. The header-reject diagnostic stays.
 The remaining defect is the empty executable hash on the Windows probe.
+
+## Empty executable hash on Windows (2026-11-09)
+`_native_build_compiler_executable_hash_uncached` only tried SIMPLE_BINARY and
+argv[0] verbatim. A bare-name Windows launch (`stage2`) gives argv[0] /
+SIMPLE_BINARY without `.exe`, so `rt_file_exists` failed and the hash was ""
+-> `uncacheable-<pid>-<micros>` scope -> `header` reject every repeat build.
+Fix (incremental.spl): candidates = SIMPLE_BINARY, SIMPLE_BINARY.exe, argv0,
+argv0.exe (`native_build_compiler_exe_candidates_v1`); when none hashes, print
+`[native-build] compiler executable hash unavailable (SIMPLE_BINARY=.. argv0=..)`
+once instead of failing silently. Spec
+`test/01_unit/compiler/80.driver/compiler_exe_hash_candidates_spec.spl` 3/3.
+Pending: stage3 repeat-build run showing hits>0.

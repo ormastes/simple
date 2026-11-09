@@ -58,3 +58,15 @@ Regression spec: `test/01_unit/compiler/50.mir/optional_struct_into_desugared_fi
 ## Progress 2026-11-06 (hir2 P2 lane)
 
 Re-checked against origin/release/1.0.0: no fix commit for this bug id was found (git log --grep). The defect only shows up in code built natively by the Stage 2/Phase 3 producer. The interpreter-lane HIR specs cannot reproduce it, so a parse_full_frontend + HirLowering spec cannot prove the bug red and then green. No compiler change was made, the workaround tags stay, and the bug stays open until a rebuilt stage3 producer can run the repro.
+
+## Compiler fix (2026-11-09)
+Native repro on `stage2_new4.exe`: `OsfHolder(id: 1, attr: parsed)` with
+`parsed: OsfAttr? = nil` -> access violation (rc -1073741819). MIR: the Aggregate
+takes the raw `osf_parse` result (Option box) as the `attr` operand.
+Fix: `lower_struct_construct` (switch_operators_calls.spl) unwraps an Optional
+record operand going into a non-optional `Named` field through
+`option_record_receiver_payload_v1` (`rt_unwrap_or_self`, the `if val`/`??`
+unwrap). Spec `test/01_unit/compiler/50.mir/optional_record_into_field_unwrap_spec.spl`
+2/2 green, 1/2 with the fix reverted. Workaround tags stay until a rebuilt producer
+re-runs the native repro. Not covered: field ASSIGNMENT `h.attr = parsed`
+(lower_assign has no HirExpr for the value); the workaround uses the safe form.

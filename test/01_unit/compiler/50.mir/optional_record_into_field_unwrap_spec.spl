@@ -1,0 +1,88 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR: a `T?` record stored into a non-optional record field is unwrapped
+
+`Holder(attr: parsed)` with `parsed: Attr?` and field `attr: Attr` (the
+desugared `has_x / x: T` shape) stored the Option enum box itself; readers
+then read the enum header as the record (stage2_new4: access violation).
+Construction now unwraps through `rt_unwrap_or_self` like `if val` / `??`.
+Bug: optional_struct_stored_into_desugared_field_keeps_option_box_2026-10-25.
+"""
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn src_of(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+fn lower_insts(src: text, fn_suffix: text) -> [text]:
+    """MIR instruction kinds (as text) of every function whose name ends with fn_suffix."""
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["app.main"] = hir
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.prescan_module_struct_names(hir_modules, "app.main")
+    val mir = mir_lowering.lower_module(hir)
+    var out: [text] = []
+    for e in mir_lowering.errors:
+        out.push("ERROR " + e.message)
+    for function in mir.functions.values():
+        if function.name.ends_with(fn_suffix):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    out.push("{instruction.kind}")
+    out
+
+fn count_containing(lines: [text], needle: text) -> i64:
+    var n = 0
+    for line in lines:
+        if line.contains(needle):
+            n = n + 1
+    n
+
+val SRC = src_of([
+    "struct OsfAttr:",
+    "    is_c: bool",
+    "    name: text",
+    "struct OsfHolder:",
+    "    id: i64",
+    "    attr: OsfAttr",
+    "fn osf_parse(want: bool) -> OsfAttr?:",
+    "    if not want:",
+    "        return nil",
+    "    OsfAttr(is_c: true, name: \"nm\")",
+    "fn build(want: bool) -> OsfHolder:",
+    "    val parsed: OsfAttr? = osf_parse(want)",
+    "    OsfHolder(id: 1, attr: parsed)",
+    "fn build_plain() -> OsfHolder:",
+    "    OsfHolder(id: 1, attr: OsfAttr(is_c: false, name: \"x\"))"
+])
+
+describe "MIR: optional record into non-optional field":
+    it "unwraps the Option box before the aggregate":
+        val insts = lower_insts(SRC, ".build")
+        expect(count_containing(insts, "ERROR")).to_equal(0)
+        expect(count_containing(insts, "rt_unwrap_or_self")).to_equal(1)
+    it "leaves a plain record operand alone":
+        val insts = lower_insts(SRC, ".build_plain")
+        expect(count_containing(insts, "rt_unwrap_or_self")).to_equal(0)
