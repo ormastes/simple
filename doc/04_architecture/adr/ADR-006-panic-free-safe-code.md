@@ -20,7 +20,7 @@ Evidence baseline: `97700b29e10`.
 | SAF-03 | No mandatory `requires`. Safety is inferred from code, types, flow and verified dependencies. Optional contracts stay for documentation and domain rules. |
 | SAF-04 | Warn now, error later. The warning phase does **not** confer the guarantee. |
 | SAF-05 | Unknown analysis, unknown callee effects, stale evidence or an unsupported backend never count as proof. Strict builds fail closed. |
-| ERR-01 | `nil` is the only canonical absence literal of `T?`. There is no competing `none`/`None` absence literal. `notinit<T>` is separate. `Result<T, E>` carries informative errors. No silent optional-to-value conversion. `??` is a lazy fallback; `?` distinguishes optional from `Result` propagation. |
+| ERR-01 | **Superseded 2026-11-09:** `None` is the absence value of `T?` in safe compiled code; `nil` is allowed only inside `unsafe:` and interpreted scripts. Handle `T?` via `None`, `.?`, `??`, `if val`, or match. `notinit<T>` is separate. `Result<T, E>` carries informative errors. No silent optional-to-value conversion. `??` is a lazy fallback; `?` distinguishes optional from `Result` propagation. |
 | PERF-01 | Cheap analysis on the ordinary path (no heavyweight solver). Remove a check only when it is proven; keep the minimum check for a fallible op. |
 | MIG-01 | Refactoring tools rewrite real source to the new API. No permanent compatibility wrapper or alias layer. |
 | MIG-02 | The collection/CUDA lane owns collection implementations. This ADR supplies the contract and migration tooling only. |
@@ -138,8 +138,8 @@ Compiler-emitted `rt_panic` sites (MIR): `mir_data.spl:1385,1403`,
 
 ## Nil and optional contract (section 5)
 
-- `nil` is the only absence literal of `T?` (ERR-01). Fix-its spell absence
-  `nil`, never `None`.
+- Absence of `T?` in safe code is `None` (ERR-01, superseded 2026-11-09); `nil` only in `unsafe:`. Fix-its spell absence
+  `None`, never `nil`.
 - A total `get(i) -> T?` that always returns `nil` is accepted.
 - There is no implicit `T?` to `T` conversion. The ways out are `??` (lazy
   fallback), `if val v = x`, `match`, and `?` propagation.

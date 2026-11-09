@@ -16,7 +16,7 @@ alwaysApply: false
 - **NO inheritance** - `class Child(Parent)` is NOT supported. Use composition, alias forwarding, traits, or mixins instead
 - **SDN format** for all config/data files, not JSON/YAML
 - **Error handling:** Use `Result<T, E>` + `?` operator (no try/catch/throw keywords — by design)
-- **nil only inside `unsafe:`** - use `Option`/`None` elsewhere; match arms are `None:`, never `nil:`
+- **nil only inside `unsafe:` (and interpreted scripts)** - safe compiled code handles `T?` only via `None`, `.?`, `??`, `if val`, or match; match arms are `None:`, never `nil:`
 - **No `Any` / erased access outside `unsafe:`** - it is a compile error
 - **Generics are erased** - there is no monomorphization pass
 - **Exhaustive match (staged):** a non-exhaustive value match is a WARNING now and becomes an ERROR after phase 3

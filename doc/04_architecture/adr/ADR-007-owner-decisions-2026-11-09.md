@@ -10,7 +10,7 @@
 | `{x}` interpolates; `{{` and `}}` are literal braces (seed and self-hosted parity) | interp_brace_literal_collides_with_string_interpolation_2026-07-03 |
 | Implement the `s{...}` set literal in both parsers | set_literal_s_brace_unparsed_2026-09-06 |
 | Implement `| Pat -> expr` match arms | readme_arrow_match_arm_syntax_does_not_parse_2026-09-19 |
-| Seed treats `.? == true/false` nil-safe, matching pure Simple | seed_optional_query_comparison_divergence_2026-08-16 |
+| Seed treats `.? == true/false` None-safe, matching pure Simple | seed_optional_query_comparison_divergence_2026-08-16 |
 | No `rt_enum_discriminant` exception; route via the owner module | value_access_ownership_spec_never_executes_2026-09-18 |
 | Ambiguous co-compiled duplicates are a compile error (qualify), then rename real clashes | jit_co_compiled_definition_ambiguity_debt_2026-09-15 |
 
