@@ -16,6 +16,10 @@ int8_t rt_array_push(SplArray* array, int64_t value) {
 }
 int64_t rt_array_len(SplArray* array) { return array ? array->len : -1; }
 int64_t rt_array_get(SplArray* array, int64_t index) { return array->items[index].as_int; }
+int8_t rt_array_set(SplArray* array, int64_t index, int64_t value) {
+    if (!array || index < 0 || index >= array->len) return 0;
+    array->items[index].as_int = value; return 1;
+}
 int64_t rt_string_new(const uint8_t* data, uint64_t len) { (void)data; (void)len; return 7; }
 void* rt_alloc(int64_t size) { return calloc(1, (size_t)size); }
 void rt_free(void* ptr) { free(ptr); }
@@ -41,13 +45,28 @@ int64_t rt_tuple_get(int64_t tuple, int64_t idx) { return rt_array_get((SplArray
  * 2026-09-13 `_WIN32` selects a real CreateProcess+job-object branch, so
  * defining it here would (a) pull in <windows.h> and fail to compile on Linux,
  * and (b) test the Windows capsule under a name that claims to test the
- * fallback. Undefining BOTH guard macros is host-independent and says exactly
- * which branch is under test. */
+ * fallback. Undefining all platform-owner guards is host-independent and
+ * also keeps the Linux cgroup/Darwin snapshot owner out of this unavailable
+ * provider fixture. The real Linux and Win32 providers have separate checks. */
 #undef _WIN32
 #undef __unix__
+#undef __linux__
+#undef __APPLE__
 #include "../runtime_process_owned.c"
 
 int main(void) {
+    /* The Linux-only capacity ABI must remain link-complete and explicitly
+     * unavailable on other providers. Never report zero capacity as success. */
+    SplArray* capacity = rt_linux_group_available_capacity_v1("/tmp", 4);
+    assert(capacity && rt_array_len(capacity) == 3);
+    assert(rt_array_get(capacity, 0) == ENOTSUP);
+    assert(rt_array_get(capacity, 1) == 0 && rt_array_get(capacity, 2) == 0);
+    rt_array_free(capacity);
+    capacity = rt_linux_group_available_capacity_v1(NULL, UINT64_MAX);
+    assert(capacity && rt_array_len(capacity) == 3);
+    assert(rt_array_get(capacity, 0) == ENOTSUP);
+    assert(rt_array_get(capacity, 1) == 0 && rt_array_get(capacity, 2) == 0);
+    rt_array_free(capacity);
     RtOwnedProcessTokenV2 token;
     RtOwnedProcessStartReceiptV2 start;
     const char* argv[] = {"never-spawned", NULL};

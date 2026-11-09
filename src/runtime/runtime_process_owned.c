@@ -6673,6 +6673,10 @@ static SplArray* group_stream_unavailable_v2(int count) {
     }
     return values;
 }
+SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len) {
+    (void)path; (void)path_len;
+    return group_stream_unavailable_v2(3);
+}
 int64_t rt_linux_group_stream_admit_profiled_v3(const char*d,int64_t dn,const char*b,int64_t bn,
         const char*p,int64_t pn,SplArray*w) {
     (void)d;(void)dn;(void)b;(void)bn;(void)p;(void)pn;(void)w;return ENOTSUP;

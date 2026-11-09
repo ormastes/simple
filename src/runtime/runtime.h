@@ -1552,8 +1552,11 @@ SplArray* rt_linux_group_start_v1(const char* program, uint64_t program_len,
 SplArray* rt_linux_group_poll_v1(int64_t token);
 int64_t rt_linux_group_cancel_v1(int64_t token);
 SplArray* rt_linux_group_collect_v1(int64_t token);
-SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
 #endif
+
+/* Capacity query returns [error, available_memory_bytes, available_disk_bytes].
+ * It remains link-complete on unsupported providers as [ENOTSUP, 0, 0]. */
+SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
 
 /* ===== Process Piped (editor LSP transport) ===== */
 
