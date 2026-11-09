@@ -42,6 +42,18 @@ fn main() {
         println!("cargo:rustc-env=SIMPLE_VERSION={}", file_version);
     }
 
+    // Record the commit the seed was built from so AOT gates can check freshness.
+    println!("cargo:rerun-if-changed={}", project_root.join(".git/HEAD").display());
+    let commit = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    println!("cargo:rustc-env=SIMPLE_BUILD_COMMIT={}", commit);
+
     // Generate tests for stdlib
     let stdlib_test_root = project_root.join("test/unit/lib/std");
     let stdlib_dest = Path::new(&out_dir).join("simple_stdlib_tests.rs");
