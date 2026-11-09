@@ -2,7 +2,7 @@
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_support.{MirBinOp, MirOperand, MirOperandKind}
 use compiler.mir.mir_instruction_graph.{MirInst}
-use compiler.mir.mir_types.{MirConstValue, MirTypeKind}
+use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind}
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use std.io_runtime.{env_get_nullable}
 use compiler.semantics.match_exhaustiveness.{match_coverage_profile_is_critical}
@@ -195,6 +195,34 @@ fn hir_expr_static_unsigned(e: HirExpr) -> bool:
             not signed
         case _:
             false
+
+fn mir_narrow_unsigned_integer_common_type(left: MirType, right: MirType) -> MirType?:
+    # Every narrow unsigned value fits in i64, as does every signed integer
+    # type here. Promote without truncating the other operand. U64 is kept
+    # unsigned only when the other operand is proven narrow unsigned too.
+    var left_narrow_unsigned = false
+    var right_narrow_unsigned = false
+    var left_integer = false
+    var right_integer = false
+    match left.kind:
+        case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
+            left_narrow_unsigned = true
+            left_integer = true
+        case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U64:
+            left_integer = true
+        case _: ()
+    match right.kind:
+        case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
+            right_narrow_unsigned = true
+            right_integer = true
+        case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U64:
+            right_integer = true
+        case _: ()
+    if not left_integer or not right_integer: return nil
+    if not left_narrow_unsigned and not right_narrow_unsigned: return nil
+    if left.kind == MirTypeKind.U64 or right.kind == MirTypeKind.U64:
+        return Some(MirType(kind: MirTypeKind.U64))
+    Some(MirType.i64())
 
 fn hir_type_has_unresolved_type_param(ty: HirType) -> bool:
     """True when `ty` still carries a bare, uninstantiated `TypeParam`
@@ -3277,6 +3305,22 @@ impl MirLowering:
         self.builder = b
         result
 
+    me widen_unsigned_word_operand(local: LocalId, target: MirType) -> LocalId:
+        # Direct numeric producers (matches and range bounds) bypass Binary.
+        # Only proven narrow unsigned locals widen into an existing word slot.
+        match target.kind:
+            case MirTypeKind.I64 | MirTypeKind.U64: ()
+            case _: return local
+        if val source = self.local_mir_type_of(local):
+            match source.kind:
+                case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
+                    var builder = self.builder
+                    val widened = builder.emit_cast(mir_operand_copy(local), target)
+                    self.builder = builder
+                    return widened
+                case _: ()
+        local
+
     me emit_bounds_check_for_index(base_type: HirType?, base_local: LocalId, index_local: LocalId):
         """Emit an explicit bounds_check intrinsic before MIR indexed access."""
         # NOTE: avoid Option.unwrap() here -- the seed interpreter mishandles
@@ -4794,8 +4838,8 @@ impl MirLowering:
         # A qualified enum variant on the RHS of `is` names a PATTERN, not a
         # value to construct.  Lowering `E.A` through the ordinary Field path
         # allocates a fresh enum object, after which the generic `Is` fallback
-        # compares the wrong representation (and currently maps the otherwise
-        # unsupported operator to MirBinOp.Add).  Resolve the declaration and
+        # compares enum handles rather than the pattern discriminant.
+        # Resolve the declaration and
         # variant before lowering the RHS, then perform the same typed runtime
         # identity + discriminant test used by qualified enum matches.
         if op == HirBinOp.Is:
@@ -5733,8 +5777,11 @@ impl MirLowering:
                 var right_narrow_int = false
                 var left_binop_type = MirType.i64()
                 var right_binop_type = MirType.i64()
+                var left_binop_type_known = false
+                var right_binop_type_known = false
                 if val left_type = self.local_mir_type_of(left_local):
                     left_binop_type = left_type
+                    left_binop_type_known = true
                     match left_type.kind:
                         case MirTypeKind.F32: left_f32 = true
                         case MirTypeKind.F64: left_f64 = true
@@ -5743,11 +5790,28 @@ impl MirLowering:
                         case _: ()
                 if val right_type = self.local_mir_type_of(right_local):
                     right_binop_type = right_type
+                    right_binop_type_known = true
                     match right_type.kind:
                         case MirTypeKind.F32: right_f32 = true
                         case MirTypeKind.F64: right_f64 = true
                         case MirTypeKind.I64 | MirTypeKind.U64: right_i64 = true
                         case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: right_narrow_int = true
+                        case _: ()
+                # Same-width unsigned + - * wraps at the operand width.
+                # Preserve that width in MIR before either native backend
+                # widens operands to the destination. Other result inference
+                # is retained; mixed integer consumers are promoted below.
+                # Bug: interp_uint_mixed_int_arith_diverges_from_jit_2026-11-06
+                var same_unsigned_arithmetic = false
+                if self.current_gpu_kernel_target == "":
+                    match op:
+                        case Add | Sub | Mul:
+                            match left_binop_type.kind:
+                                case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
+                                    if left_binop_type.kind == right_binop_type.kind:
+                                        result_type = left_binop_type
+                                        same_unsigned_arithmetic = true
+                                case _: ()
                         case _: ()
                 var result_f64 = false
                 match result_type.kind:
@@ -5824,7 +5888,19 @@ impl MirLowering:
                         if right_int_unsigned:
                             right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType(kind: MirTypeKind.U64))
                         right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType.f64())
-                if comparison and left_narrow_int and right_i64:
+                val integer_numeric_op = match op:
+                    case Add | Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | Shl | Shr | Eq | NotEq | Is | IsNot | Lt | LtEq | Gt | GtEq: true
+                    case _: false
+                val integer_common_type = if integer_numeric_op and left_binop_type_known and right_binop_type_known and not same_unsigned_arithmetic and self.current_gpu_kernel_target == "" and not self.is_runtime_value_local(left_binop.id) and not self.is_runtime_value_local(right_binop.id):
+                    mir_narrow_unsigned_integer_common_type(left_binop_type, right_binop_type)
+                else: nil
+                if val widened_integer_type = integer_common_type:
+                    # Preserve negative signed operands and out-of-range bounds
+                    # in every consumer, including division/remainder and
+                    # comparisons; never truncate the signed peer to u8.
+                    left_binop = b.emit_cast(mir_operand_copy(left_binop), widened_integer_type)
+                    right_binop = b.emit_cast(mir_operand_copy(right_binop), widened_integer_type)
+                elif comparison and left_narrow_int and right_i64:
                     right_binop = b.emit_cast(mir_operand_copy(right_binop), left_binop_type)
                 elif comparison and left_i64 and right_narrow_int:
                     left_binop = b.emit_cast(mir_operand_copy(left_binop), right_binop_type)

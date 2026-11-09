@@ -1,0 +1,62 @@
+# bug: phase2_runner_empty_limit_classification_2026_10_28
+# Real frontend/MIR and cleanup-edge probes; compiled execution pending.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir.mir_lowering_stmts.*
+fn tuple_result_function(source: text, target: text) -> (MirFunction, text, bool):
+    val parsed = parse_full_frontend(source, "tuple_result.spl", "tuple_result", Logger(level: 0))
+    var frontend = HirLowering.with_filename("tuple_result.spl")
+    val hir = frontend.lower_module(parsed)
+    expect(frontend.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors = ""
+    var fatal = false
+    for error in lowering.errors:
+        errors = errors + error.message + "\n"
+        fatal = fatal or error.fatal
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with(".{target}"):
+            return (function, errors, fatal)
+    panic("missing actual MIR function {target}: {errors}")
+
+fn record_text_tuple_types(function: MirFunction) -> [text]:
+    var out: [text] = []
+    for local in function.locals:
+        match local.type_.kind:
+            case MirTypeKind.Tuple(items):
+                if items.len() == 2:
+                    out.push("{items[0].kind}|{items[1].kind}")
+            case MirTypeKind.Ptr(pointee, _):
+                match pointee.kind:
+                    case MirTypeKind.Tuple(items):
+                        if items.len() == 2:
+                            out.push("{items[0].kind}|{items[1].kind}")
+                    case _: ()
+            case _: ()
+    out
+
+val RECORD_TEXT_SOURCE = "struct Run:\n    code: i64\n    limit: text\nfn make() -> Result<(Run, text), text>:\n    Ok((Run(code: 0, limit: \"\"), \"path\"))\nfn choose() -> i64:\n    match make():\n        case Err(_): -1\n        case Ok((run, path)): run.code\n"
+
+describe "Result<(Record, text), text> producer/consumer text slot", tag: ["only-compiled"]:
+    it "constructs and match-destructures the tuple with the same text representation":
+        val (producer, perr, pfatal) = tuple_result_function(RECORD_TEXT_SOURCE, "make")
+        val (consumer, cerr, cfatal) = tuple_result_function(RECORD_TEXT_SOURCE, "choose")
+        expect(perr + cerr).to_equal("")
+        expect(pfatal or cfatal).to_be(false)
+        val produced = record_text_tuple_types(producer)
+        val consumed = record_text_tuple_types(consumer)
+        expect(produced.len()).to_be_greater_than(0)
+        expect(consumed.len()).to_be_greater_than(0)
+        for shape in consumed:
+            expect(shape).to_equal(produced[0])
+        expect(produced[0].ends_with("Opaque(str)")).to_be(true)

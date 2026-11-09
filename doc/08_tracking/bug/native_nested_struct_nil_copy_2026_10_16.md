@@ -37,3 +37,6 @@ Status: open. workaround in place; native repro fixture added; real producer fix
 
 ## Bootstrap repro/prevention 2026-11-05
 Bootstrap review: fixture test/04_smoke/nested_record_nil_copy_native.spl exists; workaround in place; verification-pending on a stage3 native run. No new change.
+
+## Opus rerun 2026-11-09
+The producer copy guard is implemented in source by dd6c7902c4d (`copy_struct_value_recursive` in mir_lowering_stmts.spl tests address != 0 AND != canonical nil word before any field read), pinned by `test/01_unit/compiler/mir/record_copy_absence_spec.spl` (null and nil word both route to structcopy_merge). The baked 0CD6 producer predates it. Status fix-implemented-verification-pending; MirBuilder workaround may be retired after a native stage3 run of test/04_smoke/nested_record_nil_copy_native.spl.

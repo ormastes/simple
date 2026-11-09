@@ -1,11 +1,17 @@
 #!/bin/sh
 # Exercise the real scheduler, artifact gate and terminal verdict without builds.
-set -eu
+#
+# Verdict convention (repo guard standard):
+#   PASS — <what was checked>                        (exit 0)
+#   FAIL — <what broke>                              (exit 1)
+#   ERROR — nothing was checked (<reason>)           (exit 2)
+set -u
 SIMPLE_COMPILE_FAIL_FAST=0
 export SIMPLE_COMPILE_FAIL_FAST
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 runner=${1:-$root/scripts/bootstrap/bootstrap-phase-verification.shs}
-scratch=$(mktemp -d)
+[ -f "$runner" ] || { echo "ERROR — nothing was checked (runner $runner missing)"; exit 2; }
+scratch=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 for helper in matrix_should_skip record_skipped_task run_matrix_task; do
   sed -n "/^$helper() {$/,/^}$/p" "$runner" >>"$scratch/scheduler.shs"
@@ -14,9 +20,9 @@ sed -n '/^[[:space:]]*for tool in simple_mcp_server simple_lsp_mcp_server; do$/,
   "$runner" >"$scratch/tool-help.shs"
 sed -n '/^summary_read_status=0$/,$p' "$runner" >"$scratch/verdict.shs"
 for part in scheduler tool-help verdict; do
-  [ -s "$scratch/$part.shs" ] || { echo "FAIL: missing runner section $part"; exit 1; }
+  [ -s "$scratch/$part.shs" ] || { echo "FAIL — runner section $part missing or empty (runner shape changed)"; exit 1; }
 done
-die() { echo "FAIL: $*" >&2; exit 1; }
+die() { echo "FAIL — $*"; exit 1; }
 run_task() {
   probe_task=$1
   shift
@@ -64,4 +70,5 @@ for strategy in normal full; do
   ( . "$scratch/verdict.shs" ) || verdict_status=$?
   [ "$verdict_status" -eq 1 ] || die 'failure latch was ignored'
 done
-echo 'PASS: normal/full collect independent failures, enforce prerequisites and retain aggregate failure'
+echo 'PASS — 2 strategy fixture(s) checked (normal, full): independent failures collected, prerequisites enforced, aggregate failure retained'
+exit 0

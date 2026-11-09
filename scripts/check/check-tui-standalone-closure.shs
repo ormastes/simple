@@ -1,8 +1,17 @@
 #!/bin/sh
-set -eu
+# TUI standalone import-closure gate: src/app/ui/build.spl must route tui
+# generation through the narrow app.ui.tui.screen lane, and the standalone TUI
+# roots must not import hosted/web UI modules.
+#
+# Verdict convention (repo guard standard):
+#   PASS — 6 closure check(s) checked ...        (exit 0)
+#   FAIL — <what broke>                          (exit 1)
+#   ERROR — nothing was checked (<reason>)       (exit 2)
+set -u
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-cd "$ROOT_DIR"
+cd "$ROOT_DIR" || { echo "ERROR — nothing was checked (cannot cd to $ROOT_DIR)"; exit 2; }
+command -v rg >/dev/null 2>&1 || { echo "ERROR — nothing was checked (rg not found)"; exit 2; }
 
 TUI_ROOTS="
 src/app/ui.tui/app.spl
@@ -13,32 +22,45 @@ src/app/ui.tui/standalone.spl
 
 BANNED_PATTERNS='app\.ui\.render\.widgets|app\.ui\.render\.html_widgets|app\.ui\.web|app\.ui\.tauri|app\.ui\.electron|app\.ui\.browser|app\.ui\/main|app\.ui\.main|app\.ui\.cli_entry'
 
+[ -f src/app/ui/build.spl ] || { echo "ERROR — nothing was checked (src/app/ui/build.spl missing)"; exit 2; }
+for file in $TUI_ROOTS; do
+    [ -f "$file" ] || { echo "ERROR — nothing was checked (TUI root $file missing)"; exit 2; }
+done
+
+hits_file="$(mktemp)" || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -f "$hits_file"' EXIT INT TERM
+
+checked=0
+
 echo "tui_standalone_closure_check=true"
 
 if ! rg -Fq 'use app.ui.tui.screen.{{ansi_enable_alt_screen, ansi_disable_alt_screen, ansi_hide_cursor, ansi_show_cursor}}' src/app/ui/build.spl; then
     echo "generated_tui_lane=false"
-    echo "error=src/app/ui/build.spl does not route tui generation through the narrow app.ui.tui.screen lane"
+    echo "FAIL — src/app/ui/build.spl does not route tui generation through the narrow app.ui.tui.screen lane"
     exit 1
 fi
+checked=$((checked + 1))
 echo "generated_tui_lane=true"
 
 if rg -q -- '--runtime-bundle (rust-hosted|hosted)' src/app/ui/build.spl; then
     echo "standalone_runtime_lane_ok=false"
-    echo "error=src/app/ui/build.spl routes standalone tui through a hosted runtime lane"
+    echo "FAIL — src/app/ui/build.spl routes standalone tui through a hosted runtime lane"
     exit 1
 fi
+checked=$((checked + 1))
 echo "standalone_runtime_lane_ok=true"
 
 for file in $TUI_ROOTS; do
-    if rg -n "$BANNED_PATTERNS" "$file" >/tmp/tui_closure_hits.$$ 2>/dev/null; then
+    if rg -n "$BANNED_PATTERNS" "$file" >"$hits_file" 2>/dev/null; then
         echo "standalone_lane_clean=false"
-        echo "error=banned_import_in:$file"
-        cat /tmp/tui_closure_hits.$$
-        rm -f /tmp/tui_closure_hits.$$
+        cat "$hits_file"
+        echo "FAIL — banned import in $file (see hits above)"
         exit 1
     fi
+    checked=$((checked + 1))
 done
-rm -f /tmp/tui_closure_hits.$$ 2>/dev/null || true
-
 echo "standalone_lane_clean=true"
+
 echo "checked_files=$(printf '%s' "$TUI_ROOTS" | tr '\n' ' ' | xargs)"
+echo "PASS — $checked closure check(s) checked (2 build.spl lane checks + 4 standalone TUI roots, no banned import)"
+exit 0
