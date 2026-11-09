@@ -74,3 +74,45 @@ pinned. Note that gate is currently reported BLIND (`ERROR — nothing was
 checked`) on a stale seed, so the fixture will not produce a verdict until a
 redeploy — record the failing-first observation in the fixture header meanwhile.
 
+
+
+## 2026-11-09 — FIXED on work/p3-subj4-seed-20261109 (fresh cargo build of release/1.0.0 source, aarch64)
+
+Reproduced RED on a seed built from current `origin/release/1.0.0` source
+(the deployed Nov 5 binary shows the same symptoms, so the defect was live in
+source, not just a stale artifact):
+
+- JIT: `for ch in "hello": print(ch.to_i32())` -> `0 0 0 0 0`;
+  `print("5".to_i32())` -> `<value:0x5>`; `print("42".to_i32())` -> the f64
+  denormal of bit pattern 42 (~300 digits).
+- Interpreter (same binary): `104 101 108 108 111`, `5`, `42`.
+
+Root cause, two independent defects:
+
+1. **Mis-tagged print**: the HIR string-receiver result-type table
+   (`src/compiler_rust/compiler/src/hir/lower/expr/mod.rs`) typed
+   `to_int`/`to_i64` as `I64` but omitted `to_i8`/`to_i16`/`to_i32`. Those
+   calls fell through to ANY-typed generic dynamic dispatch, so MIR
+   print-lowering emitted no `BoxInt` and the raw narrowed word reached
+   `rt_println_value`, which decoded it by bit pattern. Arithmetic on the
+   same value was always correct — only the tag was missing.
+2. **Char codepoints**: `rt_string_to_int`
+   (`src/compiler_rust/runtime/src/value/collections.rs`) lacked the
+   single-character CODEPOINT fallback the interpreter arm received in
+   8d100a8aa81, so every non-digit character folded 0 under the default JIT
+   lane.
+
+Fix: added the three i-family entries to the HIR table; added the codepoint
+fallback (parse first; on failure a single character yields its codepoint;
+multi-character non-numeric still yields 0, exactly like the interpreter).
+
+GREEN evidence (same probe, fresh-built seed, JIT lane):
+`104 101 108 108 111 / 5 / 42` — byte-identical to the interpreter.
+Cargo pins: `simple-runtime string_to_int_single_char_fallback_tests` (2),
+`simple-compiler string_receiver_to_i32_family_result_is_typed_not_any` (1);
+40-test `semantic` slice and 5-test `to_int` slice pass.
+
+Known residual (separate lane, NOT fixed here): the C-runtime twin
+`rt_string_to_int` in `src/runtime/runtime_native.c` (strtoll-lenient) still
+lacks the codepoint fallback, and the interpreter rejects `to_u*` on strings
+while the JIT silently mis-computes them — both out of this row's scope.

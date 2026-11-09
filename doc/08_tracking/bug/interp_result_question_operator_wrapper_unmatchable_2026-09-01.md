@@ -49,3 +49,19 @@ The interpreter's `?` must unwrap `Ok` and early-return `Err` when the result
 of `?` is immediately method-called and returned as the function's tail
 expression. Once fixed, `hwir_host_evaluator_spec` should return 9/9 with no
 spec edit.
+
+
+## 2026-11-09 — DOCUMENTED + pinned (work/p3-subj4-seed-20261109)
+
+Root cause is lexical, not a `?`-lowering defect: `f()?.m()` lexes as the
+SAFE-NAVIGATION operator `?.` (Err/None -> nil), so a Result-returning
+one-line wrapper written that way returns nil, which matches neither Ok nor
+Err at the caller. The try-then-call form is `(f()?).m()`: Ok unwraps and
+Err early-returns through the method receiver.
+
+Pinned by `test/01_unit/compiler/95.interp/interpreter/result_try_receiver_prevention_spec.spl`
+(commit a0486f1b7e8, in release/1.0.0). Verified on the deployed seed under
+`SIMPLE_EXECUTION_MODE=interpreter`: 4/4 GREEN. Manually re-verified both
+shapes: unparenthesised `prep(h)?.get()` returns nil and falls through both
+match arms; parenthesised `(prep(h)?).get()` returns the payload. Status
+open -> documented.

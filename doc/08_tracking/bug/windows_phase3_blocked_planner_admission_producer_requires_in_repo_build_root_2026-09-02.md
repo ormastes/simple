@@ -159,3 +159,35 @@ independent, pre-existing, **not** fixed here.
 Until then, **Windows Phase 3 cannot be attempted honestly.** No Stage 3
 receipt exists and none is claimed.
 
+
+## Re-verification 2026-11-09 (p3-subj6 lane, worktree of origin/release/1.0.0)
+
+Both unblock conditions have landed on this branch:
+
+1. **Private-lane producer mode (preferred fix).**
+   `scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs` now binds the
+   admission-chain residency check to the *declared* `--bootstrap-output`
+   (`case "$admission_file" in "$adm_bootstrap_output"/* ...`, line 180) instead
+   of the literal `<repo>/build/bootstrap`; the flag is first-class with default
+   `$adm_root/build/bootstrap` (lines 91-129) and a `SIMPLE_BOOTSTRAP_BUILD_ROOT`
+   env override. External outputs outside the repo are handled by an explicit
+   allowlist (positive AND negative fixtures in the gate).
+2. **Windows-aware resume lane.** `scripts/bootstrap/resume-stage3-from-admitted.sh`
+   now carries `exe_suffix` (`.exe` for `*-pc-windows-msvc` / `*-pc-windows-gnu`),
+   MSVC `.lib` archive names, and windows abi/cc/include/lib env plumbing
+   (lines 120-141, 526).
+
+The pre-existing gate failure recorded here ("could not create fixture Stage-2
+admission", fixture field-set drift) is also fixed on this branch.
+
+Executed evidence:
+
+- `sh scripts/check/check-bootstrap-planner-admission-producer.shs`
+  -> `PASS — 19 fixture(s) checked` (covers entry-closure pinning, the
+  sibling-output refusal `parent-stage2-admission-outside-bootstrap-output`,
+  and the allowlisted external-output acceptance path).
+- Source inspection of the two rebind sites above.
+
+Not executed here: an actual Windows MSVC Phase-3 run (no Windows host, no
+native builds in this lane); per-lane receipt production on `D:` remains to be
+exercised by the Windows lane owner with the admitted `4a8dd3eb…` parent.
