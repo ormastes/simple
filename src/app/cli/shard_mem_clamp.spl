@@ -378,15 +378,37 @@ pub fn shard_commit_live_footprint_v1(base_headroom_kib: i64, now_headroom_kib: 
 pub fn shard_commit_estimate_kib_v1(static_kib: i64, observed_peak_kib: i64) -> i64:
     if observed_peak_kib > static_kib: observed_peak_kib else: static_kib
 
+# Stage3 attempt 1 (2026-11-09): a 26 GiB per-worker default, doubled to
+# 52 GiB while unmeasured, exceeded the ~24 GB budget left after the reserve,
+# so the planner priced zero workers. An estimate is only an admission price:
+# clamp it to the known budget (headroom - reserve) so one worker always fits;
+# the live commit admission still gates every further spawn. Unknown or
+# non-positive budget leaves the estimate unchanged (a reserve-exhausted host
+# is refused by the build start guard, not here).
+pub fn shard_worker_estimate_clamped_kib_v1(est_kib: i64, budget_kib: i64) -> i64:
+    if budget_kib > 0 and est_kib > budget_kib: budget_kib else: est_kib
+
+# A MIR shard pass with no module verdict used to fall back SILENTLY to an
+# unsharded in-process lowering, which grew past 10.6 GB and was killed by the
+# commit guard (stage3 attempt 1). Bounded policy: retry once with a single
+# worker; after that refuse, unless SIMPLE_MIR_SHARD_INPROCESS_FALLBACK=1.
+pub fn native_mir_shard_fallback_action_v1(parallel: i64, retried: bool, inprocess_opt_in: bool) -> text:
+    if not retried and parallel > 1: return "retry-serial"
+    if inprocess_opt_in: "inprocess" else: "refuse"
+
 # 2026-10-27 phase 3 (stage2 6b0ba5f3): with no recorded peak the pool priced
 # 8 HIR workers at the static 6 GB and admitted all of them at warmup (live
 # footprint 0), they each grew to ~11 GB commit, the host commit limit ran out
 # and every worker died in Rust's alloc-error abort. Until a peak is measured
 # for this producer, price a worker at twice the static estimate; an explicit
 # SIMPLE_*_SHARD_WORKER_KB override (override_kib > 0) is honored as-is.
+# Once a peak IS recorded for this producer it, not the static default, prices
+# the worker (2026-11-09: a 26 GiB static default refused workers whose
+# measured peak was 3.4-7.4 GB; build_tr.log mir-shard peak 7364284 kB).
+# Live observation still raises the estimate during the run.
 pub fn shard_commit_unmeasured_estimate_kib_v1(static_kib: i64, recorded_peak_kib: i64, override_kib: i64 = 0) -> i64:
     if override_kib > 0: return shard_commit_estimate_kib_v1(override_kib, recorded_peak_kib)
-    if recorded_peak_kib > 0: shard_commit_estimate_kib_v1(static_kib, recorded_peak_kib) else: static_kib * 2
+    if recorded_peak_kib > 0: shard_measured_estimate_kib_v1(recorded_peak_kib) else: static_kib * 2
 
 # 0xC0000409 (-1073740791 / 3221226505) is the Windows fast-fail that Rust's
 # `handle_alloc_error` abort raises after "memory allocation of N bytes failed",
@@ -728,3 +750,10 @@ pub fn build_memory_start_refusal_v1(available_kib: i64, reserve_kib: i64) -> te
     "error: build refused: {available_kib / 1024} MiB of RAM/commit headroom free, below the " +
         "{reserve_kib / 1024} MiB reserve (SIMPLE_BUILD_MEMORY_RESERVE_BYTES); wait for other builds " +
         "to finish or lower the reserve"
+
+# Measured peak + 25% margin, floored at 1 GiB so a near-empty record cannot
+# price a worker at nothing.
+pub const SHARD_MEASURED_FLOOR_KB_V1: i64 = 1048576
+pub fn shard_measured_estimate_kib_v1(recorded_peak_kib: i64) -> i64:
+    val est = recorded_peak_kib + recorded_peak_kib / 4
+    if est > SHARD_MEASURED_FLOOR_KB_V1: est else: SHARD_MEASURED_FLOOR_KB_V1

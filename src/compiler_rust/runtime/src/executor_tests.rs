@@ -854,3 +854,54 @@ fn test_pool_explicit_kind_stress_and_rejection() {
         crate::rt_pool_state_destroy_v1(state);
     }
 }
+
+// bug: seed_jit_spawned_thread_never_runs_join_segv_2026-11-09
+// A seed-JIT closure is a registered HeapObjectType::Closure (rt_closure_new)
+// passed as a TAG_HEAP RuntimeValue. Its word 0 is the HeapHeader, so treating
+// it as a native record called the header as code: body never ran, join SEGV'd.
+extern "C" fn boxed_add(closure: RuntimeValue, v1: RuntimeValue, v2: RuntimeValue) -> RuntimeValue {
+    assert_eq!(closure.heap_type(), Some(crate::value::HeapObjectType::Closure));
+    RuntimeValue::from_int(v1.as_int() + v2.as_int())
+}
+
+extern "C" fn boxed_double(closure: RuntimeValue, v: RuntimeValue) -> RuntimeValue {
+    assert_eq!(closure.heap_type(), Some(crate::value::HeapObjectType::Closure));
+    RuntimeValue::from_int(v.as_int() * 2)
+}
+
+#[test]
+fn test_isolated_thread_runs_runtime_heap_closure() {
+    let closure = crate::value::rt_closure_new(boxed_double as *const u8, 0);
+    let handle = rt_thread_spawn_isolated(closure.0, RuntimeValue::from_int(21));
+    assert!(handle != 0);
+    let result = rt_thread_join(handle);
+    assert!(result.is_int());
+    assert_eq!(result.as_int(), 42);
+    rt_thread_free(handle);
+}
+
+#[test]
+fn test_isolated_thread_with_args_runs_runtime_heap_closure() {
+    let closure = crate::value::rt_closure_new(boxed_add as *const u8, 0);
+    let handle =
+        rt_thread_spawn_isolated_with_args(closure.0, RuntimeValue::from_int(3), RuntimeValue::from_int(4));
+    assert!(handle != 0);
+    let result = rt_thread_join(handle);
+    assert!(result.is_int());
+    assert_eq!(result.as_int(), 7);
+    rt_thread_free(handle);
+}
+
+#[test]
+fn test_isolated_thread_runtime_heap_closure_stress() {
+    let closure = crate::value::rt_closure_new(boxed_add as *const u8, 0);
+    let handles: Vec<u64> = (0..64)
+        .map(|i| rt_thread_spawn_isolated_with_args(closure.0, RuntimeValue::from_int(i), RuntimeValue::from_int(i)))
+        .collect();
+    for (i, handle) in handles.into_iter().enumerate() {
+        assert!(handle != 0);
+        let result = rt_thread_join(handle);
+        assert_eq!(result.as_int(), 2 * i as i64);
+        rt_thread_free(handle);
+    }
+}

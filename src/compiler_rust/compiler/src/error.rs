@@ -479,6 +479,23 @@ impl std::fmt::Display for ContextualError {
     }
 }
 
+impl ContextualError {
+    /// Message prefixed with `file:line:col` when the error recorded a
+    /// position. Semantic errors raised during interpreted evaluation now
+    /// carry the enclosing statement's position (bug row:
+    /// seed_semantic_error_missing_position_2026-11-09); the self-hosted
+    /// compiler already reports `<file>:<line>:<col>: error: semantic: …`,
+    /// and this closes the seed-side diagnosability gap.
+    fn positioned_message(&self) -> String {
+        match (&self.context.file, self.context.span) {
+            (Some(file), Some(span)) => {
+                format!("{}:{}:{}: {}", file, span.line, span.column, self.message)
+            }
+            _ => self.message.clone(),
+        }
+    }
+}
+
 /// Compilation errors with optional rich context.
 #[derive(Error, Debug)]
 pub enum CompileError {
@@ -527,7 +544,7 @@ pub enum CompileError {
     IoWithContext(Box<ContextualError>),
     #[error("parse: {}", _0.message)]
     ParseWithContext(Box<ContextualError>),
-    #[error("semantic: {}", _0.message)]
+    #[error("semantic: {}", _0.positioned_message())]
     SemanticWithContext(Box<ContextualError>),
     #[error("codegen: {}", _0.message)]
     CodegenWithContext(Box<ContextualError>),
@@ -600,7 +617,21 @@ impl CompileError {
     }
 
     /// Create a semantic error with context.
-    pub fn semantic_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
+    ///
+    /// When the caller did not record a position, adopt the interpreter's
+    /// current statement span and file so the error still carries
+    /// `file:line:col` (bug row: seed_semantic_error_missing_position_2026-11-09).
+    /// Outside an interpreted evaluation both thread-locals are unset and
+    /// this is a no-op. Only fills gaps — an explicitly recorded span/file
+    /// always wins.
+    pub fn semantic_with_context(message: impl Into<String>, mut context: ErrorContext) -> Self {
+        if context.span.is_none() {
+            context.span = crate::interpreter::get_current_node_span();
+        }
+        if context.file.is_none() {
+            context.file = crate::interpreter::get_current_file()
+                .map(|path| path.display().to_string());
+        }
         Self::SemanticWithContext(Box::new(ContextualError {
             message: message.into(),
             context,

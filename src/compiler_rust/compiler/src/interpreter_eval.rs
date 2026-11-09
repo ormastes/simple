@@ -555,6 +555,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
     // First pass: register all functions, structs, enums, and classes
     // (needed for forward references — structs defined after describe blocks)
     for item in items {
+        super::interpreter_state::set_current_node_span(item.span().map(Into::into));
         match item {
             Node::Function(f) => {
                 // Never register an inactive `@cfg(<arch>)` variant: the
@@ -770,6 +771,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
 
     // Second pass: apply decorators and register other items
     for item in items {
+        super::interpreter_state::set_current_node_span(item.span().map(Into::into));
         match item {
             Node::Function(f) => {
                 // Skip inactive @cfg(<arch>) variants (mirrors the first

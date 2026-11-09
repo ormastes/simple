@@ -155,6 +155,44 @@ impl HirLowering:
             self.struct_field_order_by_name[self.module_filename + "." + name] = field_order
             self.struct_type_param_names_by_name[self.module_filename + "." + name] = type_param_names
 
+    me prescan_generic_class_method_returns(name: text, methods: Dict<text, ParserFunction>, type_params: [ParserTypeParam]):
+        """Record a generic class's instance-method DECLARED return types."""
+        # Bug generic_method_return_subst_2026_11_09: a generic owner's method
+        # symbols are registered untyped (declared_callable_type), so
+        # `b.poll()` on `b: Box<text?>` had no return type to substitute.
+        # Lower each return annotation in the class's generic scope (keys
+        # match struct_type_param_names_by_name) so the call site can
+        # instantiate `Poll<T>` from the receiver's arguments.
+        if type_params.len() == 0:
+            return
+        val saved_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
+        self.symbols.push_scope(ScopeKind.Class)
+        for tp in type_params:
+            val parameter = self.lower_type_param(tp)
+            self.prescan_type_parameters[parameter.symbol.id] = HirType(
+                kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
+                span: parameter.span)
+        # `-> Self` needs the owner, exactly as the impl-method declaration
+        # pass publishes it; saved and restored so nothing leaks.
+        val saved_self_type = self.current_method_self_type
+        val local_owner = self.symbols.lookup_qualified_type_raw(self.module_filename, name)
+        val owner_symbol = if local_owner >= 0: SymbolId(id: local_owner) else: self.symbols.lookup_or_invalid(name)
+        if owner_symbol.is_valid():
+            self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(owner_symbol, []), span: Span.empty()))
+        for method_name in methods.keys():
+            val method: ParserFunction = methods[method_name]
+            if method.is_static or method.type_params.len() > 0 or not method.has_return_type:
+                continue
+            val declared_return: Type = method.return_type
+            val lowered = self.lower_type(declared_return)
+            self.class_method_return_types_by_name[name + "::" + method_name] = lowered
+            if self.module_filename != "":
+                self.class_method_return_types_by_name[self.module_filename + "." + name + "::" + method_name] = lowered
+        self.current_method_self_type = saved_self_type
+        self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_parameters
+
     # Nested-field-access support (native --entry path bug, see
     # struct_field_types_by_name doc comment in types.spl): record this
     # struct's field NAME -> declared HirType, purely from the static
