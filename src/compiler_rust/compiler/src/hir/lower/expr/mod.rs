@@ -2160,7 +2160,26 @@ impl Lowerer {
                 // ANY-typed and already behaved correctly — that working twin
                 // is the template this follows rather than a new invention.
                 // See doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+                // `to_i8`/`to_i16`/`to_i32` are the SAME string-parse family as
+                // `to_int`/`to_i64` (interpreter_method/string.rs matches
+                // `"to_int" | "to_i64" | "to_i32" | "to_i16" | "to_i8"` in one
+                // arm, and codegen routes the STRING receiver to
+                // `rt_string_to_int` for every width). Omitting them here is
+                // the identical gap class as the `parse_int` comment above:
+                // the call fell through to generic dynamic dispatch typed
+                // `TypeId::ANY`, so MIR print-lowering emitted no BoxInt and
+                // the raw narrowed word reached `rt_println_value`, which
+                // decoded it by bit pattern — `"42".to_i32()` printed the f64
+                // denormal of bit pattern 42, `print("5".to_i32())` printed
+                // `<value:0x5>`, while `+ 1` arithmetic was correct because
+                // the raw value was right; only the tag was missing. The
+                // interpreter half is fixed (8d100a8aa81); this is the JIT
+                // half. Bug row:
+                // jit_to_i32_returns_zero_and_leaks_mistagged_value_2026-08-26.md
                 "to_int" | "to_i64" => Some(TypeId::I64),
+                "to_i8" => Some(TypeId::I8),
+                "to_i16" => Some(TypeId::I16),
+                "to_i32" => Some(TypeId::I32),
                 "parse_int" | "parse_i32" | "parse_i64" => Some(TypeId::ANY),
                 _ => None,
             };
