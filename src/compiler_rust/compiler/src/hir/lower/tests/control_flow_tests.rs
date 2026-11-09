@@ -1535,3 +1535,38 @@ fn positional_args_after_named_fill_lowest_unfilled_slots() {
         "positional-after-named must fill declared slot order a=1, b=2, c=3, d=4"
     );
 }
+
+/// `opt.? == false` / `fn() -> i64? == 5` compare a tagged optional slot with a
+/// raw scalar. The JIT used to compare the tagged word against the raw one
+/// (always false); the lowering must box the raw side and use tagged equality
+/// so it agrees with the interpreter's `Some(x)` vs `x` bridge.
+/// Bug: doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md
+#[test]
+fn optional_scalar_eq_raw_scalar_uses_tagged_equality() {
+    for body in ["bool_f().? == false", "bool_f() == false", "int_f() == 5", "int_f().? != 5"] {
+        let src = format!(
+            "fn bool_f() -> bool?:\n    return false\n\nfn int_f() -> i64?:\n    return 5\n\nfn t() -> bool:\n    return {body}\n"
+        );
+        let module = parse_and_lower(&src).unwrap();
+        let func = module.functions.iter().find(|f| f.name == "t").expect("t fn");
+        let repr = format!("{:?}", func.body);
+        assert!(
+            repr.contains("rt_unwrap_or_self") && repr.contains("rt_value_"),
+            "`{body}` must box the raw side and compare tagged: {repr}"
+        );
+    }
+}
+
+/// Two raw scalars, or an optional vs `nil`, keep the plain comparison.
+#[test]
+fn raw_scalar_and_nil_comparisons_keep_plain_binary() {
+    let module = parse_and_lower(
+        "fn bool_f() -> bool?:\n    return false\n\nfn t(a: bool) -> bool:\n    return a == false\n\nfn u() -> bool:\n    return bool_f() == nil\n",
+    )
+    .unwrap();
+    for name in ["t", "u"] {
+        let func = module.functions.iter().find(|f| f.name == name).expect("fn");
+        let repr = format!("{:?}", func.body);
+        assert!(!repr.contains("rt_value_bool"), "`{name}` must not box: {repr}");
+    }
+}

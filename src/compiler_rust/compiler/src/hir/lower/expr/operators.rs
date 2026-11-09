@@ -170,6 +170,47 @@ impl Lowerer {
             });
         }
 
+        // `opt == scalar` / `opt != scalar` where one side is an optional
+        // scalar (`bool?`/`i64?`, a tagged `Pointer<T>` slot, also what `.?`
+        // yields in value position) and the other a RAW scalar of the same
+        // width class. Comparing the tagged word against the raw one made
+        // `bool_false().? == false` and `ki() == 5` answer false under the JIT
+        // while the interpreter answers true (it bridges `Some(x)` vs `x`).
+        // Box the raw side into the tagged form and compare both as ANY via the
+        // runtime's tagged equality: absent (nil) never equals a boxed
+        // scalar, so `nil == false` stays false and `nil != true` stays true.
+        // Bug: doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md
+        if matches!(op, ast::BinOp::Eq | ast::BinOp::NotEq) {
+            let left_opt = self.optional_tagged_scalar_inner(left_hir.ty).is_some();
+            let right_opt = self.optional_tagged_scalar_inner(right_hir.ty).is_some();
+            if left_opt != right_opt {
+                let raw_ty = if left_opt {
+                    right_hir.ty
+                } else {
+                    left_hir.ty
+                };
+                if raw_ty == TypeId::BOOL || Self::is_int_scalar(raw_ty) {
+                    let normalize = |e: HirExpr| HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![e],
+                        },
+                        ty: TypeId::ANY,
+                    };
+                    let left_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, *left_hir);
+                    let right_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, *right_hir);
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: (*op).into(),
+                            left: Box::new(normalize(left_tagged)),
+                            right: Box::new(normalize(right_tagged)),
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
+            }
+        }
+
         // Type is determined by operands
         // For SIMD vectors, comparison returns a SIMD bool vector
         let ty = match op {
