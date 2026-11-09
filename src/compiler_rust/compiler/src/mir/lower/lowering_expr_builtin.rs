@@ -432,7 +432,26 @@ impl<'a> MirLowerer<'a> {
         // the runtime's tagged slot. Decode a native scalar only after the
         // checked helper has had the chance to trap on None/Err.
         if matches!(name, "rt_enum_payload" | "rt_unwrap_or_trap") && args.len() == 1 {
-            let arg_reg = self.lower_expr(&args[0])?;
+            // `xs.pop().unwrap()` (and first/last/remove): the typed accessor
+            // lowering unboxes scalar elements right after the runtime call,
+            // which would hand this checked helper a NATIVE word — a present 3
+            // reads as nil and an absent nil reads as 3. Ask the accessor to
+            // return the raw slot; the unbox below then runs on the checked
+            // payload. Only a direct (non-call) receiver is deferred so the
+            // flag cannot be consumed by an inner accessor first.
+            // doc/08_tracking/bug/stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md
+            let defers_accessor_unbox = name == "rt_unwrap_or_trap"
+                && matches!(
+                    &args[0].kind,
+                    crate::hir::HirExprKind::MethodCall { receiver, method, args: accessor_args, .. }
+                        if !matches!(receiver.kind, crate::hir::HirExprKind::MethodCall { .. })
+                            && ((accessor_args.is_empty() && matches!(method.as_str(), "first" | "last" | "pop"))
+                                || (accessor_args.len() == 1 && method == "remove"))
+                );
+            let previous = std::mem::replace(&mut self.defer_accessor_unbox, defers_accessor_unbox);
+            let arg_reg = self.lower_expr(&args[0]);
+            self.defer_accessor_unbox = previous;
+            let arg_reg = arg_reg?;
             let raw_result = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();

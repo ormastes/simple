@@ -302,14 +302,20 @@ impl BuildGraph:
                 # arm is taken (only when the condition is an `if val` binding).
                 # The loop guard above already ensures the stack is non-empty, so
                 # unwrap directly.
+                # @workaround bug=stage2_unwrap_on_array_pop_yields_nil_2026-09-13
                 # Read the top by INDEX and truncate; do not pop-and-unwrap.
-                # `rt_array_pop` returns the element RAW (never a `Some` enum,
-                # runtime/src/value/collections.rs:1752), while `.unwrap()` lowers to
-                # `rt_enum_payload`, which answers nil for anything that is not an Enum
-                # heap object (objects.rs:519). Measured in the LLVM lane that compiles
-                # Stage 2: `val (n, f) = a.pop().unwrap()` on `[(i64, bool)]` yields nil
-                # for BOTH fields, so nothing is ever marked visited and the DFS
-                # re-expands forever (site 10). See
+                # When this was written (2026-09-13) the seed's LLVM lane lowered
+                # `.unwrap()` to `rt_enum_payload`, which answered nil for the RAW
+                # element `rt_array_pop` returns, so `val (n, f) = a.pop().unwrap()`
+                # on `[(i64, bool)]` bound nil to BOTH fields and the DFS re-expanded
+                # forever (site 10). The lowering is now the checked
+                # `rt_unwrap_or_trap` typed as the element in the seed, and the
+                # pure-Simple MIR builds a real Option before `rt_array_pop` and
+                # unwraps through `rt_is_some`; both are pinned by
+                # src/compiler_rust/compiler/tests/pop_unwrap_checked.rs and
+                # test/01_unit/compiler/mir/pop_unwrap_checked_lowering_spec.spl.
+                # The index-read form stays until a Stage-2 LLVM-lane build
+                # confirms the fixed lowering end to end. See
                 # stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md.
                 val top_index = stack.len() - 1
                 val (node, expanded) = stack[top_index]
