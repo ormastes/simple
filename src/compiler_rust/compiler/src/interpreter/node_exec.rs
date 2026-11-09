@@ -361,6 +361,26 @@ fn zero_filled_fixed_array_decl(
     })
 }
 
+/// Declared named-type default for an initializer-less `var`/`val` (see
+/// `class_instantiation::noinit_named_type_default`).
+pub(crate) fn noinit_named_type_default_decl(
+    let_stmt: &simple_parser::ast::LetStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<Value> {
+    let ty = match (&let_stmt.ty, &let_stmt.pattern) {
+        (Some(ty), _) => ty,
+        (None, simple_parser::ast::Pattern::Typed { ty, .. }) => ty,
+        _ => return None,
+    };
+    super::interpreter_call::noinit_named_type_default(
+        ty, env, functions, classes, enums, impl_methods,
+    )
+}
+
 fn pack_u8_array(value: Value) -> Value {
     let Value::Array(data) = &value else {
         return value;
@@ -593,6 +613,14 @@ pub(crate) fn exec_node(
                 // module-level `var`s here, so without this the name was never
                 // bound ("variable `q_active` not found",
                 // os_namespace_uninitialized_array_module_var_not_found_2026-08-02).
+                let is_mutable = let_stmt.mutability.is_mutable();
+                bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
+            } else if let Some(value) = noinit_named_type_default_decl(let_stmt, env, functions, classes, enums, impl_methods)
+            {
+                // `var g: SomeEnum` / `var g: SomeClass` with no initializer
+                // (owner decision 2026-11-09): first variant / default
+                // construction, never nil (bug
+                // noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09).
                 let is_mutable = let_stmt.mutability.is_mutable();
                 bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
             } else if strict_mem_enabled() {
