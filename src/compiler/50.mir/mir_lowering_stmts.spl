@@ -1455,7 +1455,20 @@ impl MirLowering:
                         # and `v != nil` folded to true.
                         # doc/08_tracking/bug/mir_if_val_float_binder_numeric_cast_2026-11-06.md
                         val exists_raw_scalar_word = self.exists_scalar_word_locals.contains(init_local.id)
-                        if let_type != nil and (annotated_narrow_int or annotated_float) and not exists_raw_scalar_word:
+                        # A narrow unsigned producer must become a real word
+                        # before Copy binds it to an annotated i64/u64 local.
+                        # Otherwise MIR reports a wide binding while LLVM Copy
+                        # preserves i8/i16/i32, truncating later comparison peers.
+                        var annotated_unsigned_word = false
+                        if let_type != nil:
+                            match mir_type.kind:
+                                case MirTypeKind.I64 | MirTypeKind.U64:
+                                    if val source_type = self.local_mir_type_of(init_local):
+                                        match source_type.kind:
+                                            case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32: annotated_unsigned_word = true
+                                            case _: ()
+                                case _: ()
+                        if let_type != nil and (annotated_narrow_int or annotated_float or annotated_unsigned_word) and not exists_raw_scalar_word:
                             var cast_builder = self.builder
                             init_local = cast_builder.emit_cast(mir_operand_copy(init_local), mir_type)
                             self.builder = cast_builder
@@ -4603,6 +4616,12 @@ impl MirLowering:
         var end_local: LocalId = 0
         if val end_expr = end:
             end_local = self.lower_expr(end_expr)
+
+        # Word-carrier loops preserve high-bit narrow bounds from arithmetic.
+        # Narrow loop carriers and absent/unknown bounds retain their policy.
+        start_local = self.widen_unsigned_word_operand(start_local, loop_ty)
+        if end != nil:
+            end_local = self.widen_unsigned_word_operand(end_local, loop_ty)
 
         # Lower step value (default to typed 1)
         var step_local: LocalId = 0
