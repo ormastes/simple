@@ -676,6 +676,11 @@ bootstrap_stage3_source_snapshot_once() {
         use strict;
         use warnings;
         my ($root, @roots) = @ARGV;
+        # Build-input scope (bug stage2_admission_source_quiescence_unsatisfiable_in_shared_tree_2026-08-31):
+        # only src/app top-level directories named in the checked-in list are
+        # quiescence authority; unrelated app churn must not refuse admission.
+        # The list is loaded after the authority-root checks below.
+        my %app_dirs;
         sub lexical_absolute {
             my ($base, $path) = @_;
             my $joined = $path =~ m{^/} ? $path : "$base/$path";
@@ -692,6 +697,10 @@ bootstrap_stage3_source_snapshot_once() {
             return "/" . join("/", @normalized);
         }
         sub pruned_path {
+            if ($_[0] =~ m{^\Q$root\E/src/app/([^/]+)(?:/|$)}) {
+                my $top = "$root/src/app/$1";
+                return 1 if -d $top && !-l $top && !$app_dirs{$1};
+            }
             return $_[0] =~ m{/(?:src/app/vscode_extension/(?:[.]vscode-test|node_modules)|src/compiler_rust/(?:vendor|target))(?:/|$)};
         }
         sub canonical_missing {
@@ -752,6 +761,17 @@ bootstrap_stage3_source_snapshot_once() {
                 src/package_ownership src/plugins src/compositions)) {
             -d "$root/$required" or die "missing authority root\n";
         }
+        -d "$root/$_" or die "missing authority root\n" for @roots;
+        my $app_list = "$root/scripts/bootstrap/stage2-build-input-app-dirs.txt";
+        open(my $alf, "<", $app_list) or die "missing build-input app list\n";
+        while (my $line = <$alf>) {
+            $line =~ s/\s+$//;
+            next if $line eq "" || $line =~ /^#/;
+            $line =~ m{^[A-Za-z0-9_.-]+$} or die "invalid build-input app list entry\n";
+            $app_dirs{$line} = 1;
+        }
+        close $alf;
+        %app_dirs or die "empty build-input app list\n";
         for my $relative_root (@roots) {
             my $authority = "$root/$relative_root";
             -d $authority or die "missing authority root\n";

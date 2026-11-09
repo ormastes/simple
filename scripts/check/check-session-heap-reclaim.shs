@@ -1,23 +1,31 @@
 #!/bin/sh
 # Link the real C owner or an explicit Rust runtime archive; no mocked owner.
-set -eu
+#
+# Verdict convention (repo guard standard):
+#   PASS — 1 session-reclaim probe checked ...   (exit 0)
+#   FAIL — <what broke>                          (exit 1)
+#   ERROR — nothing was checked (<reason>)       (exit 2)
+set -u
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 out_dir=${SIMPLE_SESSION_RECLAIM_CHECK_OUT:-"$repo_root/build/native_probe/session-heap-reclaim"}
 cc_bin=${CC:-cc}
 runtime_input="$repo_root/src/runtime/runtime_native.c"
 fixture="$repo_root/test/01_unit/runtime/session_heap_reclaim_test.c"
 if [ "${1:-}" = --module-runtime-archive ]; then
-    [ "$#" -eq 2 ] && [ -f "$2" ] || { echo "error: --module-runtime-archive requires an existing Rust archive" >&2; exit 2; }
+    [ "$#" -eq 2 ] && [ -f "$2" ] || { echo "ERROR — nothing was checked (--module-runtime-archive requires an existing Rust archive)" >&2; exit 2; }
     runtime_input=$2
     fixture="$repo_root/test/01_unit/runtime/module_scope_reclaim_test.c"
 elif [ "${1:-}" = --runtime-archive ]; then
-    [ "$#" -eq 2 ] && [ -f "$2" ] || { echo "error: --runtime-archive requires an existing archive" >&2; exit 2; }
+    [ "$#" -eq 2 ] && [ -f "$2" ] || { echo "ERROR — nothing was checked (--runtime-archive requires an existing archive)" >&2; exit 2; }
     runtime_input=$2
 elif [ "$#" -ne 0 ]; then
-    echo "usage: $0 [--runtime-archive PATH | --module-runtime-archive PATH]" >&2
+    echo "ERROR — nothing was checked (usage: $0 [--runtime-archive PATH | --module-runtime-archive PATH])" >&2
     exit 2
 fi
-mkdir -p "$out_dir"
+[ -f "$fixture" ] || { echo "ERROR — nothing was checked (fixture $fixture missing)"; exit 2; }
+[ -f "$runtime_input" ] || { echo "ERROR — nothing was checked (runtime input $runtime_input missing)"; exit 2; }
+command -v "$cc_bin" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (C compiler '$cc_bin' not found)"; exit 2; }
+mkdir -p "$out_dir" || { echo "ERROR — nothing was checked (cannot create $out_dir)"; exit 2; }
 case $(uname -s) in
     Darwin) link_flags='-Wl,-dead_strip' ;;
     *) link_flags='-Wl,--gc-sections' ;;
@@ -26,11 +34,20 @@ esac
 if printf '#include <stdlib.h>\n#ifdef __GLIBC__\nglibc\n#endif\n' | "$cc_bin" -E - | grep -q '^glibc$'; then
     link_flags="$link_flags -Wl,--wrap=malloc_trim"
 fi
-"$cc_bin" -std=c11 -O1 -g -pthread -D_GNU_SOURCE \
+if ! "$cc_bin" -std=c11 -O1 -g -pthread -D_GNU_SOURCE \
     -ffunction-sections -fdata-sections -I"$repo_root/src/runtime" \
     "$fixture" \
     "$runtime_input" \
     $link_flags -ldl -lm -o "$out_dir/session_heap_reclaim_test" \
-    >"$out_dir/compile.log" 2>&1
-"$out_dir/session_heap_reclaim_test" >"$out_dir/run.log" 2>&1
+    >"$out_dir/compile.log" 2>&1; then
+    echo "FAIL — session-heap-reclaim probe did not compile/link (cc=$cc_bin; log $out_dir/compile.log)" >&2
+    exit 1
+fi
+if ! "$out_dir/session_heap_reclaim_test" >"$out_dir/run.log" 2>&1; then
+    cat "$out_dir/run.log" >&2
+    echo "FAIL — session-heap-reclaim contract probe failed (see probe output above)" >&2
+    exit 1
+fi
 cat "$out_dir/run.log"
+echo "PASS — 1 session-reclaim probe checked (compile + run; reclamation boundaries and glibc trim discipline hold)"
+exit 0
