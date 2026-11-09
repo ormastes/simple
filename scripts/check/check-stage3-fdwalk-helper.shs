@@ -1,0 +1,156 @@
+#!/bin/sh
+# check-stage3-fdwalk-helper.shs — gate for the pinned native helper
+# src/runtime/tools/stage3_fdwalk.c (Stage-3 shared runner, Darwin lane).
+#
+# Bug: doc/08_tracking/bug/bootstrap_macos_blocked_seed_compile_and_linux_only_stage3_authority_2026-09-06.md
+#
+# What it checks, in order (all fail-closed; verdict is the LAST stdout line):
+#   1. Darwin syntax: clang --target=arm64-apple-macos -fsyntax-only against the
+#      real SDK when `xcrun --show-sdk-path` works, else against the stub shim
+#      scripts/check/fixtures/stage3_fdwalk_darwin_shim (internal consistency
+#      only — the shim README says exactly what that does and does not prove).
+#   2. Linux syntax: clang --target=x86_64-linux-musl -fsyntax-only against the
+#      repo-managed musl sysroot (~/.simple/toolchains/sysroot) when present.
+#   3. Native build + behaviour, only on a POSIX host (Linux/Darwin): compile with
+#      clang, run `--selftest`, then exercise walk/exec on a temp tree:
+#        walk identity == stat identity; symlink component -> 68; missing -> 66;
+#        bad component -> 65; exec of a held /bin/sh runs and prints; exec of an
+#        unlinked held executable is rejected (71).
+#   On a non-POSIX host (Windows) step 3 is reported as NOT RUN and the verdict
+#   says "syntax-only"; it is never counted as behaviour evidence.
+#
+# Toolchain: clang ONLY (never GCC). A host whose `cc` is not clang and that has
+# no `clang` on PATH is ERROR, not a pass.
+#
+# Verdict: PASS — <n> check(s) executed, 0 failed [syntax-only]   exit 0
+#          FAIL — <n> check(s) executed, <k> failed: <names>        exit 1
+#          ERROR — nothing was checked (<reason>)                   exit 2
+
+set -u
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+source_file=$repo_root/src/runtime/tools/stage3_fdwalk.c
+shim_dir=$repo_root/scripts/check/fixtures/stage3_fdwalk_darwin_shim
+[ -f "$source_file" ] || { echo "ERROR — nothing was checked (missing $source_file)"; exit 2; }
+
+clang_bin=
+if command -v clang >/dev/null 2>&1; then
+    clang_bin=$(command -v clang)
+elif command -v cc >/dev/null 2>&1 && cc --version 2>/dev/null | grep -qi clang; then
+    clang_bin=$(command -v cc)
+fi
+[ -n "$clang_bin" ] || { echo "ERROR — nothing was checked (no clang on PATH; GCC is not accepted)"; exit 2; }
+
+checked=0
+failed=0
+failed_names=
+syntax_only=0
+record() {
+    # record <name> <rc>
+    checked=$((checked + 1))
+    if [ "$2" -ne 0 ]; then
+        failed=$((failed + 1))
+        failed_names="$failed_names $1"
+        echo "FAIL $1 (rc=$2)"
+    else
+        echo "PASS $1"
+    fi
+}
+
+# 1. Darwin syntax -----------------------------------------------------------
+sdk_path=
+if command -v xcrun >/dev/null 2>&1; then
+    sdk_path=$(xcrun --show-sdk-path 2>/dev/null) || sdk_path=
+fi
+if [ -n "$sdk_path" ] && [ -d "$sdk_path" ]; then
+    "$clang_bin" --target=arm64-apple-macos -isysroot "$sdk_path" -std=c11 -Wall -Wextra \
+        -Werror -fsyntax-only "$source_file"
+    record darwin-syntax-sdk $?
+else
+    "$clang_bin" --target=arm64-apple-macos -nostdlibinc -isystem "$shim_dir" -std=c11 \
+        -Wall -Wextra -Werror -fsyntax-only "$source_file"
+    record darwin-syntax-shim $?
+fi
+
+# 2. Linux syntax ------------------------------------------------------------
+musl_root=${SIMPLE_MUSL_SYSROOT:-$HOME/.simple/toolchains/sysroot/x86_64-linux-musl}
+if [ -d "$musl_root/usr/include" ] || [ -d "$musl_root/include" ]; then
+    "$clang_bin" --target=x86_64-linux-musl --sysroot="$musl_root" -std=c11 -Wall -Wextra \
+        -Werror -fsyntax-only "$source_file"
+    record linux-syntax-musl $?
+else
+    echo "NOTE linux-syntax-musl: musl sysroot not found at $musl_root (not run)"
+fi
+
+# 3. Native behaviour (POSIX hosts only) -------------------------------------
+host=$(uname -s 2>/dev/null || echo unknown)
+case "$host" in
+  Linux|Darwin)
+    work=$(mktemp -d "${TMPDIR:-/tmp}/stage3-fdwalk-gate.XXXXXX") || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+    helper=$work/stage3_fdwalk
+    "$clang_bin" -std=c11 -Wall -Wextra -Werror -O1 "$source_file" -o "$helper"
+    record native-build $?
+    if [ -x "$helper" ]; then
+        "$helper" --selftest
+        record selftest $?
+
+        mkdir -p "$work/tree/a/b" && printf 'payload\n' >"$work/tree/a/b/leaf" &&
+            ln -s b "$work/tree/a/link" || { echo "ERROR — nothing was checked (fixture)"; exit 2; }
+        exec 5<"$work/tree"
+        identity=$("$helper" walk --dir-fd 5 --rel a/b/leaf)
+        rc=$?
+        record walk-regular $rc
+        if [ "$rc" -eq 0 ]; then
+            want_ino=$(stat -c %i "$work/tree/a/b/leaf" 2>/dev/null || stat -f %i "$work/tree/a/b/leaf")
+            got_ino=$(printf '%s\n' "$identity" | sed -n 's/^ino=//p')
+            [ "$want_ino" = "$got_ino" ]; record walk-identity-matches-stat $?
+            printf '%s\n' "$identity" | grep -q '^schema=simple-stage3-fdwalk-v1$'; record walk-schema $?
+            printf '%s\n' "$identity" | grep -q '^kind=regular$'; record walk-kind $?
+            printf '%s\n' "$identity" | grep -Eq '^sha256=[0-9a-f]{64}$'; record walk-sha256 $?
+        fi
+        "$helper" walk --dir-fd 5 --rel a/link/leaf >/dev/null 2>&1; rc=$?
+        [ "$rc" -eq 68 ]; record walk-rejects-symlink-component-68 $?
+        "$helper" walk --dir-fd 5 --rel a/b/absent >/dev/null 2>&1; rc=$?
+        [ "$rc" -eq 66 ]; record walk-missing-66 $?
+        "$helper" walk --dir-fd 5 --rel 'a/../b' >/dev/null 2>&1; rc=$?
+        [ "$rc" -eq 65 ]; record walk-bad-component-65 $?
+        exec 5<&-
+
+        exec 6</bin/sh
+        out=$("$helper" exec --exec-fd 6 -- sh -c 'echo fdwalk-exec-ok'); rc=$?
+        [ "$rc" -eq 0 ] && [ "$out" = fdwalk-exec-ok ]; record exec-held-sh-runs $?
+        exec 6<&-
+
+        cp /bin/sh "$work/victim" && chmod 0700 "$work/victim" || { echo "ERROR — nothing was checked (victim fixture)"; exit 2; }
+        exec 7<"$work/victim"
+        rm -f "$work/victim"
+        "$helper" exec --exec-fd 7 -- sh -c 'echo must-not-run' >/dev/null 2>"$work/unlinked.err"; rc=$?
+        if [ "$host" = Darwin ]; then
+            # Darwin: no fexecve; verify-by-fd must refuse an unlinked executable.
+            [ "$rc" -eq 71 ]; record exec-unlinked-rejected-71-darwin $?
+        else
+            # Linux: fexecve of an unlinked fd is legitimately allowed by the
+            # kernel; the helper's Linux arm only checks regular+nlink>0 before
+            # fexecve, so an unlinked fd is rejected by nlink==0 -> 71 as well.
+            [ "$rc" -eq 71 ]; record exec-unlinked-rejected-71-linux $?
+        fi
+        exec 7<&-
+    fi
+    ;;
+  *)
+    syntax_only=1
+    echo "NOTE native behaviour checks: NOT RUN on $host (POSIX host required)"
+    ;;
+esac
+
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $checked check(s) executed, $failed failed:$failed_names"
+    exit 1
+fi
+if [ "$syntax_only" -eq 1 ]; then
+    echo "PASS — $checked check(s) executed, 0 failed [syntax-only: behaviour not run on $host]"
+else
+    echo "PASS — $checked check(s) executed, 0 failed"
+fi
+exit 0

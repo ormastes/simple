@@ -2041,7 +2041,7 @@ impl MirTextCodegen for MirToLlvm:
                 # `switch {nit} %lN` ill-typed. value_as_type re-reads the
                 # value's registered type and is a no-op when it already
                 # matches.
-                val discr_val = self.value_as_type(discr_raw, self.get_operand_type_at(value_operands, 0), nit)
+                val discr_val = self.value_as_type_signed(discr_raw, self.get_operand_type_at(value_operands, 0), nit, self.get_operand_unsigned_at(value_operands, 0))
                 val default_id = default.bootstrap_value()
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:switch index={block_index} default={default_id} cases={targets.len()}"
@@ -2088,8 +2088,8 @@ impl MirTextCodegen for MirToLlvm:
                 val tag_ops: [MirOperand] = [type_tag]
                 val payload_raw = self.translate_operand_at(payload_ops, 0)
                 val tag_raw = self.translate_operand_at(tag_ops, 0)
-                val payload_i64 = self.value_as_type(payload_raw, self.get_operand_type_at(payload_ops, 0), "i64")
-                val tag_i64 = self.value_as_type(tag_raw, self.get_operand_type_at(tag_ops, 0), "i64")
+                val payload_i64 = self.value_as_type_signed(payload_raw, self.get_operand_type_at(payload_ops, 0), "i64", self.get_operand_unsigned_at(payload_ops, 0))
+                val tag_i64 = self.value_as_type_signed(tag_raw, self.get_operand_type_at(tag_ops, 0), "i64", self.get_operand_unsigned_at(tag_ops, 0))
                 self.builder.emit("  call void @rt_exception_throw(i64 {payload_i64}, i64 {tag_i64})")
                 self.builder.emit("  unreachable")
 
@@ -2104,8 +2104,8 @@ impl MirTextCodegen for MirToLlvm:
                 val tag_ops: [MirOperand] = [type_tag]
                 val payload_raw = self.translate_operand_at(payload_ops, 0)
                 val tag_raw = self.translate_operand_at(tag_ops, 0)
-                val payload_i64 = self.value_as_type(payload_raw, self.get_operand_type_at(payload_ops, 0), "i64")
-                val tag_i64 = self.value_as_type(tag_raw, self.get_operand_type_at(tag_ops, 0), "i64")
+                val payload_i64 = self.value_as_type_signed(payload_raw, self.get_operand_type_at(payload_ops, 0), "i64", self.get_operand_unsigned_at(payload_ops, 0))
+                val tag_i64 = self.value_as_type_signed(tag_raw, self.get_operand_type_at(tag_ops, 0), "i64", self.get_operand_unsigned_at(tag_ops, 0))
                 self.builder.emit("  call void @rt_exception_resume(i64 {payload_i64}, i64 {tag_i64})")
                 self.builder.emit("  unreachable")
 
@@ -2144,7 +2144,7 @@ impl MirTextCodegen for MirToLlvm:
                         # See translate_call: print()'s raw-format runtime
                         # helpers need signedness-aware widening.
                         val is_print_raw_fmt = call_func_val == "@rt_raw_i64_to_string" or call_func_val == "@rt_raw_u64_to_string" or call_func_val == "@rt_raw_bool_to_string"
-                        if is_print_raw_fmt:
+                        if is_print_raw_fmt or is_integer_type(arg_ty):
                             arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned_at(args, arg_index))
                         else:
                             arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
@@ -2679,7 +2679,7 @@ impl MirTextCodegen for MirToLlvm:
             case Offset:
                 val nit = self.native_int()
                 val left_val = self.value_as_type(left_raw, self.get_operand_type(left), "ptr")
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), nit)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), nit, self.get_operand_unsigned(right))
                 self.builder.emit("  {dest_name} = getelementptr i8, ptr {left_val}, {nit} {right_val}")
 
     me translate_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand):
@@ -2691,7 +2691,7 @@ impl MirTextCodegen for MirToLlvm:
 
         match op:
             case Neg:
-                val cast_operand = self.value_as_type(operand_val, self.get_operand_type(operand), ty)
+                val cast_operand = self.value_as_type_signed(operand_val, self.get_operand_type(operand), ty, self.get_operand_unsigned(operand))
                 if is_float_type(ty):
                     self.builder.emit_fneg(dest_name, ty, cast_operand)
                 else:
@@ -2713,7 +2713,7 @@ impl MirTextCodegen for MirToLlvm:
                 val rhs = if cmp_ty == "ptr": "null" else: "0"
                 self.emit_comparison(dest_name, ty, "eq", cmp_ty, cmp_operand, rhs)
             case BitNot:
-                val cast_operand = self.value_as_type(operand_val, self.get_operand_type(operand), ty)
+                val cast_operand = self.value_as_type_signed(operand_val, self.get_operand_type(operand), ty, self.get_operand_unsigned(operand))
                 self.builder.emit_not(dest_name, ty, cast_operand)
             case Transpose:
                 self.emit_unsupported_panic("LLVM backend does not support Transpose lowering")
@@ -2828,7 +2828,9 @@ impl MirTextCodegen for MirToLlvm:
                 val is_print_raw_fmt = call_func_name == "@rt_raw_i64_to_string" or call_func_name == "@rt_raw_u64_to_string" or call_func_name == "@rt_raw_bool_to_string"
                 if call_func_name == "@rt_enum_new" and arg_i == 2 and arg_ty == "double":
                     arg_val = self.store_field_bits(arg_val, arg_ty, param_ty)
-                elif is_print_raw_fmt:
+                elif is_print_raw_fmt or is_integer_type(arg_ty):
+                    # Declared numeric parameters preserve the source integer
+                    # signedness too, not only raw formatting helpers.
                     arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned_at(args, arg_i))
                 else:
                     arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
@@ -3455,7 +3457,7 @@ impl MirTextCodegen for MirToLlvm:
         val g_name = self.global_static_names.get(g_key) ?? "@g_undeclared_{symbol.id}"
         val g_ty = self.global_static_types.get(g_key) ?? self.native_int_type
         val raw_value_val = self.translate_operand(value)
-        val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), g_ty)
+        val value_val = self.value_as_type_signed(raw_value_val, self.get_operand_type(value), g_ty, self.get_operand_unsigned(value))
         self.builder.emit_store(g_ty, value_val, g_name)
 
     me translate_global_addr_ids(dest_id: i64, symbol_id: i64, module_index: i64, ir_handle: i64):
@@ -3519,7 +3521,8 @@ impl MirTextCodegen for MirToLlvm:
             val local_id = inst.bootstrap_store_global_value_local_id()
             value_text = "%l{local_id}"
             # Match the regular StoreGlobal path using the actual SSA type.
-            value_text = self.value_as_type(value_text, self.get_local_type(local_id), g_ty)
+            val source_unsigned = if self.unsigned_locals.contains_key(local_id): self.unsigned_locals[local_id] else: false
+            value_text = self.value_as_type_signed(value_text, self.get_local_type(local_id), g_ty, source_unsigned)
         elif value_kind == 3:
             val const_kind = inst.bootstrap_store_global_const_kind()
             val const_text = inst.bootstrap_store_global_const_scalar_text()

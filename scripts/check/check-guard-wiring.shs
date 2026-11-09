@@ -403,6 +403,30 @@ scan_wiring() {
     #     runner is itself reached. If the runner ever becomes unreachable these
     #     edges stop firing and the guards become orphans -- the ratchet FAILs,
     #     which is the safe direction for a gate.
+    #
+    #     tier=local rows are the same manifest-driven invocation one tier down:
+    #     run-gate-tier.shs --tier local runs every local row's command VERBATIM
+    #     (sh -c, from the repo root, under a wall budget) on every PR via the
+    #     fast-gates job in .github/workflows/required-gates.yml and on every
+    #     land via land.shs. run-gate-tier.shs is itself a guard reached from
+    #     those roots, so key local-row command mentions on it exactly like the
+    #     bootstrap rows below. Without this, a guard wired ONLY by a local
+    #     manifest row reads as an orphan no matter how honestly the tier runs
+    #     it -- the exact false debt the 2026-11-09 guard-wiring triage hit
+    #     (36 green local-tier guards reported unwired until this credit).
+    _tierunner="$_root/scripts/check/run-gate-tier.shs"
+    if [ -f "$_tierunner" ] && [ -f "$_manifest_file" ]; then
+        awk -F, -v R="$_tierunner" '
+            /^[[:space:]]+[a-z0-9][a-z0-9-]*,/ {
+                tier=$2; cmd=$5
+                gsub(/[ \t]/, "", tier)
+                if (tier != "local") next
+                while (match(cmd, /[A-Za-z0-9_.-]+\.shs/)) {
+                    printf "%s\t%s\n", R, substr(cmd, RSTART, RLENGTH)
+                    cmd = substr(cmd, RSTART + RLENGTH)
+                }
+            }' "$_manifest_file" >> "$_wd/hits" 2>/dev/null || :
+    fi
     _bootrunner="$_root/scripts/check/check-bootstrap-must-pass.shs"
     _manifest_file="$_root/config/check/must_check_gates.sdn"
     if [ -f "$_bootrunner" ] && [ -f "$_manifest_file" ]; then

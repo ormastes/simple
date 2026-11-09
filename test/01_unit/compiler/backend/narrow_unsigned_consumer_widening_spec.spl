@@ -1,0 +1,269 @@
+# @req REQ-MIR-SAME-WIDTH-UNSIGNED-ARITHMETIC
+# UNRUN: generated IR is checked through actual LLVM backend owners.
+use std.spec.*
+use compiler.backend._MirToLlvm.class_def.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, LocalId, MirConstValue}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_graph.{MirInst, MirBlock}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator, BlockId, SwitchCase, MirBinOp, MirUnaryOp, mir_operand_copy, mir_operand_const_int}
+use compiler.backend._MirToLlvm.core_codegen.*
+use compiler.backend._MirToLlvm.aggregate_intrinsics.*
+
+fn narrow_consumer_translator(width: i64, unsigned: bool, extra_params: [text] = []) -> MirToLlvm:
+    var translator = MirToLlvm.create("test.narrow_consumers", CodegenTarget.X86_64, nil)
+    translator.local_types[0] = "i{width}"
+    translator.defined_locals[0] = true
+    translator.unsigned_locals[0] = unsigned
+    translator.remember_function_param_types("wide", ["i64"])
+    translator.remember_function_return_type("wide", "void")
+    translator.current_function_name = "probe"
+    expect(translator.builder.sb).to_be_greater_than(0)
+    translator.builder.emit("declare void @wide(i64)")
+    translator.builder.emit("declare void @__simple_intrinsic_bounds_check(i64, i64)")
+    translator.builder.emit("declare void @rt_exception_throw(i64, i64)")
+    translator.builder.emit("declare void @rt_exception_resume(i64, i64)")
+    translator.builder.emit("@global_wide = global i64 0")
+    var params = ["i{width} %l0"]
+    for parameter in extra_params:
+        params.push(parameter)
+    translator.builder.start_function("probe", params, "void")
+    translator.builder.emit_label("entry")
+    translator
+
+fn narrow_consumer_finish(translator: MirToLlvm, terminated: bool = false) -> text:
+    if not terminated: translator.builder.emit_ret_void()
+    translator.builder.end_function()
+    translator.builder.build()
+
+fn narrow_consumer_function() -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("wide"),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()],
+            return_type: MirType.unit(), is_variadic: false)))))
+
+fn narrow_consumer_call_ir(width: i64, unsigned: bool, route: text) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    val source = mir_operand_copy(LocalId(id: 0))
+    val callee = narrow_consumer_function()
+    if route == "instruction":
+        val instruction = MirInst(kind: MirInstKind.Call(nil, callee, [source]), span: nil)
+        translator.translate_call_at([instruction], 0, translator.builder.sb)
+    elif route == "terminator":
+        val blocks = [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [],
+                terminator: MirTerminator.CallTerminator(nil, callee, [source], BlockId(id: 1), nil, nil, nil)),
+            MirBlock(id: BlockId(id: 1), label: Some("done"), instructions: [], terminator: MirTerminator.Ret(nil))]
+        translator.translate_terminator_at(blocks, 0, "void", false, -1)
+        translator.builder.emit_label("bb1")
+    else:
+        translator.llvm_call_indirect_impl(nil, callee, [source],
+            MirSignature(params: [MirType.i64()], return_type: MirType.unit(), is_variadic: false))
+    narrow_consumer_finish(translator)
+
+fn narrow_consumer_gep_ir(width: i64, unsigned: bool) -> text:
+    var translator = narrow_consumer_translator(width, unsigned, ["ptr %l1"])
+    translator.local_types[1] = "ptr"
+    translator.ptr_locals[1] = true
+    translator.defined_locals[1] = true
+    translator.llvm_gep_impl(LocalId(id: 2), mir_operand_copy(LocalId(id: 1)), [mir_operand_copy(LocalId(id: 0))])
+    narrow_consumer_finish(translator)
+
+fn narrow_consumer_field_ir(width: i64, unsigned: bool) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    # The verbatim field path must retain its no-sticky-map contract.
+    translator.value_types["%l0"] = "ptr"
+    translator.store_field_bits_verbatim("%l0", "i{width}", "i64", unsigned)
+    narrow_consumer_finish(translator)
+
+fn narrow_consumer_global_ir(width: i64, unsigned: bool, indexed: bool) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    val key = translator.global_static_key(77)
+    translator.global_static_names[key] = "@global_wide"
+    translator.global_static_types[key] = "i64"
+    val source = mir_operand_copy(LocalId(id: 0))
+    if indexed:
+        val instruction = MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 77), source), span: nil)
+        translator.translate_store_global_at([instruction], 0, -1, translator.builder.sb)
+    else:
+        translator.translate_store_global(SymbolId(id: 77), source)
+    narrow_consumer_finish(translator)
+
+fn narrow_consumer_unary_ir(width: i64, unsigned: bool, op: MirUnaryOp) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    translator.local_types[1] = if unsigned: "i{width}" else: "i64"
+    translator.unsigned_locals[1] = unsigned
+    translator.translate_unaryop(LocalId(id: 1), op, mir_operand_copy(LocalId(id: 0)))
+    narrow_consumer_finish(translator)
+
+fn narrow_consumer_offset_ir(width: i64, unsigned: bool) -> text:
+    var translator = narrow_consumer_translator(width, unsigned, ["ptr %l1"])
+    translator.local_types[1] = "ptr"
+    translator.ptr_locals[1] = true
+    translator.defined_locals[1] = true
+    translator.local_types[2] = "ptr"
+    translator.translate_binop(LocalId(id: 2), MirBinOp.Offset,
+        mir_operand_copy(LocalId(id: 1)), mir_operand_copy(LocalId(id: 0)))
+    narrow_consumer_finish(translator)
+
+fn narrow_consumer_terminator_ir(width: i64, unsigned: bool, route: text) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    # These are target-IR tests, independent of the machine running SSpec.
+    translator.target_arch = "x86_64"
+    translator.target_os = "linux"
+    val source = mir_operand_copy(LocalId(id: 0))
+    val terminator = if route == "switch":
+        MirTerminator.Switch(source, [SwitchCase(value: 200, target: BlockId(id: 1))], BlockId(id: 2))
+    elif route == "throw": MirTerminator.Throw(source, mir_operand_const_int(0))
+    else: MirTerminator.Resume(source, mir_operand_const_int(0))
+    val blocks = [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [], terminator: terminator),
+        MirBlock(id: BlockId(id: 1), label: Some("case"), instructions: [], terminator: MirTerminator.Ret(nil)),
+        MirBlock(id: BlockId(id: 2), label: Some("default"), instructions: [], terminator: MirTerminator.Ret(nil))]
+    translator.translate_terminator_at(blocks, 0, "void", false, -1)
+    if route == "switch":
+        translator.builder.emit_label("bb1")
+        translator.builder.emit_ret_void()
+        translator.builder.emit_label("bb2")
+        translator.builder.emit_ret_void()
+    narrow_consumer_finish(translator, true)
+
+fn narrow_consumer_bounds_ir(width: i64, unsigned: bool) -> text:
+    var translator = narrow_consumer_translator(width, unsigned)
+    translator.llvm_intrinsic_impl(nil, "bounds_check",
+        [mir_operand_copy(LocalId(id: 0)), mir_operand_const_int(256)])
+    narrow_consumer_finish(translator)
+
+fn narrow_consumer_phi_ir(width: i64, unsigned: bool) -> text:
+    # Only well-typed matching incoming carriers. Mixed-width phis need
+    # predecessor casts and are an explicitly unqualified existing residual.
+    var translator = narrow_consumer_translator(width, unsigned,
+        ["i{width} %l1", "i1 %condition"])
+    translator.local_types[1] = "i{width}"
+    translator.defined_locals[1] = true
+    translator.unsigned_locals[1] = unsigned
+    translator.local_types[2] = "i{width}"
+    translator.unsigned_locals[2] = unsigned
+    translator.builder.emit("  br i1 %condition, label %bb0, label %bb1")
+    translator.builder.emit_label("bb0")
+    translator.builder.emit("  br label %bb2")
+    translator.builder.emit_label("bb1")
+    translator.builder.emit("  br label %bb2")
+    translator.builder.emit_label("bb2")
+    val emitted = translator.emit_ssa_phi_intrinsic(Some(LocalId(id: 2)),
+        [mir_operand_const_int(0), mir_operand_copy(LocalId(id: 0)),
+         mir_operand_const_int(1), mir_operand_copy(LocalId(id: 1))])
+    expect(emitted).to_equal(true)
+    narrow_consumer_finish(translator)
+
+fn narrow_consumer_bound_compare_ir(width: i64, op: MirBinOp, reverse: bool, through_binding: bool) -> text:
+    var translator = narrow_consumer_translator(width, true, ["i64 %l1"])
+    translator.local_types[1] = "i64"
+    translator.defined_locals[1] = true
+    translator.unsigned_locals[1] = false
+    # This is the Cast emitted by real Let/binary lowering, followed by
+    # the declared binding Copy when requested. The MIR spec checks that
+    # the real lowerer produces this sequence rather than an i8 Copy.
+    translator.translate_cast_dispatch(LocalId(id: 2), mir_operand_copy(LocalId(id: 0)), MirType.i64())
+    var widened = LocalId(id: 2)
+    if through_binding:
+        translator.local_types[3] = "i64"
+        translator.translate_copy_move(LocalId(id: 3), widened, false)
+        widened = LocalId(id: 3)
+        expect(translator.local_types[3]).to_equal("i64")
+    val left = if reverse: LocalId(id: 1) else: widened
+    val right = if reverse: widened else: LocalId(id: 1)
+    translator.translate_binop(LocalId(id: 4), op, mir_operand_copy(left), mir_operand_copy(right))
+    narrow_consumer_finish(translator)
+
+describe "narrow unsigned consumers preserve source signedness":
+    it "zero-extends all three narrow widths at every call route":
+        for width in [8, 16, 32]:
+            for route in ["instruction", "terminator", "indirect"]:
+                val ir = narrow_consumer_call_ir(width, true, route)
+                expect(ir).to_contain("zext i{width} %l0 to i64")
+                expect(ir.contains("sext i{width} %l0 to i64")).to_equal(false)
+                expect(ir).to_contain("call void")
+
+    it "keeps signed narrow arguments signed at every call route":
+        for route in ["instruction", "terminator", "indirect"]:
+            val ir = narrow_consumer_call_ir(8, false, route)
+            expect(ir).to_contain("sext i8 %l0 to i64")
+            expect(ir.contains("zext i8 %l0 to i64")).to_equal(false)
+
+    it "preserves high-bit indices and signed negative index controls":
+        for width in [8, 16, 32]:
+            expect(narrow_consumer_gep_ir(width, true)).to_contain("zext i{width} %l0 to i64")
+            expect(narrow_consumer_gep_ir(width, false)).to_contain("sext i{width} %l0 to i64")
+
+    it "widens physical field bits without sticky pointer reinterpretation":
+        for width in [8, 16, 32]:
+            val unsigned_ir = narrow_consumer_field_ir(width, true)
+            val signed_ir = narrow_consumer_field_ir(width, false)
+            expect(unsigned_ir).to_contain("zext i{width} %l0 to i64")
+            expect(signed_ir).to_contain("sext i{width} %l0 to i64")
+            expect(unsigned_ir.contains("ptrtoint")).to_equal(false)
+            expect(signed_ir.contains("ptrtoint")).to_equal(false)
+
+    it "retains matching logical-width carriers at a well-formed SSA join":
+        for width in [8, 16, 32, 64]:
+            for unsigned in [false, true]:
+                val ir = narrow_consumer_phi_ir(width, unsigned)
+                expect(ir).to_contain("phi i{width} [ %l0, %bb0 ], [ %l1, %bb1 ]")
+                expect(ir.contains("zext i{width} %l0")).to_equal(false)
+                expect(ir.contains("sext i{width} %l0")).to_equal(false)
+
+    it "preserves unsigned and signed values at both global-store routes":
+        for width in [8, 16, 32]:
+            for indexed in [false, true]:
+                val unsigned_ir = narrow_consumer_global_ir(width, true, indexed)
+                val signed_ir = narrow_consumer_global_ir(width, false, indexed)
+                expect(unsigned_ir).to_contain("zext i{width} %l0 to i64")
+                expect(signed_ir).to_contain("sext i{width} %l0 to i64")
+                expect(unsigned_ir).to_contain("store i64")
+                expect(signed_ir).to_contain("store i64")
+
+    it "preserves source signedness at unary and pointer-offset consumers":
+        for width in [8, 16, 32]:
+            val negated = narrow_consumer_unary_ir(width, true, MirUnaryOp.Neg)
+            val complemented = narrow_consumer_unary_ir(width, true, MirUnaryOp.BitNot)
+            expect(negated).to_contain("sub i{width} 0, %l0")
+            expect(complemented).to_contain("xor i{width} %l0, -1")
+            expect(negated.contains("zext i{width} %l0 to i64")).to_equal(false)
+            expect(complemented.contains("zext i{width} %l0 to i64")).to_equal(false)
+            expect(narrow_consumer_offset_ir(width, true)).to_contain("zext i{width} %l0 to i64")
+            expect(narrow_consumer_offset_ir(width, false)).to_contain("sext i{width} %l0 to i64")
+
+    it "preserves switch discriminants and exception payload carriers":
+        for width in [8, 16, 32]:
+            for route in ["switch", "throw", "resume"]:
+                expect(narrow_consumer_terminator_ir(width, true, route)).to_contain("zext i{width} %l0 to i64")
+                expect(narrow_consumer_terminator_ir(width, false, route)).to_contain("sext i{width} %l0 to i64")
+
+    it "keeps signed i64 negation and complement controls wide":
+        expect(narrow_consumer_unary_ir(64, false, MirUnaryOp.Neg)).to_contain("sub i64 0, %l0")
+        expect(narrow_consumer_unary_ir(64, false, MirUnaryOp.BitNot)).to_contain("xor i64 %l0, -1")
+
+    it "preserves high-bit indices in the bounds-check intrinsic":
+        for width in [8, 16, 32]:
+            val unsigned_ir = narrow_consumer_bounds_ir(width, true)
+            val signed_ir = narrow_consumer_bounds_ir(width, false)
+            expect(unsigned_ir).to_contain("zext i{width} %l0 to i64")
+            expect(signed_ir).to_contain("sext i{width} %l0 to i64")
+            expect(unsigned_ir).to_contain("call void @__simple_intrinsic_bounds_check(i64")
+
+    it "keeps annotated unsigned word bindings physically wide at later comparisons":
+        for width in [8, 16, 32]:
+            for op in [MirBinOp.Lt, MirBinOp.Eq, MirBinOp.Ne]:
+                val ir = narrow_consumer_bound_compare_ir(width, op, false, true)
+                expect(ir).to_contain("zext i{width} %l0 to i64")
+                expect(ir).to_contain("add i64")
+                expect(ir).to_contain("icmp")
+                expect(ir.contains("trunc i64 %l1")).to_equal(false)
+
+    it "keeps numeric is and is-not Eq-Ne carriers wide in both operand orders":
+        for width in [8, 16, 32]:
+            for reverse in [false, true]:
+                for op in [MirBinOp.Eq, MirBinOp.Ne]:
+                    val ir = narrow_consumer_bound_compare_ir(width, op, reverse, false)
+                    expect(ir).to_contain("zext i{width} %l0 to i64")
+                    expect(ir).to_contain(if op == MirBinOp.Eq: "icmp eq i64" else: "icmp ne i64")
+                    expect(ir.contains("trunc i64 %l1")).to_equal(false)
