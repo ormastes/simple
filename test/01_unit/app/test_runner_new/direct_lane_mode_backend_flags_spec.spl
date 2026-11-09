@@ -1,0 +1,93 @@
+"""Direct lane drops mode/backend flags — fail-closed refusal (REPRODUCER).
+
+Audience: anyone editing `run_one_direct` / the bypass ladder in
+`src/app/test_runner_new/test_runner_client.spl` or the arg-shape helpers in
+`src/app/test_runner_new/client_arg_shape.spl`.
+
+Why this spec exists. Measured 2026-11-09 on a fresh HEAD seed (PR #8047
+phase-2 gate): pinning SIMPLE_BINARY bypasses the light daemon, and
+run_one_direct (src/app/test_runner_new/test_runner_client.spl:554) built its
+inner invocation from only `--timeout` and `--compiler=` — a request carrying
+`--mode=native` (or smf/compile, `--native-backend=...`) was silently executed
+by the tagged interpreter in ~31 ms and reported PASS. Evidence collection was
+fail-open: the verdict claimed a lane that never ran.
+
+Neither client lane can honour a compiled-mode request today: the daemon
+request is path-only, and the direct lane's inner runner (the
+`--no-session-daemon` single lane, test_runner_single.spl) always interprets —
+its child invocation is `binary run <spec>` under a pinned
+SIMPLE_EXECUTION_MODE=interpret. So the client now FAILS LOUD at the entry
+(exit 2), naming every dropped flag, instead of silently downgrading.
+Forwarding the flags needs compiled-lane support in the single runner; that
+refactor is follow-up under the same bug row.
+
+Record: doc/08_tracking/bug/db/test_runner_direct_lane_drops_mode_backend_flags_2026_11_09.sdn
+
+The end-to-end example spawns the real client script in a child process
+against the lane-marker fixture (discovery_fixtures/
+direct_lane_flag_mode_marker_spec.spl). The single lane pins
+SIMPLE_EXECUTION_MODE=interpret before spawning the spec child, so an
+interpreted stand-in leaves `LANE-MARKER execution_mode=interpret` in the
+transcript — the behavioral marker that the requested compiled lane never ran.
+Post-fix the child refuses before executing anything, so the marker must be
+ABSENT from its output. SIMPLE_NET_TEST=1 pins the direct lane for the child
+(the same bypass shape SIMPLE_BINARY pinning produces), so the example
+exercises run_one_direct, not the daemon.
+"""
+
+use std.spec.*
+
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+use app.io.cli_ops.{cli_current_exe_path}
+
+use app.test_runner_new.client_arg_shape.{client_dropped_execution_flags}
+
+val MARKER_FIXTURE: text = "test/01_unit/app/test_runner_new/discovery_fixtures/direct_lane_flag_mode_marker_spec.spl"
+
+describe "client_dropped_execution_flags — flags the single-spec lane must not silently drop", :
+    it "names a requested native mode in both spellings", :
+        expect(client_dropped_execution_flags(["a_spec.spl", "--mode=native"]).len()).to_equal(1)
+        expect(client_dropped_execution_flags(["a_spec.spl", "--mode=native"])[0]).to_equal("--mode=native")
+        expect(client_dropped_execution_flags(["a_spec.spl", "--mode", "native"]).len()).to_equal(1)
+        expect(client_dropped_execution_flags(["a_spec.spl", "--mode", "native"])[0]).to_equal("--mode native")
+
+    it "names smf, compile and jit lanes", :
+        expect(client_dropped_execution_flags(["--mode=smf", "a_spec.spl"])[0]).to_equal("--mode=smf")
+        expect(client_dropped_execution_flags(["--compile", "a_spec.spl"])[0]).to_equal("--compile")
+        expect(client_dropped_execution_flags(["--mode=compile", "a_spec.spl"])[0]).to_equal("--mode=compile")
+        expect(client_dropped_execution_flags(["--mode", "jit", "a_spec.spl"])[0]).to_equal("--mode jit")
+
+    it "names a requested native backend in both spellings", :
+        expect(client_dropped_execution_flags(["a_spec.spl", "--native-backend=llvm"])[0]).to_equal("--native-backend=llvm")
+        expect(client_dropped_execution_flags(["a_spec.spl", "--native-backend", "cranelift"])[0]).to_equal("--native-backend cranelift")
+
+    it "names every dropped flag when several are requested", :
+        val dropped = client_dropped_execution_flags(["--mode=native", "--native-backend=llvm", "a_spec.spl"])
+        expect(dropped.len()).to_equal(2)
+        expect(dropped[0]).to_equal("--mode=native")
+        expect(dropped[1]).to_equal("--native-backend=llvm")
+
+    it "treats a plain interpreter request as honourable — the negative control", :
+        expect(client_dropped_execution_flags(["a_spec.spl"])).to_equal([])
+        expect(client_dropped_execution_flags(["a_spec.spl", "--mode=interpreter"])).to_equal([])
+        expect(client_dropped_execution_flags(["a_spec.spl", "--mode", "interpreter"])).to_equal([])
+        expect(client_dropped_execution_flags(["a_spec.spl", "--timeout", "5", "--tag", "slow"])).to_equal([])
+
+describe "the client refuses a compiled-mode request instead of downgrading", :
+    it "fails loud (exit 2) naming the dropped flag and never runs the interpreter marker", :
+        val exe = cli_current_exe_path()
+        expect(exe).to_not_equal("")
+        val (out, err, code) = process_run_bounded(
+            "/bin/sh",
+            ["-c", "env SIMPLE_NET_TEST=1 \"{exe}\" run src/app/test_runner_new/test_runner_client.spl test {MARKER_FIXTURE} --mode=native"],
+            300000,
+            8388608)
+        val combined = out + "\n" + err
+        # Fail-closed: the run is REFUSED, not downgraded.
+        expect(code).to_equal(2)
+        # The diagnostic names the dropped flag.
+        expect(combined.contains("--mode=native")).to_be_true()
+        # The behavioral marker: a silently-interpreted stand-in would print
+        # LANE-MARKER execution_mode=interpret and PASS. It must be absent.
+        expect(combined.contains("LANE-MARKER")).to_be_false()

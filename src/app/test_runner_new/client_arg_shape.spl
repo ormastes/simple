@@ -47,3 +47,50 @@ fn client_tag_value(args: [text]) -> text:
     ""
 
 export client_tag_value
+
+# Execution-mode/backend flags that select a COMPILED lane (native, smf,
+# compile, jit, ...). The single-spec client cannot honour any of them: the
+# light-daemon request is path-only, and the direct lane's inner runner
+# (test_runner_single.spl) always interprets. test_runner_client.spl main()
+# refuses the run, naming exactly the flags returned here, instead of
+# silently downgrading to the tagged interpreter and reporting PASS for a
+# lane that never ran (fail-open, measured 2026-11-09: a --mode=native
+# request executed in ~31 ms on the interpreter with a PASS verdict).
+# Bug: test_runner_direct_lane_drops_mode_backend_flags_2026_11_09.
+# Interpreter-family --mode values this lane CAN honour. Anything else —
+# native, smf, compile, binary, loader, jit, a non-interpreter composite
+# (native(baremetal(...)), jit(...)), or a typo the mode parser would quietly
+# default to "interpreter" — is a compiled-lane request this client must not
+# silently downgrade. The empty value parses to the interpreter default.
+fn _mode_value_is_interpreter(value: text) -> bool:
+    val v = value.trim()
+    v == "" or v == "interpreter" or v.starts_with("interpreter(")
+
+fn client_dropped_execution_flags(args: [text]) -> [text]:
+    var dropped: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--compile":
+            dropped.push(arg)
+        elif arg.starts_with("--compile="):
+            if arg.replace("--compile=", "") != "interpreter":
+                dropped.push(arg)
+        elif arg.starts_with("--mode="):
+            if not _mode_value_is_interpreter(arg.replace("--mode=", "")):
+                dropped.push(arg)
+        elif arg == "--mode":
+            if i + 1 < args.len():
+                if not _mode_value_is_interpreter(args[i + 1]):
+                    dropped.push("--mode " + args[i + 1])
+                i = i + 1
+        elif arg.starts_with("--native-backend="):
+            dropped.push(arg)
+        elif arg == "--native-backend":
+            if i + 1 < args.len():
+                dropped.push("--native-backend " + args[i + 1])
+                i = i + 1
+        i = i + 1
+    dropped
+
+export client_dropped_execution_flags
