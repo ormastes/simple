@@ -21,6 +21,9 @@
 #                                     tombstone shard (strings table only)
 #   changed <merged_a> <merged_b>     bug ids whose rows differ between two
 #                                     merged files (one per line)
+#   count   [legacy.sdn]              "<table> <severity> <status> <n>" over the
+#                                     merged view, plus TOTAL rows across both
+#                                     tables. Count open bugs ONLY this way.
 #   check   [legacy.sdn]              gate: every shard row id must equal its
 #                                     file stem, every shard must seal, and the
 #                                     merged view has no duplicate bug id.
@@ -124,6 +127,18 @@ cmd_changed() {
     rm -f "$_ra" "$_rb"
 }
 
+# count: open-bug tally over the MERGED view (both bug tables, shards applied).
+# Prints "<table> <severity> <status> <n>" rows, then per-severity TOTAL rows
+# summing both tables. The only sanctioned way to count bugs.
+cmd_count() {
+    cmd_merged "$@" | awk -F', *' "$AWK_ROWID"'
+        /^bugs(_active)? [|]/ { t = $1; sub(/ .*/, "", t); next }
+        /^[A-Za-z_]+ [|]/ { t = ""; next }
+        /^[ 	]*$/ { t = ""; next }
+        t != "" && /^[ 	]+[^ 	#]/ { s = $2; st = $3; gsub(/[ 	]/, "", s); gsub(/[ 	]/, "", st); c[t " " s " " st]++; tot["TOTAL " s " " st]++ }
+        END { for (k in c) print k, c[k]; for (k in tot) print k, tot[k] }' | LC_ALL=C sort
+}
+
 # check: shard integrity gate.
 cmd_check() {
     _legacy=${1:-$DEFAULT_LEGACY}
@@ -189,13 +204,14 @@ selftest() {
     echo "selftest: PASS"
 }
 
-[ $# -ge 1 ] || die "usage: bug-db-shard.shs merged|extract|write|changed|check|--selftest ..."
+[ $# -ge 1 ] || die "usage: bug-db-shard.shs merged|extract|write|changed|count|check|--selftest ..."
 _cmd=$1; shift
 case "$_cmd" in
     merged) cmd_merged "$@" ;;
     extract) [ $# -ge 2 ] || die "usage: extract <id> <merged.sdn>"; cmd_extract "$@" ;;
     write) [ $# -ge 2 ] || die "usage: write <id> <merged.sdn> [legacy.sdn]"; cmd_write "$@" ;;
     changed) [ $# -ge 2 ] || die "usage: changed <a> <b>"; cmd_changed "$@" ;;
+    count) cmd_count "$@" ;;
     check) cmd_check "$@" ;;
     --selftest) selftest ;;
     *) die "unknown subcommand $_cmd" ;;
