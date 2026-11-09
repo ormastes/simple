@@ -158,7 +158,7 @@ divergence D's tests now assert the FIXED concat behavior) and
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/h1_response_parse_spec.spl`
 (6 parse cases incl. the chunked regression, compiler-agnostic).
 
-## Divergence C — Seed reports semantic errors with no position information
+## Divergence C — Seed reports semantic errors with no position information — split out to seed_semantic_errors_lack_position_2026-11-09
 
 Both divergences A and B presented as runtime mysteries (nil pointer dereference, type mismatch with no source location) because the seed's semantic error reporting omits file and line number information.
 
@@ -197,3 +197,43 @@ compared with a literal `nil` now keeps its `T?` value. Repro:
 Verdict: fixed (already). Divergence A is a reclassified call-site idiom trap (census converted
 2026-08-16) and is pinned by `test/03_system/feature/usage/exists_check_bool_comparison_trap_spec.spl`;
 the "PARTIAL FIX / 43 sites remain" header above is stale. Prevention spec path is that same file.
+
+## 2026-11-09 — Part A (`bool?` payload comparison) fix implemented, verification pending
+Owner decision: `x.? == true/false` is nil-safe and matches self-hosted (`bool_false().? == false` true;
+`nil == false` false; `nil != true` true). Divergence C was split out to
+`seed_semantic_errors_lack_position_2026-11-09`.
+
+Root cause: the INTERPRETER was already correct (`Some(x)` vs `x` bridged in `BinOp::Eq`; forced-interpreter
+run gives true for all cases). The divergence is the JIT lane: under `run`, `main` is JIT-compiled, and
+`HIR lower_binary` compared a tagged optional slot (`Pointer<bool|int>`, also what `.?` yields in value
+position) against a RAW scalar word, so `bool_false().? == false`, `bool_false() == false` and
+`int_f() == 5` were all false. Fix: `lower_binary` (hir/lower/expr/operators.rs) boxes the raw side and compares
+both via `rt_unwrap_or_self` as ANY (tagged equality; nil never equals a boxed scalar).
+Tests: `optional_scalar_eq_raw_scalar_uses_tagged_equality` / `raw_scalar_and_nil_comparisons_keep_plain_binary`
+(control_flow_tests.rs) and the spec above (the `simple test` runner uses the interpreter lane, so the spec
+pins semantics; the JIT repro is `simple run` on a `fn main()`).
+Evidence: `simple run` on a `fn main()` repro (`e=bf().?` ...): before (bin/simple.exe) `e == false` false,
+`bt().? == true` false, `ki() == 5` false, `bf() == false` false; after (rebuilt seed) all true, while
+`bf().? == true` false, `bn().? == false` false, `bn().? != true` true, `bn().? == nil` true, `ki().? == false` false.
+HIR red->green: `optional_scalar_eq_raw_scalar_uses_tagged_equality` fails without the fix, passes with it.
+
+## 2026-11-09 (follow-up) — Part A seed fix (owner decision), Part C split
+
+Owner decision (memory owner-decisions-20261106 item 14): the seed treats
+`x.? == true` / `x.? == false` nil-safely, matching pure Simple.
+
+- **Pure-Simple reference** (native stage2 `stage2_new4.exe` probe): nil `text?`
+  -> neither literal; present `text?` -> neither; `bool?` false -> `== false`;
+  `bool?` true -> `== true`; nil `bool?` -> neither.
+- **Seed divergence found**: the interpreter already matched; the default
+  `simple run` engine (JIT lane, HIR->MIR->Cranelift) answered false for BOTH
+  literals on a `bool?` receiver (`SIMPLE_EXECUTION_MODE=interpret` true vs
+  `jit` false on the same file).
+- **Fix**: `src/compiler_rust/compiler/src/hir/lower/expr/operators.rs`
+  `lower_exists_check_bool_compare` — `x.? ==/!= <bool literal>` lowers to
+  `rt_is_present(x) and rt_unwrap_or_self(x) ==/!= literal` on tagged words.
+- **Tests**: `compiler/tests/exists_check_bool_compare_jit.rs` (JIT red 3072 vs
+  expected 6288 before the fix, green after; interpreter green both) and
+  `seed_semantic_divergences.rs::dot_query_bool_comparison_matches_pure_simple`.
+- **Part C** split to `seed_semantic_error_missing_position_2026-11-09.md`.
+- Status: fix-implemented-verification-pending.

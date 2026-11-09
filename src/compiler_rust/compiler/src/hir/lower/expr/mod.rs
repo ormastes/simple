@@ -502,6 +502,13 @@ impl Lowerer {
                 kind: HirExprKind::Global(symbol),
                 ty,
             })
+        } else if let Some(message) = self.flatten_ambiguous_callable(name) {
+            // Cross-module collision that no rule above selects a definition
+            // for. Owner decision 2026-11-09: a compile error requiring
+            // qualification, never a fall-through to the bare name (= whichever
+            // definition happened to keep it). See
+            // doc/08_tracking/bug/jit_co_compiled_definition_ambiguity_debt_2026-09-15.md
+            Err(LowerError::AmbiguousCallable(message))
         } else if let Some((source, ty)) = self.resolve_import_alias(name).map(str::to_string).and_then(|source| {
             // Selective-import alias (`use m.{f as g}`): module flattening merged
             // the imported symbol in under its ORIGINAL name, so `g` names

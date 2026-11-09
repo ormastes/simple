@@ -1,0 +1,129 @@
+"""
+# `| Pattern -> expr` match arms (self-hosted frontend)
+
+README.md:442 documents the arrow form of `match` as preferred:
+
+    match s:
+        | Circle(r) -> 2.0 * 3.14159 * r
+        | Square(side) -> 4.0 * side
+
+Owner decision 2026-11-09 (owner-decisions-20261106 item 14): IMPLEMENT it in
+both parsers, equivalent to the `case Pat: expr` form. This spec pins the
+self-hosted core parser (`core/parser_stmts.spl` caseless-arm branch): a
+leading `|` opens an arm, `->` separates pattern from body, consecutive arms
+on their own lines stay separate arms, and the resulting AST has the same
+shape as the `case` spelling.
+
+Bug: doc/08_tracking/bug/readme_arrow_match_arm_syntax_does_not_parse_2026-09-19.md
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:parser
+# @tag:match
+
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors, parser_first_error_get}
+use compiler.frontend.parser_types_expr.{ExprKind, StmtKind, PatternKind, MatchArm}
+
+fn pattern_shape(arm: MatchArm) -> text:
+    match arm.pattern.kind:
+        case PatternKind.Enum(_, variant, _): "enum:" + variant
+        case PatternKind.Binding(name, _): "bind:" + name
+        case PatternKind.Tuple(_): "tuple"
+        case _: "other"
+
+# Structural rendering of the first statement of `fn_name`, which must be a
+# match: `arms=<n>;<pattern>/<body stmt count>;...`. Positions are not part
+# of the rendering, so the arrow and `case` spellings compare equal.
+fn match_shape(source: text, fn_name: text) -> text:
+    val parsed = parse_full_frontend(source, "pipe_arrow.spl", "pipe_arrow", Logger(level: 0))
+    if parser_has_errors():
+        return "parse-error: " + parser_first_error_get()
+    if not parsed.functions.contains(fn_name):
+        return "no-fn"
+    val f = parsed.functions[fn_name]
+    if f.body.stmts.len() == 0:
+        return "empty-body"
+    match f.body.stmts[0].kind:
+        case StmtKind.Expr(e):
+            match e.kind:
+                case ExprKind.MatchCase(_, arms):
+                    var parts: [text] = []
+                    for arm in arms:
+                        var guard = ""
+                        if arm.has_guard:
+                            guard = "?"
+                        parts.push(pattern_shape(arm) + guard + "/" + "{arm.body.stmts.len()}")
+                    return "arms={arms.len()};" + parts.join(";")
+                case _: return "not-match"
+        case _: return "not-expr-stmt"
+
+val readme_arrow = """
+enum Shape:
+    Circle(f64)
+    Rectangle(f64, f64)
+    Square(f64)
+    Triangle(f64, f64, f64)
+
+fn perimeter(s: Shape) -> f64:
+    match s:
+        | Circle(r) -> 2.0 * 3.14159 * r
+        | Rectangle(w, h) -> 2.0 * (w + h)
+        | Square(side) -> 4.0 * side
+        | Triangle(a, b, c) -> a + b + c
+"""
+
+val readme_case = """
+enum Shape:
+    Circle(f64)
+    Rectangle(f64, f64)
+    Square(f64)
+    Triangle(f64, f64, f64)
+
+fn perimeter(s: Shape) -> f64:
+    match s:
+        case Circle(r): 2.0 * 3.14159 * r
+        case Rectangle(w, h): 2.0 * (w + h)
+        case Square(side): 4.0 * side
+        case Triangle(a, b, c): a + b + c
+"""
+
+describe "`| Pattern -> expr` match arms parse in the self-hosted frontend":
+    it "parses the README perimeter example as four separate arms":
+        step("README.md:442 arrow form")
+        val shape = match_shape(readme_arrow, "perimeter")
+        expect(shape).to_equal("arms=4;enum:Circle/1;enum:Rectangle/1;enum:Square/1;enum:Triangle/1")
+
+    it "produces the same AST shape as the `case Pat: expr` spelling":
+        step("arrow vs case parity")
+        expect(match_shape(readme_arrow, "perimeter")).to_equal(match_shape(readme_case, "perimeter"))
+
+    it "keeps a guard and a wildcard arm in the arrow spelling":
+        val src = "fn sign(n: i64) -> text:\n    match n:\n        | 0 -> \"zero\"\n        | x if x > 0 -> \"pos\"\n        | _ -> \"neg\"\n"
+        val shape = match_shape(src, "sign")
+        expect(shape).to_equal("arms=3;other/1;bind:x?/1;other/1")
+
+    it "keeps a deeper-indented leading `|` as a BitOr continuation inside an arm body":
+        val src = "fn flags(s: Shape) -> i64:\n    match s:\n        | Circle(r) -> 1\n            | 2\n        | Square(x) -> 4\n"
+        val shape = match_shape(src, "flags")
+        expect(shape).to_equal("arms=2;enum:Circle/1;enum:Square/1")
+
+    it "keeps multi-line `case` pattern alternatives joined by a leading `|`":
+        val multi = "fn small(n: i64) -> bool:\n    match n:\n        case 1 | 2\n            | 3: true\n        case _: false\n"
+        val single = "fn small(n: i64) -> bool:\n    match n:\n        case 1 | 2 | 3: true\n        case _: false\n"
+        expect(match_shape(multi, "small")).to_equal(match_shape(single, "small"))
+        expect(match_shape(multi, "small")).to_equal("arms=2;other/1;other/1")
+
+    it "keeps a same-indent leading `|` BitOr continuation outside match blocks":
+        val src = "fn word(a: i64, b: i64) -> i64:\n    val v = a\n    | b\n    v\n"
+        val parsed = parse_full_frontend(src, "pipe_arrow.spl", "pipe_arrow", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(false)
+        expect(parsed.functions["word"].body.stmts.len()).to_equal(2)
+
+    it "parses the arrow form in expression position":
+        val src = "fn area(s: Shape) -> f64:\n    val a = match s:\n        | Circle(r) -> r * r\n        | Square(x) -> x * x\n    a\n"
+        val parsed = parse_full_frontend(src, "pipe_arrow.spl", "pipe_arrow", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(false)

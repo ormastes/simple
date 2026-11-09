@@ -7,7 +7,7 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
-use std::cell::RefCell;
+
 use std::collections::HashMap;
 use std::collections::HashMap as StdHashMap;
 use std::io::{ErrorKind, Read, Write};
@@ -68,81 +68,93 @@ enum SocketHandle {
     RawSocket(socket2::Socket),
 }
 
-thread_local! {
-    static SOCKET_HANDLES: RefCell<StdHashMap<i64, SocketHandle>> = RefCell::new(StdHashMap::new());
-}
+// Process-global registry. Handle ids come from a process-global counter and
+// interpreter `thread_spawn*` closures run on real OS threads, so a socket
+// accepted on one thread (e.g. SimpleHttpServer.serve_loop) must stay
+// reachable from the worker thread that serves it. A thread_local map made the
+// id dangle there ("invalid socket handle"), so the worker could neither read,
+// write nor close the connection and the client hung.
+// doc/08_tracking/bug/seed_http_server_handle_connection_dispatch_2026-09-04.md
+// Entries are Arc'd and cloned out of the map before any socket call, so no
+// map shard lock is ever held across blocking accept/read/write.
+static SOCKET_HANDLES: std::sync::LazyLock<dashmap::DashMap<i64, Arc<SocketHandle>>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
 
 /// Clear all socket handles (call between test runs to prevent resource leaks).
 pub(crate) fn clear_socket_handles() {
-    SOCKET_HANDLES.with(|handles| handles.borrow_mut().clear());
+    SOCKET_HANDLES.clear();
 }
 
 fn allocate_socket(socket: SocketHandle) -> i64 {
     let id = NEXT_SOCKET_HANDLE_ID.fetch_add(1, NetOrdering::SeqCst);
-    SOCKET_HANDLES.with(|handles| {
-        handles.borrow_mut().insert(id, socket);
-    });
+    SOCKET_HANDLES.insert(id, Arc::new(socket));
     id
+}
+
+fn socket_entry(id: i64) -> Option<Arc<SocketHandle>> {
+    SOCKET_HANDLES.get(&id).map(|entry| Arc::clone(entry.value()))
 }
 
 fn with_tcp_listener<F, R>(id: i64, f: F) -> Result<R, std::io::Error>
 where
     F: FnOnce(&TcpListener) -> std::io::Result<R>,
 {
-    SOCKET_HANDLES.with(|handles| {
-        let handles = handles.borrow();
-        match handles.get(&id) {
-            Some(SocketHandle::TcpListener(listener)) => f(listener),
-            Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a TCP listener")),
-            None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
-        }
-    })
+    match socket_entry(id).as_deref() {
+        Some(SocketHandle::TcpListener(listener)) => f(listener),
+        Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a TCP listener")),
+        None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
+    }
 }
 
 fn with_tcp_stream<F, R>(id: i64, f: F) -> Result<R, std::io::Error>
 where
     F: FnOnce(&TcpStream) -> std::io::Result<R>,
 {
-    SOCKET_HANDLES.with(|handles| {
-        let handles = handles.borrow();
-        match handles.get(&id) {
-            Some(SocketHandle::TcpStream(stream)) => f(stream),
-            Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a TCP stream")),
-            None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
-        }
-    })
+    match socket_entry(id).as_deref() {
+        Some(SocketHandle::TcpStream(stream)) => f(stream),
+        Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a TCP stream")),
+        None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
+    }
 }
 
+/// `&TcpStream` implements Read + Write, so shared handles still read/write.
 fn with_tcp_stream_mut<F, R>(id: i64, f: F) -> Result<R, std::io::Error>
 where
-    F: FnOnce(&mut TcpStream) -> std::io::Result<R>,
+    F: FnOnce(&mut &TcpStream) -> std::io::Result<R>,
 {
-    SOCKET_HANDLES.with(|handles| {
-        let mut handles = handles.borrow_mut();
-        match handles.get_mut(&id) {
-            Some(SocketHandle::TcpStream(stream)) => f(stream),
-            Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a TCP stream")),
-            None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
+    match socket_entry(id).as_deref() {
+        Some(SocketHandle::TcpStream(stream)) => {
+            let mut shared: &TcpStream = stream;
+            f(&mut shared)
         }
-    })
+        Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a TCP stream")),
+        None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
+    }
 }
 
 fn with_udp_socket<F, R>(id: i64, f: F) -> Result<R, std::io::Error>
 where
     F: FnOnce(&UdpSocket) -> std::io::Result<R>,
 {
-    SOCKET_HANDLES.with(|handles| {
-        let handles = handles.borrow();
-        match handles.get(&id) {
-            Some(SocketHandle::UdpSocket(socket)) => f(socket),
-            Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a UDP socket")),
-            None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
-        }
-    })
+    match socket_entry(id).as_deref() {
+        Some(SocketHandle::UdpSocket(socket)) => f(socket),
+        Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a UDP socket")),
+        None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
+    }
+}
+
+fn with_raw_socket<F>(id: i64, f: F) -> bool
+where
+    F: FnOnce(&socket2::Socket) -> bool,
+{
+    match socket_entry(id).as_deref() {
+        Some(SocketHandle::RawSocket(socket)) => f(socket),
+        _ => false,
+    }
 }
 
 fn release_socket(id: i64) -> bool {
-    SOCKET_HANDLES.with(|handles| handles.borrow_mut().remove(&id).is_some())
+    SOCKET_HANDLES.remove(&id).is_some()
 }
 
 //==============================================================================
@@ -539,13 +551,7 @@ pub fn rt_io_tcp_bind_fd_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     let addr = extract_socket_addr(args, 1)?;
     let addr2: socket2::SockAddr = addr.into();
-    let ok = SOCKET_HANDLES.with(|handles| {
-        let handles = handles.borrow();
-        match handles.get(&handle) {
-            Some(SocketHandle::RawSocket(socket)) => socket.bind(&addr2).is_ok(),
-            _ => false,
-        }
-    });
+    let ok = with_raw_socket(handle, |socket| socket.bind(&addr2).is_ok());
     Ok(Value::Bool(ok))
 }
 
@@ -558,27 +564,38 @@ pub fn rt_io_tcp_listen_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     let backlog = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(128) as i32;
 
-    let ok = SOCKET_HANDLES.with(|handles| {
-        let mut handles = handles.borrow_mut();
-        // Take the RawSocket out, listen, convert to TcpListener, reinsert
-        if let Some(SocketHandle::RawSocket(_)) = handles.get(&handle) {
-            if let Some(SocketHandle::RawSocket(socket)) = handles.remove(&handle) {
-                if socket.listen(backlog).is_ok() {
-                    // Convert socket2::Socket → std::net::TcpListener via raw fd
-                    #[cfg(unix)]
-                    let listener = unsafe { TcpListener::from_raw_fd(socket.into_raw_fd()) };
-                    #[cfg(windows)]
-                    let listener = unsafe { TcpListener::from_raw_socket(socket.into_raw_socket()) };
-                    handles.insert(handle, SocketHandle::TcpListener(listener));
-                    return true;
-                }
-                // listen failed — put socket back
-                handles.insert(handle, SocketHandle::RawSocket(socket));
-            }
+    // Take the RawSocket out, listen, convert to TcpListener, reinsert.
+    if !matches!(socket_entry(handle).as_deref(), Some(SocketHandle::RawSocket(_))) {
+        return Ok(Value::Bool(false));
+    }
+    let Some((_, entry)) = SOCKET_HANDLES.remove(&handle) else {
+        return Ok(Value::Bool(false));
+    };
+    // Another thread may still hold a clone of the entry mid-call; then the
+    // socket cannot be consumed, so put it back and report failure.
+    let socket = match Arc::try_unwrap(entry) {
+        Ok(SocketHandle::RawSocket(socket)) => socket,
+        Ok(other) => {
+            SOCKET_HANDLES.insert(handle, Arc::new(other));
+            return Ok(Value::Bool(false));
         }
-        false
-    });
-    Ok(Value::Bool(ok))
+        Err(shared) => {
+            SOCKET_HANDLES.insert(handle, shared);
+            return Ok(Value::Bool(false));
+        }
+    };
+    if socket.listen(backlog).is_ok() {
+        // Convert socket2::Socket → std::net::TcpListener via raw fd
+        #[cfg(unix)]
+        let listener = unsafe { TcpListener::from_raw_fd(socket.into_raw_fd()) };
+        #[cfg(windows)]
+        let listener = unsafe { TcpListener::from_raw_socket(socket.into_raw_socket()) };
+        SOCKET_HANDLES.insert(handle, Arc::new(SocketHandle::TcpListener(listener)));
+        return Ok(Value::Bool(true));
+    }
+    // listen failed — put socket back
+    SOCKET_HANDLES.insert(handle, Arc::new(SocketHandle::RawSocket(socket)));
+    Ok(Value::Bool(false))
 }
 
 pub fn rt_io_tcp_accept_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -702,7 +719,7 @@ pub fn rt_io_tcp_read_exact_len_interp(args: &[Value]) -> Result<Value, CompileE
     }
 }
 
-fn read_line_chunked_interp(stream: &mut TcpStream, mut out: Option<&mut Vec<u8>>) -> std::io::Result<i64> {
+fn read_line_chunked_interp(stream: &mut &TcpStream, mut out: Option<&mut Vec<u8>>) -> std::io::Result<i64> {
     let mut total = 0i64;
     let mut chunk = [0u8; 1024];
     loop {
@@ -886,13 +903,7 @@ pub fn rt_io_tcp_set_reuseport_interp(args: &[Value]) -> Result<Value, CompileEr
     let handle = extract_handle(args, 0)?;
     let enabled = args.get(1).map(|v| v.truthy()).unwrap_or(true);
     // Try RawSocket first — pre-bind path needs this
-    let raw_ok = SOCKET_HANDLES.with(|handles| {
-        let handles = handles.borrow();
-        match handles.get(&handle) {
-            Some(SocketHandle::RawSocket(socket)) => socket.set_reuse_port(enabled).is_ok(),
-            _ => false,
-        }
-    });
+    let raw_ok = with_raw_socket(handle, |socket| socket.set_reuse_port(enabled).is_ok());
     if raw_ok {
         return Ok(Value::Bool(true));
     }
@@ -936,13 +947,7 @@ pub fn rt_io_tcp_set_reuseaddr_interp(args: &[Value]) -> Result<Value, CompileEr
     let handle = extract_handle(args, 0)?;
     let enabled = args.get(1).map(|v| v.truthy()).unwrap_or(true);
     // Try RawSocket first — pre-bind path needs this
-    let raw_ok = SOCKET_HANDLES.with(|handles| {
-        let handles = handles.borrow();
-        match handles.get(&handle) {
-            Some(SocketHandle::RawSocket(socket)) => socket.set_reuse_address(enabled).is_ok(),
-            _ => false,
-        }
-    });
+    let raw_ok = with_raw_socket(handle, |socket| socket.set_reuse_address(enabled).is_ok());
     if raw_ok {
         return Ok(Value::Bool(true));
     }
@@ -1474,15 +1479,36 @@ pub fn native_http_send_interp(args: &[Value]) -> Result<Value, CompileError> {
 /// This should be called between test runs to prevent memory leaks
 /// from unclosed sockets.
 pub fn clear_net_state() {
-    SOCKET_HANDLES.with(|handles| {
-        // Drop all socket handles (this closes them)
-        handles.borrow_mut().clear();
-    });
+    // Drop all socket handles (this closes them)
+    SOCKET_HANDLES.clear();
 }
 
 #[cfg(test)]
 mod tcp_read_contract_tests {
     use super::*;
+
+    /// seed_http_server_handle_connection_dispatch_2026-09-04: a stream
+    /// accepted on one thread (serve_loop) must be usable and closable from
+    /// the worker thread that serves it. With a thread_local registry the
+    /// worker saw "invalid socket handle" and the client hung forever.
+    #[test]
+    fn tcp_handle_accepted_on_one_thread_is_served_from_another() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let mut client = TcpStream::connect(addr).expect("connect");
+        let (accepted, _) = listener.accept().expect("accept");
+        let id = allocate_socket(SocketHandle::TcpStream(accepted));
+        let worker = std::thread::spawn(move || {
+            let wrote = with_tcp_stream_mut(id, |stream| stream.write_all(b"served")).is_ok();
+            (wrote, release_socket(id))
+        });
+        let (wrote, released) = worker.join().expect("worker thread");
+        assert!(wrote, "worker thread could not write to a handle accepted elsewhere");
+        assert!(released, "worker thread could not close a handle accepted elsewhere");
+        let mut got = String::new();
+        client.read_to_string(&mut got).expect("client read");
+        assert_eq!(got, "served");
+    }
 
     #[test]
     fn tcp_read_failure_is_nil_not_empty_bytes() {
