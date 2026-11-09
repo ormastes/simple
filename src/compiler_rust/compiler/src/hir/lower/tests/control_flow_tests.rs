@@ -1570,3 +1570,18 @@ fn raw_scalar_and_nil_comparisons_keep_plain_binary() {
         assert!(!repr.contains("rt_value_bool"), "`{name}` must not box: {repr}");
     }
 }
+
+/// `x!` on a NON-nullable raw scalar (`"20672".to_i64()` is bare `I64`) must
+/// be the identity. Routing it through `rt_unwrap_or_self` re-typed the raw
+/// word `ANY`, so the JIT decoded it as tagged: `d!` gave 2584 (= 20672 >> 3).
+/// Bug: seed_interp_local_to_i64_unwrap_shifts_by_tag_2026_11_09
+#[test]
+fn test_force_unwrap_on_raw_i64_local_is_identity() {
+    let module =
+        parse_and_lower("fn f() -> i64:\n    val d = \"20672\".to_i64()\n    return d!\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+    assert!(
+        !repr.contains("rt_unwrap_or_self"),
+        "raw i64 force-unwrap must not re-tag via rt_unwrap_or_self: {repr}"
+    );
+}

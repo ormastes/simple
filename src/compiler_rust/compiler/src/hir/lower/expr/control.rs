@@ -3328,6 +3328,30 @@ impl Lowerer {
         let inner_hir = self.lower_expr(inner, ctx)?;
         let subject_ty = inner_hir.ty;
 
+        // A NON-nullable raw scalar subject (`"20672".to_i64()` is typed bare
+        // `I64`: `to_i64` is total) holds an UNTAGGED word, and cannot be
+        // absent. Routing it through `rt_unwrap_or_self` below re-typed that raw
+        // word `ANY`, so the next consumer decoded it as tagged and shifted it
+        // by the tag width: `val d = "20672".to_i64(); d!` gave 2584 (>>3).
+        // Unwrapping a value that cannot be absent is the identity, type kept.
+        // Bug: seed_interp_local_to_i64_unwrap_shifts_by_tag_2026_11_09
+        if matches!(
+            subject_ty,
+            TypeId::BOOL
+                | TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+        ) {
+            return Ok(inner_hir);
+        }
+
         // A nullable SCALAR (`i64?`, `f64?`, `bool?`, `text?`) is not a
         // Result/Option enum: it lowers to `HirType::Pointer { inner }` and its
         // runtime value is the tagged payload itself, with nil as the absent
