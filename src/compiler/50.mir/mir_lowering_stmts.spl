@@ -1047,6 +1047,19 @@ impl MirLowering:
             fi = fi + 1
         ArrayMoveCtorInfo(names: names, kinds: kinds, omit_ok: omit_ok, call_name: call_name)
 
+    me nested_pattern_slot_let(init: HirExpr) -> bool:
+        """`case Ok((_, items))` desugars (match_desugaring.spl) to a binding
+        of the synthetic `__mp_nested_flat` payload temp plus
+        `val items = __mp_nested_flat[1]`. That slot read is a pattern
+        binding, not a user place read: a direct `case Ok(items)` binds the
+        payload handle without a copy, so the nested form must not emit a
+        second element-wise rt_array_get copy loop either."""
+        match init.kind:
+            case HirExprKind.Index(base, _):
+                val base_symbol = am_var_symbol(base)
+                base_symbol >= 0 and self.symbols.symbol_name_scalar_raw(base_symbol) == "__mp_nested_flat"
+            case _: false
+
     me array_move_let_skips_copy(symbol_id: i64, init: HirExpr) -> bool:
         """Site A of mir_array_move.spl: `var o = s` / `var o = s.f` whose
         source the analysis proved owned and dead after this binding moves
@@ -1684,7 +1697,7 @@ impl MirLowering:
                             # A place read proven owned and dead afterwards
                             # (mir_array_move.spl, Site A) takes that same
                             # path: the handle moves instead of being copied.
-                            val array_copy = self.maybe_copy_array_value(init_local, effective_type, mir_expr_kind_is_place(let_init.kind) and not initializer_is_short and not initializer_moves and not self.array_move_let_skips_copy(symbol_value_id, let_init))
+                            val array_copy = self.maybe_copy_array_value(init_local, effective_type, mir_expr_kind_is_place(let_init.kind) and not initializer_is_short and not initializer_moves and not self.array_move_let_skips_copy(symbol_value_id, let_init) and not self.nested_pattern_slot_let(let_init))
                             if val array_copy_local = array_copy:
                                 self.bind_local(symbol_value_id, array_copy_local)
                             else:
