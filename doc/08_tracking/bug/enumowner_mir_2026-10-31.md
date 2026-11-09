@@ -61,3 +61,8 @@ Real-module attempt: re-lowering the original `hir_literal_constant_v1.spl` (unt
 hir_operators, hir_types, hir_definitions) under the Rust seed exceeded the 900 s
 per-spec budget (child-timeout, <1 GB RSS) before any diagnostic. A seed-hosted
 full-import repro is therefore infeasible; it needs a native stage3 lowering run.
+
+## Status 2026-11-09 (Opus rerun) — fixed in source, verification pending
+`enum_owner_unqualified_arms_spec` 3/3 and `enum_owner_full_closure_shapes_spec` 4/4 GREEN against current
+release/1.0.0 source (seed-hosted MIR lowering). `git grep bug=enumowner-mir-20261031 -- src` = 0: the
+qualification workarounds are already gone. Remaining: native stage3 build without regressions.

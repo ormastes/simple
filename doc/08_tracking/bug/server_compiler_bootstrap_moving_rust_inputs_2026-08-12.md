@@ -1,7 +1,7 @@
 # Server compiler bootstrap blocked by moving Rust inputs
 
 Date: 2026-08-12  
-Status: OPEN; source fixes retained, compiler publication not admitted
+Status: fix-implemented-verification-pending (PR #7925 pins bootstrap to a git-archive snapshot so Rust inputs cannot move mid-run; selftest covers live-tree mutation; full bootstrap from snapshot not yet verified)
 
 The strict native web and PostgreSQL-mimic server gates require an admitted
 pure-Simple compiler. Three bounded bootstrap cycles were attempted against

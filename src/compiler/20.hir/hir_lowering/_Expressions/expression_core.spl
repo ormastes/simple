@@ -18,6 +18,7 @@ use compiler.hir.hir_lowering._Expressions.source_union_pattern_v1.*
 use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
 use compiler.hir.hir_lowering._Expressions.accessor_forwarding.*
 use compiler.hir.hir_lowering._Expressions.collection_factory_types.{collection_factory_type_concrete}
+use compiler.hir.hir_lowering.pattern_enum_substitution.{substitute_declared_pattern_type}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_lowering._Expressions.cfg_when_marker.{cfg_when_marker_cond, cfg_when_chain_is_marker}
 use compiler.hir.hir_lowering._Expressions.call_arity.*
@@ -397,11 +398,58 @@ impl HirLowering:
             val direct = self.field_type_for_base_raw(base_symbol.id, field_name)
             match direct.kind:
                 case HirTypeKind.Error: ()
-                case _: return direct
+                case _: return self.instantiate_field_type_for_base(base, direct)
         val owner_id = self.field_owner_for_hir_expr(base)
         if owner_id >= 0:
-            return self.field_type_for_owner_raw(owner_id, field_name)
+            return self.instantiate_field_type_for_base(base, self.field_type_for_owner_raw(owner_id, field_name))
         HirType(kind: HirTypeKind.Error, span: base.span)
+
+    me instantiate_field_type_for_base(base: HirExpr, declared: HirType) -> HirType:
+        # Bug tldr_future_static_owner_typeparam_2026_10_25: the field table
+        # holds the DECLARED field type (`poll_result: Poll<T>`). A read on an
+        # instantiated receiver (`b: Box<text?>`) must see `Poll<text?>`, or a
+        # `match b.poll_result: case Poll.Ready(v)` binds `v: T` and every use
+        # of `v` is lowered as an erased i64 word (native: `{v ?? "nil"}`
+        # printed the text handle as a decimal). Substitute only with a fully
+        # resolved, declaration-ordered argument list; otherwise keep the
+        # declared type unchanged (the pre-existing behaviour).
+        match declared.kind:
+            case HirTypeKind.Error: return declared
+            case _: ()
+        var base_type = base.type_
+        if not base.has_type_:
+            val base_symbol = _hir_expr_symbol_or_invalid(base.kind)
+            if not base_symbol.is_valid():
+                return declared
+            val symbol_type = self.symbols.get_symbol_type_raw(base_symbol.id)
+            if not symbol_type.?:
+                return declared
+            base_type = symbol_type.unwrap()
+        match base_type.kind:
+            case HirTypeKind.Named(owner, arguments):
+                if arguments.len() == 0:
+                    return declared
+                val names = self.owner_type_param_names_raw(owner.id)
+                if names.len() != arguments.len():
+                    return declared
+                val substituted = substitute_declared_pattern_type(declared, names, arguments)
+                match substituted.kind:
+                    case HirTypeKind.Error: return declared
+                    case _: return substituted
+            case _: return declared
+
+    me owner_type_param_names_raw(raw_owner_symbol_id: i64) -> [text]:
+        # Same key order as field_type_for_owner_raw: module-qualified first.
+        var empty: [text] = []
+        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+            val owner_name: text = owner_symbol.name
+            if val owner_module = owner_symbol.defining_module:
+                val canonical_name: text = owner_module + "." + owner_name
+                if self.struct_type_param_names_by_name.has(canonical_name):
+                    return self.struct_type_param_names_by_name[canonical_name]
+            if self.struct_type_param_names_by_name.has(owner_name):
+                return self.struct_type_param_names_by_name[owner_name]
+        empty
 
     me lower_hir_expr(e: Expr) -> HirExpr:
         if e == nil:

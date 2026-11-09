@@ -1,0 +1,111 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mir, regression
+#
+# Prevention pins for four 2026-10-25 Phase-3 bugs whose defect was observed
+# only in Stage-2-compiled objects. Current source (HIR -> 50.mir ->
+# MirToLlvm) lowers every recorded shape correctly; these pins keep it so.
+# Native confirmation 2026-11-09 with stage2_new4.exe on the same shapes:
+# `IF1 /b/runtime_native.c|IF2 /a/runtime_native.c|ONE @a!=@a!;@b!=@b!;|LINES 2000|AGG 5`.
+#  - if_expression_text_result_erased_to_i64_2026-10-25
+#  - one_element_literal_of_loop_text_boxed_as_int_2026-10-25
+#  - text_method_arg_copied_through_extern_abi_per_call_2026-10-25
+#  - mir_aggregate_trace_array_receiver_2026_10_25
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+struct Lowered:
+    ir: text
+    errors: [text]
+
+fn lower_src(src: text) -> Lowered:
+    val file = "testdata/s2shape.spl"
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parse_full_frontend(src, file, "s2shape", Logger(level: 0)))
+    var errors: [text] = []
+    for e in hl.errors:
+        errors.push("hir: " + e.message)
+    val m: HirModule = hir
+    var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(m)
+    for e in lowering.errors:
+        errors.push("mir: " + e.message)
+    Lowered(ir: MirToLlvm.create("s2shape", CodegenTarget.X86_64, nil).translate_module(mir), errors: errors)
+
+fn body_of(ir: text, fn_name: text) -> [text]:
+    var out: [text] = []
+    var inside = false
+    for line in ir.split("\n"):
+        val l: text = line
+        if l.starts_with("define ") and l.contains("." + fn_name + "("):
+            inside = true
+        if inside:
+            out = out.push(l)
+            if l == "}":
+                inside = false
+    out
+
+fn calls(lines: [text], sym: text) -> bool:
+    for line in lines:
+        val l: text = line
+        if l.contains("call ") and l.contains("@" + sym + "("):
+            return true
+    false
+
+describe "Stage-2-only workaround shapes lower correctly from current source":
+    it "nested if-expression with `?` arm keeps its text type (if_expression_text_result_erased_to_i64)":
+        val r = lower_src(
+            "fn find_dir() -> text:\n    \"/a\"\n" +
+            "fn strict_dir() -> Result<text, text>:\n    Ok(\"/b\")\n" +
+            "fn go(strict: bool, env: bool) -> Result<text, text>:\n" +
+            "    val rt_dir = if strict: (if env: strict_dir()? else: find_dir()) else: find_dir()\n" +
+            "    Ok(rt_dir + \"/runtime_native.c\")\n")
+        expect(r.errors).to_equal([])
+        val body = body_of(r.ir, "go")
+        expect(calls(body, "rt_strcat_tagged")).to_equal(true)
+        expect(calls(body, "rt_raw_i64_to_string")).to_equal(false)
+
+    it "one-element literal of a loop text var is a text element (one_element_literal_of_loop_text_boxed_as_int)":
+        val r = lower_src(
+            "fn fin(a: text, xs: [text]) -> text:\n    a + xs.join(\",\")\n" +
+            "fn go(ts: [text]) -> text:\n" +
+            "    var pending_attrs: [text] = []\n    var cur_lines: [text] = []\n    var out = \"\"\n" +
+            "    for t in ts:\n        var logical = t\n        logical = logical + \"!\"\n        pending_attrs.push(logical)\n" +
+            "    cur_lines = pending_attrs\n    pending_attrs = []\n" +
+            "    for attr in cur_lines:\n        out = out + fin(attr, [attr])\n    out\n")
+        expect(r.errors).to_equal([])
+        val body = body_of(r.ir, "go")
+        expect(calls(body, "rt_value_int_wide")).to_equal(false)
+        expect(calls(body, "rt_array_new")).to_equal(true)
+
+    it "text receiver of index_of is copied only on the raw fallback branch (text_method_arg_copied_through_extern_abi_per_call)":
+        val r = lower_src("fn le(content: text, start: i64) -> i64:\n    content.index_of(\"\\n\", start) ?? -1\n")
+        expect(r.errors).to_equal([])
+        val body = body_of(r.ir, "le")
+        expect(calls(body, "rt_text_find")).to_equal(true)
+        # Every rt_string_new must sit after a conditional branch: the tagged
+        # handle is kept as-is and only a raw char* is boxed.
+        var seen_branch = false
+        var copy_before_branch = false
+        for line in body:
+            val l: text = line
+            if l.contains("br i1 "):
+                seen_branch = true
+            if l.contains("@rt_string_new(") and not seen_branch:
+                copy_before_branch = true
+        expect(copy_before_branch).to_equal(false)
+
+    it "length of an array taken from a destructured tuple resolves (mir_aggregate_trace_array_receiver)":
+        val r = lower_src(
+            "fn pr() -> ([i64], i64):\n    ([1, 2], 3)\n" +
+            "fn go() -> i64:\n    val (ops, k) = pr()\n    val n = ops.len()\n    n + k\n")
+        expect(r.errors).to_equal([])
+        expect(calls(body_of(r.ir, "go"), "rt_array_len")).to_equal(true)

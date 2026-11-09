@@ -549,6 +549,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Index/slice operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_index_get", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_get", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_index_set", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_slice", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_contains", &[I64, I64], &[I8]),

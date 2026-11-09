@@ -82,3 +82,16 @@ core-c deploy.
 
 - `core_c_string_len_registry_2026-06-02.md`
 - `mcp_redeploy_smoke_failures_2026-06-01.md`
+
+## 2026-11-09 independent corroboration (p3-mine lane)
+
+Re-verified from a clean worktree at `origin/release/1.0.0` (not the 2026-11-09
+addendum's tree): `grep fgetc src/runtime/runtime_native.c` is empty;
+`stdin_read_char` and all four stdin readers route through `stdin_raw_byte`
+(raw `read(0, buf, 1)`, EINTR-retried) at `src/runtime/runtime_native.c:3861-3960`;
+both fixing commits (`ea2afa2f689`, `1b7d3a320e2`) are ancestors of
+`origin/release/1.0.0`. The in-tree selfcheck
+`src/runtime/test/rt_stdin_read_char_raw_selfcheck.c` was rebuilt exactly per
+its header recipe with functions extracted from the current
+`runtime_native.c` and PASSes (`printf 'line1\nABCDEFGHIJ' | ./sc` → line,
+char, 3 chars, raw read, EOF). Bug-db row set `fixed` on this evidence.
