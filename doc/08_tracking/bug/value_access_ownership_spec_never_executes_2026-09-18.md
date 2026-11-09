@@ -83,3 +83,52 @@ uses it.
   verdict convention). This spec predates that convention and does not follow it:
   the runner reports `no examples executed` rather than the suite treating a
   declared-but-unloadable spec as a hard failure.
+
+## 2026-11-09 — fix-implemented-verification-pending (owner decision: no exception)
+
+Owner ruled option 2: the ownership rule is absolute. `method_calls_literals.spl`
+gets no exception; the audit script's `-eq 1` was the stale line.
+
+What landed:
+
+- **Canonical owner created:** `src/compiler/00.common/value_access.spl` — the
+  module the spec always imported but which never existed in the tree (no git
+  history). It is the single declaration site for `rt_enum_discriminant`,
+  `rt_enum_payload`, `rt_tuple_get` and exposes the typed inline wrappers
+  `compiler_value_discriminant<TEnum>`, `compiler_value_payload<TEnum, TPayload>`,
+  `compiler_value_tuple_at<TElement>`. Added to
+  `scripts/check/no_direct_rt_allowlist.txt` (owner+reason: this record).
+- **Routed:** `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
+  and `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (which also
+  carried three externs plus three bare `rt_enum_discriminant(` calls) now import
+  the owner and declare no runtime extern. Their `_sffi_*` inline helpers are
+  kept as names and delegate to the owner.
+- **Audit:** `scripts/audit/compiler-mir-method-sffi-authority.shs` now requires
+  0 declarations / 0 direct calls / 0 `unsafe` blocks in the MIR module, the
+  owner import, and exactly one declaration of each accessor in the owner. It
+  was switched from `rg` to `grep -cE` because `rg` is absent on the Windows
+  host (the script had never run here; its `_sffi_method_hir_type_discriminant(`
+  count of 3 was already stale — the real line count is 8).
+- **Spec:** `test/01_unit/compiler/mir/value_access_ownership_spec.spl` executes.
+  Example 3 now asserts the two routed MIR files only; the design-fiction lines
+  (`val binary_op: HirBinOp = compiler_value_tuple_at(...)` etc.) that never
+  existed in `expr_dispatch.spl` were dropped.
+
+Evidence (seed `C:/dev/simple/bin/simple.exe test`, cwd = lane worktree):
+
+```
+RED   outcome=ERROR declared>=3 executed=0  error: runtime: Module "compiler.common" does not export 'value_access'
+GREEN outcome=OK    declared>=3 executed=3 passed=3 failed=0
+FLIP  (method_calls_literals.spl reverted to origin) outcome=ERROR executed=3 passed=2 failed=1; audit rc=1
+```
+
+### Remaining debt (direct raw-ABI readers, not yet asserted by the spec)
+
+The original spec's third example named six more files as clean; none of them
+is. Direct `rt_enum_discriminant(`/`rt_enum_payload(`/`rt_tuple_get(` sites
+measured 2026-11-09: `10.frontend/parser_types_expr.spl` 48,
+`50.mir/_MirLowering/module_lowering.spl` 9, `10.frontend/parser_types.spl` 7,
+`50.mir/mir_lowering_stmts.spl` 7, `50.mir/_MirLowering/function_lowering.spl` 2,
+`50.mir/_MirLoweringExpr/switch_operators_calls.spl` 2. Routing them through
+the owner is the same mechanical change as this lane's; each file should be
+added to the spec's example 3 as it is routed.

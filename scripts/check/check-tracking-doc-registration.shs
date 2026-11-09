@@ -16,11 +16,16 @@ todo="$root/doc/08_tracking/todo"
 for needed in "$bug/bug_db.sdn" "$todo/todo_db.sdn"; do
     [ -f "$needed" ] || { echo "ERROR missing-db $needed"; exit 2; }
 done
+# Sharded bug DB: read the merged view (legacy + $bug/db/*.sdn shards).
+bugdb_view="$bug/bug_db.sdn"
+if [ -d "$bug/db" ]; then
+    bugdb_view=$(mktemp); sh "$(dirname "$0")/bug-db-shard.shs" merged "$bug/bug_db.sdn" > "$bugdb_view" || exit 2
+fi
 files=$(mktemp)
 trap 'rm -f "$files"' EXIT HUP INT TERM
 find "$bug" "$todo" -type f -name '*.md' -print > "$files" || exit 2
 LC_ALL=C sort -o "$files" "$files"
-LC_ALL=C awk -v root="$root" -v bugdb="$bug/bug_db.sdn" -v tododb="$todo/todo_db.sdn" '
+LC_ALL=C awk -v root="$root" -v bugdb="$bugdb_view" -v tododb="$todo/todo_db.sdn" '
 BEGIN {
     # Explicit document aliases only. Date punctuation is not a general alias:
     # these three documents were reviewed against the older authoritative row.
@@ -156,4 +161,4 @@ END {
     }
     print (findings ? "FAIL" : "PASS") " rows=" rows " documents=" docs " explicit-unresolved=" explicit+0 " findings=" findings+0
     exit findings ? 1 : 0
-}' "$bug/bug_db.sdn" "$todo/todo_db.sdn" "$files"
+}' "$bugdb_view" "$todo/todo_db.sdn" "$files"

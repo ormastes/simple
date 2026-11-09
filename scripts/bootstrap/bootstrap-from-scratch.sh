@@ -14,6 +14,25 @@
 # and must not acquire bootstrap ownership or create its own process group.
 bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
 bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd -P) || exit 70
+
+# Pinned-archive source (owner decision 2026-11-09): build committed content from
+# a `git archive` snapshot, never the live shared working copy, so concurrent
+# edits (conflict markers, rewritten stage inputs) cannot break a long lane.
+# Opt out with SIMPLE_BOOTSTRAP_LIVE_TREE=1 (uncommitted edits ARE then built).
+# SIMPLE_BOOTSTRAP_SOURCE_REV picks the commit (default HEAD).
+if [ "${SIMPLE_BOOTSTRAP_PINNED_ARCHIVE:-}" = "" ] && [ "${SIMPLE_BOOTSTRAP_LIVE_TREE:-0}" != 1 ] &&
+   [ "${1:-}" != progress-watch ] &&
+   git -C "${bootstrap_early_repo_root}" rev-parse --git-dir >/dev/null 2>&1; then
+  bootstrap_pinned_dir=$(sh "${bootstrap_entry_dir}/bootstrap-pin-archive.shs" \
+    "${bootstrap_early_repo_root}" "${SIMPLE_BOOTSTRAP_SOURCE_REV:-HEAD}" \
+    "${bootstrap_early_repo_root}/build/bootstrap/pinned-src") || {
+    echo "bootstrap-pinned-archive-error: could not materialise source snapshot; set SIMPLE_BOOTSTRAP_LIVE_TREE=1 to build the live tree" >&2
+    exit 70
+  }
+  SIMPLE_BOOTSTRAP_PINNED_ARCHIVE=${bootstrap_pinned_dir}
+  export SIMPLE_BOOTSTRAP_PINNED_ARCHIVE
+  exec sh "${bootstrap_pinned_dir}/scripts/bootstrap/bootstrap-from-scratch.sh" "$@"
+fi
 . "${bootstrap_entry_dir}/lib/centralized-storage.shs"
 case "${1:-}" in
   progress-watch)

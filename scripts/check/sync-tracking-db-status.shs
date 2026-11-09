@@ -66,6 +66,18 @@ db_seal_kind() {
     case "$(head -1 "$1")" in '#sdn-crc32:'*) echo sealed ;; *) echo plain ;; esac
 }
 
+# Sharded bug DB: <legacy> -> path to read. When <dir>/db/ exists the merged
+# view (legacy + shards) is materialised into a temp file; otherwise <legacy>.
+merged_bugdb() {
+    if [ -d "$(dirname "$1")/db" ]; then
+        _mb=$(mktemp) || return 1
+        sh "$SELFDIR/bug-db-shard.shs" merged "$1" > "$_mb" || return 1
+        echo "$_mb"
+    else
+        echo "$1"
+    fi
+}
+
 # --------------------------------------------------------------- bug: rows
 # db -> "lineno\tid\tstatus" for every row of the bugs / bugs_active tables
 # (the file has more than one section named each; both are honoured).
@@ -190,6 +202,7 @@ todo_rows() {
 compute_bug_changes() {
     _root="$1"
     _bugdb="$_root/doc/08_tracking/bug/bug_db.sdn"
+    _bugdb=$(merged_bugdb "$_bugdb")   # sharded bug DB: read the merged view
     _bugdir="$_root/doc/08_tracking/bug"
     _clstmp=$(mktemp) || return 1
     doc_classes "$_bugdir" "$_bugdb" > "$_clstmp"
@@ -312,6 +325,12 @@ run_sync() {
     _bugdb="$_root/doc/08_tracking/bug/bug_db.sdn"
     _tododb="$_root/doc/08_tracking/todo/todo_db.sdn"
     [ -f "$_bugdb" ] && [ -f "$_tododb" ] || { echo "ERROR — nothing was checked"; return 2; }
+    # Sharded bug DB (doc/05_design/infra/tracking/bug_db_shards.md): work on
+    # the merged view; the legacy file is frozen, changed bugs become shards.
+    _bugdb_legacy="$_bugdb"
+    _bugdb=$(merged_bugdb "$_bugdb_legacy")
+    _bugdb_before=""
+    if [ "$_bugdb" != "$_bugdb_legacy" ]; then _bugdb_before=$(mktemp); cp "$_bugdb" "$_bugdb_before"; fi
 
     _bugout=$(compute_bug_changes "$_root")
     _todoout=$(compute_todo_changes "$_root")
@@ -341,6 +360,11 @@ run_sync() {
     # apply
     if [ "$_bug_change_n" -gt 0 ]; then
         apply_changes_to_db "$_bugdb" 3 "$_bug_changes" || { echo "FAIL — could not write $_bugdb"; return 1; }
+        if [ -n "$_bugdb_before" ]; then
+            for _sid in $(sh "$SELFDIR/bug-db-shard.shs" changed "$_bugdb_before" "$_bugdb"); do
+                sh "$SELFDIR/bug-db-shard.shs" write "$_sid" "$_bugdb" "$_bugdb_legacy" >/dev/null || { echo "FAIL — could not write shard $_sid"; return 1; }
+            done
+        fi
     fi
     if [ "$_todo_change_n" -gt 0 ]; then
         apply_changes_to_db "$_tododb" 10 "$_todo_changes" || { echo "FAIL — could not write $_tododb"; return 1; }
@@ -367,7 +391,7 @@ run_sync() {
     fi
 
     # reseal only what is actually CRC-stamped
-    if [ "$_bug_change_n" -gt 0 ]; then
+    if [ "$_bug_change_n" -gt 0 ] && [ -z "$_bugdb_before" ]; then
         case "$(db_seal_kind "$_bugdb")" in
             sealed)
                 _rout=$(sh "$RESEAL_TOOL" "$_bugdb")

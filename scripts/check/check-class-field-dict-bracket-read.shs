@@ -6,6 +6,13 @@
 #   val xs: [V] = self.<f>.get(k) ?? []
 # Fails when the count of such reads grows above the recorded baseline, or
 # when the baseline is stale (count dropped: lower it in the same change).
+# Field names are matched PER OWNER TYPE: `self.<f>[k]` counts only inside a
+# `class X:` / `struct X:` / `impl X:` block whose type X declares
+# `<f>: Dict<K, [V]>` (the declaration may live in another file, e.g. the
+# `impl MirLowering:` extension files). The earlier tree-wide name union
+# flagged `self.effects[i]` on a plain array because an unrelated type
+# declared an array-valued Dict field called `effects`
+# (bug class_field_array_dict_bracket_reads_native_unsafe_2026-11-06).
 # Usage: sh scripts/check/check-class-field-dict-bracket-read.shs [--list] [--root DIR]
 # Verdict (last stdout line): PASS/FAIL/ERROR, exit 0/1/2.
 set -u
@@ -25,19 +32,60 @@ if [ ! -d "$src" ] || [ ! -f "$base_file" ]; then
     echo "ERROR — nothing was checked (missing $src or $base_file)"
     exit 2
 fi
-fields=$(grep -rhoE "^    [a-z_][a-z0-9_]*: Dict<[^,]+, *\[[^]]+\]>" "$src" --include=*.spl \
-    | sed -E 's/^    ([a-z0-9_]+):.*/\1/' | sort -u | tr '\n' '|' | sed 's/|$//')
-if [ -z "$fields" ]; then
+# Both spellings of an array-valued dict field: `Dict<K, [V]>` and the brace
+# shorthand `{K: [V]}` (dict_native_pitfalls.md: a `Dict<` grep alone misses
+# about a third of the exposure).
+decl_re='^    [a-z_][a-z0-9_]*: (Dict<[^,]+, *[[][^]]+[]]>|[{][^:{}]+: *[[][^]]+[]][}])'
+decl_files=$(grep -rlE "$decl_re" "$src" --include=*.spl | sort)
+if [ -z "$decl_files" ]; then
     echo "ERROR — nothing was checked (no array-valued Dict fields found)"
     exit 2
 fi
-nfields=$(printf '%s' "$fields" | tr '|' '\n' | wc -l | tr -d ' ')
-hits=$(grep -rnE "self\.($fields)\[[^]]+\]" "$src" --include=*.spl \
-    | grep -vE "self\.($fields)\[[^]]+\] *(=[^=]|\+=)" \
-    | grep -vE "^[^:]+:[0-9]+: *#")
+all_files=$(find "$src" -name '*.spl' | sort)
+# One awk program, two passes. Pass 1 (declaring files only) records each
+# array-valued Dict field under the `class`/`struct` header it sits in.
+# Pass 2 (every file) tracks the enclosing `class`/`struct`/`impl` type and
+# matches `self.<f>[k]` reads (not writes, not comment lines) only when that
+# type declares <f>. Bracket expressions avoid awk escape-sequence drift.
+out=$(awk -v decl_re="$decl_re" '
+    function owner_of(line,    t) {
+        t = line
+        sub(/^(pub[ \t]+)?(class|struct|impl)[ \t]+/, "", t)
+        sub(/^.*[ \t]for[ \t]+/, "", t)
+        sub(/[<:(].*$/, "", t)
+        return t
+    }
+    /^(pub[ \t]+)?(class|struct|impl)[ \t]/ { cur = owner_of($0); next }
+    # Column-0 function taking an explicit receiver (`fn f(self: T, ...)` or
+    # `me f(self: T, ...)`): its body reads the fields of T through `self.`
+    # exactly like a method inside the type block does.
+    /^(pub[ \t]+)?(fn|me)[ \t]+[A-Za-z_0-9]+[(]self:[ \t]*[A-Za-z_0-9]+/ {
+        cur = $0; sub(/^.*[(]self:[ \t]*/, "", cur); sub(/[^A-Za-z_0-9].*$/, "", cur); next
+    }
+    /^[^ \t#]/ { cur = "" }
+    pass == 1 {
+        if (cur != "" && $0 ~ decl_re) {
+            name = $0; sub(/^    /, "", name); sub(/:.*/, "", name)
+            if (!((cur SUBSEP name) in seen)) {
+                seen[cur SUBSEP name] = 1
+                nfields++
+                fields[cur] = fields[cur] (fields[cur] == "" ? "" : "|") name
+            }
+        }
+        next
+    }
+    pass == 2 {
+        if (cur == "" || !(cur in fields) || $0 ~ /^[ \t]*#/) next
+        re = "self[.](" fields[cur] ")[[][^]]+[]]"
+        if ($0 ~ re && $0 !~ (re "[ ]*(=[^=]|[+]=)")) print FILENAME ":" FNR ":" $0
+    }
+    END { print "NFIELDS=" nfields+0 }
+' pass=1 $decl_files pass=2 $all_files)
+nfields=$(printf '%s\n' "$out" | sed -n 's/^NFIELDS=//p')
+hits=$(printf '%s\n' "$out" | grep -v '^NFIELDS=')
 count=$(printf '%s' "$hits" | grep -c . )
 baseline=$(tr -d ' \r\n' < "$base_file")
-[ "$list" = 1 ] && printf '%s\n' "$hits"
+[ "$list" = 1 ] && [ -n "$hits" ] && printf '%s\n' "$hits"
 if [ "$count" -gt "$baseline" ]; then
     echo "FAIL — $count class-field array-dict bracket read(s) across $nfields field(s), baseline $baseline: use .get(k) ?? [] (run --list)"
     exit 1

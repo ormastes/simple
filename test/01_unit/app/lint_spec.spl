@@ -22,8 +22,9 @@ use compiler.tools.lint.main.{lint_accessor_and_parent_names, Linter}
 use compiler.tools.fix.rules.impl_.lint_annotation.{check_unknown_attribute, check_unknown_decorator}
 use compiler.core.parser.{parse_module_silent}
 use compiler.core.ast.{module_get_decls}
-use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
+use compiler.semantics.lint.collection_patterns.{check_collection_patterns, coll006_severity_for_profile}
 use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
 
 # NOTE: describe, it, expect are built-in - no imports needed
 
@@ -435,6 +436,119 @@ describe "COLL006 string-concat-in-loop rule":
             "        i = i + 1\n" +
             "    acc\n"
         expect(count_collection_lint(source, "COLL006")).to_equal(0)  # oracle: integer operands are not text concat
+
+# bug c_runtime_string_concat_quadratic_2026-08-22: COLL006 scope and
+# robust-mode escalation (owner decision 2026-11-07). Warn only on a plain
+# `text` accumulator; a builder/buffer append in a loop is the recommended
+# pattern and must never warn. Robust/critical/verified -> ERROR, else WARN.
+fn first_collection_lint_severity(source: text, code: text) -> text:
+    parse_module_silent(source, "sample.spl")
+    val decls = module_get_decls()
+    for warning in check_collection_patterns(decls):
+        if warning.code == code:
+            return warning.severity
+    ""
+
+describe "COLL006 scope and robust escalation":
+    it "warns on text += in a loop and suggests StringBuilder":
+        # @req REQ-COMP-LINT-COLL006-002
+        # @capture(statistics): COLL006 severity for text += in a loop
+        step("Verify: text += in a loop warns at WARN severity by default")
+        val source = "fn j(parts: [text]) -> text:\n" +
+            "    var s: text = \"\"\n" +
+            "    for p in parts:\n" +
+            "        s += p\n" +
+            "    s\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(1)  # oracle: plain text += in loop
+        expect(first_collection_lint_severity(source, "COLL006")).to_equal("WARN")  # oracle: default profile is WARN
+
+    it "warns on s = s + x in a loop":
+        # @req REQ-COMP-LINT-COLL006-002
+        # @capture(statistics): COLL006 count for s = s + x
+        step("Verify: s = s + x in a loop warns")
+        val source = "fn j(parts: [text]) -> text:\n" +
+            "    var s: text = \"\"\n" +
+            "    for p in parts:\n" +
+            "        s = s + p\n" +
+            "    s\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(1)  # oracle: append form in loop
+
+    it "does not warn on a concat outside any loop":
+        # @req REQ-COMP-LINT-COLL006-002
+        # @capture(statistics): COLL006 count for straight-line concat
+        step("Verify: concat outside a loop does not warn")
+        val source = "fn j(a: text, b: text) -> text:\n" +
+            "    var s: text = a\n" +
+            "    s = s + b\n" +
+            "    s += a\n" +
+            "    s\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)  # oracle: no loop, no quadratic growth
+
+    it "does not warn on concat into a different variable":
+        # @req REQ-COMP-LINT-COLL006-002
+        # @capture(statistics): COLL006 count for non-accumulating concat
+        step("Verify: out = prefix + p in a loop does not warn")
+        val source = "fn j(parts: [text], prefix: text) -> text:\n" +
+            "    var out: text = \"\"\n" +
+            "    for p in parts:\n" +
+            "        out = prefix + p\n" +
+            "    out\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)  # oracle: target is not an operand
+
+    it "does not warn on a StringBuilder push in a loop":
+        # @req REQ-COMP-LINT-COLL006-002
+        # @capture(statistics): COLL006 count for builder push
+        step("Verify: builder .push in a loop does not warn")
+        val source = "fn j(parts: [text]) -> text:\n" +
+            "    var sb = StringBuilder.new()\n" +
+            "    for p in parts:\n" +
+            "        sb.push(p)\n" +
+            "    sb.to_text()\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)  # oracle: builder append is the fix
+
+    it "does not warn on += to a builder-typed or builder-initialized variable":
+        # @req REQ-COMP-LINT-COLL006-002
+        # @capture(statistics): COLL006 count for builder +=
+        step("Verify: += on a builder/buffer variable does not warn")
+        val typed = "fn j(parts: [text]) -> text:\n" +
+            "    var sb: StringBuilder = StringBuilder.new()\n" +
+            "    for p in parts:\n" +
+            "        sb += \"x\"\n" +
+            "    sb.to_text()\n"
+        val inferred = "fn k(parts: [text]) -> text:\n" +
+            "    var buf = string_builder()\n" +
+            "    for p in parts:\n" +
+            "        buf += \"x\"\n" +
+            "        buf = buf + \"y\"\n" +
+            "    buf.to_text()\n"
+        expect(count_collection_lint(typed, "COLL006")).to_equal(0)  # oracle: declared non-text target
+        expect(count_collection_lint(inferred, "COLL006")).to_equal(0)  # oracle: call-initialized builder target
+
+    it "escalates to ERROR under robust, critical and verified profiles":
+        # @req REQ-COMP-LINT-COLL006-002
+        # @capture(statistics): COLL006 severity per safety profile
+        step("Verify: profile -> severity projection")
+        expect(coll006_severity_for_profile("robust")).to_equal("ERROR")  # oracle: robust escalates
+        expect(coll006_severity_for_profile("reliable")).to_equal("ERROR")  # oracle: alias of robust
+        expect(coll006_severity_for_profile("critical")).to_equal("ERROR")  # oracle: stricter rung
+        expect(coll006_severity_for_profile("verified")).to_equal("ERROR")  # oracle: strictest rung
+        expect(coll006_severity_for_profile("")).to_equal("WARN")  # oracle: unset is advisory
+        expect(coll006_severity_for_profile("strict")).to_equal("WARN")  # oracle: below robust
+
+    it "reports the in-loop text concat as ERROR when SIMPLE_SAFETY_PROFILE=robust":
+        # @req REQ-COMP-LINT-COLL006-002
+        # @capture(statistics): COLL006 severity with robust profile env
+        step("Verify: robust profile env escalates the real lint warning to ERROR")
+        val source = "fn j(parts: [text]) -> text:\n" +
+            "    var s: text = \"\"\n" +
+            "    for p in parts:\n" +
+            "        s += p\n" +
+            "    s\n"
+        val previous = env_get("SIMPLE_SAFETY_PROFILE")
+        env_set("SIMPLE_SAFETY_PROFILE", "robust")
+        val robust_sev = first_collection_lint_severity(source, "COLL006")
+        env_set("SIMPLE_SAFETY_PROFILE", previous)
+        expect(robust_sev).to_equal("ERROR")  # oracle: robust mode makes COLL006 an error
 
 # --- Merged from the legacy mirror copy (unit:app/lint_spec.spl), test dedup phase B: tests this copy lacked.
 
