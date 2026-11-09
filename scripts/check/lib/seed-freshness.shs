@@ -1,0 +1,67 @@
+#!/bin/sh
+# seed-freshness.shs - shared fail-closed seed freshness check for AOT gates.
+# Bug: checked_in_seed_stale_vs_release_miscompiles_aot_2026-11-06 (owner decision).
+# A seed built before compiler changes in the tree miscompiles AOT output, so
+# AOT-producing gates must refuse a seed older than the source they compile.
+#
+# Usage (source it):  . "$(dirname "$0")/lib/seed-freshness.shs"
+#                     seed_freshness_require "$SEED_BIN" || exit 1
+# Seed build commit comes from `<seed> --version` line "build-commit: <sha>".
+# Override ONLY via SIMPLE_SEED_STALE_OVERRIDE="<reason>"; it is logged to
+# build/seed-freshness-overrides.log and echoed loudly.
+# Selftest: sh scripts/check/lib/seed-freshness.shs --selftest
+
+# seed_freshness_verdict <seed_commit> <repo_dir> -> prints reason, rc 0 fresh / 1 stale-or-unknown
+seed_freshness_verdict() {
+    _sc="$1"; _repo="$2"
+    case "$_sc" in
+        ""|unknown) echo "seed build commit unknown (seed lacks build-commit info)"; return 1 ;;
+    esac
+    git -C "$_repo" cat-file -e "$_sc^{commit}" 2>/dev/null || { echo "seed commit $_sc not present in repo"; return 1; }
+    git -C "$_repo" merge-base --is-ancestor "$_sc" HEAD 2>/dev/null || { echo "seed commit $_sc is not an ancestor of HEAD"; return 1; }
+    _chg=$(git -C "$_repo" diff --name-only "$_sc" HEAD -- src/compiler_rust src/compiler 2>/dev/null | head -3 | tr '\n' ' ')
+    if [ -n "$_chg" ]; then
+        echo "seed built at $_sc predates compiler changes since (e.g. $_chg)"; return 1
+    fi
+    echo "seed commit $_sc has no compiler changes up to HEAD"; return 0
+}
+
+# seed_freshness_require <seed_bin> [repo_dir]
+seed_freshness_require() {
+    _bin="$1"; _repo="${2:-.}"
+    _ver=$("$_bin" --version 2>&1 | sed -n 's/^build-commit: *//p' | head -1)
+    _why=$(seed_freshness_verdict "$_ver" "$_repo"); _rc=$?
+    if [ "$_rc" -eq 0 ]; then return 0; fi
+    if [ -n "${SIMPLE_SEED_STALE_OVERRIDE:-}" ]; then
+        mkdir -p "$_repo/build" 2>/dev/null
+        echo "$(date -u +%FT%TZ) override seed=$_bin reason=\"$SIMPLE_SEED_STALE_OVERRIDE\" verdict=\"$_why\"" >> "$_repo/build/seed-freshness-overrides.log"
+        echo "seed-freshness: OVERRIDDEN ($SIMPLE_SEED_STALE_OVERRIDE): $_why" >&2
+        return 0
+    fi
+    echo "seed-freshness: FAIL - $_why. Rebuild the seed from HEAD, or set SIMPLE_SEED_STALE_OVERRIDE=<reason> (recorded)." >&2
+    return 1
+}
+
+seed_freshness_selftest() {
+    _t=$(mktemp -d) || return 2
+    git init -q "$_t" && git -C "$_t" -c user.email=a@b -c user.name=t commit -q --allow-empty -m c0 || return 2
+    _c0=$(git -C "$_t" rev-parse HEAD)
+    mkdir -p "$_t/src/compiler" "$_t/docs"; echo a > "$_t/docs/x"; git -C "$_t" add -A
+    git -C "$_t" -c user.email=a@b -c user.name=t commit -q -m docs
+    _f=0
+    seed_freshness_verdict "$_c0" "$_t" >/dev/null || { echo "FAIL fresh(docs-only)"; _f=1; }
+    echo a > "$_t/src/compiler/a.spl"; git -C "$_t" add -A
+    git -C "$_t" -c user.email=a@b -c user.name=t commit -q -m comp
+    seed_freshness_verdict "$_c0" "$_t" >/dev/null && { echo "FAIL stale passed"; _f=1; }
+    seed_freshness_verdict "unknown" "$_t" >/dev/null && { echo "FAIL unknown passed"; _f=1; }
+    seed_freshness_verdict "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$_t" >/dev/null && { echo "FAIL missing commit passed"; _f=1; }
+    printf '#!/bin/sh\necho "build-commit: %s"\n' "$_c0" > "$_t/fakeseed"; chmod +x "$_t/fakeseed"
+    seed_freshness_require "$_t/fakeseed" "$_t" 2>/dev/null && { echo "FAIL require stale passed"; _f=1; }
+    SIMPLE_SEED_STALE_OVERRIDE=selftest seed_freshness_require "$_t/fakeseed" "$_t" 2>/dev/null || { echo "FAIL override"; _f=1; }
+    [ -s "$_t/build/seed-freshness-overrides.log" ] || { echo "FAIL override unrecorded"; _f=1; }
+    rm -rf "$_t"
+    if [ "$_f" -eq 0 ]; then echo "PASS - 7 selftest check(s)"; return 0; fi
+    echo "FAIL - selftest"; return 1
+}
+
+case "${0##*/}" in seed-freshness.shs) [ "${1:-}" = "--selftest" ] && { seed_freshness_selftest; exit $?; } ;; esac
