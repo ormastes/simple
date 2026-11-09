@@ -1964,8 +1964,16 @@ impl LlvmBackend {
                 let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
+            // A Yield must suspend a generator and preserve its yielded value.
+            // Until LLVM has that lowering, fail closed even when a caller
+            // bypasses the native-build generator compilability gate.
+            MirInst::Yield { .. } => {
+                return Err(CompileError::Codegen(
+                    "generators unsupported on LLVM backend: Yield requires generator lowering".to_string(),
+                ));
+            }
             // Async instructions without dest vreg
-            MirInst::ActorSend { .. } | MirInst::ActorReply { .. } | MirInst::Yield { .. } => {}
+            MirInst::ActorSend { .. } | MirInst::ActorReply { .. } => {}
 
             // Error handling instructions — use rt_enum_new for proper enum representation
             MirInst::OptionSome { dest, value } => {
@@ -4184,6 +4192,59 @@ mod tests {
     use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    /// MIR callers must not silently discard Yield when they bypass fallback selection.
+    #[test]
+    fn llvm_yield_refusal_errors_on_x86_and_x64() {
+        use crate::hir::TypeId;
+        use crate::mir::{MirFunction, MirInst, Terminator, VReg};
+        use simple_parser::ast::Visibility;
+
+        for arch in [TargetArch::X86_64, TargetArch::X86] {
+            let backend = LlvmBackend::new(Target::new(arch, TargetOS::Linux)).unwrap();
+            backend.create_module("yield_refusal").unwrap();
+            let mut func = MirFunction::new("yield_value".to_string(), TypeId::I64, Visibility::Public);
+            func.blocks[0].instructions.push(MirInst::ConstInt {
+                dest: VReg(0),
+                value: 42,
+            });
+            func.blocks[0].instructions.push(MirInst::Yield { value: VReg(0) });
+            func.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+            let error = backend.compile_function(&func).expect_err("Yield must not compile as a no-op");
+            assert!(
+                error.to_string().contains("generators unsupported on LLVM backend"),
+                "unexpected failure instead of the generator refusal: {error}"
+            );
+        }
+    }
+
+    /// The refusal is specific to Yield, not ordinary MIR value production/return.
+    #[test]
+    fn llvm_yield_refusal_preserves_ordinary_return() {
+        use crate::hir::TypeId;
+        use crate::mir::{MirFunction, MirInst, Terminator, VReg};
+        use simple_parser::ast::Visibility;
+
+        let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+        backend.create_module("ordinary_return_control").unwrap();
+        let mut func = MirFunction::new("ordinary_return".to_string(), TypeId::I64, Visibility::Public);
+        func.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 42,
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        backend.compile_function(&func).unwrap();
+        // MIR vregs initially live in allocas. The real object-emission path
+        // runs LLVM optimization before the constant-return oracle is valid.
+        let object = backend.emit_object(&crate::mir::MirModule::default()).unwrap();
+        assert!(!object.is_empty(), "ordinary MIR must emit actual object bytes");
+        backend.verify().unwrap();
+        let optimized_ir = backend.get_ir().unwrap();
+        assert!(optimized_ir.contains("ret i64 42"), "{optimized_ir}");
+    }
+
 
 
     #[test]
