@@ -2288,7 +2288,7 @@ fn try_compile_builtin_method_call<M: Module>(
     }
 
     // FR-COMPILER-012: scalar float intrinsics via MethodCallStatic path
-    if (crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round")) {
+    if crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round") {
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {

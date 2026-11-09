@@ -146,9 +146,9 @@ pub extern "C" fn rt_vulkan_get_device() -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_selected_device_identity_v1(expected_token: i64) -> *const c_char {
     let mut state = STATE.lock();
-    if (expected_token <= 0
+    if expected_token <= 0
         || expected_token != state.selected_device_token
-        || state.device_generation_quarantined)
+        || state.device_generation_quarantined
     {
         return empty_cstr();
     }
