@@ -6,3 +6,4 @@ extern int errno;
 #define ELOOP 62
 #define EMLINK 31
 #endif
+#define ENOTDIR 20
