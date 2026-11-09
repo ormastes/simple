@@ -50,6 +50,16 @@ impl<'a> super::Lexer<'a> {
             }
         }
 
+        // Set literal prefix: `s{` (no whitespace between). A plain `s`
+        // identifier followed by anything else lexes as before. The `{` is
+        // consumed here, so track it like scan_token does for a bare `{`
+        // (the matching `}` decrements bracket_depth via saturating_sub).
+        if name == "s" && self.check('{') {
+            self.advance(); // consume '{'
+            self.bracket_depth += 1;
+            return TokenKind::SetLitStart;
+        }
+
         // Check for i18n pattern: Name_"..." (identifier ending with _ followed by ")
         // The identifier must end with _ and be immediately followed by "
         if name.ends_with('_') && self.check('"') {

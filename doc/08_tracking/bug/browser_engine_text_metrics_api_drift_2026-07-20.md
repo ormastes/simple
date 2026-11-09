@@ -106,3 +106,13 @@ Serif 'G' genuinely rasterizes one pixel below the baseline (fontdue
 sfnt lane agrees at -1). The pinned value matches only a hinted FreeType
 build (the crate's optional `freetype` feature; headers absent on this
 host) or a non-overshooting first-priority font. Spec was not weakened.
+
+## Verification (2026-11-09, p3-browser sweep)
+
+Fix d01f25ea796 is an ancestor of release/1.0.0. Executed
+`text_metrics_spec.spl` on the seed interpreter: **13/14 PASS** (was 1/14
+at filing), after `cargo build --profile bootstrap -p spl_fonts` in
+src/compiler_rust and copying `libspl_fonts.so` to `build/bootstrap/lib/`
+(the SFFI examples need it; host LiberationSerif TTF present). The single
+residual is the bearing_y example above — the documented font-metric
+disagreement, not an API gap. Row closed as fixed with evidence.

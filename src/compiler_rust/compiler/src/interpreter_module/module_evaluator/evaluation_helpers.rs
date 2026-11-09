@@ -561,6 +561,18 @@ pub(super) fn process_imports_and_assignments(
                             record_owned_global(module_path, &name, &value);
                         }
                     }
+                } else if let Some(name) = get_pattern_name(&stmt.pattern) {
+                    // `var g: SomeEnum` / `var g: SomeClass` with no initializer
+                    // (owner decision 2026-11-09): first variant / default
+                    // construction, never nil. Classes/enums were registered in
+                    // the first pass, so later-declared and imported types resolve.
+                    if let Some(value) = crate::interpreter::node_exec_noinit_named_type_default_decl(
+                        stmt, env, local_functions, local_classes, local_enums, impl_methods,
+                    ) {
+                        env.insert(name.clone(), value.clone());
+                        exports.insert(name.clone(), value.clone());
+                        record_owned_global(module_path, &name, &value);
+                    }
                 }
             }
             Node::Const(stmt) => {
