@@ -380,7 +380,14 @@ mod windows_sink {
         let mut counters: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
         counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
         let size = counters.cb;
-        if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast(), size) } == 0 {
+        if unsafe {
+            K32GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast(),
+                size,
+            )
+        } == 0
+        {
             return (-1, -1);
         }
         match (

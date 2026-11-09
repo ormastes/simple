@@ -4217,7 +4217,6 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
             return Ok(Value::Nil);
         }
         let root_fd = root_handle as i32;
-        let mut retries = 0;
         let mut root_identity: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 {
             return Ok(Value::Nil);
@@ -4240,7 +4239,7 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
         let wanted = if ok { before.st_size as usize } else { 0 };
         let mut bytes = vec![0u8; wanted];
         let mut used = 0usize;
-        retries = 0;
+        let mut retries = 0;
         while ok && used < wanted {
             let count = unsafe { libc::read(fd, bytes[used..].as_mut_ptr().cast(), wanted - used) };
             if count > 0 {
