@@ -1,5 +1,21 @@
 # SimpleOS In-Guest Toolchain Execution Gap
 
+## 2026-11-09 legacy static-builder selector repair
+
+The retained legacy `clang_static.shs` builder switched on an uninitialized
+`TOOL`, so its documented no-argument invocation failed with `unsupported tool:`
+before checking the cross-build prerequisites. Defaulting an unset or empty
+selector to `clang` repairs that dispatch error while preserving explicit
+`llc`/`lld` selection and rejection of unknown tools.
+
+The focused shell regression fails on the original script at the unset-selector
+case, then passes six selector/admission cases after the repair. Its isolated
+tree intentionally lacks cross-build inputs: each supported selector must reach
+the missing-prerequisite failure without creating output. Cross-build, guest
+handoff, and compiler-operation evidence remain NOT_RUN. This repairs a legacy
+builder entrypoint only; the ordinary filesystem-launch goal and this bug stay
+open.
+
 Date: 2026-05-05
 Status: Open — kernel task preparation evidence improved 2026-05-30 and
 status gate added 2026-05-30; real compiler payloads and live
