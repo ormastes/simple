@@ -1,0 +1,28 @@
+#!/bin/sh
+# Selftest: the bootstrap compatibility pointer must be creatable WITHOUT
+# SeCreateSymbolicLinkPrivilege (bug bootstrap_publish_blocked_windows_native_symlink_privilege_2026-09-07).
+# On Windows the pointer is a directory junction.  A poisoned `ln` that fails
+# with EPERM is put first on PATH; the junction path must not touch it, the
+# result must be a real reparse point, readable, and renameable onto its final
+# name.  Elsewhere it checks the POSIX symlink path.  Verdict is the last line.
+set -u
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+work=$(mktemp -d) || exit 2
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/target/real/gen" "$work/shim" || exit 2
+echo payload > "$work/target/real/gen/f"
+printf '#!/bin/sh\necho "ln: Operation not permitted" >&2\nexit 1\n' > "$work/shim/ln"
+chmod +x "$work/shim/ln"
+. "$repo/scripts/check/lib/bootstrap-stage3/authority.shs" || { echo "ERROR - cannot source authority.shs"; exit 2; }
+os=$(uname -s 2>/dev/null || echo unknown)
+PATH="$work/shim:$PATH" bootstrap_stage3_create_compatibility_link real/gen "$work/target/.lnk" ||
+    { echo "FAIL - compatibility link creation failed (os=$os)"; exit 1; }
+case "$os" in
+MINGW*|MSYS*|CYGWIN*)
+    fsutil.exe reparsepoint query "$(cygpath -w "$work/target/.lnk")" >/dev/null 2>&1 ||
+        { echo "FAIL - pointer is not a reparse point"; exit 1; } ;;
+esac
+mv "$work/target/.lnk" "$work/target/bootstrap" || { echo "FAIL - rename onto final name failed"; exit 1; }
+[ "$(cat "$work/target/bootstrap/f" 2>/dev/null)" = payload ] ||
+    { echo "FAIL - pointer does not resolve to generation"; exit 1; }
+echo "PASS - 1 compatibility pointer created without symlink privilege, resolved and renamed (os=$os)"
