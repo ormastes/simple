@@ -3315,7 +3315,12 @@ if [ -z "${resume_stage4_output}" ] && [ -z "${bootstrap_stage2_parent_runtime}"
     if [ "${full_bootstrap}" -eq 1 ]; then
       echo "Seed/runtime stale (recorded seed input fingerprint changed). Full bootstrap will rebuild Rust."
     else
-      echo "WARNING: Seed/runtime stale, but this is not --full-bootstrap; reusing the existing Rust seed."
+      if [ "${SIMPLE_ALLOW_STALE_RUST_SEED:-0}" = "1" ]; then
+        echo "WARNING: Seed/runtime stale, not --full-bootstrap; reusing the stale Rust seed because SIMPLE_ALLOW_STALE_RUST_SEED=1. Runtime-side fixes under src/compiler_rust/runtime/** are NOT in this build." >&2
+      else
+        echo "error: Seed/runtime stale (recorded seed input fingerprint changed) and this is not --full-bootstrap. Refusing to reuse the stale Rust runtime archive: runtime-side edits would be silent no-ops (stage3_links_stale_rust_runtime_archive_runtime_fixes_are_noops_2026-08-17). Re-run with --full-bootstrap, or set SIMPLE_ALLOW_STALE_RUST_SEED=1 to override explicitly." >&2
+        exit 1
+      fi
     fi
   else
     echo "Seed/runtime current (input content hash matches); skipping Rust rebuild."
