@@ -2,7 +2,14 @@
 
 ## 2026-11-10 scoped LLVM backend regression PASS
 
-Status: **fix implemented; scoped backend tests PASS; review/landing pending**.
+**Status:** FIXED for Rust LLVM's silent Yield no-op; scoped backend tests PASS.
+**Landed:** PR #8120, merge `5c089d25fa6459d89fd07e063edee2c8b411977b`.
+
+This satisfies the original Expected section's hard-compile-error alternative;
+it does not implement generators. The canonical tracker records this narrow
+Rust LLVM backend fix, preserving historical open/preparation evidence below.
+No backend tests were rerun for the tracker reconciliation.
+
 The real LLVM-only Rust lib-test executable listed exactly the two new tests,
 then executed both: **2 passed, 0 failed, 0 ignored** (4,826 unrelated tests
 filtered out). The negative test exercised actual backend refusal on x86-64 and
