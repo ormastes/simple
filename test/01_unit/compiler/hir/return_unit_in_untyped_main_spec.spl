@@ -1,0 +1,33 @@
+"""Regression for `return ()` inside a `fn main():` that declares no return type.
+
+Bug: doc/08_tracking/bug/hir_rejects_return_unit_in_untyped_main_2026-09-01.md
+`return ()` returns UNIT, which is exactly the implicit return type of an
+untyped function, so HIR lowering must accept it.
+"""
+
+use std.spec.{describe, expect, it, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+describe "return unit in untyped main":
+    it "lowers `return ()` in a fn main with no declared return type":
+        step("Lower a main whose body ends in an explicit unit return")
+        val prior_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val source = "fn main():\n    print(\"hello\")\n    return ()\n"
+        val parsed = parse_full_frontend(source, "return_unit_main.spl", "return_unit_main", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("return_unit_main.spl")
+        val _hir = hir_lowering.lower_module(parsed)
+
+        if val prior_value = prior_bootstrap:
+            rt_env_set("SIMPLE_BOOTSTRAP", prior_value)
+        else:
+            rt_env_remove("SIMPLE_BOOTSTRAP")
+
+        step("Require no HIR lowering errors for the explicit unit return")
+        expect(hir_lowering.errors.len()).to_equal(0)
