@@ -23,28 +23,18 @@ use crate::value::Value;
 
 use std::os::raw::c_void;
 
+use windows_sys::Win32::System::SystemInformation::GlobalMemoryStatusEx;
+use windows_sys::Win32::System::Threading::CreateProcessW;
+
 type Handle = *mut c_void;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetProcessHeap() -> Handle;
     fn GetModuleFileNameW(module: Handle, buffer: *mut u16, capacity: u32) -> u32;
-    fn GlobalMemoryStatusEx(status: *mut c_void) -> i32;
     fn GetSystemTimes(idle: *mut i64, kernel: *mut i64, user: *mut i64) -> i32;
     fn HeapAlloc(heap: Handle, flags: u32, size: usize) -> *mut c_void;
     fn HeapFree(heap: Handle, flags: u32, allocation: *mut c_void) -> i32;
-    fn CreateProcessW(
-        application: *const u16,
-        command_line: *mut u16,
-        process_security: *mut c_void,
-        thread_security: *mut c_void,
-        inherit_handles: i32,
-        flags: u32,
-        environment: *mut c_void,
-        directory: *const u16,
-        startup_info: *mut c_void,
-        process_info: *mut c_void,
-    ) -> i32;
     fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
     fn SetInformationJobObject(job: Handle, kind: i32, information: *mut c_void, size: u32) -> i32;
     fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
@@ -211,7 +201,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         }
         "GlobalMemoryStatusEx" => {
             let status = opt_ptr(arg_i64(args, 0, name)?);
-            Ok(Value::Int(unsafe { GlobalMemoryStatusEx(status) } as i64))
+            Ok(Value::Int(unsafe { GlobalMemoryStatusEx(status.cast()) } as i64))
         }
         "GetSystemTimes" => {
             let idle = opt_ptr(arg_i64(args, 0, name)?);
@@ -253,14 +243,14 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 CreateProcessW(
                     application.cast(),
                     command_line.cast(),
-                    process_security,
-                    thread_security,
+                    process_security.cast(),
+                    thread_security.cast(),
                     inherit_handles,
                     flags,
                     environment,
                     directory.cast(),
-                    startup_info,
-                    process_info,
+                    startup_info.cast(),
+                    process_info.cast(),
                 )
             } as i64))
         }
