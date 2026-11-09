@@ -414,11 +414,20 @@ typedef int64_t (*rt_closure_record2_fn_t)(int64_t, int64_t, int64_t);
 
 #define RT_NATIVE_DIRECT_FUNCTION_RECORD_MARKER 0x5344495245435446LL
 
+/* Registered runtime closures (runtime_native.c). Twin of executor.rs
+ * native_callable (PR #8082). */
+extern int64_t rt_closure_func_ptr(int64_t closure_value);
+extern int64_t rt_closure_retain(int64_t closure_value);
+extern int64_t rt_closure_release(int64_t closure_value);
+
 typedef struct {
     rt_closure_fn_t  entry;
     rt_closure2_fn_t entry2;
     rt_closure_record2_fn_t entry_record2;
     int64_t          closure_ptr;
+    /* Tagged registered closure pinned for the worker (0 = none); released
+     * exactly once when td is freed. */
+    int64_t          pinned_closure;
     int64_t          data1;
     int64_t          data2;
     int              raw_worker_args;
@@ -443,6 +452,12 @@ static int rt_thread_data_release(RtThreadData* td) {
 #else
     return InterlockedDecrement(&td->refs) == 0;
 #endif
+}
+
+/* Frees td and drops the worker pin on its closure, exactly once. */
+static void spl_thread_data_free(RtThreadData* td) {
+    if (td->pinned_closure) rt_closure_release(td->pinned_closure);
+    SPL_FREE(td);
 }
 
 #if defined(SPL_THREAD_HAVE_PHDR_ITERATE)
@@ -554,7 +569,7 @@ static void* rt_isolated_wrapper(void* raw) {
         td->result = td->entry(rt_native_worker_arg(td->data1, td->raw_worker_args));
     }
     td->done = 1;
-    if (rt_thread_data_release(td)) SPL_FREE(td);
+    if (rt_thread_data_release(td)) spl_thread_data_free(td);
     return NULL;
 }
 
@@ -575,7 +590,7 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
         td->result = td->entry(rt_native_worker_arg(td->data1, td->raw_worker_args));
     }
     td->done = 1;
-    if (rt_thread_data_release(td)) SPL_FREE(td);
+    if (rt_thread_data_release(td)) spl_thread_data_free(td);
     return 0;
 }
 #endif
@@ -610,6 +625,23 @@ static int spl_worker_callable(int64_t kind, int64_t word, int64_t* entry, int64
      * pass through unchanged (raw = 0). Not a value guess between the two
      * VALUE encodings: an executable-image address is neither a heap record
      * (TAG_HEAP) nor `addr << 3` of one, which lies far outside the image. */
+    /* A Simple closure value is a TAG_HEAP-tagged registered RtCoreClosure
+     * whose word 0 is the kind/scope header, not an entry. Its func_ptr is the
+     * boxed entry `(closure, tagged...) -> tagged`: the tagged closure word is
+     * the hidden first argument and worker arguments stay tagged.
+     * Registry-validated (rt_closure_func_ptr answers 0 for anything else), so
+     * a native record is never misread. Twin of executor.rs native_callable.
+     * bug: seed_jit_spawned_thread_never_runs_join_segv_2026-11-09 */
+    if (kind == RT_WORKER_CLOSURE_VALUE && (((uint64_t)word) & TAG_MASK) == TAG_HEAP) {
+        int64_t boxed = rt_closure_func_ptr(word);
+        if (boxed != 0) {
+            if (boxed < 4096) return 0;
+            *entry = boxed;
+            *closure_ptr = word;
+            *raw = 0;
+            return 1;
+        }
+    }
     if (kind == RT_WORKER_CLOSURE_VALUE && rt_native_address_is_code(word)) {
         *entry = word;
         *closure_ptr = 0;
@@ -640,13 +672,13 @@ static int64_t spl_thread_start(RtThreadData* td) {
 #ifdef SPL_THREAD_PTHREAD
     SPL_NOTE_USER_THREADS();
     if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
-        SPL_FREE(td);
+        spl_thread_data_free(td);
         return 0;
     }
 #else
     td->thread = CreateThread(NULL, 0, rt_isolated_wrapper_win, td, 0, NULL);
     if (td->thread == NULL) {
-        SPL_FREE(td);
+        spl_thread_data_free(td);
         return 0;
     }
 #endif
@@ -664,6 +696,16 @@ int64_t rt_thread_spawn_isolated_kind(int64_t kind, int64_t closure, int64_t dat
     td->entry2      = closure_ptr ? (rt_closure2_fn_t)(intptr_t)entry : NULL;
     td->entry_record2 = NULL;
     td->closure_ptr = closure_ptr;
+    /* A registered heap closure (tagged) is pinned until the worker is done,
+     * so the spawner's transient scope may end first (pool parity). */
+    td->pinned_closure = 0;
+    if ((((uint64_t)closure_ptr) & TAG_MASK) == TAG_HEAP) {
+        if (!rt_closure_retain(closure_ptr)) {
+            SPL_FREE(td);
+            return 0;
+        }
+        td->pinned_closure = closure_ptr;
+    }
     td->data1       = data;
     td->data2       = 0;
     td->raw_worker_args = raw;
@@ -690,6 +732,16 @@ int64_t rt_thread_spawn_isolated_with_args_kind(int64_t kind, int64_t fn_ptr, in
     td->entry2      = closure_ptr ? NULL : (rt_closure2_fn_t)(intptr_t)entry;
     td->entry_record2 = closure_ptr ? (rt_closure_record2_fn_t)(intptr_t)entry : NULL;
     td->closure_ptr = closure_ptr;
+    /* A registered heap closure (tagged) is pinned until the worker is done,
+     * so the spawner's transient scope may end first (pool parity). */
+    td->pinned_closure = 0;
+    if ((((uint64_t)closure_ptr) & TAG_MASK) == TAG_HEAP) {
+        if (!rt_closure_retain(closure_ptr)) {
+            SPL_FREE(td);
+            return 0;
+        }
+        td->pinned_closure = closure_ptr;
+    }
     td->data1       = data1;
     td->data2       = data2;
     td->raw_worker_args = raw;
@@ -744,7 +796,7 @@ void rt_thread_free(int64_t handle) {
 #endif
     }
     /* An unjoined worker may still be running: it frees td on exit. */
-    if (rt_thread_data_release(td)) SPL_FREE(td);
+    if (rt_thread_data_release(td)) spl_thread_data_free(td);
 }
 
 #if defined(SIMPLE_RUNTIME_THREAD_RUST_OWNER)
