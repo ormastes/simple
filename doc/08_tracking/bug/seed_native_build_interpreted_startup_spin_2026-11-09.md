@@ -86,3 +86,33 @@ spinning phase) or measured a different invocation.
 (`llvm-build.log`, `cranelift-build.log`, `cranelift2-build.log` with span
 traces, `plain-build.log`, `tiny-build.log`, `debug-build.log`),
 `samples/llvm-5min.txt`, `samples/llvm-9min.txt`.
+
+## Fresh-seed-from-HEAD retest 2026-11-09 (phase-2 test-runner lane)
+
+The seed was rebuilt from HEAD (`origin/release/1.0.0` `8f7ca1581c1`,
+`cargo build --release --workspace`, 1m22s, binary sha256
+`9e0f01c8483dcb1f3e1db7b3a69c68ed5ec3d52b9705ad7d3e9e4922cace3a9d`) and the
+cold-cache repro rerun in worktree `build/agent-worktrees/boot-t2` with a
+private cache (`SIMPLE_NATIVE_BUILD_CACHE_DIR=out/coldstart/cache`, flags
+identical to the repro above, entry `examples/01_getting_started/hello_native.spl`).
+30 s samples, 12 min cap:
+
+| t | CPU | RSS | cache objects | log bytes |
+|---|---|---|---|---|
+| 60 s | 99.4% | 1.66 GB | 0 | 1841625 |
+| 300 s (5 min) | 99.5% | 1.75 GB | 0 | 1841625 |
+| 600 s (10 min) | 99.8% | 1.86 GB | 0 | 1841625 |
+| 721 s | killed by sampler; build rc=143 at t=751 s; no binary |
+
+**The spin persists at HEAD.** A seed rebuilt from current HEAD exhibits the
+identical shape: single hot thread ~99.8% user CPU, RSS growth 1.66→1.86 GB,
+zero cache objects, build log frozen at 1841625 bytes from t≈180 s, last span
+`load_export_source{path=[compiler, backend, linker, _ElfWriter, writer]}`
+followed by the same check-dbs workaround note — the same freeze point as the
+Nov-5 seed. Rebuilding the seed from HEAD does NOT fix this; the defect is in
+the interpreted Simple driver startup on the current tree, not in stale
+deployed-seed bytes. Status remains **open / persists at HEAD**; the phase-2
+compiled-path owner artifacts (phase-2 full CLI + test runner per
+`doc/07_guide/tooling/bootstrap_phase_verification.md`) remain unbuildable on
+this host until the spin is fixed. Samples and build log:
+`build/agent-worktrees/boot-t2/out/coldstart/{samples.log,build.log,run.meta}`.

@@ -141,8 +141,7 @@ pub(super) struct QuarantinedGraphicsSubmission {
 }
 
 pub(super) fn alloc_handle() -> i64 {
-    NEXT_HANDLE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+    simple_common::atomic_update::update_i64(&NEXT_HANDLE, Ordering::Relaxed, Ordering::Relaxed, |next| {
             (next > 0).then(|| next.checked_add(1)).flatten()
         })
         .unwrap_or(0)

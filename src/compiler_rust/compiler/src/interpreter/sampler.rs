@@ -115,7 +115,7 @@ fn init() -> bool {
             #[cfg(unix)]
             unsafe {
                 let mut sa: libc::sigaction = std::mem::zeroed();
-                sa.sa_sigaction = on_sigprof as usize;
+                sa.sa_sigaction = on_sigprof as *const () as usize;
                 sa.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
                 libc::sigemptyset(&mut sa.sa_mask);
                 libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());

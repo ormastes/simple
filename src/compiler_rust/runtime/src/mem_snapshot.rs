@@ -111,27 +111,13 @@ mod windows_sink {
         FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_TYPE_DISK, OPEN_EXISTING,
     };
 
-    #[repr(C)]
-    #[derive(Default)]
-    struct ProcessMemoryCounters {
-        cb: u32,
-        page_fault_count: u32,
-        peak_working_set: usize,
-        working_set: usize,
-        quota_peak_paged_pool: usize,
-        quota_paged_pool: usize,
-        quota_peak_nonpaged_pool: usize,
-        quota_nonpaged_pool: usize,
-        pagefile: usize,
-        peak_pagefile: usize,
-        private_usage: usize,
-    }
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
 
     #[cfg(target_pointer_width = "64")]
     const _: () = {
-        assert!(std::mem::size_of::<ProcessMemoryCounters>() == 80);
-        assert!(std::mem::offset_of!(ProcessMemoryCounters, peak_working_set) == 8);
-        assert!(std::mem::offset_of!(ProcessMemoryCounters, working_set) == 16);
+        assert!(std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() == 80);
+        assert!(std::mem::offset_of!(PROCESS_MEMORY_COUNTERS_EX, PeakWorkingSetSize) == 8);
+        assert!(std::mem::offset_of!(PROCESS_MEMORY_COUNTERS_EX, WorkingSetSize) == 16);
     };
 
     #[link(name = "kernel32")]
@@ -146,11 +132,6 @@ mod windows_sink {
         fn FlushFileBuffers(handle: HANDLE) -> i32;
         fn GetCurrentProcess() -> HANDLE;
         fn GetTickCount64() -> u64;
-        fn K32GetProcessMemoryInfo(
-            handle: HANDLE,
-            counters: *mut ProcessMemoryCounters,
-            bytes: u32,
-        ) -> i32;
     }
 
     // Exact winternl.h (Windows SDK10.0.26100.0) ABI. Only final acquisition
@@ -396,15 +377,22 @@ mod windows_sink {
     }
 
     pub fn memory_kib() -> (i64, i64) {
-        let mut counters = ProcessMemoryCounters::default();
-        counters.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+        let mut counters: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
+        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
         let size = counters.cb;
-        if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) } == 0 {
+        if unsafe {
+            K32GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast(),
+                size,
+            )
+        } == 0
+        {
             return (-1, -1);
         }
         match (
-            i64::try_from(counters.working_set / 1024),
-            i64::try_from(counters.peak_working_set / 1024),
+            i64::try_from(counters.WorkingSetSize / 1024),
+            i64::try_from(counters.PeakWorkingSetSize / 1024),
         ) {
             (Ok(current), Ok(peak)) => (current, peak),
             _ => (-1, -1),

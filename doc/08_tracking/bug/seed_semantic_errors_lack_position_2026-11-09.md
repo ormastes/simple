@@ -1,6 +1,7 @@
 # Seed reports semantic errors with no file:line:col
 
 - **Priority**: P3
+- **Duplicate (2026-11-09)**: closed as resolved-duplicate; tracked by `seed_semantic_error_missing_position_2026-11-09` (kept).
 - **Status**: open
 - **Split out**: 2026-11-09, by owner decision, from `seed_optional_query_comparison_divergence_2026-08-16.md` (was Divergence C there).
 

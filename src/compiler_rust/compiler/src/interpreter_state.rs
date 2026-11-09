@@ -716,7 +716,7 @@ impl Drop for RecursionGuard {
             // another thread) can zero it while this guard is live. A plain
             // fetch_sub would then wrap to usize::MAX and every subsequent
             // push_call_depth would fail as a phantom StackOverflow.
-            let _ = RECURSION_DEPTH.fetch_update(
+            let _ = simple_common::atomic_update::update_usize(&RECURSION_DEPTH,
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |d| d.checked_sub(1),
@@ -827,7 +827,7 @@ pub fn push_call_depth(function_name: &str) -> Result<RecursionGuard, crate::err
     if depth >= limit {
         // Undo the increment since we're about to error (saturating: see
         // RecursionGuard::drop for why a wrapping decrement is dangerous).
-        let _ = RECURSION_DEPTH.fetch_update(
+        let _ = simple_common::atomic_update::update_usize(&RECURSION_DEPTH,
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
             |d| d.checked_sub(1),

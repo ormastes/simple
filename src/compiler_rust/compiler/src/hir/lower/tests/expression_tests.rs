@@ -1946,3 +1946,51 @@ fn optional_as_numeric_cast_is_rejected_outside_unsafe() {
         .unwrap();
     assert!(matches!(&cast.kind, HirExprKind::Cast { expr, .. } if expr.ty == TypeId::ANY), "{:?}", cast.kind);
 }
+
+// The PipelineOp LLVM plugin transports an Option word, rather than narrowing
+// its payload. Compile its actual production cast through the strict HIR owner.
+#[test]
+fn llvm_pipeline_optional_destination_keeps_narrow_unsafe_boundary() {
+    let plugin = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/backend_llvm_lib/llvm_lib_translate_expr.spl"
+    ))
+    .replace("\r\n", "\n");
+    let marker = "            val raw_dest_opt = unsafe(capabilities: [ffi]):\n";
+    let start = plugin.find(marker).expect("PipelineOp raw destination boundary");
+    let block = plugin[start..]
+        .lines()
+        .take(2)
+        .map(|line| line.strip_prefix("        ").expect("match-arm indentation"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fixture = format!("fn pipeline(dest_opt: i64?) -> i64:\n{block}\n    raw_dest_opt\n");
+    let module = parse_and_lower(&fixture).expect("production raw Option cast must lower");
+    let function = module
+        .functions
+        .iter()
+        .find(|function| function.name == "pipeline")
+        .unwrap();
+    let HirStmt::Let { value: Some(value), .. } = &function.body[0] else {
+        panic!("expected raw destination binding");
+    };
+    assert_eq!(value.ty, TypeId::I64);
+    let HirExprKind::UnsafeBlock {
+        capabilities,
+        statements,
+    } = &value.kind
+    else {
+        panic!("raw conversion must retain its unsafe boundary");
+    };
+    assert_eq!(capabilities, &["ffi"]);
+    assert_eq!(statements.len(), 1, "unsafe must contain only the raw cast");
+    let original = "fn pipeline(dest_opt: i64?) -> i64:\n    dest_opt as i64\n";
+    let error = parse_and_lower(original).expect_err("original safe optional cast must fail");
+    assert!(format!("{error}").contains("SIMPLE_JIT_STRICT:"));
+    let escaped = format!("fn pipeline(dest_opt: i64?) -> i64:\n{block}\n    dest_opt as i64\n");
+    assert!(
+        parse_and_lower(&escaped).is_err(),
+        "unsafe scope must not leak to the next cast"
+    );
+    assert!(plugin.contains("ctx, mod_, builder, tm, raw_dest_opt, func as i64, call_args as i64,"));
+}

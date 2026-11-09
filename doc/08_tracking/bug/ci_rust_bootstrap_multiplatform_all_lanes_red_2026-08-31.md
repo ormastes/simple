@@ -130,3 +130,38 @@ script), this workflow is the *only* thing standing between a
 non-host compile break and `main` — and it must therefore be kept green rather
 than routinely ignored.
 
+
+## Re-verification 2026-11-09 (p3-subj6 lane, worktree of origin/release/1.0.0)
+
+All four named causes are addressed in the current workflow/source on this
+branch; the workflow was rewritten since 2026-08-31:
+
+- **Cause A (MSVC `unistd.h`).** `src/runtime/startup/common/runtime_log_hosted.c:18-28`
+  now carries a genuine Win32 backend, exactly the demanded shape: `#if defined(_MSC_VER)
+  || defined(SPL_TOOLCHAIN_CLANGCL)` includes `<io.h>`/`<basetsd.h>`, typedefs
+  `ssize_t` from `SSIZE_T`, and `#define write _write`; the POSIX side keeps
+  `<unistd.h>`. Not a one-line include guard.
+- **Cause B (host-native Linux lane missing freetype).**
+  `.github/workflows/rust-bootstrap-multiplatform.yml:355` installs
+  `libfreetype6-dev libunwind-dev` on Linux (also line 862 for the cranelift lane).
+- **Cause D (MinGW cross, E0463).** The `cross` job matrix (lines 913-922) now
+  includes `x86_64-pc-windows-gnu` with `pkg: gcc-mingw-w64-x86-64`, a clang
+  selector for the GNU bootstrap (938-943), and — the direct E0463 fix —
+  `cd src/compiler_rust && rustup target add ${{ matrix.target }}` (line 936).
+- **Untriaged aarch64/riscv64 lanes.** Now first-class matrix rows
+  (914-919) with `gcc-aarch64-linux-gnu` / `gcc-riscv64-linux-gnu` and the same
+  `rustup target add`.
+- **Causes C/E.** Documented fixed in
+  `ci_red_on_every_branch_untracked_bin_simple_and_apple_libc_fields_2026-08-31.md`.
+
+Executed evidence (this lane cannot run cargo or CI):
+
+- `cc -fsyntax-only src/runtime/startup/common/runtime_log_hosted.c` -> clean
+  (POSIX side of the cause-A split).
+- The workflow YAML parses (`yaml.safe_load` OK).
+
+Not executed here: an actual CI run (no cargo/CI in this lane; causes B/D are
+runner-environment properties whose true proof is a green workflow run). The
+full-tree `check-c-runtime-compiles-push.shs` remains red on 18 pre-existing
+host-compile failures unrelated to this row (baremetal/darwin/windows selfcheck
+TUs); `runtime_log_hosted.c` is not among them.

@@ -34,7 +34,7 @@ jobs:
     outputs:
       has_rust: ${{ steps.check.outputs.has_rust }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Check for Rust workspace
       id: check
       run: |
@@ -64,7 +64,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
+      with:
+        # PRs use their merge SHA; dispatches use the SHA resolved at creation.
+        ref: ${{ github.sha }}
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -72,19 +75,19 @@ jobs:
         toolchain: ${{ matrix.rust }}
 
     - name: Cache cargo registry
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.cargo/registry
         key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Cache cargo index
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.cargo/git
         key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Cache cargo build
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: src/compiler_rust/target
         key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
@@ -109,14 +112,34 @@ jobs:
       working-directory: .
 
     - name: Run tests
-      run: cargo test --workspace --verbose --exclude simple-driver --exclude simple-compiler --exclude simple-runtime --exclude simple-native-all
+      run: cargo test --workspace --verbose --no-fail-fast --exclude simple-driver --exclude simple-compiler --exclude simple-runtime --exclude simple-native-all
 
     - name: Check compiler library
       run: cargo check -p simple-compiler --verbose
 
     - name: Compile compiler lib tests
-      if: runner.os == 'Linux'
+      id: compiler_lib_tests
+      if: ${{ !cancelled() && runner.os == 'Linux' }}
       run: cargo test -p simple-compiler --verbose --lib --no-run
+
+    - name: Execute exact LLVM pipeline strict HIR regression
+      if: ${{ !cancelled() && runner.os == 'Linux' && steps.compiler_lib_tests.outcome == 'success' }}
+      timeout-minutes: 3
+      run: bash ../../scripts/ci/check-llvm-pipeline-strict-hir.shs "$GITHUB_WORKSPACE/build/ci/strict-hir-unit"
+
+    - name: Record blocked strict HIR prerequisite
+      if: ${{ !cancelled() && runner.os == 'Linux' && steps.compiler_lib_tests.outcome != 'success' }}
+      env:
+        PREREQUISITE_OUTCOME: ${{ steps.compiler_lib_tests.outcome }}
+      run: bash ../../scripts/ci/record-strict-hir-blocked.shs "$GITHUB_WORKSPACE/build/ci/strict-hir-unit" "$PREREQUISITE_OUTCOME"
+
+    - name: Retain strict HIR unit source and execution evidence
+      if: ${{ !cancelled() && runner.os == 'Linux' }}
+      uses: actions/upload-artifact@v6
+      with:
+        name: strict-hir-unit-${{ github.sha }}
+        path: build/ci/strict-hir-unit/
+        if-no-files-found: error
 
     - name: Compile runtime lib tests
       run: cargo test -p simple-runtime --verbose --lib --no-run
@@ -145,7 +168,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -166,7 +189,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -187,7 +210,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
