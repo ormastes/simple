@@ -162,3 +162,6 @@ a mechanical fix.
 ## Canonical database reconciliation — 2026-11-03
 
 OPEN original name-collision hypothesis; PR #6300 MERGED at a1b0b7bb79421b7d835054fd9d3ae89cc3ee34a4 and addresses a distinct integer search-offset consumer defect. TEST_BLOCKED: five authored JSON scenarios and canonical app/cross-module reproductions UNRUN without a qualified self-hosted runtime. Even a verified search-offset fix would not establish or close the historical collision hypothesis.
+
+## 2026-11-09 — closed (owner decision 2026-11-09 item 15: close after fresh-seed run)
+Seed `bin/simple.exe test` on origin/release/1.0.0 @1cc167e37fd: `claude_json_index_contract_spec` 5/5, `app/llm_caret/claude_cli_spec` 85/85, `claude_cli_cross_module_owner_spec` 4/4, all PASS. Collision not reproducible.
