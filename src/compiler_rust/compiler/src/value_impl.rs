@@ -129,7 +129,12 @@ impl Value {
             }
             Value::Nil => Ok(0),
             other => {
-                let actual_type = self.type_name();
+                // Name the enum/variant so the error is attributable without a
+                // backtrace (bug native_build_enum_to_int_mismatch_after_hir_2026-09-01).
+                let actual_type: String = match other {
+                    Value::Enum { enum_name, variant, .. } => format!("enum {}::{}", enum_name, variant),
+                    _ => self.type_name().to_string(),
+                };
                 if std::env::var("SIMPLE_DEBUG_AS_INT_BT").is_ok() {
                     if let Value::Function { name, .. } = other {
                         eprintln!(
@@ -980,5 +985,25 @@ mod dict_composite_key_tests {
                 "scalar key {key:?} must not be wrapped in a __dict_entry__ marker tuple"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod as_int_enum_attribution_tests {
+    use super::*;
+
+    /// Bug native_build_enum_to_int_mismatch_after_hir_2026-09-01: the error
+    /// must name the enum and variant, not just "enum".
+    #[test]
+    fn as_int_on_enum_names_enum_and_variant() {
+        let v = Value::Enum { enum_name: "Color".to_string(), variant: "Red".to_string(), payload: None };
+        let msg = format!("{:?}", v.as_int().unwrap_err());
+        assert!(msg.contains("cannot convert enum Color::Red to int"), "{}", msg);
+    }
+
+    #[test]
+    fn as_int_on_non_enum_keeps_type_name() {
+        let msg = format!("{:?}", Value::Bool(true).as_int().map(|_| ()).err().map(|e| format!("{:?}", e)).unwrap_or_default());
+        assert!(!msg.contains("enum "), "{}", msg);
     }
 }
