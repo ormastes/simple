@@ -196,6 +196,13 @@ The compiler supports multiple code generation backends:
 - **Linux:** LLVM most commonly available. Install `libllvm-18-dev` for `llvm-lib` backend. Preferred linker: `mold`.
 - **macOS:** Needs Homebrew LLVM (`brew install llvm`) for LLVM backend. Without it, all builds use Cranelift. Linker: system `ld` (ld64).
 - **Windows MSVC C builds:** configure a validated LLVM 23.1.x driver from `C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc`; use `clang-cl.exe` for MSVC C (or the validated `clang.exe` C driver where required), and leave `CXX` unset. `cl.exe`, GCC, G++, MinGW, and `clang++` are not admitted C compiler selections. Cargo may use `link.exe` only as its MSVC Rust linker. Static lint rule `W-WIN-CC-001` checks Windows-specific compiler selection files.
+  When sourcing `scripts/setup/windows-msvc-bootstrap-env.shs`, an explicit
+  `LLVM_SYS_231_PREFIX` takes precedence over `SIMPLE_LLVM_WIN_ROOT_23`. A selected
+  prefix without `bin/clang-cl.exe` fails setup; discovery from the local toolchain
+  store runs only when neither prefix was supplied. This prevents a missing or
+  mistyped pin from silently selecting another compiler. The toolchain contract
+  runs `scripts/check/check-windows-msvc-prefix-selection.shs` to cover both
+  explicit selection and unpinned discovery.
 
 For a pinned macOS bootstrap, Stage 2 forwards `CC`, `CXX`, `AR`, `LD`,
 `LLVM_CONFIG`, and `SIMPLE_LLVM_REQUIRED_VERSION` through its scrubbed child

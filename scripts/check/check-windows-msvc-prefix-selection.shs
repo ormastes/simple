@@ -1,0 +1,52 @@
+#!/bin/sh
+# Exercise the production LLVM-prefix selection before SDK-dependent setup.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/msvc-prefix-selection.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+awk '/^simple_msvc_llvm_prefix=/ {copy=1} copy {print} copy && /^LLVM_HOME=/ {exit}' \
+    "$root/scripts/setup/windows-msvc-bootstrap-env.shs" >"$work/selection.sh"
+[ -s "$work/selection.sh" ] || { echo 'FAIL: LLVM prefix owner absent' >&2; exit 1; }
+fallback="$work/home/.simple/toolchains/llvm-msvc-23.1.1/clang+llvm-23.1.1-x86_64-pc-windows-msvc"
+for prefix in "$fallback" "$work/primary" "$work/alternate"; do
+    mkdir -p "$prefix/bin"
+    printf '#!/bin/sh\nexit 0\n' >"$prefix/bin/clang-cl.exe"
+    chmod +x "$prefix/bin/clang-cl.exe"
+done
+cat >"$work/case.sh" <<'SH'
+. "$1" || exit $?
+printf 'selected=%s\n' "$simple_msvc_llvm_prefix"
+SH
+passed=0
+run_case() {
+    label=$1 expected=$2 primary=$3 alternate=$4 result=0
+    env -i PATH="$PATH" HOME="$work/home" LLVM_SYS_231_PREFIX="$primary" \
+        SIMPLE_LLVM_WIN_ROOT_23="$alternate" \
+        sh "$work/case.sh" "$work/selection.sh" >"$work/$label.log" 2>&1 || result=$?
+    if [ "$expected" = reject ]; then
+        [ "$result" -ne 0 ] && ! grep -q '^selected=' "$work/$label.log" && \
+            grep -q 'clang-cl.exe not found' "$work/$label.log" || {
+                cat "$work/$label.log" >&2
+                echo "FAIL: $label silently replaced an explicit LLVM prefix" >&2
+                exit 1
+            }
+    else
+        [ "$result" -eq 0 ] && grep -Fx "selected=$expected" "$work/$label.log" >/dev/null || {
+            cat "$work/$label.log" >&2
+            echo "FAIL: $label did not preserve its selected prefix" >&2
+            exit 1
+        }
+    fi
+    passed=$((passed + 1))
+}
+run_case primary "$work/primary" "$work/primary" "$work/alternate"
+run_case alternate "$work/alternate" '' "$work/alternate"
+run_case primary-only "$work/primary" "$work/primary" ''
+run_case missing-primary reject "$work/missing" ''
+run_case missing-alternate reject '' "$work/missing"
+run_case missing-primary-valid-alternate reject "$work/missing" "$work/alternate"
+auto_expected="$fallback"
+historical='/c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc'
+if [ -x "$historical/bin/clang-cl.exe" ]; then auto_expected="$historical"; fi
+run_case automatic "$auto_expected" '' ''
+printf 'PASS: %s explicit Windows LLVM prefix selection cases\n' "$passed"
