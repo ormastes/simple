@@ -26,6 +26,7 @@ use compiler.hir.ownership_types.{hir_type_requires_move, hir_type_is_short_cand
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_nominal_kind}
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.value_access.{compiler_value_discriminant}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError, marker_map_without, text_map_without}
 use compiler.frontend.resource_registry.{resource_is_declared}
 use compiler.mir.mir_types.{LocalId, LocalKind, MirLocal, mir_type_probe_text}  # explicit: a glob is not an import-origin for surface projection
@@ -583,11 +584,17 @@ impl MirLowering:
         unreliably a non-nil i64 on this path. Without threading the real
         F64/F32 type onto the binding, its spill slot is alloca'd i64 and the
         float round-trips through an i64 store (10.0 -> 10)."""
+        # Discriminant compare, not `match type_.kind` — the arm dispatch
+        # mis-routes on the stage-2 native lane (same reason local_is_array in
+        # expr_dispatch.spl uses the discriminant), which lowered f64 locals as
+        # integer ops (stage2_native_f64_arithmetic_lowered_as_integer_ops).
         if val type_ = self.builder.local_type(local):
-            match type_.kind:
-                case MirTypeKind.F32: return true
-                case MirTypeKind.F64: return true
-                case _: return false
+            val disc = compiler_value_discriminant<MirTypeKind>(type_.kind)
+            if disc == compiler_value_discriminant<MirTypeKind>(MirTypeKind.F64):
+                return true
+            if disc == compiler_value_discriminant<MirTypeKind>(MirTypeKind.F32):
+                return true
+            return false
         false
 
     fn local_is_bool(local: LocalId) -> bool:
