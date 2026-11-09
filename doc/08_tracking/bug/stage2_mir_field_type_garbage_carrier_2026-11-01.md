@@ -2,7 +2,7 @@
 
 - **ID:** stage2_mir_field_type_garbage_carrier_2026-11-01
 - **Priority:** P2 (warning only today; P1 if stage3 smoke shows the fields miscompiled)
-- **Status:** open
+- **Status:** closed (2026-11-09, not-a-defect)
 - **Owner area:** `src/compiler/50.mir` MirLowering transient-scope ownership (unassigned; same family as `mir_transient_scope_unpromoted_rti_av_2026-11-01.md`, fixed in source by #5753)
 - **Found by:** phase-3 runs 13/14c, frozen stage2 `C:/dev/p3new/stage2.exe` (source ef0681fc0e1), release tip 5fad50cca24
 
@@ -41,3 +41,13 @@ selection.
 ## Removal condition
 
 Close when a stage3 self-build prints no `[mir-field-type] ... actual=<non-kind>` lines.
+
+## Resolution (2026-11-09, bootp2)
+
+Reproduced on post-#5753 `stage2_new4.exe` (`compile src/compiler/70.backend/backend_types.spl --format=smf`):
+both lines still print with the same value. They are not garbage: `rt_enum_discriminant`
+returns DefaultHasher(variant name) truncated to u32 (see the comment beside the
+`[bootstrap-type-registration]` probe), so `2589120870` is a stable variant hash, identical for
+the two `Optional` fields (`Span?`, `text?`), and `lower_type` records no error for either field
+(no `[bootstrap-type-registration]` line). The print was an unconditional debug probe left by
+2cb67158ac0 (`fix: preserve flat optional type tags`); it is removed. Closed as not-a-defect.
