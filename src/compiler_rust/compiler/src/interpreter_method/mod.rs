@@ -521,6 +521,16 @@ pub(crate) fn evaluate_method_call(
         }
     }
 
+    // Read declaration metadata BEFORE executing the receiver: a getter may
+    // mutate bindings, and evaluating it twice would duplicate its effects.
+    let declared_receiver_width = match receiver.as_ref() {
+        Expr::Call { callee, .. } => match callee.as_ref() {
+            Expr::Identifier(name) =>
+                super::interpreter_call::declared_signed_call_return_width(name, env, functions),
+            _ => None,
+        },
+        _ => None,
+    };
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
 
     // Handle module (Dict) method calls - look up function in module and use its captured_env
@@ -1867,6 +1877,11 @@ pub(crate) fn evaluate_method_call(
                 Some(8) => Some("i8"),
                 Some(16) => Some("i16"),
                 Some(32) => Some("i32"),
+                _ => None,
+            },
+            (_, Value::Int(_)) => match declared_receiver_width {
+                Some(8) => Some("i8"), Some(16) => Some("i16"),
+                Some(32) => Some("i32"), Some(64) => Some("i64"),
                 _ => None,
             },
             _ => None,
