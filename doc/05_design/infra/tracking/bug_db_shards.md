@@ -59,6 +59,19 @@ plus `TOTAL` rows across both tables. Counting `bugs_active` alone undercounted
 open P2 on 2026-11-09 (31 vs 164). New still-real rows belong in `bugs_active`;
 the legacy `bugs` table is being drained to closed history.
 
+Count is fail-closed: missing or unreadable merged input and failed aggregation
+return nonzero, rather than becoming a successful empty tally through a shell
+pipeline. A valid empty database still succeeds with no tally rows. The count
+implementation stages merged input and unsorted tallies in private temporary
+files, checks each producer, and removes both files on success or failure.
+Its subcommand-local cleanup does not replace callers' traps or mutate the DB.
+
+`sh scripts/check/bug-db-shard.shs --selftest-count` executes missing-input,
+valid-zero and exact nonzero controls without a seal hasher or compiler. The
+full `--selftest` also invokes these controls before its existing sealed-shard
+tests, which require the configured xxh3 hasher. See
+`doc/07_guide/infra/tracking/bug_db_counting.md` for the exit/output contract.
+
 ## Not changed (named gaps)
 * `src/app/bug_gen/main.spl`, `src/app/tracking/main.spl`, `src/app/stats/*`,
   `src/compiler/90.tools/stats/*` and the Rust seed `driver/src/bug_db.rs` read
