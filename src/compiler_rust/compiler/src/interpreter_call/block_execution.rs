@@ -416,6 +416,7 @@ pub(super) fn exec_block_closure_into(
     let mut last_value = Value::Nil;
 
     for node in nodes {
+        crate::interpreter::set_current_node_span(node.span().map(Into::into));
         match node {
             Node::Expression(expr) => {
                 // Handle functional update (e.g., list->append(3))
@@ -1556,6 +1557,7 @@ fn exec_block_closure_mut_inner(
     let mut last_value = Value::Nil;
 
     for node in nodes {
+        crate::interpreter::set_current_node_span(node.span().map(Into::into));
         match node {
             Node::Expression(expr) => {
                 // Handle self-updating method calls (e.g., arr.append(3))
