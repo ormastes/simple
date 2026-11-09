@@ -65,3 +65,27 @@ copying, no receipt forgery; the quiescence invariant holds by construction
 and the run is reproducible against a commit id. `.claude/rules/bootstrap.md`
 should document this as the standard bootstrap procedure on shared hosts.
 
+
+## Fix implemented 2026-11-09 — verification pending
+
+Owner decision 2026-11-09: scope the before/after source snapshot to
+build-input paths only. `bootstrap_stage3_source_snapshot_once`
+(`scripts/check/lib/bootstrap-stage3/command-snapshot.shs`) now prunes every
+top-level `src/app/<dir>` NOT named in the checked-in
+`scripts/bootstrap/stage2-build-input-app-dirs.txt`. All other authority roots
+(`src/compiler`, `src/lib`, `src/os`, `src/runtime`, ..., `scripts/bootstrap`,
+`scripts/check/lib`) and top-level `src/app` files stay fully hashed. The list
+is mandatory and non-empty (fail closed), and editing it is itself snapshot
+churn because it lives under `scripts/bootstrap`.
+
+The list is the transitive closure of `use|from|import app.X` reachable from
+the core roots, verified by `sh scripts/bootstrap/stage2-build-input-app-dirs-check.shs`
+(`--selftest`, `--print` to regenerate; FAIL names any unlisted closure dir).
+Of the incident's three paths, `src/app/spipe/**` is now out of scope;
+`src/app/spipe_knowledge_provider` IS a real build input (imported from the
+closure) and correctly still refuses.
+
+Evidence: `test/02_integration/bootstrap_stage3_source_snapshot_scope_test.shs`
+— green with the fix; red (`FAIL: unlisted app dir present in snapshot`) with
+`command-snapshot.shs` reverted. Verification pending a real Stage 2 run in the
+shared tree.
