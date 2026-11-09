@@ -1,0 +1,47 @@
+# Canonical owner of the raw runtime value accessors used by the compiler.
+#
+# `rt_enum_discriminant` / `rt_enum_payload` / `rt_tuple_get` read the tagged
+# runtime representation of an enum value or a tuple slot. That ABI is private
+# to this one module: compiler code imports the typed `compiler_value_*`
+# wrappers below instead of declaring the externs itself, so the
+# representation contract has exactly one declaration site and one `unsafe`
+# boundary. Ownership is pinned by
+# test/01_unit/compiler/mir/value_access_ownership_spec.spl and
+# scripts/audit/compiler-mir-method-sffi-authority.shs; the module is the only
+# `src/compiler` entry in scripts/check/no_direct_rt_allowlist.txt
+# (owner + reason: doc/08_tracking/bug/value_access_ownership_spec_never_executes_2026-09-18.md).
+#
+# std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
+# cannot resolve it, which is why the externs are declared here rather than
+# re-exported from std.
+
+@unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
+extern fn rt_enum_discriminant<T>(value: T) -> i64
+@unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
+extern fn rt_enum_payload<T, TPayload>(value: T) -> TPayload
+@unsafe(reason: "raw tagged-tuple indexed borrowed value projection ABI", capabilities: [ffi])
+# TElement must match the selected variant slot; the borrowed owner must remain live.
+extern fn rt_tuple_get<TElement>(tuple: i64, index: i64) -> TElement?
+
+# Registry discriminant of an enum value (-1 when the runtime cannot identify
+# the variant). Stable across the same compiler process only.
+@inline
+fn compiler_value_discriminant<TEnum>(value: TEnum) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+# Borrowed payload of an enum value: the payload value itself for a
+# single-slot variant (TPayload = that slot's type), a tuple handle
+# (TPayload = i64, fed to compiler_value_tuple_at) for a multi-slot variant.
+@inline
+fn compiler_value_payload<TEnum, TPayload>(value: TEnum) -> TPayload:
+    unsafe(capabilities: [ffi]):
+        rt_enum_payload<TEnum, TPayload>(value)
+
+# Indexed slot of a borrowed tuple handle. Returns nil for an absent optional
+# payload slot (e.g. an `if` without an `else`), so callers can keep the
+# optional contract instead of hitting a non-optional-return nil error.
+@inline
+fn compiler_value_tuple_at<TElement>(tuple: i64, index: i64) -> TElement?:
+    unsafe(capabilities: [ffi]):
+        rt_tuple_get<TElement>(tuple, index)
