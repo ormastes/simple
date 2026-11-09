@@ -111,7 +111,6 @@ impl VulkanInstance {
 
         // Enable validation layers in debug builds
         let layer_names_raw: Vec<CString>;
-        let layer_names: Vec<*const c_char>;
 
         #[cfg(debug_assertions)]
         {
@@ -131,14 +130,16 @@ impl VulkanInstance {
             } else {
                 vec![]
             };
-            layer_names = layer_names_raw.iter().map(|name| name.as_ptr()).collect();
         }
 
         #[cfg(not(debug_assertions))]
         {
             layer_names_raw = vec![];
-            layer_names = vec![];
         }
+        let layer_names: Vec<*const c_char> = layer_names_raw
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect();
 
         // Required extensions
         let mut extension_names_raw = vec![];

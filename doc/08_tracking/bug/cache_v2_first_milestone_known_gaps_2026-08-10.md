@@ -173,3 +173,14 @@ lease kept; fresh dead-owner lease reclaimed; on-disk sweep removes only the
 dead one). The remaining cost of this design (a hung-but-live process pins its
 leases) is the safe direction, not a gap. Gap 5 is CLOSED; gaps 1, 2, 4, 6, 7
 remain; this row stays open as the milestone ledger.
+
+## Closed 2026-11-09 (lane-p2-3) — milestone ledger moved to source TODOs
+
+This is a milestone ledger, not one defect, which answers the 2026-11-04
+QUESTION. `abi_interface_digest` is now real (`module_identity.spl` header).
+Open gaps are now greppable `TODO(cache_v2_first_milestone_known_gaps_2026-08-10 gap N)`
+markers that todo-scan picks up:
+gap 1 in `src/compiler/35.semantics/interface/module_identity.spl`, gap 2 in
+`src/compiler/35.semantics/interface/compile_interface.spl`, and gap 4 in
+`src/compiler/80.driver/cache/gc/admission.spl`. Gap 5 was closed 2026-11-05.
+Gaps 6 and 7 are plan and verification items (plan §2b, and a bootstrap re-run).

@@ -243,8 +243,8 @@ fn init() -> bool {
         #[cfg(unix)]
         unsafe {
             libc::atexit(dump_at_exit);
-            libc::signal(libc::SIGTERM, dump_on_signal as libc::sighandler_t);
-            libc::signal(libc::SIGINT, dump_on_signal as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, dump_on_signal as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGINT, dump_on_signal as *const () as libc::sighandler_t);
         }
         // `libc` is a cfg(unix)-only dependency of this crate, so the call
         // above cannot compile on Windows. atexit itself is standard C and the

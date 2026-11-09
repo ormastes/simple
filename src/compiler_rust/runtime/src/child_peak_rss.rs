@@ -74,42 +74,14 @@ pub fn reap(child: &mut std::process::Child, nohang: bool) -> std::io::Result<Op
 #[cfg(windows)]
 fn windows_peak_working_set_kib(child: &std::process::Child) -> i64 {
     use std::os::windows::io::AsRawHandle;
-    #[repr(C)]
-    struct ProcessMemoryCounters {
-        cb: u32,
-        page_fault_count: u32,
-        peak_working_set_size: usize,
-        working_set_size: usize,
-        quota_peak_paged_pool_usage: usize,
-        quota_paged_pool_usage: usize,
-        quota_peak_non_paged_pool_usage: usize,
-        quota_non_paged_pool_usage: usize,
-        pagefile_usage: usize,
-        peak_pagefile_usage: usize,
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn K32GetProcessMemoryInfo(
-            process: *mut core::ffi::c_void,
-            counters: *mut ProcessMemoryCounters,
-            cb: u32,
-        ) -> i32;
-    }
-    let mut counters = ProcessMemoryCounters {
-        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
-        page_fault_count: 0,
-        peak_working_set_size: 0,
-        working_set_size: 0,
-        quota_peak_paged_pool_usage: 0,
-        quota_paged_pool_usage: 0,
-        quota_peak_non_paged_pool_usage: 0,
-        quota_non_paged_pool_usage: 0,
-        pagefile_usage: 0,
-        peak_pagefile_usage: 0,
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..unsafe { std::mem::zeroed() }
     };
     let ok = unsafe { K32GetProcessMemoryInfo(child.as_raw_handle() as *mut _, &mut counters, counters.cb) };
-    if ok != 0 && counters.peak_working_set_size > 0 {
-        (counters.peak_working_set_size / 1024) as i64
+    if ok != 0 && counters.PeakWorkingSetSize > 0 {
+        (counters.PeakWorkingSetSize / 1024) as i64
     } else {
         -1
     }

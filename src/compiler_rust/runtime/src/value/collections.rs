@@ -3036,7 +3036,7 @@ pub extern "C" fn rt_transient_array_scope_state_v1() -> i64 {
 
 fn next_transient_scope_identity(counter: &std::sync::atomic::AtomicU32) -> Option<u32> {
     use std::sync::atomic::Ordering as AtomicOrdering;
-    counter.fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |next| {
+    simple_common::atomic_update::update_u32(counter, AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |next| {
         if next == 0 { None } else { Some(next.checked_add(1).unwrap_or(0)) }
     }).ok()
 }
