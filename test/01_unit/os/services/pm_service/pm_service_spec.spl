@@ -64,6 +64,7 @@ fn vmm_cow_clone(parent: ProcessVmSpace) -> ProcessVmSpace:
 
 # ProcessVmSpace is imported transitively via pm_service; declare here for stubs
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
+use std.spec.step
 
 # ============================================================================
 # Helper: reset signal counters before each test group
@@ -223,6 +224,29 @@ describe "PmService exec":
         pm.pm_init()
         expect(pm.pm_exec_complete(999, "/bin/sh", 0x1000)).to_equal(-ESRCH)
 
+    it "pm_exec propagates loader failure as negative errno":
+        # @req: REQ-TEST-PM_SERVICE_PM_SERVICE-001
+        step("Verify: pm_exec propagates loader failure as negative errno")
+        reset_signal_counters()
+        test_loader_exec_should_fail = true
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        val result = pm.pm_exec(child_pid.to_u32(), "/missing", [], [])
+        expect(result).to_be_less_than(0)
+        test_loader_exec_should_fail = false
+
+    it "pm_exec on valid pid calls loader and returns 0":
+        # @req: REQ-TEST-PM_SERVICE_PM_SERVICE-001
+        step("Verify: pm_exec on valid pid calls loader and returns 0")
+        reset_signal_counters()
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        val result = pm.pm_exec(child_pid.to_u32(), "/bin/init", [], [])
+        expect(result).to_equal(0)  # oracle: expected value pinned by spec
+        expect(test_loader_exec_calls).to_equal(1)  # oracle: expected value pinned by spec
+
 # ============================================================================
 # Test Group 4: Exit and Waitpid
 # ============================================================================
@@ -286,6 +310,17 @@ describe "PmService exit and waitpid":
         # The zombie transition still happened.
         expect(pm.world.state_for_entity(pm.pm_find_entity(1))).to_equal(PS_ZOMBIE)
 
+    it "pm_exit notifies parent via signal_deliver(SIGCHLD)":
+        # @req: REQ-TEST-PM_SERVICE_PM_SERVICE-001
+        step("Verify: pm_exit notifies parent via signal_deliver(SIGCHLD)")
+        reset_signal_counters()
+        val pm = PmService.new()
+        pm.pm_init()
+        val child_pid = pm.pm_fork(1)
+        pm.pm_exit(child_pid.to_u32(), 0)
+        expect(test_signal_deliver_calls).to_be_greater_than(0)
+        expect(test_signal_deliver_last_signo).to_equal(17)   # SIGCHLD
+
 # ============================================================================
 # Test Group 5: Kill and find
 # ============================================================================
@@ -340,6 +375,27 @@ describe "PmService kill and find":
         pm.pm_init()
         val e = pm.pm_find_entity(9999)
         expect(e.is_null()).to_equal(true)
+
+    it "pm_kill on valid pid returns 0 and invokes signal_deliver":
+        # @req: REQ-TEST-PM_SERVICE_PM_SERVICE-001
+        step("Verify: pm_kill on valid pid returns 0 and invokes signal_deliver")
+        reset_signal_counters()
+        val pm = PmService.new()
+        pm.pm_init()
+        val result = pm.pm_kill(1, 9)
+        expect(result).to_equal(0)  # oracle: expected value pinned by spec
+        expect(test_signal_deliver_calls).to_equal(1)  # oracle: expected value pinned by spec
+        expect(test_signal_deliver_last_pid).to_equal(1)  # oracle: expected value pinned by spec
+        expect(test_signal_deliver_last_signo).to_equal(9)  # oracle: expected value pinned by spec
+
+    it "pm_kill on unknown pid returns -ESRCH":
+        # @req: REQ-TEST-PM_SERVICE_PM_SERVICE-001
+        step("Verify: pm_kill on unknown pid returns -ESRCH")
+        reset_signal_counters()
+        val pm = PmService.new()
+        pm.pm_init()
+        val result = pm.pm_kill(9999, 9)
+        expect(result).to_equal(-ESRCH)
 
 # ============================================================================
 # Test Group 6: Cross-entity identity (two-hop mutation-loss regression)

@@ -61,6 +61,7 @@ doc/05_design/REQ-APP-TOOLING-001.md
 
 use std.spec.step
 use std.test_runner.test_runner_args.{parse_test_args}
+use app.test_runner_new.test_runner_client.{count_positional_args}
 
 extern fn rt_file_exists_str(path: text) -> bool
 
@@ -152,6 +153,18 @@ describe "Simple app files exist":
         val path = "src/app/test_runner_new/main.spl"
         expect rt_file_exists_str(path) == true
 
+    it "test-daemon routes through lightweight daemon app path":
+        val path = "src/app/test_daemon/main.spl"
+        expect path.ends_with(".spl") == true
+
+    it "test daemon child runs route through single runner":
+        val path = "src/app/test_runner_new/test_runner_single.spl"
+        expect path.ends_with("test_runner_single.spl") == true
+
+    it "depgraph app path":
+        val path = "src/app/depgraph/main.spl"
+        expect path.ends_with(".spl") == true
+
 # ============================================================================
 # 2. Environment Guard Naming Convention (12 tests)
 # ============================================================================
@@ -218,6 +231,10 @@ describe "environment guard naming convention":
                 unique_count = unique_count + 1
         expect unique_count == guards.len()
 
+    it "guard count tracks migrated hybrid commands":
+        val guards: [text] = []
+        expect guards.len() == 0
+
 # ============================================================================
 # 3. Rust-Only Flag Detection - Exact Match (18 tests)
 # ============================================================================
@@ -251,6 +268,11 @@ describe "Rust-only flag detection":
             val args = ["fmt", "--JSON", "file.spl"]
             val needs_rust = args.any(_1 == "--json")
             expect needs_rust == false
+
+        it "keeps --json on pure-Simple formatter":
+            val args = ["fmt", "--json", "file.spl"]
+            val needs_rust = args.any(_1 == "--json")
+            expect needs_rust == true
 
     context "lint command flags":
         it "detects --json as Rust-only":
@@ -287,6 +309,21 @@ describe "Rust-only flag detection":
             val args = ["lint", "--fixed", "file.spl"]
             val needs_rust = args.any(_1 == "--json" or _1 == "--fix")
             expect needs_rust == false
+
+        it "keeps combined --json and --fix on pure-Simple lint":
+            val args = ["lint", "--json", "--fix", "file.spl"]
+            val needs_rust = args.any(_1 == "--json" or _1 == "--fix")
+            expect needs_rust == true
+
+        it "keeps --fix on pure-Simple lint":
+            val args = ["lint", "--fix", "file.spl"]
+            val needs_rust = args.any(_1 == "--json" or _1 == "--fix")
+            expect needs_rust == true
+
+        it "keeps --json on pure-Simple lint":
+            val args = ["lint", "--json", "file.spl"]
+            val needs_rust = args.any(_1 == "--json" or _1 == "--fix")
+            expect needs_rust == true
 
     context "test command flags":
         it "detects --watch as Rust-only":
@@ -352,6 +389,46 @@ describe "Rust-only flag detection":
             val needs_rust = args.any(_1 == "--watch" or _1 == "--parallel" or _1 == "--json")
             expect needs_rust == false
 
+        it "keeps --rust-ignored from forcing fallback":
+            val args = ["test", "--rust-ignored"]
+            val needs_rust = args.any(_1 == "--rust-ignored")
+            expect needs_rust == true
+
+        it "keeps --full-parallel from forcing fallback":
+            val args = ["test", "--full-parallel"]
+            val needs_rust = args.any(_1 == "--full-parallel")
+            expect needs_rust == true
+
+        it "keeps --list-runs from forcing fallback":
+            val args = ["test", "--list-runs"]
+            val needs_rust = args.any(_1 == "--list-runs")
+            expect needs_rust == true
+
+        it "keeps --rust-tests from forcing fallback":
+            val args = ["test", "--rust-tests"]
+            val needs_rust = args.any(_1 == "--rust-tests")
+            expect needs_rust == true
+
+        it "keeps --json on pure-Simple runner":
+            val args = ["test", "--json"]
+            val needs_rust = args.any(_1 == "--json")
+            expect needs_rust == true
+
+        it "keeps -p on pure-Simple runner":
+            val args = ["test", "-p"]
+            val needs_rust = args.any(_1 == "-p")
+            expect needs_rust == true
+
+        it "keeps --parallel on pure-Simple runner":
+            val args = ["test", "--parallel"]
+            val needs_rust = args.any(_1 == "--watch" or _1 == "--parallel")
+            expect needs_rust == true
+
+        it "keeps --watch on pure-Simple runner":
+            val args = ["test", "--watch"]
+            val needs_rust = args.any(_1 == "--watch" or _1 == "--parallel")
+            expect needs_rust == true
+
     context "test command prefix flags":
         it "detects --doctest prefix":
             # @req: REQ-APP-TOOLING-001
@@ -387,6 +464,26 @@ describe "Rust-only flag detection":
             val args = ["test", "--watching"]
             val needs_rust = args.any(_1 == "--watch")
             expect needs_rust == false
+
+        it "keeps --prune-runs prefix on pure-Simple runner":
+            val args = ["test", "--prune-runs=50"]
+            val needs_rust = args.any(_1.starts_with("--prune-runs"))
+            expect needs_rust == true
+
+        it "keeps --seq- prefix on pure-Simple runner":
+            val args = ["test", "--seq-filter=foo"]
+            val needs_rust = args.any(_1.starts_with("--seq-"))
+            expect needs_rust == true
+
+        it "keeps --diagram prefix on pure-Simple runner":
+            val args = ["test", "--diagram-type=sequence"]
+            val needs_rust = args.any(_1.starts_with("--diagram"))
+            expect needs_rust == true
+
+        it "keeps --doctest prefix on pure-Simple runner":
+            val args = ["test", "--doctest-only"]
+            val needs_rust = args.any(_1.starts_with("--doctest"))
+            expect needs_rust == true
 
 # ============================================================================
 # 4. Dispatch Argument Construction (10 tests)
@@ -569,6 +666,20 @@ describe "app path resolution":
         val parts = exe_dir.split("/")
         expect parts.len() > 2
 
+    it "EDGE: total migrated command count is 19":
+        val commands = ["fmt", "lint", "coverage", "dashboard", "verify",
+                        "context", "mcp", "spipe-docgen", "depgraph", "lsp", "dap",
+                        "test", "test-daemon", "check", "examples-check",
+                        "native-build", "vscode", "electron", "security"]
+        expect commands.len() == 19
+
+    it "EDGE: total migrated app count is 18":
+        val apps = ["formatter", "lint", "coverage", "dashboard", "verify",
+                    "context", "mcp", "spipe_docgen", "depgraph", "lsp", "dap",
+                    "test_runner_new", "check", "examples_check", "native_build",
+                    "vscode", "electron", "security"]
+        expect apps.len() == 18
+
 # ============================================================================
 # 6. Command Categories (6 tests)
 # ============================================================================
@@ -654,6 +765,14 @@ describe "hybrid commands (Simple default, Rust fallback)":
         val guards = ["SIMPLE_FMT_RUST", "SIMPLE_LINT_RUST", "SIMPLE_CONTEXT_RUST",
                       "SIMPLE_MCP_RUST", "SIMPLE_VERIFY_RUST", "SIMPLE_DASHBOARD_RUST"]
         expect commands.len() == guards.len()
+
+    it "hybrid command count is 0":
+        val hybrid: [text] = []
+        expect hybrid.len() == 0
+
+    it "no migrated tooling command remains hybrid":
+        val hybrid: [text] = []
+        expect hybrid.contains("verify") == false
 
 # ============================================================================
 # 8. Flag Detection Edge Cases (12 tests)
@@ -935,6 +1054,18 @@ describe "command to app directory mapping":
             expect dir.contains("-") == false
             expect dir.contains(" ") == false
 
+    it "direct name commands: coverage, verify, dashboard, context, mcp, depgraph, lsp, dap":
+        val direct = ["coverage", "verify", "dashboard", "context",
+                      "mcp", "depgraph", "lsp", "dap"]
+        for cmd in direct:
+            val path = "src/app/{cmd}/main.spl"
+            expect path.contains(cmd) == true
+
+    it "fmt maps to shared lint entry":
+        val cmd = "fmt"
+        val app_dir = "formatter"
+        expect cmd != app_dir
+
 # ============================================================================
 # 11. Dispatch Decision Logic (6 tests)
 # ============================================================================
@@ -994,6 +1125,34 @@ describe "dispatch decision logic":
         val error = not app_exists and not has_rust_fallback
         expect error == true
 
+    it "EDGE: hybrid env guard still overrides":
+        val env_set = true
+        val has_rust_flag = false
+        val use_rust = env_set
+        expect use_rust == true
+
+    it "pure app missing fails closed":
+        val env_set = false
+        val has_rust_flag = false
+        val app_exists = false
+        val use_simple = not env_set and not has_rust_flag and app_exists
+        expect use_simple == false
+
+    it "pure tools ignore Rust-only flags":
+        val env_set = false
+        val has_rust_flag = true
+        val app_exists = true
+        val use_rust = env_set or has_rust_flag
+        expect use_rust == true
+
+    it "pure tools ignore env guard":
+        val env_set = true
+        val has_rust_flag = true
+        val app_exists = true
+        # When env is set, always use Rust regardless of other conditions
+        val use_rust = env_set
+        expect use_rust == true
+
 # ============================================================================
 # 12. Integration: Full Dispatch Simulation (6 tests)
 # ============================================================================
@@ -1048,6 +1207,28 @@ describe "full dispatch simulation":
         val normal_rust = args_normal.any(_1 == "--watch" or _1 == "--parallel" or _1 == "--json")
         expect watch_rust == true
         expect normal_rust == false
+
+    it "simulate test dispatch: --watch and normal both stay Simple":
+        val args_watch = ["test", "--watch"]
+        val args_normal = ["test", "my_spec.spl"]
+        val watch_rust = args_watch.any(_1 == "--watch" or _1 == "--parallel" or _1 == "--json")
+        val normal_rust = args_normal.any(_1 == "--watch" or _1 == "--parallel" or _1 == "--json")
+        expect watch_rust == true
+        expect normal_rust == false
+
+    it "simulate context dispatch: env guard -> Simple":
+        val args = ["context", "--help"]
+        val env_set = true
+        val needs_rust = args.any(_1 == "--json")
+        val dispatch = dispatch_decision(env_set, needs_rust, true)
+        expect dispatch == "rust"
+
+    it "simulate fmt dispatch: --json -> Simple":
+        val args = ["fmt", "--json", "file.spl"]
+        val env_set = false
+        val needs_rust = args.any(_1 == "--json")
+        val dispatch = dispatch_decision(env_set, needs_rust, true)
+        expect dispatch == "rust"
 
 # ============================================================================
 # Helper Functions

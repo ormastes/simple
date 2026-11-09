@@ -566,9 +566,18 @@ fn _html_draw_ir_command(
     # fill that reads back as a solid bar over the parent's background. Emit a
     # real text command instead so the executor rasterizes glyphs (on Metal fast
     # mode this routes to the GPU glyph blit) in the node's foreground color.
-    if node.tag == "#text" and node.text_trimmed != "":
+    # white-space:pre/nowrap runs are measured and wrapped by layout over the
+    # RAW text (node.text_data, which keeps leading/trailing spaces and
+    # newlines); emitting node.text_trimmed here republished the trimmed run,
+    # so a <pre> block's Draw IR drew "X" at the left edge of a box layout had
+    # sized for "    X" (browser_engine_missing_ua_defaults_2026-07-11).
+    val paint_text = if st.white_space_nowrap:
+        node.text_data
+    else:
+        node.text_trimmed
+    if node.tag == "#text" and paint_text != "":
         val transformed_text = apply_text_transform_for_paint(
-            node.text_trimmed, st.text_transform
+            paint_text, st.text_transform
         )
         val visual_text_rtl = if st.direction_rtl:
             reverse_text_for_paint(transformed_text)
@@ -702,7 +711,11 @@ fn _html_draw_ir_wrap_extra_line_commands(
     var out: [DrawIrCommand] = []
     val node = nodes[i]
     val st = styles[i]
-    if node.tag != "#text" or node.text_trimmed == "" or st.text_overflow_ellipsis:
+    val paint_text = if st.white_space_nowrap:
+        node.text_data
+    else:
+        node.text_trimmed
+    if node.tag != "#text" or paint_text == "" or st.text_overflow_ellipsis:
         return out
     val wrap_line_starts = boxes.wrap_starts[i]
     val wrap_line_ends = boxes.wrap_ends[i]
@@ -717,7 +730,7 @@ fn _html_draw_ir_wrap_extra_line_commands(
         boxes.bw[i] - st.border_l - st.border_r - st.pad_l - st.pad_r
     )
     val transformed_text = apply_text_transform_for_paint(
-        node.text_trimmed, st.text_transform
+        paint_text, st.text_transform
     )
     val visual_text_rtl = if st.direction_rtl:
         reverse_text_for_paint(transformed_text)

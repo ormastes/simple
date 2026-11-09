@@ -106,3 +106,55 @@ describe "@naked lowering to LLVM IR (pure-Simple backend)":
         expect(ir).to_contain("define dso_local void @trap_only()")
         val plain = ir_for(false, "", 0, false)
         expect(plain).to_not_contain("dso_local void @trap_only")
+
+fn naked_body_module(locals: [MirLocal], insts: [MirInst]) -> MirModule:
+    """A @naked function with an arbitrary MIR body (validation fixtures)."""
+    val base = naked_module(true, "", 0, false)
+    val tmpl = base.functions[SymbolId(id: 7)]
+    val function = MirFunction(
+        symbol: tmpl.symbol, name: tmpl.name, signature: tmpl.signature,
+        locals: locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: insts, terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false,
+        is_naked: true, section: "", align: 0, is_global: false)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    MirModule(name: "hal.naked.backend", functions: functions,
+        statics: {}, constants: {}, types: {})
+
+fn naked_body_ir(locals: [MirLocal], insts: [MirInst]) -> text:
+    MirToLlvm.create("hal.naked.backend", CodegenTarget.X86_64, nil).translate_module(naked_body_module(locals, insts))
+
+describe "@naked body validation (pure-Simple backend, seed parity)":
+    it "rejects a @naked fn with a local with E-NAKED-BODY and emits no alloca":
+        step("rejects a @naked fn with a local with E-NAKED-BODY and emits no alloca")
+        val i64_t = MirType(kind: MirTypeKind.I64)
+        val local = MirLocal(id: LocalId(id: 1), name: Some("x"), type_: i64_t, kind: LocalKind.Temp)
+        val ir = naked_body_ir([local], [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(5), i64_t), span: nil),
+            MirInst(kind: MirInstKind.InlineAsm("ud2", true, [], [], [], [], []), span: nil)
+        ])
+        expect(ir).to_contain("E-NAKED-BODY")
+        expect(ir).to_not_contain("alloca")
+
+    it "rejects a @naked raw asm block carrying clobbers with E-NAKED-CLOBBER":
+        step("rejects a @naked raw asm block carrying clobbers with E-NAKED-CLOBBER")
+        val ir = naked_body_ir([], [MirInst(kind: MirInstKind.InlineAsm("ud2", true, [], [], ["rax"], [], []), span: nil)])
+        expect(ir).to_contain("E-NAKED-CLOBBER")
+
+    it "rejects a @naked fn with two asm blocks with E-NAKED-BODY":
+        step("rejects a @naked fn with two asm blocks with E-NAKED-BODY")
+        val asm1 = MirInst(kind: MirInstKind.InlineAsm("nop", true, [], [], [], [], []), span: nil)
+        val ir = naked_body_ir([], [asm1, asm1])
+        expect(ir).to_contain("E-NAKED-BODY")
+
+    it "emits the single raw block with the conservative memory clobber (D2)":
+        step("emits the single raw block with the conservative memory clobber (D2)")
+        val ir = ir_for(true, "", 0, false)
+        expect(ir).to_contain("asm sideeffect \"ud2\", \"~{{memory}}\"()")
+        expect(ir).to_not_contain("alloca")

@@ -1,22 +1,25 @@
 #!/bin/sh
 # Verify that a measured Phase-2 runtime can be inherited only unchanged.
+# Verdict is the last stdout line: PASS — <n> control(s) checked (0) /
+# FAIL — <what broke> (1) / ERROR — nothing was checked (<reason>) (2).
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 [ -f "$root/scripts/lib/simple-runtime-provenance.shs" ] || {
-    echo 'ERROR: runtime inheritance check requires scripts/lib/simple-runtime-provenance.shs in the checkout' >&2
+    echo "ERROR — nothing was checked (runtime inheritance check requires scripts/lib/simple-runtime-provenance.shs in the checkout)"
     exit 2
 }
 for _need in scripts/check/lib/bootstrap-stage3-provenance.shs scripts/bootstrap/admit-stage2-parent.shs; do
     [ -f "$root/$_need" ] || {
-        echo "ERROR: runtime inheritance check requires $_need in the checkout (sparse worktree? materialise scripts/ in full)" >&2
+        echo "ERROR — nothing was checked (runtime inheritance check requires $_need in the checkout; sparse worktree? materialise scripts/ in full)"
         exit 2
     }
 done
 BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 . "$root/scripts/bootstrap/admit-stage2-parent.shs"
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-parent-runtime.XXXXXX")
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-parent-runtime.XXXXXX") || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
 trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+controls=0
 mkdir "$scratch/runtime"
 printf 'original producer stamp\n' >"$scratch/runtime/simple.inputs.sha256"
 printf 'runtime object bytes\n' >"$scratch/runtime/libsimple_native_all.a"
@@ -25,29 +28,36 @@ BOOTSTRAP_STAGE2_PARENT_RUNTIME_SNAPSHOT=$scratch/admitted.txt
 bootstrap_stage3_directory_snapshot "$scratch/admitted.txt" "$scratch/runtime"
 BOOTSTRAP_STAGE2_PARENT_RUNTIME_SNAPSHOT_SHA256=$(bootstrap_stage3_hash_file "$scratch/admitted.txt")
 stamp_before=$(bootstrap_stage3_hash_file "$scratch/runtime/simple.inputs.sha256")
-bootstrap_stage2_parent_runtime_verify "$scratch/observed.txt"
-[ "$(bootstrap_stage3_hash_file "$scratch/runtime/simple.inputs.sha256")" = "$stamp_before" ]
+bootstrap_stage2_parent_runtime_verify "$scratch/observed.txt" || { echo "FAIL — original runtime and producer stamp not admitted"; exit 1; }
+[ "$(bootstrap_stage3_hash_file "$scratch/runtime/simple.inputs.sha256")" = "$stamp_before" ] || { echo "FAIL — admission mutated the producer stamp"; exit 1; }
+controls=$((controls + 1)); echo "control ok: original-runtime-and-stamp-preserved"
 
 cp "$scratch/admitted.txt" "$scratch/original.txt"
 printf 'forged record\n' >>"$scratch/admitted.txt"
 if bootstrap_stage2_parent_runtime_verify "$scratch/changed-record.txt"; then
-    echo 'FAIL: changed runtime receipt admitted'; exit 1
+    echo "FAIL — changed runtime receipt admitted"; exit 1
 fi
+controls=$((controls + 1)); echo "control ok: changed-record-refused"
 cp "$scratch/original.txt" "$scratch/admitted.txt"
 printf 'changed runtime bytes\n' >>"$scratch/runtime/libsimple_native_all.a"
 if bootstrap_stage2_parent_runtime_verify "$scratch/changed-runtime.txt"; then
-    echo 'FAIL: changed runtime contents admitted'; exit 1
+    echo "FAIL — changed runtime contents admitted"; exit 1
 fi
+controls=$((controls + 1)); echo "control ok: changed-runtime-refused"
 rm "$scratch/admitted.txt"
 if bootstrap_stage2_parent_runtime_verify "$scratch/missing-record.txt"; then
-    echo 'FAIL: missing runtime receipt admitted'; exit 1
+    echo "FAIL — missing runtime receipt admitted"; exit 1
 fi
+controls=$((controls + 1)); echo "control ok: missing-record-refused"
 
 # A caller cannot inject a runtime path when parent admission itself fails.
 if bootstrap_stage2_parent_admit "$scratch/missing-compiler" "$root" >/dev/null 2>&1; then
-    echo 'FAIL: missing parent admitted'; exit 1
+    echo "FAIL — missing parent admitted"; exit 1
 fi
-[ -z "${BOOTSTRAP_STAGE2_PARENT_RUNTIME_PATH:-}" ] &&
+controls=$((controls + 1)); echo "control ok: unadmitted-parent-refused"
+{ [ -z "${BOOTSTRAP_STAGE2_PARENT_RUNTIME_PATH:-}" ] &&
     [ -z "${BOOTSTRAP_STAGE2_PARENT_RUNTIME_SNAPSHOT:-}" ] &&
-    [ -z "${BOOTSTRAP_STAGE2_PARENT_RUNTIME_SNAPSHOT_SHA256:-}" ]
-echo 'PASS: original runtime and producer stamp preserved; changed/missing evidence and unadmitted parent refused'
+    [ -z "${BOOTSTRAP_STAGE2_PARENT_RUNTIME_SNAPSHOT_SHA256:-}" ]; } || {
+    echo "FAIL — failed parent admission still exported runtime inheritance variables"; exit 1
+}
+echo "PASS — $controls control(s) checked (original runtime and producer stamp preserved; changed/missing evidence and unadmitted parent refused)"

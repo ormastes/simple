@@ -6678,6 +6678,44 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
     }
 }
 
+/// `.get(i)` method entry: receiver-dispatched like `rt_at`. An ARRAY
+/// receiver answers a real `Option` (`Some(elem)` in range, `None` for a
+/// negative or past-the-end index), per the owner decision that `a.get(i)`
+/// returns `T?` on every lane while `a[i]` stays the direct form
+/// (doc/08_tracking/bug/array_get_contract_drift_crypto_2026-10-18.md).
+/// Every other receiver keeps `rt_index_get`'s answer, so dict/tuple/text
+/// `.get` is unchanged. The index arrives as a tagged RuntimeValue, exactly
+/// as for `rt_index_get`, so the codegen boxing rules are shared.
+#[no_mangle]
+pub extern "C" fn rt_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
+    if collection.heap_type() == Some(HeapObjectType::Array) {
+        return match index.as_index_i64() {
+            Some(idx) => rt_array_at(collection, idx),
+            None => rt_option_none(),
+        };
+    }
+    rt_index_get(collection, index)
+}
+
+#[cfg(test)]
+mod rt_get_optional_tests {
+    use super::*;
+    use crate::value::objects::{rt_enum_payload, rt_is_none};
+
+    #[test]
+    fn array_get_is_optional() {
+        let arr = rt_array_new(4);
+        rt_array_push(arr, RuntimeValue::from_int(10));
+        rt_array_push(arr, RuntimeValue::from_int(20));
+        let hit = rt_get(arr, RuntimeValue::from_int(1));
+        assert!(!rt_is_none(hit));
+        assert_eq!(rt_enum_payload(hit), RuntimeValue::from_int(20));
+        assert!(rt_is_none(rt_get(arr, RuntimeValue::from_int(2))));
+        assert!(rt_is_none(rt_get(arr, RuntimeValue::from_int(-1))));
+        assert!(rt_is_none(rt_get(arr, RuntimeValue::NIL)));
+    }
+}
+
 /// Set a value in a collection (array, dict)
 /// Returns true on success, false on error
 #[no_mangle]

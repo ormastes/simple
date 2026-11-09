@@ -7,36 +7,38 @@
 
 scan() {
     scan_dir=$1
-    [ -d "$scan_dir" ] || { echo "ERROR - nothing was checked (no such dir: $scan_dir)"; return 2; }
-    files=$(find "$scan_dir" -name '*.spl' 2>/dev/null)
-    [ -n "$files" ] || { echo "ERROR - nothing was checked (0 .spl files under $scan_dir)"; return 2; }
-    n=$(printf '%s\n' "$files" | wc -l | tr -d ' ')
-    hits=$(printf '%s\n' "$files" | xargs grep -nE '(^|[^A-Za-z0-9_])mir_class_identity\(' 2>/dev/null)
+    [ -d "$scan_dir" ] || { echo "ERROR — nothing was checked (no such dir: $scan_dir)"; return 2; }
+    n=$(find "$scan_dir" -name '*.spl' 2>/dev/null | wc -l | tr -d ' ')
+    [ "$n" -gt 0 ] || { echo "ERROR — nothing was checked (0 .spl files under $scan_dir)"; return 2; }
+    # grep rc is read directly: rc 2 (unreadable tree) must not scan as "0 hits".
+    hits=$(grep -rnE '(^|[^A-Za-z0-9_])mir_class_identity\(' "$scan_dir" --include='*.spl' 2>/dev/null)
+    grc=$?
+    [ "$grc" -le 1 ] || { echo "ERROR — nothing was checked (grep rc=$grc scanning $scan_dir)"; return 2; }
     if [ -n "$hits" ]; then
         printf '%s\n' "$hits"
-        echo "FAIL - $n file(s) scanned, by-value mir_class_identity( call/definition present"
+        echo "FAIL — $n file(s) scanned, by-value mir_class_identity( call/definition present"
         return 1
     fi
-    echo "PASS - $n file(s) scanned, 0 mir_class_identity( sites"
+    echo "PASS — $n file(s) scanned, 0 mir_class_identity( sites"
     return 0
 }
 
 selftest() {
-    d=$(mktemp -d) || { echo "ERROR - mktemp failed"; return 2; }
+    d=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
     mkdir -p "$d/bad" "$d/good"
     printf 'fn f(s: HirSymbol) -> text:\n    mir_class_identity(s)\n' > "$d/bad/a.spl"
     printf 'fn f(t: SymbolTable) -> text:\n    mir_class_identity_raw(t, 1)\n' > "$d/good/a.spl"
     scan "$d/bad" >/dev/null; rc=$?
-    [ "$rc" = 1 ] || { echo "ERROR - selftest: dirty fixture rc=$rc, want 1"; rm -rf "$d"; return 2; }
+    [ "$rc" = 1 ] || { echo "ERROR — selftest: dirty fixture rc=$rc, want 1"; rm -rf "$d"; return 2; }
     scan "$d/good" >/dev/null; rc=$?
-    [ "$rc" = 0 ] || { echo "ERROR - selftest: clean fixture rc=$rc, want 0"; rm -rf "$d"; return 2; }
+    [ "$rc" = 0 ] || { echo "ERROR — selftest: clean fixture rc=$rc, want 0"; rm -rf "$d"; return 2; }
     rm -rf "$d"
     return 0
 }
 
 target_root=src/compiler
 case "$1" in
-    --selftest) selftest; rc=$?; [ $rc = 0 ] && echo "PASS - selftest 2 fixtures"; exit $rc ;;
+    --selftest) selftest; rc=$?; [ "$rc" = 0 ] && echo "PASS — selftest 2 fixtures"; exit "$rc" ;;
     --root) target_root=$2 ;;
 esac
 selftest || exit 2

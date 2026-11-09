@@ -3198,7 +3198,7 @@ impl LlvmBackend {
                     "rfind" | "last_index_of" => Some("rt_string_rfind"),
                     "to_string" | "to_text" | "str" => Some("rt_to_string"),
                     "slice" | "substring" => Some("rt_slice"),
-                    "get" => Some("rt_index_get"),
+                    "get" => Some("rt_get"),
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
                     // The name-only fallback is safe only for the exact Dict
@@ -3780,7 +3780,7 @@ impl LlvmBackend {
                 let rt_name: Option<&str> = match (receiver_type.as_str(), method.as_str()) {
                     ("Array" | "array", "push") => Some("rt_array_push"),
                     ("Array" | "array", "len") => Some("rt_array_len"),
-                    ("Array" | "array", "get") => Some("rt_index_get"),
+                    ("Array" | "array", "get") => Some("rt_get"),
                     ("Array" | "array", "set") => Some("rt_index_set"),
                     ("Array" | "array", "pop") => Some("rt_array_pop"),
                     ("Array" | "array", "clear") => Some("rt_array_clear"),
