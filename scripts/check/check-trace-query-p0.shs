@@ -18,38 +18,41 @@
 #     simple-binary defaults to $SIMPLE_BIN, then bin/simple.
 #   SIMPLE_TRACE_QUERY_TEST_COMMAND, if already set, is used as-is.
 #
-# Exit: the spec runner's status. Verdict is the runner's own summary line.
+# Verdict convention (repo guard standard):
+#   PASS — 3 trace-query spec(s) checked ...     (exit 0)
+#   FAIL — <which spec failed>                   (exit 1)
+#   ERROR — nothing was checked (<reason>)       (exit 2)
 set -u
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
-    echo "check-trace-query-p0: not inside a git worktree" >&2
+    echo "ERROR — nothing was checked (not inside a git worktree)" >&2
     exit 2
 }
-cd "$repo_root" || exit 2
+cd "$repo_root" || { echo "ERROR — nothing was checked (cannot cd to $repo_root)" >&2; exit 2; }
 
 simple_bin=${1:-${SIMPLE_BIN:-bin/simple}}
 if [ ! -x "$simple_bin" ] && ! command -v "$simple_bin" >/dev/null 2>&1; then
-    echo "check-trace-query-p0: simple binary not found: $simple_bin" >&2
+    echo "ERROR — nothing was checked (simple binary not found: $simple_bin)" >&2
     exit 2
 fi
 
 declaration=doc/08_tracking/trace/features/simple_traceability_sdn_slop.sdn
 fixture_dir=$repo_root/build/test-artifacts/trace_query_p0
-mkdir -p "$fixture_dir" || exit 2
+mkdir -p "$fixture_dir" || { echo "ERROR — nothing was checked (cannot create $fixture_dir)" >&2; exit 2; }
 index_file=$fixture_dir/index
 rm -f "$index_file"
 
 # 1. Private index = HEAD tree, then one staged entry replaced.
-GIT_INDEX_FILE=$index_file git read-tree HEAD || exit 2
+GIT_INDEX_FILE=$index_file git read-tree HEAD || { echo "ERROR — nothing was checked (git read-tree HEAD failed)" >&2; exit 2; }
 staged_blob=$(sed 's/title: "Simple traceability, SDN evidence and Slop"/title: "P0 staged feature title"/' "$declaration" \
-    | git hash-object -w --stdin) || exit 2
-GIT_INDEX_FILE=$index_file git update-index --cacheinfo "100644,$staged_blob,$declaration" || exit 2
+    | git hash-object -w --stdin) || { echo "ERROR — nothing was checked (git hash-object failed)" >&2; exit 2; }
+GIT_INDEX_FILE=$index_file git update-index --cacheinfo "100644,$staged_blob,$declaration" || { echo "ERROR — nothing was checked (git update-index failed)" >&2; exit 2; }
 
 # 2. The fixture must actually differ from HEAD, or scenario 4 is vacuous.
-staged_tree=$(GIT_INDEX_FILE=$index_file git write-tree) || exit 2
-head_tree=$(git rev-parse --verify 'HEAD^{tree}') || exit 2
+staged_tree=$(GIT_INDEX_FILE=$index_file git write-tree) || { echo "ERROR — nothing was checked (git write-tree failed)" >&2; exit 2; }
+head_tree=$(git rev-parse --verify 'HEAD^{tree}') || { echo "ERROR — nothing was checked (git rev-parse HEAD tree failed)" >&2; exit 2; }
 if [ "$staged_tree" = "$head_tree" ]; then
-    echo "check-trace-query-p0: fixture index is identical to HEAD (title substitution failed?)" >&2
+    echo "ERROR — nothing was checked (fixture index is identical to HEAD; title substitution failed?)" >&2
     exit 2
 fi
 echo "check-trace-query-p0: fixture index $index_file tree=$staged_tree (HEAD tree $head_tree)"
@@ -86,6 +89,9 @@ run_spec test/03_system/app/traceability/feature/trace_query_refs_spec.spl
 refs_status=$?
 run_spec test/03_system/app/traceability/feature/trace_query_authority_spec.spl
 authority_status=$?
-if [ "$p0_status" -ne 0 ]; then exit "$p0_status"; fi
-if [ "$refs_status" -ne 0 ]; then exit "$refs_status"; fi
-exit "$authority_status"
+if [ "$p0_status" -ne 0 ] || [ "$refs_status" -ne 0 ] || [ "$authority_status" -ne 0 ]; then
+    echo "FAIL — trace-query spec(s) red: p0=$p0_status refs=$refs_status authority=$authority_status (expected all 0)"
+    exit 1
+fi
+echo "PASS — 3 trace-query spec(s) checked (p0 + refs + authority, staged-declaration fixture index)"
+exit 0
