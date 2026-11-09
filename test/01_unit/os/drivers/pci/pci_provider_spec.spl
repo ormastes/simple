@@ -31,6 +31,36 @@ use os.drivers.pci.pci_provider.{
     pci_provider_kind_name,
     pci_provider_refusal_reason
 }
+use os.drivers.pci.pci_provider.{
+    PciConfigSnapshot,
+    PciConfigTarget,
+    PciProviderKind,
+    PciAddressWindow,
+    PciHostDescriptor,
+    PciWindowKind,
+    pci_bar_decode,
+    pci_bar_size_from_probe,
+    pci_count_class,
+    pci_enumerate_snapshots,
+    pci_function_from_snapshot,
+    pci_function_is_e1000,
+    pci_function_is_infiniband,
+    pci_function_is_nvme,
+    pci_function_is_virtio_net,
+    pci_resource_grant_evidence,
+    pci_resource_grant_evidence_from_function,
+    pci_resource_grant_readiness_reason,
+    pci_resource_grant_ready,
+    pci_config_io_addr,
+    pci_ecam_addr,
+    pci_provider_can_enumerate,
+    pci_provider_config_addr,
+    pci_provider_from_board,
+    pci_provider_kind_name,
+    pci_provider_refusal_reason,
+    pci_host_descriptor_reason,
+    pci_host_config_addr
+}
 
 describe "PCI provider contracts":
     it "selects a provider by board without fallback success":
@@ -251,3 +281,23 @@ describe "PCI provider contracts":
             0
         )
         expect(pci_resource_grant_readiness_reason(no_token)).to_equal("missing-pci-issued-grant-token:nvme")
+
+    it "bounds host-neutral ECAM access by the described aperture":
+        val host = PciHostDescriptor(
+            provider: "starfive-jh7110-pcie1-dtb",
+            domain: 1u32,
+            bus_start: 0u8,
+            bus_end: 15u8,
+            ecam_base: 0x9C0000000u64,
+            ecam_size: 0x01000000u64,
+            windows: [PciAddressWindow(kind: PciWindowKind.NonPrefetchable, pci_base: 0x38000000u64, cpu_base: 0x38000000u64, size: 0x08000000u64)],
+            dma_base: 0u64,
+            dma_size: 0u64,
+            coherent: false
+        )
+        expect(pci_host_descriptor_reason(host)).to_equal("ready")
+        val address = pci_host_config_addr(host, PciConfigTarget(bus: 1, device: 2, func: 0, offset: 0x10))
+        expect(address.is_ok()).to_equal(true)
+        expect(address.unwrap()).to_equal(0x9C0000000u64 + 0x100000u64 + 0x10000u64 + 0x10u64)
+        val outside = pci_host_config_addr(host, PciConfigTarget(bus: 16, device: 0, func: 0, offset: 0))
+        expect(outside.is_err()).to_equal(true)
