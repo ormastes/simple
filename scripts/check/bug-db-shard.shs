@@ -29,6 +29,7 @@
 #                                     merged view has no duplicate bug id.
 #                                     PASS/FAIL verdict is the last stdout line.
 #   --selftest                        fixtures; fatal on failure
+#   --selftest-count                  read-only count controls; no seal hasher
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -130,14 +131,24 @@ cmd_changed() {
 # count: open-bug tally over the MERGED view (both bug tables, shards applied).
 # Prints "<table> <severity> <status> <n>" rows, then per-severity TOTAL rows
 # summing both tables. The only sanctioned way to count bugs.
-cmd_count() {
-    cmd_merged "$@" | awk -F', *' "$AWK_ROWID"'
+cmd_count() (
+    # POSIX pipelines report only their last command. Materialize each
+    # producer so an ERROR from merged (or awk) cannot become a successful
+    # empty tally when sort exits zero. The subshell owns cleanup/status.
+    _count_merged=$(mktemp) || die "count: cannot create merged input"
+    _count_unsorted=""
+    trap 'rm -f "$_count_merged" "$_count_unsorted"' 0
+    _count_unsorted=$(mktemp) || die "count: cannot create tally output"
+    cmd_merged "$@" > "$_count_merged" || exit $?
+    awk -F', *' "$AWK_ROWID"'
         /^bugs(_active)? [|]/ { t = $1; sub(/ .*/, "", t); next }
         /^[A-Za-z_]+ [|]/ { t = ""; next }
         /^[ 	]*$/ { t = ""; next }
         t != "" && /^[ 	]+[^ 	#]/ { s = $2; st = $3; gsub(/[ 	]/, "", s); gsub(/[ 	]/, "", st); c[t " " s " " st]++; tot["TOTAL " s " " st]++ }
-        END { for (k in c) print k, c[k]; for (k in tot) print k, tot[k] }' | LC_ALL=C sort
-}
+        END { for (k in c) print k, c[k]; for (k in tot) print k, tot[k] }' \
+        "$_count_merged" > "$_count_unsorted" || exit $?
+    LC_ALL=C sort "$_count_unsorted"
+)
 
 # check: shard integrity gate.
 cmd_check() {
@@ -179,7 +190,49 @@ cmd_check() {
     return 0
 }
 
+selftest_count() (
+    _count_fx=$(mktemp -d) || die "selftest-count: mktemp"
+    trap 'rm -rf "$_count_fx"' 0
+    _count_rc=0
+    sh "$HERE/bug-db-shard.shs" count "$_count_fx/nonexistent.sdn" \
+        > "$_count_fx/out" 2> "$_count_fx/err" || _count_rc=$?
+    [ "$_count_rc" -eq 2 ] || die "selftest-count: missing input returned $_count_rc, expected 2"
+    [ ! -s "$_count_fx/out" ] || die "selftest-count: missing input emitted a tally"
+    grep -q '^ERROR: .*not found$' "$_count_fx/err" || die "selftest-count: missing diagnostic"
+
+    printf 'strings |id, value|\n\nbugs_active |id, severity, status|\n\n' > "$_count_fx/empty.sdn"
+    sh "$HERE/bug-db-shard.shs" count "$_count_fx/empty.sdn" \
+        > "$_count_fx/out" 2> "$_count_fx/err" || die "selftest-count: valid zero failed"
+    [ ! -s "$_count_fx/out" ] && [ ! -s "$_count_fx/err" ] || die "selftest-count: valid zero changed output"
+
+    cat > "$_count_fx/nonzero.sdn" <<'SDN'
+strings |id, value|
+
+bugs_active |id, severity, status|
+    a, P2, open
+    b, P2, open
+
+bugs |id, severity, status|
+    c, P2, open
+    d, P3, fixed
+
+SDN
+    cat > "$_count_fx/expected" <<'COUNTS'
+TOTAL P2 open 3
+TOTAL P3 fixed 1
+bugs P2 open 1
+bugs P3 fixed 1
+bugs_active P2 open 2
+COUNTS
+    sh "$HERE/bug-db-shard.shs" count "$_count_fx/nonzero.sdn" \
+        > "$_count_fx/out" 2> "$_count_fx/err" || die "selftest-count: valid nonzero failed"
+    cmp -s "$_count_fx/expected" "$_count_fx/out" && [ ! -s "$_count_fx/err" ] \
+        || die "selftest-count: valid nonzero tally changed"
+    echo 'selftest-count: PASS (missing input rejected; valid zero and nonzero accepted)'
+)
+
 selftest() {
+    selftest_count || die "selftest: count controls"
     _fx=$(mktemp -d); _l="$_fx/bug_db.sdn"; mkdir -p "$_fx/db"
     printf 'strings |id, value|\n\n\nbugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    a, P1, open, A, f, 1, , 2026-11-01, 2026-11-01, true\n    b, P2, open, B, f, 1, , 2026-11-01, 2026-11-01, true\n\n\nbug_descriptions |bug_id, line_num, content|\n    a, 0, "desc a"\n\n' > "$_l"
     seal_file "$_l" || die "selftest: seal legacy"
@@ -204,7 +257,7 @@ selftest() {
     echo "selftest: PASS"
 }
 
-[ $# -ge 1 ] || die "usage: bug-db-shard.shs merged|extract|write|changed|count|check|--selftest ..."
+[ $# -ge 1 ] || die "usage: bug-db-shard.shs merged|extract|write|changed|count|check|--selftest|--selftest-count ..."
 _cmd=$1; shift
 case "$_cmd" in
     merged) cmd_merged "$@" ;;
@@ -214,5 +267,6 @@ case "$_cmd" in
     count) cmd_count "$@" ;;
     check) cmd_check "$@" ;;
     --selftest) selftest ;;
+    --selftest-count) selftest_count ;;
     *) die "unknown subcommand $_cmd" ;;
 esac
