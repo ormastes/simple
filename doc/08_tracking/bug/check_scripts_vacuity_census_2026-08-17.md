@@ -164,4 +164,57 @@ GPU/CPU-backend `SKIP_UNAVAILABLE` policy question remains open and is now
 the largest single class in the backlog; gates needing binaries, GPU,
 Windows, or QEMU machinery stay in the backlog per lane policy.
 
+## 2026-11-09 wave 3 (work/p3-gate-oracle3-20261109)
+
+Eight more wired gates were made verdict-conforming in this pass. Each was
+verified with a clean-tree run (where the gate is green on this host), a
+sabotage fixture FAIL (rc=1, verdict last line), and a missing-input or
+unreadable-scan ERROR (rc=2) where applicable; `sh -n` and `bash -n` clean on
+all eight. No gate's actual checks were weakened; two genuinely fail-open
+grep paths now fail closed:
+
+- `check-no-placeholder-callbacks.shs` — hyphen-style `PASS -` verdicts; the
+  hit grep was piped through two filters, so a grep hard-failure (rc 2, e.g.
+  an unreadable tree) scanned as "0 hits" and passed — the grep rc is now
+  read directly, rc > 1 is ERROR.
+- `check-tierless-std-js-imports.shs` — `PASS --`/`FAIL --`/`ERROR --`
+  verdicts converted; the count grep piped into `wc` masked rc > 1 the same
+  way — now read directly, ERROR; the selftest's unchecked `mktemp` now
+  names an ERROR verdict.
+- `check-enum-discriminant-convention-fence.shs` — hyphen-style verdicts;
+  both source greps masked hard failures (one piped into `while`, one a
+  `! grep -q` whose rc 2 read as "convention changed") — now ERROR.
+  NOTE: honestly RED on this host before and after: `runtime_native.c`
+  mentions `hash_variant_discriminant` in a prose comment and the
+  bare-symbol grep trips on it; only the separator changed — the fence
+  semantics were not touched.
+- `check-product-private-repository.shs` — per-control `PASS <name>` lines
+  and rejection paths that exited 1 with **no verdict at all**; every
+  control now names a FAIL verdict on refusal and the run ends
+  `PASS — 4 controls checked`; missing lib / mktemp failure is ERROR.
+- `check-product-private-materialization.shs` — same shape: mute `exit 1`
+  rejections and bare `set -eu` asserts; now named FAIL verdicts and
+  `PASS — 9 controls checked`.
+- `check-stage2-parent-runtime-inheritance.shs` — colon-style `PASS:` and
+  `FAIL:` lines plus `set -eu` mute aborts (mktemp, assertion failures, the
+  env-var leak check); every exit path now names a verdict,
+  `PASS — 5 control(s) checked`.
+- `check-stage2-parent-runtime-launcher.shs` — same; the refusal-reason grep
+  and the selection-block extraction now name FAIL verdicts,
+  `PASS — 6 control(s) checked`.
+- `check-test-aggregate-rss-policy.shs` — `FAIL:` to stderr (so stdout's
+  last line was not a verdict) and colon-style `PASS:`; missing
+  perl/guard/mktemp paths were mute — now named ERROR. The env-override
+  rejection runs in a subshell whose failure now propagates the verdict
+  instead of a mute `set -eu` abort. NOTE: honestly RED on this host before
+  and after: the watchdog's compiler ceiling moved (48 GiB) while the gate
+  still asserts the old 8 GiB admission bounds — checks untouched; the run
+  now fails closed with a named verdict.
+
+Remaining backlog: 47 of the 201 wired gates (55 minus these 8). The
+GPU/CPU-backend `SKIP_UNAVAILABLE` policy question remains open; gates
+needing binaries, GPU, Windows, QEMU, rustc, or an admitted Stage-2 compiler
+stay in the backlog per lane policy.
+
+
 
