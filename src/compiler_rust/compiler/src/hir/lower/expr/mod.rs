@@ -1176,6 +1176,25 @@ impl Lowerer {
         // lowered, BEFORE the builtin/string-method dispatch below
         // early-returns, so no watched primitive escapes the count.
         self.emit_text_index_census(method, receiver_hir.ty);
+        // Temporary migration census (array_get_contract_drift_crypto_2026-10-18):
+        // classifies every `.get(`: ARRAY (resolved array receiver), UNKNOWN
+        // (still ANY), OTHER (dict/struct/...). Lines are post-inference HIR.
+        if method == "get"
+            && std::env::var("SIMPLE_ARRAY_GET_CENSUS").is_ok()
+        {
+            let file = self
+                .current_file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let line = args.first().map(|a| a.span.line).unwrap_or(0);
+            let class = match self.module.types.get(receiver_hir.ty) {
+                Some(HirType::Array { .. }) => "ARRAY",
+                _ if receiver_hir.ty == TypeId::ANY => "UNKNOWN",
+                _ => "OTHER",
+            };
+            println!("ARRAYGET\t{}\t{}:{}", class, file, line);
+        }
         if let Some(HirType::Simd { .. }) = self.module.types.get(receiver_hir.ty) {
             if let Some(result) = self.lower_simd_instance_method(&receiver_hir, method, args, ctx)? {
                 return Ok(result);

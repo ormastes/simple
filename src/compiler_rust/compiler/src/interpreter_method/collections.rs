@@ -494,6 +494,15 @@ pub fn handle_array_methods(
         // represent `at(-1)`; a negative index must resolve to `None`, not
         // wrap (or saturate) to another element.
         "get" | "at" => {
+            // Temporary migration census (array_get_contract_drift_crypto_2026-10-18):
+            // runtime-definite array receivers, incl. spec DSL bodies HIR never lowers.
+            if method == "get" && std::env::var("SIMPLE_ARRAY_GET_CENSUS").is_ok() {
+                let file = crate::interpreter::get_current_file()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let line = args.first().map(|a| a.span.line).unwrap_or(0);
+                eprintln!("ARRAYGET\tARRAY-RT\t{}:{}", file, line);
+            }
             let idx_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match idx_val {
                 Value::Int(idx) if idx >= 0 && (idx as usize) < arr.len() => Value::some(arr[idx as usize].clone()),
