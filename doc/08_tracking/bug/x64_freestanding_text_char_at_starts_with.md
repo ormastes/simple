@@ -1,4 +1,18 @@
 # BUG: x86_64 freestanding native-build — text `char_at` / `starts_with` mis-decode
+
+**Status:** OPEN
+**Reconciled:** 2026-11-09
+
+## Corrective review of PR #8095
+
+Only the deep-sshd-stack `starts_with` predicate/control-flow residual is
+reopened. The corrected analysis below distinguishes it from by-design
+`char_at` and already-fixed byte-array storage. The preserved October 27
+adjudication says `keep_open`; PR #8095's reliance on the September 16
+bookkeeping banner did not resolve that residual. Severity and other bug-row
+fields are unchanged. No new native/QEMU execution is claimed, and the two
+resolved subfindings stay resolved.
+
 ## Closed 2026-09-16 — ...command.trim().starts_with("/")`. ## Fix Make the x86_64 freestanding native-build codegen
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is

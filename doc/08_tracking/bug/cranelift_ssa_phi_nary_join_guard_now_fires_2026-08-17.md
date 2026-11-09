@@ -1,5 +1,20 @@
 # cranelift `__simple_ssa_phi` N-ary-join guard now fires in a real spec
 
+**Status:** OPEN
+**Reconciled:** 2026-11-09
+
+## Corrective review of PR #8095
+
+The old sugar-plugin headline was disproven, and the November 5 `mirp2-E3`
+update records the unset-destination guard concern as fixed. That same update
+explicitly leaves the latent N-ary fallback unimplemented and open. PR #8095
+closed the whole record from the older headline without resolving this
+residual; the shard is therefore reopened. This status-only correction keeps
+the existing database severity P2 and other bug-row fields; the November 5
+document's P3 assessment is preserved for a separate severity/title review.
+No new compiler/runtime execution or recurrence of the fixed guard concern is
+claimed.
+
 - **Filed:** 2026-08-17
 - Status: STILL-OPEN (P3, downgraded) — the **headline claim is disproven by
   execution**: the guard does NOT fire, `sugar_plugin_spec.spl` is 13/13 green.
