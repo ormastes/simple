@@ -1044,7 +1044,9 @@ impl MirTextCodegen for MirToLlvm:
 
         # Asm-embedding contract (design A.2): `@naked` -> `naked noinline`
         # (never alwaysinline), `@section` -> `section "..."`, `@align` ->
-        # `align n`, `@global` -> `dso_local` external symbol. Keyed by the
+        # `align n` (owner decision R1: n is a BYTE count, emitted as-is -- never
+        # p2align; riscv twins write `@align(4)`, not `@align(2)`), `@global` ->
+        # `dso_local` external symbol. Keyed by the
         # MIR name; the loop in translate_module fills these before any body.
         val placement_naked = self.fn_naked.has(name)
         var placement_attrs = ""
@@ -1113,6 +1115,12 @@ impl MirTextCodegen for MirToLlvm:
 
         val is_start = name == "_start"
         var block_i = 0
+        if placement_naked:
+            # Design A.2 `@naked`: never run the generic block translator --
+            # it materialises locals/params as allocas inside a prologue-free
+            # `naked` define (invalid code). Seed parity: compile_naked_function.
+            self.translate_naked_body(name, body)
+            block_i = body.blocks.len()
         while block_i < body.blocks.len():
             self.translate_block_at(body.blocks, block_i, effective_ret_ty, is_start, return_slot_id, module_index, ir_handle)
             block_i = block_i + 1
@@ -1133,6 +1141,49 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.end_function()
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
+
+    me translate_naked_body(name: text, body: MirBody):
+        """Design A.2 `@naked` (seed parity with compile_naked_function): the
+        body MUST be exactly one raw `asm { }` block with no bound operands and
+        no clobbers(...), falling through to `Ret(nil)`/`Unreachable`. Nothing
+        else is materialised -- no local/param allocas, no `ret`; the block is
+        followed by `unreachable`. The asm carries the conservative implicit
+        `~{memory}` clobber (owner decision D2). Violations are recorded as
+        E-NAKED-BODY / E-NAKED-CLOBBER codegen errors (fail-closed module)."""
+        self.builder.emit_label("naked_entry")
+        var asm_blocks = 0
+        var violation = ""
+        var block_i = 0
+        while block_i < body.blocks.len() and violation == "":
+            val block = body.blocks[block_i]
+            var inst_i = 0
+            while inst_i < block.instructions.len() and violation == "":
+                val inst = block.instructions[inst_i]
+                match inst.kind:
+                    case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers, clobber_abis, options):
+                        if inputs.len() > 0 or outputs.len() > 0 or clobbers.len() > 0 or clobber_abis.len() > 0:
+                            violation = "E-NAKED-CLOBBER: `{name}` is @naked; its raw asm block must not carry clobbers(...) or bound operands (the whole register file belongs to the author)"
+                        else:
+                            asm_blocks = asm_blocks + 1
+                            if asm_blocks == 1:
+                                self.llvm_inline_asm_impl(asm_template, is_volatile, [], [], [], [], options)
+                    case _:
+                        violation = "E-NAKED-BODY: `{name}` is @naked; its body must be exactly one raw asm block, found a non-asm instruction"
+                inst_i = inst_i + 1
+            if violation == "":
+                match block.terminator:
+                    case Ret(value):
+                        match value:
+                            Some(_): violation = "E-NAKED-BODY: `{name}` is @naked; it must not return a value"
+                            nil: ()
+                    case Unreachable: ()
+                    case _: violation = "E-NAKED-BODY: `{name}` is @naked; control flow other than fall-through is not allowed"
+            block_i = block_i + 1
+        if violation == "" and asm_blocks != 1:
+            violation = "E-NAKED-BODY: `{name}` is @naked; its body must be exactly one raw asm block, found {asm_blocks}"
+        if violation != "":
+            self.codegen_error(violation)
+        self.builder.emit("  unreachable")
 
     me first_unemitted_call_destination(body: MirBody) -> i64:
         """Return the first MIR Call destination without an emitted LLVM SSA
