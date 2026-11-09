@@ -83,3 +83,36 @@ real missing-fixture ERROR. Selftest extended from 7 to 8 fatal fixtures.
 3. The 16 category-A wired guards — apply the established
    `SIMPLE="${SIMPLE_BIN:-$ROOT/bin/simple}"` pattern plus a refusal to PASS
    when the binary predates the newest source it probes.
+
+## 2026-11-09 re-census (release/1.0.0)
+
+Re-derived against the current tree. Items 1–2 above and every guard in the
+"Confirmed fail-open, by execution" table now emit conforming
+`PASS —`/`FAIL —`/`ERROR — nothing was checked` verdicts with exit 0/1/2
+(most via 0f5b67b79b4; the named repro target
+`check-jit-unresolved-symbol-guard.shs` is sound by construction, KNOWN-RED
+until the seed JIT is fixed).
+
+Seven additional wired gates were made sound in this pass (all verified with
+clean-PASS / sabotage-FAIL / environment-ERROR fixtures):
+
+- `check-runtime-concat-nul.shs` — was `set -eu` mute abort + no verdict at
+  all; now verdict-conforming. Its probe also gained the sibling-pattern
+  `spl_panic` stub (`rt_text_clone_contract_selfcheck.c` et al. already do
+  this) so it links `runtime_native.c` at all.
+- `check-session-heap-reclaim.shs`, `check-tcp-write-nosigpipe.shs`,
+  `check-allocation-registry-churn.shs` — same mute `set -eu` /
+  exit-1-without-verdict shape; now verdict-conforming.
+- `check-tui-standalone-closure.shs` — `error=` lines + mute exit 1, fixed
+  `/tmp` scratch file; now verdict-conforming with mktemp scratch.
+- `check-module-surface-hint-scan-fast-path.shs` — `error=` exits and
+  non-conforming `STATUS: PASS`; now verdict-conforming.
+- `check-trace-query-p0.shs` — mute `|| exit 2` git-plumbing paths and a raw
+  spec-status exit with no guard verdict; now every exit path names a
+  PASS/FAIL/ERROR verdict.
+
+Remaining backlog: 63 of the 201 gates wired in
+`config/check/must_check_gates.sdn` still lack a conforming verdict or FAIL
+emitter (this count includes colon-style/`STATUS:` partial conformers; the
+GPU/CPU-backend `SKIP_UNAVAILABLE` policy question above is still open).
+
