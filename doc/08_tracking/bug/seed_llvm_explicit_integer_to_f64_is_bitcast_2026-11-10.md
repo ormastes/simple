@@ -100,8 +100,9 @@ machine headers. A separate ABI-only function retains bitcast behavior.
 The actual x64 baseline failed on an i8 cast retaining an i64 bitcast; the x86
 baseline already emitted sitofp i32 but omitted semantic i8 width restoration.
 Both tests therefore detect width-correct numeric conversion, rather than
-merely accepting a nonempty artifact. Semantic-gate checks exclude Any, text,
-bool and float words.
+merely accepting a nonempty artifact. A separate authored semantic-gate unit
+test excludes Any, text, bool and float words; that standalone test was not
+executed among the two selected component tests.
 
 `test/fixtures/compiler/seed_numeric_integer_f64_cast/main.spl` retains the
 digit parser shape, explicit signed/unsigned casts and an enum Float payload.
@@ -117,7 +118,8 @@ Evidence owner: `simple-seed-llvm-numeric-f64-control4-20261110`, frozen base
 failures; `green/` retains the compilation failure; `green02/` retains both
 passing exact-test logs and the executable. `green02.identity.sdn` binds the
 actual outputs; `green02.rss.env` records terminal exit0, enforcement and
-quiescence, peak job commit4389540 KiB under the8000000 KiB ceiling.
+quiescence, peak RSS4,389,540 KiB and peak job commit4,752,272 KiB under
+the8,000,000 KiB ceiling.
 
 The Simple native fixture remains **NOT_RUN**. Rebuilding the constructor,
 producing a descendant compiler, executing numeric/Hello witnesses and
