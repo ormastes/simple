@@ -1408,7 +1408,9 @@ pub(super) fn exec_block_closure_into(
                     enums,
                     impl_methods,
                 ) {
-                    Ok(val) => last_value = val,
+                    // Retain this result across continue/error paths and release the
+                    // previous result at the existing overwrite boundary.
+                    Ok(val) => drop(std::mem::replace(&mut last_value, val)),
                     Err(CompileError::LoopBreak(val)) => {
                         last_value = val.unwrap_or(Value::Nil);
                         break;
@@ -2220,7 +2222,9 @@ fn exec_block_closure_mut_inner(
                     enums,
                     impl_methods,
                 ) {
-                    Ok(val) => last_value = val,
+                    // Retain this result across continue/error paths and release the
+                    // previous result at the existing overwrite boundary.
+                    Ok(val) => drop(std::mem::replace(&mut last_value, val)),
                     Err(CompileError::LoopBreak(val)) => {
                         last_value = val.unwrap_or(Value::Nil);
                         break;
