@@ -1,8 +1,9 @@
 # Recent Bugs
 
 **Generated:** 2026-11-01
+**Status correction:** 2026-11-10 (one scoped LLVM Yield fix; not a full regeneration)
 **Database:** `doc/08_tracking/bug/bug_db.sdn`
-**Open:** 745 | **Closed:** 866
+**Open:** 744 | **Closed:** 867
 
 ## Open Bugs
 
@@ -388,7 +389,6 @@
 | llm_caret_index_of_optioni64_tagbox_2026-07-07 | P2 | open | text.index_of returns nil for a present substring (Option<i64> tag-box mangled) | `src/app/llm_caret/json_helpers.spl:0` |
 | llm_caret_native_closure_admission_2026-08-11 | P2 | open | LLM Caret native closure admission fails on missing artifacts and unresolved Caret ABI symbols | `scripts/check/check-llm-caret-native-closure.shs:0` |
 | llm_strict_host_completion_blockers_2026-06-29 | P3 | open | LLM strict-host prereq doctor and live-HTTP evidence gates remain incomplete | `scripts/check/check-llm-strict-host-prereq-doctor.shs:0` |
-| llvm_backend_yield_silent_noop_2026-07-19 | P3 | open | LLVM codegen matches MirInst::Yield to an empty arm, emitting no code for a yield | `src/compiler_rust/compiler/src/codegen/llvm/functions.rs:1668` |
 | llvm_import_path_mangling_os_prefix_mismatch_2026-06-15 | P1 | open | rv64 cross-module calls reference os__kernel__ names while definitions emit bare/weak symbols, link fails | `src/compiler_rust/compiler/src/pipeline/native_project/imports.rs:0` |
 | llvm_sys_pinned_to_18x_blocks_newest_msvc_llvm_2026-08-09 | P3 | open | llvm-sys pinned to 18.x prevents building against newer MSVC-built LLVM | `src/compiler_rust/compiler/Cargo.toml:0` |
 | lsp_code_action_edit_emit_parse_mismatch_2026-06-16 | P2 | open | LSP code-action edits never apply: emitter output does not round-trip through the edit parser | `src/lib/nogc_sync_mut/lsp/lsp_handlers.spl:0` |
@@ -758,6 +758,7 @@
 
 | ID | Severity | Status | Title | Updated |
 |----|----------|--------|-------|---------|
+| llvm_backend_yield_silent_noop_2026-07-19 | P3 | fixed | LLVM codegen matches MirInst::Yield to an empty arm, emitting no code for a yield | 2026-11-10 |
 | bitbucket_5xx_error_drops_http_status_2026-10-31 | P2 | fixed | Bitbucket 5xx errors omitted the HTTP status | 2026-10-31 |
 | confluence_list_ignores_links_next_2026-10-31 | P1 | fixed | Confluence list and search ignored the next link | 2026-10-31 |
 | devhub_minio_truncated_body_reported_as_success_2026-10-31 | P1 | fixed | A truncated MinIO GET reported success | 2026-10-31 |
