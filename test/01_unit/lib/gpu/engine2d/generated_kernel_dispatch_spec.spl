@@ -31,6 +31,7 @@ load evidence; and submit evidence.
 """
 
 use std.gpu.engine2d.generated_kernel_dispatch.{generated_2d_dispatch_for_backend, generated_2d_launch_plan, generated_2d_execution_request, generated_2d_session_launch_gate, generated_2d_session_runtime_provenance, generated_2d_operation_provenance, generated_2d_artifact_load_evidence, generated_2d_module_artifact_evidence, generated_2d_artifact_load_evidence_from_module, generated_2d_execution_request_from_load, generated_2d_submit_result, generated_2d_execution_evidence, generated_2d_dispatch_provider, GENERATED_2D_FILL, GENERATED_2D_COPY, GENERATED_2D_ALPHA, GENERATED_2D_SCROLL, GENERATED_2D_BITMAP_GLYPH_RASTER}
+use std.gpu.engine2d.generated_kernel_dispatch.{generated_2d_dispatch_for_backend, generated_2d_launch_plan, generated_2d_execution_request, generated_2d_artifact_load_evidence, generated_2d_module_artifact_evidence, generated_2d_artifact_load_evidence_from_module, generated_2d_execution_request_from_load, generated_2d_submit_result, generated_2d_execution_evidence, generated_2d_dispatch_provider, GENERATED_2D_FILL, GENERATED_2D_COPY, GENERATED_2D_ALPHA, GENERATED_2D_SCROLL}
 
 describe "Engine2D generated 2D kernel dispatch metadata":
 
@@ -392,3 +393,44 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(failed_evidence.status_code).to_equal("not-submitted")
         expect(invalid_checksum.device_executed).to_equal(false)
         expect(invalid_checksum.status_code).to_equal("invalid-expected-checksum")
+
+    it "binds OpenCL and Metal launch plans to queue or encoder execution calls":
+        # @req: REQ-ENGINE2D-GeneratedKernelDispa-001
+        step("Verify: binds OpenCL and Metal launch plans to queue or encoder execution calls")
+        val opencl = generated_2d_execution_request("opencl", GENERATED_2D_COPY, 16, 16, 11, 22, 0)
+        val metal = generated_2d_execution_request("metal", GENERATED_2D_SCROLL, 16, 16, 33, 44, 0)
+
+        expect(opencl.can_submit).to_equal(true)
+        expect(opencl.handle_kind).to_equal("opencl-queue-kernel")
+        expect(opencl.call_shape()).to_equal("oneapi_submit(queue,kernel,global_range,local_range)")
+        expect(metal.can_submit).to_equal(true)
+        expect(metal.handle_kind).to_equal("metal-encoder-pipeline")
+        expect(metal.call_shape()).to_equal("metal_sffi_dispatch_compute(encoder,pipeline,gx,gy,gz,bx,by,bz)")
+
+    it "uses backend-specific launch APIs for HIP, OpenCL, and Metal":
+        # @req: REQ-ENGINE2D-GeneratedKernelDispa-001
+        step("Verify: uses backend-specific launch APIs for HIP, OpenCL, and Metal")
+        val hip = generated_2d_launch_plan("rocm", GENERATED_2D_ALPHA, 16, 16)
+        val opencl = generated_2d_launch_plan("opencl", GENERATED_2D_COPY, 32, 4)
+        val metal = generated_2d_launch_plan("metal", GENERATED_2D_SCROLL, 10, 10)
+
+        expect(hip.launch_api).to_equal("hip_launch_api")
+        expect(hip.artifact_name).to_equal("simple_2d_optimization.hsaco")
+        expect(opencl.launch_api).to_equal("clEnqueueNDRangeKernel")
+        expect(opencl.artifact_name).to_equal("simple_2d_optimization.spirv")
+        expect(metal.launch_api).to_equal("MTLComputeCommandEncoder.dispatchThreads")
+        expect(metal.artifact_name).to_equal("simple_2d_optimization.metallib")
+        expect(metal.args_layout).to_equal("src,dst,width,height,delta_y")
+
+    it "maps OpenCL and Metal to their binary artifact formats":
+        # @req: REQ-ENGINE2D-GeneratedKernelDispa-001
+        step("Verify: maps OpenCL and Metal to their binary artifact formats")
+        val opencl = generated_2d_dispatch_for_backend("opencl")
+        val metal = generated_2d_dispatch_for_backend("metal")
+
+        expect(opencl.source_format).to_equal("opencl-c")
+        expect(opencl.binary_format).to_equal("spirv")
+        expect(opencl.kernel_entry(GENERATED_2D_COPY)).to_equal("simple_2d_copy_u32")
+        expect(metal.source_format).to_equal("metal-shading-language")
+        expect(metal.binary_format).to_equal("metallib")
+        expect(metal.kernel_entry(GENERATED_2D_SCROLL)).to_equal("simple_2d_scroll_u32")
