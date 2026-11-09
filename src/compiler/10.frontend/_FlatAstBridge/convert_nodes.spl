@@ -2777,18 +2777,32 @@ fn text_parse_int_simple(s: text) -> i64:
 # ===== PendingDeferState snapshot (ParseContext stage 1) =====
 # See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
 # take moves this file's parse state out and installs fresh initial
-# owners; install makes a taken snapshot active again.
+# owners; install makes a taken snapshot active again. Both mutate the
+# process-global array IN PLACE (copy out + truncate / truncate + push):
+# reassigning it would store a transient-scope array in a process global
+# (native_method_call_hir_lowering_invalid_array_handle_2026-11-07).
 pub struct PendingDeferState:
     g_pending_defers: [[Stmt]]
+    g_pending_defer_base: i64
 
 pub fn pending_defer_state_take() -> PendingDeferState:
+    var groups: [[Stmt]] = []
+    for group in g_pending_defers:
+        groups.push(group)
     val s = PendingDeferState(
-        g_pending_defers: g_pending_defers
+        g_pending_defers: groups,
+        g_pending_defer_base: g_pending_defer_base
     )
-    g_pending_defers = []
+    while g_pending_defers.len() > 0:
+        val _taken_group = g_pending_defers.pop()
+    g_pending_defer_base = 0
     s
 
 pub fn pending_defer_state_install(s: PendingDeferState):
-    g_pending_defers = s.g_pending_defers
+    while g_pending_defers.len() > 0:
+        val _replaced_group = g_pending_defers.pop()
+    for group in s.g_pending_defers:
+        g_pending_defers.push(group)
+    g_pending_defer_base = s.g_pending_defer_base
 
 export PendingDeferState, pending_defer_state_take, pending_defer_state_install
