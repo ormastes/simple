@@ -89,3 +89,22 @@ Evidence: `test/02_integration/bootstrap_stage3_source_snapshot_scope_test.shs`
 — green with the fix; red (`FAIL: unlisted app dir present in snapshot`) with
 `command-snapshot.shs` reverted. Verification pending a real Stage 2 run in the
 shared tree.
+
+## Review round 2026-11-09 (owner-decision follow-ups)
+
+1. Wiring: `stage2-build-input-app-dirs-check.shs` is now a must_check_gates.sdn
+   row (`local-stage2-build-input-app-dirs`, fast-gates tier), so the closure
+   check runs in CI instead of only by hand.
+2. Coverage: the closure walker now also scans TOP-LEVEL src/app files
+   (src/app/*.spl, src/app/*.sdn) — entry points such as src/app/main.spl reach
+   app dirs no importing module names. Path-spelled reach (`src/app/<dir>`
+   under scripts/bootstrap, scripts/check/lib) is reported as NOTEs, not
+   verdict failures: those references live in phase-4 tooling, sanity runners
+   and fixtures that execute AFTER stage2/3 admission, and listing them would
+   re-break this fix. Import channels stay fail-closed. Selftest: 4 fixtures.
+   Also regenerated the list: `t32_cli` is import-reachable via
+   src/app/cli/_CliMain/main_and_help.spl and is now listed.
+3. Red/green: with command-snapshot.shs reverted to the release/1.0.0 base,
+   bootstrap_stage3_source_snapshot_scope_test.shs FAILs ("unlisted app dir
+   present in snapshot"); with the fix it prints
+   bootstrap_stage3_source_snapshot_scope=true. Captured on 2026-11-09.
