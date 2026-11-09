@@ -12,7 +12,8 @@ use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
 use std.nogc_sync_mut.io.file_ops.{file_modified_time}
-use std.nogc_sync_mut.io_runtime.{dir_list, dir_remove, process_is_running}
+use std.nogc_sync_mut.io_runtime.{dir_list, dir_remove, process_is_running, getpid}
+use std.nogc_sync_mut.io.process_ops.{process_exists}
 use std.scv.store.{scv_write_text}
 
 export scv_compile_snapshot_recover_v1, scv_compile_snapshot_gc_v1
@@ -20,6 +21,7 @@ export scv_compile_snapshot_gc_authorized_v1, scv_compile_snapshot_retain_newest
 export scv_compile_snapshot_cleanup_v1, scv_compile_snapshot_touch_v1
 export scv_compile_snapshot_max_keep_v1, scv_compile_snapshot_min_age_v1
 export scv_compile_snapshot_retain_newest_v2
+export scv_compile_snapshot_lease_acquire_v1, scv_compile_snapshot_lease_release_v1
 
 fn scv_compile_snapshot_recover_v1(cache_root: text) -> i64:
     val snapshots_root = "{cache_root}/snapshots"
@@ -134,10 +136,51 @@ fn scv_compile_snapshot_min_age_v1() -> i64:
             return parsed!
     600
 
+# Per-reader lease: one file per (snapshot, process), written lock-free by its
+# owner only. Every touch at open/publish acquires it, so a build holds it for
+# its whole life and retention can never evict a snapshot a live build is still
+# compiling from -- the min-age window alone did not cover native builds that
+# outlive it (stage2_positional_native_build_fails_in_capsule_collection_2026-09-06).
+# A lease whose owner process is gone protects nothing.
+fn scv_compile_snapshot_lease_path_v1(cache_root: text, name: text, pid: i64) -> text:
+    "{cache_root}/receipts/{name}.lease.{pid}"
+
+fn scv_compile_snapshot_lease_acquire_v1(cache_root: text, name: text):
+    if not dir_exists(cache_root + "/receipts"): dir_create(cache_root + "/receipts", true)
+    val pid = getpid()
+    val _written = scv_write_text(scv_compile_snapshot_lease_path_v1(cache_root, name, pid), "{pid}")
+    # One lease per process per store: a build compiles from the snapshot it
+    # opened last, so moving the lease releases the one it no longer reads.
+    val own_suffix = ".lease.{pid}"
+    for entry in dir_list(cache_root + "/receipts"):
+        if entry.ends_with(own_suffix) and entry != "{name}{own_suffix}":
+            val _released = file_delete("{cache_root}/receipts/{entry}")
+
+fn scv_compile_snapshot_lease_release_v1(cache_root: text, name: text):
+    val path = scv_compile_snapshot_lease_path_v1(cache_root, name, getpid())
+    if file_exists(path):
+        val _deleted = file_delete(path)
+
+fn scv_compile_snapshot_has_live_lease_v1(cache_root: text, name: text) -> bool:
+    val receipts = cache_root + "/receipts"
+    if not dir_exists(receipts):
+        return false
+    val prefix = name + ".lease."
+    for entry in dir_list(receipts):
+        if entry.starts_with(prefix):
+            val pid = entry[prefix.len():].to_i64()
+            if pid != nil and pid! > 0 and process_exists(pid!):
+                return true
+            # The owner is gone: nobody else writes this file, so reaping it
+            # cannot race a live reader.
+            val _reaped = file_delete("{receipts}/{entry}")
+    false
+
 # Records last use (epoch seconds) so retention is LRU, not first-publish.
 fn scv_compile_snapshot_touch_v1(cache_root: text, name: text):
     if not dir_exists(cache_root + "/receipts"): dir_create(cache_root + "/receipts", true)
     val _written = scv_write_text("{cache_root}/receipts/{name}.used", "{time_now_seconds()}")
+    scv_compile_snapshot_lease_acquire_v1(cache_root, name)
 
 fn scv_compile_snapshot_last_use_v1(cache_root: text, name: text) -> i64:
     val used_path = "{cache_root}/receipts/{name}.used"
@@ -185,6 +228,7 @@ fn scv_compile_snapshot_retain_filtered_v1(
         var index = 0
         while index < names.len():
             if not done[index] and names[index] != keep and
+                    not scv_compile_snapshot_has_live_lease_v1(cache_root, names[index]) and
                     (min_age_s <= 0 or stamps[index] <= young_after):
                 if (victim < 0 or stamps[index] < stamps[victim] or
                         (stamps[index] == stamps[victim] and names[index] < names[victim])):
