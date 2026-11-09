@@ -1538,25 +1538,30 @@ int64_t rt_linux_group_stream_no_child_scope_v2(const char*,int64_t,const char*,
 int64_t rt_linux_group_stream_collect_no_child_v2(const char*,int64_t,const char*,int64_t);
 int64_t rt_linux_group_stream_recover_lease_v2(const char*,int64_t,const char*,int64_t);
 int64_t rt_linux_group_stream_release_inherited_v2(void);
+#endif
+
+/* Generic callers can query the Linux group ABI on every provider. Unsupported
+ * providers return ENOTSUP, never a token, successful launch or cleanup claim.
+ * Capacity returns [error, available_memory_bytes, available_disk_bytes]; parent
+ * acquisition returns [error, token, device, inode]; start/broker [token, error].
+ * Poll/collect retain the ten-word observation shape described above; nonzero
+ * status makes the remaining placeholder fields unavailable, not observations. */
+SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
+SplArray* rt_linux_group_parent_acquire_v1(const char* attempt, uint64_t attempt_len,
+    const char* identity, uint64_t identity_len);
+SplArray* rt_linux_group_parent_acquire_at_v2(const char* path, uint64_t path_len,
+    const char* attempt, uint64_t attempt_len, const char* identity, uint64_t identity_len);
+int64_t rt_linux_group_parent_release_v1(int64_t token);
 SplArray* rt_linux_group_launch_broker_v1(const char* program,
-    uint64_t program_len, const char* digest, uint64_t digest_len,
-    SplArray* args);
+    uint64_t program_len, const char* digest, uint64_t digest_len, SplArray* args);
 SplArray* rt_linux_group_start_v1(const char* program, uint64_t program_len,
-    const char* digest, uint64_t digest_len, SplArray* args,
-    SplArray* environment, const char* directory, uint64_t directory_len,
-    const char* root, uint64_t root_len,
-    const char* identity, uint64_t identity_len,
-    int64_t memory_limit, int64_t timeout_ms,
-    const char* stdout_path, uint64_t stdout_len,
-    const char* stderr_path, uint64_t stderr_len);
+    const char* digest, uint64_t digest_len, SplArray* args, SplArray* environment,
+    const char* directory, uint64_t directory_len, const char* root, uint64_t root_len,
+    const char* identity, uint64_t identity_len, int64_t memory_limit, int64_t timeout_ms,
+    const char* stdout_path, uint64_t stdout_len, const char* stderr_path, uint64_t stderr_len);
 SplArray* rt_linux_group_poll_v1(int64_t token);
 int64_t rt_linux_group_cancel_v1(int64_t token);
 SplArray* rt_linux_group_collect_v1(int64_t token);
-#endif
-
-/* Capacity query returns [error, available_memory_bytes, available_disk_bytes].
- * It remains link-complete on unsupported providers as [ENOTSUP, 0, 0]. */
-SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
 
 /* ===== Process Piped (editor LSP transport) ===== */
 

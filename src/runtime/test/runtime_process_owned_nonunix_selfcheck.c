@@ -54,6 +54,13 @@ int64_t rt_tuple_get(int64_t tuple, int64_t idx) { return rt_array_get((SplArray
 #undef __APPLE__
 #include "../runtime_process_owned.c"
 
+static void assert_group_unavailable(SplArray* fields, int count, int error_index) {
+    assert(fields && rt_array_len(fields) == count);
+    for (int i = 0; i < count; ++i)
+        assert(rt_array_get(fields, i) == (i == error_index ? ENOTSUP : 0));
+    rt_array_free(fields);
+}
+
 int main(void) {
     /* The Linux-only capacity ABI must remain link-complete and explicitly
      * unavailable on other providers. Never report zero capacity as success. */
@@ -67,6 +74,29 @@ int main(void) {
     assert(rt_array_get(capacity, 0) == ENOTSUP);
     assert(rt_array_get(capacity, 1) == 0 && rt_array_get(capacity, 2) == 0);
     rt_array_free(capacity);
+    const char digest[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    SplArray empty = {0};
+    assert_group_unavailable(rt_linux_group_parent_acquire_v1("/tmp/attempt", 12, digest, 64), 4, 0);
+    assert_group_unavailable(rt_linux_group_parent_acquire_v1(NULL, UINT64_MAX, NULL, UINT64_MAX), 4, 0);
+    assert_group_unavailable(rt_linux_group_parent_acquire_at_v2("/sys/fs/cgroup", 14,
+        "/tmp/attempt", 12, digest, 64), 4, 0);
+    assert_group_unavailable(rt_linux_group_parent_acquire_at_v2(NULL, UINT64_MAX,
+        NULL, UINT64_MAX, NULL, UINT64_MAX), 4, 0);
+    assert_group_unavailable(rt_linux_group_launch_broker_v1("/bin/true", 9, digest, 64, &empty), 2, 1);
+    assert_group_unavailable(rt_linux_group_launch_broker_v1(NULL, UINT64_MAX, NULL, UINT64_MAX, NULL), 2, 1);
+    assert_group_unavailable(rt_linux_group_start_v1("/bin/true", 9, digest, 64, &empty, &empty,
+        "/tmp", 4, "/tmp/group", 10, digest, 64, 1048576, 1000, "/tmp/out", 8, "/tmp/err", 8), 2, 1);
+    assert_group_unavailable(rt_linux_group_start_v1(NULL, UINT64_MAX, NULL, UINT64_MAX, NULL, NULL,
+        NULL, UINT64_MAX, NULL, UINT64_MAX, NULL, UINT64_MAX, INT64_MAX, INT64_MAX,
+        NULL, UINT64_MAX, NULL, UINT64_MAX), 2, 1);
+    const int64_t tokens[] = {0, 1, INT64_MAX};
+    for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); ++i) {
+        assert_group_unavailable(rt_linux_group_poll_v1(tokens[i]), 10, 0);
+        assert_group_unavailable(rt_linux_group_collect_v1(tokens[i]), 10, 0);
+        assert(rt_linux_group_cancel_v1(tokens[i]) == ENOTSUP);
+        assert(rt_linux_group_parent_release_v1(tokens[i]) == ENOTSUP);
+    }
+    puts("Linux group unavailable ABI: 9 exports, valid/NULL/MAX controls, no success token or cleanup claim");
     RtOwnedProcessTokenV2 token;
     RtOwnedProcessStartReceiptV2 start;
     const char* argv[] = {"never-spawned", NULL};
