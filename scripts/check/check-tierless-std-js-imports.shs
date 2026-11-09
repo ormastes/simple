@@ -15,38 +15,45 @@ ALLOWED_COMMON=1
 # in the root src/lib/js tree.
 ALLOWED_TIER=1
 
-count_in() { # dir pattern-root
-    grep -rE '^[[:space:]]*use std\.js\.' --include='*.spl' "$1" 2>/dev/null | wc -l | tr -d ' '
+count_in() { # dir -> count on stdout; rc 0/1 = ok, >1 = grep hard-failure
+    out=$(grep -rE '^[[:space:]]*use std\.js\.' --include='*.spl' "$1" 2>/dev/null); grc=$?
+    [ "$grc" -gt 1 ] && return "$grc"
+    if [ -z "$out" ]; then echo 0; else printf '%s\n' "$out" | wc -l | tr -d ' '; fi
+    return 0
 }
 
 check() {
     root=$1
-    [ -d "$root/common" ] || { echo "ERROR -- nothing was checked (no $root/common)"; return 2; }
-    total=$(count_in "$root")
-    common=$(count_in "$root/common/js")
-    [ "$total" -gt 0 ] || { echo "ERROR -- nothing was checked (0 imports scanned)"; return 2; }
+    [ -d "$root/common" ] || { echo "ERROR — nothing was checked (no $root/common)"; return 2; }
+    total=$(count_in "$root"); grc=$?
+    [ "$grc" -le 1 ] || { echo "ERROR — nothing was checked (grep rc=$grc scanning $root)"; return 2; }
+    common=$(count_in "$root/common/js"); grc=$?
+    [ "$grc" -le 1 ] || { echo "ERROR — nothing was checked (grep rc=$grc scanning $root/common/js)"; return 2; }
+    [ "$total" -gt 0 ] || { echo "ERROR — nothing was checked (0 imports scanned)"; return 2; }
     if [ "$common" -gt "$ALLOWED_COMMON" ]; then
-        echo "FAIL -- $common tier-less std.js imports under common/js (allowed $ALLOWED_COMMON)"; return 1
+        echo "FAIL — $common tier-less std.js imports under common/js (allowed $ALLOWED_COMMON)"; return 1
     fi
     for tier in gc_async_mut nogc_async_mut; do
-        n=$(count_in "$root/$tier")
+        n=$(count_in "$root/$tier"); grc=$?
+        [ "$grc" -le 1 ] || { echo "ERROR — nothing was checked (grep rc=$grc scanning $root/$tier)"; return 2; }
         if [ "$n" -gt "$ALLOWED_TIER" ]; then
-            echo "FAIL -- $n tier-less std.js imports under $tier (allowed $ALLOWED_TIER: the node.buffer_module root-only module)"; return 1
+            echo "FAIL — $n tier-less std.js imports under $tier (allowed $ALLOWED_TIER: the node.buffer_module root-only module)"; return 1
         fi
     done
     if [ "$total" -gt "$BASELINE_TOTAL" ]; then
-        echo "FAIL -- $total tier-less std.js imports tree-wide (baseline $BASELINE_TOTAL)"; return 1
+        echo "FAIL — $total tier-less std.js imports tree-wide (baseline $BASELINE_TOTAL)"; return 1
     fi
-    echo "PASS -- $total tier-less std.js import(s) checked, common/js=$common, baseline $BASELINE_TOTAL"
+    echo "PASS — $total tier-less std.js import(s) checked, common/js=$common, baseline $BASELINE_TOTAL"
     return 0
 }
 
 if [ "$1" = "--selftest" ]; then
-    d=$(mktemp -d); mkdir -p "$d/common/js" "$d/js" "$d/gc_async_mut/js"
+    d=$(mktemp -d) || { echo "ERROR — nothing was checked (selftest mktemp)"; exit 2; }
+    mkdir -p "$d/common/js" "$d/js" "$d/gc_async_mut/js"
     printf 'use std.js.types.a\nuse std.js.types.b\n' > "$d/common/js/x.spl"
     check "$d" >/dev/null; rc=$?
     rm -rf "$d"
-    [ "$rc" -eq 1 ] || { echo "ERROR -- selftest: common/js violation must FAIL"; exit 2; }
+    [ "$rc" -eq 1 ] || { echo "ERROR — selftest: common/js violation must FAIL"; exit 2; }
     shift
 fi
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
