@@ -4,10 +4,17 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — root cause understood and localised to a defect CLASS; two
-`.spl` parsers hardened here, but the LIVE producer on the seed path is NOT yet
-located, so the symptom still reproduces. Read "What is NOT fixed" before
-believing any part of this is closed.
+**Status:** FIXED 2026-11-09 — the live seed producer was located and
+hardened: `parse_test_output` in
+`src/compiler_rust/driver/src/cli/test_runner/execution.rs` (the third
+implementation, as suspected) no longer scavenges counts from any line
+containing the substrings "example"/"failure"; it accepts only strict
+tally-shaped lines (`<int> example|examples, <int> failure|failures`,
+optional trailing `(NNms)`). Verified: 11/11 `parse_test_output` unit tests
+(4 new regressions for both forge directions) and end-to-end on the rebuilt
+debug binary — the original probe reports `1 total, 1 passed, 0 failed`
+(was `33 total, 1 passed, 32 failed`). Deployed-seed redeploy verification
+pending. The "What is NOT fixed" section below is retained as history.
 **Found:** 2026-08-17, lane-1 partial-fix sweep, while writing the detection
 spec for `feature_block_not_a_bdd_keyword_2026-08-04.md`.
 **Severity:** HIGH — this is a test-verdict integrity defect. The repo has been
