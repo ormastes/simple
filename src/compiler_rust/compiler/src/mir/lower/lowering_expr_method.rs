@@ -387,31 +387,16 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
-        // `xs.get(i)` on an array is the SAME read as `xs[i]`, but the generic
-        // dotted-name path emitted a bare `rt_index_get` and fed the tag-boxed
-        // slot word (`rt_value_int(v) == v << 3`) straight into an int-typed
-        // VReg — so every `[i64].get(i)` came back exactly 8x too large,
-        // silently, exit 0. `xs[i]` is correct precisely because
-        // `lower_index_expr` pairs the read with an explicit
-        // `UnboxInt`/`UnboxFloat` (+ `UnitNarrow` for narrow element widths).
-        // Route `.get(i)` through that exact path. This sits BEFORE the receiver
-        // and args are lowered, so nothing is evaluated twice. Dict/String
-        // receivers are untouched — `receiver_is_array` gates it.
-        // See doc/08_tracking/bug/list_get_returns_tag_boxed_value_shifted_left_3_2026-07-28.md
-        if method == "get" && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
-            let element_ty = self
-                .type_registry
-                .and_then(|tr| {
-                    tr.get(receiver.ty)
-                        .or_else(|| receiver_local_ty.and_then(|ty| tr.get(ty)))
-                })
-                .and_then(|ty| match ty {
-                    HirType::Array { element, .. } => Some(*element),
-                    _ => None,
-                })
-                .unwrap_or(TypeId::ANY);
-            return self.lower_index_expr(receiver, &args[0], element_ty);
-        }
+        // `xs.get(i)` on an array used to be routed through `lower_index_expr`
+        // as the SAME read as `xs[i]` (list_get_returns_tag_boxed_value_shifted_left_3_2026-07-28).
+        // Owner decision 2026-11-09 (array_get_contract_drift_crypto_2026-10-18):
+        // `a.get(i)` returns `T?` on every lane and `a[i]` is the direct form,
+        // so array `get` now takes exactly the `at` path -- HIR types it as
+        // `T?` (hir/lower/expr/mod.rs, the `"at" | "get"` arm) and the generic
+        // dispatch below reaches the receiver-dispatched `rt_get`, which
+        // returns a real `Option` whose payload the `Some(v)` binding unboxes
+        // through the typed `rt_enum_payload` gate. Dict receivers keep their
+        // own Option path further down.
 
         // `d.get(k)` on a Dict<K, V> is the SAME read as `d[k]`, but the
         // generic dotted-name/dynamic-dispatch path emitted a bare

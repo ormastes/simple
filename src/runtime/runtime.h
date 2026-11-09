@@ -914,6 +914,7 @@ int8_t   rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t 
 int8_t   rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_discriminant);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
+int64_t  rt_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
 int64_t  rt_string_eq(int64_t left, int64_t right);
 int64_t  rt_native_eq(int64_t left, int64_t right);
