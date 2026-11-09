@@ -3890,6 +3890,27 @@ impl MirLowering:
             return self.join_untyped_optional_arms(result, oj_arm_locals)
         result
 
+    me enum_slot_extraction_arms(arms: [HirMatchArm]) -> bool:
+        """True for the two-arm shape HIR `enum_payload_extract` builds:
+        `case V(.., __mp_enum_slot, ..): __mp_enum_slot` / `case _: nil`."""
+        if arms.len() != 2: return false
+        val miss: HirMatchArm = arms[1]
+        match miss.pattern.kind:
+            case HirPatternKind.Wildcard: ()
+            case _: return false
+        if not miss.body.has: return false
+        match miss.body.value.kind:
+            case HirExprKind.NilLit: ()
+            case _: return false
+        val hit: HirMatchArm = arms[0]
+        if not hit.body.has: return false
+        match hit.body.value.kind:
+            case HirExprKind.Var(slot_sym):
+                if val slot_def = self.symbols.get_symbol_raw(slot_sym.id):
+                    return slot_def.name == "__mp_enum_slot"
+                return false
+            case _: return false
+
     me bind_catch_all_arm(arm: HirMatchArm, scrut_local: LocalId):
         """`case x:` / `case x if c:` in an enum match binds x to the
         scrutinee itself (it was previously left unbound)."""
@@ -5595,6 +5616,15 @@ impl MirLowering:
                     self.runtime_elem_value_type[result.id] = self.runtime_elem_value_type[first_arm.id]
         var joined_result = result
         if expected_type == nil:
+            # Enum-slot extraction idiom (HIR match_desugaring enum_payload_extract):
+            # the nil arm is unreachable, the hit arm yields the declared slot
+            # type T. Keep T instead of joining to T? so a binder in a
+            # tuple-subject pattern stays typed (bug
+            # enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24).
+            if self.enum_slot_extraction_arms(source_arms) and merged_arm_locals.len() > 0:
+                if val hit_type = self.find_local_hir_type(merged_arm_locals[0].id):
+                    self.remember_local_hir_type(result.id, hit_type, 0, 0)
+                    return result
             joined_result = self.join_untyped_optional_arms(result, merged_arm_locals)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
