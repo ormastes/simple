@@ -156,6 +156,46 @@ ownership proof is an aliasing bug, which is strictly worse than quadratic.
 No regression gate was added, because no fix landed — a gate here would pin
 nothing.
 
+## 2026-11-09 re-verification on `origin/release/1.0.0` 7f5215f074f (still OPEN, no runtime patch)
+
+Third-lane re-measurement, same interposition method as 2026-08-24, against
+`runtime_native.c` compiled FRESH from `origin/release/1.0.0` (`gcc -O2`,
+aarch64, probe links the real `rt_string_concat`; scratch tool, not committed):
+
+| N single-char appends | wall | malloc'd bytes | mallocs |
+|---|---|---|---|
+| 50,000 | 0.394 s | 1,250,875,000 | 50,000 |
+| 100,000 | 1.469 s | 5,001,750,000 | 100,000 |
+
+2x N → 3.73x wall and exactly 4.00x malloc'd bytes: still quadratic, byte
+counts still match `sum(sizeof(RtCoreString)+len+1)` exactly (one fresh
+`malloc` + two `memcpy` per call, no capacity). The ownership contract was
+also re-verified empirically this run: after `s = s + "b"`, a second holder
+`val t = s` still observes the OLD bytes (`t` == "a"), so any in-place append
+would be a live aliasing bug, exactly as the 2026-08-22/24 design stops
+concluded. The `reserved` word remains fully occupied
+(`SHARED|TRANSIENT|SESSION|ASCII` = 1|2|4|8), so the stale option-1 capacity
+encoding has even less room than before.
+
+Call-site audit at this commit: `rt_string_concat` has exactly four inbound
+sites — `rt_any_add`, `rt_tagged_add`, `rt_push` (`+=` receiver), and the
+definition itself. There is **no runtime-internal concat-in-a-loop site**, so
+the "switch internal loop sites onto `RtStringBuilder`" fallback fixes nothing
+either; the builder stays reachable only from `rt_to_string` formatting and
+`std.common.string_builder`.
+
+**Conclusion:** a correct fix remains a compiler/MIR lowering feature (option 1
+with a last-use/escape check emitting `rt_string_append_owned`, or option 2
+builder-loop lowering), not a runtime bug fix. Per this lane's mandate, no
+risky runtime hack was landed. Side observation (unrelated, not fixed here):
+`scripts/check/check-runtime-concat-nul.shs` does not actually run at this
+commit — its compile step fails at link (`undefined symbol: spl_panic`,
+referenced from `rt_core_concat_bytes_v1`; `spl_panic` lives in `runtime.c`,
+which the script does not link). The failure IS fail-closed (direct
+`sh scripts/check/check-runtime-concat-nul.shs` exits 1, measured 2026-11-09),
+so the check is RED rather than silently green — but as wired it tests
+nothing until the link line gains `runtime.c` or a stub.
+
 
 ## 2026-11-07 — owner decision: diagnose + builder (part A+B landed, C pending)
 
