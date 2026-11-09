@@ -424,6 +424,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             "rt_dict_set",
                             "rt_dict_values",
                             "rt_index_get",
+                            "rt_get",
                             "rt_index_set",
                             "rt_len",
                             "rt_method_not_found",

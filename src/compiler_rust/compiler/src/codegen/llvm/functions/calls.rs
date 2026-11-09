@@ -135,6 +135,7 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_string_rpartition"
         | "rt_array_push"
         | "rt_index_get"
+        | "rt_get"
         | "rt_index_set"
         | "rt_enum_check_discriminant"
         | "lib__common__string_core__str_repeat" => Some(2),
@@ -2227,7 +2228,7 @@ impl LlvmBackend {
             "slice" => Some("rt_slice"),
             // Collection methods (verified as T symbols)
             "len" => Some("rt_len"),
-            "get" => Some("rt_index_get"),
+            "get" => Some("rt_get"),
             "set" => Some("rt_index_set"),
             "keys" => Some("rt_dict_keys"),
             "values" => Some("rt_dict_values"),
@@ -2474,7 +2475,7 @@ impl LlvmBackend {
                 "clear" => Some("rt_array_clear"),
                 "slice" => Some("rt_slice"),
                 "len" => Some("rt_len"),
-                "get" => Some("rt_index_get"),
+                "get" => Some("rt_get"),
                 "set" => Some("rt_index_set"),
                 "keys" => Some("rt_dict_keys"),
                 "values" => Some("rt_dict_values"),

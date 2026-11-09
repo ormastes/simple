@@ -2257,7 +2257,12 @@ impl Lowerer {
                 // bound `v = 80` (10 << 3) instead of `10`.
                 //
                 // See doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
-                "at" => {
+                //
+                // `get` joins `at` here (owner decision 2026-11-09,
+                // array_get_contract_drift_crypto_2026-10-18): `a.get(i)` is `T?`
+                // on every lane, `a[i]` the direct form. Typing `get` as bare
+                // `T` is what let the JIT bind the raw element against `Some(v)`.
+                "at" | "get" => {
                     let element_ty = match self.module.types.get(receiver.ty) {
                         Some(HirType::Array { element, .. }) => Some(*element),
                         _ => None,
@@ -2271,7 +2276,7 @@ impl Lowerer {
                         None => Some(TypeId::ANY),
                     }
                 }
-                "first" | "last" | "get" | "max" | "min" => {
+                "first" | "last" | "max" | "min" => {
                     // Returns element type (or Option<element>)
                     if let Some(HirType::Array { element, .. }) = self.module.types.get(receiver.ty) {
                         Some(*element)

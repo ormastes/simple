@@ -4594,7 +4594,7 @@ pub fn compile_call<M: Module>(
                 "rfind" | "last_index_of" => Some("rt_string_rfind"),
                 "to_string" | "to_text" | "str" => Some("rt_to_string"),
                 "slice" | "substring" => Some("rt_slice"),
-                "get" => Some("rt_index_get"),
+                "get" => Some("rt_get"),
                 "keys" => Some("rt_dict_keys"),
                 "values" => Some("rt_dict_values"),
                 "filter" => Some("rt_array_filter"),
