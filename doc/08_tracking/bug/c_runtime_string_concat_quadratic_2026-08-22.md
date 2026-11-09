@@ -156,3 +156,35 @@ ownership proof is an aliasing bug, which is strictly worse than quadratic.
 No regression gate was added, because no fix landed — a gate here would pin
 nothing.
 
+
+## 2026-11-07 — owner decision: diagnose + builder (part A+B landed, C pending)
+
+- **Builder that already exists (A):** `std.common.string_builder`
+  (`src/lib/common/string_builder.spl`): `StringBuilder` (parts array,
+  `push`/`push_line`/`to_text`/`build`), free constructors `string_builder()` /
+  `string_builder_from(s)`, and `RtStringBuilder` backed by the runtime
+  `rt_string_builder_new/push/len/finish/free` externs
+  (`src/compiler_rust/runtime/src/value/string_builder.rs`, `src/runtime/runtime.h`).
+- **Diagnostic (B):** lint `COLL006` (`src/compiler/35.semantics/lint/collection_patterns.spl`)
+  fires on `s = s + x`, `s = x + s` and `s += x` inside a loop when `s` is plain
+  text. Severity is `WARN`, escalated to `ERROR` under the robust/critical/verified
+  safety profiles (`coll006_severity_for_profile`, same rung as
+  `E-MIR-EMPTY-ARRAY-ELEM`); `simple lint` prints `error[COLL006]` then. It never
+  fires on a builder/buffer target (explicit non-text type or a builder/buffer
+  constructor initializer). Fixed a false negative on the way: statement-level
+  `s = s + x` (STMT_ASSIGN stores target/value separately) never matched.
+  Specs: `test/01_unit/app/lint_spec.spl` "COLL006 scope and robust escalation".
+- **Optimization (C):** implemented in `src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl`
+  (it replaces the earlier dead stub). The pass matches the lowered pair `tmp = rt_strcat_tagged(s, x); s = tmp`,
+  which is what both `s = s + x` and `s += x` lower to (`lower_compound_combine`). It rewrites that pair to
+  `sb = rt_string_builder_new(); push(sb, s)` in the preheader, `push(sb, x)` in the loop and
+  `s = rt_string_builder_finish(sb)` at every exit. It applies only when all of these hold:
+  `s` is a str-typed local referenced in the loop only by the concat pair; the temp is private;
+  there is a dedicated preheader; the exits have only loop predecessors; and no
+  return/throw/call-terminator leaves the loop. Unknown instruction kinds count as uses.
+  The pass is **opt-in** (`SIMPLE_MIR_STRING_BUILDER_OPT=1`) until native verification.
+  Specs: `test/01_unit/compiler/60.mir_opt/string_builder_opt_spec.spl` (MIR shape, 10 cases) and
+  `string_builder_append_behavior_spec.spl` (equality with the concat loop, and builder scaling
+  at N=10k/40k/160k measured 110.9 ms / 399 ms / 1,798 ms on the seed interpreter, i.e. linear).
+  Status: **fix-implemented-verification-pending**. Still to do: a native-lane run with the opt-in flag,
+  then default-on.
