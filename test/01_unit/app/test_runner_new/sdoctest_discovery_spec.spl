@@ -2,7 +2,8 @@ use std.spec.*
 use std.nogc_sync_mut.io.file_ops.{file_write}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.test_runner.sdoctest.types.{SdoctestConfig, SdoctestIgnore}
-use std.test_runner.sdoctest.discovery.{discover_sdoctest_files, discover_from_dir, sdoctest_file_eligible, is_ignored, is_tag_ignored, extract_basename, list_contains}
+use std.test_runner.sdoctest.config.{parse_config_from_text}
+use std.test_runner.sdoctest.discovery.{discover_sdoctest_files_for_path_run, discover_sdoctest_files, discover_from_dir, sdoctest_file_eligible, is_ignored, is_tag_ignored, extract_basename, list_contains}
 
 val ROOT = "build/md_kind/unit_discovery"
 
@@ -135,3 +136,44 @@ describe "sdoctest ignore helpers":
     it "finds list members":
         expect(list_contains(["a", "b"], "b")).to_equal(true)
         expect(list_contains(["a", "b"], "c")).to_equal(false)
+
+fn norm_names(paths: [text]) -> [text]:
+    var names: [text] = []
+    for p in paths:
+        val parts = p.replace("\\", "/").split("/")
+        names.push(parts[parts.len() - 1])
+    names.sort()
+    names
+
+describe "sdoctest path-run config (doctest_surfaces_registered_but_not_executed)":
+    it "parses path_runs: include and defaults to exclude":
+        val on = parse_config_from_text("sdoctest:\n  version: 1\n  path_runs: include\n")
+        val off = parse_config_from_text("sdoctest:\n  version: 1\n  path_runs: exclude\n")
+        val unset = parse_config_from_text("sdoctest:\n  version: 1\n")
+        expect(on.path_run_include_sources).to_equal(true)
+        expect(off.path_run_include_sources).to_equal(false)
+        expect(unset.path_run_include_sources).to_equal(false)
+
+    it "config include: path run also executes configured sources":
+        val root = fresh("pathrun_inc")
+        val scoped = root + "/scoped"
+        val corpus = root + "/corpus"
+        process_run_bounded("mkdir", ["-p", scoped], 10000, 65536)
+        process_run_bounded("mkdir", ["-p", corpus], 10000, 65536)
+        touch(scoped + "/a.md")
+        touch(corpus + "/b.md")
+        val cfg = parse_config_from_text("sdoctest:\n  version: 1\n  path_runs: include\nsources:\n  - dir: " + corpus + "\n    pattern: \"*.md\"\n")
+        val names = norm_names(discover_sdoctest_files_for_path_run(cfg, scoped, cfg.path_run_include_sources))
+        expect(names).to_equal(["a.md", "b.md"])
+
+    it "config exclude: path run stays scoped to the named path":
+        val root = fresh("pathrun_exc")
+        val scoped = root + "/scoped"
+        val corpus = root + "/corpus"
+        process_run_bounded("mkdir", ["-p", scoped], 10000, 65536)
+        process_run_bounded("mkdir", ["-p", corpus], 10000, 65536)
+        touch(scoped + "/a.md")
+        touch(corpus + "/b.md")
+        val cfg = parse_config_from_text("sdoctest:\n  version: 1\n  path_runs: exclude\nsources:\n  - dir: " + corpus + "\n    pattern: \"*.md\"\n")
+        val names = norm_names(discover_sdoctest_files_for_path_run(cfg, scoped, cfg.path_run_include_sources))
+        expect(names).to_equal(["a.md"])
