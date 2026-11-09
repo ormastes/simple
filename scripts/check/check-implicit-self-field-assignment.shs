@@ -237,6 +237,72 @@ fi
 checked=$((checked + 1))
 probes="${probes:+$probes,}interpreter/fn_noself"
 
+# FOURTH PROBE — bare field READ, the shape filed as a seed-codegen bug in
+# doc/08_tracking/bug/arm64_desktop_engine2d_seed_codegen_dbd_unresolved_global_2026-09-01.md
+# (`provider.configured` inside `pub fn ready()`, no `self.`). It is NOT a
+# compiler gap: "implicit self" means the `self` PARAMETER is implicit, never
+# the field receiver (doc/07_guide/language/coding_style.md, and the pure-Simple
+# HIR lowering defines only a `self` symbol — declaration_lowering.spl). So a
+# bare read must be rejected on BOTH engines with a diagnostic naming the field,
+# exactly like the assignment probes above, and the explicit `self.provider.
+# configured` read is the sentinel that must still work.
+implicit_read="$work/implicit_field_read.spl"
+cat > "$implicit_read" <<'IMPLICIT_READ_EOF'
+class Prov:
+    configured: bool
+
+class Svc:
+    provider: Prov
+    pub fn ready() -> bool:
+        provider.configured
+
+fn main():
+    val s = Svc(provider: Prov(configured: true))
+    print "implicit_read -> {s.ready()}"
+main()
+IMPLICIT_READ_EOF
+[ -s "$implicit_read" ] || oops "implicit read probe was not written"
+
+explicit_read="$work/explicit_field_read.spl"
+cat > "$explicit_read" <<'EXPLICIT_READ_EOF'
+class Prov:
+    configured: bool
+
+class Svc:
+    provider: Prov
+    pub fn ready() -> bool:
+        self.provider.configured
+
+fn main():
+    val s = Svc(provider: Prov(configured: true))
+    print "explicit_read -> {s.ready()}"
+main()
+EXPLICIT_READ_EOF
+[ -s "$explicit_read" ] || oops "explicit read probe was not written"
+
+for mode in interpreter jit; do
+  erout="$work/explicit_read.$mode"
+  SIMPLE_EXECUTION_MODE="$mode" "$SIMPLE_BIN" run "$explicit_read" > "$erout" 2>&1
+  errc=$?
+  [ "$errc" -eq 0 ] \
+    || oops "engine '$mode': the CORRECT read program (self.provider.configured) failed with exit $errc — read assertions would be vacuous: $(tr '\n' '|' < "$erout")"
+  /usr/bin/grep -aq '^explicit_read -> true$' "$erout" \
+    || oops "engine '$mode': explicit \`self.provider.configured\` did not read the field; expected 'explicit_read -> true', got: $(tr '\n' '|' < "$erout")"
+
+  irout="$work/implicit_read.$mode"
+  SIMPLE_EXECUTION_MODE="$mode" "$SIMPLE_BIN" run "$implicit_read" > "$irout" 2>&1
+  irrc=$?
+  if /usr/bin/grep -aq '^implicit_read -> ' "$irout"; then
+    fail "engine '$mode', form 'read': bare \`provider.configured\` was ACCEPTED and ran to completion; the recorded contract is a hard error — a bare field name never resolves through an implicit self"
+  fi
+  [ "$irrc" -ne 0 ] \
+    || fail "engine '$mode', form 'read': bare field read exited 0 — it must be a hard error"
+  /usr/bin/grep -aq 'provider' "$irout" \
+    || fail "engine '$mode', form 'read': rejected but the diagnostic does not name \`provider\`: $(tr '\n' '|' < "$irout")"
+  checked=$((checked + 1))
+  probes="${probes:+$probes,}$mode/read"
+done
+
 [ "$checked" -gt 0 ] || oops "no engine was exercised"
-printf 'PASS — %d probe(s) checked across engine settings %s (%s) — implicit `field = ...` in a method is a hard error naming the field for BOTH the `me` and plain `fn` forms, and explicit `self.field = ...` still works\n' "$checked" "$engines" "$probes"
+printf 'PASS — %d probe(s) checked across engine settings %s (%s) — implicit `field = ...` in a method and a bare `field.x` read are hard errors naming the field for the `me` and plain `fn` forms, and explicit `self.field` still works\n' "$checked" "$engines" "$probes"
 exit 0

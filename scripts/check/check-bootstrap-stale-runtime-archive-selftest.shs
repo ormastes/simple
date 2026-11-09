@@ -1,0 +1,31 @@
+#!/bin/sh
+# Selftest: bootstrap-from-scratch.sh must fail closed on a stale Rust seed/runtime
+# stamp unless --full-bootstrap or SIMPLE_ALLOW_STALE_RUST_SEED=1.
+# Extracts the real stale-check block from the script (no copy) and runs it with a
+# stubbed stamp verifier that always reports "stale".
+# Usage: sh scripts/check/check-bootstrap-stale-runtime-archive-selftest.shs [script]
+script=${1:-scripts/bootstrap/bootstrap-from-scratch.sh}
+tmp=$(mktemp -d) || exit 2
+trap 'rm -rf "$tmp"' EXIT
+start=$(grep -n 'if ! bootstrap_stage3_verify_seed_stamp "${seed_stamp}"' "$script" | head -1 | cut -d: -f1)
+end=$(grep -n '^bootstrap_step_mark seed-stale-check' "$script" | head -1 | cut -d: -f1)
+if [ -z "$start" ] || [ -z "$end" ]; then echo "ERROR - nothing was checked (block markers not found)"; exit 2; fi
+# block = from the verify call through the closing "fi" of the stale branch
+sed -n "$((start-0)),$((end-1))p" "$script" > "$tmp/block.sh"
+{
+  echo 'bootstrap_stage3_verify_seed_stamp() { return 1; }'
+  echo 'seed_stamp=x; seed_inputs_fingerprint=x; seed_bin=x; native_all_lib=x; compiler_backfill_lib=x'
+  echo 'if true; then'   # stands in for the enclosing "if [ -z ... ]" opened before the block
+  cat "$tmp/block.sh"
+} > "$tmp/run.sh"
+fails=0
+run() { # name full_bootstrap allow expect_rc expect_text
+  ( full_bootstrap=$2; SIMPLE_ALLOW_STALE_RUST_SEED=$3; export SIMPLE_ALLOW_STALE_RUST_SEED; . "$tmp/run.sh" ) > "$tmp/out" 2>&1
+  rc=$?
+  if [ "$rc" = "$4" ] && grep -q "$5" "$tmp/out"; then echo "ok   $1 (rc=$rc)"; else echo "FAIL $1 (rc=$rc, want $4 + '$5')"; fails=$((fails+1)); fi
+}
+run "stale, no flags -> refuse"              0 0 1 "Refusing to reuse the stale"
+run "stale, --full-bootstrap -> rebuild"     1 0 0 "Full bootstrap will rebuild"
+run "stale, ALLOW override -> warn, pass"    0 1 0 "WARNING: Seed/runtime stale"
+if [ "$fails" -eq 0 ]; then echo "PASS - 3 fixture(s) checked"; exit 0; fi
+echo "FAIL - $fails of 3 fixture(s) failed"; exit 1
