@@ -982,30 +982,52 @@ impl<'a> MirLowerer<'a> {
             // `private_dup_overloads`): resolve this call site to the variant
             // whose parameter types exactly match the argument types. No exact
             // match: prefer an extern decl of the same name (the local defs
-            // demonstrably have different signatures), else the last local
-            // definition — the previous last-write-wins behavior.
-            let dup_resolved: Option<String> = self.private_dup_overloads.get(name.as_str()).and_then(|candidates| {
-                let arg_tys: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
-                let exact = candidates.iter().find(|(param_tys, _)| *param_tys == arg_tys);
-                // No exact type match (args may have inferred as Any): if the
-                // arity singles out one candidate, that is still unambiguous.
-                let by_arity = || {
-                    let mut same_arity = candidates
-                        .iter()
-                        .filter(|(param_tys, _)| param_tys.len() == arg_tys.len());
-                    match (same_arity.next(), same_arity.next()) {
-                        (Some(only), None) => Some(only),
-                        _ => None,
+            // demonstrably have different signatures). Otherwise the call is
+            // AMBIGUOUS and a compile error (owner decision 2026-11-09, bug
+            // jit_co_compiled_definition_ambiguity_debt_2026-09-15) -- it used
+            // to fall back to the LAST local definition, the silent
+            // wrong-dispatch the record documents.
+            let dup_resolved: Option<String> = match self.private_dup_overloads.get(name.as_str()) {
+                None => None,
+                Some(candidates) => {
+                    let arg_tys: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
+                    let exact = candidates.iter().find(|(param_tys, _)| *param_tys == arg_tys);
+                    // No exact type match (args may have inferred as Any): if the
+                    // arity singles out one candidate, that is still unambiguous.
+                    let by_arity = || {
+                        let mut same_arity = candidates
+                            .iter()
+                            .filter(|(param_tys, _)| param_tys.len() == arg_tys.len());
+                        match (same_arity.next(), same_arity.next()) {
+                            (Some(only), None) => Some(only),
+                            _ => None,
+                        }
+                    };
+                    match exact.or_else(by_arity) {
+                        Some((_, mangled)) => Some(mangled.clone()),
+                        None if self.extern_fn_name_set.contains(name.as_str()) => None, // bare name → extern import
+                        None => {
+                            let render = |tys: &[TypeId]| {
+                                tys.iter().map(|t| format!("{:?}", t)).collect::<Vec<_>>().join(", ")
+                            };
+                            return Err(MirLowerError::Unsupported(format!(
+                                "ambiguous call to `{name}`: {} co-compiled definitions with differing \
+                                 signatures ({}) and the argument types ({}) select none of them. Qualify \
+                                 the call (annotate the arguments or import the intended definition \
+                                 selectively) or rename the duplicate definitions to unique names. \
+                                 [compiler_cross_module_private_symbol_collision]",
+                                candidates.len(),
+                                candidates
+                                    .iter()
+                                    .map(|(tys, _)| format!("({})", render(tys)))
+                                    .collect::<Vec<_>>()
+                                    .join(" vs "),
+                                render(&arg_tys),
+                            )));
+                        }
                     }
-                };
-                exact.or_else(by_arity).map(|(_, mangled)| mangled.clone()).or_else(|| {
-                    if self.extern_fn_name_set.contains(name.as_str()) {
-                        None // keep bare name → extern import
-                    } else {
-                        candidates.last().map(|(_, mangled)| mangled.clone())
-                    }
-                })
-            });
+                }
+            };
             let call_target_name = if let Some(mangled) = dup_resolved.as_deref() {
                 mangled
             } else if name == "rt_array_new_with_cap" && self.call_returns_array_of(callee, TypeId::U64) {

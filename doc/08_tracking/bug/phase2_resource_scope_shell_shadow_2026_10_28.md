@@ -82,3 +82,6 @@ function-value casts naming `shell` inside the shadowing functions (5/5 spec GRE
 the seed). Current source (`find_local` before `try_lower_function_value`) is correct
 through MIR; the defect is specific to the cached phase2 producer build. Native-build
 was not run (single-shard s3 path has an open heap-corruption crash).
+
+## 2026-11-09 — resolved-disappeared (native)
+Native re-run 2026-11-09 with the current self-hosted stage2 `C:/dev/p3new/stage2new/stage2_new4.exe` (`native-build --entry-closure`, llvm, x86_64-pc-windows-gnu, core-c-bootstrap, SIMPLE_HIR_CACHE=0, clean sparse worktree of origin/release/1.0.0 @1cc167e37fd): original-name reproducer (`test/fixtures/compiler/phase2_native_repro/shell_shadow.spl`: global `fn shell`, a `for shell in candidates` loop local and a `val shell = ...` local in a limit-shaped helper) runs correctly: `RESULT rc=0 stdout=[a=/bin/bash#3|PASS shell shadow]`. The source workaround renames (`limit_shell_path`, `candidate_shell_path`) may now be retired in a separate change.

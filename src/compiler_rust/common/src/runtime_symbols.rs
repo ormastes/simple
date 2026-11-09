@@ -451,6 +451,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // was wired into CI and reported them.
     "rt_array_at",
     "rt_at",
+    // rt_get backs the `.get()` Option accessor on arrays (receiver-dispatched;
+    // non-array receivers defer to rt_index_get). Added 2026-11-09 with the
+    // `a.get(i) -> T?` contract (array_get_contract_drift_crypto_2026-10-18).
+    "rt_get",
     "rt_array_data_ptr_text",
     // [u8] packed-backing validation + checked-copy providers
     // (runtime/src/value/collections.rs; contracts in

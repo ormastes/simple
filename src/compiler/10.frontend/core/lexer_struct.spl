@@ -169,6 +169,11 @@ struct CoreLexer:
     # call's parentheses needs real NEWLINE/INDENT/DEDENT tokens for its own
     # body even though paren_depth > 0 there. See is_forced_indentation_active.
     force_indent_bracket_depths: [i64]
+    # Stack of match-arm columns (indent_stack top when a `match` block
+    # opens), pushed/popped by parse_match_arms_common. A line starting with
+    # `|` at or left of the innermost column begins a `| Pat -> expr` arm, so
+    # its Newline/Indent survive; see pipe_line_continues.
+    match_arm_columns: [i64]
     # ADR-005 char-literal lexer gate (SIMPLE_CHAR_LITERAL_LEXER=1; default OFF).
     # OFF: `'...'` keeps its legacy string meaning. ON: `'x'` is a char literal.
     char_literal_mode: bool
@@ -204,6 +209,7 @@ fn make_core_lexer(source: text) -> CoreLexer:
         cur_start: 0,
         cur_no_interp: false,
         force_indent_bracket_depths: [],
+        match_arm_columns: [],
         char_literal_mode: char_literal_lexer_enabled()
     )
 
@@ -352,6 +358,28 @@ impl CoreLexer:
         if indent_level <= current_indent:
             return false
         self.line_starts_binary_op(p)
+
+    # A line whose first non-blank char is `|` continues the previous logical
+    # line (pattern alternative `case 1 | 2` NEWLINE `| 3:`, or a leading
+    # BitOr operand) unless it begins a `| Pat -> expr` match arm: inside a
+    # `match` block that is a `|` at or left of the arm column. Outside match
+    # blocks the historical rule (prev token can end an expression) holds, so
+    # same-indent BitOr continuation lines keep parsing.
+    fn pipe_line_continues(indent_level: i64) -> bool:
+        if not token_can_end_expr(self.cur_kind):
+            return false
+        val n: i64 = self.match_arm_columns.len()
+        if n > 0 and indent_level <= self.match_arm_columns[n - 1]:
+            return false
+        true
+
+    me push_match_arm_column():
+        val stack_len: i64 = self.indent_stack.len()
+        self.match_arm_columns.push(self.indent_stack[stack_len - 1])
+
+    me pop_match_arm_column():
+        if self.match_arm_columns.len() > 0:
+            self.match_arm_columns.pop()
 
 
     # Token-text extraction over a [start,end) char range: O(span) via indexed
@@ -1315,6 +1343,18 @@ impl CoreLexer:
                 self.scan_raw_string(start_line, start_col)
                 return
 
+        # `s{` set literal opener (TOK_SET_LIT_START). Only an `s` IMMEDIATELY
+        # followed by `{`; `s {`, `sx{` and a plain `s` lex as before. The `{`
+        # is consumed here, so track it like scan_token does for a bare `{`
+        # (the matching `}` decrements paren_depth).
+        if ident_text == "s":
+            val set_next: text = if pos < src_len then self.source_chars[pos] else ""
+            if set_next == "{":
+                self.advance()
+                self.paren_depth = self.paren_depth + 1
+                self.make_token(174, "s{", start_line, start_col)
+                return
+
         # Check for keyword
         val kw_kind: i64 = keyword_lookup(ident_text)
         if kw_kind != 6:
@@ -1453,12 +1493,22 @@ impl CoreLexer:
         val line_first: text = self.peek()
         self.at_line_start = false
 
-        # Leading-dot method-chain / leading-pipe pattern-alternative
-        # continuation: a line starting with `.` or `|` continues the
-        # previous expression — suppress Indent/Dedent.
-        if line_first == "." or line_first == "|":
+        # Leading-dot method-chain continuation: a line starting with `.`
+        # continues the previous expression — suppress Indent/Dedent.
+        if line_first == ".":
             self.scan_token()
             return
+
+        # Leading-pipe: a pattern-alternative continuation (`case 1 | 2`
+        # NEWLINE deeper `| 3:`) only when the previous token can end an
+        # expression AND this line is indented strictly deeper. A `|` at the
+        # block's own column after `match s:` or after a previous arm body is
+        # the start of a `| Pat -> expr` match arm and keeps its Indent /
+        # Newline (bug readme_arrow_match_arm_syntax_does_not_parse_2026-09-19).
+        if line_first == "|":
+            if self.pipe_line_continues(indent_level):
+                self.scan_token()
+                return
 
         # G27b: leading-operator continuation — suppress the Indent the same
         # way. self.pos is already at the first non-blank char of this line,
@@ -1584,14 +1634,20 @@ impl CoreLexer:
                 else:
                     break
             val la_c: text = if dot_la < self.source_chars.len() then self.source_chars[dot_la] else ""
-            if la_c == "." or la_c == "|":
+            if la_c == ".":
                 self.scan_token_rescan()
                 return
+            val la_indent: i64 = self.measure_indent_from(self.pos)
+            val la_first: i64 = self.skip_indent_from(self.pos)
+            # Leading `|`: same guards as the Indent site (handle_indentation)
+            # — a `| Pat -> expr` arm at the block column keeps its Newline.
+            if la_c == "|":
+                if self.pipe_line_continues(la_indent):
+                    self.scan_token_rescan()
+                    return
             # G27b: leading-operator continuation — suppress the Newline. The
             # matching Indent suppression lives in handle_indentation; both
             # sites must agree, or the parser sees a half-continued line.
-            val la_indent: i64 = self.measure_indent_from(self.pos)
-            val la_first: i64 = self.skip_indent_from(self.pos)
             if self.leading_op_continues(la_indent, la_first):
                 self.scan_token_rescan()
                 return
@@ -1911,6 +1967,16 @@ fn core_lexer_char_at_pos(lexer: CoreLexer, pos: i64) -> text:
 
 fn core_lexer_char_slice(lexer: CoreLexer, start: i64, end: i64) -> text:
     lexer.char_slice(start, end)
+
+fn core_lexer_push_match_arm_column(lexer: CoreLexer) -> CoreLexer:
+    var updated: CoreLexer = lexer
+    updated.push_match_arm_column()
+    updated
+
+fn core_lexer_pop_match_arm_column(lexer: CoreLexer) -> CoreLexer:
+    var updated: CoreLexer = lexer
+    updated.pop_match_arm_column()
+    updated
 
 fn core_lexer_enable_forced_indentation(lexer: CoreLexer) -> CoreLexer:
     var updated: CoreLexer = lexer

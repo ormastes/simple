@@ -2,7 +2,7 @@
 
 - **ID:** stage2_rejects_nil_in_optional_enum_payload_2026-11-05
 - **Priority:** P2 (bootstrap-only: the frozen stage2 that builds stage3 refuses the canonical spelling; the seed accepts it)
-- **Status:** open. Workaround sites carry `@workaround bug=stage2_rejects_nil_in_optional_enum_payload_2026-11-05`.
+- **Status:** closed — invalid premise (owner ruling 2026-11-09).
 - **Policy:** the final design (scratchpad `panic_free_rev3_decisions.md`, ERR-01) makes `nil` the ONLY canonical absence literal, with no competing `None`. Every `None` written for this bug is therefore temporary and must be restored to `nil` once stage3 self-hosts (i.e. once the compiler that builds the next stage accepts `nil` here).
 
 ## Symptom
@@ -42,3 +42,10 @@ behaviour by: `test/01_unit/compiler/50.mir/enum_payload_value_shapes_spec.spl:1
 Fix needed first (policy migration, owner: nil lane): admit `NilLit` into an `Optional` payload
 slot in safe code (lowers to the same nil word `None` already uses), flip those specs, then
 redeploy stage2; only then run the restore recipe above. Left open.
+
+## Closed 2026-11-09: invalid premise (owner ruling)
+Owner ruling 2026-11-09: `nil` must not appear outside `unsafe`; safe code spells absence `None`. The
+frozen stage2's rejection ("nil outside unsafe into optional payload slot ... use None") and the matching
+current-source rule in `enum_payload_local_compatible` are CORRECT behaviour, not a bug. The two `None`
+spellings in `builtin_method_extras.spl` are the canonical code; their `@workaround` tags were dropped.
+No restore to `nil` will happen.

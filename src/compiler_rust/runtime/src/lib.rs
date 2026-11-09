@@ -1054,6 +1054,7 @@ pub use value::{
     rt_typed_words_i64_set,
     rt_for_iterable,
     rt_index_get,
+    rt_get,
     rt_index_set,
     // Object operations
     rt_object_class_id,

@@ -1,0 +1,180 @@
+# @req REQ-SSPEC-COMPILER
+# @req REQ-GENERIC-ANNOTATION-DIAGNOSTIC
+# @tag: unit, compiler, mir, generics
+#
+# Bug tldr_future_static_owner_typeparam_2026_10_25: the TLDR table's
+# `me deref(h) -> Future<text?>` returned `Future.from_value(Some(text))` /
+# `Future.pending()` -- static factories of a generic class with an OPTIONAL
+# payload -- and the frozen stage2 reported `E-MIR-TYPE-TypeParam: unsubstituted
+# generic type parameter 'T' reached MIR lowering` for the whole module. A typed
+# receiver (`val f: Future<text?> = ...`) did not help; only direct
+# `Future<text?>(state: [], poll_result: ...)` construction did.
+#
+# Current source erases `T` to the tagged word (one erased body per generic fn,
+# function_lowering.spl `HirTypeKind.TypeParam` arm) and types the call result
+# by the use-site instance, so every shape below must lower HIR -> 50.mir ->
+# MirToLlvm with NO diagnostic, and the `Box<text?>` payload read must stay a
+# text (string concatenation), i.e. the instance argument was bound.
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val MODULE = "sfo_probe"
+
+val PRELUDE = "enum Poll<T>:\n" +
+    "    Ready(T)\n" +
+    "    Pending\n" +
+    "\n" +
+    "class Box<T>:\n" +
+    "    state: [u8]\n" +
+    "    poll_result: Poll<T>\n" +
+    "\n" +
+    "    static fn of(v: T) -> Box<T>:\n" +
+    "        Box(state: [], poll_result: Poll.Ready(v))\n" +
+    "\n" +
+    "    static fn pending() -> Box<T>:\n" +
+    "        Box(state: [], poll_result: Poll.Pending)\n" +
+    "\n" +
+    "    fn poll() -> Poll<T>:\n" +
+    "        self.poll_result\n" +
+    "\n" +
+    "class Table:\n" +
+    "    entries: Dict<text, text>\n" +
+    "\n"
+
+struct Shaped:
+    ir: text
+    errors: [text]
+
+fn shape(body: text) -> Shaped:
+    val src = PRELUDE + body
+    val file = "testdata/sfo_probe.spl"
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parse_full_frontend(src, file, MODULE, Logger(level: 0)))
+    var errors: [text] = []
+    for e in hl.errors:
+        errors.push("hir: " + e.message)
+    val m: HirModule = hir
+    var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(m)
+    for e in lowering.errors:
+        errors.push("mir: " + e.message)
+    val ir = MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir)
+    Shaped(ir: ir, errors: errors)
+
+fn has_typeparam_diag(s: Shaped) -> bool:
+    for e in s.errors:
+        val m: text = e
+        if m.contains("TypeParam") or m.contains("unsubstituted"):
+            return true
+    false
+
+fn function_body(ir: text, fn_name: text) -> [text]:
+    var out: [text] = []
+    var inside = false
+    for line in ir.split("\n"):
+        val l: text = line
+        if l.starts_with("define ") and (l.contains("." + fn_name + "(") or l.contains("@" + fn_name + "(")):
+            inside = true
+        if inside:
+            out = out.push(l)
+            if l.len() == 1:
+                inside = false
+    out
+
+fn concatenates(lines: [text]) -> bool:
+    for line in lines:
+        val l: text = line
+        if l.contains("call ") and (l.contains("@rt_strcat") or l.contains("@rt_string_concat")):
+            return true
+    false
+
+fn renders_raw_int(lines: [text]) -> bool:
+    for line in lines:
+        val l: text = line
+        if l.contains("call ") and l.contains("@rt_raw_i64_to_string"):
+            return true
+    false
+
+# The exact TLDR deref shape: a `me` method on a concrete class returning the
+# generic factory result with an optional payload, both branches.
+val DEREF = "    me deref(key: text) -> Box<text?>:\n" +
+    "        if self.entries.contains_key(key):\n" +
+    "            val payload: text? = Some(self.entries[key])\n" +
+    "            return Box.of(payload)\n" +
+    "        Box.pending()\n"
+
+describe "static generic factory with an optional payload (tldr_future_static_owner_typeparam_2026_10_25)":
+    it "me deref(..) -> Box<text?> returning Box.of(payload) / Box.pending() lowers with no diagnostic":
+        val s = shape("impl Table:\n" + DEREF)
+        expect(has_typeparam_diag(s)).to_equal(false)
+        expect(s.errors).to_equal([])
+
+    it "val b = Box.of(Some(\"x\")) (untyped local) lowers with no diagnostic":
+        val s = shape(
+            "fn probe() -> bool:\n" +
+            "    val b = Box.of(Some(\"x\"))\n" +
+            "    match b.poll():\n" +
+            "        case Poll.Ready(_): true\n" +
+            "        case Poll.Pending: false\n")
+        expect(has_typeparam_diag(s)).to_equal(false)
+        expect(s.errors).to_equal([])
+
+    it "val b: Box<text?> = Box.of(Some(\"x\")) (typed local) lowers with no diagnostic":
+        val s = shape(
+            "fn probe() -> bool:\n" +
+            "    val b: Box<text?> = Box.of(Some(\"x\"))\n" +
+            "    match b.poll():\n" +
+            "        case Poll.Ready(_): true\n" +
+            "        case Poll.Pending: false\n")
+        expect(has_typeparam_diag(s)).to_equal(false)
+        expect(s.errors).to_equal([])
+
+    it "Box<text?>.pending() with explicit owner type args lowers with no diagnostic":
+        val s = shape(
+            "fn probe() -> Box<text?>:\n" +
+            "    Box<text?>.pending()\n")
+        expect(has_typeparam_diag(s)).to_equal(false)
+        expect(s.errors).to_equal([])
+
+    # Native red (stage2_new4, 2026-11-09): `match b.poll_result: case
+    # Poll.Ready(v): print("{v ?? \"nil\"}")` on a `Box<text?>` printed the
+    # text handle as a decimal (2136921960369) -- the field read kept the
+    # DECLARED `Poll<T>`, so `v: T` lowered as an erased i64 word. The field
+    # type must be instantiated from the receiver's `Box<text?>` arguments.
+    it "factory receiver: field-match payload `v ?? \"nil\"` stays text (no raw i64 render)":
+        val s = shape(
+            "fn probe() -> text:\n" +
+            "    val b: Box<text?> = Box.of(Some(\"x\"))\n" +
+            "    match b.poll_result:\n" +
+            "        case Poll.Ready(v): \"r=\" + (v ?? \"nil\")\n" +
+            "        case Poll.Pending: \"p\"\n")
+        expect(s.errors).to_equal([])
+        expect(renders_raw_int(function_body(s.ir, "probe"))).to_equal(false)
+
+    it "direct-constructor receiver: field-match payload stays text":
+        val s = shape(
+            "fn probe() -> text:\n" +
+            "    val b: Box<text?> = Box(state: [], poll_result: Poll.Ready(Some(\"x\")))\n" +
+            "    match b.poll_result:\n" +
+            "        case Poll.Ready(v): \"r=\" + (v ?? \"nil\")\n" +
+            "        case Poll.Pending: \"p\"\n")
+        expect(s.errors).to_equal([])
+        expect(renders_raw_int(function_body(s.ir, "probe"))).to_equal(false)
+
+    it "parameter receiver: field-match payload stays text":
+        val s = shape(
+            "fn probe(b: Box<text?>) -> text:\n" +
+            "    match b.poll_result:\n" +
+            "        case Poll.Ready(v): \"r=\" + (v ?? \"nil\")\n" +
+            "        case Poll.Pending: \"p\"\n")
+        expect(s.errors).to_equal([])
+        expect(renders_raw_int(function_body(s.ir, "probe"))).to_equal(false)

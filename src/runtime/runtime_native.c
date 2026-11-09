@@ -13183,6 +13183,21 @@ int64_t rt_index_get(int64_t collection, int64_t idx) {
     return 3;
 }
 
+/* `.get(i)` method entry, receiver-dispatched like rt_at: an array receiver
+ * answers a real Option (Some(elem) in range, None otherwise) -- owner decision
+ * that `a.get(i)` is `T?` on every lane, `a[i]` the direct form
+ * (doc/08_tracking/bug/array_get_contract_drift_crypto_2026-10-18.md). Every
+ * other receiver keeps rt_index_get's answer. The index arrives tagged, as
+ * for rt_index_get, so the codegen boxing rules are shared. */
+int64_t rt_get(int64_t collection, int64_t idx) {
+    RtCoreArray* a = rt_core_as_array(collection);
+    if (a) {
+        if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_enum_new(1, 1, rt_core_nil());
+        return rt_array_at((SplArray*)a, idx >> 3);
+    }
+    return rt_index_get(collection, idx);
+}
+
 int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) {

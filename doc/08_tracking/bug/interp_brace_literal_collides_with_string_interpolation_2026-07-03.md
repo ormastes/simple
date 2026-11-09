@@ -148,3 +148,35 @@ rather than a lookup on the immediate identifier) should require the same
 missing — not a silent swallow of the whole span in one case and a
 context-free "variable not found" in the other.
 
+
+## 2026-11-09 fix-implemented-verification-pending (staged: escape = hard, malformed brace = warning)
+
+Owner rule: inside a double-quoted literal `{expr}` interpolates, `{{` is a
+literal `{`, `}}` is a literal `}`. Seed and self-hosted compilers already
+agreed on the escape; the real gap was that a `{...}` that is not a valid
+interpolation silently fell back to verbatim text with no diagnostic.
+
+Fix: both compilers keep the verbatim-literal value but now record warning
+`W-STR-BRACE-001` carrying the "use `{{` / `}}`" hint.
+- Seed: `parser/src/lexer/strings.rs` (`warn_brace`, `BRACE_WARNING_CODE`;
+  unmatched `{`, empty `{}`, `{` before a quote/escape) drained into parser
+  `error_hints` (Warning level) by `expressions/primary/literals.rs`, which also
+  warns for a hole that is not a complete expression (`{ color: red; }`).
+- Self-hosted: `string_interpolation_expand.spl` `interpolation_note_malformed_region`
+  (called from `parse_string_interpolation_regions` and
+  `flat_bridge_build_string_regions`); the MIR `split_interpolation_segments`
+  reads the already literalized text, so it needs no change.
+
+Why staged: removing the fallback outright (owner decision) was measured on the
+real corpus: 15,033 string literals in `src/**` + `test/**` (44,909 `.spl`
+files) would become errors (4,535 unmatched/lone `{`; about 10,500 non-expression
+groups: CSS, JSON, awk, `{ return; }`). Raw list: `C:/dev/wt/brace_corpus_scan.log`
+(not committed). Promotion to error + codemod is tracked in
+`string_interp_malformed_brace_warning_to_error_2026-11-09`.
+
+Left as is: a lone `}` stays accepted (the rule only covers `}}`).
+
+Evidence: seed `cargo test --lib -p simple-parser` 451 passed (new module
+`brace_escape_strict` was red before the fix); self-hosted
+`test/01_unit/compiler/frontend/string_interp_brace_escape_spec.spl` red
+(`interp_brace_warnings_reset` not found) -> green 5/5 with the worktree sources.

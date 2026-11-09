@@ -43,7 +43,7 @@ use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_TUPLE, EXPR_UNIT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_FIELD_ACCESS}
 use compiler.core.ast.{decl_get_fields, decl_get_field_types, decl_get_field_defaults, DECL_STRUCT, expr_struct_lit, expr_array_lit, expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
-use compiler.core.ast.{expr_int_lit, expr_float_lit, decl_get_field_bits, DECL_ENUM}
+use compiler.core.ast.{expr_int_lit, expr_float_lit, decl_get_field_bits, DECL_ENUM, decl_set_var_init}
 use compiler.core.ast.{expr_array_repeat}
 use compiler.core.ast_expr.{expr_mark_colon_block}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
@@ -61,7 +61,7 @@ use compiler.frontend.core.collection_feedback.{parser_collection_attributed_exp
 use compiler.frontend.core.collection_feedback.{parser_collection_declaration_hash, parser_collection_label_valid, parser_collection_label_site_id}
 use compiler.frontend.core.collection_feedback.{parser_collection_site_owner_push, parser_collection_site_owner_restore}
 use compiler.frontend.core._ParserStmt.match_type_pattern.{parse_match_type_pattern}
-use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
+use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation, lex_push_match_arm_column, lex_pop_match_arm_column}
 use compiler.frontend.core.lexer.{lex_mark_current_token_as_generic_close}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_get_span, expr_set_span}
 use compiler.core.types.{span_is_valid, span_start, span_line, span_col}
@@ -2180,6 +2180,10 @@ fn parse_match_arms_common() -> (i64, [i64]):
     parser_skip_newlines()
     val saw_indent = par_kind_get() == 181
     parser_expect(181)
+    # Record the arm column so the lexer keeps the Newline before a
+    # `| Pat -> expr` arm instead of folding it into the previous arm body.
+    if saw_indent:
+        lex_push_match_arm_column()
 
     var arm_indices: [i64] = []
     var kind = par_kind_get()
@@ -2368,6 +2372,11 @@ fn parse_match_arms_common() -> (i64, [i64]):
             # `_` here is the wildcard pattern, not the lambda shorthand.
             var patterns: [i64] = []
             val cl_ph_prev = set_placeholder_transform_suppressed(true)
+            # `| Pat -> body`: a leading `|` opens an arm (README.md "preferred
+            # arrow syntax"; owner decision 2026-11-09). Equivalent to
+            # `case Pat: body` — the `|` is only the arm marker.
+            if par_kind_get() == TOK_PIPE:
+                parser_advance()
             patterns.push(parse_expr())
             while par_kind_get() == TOK_PIPE or par_kind_get() == TOK_COMMA:
                 parser_advance()
@@ -2438,6 +2447,8 @@ fn parse_match_arms_common() -> (i64, [i64]):
                 val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, case_arm_body, pattern_binding, rationale)
                 arm_indices.push(arm_idx)
 
+    if saw_indent:
+        lex_pop_match_arm_column()
     lex_disable_forced_indentation()
     (scrutinee, arm_indices)
 
@@ -2930,7 +2941,7 @@ export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
 export var_no_init_default_expr, fixed_array_no_init_default_expr
 export struct_zero_expr_v1
 export set_noinit_robust_mode_v1, noinit_robust_mode_v1
-export set_noinit_kernel_module_v1
+export set_noinit_kernel_module_v1, noinit_pending_reset_v1, noinit_pending_push_v1, noinit_pending_resolve_v1
 export parse_if_stmt, parse_for_stmt, parse_while_stmt
 export parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow
 export parse_unsafe_block_expr_if_present
@@ -2995,9 +3006,10 @@ fn struct_zero_expr_v1(type_tag: i64, depth: i64) -> i64:
             return -1
         return expr_field_access(expr_ident(sname, 0), variants[0], 0)
     if found < 0:
-        # Not a struct/class/enum declared earlier in this module (imported or
-        # later-declared type): caller keeps the existing nil-until-assignment
-        # contract; the seed interpreter defaults these (bug
+        # Not a struct/class/enum declared earlier in this module: a
+        # later-declared one is resolved at end of module parse
+        # (noinit_pending_resolve_v1); an imported type keeps the
+        # nil-until-assignment contract (bug
         # noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09).
         return -2
     val names = decl_get_fields(found)
@@ -3031,3 +3043,31 @@ fn struct_zero_expr_v1(type_tag: i64, depth: i64) -> i64:
         entries.push(expr_field_access(v, names[fi], 0))
         fi = fi + 1
     expr_struct_lit(sname, entries, [], 0)
+
+var noinit_pending_decls_v1: [i64] = []
+var noinit_pending_types_v1: [i64] = []
+
+fn noinit_pending_reset_v1():
+    noinit_pending_decls_v1 = []
+    noinit_pending_types_v1 = []
+
+fn noinit_pending_push_v1(decl: i64, type_tag: i64):
+    if noinit_kernel_module_state_v1:
+        return
+    noinit_pending_decls_v1.push(decl)
+    noinit_pending_types_v1.push(type_tag)
+
+# Resolve no-initializer module vars whose named type was not declared earlier
+# in the module (struct_zero_expr_v1 == -2), once the whole module is parsed:
+# a later-declared struct/class gets its zero literal and a later-declared enum
+# its first variant, exactly as when declared earlier. A type not declared in
+# this module (imported) keeps the nil fallback — bug
+# noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09.
+fn noinit_pending_resolve_v1():
+    var pi = 0
+    while pi < noinit_pending_decls_v1.len():
+        val zero = struct_zero_expr_v1(noinit_pending_types_v1[pi], 0)
+        if zero >= 0:
+            decl_set_var_init(noinit_pending_decls_v1[pi], zero)
+        pi = pi + 1
+    noinit_pending_reset_v1()

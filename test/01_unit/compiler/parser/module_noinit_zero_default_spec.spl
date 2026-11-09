@@ -5,7 +5,7 @@
 use std.spec
 use compiler.core.parser.{parse_module_silent_checked}
 use compiler.core.ast.{module_decl_count_get, module_decl_at, decl_get_name, decl_get_body}
-use compiler.core.ast_expr.{expr_get_tag, expr_get_args, EXPR_INT_LIT, EXPR_BOOL_LIT, EXPR_STRUCT_LIT, EXPR_ARRAY_LIT, EXPR_NIL_LIT}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_args, EXPR_INT_LIT, EXPR_BOOL_LIT, EXPR_STRUCT_LIT, EXPR_ARRAY_LIT, EXPR_NIL_LIT, EXPR_FIELD_ACCESS}
 use compiler.frontend.core.parser_stmts.{set_noinit_robust_mode_v1, set_noinit_kernel_module_v1}
 
 fn noinit_body_tag(name: text) -> i64:
@@ -83,3 +83,31 @@ describe "module var without initializer in kernel/noalloc modules":
         expect(failed).to_equal(false)
         expect(tss_tag != EXPR_STRUCT_LIT).to_equal(true)
         expect(tbl_arg != EXPR_STRUCT_LIT).to_equal(true)
+
+describe "module var without initializer: types resolved after the whole module is parsed":
+    # @req bug noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09
+    it "zero-initializes a var whose struct is declared later in the module":
+        val src = "var later: LateP\nstruct LateP:\n    x: i64\n    ok: bool\n"
+        expect(parse_module_silent_checked(src, "late1.spl")).to_equal(false)
+        expect(noinit_body_tag("later")).to_equal(EXPR_STRUCT_LIT)
+    it "zero-fills nested later-declared struct fields":
+        val src = "var outer: LateOuter\nstruct LateOuter:\n    inner: LateInner\nstruct LateInner:\n    v: i64\n"
+        expect(parse_module_silent_checked(src, "late2.spl")).to_equal(false)
+        expect(noinit_body_tag("outer")).to_equal(EXPR_STRUCT_LIT)
+    it "zero-constructs a var whose class is declared later, same as declared earlier":
+        expect(parse_module_silent_checked("var c2: LateC2\nclass LateC2:\n    v: i64\n", "late3.spl")).to_equal(false)
+        expect(noinit_body_tag("c2")).to_equal(EXPR_STRUCT_LIT)
+    it "defaults a var whose enum is declared later to its first variant":
+        expect(parse_module_silent_checked("var e: LateE2\nenum LateE2:\n    A\n    B\n", "late4.spl")).to_equal(false)
+        expect(noinit_body_tag("e")).to_equal(EXPR_FIELD_ACCESS)
+    it "rejects a later-declared enum whose first variant carries a payload":
+        expect(parse_module_silent_checked("var e: LateE3\nenum LateE3:\n    A(i64)\n    B\n", "late5.spl")).to_equal(true)
+    it "keeps the nil fallback for a type not declared in this module (imported)":
+        expect(parse_module_silent_checked("var ext: ImportedThing\n", "late6.spl")).to_equal(false)
+        expect(noinit_body_tag("ext")).to_equal(EXPR_NIL_LIT)
+    it "keeps nil (zero BSS) for a later-declared struct in kernel modules":
+        set_noinit_kernel_module_v1(true)
+        val failed = parse_module_silent_checked("var k: LateK\nstruct LateK:\n    v: i64\n", "late7.spl")
+        set_noinit_kernel_module_v1(false)
+        expect(failed).to_equal(false)
+        expect(noinit_body_tag("k")).to_equal(EXPR_NIL_LIT)

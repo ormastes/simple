@@ -1,18 +1,24 @@
 #!/bin/sh
 # Execute the production path-validation block with real files and transcript
 # parsing. This fixture does not clone caches, run a compiler, or admit a phase.
-set -eu
+# Verdict convention (guard-soundness wave 4): em-dash PASS —/FAIL —/ERROR —
+# verdicts, verdict is the last stdout line, exit 0/1/2.
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage2-resume-platform.XXXXXX")
-scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
-trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
 owner="$repo/scripts/bootstrap/resume-stage2-from-cache.sh"
+[ -f "$owner" ] || { echo "ERROR — nothing was checked (resume-stage2-from-cache.sh missing)"; exit 2; }
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage2-resume-platform.XXXXXX") || {
+    echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P) || { echo "ERROR — nothing was checked (scratch resolution failed)"; exit 2; }
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
 # Keep the actual helpers and validation statements; only host detection is
 # substituted, allowing both Windows ABIs and POSIX contracts on any host.
 awk '/^usage\(\)/ { copy=1 } /^\[ "\$#" = 1 \]/ { copy=0 } copy' "$owner" > "$scratch/helpers"
 awk '/^platform=\$\(bootstrap_stage3_host_platform\)/ { copy=1 }
      /^stage2_recorded_cold_init=/ { copy=0 } copy' "$owner" > "$scratch/validate"
-grep -q 'transcript executable is not the frozen runtime compiler' "$scratch/validate"
+[ -s "$scratch/helpers" ] || { echo "ERROR — nothing was checked (helpers extraction empty)"; exit 2; }
+[ -s "$scratch/validate" ] || { echo "ERROR — nothing was checked (validate extraction empty)"; exit 2; }
+grep -q 'transcript executable is not the frozen runtime compiler' "$scratch/validate" || {
+    echo "FAIL — production validation contract text changed (frozen-runtime refusal missing)"; exit 1; }
 . "$scratch/helpers"
 . "$repo/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 bootstrap_stage3_host_platform() { printf '%s\n' "$fixture_platform"; }
@@ -57,15 +63,20 @@ run_case() {
     result=$?
     set -e
     if [ -z "$expected_error" ]; then
-        [ "$result" = 0 ] || { cat "$scratch/result" >&2; exit 1; }
-    else
-        [ "$result" != 0 ] && grep -Fq "$expected_error" "$scratch/result" || {
-            printf 'FAIL: %s %s expected %s\n' "$fixture_platform" "$variant" "$expected_error" >&2
-            cat "$scratch/result" >&2
+        if [ "$result" != 0 ]; then
+            echo "FAIL — $fixture_platform $variant: canonical case refused (rc=$result)"
+            cat "$scratch/result"
             exit 1
-        }
+        fi
+    else
+        if [ "$result" = 0 ] || ! grep -Fq "$expected_error" "$scratch/result"; then
+            printf 'FAIL — %s %s expected refusal %s\n' "$fixture_platform" "$variant" "$expected_error"
+            cat "$scratch/result"
+            exit 1
+        fi
     fi
 }
+set -e
 for fixture_platform in x86_64-pc-windows-msvc x86_64-pc-windows-gnu \
     x86_64-unknown-linux-gnu aarch64-apple-darwin; do
     case "$fixture_platform" in *windows*) suffix=.exe ;; *) suffix= ;; esac
@@ -76,4 +87,5 @@ for fixture_platform in x86_64-pc-windows-msvc x86_64-pc-windows-gnu \
     run_case "$fixture_platform" "$suffix" existing-output 'canonical Stage 2 output already exists'
     run_case "$fixture_platform" "$suffix" admitted-output 'an admitted Stage 2 output already exists'
 done
-printf 'Stage 2 resume platform paths: PASS (%s cases)\n' "$fixture_number"
+[ "$fixture_number" -gt 0 ] || { echo "ERROR — nothing was checked (0 platform cases ran)"; exit 2; }
+printf 'PASS — %s Stage 2 resume platform path cases checked\n' "$fixture_number"

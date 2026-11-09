@@ -175,6 +175,41 @@ fn memory_limit_bytes() -> u64 {
         * 1024
 }
 
+/// Parse a BDD tally line of the exact shape `<int> example|examples,
+/// <int> failure|failures`, with an optional trailing ` (NNms)` duration.
+/// Returns `Some((total, failed))` only when the whole line is a tally;
+/// anything else — in particular an example NAME that merely mentions
+/// "example" and "failure" (doc/08_tracking/bug/spec_verdict_forgeable_from_example_name_2026-08-17.md)
+/// — must not be read as a tally, or the file verdict becomes forgeable
+/// from an example's name.
+fn parse_bdd_tally_line(trimmed: &str) -> Option<(usize, usize)> {
+    let mut body = trimmed;
+    if let Some((head, dur)) = trimmed.rsplit_once(" (") {
+        let inner = dur.strip_suffix(')')?;
+        let dur_digits = inner.strip_suffix("ms").unwrap_or(inner);
+        if dur_digits.is_empty() || !dur_digits.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        body = head;
+    }
+    let (total_tok, rest) = body.split_once(", ")?;
+    let (num, noun) = total_tok.split_once(' ')?;
+    if noun != "example" && noun != "examples" {
+        return None;
+    }
+    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let (fnum, fnoun) = rest.split_once(' ')?;
+    if fnoun != "failure" && fnoun != "failures" {
+        return None;
+    }
+    if fnum.is_empty() || !fnum.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((num.parse().ok()?, fnum.parse().ok()?))
+}
+
 /// Parse test output to extract pass/fail counts
 pub fn parse_test_output(output: &str) -> (usize, usize) {
     // Look for patterns like "N example(s), M failure(s)"
@@ -197,19 +232,12 @@ pub fn parse_test_output(output: &str) -> (usize, usize) {
             continue;
         }
 
-        // Pattern: "X example(s), Y failure(s)"
-        if trimmed.contains("example") && trimmed.contains("failure") {
-            // Extract numbers from cleaned line
-            let parts: Vec<&str> = clean_line.split(|c: char| !c.is_numeric()).collect();
-            let numbers: Vec<usize> = parts.iter().filter_map(|p| p.parse::<usize>().ok()).collect();
-
-            if numbers.len() >= 2 {
-                let total = numbers[0];
-                let failed = numbers[1];
-                let passed = total.saturating_sub(failed);
-                total_passed += passed;
-                total_failed += failed;
-            }
+        // Pattern: "X example(s), Y failure(s)" — strict tally shape only,
+        // so an example name containing both words is never counted.
+        if let Some((total, failed)) = parse_bdd_tally_line(trimmed) {
+            let passed = total.saturating_sub(failed);
+            total_passed += passed;
+            total_failed += failed;
         }
     }
 
@@ -2473,6 +2501,51 @@ mod tests {
         let (passed, failed) = parse_test_output(output);
         assert_eq!(passed, 28);
         assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn test_parse_test_output_with_ms_duration_suffix() {
+        let output = "\x1b[32m2 examples, 0 failures\x1b[0m (12ms)";
+        let (passed, failed) = parse_test_output(output);
+        assert_eq!(passed, 2);
+        assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn test_parse_test_output_ignores_example_name_with_keywords() {
+        // Regression for spec_verdict_forgeable_from_example_name_2026-08-17.md:
+        // an example NAME mentioning "example" and "failure" must not be read
+        // as a tally line (previously forged "33 total, 1 passed, 32 failed"
+        // out of one genuinely passing example).
+        let output = "  \x1b[32m✓ registers each example separately, not as one synthetic failure\x1b[0m\n1 example, 0 failures";
+        let (passed, failed) = parse_test_output(output);
+        assert_eq!(passed, 1);
+        assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn test_parse_test_output_ignores_summary_shaped_example_name() {
+        // False-GREEN direction of the same defect: a passing example named
+        // like a tally must not inflate the pass count when no Passed:/Failed:
+        // summary lines exist.
+        let output = "  \x1b[32m✓ 99 examples, 0 failures\x1b[0m";
+        let (passed, failed) = parse_test_output(output);
+        assert_eq!(passed, 0);
+        assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn test_parse_test_output_rejects_partial_tally_shapes() {
+        for output in [
+            "examples, 2 failures",
+            "5 examples, failures",
+            "5 examples, 2 failures plus extra words",
+            " Passed: 3 trailing",
+        ] {
+            let (passed, failed) = parse_test_output(output);
+            assert_eq!(passed, 0, "input: {output:?}");
+            assert_eq!(failed, 0, "input: {output:?}");
+        }
     }
 
     #[test]
