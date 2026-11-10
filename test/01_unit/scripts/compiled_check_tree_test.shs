@@ -53,4 +53,65 @@ assert summary["error_families"] == {"E-FAKE": 1}
 assert summary["complete_per_file_outcomes"] is True
 PY
 
-echo "compiled check tree: PASS"
+# Memory ceiling phase (doc/08_tracking/bug/executable_checker_failed_only_retry_peak_rss_2026-08-02):
+# a checker batch whose process tree exceeds --max-rss-kib is killed and every
+# file in the batch is isolated and classified rss_ceiling (fail closed).
+# Enforcement requires a measurable tree RSS; elsewhere the sampler reports
+# "unsupported" and this phase is skipped.
+if [ ! -d /proc ]; then
+    echo "compiled check tree: PASS (ceiling phase skipped: no /proc)"
+    exit 0
+fi
+
+ceiling_dir="$work_dir/ceiling"
+mkdir -p "$ceiling_dir/sources"
+printf 'fn slow_one() -> i64:\n    1\n' > "$ceiling_dir/sources/slow_a.spl"
+printf 'fn slow_two() -> i64:\n    2\n' > "$ceiling_dir/sources/slow_b.spl"
+
+slow_checker="$ceiling_dir/fake-slow-checker"
+cat > "$slow_checker" <<'SH'
+#!/bin/sh
+# Any real process tree exceeds 1 KiB; hold long enough for one sample.
+sleep 30
+SH
+chmod +x "$slow_checker"
+
+set +e
+python3 "$repo_root/scripts/check/compiled-check-tree.py" \
+    --checker="$slow_checker" \
+    --root="$ceiling_dir/sources" \
+    --output-dir="$ceiling_dir/evidence" \
+    --workers=1 \
+    --batch-size=2 \
+    --timeout=60 \
+    --max-rss-kib=1 \
+    --rss-interval-s=1 > "$ceiling_dir/summary.out"
+status=$?
+set -e
+test "$status" -eq 1
+
+python3 - "$ceiling_dir/evidence" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+out = Path(sys.argv[1])
+batch = json.loads((out / "batch" / "batch-000001.result.json").read_text(encoding="utf-8"))
+assert batch["rss_ceiling_exceeded"] is True, batch
+assert batch["rss_sampler"] == "proc-tree", batch
+assert batch["rss_ceiling_kib"] == 1, batch
+assert batch["rss_tree_peak_kib"] > 1, batch
+rows = [
+    json.loads(line)
+    for line in (out / "file-results.jsonl").read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+assert len(rows) == 2, rows
+assert all(row["error_family"] == "rss_ceiling" for row in rows), rows
+assert all(row["classification"] == "needs_triage" for row in rows), rows
+summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+assert summary["error_families"] == {"rss_ceiling": 2}, summary
+assert summary["complete_per_file_outcomes"] is True, summary
+PY
+
+echo "compiled check tree: PASS (ceiling phase: rss_ceiling fail-closed)"

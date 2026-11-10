@@ -1,0 +1,68 @@
+# Regression guard for
+# bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04
+# (seed-side static admission half).
+#
+# A literal non-bool argument at a `bool`-declared parameter must be rejected
+# on BOTH execution lanes with the same diagnostic, before any corruption can
+# happen (the JIT used to re-tag such values into garbage). The existence
+# payload contract is unchanged: `x.?`, Option payloads, and real bools keep
+# the deliberate runtime PRESENCE semantics and must stay accepted.
+#
+# Needs a seed built from a tree containing the admission fix (lane base
+# d8c0a761988c or later); drive it via SIMPLE_BINARY like the sibling
+# while_block_local_val specs.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, env_set_process}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn callee_decls() -> text:
+    "fn take_bool(b: bool) -> text:\n    \"got={{b}}\"\n\nfn opt_nil() -> i64?:\n    nil\n\n"
+
+fn run_program(mode: text, body: text) -> (text, text, i64):
+    val file = get_temp_dir().replace("\\", "/") + "/bool_param_admission_fx.spl"
+    val _w = write_file(file, callee_decls() + "fn main():\n    " + body + "\nmain()\n")
+    val _e = env_set_process("SIMPLE_EXECUTION_MODE", mode)
+    val (out, err, rc) = process_run_timeout(binary(), [file], 300000)
+    val _r = env_set_process("SIMPLE_EXECUTION_MODE", "")
+    (out, err, rc)
+
+fn rejected_on_both_lanes(body: text) -> bool:
+    val (_o1, e1, rc1) = run_program("interpreter", body)
+    val (_o2, e2, rc2) = run_program("jit", body)
+    val needle = "is declared 'bool' but the argument is a"
+    rc1 != 0 and e1.contains(needle) and rc2 != 0 and e2.contains(needle)
+
+describe "bool parameter rejects literal non-bool arguments on both lanes":
+    it "rejects an integer literal (the original take_bool(42) repro)":
+        expect(rejected_on_both_lanes("print take_bool(42)")).to_equal(true)
+
+    it "rejects the integer literal 0 (falsy control)":
+        expect(rejected_on_both_lanes("print take_bool(0)")).to_equal(true)
+
+    it "rejects a text literal":
+        expect(rejected_on_both_lanes("print take_bool(\"x\")")).to_equal(true)
+
+    it "rejects a bare nil literal":
+        expect(rejected_on_both_lanes("print take_bool(nil)")).to_equal(true)
+
+describe "bool parameter keeps the existence payload contract":
+    it "accepts real bools and reports them unchanged on both lanes":
+        val (oi, _ei, rci) = run_program("interpreter", "print take_bool(true)\n    print take_bool(false)")
+        val (oj, _ej, rcj) = run_program("jit", "print take_bool(true)\n    print take_bool(false)")
+        expect(rci == 0 and rcj == 0).to_equal(true)
+        expect(oi.contains("got=true") and oi.contains("got=false")).to_equal(true)
+        expect(oj.contains("got=true") and oj.contains("got=false")).to_equal(true)
+
+    it "accepts `x.?` existence probes with presence semantics on both lanes":
+        val body = "val opt = Some(42)\n    print take_bool(opt.?)\n    print take_bool(opt_nil().?)\n    if opt.?:\n        print \"branch-then\"\n    else:\n        print \"branch-else\""
+        val (oi, _ei, rci) = run_program("interpreter", body)
+        val (oj, _ej, rcj) = run_program("jit", body)
+        expect(rci == 0 and rcj == 0).to_equal(true)
+        expect(oi).to_equal(oj)
+        expect(oi.contains("got=true") and oi.contains("got=false") and oi.contains("branch-then")).to_equal(true)
