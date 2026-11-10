@@ -244,11 +244,45 @@ y
         st_fail=1
     fi
 
+    # Fixture 5: core.worktree in the shared .git/config must fail closed with
+    # a NAMED cause — the 2026-08-08 incident had all three pre-push guards
+    # answering the generic repository-mismatch error, which reads like a
+    # tooling hiccup and invites being pushed past.
+    # doc/08_tracking/bug/core_worktree_config_disables_all_pre_push_guards_2026-08-08.md
+    st_repo5="$st_tmp/core-worktree-repo"
+    mkdir -p "$st_repo5/scripts/check"
+    cp "$st_self" "$st_repo5/scripts/check/check-no-conflict-markers-push.shs"
+    (
+        cd "$st_repo5" || exit 2
+        git init -q
+        git config user.email test@example.com
+        git config user.name test
+        printf 'hello\n' > f.txt
+        git add f.txt
+        git commit -q -m "initial"
+        st_base=$(git rev-parse HEAD)
+        printf 'hello\nworld\n' > f.txt
+        git add f.txt
+        git commit -q -m "second"
+        st_tip=$(git rev-parse HEAD)
+        git config core.worktree "$st_tmp/not-this-tree"
+        sh scripts/check/check-no-conflict-markers-push.shs "$st_base..$st_tip" > out.txt 2>&1
+        echo $? > rc.txt
+    )
+    st_rc5=$(cat "$st_repo5/rc.txt" 2>/dev/null)
+    st_out5=$(cat "$st_repo5/out.txt" 2>/dev/null)
+    if [ "$st_rc5" = "2" ] && printf '%s' "$st_out5" | "$GREP" -q "core.worktree"; then
+        echo "$SELF: selftest fixture 5 (core.worktree poison named, fail closed) -> PASS: ok"
+    else
+        echo "$SELF: selftest FIXTURE 5 FAILED (core.worktree must fail closed naming core.worktree): rc=$st_rc5 out=$st_out5" >&2
+        st_fail=1
+    fi
+
     if [ "$st_fail" -ne 0 ]; then
         echo "$SELF: ERROR — nothing was checked (selftest failed)"
         exit 2
     fi
-    echo "$SELF: selftest: 4 fixture(s) passed"
+    echo "$SELF: selftest: 5 fixture(s) passed"
     exit 0
 fi
 
@@ -285,6 +319,27 @@ done
 range="${1:-}"
 explicit=0
 [ -n "$range" ] && explicit=1
+
+# --- 0. core.worktree poison: name it, don't fail generically later ---------
+# core.worktree in the shared .git/config redirects EVERY git command in this
+# repo — including this guard's own toplevel resolution below — to a different
+# working tree. The guards then die with the generic 'repository mismatch'
+# error, which reads like a tooling hiccup, so the only protection against a
+# main tree wipe looks broken and invites being pushed past. Name the cause
+# and the repair instead.
+# doc/08_tracking/bug/core_worktree_config_disables_all_pre_push_guards_2026-08-08.md
+_cw_git_common=$(git rev-parse --git-common-dir 2>/dev/null) || _cw_git_common=""
+if [ -n "$_cw_git_common" ] && [ -f "$_cw_git_common/config" ]; then
+    _cw_value=$(git config --file "$_cw_git_common/config" --get core.worktree 2>/dev/null) || _cw_value=""
+    if [ -n "$_cw_value" ]; then
+        die 2 "core.worktree = '$_cw_value' is set in $_cw_git_common/config.
+  That key redirects every git command in this repository — this guard
+  included — to a DIFFERENT working tree, so the pre-push guards cannot
+  check the tree about to be pushed and fail closed here.
+  Repair:  git config --file \"$_cw_git_common/config\" --unset core.worktree
+  One-run workaround: export GIT_DIR=<repo>/.git GIT_WORK_TREE=<repo>"
+    fi
+fi
 
 # --- 1. cwd must be inside a git repository ---------------------------------
 toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""

@@ -49,6 +49,7 @@
 # goes to stdout and always begins with PASS:, FAIL: or ERROR:.
 #
 # Usage: check-no-conflict-tree-push.shs [rev-range | --<rev-list args>...]
+#   --selftest: run the fail-closed core.worktree-poison fixture and exit
 #   default range: main@origin..@-   (what a `jj git push --bookmark main` sends)
 #   An explicit range MUST contain ".." — a bare rev means "all history
 #   reachable from it" to git and is rejected rather than silently
@@ -127,6 +128,49 @@ if [ "${1:-}" = --test-max-commits ]; then
     shift 2
 fi
 
+# --selftest: fail-closed fixture for the core.worktree poison (2026-11-11).
+# The 2026-08-08 incident: core.worktree in the shared .git/config redirected
+# every git command to another tree and all three pre-push guards answered the
+# GENERIC repository-mismatch error — protection that looks like a tooling
+# hiccup gets ignored. This fixture poisons a throwaway repo and requires the
+# guard to exit 2 naming core.worktree and the repair.
+# doc/08_tracking/bug/core_worktree_config_disables_all_pre_push_guards_2026-08-08.md
+if [ "${1:-}" = --selftest ]; then
+    st_self=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P)/$(basename -- "$0")
+    st_tmp=$(mktemp -d 2>/dev/null) || die 2 "mktemp -d failed"
+    trap 'rm -rf "$st_tmp" 2>/dev/null' EXIT HUP INT TERM
+    st_repo="$st_tmp/core-worktree-repo"
+    mkdir -p "$st_repo/scripts/check"
+    cp "$st_self" "$st_repo/scripts/check/check-no-conflict-tree-push.shs"
+    (
+        cd "$st_repo" || exit 2
+        git init -q
+        git config user.email test@example.com
+        git config user.name test
+        printf 'hello\n' > f.txt
+        git add f.txt
+        git commit -q -m "initial"
+        st_base=$(git rev-parse HEAD)
+        printf 'hello\nworld\n' > f.txt
+        git add f.txt
+        git commit -q -m "second"
+        st_tip=$(git rev-parse HEAD)
+        git config core.worktree "$st_tmp/not-this-tree"
+        sh scripts/check/check-no-conflict-tree-push.shs "$st_base..$st_tip" > out.txt 2>&1
+        echo $? > rc.txt
+    )
+    st_rc=$(cat "$st_repo/rc.txt" 2>/dev/null)
+    st_out=$(cat "$st_repo/out.txt" 2>/dev/null)
+    if [ "$st_rc" = "2" ] && printf '%s' "$st_out" | "$GREP" -q "core.worktree"; then
+        echo "$SELF: selftest fixture 1 (core.worktree poison named, fail closed) -> PASS: ok"
+        echo "$SELF: selftest: 1 fixture(s) passed"
+        exit 0
+    fi
+    echo "$SELF: selftest FIXTURE 1 FAILED (core.worktree must fail closed naming core.worktree): rc=$st_rc out=$st_out" >&2
+    echo "$SELF: ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
 range="${1:-}"
 explicit=0
 rawmode=0
@@ -156,6 +200,27 @@ case "$range" in
         exit 2
         ;;
 esac
+
+# --- 0. core.worktree poison: name it, don't fail generically later ---------
+# core.worktree in the shared .git/config redirects EVERY git command in this
+# repo — including this guard's own toplevel resolution below — to a different
+# working tree. The guards then die with the generic 'repository mismatch'
+# error, which reads like a tooling hiccup, so the only protection against a
+# main tree wipe looks broken and invites being pushed past. Name the cause
+# and the repair instead.
+# doc/08_tracking/bug/core_worktree_config_disables_all_pre_push_guards_2026-08-08.md
+_cw_git_common=$(git rev-parse --git-common-dir 2>/dev/null) || _cw_git_common=""
+if [ -n "$_cw_git_common" ] && [ -f "$_cw_git_common/config" ]; then
+    _cw_value=$(git config --file "$_cw_git_common/config" --get core.worktree 2>/dev/null) || _cw_value=""
+    if [ -n "$_cw_value" ]; then
+        die 2 "core.worktree = '$_cw_value' is set in $_cw_git_common/config.
+  That key redirects every git command in this repository — this guard
+  included — to a DIFFERENT working tree, so the pre-push guards cannot
+  check the tree about to be pushed and fail closed here.
+  Repair:  git config --file \"$_cw_git_common/config\" --unset core.worktree
+  One-run workaround: export GIT_DIR=<repo>/.git GIT_WORK_TREE=<repo>"
+    fi
+fi
 
 # --- 1. cwd must be inside a git repository ---------------------------------
 toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
