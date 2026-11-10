@@ -1,6 +1,6 @@
 # VirtIO split ring corrupts neighboring fields and reuses live descriptors
 
-Priority: P1. Source implementation in progress; runtime verification pending.
+Priority: P1. Source fix implemented; runtime verification pending.
 
 Owner: `src/os/drivers/virtio/virtio_common.spl`, `Virtqueue`.
 Found while implementing the existing VirtIO-console host-GPU transport gap on
@@ -41,3 +41,9 @@ test runner. Required evidence is a red/green native-memory execution and
 focused unit execution with exact producer identity and positive test counts.
 The separate VirtIO-console transport remains unavailable until its device,
 socket, session, and live x86_64/RISC-V acceptance gates pass.
+
+Source review passed at `d9d3bfec0895b0c8f130373724a8dcd5552f7b96`.
+Working/staged environment guards, workspace-root guard, and executable-spec
+layout check passed. The user authorized source fixes with executable tests
+to land while unavailable runtime checks remain explicitly waiting for
+verification; this does not waive an actual failing check or close this bug.
