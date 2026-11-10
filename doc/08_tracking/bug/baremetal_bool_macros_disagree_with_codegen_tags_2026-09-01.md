@@ -111,3 +111,21 @@ The ARM64 and x86_64 primitive logical consumers still interpreted tagged false 
 The whole-production-object reproducer landed in #7447 records the original release failing25 of190 assertions per architecture and the candidate repair passing190/190 on both. The seven producer owners and two logical owners also have a focused native regression. Both checks are now CI-wired for owner/header/test changes, including the complete-object QEMU user-mode regression. The current release integration is validated with exact input identities in the landing receipt.
 
 Astra reviewed the production C patch and confirmed that compiler/lib/MCP-specific conditional gates do not automatically apply to these embedded C files. This records completion of the primitive C consumer repair only. It does not claim a device boot, a Simple-generated caller, full owner branch coverage, or broader system qualification; those remain separate acceptance work. No broad bug closure is added here.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED.** The 2026-11-05/2026-11-07 resolution (#7447 lineage) is merged
+on base: `arch/common/baremetal_runtime.h:70-77` aliases `TRUE_VALUE`/`FALSE_VALUE` to
+`TAGGED_BOOL_TRUE`/`TAGGED_BOOL_FALSE` (11/19) with `_Static_assert` guards, and each
+self-contained arch TU carries the same per-definition guard (e.g.
+`arch/x86_64/boot/baremetal_stubs.c:333-336`).
+
+Verification on this host (Windows Git Bash, source-level check):
+`sh scripts/check/check-baremetal-tagged-bool-decode.shs` →
+`PASS — 4 definition(s) checked, all decode the tagged bool` (exit 0).
