@@ -1,7 +1,7 @@
 # scripts/check vacuity census — guards that pass by construction or exit mute
 
 **Date:** 2026-08-17
-**Status:** OPEN
+**Status:** OPEN — named fail-opens fixed and verified conforming (waves 1-5, re-verified 2026-11-11 lane ne4); backlog re-derived 2026-11-11: 59 of 201 directly-wired gates lack an em-dash verdict (wave-5 count 64 of 245 on the wider transitive universe)
 **Lane:** scripts
 **Related:** `doc/08_tracking/bug/engine_divergence_guard_hardcodes_stale_seed_2026-08-17.md`
 
@@ -327,3 +327,33 @@ Remaining backlog: 64 of the 245 wired gate scripts (72 minus these 8). The
 GPU/CPU-backend `SKIP_UNAVAILABLE` policy question remains open; gates
 needing binaries, GPU, QEMU, rustc, lake, or an admitted Stage-2 compiler
 stay in the backlog per lane policy.
+
+## 2026-11-11 re-derivation (lane ne4, batch p3-ne4-20261111)
+
+Backlog re-derived from the live tree on release/1.0.0 tip (fa6366ca8bf5):
+
+- Wired universe from `config/check/must_check_gates.sdn` + `rules.sdl` +
+  hook/CI script references: **201 unique gate scripts** (the wave-4/5
+  figure of 245 included transitive references; 201 is the directly
+  wired set on this tree).
+- Static scan for the conforming em-dash verdict token
+  (`PASS —` / `FAIL —` / `ERROR —`): **59 of 201 wired gates have no
+  em-dash verdict** in source. This is consistent with wave 5's "64 of
+  245" once universe size is accounted for; no wave 6 has landed, so the
+  backlog is materially unchanged since 2026-11-09 wave 5.
+- The 2026-08-17 "Confirmed fail-open, by execution" table re-checked by
+  source inspection: `check-cpu-backend-artifacts.shs` and
+  `check-gpu-backend-layer-evidence.shs` now emit conforming verdicts on
+  every path, including `ERROR — nothing was checked (N ... skipped as
+  unavailable, 0 verified)` — the absence-of-evidence policy this doc
+  demanded for SKIP_UNAVAILABLE is implemented (lines 47-59 and 141 of
+  those scripts respectively).
+- The GPU/CPU-backend `SKIP_UNAVAILABLE` policy question is therefore
+  RESOLVED in implementation (unavailable -> ERROR exit 2), not open as
+  this doc's 2026-08-17 text assumed.
+
+Verdict: the census remains OPEN as a backlog tracker (59/201
+non-conforming wired gates); the specific fail-open defects named at
+filing are all fixed. Next wave (per the established pattern of 8 gates
+per wave with clean-PASS / sabotage-FAIL / missing-input-ERROR fixtures)
+is cache-lane scheduling, not done here.

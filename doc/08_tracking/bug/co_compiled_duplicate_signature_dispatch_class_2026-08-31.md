@@ -1,6 +1,6 @@
 # Co-compiled duplicate definitions with differing signatures — dispatch class
 
-Status: FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
+Status: FIXED — verified 2026-11-11 (lane ne4); raw-wrapper rename landed 2026-11-08 (fe8c1a623557) and resolver is fail-closed (10e216d19f8c)
 Found: 2026-08-31, while fixing known_bugs C12/C13.
 
 Resolution: the five remaining raw/high-level collisions (`atomic_bool_new`,
@@ -67,3 +67,28 @@ second is a compiler design decision.
 Rename the raw wrappers in `src/lib/nogc_sync_mut/sffi/` with an `sffi_`
 prefix (`sffi_process_run_with_limits`, `sffi_env_get`, `sffi_shell`, ...) so
 the warning class goes to zero, then make the diagnostic fatal to keep it there.
+
+## 2026-11-11 addendum (lane ne4, batch p3-ne4-20261111)
+
+Verdict: FIXED (pending -> fixed). Both halves of the suggested durable
+fix are landed on release/1.0.0 (worktree tip fa6366ca8bf5):
+
+1. `fe8c1a623557` "fix(sffi): deduplicate raw wrapper names" (2026-11-08)
+   — the five live raw/high-level collisions now use unique `sffi_`
+   names (`sffi_atomic_bool_new`, `sffi_env_get`, `sffi_env_vars`,
+   `sffi_process_run_with_limits`, `sffi_process_wait`); facades and
+   callers migrated. `atomic_i64_new`, `mcdc_condition_key`, `shell`
+   unchanged as documented.
+2. `10e216d19f8c` "fix(resolve): ambiguous co-compiled duplicate
+   definition is a compile error (owner decision 6)" (2026-11-09) —
+   the JIT/HIR/MIR resolver no longer falls back to the last definition
+   for ambiguous bare-name dispatch; it fails closed. Repro:
+   `test/01_unit/compiler/interpreter/ambiguous_co_compiled_fn_call_error_spec.spl`.
+
+Runtime verification that was pending is now done (seed-smoke, refreshed
+2026-11-11 seed, build-commit 0791c2b7f4a7):
+`test/01_unit/lib/nogc_sync_mut/sffi/raw_high_level_duplicate_signature_spec.spl`
+(the pinning spec named in this doc) -> 4/4 PASS. The compile of the
+full sffi/io surface during that run emits no
+`compiler_cross_module_private_symbol_collision` warnings for any of the
+eight historical pairs.
