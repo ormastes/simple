@@ -1,7 +1,8 @@
 # Census: local binding shadowed by a module namespace (2026-08-18)
 
-Status: OPEN (compiler defect, seed-side). This document is the **census** for
-the defect class; it does not fix the compiler.
+Status: FIXED (2026-11-11, P3 lane ne2) — the unblock condition named below is met on the refreshed
+seed; the defect class no longer reproduces. This document is the **census** for the defect class;
+it is retained as the historical census.
 
 Cross-links (the two originally confirmed instances):
 
@@ -227,3 +228,35 @@ or verified in this lane (shared seed, rebuild forbidden).
 Unblock condition: rebuild the seed, then
 `test/01_unit/language/match_binding_module_name_shadow_spec.spl` goes 2/2, and
 a new `for`-loop equivalent of the probe in the table above goes green.
+
+
+## Verdict addendum — 2026-11-11 (P3 lane ne2)
+
+Verdict: **FIXED.** The unblock condition named in "Real fix" below — rebuild the
+seed, then `match_binding_module_name_shadow_spec` goes green — is met on the
+refreshed seed (`bin/simple.exe`, build-commit `0791c2b7f4a7`, PR #8179 lineage;
+seed-smoke runs, `--mode=interpreter --no-cache`):
+
+- `test/01_unit/language/match_binding_module_name_shadow_spec.spl` → 6/6 passed
+  (the spec has grown from the 2 examples the gate cited; all green).
+- The `for`-loop form — the CONFIRMED biting form in this census — no longer
+  reproduces at current source: the sibling record
+  `for_loop_var_shadowed_by_module_alias_2026-08-18.md` carries a 2026-11-05 note
+  ("Not reproducible at current source", green on BOTH the JIT and interpreter
+  lanes) attributing the coverage to the locals-win resolution change in
+  `module_global_target` (consulting `env.is_local` first). The dedicated
+  regression spec for that change,
+  `test/01_unit/compiler/interpreter/local_shadows_builtin_input_spec.spl`, passes
+  1/1 on the refreshed seed (run this lane).
+- Root-cause fix: local bindings (`val`/`var`/`for`/pattern) now win over
+  module-namespace bindings, including namespaces bound by importers — exactly
+  the remedy section "Real fix" demanded, delivered seed-side on 2026-10-30
+  (match form; see sibling record) and extended by the 2026-11-05 locals-win
+  change (for/var form).
+
+The census tables above are historical. The Tier-A SUSPECTED `val`/`var`/`match`
+rows were recorded defensively against a resolution-order change; that change
+has now happened in the direction that keeps local bindings winning, and the
+prevention specs (match-shadow + local-shadows) pin the behavior. A fresh census
+would only be warranted if a seed change ever makes a namespace binding win again
+— the two prevention specs are the durable guard.
