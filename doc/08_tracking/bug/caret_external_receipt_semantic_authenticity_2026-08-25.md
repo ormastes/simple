@@ -1,7 +1,10 @@
 # Caret external receipt semantic authenticity gap
 
-Status: open. The five external Caret must-check rows remain `TODO` and generic
-signed receipts are deliberately rejected until lane-specific validators land.
+Status: fixed 2026-11-11 (lane ne3) — fail-closed quarantine restored and
+re-verified live (regression test PASS: all five generic signed Caret receipts
+fail closed at the semantic quarantine). The five rows remain `TODO` pending
+the versioned validators below; that is deliberate tracked follow-up, not an
+open defect. See "Addendum 2026-11-11" at the end of this file.
 
 `check-external-must-check-receipt.shs` previously accepted a trusted signature
 over four generic blobs and exact `acceptance.*=PASS` labels for local Slang,
@@ -73,3 +76,32 @@ evidence attachments.
 The automated wrapper, messaging, and batch-adapter rows remain separate
 bootstrap checks and must never promote these production rows.
 
+
+
+## Addendum 2026-11-11 — lane ne3: FIXED — fabrication path closed; quarantine
+## re-verified live on this lane
+
+Traversed on work/p3-ne3-20261111 (origin/release/1.0.0 tip 93490a99c5d8).
+
+The 2026-11-05 regression fix was re-executed here, not just re-read:
+
+```
+$ sh test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs
+PASS: all five generic signed Caret receipts fail closed at the semantic quarantine
+(exit 0)
+```
+
+(log: `build/review/p3fix-ne3-20261111-logs/row7_quarantine_test.log`). The test
+builds a fixture reviewer key + policy, signs a generic artifact per Caret row
+(installed-provider, runtime-primitives, multi-manager, smux, and the local
+row's gate list in `check-external-must-check-receipt.shs:157`), points the
+first attachment at a hostile path to prove quarantine ordering, and asserts
+the post-authentication/pre-attachment failure for all five rows — all five
+fail closed as required.
+
+Residual, deliberately out of scope of the defect itself: the five external
+rows remain `TODO` until the versioned lane-specific validators listed above
+land (installed providers, runtime primitives, multi-manager, smux PTY,
+local-Slang generation endpoint). That follow-up is a feature effort, not an
+open security hole: with the quarantine in place, a trusted signature over
+generic blobs can no longer promote a row.

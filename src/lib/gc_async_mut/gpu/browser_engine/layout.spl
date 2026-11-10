@@ -7,6 +7,10 @@ use std.gc_async_mut.gpu.browser_engine.layout_table.{layout_table}
 use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{
     WebLayoutContext, LayoutBox, LineBox, InlineFragment, layout_context_new
 }
+use std.gc_async_mut.gpu.browser_engine.layout_inline.{
+    _collect_text, _split_words, _parse_inline_text_align
+}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_get_attr, be_dom_get_style}
 
 val M14_LINE_HEIGHT = 24
 val M14_BASELINE = 19
@@ -349,8 +353,134 @@ fn layout_block(node: BeDomNode, ctx: WebLayoutContext) -> LayoutBox:
     (`is_anonymous == true`) per CSS 2.1 §9.2.1."""
     _m14_layout_block_node(_m14_layout_root(node), ctx.available_width, 0)
 
+# Fixed per-character advance for IFC text measurement. M14 carries no font
+# metrics, so inline text advances at the same uniform rate the rest of the
+# M14 model assumes; one space between words costs one character advance.
+val IFC_CHAR_WIDTH = 8
+
+fn _m14_inline_style_prop(node: BeDomNode, name: text) -> text:
+    """Extract a `name:` value from the inline style attribute; "" when the
+    attribute or property is absent."""
+    val style_attr = be_dom_get_attr(node, "style")
+    if style_attr.len() == 0:
+        return ""
+    val needle = name + ":"
+    val idx = style_attr.index_of(needle)
+    if idx < 0:
+        return ""
+    val start = idx + needle.len()
+    var end = start
+    while end < style_attr.len() and style_attr.slice(end, end + 1) != ";":
+        end = end + 1
+    style_attr.slice(start, end).trim()
+
+fn _m14_text_width(s: text) -> i32:
+    """Advance width of `s` in the fixed-rate M14 text model."""
+    s.len() * IFC_CHAR_WIDTH
+
+fn _m14_chunk_word(w: text, avail: i32) -> [text]:
+    """Split `w` into chunks no wider than `avail` (word-break: break-all /
+    overflow-wrap: break-word)."""
+    var chunks: [text] = []
+    var max_chars = avail / IFC_CHAR_WIDTH
+    if max_chars < 1:
+        max_chars = 1
+    var i = 0
+    while i < w.len():
+        var j = i + max_chars
+        if j > w.len():
+            j = w.len()
+        chunks.push(w.slice(i, j))
+        i = j
+    chunks
+
+fn _m14_ifc_line(runs: [text], used_w: i32, y: i32, avail: i32, align: text) -> LineBox:
+    """Build one LineBox from the text runs packed on a single line, with
+    fragments positioned per `text-align` (left default; center/right offset
+    the whole run within the available width)."""
+    var x0 = 0
+    if align == "center":
+        x0 = (avail - used_w) / 2
+        if x0 < 0:
+            x0 = 0
+    else:
+        if align == "right":
+            x0 = avail - used_w
+            if x0 < 0:
+                x0 = 0
+    var frags: [InlineFragment] = []
+    var x = x0
+    var i = 0
+    while i < runs.len():
+        val w = _m14_text_width(runs[i])
+        frags.push(InlineFragment(
+            x: x, y: y, width: w, height: M14_LINE_HEIGHT,
+            baseline_offset: M14_BASELINE, text_run: runs[i]))
+        x = x + w + IFC_CHAR_WIDTH
+        i = i + 1
+    LineBox(
+        x: x0, y: y, width: used_w, height: M14_LINE_HEIGHT,
+        baseline: M14_BASELINE, fragments: frags)
+
+fn layout_inline(node: BeDomNode, ctx: WebLayoutContext) -> LayoutBox:
+    """Lay out `node` as an inline formatting context over the M14 public
+    LayoutBox type, performing real line breaking.
+
+    Whitespace-separated words are packed greedily into lines of
+    `ctx.available_width` px. An oversized word is split into width-fitting
+    chunks when the root element requests it (`word-break: break-all` or
+    `overflow-wrap: break-word`/`anywhere`); otherwise it keeps its own
+    overflowing line, per CSS Text Level 3. Fragments are positioned per
+    `text-align` (default left)."""
+    val root = _m14_layout_root(node)
+    val avail = ctx.available_width
+    val align = _parse_inline_text_align(root)
+    val word_break = _m14_inline_style_prop(root, "word-break")
+    var wrap = _m14_inline_style_prop(root, "overflow-wrap")
+    if wrap == "":
+        wrap = be_dom_get_style(root).overflow_wrap
+    var tokens: [text] = []
+    val words = _split_words(_collect_text(root))
+    var i = 0
+    while i < words.len():
+        val w = words[i]
+        if _m14_text_width(w) > avail and (word_break == "break-all" or wrap == "break-word" or wrap == "anywhere"):
+            val chunks = _m14_chunk_word(w, avail)
+            var k = 0
+            while k < chunks.len():
+                tokens.push(chunks[k])
+                k = k + 1
+        else:
+            tokens.push(w)
+        i = i + 1
+    var lines: [LineBox] = []
+    var cur: [text] = []
+    var cur_w = 0
+    i = 0
+    while i < tokens.len():
+        val w = _m14_text_width(tokens[i])
+        if cur.len() == 0:
+            cur.push(tokens[i])
+            cur_w = w
+        else:
+            val joined = cur_w + IFC_CHAR_WIDTH + w
+            if joined <= avail:
+                cur.push(tokens[i])
+                cur_w = joined
+            else:
+                lines.push(_m14_ifc_line(cur, cur_w, lines.len() * M14_LINE_HEIGHT, avail, align))
+                cur = [tokens[i]]
+                cur_w = w
+        i = i + 1
+    if cur.len() > 0:
+        lines.push(_m14_ifc_line(cur, cur_w, lines.len() * M14_LINE_HEIGHT, avail, align))
+    LayoutBox(
+        x: 0, y: 0, width: avail, height: lines.len() * M14_LINE_HEIGHT,
+        is_anonymous: false, line_boxes: lines, children: [])
+
 export layout_tree, layout_node, layout_to_scene, paint_box
 export layout_block
+export layout_inline
 export layout_table
 export WebLayoutContext, LayoutBox, LineBox, InlineFragment, layout_context_new
 export layout_flex

@@ -75,3 +75,15 @@ diagnostic artifacts are not admitted test producers. The original HIR/MIR
 construction gate remains unrun, and the five `Dict<K, V>` workaround spellings
 in `phase_memo_ownership.spl` remain until that gate passes on an admitted
 producer. This follow-up does not close the bug.
+
+## 2026-11-10 P2 triage (lane p2-compiler-triage-20261110)
+
+VERDICT: SUPERSEDED. Parser repair 061ee2d4735 is an ancestor of release/1.0.0
+d7a430cc2baf. Workaround removal COMPLETED by 036b4597d431 (2026-11-09):
+phase_memo_ownership.spl:5-9 uses the original {K: V} positional payloads, no
+@workaround tags remain, and the commit message records the native stage2_new4
+original-form gate. Qualified on the deployed seed (interpreter):
+positional_payload_brace_dict_spec.spl 9/9, positional_payload_spelling_spec.spl
+5/5; repro fixture test/fixtures/repro/compiler/positional_brace_dict_payload/
+main.spl prints a=207 b=13 c=5, exit 0. Cycles: 1. Evidence:
+build/review/p2fix-compiler-20261110.sdn.

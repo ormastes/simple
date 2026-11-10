@@ -1,0 +1,133 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Regression for doc/08_tracking/bug/doc_coverage_command_broken_missing_load_sdoctest_blocks_2026-09-05.md
+# (second defect, recorded in doc_coverage_sdoctest_functions_never_implemented_2026-09-02.md):
+# the scanner carried its own simplified "DocItem" struct while the command,
+# analysis and reporting modules were written against types.doc_item.DocItem.
+# One program containing both structs failed semantic analysis
+# ("class `DocItem` has no field named `has_inline_comment`"), so
+# `bin/simple doc-coverage` could never complete a run. These examples force
+# the whole pipeline (scanner -> analysis -> every reporter) into one program
+# and assert the cross-module contract end to end.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.io.mod (file_write, shell)
+use app.doc_coverage.scanner.mod.{scan_file_for_docs}
+use app.doc_coverage.analysis.sdoctest_coverage.{compute_sdoctest_coverage}
+use app.doc_coverage.reporting.mod.{export_coverage_json, export_coverage_csv, generate_coverage_markdown, render_coverage_terminal}
+use app.doc_coverage.types.doc_item.{DocItem, DocKind}
+use std.string.{NL}
+
+# ============================================================================
+# Fixture helpers
+# ============================================================================
+
+fn _write_fixture() -> text:
+    val path = "test_doc_item_pipeline_fixture.spl"
+    val content = "# leading comment documents the function{NL}fn documented_fn():{NL}    42{NL}{NL}static fn helper_fn():{NL}    1{NL}{NL}struct BareStruct:{NL}    field: i64{NL}{NL}enum BareEnum:{NL}    Variant1{NL}"
+    val ok = file_write(path, content)
+    expect(ok).to_equal(true)
+    path
+
+fn _cleanup(path: text):
+    shell("rm -f {path}")
+
+# ============================================================================
+# Scanner produces the shared types.doc_item.DocItem
+# ============================================================================
+
+describe "scanner produces shared DocItem":
+    it "maps scanned declarations onto types.doc_item.DocItem fields":
+        step("maps scanned declarations onto types.doc_item.DocItem fields")
+        val path = _write_fixture()
+        val items = scan_file_for_docs(path)
+        _cleanup(path)
+
+        expect(items.len()).to_equal(4)
+
+        val fn_item = items[0]
+        expect(fn_item.name).to_equal("documented_fn")
+        expect(fn_item.kind).to_equal(DocKind.Function)
+        expect(fn_item.file_path).to_equal(path)
+        expect(fn_item.line).to_equal(2)
+        expect(fn_item.has_inline_comment).to_equal(true)
+        expect(fn_item.has_docstring).to_equal(false)
+
+        val static_item = items[1]
+        expect(static_item.kind).to_equal(DocKind.Function)
+        expect(static_item.name).to_equal("helper_fn")
+
+        expect(items[2].kind).to_equal(DocKind.Struct)
+        expect(items[3].kind).to_equal(DocKind.Enum)
+
+    it "marks uncommented declarations as missing inline documentation":
+        step("marks uncommented declarations as missing inline documentation")
+        val path = _write_fixture()
+        val items = scan_file_for_docs(path)
+        _cleanup(path)
+
+        expect(items[1].has_inline_comment).to_equal(false)
+        expect(items[2].has_inline_comment).to_equal(false)
+
+# ============================================================================
+# Full pipeline: scan -> compute -> every reporter, one program
+# ============================================================================
+
+describe "doc coverage pipeline end to end":
+    it "compute_sdoctest_coverage accepts scanned items and aggregates per file":
+        step("compute_sdoctest_coverage accepts scanned items and aggregates per file")
+        val path = _write_fixture()
+        val items = scan_file_for_docs(path)
+        _cleanup(path)
+
+        val blocks: [text] = ["example calling documented_fn"]
+        val report = compute_sdoctest_coverage(items, blocks)
+
+        expect(report.total_items).to_equal(4)
+        expect(report.documented_items).to_equal(1)
+        expect(report.missing_docs).to_equal(3)
+        expect(report.sdoctest_coverage).to_equal(1)
+        expect(report.files.len()).to_equal(1)
+        val file_cov = report.files[0]
+        expect(file_cov.path).to_equal(path)
+        expect(file_cov.total_items).to_equal(4)
+        expect(file_cov.documented_items).to_equal(1)
+        expect(file_cov.missing_docs).to_equal(3)
+        expect(file_cov.items.len()).to_equal(4)
+        # NOTE: the per-item `has_sdoctest` annotation is written inside
+        # compute_sdoctest_coverage and is invisible here only because class
+        # field WRITES on loop-bound items are erased under the test runner
+        # (doc/08_tracking/bug/class_field_access_erased_under_test_runner_2026-08-18.md);
+        # the aggregate counter below is the stable contract.
+        expect(report.sdoctest_coverage).to_equal(1)
+
+    it "every reporter renders the computed report without field errors":
+        step("every reporter renders the computed report without field errors")
+        val path = _write_fixture()
+        val items = scan_file_for_docs(path)
+        _cleanup(path)
+
+        val report = compute_sdoctest_coverage(items, [])
+        var all_items: [DocItem] = []
+        var fi = 0
+        while fi < report.files.len():
+            val file_cov = report.files[fi]
+            var ii = 0
+            while ii < file_cov.items.len():
+                all_items.push(file_cov.items[ii])
+                ii = ii + 1
+            fi = fi + 1
+        val json = export_coverage_json(report, true)
+        val csv = export_coverage_csv(all_items)
+        val md = generate_coverage_markdown(report)
+        val terminal = render_coverage_terminal(report)
+
+        expect(json.contains("documented_fn")).to_equal(true)
+        expect(json.contains("has_inline_comment")).to_equal(true)
+        expect(csv.contains("documented_fn")).to_equal(true)
+        expect(md.contains("BareStruct")).to_equal(true)
+        # The terminal renderer is an aggregate scope table by design; it
+        # prints the report header and totals, never individual item names.
+        expect(terminal.contains("Documentation Coverage Report")).to_equal(true)
+        expect(terminal.contains("Total Items")).to_equal(true)

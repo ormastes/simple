@@ -40,3 +40,35 @@ route `fill_span`/`alpha_blend_span` whole-span through the existing
 
 AOT/native builds are NOT affected (packed framebuffer, kernels run in place).
 This is interpreter-lane only.
+
+## 2026-11-10 P3 triage (work/p3-interp2-20261110) — SUPERSEDED (mechanism fixed; measured); residual blend gap routed
+
+The per-element gather/scatter mechanism this record describes no longer
+exists in `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`:
+
+- 2026-08-15: the bulk `arr.write_span(src, dst_off, src_off, count)`
+  mutating-method channel replaced the per-element scatter loops
+  (`_write_span_bulk`, file lines 444-457).
+- 2026-08-20: `simd_fill_row` lost its native branch entirely (native
+  round trip measured ~3x the memory traffic of the scalar store loop it
+  replaced; see the in-file citation of
+  `engine2d_simd_span_kernels_slower_and_fill_colour_corrupt_2026-08-06.md`).
+
+Re-measured on the deployed Windows Rust seed (worktree `bin/simple.exe`,
+x86_64 AVX2, `native_rows=true`, same 640px x 400-iter rig via
+`build/p3fix-interp2/span_bench_triage.spl`; 2026-08-14 numbers in
+parentheses):
+
+| kernel | interp ns/px then | interp ns/px now | C SIMD ns/px |
+|--------|------------------|------------------|--------------|
+| fill   | ~31              | ~1               | 0.17 |
+| copy   | ~47              | ~0               | 0.19 |
+| blend  | ~250             | ~14              | 0.83 |
+
+22-31x improvement across the board; the documented 180-300x marshalling
+cliff is closed. Residual gap is blend at ~17x C, whose remaining
+gather/scatter is two bulk `write_span` copies around the native span call;
+fully deleting them needs the interpreter extern ABI to pass `[u32]` by
+pinned data pointer (seed work, src/compiler_rust — outside the P3
+interpreter lane's write scope). Routed to the compiler-seed lane. No code
+change made here.

@@ -45,3 +45,21 @@ before returning, per the repo's fail-with-verdict convention.
 ## Triage 2026-11-03 (boot-script-fixes lane)
 
 Already fixed on origin: scripts/check/lib/bootstrap-stage3-provenance.shs:31-33 now prints a typed message naming the non-canonical facade path and the physical-path remedy before returning 1. Row closed fixed.
+
+## Triage 2026-11-10 (p3-boot2 lane)
+
+SUPERSEDED — the 2026-11-03 triage's claim is verified live on
+work/p3-boot2-20261110 (base origin/release/1.0.0). The silent-exit defect is
+fixed: `scripts/check/lib/bootstrap-stage3-provenance.shs:31-33` now prints a
+typed diagnostic naming the non-canonical facade path, the expected canonical
+path, and the physical-path remedy before returning 1.
+
+Live reproduction (this lane, one cycle): sourcing the facade with a
+non-canonical path component (`scripts/check/lib/../lib/bootstrap-stage3-provenance.shs`,
+the same string-compare arm a symlinked PWD hits — no Windows symlink
+privilege needed) prints
+
+    bootstrap Stage 3 provenance: facade path is not canonical: <given> (expected <physical>; invoke through the physical path, not a symlink such as /tmp on macOS)
+
+and exits rc=1. No silent `set -e` death. The doc's suggested fix (typed error
+line per the fail-with-verdict convention) is exactly what shipped.

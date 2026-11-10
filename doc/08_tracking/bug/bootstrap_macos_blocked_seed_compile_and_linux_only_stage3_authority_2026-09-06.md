@@ -922,3 +922,50 @@ forbids. A faithful port needs native helpers first: an
 helper or a small pinned C tool). That is a design and implementation task in
 its own right. Until it lands, the capsule lane still fails closed on macOS
 and BSD, which is the safe failure mode. This bug stays open.
+
+## Triage 2026-11-10 (p3-boot2 lane)
+
+SUPERSEDED for this record's bootstrap-tooling scope, with residuals that
+belong to other lanes (details below). Verified on work/p3-boot2-20261110
+(base origin/release/1.0.0), one cycle, source + gate evidence only (a macOS
+host is not reachable from this Windows lane and no macOS run is claimed):
+
+- macOS seed-compile / C-runtime / authority-publish defects (1-4) and the
+  Stage-2/Stage-4 build gates: fixed per this doc's own re-triangies
+  (2026-11-04, 2026-11-07), which stand unmodified on this branch.
+- Capsule-port classes C/D (fd-relative walk, exec-by-held-fd): the
+  2026-11-07 "Capsule port scoping" section demanded native helpers first;
+  owner decision (10) shipped them as `2e12cd1f450f` (2026-11-09) — pinned
+  C helper `src/runtime/tools/stage3_fdwalk.c` (openat/O_NOFOLLOW walk,
+  fexecve-style held-fd exec) wired into the shared stage3 runner.
+  Gate: `sh scripts/check/check-stage3-fdwalk-helper.shs` ->
+  `PASS — 1 check(s) executed, 0 failed [syntax-only: behaviour not run on
+  MINGW64_NT-10.0-26300]` (behaviour checks are POSIX-host-only by design).
+- Capsule mode without procfs still refuses fail-closed
+  (`portable-descriptor-capsule-not-supported`,
+  manifest-write.shs:134, manifest-verify.shs:799) — the deliberate safe
+  state this doc endorses until the producer/protocol redesign is complete.
+
+Residuals owned elsewhere (not this lane, not re-litigated):
+- `serialize_mir_function` Stage-2 SEGV (blocker B) and native f64
+  correctness: compiler/runtime lanes (src/compiler, src/runtime).
+- Stage-4 gate 6 runtime-capsule Mach-O symbol strength: link-architecture
+  owner lane.
+- End-to-end macOS Stage-3 run: needs a macOS host; the doc's own re-triage
+  states "a separate lane owns it".
+
+---
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **STALE-BLOCKED (host-limited + owner design decision)**. Verified in
+this worktree (base `origin/release/1.0.0`, 1504212d788b): the three landed
+fixes are present — defect 1's Apple stat field names exist at
+`src/compiler_rust/runtime/src/cache_host_authority_v1.rs:196-206`
+(`st_mtime_nsec`/`st_ctime_nsec` arms); defects 2-4 live in
+`scripts/check/lib/bootstrap-stage3/` and `src/runtime/`, outside this lane's
+edit scope but reviewed as landed. The remaining Stage-3/4 manifest-verification
+`/proc` coupling is, per this doc's own "Still OPEN" section, a deliberate
+descriptor-pinning security property whose macOS port (`/dev/fd/N` semantics
+differ) "needs a design decision rather than a substitution" — not a P3 code
+fix, and unverifiable from a Windows host. No change made.

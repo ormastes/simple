@@ -1,4 +1,38 @@
 # `self.error(...)` used where `self.error_fatal(...)` was intended — family sweep
+
+## Statement-binding invariant follow-up, 2026-11-10
+
+The release/1.0.0 source at `6d496f82c5a` still records eight statement
+invariant failures as nonfatal in `mir_lowering_stmts.spl`: three missing
+let-symbol paths, two missing initializer-local paths, an empty expression
+statement payload, a missing range-loop symbol, and a missing indexed-loop
+symbol. Returning after a malformed, unused binding does not guarantee a
+later `undefined variable` diagnostic. These messages are absent from the
+legacy fatal-message allowlist, so the driver can admit incomplete MIR.
+
+This follow-up changes only those eight sites to `error_fatal`, preserving
+diagnostic collection and lowering recovery. It leaves ordinary advisories
+and the documented Option.None fallback unchanged.
+
+`test/01_unit/compiler/mir/statement_binding_fatal_spec.spl` invokes the
+production statement/range/indexed-array lowerers with unresolved symbols,
+checks their source spans and actual driver fatal classification, and
+includes resolved-binding and advisory controls. These tests isolate an
+unused malformed binding rather than relying on a later variable use to
+produce an unrelated fatal error. The additional initializer/payload guards
+still require their producer-fault boundary evidence; no coverage claim is
+made from the binding tests alone.
+
+Status: source repair and executable regression authored; verification
+pending. No admitted self-hosted full CLI/test runner was available during
+authoring. The shared `bin/simple.exe` was independently identified as the
+Rust seed and was not substituted for product verification. Required runtime
+checks, original-boundary evidence, branch coverage, and generated SPipe
+manual remain pending the campaign's runtime prerequisite. This subsection
+does not close the full diagnostic family or reuse historical test passes.
+
+Provider input/output/cache-read/cache-create token usage: unavailable.
+Comparable cohort average and ratio: unavailable; no values were guessed.
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

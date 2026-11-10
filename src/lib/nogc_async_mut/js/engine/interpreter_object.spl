@@ -12,15 +12,35 @@ use std.nogc_async_mut.js.engine.interpreter.{JsInterpreter}
 impl JsInterpreter:
     # Register a native function placeholder and return its index
     me _register_native(name: text, native_id: i64) -> i64:
+        # In-place pushes, not local-alias-store-back: the alias form
+        # deep-copies both tables per registration, so each timer handle's
+        # eight native method registrations cost O(total functions) — the
+        # O(n^2) that hung the 4096-entry timer queue
+        # (js_timer_queue_4096_entries_hang_2026-09-01).
         val fn_idx = self.functions.len()
-        val placeholder = JsFunction.create(name, [], [], -1)
-        var functions: [JsFunction] = self.functions
-        functions.push(placeholder)
-        self.functions = functions
-        var native_id_map: [Pair<i64, i64>] = self.native_id_map
-        native_id_map.push(Pair(first: fn_idx, second: native_id))
-        self.native_id_map = native_id_map
+        self.functions.push(JsFunction.create(name, [], [], -1))
+        self.native_id_map.push(Pair(first: fn_idx, second: native_id))
         fn_idx
+
+    # Native id registered for `fn_id`, or 0 when it is a script function
+    # (native ids are strictly negative, so 0 is unambiguous).
+    # native_id_map is sorted by fn_id (registrations append increasing
+    # function indices), so binary search replaces the former linear scan
+    # that made every JS call O(registered natives) — O(n^2) once
+    # per-object natives grow the table (timer handles, promises).
+    me _lookup_native_id(fn_id: i64) -> i64:
+        var lo = 0
+        var hi = self.native_id_map.len() - 1
+        while lo <= hi:
+            val mid = (lo + hi) / 2
+            val mapping = self.native_id_map.get(mid)
+            if mapping.first == fn_id:
+                return mapping.second
+            if mapping.first < fn_id:
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        0
 
     # Define a native function in the global scope
     me _define_global_native(name: text, native_id: i64):

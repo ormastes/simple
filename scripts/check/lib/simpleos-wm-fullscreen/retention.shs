@@ -2,39 +2,72 @@ archive_previous_run() {
     [ -f "$BUILD_DIR/evidence.env" ] || return 0
     prev_status="$(sed -n 's/^simpleos_wm_fullscreen_status=//p' "$BUILD_DIR/evidence.env" | head -n 1)"
     [ -n "$prev_status" ] || prev_status=unknown
-    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    dest="$EVIDENCE_RUNS_DIR/$stamp-$prev_status"
-    dup=0
-    while [ -e "$dest" ]; do
-        dup=$((dup + 1))
-        dest="$EVIDENCE_RUNS_DIR/$stamp-$prev_status.$dup"
-    done
-    mkdir -p "$dest" || return 0
+    case "$prev_status" in
+        pass|fail|skip|blocked|unknown) ;;
+        *) prev_status=unknown ;;
+    esac
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)" || return 1
+    mkdir -p "$EVIDENCE_RUNS_DIR" || return 1
+    # Keep partial copies invisible to archive discovery/pruning. A unique
+    # same-filesystem staging directory becomes a published run only after
+    # every present artifact and the run metadata have been written.
+    pending="$(mktemp -d "$EVIDENCE_RUNS_DIR/.pending-$stamp-XXXXXX")" || return 1
+    nonce="${pending##*-}"
+    dest="$EVIDENCE_RUNS_DIR/$stamp-$nonce-$prev_status"
+    [ ! -e "$dest" ] || return 1
     for retained in "$BUILD_DIR/evidence.env" "$LAUNCH_OUT" "$SERIAL_LOG" \
         "$CAPTURE_OUT" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" \
         "$BROWSER_EVENT_PPM" "$FONT_REGION_RGB"
     do
         if [ -f "$retained" ]; then
-            cp -p "$retained" "$dest/" 2>/dev/null || true
+            cp -p "$retained" "$pending/" || return 1
         fi
     done
-    {
-        echo "archived_at_utc=$stamp"
-        echo "archived_from=$BUILD_DIR"
-        echo "archived_run_status=$prev_status"
-        echo "archived_by_wrapper=$WRAPPER"
-        echo "note=retained copy of a PREVIOUS run; the current run writes only the canonical \$BUILD_DIR paths"
-    } >"$dest/RUN_INFO.env"
+    printf '%s\n' \
+        "archived_at_utc=$stamp" \
+        "archived_from=$BUILD_DIR" \
+        "archived_run_status=$prev_status" \
+        "archived_by_wrapper=$WRAPPER" \
+        "note=retained copy of a PREVIOUS run; the current run writes only the canonical \$BUILD_DIR paths" \
+        >"$pending/RUN_INFO.env" || return 1
+    mv "$pending" "$dest" || return 1
+    if [ "$prev_status" = pass ]; then
+        # Commit completion order separately from random archive names. The
+        # next failed run must still protect this PASS, not a lexically later
+        # old name. A failed marker update leaves canonical evidence intact.
+        latest_pass="$EVIDENCE_RUNS_DIR/.latest-pass"
+        if [ -e "$latest_pass" ] || [ -L "$latest_pass" ]; then
+            [ -f "$latest_pass" ] && [ ! -L "$latest_pass" ] || return 1
+        fi
+        latest_pending="$(mktemp "$EVIDENCE_RUNS_DIR/.latest-pass-XXXXXX")" || return 1
+        printf '%s\n' "${dest##*/}" >"$latest_pending" || return 1
+        mv -f "$latest_pending" "$latest_pass" || return 1
+    fi
     echo "simpleos_wm_fullscreen_retained_previous_run=$dest status=$prev_status"
 }
 
 prune_archived_runs() {
     [ -d "$EVIDENCE_RUNS_DIR" ] || return 0
-    keep_pass="$(ls -1 "$EVIDENCE_RUNS_DIR" 2>/dev/null | grep -E -- '-pass(\.[0-9]+)?$' | sort | tail -n 1)"
+    latest_pass="$EVIDENCE_RUNS_DIR/.latest-pass"
+    if [ -e "$latest_pass" ] || [ -L "$latest_pass" ]; then
+        [ -f "$latest_pass" ] && [ ! -L "$latest_pass" ] || return 1
+        IFS= read -r keep_pass <"$latest_pass" || return 1
+        case "$keep_pass" in
+            ''|.*|*/*) return 1 ;;
+            *-pass|*-pass.[0-9]*) ;;
+            *) return 1 ;;
+        esac
+        [ -d "$EVIDENCE_RUNS_DIR/$keep_pass" ] &&
+            [ ! -L "$EVIDENCE_RUNS_DIR/$keep_pass" ] || return 1
+    else
+        # Legacy archives predate the completion record; use filesystem
+        # completion times rather than names until a new PASS is published.
+        keep_pass="$(ls -1t "$EVIDENCE_RUNS_DIR" 2>/dev/null | grep -E -- '-pass(\.[0-9]+)?$' | head -n 1)"
+    fi
     total="$(ls -1 "$EVIDENCE_RUNS_DIR" 2>/dev/null | wc -l | tr -d ' ')"
     [ "$total" -gt "$EVIDENCE_RETAIN" ] || return 0
     excess=$((total - EVIDENCE_RETAIN))
-    for stale in $(ls -1 "$EVIDENCE_RUNS_DIR" 2>/dev/null | sort); do
+    for stale in $(ls -1tr "$EVIDENCE_RUNS_DIR" 2>/dev/null); do
         [ "$excess" -gt 0 ] || break
         [ "$stale" = "$keep_pass" ] && continue
         rm -rf "$EVIDENCE_RUNS_DIR/$stale"
@@ -42,7 +75,10 @@ prune_archived_runs() {
     done
 }
 
-archive_previous_run
+if ! archive_previous_run; then
+    echo "simpleos_wm_fullscreen_retention_failed: previous evidence preserved" >&2
+    exit 1
+fi
 prune_archived_runs
 
 rm -f "$LAUNCH_OUT" "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_OUT" \

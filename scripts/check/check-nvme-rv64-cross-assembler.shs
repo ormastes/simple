@@ -1,0 +1,87 @@
+#!/bin/sh
+# Exercise the production wrapper's assembler selection with real RV64 objects.
+# The deliberately failing Simple command is a boundary control, not firmware
+# compilation or boot evidence. No self-hosted compiler is substituted here.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+REAL_SH=$(command -v sh)
+REAL_CLANG=${NVME_RV64_TEST_CLANG:-$(command -v clang || true)}
+[ -n "$REAL_CLANG" ] || { echo "FAIL: real clang required" >&2; exit 2; }
+CASE_ROOT=$(mktemp -d)
+echo "rv64-cross-assembler evidence=$CASE_ROOT"
+
+embedded_firmware_setup() {
+  CASE_DIR="$CASE_ROOT/$1"
+  TOOLS="$CASE_DIR/tools"
+  mkdir -p "$TOOLS" "$CASE_DIR/examples/09_embedded/simpleos_nvme_fw/fw_rv64"
+  cp "$ROOT/examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs" "$CASE_DIR/examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs"
+  for tool in mkdir rm cat date env grep tail; do
+    real_tool=$(command -v "$tool")
+    printf '#!/bin/sh\nexec "%s" "$@"\n' "$real_tool" >"$TOOLS/$tool"
+    chmod +x "$TOOLS/$tool"
+  done
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$CASE_DIR" >"$TOOLS/git"
+  printf '#!/bin/sh\nexec "%s" 0.01\n' "$(command -v sleep)" >"$TOOLS/sleep"
+  printf '#!/bin/sh\necho compiler-reached >"%s/compiler-reached"\nexit 73\n' "$CASE_DIR" >"$CASE_DIR/compiler"
+  chmod +x "$TOOLS/git" "$TOOLS/sleep" "$CASE_DIR/compiler"
+}
+
+embedded_firmware_clang() {
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$REAL_CLANG" >"$1"
+  chmod +x "$1"
+}
+
+embedded_firmware_check() {
+  expected=$1
+  override=${2:-}
+  rc=0
+  (cd "$CASE_DIR" && PATH="$TOOLS" NVME_RV64_SIMPLE_BIN="$CASE_DIR/compiler" NVME_RV64_CROSS_CLANG="$override" "$REAL_SH" examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs) >"$CASE_DIR/result.log" 2>&1 || rc=$?
+  [ "$rc" -eq "$expected" ] || { cat "$CASE_DIR/result.log"; echo "FAIL: expected $expected, got $rc" >&2; exit 1; }
+  if [ "$expected" -eq 73 ]; then
+    [ -s "$CASE_DIR/build/test-artifacts/nvme_fw_rv64_start.o" ]
+    [ -f "$CASE_DIR/compiler-reached" ]
+    grep -q 'NVME_RV64_BUILD_FAILED code=73 reason=native-build-failed' "$CASE_DIR/result.log"
+  else
+    [ ! -f "$CASE_DIR/compiler-reached" ]
+  fi
+  [ ! -e "$CASE_DIR/build/nvme_fw_rv64.elf" ]
+  echo "PASS: $(basename "$CASE_DIR")"
+}
+
+embedded_firmware_setup automatic
+embedded_firmware_clang "$TOOLS/clang"
+embedded_firmware_check 73
+grep -q 'start_assembler=clang target_flags=--target=riscv64-unknown-elf' "$CASE_DIR/build/test-artifacts/nvme_fw_rv64_build.out"
+
+embedded_firmware_setup explicit_spaces
+embedded_firmware_clang "$CASE_DIR/clang with spaces"
+embedded_firmware_check 73 "$CASE_DIR/clang with spaces"
+
+embedded_firmware_setup gcc_preferred
+printf '#!/bin/sh\nexec "%s" --target=riscv64-unknown-elf "$@"\n' "$REAL_CLANG" >"$TOOLS/riscv64-unknown-elf-gcc"
+chmod +x "$TOOLS/riscv64-unknown-elf-gcc"
+embedded_firmware_check 73 /deliberately/missing/clang
+grep -q 'start_assembler=riscv64-unknown-elf-gcc target_flags=$' "$CASE_DIR/build/test-artifacts/nvme_fw_rv64_build.out"
+
+embedded_firmware_setup skip_unsupported
+printf '#!/bin/sh\nexit 1\n' >"$TOOLS/clang"
+chmod +x "$TOOLS/clang"
+embedded_firmware_clang "$TOOLS/clang-18"
+embedded_firmware_check 73
+grep -q 'start_assembler=clang-18 ' "$CASE_DIR/build/test-artifacts/nvme_fw_rv64_build.out"
+
+embedded_firmware_setup no_toolchain
+embedded_firmware_check 2
+grep -q 'no-rv64-cross-assembler' "$CASE_DIR/result.log"
+
+embedded_firmware_setup bad_override
+embedded_firmware_check 1 /deliberately/missing/clang
+grep -q 'NVME_RV64_BUILD_FAILED start-stub' "$CASE_DIR/result.log"
+
+embedded_firmware_setup failed_assembler
+printf '#!/bin/sh\nexit 42\n' >"$TOOLS/riscv64-unknown-elf-gcc"
+chmod +x "$TOOLS/riscv64-unknown-elf-gcc"
+embedded_firmware_check 1
+grep -q 'NVME_RV64_BUILD_FAILED start-stub' "$CASE_DIR/result.log"
+
+echo "STATUS: PASS nvme-rv64-cross-assembler 7 cases (assembler boundary only)"

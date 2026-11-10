@@ -1,0 +1,147 @@
+"""Split-ring layout, halfword access and descriptor exhaustion regressions."""
+
+use std.spec.*
+use os.drivers.virtio.virtio_common.{Virtqueue, VirtioDevice}
+use os.kernel.boot.mmio.{mmio_reset_for_test, mmio_disable_test_mode, mmio_read16, mmio_write16, mmio_read32, mmio_write32}
+
+describe "VirtIO split-ring owner":
+    it "aligns all three regions and preserves space for the event fields":
+        val queue = Virtqueue.new(0x1000u64, 128)
+        expect(queue.desc_addr).to_equal(0x1000u64)
+        expect(queue.avail_addr).to_equal(0x1800u64)
+        expect(queue.used_addr).to_equal(0x1908u64)
+        expect(queue.used_addr % 4u64).to_equal(0u64)
+        val single = Virtqueue.new(0x2000u64, 1)
+        expect(single.used_addr).to_equal(0x2018u64)
+
+    it "exhausts every descriptor exactly once and reuses only a returned slot":
+        mmio_reset_for_test()
+        var queue = Virtqueue.new(0x1000u64, 4)
+        queue.init_free_list()
+        expect(mmio_read16(0x103Eu64)).to_equal(4u16)
+        expect(queue.alloc_desc()).to_equal(0)
+        expect(queue.alloc_desc()).to_equal(1)
+        expect(queue.alloc_desc()).to_equal(2)
+        expect(queue.alloc_desc()).to_equal(3)
+        expect(queue.alloc_desc()).to_equal(-1)
+        queue.free_desc(2u16)
+        expect(queue.alloc_desc()).to_equal(2)
+        expect(queue.alloc_desc()).to_equal(-1)
+        mmio_disable_test_mode()
+
+    it "terminates a one-descriptor queue with an explicit sentinel":
+        mmio_reset_for_test()
+        var queue = Virtqueue.new(0x1000u64, 1)
+        queue.init_free_list()
+        expect(mmio_read16(0x100Eu64)).to_equal(1u16)
+        expect(queue.alloc_desc()).to_equal(0)
+        expect(queue.alloc_desc()).to_equal(-1)
+        mmio_disable_test_mode()
+
+    it "uses halfword writes for links and available entries":
+        mmio_reset_for_test()
+        var queue = Virtqueue.new(0x1000u64, 4)
+        mmio_write32(queue.desc_addr + 14u64, 0xABCD1234u32)
+        mmio_write32(queue.avail_addr + 2u64, 0xABCD5678u32)
+        mmio_write32(queue.avail_addr + 4u64, 0xABCD9876u32)
+        queue.init_free_list()
+        queue.push_avail(3u16)
+        expect(mmio_read16(queue.desc_addr + 14u64)).to_equal(1u16)
+        expect(mmio_read16(queue.avail_addr + 2u64)).to_equal(1u16)
+        expect(mmio_read16(queue.avail_addr + 4u64)).to_equal(3u16)
+        # The typed MMIO journal distinguishes call widths. The native fixture
+        # separately proves adjacent-byte preservation in actual memory.
+        expect(mmio_read32(queue.desc_addr + 14u64)).to_equal(0xABCD1234u32)
+        expect(mmio_read32(queue.avail_addr + 2u64)).to_equal(0xABCD5678u32)
+        expect(mmio_read32(queue.avail_addr + 4u64)).to_equal(0xABCD9876u32)
+        mmio_disable_test_mode()
+
+    it "wraps the available index at 65536 without overwriting another slot":
+        mmio_reset_for_test()
+        var queue = Virtqueue.new(0x1000u64, 4)
+        queue.init_free_list()
+        mmio_write16(queue.avail_addr + 2u64, 65535u16)
+        mmio_write16(queue.avail_addr + 4u64, 2u16)
+        queue.push_avail(1u16)
+        expect(mmio_read16(queue.avail_addr + 10u64)).to_equal(1u16)
+        expect(mmio_read16(queue.avail_addr + 2u64)).to_equal(0u16)
+        expect(mmio_read16(queue.avail_addr + 4u64)).to_equal(2u16)
+        mmio_disable_test_mode()
+
+    it "widens descriptor indices before scaling to byte addresses":
+        mmio_reset_for_test()
+        var queue = Virtqueue.new(0x1000u64, 8192)
+        # Seed just the last live link; no 8192-entry journal is required.
+        queue.free_head = 4096u16
+        mmio_write16(0x1100Eu64, 8192u16)
+        mmio_write16(0x100Eu64, 17u16)
+        expect(queue.alloc_desc()).to_equal(4096)
+        expect(queue.alloc_desc()).to_equal(-1)
+        queue.free_desc(4096u16)
+        expect(mmio_read16(0x1100Eu64)).to_equal(8192u16)
+        expect(mmio_read16(0x100Eu64)).to_equal(17u16)
+        mmio_disable_test_mode()
+
+    it "leaves invalid sizes and unaligned bases inert":
+        mmio_reset_for_test()
+        var zero = Virtqueue.new(0x1000u64, 0)
+        var negative = Virtqueue.new(0x1000u64, -1)
+        var odd = Virtqueue.new(0x1000u64, 3)
+        var large = Virtqueue.new(0x1000u64, 65536)
+        var unaligned = Virtqueue.new(0x1001u64, 4)
+        var null_base = Virtqueue.new(0u64, 4)
+        zero.init_free_list()
+        zero.push_avail(0u16)
+        expect(zero.alloc_desc()).to_equal(-1)
+        expect(negative.alloc_desc()).to_equal(-1)
+        expect(odd.alloc_desc()).to_equal(-1)
+        expect(large.alloc_desc()).to_equal(-1)
+        expect(unaligned.alloc_desc()).to_equal(-1)
+        expect(null_base.alloc_desc()).to_equal(-1)
+        expect(mmio_read16(0x100Eu64)).to_equal(0u16)
+        mmio_disable_test_mode()
+
+    it "rejects invalid descriptor indices without changing memory or ownership":
+        mmio_reset_for_test()
+        var queue = Virtqueue.new(0x1000u64, 4)
+        queue.init_free_list()
+        expect(queue.alloc_desc()).to_equal(0)
+        val next_free = queue.free_head
+        mmio_write16(queue.desc_addr + 78u64, 0xBEEFu16)
+        mmio_write16(queue.avail_addr + 4u64, 0xCAFEu16)
+        queue.free_desc(4u16)
+        queue.free_desc(65535u16)
+        queue.push_avail(4u16)
+        queue.push_avail(65535u16)
+        expect(queue.free_head).to_equal(next_free)
+        expect(mmio_read16(queue.desc_addr + 78u64)).to_equal(0xBEEFu16)
+        expect(mmio_read16(queue.avail_addr + 4u64)).to_equal(0xCAFEu16)
+        expect(mmio_read16(queue.avail_addr + 2u64)).to_equal(0u16)
+        expect(queue.alloc_desc()).to_equal(1)
+        mmio_disable_test_mode()
+
+    it "accepts the maximum queue and consumes its unsigned end sentinel":
+        mmio_reset_for_test()
+        var queue = Virtqueue.new(0x1000u64, 32768)
+        expect(queue.num_descs).to_equal(32768)
+        expect(queue.used_addr % 4u64).to_equal(0u64)
+        queue.free_head = 32767u16
+        mmio_write16(queue.desc_addr + 32767u64 * 16u64 + 14u64, 32768u16)
+        expect(queue.alloc_desc()).to_equal(32767)
+        expect(queue.alloc_desc()).to_equal(-1)
+        mmio_disable_test_mode()
+
+    it "refuses an invalid device queue before publishing QUEUE_READY":
+        mmio_reset_for_test()
+        val base = 0x10000000u64
+        mmio_write32(base + 0x000u64, 0x74726976u32)
+        mmio_write32(base + 0x004u64, 2u32)
+        mmio_write32(base + 0x008u64, 3u32)
+        mmio_write32(base + 0x034u64, 3u32)
+        var device = VirtioDevice(base_addr: base, device_id: 0u32, queue: Virtqueue.new(0u64, 0))
+        val initialized = device.init()
+        expect(initialized.is_err()).to_equal(true)
+        expect(mmio_read32(base + 0x070u64)).to_equal(128u32)
+        expect(mmio_read32(base + 0x044u64)).to_equal(0u32)
+        expect(device.queue.num_descs).to_equal(0)
+        mmio_disable_test_mode()

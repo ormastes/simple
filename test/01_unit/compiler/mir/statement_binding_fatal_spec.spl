@@ -1,0 +1,105 @@
+"""Malformed HIR bindings must not publish MIR that silently drops source work."""
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock}
+use compiler.hir.hir_types.{HirType, SymbolId, SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir.mir_types.{MirType}
+use compiler.driver.driver_mir_error_owner.{driver_mir_error_is_fatal_owned_v1}
+
+fn mir_calls_span() -> Span:
+    var span = Span.empty()
+    span.file = "binding_invariant.spl"
+    span.line = 11
+    span.col = 5
+    span
+
+fn mir_calls_setup() -> MirLowering:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_simple_function("binding_invariant", "unit")
+    lowering.builder = builder
+    lowering
+
+fn mir_calls_integer(value: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true,
+        type_: HirType.i64(), span: mir_calls_span())
+
+fn mir_calls_body() -> HirBlock:
+    HirBlock(stmts: [], has: false, value: nil, span: mir_calls_span())
+
+fn mir_calls_check(lowering: MirLowering, message: text):
+    expect(lowering.errors.len()).to_equal(1)
+    val diagnostic = lowering.errors[0]
+    expect(diagnostic.message).to_equal(message)
+    expect(diagnostic.fatal).to_equal(true)
+    expect(driver_mir_error_is_fatal_owned_v1(diagnostic)).to_equal(true)
+    expect(diagnostic.span.?).to_equal(true)
+    if val source = diagnostic.span:
+        expect(source.file).to_equal("binding_invariant.spl")
+        expect(source.line).to_equal(11)
+        expect(source.col).to_equal(5)
+
+describe "MIR binding invariant failures block publication":
+    it "rejects an unresolved let even when the binding is never used":
+        step("Lower a malformed HIR let without a later undefined-variable cascade")
+        var lowering = mir_calls_setup()
+        val statement = HirStmt(kind: HirStmtKind.Let(SymbolId(id: -1),
+            HirType.i64(), mir_calls_integer(7)), span: mir_calls_span())
+        lowering.lower_stmt(statement)
+        mir_calls_check(lowering, "let binding has no resolved symbol")
+
+    it "rejects an unresolved range binding even when the loop body is empty":
+        step("Lower a counted range with a missing binding and no variable reads")
+        var lowering = mir_calls_setup()
+        lowering.lower_for_range(SymbolId(id: -1), mir_calls_integer(0),
+            mir_calls_integer(2), false, nil, mir_calls_body(), mir_calls_span())
+        mir_calls_check(lowering, "for range loop variable has no resolved symbol")
+
+    it "rejects an unresolved indexed-array binding before publishing the loop":
+        step("Lower an indexed array loop with a missing binding and empty body")
+        var lowering = mir_calls_setup()
+        var builder = lowering.builder
+        val collection = builder.new_temp(MirType.ptr(MirType.i64(), false))
+        lowering.builder = builder
+        lowering.lower_for_array_indexed(SymbolId(id: -1), collection, MirType.i64(),
+            mir_calls_body(), mir_calls_span(), HirType.i64(), nil)
+        mir_calls_check(lowering, "for loop variable has no resolved symbol")
+
+    it "preserves resolved let and range bindings":
+        step("Lower well-formed HIR bindings through the same production owners")
+        var let_lowering = mir_calls_setup()
+        let_lowering.lower_stmt(HirStmt(kind: HirStmtKind.Let(SymbolId(id: 7),
+            HirType.i64(), mir_calls_integer(7)), span: mir_calls_span()))
+        expect(let_lowering.errors.len()).to_equal(0)
+        expect(let_lowering.builder.instructions.len()).to_be_greater_than(0)
+
+        var range_lowering = mir_calls_setup()
+        range_lowering.lower_for_range(SymbolId(id: 8), mir_calls_integer(0),
+            mir_calls_integer(2), false, nil, mir_calls_body(), mir_calls_span())
+        expect(range_lowering.errors.len()).to_equal(0)
+        expect(range_lowering.builder.blocks.len()).to_be_greater_than(1)
+
+    it "preserves resolved indexed-array bindings":
+        step("Lower the positive indexed-array control with a valid symbol")
+        var lowering = mir_calls_setup()
+        var builder = lowering.builder
+        val collection = builder.new_temp(MirType.ptr(MirType.i64(), false))
+        lowering.builder = builder
+        lowering.lower_for_array_indexed(SymbolId(id: 9), collection, MirType.i64(),
+            mir_calls_body(), mir_calls_span(), HirType.i64(), nil)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.builder.blocks.len()).to_be_greater_than(1)
+
+    it "keeps ordinary advisory diagnostics nonfatal after a rejected binding":
+        step("Collect an advisory after an invariant failure without changing its severity")
+        var lowering = mir_calls_setup()
+        lowering.lower_stmt(HirStmt(kind: HirStmtKind.Let(SymbolId(id: -1),
+            HirType.i64(), mir_calls_integer(7)), span: mir_calls_span()))
+        lowering.error("advisory control", nil)
+        expect(lowering.errors.len()).to_equal(2)
+        expect(driver_mir_error_is_fatal_owned_v1(lowering.errors[0])).to_equal(true)
+        expect(lowering.errors[1].message).to_equal("advisory control")
+        expect(driver_mir_error_is_fatal_owned_v1(lowering.errors[1])).to_equal(false)

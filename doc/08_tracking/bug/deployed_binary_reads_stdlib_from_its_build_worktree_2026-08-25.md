@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN. **Severity: HIGH — this silently invalidates stdlib evidence.** Not a GPU bug;
+**Status:** SUPERSEDED. **Severity: HIGH — this silently invalidates stdlib evidence.** Not a GPU bug;
 it was found while investigating one, and it is the actual cause of that "GPU bug".
 
 ## Symptom
@@ -107,3 +107,23 @@ results: a spec that passes may be passing against foreign source.
 ## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
 
 Not reproducible on the current seed (sentinel 888 in an invoking-tree src/lib shadowing std.async_core is read; build tree has the module too). Gate: scripts/check/check-stdlib-invoking-tree-wins.shs --selftest <binary>. Run it against each deployed Linux binary to confirm.
+
+## 2026-11-10 status — SUPERSEDED (P3 library lane, work/p3-lib-20261110)
+
+Round-15 note confirmed on this lane's base with the deployed Windows seed
+from the main repo, run against a foreign tmp project:
+`sh scripts/check/check-stdlib-invoking-tree-wins.shs --selftest
+/c/Users/yoon/dev/simple/bin/simple.exe` printed
+`PASS -- 1 probe, invoking tree's src/lib won (rc=0)` (fatal selftest silent =
+pass, then the real sentinel probe saw 888 from the invoking tree). The
+foreign-build-tree resolution defect does not reproduce on the current seed.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Third consecutive SUPERSEDED verdict, now on this lane's refreshed seed
+(bin/simple.exe, build-commit `0791c2b7f4a7`, 2026-11-11). Gate seed-smoke:
+`sh scripts/check/check-stdlib-invoking-tree-wins.shs --selftest
+"$PWD/bin/simple.exe"` → `PASS -- 1 probe, invoking tree's src/lib won
+(rc=0)` (fatal selftest silent = pass, then the real sentinel probe saw
+the invoking tree's value). Fixing change family: PR #7597 (merge
+`9e7e7a526edb`), module_loader cwd-first / invoking-tree-wins resolution.

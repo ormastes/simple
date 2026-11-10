@@ -80,3 +80,51 @@ the advice is wrong on both counts.
 
 ## Not done
 No bootstrap was started; no binary was rebuilt or redeployed.
+
+## Triage 2026-11-10 (p3-boot2 lane)
+
+SUPERSEDED — all three defects are fixed on work/p3-boot2-20261110 (base
+origin/release/1.0.0). One verification cycle; the doc's original reproducer
+was re-run live with this lane's seed binary.
+
+Defect 1 (conflated message) — verified live:
+`SIMPLE_LIB=src bin/simple.exe run src/app/build/bootstrap_receipt_main.spl
+--bootstrap-reason=self-host-convergence-check
+--bootstrap-receipt=/tmp/p3boot2-receipt-probe.receipt` prints exactly
+`bootstrap-policy-error: admission-hash-required:
+--parent-compiler-sha256=<64 lowercase hex>` and exits 2, and writes NO file
+(the probe path stays absent — `receipt-write-failed` no longer masks a
+missing-hash refusal). The three distinct messages sit at
+`src/app/build/bootstrap_receipt_planner.spl:74` (`admission-hash-required`),
+`:84` (`reason-not-allowed-for-target`), `:95` (`receipt-write-failed`,
+real write failures only).
+
+Defect 3 (`simple build bootstrap` is not a planner) — fixed both halves:
+- CLI: `src/app/build/cli_entry.spl:181-182` routes `build bootstrap` to
+  `plan_bootstrap_authorization` ("Emit authorization only; this function
+  never starts a bootstrap stage"), with the explicit comment at :211-213
+  that bootstrap never falls through to native-build; help text :158
+  describes it as the receipt planner.
+- Script advice: `scripts/bootstrap/bootstrap-from-scratch.sh:787-791` now
+  names the planner command `simple run src/app/build/bootstrap_receipt_main.spl
+  --bootstrap-reason=... --bootstrap-receipt=... <four admission hashes>`,
+  replacing the old `simple build bootstrap` wording (comment at :784-788
+  records why), gated by
+  `scripts/check/check-bootstrap-receipt-instruction.shs`.
+
+Defect 2 (no admittable receipt on a tree with no stage2 — circular
+admission) — superseded by the implemented genesis path (the owner
+security-model decision this doc said was needed):
+`scripts/bootstrap/bootstrap-from-scratch.sh:757-765` gives
+`--full-bootstrap --stop-after-stage2` (no receipt) a narrow trust-root
+lane with recorded, distinguishable provenance
+`explicit-full-bootstrap-stage2-trust-root` (plus `--stop-after-seed`'s
+`explicit-full-bootstrap-seed-prerequisite`), and :767-776 lets a previously
+admitted pure-Simple parent (`SIMPLE_BUILD_COMPILER`, provenance-bound via
+`scripts/bootstrap/admit-stage2-parent.shs`) refresh the first Stage-2
+producer. The canonical producer allow-lists both authorities
+(`scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs:172-173`),
+and `scripts/check/check-bootstrap-planner-admission-producer.shs:295`
+pins the trust-root authority. The fail-closed receipt validation itself was
+verified end-to-end in the p3-boot batch-1 lane (sibling record
+`bootstrap_admission_v2_circular_and_cannot_express_imported_parent_2026-08-18`).

@@ -188,3 +188,35 @@ No fix landed in this pass; the measurement harness is
 `scripts/perf/measure-peak-rss.shs` (ps-sample on Windows, exact
 PeakWorkingSet) and the numbers above are the baseline a budget gate on this
 host would be set against.
+
+## 2026-11-10 status — LIVE-blocked-by-scope (P3 bootstrap lane row 43, work/p3-boot6-20261110)
+
+Re-judged on this lane's base (`4343ce254922`): still LIVE. The 2026-11-07
+Windows re-measurement in this record (1.99 GB no-arg floor on
+`simple-base.exe` tip `4eb1de2ecbd`) stands as the current baseline; nothing
+in the 25 merges on this base changes the worker spawn shape
+(`bin/simple native-build` still spawns `run src/app/cli/native_build_worker.spl`
+interpreted) or the seed's module-cache retention design
+(`src/compiler_rust/compiler/src/module_cache.rs`, six process-lifetime
+thread_local maps, cleared only by the test runner). Both remedy directions
+named in this record are outside the bootstrap-tooling scope: (a) running a
+compiled `native_build_worker` is the self-host bootstrap redesign itself
+(chicken-and-egg by definition), and (b) per-`FunctionDef` AST density /
+`PARTIAL_MODULE_EXPORTS_CACHE` duplicate retention is `src/compiler_rust`
+(seed-fix lane, excluded) or `src/compiler` (agent-30 lane, excluded).
+
+Fix sketch for the owning lane: instrument the seed's interpreted module
+loader to census `PARTIAL_MODULE_EXPORTS_CACHE` vs `MODULE_EXPORTS_CACHE`
+live bytes after the no-arg worker run; if duplicate retention is confirmed,
+drop the partials table on successful module completion and re-measure the
+no-arg floor (must fall well below 1.99 GB). If it is not confirmed, the
+floor is intrinsic interpreter cost and the only honest fix is (a).
+
+BLOCKED-needs-grant (heavy build forbidden on this lane): seed rebuild to
+land/verify any retention fix —
+`(cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver && cargo build --profile bootstrap -p simple-native-all --features driver-compat)`
+— plus re-measure via
+`SIMPLE_MEM_TRACE=1 sh scripts/perf/measure-peak-rss.shs -- bin/simple.exe run src/app/cli/native_build_worker.spl`.
+No measurement re-run this pass: 2026-11-07 baseline on the same host shape is
+already in-record and a re-run would only re-print it (budget rule: no
+identical reruns).

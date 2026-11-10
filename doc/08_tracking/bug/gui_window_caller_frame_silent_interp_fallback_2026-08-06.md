@@ -257,3 +257,27 @@ REFUTED for the confirmed trigger (loud, both modes). Remaining open work is
 the perf-cliff root cause (item 2), which is unchanged from 2026-08-06 and
 is architectural, not a visibility gap.
 
+## 2026-11-10 P3 triage (work/p3-interp2-20261110) — visibility re-confirmed; root cause still out of lane
+
+Second-lane re-run of the 2026-08-09 decisive probe (real
+`browser_engine_pixels_at` from a module importing `gui_renderer`, 8x8,
+fixture `build/p3fix-interp2/probe_caller_frame_repro.spl`) on the deployed
+Windows Rust seed (worktree `bin/simple.exe`):
+
+- `SIMPLE_JIT_STRICT=1`: exit 1 within seconds, with the loud
+  `[jit-fallback] ... whole module dropped to the interpreter` line and a
+  hard `SIMPLE_JIT_STRICT: ... refusing to fall back to the interpreter`
+  error. The "not silent" finding re-confirms.
+- The named trigger has MOVED: the lowering failure is now
+  `Unsupported feature: type alias 'JsBrowserError' names a struct/class
+  declared with different layouts by several flattened modules; the alias
+  has no owner to resolve it through` (log preserved at
+  `build/p3fix-interp2/row12_strict.log`) — no longer
+  `unresolved external symbol 'subsys_from_scope'`. Either way the module
+  demotes whole to the interpreter with a loud diagnostic, so the
+  visibility item of this bug stays refuted.
+- The perf-cliff root cause (item 2) remains LIVE but lives in the seed
+  JIT/HIR lowering (src/compiler_rust / src/compiler), outside the P3
+  interpreter lane's write scope. Routed to the compiler lanes. No code
+  change here.
+

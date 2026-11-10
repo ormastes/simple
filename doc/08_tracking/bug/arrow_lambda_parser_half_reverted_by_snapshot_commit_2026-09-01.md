@@ -59,3 +59,36 @@ forward on these files for unrelated reasons — see
 
 A freshly built seed "fixes a real parser gap the deployed binary lacks". If
 that gap is the arrow lambda, this record is why main lost it.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED.** Both halves of `9e548aad80a` are restored on base via the
+snapshot-recovery commit `5e937a7116ce fix(restore): recover rust seed code lost in stale
+snapshot 4edef8fab8`:
+
+- Seed parser: `try_arrow_lambda_from_paren_list` exists
+  (`parser/src/expressions/primary/collections.rs:132,139,161`) and handles `() => e`,
+  `(x) => e`, `(x, y) => e`.
+- The `) =>` `CommonMistake::TsArrowFunction` detection rule is retired
+  (`parser/src/error_recovery.rs:538-549` documents the removal), and the pinned guard test
+  was inverted, not deleted (`parser/tests/control_flow.rs:495` now asserts
+  `detect_common_mistake(FatArrow, RParen) == None`).
+- Simple frontend: the D1 productions are present
+  (`src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl:707-754`, zero/multi/single
+  parameter forms).
+
+Seed-smoke: `bin/simple.exe run` on a fixture using all three forms printed the correct
+`6`, `34`, `42` (typed higher-order application of `(x) => x + 1`, `(x, y) => x*10+y`,
+`() => 42`). The frontend arrow-lambda scenarios in
+`test/01_unit/compiler/frontend/parser_contextual_new_scope_spec.spl` pass under the seed
+("uses the supported parenthesized arrow parameter scope", "binds existing
+multi-parameter arrow names before the body"). That spec still has 2 failures in
+UNRELATED scenarios ("admits the supported typed var without an explicit initializer",
+"blocks opaque imported shadow authority ...") — pre-existing on the release base, not
+this bug. The Rust `cargo test` half of the guard remains the seed lane's to execute.

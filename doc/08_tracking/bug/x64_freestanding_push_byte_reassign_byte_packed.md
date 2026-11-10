@@ -127,3 +127,30 @@ extern ABI, and only reproduces in the full freestanding sshd closure. Not worke
 this session (freestanding x86_64 QEMU lane, out of family G scope). Next step:
 an HIR method-resolution spec where a user class defining `to_i64` is in scope and
 `u8.to_i64()` must stay the primitive conversion.
+
+## 2026-11-10: LLVM import resolver sibling repaired; native acceptance remains open
+
+The current LLVM native import resolver had a directly reproducible owner-loss
+path: `resolve_name_variants("u8.to_i64", ..., import_map)` discarded the
+numeric qualifier and accepted a bare `to_i64` import belonging to
+`VfsFileSize`. Its existing builtin-owner guard covered collections and text
+but omitted all ten canonical numeric owner names emitted by MIR.
+
+The guard now includes those numeric owners. Exact owner-qualified import
+spellings still resolve, as do authored nonnumeric receiver imports. Four
+unit tests in `pipeline/native_project/imports.rs` cover numeric collisions in
+both import maps, a legitimate numeric-owner import, an authored custom-owner
+import, and the existing collection-owner guard. HIR canonicalizes aliases
+such as `int`/`float` before MIR emits the owner name.
+
+On Windows, the exact production helper and resolver functions plus their
+unit tests were compiled with `rustc --test --edition 2021`, without replacing
+any helper dependency: before the guard change, 3 passed and the numeric
+collision test failed; afterward, all 4 passed. This is direct owner-level
+unit evidence. The full compiler crate and native freestanding closure were
+not built for this check.
+
+This patch repairs the LLVM sibling path, not proof of the original
+Cranelift/full-sshd acceptance. The original `.push` workaround remains in
+place. The record stays open for the rebuilt-producer HIR/native disassembly
+and full SSH byte-equality evidence described above.

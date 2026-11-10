@@ -279,3 +279,30 @@ slot in `35.semantics/any_escape/checker.spl`, each currently guarded only by
 `SIMPLE_DEBUG_FIELD_ACCESS=1` and read the `[field-access-error]` frame, exactly
 as was done for traps 1 and 3. That run costs ~27 min; the LSP entry cannot
 substitute for it here because its closure does not hit this trap.
+
+## 2026-11-10 P3-boot5 triage (row 40) — SUPERSEDED
+
+The whole `kind`-on-nil / `kind`-on-Option trap class documented above is
+fixed in-tree at HEAD `4343ce254922` and pinned:
+
+- `src/compiler/35.semantics/any_escape/checker.spl` now unwraps every declared
+  type slot with `if val` before calling `any_type_is_any` /
+  `any_type_mentions_any` (sites at :153, :286, :679 and siblings; the Trap-1
+  `Let` arm carries the "Do not bind the flat optional with `if val`" comment
+  at :610 matching the flat-optional constraint).
+- The seed interpreter gained the missing debug branches:
+  `field_access_debug_enabled()` gates at
+  src/compiler_rust/compiler/src/interpreter/expr/calls.rs:833, :1320, :1366,
+  :1408, :1438 — covering the Option/Result arms the 2026-08-22 localization
+  needed.
+- Regression pins pass on the worktree seed (bin/simple.exe, 2026-11-10):
+  `test/01_unit/compiler/semantics/any_escape/absent_declared_types_spec.spl`
+  6/6, `any_escape_spec.spl` 9/9, `hir_expr_kind_exhaustive_spec.spl` 6/6
+  (--mode=interpret). The later blockers this record sequenced into
+  (`mir_unresolved_method_call_merge`, `'id' on function`) were filed and are
+  tracked as their own records.
+
+Unrelated red observed in the same directory for the compiler lane:
+`checked_converter_identity_spec.spl` (added by PR #7597) fails 3/4 on the
+Windows seed ("expected 4 to equal 0" warning/error-count shape) — not this
+trap class, not baselined.

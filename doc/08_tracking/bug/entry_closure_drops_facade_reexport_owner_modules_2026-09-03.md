@@ -157,3 +157,22 @@ Evidence:
   dict) — a different bug, not a closure defect.
 
 Status: fix-implemented-verification-pending.
+
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 32)
+
+**Verdict: SUPERSEDED (fix verified — status advances to verified).**
+
+Corroborates and closes out the 2026-11-09 never-touched-p3 note
+("fix-implemented-verification-pending") at this lane's base
+(origin/release/1.0.0):
+
+- Fix commits `7d8820319a2`, `5334d6c7b3d`, `4a5b072e594` are all ancestors
+  of this base.
+- Fresh seed-smoke (worktree Rust seed `bin/simple.exe`, label seed-smoke,
+  2026-11-10): `bin/simple.exe test
+  test/01_unit/compiler/driver/generated_facade_origin_closure_spec.spl
+  --mode=interpret` → "All tests passed!" — the closure spec guarding both
+  dropped edge classes (`export X.*` and `# Re-exported from`) passes.
+
+No change made in this lane.

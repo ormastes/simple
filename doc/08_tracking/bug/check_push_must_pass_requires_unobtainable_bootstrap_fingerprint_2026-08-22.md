@@ -58,3 +58,23 @@ and `check-no-unresolved-runtime-symbols.shs` (landed advisory while honestly
 RED, promoted once green). Keep the structural guards mandatory; they must
 not be skipped as collateral of an unobtainable gate.
 
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 24)
+
+**Verdict: SUPERSEDED (FIXED verified live).**
+
+The in-doc "Status: FIXED, 2026-11-08" note is confirmed on this lane's
+base:
+
+- The gate now permits an `unrecorded`, all-TODO ledger only when the
+  published predecessor is also unpromoted
+  (`ALLOW_UNPROMOTED_LEDGER`, `ledger_is_unpromoted_at_rev` at
+  `scripts/check/check-push-must-pass.shs:254,316,2261`), and any genuine PASS
+  still requires the matching fingerprint (`:255`); an unpromoted ledger
+  carrying a PASS row fails closed (`:272,281`, self-test fixture
+  `unpromoted ledger with PASS accepted` guard at `:1868-1869`).
+- `sh scripts/check/check-push-must-pass.shs --self-test` — PASS, 33
+  ledger/budget/dispatcher/rebase/stale-merge fixtures checked (run on the
+  p3-boot3 worktree, rc=0, 2026-11-10).
+
+No change made in this lane.

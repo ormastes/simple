@@ -184,6 +184,10 @@ fn is_builtin_receiver_type(type_part: &str) -> bool {
     matches!(
         type_part,
         "Array" | "Slice" | "Dict" | "Map" | "Set" | "List" | "Tuple" | "Range" | "text" | "String" | "str"
+            // Canonical numeric owners emitted by MIR builtin_type_name.
+            // HIR resolves aliases (int/float) to these primitive TypeIds.
+            // Dropping u8 from u8.to_i64 used to bind VfsFileSize.to_i64.
+            | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64"
     )
 }
 
@@ -1624,5 +1628,45 @@ fn extract_let_name(pattern: &simple_parser::Pattern) -> Option<String> {
         simple_parser::Pattern::MutIdentifier(n) => Some(n.clone()),
         simple_parser::Pattern::Typed { pattern: inner, .. } => extract_let_name(inner),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod numeric_receiver_resolution_tests {
+    use super::resolve_name_variants;
+    use std::collections::HashMap;
+
+    #[test]
+    fn numeric_receiver_does_not_bind_bare_custom_conversion() {
+        let empty = HashMap::new();
+        let colliding = HashMap::from([(
+            "to_i64".to_string(),
+            "services__vfs__vfs_boot_init__VfsFileSize.to_i64".to_string(),
+        )]);
+        for owner in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"] {
+            let call = format!("{owner}.to_i64");
+            assert_eq!(resolve_name_variants(&call, &empty, &colliding), None, "import map: {call}");
+            assert_eq!(resolve_name_variants(&call, &colliding, &empty), None, "use map: {call}");
+        }
+    }
+
+    #[test]
+    fn exact_numeric_receiver_import_remains_resolvable() {
+        let owned = "core__numeric__u8.to_i64".to_string();
+        let import = HashMap::from([("u8__to_i64".to_string(), owned.clone())]);
+        assert_eq!(resolve_name_variants("u8.to_i64", &HashMap::new(), &import), Some(owned));
+    }
+
+    #[test]
+    fn custom_receiver_keeps_its_authored_bare_import() {
+        let owned = "services__vfs__vfs_boot_init__VfsFileSize.to_i64".to_string();
+        let import = HashMap::from([("to_i64".to_string(), owned.clone())]);
+        assert_eq!(resolve_name_variants("VfsFileSize.to_i64", &HashMap::new(), &import), Some(owned));
+    }
+
+    #[test]
+    fn collection_receiver_still_rejects_bare_import() {
+        let import = HashMap::from([("is_empty".to_string(), "unrelated__Sp.is_empty".to_string())]);
+        assert_eq!(resolve_name_variants("Array.is_empty", &HashMap::new(), &import), None);
     }
 }

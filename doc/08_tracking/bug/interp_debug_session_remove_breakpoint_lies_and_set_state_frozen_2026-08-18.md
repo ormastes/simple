@@ -1,6 +1,6 @@
 # `SessionManager.remove_breakpoint` returns `true` while the breakpoint stays armed; `set_state` is frozen (interpreter)
 
-- **Status:** OPEN
+- **Status:** SUPERSEDED
 - **Filed:** 2026-08-18
 - **Severity:** MEDIUM-HIGH (actively misreported success in a debugger control path)
 - **Evidence bar:** **SOURCE-VERIFIED, NOT EXECUTION-VERIFIED**
@@ -116,3 +116,30 @@ second unverified step: dict-element copying is reasoned from the shared
 Engine fix — construct `Value::ClassInstance` in the interpreter. Do **not** add
 a `self.sessions[session_id] = session` write-back here; that masks the engine
 defect rather than fixing it, as the canonical record states.
+
+## Addendum 2026-11-11 — lane interp5 verdict: SUPERSEDED
+
+Verdict: **SUPERSEDED** by commit
+`6c7b4db3d3920d56f0d3ddde4d2ba55589881bb2` (2026-11-04, "fix(interp): class
+reference semantics by default"), merged 2026-11-06 via PR #7171
+(`ab75875a8b69`) with owner decision `4f943a6408c5` ("classes are reference
+types, structs value types", 2026-11-06). The exact engine fix this bug's
+"Correct fix" section prescribed — construct `Value::ClassInstance` in the
+interpreter — landed: class values are reference-carried by default, so
+`val session = self.sessions[session_id]` now binds shared identity and the
+assignments stick. The source intentionally retains no write-back, per the
+canonical record.
+
+Seed-smoke verification (2026-11-11, lane interp5, refreshed seed
+`bin/simple.exe` 2026-11-11 build, `SIMPLE_LIB=src`, `SIMPLE_TIMEOUT_SECONDS=0`,
+`build/review/scratch/interp5_bug3_repro.spl` — the doc's minimal repro plus a
+`set_state` probe):
+
+- Interpreter (`SIMPLE_EXECUTION_MODE=interpret`):
+  `drop_mark returned=true expect remaining 1, got 1` and
+  `set_state expect 7, got 7` — both writes persist; the return value and the
+  observable state agree (bug predicted `returned=true ... got 2`).
+- JIT control (`SIMPLE_EXECUTION_MODE=jit`): identical correct output.
+
+No write-back was added to `session.spl` (lines 215–228 unchanged) — the engine
+fix is the only reason this is correct now. No further action.

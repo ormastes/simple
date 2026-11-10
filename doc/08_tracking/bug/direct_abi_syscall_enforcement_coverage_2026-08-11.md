@@ -41,3 +41,29 @@ separate isolation issue.
 4. Run the target QEMU syscall-entry path; host interpreter tests alone do not
    prove the C/assembly trap route.
 
+
+## 2026-11-10 triage (P3 runner2 lane, work/p3-runner2-20261110): LIVE, out of lane (OS-kernel lane)
+
+None of the four required-resolution items shows completion evidence on
+this base (origin/release/1.0.0), and item 4 ("run the target QEMU
+syscall-entry path; host interpreter tests alone do not prove the
+C/assembly trap route") cannot be executed from a Windows seed-smoke lane
+at all. Adjacent OS-kernel progress exists but does not claim this AC:
+7e36d9a577aa ("thread Scheduler/IpcManager state across process
+syscalls"), decd3c16f596 ("thread scheduler state through
+dispatch_spawn_binary_direct"), 6788fd65c4c0 ("land the execve
+capability/state-threading repair on the legacy leg") — all state
+threading, none the trap-table resolution proof or the adversarial
+per-class scenarios this bug requires.
+
+Not fixed in this lane: the work is (a) owned by src/os kernel + target
+QEMU verification, outside the test-runner lane's scope, and (b)
+explicitly un-provable from host interpreter specs per the bug's own
+required resolution item 4 — writing a host-only spec that purported to
+satisfy it would be the dishonest-green pattern this ledger exists to
+catch. Syscall dispatch/entry unit specs exist under
+test/01_unit/os/kernel/ (syscall_dispatch_spec, syscall_entry_spec,
+syscall_shim_*_spec) and remain the kernel lane's host-side evidence base.
+
+Handed back to the OS-kernel lane with the AC table above as the
+checklist.

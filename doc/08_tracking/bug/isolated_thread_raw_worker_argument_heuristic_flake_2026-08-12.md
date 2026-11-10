@@ -188,3 +188,27 @@ and "looks like a pointer" logic.
 native-compiled Simple `thread_spawn_with_args` smoke
 (`check-thread-spawn-with-args-native.shs`). That smoke needs a seed that can
 link native binaries on this host.
+
+## Windows current-source C verification (2026-11-10)
+
+At `release/1.0.0` source `6d496f82c5acabc2fc52b2b78146272e664dc371`,
+LLVM clang 23.1.2 targeting x86_64-pc-windows-msvc compiled and ran
+`windows_thread_code_dispatch_test.c` successfully (exit 0). This direct
+dispatch fixture includes the real thread owner and explicitly supplies an
+empty registered-closure fixture; it does not qualify registered heap closures.
+
+The canonical `check-rt-thread-owner-contract.shs` also passed (exit 0):
+42 current core-C objects linked, and `rt_thread_owner_contract_selfcheck`
+executed successfully. It covers one/two-argument explicit kinds, invalid
+kinds/tags, handle lifetime, and 2,048 pool tasks with dual-decodable words.
+The historical duplicate-timestamp-symbol link failure above is not present
+in this source composition. Both checks ran once; no unchanged PASS was rerun.
+
+Exact commands, source/binary identities, and result scope are in
+[the SDN receipt](evidence/20261110/p0_thread_runtime.sdn). No runtime source
+was changed for this verification. Status remains
+**fix-implemented-verification-pending**: Linux, aarch64, board execution,
+and the native-compiled Simple smoke are still unexecuted. Ubuntu WSL failed
+to start with `Wsl/Service/CreateInstance/E_FAIL`; no Linux result is inferred
+from that installed distribution. The Simple smoke requires a proven native
+compiler/runtime; a Rust-seed result cannot establish self-hosted qualification.

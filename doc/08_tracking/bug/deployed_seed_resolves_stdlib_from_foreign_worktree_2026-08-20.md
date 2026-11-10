@@ -1,7 +1,7 @@
 # Deployed seed resolves `src/lib` stdlib from a FOREIGN worktree first
 
 - **Date:** 2026-08-20
-- **Status:** OPEN
+- **Status:** SUPERSEDED
 - **Severity:** high (silently executes another session's stdlib; edits to this tree's `src/lib/**` are invisible)
 
 ## Symptom
@@ -56,3 +56,21 @@ guard's reason text and stays RED under the foreign-tree stdlib.
 ## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
 
 Same evidence and gate as deployed_binary_reads_stdlib_from_its_build_worktree_2026-08-25: scripts/check/check-stdlib-invoking-tree-wins.shs.
+
+## 2026-11-10 status — SUPERSEDED (P3 library lane, work/p3-lib-20261110)
+
+Same root cause and same gate as
+deployed_binary_reads_stdlib_from_its_build_worktree_2026-08-25; same result on
+this lane's base: `check-stdlib-invoking-tree-wins.shs --selftest <deployed
+seed>` → `PASS -- 1 probe, invoking tree's src/lib won`. The baked
+build-worktree search root no longer wins over the invoking repo's `src/lib`.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Same root cause and same gate as
+deployed_binary_reads_stdlib_from_its_build_worktree_2026-08-25; verdict
+re-confirmed on this lane's refreshed seed (bin/simple.exe, build-commit
+`0791c2b7f4a7`): `check-stdlib-invoking-tree-wins.shs --selftest
+"$PWD/bin/simple.exe"` → `PASS -- 1 probe, invoking tree's src/lib won
+(rc=0)`. The `_access_ensure`-era foreign-tree-wins behaviour does not
+reproduce.
