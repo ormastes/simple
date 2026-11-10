@@ -90,3 +90,36 @@ about 18 minutes and does not leave it.
 - The phase emits no progress line between `phase3:hir:imports:start` and the
   next module, so "no log growth" cannot by itself distinguish slow from stuck.
   That observability gap is worth closing independently of the root cause.
+
+## 2026-11-11 addendum (lane boot19) — BLOCKED (needs the sanctioned bootstrap; first status stays OPEN)
+
+Verdict: BLOCKED. This row cannot be settled with the Rust seed
+`bin/simple.exe`; it needs a self-hosted stage3 candidate to replay against.
+The 2026-11-04 bootstrap triage in `doc/08_tracking/bug/bug_db.sdn:8422`
+already adjudicated exactly this and prescribed the close-out procedure;
+boot19 re-confirms the routing and adds no new diagnosis.
+
+Exact grant command (from the 2026-11-04 adjudication, verbatim):
+
+1. Fresh worktree rebased on origin/release/1.0.0 with no other bootstrap running.
+2. `SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`
+   (sanctioned bootstrap; yields `build/bootstrap/stage3/<triple>/simple` and
+   `stage3-command.transcript`).
+3. Replay the Symptom/Reproduction section of this doc with that stage3 binary
+   under a timeout (stage3 cmd form: `build/bootstrap/stage3/<triple>/simple
+   native-build <entry> ...`, or replay `stage3-command.transcript`) and
+   capture rc plus last 50 log lines.
+4. Append the observed rc and log here (and in `bug_db.sdn`) and set status
+   closed if it no longer reproduces.
+
+Context for the granted lane: several stage-2/3 blockers behind this
+record's snapshot have since been fixed (entry-closure char/byte import drop —
+`13d7746adc0e`; `local_symbol_index_slots` reset — merge `9e7e7a526edb`/PR
+#7597; SSA duplicate-def slotting —
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl:206-228`;
+checked unwrap lowering — `e569d40037c7`), so there is a reasonable chance
+the spin no longer reproduces. Per the adjudication, that is for the granted
+bootstrap run to establish — not for seed-smoke or source inspection to
+claim. The observability gap this doc notes (no progress line between
+`phase3:hir:imports:start` and the next module) remains a legitimate
+follow-up for the same lane.

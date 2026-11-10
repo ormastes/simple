@@ -2,7 +2,7 @@
 
 # Site 9: Stage 2's Stage-3 route now times out in `native_compile` (status 124)
 
-- Status: OPEN (2026-09-13)
+- Status: FIXED (2026-11-11, lane boot19 — sites 9/10a/10b/11 all resolved; guard specs green in seed-smoke)
 - Found: bootstrap lane BOOT-8, `work/bootstrap-full-6-2026-09-12` at `272482747da`,
   run `build/bootstrap-boot8a` (08:11:19 -> 08:33:13, 22m, load ~23-35, `--jobs=10`).
 - Severity: **the current `--stop-after-stage2` admission blocker**, and the successor to
@@ -472,3 +472,40 @@ Measured, 6 in parallel, 240 s cap, gate env/argv, `stage2_module_path_naming.sp
 The fixed build's `bind_local` has no `rt_array_get` loop left: its only
 probing is through `local_symbol_free_bucket`. The gate's 180 s ceiling was
 not changed.
+
+## 2026-11-11 addendum (lane boot19) — FIXED
+
+Verdict: FIXED. Every defect this record tracks is resolved on
+`origin/release/1.0.0`, matching the 2026-11-03 stale sweep and the
+perf-triage-13 note in `bug_db.sdn` ("confirmed fixed"):
+
+- Site 9: `src/compiler/80.driver/driver_build/parallel.spl:298` is
+  `while stack.len() > 0:` — the dead `rt_is_some` emptiness branch is gone.
+  Guard spec `test/01_unit/compiler/driver/build_graph_topological_order_terminates_spec.spl`
+  GREEN 3/3 in seed-smoke (2026-11-11, fresh seed `bin/simple.exe`,
+  `--mode=interpreter --no-cache`).
+- Site 10a (duplicate local value, `llc` "multiple definition of local
+  value"): the MIR-to-LLVM emitter now runs an `ssa_alloca_transform_blocks`
+  pass that slots single-block multi-def locals, plus a fail-closed
+  `llvm_assert_unique_ssa_defs` / `llvm_first_duplicate_ssa_def` check
+  (`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl:206-228`) that
+  turns any residual duplicate into a compiler-side abort naming the FUNCTION,
+  instead of a silent llc link-stage error on a deleted staging file.
+- Site 10b (capsule identity over empty content): fixed 2026-09-13 per this
+  record; unchanged.
+- Site 11 (Windows `MirLowering.bind_local` probe): the reset line this
+  record's fix section demanded is at
+  `src/compiler/50.mir/_MirLowering/function_lowering.spl:367`
+  (`self.local_symbol_index_slots = []`), with a comment citing site 11. The
+  unbounded `while slots[bucket] >= 0` insertion probe no longer exists
+  anywhere in `src/compiler/50.mir/_MirLowering/`. Guard spec
+  `test/01_unit/compiler/mir/local_symbol_index_spec.spl` GREEN 6/6 in
+  seed-smoke (2026-11-11).
+
+Verification actually run (2026-11-11, lane boot19): the two seed-smoke spec
+runs above plus source inspection of all three fix sites. The gate's 180 s
+`STAGE2_SELFHOST_ROUTE_TIMEOUT_SECONDS` ceiling remains correctly unchanged.
+The underlying native `.?`-on-empty-array defect stays tracked in
+`native_codegen_dotq_true_on_empty_array_2026-09-13.md` (separate row). The
+2026-09-26 "intermittent Windows hang" paragraph is superseded by the site-11
+fix measured in this record's own 2026-09-27 section.
