@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-09-02 — isolated while fixing
   `is_dir_always_false_shell_dependency_2026-09-02.md`
-- **Status:** OPEN (compiler/interpreter defect; not fixed here)
+- **Status:** SUPERSEDED (compiler/interpreter defect; not fixed here)
 - **Host:** Windows 11, `bin/simple.exe` 16,347,136 bytes,
   md5 `d52d770724a9f8797e98ac7819709ab9`
 
