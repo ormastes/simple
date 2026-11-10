@@ -6,7 +6,10 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-05
 **Severity:** high — silent wrong values, no diagnostic, no crash
-**Status:** open
+**Status:** FIXED (2026-11-11, lane boot17) — verified on a stage2 candidate
+2026-11-05 (addendum below) and hardened since by eda3b5103ca3 (2026-11-09)
+`local_is_float` discriminant-compare guard, verified present and effective
+at tip. See addendum.
 **Area:** Stage-2 native codegen (aarch64-unknown-linux-gnu)
 
 ## Summary
@@ -162,3 +165,31 @@ df48a86ff5a) compiled and ran:
 Result: exit 0 — f64 addition is correct, no integer-bit-pattern lowering.
 The silent-wrong-value f64 arithmetic lowering does not reproduce at current
 release/1.0.0 source.
+
+## Addendum 2026-11-11 (lane boot17) — FIXED, guard verified at tip (aarch64 host-limited)
+
+Prior verification: the 2026-11-05 addendum above ran `addf(1.5, 2.25) ==
+3.75` through a cranelift aarch64 stage2 candidate built from release/1.0.0
+source — exit 0, correct f64 addition. This branch is cut from
+origin/release/1.0.0 tip; per the no-green-rerun rule the aarch64 stage2
+probe was not repeated (no aarch64 host here).
+
+**Source-guard + seed re-confirmation actually run** (worktree
+simple-p3-boot17-20261111, fresh seed 46fe8f6b6def):
+
+- `local_is_float` (src/compiler/50.mir/mir_lowering_stmts.spl:616-635) now
+  detects floats by `compiler_value_discriminant<MirTypeKind>` compare, not
+  `match type_.kind` arm dispatch — its comment names this bug
+  (stage2_native_f64_arithmetic_lowered_as_integer_ops) and explains the
+  stage2-native arm-dispatch mis-route. Landed in eda3b5103ca3 (2026-11-09),
+  after the 11-05 verification, as a hardening of the same guard the doc's
+  "Why it happens" section identified.
+- The binop dest-type override the doc prescribes is in place:
+  src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:5761-5767 forces an
+  F64/F32 result type for Add|Sub|Mul|Div|Mod|Pow when either operand is
+  float, with a comment quoting this failure mode.
+- Full doc probe table under `bin/simple.exe run --mode=interpreter`:
+  `f+g=3.75`, `f-g=-0.75`, `f*g=3.375`, `f/g=0.6666666666666666`,
+  `addf(1.5, 2.25)=3.75`, `0.5+0.5=1.0`, `1.0+1.0=2.0`, `0.0-1.5=-1.5` —
+  every interpreter-column value matches the doc's evidence table (no
+  integer-bit-pattern lowering).
