@@ -1,7 +1,7 @@
 # GPU glyph rasterization is NOT-STARTED on Vulkan and Metal; deferred for want of a device
 
 Date: 2026-09-06
-Status: DEFERRED (no device on the reference host)
+Status: DEFERRED (no device on the reference host) — re-confirmed 2026-11-11 (lane ne11); deferral still stands, see addendum
 Area: lib / gc_async_mut / gpu / engine2d — font offload
 
 All `file:line` below were read at `origin/main` `461e48379ff` (2026-09-06).
@@ -73,3 +73,24 @@ A real GPU device that rasterizes glyphs, with a captured trace:
 - a pixel diff against the CPU rasterizer for the same face/size, recorded.
 
 Anything short of all four leaves this record OPEN.
+
+---
+
+## 2026-11-11 addendum — lane ne11 (P3 traverse, batch ne11)
+
+**Verdict: DEFERRED re-confirmed — keep OPEN (hardware-gated, BLOCKED on this lane).**
+
+- The gap is unchanged by design: no GPU *vector* (outline -> coverage) glyph
+  rasterizer exists for Vulkan or Metal on the current tip; CPU raster + device
+  blit remains the architecture (`engine2d/backend_vulkan.spl` `draw_text`,
+  `backend_metal.spl` `draw_text_hires`, `font_atlas_composite.spl`).
+- This Windows P3 lane has no Vulkan/Metal device evidence path; the four-part
+  closing evidence (executed outline->coverage kernel, tool-produced
+  `.rdc`/`.gputrace`, `device_readback` provenance, recorded pixel diff vs CPU)
+  cannot be manufactured here, and this record explicitly forbids device-free
+  closure.
+- Grant: a lane with a real GPU — Linux Vulkan host under RenderDoc
+  (`sh scripts/check/check-gui-vulkan-window.shs`-class capture + a new
+  outline->coverage kernel spec), or a macOS Metal host producing an Xcode
+  `.gputrace` — owns closure. Until then the `# TODO: [gpu]` markers correctly
+  stay TODO per `.claude/rules/code-style.md`.
