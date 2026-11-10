@@ -19,7 +19,7 @@ fn lower_body(source: &str) -> Vec<HirStmt> {
 
 #[test]
 fn codegen_inline_asm_single_instruction_collects_cli() {
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_cli", |f| {
         let ret = f.new_vreg();
@@ -46,7 +46,7 @@ fn codegen_inline_asm_single_instruction_collects_cli() {
 
 #[test]
 fn codegen_inline_asm_multi_instruction_collects_cli_hlt() {
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_cli_hlt", |f| {
         let ret = f.new_vreg();
@@ -74,7 +74,7 @@ fn codegen_inline_asm_multi_instruction_collects_cli_hlt() {
 
 #[test]
 fn native_inline_asm_x86_target_uses_intel_syntax() {
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_x86_intel", |f| {
         let ret = f.new_vreg();
@@ -107,7 +107,7 @@ fn native_inline_asm_x86_target_uses_intel_syntax() {
 
 #[test]
 fn native_inline_asm_riscv_target_preserves_raw_instructions() {
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_riscv_raw", |f| {
         let ret = f.new_vreg();
@@ -139,7 +139,7 @@ fn native_inline_asm_riscv_target_preserves_raw_instructions() {
 
 #[test]
 fn native_inline_asm_rejects_unresolved_simple_operands() {
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_operand_skip", |f| {
         let ret = f.new_vreg();
@@ -168,7 +168,7 @@ fn native_inline_asm_rejects_unresolved_simple_operands() {
 
 #[test]
 fn native_inline_asm_c_rejects_simple_operand_directives() {
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_simple_operands", |f| {
         let ret = f.new_vreg();
@@ -286,7 +286,7 @@ fn main() -> i64:
 /// "unknown operand") — 8 of that gate's 18 errors.
 #[test]
 fn native_inline_asm_riscv_target_rejects_x86_blocks() {
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_x86_in_riscv_tu", |f| {
         let ret = f.new_vreg();
@@ -358,7 +358,7 @@ fn native_inline_asm_riscv_target_rejects_x86_blocks() {
 /// and an x86 block stays in it.
 #[test]
 fn native_inline_asm_x86_target_still_rejects_riscv_blocks() {
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_riscv_in_x86_tu", |f| {
         let ret = f.new_vreg();
@@ -397,11 +397,12 @@ fn native_inline_asm_x86_target_still_rejects_riscv_blocks() {
 
 /// Defect 2, end to end through the emitter: a block-form operand placeholder
 /// now reaches the C sidecar with its braces intact, so the existing
-/// `has_unresolved_simple_operand` guard turns it into a skip comment instead
-/// of handing `csrr 0, mcause` to the riscv64 assembler.
+/// `has_unresolved_simple_operand` guard rejects it with E-ASM-UNRESOLVED
+/// (fail-closed since 82405d7bfcc) instead of handing `csrr 0, mcause` to the
+/// riscv64 assembler or silently dropping the line.
 #[test]
 fn native_inline_asm_riscv_skips_block_form_operand_placeholders() {
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_riscv_operand_skip", |f| {
         let ret = f.new_vreg();
@@ -423,17 +424,13 @@ fn native_inline_asm_riscv_skips_block_form_operand_placeholders() {
     }));
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let c_path = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target(
+    let err = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target(
         dir.path(),
         Some(("riscv64-unknown-elf", "-march=rv64imac", "-mabi=lp64")),
     )
-    .expect("write asm c")
-    .expect("asm c");
-    let c = std::fs::read_to_string(c_path).expect("read asm c");
-    assert!(!c.contains("csrr 0, mcause"));
-    assert!(!c.contains("csrc mip, msie"));
-    assert!(c.contains("skipped Simple asm with unresolved operands"));
-    assert!(c.contains("\"wfi\\n\""), "unbound lines in the same block must survive");
+    .expect_err("unbound operand placeholder must fail closed, not be skipped");
+    assert!(err.contains("E-ASM-UNRESOLVED"), "{err}");
+    assert!(err.contains("csrr {0}, mcause"), "{err}");
 }
 
 #[test]
@@ -478,7 +475,7 @@ fn sidecar_dialect_identity_and_target_admission() {
     use crate::hir::AsmDialect;
     use crate::codegen::inline_asm::{clear_inline_asm_blocks, register_inline_asm};
     use crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target;
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     clear_inline_asm_blocks();
     let instructions = vec!["nop".to_string()];
     let default = register_inline_asm(&instructions, true, AsmDialect::Default);
@@ -520,7 +517,7 @@ fn naked_sidecar_attribute_does_not_change_regular_asm() {
     use crate::hir::AsmDialect;
     use crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target;
 
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     clear_inline_asm_blocks();
     let instructions = vec!["nop".to_string()];
     let regular = register_inline_asm(&instructions, true, AsmDialect::Default);
@@ -593,7 +590,7 @@ fn naked_simpleos_mutex_cas_cpu_id_disassembly_and_execution() {
         func
     }
 
-    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    let _guard = inline_asm_test_lock().lock().unwrap_or_else(|e| e.into_inner());
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     let mut module = MirModule::new();
     module.functions.push(naked_function(
