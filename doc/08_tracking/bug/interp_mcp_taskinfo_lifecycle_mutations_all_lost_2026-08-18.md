@@ -101,3 +101,14 @@ reasoned from the shared `Value::Object` representation, not demonstrated.
 Engine fix — construct `Value::ClassInstance` in the interpreter. Do **not** add
 `self.tasks[id] = task` write-backs to these five methods; a local write-back
 papers over the engine defect, as the canonical record states explicitly.
+
+## 2026-11-10 triage — SUPERSEDED (seed-smoke, lane p3-interp3 row 16)
+
+Executed the record's minimal repro
+(`build/p3fix-interp3/row16_taskinfo_repro.spl`, Dict<text, Info> element
+bind-then-mutate) on the worktree seed under `SIMPLE_EXECUTION_MODE=interpreter`:
+prints `expect 2, got 2` — Dict element reads of class values alias after the
+2026-11-04 ClassInstance default-carrier flip (the canonical record's
+2026-11-06 re-verification covers the dict-value probe). Engine fix confirmed;
+no `self.tasks[id] = task` write-back is needed in
+`src/lib/nogc_async_mut/mcp/tasks.spl`.
