@@ -4452,6 +4452,13 @@ pub fn compile_call<M: Module>(
                 // not found" on the JIT while working on the interpreter.
                 "trim_start" | "trim_left" => Some("rt_string_trim_start"),
                 "trim_end" | "trim_right" => Some("rt_string_trim_end"),
+                // Arity-aware, same as `substr` below and the
+                // `try_compile_builtin_method_call` table: a two-argument
+                // `split(sep, limit)` must reach `rt_string_split_limit` or the
+                // bound is silently dropped (the runtime never read the third
+                // arg). `args` here includes the receiver.
+                // doc/08_tracking/bug/text_split_limit_ignored_2026-07-20.md
+                "split" if args.len() >= 3 => Some("rt_string_split_limit"),
                 "split" => Some("rt_string_split"),
                 // `to_bytes` is the interpreter's alias of `bytes`
                 // (interpreter_method/string.rs: `"bytes" | "to_bytes"` and
