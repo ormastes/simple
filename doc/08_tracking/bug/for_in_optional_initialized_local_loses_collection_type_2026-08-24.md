@@ -1,6 +1,8 @@
 # `for-in` over a local initialized from an OPTIONAL-returning function loses its collection type (#143 residue) (2026-08-24)
 
-- **Status:** OPEN — not fixed. Root cause isolated to a 12-line reproducer.
+- **Status:** FIXED (2026-11-11, lane ne9 — fix chain verified present at
+  this tip: 9ca094b44ee + 3dc5b8dd8a2 + parser payload preservation;
+  residue annotations landed via PR #7597)
 - **Severity:** HIGH — it is 30 of the 32 remaining `#143` blockers on
   `native-build src/app/mcp/main.spl`
 - **Area:** HIR local-type resolution (`20.hir`), surfacing at
@@ -451,3 +453,33 @@ starts from an open question, not from this fix.
   `borrow_check()` runs after `lower_to_mir`, so the NLL false positive in
   `nll_mut_borrow_of_local_false_positive_at_return_2026-08-24.md` remains queued
   behind it and has never executed on this closure.
+
+## 2026-11-11 — P3 ne9 triage: FIXED (chain complete and present in code)
+
+Lane ne9 verified the whole chain survives at this tip
+(origin/release/1.0.0, `482cdf40753b`):
+
+- `9ca094b44ee`, `3dc5b8dd8a2`, `fb7e76c489a` are all ancestors of HEAD.
+- The hoisted annotation-preference arms (`annotated_is_dict_pre` /
+  `annotated_is_array_pre`) exist at
+  `src/compiler/50.mir/mir_lowering_stmts.spl:1611-1624`, exactly as
+  this doc's fix section describes.
+- The parser root fix survives at
+  `src/compiler/10.frontend/core/parser.spl:706`:
+  `parser_absorb_optional_suffix` preserves the payload via the
+  TYPE_OPTION_GENERIC registry (dedicated `i64`/`f64`/`text`/`bool`
+  tags), and its comment cites this doc.
+- The container-only payload adoption survives as
+  `_hir_optional_container_payload` at
+  `src/compiler/20.hir/hir_types.spl:1005`, also citing this doc.
+
+The residue this doc deferred (the 12 uncharacterized `NamedVar` sites)
+was re-characterized by the sibling residue doc as missing library
+annotations, and those landed via PR #7597 (see the 2026-11-11 addendum
+in `for_in_143_residue_characterized_closure_context_2026-08-25.md`,
+same batch).
+
+Native-fixture re-runs are not repeated: no test lane native-builds
+(this doc records why a green suite would be theatre), and the Windows
+native-build success-path hang is a known live defect routed to its
+owner lane.
