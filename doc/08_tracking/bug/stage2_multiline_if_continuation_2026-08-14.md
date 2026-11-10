@@ -1,7 +1,10 @@
 # Stage 2 multiline `if` continuation divergence
 
 Date: 2026-08-14
-Status: OPEN — seed leg re-verified GREEN 2026-08-17; self-host leg BLOCKED
+Status: FIXED (2026-11-11, lane boot17; originally RESOLVED 2026-08-17) —
+self-hosted lexer glues the leading-`and` continuation; regression spec
+`test/01_unit/compiler/frontend/lexer_if_condition_leading_and_continuation_spec.spl`
+re-verified 4/4 on the fresh seed. See addendum.
 Owner: compiler frontend
 
 The freshly rebuilt bootstrap seed accepts the parenthesized multiline
@@ -94,3 +97,26 @@ since a spec's own source is lexed by the Rust seed that executes it):
 Results: 4 total, 4 passed, 0 failed
 SPEC FILE VERDICT: ... declared>=4 executed=4 passed=4 failed=0 dropped=0
 ```
+
+## Addendum 2026-11-11 (lane boot17) — FIXED, re-verified on the fresh seed
+
+**Verification actually run** (worktree simple-p3-boot17-20261111, branch
+`work/p3-boot17-20261111`, fresh seed 46fe8f6b6def):
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test \
+  test/01_unit/compiler/frontend/lexer_if_condition_leading_and_continuation_spec.spl \
+  --mode=interpreter --no-cache
+# SPEC FILE VERDICT: ... outcome=OK declared>=4 executed=4 passed=4 failed=0
+```
+
+The earlier "self-host leg BLOCKED" qualifier in this doc's status line is
+resolved by the 2026-08-17 RESOLVED analysis and remains true at this source:
+the regression spec drives the SELF-HOSTED lexer (`core.lexer.lex_init` /
+`lex_next`, `src/compiler/10.frontend/core/lexer_struct.spl`) in-process, so
+it exercises the Simple-source lexer's continuation handling — not the Rust
+seed's lexing of the spec file — and no Stage-2 binary is needed for that leg.
+The unparenthesized form is live in the compiler source the spec protects:
+`src/compiler/60.mir_opt/mir_opt/typed_storage_view_producer.spl:68`
+(`and declaration.base_local_id == base_local_id:`). No explicit-grouping
+workaround remains to remove.
