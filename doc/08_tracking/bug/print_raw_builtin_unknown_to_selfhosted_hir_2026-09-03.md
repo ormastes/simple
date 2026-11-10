@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-03
-- Status: CLOSED 2026-11-06 — `terminal.spl` now declares `extern fn print_raw(data: text) -> i64` (200debf89df), backed by `src/runtime/runtime_native.c` `print_raw`; resolves as an ordinary extern in the self-hosted HIR.
+- Status: CLOSED 2026-11-06 — `terminal.spl` now declares `extern fn print_raw(data: text) -> i64` (200debf89df), backed by `src/runtime/runtime_native.c` `print_raw`; resolves as an ordinary extern in the self-hosted HIR. **Closure re-verified 2026-11-11 by lane compiler6 — see the addendum at the end of this file.**
 - Platform: platform-independent (measured on Windows x86_64-pc-windows-msvc)
 - Severity: poisons `std.tui.terminal`, which cascades into any app using it
 
@@ -55,3 +55,27 @@ verify, which is blocked separately.
 
 No platform-specific content — a missing front-end builtin, identical on Unix.
 
+
+## Verification addendum 2026-11-11 — lane compiler6 (STALE, closure confirmed)
+
+Lane compiler6 re-verified the 2026-11-06 closure on the tracked fresh seed
+(`bin/simple.exe`, build 46fe8f6b6def, seed-smoke):
+
+1. Fixing commit `200debf89df9` ("fix(io): bind Vulkan raw owner and terminal
+   print ABI", 2026-10-04) is in this branch's history; its diff adds
+   `extern fn print_raw(data: text) -> i64` to
+   `src/lib/nogc_sync_mut/tui/terminal.spl` (present today at line 38).
+2. Runtime backing exists: `src/runtime/runtime_native.c:4031`
+   `int64_t print_raw(int64_t value)`.
+3. Seed-lane execution evidence: a spec importing
+   `std.tui.terminal.{terminal_get_size, terminal_stdout_is_tty}` and calling
+   both (the latter is the devhub/output.spl:18 cascade casualty the record
+   named) runs GREEN — `outcome=OK, 1 passed, 0 failed`. The module is not
+   poisoned; the extern declaration coexists with the seed's print_raw
+   builtin and the named collateral resolves.
+
+Limitation: the self-hosted HIR native-build lane the record originally
+measured on (devhub entry-closure) requires a stage2 deploy this lane is not
+granted; the structural evidence (extern declaration + runtime symbol) plus
+the seed-lane GREEN are the verification this lane can stand up. No code
+change was needed; the record's CLOSED status stands.
