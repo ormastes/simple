@@ -45,3 +45,19 @@ must begin with a bounded diagnostic that retains the crash IP/registers or an
 equivalent exact MIR function/expression owner, then add a focused reproducer
 before changing code. Stage 3, tools-only Stage 4, local deployment, rebase,
 and push remain blocked.
+
+## Triage 2026-11-11 (lane boot20) — BLOCKED, kept OPEN
+
+Verdict: **BLOCKED** (stage-chain diagnostic, per this record's own standing
+instruction: "The next session must begin with a bounded diagnostic that
+retains the crash IP/registers or an equivalent exact MIR function/expression
+owner"). Reproducing requires the admitted Stage 2 Linux binary +
+`--resume-stage3-from-admitted` chain plus core/IP capture — not runnable on
+this Windows lane host (known native-build success-path hang; no admitted
+stage2 Linux binary on this host). No source change attempted; the three-cycle
+cap still stands.
+
+Grant needed (verbatim): a Linux x86_64 host with the admitted Stage 2
+candidate `042b35c2ef8c…` restored and core-pattern (`ulimit -c` / gdb
+batch `-ex run -ex bt`) wired into the stage3 command snapshot, so the crash
+IP/registers are retained on the first retry.

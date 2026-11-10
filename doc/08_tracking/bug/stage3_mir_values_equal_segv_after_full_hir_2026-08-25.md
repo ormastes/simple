@@ -167,3 +167,28 @@ SIMPLE_TIMEOUT_SECONDS=0 sh scripts/bootstrap/bootstrap-from-scratch.sh \
 Then require `real-lower:done eval_gteq` and complete Stage 3 admission before
 promoting any must-check compiler row.
 
+
+## Triage 2026-11-11 (lane boot20) — BLOCKED, kept OPEN
+
+Verdict: **BLOCKED** (stage-chain probe; three-cycle cap already exhausted per
+this record). The pending verification — resume from the admitted Stage 2 at
+`build/bootstrap/mustcheck-stage3-arm-body` and require `real-lower:done
+eval_gteq` — needs the Linux x86_64 admitted-chain environment and a
+persistent PTY-polled session. Not runnable on this Windows lane host (no
+admitted stage2 artifact here; known native-build success-path hang). No
+source change attempted; in-tree match-arm typed-rebinding fixes remain
+plausibly correct but unverified end-to-end.
+
+Grant needed (verbatim): a Linux x86_64 host with
+`build/bootstrap/mustcheck-stage3-arm-body` (admitted Stage 2, commit
+`7bb6f81954`) restored, plus a session manager able to hold the resume command
+below in a persistent PTY polled at <=60 s intervals with
+SIMPLE_TIMEOUT_SECONDS=0:
+
+```sh
+SIMPLE_TIMEOUT_SECONDS=0 sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --strategy=adhoc \
+  --resume-stage3-from-admitted=build/bootstrap/mustcheck-stage3-arm-body \
+  --bootstrap-receipt=build/bootstrap/mustcheck-stage3-arm-body/planner-admission-v2.env \
+  --jobs=1
+```

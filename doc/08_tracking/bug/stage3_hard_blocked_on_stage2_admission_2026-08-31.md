@@ -1,6 +1,14 @@
 # Stage 3 is hard-blocked on Stage-2 admission (2026-08-31, aarch64-apple-darwin)
 
-Status: BLOCKED — not a defect in the Stage-3 lane. Investigation + pre-staged runbook.
+Status: RESOLVED — not a defect in the Stage-3 lane. Investigation + pre-staged runbook; Stage 2 ADMITTED per "RESOLVED 2026-08-31" section below. Re-triaged 2026-11-11 (lane boot20).
+
+## Triage 2026-11-11 (lane boot20) — RESOLVED, top-line status reconciled
+
+Verdict: **RESOLVED**. The in-doc contradiction is removed: the "RESOLVED
+2026-08-31 — Stage 2 ADMITTED" section (bootstrap exits rc=0 10/10, stage2
+struct receiver PASS 10/10) already resolved the blocker this row tracks; only
+the top-line Status still said BLOCKED. No new defect on current tip. Kept as
+runbook reference for the stage-3 planner-admission-v2 receipt.
 
 ## 1. Stage-3 entry contract (both lanes)
 

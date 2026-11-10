@@ -1,7 +1,7 @@
 # Stage 3 links a STALE Rust runtime archive — every runtime-side fix is a silent no-op there
 
 Date: 2026-08-17
-Status: OPEN — blocker for all runtime-side stage-3 work
+Status: FIXED — fail-closed gate landed (2026-11-09) and regression-spec pinned 2026-11-11 (lane boot20). Blocker for runtime-side stage-3 work is closed: stale Rust runtime archives are now refused, not warned-about.
 Severity: high (invalidates ablation on any `src/compiler_rust/runtime/**` change)
 
 ## Verdict
@@ -99,3 +99,19 @@ That commit, not `rt_clear`, is where both the error delta and the SEGV live.
 
 ## 2026-11-09 fix
 `bootstrap-from-scratch.sh` now exits 1 when the Rust seed/runtime stamp is stale and --full-bootstrap is not set (override: SIMPLE_ALLOW_STALE_RUST_SEED=1, loud warning). Verified: bash -n only; native re-run pending.
+
+## 2026-11-11 (lane boot20) — FIXED, regression spec landed
+
+Verdict: **FIXED**. "Do next #1" (fail closed on a stale runtime archive) is
+implemented at `scripts/bootstrap/bootstrap-from-scratch.sh:3390-3399` — stale
+seed/runtime without `--full-bootstrap` now exits 1 with a named error, with an
+explicit `SIMPLE_ALLOW_STALE_RUST_SEED=1` override; the warn-and-continue shape
+is gone from the script. Do-next items #2/#3 (ablation re-run under
+`--full-bootstrap` with a disassembly gate) remain stage-chain work and are not
+part of this row's code defect.
+
+Evidence (seed-smoke, build commit `46fe8f6b6def`, `--mode=interpreter
+--no-cache`): new regression spec
+`test/01_unit/app/cli/bootstrap_stale_rust_seed_fail_closed_spec.spl` passes
+**4/4** (fail-closed error text + bug-doc name present in script source,
+explicit override present, old warn-and-continue message absent).

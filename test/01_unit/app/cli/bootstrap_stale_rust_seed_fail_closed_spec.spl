@@ -1,0 +1,46 @@
+# @cover scripts/bootstrap/bootstrap-from-scratch.sh 20%
+#
+# REGRESSION spec for
+# doc/08_tracking/bug/stage3_links_stale_rust_runtime_archive_runtime_fixes_are_noops_2026-08-17.md
+#
+# Root cause: the Rust runtime archive was only rebuilt under --full-bootstrap;
+# every other run proceeded on a content-stale archive with a warning, making
+# any src/compiler_rust/runtime/** edit a silent no-op for stages 2 and 3.
+#
+# Fix (2026-11-09, in-tree): bootstrap-from-scratch.sh exits 1 when the recorded
+# seed/runtime input fingerprint no longer matches the source tree and
+# --full-bootstrap is not set, unless SIMPLE_ALLOW_STALE_RUST_SEED=1 is set
+# explicitly (loud warning). This spec pins the fail-closed gate in the script
+# source so the warn-and-continue shape cannot silently return.
+#
+# The script is ~370 KB -- over the session text-read limit -- so the source
+# pins are probed with grep -F through sh, matching the rc contract:
+# grep rc 0 = found, rc 1 = absent.
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+
+val SCRIPT = "scripts/bootstrap/bootstrap-from-scratch.sh"
+
+fn grep_count(needle: text) -> (text, i32):
+    # -F fixed string, -c count; the needle never contains a quote.
+    rt_process_run_timeout("sh", ["-c", "grep -cF '" + needle + "' " + SCRIPT], 30000)
+
+describe "bootstrap refuses a stale Rust runtime archive unless explicitly overridden":
+    it "the bootstrap script exists (non-vacuity)":
+        expect(rt_file_exists(SCRIPT)).to_equal(true)
+
+    it "fails closed with a named error instead of warning and continuing":
+        val (out, _err, rc) = grep_count("Refusing to reuse the stale Rust runtime archive")
+        expect(rc).to_equal(0)
+        expect((out.trim().to_int() ?? 0) >= 1).to_equal(true)
+        val (_o2, _e2, rc2) = grep_count("stage3_links_stale_rust_runtime_archive_runtime_fixes_are_noops_2026-08-17")
+        expect(rc2).to_equal(0)
+
+    it "offers an explicit opt-out override rather than an implicit one":
+        val (_out, _err, rc) = grep_count("SIMPLE_ALLOW_STALE_RUST_SEED")
+        expect(rc).to_equal(0)
+
+    it "the old warn-and-continue message is gone":
+        val (_out, _err, rc) = grep_count("reusing the existing Rust seed")
+        expect(rc).to_equal(1)
