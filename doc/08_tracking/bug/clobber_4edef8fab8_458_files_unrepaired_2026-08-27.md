@@ -204,3 +204,37 @@ residue. Full closure needs a per-file refactor-vs-loss disambiguation
 over the 67 partial-shrink rows — a dedicated lane, not completed here.
 The Stage-3 wall evidence from 2026-08-27 remains historical; the
 20.hir callable-dependency restore predates this measurement.
+
+## 2026-11-11 addendum (lane hunk-audit-20261111)
+
+Sibling-of-clobber audit: same merged-and-then-dropped defect class as
+the 68596e901bd1 office hunk lost by transplant merge 9e7e7a526edb
+(PR #7597, restored by interp8 as 2866c3af35e5 / PR #8269). Mechanical
+signature sweep over the 2026-08-01..2026-09-15 fix-commit window
+(src/app, src/lib; 120 commits selected, 412 signature lines,
+P0 = office/dashboard): 56 commits had absent signatures, of which
+
+- **3 genuine drops restored** (specs 6/6 GREEN interpreted, on
+  work/hunk-audit-20261111):
+  - `20c824be328e` FLOOR/CEILING negative-significance inversion
+    (math_bridge.spl) — restored as 3ee9789eed71
+  - `574e897a4805` circular references silently wrong instead of #CIRC!
+    (file_formats.spl) — restored as 41a5f079e0bd, 3-way merged with
+    the tip's newer spill-spec phase
+  - `282d89f85df7` dependency-order recalculation (file_formats.spl) —
+    restored as b7bfdecb91ea
+- 2 office Calc-access candidates (`f67242086ac7`, `c0c2ef518afe`)
+  recorded BLOCKED-not-dropped: absent, but the tip carries a newer
+  channel-based transport reworking the same files; restoring would
+  regress it.
+- All other candidates excluded with rationale: the 2026-09-21
+  layout-renderer module split (symbols verified in successor files),
+  http_client/fs.spl moves, simd_scan and storage_roots reworks whose
+  fix intent survives in evolved form, SPIR-V blob regeneration, and
+  meta restore/revert commits.
+
+Full machine-readable report: `build/review/hunk-audit-20261111.sdn`
+(gitignored, on disk in the lane worktree). The three restored hunks
+were all from the same office-fix campaign as the known
+68596e901bd1 instance — the transplant dropped that campaign nearly
+wholesale, not as a one-off.
