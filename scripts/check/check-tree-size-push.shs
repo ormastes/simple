@@ -556,9 +556,9 @@ evaluate_rev_banded() {
 }
 
 # ===========================================================================
-# SELFTEST — runs before every scan, FATAL. 26 fixtures.
+# SELFTEST — runs before every scan, FATAL. 27 fixtures.
 # ===========================================================================
-SELFTEST_EXPECTED=26
+SELFTEST_EXPECTED=27
 
 # --- FIXTURE HERMETICITY (2026-08-01) --------------------------------------
 # Every git call that BUILDS a fixture must go through st_git/st_git_init.
@@ -926,6 +926,48 @@ selftest() {
         st_fail=1
     fi
 
+    # --- 1 fixture: core.worktree poison must fail closed, naming the cause ---
+    # The 2026-08-08 incident: core.worktree in the shared .git/config redirected
+    # every git command to another tree and all three pre-push guards answered
+    # the GENERIC repository-mismatch error — protection that looks like a
+    # tooling hiccup gets ignored. Runs the whole script as a subprocess in a
+    # poisoned repo, like the markers guard's fixture 5. Not a verdict fixture:
+    # asserts the script-level detector, like env-isolation.
+    st_ran=$(( st_ran + 1 ))
+    st_cw_self=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P)/$(basename -- "$0")
+    st_cw_repo="$TMPROOT/core-worktree-repo"
+    rm -rf "$st_cw_repo"
+    st_git_init "$st_cw_repo" >/dev/null 2>&1 || {
+        echo "SELFTEST FAIL: core.worktree fixture repo init failed" >&2; st_fail=1; }
+    if [ -d "$st_cw_repo/.git" ]; then
+        mkdir -p "$st_cw_repo/scripts/check" || st_fail=1
+        cp "$st_cw_self" "$st_cw_repo/scripts/check/check-tree-size-push.shs" || st_fail=1
+        (
+            cd "$st_cw_repo" || exit 1
+            printf 'x\n' > f.txt
+            st_git "$st_cw_repo" add f.txt >/dev/null 2>&1 || exit 1
+            st_git "$st_cw_repo" commit -q -m "initial" >/dev/null 2>&1 || exit 1
+            st_cw_base=$(st_git "$st_cw_repo" rev-parse HEAD) || exit 1
+            printf 'x\ny\n' > f.txt
+            st_git "$st_cw_repo" add f.txt >/dev/null 2>&1 || exit 1
+            st_git "$st_cw_repo" commit -q -m "second" >/dev/null 2>&1 || exit 1
+            st_git "$st_cw_repo" config core.worktree "$TMPROOT/not-this-tree" || exit 1
+            # --push-tip skips the nested selftest (this guard runs its full
+            # selftest before every scan; without the skip the fixture would
+            # recurse); the step-0 poison detector fires before any scan.
+            sh scripts/check/check-tree-size-push.shs --push-tip "$st_cw_base..HEAD" > out.txt 2>&1
+            echo $? > rc.txt
+        )
+        st_cw_rc=$(cat "$st_cw_repo/rc.txt" 2>/dev/null)
+        st_cw_out=$(cat "$st_cw_repo/out.txt" 2>/dev/null)
+        if [ "$st_cw_rc" = "2" ] && printf '%s' "$st_cw_out" | "$GREP" -q "core.worktree"; then
+            echo "SELFTEST: fixture 'core.worktree' (poison named, fail closed) -> ok"
+        else
+            echo "SELFTEST FAIL: fixture 'core.worktree' expected exit 2 naming core.worktree, got rc=$st_cw_rc out=$st_cw_out" >&2
+            st_fail=1
+        fi
+    fi
+
     CFG_ABS_MIN=$st_s_min;  CFG_ABS_MAX=$st_s_max
     CFG_TOL_PERMILLE=$st_s_tol; CFG_PATHS=$st_s_paths
     CFG_SRC_MIN=$st_s_smin; CFG_SRC_MAX=$st_s_smax
@@ -935,7 +977,7 @@ selftest() {
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (17 must-fail, 8 must-pass, 1 env-isolation)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (17 must-fail, 8 must-pass, 1 env-isolation, 1 core.worktree)"
     return 0
 }
 
@@ -1050,6 +1092,27 @@ case "$range" in
         die 2 "unknown option '$range'; raw mode is '--rev-list-args <args>...'"
         ;;
 esac
+
+# --- 0. core.worktree poison: name it, don't fail generically later ---------
+# core.worktree in the shared .git/config redirects EVERY git command in this
+# repo — including this guard's own toplevel resolution below — to a different
+# working tree. The guards then die with the generic 'repository mismatch'
+# error, which reads like a tooling hiccup, so the only protection against a
+# main tree wipe looks broken and invites being pushed past. Name the cause
+# and the repair instead.
+# doc/08_tracking/bug/core_worktree_config_disables_all_pre_push_guards_2026-08-08.md
+_cw_git_common=$(git rev-parse --git-common-dir 2>/dev/null) || _cw_git_common=""
+if [ -n "$_cw_git_common" ] && [ -f "$_cw_git_common/config" ]; then
+    _cw_value=$(git config --file "$_cw_git_common/config" --get core.worktree 2>/dev/null) || _cw_value=""
+    if [ -n "$_cw_value" ]; then
+        die 2 "core.worktree = '$_cw_value' is set in $_cw_git_common/config.
+  That key redirects every git command in this repository — this guard
+  included — to a DIFFERENT working tree, so the pre-push guards cannot
+  check the tree about to be pushed and fail closed here.
+  Repair:  git config --file \"$_cw_git_common/config\" --unset core.worktree
+  One-run workaround: export GIT_DIR=<repo>/.git GIT_WORK_TREE=<repo>"
+    fi
+fi
 
 # --- 1. cwd must be inside a git repository ---------------------------------
 toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""

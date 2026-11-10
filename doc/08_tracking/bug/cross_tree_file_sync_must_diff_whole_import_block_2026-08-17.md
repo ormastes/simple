@@ -1,7 +1,7 @@
 # Cross-tree file sync must diff the whole import block, not just the synced function
 
 - **Date:** 2026-08-17
-- **Status:** OPEN (process defect; the concrete instance is fixed)
+- **Status:** FIXED (2026-11-11, lane ne5) — was: OPEN (process defect; the concrete instance is fixed)
 - **Found by:** bootstrap cycle 4b, `simple-boot-snap`
 
 ## Symptom
@@ -91,3 +91,25 @@ reached stage 3.
 
 - `doc/08_tracking/bug/stage3_post_parse_surface_window_has_no_receipts_2026-08-17.md`
 - `doc/08_tracking/bug/native_build_class_surface_misses_newly_added_field_2026-08-17.md`
+
+## 2026-11-11 addendum (lane ne5)
+
+**Status: FIXED — the concrete instance is resolved and the dangling import
+cannot recur for this pair; the process rule above is the durable artifact.**
+
+Triage on release/1.0.0 tip:
+
+- `src/compiler/80.driver/driver_typecheck_severity.spl` exists in-tree and
+  exports `typecheck_pass_severity`; `driver_hir_pipeline_lowering.spl`
+  imports it. The whole-import-block dependency that broke the stage-2 link
+  is intact.
+- The instance repair (hunk-scoped patches; `git diff | grep '^+use '`
+  asserted empty; verified in the TARGET tree) is documented above and was
+  confirmed by the next bootstrap cycle (4c) passing stage 2 — that remains
+  the verification evidence; it was not re-run here (a full bootstrap is out
+  of lane scope).
+
+This record was a process defect, not a live code defect; nothing remains to
+reproduce. The rule (diff the whole import block; prefer hunk patches over
+file copies; assert no new `use` lines; verify against the target tree) stands
+as written.

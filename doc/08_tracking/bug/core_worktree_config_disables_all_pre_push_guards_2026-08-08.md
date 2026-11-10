@@ -4,8 +4,9 @@
 - **Severity:** Critical — the repo's only automated protection against a `main`
   tree wipe is currently **off for every lane**, and fails in a way that looks
   like a tooling hiccup rather than a disabled gate.
-- **Status:** Open. Detected and worked around, **not repaired** (see *Why not
-  repaired here*).
+- **Status:** FIXED (2026-11-11, lane ne5) — was: Open. Detected and worked
+  around, **not repaired**. The generic-failure defect is repaired in the
+  guards themselves; the host-local config poison was never in this repo.
 
 ## Symptom
 
@@ -145,3 +146,41 @@ every push.
 
 It is present in `origin/main` (not introduced by this lane) and says RESTORE.
 Whichever lane left it should restore it or delete it.
+
+## 2026-11-11 addendum (lane ne5)
+
+**Status: FIXED — the named-detector gap is repaired in all three guards; the
+config poison itself was host-local and is not present in this repo.**
+
+Triage on release/1.0.0 tip (worktree simple-p3-ne5-20261111):
+
+- `git rev-parse --show-toplevel` == `pwd -P` here, and the shared config has
+  no `core.worktree` key (this worktree's `.git` is a linked-worktree gitdir
+  pointer). The poison was local to the shared clone described above; nothing
+  to unset here.
+- The systemic defect — all three guards answering the GENERIC
+  repository-mismatch error, which reads like a tooling hiccup and invites
+  being pushed past — was still live: none of the three scripts named the
+  cause.
+
+Fixed in this lane: an identical step-0 `core.worktree` poison detector was
+added to all three guards (`check-tree-size-push.shs`,
+`check-no-conflict-tree-push.shs`, `check-no-conflict-markers-push.shs`). It
+resolves the shared config via `git rev-parse --git-common-dir` and fails
+closed — BEFORE any toplevel resolution — with a message naming the cause and
+both the repair (`git config --unset core.worktree`) and the documented
+GIT_DIR/GIT_WORK_TREE one-run workaround.
+
+Paired tests, all run 2026-11-11 (shell-only, no seed):
+
+- `check-no-conflict-markers-push.shs --selftest` — 5/5 fixtures; new fixture 5
+  poisons a throwaway repo and requires exit 2 plus the named cause.
+- `check-no-conflict-tree-push.shs --selftest` — NEW mode, 1/1 fixture, same
+  shape.
+- `check-tree-size-push.shs --selftest` — 27/27 fixtures; new fixture 27 runs
+  the whole script (in `--push-tip` mode, which skips the nested selftest) in
+  a poisoned repo and requires exit 2 plus the named cause.
+
+The doc's "worth adding to the guards themselves as a named, self-explaining
+failure" recommendation is now implemented; the one-command detector is
+subsumed by the guards' step-0 check.
