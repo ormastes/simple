@@ -195,3 +195,27 @@ calling it directly from Simple caused a segfault. That experiment was reverted.
 Safe retained fix: `_cli_driver_binary()` now returns `""` when `bin/simple`
 does not exist instead of returning a missing candidate path. This avoids a
 bad delegation target but does not close the Stage4 `-c` deploy gate.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED (the row's defect).** Both missing ELF runtime resolver entries
+are present on base (`src/compiler_rust/compiler/src/elf_utils.rs`):
+`rt_cranelift_new_aot_module` at :852 (plus `rt_cranelift_new_aot_module_triple` :855 and
+the `spl_cranelift_*_v2` family :858-862) and `rt_cranelift_aot_define_function` at :893.
+
+Seed-smoke: `SIMPLE_NATIVE_BUILD_RUST=1 bin/simple.exe native-build --backend cranelift`
+on a two-module fixture compiled BOTH units with NO `unknown extern function:
+rt_cranelift_new_aot_module` error — the build reached the link phase, and neither
+Cranelift AOT extern appeared in the unresolved-symbol list.
+
+Environment note: the link itself cannot complete in this fresh worktree because no
+prebuilt runtime archive exists for `find_runtime_library()` to pick up (the 78
+`rt_*` runtime-support symbols are missing). That gap is a worktree provisioning issue,
+identical on the LLVM backend, not this row. The later deploy-gate items this doc records
+(Stage4 `-c` smoke) are separate tracked concerns outside the missing-extern defect.
