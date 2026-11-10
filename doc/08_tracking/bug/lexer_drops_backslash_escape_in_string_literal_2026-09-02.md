@@ -97,3 +97,44 @@ literal. Two engine-independent routes exist: `char_from_code(92)` (used by
 `test/01_unit/lib/common/windows_path_*_spec.spl`), and a RAW string —
 `r"C:\Users\name"` — which `test/01_unit/lib/common/string_literals_spec.spl:68`
 already relies on and which is unaffected by this defect.
+
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: LIVE — FIXED in seed lexer (commit a8a1070724d7)
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
+
+- LIVE confirmed: byte-level probe on the refreshed seed measured raw `"a\b"`
+  → `a`+0x08 (len 2), `"C:\Temp"` → len 6, `"C:\Windows\System32"` → len 17 —
+  backslashes deleted exactly as filed.
+- Root cause (measured, not inferred): the seed lexer
+  (`src/compiler_rust/parser/src/lexer/escapes.rs process_escape`) dropped the
+  backslash in its default arm (`\T` → `T`), and had non-authority arms
+  (`\b`→backspace, `\a`/`\f`/`\v`, `\:`/`\/`/`\.`/`\-`) that the pure-Simple
+  lexer (`lexer_struct.spl scan_string`, the semantic authority) does not have —
+  its `else` preserves `\` + char for every non-escape.
+- Fix (a8a1070724d7): new `EscapeResult::KeepBoth(char)` — unknown escapes keep
+  both bytes at all four call sites (f-string, ADR-005 char literal, i18n x2);
+  the non-authority arms were removed; `\{`/`\}` intentionally retained
+  (load-bearing JSON/CSS spec users — a residual divergence from the authority,
+  recorded here as follow-up).
+- Verification (seed-smoke labels throughout):
+  - `cargo test -p simple-parser` → 453 passed + 2 new pinning tests
+    (`test_unknown_escape_preserves_backslash`,
+    `test_unknown_escape_in_char_literal_is_error`), 0 failed.
+  - End-to-end on a debug seed rebuilt from this tree (cargo build, llvm-mingw
+    clang shim; NOT the tracked bin/simple.exe): probe spec 5/5 — raw
+    `"a\b"` len 3, `"C:\Temp"` len 7, `"C:\Windows\System32"` len 19 (byte
+    inspection: both backslashes present), escaped `"a\\b"` len 3,
+    `char_from_code(92)` oracle len 3.
+  - Regression spot-checks (fixed vs unfixed seed, identical results):
+    `string_literals_spec.spl` 24/24 PASS both; `json_unicode_escape_spec.spl`
+    6/11 both (5 pre-existing failures); `query_diagnostics_spec.spl` 11/15
+    both (4 pre-existing failures, `\{` behavior unchanged).
+- Correction to this doc: the expected length table's "20" for
+  `C:\Windows\System32` is a miscount — the literal is 19 characters
+  (C, :, \, W…s, \, S…2). The pre-fix JIT measurement of 19 was actually
+  correct; only the interpreter's 17 was the defect.
+- Note: the tracked refreshed seed bin/simple.exe does NOT contain the fix
+  (seed rebuild needed); the end-to-end evidence above comes from a debug build
+  of the same source tree. The pure-Simple self-hosted side needed no change —
+  it already implements the preserving contract.

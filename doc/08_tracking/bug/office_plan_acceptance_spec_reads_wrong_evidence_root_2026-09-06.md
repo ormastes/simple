@@ -51,3 +51,26 @@ gate run, which needs an admitted Phase-3 compiler (`SIMPLE_TARGET_PHASE3`,
 `scripts/check/build-office-standalone-target.shs:46`). No `build/**/stage3/**`
 compiler exists in this tree, and producing one is a bootstrap.
 
+## Addendum 2026-11-11 — lane runner5: SUPERSEDED
+
+Fix option 1 has been applied. Fixing commit: `8bc5c33e3bd4`
+"fix(office): align handoff receipt root with evidence gate" (2026-11-03, in
+origin/release/1.0.0 history). The spec's `OFFICE_UI_BASE` is now
+`build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access/runs/`
+(`office_cli_tui_ui_access_spec.spl:25`), which joins to the same root the
+gate writes (`check-office-cli-tui-ui-access.spl:26,73-74`). The commit also
+added `scripts/check/check-office-handoff-evidence-root.py`.
+
+Seed-smoke verification on refreshed seed (build-commit 0791c2b7f4a7):
+- `python scripts/check/check-office-handoff-evidence-root.py` →
+  `PASS: 9 receipt paths, two isolated runs; historical mismatch rejected`.
+- `bin/simple.exe test test/03_system/plan_acceptance/office_cli_tui_ui_access_spec.spl
+  --mode=interpreter --no-cache` → 3 passed / 9 failed; every failure is the
+  documented *first* blocker (`OFFICE_GATE_BINARY must name the compiled
+  Office evidence gate`) — no evidence-path read error appears. End-to-end
+  GREEN still needs a compiled gate binary (bootstrap prerequisite the bug
+  doc itself scoped out), but the evidence-root mismatch this bug is about
+  is fixed and guarded.
+
+Verdict: SUPERSEDED by 8bc5c33e3bd4.
+

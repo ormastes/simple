@@ -88,3 +88,23 @@ B=src/compiler_rust/target/release/simple.exe
 SIMPLE_BINARY="$B" "$B" test test/01_unit/lib/std/testing/mock_spec.spl
 ```
 
+## Addendum 2026-11-11 — lane runner5: SUPERSEDED
+
+Refreshed-seed seed-smoke (`SIMPLE_LIB=src
+SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+test/01_unit/lib/std/testing/mock_spec.spl --mode=interpreter --no-cache`,
+seed build-commit 0791c2b7f4a7): **56/56 passed, 0 failed** — the failing
+"retrieves specific call by index" case now passes.
+
+Fixing commit: `668a95c5ba39` "fix(seed-interp): coerce values bound to
+declared signed widths" (2026-11-06, in origin/release/1.0.0 history). It
+adds `coerce_to_declared_signed` in the seed interpreter so a value bound to
+a declared `i8`/`i16`/`i32`/`i64` parameter takes that width's
+two's-complement value. Before it, the literal `0` bound to `get_call(index:
+i32)` stayed a raw `i64`, and `index as usize` then failed with
+`semantic: type mismatch: cannot cast i64 to usize` in interpreted spec-DSL
+execution only — exactly the reported symptom. JIT already coerced, matching
+the "works in fn main()" observation.
+
+Verdict: SUPERSEDED by 668a95c5ba39.
+
