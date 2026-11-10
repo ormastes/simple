@@ -101,3 +101,26 @@ ADD semantic-equivalence evidence.
 Unblock condition: satisfy Gates 4 and 5 in
 `doc/04_architecture/simple_formal_verification_2_0.md` without weakening the
 existing fail-closed scripts.
+
+## 2026-11-11 — P3 ne9 triage: still LIVE — unblock conditions unmet
+
+Lane ne9 (batch 2026-11-11) re-checked the environment claims at this
+tip (origin/release/1.0.0 worktree, `482cdf40753b`):
+
+- `bin/simple.exe` still prints the "Rust-built Simple binary is a
+  bootstrap seed only" warning (build-commit `46fe8f6b6def`); repository
+  policy still prohibits converting seed results into release evidence.
+- `bin/release/<triple>/simple` does not exist in this tree, so the
+  self-hosted-validation blocker stands exactly as written.
+- No `lean4export`/`nanoda` adapter provisioning is visible from this
+  lane, and the product-refinement blockers (SimpleOS model_proven
+  until a source-to-model adapter checks, RV32I retirement path,
+  IPC/storage/unmap typed promotion) are outside a traverse lane's
+  scope to satisfy.
+
+Not fixable from a P3 traverse lane: deploying the genuine self-hosted
+binary is the bootstrap lane's deliverable (this lane is also barred
+from entry-closure native builds), and the formal-verification gates
+require the FV 2.0 integration lane. The status line correctly stays
+open; this addendum records that the 2026-08-12 blocker list was
+re-confirmed, not silently stale.
