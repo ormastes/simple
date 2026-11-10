@@ -114,3 +114,37 @@ redeploy carries). This lane's own private candidate binary
 `pipeline::module_loader` commit) already exhibits the fixed behaviour --
 see `RECEIPT_PERF_8.md` for the measured before/after on that candidate.
 
+
+---
+
+## Addendum 2026-11-11 — lane seed2 — verdict SUPERSEDED (by the seed refresh itself)
+
+Triage-first pass, batch 2. The row's only requested action was a seed
+redeploy; the tracked seed was refreshed today (refresh #8184, build-commit
+`0791c2b7f4a7`, per the lane brief). This addendum judges against that
+refreshed binary in this worktree.
+
+**Binary-level oracle (the row's own proof, re-applied):** `nm bin/simple.exe`
+shows 3 `compute_var_roots` symbols — the function
+(`...var_overlay17compute_var_roots`) plus 2
+`LocalKey<RefCell<HashMap<PathBuf, Vec<PathBuf>>>>::with::<compute_var_roots::closure>`
+cache closures, i.e. `VAR_ROOTS_CACHE` is compiled into the refreshed binary.
+The stale aarch64 deployed binary this row indicted had none. Fix commit
+`8533c416681` (with `7bb5ef796a6`/`07b1cf5221c`) is an ancestor of
+`0791c2b7f4a7` (`git merge-base --is-ancestor` -> YES).
+
+**Functional seed-smoke:** `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe
+bin/simple.exe lint <2-line file>` -> `Lint passed: all files clean`, rc=0.
+
+**Caveat (not a regression of the fix):** the row-era pin
+`test/05_perf/startup/lint_repeated_package_init_open_budget_spec.spl` (last
+touched 2026-11-07) does not compile on the refreshed seed: line 103 returns
+`to_i64()` (Optional) from `-> i64`, rejected by the newer
+"nil is forbidden by the non-optional return contract" HIR strictness
+(~2026-11-09). It is also a Linux/strace spec (`strace -f -e trace=openat`,
+`mktemp`, `sha256sum`) that cannot execute on this Windows host. Both are
+spec-drift/environment facts, independent of `VAR_ROOTS_CACHE` presence, and
+not edited by this lane.
+
+**Cycles:** 0 (no live defect; the row's premise was the old stale deployed
+seed). Evidence: `build/review/p3fix-seed2-20261111.sdn`.
