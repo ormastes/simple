@@ -1,0 +1,102 @@
+# Guard: the F1 findings of doc/08_tracking/bug/architecture_rule_audit_2026-08-11.md
+# must not be reintroduced.
+#
+# WHAT THIS GUARDS
+#   F1 (std.gpu): src/lib/nogc_sync_mut/spec/evidence/counterpart/
+#   host_vulkan_lavapipe_provider.spl labeled evidence through
+#   `use std.gpu.engine2d.sffi_vulkan.{vulkan_sffi_device_name}`. `std.gpu`
+#   resolves through GC_ALIAS_MANIFEST to the gc_async_mut family, so a
+#   nogc_sync_mut importer hits `nogc_imports_gc_family` — the hard
+#   error[gc_boundary] class. The scoped fix routes the import through the
+#   same-named facade owned by the importer's own family
+#   (std.nogc_sync_mut.gpu.engine2d.sffi_vulkan), which is the wrapper owner
+#   per the backend-routing policy in
+#   doc/04_architecture/runtime/runtime_family_support_matrix.md §2.6.1.
+#
+#   F2 (std.async): src/lib/nogc_async_mut/async/runtime.spl imported
+#   std.async.future/poll/combinators. There is no src/lib/async/ family;
+#   `std.async.*` resolves through the interpreter family search order to
+#   this file's own siblings in nogc_async_mut (rank 2), but the legacy
+#   "async" manifest row (rank 3) classifies the literal import path as a
+#   higher layer, producing spurious `higher_layer_runtime_family`
+#   violations. The scoped fix spells the canonical family path
+#   (std.nogc_async_mut.async.*). Retiring the phantom "async" manifest row
+#   itself is compiler-owner work recorded in the bug doc and is NOT claimed
+#   fixed here.
+#
+# HOW IT GUARDS
+#   1. Source scan: the two files must not contain any `use std.gpu.` /
+#      `use std.async.` import line (reintroduction fails immediately).
+#   2. Semantic lock: the production checker
+#      (compiler.semantics.gc_boundary_check.check_runtime_family_import_violations)
+#      must keep classifying the OLD import paths as violations and the
+#      replacement paths as clean — so a manifest/alias regression that
+#      silently re-legitimizes the old paths also fails here.
+#
+# HONESTY
+#   The source scan needs /bin/sh + grep (repo-standard spec idiom, see
+#   gc_strategy_naming_spec.spl). When the shell is unavailable the spec
+#   SKIPS with the reason; it never passes by doing nothing. The semantic
+#   half has no external prerequisite and always runs.
+use std.spec.*
+use std.spec.{skip}
+use std.convert.{try_parse_int}
+use compiler.semantics.gc_boundary_check.{check_runtime_family_import_violations}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _shell_ok() -> bool:
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", "echo ok"])
+    stdout.trim() == "ok"
+
+fn _count_matches(pattern: text, path: text) -> i64:
+    val cmd = "grep -cE '" + pattern + "' " + path + " 2>/dev/null || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    val trimmed = stdout.trim()
+    if trimmed.len() == 0:
+        return -1
+    # -1 sentinel: distinguish "shell/file broken" from a real zero count.
+    try_parse_int(trimmed) ?? -1
+
+val PROVIDER: text = "src/lib/nogc_sync_mut/spec/evidence/counterpart/host_vulkan_lavapipe_provider.spl"
+val ASYNC_RUNTIME: text = "src/lib/nogc_async_mut/async/runtime.spl"
+
+describe "runtime family forbidden-import guard (architecture_rule_audit_2026-08-11 F1)":
+    it "lavapipe provider never reimports the GC gpu family (F1)":
+        step("lavapipe provider never reimports the GC gpu family")
+        if not _shell_ok():
+            skip("no /bin/sh with echo available for source scan")
+        expect(_count_matches("^use std\\.gpu\\.", PROVIDER)).to_equal(0)
+        expect(_count_matches("^use std\\.nogc_sync_mut\\.gpu\\.engine2d\\.sffi_vulkan", PROVIDER)).to_be_greater_than(0)
+
+    it "async runtime never reimports the phantom std.async layer (F2)":
+        step("async runtime never reimports the phantom std.async layer")
+        if not _shell_ok():
+            skip("no /bin/sh with echo available for source scan")
+        expect(_count_matches("^use std\\.async\\.", ASYNC_RUNTIME)).to_equal(0)
+        expect(_count_matches("^use std\\.nogc_async_mut\\.async\\.", ASYNC_RUNTIME)).to_be_greater_than(0)
+
+    it "checker still flags the old paths and accepts the replacement paths":
+        step("checker still flags the old paths and accepts the replacement paths")
+        val old_gpu = check_runtime_family_import_violations(
+            "std.nogc_sync_mut.spec.evidence.counterpart.host_vulkan_lavapipe_provider",
+            ["std.gpu.engine2d.sffi_vulkan"]
+        )
+        expect(old_gpu.len()).to_equal(1)
+        expect(old_gpu[0].reason).to_equal("nogc_imports_gc_family")
+        val new_gpu = check_runtime_family_import_violations(
+            "std.nogc_sync_mut.spec.evidence.counterpart.host_vulkan_lavapipe_provider",
+            ["std.nogc_sync_mut.gpu.engine2d.sffi_vulkan"]
+        )
+        expect(new_gpu.len()).to_equal(0)
+        val old_async = check_runtime_family_import_violations(
+            "std.nogc_async_mut.async.runtime",
+            ["std.async.future", "std.async.poll", "std.async.combinators"]
+        )
+        expect(old_async.len()).to_equal(3)
+        expect(old_async[0].reason).to_equal("higher_layer_runtime_family")
+        val new_async = check_runtime_family_import_violations(
+            "std.nogc_async_mut.async.runtime",
+            ["std.nogc_async_mut.async.future", "std.nogc_async_mut.async.poll", "std.nogc_async_mut.async.combinators"]
+        )
+        expect(new_async.len()).to_equal(0)
