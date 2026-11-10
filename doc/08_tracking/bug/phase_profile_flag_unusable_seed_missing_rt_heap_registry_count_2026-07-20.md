@@ -116,3 +116,33 @@ record (`nvme_rv32_firmware_build_timeout_2026-07-05.md`), never reaching the
 firmware extern-resolution phase. Status: FIXED at tip by seed redeployment
 (symbol-presence proof above); option 2 (diagnostic degrade) remains a
 hardening suggestion, not required for closure.
+
+---
+
+## Addendum 2026-11-11 — lane seed2 — verdict SUPERSEDED (re-verified on refreshed seed)
+
+Triage-first pass, batch 2. The 2026-11-05 riscv-sweep verification already
+declared this FIXED at tip by seed redeployment (option 1) on the aarch64
+seed; this addendum spot-checks the 2026-11-11 refreshed seed
+(build-commit `0791c2b7f4a7`, refresh #8184) that this lane judges against.
+
+**Seed-smoke (this lane's proof):**
+1. `nm bin/simple.exe` -> `T rt_heap_registry_count` (0x140beb041) plus the
+   Rust registration wrapper
+   `interpreter_extern6memory22rt_heap_registry_count`; registration intact in
+   `src/compiler_rust/common/src/runtime_symbols.rs:287,414`, C definition at
+   `src/runtime/runtime_native.c:1975`. The flagged
+   `unknown extern function: rt_heap_registry_count` failure mode cannot occur
+   against this binary.
+2. Functional: `SIMPLE_COMPILER_PHASE_PROFILE=1 bin/simple.exe lint
+   /tmp/p3seed2/probe2.spl` -> rc=0, `Lint passed: all files clean`. (The lint
+   driver path emits no BOOTSTRAP-PHASE lines itself; the rv32 A/B probe
+   remains impractical here — heavy native-build lane, and per the 2026-11-05
+   note it times out in the cold-load that is the subject of the rv32 sibling
+   record. Symbol presence is the row's own closure oracle.)
+
+**Residual (not required for closure, per 2026-11-05):** option 2 — make the
+diagnostic degrade instead of abort — remains an open hardening suggestion for
+the driver owner.
+
+**Cycles:** 0. Evidence: `build/review/p3fix-seed2-20261111.sdn`.
