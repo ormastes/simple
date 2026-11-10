@@ -5,14 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-18
-- Status: **OPEN (2026-11-08 revalidated)** — Cause 2 was fixed by the
-  module-qualified HIR struct identity work on 2026-10-19 (below). The original
-  CLI-substring gate was replaced by `cd1af4f68de` with a real argv-capability
-  check, but the titled whole-program lint de-JIT remains: current
-  `exec_core.rs` deliberately returns `lint-jit-parity-unproven` before that
-  check because the lint JIT lane has produced false-clean results. The record
-  stays open for a verified lint JIT parity fix; no lint behavior was changed
-  in this batch.
+- Status: SUPERSEDED (2026-11-11, lane interp9) — BOTH titled de-JIT causes verified fixed on current tip; the residual whole-program lint interpreter pin is deliberate (`lint-jit-parity-unproven`) and its remaining tail (lint JIT parity) is tracked by `lint_jit_segv_text_as_string_array_2026-10-10.md`. See 2026-11-11 addendum below.
 - Supersedes the "superlinearity not located" section of
   `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`.
 - Binary identity for every number below:
@@ -320,3 +313,29 @@ purpose. Fable review (round 1) also hardened: enum payload/trait signature
 rewrite, layout census compares field types, and
 `qualified_method_owner_matches` no longer equates `Type` with
 `__spl_flat_<owner>__Type`.
+
+## 2026-11-11 addendum (lane interp9, work/p3-interp9-20261111) — titled causes FIXED, residual pin deliberate
+
+Verification: source inspection of `src/compiler_rust/driver/src/exec_core.rs`
+on this worktree tip (base c8b6d0ebe90e), no lint run needed for the verdict.
+
+- **Cause 1 (entry-file text-grep): FIXED.** `source_uses_cli_args` survives
+  only as the body of the capability-gated arm
+  `!cli_args_backed && source_uses_cli_args(path)` → `"cli-args-unbacked-runtime"`.
+  The old unconditional substring gate (any file merely MENTIONING
+  `std.cli`/`get_cli_args`) is gone, and the in-code comment records the
+  measured 2.7x cost it imposed and the argv-hook capability
+  (`rt_set_args_vec` populated for every lane) that made the narrow gate safe.
+- **Cause 2 (duplicate `Span` de-JIT): FIXED** by the 2026-10-19
+  module-qualified HIR struct identity work recorded above.
+- **What remains (not a defect):** `interpreter_preference_reason` returns
+  `"lint-jit-parity-unproven"` for `src/app/cli/lint_entry.spl` BEFORE the
+  capability check. This is a deliberate, documented pin: the lint JIT lane is
+  measurably WRONG (false-clean on duplicate-typed-args fixtures; SEGV/exit-70
+  history). The remaining tail — a verified lint JIT parity fix — is tracked by
+  `doc/08_tracking/bug/lint_jit_segv_text_as_string_array_2026-10-10.md`.
+
+So the titled condition ("two stacked de-JIT causes") is resolved; the record
+is superseded by the lint-JIT-parity record for whatever work is left. The
+measured expectations in this doc (rename buys ~1.23x, not 100x; lexer linear
+at ~21 ms/token) remain the standing guidance against over-investment.
