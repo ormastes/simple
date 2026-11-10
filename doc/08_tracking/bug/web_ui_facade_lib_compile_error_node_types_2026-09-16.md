@@ -26,3 +26,24 @@ field (renamed or restructured per language rules).
 Fix the declaration at node_types.spl:69 (rename the field or adjust to the
 sanctioned class-field syntax), then re-run
 `test/01_unit/lib/nogc_async_mut/web_ui/web_ui_facade_spec.spl`.
+
+
+## Triage 2026-11-10 (p3-lib2 lane, work/p3-lib2-20261110)
+
+**Verdict: SUPERSEDED — `node_types.spl` compiles as-is; the unblock condition
+is met. Verified with the worktree Rust seed (bin/simple.exe, built 2026-11-10).**
+
+- `./bin/simple.exe test test/01_unit/lib/nogc_async_mut/web_ui/web_ui_facade_spec.spl`
+  -> **PASS, rc=0**: `SPEC FILE VERDICT ... outcome=OK declared>=1 executed=1
+  passed=1 failed=0`. The spec imports the whole web_ui tree including
+  `std.common.web.node_types`; the `namespace: text` field in `class Element`
+  (line 69) no longer trips any diagnostic.
+- `simple check src/lib/common/web/node_types.spl` surfaces no "Common mistake
+  detected" and no namespace-related error (parse/resolve phases clean; the
+  command then stops at the environmental "no admitted cached self-hosted check
+  worker artifact" gap — no deployed pure-Simple binary in this worktree, same
+  as every other check this session).
+- MC/DC note: the harness honestly reports "MC/DC: unavailable (compiler lacks
+  probe emission)" because the selected binary is the Rust seed — a host-limit,
+  not a spec failure; the file's real pass/fail verdict is the PASS above.
+- No source change was needed; the file is untouched on this branch.
