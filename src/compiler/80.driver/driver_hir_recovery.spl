@@ -66,7 +66,7 @@ pub fn hir_shard_recovery_claim(queue: text, owner: text, path: text, key: text)
     if hir_shard_claim_valid(file_read("{base}.claim")): 0 else: HIR_SHARD_CLAIM_INVALID_CLAIM_V1
 
 pub fn hir_shard_recovery_terminal(queue: text, owner: text, path: text, state: text, cache_stored: bool) -> bool:
-    if state != "PASS" and state != "FAILED" and state != "CRASH" and state != "BLOCKED" and state != "SKIPPED":
+    if state != "PASS" and state != "FAILED" and state != "CRASH" and state != "TIMEOUT" and state != "BLOCKED" and state != "SKIPPED":
         return false
     val base = hir_shard_record_base(queue, path)
     # The claim is immutable and only its owner terminalizes, so one exclusive
@@ -308,3 +308,14 @@ pub fn hir_shard_recovery_unclaimed_count(queue: text) -> i64:
 # the last row after the failed worker was reaped.
 pub fn hir_shard_recovery_replacements_dispatchable(queue: text, queued_replacements: i64) -> bool:
     queued_replacements > 0 and hir_shard_recovery_unclaimed_count(queue) > 0
+
+# A worker reaped because its --timeout deadline elapsed (still running, poll
+# result -2) is a TIMEOUT, not a CRASH. Exit/retry handling is identical.
+pub fn hir_shard_reap_deadline_hit_v1(polled: i64, timeout_ms: i64, elapsed_ms: i64) -> bool:
+    polled == -2 and timeout_ms > 0 and elapsed_ms >= timeout_ms
+
+pub fn hir_shard_reap_state_v1(blocked: bool, code: i64, finished: bool, deadline_hit: bool) -> text:
+    if blocked: return "BLOCKED"
+    if code < 0:
+        return if deadline_hit: "TIMEOUT" else: "CRASH"
+    if finished: "FAILED" else: "BLOCKED"
