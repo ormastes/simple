@@ -3,6 +3,33 @@
 > `scripts/setup/`); only the external full-CLI redeploy remains. Not selected
 > for this pass — blocked on deployment, not source.
 
+## Addendum 2026-11-11 — lane runner4: SUPERSEDED at source level (prior-lane triage confirmed)
+
+Spot-checked the 2026-11-04/05 triage from a Windows worktree at release/1.0.0
+tip `b364745fdbf8` (all seed-smoke):
+
+1. **Inline `unsafe(...): expr` (Defect 2) — confirmed fixed in tree AND at
+   runtime:** `parse_unsafe_block_expr_if_present` at
+   `src/compiler/10.frontend/core/parser_stmts.spl:644`; the doc's minimal
+   `inline.spl` repro (extern `rt_random_randint` + single-line
+   `unsafe(capabilities: [ffi]): rt_random_randint(a, b)`) parses and **prints
+   `ok`** under the refreshed 2026-11-11 seed
+   (`bin/simple.exe run --mode=interpreter`, engine-demotion notice for the
+   ffi splice only — no parse error).
+2. **Deploy slot (Defect 1) — confirmed fixed at source:**
+   `scripts/setup/release-platform.shs:7-9` canonicalises `*-apple-darwin` →
+   `*-apple-darwin-macho`; `scripts/setup/setup.shs:92-98` refuses to point
+   `bin/simple` at a slot binary identifying as `simple-bootstrap`.
+3. **Remaining: external macOS redeploy only.** The fresh Stage-4 full-CLI
+   deploy for `bin/release/aarch64-apple-darwin-macho/` is owned by the
+   bootstrap lane and lives on a macOS host; it cannot be produced or
+   verified from this Windows lane. `bin/simple test` on the self-hosted
+   macOS binary stays blocked until that deploy lands — deployment
+   dependency, not a source defect.
+
+Verdict: SUPERSEDED (source-level; confirms prior-lane triage). Residual
+action = bootstrap-lane macOS redeploy, external to this lane.
+
 # Status 2026-11-04 — source-level parts FIXED; redeploy dependency on the bootstrap lane
 - **Inline `unsafe(...): expr` (Defect 2): fixed.** Rust seed parser carries
   `parser/src/unsafe_inline_body_test.rs`; pure-Simple parser handles it at

@@ -66,3 +66,28 @@ The three lint runs performed were:
 
 The spec was NOT lint-verified, because it cannot be. Recorded here rather than
 claimed as clean.
+
+## Addendum 2026-11-11 — lane runner4: SUPERSEDED
+
+Reproduced the repro command on release/1.0.0 tip `b364745fdbf8` with the
+refreshed 2026-11-11 seed (seed-smoke, JIT lane, no execution-mode override):
+
+- `test/01_unit/lib/common/spec/dual_run_tranche_e_spec.spl` (one of the two
+  crashing files named here): `bin/simple.exe lint` completes, **rc=0** —
+  no SEGV, real verdict.
+- `test/01_unit/lib/common/spec/dual_run_simd_lane_spec.spl` (the other
+  named file): no longer exists in the tree — deleted by merge `9e7e7a526edb`
+  (PR #7597, 2026-11-07). Its successor population
+  (`test/01_unit/lib/common/dual_run_jit/str_twins_jit_dual_run.spl`,
+  `dual_run_tranche_[a-e]_spec.spl`, `dual_run_pairs_spec.spl`,
+  `dual_run_shadow_spec.spl`) lints without crashing
+  (`str_twins_jit_dual_run.spl` rc=0).
+
+The dual-run spec lint crash no longer reproduces; the pre-commit lint
+requirement is satisfiable for this file class again. The wrapper
+misclassification point (a SEGV rc being reported as "1 with findings" by
+`lint-cached.shs`) was a secondary observation; with the crash gone it no
+longer triggers for this class, and no wrapper change was made in this
+lane.
+
+Verdict: SUPERSEDED.

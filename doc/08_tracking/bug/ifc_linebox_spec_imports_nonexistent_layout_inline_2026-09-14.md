@@ -58,3 +58,37 @@ One of two, and the choice is an owner decision rather than a guess:
 Do NOT "fix" this by deleting the spec or marking it pending: per
 `.claude/rules/testing.md`, a correct spec that fails is a legitimate artifact,
 and this one fails for a mechanical reason that hides ten real invariants.
+
+## Addendum 2026-11-11 — lane runner4: LIVE → FIXED (unblock option 1)
+
+Reproduced at release/1.0.0 tip `b364745fdbf8` with the refreshed seed
+(seed-smoke): the spec now compiles and all 10 examples *execute*, but each
+fails with `semantic: ...:22:5: function `layout_inline` not found` — the
+symbol was still absent from the `std.gc_async_mut.gpu.browser_engine.layout`
+export surface, exactly as filed.
+
+Implemented unblock option 1: added `fn layout_inline(node: BeDomNode, ctx:
+WebLayoutContext) -> LayoutBox` in
+`src/lib/gc_async_mut/gpu/browser_engine/layout.spl` (exported), reusing the
+pre-existing (previously unused, now `pub`) text helpers
+`_collect_text`/`_split_words`/`_parse_inline_text_align` from
+`layout_inline.spl`. Behaviour: greedy word packing into lines of
+`ctx.available_width` at a fixed 8px/char M14 advance, oversized-word
+chunking for `word-break: break-all` / `overflow-wrap: break-word`/`anywhere`,
+overflowing own line otherwise, and `text-align` left/center/right fragment
+positioning. The expected values in the spec are all relative bounds (line
+counts, width ceilings, x > 0), so they hold without Chrome-derived metrics;
+the fixed-rate text model is documented in the function docstrings.
+
+seed-smoke verification after the fix:
+
+```
+test/01_unit/browser_engine/ifc_linebox_spec.spl: 10 total, 10 passed, 0 failed
+test/01_unit/browser_engine/anonymous_block_spec.spl: 4 total, 4 passed, 0 failed (regression)
+test/01_unit/browser_engine/layout_inline_coverage_closure_spec.spl: 10 total, 10 passed, 0 failed (regression)
+bin/simple lint layout.spl layout_inline.spl: rc 0, 0 errors
+```
+
+Verdict: FIXED in this lane. Note the sibling `layout_inline.spl` header
+comment referencing a `_build_line_box` implementation remains aspirational;
+no such function exists.
