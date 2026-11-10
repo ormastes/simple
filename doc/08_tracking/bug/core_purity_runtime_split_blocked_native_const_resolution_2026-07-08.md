@@ -82,3 +82,29 @@ the single source of truth):
 
 Regression spec: `test/01_unit/lib/common/js_runtime_native_const_cross_module_spec.spl`
 (RED: `semantic: variable NATIVE_PARSE_INT not found`; GREEN after fix).
+
+## Step 4 completed 2026-11-10 (work/p2fix-librt-20261110, seed-smoke only)
+
+The 2026-11-05 constant-resolution fix unblocked Step 4; this pass completes
+the relocation:
+
+- `common/js/engine/runtime.spl` is pure: JsRuntime/PrototypeChain/factory/
+  error-ctors removed; 51 NATIVE_* ids + pub/exported dispatch_native remain.
+  check-core-lib-purity.shs drops the file (35 -> 34 new violations; the rest
+  is other lanes' pre-existing debt and the win_text_access stale entry).
+- Consumers of the common JsRuntime repointed to std.js.engine.runtime
+  (common/js/mod.spl, gc script_runner, gc browser_session{,_runtime,_storage};
+  test js_async_fetch_spec likewise). This also fixes a latent break:
+  browser_session called JsRuntime.new_browser, which the common copy never
+  implemented.
+- fetch-global parity: full runtime now installs `fetch` lazily (fails closed
+  without a host window); js_async_fetch_spec green again.
+- No ID renumbered: retained cross-module spec pins -10/-1/-20/-30 and stays
+  green; host_property spec green. REMAINING (option 3, needs a renumbering
+  design + admitted-producer runtime): the 11 duplicate-name divergent IDs and
+  the numeric-range collisions inside the full runtime's own table
+  (NATIVE_ARRAY_PUSH=-50 vs NATIVE_FETCH=-50; NATIVE_STRING_CHAR_AT=-60 vs
+   NATIVE_STORAGE_GET_ITEM=-60) mean a single-ID-owner unification cannot land
+  without changing live dispatch values.
+
+Seed-smoke only (Rust seed interpreter); no self-hosted/native claim.

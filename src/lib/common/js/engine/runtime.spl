@@ -1,48 +1,27 @@
-# JavaScript runtime for the Simple Browser Platform.
-# Sets up the global environment with built-in objects (console, Math, JSON),
-# global functions (parseInt, parseFloat, isNaN, isFinite), prototypes,
-# and provides the top-level eval() entry point.
+# JavaScript native-dispatch ID contract + pure dispatch for the Simple Browser Platform.
+#
+# PURE TIER OWNER (core-purity split of
+# doc/08_tracking/bug/core_purity_runtime_split_blocked_native_const_resolution_2026-07-08):
+# this module owns only the pure NATIVE_* id constants and the pure
+# dispatch_native for the basic built-in families (console, parse, Math, JSON,
+# timers, Symbol). The impure JsRuntime host class lives in the full runtime at
+# src/lib/nogc_sync_mut/js/engine/runtime.spl, reached by hosts through
+# `use std.js.engine.runtime.{JsRuntime}` (tier fallback). Do not re-add
+# interpreter/parser imports or the JsRuntime class here — check-core-lib-purity.shs
+# ratchets this file.
 
-use std.common.js.types.pair.{Pair}
 use std.common.js.types.js_types.JsValue
-use std.common.js.types.js_types.JsObject
-use std.common.js.types.js_types.JsProperty
-use std.common.js.types.ast_types.JsExpression
-use std.common.js.types.ast_types.JsStatement
-use std.nogc_sync_mut.js.engine.interpreter.JsInterpreter
-use std.nogc_sync_mut.js.engine.interpreter_async.{JsInterpreter}
-use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
-use std.nogc_sync_mut.js.engine.interpreter_exec.{JsInterpreter}
 use std.common.js.builtins.json.{json_parse}
-use std.common.string_core.{char_code}
-# Load common engine modules LAST so their JsLogger/js_nan/etc. win over nogc versions
-use lib.common.js.engine.js_error.{JsError, js_script_error, JsLogger, LogLevel, JsBrowserResult, JsBrowserError}
-use std.nogc_sync_mut.js.engine.parser.{js_parse_program_subset}
+use lib.common.js.engine.js_error.{JsLogger}
 
 # Safe NaN/Infinity sentinels — immune to _RT_NAN function registry ordering
 val _RT_NAN: f64 = -9999999999.999
 val _RT_INF: f64 = 9999999999.0
 val _RT_NEG_INF: f64 = -9999999999.0
 
-# ── Prototype chain ──────────────────────────────────────────────────────
-
-class PrototypeChain:
-    object_proto: i64
-    array_proto: i64
-    function_proto: i64
-    string_proto: i64
-    number_proto: i64
-    error_proto: i64
-
-    static fn empty() -> PrototypeChain:
-        PrototypeChain(
-            object_proto: -1,
-            array_proto: -1,
-            function_proto: -1,
-            string_proto: -1,
-            number_proto: -1,
-            error_proto: -1,
-        )
+# ── Prototype chain (moved with JsRuntime to the full runtime; kept name free) ──
+# PrototypeChain and class JsRuntime now live in
+# src/lib/nogc_sync_mut/js/engine/runtime.spl (std.js.engine.runtime tier fallback).
 
 # ── Symbol ID counter ───────────────────────────────────────────────────
 var _symbol_counter = 0
@@ -167,25 +146,6 @@ fn _next_timer_id() -> i64:
     _timer_id_counter = _timer_id_counter + 1
     _timer_id_counter
 
-# ── Error constructors ───────────────────────────────────────────────────
-
-fn create_error(message: text, error_type: text) -> JsValue:
-    # Returns a JsValue.String encoding the error for now.
-    # A full implementation would create an Error object with .message, .stack, etc.
-    JsValue.String(v: "{error_type}: {message}")
-
-fn create_type_error(message: text) -> JsValue:
-    create_error(message, "TypeError")
-
-fn create_reference_error(message: text) -> JsValue:
-    create_error(message, "ReferenceError")
-
-fn create_syntax_error(message: text) -> JsValue:
-    create_error(message, "SyntaxError")
-
-fn create_range_error(message: text) -> JsValue:
-    create_error(message, "RangeError")
-
 # ── Native function dispatch ─────────────────────────────────────────────
 
 fn _js_floor(n: f64) -> f64:
@@ -195,7 +155,7 @@ fn _js_floor(n: f64) -> f64:
         return fv - 1.0
     fv
 
-fn dispatch_native(fn_id: i64, args: [JsValue], logger: JsLogger) -> JsValue:
+pub fn dispatch_native(fn_id: i64, args: [JsValue], logger: JsLogger) -> JsValue:
     if fn_id == NATIVE_CONSOLE_LOG:
         console_log(args, logger)
         return JsValue.Undefined
@@ -405,328 +365,11 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: JsLogger) -> JsValue:
 
     JsValue.Undefined
 
-# ── Runtime ──────────────────────────────────────────────────────────────
-
-class JsRuntime:
-    interpreter: JsInterpreter
-    global_object: i64
-    prototypes: PrototypeChain
-    logger: JsLogger
-    native_functions: [Pair<text, i64>]
-
-    static fn new(logger: JsLogger) -> JsRuntime:
-        var interp = JsInterpreter.create(logger)
-        val global_obj = interp.create_object()
-        var rt = JsRuntime(
-            interpreter: interp,
-            global_object: global_obj,
-            prototypes: PrototypeChain.empty(),
-            logger: logger,
-            native_functions: [],
-        )
-        rt.initialize()
-        rt
-
-    # Register a native function in the interpreter's function table
-    me _register_native(name: text, native_id: i64) -> i64:
-        # Store a JsFunction with empty body — the interpreter will check for
-        # negative IDs and dispatch to the native handler.
-        var interpreter = self.interpreter
-        val fn_idx = interpreter._register_native(name, native_id)
-        var native_functions: [Pair<text, i64>] = self.native_functions
-        native_functions.push(Pair(first: name, second: native_id))
-        self.native_functions = native_functions
-        self.interpreter = interpreter
-        fn_idx
-
-    # Define a native function in the global scope
-    me _define_global_fn(name: text, native_id: i64):
-        val fn_idx = self._register_native(name, native_id)
-        val fn_val = JsValue.Function(id: fn_idx)
-        var interpreter = self.interpreter
-        interpreter.define_global_value(name, fn_val)
-        self.interpreter = interpreter
-
-    me _define_global_value(name: text, value: JsValue):
-        var interpreter = self.interpreter
-        interpreter.define_global_value(name, value)
-        self.interpreter = interpreter
-
-    # Define a native method on an object
-    me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
-        val fn_idx = self._register_native(method_name, native_id)
-        val fn_val = JsValue.Function(id: fn_idx)
-        self.set_host_property(obj_id, method_name, fn_val)
-
-    # Initialize the global environment with all built-in objects and functions
-    me initialize():
-        self.logger.debug("Initializing JS runtime globals")
-        # ── Global values ────────────────────────────────────────────
-        self._define_global_value("undefined", JsValue.Undefined)
-        self._define_global_value("NaN", JsValue.Number(v: _RT_NAN))
-        self._define_global_value("Infinity", JsValue.Number(v: _RT_INF))
-
-        # ── Global functions ─────────────────────────────────────────
-        self._define_global_fn("parseInt", NATIVE_PARSE_INT)
-        self._define_global_fn("parseFloat", NATIVE_PARSE_FLOAT)
-        self._define_global_fn("isNaN", NATIVE_IS_NAN)
-        self._define_global_fn("isFinite", NATIVE_IS_FINITE)
-        self._define_global_fn("Symbol", NATIVE_SYMBOL)
-        self._define_global_fn("String", NATIVE_STRING_CONSTRUCTOR)
-        self._define_global_fn("Number", NATIVE_NUMBER_CONSTRUCTOR)
-        self._define_global_fn("Boolean", NATIVE_BOOLEAN_CONSTRUCTOR)
-        self._define_global_fn("fetch", NATIVE_FETCH)
-
-        # ── console object ───────────────────────────────────────────
-        val console_id = self.create_host_object()
-        self._define_method_on(console_id, "log", NATIVE_CONSOLE_LOG)
-        self._define_method_on(console_id, "error", NATIVE_CONSOLE_ERROR)
-        self._define_method_on(console_id, "warn", NATIVE_CONSOLE_WARN)
-        self._define_global_value("console", JsValue.Object(id: console_id))
-
-        # ── Math object ──────────────────────────────────────────────
-        val math_id = self.create_host_object()
-        self.set_host_property(math_id, "PI", JsValue.Number(v: 3.141592653589793))
-        self.set_host_property(math_id, "E", JsValue.Number(v: 2.718281828459045))
-        self.set_host_property(math_id, "LN2", JsValue.Number(v: 0.6931471805599453))
-        self.set_host_property(math_id, "LN10", JsValue.Number(v: 2.302585092994046))
-        self.set_host_property(math_id, "SQRT2", JsValue.Number(v: 1.4142135623730951))
-        self._define_method_on(math_id, "floor", NATIVE_MATH_FLOOR)
-        self._define_method_on(math_id, "ceil", NATIVE_MATH_CEIL)
-        self._define_method_on(math_id, "round", NATIVE_MATH_ROUND)
-        self._define_method_on(math_id, "random", NATIVE_MATH_RANDOM)
-        self._define_method_on(math_id, "abs", NATIVE_MATH_ABS)
-        self._define_method_on(math_id, "max", NATIVE_MATH_MAX)
-        self._define_method_on(math_id, "min", NATIVE_MATH_MIN)
-        self._define_method_on(math_id, "sqrt", NATIVE_MATH_SQRT)
-        self._define_method_on(math_id, "pow", NATIVE_MATH_POW)
-        self._define_global_value("Math", JsValue.Object(id: math_id))
-
-        # ── JSON object ──────────────────────────────────────────────
-        val json_id = self.create_host_object()
-        self._define_method_on(json_id, "parse", NATIVE_JSON_PARSE)
-        self._define_method_on(json_id, "stringify", NATIVE_JSON_STRINGIFY)
-        self._define_global_value("JSON", JsValue.Object(id: json_id))
-
-        # Promise namespace object
-        val promise_ctor_id = self.create_host_object()
-        val promise_proto_id = self.create_host_object()
-        self.set_host_property(promise_ctor_id, "prototype", JsValue.Object(id: promise_proto_id))
-        val promise_resolve_fn = self._register_native("Promise.resolve", NATIVE_PROMISE_RESOLVE)
-        self.set_host_property(promise_ctor_id, "resolve", JsValue.Function(id: promise_resolve_fn))
-        val promise_reject_fn = self._register_native("Promise.reject", NATIVE_PROMISE_REJECT)
-        self.set_host_property(promise_ctor_id, "reject", JsValue.Function(id: promise_reject_fn))
-        self._define_method_on(promise_proto_id, "then", NATIVE_PROMISE_THEN)
-        self._define_method_on(promise_proto_id, "catch", NATIVE_PROMISE_CATCH)
-        self._define_method_on(promise_proto_id, "finally", NATIVE_PROMISE_FINALLY)
-        var interpreter = self.interpreter
-        interpreter.promise_ctor_id = promise_ctor_id
-        interpreter.promise_proto_id = promise_proto_id
-        interpreter.define_global_value("Promise", JsValue.Object(id: promise_ctor_id))
-        self.interpreter = interpreter
-
-        # ── Timer stubs ──────────────────────────────────────────────
-        self._define_global_fn("setTimeout", NATIVE_SET_TIMEOUT)
-        self._define_global_fn("setInterval", NATIVE_SET_INTERVAL)
-        self._define_global_fn("clearTimeout", NATIVE_CLEAR_TIMEOUT)
-        self._define_global_fn("clearInterval", NATIVE_CLEAR_INTERVAL)
-
-        # ── Prototypes (create empty objects for now) ────────────────
-        self.prototypes.object_proto = self.create_host_object()
-        self.prototypes.array_proto = self.create_host_object()
-        self.prototypes.function_proto = self.create_host_object()
-        self.prototypes.string_proto = self.create_host_object()
-        self.prototypes.number_proto = self.create_host_object()
-        self.prototypes.error_proto = self.create_host_object()
-
-        self.logger.debug("JS runtime initialized with {self.interpreter.functions.len()} native functions")
-
-    # ── Public API ───────────────────────────────────────────────────
-
-    me create_host_object() -> i64:
-        var interpreter = self.interpreter
-        val obj_id = interpreter.create_object()
-        self.interpreter = interpreter
-        obj_id
-
-    me set_host_property(obj_id: i64, key: text, value: JsValue):
-        var interpreter = self.interpreter
-        interpreter.set_object_property(obj_id, key, value)
-        self.interpreter = interpreter
-
-    fn get_host_property(obj_id: i64, key: text) -> JsValue:
-        val interpreter = self.interpreter
-        var i = interpreter.object_store.prop_keys.len() - 1
-        while i >= 0:
-            if interpreter.object_store.prop_obj_ids.get(i) == obj_id and interpreter.object_store.prop_keys.get(i) == key:
-                return interpreter.object_store.prop_values.get(i)
-            i = i - 1
-        JsValue.Undefined
-
-    fn get_host_object(obj_id: i64) -> JsObject:
-        val interpreter = self.interpreter
-        var props: [JsProperty] = []
-        var seen_keys: [text] = []
-        var i = interpreter.object_store.prop_keys.len() - 1
-        while i >= 0:
-            if interpreter.object_store.prop_obj_ids.get(i) == obj_id:
-                val property_key = interpreter.object_store.prop_keys.get(i)
-                var already_seen = false
-                var seen_idx = 0
-                while seen_idx < seen_keys.len():
-                    if seen_keys.get(seen_idx) == property_key:
-                        already_seen = true
-                        seen_idx = seen_keys.len()
-                    seen_idx = seen_idx + 1
-                if not already_seen:
-                    seen_keys.push(property_key)
-                    if interpreter.object_store.prop_enumerables.get(i):
-                        props.push(JsProperty(
-                            key: property_key,
-                            value: interpreter.object_store.prop_values.get(i),
-                            writable: true,
-                            enumerable: true,
-                            configurable: interpreter.object_store.prop_configurables.get(i)
-                        ))
-            i = i - 1
-
-        var reversed: [JsProperty] = []
-        var ri = props.len() - 1
-        while ri >= 0:
-            reversed.push(props.get(ri))
-            ri = ri - 1
-
-        var proto_id = -1
-        if obj_id >= 0 and obj_id < interpreter.object_store.obj_proto_ids.len():
-            proto_id = interpreter.object_store.obj_proto_ids.get(obj_id)
-        JsObject(id: obj_id, properties: reversed, prototype_id: proto_id)
-
-    fn inspect_host_property(obj_id: i64, key: text) -> ObjectLookupDiagnostic:
-        val snapshot = self.get_host_object(obj_id)
-        var snapshot_found = false
-        var pi = 0
-        while pi < snapshot.properties.len():
-            if snapshot.properties.get(pi).key == key:
-                snapshot_found = true
-                pi = snapshot.properties.len()
-            pi = pi + 1
-
-        val interpreter = self.interpreter
-        var direct_scan_found = false
-        var i = interpreter.object_store.prop_keys.len() - 1
-        while i >= 0:
-            if interpreter.object_store.prop_obj_ids.get(i) == obj_id and interpreter.object_store.prop_keys.get(i) == key:
-                direct_scan_found = true
-                i = -1
-            else:
-                i = i - 1
-
-        ObjectLookupDiagnostic(
-            requested_obj_id: obj_id,
-            normalized_obj_id: obj_id,
-            property_count: snapshot.properties.len(),
-            direct_scan_found: direct_scan_found,
-            snapshot_found: snapshot_found
-        )
-
-    # Evaluate a string of JavaScript source code
-    me eval(source: text) -> JsBrowserResult<JsValue>:
-        self.logger.debug("Evaluating JS source ({source.len()} chars)")
-
-        # Parse using the nogc parser (avoids struct collision with common JsParser)
-        val program = js_parse_program_subset(source)
-
-        self.logger.debug("Parsed {program.len()} top-level statements")
-
-        # Execute
-        val result = self.interpreter.execute(program)?
-
-        self.logger.debug("Execution complete")
-        Ok(result)
-
-    me drain_due_timers(current_time_ms: i64) -> i64:
-        var interpreter = self.interpreter
-        val ran_count = interpreter.drain_due_timers(current_time_ms)
-        self.interpreter = interpreter
-        ran_count
-
-    me drain_pending_microtasks() -> bool:
-        var interpreter = self.interpreter
-        val ran = interpreter.drain_pending_microtasks()
-        self.interpreter = interpreter
-        ran
-
-    # Call a function by its internal ID with given arguments
-    me call(function_id: i64, args: [JsValue]) -> JsBrowserResult<JsValue>:
-        var call_result = JsValue.Undefined
-        var call_ok = false
-        val interpreter = self.interpreter
-
-        # Check if it's a native function
-        var i = 0
-        val nlen = self.native_functions.len()
-        var native_hit = false
-        var native_result = JsValue.Undefined
-        while i < nlen:
-            val pair = self.native_functions.get(i)
-            if i == function_id:
-                native_result = dispatch_native(pair.second, args, self.logger)
-                native_hit = true
-                break
-            i = i + 1
-        if native_hit:
-            call_result = native_result
-            call_ok = true
-
-        # User-defined function
-        if not call_ok and function_id >= 0 and function_id < interpreter.functions.len():
-            val js_fn = interpreter.functions.get(function_id)
-            val env_stack = interpreter.env_stack
-            val params = js_fn.params
-            val fn_env = env_stack.create_env(js_fn.closure_env)
-
-            var pi = 0
-            val plen = params.len()
-            while pi < plen:
-                val param_name = params.get(pi)
-                var param_val = JsValue.Undefined
-                if pi < args.len():
-                    param_val = args.get(pi)
-                env_stack.define_var(fn_env, param_name, param_val)
-                pi = pi + 1
-
-            val saved = interpreter.control_return
-            interpreter.control_return = false
-            var result = JsValue.Undefined
-            var bi = 0
-            val blen = js_fn.body.len()
-            while bi < blen:
-                result = interpreter.exec_statement(js_fn.body.get(bi), fn_env)?
-                if interpreter.control_return:
-                    result = interpreter.return_value
-                    break
-                bi = bi + 1
-            interpreter.control_return = saved
-            call_result = result
-            call_ok = true
-
-        if call_ok:
-            return Ok(call_result)
-        Err(js_script_error("Invalid function id: {function_id}"))
-
-    # Register a host-provided native function by name and callback ID
-    me define_native_function(name: text, callback_id: i64):
-        self._define_global_fn(name, callback_id)
-
-# Convenience factory for hosts outside this module: import aliasing does not
-# register constructors/enums (interpreter gap), so embedders that have their
-# own JsLogger type in scope construct the engine through this named function.
-pub fn js_runtime_with_default_logger(name: text) -> JsRuntime:
-    JsRuntime.new(JsLogger(name: name, level: LogLevel.Info))
-
-# Cross-module native-dispatch id contract: importers in other tiers (and the
-# core-purity-split JsRuntime host) resolve these constants via `use`, so they
-# must be explicitly exported like std.nogc_sync_mut.js.engine.runtime does.
+# Cross-module native-dispatch id contract: importers in other tiers resolve
+# these constants via `use`, so they must be explicitly exported like
+# std.nogc_sync_mut.js.engine.runtime does. dispatch_native is the shared pure
+# basic-family dispatcher used by every tier's interpreter fallback.
+export dispatch_native
 export NATIVE_CONSOLE_LOG, NATIVE_CONSOLE_ERROR, NATIVE_CONSOLE_WARN
 export NATIVE_PARSE_INT, NATIVE_PARSE_FLOAT, NATIVE_IS_NAN, NATIVE_IS_FINITE
 export NATIVE_STRING_CONSTRUCTOR, NATIVE_NUMBER_CONSTRUCTOR, NATIVE_BOOLEAN_CONSTRUCTOR

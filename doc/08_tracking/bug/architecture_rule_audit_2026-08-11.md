@@ -241,3 +241,34 @@ fixable defect. Left as-is, no code change attempted.
 ## Triage 2026-11-04 (c28-w4)
 
 F2 (std.async manifest row) still live: runtime.spl:12-14 import std.async.* while src/lib/async/ does not exist and gc_boundary_check.spl:163 keeps the rank-3 async row whose comment claims nothing imports it - comment is wrong. F4 (class X(Y) inheritance) is RESOLVED: zero class X(Y) declarations remain under src/compiler (the 3 cited files moved or were rewritten). F1 still present: host_vulkan_lavapipe_provider.spl:97 imports std.gpu (nogc_sync_mut -> gc). F3 (fanout RED) not re-run this pass. QUESTIONS FOR OWNER: (1) F1 choose (a) read device name via rt_vulkan extern or (b) move vulkan_sffi_device_name to common/ ; (2) F2 retire the async manifest row or rewrite the 3 imports to std.nogc_async_mut.async.* ; (3) 389-violation runtime-family backlog: ratchet-only or burn-down?
+
+## F1/F2 scoped fix 2026-11-10 (work/p2fix-librt-20261110, seed-smoke only)
+
+No owner answer to the 2026-11-04 questions was on record; the fix therefore
+follows the decisions already written down in
+doc/04_architecture/runtime/runtime_family_support_matrix.md §2.6.1 (no-GC sync
+owns the Vulkan SFFI wrappers; GC/gpu copies are re-export facades) and
+doc/05_design/runtime/sosix_runtime_unification_design.md (`std.async.future`
+canonical implementation is `nogc_async_mut/async/future.spl`, rank 2).
+
+- F1 (std.gpu): `host_vulkan_lavapipe_provider.spl` now imports
+  `vulkan_sffi_device_name` from `std.nogc_sync_mut.gpu.engine2d.sffi_vulkan`
+  — the same-named one-line facade (`rt_vulkan_device_name(id)`) owned by the
+  importer's own family — instead of through the `std.gpu` gc_async_mut alias.
+  Evidence receipt behavior is unchanged. Guard:
+  test/01_unit/lib/runtime_family_forbidden_import_guard_spec.spl (fails on
+  reintroduction; seed-smoke PASS 3/3, negative test RED).
+- F2 (std.async): `nogc_async_mut/async/runtime.spl:12-14` now imports
+  `std.nogc_async_mut.async.{future,poll,combinators}` — the canonical family
+  path of the same sibling modules the search order already resolved to.
+  Chose the audit's option (b); option (a) (retiring the rank-3 "async"
+  manifest row at gc_boundary_check.spl:163) is compiler-owner work — it
+  changes diagnostics for every `std.async.*` importer at once and has three
+  Rust-side mirrors (module_loader.rs, checker_resources.rs family enums) that
+  must move together. REMAINING for the runtime-family owner: retire the
+  phantom "async" row + its now-proven-false "nothing imports async.*"
+  comment, in Simple and Rust mirrors together.
+
+Multi-finding audit scope (F3 fanout, 389-violation backlog ratchet, Perl
+scripts, MDSOC adoption) untouched. Runtime verification: Rust seed
+interpreter only; no self-hosted/native claim.
