@@ -19,7 +19,7 @@ evidence found in the body. This is bookkeeping, not verification.
   host. Left OPEN. (An earlier draft of this triage closed it on the `--compile` output;
   that was withdrawn once the missing artifact and the native-build failure were seen.)
 
-**Status:** OPEN — see the Triage 2026-09-13 section below
+**Status:** FIXED (2026-11-11 lane compiler5: fix 5c67273d1801 in branch history — see addendum below; native dual-backend re-proof BLOCKED by the Windows native-build hang)
 **Date:** 2026-06-22 (supersedes the 2026-06-21 doc dropped by parallel churn).
 **Mode:** native AOT only (`bin/simple <file> --compile` / `native-build`). Interpreter and `check` are unaffected.
 
@@ -97,3 +97,31 @@ is built by `scripts/bootstrap/bootstrap-from-scratch.sh` (Rust seed → stage2
 --entry-closure`). Stage2 yields a deployable binary; stage3 self-host
 convergence is the historically-fragile part.
 
+
+## Addendum 2026-11-11 — lane compiler5 (P3 batch-5 triage): FIXED (source); native re-proof BLOCKED
+
+- **Fix commit in branch history:** `5c67273d1801` ("fix(native-build):
+  preserve generic result array provenance", 2026-07-15) — exactly the
+  resolution recorded in this doc's "2026-07-15 resolution" section
+  (`lower_enum_match` recovers the selected Ok/Err payload type from the
+  scrutinee signature and preserves the Array/Slice runtime marker, routing
+  `data[i]` through `rt_array_get`). Verified `git merge-base --is-ancestor
+  5c67273d1801 HEAD` = true. The commit also added the focused checker
+  `scripts/check/check-native-crossmodule-result-u8.shs` and the fixture
+  `test/fixtures/native_crossmodule_result_u8/{main,provider}.spl`, both present
+  in this tree.
+- **Verification actually run on the fresh seed** (build-commit 46fe8f6b6def,
+  `--mode=interpreter --no-cache`): the fixture runs interpreted (exit 8 —
+  `cross_target_class_array_ok` leg) which, as this doc itself notes, proves
+  nothing about the native-only defect; recorded only as fixture sanity.
+- **Native dual-backend re-proof: BLOCKED.** The checker's `native-build
+  --entry-closure` path hits the known Windows native-build hang (build log
+  completes, no binary, process never exits). Confirmed in this worktree with a
+  trivial hello-world probe (120 s timeout, no artifact). Per lane rules the
+  hang was not retried. Exact grant command for a non-Windows or fixed host:
+  `SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build --source test/fixtures
+  --source src/lib --entry-closure --entry
+  test/fixtures/native_crossmodule_result_u8/main.spl --output <bin>` (LLVM
+  default backend; rerun with `--backend=cranelift`), then run `<bin>` and
+  expect `result-u8-ok`; or simply `sh
+  scripts/check/check-native-crossmodule-result-u8.shs`.

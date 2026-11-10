@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** `elif_val_pattern_in_if_expression_fails_to_bind_2026-08-19`
-- Status: OPEN (workaround landed)
+- Status: FIXED (verified 2026-11-11, lane work/p3-interp7-20261111, fresh seed 46fe8f6b6def: interpret and JIT both bind correctly; JIT fix 752d38cd9875 confirmed in seed build ancestry)
 - **Found:** 2026-08-19 (gui triage during the match-arm leak investigation)
 
 ## Symptom
@@ -86,3 +86,22 @@ option_enum_match_variant / if_val_typed_option_class_unwrap / match_expr_bindin
 specs. HIR-lowering regression test:
 `cargo test -p simple-compiler --lib user_enum_some_variant` (passes; fails if the
 gate is reverted — initializer becomes an `If`).
+
+
+## 2026-11-11 P3 triage (work/p3-interp7-20261111) — FIXED, both engines verified on the fresh seed
+
+Re-verified on the fresh seed (worktree `bin/simple.exe`, build-commit
+`46fe8f6b6def`, fixtures `build/p3fix-interp7/elif_val_repro.spl` and
+`elif_val_repro2.spl`, user enum `Opt: Some(i64) | None`, `elif val
+Opt.Some(x) = o` inside an if-EXPRESSION):
+
+- `SIMPLE_EXECUTION_MODE=interpret` → `7` / `107` (pattern var as whole arm
+  value; `x + 100` variant) — documented interpreter symptom gone.
+- `SIMPLE_EXECUTION_MODE=jit` → `7` / `107` — identical; the 2026-11-10
+  pointer-garbage divergence is gone in the built binary. The seedfix commit
+  `752d38cd9875` is confirmed in the seed build ancestry
+  (`git merge-base --is-ancestor 752d38cd9875 46fe8f6b6def`).
+
+The md_renderer.spl workaround (statement-position `if val`) is behaviorally
+subsumed but was not reverted in this lane (triage-only; the revert is an
+optional cleanup for the editor lane). No code change in this lane.

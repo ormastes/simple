@@ -1,6 +1,6 @@
 # Progressive damage slicer interpreter timeout — 2026-08-12
 
-Status: OPEN; implementation present but not admitted to production.
+Status: SUPERSEDED — timeout no longer reproduces (re-verified 2026-11-11, lane work/p3-interp7-20261111, fresh seed 46fe8f6b6def: 4/4 PASS); production wiring remains with the UI/render lane.
 
 `common.ui.render_opt.damage_budget_slice` was added to partition an exact
 over-budget `DamageFramePlan` into current and deferred rectangles without
@@ -48,3 +48,16 @@ on the deployed Windows Rust seed (worktree `bin/simple.exe`, direct seed
 invocation): 4 total, 4 passed in ~3.1s, matching the
 work/p3-interp-20261110 note. SUPERSEDED (timeout no longer reproduces)
 stands; production wiring remains with the owning UI/render lane.
+
+
+## 2026-11-11 P3 triage (work/p3-interp7-20261111) — SUPERSEDED stands, re-verified on the fresh seed
+
+Re-ran `test test/01_unit/lib/common/ui/render_opt/damage_budget_slice_spec.spl
+--mode=interpreter --no-cache` on the fresh seed (worktree `bin/simple.exe`,
+build-commit `46fe8f6b6def`, cwd = worktree root): 4/4 PASS, ~10.6 s wall.
+The 120 s worker-budget timeout does not reproduce on the current seed +
+source. Verdict unchanged: SUPERSEDED (timeout no longer reproduces). Per
+this record's own prohibition the slicer was NOT wired into WM/Web/GUI
+production; that admission decision (plus a daemon-mode re-check and
+replay-checksum parity) stays with the owning UI/render lane. No code change
+in this lane.
