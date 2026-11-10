@@ -182,3 +182,33 @@ not fire, which is the point of this report.
 ## Triage 2026-11-03 (boot-script-fixes lane)
 
 Already fixed on origin: bootstrap-from-scratch.sh:2857-2893 guards the shared seed path with a worktree-level Rust authority lock (rust_authority_lock_root, bootstrap_acquire_rust_authority) plus immutable bootstrap.generations publication, independent of --output. Row closed fixed.
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 17)
+
+**Verdict: SUPERSEDED (fix verified live at this lane's base).**
+
+Independently re-verified on the p3-boot3 worktree (base
+origin/release/1.0.0), corroborating the 2026-11-03 boot-script-fixes note
+with current line numbers:
+
+- The shared seed path is still the hardcoded
+  `src/compiler_rust/target/bootstrap/simple` (now
+  `scripts/bootstrap/bootstrap-from-scratch.sh:3001`), but publication into it
+  is serialized repo-wide, independent of `--output`:
+  `rust_authority_lock_root=.../src/compiler_rust/target/.bootstrap-authority-locks`
+  (`:3004`), `bootstrap_acquire_rust_authority` (`:3051`) using the shared
+  portable lock, publication via immutable `bootstrap.generations/` +
+  `bootstrap.current.env` transaction marker with refuse-or-recover
+  (`:3154-3167`, `:4207-4223`), and atomic `cp -pL` + `mv` materialization in
+  `bootstrap_authority_materialize_legacy_file`
+  (`scripts/bootstrap/bootstrap-authority-wiring.shs:424-434`) — the exact
+  atomic-rename shape this doc said was deliberately withheld on 2026-07-31.
+- A shared-cargo-cache lock additionally serializes sibling worktrees'
+  cargo runs before the publication lock (`bootstrap_acquire_shared_rust_cargo_cache`,
+  `:3013-3050`).
+
+The guard's `--output=<other-dir>` escape hatch remains per-output-dir only,
+but the artifact whose clobbering motivated the guard (the seed and its
+siblings) is now covered by the worktree-level authority lock, so concurrent
+bootstraps with different outputs no longer race the staging copy. No change
+made in this lane.

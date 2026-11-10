@@ -152,3 +152,43 @@ explicitly-declared hand-driven artifact.
 
 ## Round-10 verdict note (2026-11-06)
 Defect 2 (native_all 60s default): ALREADY-FIXED - native_all/src/lib.rs no longer declares the 60s timeout; test native_build_provider_uses_compiler_sized_file_timeout pins the NativeBuildConfig default. Defect 1 (stage4 load_sources SEGV) and Defect 3 (generic-arg misparse, needs a bisect of data_ops.spl) are host-blocked / verification-pending: they need a Phase-3 stage3 binary. Command: bootstrap/stage3/<triple>/simple native-build --source src/compiler --source src/app --source src/lib --entry src/app/cli/main.spl --entry-closure --threads 4 -o build/stage4/simple
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 22)
+
+**Verdict: Defect 2 SUPERSEDED (verified fixed-at-tip); Defects 1 and 3
+BLOCKED-needs-grant (heavy stage-3-binary repro, compiler owners).**
+
+Defect 2 (native_all 60s per-file timeout) — independently verified at this
+lane's base: `src/compiler_rust/native_all/src/lib.rs` no longer declares a 60s
+default; the embedded CLI inherits `DEFAULT_NATIVE_FILE_TIMEOUT_SECS = 300`
+(`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:720,728`), and
+the pinning test `native_build_provider_uses_compiler_sized_file_timeout`
+(native_all/src/lib.rs:1353) asserts `NativeBuildConfig::default().file_timeout
+== 300`. (Test execution requires a cargo build — heavy, not run in this lane;
+source assertions verified directly.)
+
+Defect 1 (stage-4 `load_sources` SEGV) and Defect 3 (`data_ops.spl:38`
+comparison misparsed as a generic-argument list) — both owners are
+`src/compiler` (outside this lane's bootstrap-script scope) and both need a
+Phase-3 stage-3 binary to reproduce or clear. The misleading-message half of
+Defect 3 is the diagnostic fix recorded in
+`const_generic_argument_rejected_in_constructor_call_2026-08-17.md`
+(RESOLUTION 2026-08-17); whether the `data_ops.spl` misparse itself persists on
+the current parser is exactly what the repro below decides. No seed/release
+binary exists on this Windows host to run a seed-smoke parse check without a
+heavy cargo build.
+
+Exact command for the granted lane:
+
+```sh
+bootstrap/stage3/<triple>/simple native-build --source src/compiler \
+  --source src/app --source src/lib --entry src/app/cli/main.spl \
+  --entry-closure --threads 4 -o build/stage4/simple
+```
+
+A clean build clears Defect 1's `load_sources` crash; a diagnostic (not SEGV)
+with `data_ops.spl` in the text keeps Defect 3 open for the parser lane.
+
+Also noted, NOT fixed here (out of lane scope): the stale ByteOrder KNOWN
+BLOCKER section in `.claude/rules/bootstrap.md` this doc says should be
+updated — `.claude/**` is write-protected for this lane.

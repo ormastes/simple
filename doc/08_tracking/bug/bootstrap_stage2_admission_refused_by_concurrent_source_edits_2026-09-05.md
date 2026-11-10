@@ -128,3 +128,32 @@ was given 17 GiB of headroom and settled at 8.7 GiB free. Symlinking
 `src/compiler_rust/target` at the main checkout's target to save that space does
 NOT work — the run fails immediately with `error: failed to fingerprint Rust
 seed inputs`. Give the worktree a real target directory.
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 18)
+
+**Verdict: operational concern SUPERSEDED; refusal diagnostic FIXED in this lane.**
+
+The gate itself stays correct-by-design (refusing a tree that changed
+mid-build is its job). The doc's operational recommendation — bootstrap from
+an immutable pinned snapshot instead of the shared checkout — is now the
+default path, not a manual workaround:
+
+- `scripts/bootstrap/bootstrap-from-scratch.sh` builds a pinned `git archive`
+  snapshot via `bootstrap-pin-archive.shs` unless `SIMPLE_BOOTSTRAP_LIVE_TREE=1`
+  (header comment "Pinned-archive source (owner decision 2026-11-09)"), so
+  concurrent edits to the shared working copy cannot invalidate a long lane.
+- `scripts/bootstrap/bootstrap-in-snapshot.shs` wraps the same isolation
+  explicitly; `sh scripts/bootstrap/bootstrap-in-snapshot.shs --selftest`
+  passes (8 assertions, verified this lane on the p3-boot3 worktree).
+
+The remaining actionable item from "What to do" — the refusal named neither
+which snapshot differed nor which files changed — is FIXED in
+`scripts/bootstrap/bootstrap-from-scratch.sh`: both Stage 2 admission refusal
+sites now print the failing input class (tool-authority snapshot before/after
+paths, sanity evidence, receiver evidence) and the first
+`SIMPLE_BOOTSTRAP_ADMISSION_DIFF_MAX` (default 5) decoded differing source
+paths via the new `bootstrap_stage2_source_snapshot_diff_paths` helper
+(decodes `file-hex:`/`link-*-hex:` snapshot records). Regression:
+`sh scripts/bootstrap/tests/stage2-admission-refusal-diff-test.shs` — PASS
+(4 assertions: identical silent; changed/added/removed decoded; max honoured;
+missing snapshot refused).
