@@ -67,3 +67,52 @@ which JS parser implementation actually receives the source in this closure
 (instrument the WARN site), then de-duplicate the colliding js-engine symbol
 sets so dispatch is deterministic.
 
+
+## 2026-11-10 P3 triage (work/p3-interp-20261110) — FIXED
+
+Root cause as of this date was NOT the suspected `$dupN` parser-family
+dispatch: the 2026-11-07 seed class-resolution fix
+(`resolve_class_in_scope`/`resolve_class_for_instance`) already routes
+`browser_session.spl`'s `JsRuntime` references to the imported
+`std.common.js.engine.runtime.JsRuntime` — which then genuinely lacked the
+browser constructor contract that only `std.nogc_sync_mut.js.engine.runtime`
+carried:
+
+- `semantic: unknown static method new_browser on class JsRuntime`
+- then, after step 1: `semantic: method '_define_global_native' not found`
+
+Fix (minimal, `src/lib/common/js/engine/runtime.spl`, interpreter owner area):
+- added `static fn new_browser(logger) -> JsRuntime` — this engine has no
+  node-compat mode to disable, so it delegates to `new` (whose
+  `initialize()` already wires the browser native set: fetch/storage/
+  WebAssembly/DOM-event/TextEncoder-Decoder/GPU);
+- added `me _define_global_native(name, native_id)` — same wiring as the
+  existing `_define_global_fn` under the name the browser session programs
+  against (contract parity with the nogc_sync_mut tree).
+
+Evidence (deployed Windows Rust seed, worktree bin/simple.exe, cwd = worktree):
+- `test test/01_unit/browser_engine/browser_script_execution_spec.spl
+  --no-session-daemon` → 4/4 PASS (was 0/4; inline JS, Simple script, and
+  wasm-recorded lanes all execute/serialize now).
+- `test test/01_unit/browser_engine/browser_animation_clock_spec.spl
+  --no-session-daemon` → 2/2 PASS (was 1/2).
+- Adjacent js-engine regression sweep (test/01_unit/lib/js):
+  `js_native_confinement_spec` 6/6; `statement_dispatch_regression_spec`
+  3/3-failures and `function_scope_chain_and_global_constructors_spec`
+  1/1-failure are byte-identical before/after the change (git-stash A/B),
+  i.e. pre-existing and unrelated.
+
+Cycles used: 2 (fix constructor → verify; add `_define_global_native` →
+verify). Status: FIXED on the interpreter lane.
+
+### 2026-11-10 rebase correction (landing review)
+
+The code change in commit d4c7ea8312c9 (adding `new_browser` /
+`_define_global_native` to the common-tier JsRuntime) is **superseded by the
+core-purity tier relocation landed in PR #8144**: the common tier no longer
+carries the impure JsRuntime class at all, and the full-runtime tier's
+JsRuntime already exposes both methods. The rebase resolved the conflict by
+keeping the relocated structure. Post-rebase verification on current
+release/1.0.0 source: `browser_script_execution_spec` 4/4 PASS,
+`browser_animation_clock_spec` 2/2 PASS with NO code change. Bug status
+remains FIXED; the fixing change is #8144, not the reverted hunk.

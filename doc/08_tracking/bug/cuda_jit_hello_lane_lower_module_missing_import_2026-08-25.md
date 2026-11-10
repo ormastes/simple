@@ -46,3 +46,23 @@ map; see `engine_specs_spec_runner_interpreter_divergence_2026-09-16.md`
 the `ParserModule has no field named friends` member collision in this lane
 is fully covered is reported in the PR table from a re-run of
 `test/03_system/gpu_lane/cuda_jit_hello_spec.spl` on the fixed seed.
+
+## 2026-11-10 P3 triage (work/p3-interp-20261110) — verification advanced; SUPERSEDED as far as a CUDA-less host can show
+
+Re-ran `test test/03_system/gpu_lane/cuda_jit_hello_spec.spl` on the deployed
+Windows Rust seed (worktree `bin/simple.exe`, cwd = worktree, no CUDA device,
+no SIMPLE_CUDA_TEST):
+
+- Result: 14/14 PASS, including "computes vector-add on a live CUDA host ..."
+which SKIPs cleanly per the no-device contract.
+- Symptom 2's seed-side trigger is gone: with the 2026-11-07
+  module-qualified class registry, the full
+  `cuda_jit_lane_executor` + `compiler.hir.hir_lowering.*` import closure
+  compiles with NO `semantic: class ParserModule has no field named friends`
+  (that failure mode aborts the whole spec at semantic time; the spec now runs
+  to a clean verdict).
+
+Live-device dispatch (RECORD drain + `0xCAFE0000` sentinel) still requires a
+re-run on a host with live CUDA devices (`SIMPLE_GPU_TEST=1
+SIMPLE_CUDA_TEST=1`) to close the record fully; everything a CUDA-less host
+can verify is green.
