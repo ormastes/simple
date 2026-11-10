@@ -58,3 +58,45 @@ Bisect which sub-state of the WM example (shared vulkan offscreen, shared
 metal session, or text/font evidence) flips the strict evidence, then either
 reset that state on engine shutdown or make the evidence check ignore
 process-level leftovers it should not depend on.
+
+## Triage addendum (2026-11-11, lane ne7)
+
+**Status: OPEN — reported mechanism no longer reproduces on the 2026-11-11
+seed; the spec remains red on two adjacent stale-oracle failures that need
+owner triage.**
+
+Seed-smoke run
+(`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe test test/02_integration/rendering/engine2d_embedded_surface_spec.spl --mode=interpreter --no-cache`,
+fresh seed 46fe8f6b6def, Windows lane): 10 executed, 8 passed, 2 failed
+(was 7 passed / 3 failed on 2026-08-19).
+
+Reported mechanism — FIXED in behavior:
+
+- "uses the Vulkan device path only for preflighted root and named-child
+  compositions" — PASS
+- "composites preflighted resolved text through checked Vulkan image
+  blending" — PASS
+- Both run AFTER the shared-session WM example in the same process and now
+  return `readback_source=device_readback`, `backend_handle>0`,
+  `skipped_command_count=0` (the spec asserts exactly this at lines 269-275
+  and 303-308). The 2026-08-19 signature — every fresh-device call coming
+  back `cpu_fallback`/`backend_handle=0` after the WM example — no longer
+  occurs.
+
+Remaining red (different defect, same spec):
+
+- "composites a canonical offset translucent WM window on shared Vulkan and
+  Metal sessions" — FAILS BEFORE any backend work, at stale canonical-scene
+  oracle constants from `shared_wm_scene_draw_ir_composition_with_content`:
+  actual window `embedding.x=14` (oracle 10), body alpha `0x28` (oracle
+  `0x33`), content command `112x44` kind `rect` (oracle `120x52` kind
+  `image`), content `y=68` (oracle 64). The WM scene chrome metrics changed
+  after this spec's oracles were written; whether the change is intentional
+  is an owner call, so the oracles were not rewritten here.
+- "opacity_milli=500 blends the embedded surface at ~50% over the background"
+  — FAILS on one off-by-one: actual red channel 126 vs oracle 127. Not one
+  of this bug's three examples; a blend integer-math rounding drift.
+
+Owner follow-up: confirm the canonical WM chrome change (4px inset, alpha
+0x28) is intended, then update the oracle constants under review; separately
+adjudicate the 126-vs-127 blend rounding oracle.

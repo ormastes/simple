@@ -5,8 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-02
-**Status:** Partially resolved — 4 modules deleted, 4 filed here with a measured
-reason to leave them.
+**Status:** FIXED (2026-11-11, lane ne7) — audit inventory obsolete; retained-module hazards dissolved on release tip.
 **Follows:** `effect_pass_dead_and_stub002_falsely_fixed_2026-08-01.md`, which
 deleted the only consumer of this family and deliberately did NOT delete the
 family itself.
@@ -140,3 +139,43 @@ before it. What exists is runtime module-graph evidence:
 definitions) and for `FunctionEffectInfo` (two), which is a design call, not a
 cleanup.
 
+
+## Triage addendum (2026-11-11, lane ne7)
+
+**Status: FIXED — audit inventory obsolete on release/1.0.0 tip; closure
+condition (an owner for the colliding names) has been resolved by later
+renames/deletions, probe-verified on the 2026-11-11 seed.**
+
+Current tip state (branch work/p3-ne7-20261111), reconciling the
+"Retained — 4 modules" inventory:
+
+- `effects_phase3a.spl` — GONE. The stop-and-report case (third `enum Effect`
+  whose `impl` won the flat-registry name) no longer exists; nothing named
+  `effects_phase3a` remains under `src/compiler/00.common/`.
+- `effects_solver.spl` — GONE. The unexplained
+  `export use ...{EffectScanner, EffectSolver}` case is deleted with it.
+- `FunctionEffectInfo` two-definition collision — DISSOLVED by rename.
+  `effects_cache.spl:35` now defines `struct CachedFunctionEffectInfo` with
+  an explicit doc note "Distinct from
+  compiler.common.effects.FunctionEffectInfo", and the facade exports the two
+  distinct names (`src/compiler/00.common/__init__.spl:62` exports
+  `FunctionEffectInfo` from `effects.spl`; `:65` exports
+  `CachedFunctionEffectInfo` from `effects_cache.spl`).
+- Second-order `needs_promise_wrapping` execution hazard — remediated by
+  free functions: `src/compiler/30.types/type_system/effects.spl:28,35`
+  provides `effect_is_async` / `effect_is_sync` that do not depend on
+  winning an `impl` on the `Effect` name.
+
+Verification actually run (seed-smoke,
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ... --mode=interpreter --no-cache`,
+fresh seed 46fe8f6b6def): a probe spec importing the
+`compiler.common` facade and constructing both `CachedFunctionEffectInfo.empty("probe")`
+(only the cache struct provides it) and `FunctionEffectInfo(...)` from
+`effects.spl` PASSED (1/1) — both names resolve distinctly through the
+facade with no unresolved-import diagnostics. This is the qualification the
+2026-10-27 v3 freeze left open ("qualify current facade resolution; no
+runtime winner was inferred from old probes").
+
+The remaining two `enum Effect` definitions (`30.types/type_system/effects.spl`,
+`50.mir/mir_effects.spl`) are now the only pair; no third body and no
+method-pair hazard was observed through the `compiler.common` facade.

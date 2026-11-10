@@ -8,6 +8,8 @@ evidence found in the body. This is bookkeeping, not verification.
 **Date:** 2026-08-17
 **Severity:** P1 — silent wrong value, exit 0, no diagnostic.
 **Status:** FIXED (verified 2026-11-03, fix commit ee815637f72; see "Verified" at the end).
+**2026-11-11 update:** a second lowering site of the same defect — tuple
+*destructuring assignment* — is now also FIXED (see addendum at the end).
 
 ## How it was found
 
@@ -164,3 +166,61 @@ PASS for every row including `tuple_i64_0`, `tuple_inferred_i64_1`,
 `tuple_mixed_i64_1`, `tuple_mixed_text_1`, `tuple_labeled_i64_1`,
 `tuple_labeled_text_0`. (The `test` subcommand is unavailable on the seed, so
 the probe was run directly via `run`.)
+
+## Addendum 2026-11-11 (lane seedfix, routed from boot7 / PR #8193): destructuring-ASSIGNMENT site of the same defect — FIXED
+
+The ee815637f72 fix typed only the constant-index `.get()` path. The OTHER
+consumer of `rt_tuple_get` — the tuple-destructuring-assignment lowering
+(`HirExprKind::Tuple` arm of `HirStmt::Assign` in
+`src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`) — extracted each
+element with a bare `rt_tuple_get` and stored the tagged RuntimeValue verbatim.
+
+Repro (routed shape, verified on the refreshed baseline seed
+`bin/simple.exe` build-commit 0791c2b7f4a7):
+
+```
+fn main():
+    val t = (10, 20)
+    var c: i64 = 0
+    var d: i64 = 0
+    (c, d) = t
+    print c          # JIT: 80   interpreter: 10
+    print d          # JIT: 160  interpreter: 20
+```
+
+Everything the 2026-08-17 record listed as correct stayed correct (val
+-destructure, array-destructure, whole-tuple assign, `t.0` reads); only the
+destructuring-assignment lowering missed the unbox — exactly the omission this
+record predicted could exist at "the destructuring-assign lowering site".
+
+Two defects at the same site, both fixed in one change:
+
+1. **Raw tagged word into typed sinks** — fixed by decoding each extracted
+   leaf through the shared type-directed unbox tail
+   (`unbox_dict_read_result`, the same tail the fixed `.get()` path reaches
+   via `lower_index_expr`): int unbox (+ `UnitNarrow` for narrow widths),
+   float unbox, u64 wide-word unbox, string cast, aggregate/ANY passthrough.
+2. **Global sinks silently dropped** — the generic leaf path ran
+   `lower_lvalue(Global)`, which is a dynamic value lookup, NOT an address;
+   the subsequent `Store` wrote nowhere the global read path observes (sink
+   kept its initial value under JIT). Global leaves now mirror the plain
+   `g = v` arm: `GlobalStore` with the `box_scalar_for_tagged_slot` tail.
+
+Out of scope, observed while pinning (front-end rejects in BOTH engines, so
+they cannot exercise this JIT site): labeled-tuple destructuring assignment
+("tuple unpacking requires tuple or array"), nested-array patterns inside a
+tuple unpacking ("tuple unpacking target must be identifier"). The nested
+arm keeps its existing raw-handle behaviour, unchanged.
+
+Pin (mirrors the int-width matrix pattern: run-path probe + subprocess spec,
+absolute-literal oracles, dual-engine):
+
+- `test/01_unit/compiler/codegen/probe_tuple_destructuring_assign_jit.spl`
+- `test/01_unit/compiler/codegen/tuple_destructuring_assign_class_spec.spl`
+
+Verified on the seedfix seed built from work/seedfix-20261111: probe 22/22 PASS
+under BOTH `SIMPLE_EXECUTION_MODE=interpreter` and `=jit` (baseline seed: 15
+FAIL / 7 PASS under JIT); spec verdict OK 2/2 via
+`SIMPLE_LIB=src SIMPLE_BINARY=<seed> SIMPLE_BIN=<seed> <seed> test
+test/01_unit/compiler/codegen/tuple_destructuring_assign_class_spec.spl
+--mode=interpreter --no-cache`.

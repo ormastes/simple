@@ -1090,6 +1090,41 @@ impl<'a> MirLowerer<'a> {
                                 self.lower_array_destructuring_assign(nested, elem_reg, 1)?;
                                 continue;
                             }
+                            // `rt_tuple_get` returns the stored tagged
+                            // RuntimeValue verbatim, so storing `elem_reg` raw
+                            // fed `v << 3` into an int-typed sink (`10` read
+                            // back as `80` under JIT). Decode the leaf through
+                            // the same shared type-directed unbox tail as
+                            // tuple `.get(const)` / `d[k]` before the Store;
+                            // aggregate and erased (ANY) leaves pass through
+                            // unchanged. Same defect family as
+                            // jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17
+                            // — that fix (ee815637f72) typed only the `.get()`
+                            // path and missed this destructuring-assign site.
+                            let elem_reg = self.unbox_dict_read_result(elem_reg, elem.ty)?;
+                            // A global leaf has no addressable lvalue:
+                            // `lower_lvalue(Global)` is a dynamic value lookup,
+                            // not an address, so the generic Store below wrote
+                            // nowhere the global read path observes (the sink
+                            // kept its initial value under JIT). Mirror the
+                            // plain `g = v` arm: GlobalStore with the
+                            // tagged-slot boxing tail.
+                            if let HirExprKind::Global(global_name) = &elem.kind {
+                                let global_name = global_name.clone();
+                                let stored_val =
+                                    self.box_scalar_for_tagged_slot(elem.ty, elem.ty, elem_reg)?;
+                                let stored_ty =
+                                    if stored_val != elem_reg { TypeId::ANY } else { elem.ty };
+                                self.with_func(|func, current_block| {
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::GlobalStore {
+                                        global_name,
+                                        value: stored_val,
+                                        ty: stored_ty,
+                                    });
+                                })?;
+                                continue;
+                            }
                             let addr_reg = self.lower_lvalue(elem)?;
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();

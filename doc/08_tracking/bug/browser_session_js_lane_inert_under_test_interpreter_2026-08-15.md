@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** FIXED (verified 2026-11-11, lane work/p3-interp7-20261111, fresh seed 46fe8f6b6def; fixing change PR #8144)
 **Area:** `src/lib/gc_async_mut/web/browser_session*.spl`, `src/lib/*/js/engine/**`
 **Specs blocked:**
 - `test/01_unit/browser_engine/browser_script_execution_spec.spl` — 0/4
@@ -116,3 +116,19 @@ keeping the relocated structure. Post-rebase verification on current
 release/1.0.0 source: `browser_script_execution_spec` 4/4 PASS,
 `browser_animation_clock_spec` 2/2 PASS with NO code change. Bug status
 remains FIXED; the fixing change is #8144, not the reverted hunk.
+
+
+## 2026-11-11 P3 triage (work/p3-interp7-20261111) — FIXED, re-verified on the fresh seed
+
+Re-verified on the fresh seed (worktree `bin/simple.exe`, build-commit
+`46fe8f6b6def`, cwd = worktree root, `--mode=interpreter --no-cache
+--no-session-daemon`):
+
+- `test test/01_unit/browser_engine/browser_script_execution_spec.spl` → 4/4
+  PASS (was 0/4 at filing).
+- `test test/01_unit/browser_engine/browser_animation_clock_spec.spl` → 2/2
+  PASS (was 1/2).
+
+Matches the 2026-11-10 post-rebase verification; the fixing change remains
+the core-purity tier relocation (PR #8144), not the reverted d4c7ea8312c9
+hunk. No code change in this lane.

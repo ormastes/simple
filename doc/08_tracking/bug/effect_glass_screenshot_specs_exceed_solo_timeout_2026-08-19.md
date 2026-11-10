@@ -43,3 +43,32 @@ proves forward progress and correct output).
 2. Reduce spec capture size (e.g. 100x75) — weakens pixel-diff coverage;
    needs owner approval.
 
+
+## Triage addendum (2026-11-11, lane ne7)
+
+**Status: LIVE — remains OPEN; out of scope for a P3 traverse lane.**
+
+Re-checked on release/1.0.0 tip (branch work/p3-ne7-20261111):
+
+- `test/02_integration/rendering/effect_engine_compare_spec.spl` still
+  captures at 400x300 (`val W: i32 = 400`, `val H: i32 = 300`) with two
+  `capture_with_effect_engine` calls per example; `glass_pipeline_screenshot_spec.spl`
+  unchanged in shape.
+- The `@timeout_secs 2400` mitigation this doc says was applied is NOT present
+  in the release tip — `git log -S "timeout_secs 2400"` over the file's full
+  history on this branch returns no commit.
+- No JIT/native capture path for the pure-Simple layout + software rasterizer
+  pipeline has been deployed; `capture_with_effect_engine`
+  (`src/lib/gc_async_mut/gpu/browser_engine/backend_screenshot_capture.spl:132`)
+  still renders through the software backend (the 2026-10-27 v3 triage freeze
+  measured that both "int" and "float" engine names call the same software
+  backend after validation).
+- 2026-10-27 v3 freeze classification: `valid / untested / keep_open`; the
+  documented fix options (deploy JIT rendering path, or shrink capture size)
+  were explicitly "not taken unilaterally" and still require an owner
+  decision.
+
+Not re-run here: at 400x300 the spec needs hours of interpreter raster time;
+no honest PASS/FAIL is obtainable in a P3 lane. Remaining owner decision is
+unchanged: deploy a JIT/native capture path or approve a capture-size
+reduction.

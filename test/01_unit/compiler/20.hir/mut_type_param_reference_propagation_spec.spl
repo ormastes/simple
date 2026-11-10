@@ -1,0 +1,64 @@
+# Regression: doc/08_tracking/bug/mut_param_annotation_no_reference_propagation_2026-07-20.md
+# `fn modify(x: mut i64)` spells the exclusive-borrow capability on the TYPE
+# (memory.md Rule 4), so the parameter must reach HIR as a mutable reference
+# AND carry the same by-reference marker (`HirParam.is_mutable`) that the
+# `mut x: i64` name-prefix spelling already threads to MIR function_lowering.
+# Before the fix only the name-prefix spelling set the marker; the type
+# spelling lowered to `Ref(T, true)` with `is_mutable: false`, so MIR took the
+# by-value copy path and callee writes never reached the caller.
+use std.spec.{describe, it, expect, step, fail}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirTypeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirParam}
+
+fn mutparam_lower(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "mutparam.spl", "mutparam", Logger(level: 0))
+    expect(parser_has_errors()).to_be(false)
+    var lowering = HirLowering.with_filename("mutparam.spl")
+    lowering.lower_module(parsed)
+
+fn mutparam_first_param(module: HirModule, name: text) -> HirParam:
+    for function in module.functions.values():
+        if function.name == name: return function.params[0]
+    fail("missing lowered function " + name)
+    nil
+
+fn mutparam_is_mut_ref(param: HirParam) -> bool:
+    match param.type_.kind:
+        case HirTypeKind.Ref(_, mutable): mutable
+        case _: false
+
+describe "mut-typed parameter reference propagation":
+    it "`x: mut i64` lowers to Ref(i64, true) and marks the param by-reference":
+        step("the parser_type_annotations_spec shape: fn modify(x: mut i64)")
+        val module = mutparam_lower("fn modify(x: mut i64):\n    x = x + 1\n")
+        val param = mutparam_first_param(module, "modify")
+        expect(mutparam_is_mut_ref(param)).to_be(true)
+        expect(param.is_mutable).to_be(true)
+
+    it "`mut y: i64` name-prefix spelling still marks the param by-reference":
+        val module = mutparam_lower("fn bump(mut y: i64):\n    y = y + 1\n")
+        expect(mutparam_first_param(module, "bump").is_mutable).to_be(true)
+
+    it "`d: mut Data` struct parameter marks the param by-reference":
+        step("memory.md Rule 4: fn update(data: mut Data)")
+        val module = mutparam_lower("struct Data:\n    value: i64\n\nfn update(d: mut Data):\n    d.value = 10\n")
+        val param = mutparam_first_param(module, "update")
+        expect(mutparam_is_mut_ref(param)).to_be(true)
+        expect(param.is_mutable).to_be(true)
+
+    it "a plain `x: i64` parameter stays by-value":
+        val module = mutparam_lower("fn read_only(x: i64) -> i64:\n    x * 2\n")
+        val param = mutparam_first_param(module, "read_only")
+        expect(mutparam_is_mut_ref(param)).to_be(false)
+        expect(param.is_mutable).to_be(false)
+
+    it "`&T` unique owner parameter is not a mutable borrow":
+        val module = mutparam_lower("struct Data:\n    value: i64\n\nfn own(d: &Data) -> i64:\n    d.value\n")
+        val param = mutparam_first_param(module, "own")
+        expect(mutparam_is_mut_ref(param)).to_be(false)
+        expect(param.is_mutable).to_be(false)

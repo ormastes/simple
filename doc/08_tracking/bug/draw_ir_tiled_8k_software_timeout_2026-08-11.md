@@ -30,3 +30,30 @@ Acceptance:
 - optimized row reports 510 rendered and 510 occluded operations;
 - row includes p50/p95, RSS, fallback, readback mode, and revision;
 - any 8K/80 pass requires p95 <= 12.5ms without cached-frame substitution.
+
+## Triage addendum (2026-11-11, lane ne7)
+
+**Status: LIVE — remains OPEN; out of scope for a P3 traverse lane.**
+
+Re-checked on the release/1.0.0 tip (branch work/p3-ne7-20261111):
+
+- `test/05_perf/graphics_2d/bench_draw_ir_tiled_occlusion_8k.spl` is
+  unchanged in shape since the report: still 7680x4320, 510 tiles, both
+  `engine2d_draw_ir_render_tiled` and `engine2d_draw_ir_render_tiled_unculled`
+  in one process with full readback + checksum (`git log --follow` shows only
+  merge/lineage commits touching the file; last content-bearing change
+  predates this bug).
+- No split-process optimized/oracle evidence harness and no separately
+  bounded per-lane rows exist anywhere in `test/05_perf/graphics_2d/`,
+  `var/lib/`, or `build/` (grep for the acceptance row markers finds nothing).
+- The 2026-10-27 v3 triage freeze
+  (`doc/08_tracking/bug/triage_20261027/evidence_v3/lane01_accepted.md`)
+  classifies this `valid / untested / keep_open` with the same remaining work
+  (collect separately bounded optimized/oracle rows on identical
+  scene/revision with matching checksums).
+
+Not re-run here: an 8K software raster bench cannot produce honest evidence
+in interpreter mode on the Windows lane, and the acceptance criteria
+(split-process harness, native runner profile, p95 <= 12.5ms at 8K/80) are a
+perf-infrastructure build, not a P3 fix. No green rerun attempted per
+runaway-guard rules.

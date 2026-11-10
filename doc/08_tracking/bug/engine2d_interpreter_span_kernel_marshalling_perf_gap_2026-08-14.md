@@ -1,7 +1,7 @@
 # engine2d interpreter span kernels 180–300× slower than C due to per-element marshalling
 
 - **Date:** 2026-08-14
-- **Status:** OPEN
+- **Status:** SUPERSEDED (marshalling mechanism fixed and re-measured 2026-11-11, lane work/p3-interp7-20261111); fresh-seed interpreted store-loop regression cross-filed as interp_indexed_array_store_regression_2026-11-11
 - **Area:** lib/engine2d + interpreter extern array ABI
 - **Severity:** perf (correctness is bit-exact; parity specs green)
 
@@ -72,3 +72,35 @@ fully deleting them needs the interpreter extern ABI to pass `[u32]` by
 pinned data pointer (seed work, src/compiler_rust — outside the P3
 interpreter lane's write scope). Routed to the compiler-seed lane. No code
 change made here.
+
+
+## 2026-11-11 P3 triage (work/p3-interp7-20261111) — SUPERSEDED stands, re-measured on the fresh seed
+
+Re-measured on the fresh seed (worktree `bin/simple.exe`, build-commit
+`46fe8f6b6def`, x86_64 AVX2, `native_rows=true`, same 640px x 400-iter rig).
+The tracked rig was copied to `build/p3fix-interp7/span_bench_triage.spl`
+with `println`→`print` because the tracked rig currently fails on this seed
+with `semantic: unknown extern function: rt_println` (a prelude-shadowing
+local `println` in the import closure wins over the builtin — side
+observation, not part of this verdict). Two fresh-process samples, identical
+results; parity checksum `832951345` byte-identical across samples. The rig's
+leading `"""` docstring demotes the module to the interpreter, so these are
+interpreter numbers:
+
+| kernel | 2026-08-14 interp | 2026-11-10 interp (interp2 lane) | 2026-11-11 interp (this lane) | C SIMD 2026-08-14 |
+|--------|-------------------|----------------------------------|-------------------------------|-------------------|
+| fill   | ~31 ns/px         | ~1 ns/px                         | ~4074 ns/px                   | 0.17 |
+| copy   | ~47 ns/px         | ~0 ns/px                         | ~0.16 ns/px                   | 0.19 |
+| blend  | ~250 ns/px        | ~14 ns/px                        | ~0.24 ns/px                   | 0.83 |
+| blit   | —                 | —                                | ~0.09 ns/px                   | — |
+
+The documented per-element gather/scatter marshalling cliff stays closed:
+copy/blend/blit sit at C parity via the bulk `write_span` + native row
+kernels. The fill row (deliberately scalar since 2026-08-20) however measures
+~130× slower than this record's own 2026-08-14 interpreted baseline of the
+same loop on the fresh seed. That interpreter indexed-store regression was
+NOT present as a marshalling cost and is cross-filed as
+`interp_indexed_array_store_regression_2026-11-11.md` (route: compiler-seed
+lane; needs a seed rebuild this lane cannot perform). Residual pinned-data-
+pointer ABI work from the 2026-11-10 note stays routed to the compiler-seed
+lane. No code change in this lane.

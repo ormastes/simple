@@ -1,0 +1,121 @@
+# Run-path probe: tuple-DESTRUCTURING-ASSIGNMENT leaves into typed sinks.
+#
+# Pin for doc/08_tracking/bug/jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17.md
+# (2026-11-11 seedfix addendum). The original fix ee815637f72 typed only the
+# constant-index tuple `.get()` path. The OTHER consumer of `rt_tuple_get` —
+# the `(c, d) = t` destructuring-ASSIGNMENT lowering in
+# src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs — still stored the
+# raw tagged RuntimeValue into the sink: under JIT `val t = (10, 20)` /
+# `(c, d) = t` printed `c=80 d=160` (v << 3), while the interpreter printed
+# 10 20. val-destructure, array-destructure, whole-tuple assign, and `.0`
+# reads were already correct; only this site missed the unbox.
+#
+# Every oracle below is an ABSOLUTE literal, never "the engines agree".
+# Run under BOTH `SIMPLE_EXECUTION_MODE=interpreter` and `=jit`.
+
+fn check(name: text, actual: i64, expected: i64):
+    if actual == expected:
+        print "PASS " + name
+    else:
+        print "FAIL " + name + " actual=" + ("" + actual) + " expected=" + ("" + expected)
+
+# Module-level globals: destructuring assignment must also unbox into
+# Global-addressed sinks (lower_lvalue(Global) shares the same Store path).
+var g_a: i64 = 0
+var g_b: i64 = 0
+
+fn takes(x: i64) -> i64:
+    x
+
+fn main():
+    # ---- the exact routed repro ------------------------------------------
+    val t = (10, 20)
+    var c: i64 = 0
+    var d: i64 = 0
+    (c, d) = t
+    check("da_i64_0", c, 10)
+    check("da_i64_1", d, 20)
+    # destructured value flowing into a typed parameter sink
+    check("da_i64_param", takes(c) + takes(d), 30)
+
+    # ---- controls: neighbouring paths that were already correct ----------
+    val (vc, vd) = (3, 4)
+    check("da_val_destructure_0", vc, 3)
+    var wt2 = (0, 0)
+    wt2 = t
+    check("da_whole_tuple_0", wt2.0, 10)
+    check("da_index_read_1", t.1, 20)
+
+    # ---- mixed / labeled tuples: per-position element types --------------
+    val tmixed = ("seven", 7)
+    var ms: text = ""
+    var mn: i64 = 0
+    (ms, mn) = tmixed
+    check("da_mixed_i64_1", mn, 7)
+    if ms == "seven":
+        print "PASS da_mixed_text_0"
+    else:
+        print "FAIL da_mixed_text_0 actual=" + ms
+    # (labeled-tuple destructuring ASSIGNMENT is rejected by the shared
+    # front-end semantic pass — "tuple unpacking requires tuple or array" —
+    # in both engines, so it cannot pin this JIT lowering site; labeled
+    # coverage stays on the `.get()` path in the width-matrix probe.)
+    val tlabeled = (left: 8, right: 9)
+    check("da_labeled_read_0", tlabeled.0, 8)
+    check("da_labeled_read_1", tlabeled.1, 9)
+
+    # ---- narrow widths: unbox + UnitNarrow tail ---------------------------
+    val ti8 = (5i8, 6i8)
+    var a8: i8 = 0i8
+    var b8: i8 = 0i8
+    (a8, b8) = ti8
+    check("da_i8_0", a8 as i64, 5)
+    check("da_i8_1", b8 as i64, 6)
+    val ti32 = (12i32, 13i32)
+    var a32: i32 = 0i32
+    var b32: i32 = 0i32
+    (a32, b32) = ti32
+    check("da_i32_0", a32 as i64, 12)
+    check("da_i32_1", b32 as i64, 13)
+
+    # ---- u64: the separately-tagged wide word ----------------------------
+    val tu64 = (9u64, 11u64)
+    var au: u64 = 0u64
+    var bu: u64 = 0u64
+    (au, bu) = tu64
+    check("da_u64_0", au as i64, 9)
+    check("da_u64_1", bu as i64, 11)
+
+    # ---- bool and f64 sinks: UnboxFloat path ------------------------------
+    val tb = (1, true)
+    var ab: i64 = 0
+    var bb: bool = false
+    (ab, bb) = tb
+    check("da_bool_int_0", ab, 1)
+    if bb:
+        print "PASS da_bool_1"
+    else:
+        print "FAIL da_bool_1"
+    val tf = (2.5, 4.5)
+    var af: f64 = 0.0
+    var bf: f64 = 0.0
+    (af, bf) = tf
+    if af == 2.5:
+        print "PASS da_f64_0"
+    else:
+        print "FAIL da_f64_0"
+    if bf == 4.5:
+        print "PASS da_f64_1"
+    else:
+        print "FAIL da_f64_1"
+
+    # ---- nested-array patterns inside a tuple unpacking are rejected by
+    # the shared front-end ("tuple unpacking target must be identifier"),
+    # so they cannot pin this JIT site; the nested arm keeps its existing
+    # raw-handle behaviour, unchanged by the fix.
+    # ---- globals as sinks -------------------------------------------------
+    (g_a, g_b) = t
+    check("da_global_i64_0", g_a, 10)
+    check("da_global_i64_1", g_b, 20)
+
+    print "TUPLE_DESTRUCTURING_ASSIGN PROBE: DONE"

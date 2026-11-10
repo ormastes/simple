@@ -72,3 +72,35 @@ that strict readback and verify its checksum outside the measured frames.
   measured reacquire/re-present operation.
 - 7680x4320 dynamic and retained rows report p50/p95, RSS/device memory,
   fallback=false, completion known, and exact presentation receipts.
+
+## Triage addendum (2026-11-11, lane ne7)
+
+**Status: PARTIAL — remains OPEN; live presentation proof still outstanding
+(matches 2026-10-27 v3 lane02 freeze: keep_open, no admission without live
+checksum evidence).**
+
+Current tip state (branch work/p3-ne7-20261111):
+
+- The presentation ownership moved again: the engine now exposes
+  `present_window_device()` (`src/lib/gc_async_mut/gpu/engine2d/engine.spl:3603`),
+  forwarding to the strict-submission Vulkan owner
+  (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`), with
+  compositor-side fail-closed scalar gates in
+  `src/os/compositor/vulkan_present_damage_gate.spl` (rect validation,
+  overlap rejection, receipt byte accounting).
+- The symbols this bug's 2026-08-11 update named
+  (`VulkanEngine2dPresenter`, `rt_vk_swapchain_copy_engine2d_buffer_and_present`)
+  no longer exist in `src/` — `VulkanEngine2dPresenter` survives only in a
+  comment in `vulkan_present_damage_gate.spl:3`.
+- No live presentation evidence exists on disk: no presentation receipts,
+  timed-frame checksums, or 8K p50/p95 rows anywhere under `build/`, `var/`,
+  or `doc/08_tracking/` newer than this bug. The sibling bug
+  `engine2d_vulkan_window_8k_gate_is_device_present_proxy_2026-08-31`
+  (v3 freeze) records that the 8K window gate passes via an Xvfb
+  device-present PROXY, not real window rendering — consistent with live
+  proof still being open.
+
+Not attempted here: the acceptance criteria (Xvfb/physical surface live
+presentation, verification readback outside timed frames, zero-readback
+timed frames, 7680x4320 p50/p95 + RSS + presentation receipts) require a
+Linux display environment and are out of scope for a Windows P3 lane.
