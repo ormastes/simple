@@ -37,3 +37,27 @@ bug. Check the archive with `nm` before suspecting codegen.
 Add `runtime_contracts.c` (and audit for other moved providers) to the capsule
 script's compile list, then prove the gate both ways: capsule build succeeds
 from a clean tree, and deleting a provider makes it fail naming that provider.
+
+## 2026-11-10 status — P3 runtime-lane triage (worktree simple-p3-rt-20261110)
+
+**Verdict: SUPERSEDED — the requested fix is in the tree at base
+1504212d788b.** `scripts/check/build-core-c-bootstrap-runtime-capsule.shs`
+now:
+
+- compiles `runtime_contracts.c` as a first-class `SOURCE_FILES` entry
+  (alongside the runtime_native/legacy_core/simd sources), and
+- proves the provider exactly as this doc's "Fix" section asks: `nm`
+  text-symbol assertions that `simple_contract_check` /
+  `simple_contract_check_msg` resolve in the archive AND in
+  `runtime_contracts.o`, plus `assert_single_provider` checks pinning each to
+  `runtime_contracts.o` alone (no duplicate-definition escape).
+
+Pickaxe (`git log -G runtime_contracts -- <script>`): the composition arrived
+with PR #7597 (merge `9e7e7a526edb`, 2026-11-07) — the only history touching
+this script for that provider.
+
+Execution label: **host-limited** — the capsule script intentionally supports
+only Linux/Darwin (`*) die "unsupported-host:$PLATFORM"`), so it cannot be run
+to completion from this Windows (MINGW64) host; the verdict above is
+script-content evidence at a pinned base, recorded honestly rather than
+claimed as a run. No change made.
