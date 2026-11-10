@@ -1,11 +1,11 @@
 # Stage 3 cannot start: the canonical Stage-3 step passes no package-index authority and no cold-init
-## Closed 2026-09-16 — ...nus the planner-admission receipt. ## Fix direction (not applied by this lane) Add `SIMPLE
+## Closed 2026-09-16 — cold-init env fix landed in all three Stage-3 callers; pin check GREEN (re-verified 2026-11-11, lane boot15)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
-- Status: OPEN (2026-09-13)
+- Status: FIXED (2026-11-09 closure, lane p3-subj6; pin check re-verified 2026-11-11, lane boot15)
 - Area: bootstrap / 80.driver source pipeline
 - Found by: BOOT-14 (first Stage-3 run ever reached in this lane series)
 
@@ -102,3 +102,21 @@ Note: the original caution that this changes the Stage-3 args hash bound by
 admission receipts still stands for lanes with pre-existing receipts; this
 closure only certifies that current-tree callers consistently declare the
 cold-init route and that the pin check guarding it is green again.
+
+## Addendum 2026-11-11 — P3 boot15 lane triage (worktree simple-p3-boot15-20261111, base f7640d20a458)
+
+**Verdict: FIXED.** Status flipped OPEN -> FIXED in this commit.
+
+- The closure evidence of 2026-11-09 (lane p3-subj6, recorded above) stands: the
+  `SIMPLE_PACKAGE_INDEX_COLD_INIT=1` fix from "Fix direction" is present in all three
+  Stage-3 callers in both the args-digest vector and the transcribed invocation
+  (`bootstrap-from-scratch.sh`, `resume-stage3-from-admitted.sh` /
+  `lib/stage3-native-build-worker.sh`, `bootstrap-stage3-candidate-builder.shs`), and
+  commit `9414af76ef95` (2026-11-09) repaired the pin check's extraction anchors after
+  the cgroup-worker refactor.
+- This lane re-ran the executable contract on the fresh-seed worktree base:
+  `sh scripts/check/check-bootstrap-stage3-package-index-cold-init.shs`
+  -> `PASS — 9 block(s) checked, all declare SIMPLE_PACKAGE_INDEX_COLD_INIT=1`.
+- Standing caution (from the 2026-11-09 note): the fix changes the Stage-3 args hash
+  that admission receipts bind; lanes holding pre-existing receipts must re-admit.
+  This closure certifies caller consistency and the green pin check only.
