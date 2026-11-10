@@ -78,3 +78,16 @@ base:
   p3-boot3 worktree, rc=0, 2026-11-10).
 
 No change made in this lane.
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: FIXED — verified live in this lane (evidence re-run, not cited).**
+`sh scripts/check/check-push-must-pass.shs --self-test` — PASS, "33
+ledger/budget/dispatcher/rebase/stale-merge fixtures checked", rc=0, run
+2026-11-11 on this worktree. The unpromoted-ledger permission
+(`ALLOW_UNPROMOTED_LEDGER` / `ledger_is_unpromoted_at_rev`,
+`scripts/check/check-push-must-pass.shs:254,316,2261`) and the
+fail-closed PASS-row guard (`:272,281`) are present at this base. The
+circular-gate shape this doc recorded (hook blocks the fixes needed to
+produce the evidence it demands) no longer holds for an all-TODO
+`unrecorded` ledger. No change made in this lane.

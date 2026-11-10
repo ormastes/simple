@@ -1,5 +1,5 @@
 # Bootstrap lock is keyed on `--output`, but the seed path is not — concurrent bootstraps still collide
-## Open 2026-09-16 — needs owner triage
+## Status 2026-11-11 — SUPERSEDED (verified at p3-boot11 base; was "Open 2026-09-16 — needs owner triage")
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -230,3 +230,20 @@ immutable generation and rebinds the marker instead of overwriting an executing
 binary — implementing suggested fixes 1+2 together and eliminating the ETXTBSY
 clobber class by construction. Lock arrival merged via 9e7e7a526edb (2026-11-07,
 ancestor of this branch). No change made.
+
+---
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: SUPERSEDED (independently verified at this lane's base,
+origin/release/1.0.0 tip f01a4d15967e).** The 2026-11-03/2026-11-10 triage
+claims were re-checked against source, not trusted: the shared seed path is
+still the hardcoded `src/compiler_rust/target/bootstrap/simple`, but
+publication is serialized repo-wide independent of `--output` —
+`rust_authority_lock_root` (`scripts/bootstrap/bootstrap-from-scratch.sh:3060`),
+`bootstrap_acquire_rust_authority()` (`:3107`, acquired at `:3211/:3779/:3982/:4209`),
+and atomic `cp -pL` + `mv` materialization via
+`bootstrap_authority_materialize_legacy_file`
+(`scripts/bootstrap/bootstrap-authority-wiring.shs:424`). Suggested fixes 1+2
+both stand implemented; the ETXTBSY clobber class is closed by construction.
+No change made in this lane.
