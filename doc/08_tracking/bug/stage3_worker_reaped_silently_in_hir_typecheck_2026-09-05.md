@@ -537,3 +537,33 @@ but it is not the explanation for those deaths.
 Not changed here: the monitor is a shared resource guard and another session had
 a live run against it at the time of writing.
 
+
+## Addendum 2026-11-11 — P3 boot15 lane triage (worktree simple-p3-boot15-20261111, base f7640d20a458)
+
+**Verdict: BLOCKED — kept OPEN.** The SEGV itself remains the sole open defect; this
+lane confirms the diagnostics from UPDATE 2/UPDATE 3 are now IN TREE, so the next run
+names its own crash window:
+
+- Commit `3adea6ecb4c1` ("diag(driver): name the Stage-3 crash window, and census Dict
+  modules fail-closed") is an ancestor of this base. Verified present in source:
+  `phase3:hir:loop:done` / `phase3:hir:ctx_publish:done`
+  (`driver_hir_pipeline_lowering.spl:1551,1596,2442,2530`), the fail-closed Dict census
+  `phase3:hir:validate:dict_census:start/done` plus `[post-hir-validation-fatal]`
+  naming dropped HIR aggregates (`driver_hir_pipeline_support.spl:641-644`), and
+  `driver_dict_entry_count` (`driver_hir_pipeline_support.spl:257`) replacing the
+  broken `Dict.len()` on the streaming `file:done` line.
+- The environment confounds this record isolated (RSS monitor `KILL_SIMPLE_MEM_MB`
+  24 GB ceiling at `scripts/resource/kill_simple_monitor.shs:47` still kills
+  legitimate 42-50 GB workers; unanchored `pkill` practice note stands) are documented
+  and unchanged; both are owner decisions recorded in the body.
+
+**Grant (non-Windows host, aarch64-unknown-linux-gnu):**
+`KILL_SIMPLE_MEM_MB=65536 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3`
+with `SIMPLE_STAGE3_STREAMING_SURFACES=1 SIMPLE_COMPILER_PHASE_PROFILE=1` and apport
+core capture armed (`printf '[main]\nunpackaged=true\n' > ~/.config/apport/settings`;
+snapshot `/var/crash` by content hash — apport overwrites same-executable reports).
+Read the core by registers/ProcMaps per UPDATE 4 (`gdb -batch -ex bt` will NOT
+symbolize this class). The in-tree receipts now bound the fault to
+loop-done / ctx_publish / validate:census / ast_reset / lexer_release / reclaim; the
+`[post-hir-validation-fatal]` line names any dropped module outright. Do not bisect by
+module before reading that trace — UPDATE 3 supersedes the bisect.

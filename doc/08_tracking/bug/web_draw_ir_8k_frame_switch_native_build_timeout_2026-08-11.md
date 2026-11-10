@@ -71,3 +71,35 @@ Additional acceptance:
   closure, or lower the validity check without that missing runtime symbol;
 - require the runner to remain in JIT/native mode (no interpreter fallback)
   before admitting an 8K timing row.
+
+## Addendum 2026-11-11 — P3 boot15 lane triage (worktree simple-p3-boot15-20261111, base f7640d20a458)
+
+**Verdict: BLOCKED — kept OPEN (PARTIAL FIX; NATIVE 8K EVIDENCE OPEN).**
+
+- The named JIT blocker is resolved: the sibling record
+  `vulkan_engine2d_native_jit_missing_rt_struct_receiver_valid_2026-08-12.md` is
+  CLOSED (Resolved 2026-08-15 — panic gone, both integration specs PASS on the fixed
+  binary), and `rt_struct_receiver_valid` is defined in-tree
+  (`src/runtime/runtime_native.c:8541`, declared `src/runtime/runtime.h:436`). The
+  "make `rt_struct_receiver_valid` available to the self-hosted JIT runtime closure"
+  acceptance item is satisfied by that resolution; do not re-chase it.
+- The executable gate `scripts/check/check-web-draw-ir-8k-frame-switch.shs` now runs
+  the bench with `--mode=jit` under a 180 s budget (`SIMPLE_TIMEOUT_SECONDS`
+  overridable) instead of requiring a full native-build — a strictly lower barrier
+  than the 2026-08-11/08-12 attempts. The bench fixture exists unchanged at
+  `test/05_perf/graphics_2d/bench_web_draw_ir_8k_frame_switch.spl`.
+- What is still missing is everything in "Acceptance": the reusable native artifact
+  (or at minimum one JIT-mode receipt row proving `status=pass`,
+  `revision_render_count=1`, `revision_reuse_count=200`, checksum, p95 <= 12.5 ms,
+  RSS, fallback=false, readback mode). The prior lane's three-cycle cap is exhausted,
+  and on this Windows host BOTH `native-build` and JIT-heavy closure compilation are
+  in the known-live native-build hang class — this lane records BLOCKED and does not
+  retry a hung build. No 8K/80 claim is made.
+
+**Grant (non-Windows host, x86_64-unknown-linux-gnu, self-hosted binary preferred):**
+`SIMPLE_BIN=<binary> sh scripts/check/check-web-draw-ir-8k-frame-switch.shs`
+(raise `SIMPLE_TIMEOUT_SECONDS` as needed; require the run to stay in JIT/native mode
+— no interpreter fallback — before admitting a row), then the native-artifact leg:
+`bin/simple native-build --source src --source test/05_perf/graphics_2d --entry test/05_perf/graphics_2d/bench_web_draw_ir_8k_frame_switch.spl --entry-closure --opt-level=aggressive --strip --output build/render_perf/bench_web_draw_ir_8k_frame_switch`
+followed by the artifact's own seed + 200-retained-calls run and the
+`pixels`-copy profile question (identity/receipt vs 132.7 MB per-hit copy).

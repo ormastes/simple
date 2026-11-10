@@ -122,3 +122,27 @@ bottleneck.
 
 ## Round-10 verdict note (2026-11-06)
 Verdict: feature-sized / verification-pending, no patch. The record forbids a speculative rewrite until measured. Needs a manifest-attested full CLI (Phase 3): SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1 <stage binary> native-build --entry-closure --entry src/app/cli/main.spl, bounded at 10s and 30s.
+
+## Addendum 2026-11-11 — P3 boot15 lane triage (worktree simple-p3-boot15-20261111, base f7640d20a458)
+
+**Verdict: BLOCKED — kept OPEN.** The Round-10 verdict note (2026-11-06) is the
+authoritative current state and this lane adopts it without modification:
+feature-sized / verification-pending, NO source patch to
+`src/app/io/_CliCompile/compile_targets.spl` is acceptable until measured under a
+manifest-attested full CLI. The record's own acceptance machinery (byte-for-byte
+closure/diagnostics fixtures, `test/05_perf/compiler/` SPipe regression, O3 optimize
+run, identical 10 s/30 s boundaries) is fully specified above and needs no re-triage.
+
+Windows is excluded for the measurement itself: the entry-closure `native-build`
+probe is in the known-live Windows native-build hang class, which this lane must
+record BLOCKED and never retry. The full CLI prerequisite is additionally behind the
+OPEN `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`
+frontier.
+
+**Grant (non-Windows host, after a standalone-PASS Stage 3 provenance manifest exists):**
+`SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1 <manifest-selected full CLI> native-build --entry-closure --entry src/app/cli/main.spl`
+bounded at 10 s and 30 s; preserve every `closure visited` line; then follow the
+record's "Required next experiment" steps 1-4 verbatim (fixtures, order-preserving
+change only, byte-for-byte equality, strictly-later trace receipt at one boundary).
+Until those gates pass, `stage4_full_cli_closure_spin_2026-07-18.md` remains
+authoritative.

@@ -153,3 +153,28 @@ value-semantics class this record already names, not an indexing bug.
 
 The failed fix is deliberately NOT landed: it changes no behaviour and would
 imply the desync theory is live.
+
+## Addendum 2026-11-11 — P3 boot15 lane triage (worktree simple-p3-boot15-20261111, base f7640d20a458)
+
+**Verdict: BLOCKED — kept OPEN.** The crash windows this record names were cleared in
+August per its own body (surface-freeze SEGV, nested-pattern transform, borrow
+`CallTerminator` fix, capsule-batch `find` fix — do not re-investigate per "Unblock
+condition"); the 2026-08-27 phase-2 `CompileContext.errors` SEGV was never root-caused
+(the failed desync fix was deliberately not landed) and its reproduction requires the
+Stage 2 -> Stage 3 chain, which cannot run on the Windows lane host.
+
+The residual ask of this record — self-hosted `check`/test/SPipe/optimizer plus
+matched perf/RSS gates for MC/DC/RT-HAL (AC-13/15/16/18) — is a Stage-3/4 admission
+state, not a source defect this lane can edit. The live continuation is owned by the
+newer still-open records: `stage3_hir_segv_compiler_driver_unit2of833_2026-09-14.md`,
+`stage3_driver_hir_lowering_spins_after_parse_fix_2026-09-21.md`, and
+`stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`; the
+2026-11-10 rt-lane addendum on `deployed_simple_runtime_missing_blocks_mcdc_rt_hal_2026-08-25.md`
+corroborates this routing ("LIVE, but not a `src/runtime` defect ... unblock condition
+is bootstrap-deployment admission state").
+
+**Grant (non-Windows host, x86_64-unknown-linux-gnu):**
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3`
+(admitted Stage 3 required), then run this record's MC/DC/RT-HAL verification gates on
+the admitted compiler. Until Stage 3/4 admission lands, no edit in this row's scope
+can move AC-13/15/16/18; do not burn cycles on the cleared surface-freeze path.

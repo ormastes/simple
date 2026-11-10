@@ -262,3 +262,32 @@ Second attempt, 11:28 local: 37 GiB free, no peer bootstrap; worktree
 `--stop-after-stage2` command started (log: `<scratch>/zk-stage2-build.log`).
 Outcome recorded below when known.
 
+## Addendum 2026-11-11 — P3 boot15 lane triage (worktree simple-p3-boot15-20261111, base f7640d20a458)
+
+**Verdict: BLOCKED — fix implemented in tree; macOS Stage-3 verification pending (kept OPEN).**
+
+- The root-cause record `zerokind_is_a_corrupt_aggregate_2026-09-03.md` classifies this
+  class as FIX-IMPLEMENTED-VERIFICATION-PENDING: seed codegen fix `2c89727c11c`
+  ("stop turning a nil Optional<aggregate> into a zeroed aggregate",
+  `src/compiler_rust/compiler/src/codegen/llvm/functions/objects.rs`) is an ancestor of
+  this base, and the post-fix aarch64 Stage-3 runs recorded in `f859550a42ce` report
+  **0** `E-MIR-TYPE-ZeroKind` raises (was 3) and 0 post-mono reports (was 16).
+- This lane's own seed-smoke verification (fresh seed 46fe8f6b6def, build-commit of
+  bin/simple.exe in this worktree):
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+  test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl
+  --mode=interpreter --no-cache` -> `SPEC FILE VERDICT ... outcome=OK declared>=4
+  executed=4 passed=4 failed=0`. (Two private-fn-import visibility warnings on
+  `env_unset`/`time_now_unix_micros` are the known live seed divergence; routed, not
+  this row.)
+- What remains is exactly the closing experiment the root-cause record names: a
+  Stage-3 run on aarch64-apple-darwin with a seed built at/after `2c89727c11c`,
+  confirming `grep -c E-MIR-TYPE-ZeroKind` = 0 and `[post-mono-verify]` = 0 in the
+  worker stderr with `phase5:mode_dispatch` reached. That chain cannot run on the
+  Windows lane host.
+
+**Grant (non-Windows host, aarch64-apple-darwin):**
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --strategy=adhoc --full-bootstrap --stop-after-stage3 --mode=dynload`,
+then verify `grep -c E-MIR-TYPE-ZeroKind build/bootstrap/logs/aarch64-apple-darwin/stage3-native-build.log` = 0
+and `[post-mono-verify]` absent, `phase5:mode_dispatch` reached. Close on those numbers;
+re-open this record only with a fresh dated repro if a raise returns.
