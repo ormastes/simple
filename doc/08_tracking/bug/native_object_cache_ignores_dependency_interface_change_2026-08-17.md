@@ -134,3 +134,35 @@ so the row stays OPEN with its fix direction intact.
 
 Prerequisite for anyone picking this up: get a native-build of a small fixture
 to COMPLETE first, then re-run the four scenarios.
+
+## Addendum 2026-11-11 (lane ne17) — LIVE re-confirmed; gate RED on fresh seed
+
+Gate `scripts/check/check-native-object-cache-invalidation.shs` run on fresh
+seed 46fe8f6b6def (Windows host, worktree simple-p3-ne17-20261111, tip
+f7640d20a458; `SIMPLE_BIN=<worktree>/bin/simple.exe`; ~18s total):
+
+```
+cold build:                          0 reused / 6 rebuilt  (expected 0/6) OK
+no change (all valid):               5 reused / 1 rebuilt  (expected 6/0) MISMATCH
+leaf BODY edit:                      4 reused / 2 rebuilt  (expected 5/1) MISMATCH
+leaf INTERFACE edit (arity):         4 reused / 2 rebuilt  (expected 1/5) MISMATCH
+```
+
+The SAFETY direction is violated exactly as recorded 2026-08-17: after the
+leaf's arity changed, 4 dependent objects compiled against the old signature
+were served from cache. Absolute counts shifted by one module that now always
+rebuilds (5/1 baseline instead of 6/0); the under-invalidation shape is
+unchanged.
+
+The row's stated prerequisite now clears on this host: a one-module fixture
+native-build (Rust engine, cranelift) completes in ~7-11s. Linking needs a
+clang whose `-print-libgcc-file-name` resolves to an existing file — prepend
+`~/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin` to PATH (the ROCm
+clang 21 on default PATH prints a nonexistent builtins path).
+
+Fix still not attempted: it lives in the Rust engine's per-module cache key
+(`src/compiler_rust/.../pipeline/native_project/mod.rs`), and this lane may
+not rebuild the seed (no cargo). **Grant:** a seed lane with cargo access, to
+implement the per-module `own source hash + imported-interface digests` key
+and re-run the four-scenario gate before/after (the gate now runs in seconds
+on Windows, so before/after evidence is cheap).
