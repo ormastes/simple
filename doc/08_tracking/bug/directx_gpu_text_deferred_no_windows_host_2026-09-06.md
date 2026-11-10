@@ -1,7 +1,10 @@
 # DirectX has no GPU text on either platform; deferred for want of a Windows D3D11 host
 
 Date: 2026-09-06
-Status: DEFERRED (no Windows host; Linux lane is a counter-handle fake)
+Status: DEFERRED (no Windows host; Linux lane is a counter-handle fake) —
+re-verified unchanged 2026-11-11 (lane ne6); the triage host IS Windows, but no
+device-verifiable text path exists to exercise, so the deferral stands (see
+addendum)
 Area: lib / gc_async_mut / gpu / engine2d — DirectX backend
 
 All `file:line` below were read at `origin/main` `461e48379ff` (2026-09-06).
@@ -68,3 +71,28 @@ Either of:
 A green run of `backend_directx_spec.spl` on this host is **not** closing
 evidence: its Linux `init()` reduces to an `rt_file_exists` probe for
 `libvulkan.so` (`nogc_async_mut/gpu/vulkan_icd_sffi.spl`), so it is device-free by construction.
+
+---
+
+## Addendum 2026-11-11 (lane ne6, batch p3-ne6)
+
+**Verdict: DEFERRED stands, source-verified unchanged.** Re-read at tip on
+branch work/p3-ne6-20261111:
+
+- `src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl` `draw_text_bg`
+  (:229-231) and `draw_text` (:390-392) still hand both calls to the software
+  mirror and then `_poison_native_receipt()` — the honest-poison shape this
+  doc describes is intact, and no GPU text lane has been added.
+- `src/lib/common/gpu/font_atlas_composite.spl` still has no HLSL twin;
+  `src/runtime/runtime_directx_core.c` still exports no compute/present
+  entries for text.
+- The `# TODO(P2,gpu)` markers this doc says stay TODOs are still TODOs
+  (`backend_directx.spl:49`).
+
+Host-limit note: this triage runs on a Windows host, which satisfies the
+letter of "a Windows host" but not the closing evidence: there is still no
+real D3D11 text path to compile and run — the `_WIN32` C branch provides
+device open/execute-readback only. Building the text lane remains the deferred
+work, and a device-verified text frame remains the unmet closing condition.
+No scope decision ("DirectX text is out of scope") has been written down, so
+the record stays open per its own rule.
