@@ -1,5 +1,29 @@
 # Self-hosted stage4 `run` (interpreted) drops string interpolation
 
+## 2026-11-10 expression-entry sibling repair — verification pending
+
+The module pipeline already calls `core_frontend_parse_reset`, including
+interpolation expansion. A source audit found a separate live omission:
+`core_interpret_expr` parsed one expression and immediately evaluated it,
+leaving ordinary string nodes unpromoted. It now runs the same existing
+interpolation expansion and placeholder-argument transform as the module
+frontend after parsing completes. The evaluator does not acquire a parser
+dependency, and appended fragments remain in the same AST arena.
+
+`test/01_unit/compiler/interpreter/core_expression_interpolation_spec.spl`
+adds direct product-API scenarios for arithmetic/multiple regions, a runtime
+lambda variable with module parity, escaped braces, raw/plain text, and mixed
+malformed/valid regions. Fixture braces are assembled from character codes,
+so the outer runner cannot supply the behavior under test.
+
+These tests are authored but unexecuted: this Windows campaign has no proven
+self-hosted full CLI/test runner. Runtime checks, generated-doc validation,
+and the compiler/core/MCP smoke gates remain pending. The original Stage4
+`run` reproduction still requires a fresh full CLI with seed delegation
+impossible; this expression-path repair does not claim to settle it.
+
+Historical evidence and failed attempts below are retained unchanged.
+
 **Status:** open, blocking self-hosted deploy. **Filed:** 2026-07-30.
 
 ## Symptom (PROVED, reproduced twice, isolated from seed delegation)
