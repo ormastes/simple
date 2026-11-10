@@ -54,3 +54,26 @@ linking, not an isolated function. Cross-referenced verification against
 **Status:** PARTIALLY-FIXED. Sub-issue (a) resolved; sub-issue (b) remains
 explicit open TODO per cross-referenced doc.
 
+## 2026-11-10 status — P3 runtime-lane triage (worktree simple-p3-rt-20261110)
+
+**Verdict: SUPERSEDED.** Sub-issue (a) (bare `run_check`/`run_arch_check`
+mangling) stays FIXED-AT-TIP per the in-doc 2026-07-17 verification. Sub-issue
+(b) (Stage-4 full-CLI capability providers) is no longer tracked here: the
+current authority is the newer OPEN bug
+`stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`
+(2026-09-01), which tracks the same link boundary host-independently.
+
+Source audit at base 1504212d788b — all three sub-issue-(b) symbols have live
+runtime providers, so no `src/runtime` gap remains on this side of the
+boundary:
+
+- `rt_array_concat` — `src/runtime/runtime_native.c:11122`
+- `spl_dlsym` — `src/runtime/runtime_native.c:11370` (also `runtime_dynload.c:2077`)
+- `spl_wffi_call_i64` — `src/runtime/runtime_native.c:11421`
+
+What remains is the Stage-4 linker/provider-composition boundary itself
+(compiler/native_project lane, per the TODO's own "fix call-target mangling at
+its canonical owner" note), which the 2026-09-01 bug tracks. No `src/runtime`
+change made; nothing further actionable in this lane. Execution label:
+host-independent-source (presence verified by source audit at a pinned base).
+
