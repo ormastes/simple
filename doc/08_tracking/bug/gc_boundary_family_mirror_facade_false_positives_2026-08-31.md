@@ -1,7 +1,7 @@
 # gc-warning: family-mirror re-export shims reported as layering violations
 
 - Filed: 2026-08-31
-- Status: FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
+- Status: FIXED (2026-11-08)
 - Component: `35.semantics/gc_boundary_check.spl`, seed `interpreter_module/{module_loader,path_resolution}.rs`
 
 Seed-half resolution: `path_resolution.rs` now normalizes native and mixed

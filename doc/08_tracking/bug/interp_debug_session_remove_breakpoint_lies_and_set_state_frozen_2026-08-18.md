@@ -1,6 +1,6 @@
 # `SessionManager.remove_breakpoint` returns `true` while the breakpoint stays armed; `set_state` is frozen (interpreter)
 
-- **Status:** OPEN
+- **Status:** SUPERSEDED
 - **Filed:** 2026-08-18
 - **Severity:** MEDIUM-HIGH (actively misreported success in a debugger control path)
 - **Evidence bar:** **SOURCE-VERIFIED, NOT EXECUTION-VERIFIED**

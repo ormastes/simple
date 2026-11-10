@@ -1,7 +1,7 @@
 # JS timer/animation-frame queue hangs (>150s, never completes) at 4096 entries
 
 Date: 2026-09-01
-Status: OPEN
+Status: SUPERSEDED
 Severity: Medium — test hang, likely O(n) or worse per-op cost in the
 JS-engine timer/task queue implementation
 

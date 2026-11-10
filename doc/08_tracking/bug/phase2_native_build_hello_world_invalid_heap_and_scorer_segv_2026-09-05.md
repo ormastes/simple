@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05 (macOS aarch64, `bin/local/phase2-aarch64-apple-darwin/simple`, 139,502,808 bytes, `simple-bootstrap 1.0.0-rc.1`)
-**Status:** OPEN — blocks lane (a) of measuring the sspec score natively; a working
+**Status:** SUPERSEDED — blocks lane (a) of measuring the sspec score natively; a working
 seed-interpreter lane exists instead (`scripts/check/sspec-score-seed-lane.shs`)
 
 ## 1. Hello world does not native-build (this, not `Id`, is the real blocker)

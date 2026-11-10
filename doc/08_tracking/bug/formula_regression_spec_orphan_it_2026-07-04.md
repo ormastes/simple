@@ -6,7 +6,7 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-04
 **Severity:** medium
-**Status:** open
+**Status:** SUPERSEDED
 
 ## Symptom
 

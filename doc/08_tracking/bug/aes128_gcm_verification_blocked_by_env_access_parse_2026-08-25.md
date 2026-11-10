@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-25  
-**Status:** Open, unrelated blocker
+**Status:** SUPERSEDED, unrelated blocker
 
 The repository's nominal production path
 `bin/release/x86_64-unknown-linux-gnu/simple` identifies itself as a Rust-built

@@ -1,6 +1,6 @@
 # `simple lint` SEGVs on the dual-run spec files
 
-- **Status:** OPEN
+- **Status:** SUPERSEDED
 - **Found:** 2026-09-03, linting a new dual-run tranche spec before commit
 - **Area:** `src/app/lint` / `src/compiler/90.tools/lint`
 - **Engine:** `bin/simple` Rust seed `v1.0.0-rc.1`, Windows x86_64

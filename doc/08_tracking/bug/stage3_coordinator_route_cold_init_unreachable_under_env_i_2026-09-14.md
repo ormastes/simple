@@ -1,7 +1,7 @@
 # Stage 3 coordinator route is unusable on a cold checkout: its own remedy cannot reach the child
 
 - **Filed:** 2026-09-14
-- **Status:** OPEN
+- **Status:** SUPERSEDED
 - **Tree:** `origin/main` `4f4d0e12832`
 
 ## Symptom

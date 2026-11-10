@@ -1,6 +1,6 @@
 # C-runtime compile gate RED: rt_browser_renderer_namespace_selfcheck.c
 
-Status: OPEN. Filed 2026-08-18.
+Status: SUPERSEDED. Filed 2026-08-18.
 
 `sh scripts/check/check-c-runtime-compiles-push.shs` currently reports
 `FAIL — 1 file(s) failed to compile: src/runtime/test/rt_browser_renderer_namespace_selfcheck.c (103 compiled clean, 2 skipped...)`.

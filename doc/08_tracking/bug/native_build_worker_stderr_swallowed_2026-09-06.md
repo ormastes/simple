@@ -1,6 +1,6 @@
 # native-build discards the worker's stderr, hiding the real error
 
-Status: OPEN (pre-existing; surfaced while building the dynamic-runtime lane)
+Status: SUPERSEDED (pre-existing; surfaced while building the dynamic-runtime lane)
 Component: `src/compiler_rust/compiler/src/pipeline/native_project` (worker protocol)
 
 ## Symptom

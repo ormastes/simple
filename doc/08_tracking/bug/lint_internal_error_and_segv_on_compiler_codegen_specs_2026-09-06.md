@@ -87,3 +87,28 @@ verdict gives neither.
 Consequence for the gate: lint coverage is silently zero for at least the
 backend and driver layers of the compiler, which is where the bootstrap lanes
 do all of their work.
+
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: SUPERSEDED (both named files lint clean on refreshed seed; BOOT-6 SIGSEGV gone on the one product file fully checked)
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111), direct
+`bin/simple.exe lint <file>` invocations (seed-smoke):
+
+- `test/01_unit/compiler/codegen/pure_simple_cond_optional_presence_lowering_spec.spl`
+  → "Lint completed with 0 error(s) and 12 warning(s)" — the
+  `string index out of bounds: index is 13083 but length is 13083` internal
+  error is gone.
+- `test/01_unit/compiler/codegen/condition_tag_decode_spec.spl`
+  → "Lint completed with 0 error(s) and 3 warning(s)", rc=0 — the SIGSEGV is
+  gone.
+- BOOT-6 scope spot-check: `src/compiler/70.backend/backend/llvm_backend_tools.spl`
+  → "Lint completed with 0 error(s) and 40 warning(s)" (was rc=139).
+  `src/compiler/80.driver/driver_aot_native_output.spl` was still linting when
+  the lane closed (large file, 12+ minutes in-process without crashing — a
+  2026-09-style SIGSEGV would have terminated it immediately); no verdict line
+  was captured for it or for `backend_helpers.spl`.
+- Verdict: SUPERSEDED on the refreshed seed. The linter produces usable
+  verdicts (0 errors, warnings enumerated) for the exact files this doc says
+  were unlintable. No fixing commit is cited because no single one was
+  identified — the linter has been reworked broadly since 2026-09; the refreshed
+  2026-11-11 seed (0791c2b7f4a7) demonstrably no longer exhibits either failure.

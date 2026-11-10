@@ -120,3 +120,33 @@ Workaround for measurement in the meantime: run each spec directly,
 file, minus the crashing output parser, and it agrees file-for-file with the
 runner where the runner survives (verified on
 `test/00_formal_verification/compiler`, 16 files).
+
+## Addendum 2026-11-11 (lane interp6) — SUPERSEDED
+
+**Verdict: SUPERSEDED — fixed on origin/release/1.0.0.**
+
+The three receiver matches in
+`src/compiler_rust/compiler/src/interpreter/expr/collections.rs` now all carry
+`Value::StrBytes` arms: scalar index (~line 691, byte-indexed, negative-index
+normalisation), the step-slice length match (~line 877) and step-slice dispatch
+(~line 1019), plus the range-index path — each with a comment citing the
+"cannot index/slice value of type str" abort this record documents. Bracket
+forms and the method lane now agree on StrBytes values.
+
+Fixing commit on this branch: `9e7e7a526edb43ab29171d920449367e5fd48127`
+(2026-11-07, squash-merge of PR #7597) — confirmed by
+`git log -S 'StrBytes(bytes) =>' -- .../collections.rs`.
+
+**Seed-smoke verification (refreshed seed, build-commit 0791c2b7f4a7):** the
+record's minimal repro plus the step-slice and scalar forms, plain run mode
+(`build/p3fix-interp6/fx/strbytes.spl`, gitignored):
+
+```
+val a = "日本語"; val b = a[0:2]; val c = b[0:1]   # the exact abort shape
+SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter ./bin/simple.exe run strbytes.spl
+b.len=2   c.len=1   d.len=2 (a[0:6:2])   scalar=1 (b[0])
+```
+
+All four print the expected values; the second-slice abort
+(`cannot slice value of type str with step`) and the scalar sibling
+(`cannot index value of type str`) no longer fire.
