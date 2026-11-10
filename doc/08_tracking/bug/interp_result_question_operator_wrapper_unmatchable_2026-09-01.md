@@ -65,3 +65,11 @@ Pinned by `test/01_unit/compiler/95.interp/interpreter/result_try_receiver_preve
 shapes: unparenthesised `prep(h)?.get()` returns nil and falls through both
 match arms; parenthesised `(prep(h)?).get()` returns the payload. Status
 open -> documented.
+
+## 2026-11-10 triage — SUPERSEDED/documented (seed-smoke, lane p3-interp4 row 21)
+
+Documented as lexical (not a `?`-lowering defect) by bdcbec5bd33d (in branch):
+`f()?.m()` lexes as safe-navigation; `(f()?).m()` is the try-then-call form.
+Pinned by test/01_unit/compiler/95.interp/interpreter/result_try_receiver_prevention_spec.spl
+— re-verified this lane: 4 total, 4 passed, 0 failed on the worktree seed
+under SIMPLE_EXECUTION_MODE=interpreter. No code change.
