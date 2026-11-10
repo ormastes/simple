@@ -40,3 +40,27 @@ dormant method is not widened into the current Stage 3 blocker fix.
 
 ## 2026-11-09 resolution
 Dormant MIR `lower_bootstrap_flat_function` deleted (no callers; the `bootstrap-flat` path is `lower_module`, which uses `lower_function`). Removes the `result ?? LocalId(id: 0)` hazard. Verification pending native re-run.
+
+## Triage 2026-11-10 (p3-boot2 lane)
+
+SUPERSEDED — the 2026-11-09 resolution is verified on
+work/p3-boot2-20261110 (base origin/release/1.0.0). Commit
+`d907f4858774` ("fix(mir): delete dormant lower_bootstrap_flat_function
+(tail-local payload loss hazard)", 2026-11-09) is an ancestor of this branch
+and removed 49 lines from
+`src/compiler/50.mir/_MirLowering/module_lowering.spl`, including the
+`result ?? LocalId(id: 0)` hazard this record names.
+
+Verification (one cycle):
+- `grep -rn lower_bootstrap_flat_function src/compiler/50.mir/` — no hits.
+  The only same-named method left is the HIR declaration-lowering one
+  (`src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl:110`),
+  which this record explicitly scopes out ("a different owner").
+- `doc/09_report/generics_coverage_baseline.md:110` independently records
+  "`lower_bootstrap_flat_function` has no in-tree caller".
+
+The deletion is one of this record's two sanctioned resolutions ("delete the
+unused compatibility method after proving no external/generated consumer");
+the mixed-tail fixture checklist applied to *reactivation*, which is no
+longer possible. The staged-native mixed-tail defect class in the ACTIVE
+`lower_function` owner belongs to the compiler lane, not this record.
