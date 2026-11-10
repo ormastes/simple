@@ -96,6 +96,8 @@ extern fn rt_path_absolute(path: text) -> text?
 extern fn rt_dir_list(path: text) -> [text]?
 @unsafe(reason: "raw recursive directory walk; empty data conflates empty, inaccessible, and provider failure", capabilities: [ffi])
 extern fn rt_dir_walk(path: text) -> [text]
+@unsafe(reason: "runtime byte->text conversion; used for the substring policy probe", capabilities: [ffi])
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
 
 # Directories to skip during source collection
 val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
@@ -260,6 +262,69 @@ fn _driver_text_index_of(value: text, needle: text) -> i64:
     if not value.contains(needle):
         return -1
     value.split(needle)[0].len()
+
+# --- Byte/char substring policy defence (2026-11-11) --------------------------
+# The Simple language contract (src/lib/common/string_core.spl:15) defines
+# text.substring / text[a:b] / text.len() as BYTE-offset operations, and the
+# self-hosted runtime implements exactly that. The Rust bootstrap seed through
+# 2026-11-11 instead implements them with CHARACTER offsets while byte_at /
+# byte_len stay byte-based. This scanner navigates in byte space (the line
+# cursor is a byte_at scan), so feeding its byte offsets into substring
+# desynced it at the first multi-byte source line and dropped EVERY import
+# after it: measured on the refreshed seed (build-commit 0791c2b7f4a7),
+# _driver_entry_import_module_paths("é\nuse std.a\nuse std.b\n") returned [].
+# The helpers below keep the scanner correct under EITHER policy; the
+# seed-side primitive defect itself is routed to the seed-fix lane, recorded
+# in doc/08_tracking/bug/
+# entry_import_scanner_loses_imports_after_multibyte_utf8_2026-11-11.md.
+var _g_substring_policy: i64 = -1
+
+fn _driver_substring_is_byte_based_v1() -> bool:
+    if _g_substring_policy >= 0:
+        return _g_substring_policy == 1
+    # "é" is C3 A9 in UTF-8: a byte-offset substring(0, 1) is the single byte
+    # C3; a char-offset substring(0, 1) is the whole two-byte character.
+    # Build the probe texts from bytes so their types are unambiguously text
+    # (the seed types text.substring's result as str, which has no byte_len).
+    val probe_bytes: [u8] = [0xC3 as u8, 0xA9 as u8]
+    var probe_txt: text = ""
+    var first_byte: text = ""
+    unsafe(capabilities: [ffi]):
+        probe_txt = rt_bytes_to_text(probe_bytes)
+        first_byte = rt_bytes_to_text([0xC3 as u8])
+    _g_substring_policy = if probe_txt.substring(0, 1) == first_byte: 1 else: 0
+    _g_substring_policy == 1
+
+fn _driver_byte_to_char_advance_v1(content: text, from_byte: i64, from_char: i64, to_byte: i64) -> i64:
+    """Advance a monotonically moving (byte -> char) cursor; returns the char
+    position of `to_byte`.
+
+    Scanner line boundaries are ASCII newlines, which never split a multi-byte
+    sequence, so every byte offset handed here is also a character boundary and
+    counting UTF-8 lead bytes is exact. Callers keep the cursor as loop state
+    so each line costs O(line bytes), not O(file)."""
+    var c = from_char
+    var i = from_byte
+    while i < to_byte:
+        val b = content.byte_at(i)
+        if b < 128 or b >= 192:
+            c = c + 1
+        i = i + 1
+    c
+
+fn _driver_triple_quote_byte_index_v1(content: text, start_byte: i64) -> i64:
+    """Byte index of the next `\"\"\"` at/after start_byte, else -1.
+
+    Scans bytes directly, so the answer stays in the same byte space as the
+    _driver_line_end cursor regardless of the runtime's substring policy (the
+    seed's text.index_of reports character offsets)."""
+    val n = content.byte_len()
+    var i = start_byte
+    while i + 2 < n:
+        if content.byte_at(i) == 34 and content.byte_at(i + 1) == 34 and content.byte_at(i + 2) == 34:
+            return i
+        i = i + 1
+    -1
 
 fn _driver_resolver_path_exists_v1(path: text) -> bool:
     # A declared dependency remains a required read after deletion; do not let
@@ -770,7 +835,12 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
     # triple-quote byte scan on every one made closure discovery quadratic in
     # dispatch overhead even though only the delimiter-bearing lines need the
     # established allocating/docstring path.
-    var next_triple_quote = content.index_of("\"\"\"", 0) ?? -1
+    var next_triple_quote = _driver_triple_quote_byte_index_v1(content, 0)
+    # Char-policy runtimes only: incremental byte->char conversion cursor for
+    # line slicing (see _driver_substring_is_byte_based_v1). Threaded through
+    # the loop so each line costs O(line bytes), not O(file).
+    var conv_byte: i64 = 0
+    var conv_char: i64 = 0
     while line_start < content.byte_len():
         val current_start = line_start
         val line_end = _driver_line_end(content, current_start)
@@ -780,13 +850,21 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
             content, current_start, line_end, in_doc, has_triple_quote)
         line_start = line_end + 1
         if has_triple_quote:
-            next_triple_quote = content.index_of("\"\"\"", line_start) ?? -1
+            next_triple_quote = _driver_triple_quote_byte_index_v1(content, line_start)
         # PERF: keep ordinary lines allocation-free. The predicate scans for a
         # triple quote before rejecting so commented/docstring quote semantics
         # remain on the established slow path.
         if not materialize_line:
             continue
-        val raw_line = content.substring(current_start, line_end)
+        var raw_line: text = ""
+        if _driver_substring_is_byte_based_v1():
+            raw_line = content.substring(current_start, line_end)
+        else:
+            conv_char = _driver_byte_to_char_advance_v1(content, conv_byte, conv_char, current_start)
+            val char_start = conv_char
+            conv_char = _driver_byte_to_char_advance_v1(content, current_start, conv_char, line_end)
+            conv_byte = line_end
+            raw_line = content.substring(char_start, conv_char)
         var scan_line = raw_line
         if not in_doc:
             val comment_at = _driver_text_index_of(scan_line, "#")
@@ -998,9 +1076,21 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
     var in_doc = false
     var generated_owner = ""
     var line_start: i64 = 0
-    while line_start < content.len():
+    # Char-policy runtimes only: incremental byte->char conversion cursor for
+    # line slicing (see _driver_substring_is_byte_based_v1).
+    var conv_byte: i64 = 0
+    var conv_char: i64 = 0
+    while line_start < content.byte_len():
         val line_end = _driver_line_end(content, line_start)
-        val raw_line = content[line_start:line_end]
+        var raw_line: text = ""
+        if _driver_substring_is_byte_based_v1():
+            raw_line = content.substring(line_start, line_end)
+        else:
+            conv_char = _driver_byte_to_char_advance_v1(content, conv_byte, conv_char, line_start)
+            val char_start = conv_char
+            conv_char = _driver_byte_to_char_advance_v1(content, line_start, conv_char, line_end)
+            conv_byte = line_end
+            raw_line = content.substring(char_start, conv_char)
         line_start = line_end + 1
         var scan_line = raw_line
         if not in_doc:
