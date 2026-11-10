@@ -159,7 +159,9 @@ Lane compiler6 re-verified the 2026-09-01 resolution on the tracked fresh seed
   512 words on an aged worn page — drift acts across the WHOLE page, the
   exact property items 1/2 exist to deliver.
 * Corroboration: `fil_nand_emu_e2e_check.spl` (the fold-collision check
-  ported to the S3 window) was launched on the same lane; it is dominated by
-  full-chip per-op cell sweeps and progresses at minutes-per-device-op under
-  the seed interpreter, so it is not a lane-time gate; the witness above is
-  the record's stated acceptance gate.
+  ported to the S3 window) was launched on the same lane and observed
+  partial-green (first 5 assertions PASS — writes lba0..lba4 — 0 FAIL) before
+  being stopped at the lane time budget: the check is dominated by
+  full-chip per-op cell sweeps (minutes per device op under the seed
+  interpreter), so it is not a lane-time gate; the witness above is the
+  record's stated acceptance gate. Log retained at `/tmp/p3c6/emu_e2e.log`.
