@@ -1,6 +1,6 @@
 # Lane-local Rust seed unbuildable: REBASE91 salvage re-introduced a stale `INLINE_INT_BITS` block
 
-- **Status:** CLOSED-OBSOLETE (2026-11-08) — the reported duplicate was
+- **Status:** SUPERSEDED (2026-11-08) — the reported duplicate was
   lane-local and was already repaired. Current `release/1.0.0` contains exactly
   one `INLINE_INT_BITS` definition and one `fits_inline_int` definition in
   `runtime/src/value/core.rs:292,309`. No release source change is required.

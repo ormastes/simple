@@ -38,7 +38,7 @@ the tracked probe link at tip needs `rt_text_eq_any` provided outside the
 absolute-path include on hosts without the ormastes checkout; nothing about
 that caveat affects the len/accumulation verdicts above.
 
-Status: OPEN. Blocks running real toolchain components (caret, MCP, linter,
+Status: SUPERSEDED. Blocks running real toolchain components (caret, MCP, linter,
 test runner) in-guest on SimpleOS riscv64.
 
 ## How this was found

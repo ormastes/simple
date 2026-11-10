@@ -1,6 +1,6 @@
 # RV32 cache maintenance imports RV64-only SFFI providers
 
-- **Status:** OPEN; UNSAFE-TAGGED
+- **Status:** SUPERSEDED; UNSAFE-TAGGED
 - **Filed:** 2026-08-26
 - **Area:** RISC-V bare-metal cache maintenance
 - **Severity:** high — an exercised RV32 cache path can lack its declared target

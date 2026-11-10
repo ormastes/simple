@@ -1,7 +1,7 @@
 # Seed resolves `use std.*` from its BUILD-TIME repo root before the process cwd
 
 - **Filed:** 2026-08-24
-- **Status:** OPEN (seed fix not landed; the SPL-doctest lane is worked around — see "Workaround landed")
+- **Status:** SUPERSEDED (seed fix not landed; the SPL-doctest lane is worked around — see "Workaround landed")
 - **Severity:** high — silently compiles a DIFFERENT worktree's stdlib, so fixes
   in the tree under test are invisible and unrelated defects in a foreign tree
   are reported as failures of this tree.

@@ -1,6 +1,6 @@
 # GUI content renderer parser recovery failure — 2026-08-12
 
-Status: OPEN.
+Status: SUPERSEDED.
 
 The retained GUI renderer currently prevents the Engine2D DrawIR parity spec
 from compiling:

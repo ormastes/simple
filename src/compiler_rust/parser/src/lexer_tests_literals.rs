@@ -156,6 +156,64 @@ fn test_string_escape_octal_max_byte() {
 }
 
 #[test]
+fn test_unknown_escape_preserves_backslash() {
+    // Pure-Simple lexer contract (lexer_struct.spl scan_string): only
+    // n/t/r/\\/"/'/x/u/octal are escapes; every other `\X` keeps BOTH bytes.
+    // Regression: lexer_drops_backslash_escape_in_string_literal_2026-09-02 —
+    // the default arm used to drop the backslash, so "a\b" measured 2
+    // ("a" + backspace via the removed 'b' arm) and `C:\Users` lost its
+    // separators entirely.
+    use crate::token::FStringToken;
+    assert_eq!(
+        tokenize(r#""a\b""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("a\\b".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    assert_eq!(
+        tokenize(r#""C:\Users""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("C:\\Users".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    assert_eq!(
+        tokenize(r#""x\Ty""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("x\\Ty".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    // Non-escape punctuation keeps the backslash too (\: \/. \. \- are NOT
+    // escapes in the pure-Simple lexer; the seed's extra arms were removed).
+    assert_eq!(
+        tokenize(r#""a\:b\/c\.d\-e""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("a\\:b\\/c\\.d\\-e".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    // Known escapes still collapse to one char.
+    assert_eq!(
+        tokenize(r#""a\nb\tc\rd\\e\"f\0g""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("a\nb\tc\rd\\e\"f\0g".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_unknown_escape_in_char_literal_is_error() {
+    // `\b` is two scalars (backslash + b), which a char literal cannot hold
+    // under the pure-Simple contract.
+    let kinds = tokenize_char_mode(r"'\b'", true);
+    let msg = first_error(&kinds).unwrap_or_else(|| panic!("'\\b' must be a lex error: {kinds:?}"));
+    assert!(msg.contains("more than one Unicode scalar"), "{msg}");
+}
+
+#[test]
 fn test_raw_string_literals() {
     // Single-quoted strings are raw (no escape processing, no interpolation)
     assert_eq!(

@@ -1,7 +1,7 @@
 # `file_write_bytes` writes 3 garbage bytes when the call is codegen-compiled
 
 Date: 2026-08-27
-Status: OPEN — root-caused and minimally reproduced; fix is in the Rust seed
+Status: SUPERSEDED — root-caused and minimally reproduced; fix is in the Rust seed
         (`src/compiler_rust/`), out of scope for this lane.
 Class: (b) real product bug — seed extern-argument marshalling
 Found by: soak lane (reported, not fixed; it cost that lane real time by

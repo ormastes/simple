@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
-**Status:** OPEN — both found during integration wiring, both worked around locally
+**Status:** fixed (2026-11-11, P3 lane ne2) — both defects verified non-reproducing on release/1.0.0 tip; evidence below
 **Found by:** Q2 (duplicate-check LSH wiring + real in-process search provider)
 
 ---
@@ -73,3 +73,46 @@ Neither defect was visible to the package that owned the code — both required 
 integration paths alongside primitives rather than after them; a green package
 suite proved less than it appeared to.
 
+
+
+## Verdict addendum — 2026-11-11 (P3 lane ne2)
+
+Verdict: **FIXED** — both defects verified non-reproducing on `release/1.0.0` tip.
+All runs this lane: refreshed seed (`bin/simple.exe`, build-commit `0791c2b7f4a7`),
+seed-smoke, `--mode=interpreter --no-cache`. Scratch probes live (uncommitted,
+under gitignored `build/p3ne2/`) with logs.
+
+**Defect 2 (shingle aliasing) — fixed in code.** `shingles_of_tokens` now joins
+windows with byte `0x1F` (unit separator), not an empty separator — see
+`src/lib/common/search/fingerprint.spl:63` (`joined = joined + "\u001F"`,
+byte content verified with `od -c`: `037` between the quotes). That is exactly
+this record's fix direction: a separator that cannot occur inside a token, making
+the token-sequence → shingle mapping injective. Probe results
+(`build/p3ne2/shingle_probe.spl`, 2/2 passed):
+
+- Doc example: `["ab","c"]` vs `["a","bc"]` at k=2 → **different** shingles.
+- Residual edge this lane probed: `["a b","c"]` vs `["a","b c"]` (tokens that
+  themselves contain a space) → **different** shingles (the 0x1F separator
+  disambiguates where a plain space could not).
+
+Not landed: the spec pin this record asked for — an assertion that `["ab","c"]`
+and `["a","bc"]` produce different shingles — is still absent from
+`test/01_unit/lib/common/search/fingerprint_spec.spl`. Recorded as follow-up;
+the code behavior is verified above.
+
+**Defect 1 (`invalid_parallel_arrays` on caller-built multi-term input) — not a
+defect in the entry point.** Probe (`build/p3ne2/bm25_two_field_probe.spl`, 2/2
+passed): two `Bm25FieldV1` in canonical order (`identifier` ordinal 0, `title`
+ordinal 1) sharing one identical 2-term `term_keys` array `["alpha","search"]`
+→ `bm25_fixed_v1_score_checked` **ACCEPTED** (`raw=26897`); single-field
+two-term baseline also accepted (`raw=5870`). The `invalid_parallel_arrays`
+paths in `ranking.spl:489-525` fire only for the pinned rejection shapes —
+length mismatch, non-canonical field order, differing keys — all intended and
+locked by `test/01_unit/lib/common/search/ranking_spec.spl` ("rejects array
+mismatch, noncanonical field order, and unknown weight"). The 2026-08-31 caller
+repro (`test/01_unit/app/spipe/search/dbg2_spec.spl`) no longer exists in the
+tree; `index_engine_provider.spl` retains its functional per-term summation
+workaround, which is suboptimal but not defective. The doc's own correction
+("the defect is in how that caller constructs its parallel arrays, or in a
+narrower shape the validation rejects") resolves to: valid shapes are accepted;
+no validation change warranted.

@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: **OPEN** — codegen defect, not fixed. One call site was repaired
+- Status: **SUPERSEDED** — codegen defect, not fixed. One call site was repaired
   (see below); the comparison itself is still wrong everywhere else.
 - Date: 2026-09-01
 - Measured in-guest under real OpenSBI v1.4 `-bios fw_payload` (never

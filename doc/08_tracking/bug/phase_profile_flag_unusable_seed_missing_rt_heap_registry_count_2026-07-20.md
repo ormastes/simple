@@ -1,7 +1,7 @@
 # Phase-profile tracing breaks every rv32 firmware build: `rt_heap_registry_count` missing from the seed
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** SUPERSEDED
 - **Severity:** high (blocks **all** `fw_rv32` firmware builds on pristine
   sources — the scripts enable the triggering flag unconditionally)
 - **Area:** `src/compiler/80.driver/driver_log_helpers.spl:9,45`

@@ -1,7 +1,7 @@
 # riscv64 in-guest Simple interpreter blocked on 43 missing baremetal `rt_*` symbols
 
 Date: 2026-08-31
-Status: OPEN — lane landed, honestly RED (gate exits 2, `ERROR — nothing was checked`)
+Status: SUPERSEDED — lane landed, honestly RED (gate exits 2, `ERROR — nothing was checked`)
 Base: `fix/simpleos-riscv64-components` (PR #179, `ed610b469e2`)
 Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`
 

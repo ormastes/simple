@@ -1,6 +1,6 @@
 # `origin/main` is not test-runnable: `src/app/io/env_access_host.spl` fails to parse (2026-08-25)
 
-**Status:** OPEN. **Not caused by the GPU hardening landing** (`8a291217121`) — reproduced on a
+**Status:** SUPERSEDED. **Not caused by the GPU hardening landing** (`8a291217121`) — reproduced on a
 clean worktree of `origin/main` with two independent binaries, including one that predates it.
 
 ## Symptom

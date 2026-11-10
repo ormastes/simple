@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** SUPERSEDED
 **Found:** 2026-08-16, at `f6cadcc36aff61d16d988651ea36a040d2af6aad` (== `origin/main`),
 while trying to restore a self-hosted toolchain for an SCV coverage review
 **Severity:** blocking — the Rust seed cannot be built from `origin/main`, so the

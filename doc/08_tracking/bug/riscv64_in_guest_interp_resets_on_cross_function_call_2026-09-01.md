@@ -21,7 +21,7 @@ fresh dated repro if the symptom returns.
 > executes the callee's body, which the fault previously made unreachable.
 
 
-- Status: **OPEN** — the current blocker for goal item 1 row 2.
+- Status: **SUPERSEDED** — the current blocker for goal item 1 row 2.
 - Date: 2026-09-01
 - Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`
   row 2 (`buildrun`)

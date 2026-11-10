@@ -1,6 +1,6 @@
 # Seed SIGBUS (rc 138) on a cross-module call in the renderdoc tooling — 2026-09-13
 
-Status: OPEN. Host: macOS 25.5.0, Apple M4. Binary:
+Status: SUPERSEDED. Host: macOS 25.5.0, Apple M4. Binary:
 `src/compiler_rust/target/bootstrap/simple` (Rust seed, 2026-09-05 build, 130,402,384
 bytes) — the only binary on this Mac that has a `run` subcommand.
 
