@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: BLOCKED-ON-DEPLOY (fix committed to source, not yet in the deployed binary)
+- Status: SUPERSEDED (fix committed to source, not yet in the deployed binary)
 - Found: 2026-08-18, while writing C-MIG-0033 (`test/01_unit/lib/common/numeric_round_is_nan_crosslang_spec.spl`)
 - Severity: correctness divergence from IEEE 754
 
@@ -128,3 +128,17 @@ updated to RESOLVED with that spec cited.
 ## Closed stale 2026-11-03
 
 Re-verified on the deployed Rust seed (bin/simple.exe, built 2026-11-03) on origin/release/1.0.0 with both `SIMPLE_EXECUTION_MODE=interpret` and `=jit`: the documented repro now produces the correct result on both lanes (see lane seed-interp-p23 evidence: float `0.0/0.0 1.0/0.0 -1.0/0.0` -> `NaN inf -inf`; `d["k"].push` twice on a 1-element list -> len 3; `elif val Some(x) = o` in an if-expression -> binds 7). Closed as stale.
+
+## Addendum 2026-11-11 — lane interp5 verdict: SUPERSEDED (prior-lane closure confirmed)
+
+Verdict: **SUPERSEDED** by commit `6560ca5fc9e0` (2026-08-21, "fix(interp):
+float division by zero yields IEEE NaN/inf, integer division still raises"),
+an ancestor of base `b364745fdbf8`. The 2026-11-03 stale-closure above is
+confirmed on the 2026-11-11 refreshed seed.
+
+Seed-smoke spot-check (2026-11-11, lane interp5, refreshed seed
+`bin/simple.exe` 2026-11-11 build, `SIMPLE_LIB=src`, `--mode=interpreter
+--no-cache`): `test/01_unit/lib/common/interpreter_float_division_by_zero_ieee_spec.spl`
+→ 6 total / 6 passed. Per the fixing commit and spec header: float `0.0/0.0`
+→ NaN, `1.0/0.0` → inf, `-1.0/0.0` → -inf; integer division by zero still
+raises as intended. No further action.
