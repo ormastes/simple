@@ -68,3 +68,28 @@ that diagnostic. No Linux-style signal/-1 worker reaping occurs here, so
 the filing host's root cause cannot be reproduced or verified from this
 lane; handed back to the native-build lane with the runner-side contract
 confirmed green.
+
+---
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 28)
+
+**Verdict: STALE — host-specific 2026-08-31 state; reporting gap it named is closed.**
+
+- The reproducer's subject artifact `bin/release/x86_64-unknown-linux-gnu/simple`
+  no longer exists in-tree: committed binaries/build byproducts were untracked
+  in #1054 (`6b3e640c3fde`). The exact host state (seed built from that tree,
+  `--runtime-bundle core-c-bootstrap` compile dying after ~12 s) cannot be
+  reconstituted from this lane.
+- The complaint's actionable half — the worker's fatal error being lost to
+  stderr spill — has been rewritten. `src/app/cli/native_build_main.spl:2298-2346`
+  (`native_build_worker_failure_lines_v1`) now classifies the exit-status
+  space explicitly: core dump (`dumped core`), Windows native status, POSIX
+  signal (SIGSEGV/SIGABRT vs SIGKILL/SIGTERM with OOM-reaper hint), the
+  `-1`-without-`[TIMEOUT:]` case (this doc's exact message, now labelled
+  "NOT a timeout"), and true timeouts; and `:2285-2291` preserves bounded
+  worker **stdout** (which carries the `[build]` step log and real error
+  line) on the failure path instead of discarding it.
+- The residual core condition (the native compile itself dying on the
+  reporter's Linux host even without `--coverage`) is a compiler/runtime
+  defect, not bootstrap scripting, and is not verifiable from this Windows
+  lane. No change made in this lane.

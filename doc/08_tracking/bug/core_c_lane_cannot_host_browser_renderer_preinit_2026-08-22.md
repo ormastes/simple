@@ -46,3 +46,30 @@ Until then the renderer worker must be built on a lane that keeps `.preinit_arra
 2. Allow `.preinit_array` specifically in `forbidden_archive_sections`. Weakens
    the invariant the Stage4 tests exist to prove; not recommended.
 
+
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 26)
+
+**Verdict: LIVE — fix blocked by this lane's scope.**
+
+Re-verified at this lane's base (origin/release/1.0.0); the requested
+explicit startup entry was never added:
+
+- No `rt_browser_renderer_preinit_enter` (or any explicit preinit entry)
+  exists anywhere under `src/runtime/` (grep 2026-11-10, zero hits).
+- `src/runtime/runtime_process.c:3844-3853` still compiles the
+  `.preinit_array` registration out under `#if !defined(SIMPLE_CORE_C_STANDALONE)`
+  and keeps only an unreferenced-for-production alias in the standalone arm;
+  the source comment at `:3834-3843` still cites this bug as the recorded
+  open state.
+- Consequence unchanged: a core-C-standalone-built renderer worker still
+  fails closed (`rt_browser_renderer_sandbox_enter()` refuses without
+  `s_browser_renderer_preinit_active`; worker exits).
+
+The documented fix (doc option 1: add `rt_browser_renderer_preinit_enter(argc,
+argv, envp)` and have the core-C entry shim forward `argc/argv/envp` for the
+worker marker) requires edits to `src/runtime/runtime_process.c` **and** the
+compiler-generated core-C main shim (`src/compiler` backend). Both trees are
+outside this lane's scope (`src/runtime` runtime lane; `src/compiler`
+seed-fix lane active). No change made in this lane; fix sketch above is
+ready for whichever lane owns those trees.
