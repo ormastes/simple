@@ -104,3 +104,28 @@ doctest discovery sweep.
 - `doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md` — the
   `rt_test_it` extern itself had no runtime backing anywhere; fixed separately
   in the same change by routing the spec decorators through the `it` builtin.
+
+
+## Triage 2026-11-10 (p3-lib2 lane, work/p3-lib2-20261110)
+
+**Verdict: SUPERSEDED — the proposed seed fix landed (cwd first, build-time
+roots last; PR #7597, 2026-11-07) and is verified live in the deployed worktree
+seed (bin/simple.exe, built 2026-11-10).**
+
+- `compiler/src/pipeline/module_loader.rs` now routes the fallback list through
+  `resolve_from_stdlib_fallbacks(runtime_root, manifest_root, ...)`
+  (line 599), where `runtime_root` is the process cwd and it is tried FIRST;
+  `repo_root`/manifest-derived build-time paths come after. This is exactly the
+  doc's "Proposed seed fix".
+- Empirical A/B on this host: probe source written OUTSIDE any repo
+  (Git-Bash `/tmp`), run with cwd = the invoking worktree, importing a helper
+  (`os_from_uname`) added ONLY to that worktree's
+  `src/lib/nogc_async_mut/env/platform.spl`: **rc=0, helper found and called**.
+  Pre-fix this shape resolved to the build-time root and failed. Corroborating
+  gate `scripts/check/check-stdlib-invoking-tree-wins.shs --selftest`: PASS.
+- Related `stdlib_spl_edits_not_live_under_bin_simple_run_2026-08-08` was
+  verified the same session by its exact sabotage repro (constant-7 patch to
+  `salt.spl` picked up by `bin/simple run`: printed `7,7,7,7`). Both probes'
+  stdlib edits were reverted; tree clean.
+- The landed workaround (doctest composite under `.simple/doctest/`) remains as
+  defense-in-depth; it no longer carries the correctness burden alone.

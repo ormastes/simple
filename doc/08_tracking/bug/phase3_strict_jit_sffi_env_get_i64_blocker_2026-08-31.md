@@ -76,3 +76,29 @@ The Phase3 candidate is not admissible: it produced no executable, so
 `--version`, `native-build --help`, and all downstream tests/tools are
 not admissible. No interpreter fallback, stub, alias provider, or candidate
 retry is acceptable as substitute evidence.
+
+
+## Triage 2026-11-10 (p3-lib2 lane, work/p3-lib2-20261110)
+
+**Verdict: SUPERSEDED — fixed on origin/release/1.0.0 base (PR #7597, 2026-11-07);
+the doc's acceptance condition is met in-tree.**
+
+- The flattened-alias loss boundary is proven and repaired by the SFFI alias
+  table: `sffi_alias_target("sffi_env_get_i64") == Some("rt_env_get_i64")`
+  (`compiler/src/codegen/instr/calls.rs:3856`, comment cites this exact import
+  alias). The remap is wired into JIT import resolution at
+  `codegen/jit.rs:492` (mirrored in `common_backend.rs:140`): a direct Call to
+  `sffi_env_get_i64` also requires the canonical `rt_env_get_i64` to resolve,
+  and `rt_env_get_i64` is registered (`common/src/runtime_symbols.rs:881`). A
+  synthetic bare `sffi_env_get_i64` provider was NOT added, per the doc.
+- Exact strict-JIT regression demanded by the doc exists and is asserted:
+  `codegen/jit_tests.rs::test_jit_sffi_env_i64_alias_uses_registered_runtime_provider`
+  (line 455) compiles the flattened `extern fn sffi_env_get_i64` module and runs
+  it (asserts `provider.get_symbol("sffi_env_get_i64").is_none()`, provider has
+  `rt_env_get_i64`, call returns the default 41). Complementary MIR-level
+  guard: `compiler/src/pipeline/native_project/tests.rs:601` proves the
+  flattened decl-arena graph calls `_sffi_env_get_i64` and never lists bare
+  `sffi_env_get_i64` in `mir.extern_fn_names`.
+- Host-limit note: cargo test execution of `compiler_rust` is outside this lane's
+  scope (agent-10 owns compiler_rust); the fix + both regression tests are
+  present and wired in the current tree.

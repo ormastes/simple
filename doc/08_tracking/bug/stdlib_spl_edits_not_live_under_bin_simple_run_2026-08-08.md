@@ -107,3 +107,26 @@ actual danger. Silence is what made this expensive.
 
 Verify stdlib `.spl` edits with `bin/simple test <spec>`, never `bin/simple run`.
 Confirm the harness is live with a sabotage-to-constant before trusting a GREEN.
+
+
+## Triage 2026-11-10 (p3-lib2 lane, work/p3-lib2-20261110)
+
+**Verdict: SUPERSEDED — the doc's exact sabotage repro now proves `bin/simple
+run` resolves the working-tree stdlib. Verified with the worktree Rust seed
+(bin/simple.exe, built 2026-11-10).**
+
+- Sabotage reproduced verbatim: `src/lib/common/bcrypt/salt.spl` line 115
+  patched from `var byte_val = rt_random_i64() % 256` to `var byte_val = 7`,
+  probe importing `std.bcrypt.salt.generate_random_bytes(4)` run with
+  `./bin/simple.exe run`: printed **7,7,7,7**, rc=0. Pre-fix this printed the
+  old LCG stream (e.g. `126,223,44,245`). On-disk `.spl` edits are live on the
+  run path.
+- Companion evidence: `seed_stdlib_resolves_build_time_repo_root_before_cwd_2026-08-24`
+  (cwd-first stdlib fallback) and `seed_segv_calling_newly_added_stdlib_function_2026-09-02`
+  (newly added stdlib fn callable) were verified the same session; gate
+  `scripts/check/check-stdlib-invoking-tree-wins.shs --selftest` PASS.
+- The "second trap" (list[i] loop-variable index shifted left 3 under JIT) was
+  not re-probed; it is tracked separately in the interpreter lane's open set
+  and is out of this library row's scope.
+- The sabotage patch was reverted; tree clean. Standing guidance (verify with
+  sabotage-to-constant) remains good practice regardless.

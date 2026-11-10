@@ -109,3 +109,23 @@ bin/simple run <any .spl importing std.gpu.engine2d.engine>   # ~150k lines
 # quiet + ~16% faster
 SIMPLE_NO_DEPRECATED_WARNINGS=1 bin/simple run <same file>    # 7 lines
 ```
+
+
+## Triage 2026-11-10 (p3-lib2 lane, work/p3-lib2-20261110)
+
+**Verdict: SUPERSEDED — both defects fixed on origin/release/1.0.0 base (PR #7597,
+2026-11-07).**
+
+- `CommonMistake::PythonSelf` no longer exists anywhere under `src/compiler_rust/`
+  (grep: 0 matches). The variant was replaced by `ExplicitSelf`
+  ("(self) parameter when implicit", `parser/src/error_recovery.rs:50`), which is
+  never emitted by `detect_common_mistake` — it exists only to describe the
+  `fn f(self)` parameter shape the doc said the heuristic should be restricted to.
+  No detector fires on `self.<ident>` field access at all.
+- The O(hints x lines) printer is fixed: `display_parser_hints`
+  (`compiler/src/pipeline/module_loader.rs:982`) now indexes source lines once
+  ("Index the source lines ONCE. `source.lines().nth(n)` re-walks the file").
+- Seed-smoke on the worktree seed (`bin/simple.exe`, built 2026-11-10): a class
+  probe exercising `self.n = self.n + 1` / `return self.n` compiles and runs
+  (rc=0, correct value) with **0** `Common mistake detected` lines. The ~11.5k
+  hint wall cannot reproduce.
