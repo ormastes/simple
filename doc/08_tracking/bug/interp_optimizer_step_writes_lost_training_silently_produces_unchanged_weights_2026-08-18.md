@@ -116,3 +116,14 @@ local write-back would make these four call sites pass while leaving the engine
 defect in place for every other unprotected site, and would remove the strongest
 symptom that motivates fixing it — i.e. it masks the defect rather than fixing
 it.
+
+## 2026-11-10 triage — SUPERSEDED (seed-smoke, lane p3-interp3 row 18)
+
+Executed the record's minimal repro
+(`build/p3fix-interp3/row18_optimizer_repro.spl`, list element
+bind-then-mutate over `self.params[i]`) on the worktree seed under
+`SIMPLE_EXECUTION_MODE=interpreter`: prints `expect 98, got 98` — list element
+reads of class values alias after the 2026-11-04 ClassInstance
+default-carrier flip; optimizer `step()` writes land. Engine fix confirmed; no
+`self.parameters[i] = param` write-back is needed in
+`src/lib/gc_async_mut/pure/training.spl`.
