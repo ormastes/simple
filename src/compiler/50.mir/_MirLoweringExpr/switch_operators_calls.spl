@@ -8585,6 +8585,27 @@ impl MirLowering:
                         val capture_struct = self.struct_value_syms.get(source_local.id)
                         if capture_struct != None:
                             lw.struct_value_syms[loaded_local.id] = capture_struct ?? ""
+                        # A captured collection handle keeps its parent-side
+                        # identity: `rt_closure_get_capture` returns an i64
+                        # word, so without this a captured `Dict`/array local
+                        # had no MIR collection type and no dict/array marker
+                        # inside the lift, and `d.get(k)` routed to the
+                        # runtime fallback ("unresolved method call: get
+                        # owner=") -- bug caret_closure_enum_payload_binding_
+                        # collection_gaps_2026_11_03 (class 3).
+                        val capture_mir_type = self.lookup_local_type(source_local)
+                        match capture_mir_type.kind:
+                            case MirTypeKind.Dict(_, _) | MirTypeKind.Array(_, _):
+                                var collection_builder = lw.builder
+                                collection_builder.set_local_type(loaded_local, capture_mir_type)
+                                lw.builder = collection_builder
+                            case _: ()
+                        if self.runtime_dict_locals.contains(source_local.id):
+                            lw.runtime_dict_locals[loaded_local.id] = true
+                        if self.runtime_array_locals.contains(source_local.id):
+                            lw.runtime_array_locals[loaded_local.id] = true
+                        if val capture_elem_type = self.runtime_elem_value_type.get(source_local.id):
+                            lw.runtime_elem_value_type[loaded_local.id] = capture_elem_type
                         cap_i = cap_i + 1
                 var result = if val typed_return = declared_return:
                     lw.lower_expr_for_slot(body, typed_return)
