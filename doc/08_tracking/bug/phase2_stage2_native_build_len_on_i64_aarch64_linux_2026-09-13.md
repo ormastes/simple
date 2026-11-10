@@ -157,3 +157,44 @@ innermost interpreted functions as a note plus an `[unknown-method]` stderr
 line. Next aarch64 Linux run: rerun the failing `native-build` with
 `SIMPLE_BOOTSTRAP_DIAG=1` and record the module + call stack here. cargo not
 run on Windows (disk < 30 GB); needs a seed rebuild to take effect.
+
+---
+
+## Addendum 2026-11-11 (lane boot7) — SUPERSEDED-by-prior-lane; spot-check found the 2026-11-09 diagnostic incomplete for this row's exact error shape
+
+This doc already carries verified addenda from earlier lanes: 2026-11-05 (defect
+no longer reproducible at current source — trust-root bootstrap built Stage 2 on
+aarch64 Linux, 1567 modules, sanity gate PASS; 900 s hello-world probe with zero
+`len`-on-`i64` occurrences) and 2026-11-09 (location diagnostic landed,
+fix-implemented-verification-pending). Spot-checks at tip b364745fdbf8:
+
+1. **Headline defect** (native-build blocked by `method 'len' not found on type
+   'i64'` under the compiler's own closure): accepted as SUPERSEDED per the
+   2026-11-05 verified addendum. Not re-run here: the repro needs the aarch64
+   Linux bootstrap (Windows host, and native/entry-closure builds are forbidden
+   in this lane).
+
+2. **2026-11-09 location diagnostic — spot-check: INCOMPLETE for this row's
+   error shape.** The landed fix (cf52b105306b, "diag(seed): unknown-method
+   errors carry module file + interpreted call stack", an ancestor of the
+   2026-11-11 seed build 0791c2b7f4a7) attaches `while evaluating module:
+   <file>` only inside the `bail_unknown_method!` macro
+   (src/compiler_rust/compiler/src/interpreter/error_macros.rs:89-91). This
+   row's exact error text — `method 'len' not found on type 'i64' (receiver
+   value: N)` — is raised from a DIFFERENT site, the primitive dispatch tail at
+   src/compiler_rust/compiler/src/interpreter_method/mod.rs:2050-2075, which
+   builds its `ErrorContext` manually and does NOT carry the module note.
+   Seed-smoke (2026-11-11, refreshed seed 0791c2b7f4a7): `val x: i64 = 5;
+   print(x.len())` under SIMPLE_EXECUTION_MODE=interpret, with and without
+   SIMPLE_BOOTSTRAP_DIAG=1, prints the bare
+   `error: semantic: method 'len' not found on type 'i64' (receiver value: 5)`
+   with NO module file, NO note, NO call stack. This is exactly the gap the
+   pinning test 51954450aa61 documents ("the primitive dispatch tail builds its
+   ErrorContext manually and does NOT yet carry the module note (follow-up on
+   the tracking bug)").
+
+Residual follow-up (recorded, not fixable in-lane): extend the module-note
+attachment to the manual-ctx dispatch tail in interpreter_method/mod.rs so this
+row's error shape is locatable too. Fix is seed-side Rust and only takes effect
+after a seed rebuild (cargo not runnable on this Windows host per the 2026-11-09
+note: disk < 30 GB), so no in-lane fix attempted.
