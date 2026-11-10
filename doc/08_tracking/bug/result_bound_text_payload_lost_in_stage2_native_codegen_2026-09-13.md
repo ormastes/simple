@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: SUPERSEDED (2026-09-13)
 - Found: bootstrap lane BOOT-6, `work/bootstrap-full-4-2026-09-12`
 - Severity: **masking.** It does not fail a build by itself; it erases the
   reason another failure gives, which is strictly worse than a loud failure.
