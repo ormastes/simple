@@ -278,3 +278,29 @@ concern FIXED: the guard no longer does a bare `return` leaving
 continuation block and binds the dest to `iconst 0` (fail closed, same shape
 as the unsupported-intrinsic arm). N-ary fallback remains unimplemented and
 latent (headline already disproven 2026-08-17). Status: open P3, latent.
+
+## Status 2026-11-10 — FIXED (source + regression, seed-smoke only)
+
+Resolved on branch work/p2fix-compiler-batch-20261110 (commits e93e4798e6dd
+fix, follow-up test commit). Route (1) from the record's own "Fix
+direction": compile_function now guarantees every __simple_ssa_phi
+destination a stack slot via the new owner helper
+`cranelift_ssa_phi_dest_ids` (Unit-typed phi dests previously got size 0),
+making the arity-agnostic edge-store/reload lowering
+(`store_phi_incomings_for_edge`) unconditionally reachable. The no-slot
+elif fallbacks and the args.len()>4 trap remain as fail-closed backstops;
+the stale "latent" comment is rewritten. The earlier secondary concern
+(bare return leaving value_map unset) was already repaired at base (trap +
+continuation + defined value_map entry).
+
+Regression: test/01_unit/compiler/backend/cranelift_ssa_phi_nary_join_spec.spl
+— six 3-predecessor probes (i64 + Unit dests, entry via each predecessor)
+executed through the real Cranelift provider JIT. Seed-smoke: 2/2 green
+post-fix; pre-fix stash check 0/2 (owner helper absent -> Unit-dest shape
+would trap). Guard specs cranelift_shift_width (9/9) and
+cranelift_gemm_fusion (3/3) unchanged green. Seed limitation hit and
+worked around: rt_cranelift_call_function_ptr accepts NO arguments
+(seed runtime, cranelift_sffi.rs), so probes route entry through one
+predecessor instead of a selector arg. Remaining: llvm-lib twin
+(llvm_lib_translate_expr.spl:714) keeps its own N-ary restriction —
+separate lane. Native/self-hosted qualification not claimed.

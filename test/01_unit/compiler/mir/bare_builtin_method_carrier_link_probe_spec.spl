@@ -1,0 +1,139 @@
+# Purpose and audience: executable specification evidence for the owning
+# compiler team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+"""
+# Bare built-in method symbols on cross-module carriers must never reach MIR
+
+Prevention spec for bug
+`llm_caret_native_entry_closure_bare_builtin_method_symbols_2026-11-04`:
+a native --entry-closure build of the llm_caret hook_worker carrier reached
+its final link but left bare built-in method symbols
+(`len`/`trim`/`starts_with`/`unwrap_err` and siblings) unresolved, because the
+receiver's owner/type was not propagated to MIR lowering.
+
+This spec lowers a two-module producer/consumer fixture through the real
+frontend -> HIR -> MIR pipeline (module surfaces, no type-inference pass --
+the same declared-types-only shape the native entry lane sees) and pins:
+
+- every bare built-in carrier call lowers to a concrete `rt_*` runtime call
+  (or the proven Result-unwrap branch sequence), never to a bare leaf-name
+  call target;
+- no `unresolved method call` diagnostic is emitted for any of them.
+
+Probe set (the four names the bug names, plus their siblings):
+`len` on a cross-module `[SqlToken]` call result, `trim` on a cross-module
+`text` result, `starts_with` on a cross-module `text` result, `unwrap_err` on
+a cross-module `Result<text, SqlToken>` result, the erased `&:trim` closure
+carrier, and the chained `load(..).map(..).unwrap_err()` combinator carrier.
+"""
+
+# @tag: unit, compiler, mir, entry-closure, builtin-methods
+
+use std.spec.{describe, it, expect, step}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val tok_lib_src = "pub struct SqlToken:\n" +
+    "    kind: i64\n" +
+    "    value: text\n" +
+    "\n" +
+    "pub fn sql_tokenize(input: text) -> [SqlToken]:\n" +
+    "    []\n" +
+    "\n" +
+    "pub fn first_word(input: text) -> text:\n" +
+    "    input\n" +
+    "\n" +
+    "pub fn load(input: text) -> Result<text, SqlToken>:\n" +
+    "    Ok(input)\n"
+
+val tok_main_src = "use probe.tok.{sql_tokenize, first_word, load}\n" +
+    "\n" +
+    "fn carrier_len() -> i64:\n" +
+    "    val toks = sql_tokenize(\"CREATE TABLE t\")\n" +
+    "    toks.len()\n" +
+    "\n" +
+    "fn carrier_trim() -> i64:\n" +
+    "    val w = first_word(\"  hi  \")\n" +
+    "    w.trim().len()\n" +
+    "\n" +
+    "fn carrier_starts_with() -> bool:\n" +
+    "    val w = first_word(\"hello\")\n" +
+    "    w.starts_with(\"he\")\n" +
+    "\n" +
+    "fn carrier_unwrap_err() -> text:\n" +
+    "    val r = load(\"x\")\n" +
+    "    r.unwrap_err().value\n" +
+    "\n" +
+    "fn carrier_erased_lambda(words: [text]) -> [text]:\n" +
+    "    words.map(&:trim)\n" +
+    "\n" +
+    "fn carrier_chained() -> text:\n" +
+    "    load(\"x\").map(fn(v: text): v + \"!\").unwrap_err().value\n"
+
+fn lower_two_module() -> text:
+    val log = Logger(level: 0)
+    val lib_ast = parse_full_frontend(tok_lib_src, "probe/tok.spl", "probe.tok", log)
+    val main_ast = parse_full_frontend(tok_main_src, "probe/main.spl", "probe.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["probe.tok"] = lib_ast
+    modules["probe.main"] = main_ast
+    val sources = [
+        SourceFile(path: "probe/tok.spl", content: tok_lib_src, module_name: "probe.tok"),
+        SourceFile(path: "probe/main.spl", content: tok_main_src, module_name: "probe.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lib_lowering = hirlowering_for_module("probe/tok", surfaces)
+    var main_lowering = hirlowering_for_module("probe.main", surfaces)
+    val lib_hir = lib_lowering.lower_module(lib_ast)
+    val main_hir = main_lowering.lower_module(main_ast)
+    var result = ""
+    for e in lib_lowering.errors:
+        result = result + "HIR_ERROR:" + e.message + "\n"
+    for e in main_lowering.errors:
+        result = result + "HIR_ERROR:" + e.message + "\n"
+    var mir_lowering = MirLowering.new(main_hir.symbols)
+    var hir_modules: Dict<text, compiler.hir.hir_types.HirModule> = {}
+    hir_modules["probe.tok"] = lib_hir
+    hir_modules["probe.main"] = main_hir
+    for module_key in hir_modules.keys():
+        mir_lowering.prescan_module_struct_names(hir_modules, module_key)
+    val mir = mir_lowering.lower_module(main_hir, [lib_hir, main_hir])
+    for e in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + e.message + "\n"
+    for function in mir.functions.values():
+        result = result + serialize_mir_function(function)
+    result
+
+describe "bare built-in method symbols on cross-module carriers":
+    it "emits no unresolved-method diagnostics for any carrier":
+        step("lower the two-module fixture through the real pipeline")
+        val mir = lower_two_module()
+        expect(mir.contains("unresolved method call")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+
+    it "lowers every bare carrier call to a concrete runtime symbol":
+        step("len/trim/starts_with/unwrap_err must not survive as bare call targets")
+        val mir = lower_two_module()
+        expect(mir).to_contain("rt_array_len")
+        expect(mir).to_contain("rt_string_trim")
+        expect(mir).to_contain("rt_string_starts_with")
+        expect(mir).to_contain("rt_enum_discriminant")
+        expect(mir).to_contain("rt_enum_payload")
+
+    it "never emits a bare leaf-name call target for the built-in methods":
+        step("negative MIR probe: bare symbols are the link failure the bug reported")
+        val mir = lower_two_module()
+        # A bare call target serializes as {\"Const\":{\"value\":\"len\", ...}}.
+        expect(mir.contains("\\\"value\\\":\\\"len\\\"")).to_equal(false)
+        expect(mir.contains("\\\"value\\\":\\\"trim\\\"")).to_equal(false)
+        expect(mir.contains("\\\"value\\\":\\\"starts_with\\\"")).to_equal(false)
+        expect(mir.contains("\\\"value\\\":\\\"unwrap_err\\\"")).to_equal(false)

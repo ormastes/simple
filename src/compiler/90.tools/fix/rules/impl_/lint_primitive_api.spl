@@ -55,7 +55,13 @@ fn primitive_api_audit_source(source: text, file: text) -> [PrimitiveApiAuditEnt
             if return_type != "":
                 all_types.push(return_type)
 
-            val is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+            var is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+            # AC-D2 (primitive_api_lint_ac_d1_and_ac_d2_are_contradictory_2026-08-04):
+            # the all-same-primitive exemption is for pure math only. A pub fn
+            # whose entire body forwards its own params to an extern fn mirrors
+            # the extern signature and must still be flagged.
+            if is_pure_math and _extern_passthrough_body(lines, line_num, item_name, params):
+                is_pure_math = false
 
             if not is_pure_math:
                 for param in params:
@@ -123,6 +129,7 @@ fn check_primitive_api_with_lines(file: text, lines: [text]) -> [EasyFix]:
             continue
 
         if not is_extern_fn and is_pub_fn:
+            val item_name = _extract_public_function_name(trimmed)
             val params = _extract_params(trimmed)
             val return_type = _extract_return_type(trimmed)
 
@@ -134,7 +141,13 @@ fn check_primitive_api_with_lines(file: text, lines: [text]) -> [EasyFix]:
             if return_type != "":
                 all_types.push(return_type)
 
-            val is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+            var is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+            # AC-D2 (primitive_api_lint_ac_d1_and_ac_d2_are_contradictory_2026-08-04):
+            # the all-same-primitive exemption is for pure math only. A pub fn
+            # whose entire body forwards its own params to an extern fn mirrors
+            # the extern signature and must still be flagged.
+            if is_pure_math and _extern_passthrough_body(lines, line_num, item_name, params):
+                is_pure_math = false
 
             if not is_pure_math:
                 for param in params:
@@ -186,6 +199,97 @@ fn _all_same_primitive(types: [text]) -> bool:
         if ty != first:
             return false
     true
+
+# --- AC-D1/AC-D2 body discriminator ---------------------------------------
+# Bug: primitive_api_lint_ac_d1_and_ac_d2_are_contradictory_2026-08-04.
+# AC-D1 (`negate(x: i64) -> i64` with body `return 0 - x`) and AC-D2
+# (`wrap_alloc(size: i64) -> i64` with body `return rt_alloc(size)`) have
+# textually identical declaration lines, so no line-only predicate can
+# separate them. The D-1 all-same-primitive exemption is a pure-math
+# exemption; a pub fn whose entire body is a pass-through call forwarding
+# its own params to an extern fn mirrors the extern signature and is NOT
+# pure math, so the exemption must not suppress it.
+
+fn _single_body_statement(lines: [text], decl_line_num: i64) -> text:
+    # Body = the indented lines following the 1-based declaration line.
+    # Returns the single effective (non-comment, non-blank) statement when the
+    # body is exactly one statement, else "".
+    var stmts: [text] = []
+    var i = decl_line_num
+    while i < lines.len():
+        val raw = lines[i]
+        val trimmed = raw.trim()
+        i = i + 1
+        if trimmed == "":
+            continue
+        if not raw.starts_with(" ") and not raw.starts_with("\t"):
+            break
+        if trimmed.starts_with("#"):
+            continue
+        stmts.push(trimmed)
+    if stmts.len() == 1:
+        return stmts[0]
+    ""
+
+fn _extern_passthrough_body(lines: [text], decl_line_num: i64, fn_name: text, params: [text]) -> bool:
+    if params.len() == 0:
+        return false
+    var call = _single_body_statement(lines, decl_line_num)
+    if call == "":
+        return false
+    if call.starts_with("return "):
+        call = call.slice(7).trim()
+    val hash_pos = call.find(" #")
+    if hash_pos >= 0:
+        call = call.slice(0, hash_pos).trim()
+    if not call.ends_with(")"):
+        return false
+    val paren_pos = call.find("(")
+    if paren_pos <= 0:
+        return false
+    val callee = call.slice(0, paren_pos).trim()
+    if callee == "" or callee == fn_name:
+        return false
+    var ci = 0
+    while ci < callee.len():
+        val c = callee.slice(ci, ci + 1)
+        val is_alnum = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9")
+        if not (is_alnum or c == "_"):
+            return false
+        ci = ci + 1
+    val args_str = call.slice(paren_pos + 1, call.len() - 1).trim()
+    var arg_texts: [text] = []
+    if args_str != "":
+        arg_texts = args_str.split(",")
+    if arg_texts.len() != params.len():
+        return false
+    var pi = 0
+    while pi < params.len():
+        if arg_texts[pi].trim() != _extract_param_name(params[pi]):
+            return false
+        pi = pi + 1
+    # The callee must be an extern: declared `extern fn` in this source or
+    # carrying the runtime `rt_` extern prefix.
+    if callee.starts_with("rt_"):
+        return true
+    val extern_names = _extern_declared_names(lines)
+    var ei = 0
+    while ei < extern_names.len():
+        if extern_names[ei] == callee:
+            return true
+        ei = ei + 1
+    false
+
+fn _extern_declared_names(lines: [text]) -> [text]:
+    var names: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("extern fn "):
+            val rest = trimmed.slice(10)
+            val paren_pos = rest.find("(")
+            if paren_pos >= 0:
+                names.push(rest.slice(0, paren_pos).trim())
+    names
 
 fn _extract_params(line: text) -> [text]:
     val paren_start = line.find("(")

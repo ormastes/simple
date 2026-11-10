@@ -124,3 +124,22 @@ Already marked ARCHITECTURAL-OPEN (a genuine spec/rule-design contradiction need
 ## Triage 2026-11-04 (c28-w4)
 
 Triage 2026-11-04 (no change, lint rules owned by other lanes): still a spec/rule design contradiction (lint_primitive_api.spl:160 _all_same_primitive is a single-line text scan). Proposed resolution for owner: AC-D2 discriminator = body is a pass-through to an extern fn, implemented in the AST-driven primitive_api.spl check_call_site, leaving the EasyFix text rule to AC-D1 only. QUESTION: accept that split, or drop AC-D2?
+
+## Status 2026-11-10 — FIXED (source + regressions, seed-smoke only)
+
+Resolved on branch work/p2fix-compiler-batch-20261110 (commits 5c064c3b64ea
+fix, b901f6baa044 spec). The D-1 `_all_same_primitive` exemption is now
+refined by a body-aware extern pass-through discriminator in
+`check_primitive_api_with_lines` (and `primitive_api_audit_source`): an
+all-same-primitive `pub fn` whose entire body forwards its own params to an
+extern fn (declared `extern fn` in the same source or `rt_`-prefixed) is
+flagged (AC-D2), while math bodies, transformed args, and forwards to
+non-extern locals keep the exemption (AC-D1). Positive + negative wrapper
+regressions added to test/system/code_quality/primitive_api_lint_spec.spl.
+
+Seed-smoke (Rust seed bin/simple.exe, --mode=interpreter, mirror spec carrying
+identical examples): 13/13 green post-fix; pre-fix stash check: 10 passed /
+3 failed (all three AC-D2 wrapper examples red). Canonical spec not directly
+runnable under the seed: its module docstring trips a pre-existing seed lexer
+limitation at base (unrelated to this fix). Native/self-hosted qualification
+not claimed.

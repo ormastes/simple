@@ -450,6 +450,26 @@ fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, Cranel
 # Function Compilation
 # ============================================================================
 
+fn cranelift_ssa_phi_dest_ids(func: MirFunction) -> Dict<i64, bool>:
+    # __simple_ssa_phi destinations must always carry a stack slot: incoming
+    # values are stored per predecessor edge (store_phi_incomings_for_edge)
+    # and the join reloads the slot -- that path is arity-agnostic and is the
+    # only correct N-ary lowering. Unit-typed locals otherwise get size 0 and
+    # would fall into the degenerate no-slot fallbacks / the N-ary trap
+    # (bug cranelift_ssa_phi_nary_join_guard_now_fires_2026-08-17). Plain-i64
+    # dict, no LocalId? arguments: stage4-lane ABI (see compile_function).
+    var ids: Dict<i64, bool> = {}
+    for block in func.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case Intrinsic(dest, name, _):
+                    if name == "__simple_ssa_phi":
+                        if val d = dest:
+                            ids[d.id] = true
+                case _:
+                    ()
+    ids
+
 fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, CraneliftGlobalBinding>) -> bool:
     val emit_name = cl_function_emit_name(func.name)
     val sig = build_signature(func.signature, func.name == "main")
@@ -481,6 +501,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
     var alloc_addresses: Dict<i64, i64> = {}
 
     # Allocate stack slots for all locals
+    val phi_dest_ids = cranelift_ssa_phi_dest_ids(func)
     for local in func.locals:
         # (vestigial local.? gate removed: `.?` on a loop-bound plain
         # struct is FALSE on the stage4 lane and skipped EVERY local.)
@@ -497,6 +518,12 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
                 size = 0
             case _:
                 ()
+        # __simple_ssa_phi destinations are exempt from the Unit size-0
+        # waiver: the phi edge-store/reload mechanism needs a physical slot
+        # for every predecessor edge, and the no-slot fallbacks cannot
+        # represent N-ary joins (see the guard in cl_translate_instruction).
+        if size == 0 and phi_dest_ids.has(local.id.id):
+            size = 8
         if size > 0:
             val slot = cranelift_stack_slot(ctx, size, 8)
             slot_map[local.id.id] = slot
@@ -861,14 +888,19 @@ fn cl_translate_instruction(
                 val len = cl_translate_operand(ctx, cl_module, args[1], value_map, slot_map, func)
                 translate_runtime_import_call_i64(ctx, cl_module, "__simple_intrinsic_bounds_check", [index, len])
             elif name == "__simple_ssa_phi" and dest.?:
-                # bug #135 (opus review Finding 3): the stack-slot path below
-                # doesn't care about arg count (it just loads the phi's slot),
-                # but the two elif fallbacks (no slot registered) only ever
-                # look at args[0] / args[1] -- an N-ary join (elif-ladder,
-                # more than one incoming pair) would silently use just the
-                # first pair. No caller currently emits N-ary joins through
-                # this backend, so this is latent; guard it loudly rather
-                # than miscompiling silently if that ever changes.
+                # bug #135 (opus review Finding 3) +
+                # cranelift_ssa_phi_nary_join_guard_now_fires_2026-08-17:
+                # compile_function guarantees every __simple_ssa_phi
+                # destination a stack slot (even Unit-typed), and the slot
+                # path is arity-agnostic: incoming values are stored per
+                # predecessor edge in store_phi_incomings_for_edge and the
+                # join just reloads the slot. The two elif fallbacks below
+                # (no slot registered) only ever look at args[0] / args[1]
+                # and cannot represent an N-ary join (elif-ladder, more than
+                # one incoming pair), so if that combination is ever reached
+                # we fail closed — trap plus a defined value_map entry in the
+                # unreachable continuation — rather than silently using the
+                # first pair.
                 var phi_guard_id = -1
                 if val phi_guard_l = dest:
                     phi_guard_id = phi_guard_l.id
