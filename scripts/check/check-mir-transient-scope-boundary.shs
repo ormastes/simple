@@ -44,6 +44,7 @@ TYPES_REL="src/compiler/50.mir/mir_lowering_types.spl"
 BUILDER_REL="src/compiler/50.mir/mir_data.spl"
 MODULE_REL="src/compiler/50.mir/mir_instruction_graph.spl"
 SYMBOLS_REL="src/compiler/20.hir/hir_types.spl"
+RTI_REL="src/compiler/20.hir/return_type_interface_v1.spl"
 TARGET_REL="src/compiler/00.common/mir_target_context.spl"
 
 CHECKED=0
@@ -65,7 +66,7 @@ scan_tree() {
     _checked=0
     _fails=""
 
-    for _rel in "$DRIVER_REL" "$LOWER_REL" "$OWNER_REL" "$SFFI_REL" "$TYPES_REL" "$BUILDER_REL" "$MODULE_REL" "$SYMBOLS_REL" "$TARGET_REL"; do
+    for _rel in "$DRIVER_REL" "$LOWER_REL" "$OWNER_REL" "$SFFI_REL" "$TYPES_REL" "$BUILDER_REL" "$MODULE_REL" "$SYMBOLS_REL" "$RTI_REL" "$TARGET_REL"; do
         if [ ! -f "${_root}/${_rel}" ]; then
             echo "SCAN_RESULT 0 missing-source-files:${_rel}"
             return 0
@@ -172,6 +173,7 @@ scan_tree() {
         _field_roots "${_root}/${BUILDER_REL}" MirBuilder self.builder
         _field_roots "${_root}/${MODULE_REL}" MirModule self.builder.module
         _field_roots "${_root}/${SYMBOLS_REL}" SymbolTable self.symbols
+        _field_roots "${_root}/${RTI_REL}" ReturnTypeInterfaceTable self.rti
         _field_roots "${_root}/${TARGET_REL}" MirTargetContext self.target_context
     )
     _owner_code=$(awk '
@@ -184,7 +186,10 @@ scan_tree() {
     ' "${_owner}")
     _actual=$(printf '%s\n' "${_owner_code}" | sed -n 's/^ok = promote_and_release_transient_owner_roots(\[\(self\.[A-Za-z_0-9.]*\)\]) and ok$/\1/p')
     _checked=$((_checked + 1))
-    if [ -z "${_expected}" ] || [ "$(printf '%s\n' "${_expected}" | sort)" != "$(printf '%s\n' "${_actual}" | sort)" ]; then
+    # Coverage is a set: repeating an already retained root cannot make a
+    # missing or unexpected root valid. Do not reject safe duplicate roots
+    # introduced by independently landed owner inventories.
+    if [ -z "${_expected}" ] || [ "$(printf '%s\n' "${_expected}" | sort -u)" != "$(printf '%s\n' "${_actual}" | sort -u)" ]; then
         _fails="${_fails}${_fails:+; }owner-field-inventory-drift"
     fi
     # Match a deliberately small straight-line helper grammar: promote each
@@ -255,6 +260,7 @@ scan_tree() {
         inbody { sub(/^[[:space:]]*/, ""); print }
     ' "${_lower}")
     _expected_abort=$(printf '%s\n' \
+        'bootstrap_mir_store_discard_pending()' \
         'val aborted = reverse_reference_module_abort_v1(token)' \
         'val ended = transient_array_scope_end_v1()' \
         'aborted and ended')
@@ -324,6 +330,7 @@ selftest() {
 struct MirLowering:
     builder: MirBuilder
     symbols: SymbolTable
+    rti: ReturnTypeInterfaceTable
     target_context: MirTargetContext
     current_module_id: text
     errors: [MirError]
@@ -341,6 +348,12 @@ EOF
 class SymbolTable:
     symbols: Dict<i64, HirSymbol>
 EOF
+        cat > "${_d}/${RTI_REL}" <<'EOF'
+class ReturnTypeInterfaceTable:
+    rows_by_module: Dict<text, ReturnTypeRow>
+    rows_by_key: Dict<text, ReturnTypeRow>
+    aliases: Dict<text, text>
+EOF
         cat > "${_d}/${TARGET_REL}" <<'EOF'
 struct MirTargetContext:
     arch: text
@@ -351,6 +364,7 @@ impl MirLowering:
         var ok = true
         ok = promote_and_release_transient_owner_roots([self.builder]) and ok
         ok = promote_and_release_transient_owner_roots([self.symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.rti]) and ok
         ok = promote_and_release_transient_owner_roots([self.target_context]) and ok
         ok = promote_and_release_transient_owner_roots([self.current_module_id]) and ok
         ok = promote_and_release_transient_owner_roots([self.errors]) and ok
@@ -358,6 +372,9 @@ impl MirLowering:
         ok = promote_and_release_transient_owner_roots([self.builder.locals]) and ok
         ok = promote_and_release_transient_owner_roots([self.builder.module.functions]) and ok
         ok = promote_and_release_transient_owner_roots([self.symbols.symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.rti.rows_by_module]) and ok
+        ok = promote_and_release_transient_owner_roots([self.rti.rows_by_key]) and ok
+        ok = promote_and_release_transient_owner_roots([self.rti.aliases]) and ok
         ok = promote_and_release_transient_owner_roots([self.target_context.arch]) and ok
         ok
 EOF
@@ -539,6 +556,7 @@ EOF
     cat > "${_tmp}/modern/${LOWER_REL}" <<'EOF'
 use compiler.mir._MirLowering.transient_owner.*
 fn mir_abort_reverse_reference_scope_v1(token: i64) -> bool:
+    bootstrap_mir_store_discard_pending()
     val aborted = reverse_reference_module_abort_v1(token)
     val ended = transient_array_scope_end_v1()
     aborted and ended
@@ -589,6 +607,22 @@ EOF
     sed 's/            val _e2 = mir_abort_reverse_reference_scope_v1(reverse_token)/            if false:\
                 val _e2 = mir_abort_reverse_reference_scope_v1(reverse_token)/' "${_tmp}/modern/${LOWER_REL}" > "${_tmp}/sibling_cleanup/${LOWER_REL}"
 
+    # Class children may outlive the scope through an older RTI owner. Every
+    # declared child is mandatory, while repeating one valid root is harmless.
+    for _shape in duplicate_root missing_rti new_rti_field extra_root missing_pending_discard late_pending_discard; do
+        cp -R "${_tmp}/modern" "${_tmp}/${_shape}"
+    done
+    sed '/roots(\[self.rti.aliases\])/p' "${_tmp}/modern/${OWNER_REL}" > "${_tmp}/duplicate_root/${OWNER_REL}"
+    cp -R "${_tmp}/duplicate_root" "${_tmp}/duplicate_root_nofree"
+    sed '/rt_array_free(roots)/d' "${_tmp}/duplicate_root/${SFFI_REL}" > "${_tmp}/duplicate_root_nofree/${SFFI_REL}"
+    sed '/roots(\[self.rti.aliases\])/d' "${_tmp}/modern/${OWNER_REL}" > "${_tmp}/missing_rti/${OWNER_REL}"
+    printf '    late_rows: Dict<text, ReturnTypeRow>\n' >> "${_tmp}/new_rti_field/${RTI_REL}"
+    sed '/^        ok$/i\
+        ok = promote_and_release_transient_owner_roots([self.nonexistent]) and ok' "${_tmp}/modern/${OWNER_REL}" > "${_tmp}/extra_root/${OWNER_REL}"
+    sed '/^    bootstrap_mir_store_discard_pending()/d' "${_tmp}/modern/${LOWER_REL}" > "${_tmp}/missing_pending_discard/${LOWER_REL}"
+    sed '/^    bootstrap_mir_store_discard_pending()/d; /^    val ended = transient_array_scope_end_v1()/a\
+    bootstrap_mir_store_discard_pending()' "${_tmp}/modern/${LOWER_REL}" > "${_tmp}/late_pending_discard/${LOWER_REL}"
+
     # Fixture F: empty tree. Must check 0 invariants so the caller ERRORs.
     _mk "${_tmp}/empty"
     rm -f "${_tmp}/empty/${DRIVER_REL}" "${_tmp}/empty/${LOWER_REL}"
@@ -625,6 +659,11 @@ EOF
         _expect "${_shape}" fail
     done
     _expect modern pass
+    _expect duplicate_root pass
+    _expect duplicate_root_nofree fail
+    for _shape in missing_rti new_rti_field extra_root missing_pending_discard late_pending_discard; do
+        _expect "${_shape}" fail
+    done
     _expect new_carriers pass
     for _shape in missing_map missing_optional missing_scalar; do
         _expect "${_shape}" fail
@@ -653,7 +692,7 @@ done
 # Selftest is unconditional and fatal, exactly like the sibling guards.
 selftest
 if [ "${SELFTEST_ONLY}" = "1" ]; then
-    echo "PASS — 26 selftest fixture(s) checked, scanner rejects unscoped lowering, invalid cleanup/SFFI forwarding, and incomplete owner inventories"
+    echo "PASS — 33 selftest fixture(s) checked, scanner rejects unscoped lowering, invalid cleanup/SFFI forwarding, and incomplete owner inventories"
     exit 0
 fi
 
