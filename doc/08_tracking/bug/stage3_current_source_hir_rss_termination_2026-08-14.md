@@ -1415,3 +1415,62 @@ Not closed. This removes part of the RSS carried into HIR. In the same run,
 HIR itself still grew from 6.18 GB to 7.1 GB over 1073 modules. A canonical
 Stage 3 under the RSS budget has not been run with this fix, because it
 needs a Stage 2 rebuilt from this tree.
+
+---
+
+## 2026-11-10 (p0-hir-verify lane, Windows worktree, seed-smoke) — OWNER FIX RE-CONFIRMED; FAMILY GUARD RE-ANCHORED; RSS TRANSACTION STILL GATED
+
+Lane: `work/p0-hir-verify-20261110` on `origin/release/1.0.0` (includes Nil-singleton PR #8142).
+Runtime: `bin/simple.exe` Rust seed v1.0.0-rc.1, `--mode=interpreter`. Seed-smoke labeling: all
+results below are source-text contracts executed by the seed interpreter; no native/self-hosted
+claim is made.
+
+### Static re-confirmation of the owner fix (current source)
+
+- `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:1035` constructs one
+  `hirlowering_for_module("", surfaces)` before the streaming per-source loop (`:1122`);
+  `:1827` constructs one `hirlowering_for_module_with_diagnostics(...)` before the
+  retained/bootstrap per-source loop (`:1904`). No `hirlowering_for_module*` constructor
+  appears inside either loop body; the only in-loop call is `lowering.begin_module(...)`.
+- `src/compiler/20.hir/hir_lowering/context_helpers.spl:70-187` `begin_module` resets
+  transient state in place (`symbols.reset_module()`, per-module dict/array clears,
+  re-export visit workspaces cleared); the frozen surface registry, inference config,
+  re-export root caches, generation and counters are not touched. The only
+  `hirlowering_new()` in the file is the separate `with_resolver` constructor at `:190`.
+- Verdict: the RSS-termination owner fix is PRESENT in current source, unchanged in shape
+  from the 2026-11-02 re-validation.
+
+### Executable focused verification (seed-smoke)
+
+| spec | arrival | after | verdict |
+|---|---|---|---|
+| `test/01_unit/compiler/driver/stage3_hir_lowerer_reuse_contract_spec.spl` | 7/7 PASS exit 0 (no repair needed; the 2026-11-02 anchor drift is already repaired on this base) | same | GREEN |
+| `test/01_unit/compiler/driver/driver_memory_lifecycle_family_spec.spl` | 4/5 FAIL exit 1 | 5/5 PASS exit 0 | FIXED (spec-only) |
+
+The family-guard failure was spec-anchor drift, not an owner regression: the example
+anchored `while source_idx < self.ctx.sources.len():`, a loop header renamed to
+`while hir_loop_pos < hir_visit_order.len():` on both per-source paths. Repair
+re-anchors to both current loop bodies (streaming `[1012,1671)` and retained
+`[1811,2443)`, the latter searched after `if self.ctx.sources.len() <= 0:` to skip the
+streaming function's same-named `phase_hir_modules` declaration) and asserts the same two
+forbidden constructors in each loop tail. No driver or lowering source was edited; no
+assertion was weakened — the negative checks still forbid `hirlowering_for_module_with_diagnostics(`
+and `hirlowering_new()` in-loop, now at both loops instead of only the renamed one.
+
+### Still blocked (unchanged, recorded with exact command)
+
+Acceptance item 3 (one cache-preserving canonical Stage-3 transaction under the RSS
+budget) was NOT run: this lane has no admitted Stage-2 producer, the full-closure HIR
+run is the >8 GB multi-hour transaction this row's own history repeatedly documents, and
+the task brief excludes it. Exact canonical command for the granted lane (from
+`scripts/bootstrap/bootstrap-from-scratch.sh:2068-2102`, cache-preserving, single worker):
+
+```bash
+SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_COMPILER_PHASE_PROFILE=1 \
+SIMPLE_COMPILER_PHASE_PROFILE_FILE=<retained> SIMPLE_MEM_SNAPSHOT_FILE=<retained> \
+sh scripts/bootstrap/bootstrap-from-scratch.sh --stage 3 --resume
+```
+
+(preceded by a current-HEAD Stage-2 admission; RSS/termination evidence requires the
+instrumented sinks this doc's 2026-08-14 section specifies). Row remains OPEN;
+RSS boundedness is proven at source-contract level only, not measured.

@@ -140,3 +140,42 @@ Regression: `test/01_unit/compiler/mir_opt/ssa_alloca_store_retention_native_che
   for purity/readonly attributes; it does not participate in constant lowering
   or return-value emission. Left unchanged, as it is a separate latent issue
   and stage2 is green with it as-is.
+
+---
+
+## 2026-11-10 (p0-hir-verify lane, Windows worktree, seed-smoke) — FIX RE-CONFIRMED; REGRESSION EXTENDED
+
+Lane: `work/p0-hir-verify-20261110` on `origin/release/1.0.0`. Runtime: `bin/simple.exe` Rust
+seed v1.0.0-rc.1, `--mode=interpreter`; seed-smoke only (no native/self-hosted claim).
+
+### Static re-confirmation (current source)
+
+`src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl` still carries the named-record
+transport: `struct SsaAllocaDefStoreResult` (:41) / `struct SsaAllocaRewriteInstResult` (:51),
+returned by `ssa_alloca_apply_def_store` (:1699/:1740) and `ssa_alloca_rewrite_inst`
+(:1742/:1747); the block rewrite consumes named fields. The doc comments also record a later
+hardening in the same owner: the written-local Option is dispatched by explicit
+`match`/sentinel (`>= 0`) instead of payload truthiness, because the seed interpreter's `.?`
+on a boxed `i64?` collapsed `Some(0)` to falsy and dropped the rename+Store for local id 0.
+
+### Executable verification (seed-smoke, real transform)
+
+`test/01_unit/compiler/mir_opt/ssa_alloca_store_retention_native_check.spl` drives the real
+`ssa_alloca_transform_blocks` with real MIR values (not text anchors).
+
+- Arrival state: 2/2 PASS (cross-block boolean; adjacent text-pointer) — the 2026-08-03
+  oracle was already green on this base.
+- Extended this lane to 4/4 PASS, exit 0, adding:
+  - "retains the defining store when the slotted local is id 0" — targets the documented
+    `.?`-on-Some(0) hazard in the same owner (single def, cross-block live, local id 0:
+    Alloc/Const/Store/Load/Ret must survive exactly like the id-5 oracle);
+  - "retains both stores of a same-block reassignment" — single-block multi-def
+    (`x = true; x = false; return x`): both renamed Const defs, two Stores into the one
+    shared slot, Load before Ret, Ret of the loaded temp (shape per the transform
+    docstring: single-block straight-line reassignment is slotted, not a no-op).
+
+### Still blocked (unchanged)
+
+The x86 Stage-4 revalidation (rebuild pure-Simple Stage 3, repeat the failed shard) needs an
+admitted pure-Simple producer; none exists in this lane — BLOCKED-needs-grant, same gate as
+the canonical Stage-3 transactions of the sibling rows.
