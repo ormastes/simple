@@ -19,6 +19,12 @@ Tests the text-scanner lint (`check_primitive_api`) after Team W adds:
 - D-1: pure-math exemption — `pub fn` where every param and return type is the
   SAME bare primitive is not flagged.
 - D-2: extern fn exemption — lines starting with `extern fn` are never flagged.
+- AC-D2 body discriminator (2026-11-10, bug
+  primitive_api_lint_ac_d1_and_ac_d2_are_contradictory_2026-08-04): the D-1
+  exemption is pure-math only — a `pub fn` whose entire body forwards its own
+  params to an extern fn (declared `extern fn` or `rt_`-prefixed) mirrors the
+  extern signature and is still flagged. Math bodies (`return 0 - x`) and
+  non-passthrough calls keep the exemption.
 - AC-7: `primitive_api` level is `deny` in `build_default_levels()` after Phase 2.
 
 These specs WILL FAIL until Team W lands the exemptions and Phase 2 promotes the
@@ -122,6 +128,43 @@ describe "primitive_api lint — D-2 extern fn exemption":
             "pub fn wrap_alloc(size: i64) -> i64:\n" +
             "    return rt_alloc(size)\n"
         expect(count_primitive_api_fixes(source)).to_be_greater_than(0)
+
+    it "AC-D2: should STILL flag multi-arg pub fn forwarding to a same-primitive extern fn":
+        # All-same-primitive signature would be math-exempt, but the body is a
+        # pure pass-through to an extern fn — must still fire (body-aware
+        # discriminator for primitive_api_lint_ac_d1_and_ac_d2_are_contradictory_2026-08-04).
+        val source =
+            "extern fn rt_sum(a: i64, b: i64) -> i64\n" +
+            "pub fn add_wrap(a: i64, b: i64) -> i64:\n" +
+            "    return rt_sum(a, b)\n"
+        expect(count_primitive_api_fixes(source)).to_be_greater_than(0)
+
+    it "AC-D2: should STILL flag pub fn forwarding to a declared non-rt extern fn":
+        # Extern pass-through is recognized via the `extern fn` declaration
+        # itself, not only the `rt_` runtime prefix.
+        val source =
+            "extern fn os_send(buf: i64, len: i64) -> i64\n" +
+            "pub fn forward_send(buf: i64, len: i64) -> i64:\n" +
+            "    return os_send(buf, len)\n"
+        expect(count_primitive_api_fixes(source)).to_be_greater_than(0)
+
+    it "AC-D1: should NOT flag same-primitive fn that transforms the arg before an extern call":
+        # `size + 1` is not a pure pass-through; the D-1 math exemption still
+        # applies. Guards the discriminator against over-widening.
+        val source =
+            "pub fn alloc_padded(size: i64) -> i64:\n" +
+            "    return rt_alloc(size + 1)\n"
+        expect(count_primitive_api_fixes(source)).to_equal(0)
+
+    it "AC-D1: should NOT flag same-primitive fn forwarding to a non-extern local fn":
+        # Only extern pass-through loses the exemption; forwarding to a local
+        # pub fn keeps it.
+        val source =
+            "pub fn double(x: i64) -> i64:\n" +
+            "    return x + x\n" +
+            "pub fn quadruple(x: i64) -> i64:\n" +
+            "    return double(double(x))\n"
+        expect(count_primitive_api_fixes(source)).to_equal(0)
 
 
 # ============================================================================
