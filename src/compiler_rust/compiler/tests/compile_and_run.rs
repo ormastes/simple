@@ -513,3 +513,105 @@ fn main() -> i64:
 "#;
     assert_eq!(compile_and_run(src), 0);
 }
+
+// Bug: doc/08_tracking/bug/jit_unsafe_optional_as_cast_garbage_2026_11_09.md
+// `T? as <numeric>` inside `unsafe:` must extract the Some payload, not
+// reinterpret the boxed Option heap word.
+#[test]
+fn unsafe_optional_u64_as_cast_extracts_payload() {
+    let src = r#"
+fn mk(v: u64) -> u64?:
+    if v != 0:
+        v
+    else:
+        nil
+
+fn main() -> i64:
+    val r = mk(4275044352)
+    var out: u64 = 0
+    unsafe:
+        out = r as u64
+    if out == 4275044352:
+        return 42
+    return 7
+"#;
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn unsafe_optional_i64_as_cast_extracts_payload() {
+    let src = r#"
+fn mk(v: i64) -> i64?:
+    if v != 0:
+        v
+    else:
+        nil
+
+fn main() -> i64:
+    val r = mk(-1234567)
+    var out: i64 = 0
+    unsafe:
+        out = r as i64
+    if out == -1234567:
+        return 42
+    return 7
+"#;
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn unsafe_optional_text_as_cast_decodes_payload() {
+    let src = r#"
+fn mk(v: text) -> text?:
+    if v != "":
+        v
+    else:
+        nil
+
+fn main() -> i64:
+    val r = mk("77")
+    var out: i64 = 0
+    unsafe:
+        out = r as i64
+    if out == 77:
+        return 42
+    return 7
+"#;
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn unsafe_option_enum_i64_as_cast_extracts_payload() {
+    let src = r#"
+fn main() -> i64:
+    val r: Option<i64> = Some(99)
+    var out: i64 = 0
+    unsafe:
+        out = r as i64
+    if out == 99:
+        return 42
+    return 7
+"#;
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn unsafe_optional_as_cast_to_wider_int_converts_payload() {
+    let src = r#"
+fn mk(v: i32) -> i32?:
+    if v != 0:
+        v
+    else:
+        nil
+
+fn main() -> i64:
+    val r = mk(-5)
+    var out: i64 = 0
+    unsafe:
+        out = r as i64
+    if out == -5:
+        return 42
+    return 7
+"#;
+    assert_eq!(compile_and_run(src), 42);
+}
