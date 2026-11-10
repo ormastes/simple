@@ -1,0 +1,133 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering of chained / nested `.replace(...)` on text
+Bug: native_build_nested_replace_method_resolution_2026-07-26 -- the
+self-hosted native build lost the text type of the intermediate result of a
+chained `s.replace(a, b).replace(c, d)` (and the nested-argument form
+`wrap(s.replace(a, b).replace(c, d))`), so the second `.replace` failed method
+resolution. Both calls must lower to `rt_string_replace` with a text-typed
+intermediate local, and the chain must lower with zero diagnostics.
+Prevention: `trim().replace()`, `replace().len()`, `replace` nested inside a
+string interpolation, and the chained-argument shape from
+`src/lib/nogc_sync_mut/play/wm/mod.spl` (`titles.push(line.replace(..).replace(..))`).
+"""
+
+# @tag: unit, compiler, mir, text
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct ReplaceShape:
+    callees: [text]
+    replace_calls: i64
+    text_typed_replace_dests: i64
+    errors: [text]
+
+fn count_of(lst: [text], item: text) -> i64:
+    var n = 0
+    for x in lst:
+        if x == item:
+            n = n + 1
+    n
+
+fn dest_is_text(function: MirFunction, dest: LocalId?) -> bool:
+    """The MIR text handle is `Opaque(str)` (see mir_data.spl rt_string_* returns)."""
+    if val d = dest:
+        for l in function.locals:
+            if l.id.id == d.id:
+                match l.type_.kind:
+                    case MirTypeKind.Opaque(name): return name == "str"
+                    case _: return mir_type_is_text(l.type_)
+    false
+
+fn shape_of(src: text, target: text) -> ReplaceShape:
+    val file = "testdata/nested_replace_chain_lowering_spec.spl"
+    val parsed = parse_full_frontend(src, file, "nested_replace_chain_lowering_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    var replace_calls = 0
+    var text_typed = 0
+    for function in mir.functions.values():
+        print "PROBE fn {function.name} target {target}"
+        if not (function.name == target or function.name.ends_with("." + target)):
+            continue
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(dest, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                                print "PROBE callee {name}"
+                                if name == "rt_string_replace":
+                                    replace_calls = replace_calls + 1
+                                    if dest_is_text(function, dest):
+                                        text_typed = text_typed + 1
+                            case _: pass
+                    case _: pass
+    var errors: [text] = []
+    for e in hir_lowering.errors:
+        errors = errors.push("hir: " + e.message)
+    for e in lowering.errors:
+        errors = errors.push("mir: " + e.message)
+    ReplaceShape(callees: callees, replace_calls: replace_calls, text_typed_replace_dests: text_typed, errors: errors)
+
+fn expect_double_replace(src: text, target: text):
+    val shape = shape_of(src, target)
+    for m in shape.errors:
+        print "diagnostic: {m}"
+    expect(shape.errors.len()).to_equal(0)
+    expect(shape.replace_calls).to_equal(2)
+    expect(shape.text_typed_replace_dests).to_equal(2)
+
+describe "chained .replace(...).replace(...) on text (native_build_nested_replace_method_resolution_2026-07-26)":
+    it "lowers both calls of a direct chain to rt_string_replace with a text intermediate":
+        expect_double_replace("fn f(s: text) -> text:\n    s.replace(\"\\t\", \" \").replace(\"\\r\", \" \")\n", "f")
+
+    it "lowers a chain passed as a nested call argument (wm/mod.spl titles.push shape)":
+        expect_double_replace("fn wrap(t: text) -> text:\n    \"[\" + t + \"]\"\n\nfn f(line: text) -> text:\n    wrap(line.replace(\"\\t\", \" \").replace(\"\\r\", \" \"))\n", "f")
+
+    it "lowers a chain pushed onto a text array":
+        expect_double_replace("fn f(line: text) -> i64:\n    var titles: [text] = []\n    titles.push(line.replace(\"\\t\", \" \").replace(\"\\r\", \" \"))\n    titles.len()\n", "f")
+
+    it "lowers a chain on a call-result receiver":
+        expect_double_replace("fn g() -> text:\n    \"a\\tb\\r\"\n\nfn f() -> text:\n    g().replace(\"\\t\", \" \").replace(\"\\r\", \" \")\n", "f")
+
+describe "sibling chained text-method shapes (prevention)":
+    it "lowers trim().replace() with a text-typed replace result":
+        val shape = shape_of("fn f(s: text) -> text:\n    s.trim().replace(\"a\", \"b\")\n", "f")
+        for m in shape.errors:
+            print "diagnostic: {m}"
+        expect(shape.errors.len()).to_equal(0)
+        expect(shape.replace_calls).to_equal(1)
+        expect(shape.text_typed_replace_dests).to_equal(1)
+        expect(count_of(shape.callees, "rt_string_trim")).to_equal(1)
+
+    it "lowers replace().len() through a text intermediate":
+        val shape = shape_of("fn f(s: text) -> i64:\n    s.replace(\"a\", \"b\").len()\n", "f")
+        for m in shape.errors:
+            print "diagnostic: {m}"
+        expect(shape.errors.len()).to_equal(0)
+        expect(shape.replace_calls).to_equal(1)
+        expect(shape.text_typed_replace_dests).to_equal(1)
+
+    it "lowers a replace chain nested inside a string interpolation":
+        expect_double_replace("fn f(s: text) -> text:\n    \"<{s.replace(\\\"\\\\t\\\", \\\" \\\").replace(\\\"\\\\r\\\", \\\" \\\")}>\"\n", "f")
+
+    it "lowers replace().trim() as a nested call argument (dom_backend set_attr shape)":
+        val shape = shape_of("fn sink(a: text, b: text) -> text:\n    a + b\n\nfn f(v: text, cls: text) -> text:\n    sink(\"class\", v.replace(cls, \"\").trim())\n", "f")
+        for m in shape.errors:
+            print "diagnostic: {m}"
+        expect(shape.errors.len()).to_equal(0)
+        expect(shape.replace_calls).to_equal(1)
+        expect(shape.text_typed_replace_dests).to_equal(1)
+        expect(count_of(shape.callees, "rt_string_trim")).to_equal(1)
