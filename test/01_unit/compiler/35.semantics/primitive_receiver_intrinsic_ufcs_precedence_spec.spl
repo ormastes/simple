@@ -1,0 +1,68 @@
+# Regression for native_primitive_to_i64_ufcs_collision_2026-07-24.
+# A primitive receiver's intrinsic conversion (`x.to_i64()` on i64/f64/text)
+# must never resolve to a same-named free function that is merely in scope;
+# UFCS (priority 3) only applies when no primitive intrinsic owns the name.
+# @req REQ-SSPEC-COMPILER
+
+use std.spec.*
+use std.spec.step
+
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirCallArg, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind, SymbolTable}
+use compiler.hir.{MethodResolution}
+use compiler.semantics.resolve.{MethodResolver}
+
+fn prim_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn i64_type() -> HirType:
+    prim_type(HirTypeKind.Int(64, true))
+
+fn receiver(ty: HirType) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true, type_: ty, span: Span.empty())
+
+fn resolver_with_free_fn(name: text, first_param: HirType) -> MethodResolver:
+    var symbols = SymbolTable.new()
+    val fn_type = prim_type(HirTypeKind.Function([first_param], i64_type(), []))
+    symbols.define(name, SymbolKind.Function, Some(fn_type), Span.empty(),
+        Visibility.Public, false, nil)
+    MethodResolver.new(symbols)
+
+fn is_free_function(resolution: MethodResolution) -> bool:
+    match resolution:
+        case FreeFunction(_): true
+        case _: false
+
+fn expect_not_ufcs(method: text, receiver_type: HirType, first_param: HirType):
+    var resolver = resolver_with_free_fn(method, first_param)
+    val resolution = resolver.resolve_method(receiver(receiver_type), method, [])
+    expect(is_free_function(resolution)).to_equal(false)
+
+describe "primitive receiver intrinsic precedence over UFCS free functions":
+    it "keeps i64.to_i64() on the primitive intrinsic with an exact-typed free to_i64 in scope":
+        step("Resolve 7.to_i64() with fn to_i64(v: i64) visible")
+        expect_not_ufcs("to_i64", i64_type(), i64_type())
+
+    it "keeps i64.to_i64() on the primitive intrinsic with an untyped free to_i64 in scope":
+        step("Resolve 7.to_i64() with fn to_i64(v) visible (Infer first param)")
+        expect_not_ufcs("to_i64", i64_type(), prim_type(HirTypeKind.Infer(0, 0)))
+
+    it "keeps f64.to_i64() on the primitive intrinsic":
+        expect_not_ufcs("to_i64", prim_type(HirTypeKind.Float(64)), prim_type(HirTypeKind.Float(64)))
+
+    it "keeps text.to_i64() on the primitive intrinsic":
+        expect_not_ufcs("to_i64", prim_type(HirTypeKind.Str), prim_type(HirTypeKind.Str))
+
+    it "keeps sibling conversions to_f64 / to_text / len on the primitive intrinsic":
+        step("fn to_f64(n: i64) exists in src/lib/common/complex; it must not steal i64.to_f64()")
+        expect_not_ufcs("to_f64", i64_type(), i64_type())
+        expect_not_ufcs("to_text", i64_type(), prim_type(HirTypeKind.Infer(0, 0)))
+        expect_not_ufcs("len", prim_type(HirTypeKind.Str), prim_type(HirTypeKind.Infer(0, 0)))
+
+    it "still resolves UFCS for a non-intrinsic method name on a primitive receiver":
+        step("fn double(v: i64) is a legitimate UFCS target for 7.double()")
+        var resolver = resolver_with_free_fn("double", i64_type())
+        val resolution = resolver.resolve_method(receiver(i64_type()), "double", [])
+        expect(is_free_function(resolution)).to_equal(true)
