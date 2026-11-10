@@ -147,3 +147,23 @@ Do not commit an implementation if semantic parity fails, the speedup is below
 the canonical codec gates regress. Preserve the current legacy path and record
 the failing evidence instead.
 
+
+## 2026-11-11 — P3 ne9 triage: still LIVE (design open, not superseded)
+
+Lane ne9 (batch 2026-11-11) re-checked the premise at this tip
+(origin/release/1.0.0, `482cdf40753b`):
+
+- The interpreted lane still routes flat-AST conversion through the
+  `SIMPLE_BOOTSTRAP*` environment mirror: `_FlatAstBridge/convert_nodes.spl`
+  reads `SIMPLE_BOOTSTRAP` via `flat_bridge_env_get(...)` at multiple
+  conversion sites, and `module_assembly.spl` still field-falls back
+  through `SIMPLE_BOOTSTRAP_DECL_*` keys (`flat_module_env_get`).
+- No bridge-scoped arena mode has been admitted: `flat_pools_dump_all()` /
+  `flat_pools_restore_all()` exist in `module_assembly.spl` as the codec
+  plus self-tests, but nothing enters an arena-read scope around
+  `flat_ast_to_module()`.
+
+The status line correctly stays open. Implementing the candidate is out
+of scope for a traverse lane: the acceptance criteria demand a measured
+>=3x throughput improvement, an RSS bound, and unchanged codec/parity
+gates on a hot compiler path.
