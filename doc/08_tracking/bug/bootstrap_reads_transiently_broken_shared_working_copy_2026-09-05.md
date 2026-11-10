@@ -1,10 +1,10 @@
 # Bootstrap builds from the LIVE shared working copy, so a parallel session's half-second of conflict markers aborts a 2-hour lane
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 — FIXED (lane boot10): pinned-archive snapshot + RSS-monitor worker protection verified live. See addendum
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** fix-implemented-verification-pending (2026-11-09): bootstrap-from-scratch.sh re-execs from a pinned `git archive` snapshot (scripts/bootstrap/bootstrap-pin-archive.shs, --selftest); opt out SIMPLE_BOOTSTRAP_LIVE_TREE=1
+**Status:** CLOSED 2026-11-11 (FIXED: pinned-archive snapshot landed 60c57b7bdd89 2026-11-09 + RSS-monitor worker protection landed; verified live by lane boot10)
 **Filed:** 2026-09-05
 **Host:** aarch64-unknown-linux-gnu
 **Severity:** medium-high — costs a full bootstrap lane, and the failure it
@@ -342,3 +342,27 @@ Not re-verified (out of scope by this record's own classification): the
 cross-session process-contention modes (1-3 in the UPDATE section) are
 coordination/environmental; the planner-admission produce-then-launch window
 is covered by the receipt-chain wiring verified in the p3-boot batch-1 lane.
+
+## Triage 2026-11-11 (lane boot10)
+
+FIXED — both deliveries re-verified live on work/p3-boot10-20261111 (base
+origin/release/1.0.0), one cycle:
+
+1. Snapshot fix (fix 3): `sh scripts/bootstrap/bootstrap-pin-archive.shs
+   --selftest` -> `PASS — 5 selftest assertion(s) checked, pinned archive
+   isolates build from live edits`. Wired at
+   `scripts/bootstrap/bootstrap-from-scratch.sh:20-31` (re-exec from the
+   pinned `git archive` snapshot by default; `SIMPLE_BOOTSTRAP_LIVE_TREE=1`
+   opts back in). Landed as `60c57b7bdd89` (2026-11-09), an ancestor of
+   this branch.
+2. RSS-monitor fix (the record's own option 2):
+   `scripts/resource/kill_simple_monitor.shs:216-227` protects
+   `*native_build_worker.spl*` and `*bootstrap_main.spl*` in
+   `is_protected()`, with the comment citing this exact record and its seven
+   killed Stage-3 runs. This closes "a Stage-3 self-host cannot complete on
+   this host while that monitor runs".
+
+Not re-verified (out of scope by this record's own classification): the
+cross-session process-contention modes are coordination/environmental; the
+planner-admission produce-then-launch window is covered by the receipt-chain
+wiring verified in the p3-boot batch-1 lane. No code change this lane.

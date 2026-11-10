@@ -3,7 +3,7 @@
 - **Date:** 2026-07-27
 - **Area:** pure-Simple parser / keyword identifiers
 - **Severity:** high — blocks the strict Stage 4 full-CLI bootstrap.
-- **Status:** OPEN.
+- **Status:** CLOSED 2026-11-11 (FIXED by 9e7e7a526edb 2026-11-07 / PR #7597; verified live by lane boot10).
 
 ## Reproduction
 
@@ -68,3 +68,34 @@ compiling the current `src/compiler/10.frontend/core/parser.spl` module-level
 state. Executable verification needs the self-hosted binary (heavy build,
 outside this lane's grant). Source-level fix + spec + grep gate are the
 cited evidence.
+
+## Triage 2026-11-11 (lane boot10)
+
+FIXED — the required token-adjacency disambiguation re-verified live on
+work/p3-boot10-20261111 (base origin/release/1.0.0), one cycle. The fix
+lands in `9e7e7a526edb` (2026-11-07, PR #7597), an ancestor of this branch:
+
+- Statement position: `src/compiler/10.frontend/core/parser_stmts.spl:1030-1031`
+  — `adjacent_index = kind == TOK_LBRACKET and par_line_get() == match_line
+  and par_col_get() == match_col + 5`; `match[0]` routes to identifier +
+  postfix indexing, spaced `match [first]:` stays a match statement.
+- Expression position: `src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl:1196-1197`
+  — the same adjacency test.
+- Focused regression spec `test/01_unit/core/parser_ce_keyword_identifier_spec.spl:74-88`
+  drives this record's exact reproducer (`var match = [10, 20]`,
+  `val first = match[0]`, `match[0] = 30`, spaced `match [first]:`).
+- Interim guard re-run live this lane:
+  `sh scripts/check/check-keyword-identifier-bindings.shs` ->
+  `check-keyword-identifier-bindings: PASS — 45021 .spl file(s) checked`
+  (rc=0; only the known non-FATAL WARNING classes: test-file keyword
+  bindings and one `match`-named function parameter).
+
+Verification gap (unchanged from the 2026-11-10 triage, seed-JIT limitation
+not a parser failure): the regression spec cannot EXECUTE under this lane's
+Rust seed — specs importing `core.parser` fail semantic setup with
+"variable `par_state` not found"; executable verification needs the
+self-hosted binary (heavy build, outside this lane's grant). Source-level
+fix + regression spec + grep gate are the cited evidence. Designed behavior
+note: `val match = ...` is rejected by both parsers one step earlier than
+in 2026-07-27; the `match[0]` adjacency arm serves G33-sanctioned
+`var match`.

@@ -3,7 +3,7 @@
 - **Date:** 2026-08-16
 - **Component:** pure-Simple MIR bootstrap compatibility lowering
 - **Severity:** high if the dormant path is reactivated
-- **Status:** OPEN / TODO (currently unused method)
+- **Status:** CLOSED 2026-11-11 (FIXED by d907f4858774 2026-11-09, dormant method deleted; verified live by lane boot10)
 - **Owner:** `MirLowering.lower_bootstrap_flat_function`
 
 ## Problem
@@ -64,3 +64,18 @@ unused compatibility method after proving no external/generated consumer");
 the mixed-tail fixture checklist applied to *reactivation*, which is no
 longer possible. The staged-native mixed-tail defect class in the ACTIVE
 `lower_function` owner belongs to the compiler lane, not this record.
+
+## Triage 2026-11-11 (lane boot10)
+
+FIXED — deletion re-verified on work/p3-boot10-20261111 (base
+origin/release/1.0.0), one cycle. Commit `d907f4858774` ("fix(mir): delete
+dormant lower_bootstrap_flat_function (tail-local payload loss hazard)",
+2026-11-09) is an ancestor of this branch and
+`grep -rn lower_bootstrap_flat_function src/compiler/50.mir/` returns no hits.
+The only same-named method left is the HIR declaration-lowering owner at
+`src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl:110`, which
+this record explicitly scopes out ("a different owner"). The deletion is one
+of this record's two sanctioned resolutions; the mixed-tail fixture
+checklist applied to reactivation, which the deletion makes impossible. The
+staged-native mixed-tail defect class in the ACTIVE `lower_function` owner
+belongs to the compiler lane, not this record. No code change this lane.
