@@ -1,7 +1,6 @@
 # `impl X:` -> free-function refactor wreckage: family sweep (2026-08-07)
 
-Status: PARTIALLY FIXED. One cluster landed (`46c39fa9faf`); the rest is
-enumerated below and still open.
+Status: FIXED — closed 2026-11-11 (lane ne11); all open clusters restored on release, two damaged files since deleted, see addendum
 
 ## Scope of the sweep
 
@@ -185,3 +184,40 @@ rewrite it to `.clone()`. Needs confirmation that `text.clone()` even exists
 before either choice is made.
 
 Net: this cluster is well-specified but needs per-site judgement, not `sed`.
+
+---
+
+## 2026-11-11 addendum — lane ne11 (P3 traverse, batch ne11)
+
+**Verdict: FIXED on release — every cluster this record enumerates is resolved
+on the current tip; closure on commit ancestry + targeted symbol greps run
+this lane.**
+
+- **Shape (d) folded-receiver mangle (was 23 sites / 8 files):** restored by
+  `b0c98541d2a4` (ancestor of release tip, verified `git merge-base
+  --is-ancestor`). Two of the eight files no longer exist: `expression_evaluator.spl`
+  deleted as dead/unbindable (`03f5c1420753`), and `tracker.spl` went away with
+  the monomorphization deletion (`200a05f5bc8a`). Re-grep of the six surviving
+  files this lane: **zero** `self.<field>_<method>(self.<field>, ...)` mangle
+  shapes; e.g. `macro_check/template.spl:223` now correctly reads
+  `self.errors.is_empty()`.
+- **cycle_detector cluster (highest-liveness open cluster, 10 symbols):**
+  restored by `bc052a4470d5`; the whole `40.mono/monomorphize/` tree was then
+  deleted by `200a05f5bc8a` (monomorphization removed). This lane's grep for
+  `visited_get|cycle_path_clone|rec_stack_get|in_degree_get|queue_pop|
+  metadata_add_circular` across `src/compiler/**`: **zero hits**.
+- **Other unresolved free calls (effects/recovery/testing and the 20-file
+  list):** `cd5286d33ec0` restored the survivors it named; all 13 remaining
+  files from the doc's list still exist and compile in-tree. The
+  `borrow_check/mod.spl` bare `pass_do_nothing` call is gone — every site now
+  passes a required comment string and the parser enforces it (REQC001 lint,
+  `parser_stmts.spl:1134`), i.e. the no-op became a first-class linted
+  statement form rather than a phantom function.
+- **Oracle boundary (honest):** the wholesale free-function oracle was NOT
+  re-run over a pinned tree on this lane. Attempted `simple check src/compiler`
+  once (fresh seed): timed out at 280s (EXIT=124); the 66-line partial log
+  contained zero `unresolved` occurrences. "Fixed" above means: every
+  specifically-enumerated cluster is provably restored or its file deleted,
+  per the fix commits cited (all on-branch ancestors) plus targeted greps.
+  A future lane rebuilding the detector must still run the inject/restore
+  vacuity check this doc mandates.
