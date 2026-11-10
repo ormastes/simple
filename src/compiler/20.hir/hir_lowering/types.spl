@@ -1496,6 +1496,41 @@ impl HirLowering:
                     if custom_primitive_is_name(name):
                         custom_primitive_bind_symbol(name, symbol_id.id)
                     self.lower_resolved_named_kind(symbol_id, hir_args, span)
+                # `nil` (p2_28, unresolved_type_declared_nowhere_family
+                # 2026-08-01): the canonical no-value annotation the frontend
+                # advertises (parser keyword TOK_KW_NIL -> TYPE_NIL,
+                # _FlatAstBridge/convert_nodes.spl -> Named("nil")). It lands
+                # here with no declaration anywhere in the tree; previously
+                # it fell through to the strict "unresolved type: nil" gate.
+                # Resolve to the explicit nil-singleton HirTypeKind.Nil.
+                #
+                # Placement is AFTER the symbol lookup, by the same
+                # load-bearing rule as the Map/HashMap/tuple arms below: a
+                # real symbol of this name must win. That is theoretical for
+                # the lowercase spelling — `nil` is a parser keyword, so no
+                # module can declare a type of this name — but it costs
+                # nothing and keeps the precedence rule uniform.
+                #
+                # Deliberately NOT an arm for uppercase `Nil`: the library
+                # dialect that writes `Result<Nil, text>` (lib/common/debug/
+                # service_v1.spl) is a separate source-policy question; it
+                # stays erroring until that policy is decided. A module that
+                # declares its own `Nil` resolves through the symbol lookup
+                # above as before.
+                #
+                # Semantics: distinct from `unit`/`void` (-> Unit above) and
+                # from an Optional's absence state; threaded as itself through
+                # Result/Optional generic arguments, equality, inference, the
+                # module-surface/RTI vocabularies, and MIR (-> MirTypeKind.Nil,
+                # one tagged SplValue word, constant 3). Zero arguments:
+                # `nil<T>` is not a generic; an argument list is an author
+                # error, reported rather than ignored.
+                elif name == "nil":
+                    if hir_args.len() != 0:
+                        self.error("nil type takes no type arguments", span)
+                        HirTypeKind.Error
+                    else:
+                        HirTypeKind.Nil
                 # SEED-PARITY (2026-08-01): the three rules below all sit AFTER
                 # the symbol lookup, exactly where the seed puts them
                 # (type_resolver.rs:141 single-letter, :178 tuple, :182 bare

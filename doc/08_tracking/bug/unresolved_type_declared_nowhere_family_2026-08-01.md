@@ -456,3 +456,36 @@ the interpreter on high-bit-set limbs" — the same reasoning may argue for sign
 ## HIR-P2 HC triage 2026-11-05
 
 Class A/B fixes landed; Class C is not verifiable in the interpreter lane. The usize/isize signedness divergence needs a deliberate cross-engine decision (documented in-record). Remains OPEN pending that decision.
+
+## p2_28 current-source fix status 2026-11-10 (lane work/p2fix-niltype-20261110)
+
+Status: lowercase `nil` annotation IMPLEMENTED in current source; uppercase
+`Nil` remains a deliberate policy hold.
+
+- `HirTypeKind.Nil` (appended, discriminants preserved) + `MirTypeKind.Nil`
+  (appended). ABI: one 64-bit tagged SplValue word, constant 3 — the same
+  representation `NilLit` has always materialized; the source type is no
+  longer laundered into Unit/i64.
+- `lower_named_kind` resolves `nil` AFTER the symbol lookup, so a real
+  declaration of the name would still win (the lowercase spelling is a parser
+  keyword, so this is belt-and-braces). `nil<T>` errors. Uppercase `Nil` has
+  NO arm: undeclared it still hits `unresolved type: Nil`; a module that
+  declares its own `Nil` resolves through the symbol path unchanged.
+- Threaded through: type equality, HM unification, alias/generic-argument
+  resolution, module-surface semantic identity, RTI (`b:nil` round trip),
+  union member keys (distinct `niltype` token — Unit keeps its historic
+  `nil` token), MIR JSON / verification IR / semantic coverage, enum payload
+  acceptance (a nil slot takes exactly the nil literal; the Unit/NilLit veto
+  is untouched and still fail-closed, nested tuples included), LLVM +
+  Cranelift + interpreter + common-trait type mappers, HIR codec (tag 30),
+  generated visitor/hash/children arms, and the schema registry.
+- NOT done (deferred, fail-loud today): direct isel lanes (x86_64/riscv/
+  aarch64) classify `Nil` as unsupported; wasm mapper default-stubs it;
+  portable-body caching treats nil-typed signatures as non-portable
+  (conservative fallback); uppercase `Nil` policy; the library's 11
+  `Result<Nil, text>` annotations are NOT rewritten.
+- Evidence: test/01_unit/compiler/type/nil_singleton_type_pipeline_spec.spl
+  (11 examples) + nil_singleton_runtime_spec.spl (7 examples), seed-smoke
+  only; no self-hosted/native qualification claimed. Existing nil/Optional
+  specs re-run green (Some(0)/Some(3) controls included). See
+  build/review/p2fix-niltype-20261110.sdn.
