@@ -1,7 +1,7 @@
 # Stage 2 MSVC link failure is UNDIAGNOSABLE: the Err payload interpolates to `<invalid-heap:0x...>`
 
 - **Filed:** 2026-09-03
-- **Status:** OPEN — current Windows MSVC Stage 2 blocker
+- **Status:** OPEN — current Windows MSVC Stage 2 blocker. Masking defect (1) FIXED in source 2026-11-07 (merge 9e7e7a526edb): the wrapper now interpolates `{e.message}`, and `MsvcLinker.link`/`LldLinkLinker.link` print the raw linker output and persist it to `{output}.link.log` at the call site, so the real diagnostic survives even a corrupt Err payload — component-verified on the seed JIT lane 2026-11-11 (lane interp12, see "Addendum 2026-11-11"). The underlying link failure (2) is still unknown: reproducing it requires a self-hosted stage2 native link, which this lane cannot run (no entry-closure native builds; native-build Windows hang is a known live defect). OPEN pending a stage2 lane.
 - **Platform:** Windows MSVC (self-hosted stage 2 candidate). The masking mechanism is a
   value-representation defect and is not obviously Windows-specific, but it has only been
   observed on this lane.
@@ -73,3 +73,55 @@ the MinGW/`gcc` link route, not the MSVC route the probe uses, so it fails diffe
 on the probe's MSVC route. Whether it is specific to the large route-guard link or affects every
 MSVC link is still **open** and is the first thing to settle next session — force the MSVC route
 on a small input rather than relying on the default route selection.
+
+
+## Addendum 2026-11-11 (lane interp12) — masking defect fixed in source; underlying link failure stays OPEN (BLOCKED here)
+
+**Source inspection (current tree, tip f7640d20a458):** the quoted
+`Err("Windows MSVC linking failed: {e}")` no longer exists. The wrapper at
+`src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl:2807` now
+does `Err("Windows MSVC linking failed: {e.message}")`, and
+`msvc.spl` (`MsvcLinker.link` ~L242-249 and `LldLinkLinker.link` ~L448-455)
+prints the raw linker output before wrapping and persists it to
+`{output}.link.log` — exactly this doc's suggested next step ("add a probe that
+prints the raw linker stderr before it is wrapped"). `msvc.spl`'s own comment
+names the root cause "the `{e}`-interpolates-a-struct defect" and calls the
+corrupted-payload theory a misdiagnosis. The change arrived with merge
+9e7e7a526edb (2026-11-07); `git log -S 'Windows MSVC linking failed: {e}'`
+finds no commit that ever contained the `{e}` form on this branch.
+
+**Component verification actually run** (worktree simple-p3-interp12-20261111,
+fresh seed 46fe8f6b6def, seed-smoke, seed JIT lane — the same engine family as
+the self-hosted stage2 native lane):
+
+```
+./bin/simple.exe run build/review/p3fix-interp12-20261111/tmp/row8_probe.spl --no-cache
+# wrapped-message: the real linker diagnostic
+# whole-struct: <invalid-heap:0x197f32473a1>
+```
+
+`{e.message}` extracts the diagnostic text; interpolating the whole struct
+reproduces the documented `<invalid-heap:0x...>` shape — confirming both the
+defect class and the fix. (Under the seed tree-walk interpreter the minimal
+`Result<T, LinkError>`-match probe trips an unrelated "assertion outside an
+`it` block" interpreter quirk; the production path runs native, and no
+end-to-end MSVC link was attempted on this lane.)
+
+**Remaining defect (2) — the underlying link failure — is BLOCKED here:**
+reproducing it needs a self-hosted stage2 binary to run a native-build through
+the MSVC route, and this lane is granted neither entry-closure native builds
+nor a workaround for the known live native-build Windows hang.
+
+**Grant command for the owning stage2 lane:**
+
+```
+# stage2 lane, with native-build granted (run under the codex-run-guard):
+# 1. build/refresh the self-hosted candidate (bootstrap flow), then force the
+#    MSVC route on a SMALL input first (this doc's scope-check question:
+#    does <invalid-heap>/the link failure hit every MSVC link or only the
+#    route-guard link?):
+bin/simple native-build --entry <small_probe>.spl --linker msvc --output build/review/msvc-small-probe
+# 2. if the link fails, read the real diagnostic from the probe's own stdout
+#    ([msvc-link] output-begin..end) and/or `<output>.link.log`, then re-triage
+#    the underlying failure and update this doc.
+```

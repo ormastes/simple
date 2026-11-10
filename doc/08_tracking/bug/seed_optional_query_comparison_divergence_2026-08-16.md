@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - **Date**: 2026-08-16
-- **Status**: PARTIAL FIX (Divergence A: 2 sites fixed in h1_client.spl, 43 total sites tree-wide remain; Divergence B: constant made pub; Divergence C: open)
+- **Status**: FIXED (2026-11-11, lane interp12) — Divergence A reclassified + census-converted (pinned, spec green); Divergence B fixed (`pub val`) with the chunked-decode root cause closed by Divergence D's ByteArray-concat fix (spec green); Divergence D FIXED at root; the 2026-11-09 Part A `bool?` JIT fix is verified on fresh seed 46fe8f6b6def (specs 7/7, 10/10, 8/8 + JIT repro matches); Divergence C split out to `seed_semantic_errors_lack_position_2026-11-09.md`. See "Addendum 2026-11-11". (Supersedes:) PARTIAL FIX (Divergence A: 2 sites fixed in h1_client.spl, 43 total sites tree-wide remain; Divergence B: constant made pub; Divergence C: open)
 - **Area**: compiler_rust (seed interpreter), lib/gc_async_mut/gpu/browser_engine
 - **Related**: `src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl` (TLS handshake guard), `src/lib/gc_async_mut/gpu/browser_engine/net/entity/request_types.spl` (BROWSER_MAX_RESOURCE_BYTES)
 
@@ -237,3 +237,30 @@ Owner decision (memory owner-decisions-20261106 item 14): the seed treats
   `seed_semantic_divergences.rs::dot_query_bool_comparison_matches_pure_simple`.
 - **Part C** split to `seed_semantic_error_missing_position_2026-11-09.md`.
 - Status: fix-implemented-verification-pending.
+
+
+## Addendum 2026-11-11 (lane interp12) — verified FIXED on fresh seed 46fe8f6b6def
+
+The header's "PARTIAL FIX / 43 sites remain" predates the 2026-11-07 round-15
+correction and the 2026-11-09 Part A seed fix; this addendum closes the last
+open in-scope item (Part A verification) and re-confirms the pins.
+
+**Verification actually run** (worktree simple-p3-interp12-20261111, seed-smoke):
+
+```
+# Part A JIT repro (bool? payload compare, doc's e=bf().? shape), default run lane:
+./bin/simple.exe run build/review/p3fix-interp12-20261111/tmp/row4_jit_repro.spl --no-cache
+# e==false true | bt.?==true true | ki==5 true | bf==false true
+# bf.?==true false | bn.?==false false | bn.?!=true true | bn.?==None true | kf.?==false false
+# — exactly the documented post-fix values
+
+# interpreter specs:
+./bin/simple.exe test test/01_unit/compiler/interpreter/exists_check_presence_regression_spec.spl --mode=interpreter --no-cache   # 7/7
+./bin/simple.exe test test/01_unit/compiler/interpreter/exists_check_bool_payload_compare_spec.spl --mode=interpreter --no-cache # 10/10
+./bin/simple.exe test test/03_system/feature/usage/exists_check_bool_comparison_trap_spec.spl  --mode=interpreter --no-cache     # 8/8
+./bin/simple.exe test test/01_unit/lib/gc_async_mut/gpu/browser_engine/h1_response_parse_spec.spl --mode=interpreter --no-cache # 6/6 (chunked regression pin)
+```
+
+Divergence C (semantic error position) remains tracked in its split-out doc and
+is intentionally not covered here. Verdict: STALE (no new code change this
+lane).
