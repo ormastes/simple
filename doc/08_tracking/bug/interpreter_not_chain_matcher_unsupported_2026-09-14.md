@@ -138,3 +138,37 @@ enclosing `it` block. Not a data-loss-style silent-pass risk — it fails
 loudly, every time, at ERROR severity, exactly like the JavaNew case's
 diagnostic-quality standard.
 
+
+## Addendum 2026-11-11 (lane interp6) — SUPERSEDED
+
+**Verdict: SUPERSEDED — fixed on origin/release/1.0.0.**
+
+The interpreter's `Expr::MethodCall` arm in
+`src/compiler_rust/compiler/src/interpreter/expr/calls.rs:193-206` now peels
+the BDD negation link before generic dispatch: for `method.starts_with("to")`
+it calls `peel_bdd_matcher_receiver(receiver)` (handles both
+`FieldAccess { expect(x), "not" }` and paren `not(...)`/`not_(...)` method
+forms) and routes to `evaluate_negated_bdd_matcher` in
+`src/compiler_rust/compiler/src/interpreter_method/mod.rs:308-341`, which
+maps dedicated negated arms (`to_not_contain` etc.) and otherwise runs the
+positive matcher with suppressed failure state. This is exactly the fix
+location the bug doc prescribed.
+
+Fixing commit: `9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07,
+squash-merge of PR #7597) — confirmed via
+`git log -S 'evaluate_negated_bdd_matcher'` and the commit diff.
+
+**Seed-smoke verification (refreshed seed, build-commit 0791c2b7f4a7):**
+scratch probe `build/p3fix-interp6/not_chain_seed_smoke_spec.spl` (build/,
+gitignored) runs the bug doc's minimal repro shape plus all three spellings in
+use across the tree (`.not.to_contain`, `.not.to_equal`, `.not.to_be_nil`):
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe $PWD/bin/simple.exe test \
+  build/p3fix-interp6/not_chain_seed_smoke_spec.spl --mode=interpreter --no-cache
+SPEC FILE VERDICT ... outcome=OK declared>=3 executed=3 passed=3 failed=0
+Results: 3 total, 3 passed, 0 failed
+```
+
+Before the fix each assertion aborted with
+`semantic: undefined field: unknown property or method 'not' on String`.

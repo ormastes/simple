@@ -5,9 +5,8 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-15
-**Status:** PARTIAL (2026-08-15: docker/Vulkan system lane GREEN with a
-runtime-vulkan seed at `build/browser-vulkan/simple`; compiler `vulkan`
-feature still blocked by incomplete vendored rspirv — see bottom)
+**Status:** OPEN — LIVE (2026-11-11, P3 lane ne2): runtime seed gap closed on the refreshed seed; the
+  genuine GPU-paint lane and compiler-side SPIR-V remain open
 **Area:** src/app/browser, src/compiler_rust (seed features)
 
 ## Gap 1 — no browser-level Vulkan render lane
@@ -137,3 +136,41 @@ it and reads it back pixel-perfect on lavapipe (`readback_source=device_readback
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+
+## Verdict addendum — 2026-11-11 (P3 lane ne2)
+
+Verdict: **LIVE** (status stays OPEN) — one of the two gaps closed on the
+refreshed seed; the other is a design item and the compiler-side block is
+infrastructure, all outside this lane.
+
+**Gap 2 (runtime seed feature) — closed on the refreshed seed.** Export scan of
+the tracked seed (`bin/simple.exe`, build-commit `0791c2b7f4a7`, `strings -a`):
+151 `rt_vulkan*` symbols, including the full surface the 2026-08-15 lane had to
+hand-build a cargo-featured seed for: `rt_vulkan_init`, `rt_vulkan_is_available`,
+`rt_vulkan_select_device`, `rt_vulkan_shutdown`, `rt_vulkan_device_count`,
+`rt_vulkan_alloc_buffer`, `rt_vulkan_init_headless_present`,
+`rt_vulkan_present_buffer` (the `rt_vulkan_selected_device_index` name from this
+record no longer exists; the current sffi surface is
+`src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl`, which imports
+`rt_vulkan_select_device` / `rt_vulkan_selected_device_type` instead). The lib
+also gained availability gating (`vulkan_sffi_is_available()`), so a
+non-vulkan seed degrades instead of dying with "unknown extern function". The
+`build/browser-vulkan/simple` side deployment is obsolete for the runtime
+surface. Not re-run here: the docker/lavapipe lane
+(`check-simple-web-browser-docker-vulkan.shs`) is not runnable on this Windows
+host — that part of the 2026-08-15 GREEN verdict stands as prior evidence.
+
+**Gap 1 (genuine GPU-paint lane) — unchanged by design.** `render_lane.spl`
+today defaults to the `vulkan` lane (`BROWSER_RENDER_LANE_DEFAULT =
+BROWSER_RENDER_LANE_VULKAN`, lines 54-57), which is still CPU paint + Vulkan
+present/readback with honest provenance — not the browser's draw IR routed
+through engine2d GPU primitives. That remains a design-level feature request.
+
+**Compiler-side `vulkan` (SPIR-V codegen) — still blocked.** The vendored
+`rspirv 0.12` E0583 defect (missing `dr/build` tree) recorded above is a
+re-vendor job needing `cargo` — forbidden in this lane and classified
+seed-owned. Grant: run the rspirv 0.12 re-vendor
+(`cargo vendor`-equivalent refresh of `src/compiler_rust/vendor/rspirv` with the
+`dr/build/` module tree and `.cargo-checksum.json` intact), then add the driver
+feature forwarding `simple-runtime/vulkan` + `simple-compiler/vulkan`.

@@ -84,3 +84,24 @@ accept — but the divergence itself is the defect and will recur elsewhere.
 
 Stage3 `s3_fable44` builds, links and runs a fixture with module-level
 `var x: i64 = -1` and `var s: text = ""`: rc=0, stdout `PASS modvar`.
+
+## 2026-11-10 status — SUPERSEDED (P3 bootstrap lane row 45, work/p3-boot6-20261110)
+
+Corroborates the W3b addendum. Source-verified on this lane's base
+(`4343ce254922`): the pure-Simple parser now accepts the module-level
+`var x: T = <expr>` form the record says it rejected —
+`src/compiler/10.frontend/core/parser_decls_use.spl:454-486` parses the
+annotized declaration, requires `=` for types with no safe zero (fn type,
+text, Option, dynamic array) with an explicit diagnostic, synthesizes zero
+defaults for scalars/fixed arrays/named types, and falls through to
+`parse_expr` for the initializer. Divergence itself is closed: the seed's
+lax acceptance and the native-build parser's rejection were reconciled in
+the parser, which is the fix direction this record prescribes. Pins in tree:
+`test/01_unit/compiler/parser/module_noinit_zero_default_spec.spl`,
+`test/01_unit/compiler/parser/module_noinit_enum_class_zero_spec.spl`
+(queued under seed-smoke this pass; results in
+build/review/p3fix-boot6-20261110.sdn).
+The two `expr_dispatch.spl` declarations named in this record still exist
+and are accepted forms today. Not re-verified end-to-end by this lane: a full
+native-build of a modvar fixture is a ~2-3 GB interpreted-worker run
+(heavy-forbidden); W3b (2026-11-05) already holds the end-to-end rc=0.

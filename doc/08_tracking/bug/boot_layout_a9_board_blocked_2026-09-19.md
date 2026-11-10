@@ -1,6 +1,6 @@
 # Boot layout (lane A9): internal-linker rung 3 reached, rung 4 partial (hello kernel boots, gate FAIL by design); board run blocked
 
-Status: OPEN (P2)
+Status: OPEN — BLOCKED (2026-11-11, P3 lane ne2): rungs 1-2 re-verified green on the refreshed seed; board rung still needs hardware, rung 4 full-kernel gate needs an aarch64 Linux + AAVMF QEMU host
 **Date:** 2026-09-19
 **Owner:** lane A9, mold/MDSOC++ linker plan
 **Related:** `doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md` (A9 row, gate G4),
@@ -268,3 +268,34 @@ fn main():
         case Err(e):
             print "bootlink: ERROR {e}"
 ```
+
+
+## Verdict addendum — 2026-11-11 (P3 lane ne2)
+
+Verdict: **BLOCKED** (status stays OPEN) — engineering rungs healthy and
+re-verified; the two things this record is actually blocked on (board hardware;
+rung 4 with the FULL kernel) are both outside this lane's environment.
+
+Re-verified this lane on the refreshed seed (`bin/simple.exe`, build-commit
+`0791c2b7f4a7`, seed-smoke `--mode=interpreter --no-cache`, Windows x86_64 host):
+
+- `test/01_unit/compiler/backend/linker/linker_script_spec.spl` → 51/51 passed
+  (rung 1; the spec has grown from the 44 examples cited above).
+- `test/01_unit/compiler/backend/linker/boot_layout_plan_spec.spl` → 25/25 passed
+  (rung 2; grown from 22).
+
+Still blocked, exactly as the body states:
+
+- **Board rung:** this host has no board and none can be granted from a shell.
+  Grant: a physical aarch64 board with UEFI (EDK2) plus a serial/SSH transcript
+  of the `BOOTAA64.EFI` + `limine.conf` + `kernel.elf` ESP boot showing the
+  gate's `[BOOT]` markers (path documented under "What a board run needs").
+- **Rung 4 with the full kernel:** needs the full SimpleOS kernel's objects
+  linked internally and the real-firmware QEMU gate. This Windows host has no
+  `qemu-system-*` and no AAVMF pflash. Grant: an aarch64 Linux host with
+  `edk2-aarch64-code.fd` / `edk2-arm-vars.fd` (as in "Rung 4 evidence") to run
+  `scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs` against the
+  internally linked full-kernel ELF.
+
+No evidence contradicts the rung-3 parity or rung-4-hello claims recorded above;
+they stand un-re-run (per runaway guard, prior PASS evidence is not re-executed).

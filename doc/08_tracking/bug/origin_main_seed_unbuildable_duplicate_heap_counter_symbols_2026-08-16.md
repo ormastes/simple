@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** SUPERSEDED
 **Found:** 2026-08-16, at `f6cadcc36aff61d16d988651ea36a040d2af6aad` (== `origin/main`),
 while trying to restore a self-hosted toolchain for an SCV coverage review
 **Severity:** blocking — the Rust seed cannot be built from `origin/main`, so the
@@ -112,3 +112,31 @@ editing it from this session risks clobbering in-flight work.
    symbol sets and deliberately keeps them separate rather than unioned, so the data is
    already there.
 
+
+---
+
+## Addendum 2026-11-11 — lane seed2 — verdict SUPERSEDED
+
+Triage-first pass, batch 2, judged against the refreshed seed (bin/simple.exe,
+build-commit `0791c2b7f4a7`, refresh #8184). Both halves of the row are already
+resolved upstream of the refresh.
+
+**Defect half — duplicate `rt_heap_*_bytes` link collision: FIXED.**
+`src/runtime/runtime_memtrack.c:267-300` now guards the C pair:
+`SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS` omits them entirely on the
+Rust-hosted build (MSVC path, after the 2026-08-30 LNK2005 incident documented
+in the in-source comment), `__attribute__((weak))` fallbacks for GNU/clang
+non-Windows, and a strong Windows definition only when the Rust provider is
+excluded. `src/compiler_rust/runtime/src/value/heap.rs:765,771` still owns the
+Rust pair. In-tree via merge `9e7e7a526edb` (2026-11-07), an ancestor of
+`0791c2b7f4a7`. Binary-level proof on the refreshed seed: `nm bin/simple.exe`
+shows exactly one `T rt_heap_live_bytes` and one `T rt_heap_peak_bytes`
+(the other matches are the Rust interpreter_extern wrappers and
+`rt_heap_live_bytes_by_kind`, distinct symbols) — and the refreshed binary
+itself links and runs, which a live duplicate-symbol defect would prevent.
+
+**Guard half — `cargo check` never links: FIXED.** `scripts/check/
+check-seed-builds-push.shs:89` now lists `GATING cargo build --release --bin
+simple (LINK leg, added 2026-08-28)`, exactly the row's option 1.
+
+**Cycles:** 0. Evidence: `build/review/p3fix-seed2-20261111.sdn`.

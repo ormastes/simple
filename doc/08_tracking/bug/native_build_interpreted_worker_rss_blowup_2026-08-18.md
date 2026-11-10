@@ -221,3 +221,32 @@ with `break abort` / `break alloc::alloc::handle_alloc_error`, `bt 60` at the
 2^31-byte request. The in-process sampler now also runs on Windows
 (`SIMPLE_INTERP_SAMPLE=1`, round-15 seed change), so on a host that reaches
 `parse` the creep can be attributed to a Simple function without gdb.
+
+## 2026-11-10 status — LIVE-blocked-by-scope (P3 bootstrap lane row 44, work/p3-boot6-20261110)
+
+Re-judged on this lane's base (`4343ce254922`): still LIVE, two terms as
+recorded. Term 1 (fixed ~2.7-3.1 GB import-closure load) is intrinsic to
+spawning the interpreted worker and is the redesign item — same disposition
+as row 43 (`native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18`).
+Term 2 (unbounded creep inside the interpreted `parse` step, the guard-killer)
+was never attributed: the 2026-11-07 Windows pass could not reach `parse 0/2`
+because the memory-reserve guard refused the build on a loaded host. Both
+fix surfaces are excluded from this lane: term 2's retention lives in the
+pure-Simple `ast:parse_module` path interpreted under the seed
+(`src/compiler`, agent-30 lane) or in seed interpreter allocations
+(`src/compiler_rust`, seed-fix lane).
+
+Fix sketch for the owning lane: on a Linux host with >= 8 GB free, attribute
+term 2 with the in-process sampler now available on Windows too
+(`SIMPLE_INTERP_SAMPLE=1`, round-15 seed change) or, per this record's Next
+steps item 2, `ulimit -v 6000000; gdb -q -batch -x cmds --args bin/simple run src/app/cli/native_build_worker.spl --source test/fixtures/native_trailing_default_param --entry test/fixtures/native_trailing_default_param/main.spl --entry-closure -o out.bin`
+with `break abort` (NOT `rust_oom` — stays pending on the deployed binary)
+and `bt 60` at the 2^31-byte request; the 2^31 single allocation names one
+doubling buffer. Fix the identified retention in `parse_module` (term 2,
+small change); file term 1 as the redesign it is.
+
+BLOCKED-needs-grant (heavy/host-forbidden on this lane): the gdb attribution
+run above is Linux-only (this lane runs Windows; `ulimit`/`gdb` shape
+unavailable) and the fixture native-build run peaks ~3 GB against the
+24 GiB reserve guard on a loaded 64 GB host. Exact command recorded above;
+no re-measure this pass (2026-11-07 baseline already in-record).

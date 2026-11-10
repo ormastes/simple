@@ -72,3 +72,15 @@ defects compounded into an eight-minute repro that measured nothing.
   through.
 - Whether the four files above currently compile on any lane, or are simply
   never native-built.
+
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: SUPERSEDED
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
+
+- Prior closure (2026-11-09, recorded above) cites fixing commit 8a4fe2ae2b3 and
+  guard spec `test/01_unit/compiler/hir/return_unit_in_untyped_main_spec.spl`.
+- Seed-smoke re-verification (2026-11-11):
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/compiler/hir/return_unit_in_untyped_main_spec.spl --mode=interpreter --no-cache`
+  → SPEC FILE VERDICT outcome=OK, declared>=1 executed=1 passed=1 failed=0.
+- Verdict: SUPERSEDED. No code change.
