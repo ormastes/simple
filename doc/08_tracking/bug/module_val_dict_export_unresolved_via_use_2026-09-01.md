@@ -4,7 +4,10 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (SIMPLE-CAPABILITY / compiler import resolution)
+**Status:** FIXED (2026-11-11, lane ne15) — dict-valued module `val` exports now
+resolve through named and wildcard `use`; 8/9 examples pass on the fresh seed.
+The 1 residual failure is a separate `dir.create`/`dir.exist` Windows issue, not
+this import gap. See addendum.
 **Filed:** 2026-09-01
 **Found by:** triage of `test/01_unit/lib/std/` failures on Windows
   (`test/01_unit/lib/std/shell/file_system_spec.spl`, 0/9 passing).
@@ -81,3 +84,32 @@ bin/simple test test/01_unit/lib/std/shell/file_system_spec.spl
 # Results: 9 total, 0 passed, 9 failed — all "variable `file` not found"
 ```
 
+
+
+## Addendum 2026-11-11 (lane ne15) — FIXED; dict-val export resolves via `use`; 1 residual example is a different defect
+
+**Verification actually run** (worktree simple-p3-ne15-20261111, tip
+f7640d20a458, fresh seed 46fe8f6b6def, seed-smoke):
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ./bin/simple.exe test \
+  test/01_unit/lib/std/shell/file_system_spec.spl --mode=interpreter --no-cache
+# Results: 9 total, 8 passed, 1 failed
+```
+
+(was: `9 total, 0 passed, 9 failed` — every example `variable 'file' not
+found`). All `file.*` namespace calls through the documented
+`use std.shell.{file}` pattern now resolve and behave correctly (exists,
+write/read text, append, copy, rename, recursive dir create, dir list all
+green). The compiler/import-resolution mechanism this doc filed is fixed.
+
+**Residual 1/9** — "should create and remove directory" fails at
+`assert_true(dir.exist(test_dir))` after `dir.create(test_dir)`, both with
+and without a pre-created `build/test_tmp` parent. That is a
+`dir.create` (= `dir_create(path, false)`, non-recursive) / `dir.exist`
+(= `dir_exists`) Windows fs-layer behavior issue in
+`src/lib/nogc_sync_mut/shell/dir.spl` — unrelated to the val-dict export
+gap. An isolated `use std.shell.{dir}` probe also surfaced a separate
+`dir_exist` resolution error inside the shell module graph on the seed.
+Lead for a new row (stdlib fs / seed), not fixed in this pass; out of scope
+for this doc.
