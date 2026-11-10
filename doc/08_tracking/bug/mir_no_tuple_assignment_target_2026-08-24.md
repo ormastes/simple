@@ -1,6 +1,6 @@
 # MIR lowering has no assignment-target support for a tuple (2026-08-24)
 
-- **Status:** OPEN — not fixed
+- **Status:** FIXED (2026-08-24, `lower_hir_tuple_destructure_assign`); re-verified at tip 2026-11-11 (lane p3-compiler4)
 - **Severity:** HIGH — blocks `native-build src/app/mcp/main.spl`, and the
   construct is used ~10 times in `src/app/mcp/` alone
 - **Area:** `src/compiler/50.mir/mir_lowering_stmts.spl:1740` (pure Simple)
@@ -143,3 +143,20 @@ native codegen yet (#143); iterate an array or use while
 
 That is a deliberate unimplemented-feature diagnostic in native codegen, not a
 regression, and it is out of scope here.
+
+## Triage 2026-11-11 (p3-compiler4 lane, batch 4 row 7) — re-verified FIXED at tip
+
+- `lower_hir_tuple_destructure_assign` present at
+  `src/compiler/20.hir/hir_lowering/statements.spl:740`, invoked from the
+  flat-parser `ExprKind.Assign` arm at :1054 (matching this record's corrected
+  diagnosis of where the hook lives).
+- Seed-smoke (interpreter): this record's fixture — `var s = ""`,
+  `var n: i64 = 0`, `(s, n) = pair()` — executes; `s=hello`, `len=5` correct.
+
+Seed-side observation (NOT this row's MIR-lowering defect, routed for the
+seed-fix lane): on the seed interpreter the assignment form renders the i64
+element scaled (`n=56` for a declared 7; the `val (a,b) = ...` declaration
+form renders `b=7` correctly). The MIR lowering fix this record describes was
+verified natively by its author; the interpreter-lane element rendering on the
+seed looks like a seed-side handle-width issue and is out of scope here. No
+code change in this lane.

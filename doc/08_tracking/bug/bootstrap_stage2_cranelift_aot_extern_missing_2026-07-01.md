@@ -1,6 +1,6 @@
 # Bootstrap Stage2 Missing Cranelift AOT Extern
 
-Status: partially fixed
+Status: SUPERSEDED (named defect fixed-at-tip; re-verified 2026-11-11, lane p3-compiler4)
 Date: 2026-07-01
 
 ## Symptom
@@ -246,3 +246,19 @@ Source audit on the p3-boot3 worktree (base origin/release/1.0.0):
 
 No code change in this lane; no in-scope script owner remains for this row.
 ocs(bug): triage bootstrap_stage2_cranelift_aot_extern_missing_2026-07-01 row 19 — SUPERSEDED)
+
+---
+
+## Triage 2026-11-11 (p3-compiler4 lane, batch 4 row 1) — SUPERSEDED
+
+Corroborates the 2026-11-10 p3-compiler and p3-boot3 triages with a fresh source
+audit at this lane's base (origin/release/1.0.0 tip, commit 93490a99c5d8):
+
+- `src/compiler_rust/compiler/src/elf_utils.rs:852` maps
+  `rt_cranelift_new_aot_module` (plus `_triple` :855 and the `spl_cranelift_*_v2`
+  family :858-862); `:893` maps `rt_cranelift_aot_define_function`. Both named
+  externs from this record's Stage-2 failure resolve.
+- The later deploy-gate items (Stage4 `-c` exit-248, full-CLI link) are tracked
+  by the `stage4_full_cli_*` family, not this row.
+
+No code change; no re-run of native bootstrap (out of lane grant).
