@@ -460,6 +460,28 @@ impl HirLowering:
             case _:
                 nil
 
+    me is_bare_self_field_name(name: text) -> bool:
+        """True when a method body is being lowered and the enclosing class
+        declares an instance field `name`. Callers have already established
+        that `name` is NOT a local/parameter (the scope lookup missed, or
+        resolved to a non-local symbol), so a hit is a bare field reference."""
+        if self.current_method_self_symbol_id < 0:
+            return false
+        val found = self.field_type_for_owner_raw(self.current_method_self_symbol_id, name)
+        match found.kind:
+            case HirTypeKind.Error: false
+            case _: true
+
+    me warn_bare_field_shadowed_by_global(name: text, span: Span):
+        """Staged diagnostic for the bug above: a bare field name that happens
+        to resolve to a same-named module-level symbol silently binds to the
+        GLOBAL, not the field. A warning (not an error) while the in-tree
+        census of bare-field sites is non-zero; the error stage waits on a
+        zero census."""
+        if not self.is_bare_self_field_name(name):
+            return
+        self.warning("[W-HIR-BAREFIELD-001] bare field reference `{name}` at {span.file}:{span.line}:{span.col} resolves to module-level `{name}`, not the field; write `self.{name}`", span)
+
     me lower_unresolved_ident(name: text, span: Span) -> HirExprKind:
         """Unresolved identifier: known interpreter builtins (print, ...) are
         not in the symbol table on the single-file/-c unstub path — define
@@ -544,7 +566,17 @@ impl HirLowering:
             if self.try_register_bootstrap_global_symbol(name, span):
                 val global_sym = self.symbols.lookup_or_invalid(name)
                 if global_sym.is_valid():
+                    self.warn_bare_field_shadowed_by_global(name, span)
                     return HirExprKind.NamedVar(global_sym, name)
+            # Bare field reference (`xlen` for `self.xlen`) inside a method:
+            # illegal in every lane (bug bare_field_reference_in_methods_
+            # is_illegal_but_pervasive_2026-08-10). Name the field and the
+            # required spelling instead of the generic unresolved-name text.
+            if self.is_bare_self_field_name(name):
+                self.error(
+                    "[E-HIR-BAREFIELD-001] bare field reference `{name}` at {span.file}:{span.line}:{span.col}; methods must spell fields as `self.{name}`",
+                    span)
+                return HirExprKind.Error
             # Preserve scalar source provenance before Span crosses the
             # aggregate diagnostic boundary. The driver intentionally carries
             # only rendered text under native closure pressure.
