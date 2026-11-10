@@ -92,3 +92,13 @@ inline in the `nvme_reg_defs.spl` module docstring so the shape is not
 
 Both are also argument-binding corruptions in the interpreter; this may share a
 root cause with them.
+
+## 2026-11-10 triage — SUPERSEDED (seed-smoke, lane p3-interp3 row 17)
+
+Re-ran the record's two-module repro (`build/p3fix-interp3/bfmod.spl` +
+`bfuse.spl`) on the worktree seed: every `mask(...)` prints 24 (A, B, local
+copy, inline, rebuilt) in both the default run and
+`SIMPLE_EXECUTION_MODE=interpreter`. Module-level `val` structs bind correctly
+as call arguments on the current seed. The nullary-function workaround in
+`examples/09_embedded/simpleos_nvme_fw/fw/nvme_reg_defs.spl` can be retired by
+its owner (optional; outside this lane).

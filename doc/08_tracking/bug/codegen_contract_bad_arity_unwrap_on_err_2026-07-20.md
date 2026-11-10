@@ -126,3 +126,29 @@ the executable has older positive expectations. That pre-existing feature/oracle
 divergence is outside this arity correction; do not claim the entire vec suite
 green, invent vector support, or weaken those positive controls in this change.
 Actual execution plus the separate feature contract must resolve it.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — ARITY DEFECT VERIFIED FIXED; SEPARATE VEC DIVERGENCE REMAINS
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**The row's arity defect: SUPERSEDED — and the 2026-11-07 rewrite is now EXECUTED**
+(it landed as OPEN/WAIT_VERIFY with no execution). Seed-smoke of
+`test/01_unit/compiler/codegen/vec_types_contract_spec.spl`:
+
+- "rejects gpu_vec4_load_f32 with bad arity (CUDA)" — PASS (asserts `is_err()`, CUDA
+  phase, `"requires exactly 2 arguments"`).
+- "rejects gpu_vec4_store_f32 with bad arity (CUDA)" — PASS (same shape, 6 arguments).
+- No `.unwrap()` on the bad-arity path remains.
+
+**Still red, deliberately out of this row's scope:** the 4 POSITIVE CUDA vec scenarios
+("emits ld/st.global.v4/v2.f32 ...") fail with
+`called unwrap on Err: CompileError(... CUDA memory operation requires a pointer operand ...)`
+— the backend now rejects CUDA vector-result memory ops. That is exactly the
+feature/oracle divergence this doc's 2026-11-07 note quarantined ("do not claim the entire
+vec suite green ... Actual execution plus the separate feature contract must resolve it").
+It needs its own feature-contract row; the positive controls were correctly left
+unweakened.

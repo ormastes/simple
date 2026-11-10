@@ -84,3 +84,25 @@ is lost and subsequent `tree.create_layer` returns colliding layer ids
 
 ## 2026-11-06 round 9: FIXED (seed JIT/native lane)
 MIR `for` lowering (`mir/lower/lowering_stmt.rs`) fed the `List<T>` object handle to `rt_for_iterable` as if it were an array, so the loop ran zero times silently. It now iterates the `items` payload. Spec: test/01_unit/compiler/interpreter/for_over_list_class_jit_spec.spl (probe run under interpreter and jit; RED on seed JIT: FOR_LIST_SUM=0, GREEN: 7).
+
+## 2026-11-10 P3 seedfix lane — BUILD SKEW, source already correct (no source fix)
+
+Routed today as a LIVE defect ("no Value::ClassInstance arm in either iterator
+site"). Finding: both `iter_to_vec` (interpreter_helpers/collections.rs) and
+`get_iterator_values` (interpreter_call/block_execution.rs) already handle the
+ClassInstance case via a pre-match guard `aggregate_class() == Some("List")` that
+peels the `items` payload; `aggregate_class()`/`aggregate_field()` both match
+`Value::ClassInstance`. The "no arm" claim only inspected the fall-through match
+arms.
+
+Evidence of build skew: the deployed `bin/simple.exe` (git blob 1e46cf298) fails the
+acceptance spec `test/01_unit/compiler/interpreter/for_over_list_class_spec.spl`
+3/3 with "cannot iterate over this type: ClassInstance(...)", while a FRESH debug
+AND release build from HEAD source passes it 3/3. The committed seed binary predates
+the aggregate_class handling; the source is correct. Residual-hole hypothesis ruled
+out by the fresh build.
+
+Action: no source change. Added a unit regression lock
+(`cargo test -p simple-compiler --lib iter_to_vec_list_tests`, 2 passed; commit
+78a51361c70c). Recommend a seed rebuild+redeploy so the deployed binary matches
+source. Evidence: build/review/p3fix-seedfix-20261110.sdn.

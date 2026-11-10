@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: SUPERSEDED (2026-09-13)
 - Found: 2026-09-13, PERF-9, running the mandatory before/after seed test leg
   after rebasing onto `origin/main` `6ff00b3df42`.
 - Component: `src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs`,
@@ -98,3 +98,27 @@ this bug tracks, and the vulkan pin/count skew is a deliberate anti-inflation
 guard that needs the owning lane's context. Diagnosed first failure verbatim:
 `family_size_is_pinned`: `assertion left == right failed: left: 132, right: 131`
 at `compiler/src/interpreter_extern/vulkan.rs:487`.
+
+## 2026-11-10 status — SUPERSEDED (P3 library lane, work/p3-lib-20261110)
+
+Confirmed the 2026-11-05 verification evidence still holds on
+origin/release/1.0.0: the aarch64 compile blocker is fixed in-tree.
+`common/src/target.rs:1303` guards
+`the_host_target_widens_exactly_when_the_host_admits_avx512` behind a real
+`#[cfg(target_arch = "x86_64")]` (the `cfg!` + `is_x86_feature_detected!`
+anti-pattern is gone), the production probe at `common/src/target.rs:304-308`
+is likewise cfg-guarded, and
+`compiler/src/codegen/llvm/backend_core.rs` no longer references
+`is_x86_feature_detected!`. This lane is not the src/compiler_rust owner; no
+change made here.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Confirmed again on this lane's base (`790b54f7c4fc`): the fix is intact
+and attributable to PR #7597 (merge `9e7e7a526edb`) — real
+`#[cfg(target_arch = "x86_64")]` guards at `common/src/target.rs:304` and
+`:1303`, and zero `is_x86_feature_detected!` references in
+`backend_core.rs` (grepped). Host-limit unchanged: no aarch64 host/cargo
+in this lane, so the executed leg remains the 2026-11-05 aarch64 run
+recorded above (target package compiles; 4608 passed / 8 failures all
+unrelated to this bug). No evidence to the contrary.

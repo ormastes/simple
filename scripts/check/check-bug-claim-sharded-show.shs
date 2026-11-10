@@ -1,0 +1,89 @@
+#!/bin/sh
+# Exercise the public claim-and-show CLI against real temporary SDN shards.
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CLAIM="$HERE/bug-claim.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/bug-claim-sharded-show.XXXXXXXX")
+trap 'rm -rf "$fixture"' EXIT
+trap 'exit 130' INT TERM
+mkdir "$fixture/db" "$fixture/tmp"
+export TMPDIR="$fixture/tmp"
+export BUG_CLAIM_DB="$fixture/bug_db.sdn"
+export BUG_CLAIM_NOW=2026-11-10T05:00:00Z
+export BUG_CLAIM_LOCK_RETRIES=0
+export SDN_SEAL_ALGO=crc32
+cat > "$BUG_CLAIM_DB" <<'SDN'
+strings |id, value|
+
+bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    ACTIVE, P1, open, "Active-table fixture", a.spl, 1, test, 2026-11-01, 2026-11-01, true
+
+bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    LEGACY, P2, open, "Legacy-table fixture", b.spl, 2, test, 2026-11-01, 2026-11-01, true
+
+bug_descriptions |bug_id, line_num, content|
+    ACTIVE, 0, "Description survives the claim"
+    LEGACY, 0, "Legacy description survives the claim"
+
+bug_difficulty |bug_id, difficulty, basis, assessed_at, assessed_by|
+    ACTIVE, 2, "Real temporary shard", 2026-11-10, fixture
+
+bug_environments |bug_id, found_env, reproduction_env, reproduction_state, evidence, recorded_at|
+    ACTIVE, unknown, windows, candidate, fixture, 2026-11-10
+
+SDN
+cp "$BUG_CLAIM_DB" "$fixture/legacy.before"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+contains() { grep -Fq -- "$2" "$1" || fail "$1 lacks $2"; }
+no_temporary_state() {
+    [ ! -e "$BUG_CLAIM_DB.lock" ] || fail "claim lock leaked"
+    [ -z "$(find "$TMPDIR" -mindepth 1 -print -quit)" ] || fail "merged/work temporary files leaked"
+    cmp -s "$BUG_CLAIM_DB" "$fixture/legacy.before" || fail "legacy database changed"
+}
+
+for bug in ACTIVE LEGACY; do
+    rc=0
+    sh "$CLAIM" show "$bug" --intent for_fixing --session fixture/owner > "$fixture/$bug.show" 2>&1 || rc=$?
+    # Check persisted ownership independently: a failure after CLAIMED must not
+    # be mistaken for an uncommitted claim or hidden by matching one log line.
+    sh "$CLAIM" status "$bug" > "$fixture/$bug.status"
+    contains "$fixture/$bug.status" 'state=fixing session=fixture/owner'
+    if [ "$rc" -ne 0 ]; then
+        cat "$fixture/$bug.show" >&2
+        fail "show $bug exited $rc after publishing the claim"
+    fi
+    contains "$fixture/$bug.show" "CLAIMED: $bug fixing by fixture/owner"
+    contains "$fixture/$bug.show" "$bug, P"
+    contains "$fixture/$bug.show" 'survives the claim'
+    contains "$fixture/$bug.show" 'state=fixing session=fixture/owner'
+    [ -f "$fixture/db/$bug.sdn" ] || fail "claim shard missing"
+    no_temporary_state
+done
+contains "$fixture/ACTIVE.show" 'ACTIVE, 2, "Real temporary shard"'
+contains "$fixture/ACTIVE.show" 'ACTIVE, unknown, windows, candidate, fixture'
+
+sh "$CLAIM" show ACTIVE --intent for_fixing --session fixture/owner > "$fixture/refresh"
+contains "$fixture/refresh" 'already fixing by fixture/owner'
+contains "$fixture/refresh" 'state=fixing session=fixture/owner'
+no_temporary_state
+
+cp "$fixture/db/ACTIVE.sdn" "$fixture/claimed.before"
+rc=0
+sh "$CLAIM" show ACTIVE --intent for_fixing --session fixture/rival > "$fixture/refused" 2>&1 || rc=$?
+[ "$rc" -eq 3 ] || fail "rival show returned $rc instead of 3"
+contains "$fixture/refused" REFUSED
+cmp -s "$fixture/db/ACTIVE.sdn" "$fixture/claimed.before" || fail "refused rival changed the owner"
+no_temporary_state
+
+sh "$CLAIM" show ACTIVE --intent not_for_fixing > "$fixture/read-only"
+contains "$fixture/read-only" 'state=fixing session=fixture/owner'
+cmp -s "$fixture/db/ACTIVE.sdn" "$fixture/claimed.before" || fail "read-only show changed the shard"
+no_temporary_state
+
+sh "$CLAIM" release ACTIVE fixture/owner > "$fixture/release"
+sh "$CLAIM" status ACTIVE > "$fixture/released.status"
+contains "$fixture/released.status" 'state=released'
+contains "$fixture/released.status" 'status=open'
+no_temporary_state
+echo 'PASS: sharded claim-and-show, both tables, details, refresh, refusal, read-only, release and cleanup'

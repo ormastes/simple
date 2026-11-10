@@ -213,3 +213,25 @@ calls symlink() on Windows. Reproduced on Windows 11 (MINGW64): a poisoned
 `sh scripts/check/check-bootstrap-compat-link-no-privilege.shs` ->
 `PASS - 1 compatibility pointer created without symlink privilege ...`.
 Status: fix-implemented-verification-pending.
+
+## Triage 2026-11-10 (p3-boot2 lane)
+
+SUPERSEDED — the 2026-11-09 resolution (no-privilege NTFS junction) is
+verified live on this host from work/p3-boot2-20261110 (base
+origin/release/1.0.0), one cycle:
+
+- `sh scripts/check/check-bootstrap-compat-link-no-privilege.shs` ->
+  `PASS - 1 compatibility pointer created without symlink privilege,
+  resolved and renamed (os=MINGW64_NT-10.0-26300)`.
+- Windows junction code confirmed in both named sites:
+  `scripts/check/lib/bootstrap-stage3/authority.shs:4924-4928`
+  (`cmd.exe //d //c mklink //J`, with a comment explaining the
+  directory-only ABI/atomicity contract) and
+  `scripts/check/lib/bootstrap-authority-generation-publish.pl:74`
+  (`mklink //J` on the fresh-publish path, junction-verified before rename).
+  The remaining `winsymlinks:nativestrict` wrapper no longer reaches a
+  `symlink()` call on Windows, matching the resolution's claim.
+
+No code change needed; the phase-1 publish lane no longer depends on
+SeCreateSymbolicLinkPrivilege. Recovery-marker handling from this record
+remains documented in authority.shs for the next run.

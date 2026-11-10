@@ -46,3 +46,10 @@ list the spec asserts — i.e. the "route through an owner / retire stale spec
 lines" unblock condition is satisfied and the spec is the authority.
 Neighbours green: host_io_topology 4/4, convert 1/1, temp_dir_creation 2/2,
 system_location 7/7, platform_path_owner 2/2. No source change in this closure.
+
+## 2026-11-10 re-verification (lane p3-runner3, row 16): SUPERSEDED (closed)
+
+Re-verified with the worktree seed-smoke binary (bin/simple.exe, v1.0.0-rc.1,
+`--mode=interpreter`): `test/01_unit/lib/nogc_sync_mut/env_platform_process_owner_spec.spl`
+passes 1/1 (`outcome=OK`). Confirms the 2026-11-09 p3-subj7 closure; no source
+change in this closure.

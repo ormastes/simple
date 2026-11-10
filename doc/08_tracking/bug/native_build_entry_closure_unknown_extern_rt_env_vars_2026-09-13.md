@@ -73,3 +73,21 @@ analysis: `unknown extern function: rt_env_vars` no longer appears in any log.
 Both builds now AV during MIR (`phase=mir done=0`, in a child worker; lldb on the
 main process never stops), which is the s3_fable44 F3 AV
 (`native_trait_owner_for_type+0x202e`) fixed by PR #6933 — a separate defect.
+
+## 2026-11-10 status — SUPERSEDED (P3 library lane, work/p3-lib-20261110)
+
+The record's own 2026-11-05 addendum already closed this as outdated (W3b):
+stage3 `native-build --entry-closure` of entries using
+`use std.io.env_ops.{env_vars}` passes semantic analysis — `unknown extern
+function: rt_env_vars` no longer appears. The remaining MIR-phase AV is a
+separate defect fixed by PR #6933. No contrary evidence found on this lane's
+base; premise stale.
+
+## 2026-11-10 status — SUPERSEDED (P3 bootstrap lane row 41, work/p3-boot6-20261110)
+
+Corroborates the library-lane note above. Verified on this lane's base
+(`4343ce254922`): merge `37a5739f0c17` (PR #6933,
+`work/nto-hirtype-payload`) is an ancestor, so the MIR-phase AV named in the
+2026-11-05 addendum is fixed in-tree; the record's own W3b addendum already
+recorded `unknown extern function: rt_env_vars` gone from every log shape
+tried. Premise stale; no contrary evidence found; no code change.

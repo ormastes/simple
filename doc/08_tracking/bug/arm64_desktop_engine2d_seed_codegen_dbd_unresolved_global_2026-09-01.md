@@ -126,3 +126,16 @@ bodies, it is a different defect and should be filed with its current output.
 Status: **closed** (stale premise, evidence above). No seed change was made or
 needed; changing the seed to resolve bare fields would have BROKEN parity with
 the self-hosted compiler and the recorded contract.
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **SUPERSEDED (closed 2026-11-09 closure confirmed)**. Closure evidence
+verified present in this worktree (base `origin/release/1.0.0`,
+1504212d788b): `test/01_unit/bugs/dbd_implicit_self_read_and_imported_static_call_spec.spl`
+and `test/01_unit/bugs/dbd_transaction_owner_shape_helper.spl` both exist; the
+source fix (`self.provider.configured`, landed with 711c590347f) is the recorded
+contract direction (hard error on bare field read, pinned on both engines by
+`scripts/check/check-implicit-self-field-assignment.shs`). No seed change made
+or needed; a bare-field-resolving seed would break parity with the self-hosted
+compiler. The full arm64 media phase re-run remains a Linux/QEMU-lane item per
+the closure note.

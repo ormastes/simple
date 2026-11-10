@@ -1,6 +1,6 @@
 # `origin/main` is not test-runnable: `src/app/io/env_access_host.spl` fails to parse (2026-08-25)
 
-**Status:** OPEN. **Not caused by the GPU hardening landing** (`8a291217121`) — reproduced on a
+**Status:** SUPERSEDED. **Not caused by the GPU hardening landing** (`8a291217121`) — reproduced on a
 clean worktree of `origin/main` with two independent binaries, including one that predates it.
 
 ## Symptom
@@ -79,3 +79,27 @@ Verified on `origin/main` at `c2504144e5a` after the fix in `a8a32ebccad`:
 `PASS — 1 fixture invocation executed ... tree is test-runnable`.
 
 Status: the original defect is FIXED (`a8a32ebccad`) and the class is now guarded.
+
+## 2026-11-10 status — SUPERSEDED (P3 library lane, work/p3-lib-20261110)
+
+Re-verified on this lane's base (origin/release/1.0.0, which contains
+`a8a32ebccad`): the env_access_host.spl parse failure does not reproduce. The
+guard fixture `test/fixtures/doctest/green.md` was executed with the deployed
+seed from a clean lane worktree — the run compiled and progressed past parsing
+to runtime stages (it stops on a Windows-seed-only gap: `unknown extern
+function: rt_io_file_open_read`, a seed registration gap unrelated to this
+record). The parse regression is fixed and guarded as the record states.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Re-verified with this lane's refreshed seed (bin/simple.exe, build-commit
+`0791c2b7f4a7`, seed-smoke): `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe
+$PWD/bin/simple.exe test test/fixtures/doctest/green.md --mode=interpreter
+--no-cache` → full `PASS (1 passed, 0 skipped, 83ms)`, rc=0 — no parse
+failure at `env_access_host.spl`, and no Windows-seed extern stop either
+(the 2026-11-10 lane stopped at `rt_io_file_open_read`; the 2026-11-11
+seed completes the doctest). Original defect fixed in `a8a32ebccad`
+(ancestor of this base); guard `check-main-test-runnable-push.shs`
+remains the class gate. Env-facade lens: the failure class was
+parse-level, not a raw env read; the guarded invariant is the committed
+tree staying test-runnable.

@@ -1,7 +1,7 @@
 # Stage 3 coordinator route is unusable on a cold checkout: its own remedy cannot reach the child
 
 - **Filed:** 2026-09-14
-- **Status:** OPEN
+- **Status:** SUPERSEDED
 - **Tree:** `origin/main` `4f4d0e12832`
 
 ## Symptom
@@ -42,3 +42,42 @@ Two candidate fixes — adding the variable to the forwarded allowlist, or havin
 the script cold-initialise the journal itself when it is missing — are both
 behaviour changes to an admission-bearing script and were not made
 speculatively. Measured on macOS arm64 (`hw.ncpu=10`), F74 round 3.
+
+
+## Triage 2026-11-10 (p3-lib2 lane, work/p3-lib2-20261110)
+
+**Verdict: SUPERSEDED — finding 1 (remedy unreachable) fixed in
+`scripts/bootstrap/resume-stage3-from-admitted.sh`; finding 2 (fallback never
+engaged) superseded by the route redesign. PR #7597, 2026-11-07.**
+
+- Finding 1: the script now implements the doc's first candidate fix as a
+  deliberate, single-variable pass-through (lines 931-976): the operator's
+  `SIMPLE_SCV_INVENTORY_COLD_INIT` is validated to be exactly `1`, baked into
+  the Stage 3 args hash (line 1003), and forwarded into all four `env -i` child
+  invocations (lines 1041, 1054, 1082, 1091). The comment block cites this
+  bug's exact F74 symptom ("identical SCV-E-ADMISSION ... with the variable
+  set"). `sh -n` clean.
+- Finding 2: the `requested_route=coordinator / fallback_route=direct` pair the
+  doc observed no longer drives routing — the Stage 3 build path was
+  redesigned (user policy 2026-11-05) to a per-file worker-pool coordinator
+  (`src/app/cli/bootstrap_main.spl:284 run_bootstrap_native_build_coordinator`,
+  positional route at 593-606). The coordinator "owns process/cache sharding,
+  failure fallback, and MemAvailable fanout clamping" (bootstrap_main.spl:570);
+  the env pair is still recorded on receipts for lineage only.
+- Host-limit: a full cold-checkout Stage 3 coordinator run is not executable in
+  this lane (no admitted Stage 2 + self-hosted binary chain on this Windows
+  host); the script-level forwarding and the driver-side route ownership are
+  the verified evidence.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Re-verified the script-level evidence on this base: finding 1 stays fixed —
+`scripts/bootstrap/resume-stage3-from-admitted.sh` validates the operator's
+`SIMPLE_SCV_INVENTORY_COLD_INIT` to be unset or exactly `1` (lines
+972-975) and forwards it into env -i child invocations (recorded-cold-init
+forwarding token present at :585). `sh -n` clean. Env-facade lens: the
+pass-through is a deliberate, validated single-variable forward into env -i
+children — not a raw env read in app/lib leaf code. Finding 2 stays
+superseded by the worker-pool coordinator redesign. Host-limit unchanged: a
+full cold-checkout Stage 3 coordinator run needs the admitted Stage 2 +
+self-hosted chain (not on this Windows host); no new executed evidence.

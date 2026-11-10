@@ -1,6 +1,6 @@
 # Tier-less `use std.js.*` resolves to `src/lib/js/`, never to the importer's own tier
 
-Status: PARTIALLY FIXED (common/js/** made tier-explicit; other trees still exposed)
+Status: SUPERSEDED (common/js/** made tier-explicit; other trees still exposed)
 Date: 2026-08-01
 Related: `tierless_std_import_ambiguity_resolves_by_registration_order_2026-07-29.md`
 Related: `js_value_symbol_variant_alien_to_nogc_js_engines_2026-08-01.md` (commit `fde7f791f5b`)
@@ -152,3 +152,53 @@ Ratchet gate scripts/check/check-tierless-std-js-imports.shs (common/js <= 1, tr
 
 
 Round 15 update: tier decision made (own tier first, common fallback); 156 imports rewritten in gc_async_mut and nogc_async_mut; ratchet check-tierless-std-js-imports.shs at 141 total, buffer_module the one tier-less exception.
+
+
+## Triage 2026-11-10 (p3-lib2 lane, work/p3-lib2-20261110)
+
+**Verdict: LIVE REGRESSION on the base -> FIXED in commit 6fe5a8af577f
+(work/p3-lib2-20261110).**
+
+The round-15 ratchet
+(`scripts/check/check-tierless-std-js-imports.shs`, wired into
+`config/check/must_check_gates.sdn`) regressed to FAIL on the
+origin/release/1.0.0 base: **5 tier-less `use std.js.*` lines under
+gc_async_mut (allowed 1)** and tree total 145 > baseline 141. Four of the five
+were new `std.js.engine.runtime` imports in the browser-engine files; the fifth
+is the sanctioned root-only `std.js.node.buffer_module`.
+
+Fix (import lines only, per this bug's own methodology — zero change to which
+modules load or which constant values bind):
+
+- `gc_async_mut/gpu/browser_engine/script/script_runner.spl`
+- `gc_async_mut/web/browser_session.spl`
+- `gc_async_mut/web/browser_session_runtime.spl`
+- `gc_async_mut/web/browser_session_storage.spl`
+
+each rewrote `use std.js.engine.runtime.{...}` ->
+`use std.nogc_sync_mut.js.engine.runtime.{...}`, the exact module the tier
+fallback was already loading (the tier order reaches nogc_sync_mut before
+common; `class JsRuntime` and all 22 of the imported NATIVE_* ids that common
+does NOT own exist only in the nogc_sync_mut full runtime —
+`common/js/engine/runtime.spl` is the pure-constants tier and would have left
+those 22 unresolved).
+
+Evidence: ratchet FAIL(5>1, 145>141) -> **PASS(141=baseline, common/js=1)**.
+All 4 files re-checked with the worktree seed: no E1002/use-warning; `simple
+check` on them stops only at the environmental "no admitted cached self-hosted
+check worker artifact" gap (identical rc=1 on an untouched control file).
+
+Remaining exposure unchanged from round 15: ~test/** tier-less spec imports and
+the `std.js.node.buffer_module` exception stay as recorded; the conformance
+runner home decision is still open.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Verify-only row: claim was PR #8159. **Claim holds.** Merge `28a2398780db`
+is an ancestor of this base, and the ground-truth ratchet passes on this
+lane's tree at `790b54f7c4fc`: `sh scripts/check/check-tierless-std-js-imports.shs`
+→ `PASS — 141 tier-less std.js import(s) checked, common/js=1, baseline 141`
+(the 2026-11-10 lane's FAIL was 5>1 gc_async_mut, 145>141; that lane's
+import rewrite plus the JsRuntime tier relocation `ca7a7b84b274` inside PR
+#8159 repointed the four browser-engine consumers, and the rewrite holds).
+No source change on this branch. Remaining exposure per round 15 unchanged.

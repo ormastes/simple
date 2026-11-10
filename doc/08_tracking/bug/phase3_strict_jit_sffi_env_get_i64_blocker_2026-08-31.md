@@ -1,6 +1,6 @@
 # Phase3 strict-JIT `sffi_env_get_i64` blocker
 
-Status: OPEN / release-blocking for the Phase3 core-C candidate.
+Status: SUPERSEDED / release-blocking for the Phase3 core-C candidate.
 
 ## Observed fact
 
@@ -76,3 +76,42 @@ The Phase3 candidate is not admissible: it produced no executable, so
 `--version`, `native-build --help`, and all downstream tests/tools are
 not admissible. No interpreter fallback, stub, alias provider, or candidate
 retry is acceptable as substitute evidence.
+
+
+## Triage 2026-11-10 (p3-lib2 lane, work/p3-lib2-20261110)
+
+**Verdict: SUPERSEDED — fixed on origin/release/1.0.0 base (PR #7597, 2026-11-07);
+the doc's acceptance condition is met in-tree.**
+
+- The flattened-alias loss boundary is proven and repaired by the SFFI alias
+  table: `sffi_alias_target("sffi_env_get_i64") == Some("rt_env_get_i64")`
+  (`compiler/src/codegen/instr/calls.rs:3856`, comment cites this exact import
+  alias). The remap is wired into JIT import resolution at
+  `codegen/jit.rs:492` (mirrored in `common_backend.rs:140`): a direct Call to
+  `sffi_env_get_i64` also requires the canonical `rt_env_get_i64` to resolve,
+  and `rt_env_get_i64` is registered (`common/src/runtime_symbols.rs:881`). A
+  synthetic bare `sffi_env_get_i64` provider was NOT added, per the doc.
+- Exact strict-JIT regression demanded by the doc exists and is asserted:
+  `codegen/jit_tests.rs::test_jit_sffi_env_i64_alias_uses_registered_runtime_provider`
+  (line 455) compiles the flattened `extern fn sffi_env_get_i64` module and runs
+  it (asserts `provider.get_symbol("sffi_env_get_i64").is_none()`, provider has
+  `rt_env_get_i64`, call returns the default 41). Complementary MIR-level
+  guard: `compiler/src/pipeline/native_project/tests.rs:601` proves the
+  flattened decl-arena graph calls `_sffi_env_get_i64` and never lists bare
+  `sffi_env_get_i64` in `mir.extern_fn_names`.
+- Host-limit note: cargo test execution of `compiler_rust` is outside this lane's
+  scope (agent-10 owns compiler_rust); the fix + both regression tests are
+  present and wired in the current tree.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Re-confirmed statically on this base (`790b54f7c4fc`): the doc's acceptance
+condition stays met in-tree. `sffi_alias_target("sffi_env_get_i64") ==
+Some("rt_env_get_i64")` at `codegen/instr/calls.rs:3856` (comment cites
+this exact import), wired into JIT import resolution at
+`codegen/jit.rs:492`; `rt_env_get_i64` registered at
+`common/src/runtime_symbols.rs:881`; the demanded strict-JIT regression
+`jit_tests.rs::test_jit_sffi_env_i64_alias_uses_registered_runtime_provider`
+present at :455. No synthetic bare provider added. Host-limit unchanged:
+cargo execution of compiler_rust belongs to the compiler_rust owner lane;
+this lane is not that owner and made no change.

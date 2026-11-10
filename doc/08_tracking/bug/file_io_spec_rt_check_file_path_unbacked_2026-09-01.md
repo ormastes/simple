@@ -78,3 +78,10 @@ SIMPLE_BINARY="$B" "$B" test test/01_unit/lib/std/file/file_io_spec.spl
 defect class is gone. `test/01_unit/lib/std/file/file_io_spec.spl` passes 4/4
 with the seed interpreter (`--mode=interpreter --clean`) on
 origin/release/1.0.0 (worktree @54181f128ea). No source change in this closure.
+
+## 2026-11-10 re-verification (lane p3-runner3, row 18): SUPERSEDED (closed)
+
+Re-verified with the worktree seed-smoke binary (bin/simple.exe, v1.0.0-rc.1,
+`--mode=interpreter`): `test/01_unit/lib/std/file/file_io_spec.spl` passes 4/4
+(`outcome=OK`). `rt_check_file_path` remains absent from the tree. Confirms the
+2026-11-09 p3-subj7 closure; no source change in this closure.

@@ -188,3 +188,27 @@ Compositor IPC method numbers are common protocol data rather than an
 entry-closure build compiled 271 modules and retained the identical 23-symbol
 set, so the remaining host blocker is tracked as compiler reachability rather
 than bypassed with runtime stubs.
+
+
+## Recovering a failed evidence archive
+
+The fullscreen wrapper preserves the previous canonical run until every existing
+artifact and its run metadata have been copied to a hidden `.pending-*` directory
+and that directory has been published under `BUILD_DIR/runs`. A copy, metadata,
+directory, or publication failure exits nonzero before canonical files are reset.
+Pruning also fails before reset if an old archive cannot be removed. Each
+completed PASS atomically updates `runs/.latest-pass`; later failed runs preserve
+that recorded archive even when older names sort later because of clock skew or
+same-second random names. Invalid completion records fail closed. Old archives
+without a completion record use filesystem modification times until a new PASS
+is archived.
+
+After `simpleos_wm_fullscreen_retention_failed`, correct the filesystem or space
+problem and retain the canonical evidence. Hidden `.pending-*` fragments are
+incomplete diagnostics, never published PASS runs; inspect or remove one only
+after confirming that no live wrapper owns it. Retry the wrapper with its
+original inputs when storage is usable.
+
+`sh scripts/check/check-wm-evidence-retention.shs` exercises archive failures and
+byte preservation without QEMU. A PASS from this check qualifies only retention,
+not guest rendering, a firmware boot, or a compiler.

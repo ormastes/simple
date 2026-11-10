@@ -195,3 +195,54 @@ calling it directly from Simple caused a segfault. That experiment was reverted.
 Safe retained fix: `_cli_driver_binary()` now returns `""` when `bin/simple`
 does not exist instead of returning a missing candidate path. This avoids a
 bad delegation target but does not close the Stage4 `-c` deploy gate.
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED (the row's defect).** Both missing ELF runtime resolver entries
+are present on base (`src/compiler_rust/compiler/src/elf_utils.rs`):
+`rt_cranelift_new_aot_module` at :852 (plus `rt_cranelift_new_aot_module_triple` :855 and
+the `spl_cranelift_*_v2` family :858-862) and `rt_cranelift_aot_define_function` at :893.
+
+Seed-smoke: `SIMPLE_NATIVE_BUILD_RUST=1 bin/simple.exe native-build --backend cranelift`
+on a two-module fixture compiled BOTH units with NO `unknown extern function:
+rt_cranelift_new_aot_module` error — the build reached the link phase, and neither
+Cranelift AOT extern appeared in the unresolved-symbol list.
+
+Environment note: the link itself cannot complete in this fresh worktree because no
+prebuilt runtime archive exists for `find_runtime_library()` to pick up (the 78
+`rt_*` runtime-support symbols are missing). That gap is a worktree provisioning issue,
+identical on the LLVM backend, not this row. The later deploy-gate items this doc records
+(Stage4 `-c` smoke) are separate tracked concerns outside the missing-extern defect.
+
+---
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 19)
+
+**Verdict: SUPERSEDED (named defect FIXED-AT-TIP; residual tracked elsewhere).**
+
+Source audit on the p3-boot3 worktree (base origin/release/1.0.0):
+
+- The original blocker — `error: semantic: unknown extern function:
+  rt_cranelift_new_aot_module` during the Stage 2 native build — is resolved:
+  the ELF runtime resolver maps `rt_cranelift_aot_define_function` to the real
+  `cranelift_sffi` function (`src/compiler_rust/compiler/src/elf_utils.rs:893`
+  in-tree) and the runtime bridge provides the implementations
+  (`src/runtime/runtime_cranelift_bridge_stub.c:68,483`).
+- The 2026-10-27 ledger triage round reached the same conclusion
+  (`doc/08_tracking/bug/triage_20261027/evidence_v3/lane00_accepted.md`,
+  accepted/source_reviewed): "The original missing AOT extern is now mapped to
+  the real cranelift_sffi function."
+- The doc's long tail (SIMPLE_BOOTSTRAP leakage, worker launcher,
+  SIMPLE_NATIVE_BUILD_RUST route, Stage 4 `-c` exit-248 smoke) is a sequence
+  of separate defects. The still-open Stage 4 full-CLI boundary is tracked by
+  the current authority bug
+  `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`
+  and the `stage4_full_cli_*` family, not by this row.
+
+No code change in this lane; no in-scope script owner remains for this row.
+ocs(bug): triage bootstrap_stage2_cranelift_aot_extern_missing_2026-07-01 row 19 — SUPERSEDED)

@@ -66,3 +66,11 @@ Live-device dispatch (RECORD drain + `0xCAFE0000` sentinel) still requires a
 re-run on a host with live CUDA devices (`SIMPLE_GPU_TEST=1
 SIMPLE_CUDA_TEST=1`) to close the record fully; everything a CUDA-less host
 can verify is green.
+
+## 2026-11-10 P3 triage (work/p3-interp2-20261110) — independently confirmed; verdict unchanged
+
+Second-lane re-run of `test test/03_system/gpu_lane/cuda_jit_hello_spec.spl`
+on the deployed Windows Rust seed (worktree `bin/simple.exe`, no CUDA
+device, no SIMPLE_CUDA_TEST): 14 total, 14 passed, 0 failed in ~8.7s —
+identical to the work/p3-interp-20261110 result. SUPERSEDED stands; only the
+live-device re-run on a CUDA host remains, with the owning GPU lane.

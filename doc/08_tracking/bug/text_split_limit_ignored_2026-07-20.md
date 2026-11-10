@@ -131,3 +131,26 @@ Fixture `build/review/fixtures/split_limit_probe.spl` (main() printing len check
   claim covers the interpreters only. `src/compiler_rust` is frozen for sibling P3 lanes, so
   no edit was made there; the seed-JIT owner should pick this up with the probe above as the
   reproducer.
+
+## 2026-11-10 P3 seedfix lane — seed-JIT LIMIT now honored (work/p3-seedfix-20261110)
+
+The "new finding" above (seed JIT ignores the split limit) is FIXED in
+src/compiler_rust. Root cause: the cranelift builtin-method tables mapped `split`
+unconditionally to `rt_string_split(string, delimiter)`, whose runtime never reads a
+limit; a two-arg call's limit was passed but dropped. The runtime already exposes
+`rt_string_split_limit(string, delimiter, limit: i64)` with bounded-splitn semantics
+matching the interpreter.
+
+Fix: arity-aware dispatch in both cranelift tables (mirroring the existing `substr`
+precedent) — `try_compile_builtin_method_call` (closures_structs.rs: "split" if
+args.len()==2) and the qualified-call table (calls.rs: "split" if args.len()>=3,
+args include the receiver). Commits 989a41515461 (fix) + 1b27c3582d76 (test).
+
+Verified on a fresh build (debug AND release, SIMPLE_JIT_STRICT=1):
+`"a:b:c".split(":", 2)` literal and variable-held, and `split(":", 1)` now yield
+2/2/1 with tail "b:c" on the JIT (was 3/3/3, tail "b"). 1-arg split still
+full-splits; empty-separator limit matches the interpreter; interpreter spec
+nested_string_split_spec 5/5 PASS. Regression test:
+`cargo test -p simple-compiler --lib shared_method_static_split` (2 passed).
+The pure-Simple MIR fix in method_calls_literals.spl is unaffected (the seed never
+executes it). Evidence: build/review/p3fix-seedfix-20261110.sdn.

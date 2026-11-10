@@ -253,6 +253,11 @@ fn _shim_keepalive() -> u64:
     total = total + (spl_handle_uname as u64)
     total
 
+# A module slot keeps a real native relocation to the address graph. Boot
+# stores the function value without executing native-only pointer arithmetic.
+# An unused local reference can be discarded by optimization instead.
+var _g_shim_keepalive: fn() -> u64 = _shim_keepalive
+
 @export("C", name: "shim_init")
 fn shim_init(sched: Scheduler, ipc: IpcManager, klog: KernelLog):
     """Boot-time initializer.  Call once before any SYSCALL can arrive."""
@@ -260,9 +265,9 @@ fn shim_init(sched: Scheduler, ipc: IpcManager, klog: KernelLog):
     g_shim_ipc = ipc
     g_shim_klog = klog
     shim_positioned_reset_v1()
-    # Keep the keepalive reference alive under DCE. The compiler treats
-    # the assignment's RHS as used even if we ignore the result.
-    val _keepalive = _shim_keepalive()
+    # Retain the exported providers without invoking their address graph.
+    # Interpreter initialization must not cast function values to integers.
+    _g_shim_keepalive = _shim_keepalive
 
 pub(package) fn shim_server_startup_runtime_owner_enable_v1():
     g_shim_server_startup_runtime_owner_available_v1 = true

@@ -109,3 +109,15 @@ The admissible artifact is therefore specifically a **Stage 4 full CLI**
 target `cli`), which is exactly the artifact
 `scripts/check/admit-simpleos-arm64-server-compiler.shs` exists to admit and
 which CLAUDE.md records as not currently deployed anywhere.
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **STALE-BLOCKED (by design — not a seed code defect)**. Re-read against
+`origin/release/1.0.0` at 1504212d788b; nothing in the record contradicts the
+doc's own Finding 2: the attested builder's version/path filters are the guard
+working correctly and "must not be weakened". No change in `src/compiler_rust`
+can make a Rust seed admissible — the remaining work is producing/admitting a
+pure-Simple Stage 4 full CLI (`scripts/check/admit-simpleos-arm64-server-compiler.shs`),
+an infrastructure pipeline task outside this lane. Evidence: host-limited review;
+guard scripts unchanged and behaving as documented. No code change made; the
+open "Remaining blocker" section stands as the tracking item.

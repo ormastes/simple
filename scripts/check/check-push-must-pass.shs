@@ -1395,10 +1395,15 @@ rebased_push_published_base() {
     done <<REBASED_LINES
 $_rebased_lines
 REBASED_LINES
-    if [ -z "$_rebased_best" ]; then
-        [ -z "$_rebased_missing" ] || echo "push-must-check: remote has newer$_rebased_missing than this clone has fetched; run git fetch first" >&2
+    # An unavailable advertised line might be the closest base. Returning a
+    # different candidate here silently charges its upstream changes to this
+    # push, even though the on-demand fetch just failed. Refuse the incomplete
+    # comparison instead of treating the missing line as unrelated history.
+    if [ -n "$_rebased_missing" ]; then
+        echo "push-must-check: remote has newer$_rebased_missing than this clone has fetched; run git fetch first" >&2
         return 1
     fi
+    [ -n "$_rebased_best" ] || return 1
     printf '%s\n' "$_rebased_best"
 }
 
@@ -1488,10 +1493,9 @@ new_ref_published_base() {
 }
 
 # Closest published protected line for a new ref without a usable release
-# upstream; falls back to the historical origin/main merge-base.
+# upstream. A local tracking ref cannot override failed live authority.
 new_ref_closest_published_base() {
-    rebased_push_published_base "$1" && return 0
-    git -C "$ROOT" merge-base "$1" origin/main
+    rebased_push_published_base "$1"
 }
 
 # The blocking budget needs GNU timeout(1). Absence is an ERROR naming the
@@ -1674,9 +1678,27 @@ if [ "${1:-}" = --self-test-release-base ]; then
         commit-tree "$_st_rel_prev^{tree}" -p "$_st_rel_prev") || exit 2
     git -C "$_st_dir/remote.git" update-ref refs/heads/release/1.0 "$_st_rel_remote" || exit 2
     git -C "$ROOT" rev-parse --verify --quiet "$_st_rel_remote^{commit}" >/dev/null && exit 2
+    # The advertised release object is genuinely absent. Inject only the
+    # transfer failure, keeping the live Git advertisement/merge-base path:
+    # neither an older main candidate nor the new-ref wrapper may mask it.
+    (
+        published_line_fetch() { return 1; }
+        if rebased_push_published_base "$_st_tip" >"$_st_dir/unfetched.out" 2>"$_st_dir/unfetched.err"; then
+            echo 'push-must-check: failed release fetch selected a stale base: FAIL' >&2; exit 2
+        fi
+        [ ! -s "$_st_dir/unfetched.out" ] || exit 2
+        grep -q 'run git fetch first' "$_st_dir/unfetched.err" || exit 2
+        if new_ref_closest_published_base "$_st_tip" >"$_st_dir/unfetched-new.out" 2>"$_st_dir/unfetched-new.err"; then
+            echo 'push-must-check: new-ref fallback masked failed release fetch: FAIL' >&2; exit 2
+        fi
+        [ ! -s "$_st_dir/unfetched-new.out" ] || exit 2
+        grep -q 'run git fetch first' "$_st_dir/unfetched-new.err" || exit 2
+    ) || exit 2
+    echo 'push-must-check: failed advertised release fetch refuses rebased and new-ref stale bases: PASS'
     [ "$(rebased_push_published_base "$_st_tip")" = "$_st_release_one" ] || {
         echo 'push-must-check: unfetched release tip fell back to a main base: FAIL' >&2; exit 2; }
     git -C "$ROOT" rev-parse --verify --quiet "$_st_rel_remote^{commit}" >/dev/null || exit 2
+    [ "$(new_ref_closest_published_base "$_st_tip")" = "$_st_release_one" ] || exit 2
     git -C "$_st_dir/remote.git" update-ref refs/heads/release/1.0 "$_st_rel_prev" || exit 2
     echo 'push-must-check: unfetched advanced release is fetched and stays the base (not main): PASS'
 

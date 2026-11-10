@@ -51,7 +51,7 @@ linking, not an isolated function. Cross-referenced verification against
   from the production `link_llvm_native` body" and "Provider composition, TODO
   535" remains incomplete.
 
-**Status:** PARTIALLY-FIXED. Sub-issue (a) resolved; sub-issue (b) remains
+**Status:** SUPERSEDED. Sub-issue (a) resolved; sub-issue (b) remains
 explicit open TODO per cross-referenced doc.
 
 ## 2026-11-10 status — P3 runtime-lane triage (worktree simple-p3-rt-20261110)
@@ -77,3 +77,45 @@ its canonical owner" note), which the 2026-09-01 bug tracks. No `src/runtime`
 change made; nothing further actionable in this lane. Execution label:
 host-independent-source (presence verified by source audit at a pinned base).
 
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 21)
+
+**Verdict: SUPERSEDED — corroborated independently.**
+
+The same-day runtime-lane triage above stands. Re-verified at this lane's
+base (origin/release/1.0.0, worktree simple-p3-boot3-20261110):
+
+- The superseding tracker
+  `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`
+  exists.
+- All three sub-issue-(b) providers are live at the cited lines:
+  `rt_array_concat` `src/runtime/runtime_native.c:11122`,
+  `spl_dlsym` `:11370`, `spl_wffi_call_i64` `:11421`. No `src/runtime` gap
+  on this side of the Stage-4 link boundary.
+
+No change made in this lane; the Stage-4 linker/provider-composition boundary
+remains with the compiler/native_project lane under the 2026-09-01 tracker.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: SUPERSEDED-by-prior-lane** — spot-check corroborates the
+2026-11-10 p3-rt addendum (and its same-day p3-boot3 corroboration); no deep
+triage redone.
+
+Spot-check at this lane's base (origin/release/1.0.0 tip 790b54f7c4fc):
+
+- All three sub-issue-(b) providers still live at the exact cited lines of
+  `src/runtime/runtime_native.c`: `rt_array_concat` (:11122),
+  `spl_dlsym` (:11370), `spl_wffi_call_i64` (:11421). No `src/runtime` gap
+  on this side of the Stage-4 link boundary.
+- Superseding tracker
+  `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`
+  present in the tree.
+- Prior-lane base 1504212d788b is an ancestor of this base, so the cited
+  fix state is not newer than what was triaged.
+- seed-smoke (refreshed seed 0791c2b7f4a7): `bin/simple.exe --version`
+  exit 0, v1.0.0-rc.1 — seed healthy for this lane's runs.
+
+Nothing actionable in the `src/runtime` lane; the Stage-4 linker/provider
+boundary stays with the compiler/native_project lane under the 2026-09-01
+tracker. No change made.

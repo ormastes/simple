@@ -1,0 +1,27 @@
+# @req shim_init_keepalive_function_ptr_cast_breaks_interpreter_2026-08-06
+use std.spec.{describe, it, expect}
+use os.kernel.abi.syscall_shim.{shim_init, g_shim_klog}
+use os.kernel.abi.syscall_shim_process.{spl_handle_getpid}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+
+describe "Syscall shim boot initialization":
+    """Initialize the actual kernel shim without executing its native address
+    retention graph. The installed log size makes a no-op initializer fail."""
+
+    it "installs supplied boot state without evaluating function address casts":
+        val scheduler = Scheduler.new()
+        val expected_pid = scheduler.get_current().id.to_i64()
+        shim_init(scheduler, IpcManager.new(), KernelLog.new(7))
+        expect(g_shim_klog.capacity).to_equal(7u64)
+        expect(g_shim_klog.entries.len()).to_equal(7)
+        expect(spl_handle_getpid(0, 0, 0, 0, 0, 0)).to_equal(expected_pid)
+
+    it "replaces a previous boot log through the same real initializer":
+        shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(5))
+        expect(g_shim_klog.capacity).to_equal(5u64)
+        shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(19))
+        expect(g_shim_klog.capacity).to_equal(19u64)
+        expect(g_shim_klog.entries.len()).to_equal(19)
+        expect(g_shim_klog.total_written).to_equal(0u64)

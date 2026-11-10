@@ -1,7 +1,7 @@
 # riscv64 in-guest Simple interpreter blocked on 43 missing baremetal `rt_*` symbols
 
 Date: 2026-08-31
-Status: OPEN — lane landed, honestly RED (gate exits 2, `ERROR — nothing was checked`)
+Status: SUPERSEDED — lane landed, honestly RED (gate exits 2, `ERROR — nothing was checked`)
 Base: `fix/simpleos-riscv64-components` (PR #179, `ed610b469e2`)
 Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`
 
@@ -412,3 +412,33 @@ in this section reproduce the list exactly.
 
 The NEW 35-symbol link blocker is tracked as its own record:
 `riscv64_in_guest_kernel_link_blocked_35_symbols_2026-11-05.md` (P2, open).
+
+---
+
+# P3 TRIAGE ADDENDUM (2026-11-11, lane boot8) — SUPERSEDED
+
+Verdict: **SUPERSEDED — the 43-symbol blocker this record was opened for is CLOSED and verified fixed at tip; the lane's current RED is a different, separately-tracked defect.**
+
+This doc's 2026-11-05 "RE-VERIFIED at tip" section already established: all 43
+symbols in `riscv64_interpreter_missing_rt_symbols_2026-08-31.txt` have real
+definitions in `arch/riscv64/boot/baremetal_runtime_core.inc.c` (strong, >8
+bytes, no weak-nil stubs) and a real interp-row kernel build's link contains
+none of the original 43. This lane spot-checked at `work/p3-boot8-20261111` HEAD
+(`7d4140c1a6b3`):
+
+- Source: a definition-scan over `baremetal_runtime_core.inc.c` confirms the
+  sampled set across every bucket is present — file (`rt_file_exists`),
+  diagnostics/print (`rt_print_value`, `rt_panic`, `rt_unwrap_or_trap`,
+  `rt_platform_name`, ...), dict (`rt_dict_new/keys/values/contains`),
+  transient heap, env (`rt_env_get/get_i64/set/remove`), array/collection
+  (`rt_array_copy`, `rt_push/pop/clear/sort/index_of`,
+  `rt_collection_remove`), value/convert (`rt_value_as_int/float`,
+  `rt_value_float`, `rt_string_to_float`, `rt_raw_i64_to_string`), and time
+  (`rt_time_now_unix_micros`, `rt_time_now_monotonic_ms`). No absent symbol.
+
+Host-limit note: a fresh in-guest link/boot is not possible on this Windows
+host; verification here is source definition-scan. The real-build link proof
+stands from the cited 2026-11-05 section. This record's blocker is closed; the
+NEW 35-symbol link blocker is tracked separately as
+`riscv64_in_guest_kernel_link_blocked_35_symbols_2026-11-05.md` (P2, open) and is
+out of this record's scope.

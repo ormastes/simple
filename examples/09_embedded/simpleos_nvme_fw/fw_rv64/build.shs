@@ -279,7 +279,31 @@ done:
     j       1b
 EOF_START
 
-if ! riscv64-unknown-elf-gcc -march=rv64imafdc -mabi=lp64d -c "$START_ASM" -o "$START_OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
+# Match the RV32 wrapper: LLVM-only hosts can assemble the real start stub
+# without installing a GCC cross toolchain. Keep an installed GCC preferred.
+RV64_CC=""
+RV64_CC_TARGET=""
+if command -v riscv64-unknown-elf-gcc >/dev/null 2>&1; then
+  RV64_CC="riscv64-unknown-elf-gcc"
+elif [ -n "${NVME_RV64_CROSS_CLANG:-}" ]; then
+  RV64_CC="$NVME_RV64_CROSS_CLANG"
+  RV64_CC_TARGET="--target=riscv64-unknown-elf"
+else
+  for cand in clang clang-18 clang-17 clang-16 clang-15 clang-14 clang-13 clang-12; do
+    if command -v "$cand" >/dev/null 2>&1 \
+      && printf 'int _rv64_probe;\n' | "$cand" --target=riscv64-unknown-elf -march=rv64imafdc -mabi=lp64d -c -x c - -o /dev/null >/dev/null 2>&1; then
+      RV64_CC="$cand"
+      RV64_CC_TARGET="--target=riscv64-unknown-elf"
+      break
+    fi
+  done
+fi
+if [ -z "$RV64_CC" ]; then
+  echo "NVME_RV64_BUILD_FAILED no-rv64-cross-assembler: install riscv64-unknown-elf-gcc or set NVME_RV64_CROSS_CLANG to a clang with RISC-V support" >&2
+  exit 2
+fi
+echo "start_assembler=$RV64_CC target_flags=$RV64_CC_TARGET" >>"$OUT_LOG"
+if ! "$RV64_CC" $RV64_CC_TARGET -march=rv64imafdc -mabi=lp64d -c "$START_ASM" -o "$START_OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
   echo "NVME_RV64_BUILD_FAILED start-stub out=$OUT_LOG err=$ERR_LOG" >&2
   tail -n 40 "$ERR_LOG" >&2 || true
   exit 1

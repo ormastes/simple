@@ -64,3 +64,17 @@ composition root deterministically shadows the in-tree stub for the K1
 selected-module path (or the stub needs to be produced by a pre-pass that the
 gate can verify). Until then, receipts carry `stub-fallback` and the runtime
 `install_selected_k1_backend_table_v1()` keeps returning `false`.
+
+## 2026-11-10 P3-boot5 triage (row 34) — SUPERSEDED
+
+Premise outdated. The stub now lives at
+`src/compiler/80.driver/bootstrap_k1_selected.spl` (894-byte fail-closed stub;
+the old `src/compiler/driver/` logical path no longer exists as a directory),
+and the composition-shadowing mechanism was fixed by `21bbc08f73a`
+(source_root_resolution: selected composition roots win over numbered layers),
+ancestor of HEAD. The gate (`scripts/bootstrap/write-k1-composition-receipt.shs`
+:395-425) keys binding on the scanned content length under either spelling and
+uniqueness-checks the selection witness. Corroborates bugdb close
+`1591de5a5e58` (2026-11-09). seed-smoke (worktree seed bin/simple.exe,
+2026-11-10): `test/01_unit/compiler/driver/source_root_composition_precedence_spec.spl`
+--mode=interpret -> "All tests passed!".

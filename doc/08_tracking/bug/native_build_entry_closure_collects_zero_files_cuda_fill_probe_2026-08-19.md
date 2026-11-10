@@ -38,3 +38,18 @@ and `check-cuda-dlopen-fallback.shs` PASSes.
 ## Next step
 Debug the entry-closure collector in the native-build path (seed CLI) or
 regenerate the probe with a stage binary once bootstrap redeploy is unblocked.
+
+## 2026-11-10 P3-boot5 triage (row 39) — SUPERSEDED
+
+Premise outdated, corroborating the bugdb close already recorded in
+`doc/08_tracking/bug/db/native_build_entry_closure_collects_zero_files_cuda_fill_probe_2026-08-19.sdn`
+(2026-11-09). The recorded error text is gone: the collector's message at
+`src/compiler/80.driver/driver_source_pipeline_loading.spl:1004` now reads
+"collected zero source files: the entry must be a path to a .spl file ... not a
+module path ..., and the path is resolved relative to the current working
+directory" — directly answering this record's complaint that the diagnosis was
+wrong (message rewrite landed via PR #7597 merge `9e7e7a526edb`, 2026-11-07).
+Per the 2026-11-09 note, the documented recipe now passes entry collection on
+seed and proceeds to an unrelated parse error. A full re-run of the CUDA probe
+recipe is host-heavy (Linux CUDA host) and was not repeated from this Windows
+lane.

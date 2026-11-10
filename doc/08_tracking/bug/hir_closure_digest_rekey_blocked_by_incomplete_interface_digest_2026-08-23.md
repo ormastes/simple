@@ -238,3 +238,47 @@ that must trigger fallback.
 **Status: still OPEN.** The closure digest remains keyed on `content_hash`
 and its guard row is untouched.
 
+
+---
+
+## Addendum 2026-11-11 — lane compiler2 — verdict LIVE (deliberate deferral; NOT a batch-lane fix)
+
+Triage-first pass, batch 2. The re-key has **not** landed; the premise still
+holds on the refreshed seed (build-commit 0791c2b7f4a7).
+
+**Current source confirms still content-keyed.** `hir_cache_closure_digest`
+(`src/compiler/80.driver/driver_hir_cache.spl:198-209`) still folds each
+surface's raw `content_hash` / `content_length` into the closure digest (line
+206). A comment/body edit anywhere in the closure still invalidates every HIR
+cache entry — the 0%-by-construction incremental hit rate this doc describes
+persists. A `hir_cache_surface_neutral_token` / `pp_marker_strip` normalization
+(driver_hir_cache.spl:152-160) now neutralizes preprocessing-marker differences,
+but it is still content-based, not interface-based; it does not change the
+premise.
+
+**The Update-2 prerequisite is no longer in the tree.**
+`src/compiler/80.driver/cache/surface_type_encode.spl` is absent from HEAD
+(`find src/compiler -iname '*surface_type_encode*'` -> nothing), and the
+documented guard row `interface-digest-differential` is no longer present in
+`scripts/check/check-perf-regression-tests.shs`. Either the encoder work was not
+merged to this line or was later removed; the re-key itself is in neither case
+present. (Not independently re-derived beyond these checks.)
+
+**Seed-smoke:** the tied differential spec
+`test/01_unit/compiler/driver/interface_digest_differential_spec.spl`
+(interpreter, `--no-cache`) -> `outcome=OK, passed=12/12`: the textual
+interface-digest extractor behavior is unchanged and pinned. Evidence log:
+`build/review/p3c2-ifacedigest-seedsmoke.log`.
+
+**Why no fix was attempted (0 cycles).** This is a deliberate
+correctness-before-speed deferral, and the doc is explicit that a partially
+validated re-key "produces a silently stale compiler binary, which is strictly
+worse than the 0% hit rate it would replace." Doing it correctly requires a new
+lossless `ModuleSurface` encoder (every field encoded or a per-surface
+fail-closed fallback), verified `imports`/`exports`/`assoc_types` projections,
+sorted `impl.methods` keys, trait-default-body and enum-variant-default
+fallbacks, folded through `action_key.interface_digest_of`, plus differential
+rows. That is a large, high-risk compiler change belonging to a dedicated owner
+lane with full differential proof — not a P3-essential batch lane. Recommended
+routing: owner compiler/cache lane; keep the closure digest keyed on
+`content_hash` until the encoder + differential proof exist.

@@ -5,7 +5,7 @@
   `src/compiler_rust/compiler/src/pipeline/module_loader.rs` (hint printer)
 - **Severity:** medium — not a correctness bug, but it buries every real
   diagnostic and costs ~16% of a short interpreted run.
-- **Status:** OPEN. Found while root-causing the 2D × headless showcase cell
+- **Status:** SUPERSEDED. Found while root-causing the 2D × headless showcase cell
   (see `engine2d_load_font_interpreter_3kb_per_sec_2026-07-25.md`).
 
 ## What happens
@@ -109,3 +109,33 @@ bin/simple run <any .spl importing std.gpu.engine2d.engine>   # ~150k lines
 # quiet + ~16% faster
 SIMPLE_NO_DEPRECATED_WARNINGS=1 bin/simple run <same file>    # 7 lines
 ```
+
+
+## Triage 2026-11-10 (p3-lib2 lane, work/p3-lib2-20261110)
+
+**Verdict: SUPERSEDED — both defects fixed on origin/release/1.0.0 base (PR #7597,
+2026-11-07).**
+
+- `CommonMistake::PythonSelf` no longer exists anywhere under `src/compiler_rust/`
+  (grep: 0 matches). The variant was replaced by `ExplicitSelf`
+  ("(self) parameter when implicit", `parser/src/error_recovery.rs:50`), which is
+  never emitted by `detect_common_mistake` — it exists only to describe the
+  `fn f(self)` parameter shape the doc said the heuristic should be restricted to.
+  No detector fires on `self.<ident>` field access at all.
+- The O(hints x lines) printer is fixed: `display_parser_hints`
+  (`compiler/src/pipeline/module_loader.rs:982`) now indexes source lines once
+  ("Index the source lines ONCE. `source.lines().nth(n)` re-walks the file").
+- Seed-smoke on the worktree seed (`bin/simple.exe`, built 2026-11-10): a class
+  probe exercising `self.n = self.n + 1` / `return self.n` compiles and runs
+  (rc=0, correct value) with **0** `Common mistake detected` lines. The ~11.5k
+  hint wall cannot reproduce.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Confirmed on this lane's refreshed seed (bin/simple.exe, build-commit
+`0791c2b7f4a7`, 2026-11-11). Seed-smoke probe
+(`build/review/probe_self_field_20261111.spl`): a class using
+`self.n = self.n + 1` and `return self.n` compiles and runs rc=0 with the
+correct value (`n=2`), and the run log contains **0**
+`Common mistake detected` lines (`grep -c` = 0). The PythonSelf hint wall
+stays absent from src/compiler_rust (PR #7597, merge `9e7e7a526edb`).

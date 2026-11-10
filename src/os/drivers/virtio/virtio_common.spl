@@ -6,7 +6,8 @@
 # VirtIO devices use virtqueues (ring buffers) for communication:
 #   Driver writes descriptors → Available ring → Device processes → Used ring → Driver
 
-use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
+use os.kernel.boot.mmio.{mmio_read16, mmio_write16, mmio_read32, mmio_write32}
+use os.kernel.boot.mmio_hardware.{mmio_memory_barrier}
 use os.kernel.types.memory_types.{PhysAddr}
 use os.kernel.memory.pmm.{pmm_alloc_pages}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
@@ -95,29 +96,42 @@ class Virtqueue:
 
 impl Virtqueue:
     static fn new(base: u64, num: i32) -> Virtqueue:
+        # Split rings require an aligned descriptor table and a power-of-two
+        # size no larger than 32768. An invalid queue remains empty.
+        val valid = base != 0u64 and (base & 15u64) == 0u64 and num > 0 and num <= 32768 and (num & (num - 1)) == 0
+        val count = if valid: num else: 0
         # Layout: descriptors | available ring | used ring
-        val desc_size = (num * 16).to_u64()             # 16 bytes per descriptor
-        val avail_size = (6 + 2 * num).to_u64()         # 2-byte header + indices
-        val used_size = (6 + 8 * num).to_u64()          # 2-byte header + (id, len) pairs
+        val desc_size = (count * 16).to_u64()          # 16 bytes per descriptor
+        val avail_size = (6 + 2 * count).to_u64()      # flags, idx, ring, used_event
+        val used_base = (base + desc_size + avail_size + 3u64) & 0xFFFFFFFFFFFFFFFCu64
 
         Virtqueue(
             base_addr: base,
-            num_descs: num,
+            num_descs: count,
             free_head: 0,
             last_used_idx: 0,
             desc_addr: base,
             avail_addr: base + desc_size,
-            used_addr: base + desc_size + avail_size
+            used_addr: used_base
         )
 
-    fn init_free_list():
+    me init_free_list():
         """Initialize descriptor free list (chain all descriptors)."""
-        var i: u16 = 0
-        while i < self.num_descs.to_u16() - 1:
-            # Set each descriptor's next to i+1
-            val desc_offset = self.desc_addr + (i * 16).to_u64()
-            mmio_write32(desc_offset + 14, (i + 1).to_u32())  # next field at offset 14
+        if self.num_descs <= 0:
+            return
+        self.free_head = 0u16
+        self.last_used_idx = 0u16
+        var i: i32 = 0
+        while i < self.num_descs:
+            # The final link is the out-of-range sentinel, including N=1.
+            # Widen before scaling: a u16 byte offset wraps above 4096 slots.
+            val desc_offset = self.desc_addr + i.to_u64() * 16u64
+            mmio_write16(desc_offset + 14u64, (i + 1).to_u16())
             i = i + 1
+        mmio_write16(self.avail_addr, 0u16)
+        mmio_write16(self.avail_addr + 2u64, 0u16)
+        mmio_write16(self.used_addr, 0u16)
+        mmio_write16(self.used_addr + 2u64, 0u16)
 
     me alloc_desc() -> i32:
         """Allocate a free descriptor. Returns -1 if none available."""
@@ -125,27 +139,33 @@ impl Virtqueue:
             return -1
         val idx = self.free_head.to_i32()
         # Read next free from descriptor's next field
-        val desc_offset = self.desc_addr + (self.free_head * 16).to_u64()
-        val next = mmio_read32(desc_offset + 14).to_u16()
+        val desc_offset = self.desc_addr + self.free_head.to_u64() * 16u64
+        val next = mmio_read16(desc_offset + 14u64)
         self.free_head = next
         idx
 
     me free_desc(idx: u16):
         """Return descriptor to free list."""
-        val desc_offset = self.desc_addr + (idx * 16).to_u64()
-        mmio_write32(desc_offset + 14, self.free_head.to_u32())
+        if idx >= self.num_descs.to_u16():
+            return
+        val desc_offset = self.desc_addr + idx.to_u64() * 16u64
+        mmio_write16(desc_offset + 14u64, self.free_head)
         self.free_head = idx
 
     me push_avail(desc_idx: u16):
         """Add descriptor index to available ring."""
+        if self.num_descs <= 0 or desc_idx >= self.num_descs.to_u16():
+            return
         # Read current avail idx
         val avail_idx_addr = self.avail_addr + 2  # offset 2 = idx field
-        val avail_idx = mmio_read32(avail_idx_addr).to_u16()
+        val avail_idx = mmio_read16(avail_idx_addr)
         # Write descriptor index to ring
-        val ring_offset = self.avail_addr + 4 + (avail_idx % self.num_descs.to_u16() * 2).to_u64()
-        mmio_write32(ring_offset, desc_idx.to_u32())
-        # Increment avail idx
-        mmio_write32(avail_idx_addr, (avail_idx + 1).to_u32())
+        val ring_offset = self.avail_addr + 4u64 + (avail_idx % self.num_descs.to_u16()).to_u64() * 2u64
+        mmio_write16(ring_offset, desc_idx)
+        # Publish the descriptor and ring entry before making idx visible.
+        mmio_memory_barrier()
+        val next_idx = ((avail_idx.to_u32() + 1u32) & 0xFFFFu32).to_u16()
+        mmio_write16(avail_idx_addr, next_idx)
 
 # ============================================================================
 # VirtIO Device Initialization
@@ -217,6 +237,9 @@ impl VirtioDevice:
             return Result.Err("virtqueue 0 not available")
 
         val queue_size = if max_queue > VIRTQUEUE_SIZE.to_u32(): VIRTQUEUE_SIZE.to_u32() else: max_queue
+        if (queue_size & (queue_size - 1u32)) != 0u32:
+            self.write_reg(VIRTIO_MMIO_STATUS, VIRTIO_STATUS_FAILED)
+            return Result.Err("virtqueue size is not a power of two")
         self.write_reg(VIRTIO_MMIO_QUEUE_NUM, queue_size)
 
         # Allocate virtqueue memory from PMM (3 pages = 12KB for descriptors + rings)
@@ -229,6 +252,9 @@ impl VirtioDevice:
             # Use a reserved high-RAM scratch page range on QEMU virt.
             queue_base = 0x50000000
         self.queue = Virtqueue.new(queue_base, queue_size.to_i32())
+        if self.queue.num_descs == 0:
+            self.write_reg(VIRTIO_MMIO_STATUS, VIRTIO_STATUS_FAILED)
+            return Result.Err("invalid virtqueue memory alignment")
         self.queue.init_free_list()
 
         # Set queue addresses
@@ -251,4 +277,5 @@ impl VirtioDevice:
 
     fn notify_queue(queue_idx: u32):
         """Notify device that new buffers are available."""
+        mmio_memory_barrier()
         self.write_reg(VIRTIO_MMIO_QUEUE_NOTIFY, queue_idx)
