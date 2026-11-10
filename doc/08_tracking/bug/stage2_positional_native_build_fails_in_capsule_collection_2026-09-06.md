@@ -1,7 +1,7 @@
 # Stage-2 positional native-build fails in the capsule-collection checkpoint, silently
 
 - **Date:** 2026-09-06
-- **Status:** OPEN (diagnostics landed; producer defect not yet fixed)
+- **Status:** FIXED (2026-11-11, lane boot18) — producer fingerprint defect fixed (`from_file` now sha256 of raw bytes); receipt specs green on seed. See addendum below.
 - **Severity:** release-blocking — sole blocker to a completed bootstrap
 - **Area:** `src/compiler/80.driver/driver_aot_native_output.spl`, native AOT collect lane
 - **Host:** aarch64-unknown-linux-gnu
@@ -139,3 +139,28 @@ Rebuild a Stage 2 carrying these diagnostics and read the
 `native-capsule-*` line it now prints. That names the failing sub-check without
 guessing, which is the point — every hypothesis above that is not marked
 MEASURED is a hypothesis.
+
+
+## 2026-11-11 addendum (lane boot18, work/p3-boot18-20261111) — FIXED, verified on seed
+
+Verdict: FIXED. The producer fingerprint defect behind the silent
+capsule-collection failure is fixed in source:
+`src/compiler/80.driver/driver_build/incremental.spl:1040-1056`,
+`FileFingerprint.from_file` now hashes the raw file bytes with
+`rt_file_hash_sha256` instead of the text-read + `rt_hash_text` path that
+produced this doc's measured anomaly (`size=16`, `content_hash=241` — a decimal
+machine-word hash of the truncated ELF-header text read). The in-code comment
+states the reasoning verbatim ("rt_hash_text is a decimal machine-word hash and
+cannot authenticate a native capsule receipt"). The receipt is now written and
+validated from one sha256-of-bytes function, so the write-time/validate-time
+drift this doc chased is gone.
+
+Verification actually run (seed-smoke, `SIMPLE_LIB=src`, `--mode=interpreter
+--no-cache`):
+- `test/01_unit/compiler/driver/incremental_fingerprint_digest_admission_spec.spl`
+  **5/5 GREEN**.
+- `test/01_unit/compiler/driver/collection_native_receipt_spec.spl` **5/5 GREEN**.
+The diagnostic improvements this doc landed are also present in
+`driver_aot_native_output.spl` (`driver_native_capsule_result_reason_v1` naming
+the invariant, `_collect_failure` printing module/tag/detail bare, single
+evaluation of the receipt invariant per unit).

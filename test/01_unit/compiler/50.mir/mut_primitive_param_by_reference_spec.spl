@@ -1,0 +1,90 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR: `x: mut i64` is passed by reference
+
+Bug: mut_param_annotation_no_reference_propagation_2026-07-20
+
+`fn bump(x: mut i64): x = x + 1` must write through to the caller's local.
+HIR lowers `mut T` to Ref(T, true); MIR must then use a by-reference calling
+convention for primitives: the caller passes the local's address (MIR `Ref`),
+the callee loads the value on entry and stores it back before every return.
+Struct and array `mut` params keep their existing pointer path.
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val PRIM_SRC = "fn bump(x: mut i64):\n    x = x + 1\n\nfn main() -> i64:\n    var n = 41\n    bump(n)\n    n\n"
+val EARLY_SRC = "fn bump2(x: mut i64) -> i64:\n    if x > 0:\n        x = x + 1\n        return 1\n    x = 7\n    0\n\nfn main() -> i64:\n    var n = 41\n    bump2(n)\n    n\n"
+val PLAIN_SRC = "fn keep(x: i64) -> i64:\n    x + 1\n\nfn main() -> i64:\n    var n = 41\n    keep(n)\n    n\n"
+val STRUCT_SRC = "struct P:\n    v: i64\n\nfn sbump(p: mut P):\n    p.v = p.v + 1\n\nfn main() -> i64:\n    var p = P(v: 1)\n    sbump(p)\n    p.v\n"
+val ARRAY_SRC = "fn abump(xs: mut [i64]):\n    xs[0] = xs[0] + 1\n\nfn main() -> i64:\n    var xs = [1, 2]\n    abump(xs)\n    xs[0]\n"
+
+fn lower_src(src: text) -> MirModule:
+    val parsed = parse_full_frontend(src, "mut_prim_param_probe.spl", "mut_prim_param_probe", Logger(level: 0))
+    var hl = HirLowering.with_filename("mut_prim_param_probe.spl")
+    val hir = hl.lower_module(parsed)
+    var ml = MirLowering.new(hir.symbols)
+    ml.lower_module(hir)
+
+# Count instructions of one kind ("load", "store", "ref") in function `name`.
+fn count_kind(src: text, name: text, kind: text) -> i64:
+    val module = lower_src(src)
+    var count = 0
+    for entry in module.functions.values():
+        val f: MirFunction = entry
+        if f.name == name or f.name.ends_with("." + name):
+            for block in f.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.Load(_, _):
+                            if kind == "load": count = count + 1
+                        case MirInstKind.Store(_, _):
+                            if kind == "store": count = count + 1
+                        case MirInstKind.Ref(_, _, _):
+                            if kind == "ref": count = count + 1
+                        case _: ()
+    count
+
+# Number of Ret terminators in function `name`.
+fn count_returns(src: text, name: text) -> i64:
+    val module = lower_src(src)
+    var count = 0
+    for entry in module.functions.values():
+        val f: MirFunction = entry
+        if f.name == name or f.name.ends_with("." + name):
+            for block in f.blocks:
+                match block.terminator:
+                    case MirTerminator.Ret(_): count = count + 1
+                    case _: ()
+    count
+
+describe "MIR by-reference calling convention for `mut` primitive params":
+    it "caller passes the address of the local":
+        expect(count_kind(PRIM_SRC, "main", "ref")).to_be_greater_than(0)
+
+    it "callee loads the incoming value through the reference":
+        expect(count_kind(PRIM_SRC, "bump", "load")).to_be_greater_than(0)
+
+    it "callee stores the new value back through the reference":
+        expect(count_kind(PRIM_SRC, "bump", "store")).to_be_greater_than(0)
+
+    it "stores back on every return path":
+        expect(count_returns(EARLY_SRC, "bump2")).to_be_greater_than(0)
+        expect(count_kind(EARLY_SRC, "bump2", "store")).to_be_greater_than(count_returns(EARLY_SRC, "bump2") - 1)
+        expect(count_kind(EARLY_SRC, "bump2", "store")).to_be_greater_than(1)
+
+    it "plain by-value param stays by value (control)":
+        expect(count_kind(PLAIN_SRC, "main", "ref")).to_equal(0)
+        expect(count_kind(PLAIN_SRC, "keep", "store")).to_equal(0)
+
+    it "mut struct param keeps the pointer path without a primitive ref (control)":
+        expect(count_kind(STRUCT_SRC, "main", "ref")).to_equal(0)
+
+    it "mut array param keeps the pointer path without a primitive ref (control)":
+        expect(count_kind(ARRAY_SRC, "main", "ref")).to_equal(0)

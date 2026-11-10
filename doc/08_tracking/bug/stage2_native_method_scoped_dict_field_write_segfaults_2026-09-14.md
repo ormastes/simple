@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-14)
+- Status: FIXED (2026-11-11, lane boot18) — Correction-2 scalar-reader fix verified present; pin spec green on seed. See addendum below.
 - Lane: BOOT-20 (`work/bootstrap-s3-2-2026-09-14`), found while chasing
   `stage2_native_class_field_text_dict_owner_lost_2026-09-14.md`
 - Binary: pinned Stage-2 candidate `bin/release/aarch64-unknown-linux-gnu/simple.phase2`,
@@ -157,3 +157,29 @@ Fix: the method now reads the symbol through
 `HirSymbol?` and no `.unwrap()` exists at the call site. Rebuilt Stage 2 (sha256
 `ae06cc25e5c048246bfb…`) builds the same program (rc=0) and it prints `a`.
 Pinned by `test/01_unit/compiler/mir/external_layout_reference_nil_info_guard_source_spec.spl`.
+
+
+## 2026-11-11 addendum (lane boot18, work/p3-boot18-20261111) — FIXED, verified on seed
+
+Verdict: FIXED. Correction 2's fix is present at
+`src/compiler/50.mir/_MirLowering/module_lowering.spl:969-972`:
+`record_external_layout_reference` reads the symbol through
+`symbol_name_scalar_raw` / `symbol_defining_module_scalar_raw`, so no
+`HirSymbol?` and no `.unwrap()` exists at the call site (the SEGV was the seed
+`unwrap`->`Poll.unwrap` misbind returning 0, per the open producer bug
+`unwrap_still_rebinds_to_poll_unwrap_at_closure_scale_2026-09-13`). The method
+comment at :960-967 documents exactly this hazard.
+
+Verification actually run (seed-smoke, tracked `bin/simple.exe` build-commit
+`46fe8f6b6def`, `SIMPLE_LIB=src`, `--mode=interpreter --no-cache`):
+
+- Pin `test/01_unit/compiler/mir/external_layout_reference_nil_info_guard_source_spec.spl`
+  was RED on the base tip for a stale reason: its final assertion grepped the
+  sibling guard as `if info != nil and info.name != "": return info.name`, but
+  the nil-safe refactor (`d5943d124053`, merge `3f07e8ce4931`) re-spelled the
+  sentinel as `info != None` inside a `match ... case Some(info)` arm
+  (`module_lowering.spl:1031-1034`). Assertions 1-8 (scalar readers present; no
+  `get_symbol_raw(` / `.unwrap()` / `info.` in code; guard precedes first use)
+  all passed — only assertion 9 was stale. I repaired assertion 9 to the
+  None-based guard and re-ran: **spec 1/1 GREEN**. The defect fix itself was
+  untouched.

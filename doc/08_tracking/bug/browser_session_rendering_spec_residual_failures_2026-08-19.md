@@ -1,5 +1,5 @@
 # Residual failures in browser_session dom-input / script-css-animation specs (post interpreter-collision fixes)
-## Open 2026-09-16 — needs owner triage
+## OPEN 2026-11-11 — LIVE; not test-runner area; handed back to the JS-engine/browser lane with fresh measured verdicts (P3 runner6 triage)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -69,3 +69,33 @@ Not fixed in this lane: the defect lives in sibling-owned engine code
 (src/lib JS engine / browser engine), and this doc itself says to coordinate
 with the in-flight JS-engine work before fixing. Handed back with measured
 verdicts for the engine lane.
+
+## 2026-11-11 triage (P3 runner lane, work/p3-runner6-20261111): LIVE — import blocker resolved since 2026-11-10; residuals match the doc's own diagnosis; engine lane owns the fix
+
+Fresh seed-smoke measurement on this base (fresh Rust seed
+bin/simple.exe, build-commit 46fe8f6b6def, SIMPLE_LIB=src,
+`bin/simple.exe test <spec> --mode=interpreter --no-cache`, 2026-11-11):
+
+- The 2026-11-10 blocker is GONE: `JsRuntime.new_browser` now exists at
+  `src/lib/nogc_sync_mut/js/engine/runtime.spl:278` and is called by
+  `src/lib/gc_async_mut/web/browser_session.spl:812`. Both specs now execute
+  their examples instead of failing every example at import.
+- Specs moved: now at `test/02_integration/rendering/`
+  (`browser_session_dom_input_spec.spl`,
+  `browser_session_script_css_animation_spec.spl`).
+- `browser_session_dom_input_spec.spl`: **19/25, 6 failures** — exactly the
+  six residuals enumerated in this doc (mixed-case Draw IR text wrapping;
+  inline-handler title writes; sandbox-blocked form navigation x2; reset
+  default-action; blur-before-focus). The diagnosed mechanisms are reachable
+  and unchanged.
+- `browser_session_script_css_animation_spec.spl`: **6/25, 19 failures** —
+  comprehensively red in the scripted DOM mutation flush path this doc names
+  (worse than the 18/25 recorded at filing; the cssText ordered-write flush
+  path still drops writes).
+
+Not fixed in this lane: every remaining mechanism lives in the JS-engine /
+browser-session engine code (`src/lib/gc_async_mut/web/`,
+`src/lib/nogc_sync_mut/js/`), which is outside this lane's test-runner area,
+and this doc itself says to coordinate with the in-flight JS-engine work
+before fixing. Handed back with the measured verdicts above. Verdict: LIVE —
+OPEN, owner: JS-engine/browser lane.

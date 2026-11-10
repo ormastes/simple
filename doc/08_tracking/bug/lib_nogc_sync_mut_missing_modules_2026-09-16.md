@@ -49,3 +49,43 @@ owning lane's sign-off (testing rules forbid weakening assertions to pass).
 Each named module/export lands in `src/lib` (or the spec is deliberately retired with a
 decision record). Re-run: `SIMPLE_TIMEOUT_SECONDS=600 bin/simple test <spec>` expecting
 outcome=OK.
+
+---
+
+## 2026-11-11 — Lane rt3 triage verdict: OPEN, partially landed (module census)
+
+Status kept OPEN: many contracted modules now exist and their specs pass, but
+a substantive subset is still absent. Census + re-verification on the current
+base (seed build `46fe8f6b6def`):
+
+**Modules landed, specs now PASS** (were "Cannot resolve module / does not
+export" on 2026-09-16):
+- `std.nogc_sync_mut.gpu.chromium_reference_oracle_sffi` —
+  `gpu/chromium_reference_oracle_sffi_spec.spl` PASS.
+- `std.gpu.provider` — `gpu/provider_spec.spl` PASS.
+- `std.ui_test.gui_driver` / `std.ui_test.tui_driver` — `ui_test/gui_driver_spec.spl` 5/5 PASS
+  (tui_driver module present alongside).
+- `SgttiTestDriver.resolve_strict` / `.geometry` — `ui_test/sgtti_strict_resolve_spec.spl` PASS.
+- `std.common.spec.scenario_text_evidence` and `std.spec.scenario_evidence_manifest_io` —
+  both modules present (`scenario_text_evidence.spl`, `scenario_evidence_manifest_io.spl`).
+- `std.nogc_sync_mut.sffi.package` — module present (`sffi/package.spl`);
+  `sffi/package_sha256_spec.spl` PASS.
+- (5 of these re-verified green in one batch: provider, chromium oracle sffi,
+  sgtti_strict_resolve, package_sha256, gui_driver — 0 failed.)
+
+**Still missing (specs still ERROR, `executed=0`):**
+- `std.nogc_sync_mut.enterprise_{assets,expense,quality,warehouse}` — no such
+  dirs under `src/lib/nogc_sync_mut/` (24 other `enterprise_*` dirs exist).
+  `enterprise_assets_spec.spl` re-verified `outcome=ERROR, executed=0`.
+- `std.nogc_sync_mut.mission_critical.domain_arena_v2` — dir still has only
+  `bounded_process_policy.spl`, `domain_arena_v1.spl`, `mci_evidence_manifest_v1.spl`.
+- `std.concurrent.server_worker_policy` — dir still has only
+  `actor_hooks/channel/mutex/rwlock/thread`.
+- `std.nogc_sync_mut.io.hal_buffer_dispatch` — no such file.
+
+**Disposition:** the landed half needs no action. The still-missing half
+(enterprise×4, `domain_arena_v2`, `server_worker_policy`, `hal_buffer_dispatch`)
+is substantive feature implementation beyond a P3 triage lane; per this
+record's own unblock condition each module must be implemented by an owner or
+its spec deliberately retired with the owning lane's sign-off (testing rules
+forbid weakening assertions to pass). Kept OPEN for that subset.

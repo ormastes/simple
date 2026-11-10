@@ -1,6 +1,6 @@
 # Bitfield "coverage" is vacuous, and `custom_primitive_bitfield.spl` is unreachable code
 
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-11-11 — both findings verified fixed on release/1.0.0 (P3 runner6 lane; Finding 1 via squash-merge 839e59ffa7dc of 93a6de8b95ee, Finding 2 deletion confirmed)
 - **Date:** 2026-08-18
 - **Area:** `test/01_unit/compiler/mir/bitfield_mir_spec.spl`,
   `src/compiler/50.mir/custom_primitive_bitfield.spl`
@@ -246,3 +246,22 @@ verified absent in this worktree).
 Seed-smoke evidence (Rust seed `bin/simple.exe`, this worktree):
 `bin/simple.exe test test/01_unit/compiler/mir/bitfield_mir_spec.spl`
 -> SPEC FILE VERDICT outcome=OK declared>=14 executed=14 passed=14 failed=0.
+
+## 2026-11-11 triage (P3 runner lane, work/p3-runner6-20261111): verified FIXED on this base
+
+- Finding 1: `test/01_unit/compiler/mir/bitfield_mir_spec.spl` measured
+  non-vacuous on this tree — zero `check(code.contains(...))` assertions,
+  real import of `compiler.backend.bitfield.{BitLayout, bits_needed,
+  would_straddle_word}` at line 8, explicit positive-control describe block.
+  The fixing change is present as squash-merge `839e59ffa7dc` ("test(std.spec):
+  restore genuine bitfield MIR spec, drop vacuous literal-contains examples";
+  the 2026-11-10 lane's SHA `93a6de8b95ee` is not itself an ancestor — branch
+  squash-merged — but its content is verbatim in the tree). Companion commit
+  `c4ea35e05394` de-vacuified the legacy twin.
+- Finding 2: `src/compiler/50.mir/custom_primitive_bitfield.spl` confirmed
+  absent (`ls` rc=2); no `BitfieldValidator` references remain in src/.
+- The from-scratch-rebuild evidence gap this doc recorded is bootstrap-lane
+  territory and does not reopen either finding.
+
+No live rerun (prior lane's seed-smoke 14/14 on this same spec stands; per
+the lane's no-green-rerun rule). Verdict: FIXED / RESOLVED.

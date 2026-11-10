@@ -781,6 +781,21 @@ impl MirLowering:
                 LocalId(id: pli + parameter_local_offset)
             val param_symbol_id = param.symbol.id
             self.bind_local(param_symbol_id, local)
+            # `x: mut i64` (bug mut_param_annotation_no_reference_propagation_
+            # 2026-07-20): the arg is the caller's address. Work on a loaded
+            # copy; MirBuilder.set_terminator stores it back before every Ret.
+            match param.type_.kind:
+                case HirTypeKind.Ref(ref_inner, true):
+                    match ref_inner.kind:
+                        case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                            var ref_bldr = self.builder
+                            val loaded = ref_bldr.emit_load(mir_operand_copy(local), self.lower_type(ref_inner))
+                            ref_bldr.mut_ref_param_ptrs.push(local)
+                            ref_bldr.mut_ref_param_values.push(loaded)
+                            self.builder = ref_bldr
+                            self.bind_local(param_symbol_id, loaded)
+                        case _: ()
+                case _: ()
             # Thread the real HIR parameter name onto the (nameless) MIR arg
             # local so backends render actual port names, not arg0/arg1/arg2.
             var name_bldr = self.builder

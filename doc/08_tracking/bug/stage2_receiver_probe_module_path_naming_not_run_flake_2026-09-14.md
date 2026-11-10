@@ -1,7 +1,7 @@
 # Stage 2 receiver probe intermittently loses `compiler.common.module_path_naming` (NOT_RUN)
 
 - **Filed:** 2026-09-14
-- **Status:** OPEN — intermittent, not bisected
+- **Status:** OPEN — intermittent, not bisected (2026-11-11 lane boot18: same base+flake pair as the NOT_RUN record; attribution FIXED and verified, transient stays OPEN — see addendum)
 - **Severity:** blocks a bootstrap lane non-deterministically
 - **Lane:** macOS arm64, F74 round 3, worktree `agent-affc884d75d16fbde`, tip `def2a9c30a1`
 
@@ -52,3 +52,30 @@ evidence; nothing was bisected.
 
 Not reliably reproducible. 1 failure in 2 runs on this host. Re-running the same
 command was sufficient to get past it.
+
+
+## 2026-11-11 addendum (lane boot18, work/p3-boot18-20261111) — same pair as the NOT_RUN record; transient stays OPEN
+
+This flake is the same underlying transient as
+`stage2_receiver_probe_module_path_naming_not_run_2026-09-14.md` (base+flake
+pair, triaged together 2026-11-11). The `never started (build ended first)`
+reason the compiler recorded here was the misattribution the 2026-09-14 fix
+corrected: the sequential concurrency-1 build DID start both units (llc
+resolved once per module in the log this doc quotes), so a genuine "build ended
+first" race was never the mechanism. The real defect was an outcome that was
+never recorded plus a capsule receipt invariant rejected only on a later look;
+both halves are now covered:
+
+- Attribution: FIXED + verified — `native_attempted_unit_outcome_recorded_spec.spl`
+  **4/4 GREEN** on the tracked seed (see the base record's 2026-11-11 addendum
+  for the mechanism and code sites).
+- Mechanism: the site-10 frozen-source-identity fix is pinned green
+  (`native_capsule_source_identity_survives_eviction_spec.spl` 7/7), but it
+  predates this flake (2026-09-12 vs 2026-09-14) and does not by itself close
+  the intermittent `uncached_names[0]` edge this record hit.
+
+Verdict: transient stays OPEN (Status unchanged); not reproducible in this lane
+(1 failure in 2 runs on the original host; this doc's own repro note says
+re-running was the only workaround, and there is no repro smaller than the
+~90 min Stage-2 trust-root lane). A recurrence now fails NAMING the invariant
+instead of surfacing as a false NOT_RUN — keep the probe fail-closed.
