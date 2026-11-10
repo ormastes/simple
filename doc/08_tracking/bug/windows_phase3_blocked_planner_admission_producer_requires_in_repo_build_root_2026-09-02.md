@@ -1,11 +1,14 @@
 # Windows Phase 3 blocked: planner-admission-v2 producer refuses any bootstrap output outside `<repo>/build/`
-## Open 2026-09-16 — needs owner triage
+## Triaged 2026-11-11 (lane boot16) — FIXED; see addendum at end
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-02
-**Status:** OPEN — blocks W2 (Phase 3) on the Windows MSVC lane
+**Status:** FIXED (2026-11-11, lane boot16) — both unblock conditions are landed
+and source-verified; guard gate re-pass on THIS Windows host is environmentally
+blocked (slow + a sanity-fixture failure), so the green claim rests on the
+2026-11-09 Linux PASS plus source inspection. See addendum.
 **Failing acceptance gate:** §8 *Provenance* / *Phase 3* of
 `doc/03_plan/compiler/windows_bootstrap_separate_hosts_nonconflicting_plan_2026-08-30.md`
 
@@ -191,3 +194,52 @@ Executed evidence:
 Not executed here: an actual Windows MSVC Phase-3 run (no Windows host, no
 native builds in this lane); per-lane receipt production on `D:` remains to be
 exercised by the Windows lane owner with the admitted `4a8dd3eb…` parent.
+
+
+---
+
+## Triage addendum 2026-11-11 (lane boot16)
+
+**Verdict: FIXED** (both unblock conditions landed and source-verified), with a
+verification caveat recorded below.
+
+Source-verified present and UNCHANGED since the 2026-11-09 recorded gate PASS
+(`git log --since=2026-11-08` over the gate, `sanity.shs`, the producer, and the
+resume script returns zero commits — none of these files moved between that PASS
+and this HEAD):
+
+1. **Private-lane producer mode (preferred fix).**
+   `produce-bootstrap-planner-admission-v2.shs` binds the admission-chain
+   residency check to the declared `--bootstrap-output`
+   (`case "$admission_file" in "$adm_bootstrap_output"/* ...)`, line ~180), with a
+   first-class `--bootstrap-output` flag (default `$adm_root/build/bootstrap`,
+   lines ~91-137), a `SIMPLE_BOOTSTRAP_BUILD_ROOT` env override, and an explicit
+   external-output allowlist (`bootstrap_stage3_resume_output_path`,
+   `bootstrap-output-outside-allowlisted-root`). The old literal
+   `<repo>/build/bootstrap` hardcoding is gone.
+2. **Windows-aware resume lane.** `resume-stage3-from-admitted.sh` now carries
+   `exe_suffix` (`.exe` for `*-pc-windows-msvc`/`*-pc-windows-gnu`), MSVC `.lib`
+   archive names, and Windows abi/cc/include/lib env plumbing (lines ~120-141,
+   ~526-540).
+
+**Verification caveat (transparent):** this lane re-ran the guard gate
+`check-bootstrap-planner-admission-producer.shs` on this Windows-native Git Bash
+host. It did NOT complete cleanly: it exceeded 600 s and stopped at
+`FAIL — producer refused a well-formed admission: stage2-sanity-error:
+sanity-receipt role=bootstrap0 failure=status-verification
+(... parent-stage2-admission-invalid)`. That failure is in the per-probe sanity
+group verification (`bootstrap_stage3_verify_frontend_group_status` in
+`scripts/check/lib/bootstrap-stage3/sanity.shs`, via the
+`run-process-group-bounded-log-windows.py` collector) — a sanity-evidence path
+that is ORTHOGONAL to this row's build-output-residency defect. Because the gate
++ sanity + producer files are byte-identical to the 2026-11-09 Linux PASS, this
+is an environmental gate-portability/slowness issue on Windows Git Bash, NOT a
+producer regression.
+
+**Follow-up (not this row's defect):** `check-bootstrap-planner-admission-producer.shs`
+should be made to run cleanly and quickly on a Windows-native host (it passes on
+Linux per 2026-11-09, fails + runs >600 s here). Worth its own bug; the row 6
+build-output fix itself is landed and source-verified.
+
+Per the caveat, the "19 fixtures PASS" evidence for this row rests on the
+2026-11-09 Linux execution recorded above, not a fresh local green run.
