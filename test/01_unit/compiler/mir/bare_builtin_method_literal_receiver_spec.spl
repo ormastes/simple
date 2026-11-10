@@ -1,0 +1,147 @@
+# Purpose and audience: executable specification evidence for the owning
+# compiler team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+"""
+# Built-in methods on literal receivers lower to qualified runtime symbols
+
+Repro + prevention spec for bug
+`llm_caret_native_entry_closure_bare_builtin_method_symbols_2026-11-04`:
+under the native --entry-closure lane (module surfaces, no type-inference
+pass, so `receiver.type_` is absent) a built-in method call reached the link
+as a bare symbol named after the method (`len`, `trim`, `starts_with`,
+`unwrap_err`). The cross-module carrier shape is pinned by
+`bare_builtin_method_carrier_link_probe_spec.spl`; this file pins the
+LITERAL / primitive receiver shape, one `it` per receiver family, so a
+regression names the family that broke:
+
+- text literal:  `"..".len()`, `"..".trim()`, `"..".starts_with("..")`
+- array literal: `[1, 2, 3].len()`
+- int literal:   `42.to_text()`
+- float literal: `3.5.to_i64()`
+- bool literal:  `true.to_text()`
+- Result literal: `Err("boom").unwrap_err()`
+
+Every call must lower to a concrete `rt_*` (or typed-alias) call operand and
+never to a `Const Str("<method>")` call target, and no `unresolved method
+call` diagnostic may be emitted.
+"""
+
+# @tag: unit, compiler, mir, entry-closure, builtin-methods
+
+use std.spec.{describe, it, expect, step}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_single_module(src: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "probe/lit.spl", "probe.lit", log)
+    var modules: Dict<text, Module> = {}
+    modules["probe.lit"] = ast
+    val sources = [SourceFile(path: "probe/lit.spl", content: src, module_name: "probe.lit")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("probe.lit", surfaces)
+    val hir = lowering.lower_module(ast)
+    var result = ""
+    for e in lowering.errors:
+        result = result + "HIR_ERROR:" + e.message + "\n"
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var hir_modules: Dict<text, compiler.hir.hir_types.HirModule> = {}
+    hir_modules["probe.lit"] = hir
+    for module_key in hir_modules.keys():
+        mir_lowering.prescan_module_struct_names(hir_modules, module_key)
+    val mir = mir_lowering.lower_module(hir, [hir])
+    for e in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + e.message + "\n"
+    for function in mir.functions.values():
+        result = result + serialize_mir_function(function)
+    result
+
+# A call target serializes as {"Const":{"value":"<symbol>", ...}} with
+# PLAIN quotes -- a backslash-escaped probe never matches and is vacuous
+# (the sibling carrier spec shipped exactly that defect, fixed alongside).
+fn call_target(symbol: text) -> text:
+    "\"value\":\"" + symbol + "\""
+
+fn bare_target(method: text) -> text:
+    call_target(method)
+
+fn expect_clean(mir: text):
+    expect(mir.contains("unresolved method call")).to_equal(false)
+    expect(mir.contains("MIR_ERROR:")).to_equal(false)
+    expect(mir.contains("HIR_ERROR:")).to_equal(false)
+
+describe "built-in methods on literal receivers lower to runtime symbols":
+    it "text literal: len / trim / starts_with":
+        step("lower text-literal receivers without a type-inference pass")
+        val mir = lower_single_module(
+            "fn lit_len() -> i64:\n" +
+            "    \"abc\".len()\n" +
+            "\n" +
+            "fn lit_trim() -> text:\n" +
+            "    \"  abc  \".trim()\n" +
+            "\n" +
+            "fn lit_starts_with() -> bool:\n" +
+            "    \"hello\".starts_with(\"he\")\n")
+        expect_clean(mir)
+        expect(mir).to_contain("rt_string_len")
+        expect(mir).to_contain("rt_string_trim")
+        expect(mir).to_contain("rt_string_starts_with")
+        expect(mir.contains(bare_target("len"))).to_equal(false)
+        expect(mir.contains(bare_target("trim"))).to_equal(false)
+        expect(mir.contains(bare_target("starts_with"))).to_equal(false)
+
+    it "array literal: len":
+        step("lower an array-literal receiver")
+        val mir = lower_single_module(
+            "fn lit_arr_len() -> i64:\n" +
+            "    [1, 2, 3].len()\n")
+        expect_clean(mir)
+        # A known array receiver keeps the runtime array-length owner `rt_len`
+        # (method_calls_literals.spl len_symbol selection); it is a qualified
+        # rt_* symbol, not the bare `len` the bug reported.
+        expect(mir).to_contain(call_target("rt_len"))
+        expect(mir.contains(bare_target("len"))).to_equal(false)
+
+    it "int literal: to_text":
+        step("lower an int-literal receiver")
+        val mir = lower_single_module(
+            "fn lit_int_text() -> text:\n" +
+            "    42.to_text()\n")
+        expect_clean(mir)
+        expect(mir).to_contain("rt_")
+        expect(mir.contains(bare_target("to_text"))).to_equal(false)
+
+    it "float literal: to_i64":
+        step("lower a float-literal receiver")
+        val mir = lower_single_module(
+            "fn lit_float_int() -> i64:\n" +
+            "    3.5.to_i64()\n")
+        expect_clean(mir)
+        expect(mir.contains(bare_target("to_i64"))).to_equal(false)
+
+    it "bool literal: to_text":
+        step("lower a bool-literal receiver")
+        val mir = lower_single_module(
+            "fn lit_bool_text() -> text:\n" +
+            "    true.to_text()\n")
+        expect_clean(mir)
+        expect(mir.contains(bare_target("to_text"))).to_equal(false)
+
+    it "Result literal: unwrap_err":
+        step("lower an Err(..) constructor receiver")
+        val mir = lower_single_module(
+            "fn lit_unwrap_err() -> text:\n" +
+            "    val r: Result<i64, text> = Err(\"boom\")\n" +
+            "    r.unwrap_err()\n")
+        expect_clean(mir)
+        expect(mir).to_contain("rt_enum_payload")
+        expect(mir.contains(bare_target("unwrap_err"))).to_equal(false)
