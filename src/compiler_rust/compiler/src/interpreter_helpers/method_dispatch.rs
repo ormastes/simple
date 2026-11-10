@@ -981,6 +981,32 @@ pub(crate) fn call_method_on_value(
         }
     }
 
+    // Postfix equality matcher on a chained-call receiver
+    // (`xs.len().to_equal(3)`): the top-level method path in
+    // interpreter_method/mod.rs handles `x.to_equal(y)`, but a chained receiver
+    // arrives here already evaluated. Same nullable-aware semantics.
+    // Bug: ml_kem_postfix_to_equal_chained_call_not_found_2026-07-20.
+    if matches!(method, "to_equal" | "to_be" | "to_not_equal") {
+        use crate::interpreter::interpreter_call::{
+            push_bdd_failure, BDD_EXPECT_FAILED, BDD_MATCHER_COUNT, BDD_MATCHER_RAN,
+        };
+        BDD_MATCHER_RAN.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+        BDD_MATCHER_COUNT.with(|cell: &std::cell::RefCell<usize>| *cell.borrow_mut() += 1);
+        let expected = _args.first().cloned().unwrap_or(Value::Nil);
+        let want_equal = method != "to_not_equal";
+        let matched = recv_val.nullable_eq(&expected) == want_equal;
+        if !matched {
+            BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+            push_bdd_failure(format!(
+                "expected {} to {}equal {}",
+                recv_val.to_display_string(),
+                if want_equal { "" } else { "not " },
+                expected.to_display_string()
+            ));
+        }
+        return Ok(Value::Bool(matched));
+    }
+
     if std::env::var("SIMPLE_DEBUG_NESTED_DISPATCH").is_ok() {
         let variant = match &recv_val {
             Value::Object { class, .. } => format!("Object(class={})", class),
