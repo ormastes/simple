@@ -84,3 +84,50 @@ Do not mark the BugDB row fixed until both modes pass on that admitted binary.
 - Workflow/SPipe/manual docs: N/A; no workflow or scenario-manual contract
   changed.
 
+
+---
+
+## 2026-11-10 (p0-hir-verify lane, Windows worktree, seed-smoke) — PURE-SIMPLE FIX RE-CONFIRMED; NEW SEED-JIT DIVERGENCE RECORDED
+
+Lane: `work/p0-hir-verify-20261110` on `origin/release/1.0.0`. Runtime: `bin/simple.exe` Rust
+seed v1.0.0-rc.1. Seed-smoke only; no native/self-hosted claim.
+
+### Static re-confirmation of the pure-Simple fix (current source)
+
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:4604-4629`:
+- comment names this bug and records that the fix was "First fixed 2026-08-17, lost in the
+  2050c046ee3 mega-SCC refactor, re-applied here";
+- `:4623-4624` — `val ts_arg_ready = if (method == "split" and ts_arg_index == 1) or
+  method == "repeat": ts_arg_local else: self.ensure_tagged_str(ts_arg_local)` — split's
+  limit (and repeat's count) preserved as the lowered numeric local, separator still tagged;
+- `:4629` — `case "split": if args.len() == 2: "rt_string_split_limit" else:
+  "rt_string_split"`.
+
+### Executable verification (seed-smoke)
+
+- `SIMPLE_LIB=src bin/simple.exe test test/01_unit/compiler/interpreter/nested_string_split_spec.spl
+  --mode=interpreter` — **5/5 PASS, exit 0** (two-part literal limit, variable-held limit
+  path coverage via the spec's adjacent cases, limit one, missing separator, chars).
+- `--mode=native` is NOT native evidence on the seed: the JIT declines the test-runner
+  harness module (`_attach_scope_evidence` argument-8 default, `src/app/test_runner_new/main.spl`)
+  and silently falls back to interpreter (5/5 PASS but interpreted).
+- Pure-Simple MIR-native boundary run (the actual fixed surface) remains pending an admitted
+  pure-Simple CLI, per this doc's unblock condition:
+  `SIMPLE_LIB=src <admitted-simple> test test/01_unit/compiler/interpreter/nested_string_split_spec.spl --mode=native`
+  — BLOCKED-needs-grant.
+
+### New finding: the seed JIT ignores the split limit (Rust-side, out of this row's owner)
+
+Fixture `build/review/fixtures/split_limit_probe.spl` (main() printing len checks for
+`"a:b:c".split(":", 2)` literal and variable-held, and `split(":", 1)`):
+
+- `SIMPLE_JIT_STRICT=1 bin/simple.exe run split_limit_probe.spl` -> JIT compiles and runs
+  (no fallback, no hard error) and prints `len=3` for ALL three cases: the limit is ignored
+  end-to-end under the seed JIT. Interpreter (spec above) honors it: a JIT-vs-interpreter
+  divergence on the Rust seed, the documented "JIT+native silently wrong where the
+  interpreter is correct" pattern. This does not bear on the pure-Simple fix in
+  `method_calls_literals.spl` (the seed never executes it), but it contradicts any assumption
+  that all Rust engine surfaces bound the limit; the earlier "both live Rust dispatchers"
+  claim covers the interpreters only. `src/compiler_rust` is frozen for sibling P3 lanes, so
+  no edit was made there; the seed-JIT owner should pick this up with the probe above as the
+  reproducer.
