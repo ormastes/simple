@@ -1,0 +1,94 @@
+# `--mode=smf` packaging keeps relocations for the merged Code section only
+# (build_smf_with_relocations / generate_smf_with_options drop every other
+# allocated section). An object whose relocated constants live in an
+# allocated non-code section -- LLVM's `.data.rel.ro.<sym>` pointer tables,
+# `.rodata.*`, `.data.*`, `.init_array` -- must therefore be NAMED so the
+# driver fails closed, instead of emitting an SMF whose code dereferences
+# those tables unrelocated (child SIGBUS). This is the pure-Simple twin of the
+# seed's "relocation source section <name> is not executable code" verdict.
+# Bug: smf_native_codegen_data_rel_ro_subsection_2026_11_09
+# @cover src/compiler/80.driver/smf_elf_parser.spl
+
+use compiler.driver.smf_elf_parser.{elf_relocated_non_code_section}
+use compiler.backend.linker.elf_writer.{
+    ElfWriterSection, ElfWriterSymbol, ElfWriterReloc,
+    elf_write_object, elf_writer_config_x86_64
+}
+
+fn to_u8(raw: [i64]) -> [u8]:
+    var bytes: [u8] = []
+    for byte in raw:
+        bytes.push(byte as u8)
+    bytes
+
+# `.text` is one `ret`; `section_name` holds one 8-byte pointer slot patched
+# by an R_X86_64_64 (type 1) against the function symbol (user index 0).
+fn relocated_object(section_name: text, sh_type: i64, sh_flags: i64) -> [u8]:
+    val sections: [ElfWriterSection] = [
+        ElfWriterSection(".text", 1, 6, [195], 0, 0),
+        ElfWriterSection(section_name, sh_type, sh_flags,
+            [0, 0, 0, 0, 0, 0, 0, 0], 0, 0)
+    ]
+    val symbols: [ElfWriterSymbol] = [
+        ElfWriterSymbol("rel_fn", 0x12, 0, 1, 0, 1),
+        ElfWriterSymbol("rel_tbl", 0x11, 0, 2, 0, 8)
+    ]
+    val relocs: [ElfWriterReloc] = [
+        ElfWriterReloc(0, (0 << 32) | 1, 0, section_name)
+    ]
+    to_u8(elf_write_object(elf_writer_config_x86_64(), sections, symbols, relocs))
+
+# `.text` = `call rel32` to an undefined symbol (R_X86_64_PLT32 = 4) plus a
+# `.data` byte that nothing relocates.
+fn code_only_relocated_object() -> [u8]:
+    val sections: [ElfWriterSection] = [
+        ElfWriterSection(".text", 1, 6, [232, 0, 0, 0, 0, 195], 0, 0),
+        ElfWriterSection(".data", 1, 3, [7], 0, 0)
+    ]
+    val symbols: [ElfWriterSymbol] = [
+        ElfWriterSymbol("rel_fn", 0x12, 0, 1, 0, 6),
+        ElfWriterSymbol("rel_ext", 0x10, 0, 0, 0, 0)
+    ]
+    val relocs: [ElfWriterReloc] = [
+        ElfWriterReloc(1, (1 << 32) | 4, -4, ".text")
+    ]
+    to_u8(elf_write_object(elf_writer_config_x86_64(), sections, symbols, relocs))
+
+describe "SMF packaging names a relocated non-code ELF section":
+    it "names an LLVM .data.rel.ro.<sym> pointer-table subsection":
+        # SHF_WRITE|SHF_ALLOC PROGBITS -- exactly how clang emits it.
+        expect(elf_relocated_non_code_section(
+            relocated_object(".data.rel.ro.tbl", 1, 3))).to_equal(".data.rel.ro.tbl")
+
+    it "names the plain .data.rel.ro section as well":
+        expect(elf_relocated_non_code_section(
+            relocated_object(".data.rel.ro", 1, 3))).to_equal(".data.rel.ro")
+
+    it "returns empty when only code sections carry relocations":
+        expect(elf_relocated_non_code_section(code_only_relocated_object())).to_equal("")
+
+    it "returns empty for a non-ELF or truncated input":
+        expect(elf_relocated_non_code_section([])).to_equal("")
+        expect(elf_relocated_non_code_section([127, 69, 76, 70])).to_equal("")
+
+describe "sibling allocated section kinds through the same scan":
+    it "names a relocated .rodata.<sym> constant":
+        expect(elf_relocated_non_code_section(
+            relocated_object(".rodata.str", 1, 2))).to_equal(".rodata.str")
+
+    it "names a relocated .data.<sym> variable":
+        expect(elf_relocated_non_code_section(
+            relocated_object(".data.var", 1, 3))).to_equal(".data.var")
+
+    it "names a relocated .init_array constructor table":
+        # SHT_INIT_ARRAY = 14, SHF_WRITE|SHF_ALLOC.
+        expect(elf_relocated_non_code_section(
+            relocated_object(".init_array", 14, 3))).to_equal(".init_array")
+
+    it "ignores .eh_frame, which SMF packaging drops by design":
+        expect(elf_relocated_non_code_section(
+            relocated_object(".eh_frame", 1, 2))).to_equal("")
+
+    it "ignores a non-allocated section such as .debug_info":
+        expect(elf_relocated_non_code_section(
+            relocated_object(".debug_info", 1, 0))).to_equal("")
