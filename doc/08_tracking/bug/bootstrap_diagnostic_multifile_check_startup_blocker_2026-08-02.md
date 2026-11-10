@@ -128,6 +128,34 @@ found while the canonical hosted rlib at
 Using `.../target/bootstrap` would align both selectors, but a fourth build was
 not run because the mandatory three-cycle cap had been reached.
 
+## Triage 2026-11-10 (p3-boot lane)
+
+SUPERSEDED for the live symptom. The core finding — "the production
+`src/app/cli/check_entry.spl` does not execute one multi-file worker; a 12-file
+check launches 12 expensive workers" — no longer holds. Current
+`src/app/cli/check_entry.spl` on work/p3-boot-20261110:
+
+- `main()` expands targets and packs them into bounded chunks
+  (`CHECK_CHUNK_SIZE = 32`, :67; loop at :341-349).
+- `run_worker_chunk()` (:286-311) launches ONE worker for the whole chunk with
+  a scaled timeout (`CHECK_WORKER_TIMEOUT_MS + chunk.len() *
+  CHECK_CHUNK_TIMEOUT_PER_FILE_MS`, :68, :296).
+- On a chunk failure, the caller re-runs the chunk's members one file at a
+  time (:356-363) to recover exact per-file attribution and isolate a file
+  that crashed or timed out the shared worker — directly addressing this
+  record's "cannot prove which files completed" concern for the chunk path.
+
+Residual, intentionally NOT taken up in this lane: the larger "one cached
+diagnostic-only check-runner artifact with append-only per-file terminal
+records" design (this doc's "Safe stronger design") plus its five required
+proofs. That is a feature-sized build with heavy native verification, and the
+doc itself blesses the slow-but-correct default until the proofs exist; the
+chunked middle path now shipped covers the reported production blocker. The
+cached-selector tail of this doc lives in the Rust seed
+(`src/compiler_rust/compiler/src/linker/native_binary/options.rs`,
+`bootstrap/deps` authority search) — agent-10's area, needs a seed rebuild to
+verify.
+
 ## Static selector resolution
 
 Hosted runtime archive and rlib discovery now share one normalized authority
