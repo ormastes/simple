@@ -36,3 +36,25 @@ GROWTH, PROB, and RANDARRAY all have documented hand-computed/probabilistic
 expectations already written — this is purely a structural indent fix, not
 new test-writing).
 
+## Addendum 2026-11-11 — lane runner4: SUPERSEDED
+
+All five sections (LINEST, TREND, GROWTH, PROB, RANDARRAY) are now wrapped
+in `describe` blocks at `test/01_unit/app/office/sheets/formula_regression_spec.spl:114,207,254,310,377`.
+Fix is in the ancestry of release/1.0.0 tip `b364745fdbf8` (file last
+changed by merge `9e7e7a526edb`, PR #7597, 2026-11-07). Note the in-file
+comment at lines 104-111 claiming TREND/GROWTH/PROB/RANDARRAY are "still
+orphaned" is now stale — the wrapping landed with the file at this tip.
+
+seed-smoke verification (refreshed seed 2026-11-11,
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+test/01_unit/app/office/sheets/formula_regression_spec.spl
+--mode=interpreter --no-cache`):
+
+```
+SPEC FILE VERDICT: ... outcome=OK declared>=28 executed=28 passed=28 failed=0 skipped=0 dropped=0
+Results: 28 total, 28 passed, 0 failed
+```
+
+28/28 executed and passed (expected rise "7 to ~27" met and slightly
+exceeded — 28 `it` blocks). No regressions. Verdict: SUPERSEDED.
+
