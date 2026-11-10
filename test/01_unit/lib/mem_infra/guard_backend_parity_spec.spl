@@ -121,15 +121,18 @@ val SURVIVED = "uaf_probe: survived"
 # spec body whichever way it is read. Full write-up, including why the
 # original sabotage check passed for the wrong reason:
 # doc/08_tracking/bug/test_daemon_freezes_env_binary_override_dead_2026-08-02.md
-fn survived_uaf(engine: text, guard_on: bool) -> bool:
+fn run_probe(engine: text, guard_on: bool) -> text:
     val gate = if guard_on: "SIMPLE_MEM_GUARD_RATE=1 " else: ""
     # NB: the `{{`/`}}` are escaped braces — a bare `{...}` in a Simple text
     # literal is string interpolation, so an unescaped `${SIMPLE_TEST_BINARY:-…}`
     # is parsed as an interpolation of a variable named `SIMPLE_TEST_BINARY:-…`
     # and fails to compile rather than reaching the shell.
-    val cmd = "{gate}SIMPLE_EXECUTION_MODE={engine} \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" run '{FIXTURE}' 2>&1"
+    val cmd = "{gate}SIMPLE_ENGINE_RECEIPT=1 SIMPLE_EXECUTION_MODE={engine} \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" run '{FIXTURE}' 2>&1"
     val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
-    out.contains(SURVIVED)
+    out
+
+fn survived_uaf(engine: text, guard_on: bool) -> bool:
+    run_probe(engine, guard_on).contains(SURVIVED)
 
 describe "guard capability-matrix row matches observed guard-page behaviour":
     # @manual scenario evidence
@@ -154,7 +157,14 @@ describe "guard capability-matrix row matches observed guard-page behaviour":
         # rt_interp_call trampoline) - it is NOT evidence about the cranelift
         # matrix row, which describes a natively-linked artifact.
         step("Sabotage control: with the guard knob unset the same UAF survives")
-        assert_equal(survived_uaf("jit", false), true)
+        val jit_off = run_probe("jit", false)
+        assert_equal(jit_off.contains(SURVIVED), true)
+
+        step("Engine receipt: the JIT really ran, with no silent demotion to the interpreter")
+        # A demoted run prints the same UAF output as the interpreter arm, which
+        # would make this arm vacuous. Fail loudly instead.
+        assert_equal(jit_off.contains("[engine-receipt] engine=cranelift-jit "), true)
+        assert_equal(jit_off.contains(" demoted=no "), true)
 
         step("With SIMPLE_MEM_GUARD_RATE=1 the UAF must NOT survive on the JIT lane either")
         assert_equal(survived_uaf("jit", true), false)

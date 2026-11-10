@@ -127,7 +127,7 @@ fn run_fixture(engine: text, fixture: text, harden_on: bool) -> text:
     # NB: `{{`/`}}` are escaped braces — a bare `{...}` in a Simple text literal
     # is string interpolation, so an unescaped `${SIMPLE_TEST_BINARY:-…}` parses
     # as an interpolation of a variable named `SIMPLE_TEST_BINARY:-…`.
-    val cmd = "{gate}SIMPLE_EXECUTION_MODE={engine} \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" run '{fixture}' 2>&1"
+    val cmd = "{gate}SIMPLE_ENGINE_RECEIPT=1 SIMPLE_EXECUTION_MODE={engine} \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" run '{fixture}' 2>&1"
     val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
     out
 
@@ -167,6 +167,16 @@ describe "harden capability-matrix row matches observed quarantine behaviour":
         assert_equal(harden_off.contains("t1=0"), true)
         assert_equal(harden_off.contains("t2=0"), true)
         assert_equal(harden_off.contains("t3=0"), true)
+
+        step("Engine receipt: the JIT really ran; the only splice allowed is the probe extern")
+        # A whole-module demotion would print the same counts as the
+        # interpreter, making this arm vacuous. The probe's own
+        # rt_mem_harden_check_native has no JIT symbol and is spliced through the
+        # interpreter bridge (it reads the same quarantine the JIT lane's
+        # rt_alloc fills); any OTHER demotion must fail loudly.
+        assert_equal(harden_off.contains("[engine-receipt] engine=cranelift-jit "), true)
+        val only_probe_splice = harden_off.contains(" demoted=no ") or harden_off.contains(" demoted=yes reason=hybrid-interp-splice: rt_mem_harden_check_native file=")
+        assert_equal(only_probe_splice, true)
 
     it "claims harden: false on llvm, whose core runtime lane has no quarantine":
         # @req REQ-SSPEC-LIB
