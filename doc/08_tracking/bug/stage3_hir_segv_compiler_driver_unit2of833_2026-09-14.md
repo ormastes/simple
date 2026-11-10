@@ -1,7 +1,14 @@
 # Stage 3 native-build SEGVs in the HIR phase at unit 2 of 833 (`compiler.driver.driver*`)
 
 - **Filed:** 2026-09-14
-- **Status:** OPEN — blocks every Stage 3 / Stage 4 / deploy on macOS arm64
+- **Status:** SUPERSEDED — absorbed by
+  `stage3_hir_enum_payload_closure_stack_overflow_driver_2026-09-14.md` (same
+  crash point: HIR phase, unit 2 of 833, `compiler.driver.driver`; the successor
+  doc names this record as superseded and carries the root-cause diagnosis).
+  That successor's prescribed `[text]` reentry breaker is FIXED in-tree as of
+  2026-11-11 (lane boot20); regression spec
+  `test/01_unit/compiler/hir/materialized_payload_closure_reentrancy_breaker_spec.spl`
+  passes 6/6 (seed-smoke). Dated addendum 2026-11-11 (lane boot20).
 - **Tree:** `origin/main` `4f4d0e12832` (includes #951, #952, #955, #968)
 - **Lane:** F74 round 3, macOS arm64, worktree `agent-affc884d75d16fbde`
 
