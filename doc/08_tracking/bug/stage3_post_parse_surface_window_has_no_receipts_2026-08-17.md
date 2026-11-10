@@ -1,7 +1,31 @@
 # Stage 3: the post-parse module-surface window emits no progress receipts
 
 - **Date:** 2026-08-17
-- **Status:** OPEN (mitigated — receipts added; the underlying ~30-minute cost is not fixed)
+- **Status:** OPEN — receipts half **FIXED in-tree** (relocated to
+  `driver_source_parse_retained.spl`; confirmed present 2026-11-11 lane boot14). Underlying
+  ~30-minute cost root-cause **BLOCKED (stage-chain probe)** — naming the sub-step requires a
+  stage-3 run (not runnable on this Windows host — known native-build hang on the success path).
+
+## Triage 2026-11-11 (lane boot14) — receipts FIXED; cost root-cause BLOCKED, kept OPEN
+
+Verdict: receipts mitigation **present/landed**; the "why does the window cost ~30 minutes"
+half is **BLOCKED** (stage-chain probe). Kept OPEN for the cost half.
+
+Evidence gathered this session (seed-smoke, build-commit `46fe8f6b6def`):
+- Receipts confirmed present, relocated with the parse-pipeline split into
+  `src/compiler/80.driver/driver_source_parse_retained.spl`:
+  `log_build_progress("surface_build", ...)` at :330 and :380, `log_build_progress("surface_alias", ...)`
+  at :383, plus the `resolve_export_origins`/`finish` ordering; task mapping in
+  `driver_log_helpers.spl:336-338` (`surface_alias`/`surface_build`/`surface_freeze` →
+  `ManifestWrite`, `export_origins`). The original "emitted NOTHING" gap is closed.
+- The ~30-min compute-bound, allocation-free cost was **not** re-measured: the new receipts
+  only name the sub-step once a stage-3 run emits them.
+
+Exact grant command (non-Windows host) — run stage-3 and read which new receipt
+(`surface_build`/`surface_alias`/`export_origins`/`surface_freeze`) the window stalls after:
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --output=build/bootstrap
+```
 - **Component:** `src/compiler/80.driver/driver_source_pipeline_parsing.spl`
 
 ## Symptom

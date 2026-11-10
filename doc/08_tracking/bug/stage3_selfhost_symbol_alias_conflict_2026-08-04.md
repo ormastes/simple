@@ -1,9 +1,32 @@
 # Stage-3 self-host: `Symbol` struct/type_alias conflict and nil-receiver crash
 
-Status: PARTIALLY FIXED (2026-08-08) — part A (struct/type_alias conflict)
-fixed; part B (nil-receiver crash) is the SAME issue as the "nil-receiver
-SIGILL in lower_expr" bug being worked by another lane and was left for that
-lane to avoid duplicate/conflicting work. See "Part A fix" section below.
+Status: **FIXED (Part A, 2026-08-08) — re-verified 2026-11-11 (lane boot14).** Part A
+(struct/type_alias conflict) is fixed and its regression spec passes 4/4 (seed-smoke); the
+held `VhdlProcessKind` duplicate-terminal sweep has also landed. Part B (nil-receiver crash)
+is tracked separately in `stage3_selfhost_nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md`
+(still OPEN, another lane) and is **not** part of this record's verdict.
+
+## Triage 2026-11-11 (lane boot14) — Part A FIXED (re-verified), CLOSED for Part A
+
+Verdict: **FIXED** (Part A). This record's named defect — the `Symbol` struct vs
+`type Symbol = text` alias collision — is resolved.
+
+Verification run this session (seed-smoke, build-commit `46fe8f6b6def`):
+- `grep -rn "struct Symbol" src/compiler/` → **no match**; no `struct Symbol` remains under
+  `src/compiler`. `type Symbol = text` aliases remain the sole owners
+  (`00.common/effects.spl:29`, `30.types/*.spl`, `25.traits/trait_method_resolution.spl:9`).
+- Regression spec `test/01_unit/compiler/bootstrap/hir_symbol_alias_owner_collision_spec.spl`
+  **passes 4/4, 0 failures** (rc=0), including the `it "does not register a struct Symbol that
+  collides with the module-local type_alias Symbol"` guard.
+- The previously "not landed" `VhdlProcessKind` sweep has landed differently than the
+  held rename: there is now **one** terminal `enum VhdlProcessKind`
+  (`50.mir/mir_instruction_support.spl:60`, re-exported via
+  `compiler.mir.mir_data`), and `70.backend/backend/common/hardware_codegen.spl` +
+  `hardware_codegen_types.spl` consume it via `use`/`export use` (ponytail comments confirm
+  "ONE terminal declaration"). The duplicate-terminal-declaration risk is resolved.
+
+Part B remains OPEN in its own record (`..._nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md`);
+no change was made to it here.
 Date: 2026-08-04
 Lane: stage-3 self-host blocker sweep
 

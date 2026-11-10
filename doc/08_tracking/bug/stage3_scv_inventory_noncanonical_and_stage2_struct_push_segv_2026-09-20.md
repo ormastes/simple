@@ -1,7 +1,38 @@
 # Stage 3 SCV inventory noncanonical; stage 2 compiler SEGV on struct push
 
 - **Date:** 2026-09-20
-- **Status:** OPEN. These are the two blockers left on the FreeBSD QEMU self-host lane after the lane fixes in PR #1141.
+- **Status:** OPEN — triaged 2026-11-11 (lane boot14). **Section 2 (Stage-2 struct-push
+  SEGV): FIXED (PR #1144).** **Section 1 (SCV inventory noncanonical sort): fix implemented
+  and interpreter-verified** (sort rewritten to a stable bytewise merge sort; regression
+  specs pass 9/9 and 3/3, seed-smoke) — end-to-end FreeBSD Stage-2→Stage-3 cold-init remeasure
+  is **BLOCKED (stage-chain probe)**, needs a stage3-capable binary.
+
+## Triage 2026-11-11 (lane boot14) — Sec.2 FIXED; Sec.1 fix verified in-tree, end-to-end BLOCKED
+
+Verdict: **Section 2 = FIXED (PR #1144).** **Section 1 = fix implemented + interpreter-verified;
+end-to-end stage-3 cold-init remeasure BLOCKED.** Kept OPEN for that remeasure.
+
+Evidence gathered this session (seed-smoke, build-commit `46fe8f6b6def`):
+- The sort is rewritten in-tree: `compile_source_inventory_sort_v1`
+  (`src/lib/scv/compile_source_inventory_core.spl:399`) is now a **stable bottom-up merge
+  sort** (O(n log n), one n-sized buffer per pass, already-ordered fast path) using the
+  dedicated bytewise comparator `compile_source_inventory_identity_cmp_v1` (:388,
+  `byte_at`/`byte_len` — no pointer/address compare), replacing the old O(n²) insertion sort
+  over raw `<` on a struct field read out of an array. Both defect facets (non-determinism and
+  quadratic RSS) are addressed.
+- Regression specs pass (seed-smoke 2026-11-11): `compile_source_inventory_cold_spec.spl`
+  **9/9** (cold/order-independent application yields the same canonical encoded bytes as
+  sequential — exercises the sort) and `compile_source_inventory_verified_digest_spec.spl`
+  **3/3** (decode rejects `inventory-noncanonical` row order).
+- Section 2 (struct-push SEGV) remains FIXED per PR #1144.
+
+Exact grant command (non-Windows host, FreeBSD/aarch64 stage3-capable binary) — remeasure
+the FreeBSD Stage-3 cold-init that originally produced `inventory-noncanonical`:
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=<output> --bootstrap-receipt=<stage3 planner receipt>
+```
+with the checker's env plus `SIMPLE_SCV_INVENTORY_COLD_INIT=1`, then confirm the written
+`<sha>.inventory` passes the read-back `encode(decode(file)) == file` round-trip.
 - **Area:** the pure-Simple Stage 2 compiler (self-hosted codegen), SCV compile-source inventory (`src/lib/scv/compile_source_inventory.spl`)
 
 ## 1. Stage 3 SCV admission: `git-event-apply:inventory-noncanonical`
