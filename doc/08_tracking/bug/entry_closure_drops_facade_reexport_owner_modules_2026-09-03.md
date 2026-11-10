@@ -1,5 +1,5 @@
 # Phase-1 entry closure never loads a facade's re-export OWNER modules
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 — fix verified at tip by p3-boot12 (was: Open 2026-09-16 — needs owner triage)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -174,5 +174,22 @@ Corroborates and closes out the 2026-11-09 never-touched-p3 note
   test/01_unit/compiler/driver/generated_facade_origin_closure_spec.spl
   --mode=interpret` → "All tests passed!" — the closure spec guarding both
   dropped edge classes (`export X.*` and `# Re-exported from`) passes.
+
+No change made in this lane.
+
+
+## Triage 2026-11-11 (P3 boot12 lane, work/p3-boot12-20261111)
+
+**Verdict: SUPERSEDED — fix verified live; confirms the 2026-11-09
+never-touched-p3 note and the 2026-11-10 p3-boot4 verdict at this base.**
+
+- Fix commits 7d8820319a2, 5334d6c7b3d, 4a5b072e594 verified ancestors of
+  this base (`git merge-base --is-ancestor` → YES for all three).
+- Seed-smoke (fresh seed 46fe8f6b6def, label seed-smoke, 2026-11-11):
+  `SIMPLE_LIB=src bin/simple.exe test
+  test/01_unit/compiler/driver/generated_facade_origin_closure_spec.spl
+  --mode=interpreter --no-cache` → `Results: 6 total, 6 passed, 0 failed`.
+  The closure spec guarding both dropped edge classes (`export X.*` and
+  `# Re-exported from X.spl`) passes on current source.
 
 No change made in this lane.

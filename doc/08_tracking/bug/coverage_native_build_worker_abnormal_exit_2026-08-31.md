@@ -1,6 +1,6 @@
 # native-build worker wrapper exits abnormally, so no coverage-native spec can build (2026-08-31)
 
-Status: OPEN. Found while making the coverage wrapper-compile path fail closed (PR #157).
+Status: STALE 2026-11-11 — host-side 2026-08-31 Linux toolchain state; subjects gone from tree, runner-side fail-closed contract verified live in source (p3-boot12).
 
 `bin/simple test <spec> --coverage --mode=native` never produces a binary on this
 host. The compile step (`native-build --backend llvm --source src/lib
@@ -93,3 +93,30 @@ confirmed green.
   reporter's Linux host even without `--coverage`) is a compiler/runtime
   defect, not bootstrap scripting, and is not verifiable from this Windows
   lane. No change made in this lane.
+
+
+## Triage 2026-11-11 (P3 boot12 lane, work/p3-boot12-20261111)
+
+**Verdict: STALE — confirms the 2026-11-10 p3-boot4 verdict with first-hand
+evidence on this base (origin/release/1.0.0 tip + boot11 merge).**
+
+- Subject binary `bin/release/x86_64-unknown-linux-gnu/simple` absent in this
+  worktree (ls rc=2) — the 2026-08-31 filing-host state cannot be reconstituted.
+- Reporting rewrite live: `native_build_worker_failure_lines_v1` at
+  `src/app/cli/native_build_main.spl:2298` (classifies core dump / Windows
+  status / POSIX signal / `-1`-without-timeout / true timeout); bounded worker
+  stdout preserved at the :2294 call site.
+- Runner fail-closed contract live: "ABORTED BEFORE EXECUTION — coverage
+  instrumentation wrapper failed to compile ... this is NOT a test result" at
+  `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:1007` (degrade
+  twin :1033); `compile_output_diagnostic_line_v1` error-line ranker at :1041
+  (commit 202ab47c283b verified ancestor of this base).
+- Seed-smoke (fresh seed 46fe8f6b6def, label seed-smoke, 2026-11-11):
+  `bin/simple.exe test test/01_unit/compiler/driver --coverage --no-cache`
+  entered the one-time SCV compile-event-journal inventory cold init and was
+  killed at the 150 s bounded probe limit (rc=124). Per this lane's routing
+  rules the coverage instrumented-build lane is not retried and no hang is
+  re-diagnosed; the filing host's Linux-side worker reaping (signal/-1 after
+  ~12 s) stays with the native-build/compiler lane.
+
+No change made in this lane.
