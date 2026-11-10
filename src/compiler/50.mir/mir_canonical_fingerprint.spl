@@ -1,0 +1,58 @@
+# Canonical MIR module fingerprint.
+#
+# serialize_mir_module walks Dict values in dict order and omits statics,
+# constants and types, so it cannot key a cache. This sorts every collection
+# by (name, symbol id) and covers all of them.
+# doc/08_tracking/bug/native_cache_mir_fingerprint_prerequisite_blocked_2026-08-02.md
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_graph.{mir_sorted_positions, mir_module_functions_sorted, mir_module_statics_sorted}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type, serialize_const_value, escape_json_string, serialize_mir_enum_declaration_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn mir_fp_constant_row(c: MirConstant) -> text:
+    "{c.symbol.id}|{escape_json_string(c.name)}|{serialize_mir_type(c.type_)}|{serialize_const_value(c.value)}"
+
+fn mir_fp_static_row(s: MirStatic) -> text:
+    var init = "-"
+    if val i = s.init:
+        init = mir_fp_constant_row(i)
+    "{s.symbol.id}|{escape_json_string(s.name)}|{serialize_mir_type(s.type_)}|{init}|{s.is_mutable}|{s.alignment}|{s.is_external}"
+
+fn mir_fp_type_row(t: MirTypeDef) -> text:
+    "{t.symbol.id}|{escape_json_string(t.name)}|{t.kind}|{t.is_export_c}|{escape_json_string(t.export_name)}"
+
+fn mir_module_canonical_fingerprint_v1(module: MirModule) -> text:
+    var parts: [text] = ["name:{escape_json_string(module.name)}"]
+    for func in mir_module_functions_sorted(module):
+        parts = parts.push("fn:" + serialize_mir_function(func))
+    for st in mir_module_statics_sorted(module):
+        parts = parts.push("static:" + mir_fp_static_row(st))
+
+    var const_ids: [i64] = []
+    var const_names: [text] = []
+    var consts: [MirConstant] = []
+    for symbol in module.constants.keys():
+        val c = module.constants[symbol]
+        const_ids = const_ids.push(symbol.id)
+        const_names = const_names.push(c.name)
+        consts = consts.push(c)
+    for pos in mir_sorted_positions(const_names, const_ids):
+        parts = parts.push("const:" + mir_fp_constant_row(consts[pos]))
+
+    var type_ids: [i64] = []
+    var type_names: [text] = []
+    var types: [MirTypeDef] = []
+    for symbol in module.types.keys():
+        val t = module.types[symbol]
+        type_ids = type_ids.push(symbol.id)
+        type_names = type_names.push(t.name)
+        types = types.push(t)
+    for pos in mir_sorted_positions(type_names, type_ids):
+        parts = parts.push("type:" + mir_fp_type_row(types[pos]))
+
+    for record in module.enum_semantic_declarations:
+        parts = parts.push("enum:" + serialize_mir_enum_declaration_v1(record))
+    "simple/mir-fp/v1:" + sha256_text(parts.join("\n"))
+
+export mir_module_canonical_fingerprint_v1
