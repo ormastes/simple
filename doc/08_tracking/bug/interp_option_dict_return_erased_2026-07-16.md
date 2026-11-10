@@ -112,3 +112,21 @@ return channel) — write-forbidden to this lane; routed to the seed-fix lane
 together with this grant request. The STATICS_FAILED_KEY workaround in
 cranelift_codegen_adapter.spl remains the in-tree mitigation and is unaffected
 by the probe (file restored byte-identical to HEAD).
+
+## 2026-11-11 unbounded probe verdict (seedfix lane, parent-executed)
+
+The granted unbounded probe ran ~4h wall / ~11.4k CPU-s (pid 14504, detached
+per grant; log preserved at build/review/seedfix-defectC-probe.log, 9887
+lines). Progress: silent compiler-graph phase ended (~3h50m); module-load
+phase began; then the log FROZEN at 9886 lines for the final ~40 min while
+the process stayed ~98% CPU — no forward progress. Killed as pathological;
+`cranelift_codegen_adapter.spl` probe edit restored byte-identical to HEAD;
+`PROBE_OPT_DICT_CHECK` never emitted.
+
+Verdict: LIVE, re-classified — the Option<Dict<K,V>> return channel does not
+merely erase payloads, it appears to HANG the seed codegen path (CPU-bound
+no-output loop). Evidence is stronger than the original erasure report: a
+minimal hello-world-class entry with `fn _probe_opt_dict() -> Dict<i64,i64>?`
+never completes codegen. Next owner step: bisect the hang site in
+src/compiler_rust with a debug build (SIMPLE_DBG_* flags), or bound the
+compiler-graph phase with a cycle counter and dump the active node list.
