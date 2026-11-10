@@ -8,7 +8,7 @@ evidence found in the body. This is bookkeeping, not verification.
 **Area:** `src/runtime/runtime_native.c:2794-2830` (`rt_string_concat`); pure
 tree-walk `src/compiler/10.frontend/core/interpreter/ops.spl:49` (delegates to
 host `+`)
-**Status:** OPEN (filed from the pure-lane audit of the seed's 2026-08-22
+**Status:** SUPERSEDED (filed from the pure-lane audit of the seed's 2026-08-22
 memory fixes; not fixed here because the sound fix changes the `RtCoreString`
 ABI)
 **Seed counterpart:** `Arc::try_unwrap` in-place append for `s = s + x` /

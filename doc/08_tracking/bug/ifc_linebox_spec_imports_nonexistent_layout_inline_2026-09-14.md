@@ -1,7 +1,7 @@
 # `ifc_linebox_spec` is 0/10 — it imports a `layout_inline` that has never existed
 
 - **Filed:** 2026-09-14 (web ↔ Chrome layout-geometry parity, round 18)
-- **Status:** OPEN, pre-existing, NOT caused by round 18
+- **Status:** FIXED, pre-existing, NOT caused by round 18
 - **Spec:** `test/01_unit/browser_engine/ifc_linebox_spec.spl`
 - **Symptom:** all 10 examples fail with the same non-assertion error,
   `semantic: function \`layout_inline\` not found`. No `expected X to equal Y`

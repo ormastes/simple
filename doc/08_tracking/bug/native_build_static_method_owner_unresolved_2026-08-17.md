@@ -195,3 +195,46 @@ Each of the first two has its own row; they are summarised here only for context
   between the native and interpreter lowering lanes, measured differentially
   against the interpreter as oracle rather than against hardcoded strings.
 
+
+## 2026-11-10/11 status — SUPERSEDED on source evidence; executed confirmation blocked-needs-grant (P3 bootstrap lane row 48, work/p3-boot6-20261110)
+
+Re-judged on this lane's base (`4343ce254922`), refreshed seed
+(build-commit `0791c2b7f4a7`).
+
+**Fix presence — verified in source.** Both prescribed halves are in-tree at
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:4962-5033`:
+the name-derived owner recovery (`static_receiver_name != ""` +
+`lookup_or_invalid` + `lookup_method_in_type`, Function-kind test, ordered
+before the unique-static-method widening), with an in-code comment citing
+this record. The 38 unconditional `[mir-method-call]` eprint probes are
+gated, in evolved form: a `mir_trace_enabled()` generation counter
+(`mir_mc_trace_state`) guards every probe (:2603-2608 and siblings).
+Fixtures `test/fixtures/native_static_method_owner/main.spl` and
+`test/fixtures/native_trailing_default_param/` are present.
+
+**Executed confirmation — blocked on this host.** The record's own
+confirming spec
+(`test/01_unit/compiler/native/native_static_method_owner_resolution_spec.spl`)
+shells out to a real `native-build` of the fixture, so it pays the full
+interpreted-worker cost this repo's rows 43/44 measure. Four attempts on
+this loaded Windows host, all ending in watchdog/child-timeout before the
+build completed: 600 s and 880 s external budgets (orphan worker held the
+pipe), then the runner's internal 900 s default
+(`reason=child-timeout budget_ms=900000`), then `--timeout 1800`
+successfully applied (`budget_ms=1800000`) — the worker's own watchdog fired
+at 1800 s (`[watchdog] wall-clock timeout (1800s) exceeded`, crash report
+`.simple/logs/crash_12812.log`, no phase attribution). Both long runs
+froze their build log at the identical byte offset (611,607 B) — a
+deterministic pipeline prefix, then a silent CPU-bound phase (LLVM
+codegen/link of the fixture) that does not finish in 30 minutes here. This
+is the same host-shape pathology as `native_build_interpreted_worker_*`,
+not evidence about the fix either way.
+
+BLOCKED-needs-grant (executed confirmation): quiet Linux host or the
+compiled-worker lane, command
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/compiler/native/native_static_method_owner_resolution_spec.spl --no-cache --timeout 1800`
+(historical confirming budget on a quiet 2026-08 box was 1500-3000 s). The
+companion parity spec `native_interpreter_owner_resolution_parity_spec.spl`
+is the same shape and cost. Until then the shipped-state caveat of this
+record stands, narrowed: fix confirmed present in source; execution
+unconfirmed for infrastructure reasons only.

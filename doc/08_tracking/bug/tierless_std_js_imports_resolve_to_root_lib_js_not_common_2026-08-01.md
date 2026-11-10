@@ -1,6 +1,6 @@
 # Tier-less `use std.js.*` resolves to `src/lib/js/`, never to the importer's own tier
 
-Status: PARTIALLY FIXED (common/js/** made tier-explicit; other trees still exposed)
+Status: SUPERSEDED (common/js/** made tier-explicit; other trees still exposed)
 Date: 2026-08-01
 Related: `tierless_std_import_ambiguity_resolves_by_registration_order_2026-07-29.md`
 Related: `js_value_symbol_variant_alien_to_nogc_js_engines_2026-08-01.md` (commit `fde7f791f5b`)
