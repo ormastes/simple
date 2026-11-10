@@ -74,3 +74,47 @@ transactional rollback the session claims to provide.
 
 ## No seed (Rust) change is required.
 
+## Addendum 2026-11-11 — lane ne3: issue #1 FIXED (source-verified); issue #2
+## runtime verification BLOCKED by a known, already-routed P1 seed hazard
+
+Traversed on work/p3-ne3-20261111 (origin/release/1.0.0 tip 93490a99c5d8),
+refreshed seed bin/simple.exe (2026-11-11, build-commit 0791c2b7f4a7), all runs
+seed-smoke (`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe
+test <spec> --mode=interpreter --no-cache`).
+
+**Issue #1 (disturbed body) — FIXED in source.** The single-sourcing direction
+this bug demanded has landed: `src/lib/gc_async_mut/web/browser_session.spl:61`
+now imports `std.nogc_sync_mut.js.engine.runtime` (tier-explicit import fix
+`7f923ed08d39` "fix(lib): make 4 gc_async_mut js.engine.runtime imports
+tier-explicit", 2026-11-10, ancestor of this tip), and the nogc_sync_mut engine
+copy now implements the guard: `_consume_response_body`
+(`src/lib/nogc_sync_mut/js/engine/interpreter_native.spl:8779`) is routed by
+all four body natives (`_native_response_text/_json/_blob/_array_buffer`,
+:8805/:8813/:8825/:8847) and its comment cites this bug doc. The four-way
+duplication itself still exists (gc_sync_mut / nogc_async_mut copies still have
+no guard), but the copy this lane resolves to is guarded, which is what the
+bug's fix directive ("make the disturbed-body rule single-sourced rather than
+porting the guard three more times") required for this consumer. Full
+single-sourcing remains desirable follow-up.
+
+**Runtime verification of both issues — BLOCKED on this lane.**
+`browser_session_async_spec.spl` now compiles and executes all 24 examples but
+every one fails at semantic load with `method 'trim' not found on value of type
+enum in nested call context` (log:
+`build/review/p3fix-ne3-20261111-logs/row2_async_full.log` in this lane's
+worktree), preceded by `warning[enum-bare-name-ambiguous]: enum JsValue is
+registered again with a different variant set`. This is the known P1 seed
+hazard `seed_enum_variant_bare_name_last_registration_wins_2026_10_19`
+(status: fix-implemented-verification-pending) surfacing on the refreshed
+seed, already routed to the seed lane by the lib3 traverse lane
+(`build/review/p3fix-lib3-20261111.sdn`, host-gap note in
+`doc/08_tracking/bug/js_timer_queue_4096_entries_hang_2026-09-01.md`). A
+minimal enum-in-nested-call-arg probe passes on this seed, confirming the
+blocker is the duplicate JsValue registration, not a regression of the
+2026-08-17 `instantiate_class` fix. Grant to finish verification: land the
+seed-lane fix for `seed_enum_variant_bare_name_last_registration_wins_2026_10_19`,
+redeploy the seed, then re-run both specs with the same seed-smoke command.
+
+**Issue #2 (timer rollback)** — no fix commit identified; cannot be confirmed
+either way until the hazard above is cleared. Status stays OPEN.
+
