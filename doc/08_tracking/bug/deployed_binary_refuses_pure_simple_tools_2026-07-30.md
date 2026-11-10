@@ -1,5 +1,5 @@
 # Deployed `bin/simple` refuses `test`/`lint`/`fmt` — all spec verification blocked
-## Closed 2026-09-16 — RESOLVED/not reproducible 2026-07-30; mem_cli_spec 7/7 verified normally
+## Closed 2026-09-16 — RESOLVED/not reproducible 2026-07-30; mem_cli_spec 7/7 verified normally; re-verified 2026-11-11 (lane ne6, refreshed seed v1.0.0-rc.1 @ 0791c2b7f4a7) — dispatch works, refusal absent, see addendum
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
@@ -219,3 +219,30 @@ Held back pending a working runner, because it must not land unverified:
 2. Produce a genuine pure-Simple binary via bootstrap and deploy it.
 3. Re-verify the held changes above before landing them.
 
+
+---
+
+## Addendum 2026-11-11 (lane ne6, batch p3-ne6)
+
+**Verdict: CLOSED re-verified.** The doc was closed 2026-09-16; this addendum
+re-runs the acceptance measurement on the refreshed seed (v1.0.0-rc.1,
+build-commit 0791c2b7f4a7) in this worktree (seed-smoke,
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+test/03_system/app/mem_cli_spec.spl --mode=interpreter --no-cache`).
+
+Result: the spec **dispatched and executed** — 17 examples declared/executed,
+7 passed / 10 failed, exit 1. The refusal string ("pure-Simple tool 'test'
+unavailable; refusing Rust fallback") did NOT appear; `test` reaches the
+pure-Simple app normally. The refusal defect is not reproducible at tip.
+
+The 10 failures are host/spec drift, not this bug (full log:
+`build/review/mem_cli_spec_run.log` in the lane worktree, not committed):
+- 7 examples fail with `semantic: ... function 'run_mem_timeout' not found` —
+  the spec references a helper that does not resolve at tip (spec-side drift).
+- `test-daemon: light daemon requires Linux /proc; running directly on
+  windows` — Windows-host limitation.
+- TUI `top --once` exact-frame expectation and the `routes mem through the CLI
+  dispatch arm` assert — Windows-host/dispatch drift.
+
+None of these re-open the refusal question; recorded so a future lane does not
+read the red count as a recurrence of this row.

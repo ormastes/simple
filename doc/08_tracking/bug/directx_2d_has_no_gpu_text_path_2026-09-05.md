@@ -1,8 +1,8 @@
 # DirectX Engine2D has no GPU text path, so the Vulkan/Metal font batching has nothing to port into
 
 - **Filed:** 2026-09-05
-- **Status:** OPEN, not started. Recorded while porting the Vulkan font
-  frame-batching optimization to Metal.
+- **Status:** OPEN — re-verified unchanged 2026-11-11 (lane ne6); still no GPU
+  text path, still host-limited (see addendum)
 - **Owner surface:** `src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl`,
   `src/runtime/runtime_directx_core.c`
 - **Platform:** Windows (native D3D11) and Linux (DXVK). Neither is available
@@ -59,3 +59,31 @@ link, or execute it would produce exactly the kind of green-looking, never-run
 code the stage-binary and unbacked-extern guards exist to catch. The scope is
 recorded here instead so the work is visible and can be picked up on a host
 that can prove it.
+
+---
+
+## Addendum 2026-11-11 (lane ne6, batch p3-ne6)
+
+**Verdict: LIVE (deferred), source-verified unchanged, host-limited.** No
+codegen change was attempted: per this doc's own reasoning, writing an
+unverifiable D3D compute path from a lane that cannot prove it would produce
+exactly the false-evidence class the guards exist to catch.
+
+Source state at tip (read 2026-11-11, worktree branch
+work/p3-ne6-20261111):
+
+- `src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl:49-54` still carries
+  the TODO citing this doc; `draw_text_bg` (:229-231) and `draw_text` (:390-392)
+  still delegate to `self.sw.*` and then `_poison_native_receipt()`.
+- `src/lib/common/gpu/font_atlas_composite.spl` has no HLSL/DirectX twin
+  (Vulkan GLSL + Metal packed sources only).
+- `src/runtime/runtime_directx_core.c` `rt_directx_*` entries remain
+  submission/readback infrastructure — no compute dispatch, no fence, no
+  present entry for a text path.
+- Last functional touch of `backend_directx.spl` predates the filing (only the
+  2026-11-07 merge shows in `git log --since=2026-09-01`).
+
+Host-limit note: the triage host IS Windows, but closing evidence per this doc
+requires the GPU text path to be IMPLEMENTED first (HLSL twin, frame opcode,
+`rt_directx_*` dispatch) and then proven with a device-produced text frame on
+Windows or DXVK. None of the implementation exists, so the row stays OPEN.
