@@ -1,0 +1,149 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+"""
+## Purpose and audience
+
+Purpose: pin the fix for
+doc/08_tracking/bug/paren_tail_after_block_match_val_parsed_as_call_2026-08-18.md
+in the PURE-SIMPLE front end: a parenthesised tail on the line after a
+block-`match` `val` initialiser is a NEW statement, never a call glued onto the
+match value. Pre-fix the source was parsed as
+`val a = (match ...)(a > 0 and a < 10)`, so `a` was referenced inside its own
+initialiser and the whole function failed with `value is not callable`.
+
+Audience: parser maintainers confirming the block-match statement boundary.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/parser/paren_tail_after_block_match_val_parity_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+The spec drives the pure-Simple front end directly (`compiler.core.parser`),
+so it verifies the self-hosted parser even when the test runner itself is the
+Rust seed. The deployed seed parser still carries the defect until the next
+seed rebuild (out of scope: seed sources are not edited here); the filed bug
+doc records that lane boundary.
+
+Known limitation accepted by the fix (zero uses in src/ examples/ test/):
+`(match ...: ...)(args)` — an explicit-paren match value CALLED in place — is
+no longer a call; write the callee through a `val` first. Bare match values
+inside larger expressions (`Ok(match k: ...)`, `x + (match k: ...)`), which is
+the only shape the corpus uses, are unaffected: no postfix operator ever
+directly followed them.
+"""
+
+"""
+Regression coverage for paren_tail_after_block_match_val_parsed_as_call_2026-08-18.
+
+The bug doc's controls are all pinned: the exact multi-line reproducer, the
+single-line variant (failed pre-fix too), the unparenthesised-tail control
+(always passed), the plain-val control, and the one-intervening-val control.
+The AST assertions discriminate the mis-parse: glued = ONE val statement whose
+initialiser is EXPR_CALL(callee = match); fixed = TWO statements, the val
+whose initialiser is EXPR_MATCH plus a separate expression statement.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.core.ast.{module_get_decls, decl_get_name, decl_get_body,
+    stmt_get_tag, stmt_get_expr, expr_get_tag,
+    STMT_EXPR, STMT_VAL_DECL, EXPR_MATCH, EXPR_CALL, EXPR_BINARY}
+use compiler.core.parser.{parse_module, parser_has_errors, parser_set_had_error}
+
+fn parse(name: text, source: text) -> [i64]:
+    parser_set_had_error(false)
+    parse_module(source, "paren_tail_after_block_match_val_" + name + ".spl")
+    expect(parser_has_errors()).to_equal(false)
+    module_get_decls()
+
+fn fn_body(decls: [i64], fn_name: text) -> [i64]:
+    var i = 0
+    while i < decls.len():
+        if decl_get_name(decls[i]) == fn_name:
+            return decl_get_body(decls[i])
+        i = i + 1
+    expect("function " + fn_name + " present").to_equal("missing")
+    []
+
+describe "paren tail after a block-match val is a new statement (pure-Simple front end)":
+    it "AC-1: the bug doc reproducer parses as val + separate paren statement":
+        # @req REQ-SSPEC-UNIT
+        step("parse the exact multi-line reproducer from the 2026-08-18 bug doc")
+        val src = "fn mk(n: i64) -> Result<i64, text>:\n" +
+            "    if n > 0:\n" +
+            "        return Ok(n)\n" +
+            "    Err(\"neg\")\n" +
+            "\n" +
+            "fn f() -> bool:\n" +
+            "    val a = match mk(1):\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(_): return false\n" +
+            "    (a > 0 and a < 10)\n"
+        val body = fn_body(parse("reproducer", src), "f")
+        expect(body.len()).to_equal(2)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_VAL_DECL)
+        expect(expr_get_tag(stmt_get_expr(body[0]))).to_equal(EXPR_MATCH)
+        expect(stmt_get_tag(body[1])).to_equal(STMT_EXPR)
+        expect(expr_get_tag(stmt_get_expr(body[1]))).to_equal(EXPR_BINARY)
+
+    it "AC-2: the single-line variant is rejected loudly, never silently glued":
+        # @req REQ-SSPEC-UNIT
+        step("same-line multi-arm match no longer parses at all — a loud error, not a silent call-glue")
+        # The 2026-08-18 single-line control (v3/v5) parsed and mis-bound the
+        # paren tail as a call. Since the match-arm column work (and the
+        # 2026-11-09 `| Pat -> expr` arms) the same-line multi-`case` shape is
+        # a hard parse error, so the glue cannot manifest silently there.
+        # Pin the loud rejection so a future leniency cannot re-introduce the
+        # silent path without failing here.
+        val src = "fn mk(n: i64) -> Result<i64, text>:\n" +
+            "    if n > 0:\n" +
+            "        return Ok(n)\n" +
+            "    Err(\"neg\")\n" +
+            "\n" +
+            "fn f() -> bool:\n" +
+            "    val a = match mk(1): case Ok(v): v case Err(_): 0\n" +
+            "    (a > 0 and a < 10)\n"
+        parser_set_had_error(false)
+        parse_module(src, "paren_tail_after_block_match_val_single_line_rejected.spl")
+        expect(parser_has_errors()).to_equal(true)
+
+    it "AC-3: an intervening val between the match and the paren tail (bug-doc control v4)":
+        # @req REQ-SSPEC-UNIT
+        step("block-match val + one intervening val + parenthesised tail")
+        val src = "fn mk(n: i64) -> Result<i64, text>:\n" +
+            "    if n > 0:\n" +
+            "        return Ok(n)\n" +
+            "    Err(\"neg\")\n" +
+            "\n" +
+            "fn f() -> bool:\n" +
+            "    val a = match mk(1):\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(_): return false\n" +
+            "    val b = a\n" +
+            "    (b > 0 and b < 10)\n"
+        val body = fn_body(parse("intervening_val", src), "f")
+        expect(body.len()).to_equal(3)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_VAL_DECL)
+        expect(expr_get_tag(stmt_get_expr(body[0]))).to_equal(EXPR_MATCH)
+        expect(stmt_get_tag(body[2])).to_equal(STMT_EXPR)
+
+    it "control: a match value used as a call ARGUMENT keeps its EXPR_MATCH shape":
+        # @req REQ-SSPEC-UNIT
+        step("Ok(match ...) — match inside a larger expression is untouched by the boundary rule")
+        val src = "fn mk(n: i64) -> Result<i64, text>:\n" +
+            "    if n > 0:\n" +
+            "        return Ok(n)\n" +
+            "    Err(\"neg\")\n" +
+            "\n" +
+            "fn f() -> i64:\n" +
+            "    val a = 1 + (match mk(1):\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(_): 0)\n" +
+            "    a\n"
+        val body = fn_body(parse("operand", src), "f")
+        expect(body.len()).to_equal(2)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_VAL_DECL)
+        expect(expr_get_tag(stmt_get_expr(body[0]))).to_equal(EXPR_BINARY)
