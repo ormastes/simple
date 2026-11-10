@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
 the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-08-11  
-**Status:** OPEN  
+**Status:** SUPERSEDED 2026-11-11 — umbrella absorbed by the per-arch 2026-08-11 follow-up rows and declared obsolete by the 2026-09-16 normalization; see the dated addendum below.  
 **Acceptance criteria:** AC-3 through AC-8, AC-10 through AC-14
 
 ## Observed state
@@ -91,3 +91,34 @@ After fresh media generation, run each `test/03_system/os/qemu/sys_qemu_<arch>_f
 - Owner: SOSIX/QEMU integration lane
 - Final reviewer: independent normal/highest-capability reviewer
 
+
+---
+
+## Addendum 2026-11-11 — lane runner7: SUPERSEDED (umbrella absorbed by per-arch rows)
+
+This row's header was already marked "Obsolete 2026-09-16 — referenced
+path(s) gone" by the bug-ledger normalization pass, but the Status field was
+never flipped. Verified the absorption claim at release tip (HEAD
+`68ab3383080f`):
+
+- Every per-arch subject this umbrella tracked now has its own open bug row in
+  the same ledger: `arm32_qemu_release_lineage_and_nonce_gap_2026-08-11.md`,
+  `arm64_qemu_dynamic_root_dirent_and_fabricated_stubs_2026-08-11.md`,
+  `riscv32_qemu_guest_ls_and_program_execution_gap_2026-08-11.md`,
+  `riscv64_qemu_release_lineage_and_nonce_gap_2026-08-11.md`,
+  `x86_32_qemu_release_lineage_nonce_and_clean_source_gap_2026-08-11.md`,
+  `x86_64_qemu_release_lineage_nonce_and_clean_source_gap_2026-08-11.md`,
+  plus `sosix_qemu_external_host_admission_and_collector_gaps_2026-08-11.md`
+  and `host_qemu_virtio_gpu_gl_missing_egl_symbol_2026-08-11.md`.
+- The resume-command artifacts exist at tip:
+  `scripts/check/check-sosix-qemu-matrix.shs` and
+  `test/03_system/os/qemu/sys_qemu_{arm32,arm64,riscv32,riscv64,...}_fs_exec_spec.spl`.
+  (The header's "paths gone" example is itself stale on this point — the specs
+  are present; the row is superseded because its subjects are tracked
+  per-arch, not because the files vanished.)
+- The remaining unblock conditions (admitted pure-Simple Stage 4 lineage, fresh
+  six-arch media, nonce correlation) are owner/infra decisions carried by the
+  per-arch rows and the bootstrap lane, not by this umbrella.
+
+Verdict: SUPERSEDED — flip only; no code or spec change. Live work continues in
+the per-arch rows named above.
