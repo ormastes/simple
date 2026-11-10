@@ -474,3 +474,27 @@ additionally checks 12 join/bytes cases through the new fast paths
   to copy; a census of other `parts.push(char_*)`-then-`join` loops has not
   been done.
 
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED FOR THE COMPILER LANE
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED for the compiler lane.** The 2026-09-06 re-measurement's
+conclusion stands and is now confirmed on this host: the codegen lane is not the defect.
+The lib+runtime fix (per-element boxed round-trips removed; `base64.spl` accumulates
+`[u8]` and converts once) is merged on base, and the wired ratchet passes on the Windows
+seed:
+
+`sh scripts/check/check-base64url-codegen-lane-perf.shs` →
+`PASS — 100 vector(s) KAT-verified, ratio 20.1x under ceiling 60x` (same envelope as the
+recorded 17.6x aarch64 measurement; correctness KAT asserted before timing).
+
+Remaining OPEN items named by this record are all outside `src/compiler` (this lane's
+scope): utf8_validate `u64`-window ASCII fast path and base64 decode single-pass
+(`src/lib/common/base_encoding/utilities.spl`, `base64.spl`), `char_from_code` census,
+and `rt_array_join`'s quadratic (`src/runtime`) — these belong to the lib/runtime lanes.
+C-MIG-0019 time_utils was already debunked in-record as a measurement artifact.
