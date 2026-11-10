@@ -10,6 +10,18 @@ use plugins.backend_llvm_lib.llvm_lib_type_mapper.{LlvmLibTypeMapper}
 use std.sffi.llvm.*
 use std.sffi.llvm.{LLVM_PRIVATE_LINKAGE}
 use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
+use compiler.mir.mir_instruction_support.{MirCallOrigin, mir_call_origin_uses_local_symbols}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
+
+fn llvm_lib_named_call_symbol(name: text, origin: MirCallOrigin) -> text:
+    if mir_call_origin_uses_local_symbols(origin):
+        if name == "main": return "__simple_main"
+        if mir_runtime_owned_call_name(name): return mir_runtime_owned_local_symbol(name)
+        return name
+    if origin == MirCallOrigin.Runtime:
+        if name == "get_args" or name == "get_cli_args" or name == "sys_get_args": return "rt_get_args"
+        if name == "print": return "rt_println"
+    name
 
 @unsafe(reason: "raw tagged i64-array append status ABI", capabilities: [ffi])
 extern fn rt_array_push_i64_raw(values: [i64], value: i64) -> i8
@@ -638,7 +650,7 @@ fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
         val raw_value = _sffi_tuple_get_i64(const_payload, 0)
         if _sffi_enum_discriminant<text>(raw_value) == 0xd43c7eb8:  # hash("Str")
             val name: text = _sffi_enum_payload<text>(raw_value)
-            fn_name = if name == "main": "__simple_main" elif name == "get_args" or name == "get_cli_args" or name == "sys_get_args": "rt_get_args" elif name == "print": "rt_println" else: name
+            fn_name = llvm_lib_named_call_symbol(name, func.call_origin)
             func_ref = llvm_get_named_function(mod_, fn_name)
     else:
         match func_kind:
@@ -650,8 +662,7 @@ fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
 
     if func_ref == 0:
         val callee_desc = if fn_name != "": "'" + fn_name + "'" else: "<indirect>"
-        eprint("[llvm-lib] ERROR: unresolved function call to " + callee_desc + ", skipping instruction — generated code will be broken")
-        return local_value_map
+        panic("[llvm-lib] unresolved function call to " + callee_desc)
     val actual_param_count = llvm_count_params(func_ref)
     if actual_param_count != args.len():
         eprint("[llvm-lib] ERROR: call arity mismatch for '" + fn_name + "': MIR args=" + args.len().to_text() + " LLVM params=" + actual_param_count.to_text() + ", skipping instruction")
@@ -848,13 +859,14 @@ fn translate_operand_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapp
         val payload = _sffi_enum_payload<MirOperandKind>(operand_kind)
         val value: MirConstValue = _sffi_tuple_get_i64(payload, 0)
         val const_type: MirType = _sffi_tuple_get_i64(payload, 1)
-        return translate_const_value_llvm(ctx, mod_, builder, tm, value, const_type)
+        return translate_const_value_llvm(ctx, mod_, builder, tm, value, const_type, operand.call_origin)
 
     eprint("[llvm-lib] ERROR: invalid MIR operand discriminant " + operand_disc.to_text())
     0
 
 fn translate_const_value_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
-                         value: MirConstValue, ty: MirType) -> i64:
+                         value: MirConstValue, ty: MirType,
+                         call_origin: MirCallOrigin = MirCallOrigin.Source) -> i64:
     val llvm_ty = tm.map_type(ty)
     match value:
         case Int(v):
@@ -871,12 +883,12 @@ fn translate_const_value_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibType
             val ty_kind: MirTypeKind = ty.kind
             match ty_kind:
                 case FuncPtr(_):
-                    val fn_name = if name == "main": "__simple_main" else: name
+                    val fn_name = llvm_lib_named_call_symbol(name, call_origin)
                     val func_ref = llvm_get_named_function(mod_, fn_name)
                     if func_ref != 0:
                         func_ref
                     else:
-                        llvm_const_null(llvm_ty)
+                        panic("[llvm-lib] unresolved function reference '" + fn_name + "'")
                 case _:
                     # String constant
                     val str_val = llvm_const_string_in_context(ctx, name, false)

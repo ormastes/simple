@@ -18,6 +18,7 @@ use compiler.mir.mir_data.*
 use compiler.backend.backend.backend_types.{BackendKind, CompileError, compileerror_backend_error}
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
 
 fn lean_err(msg: text) -> CompileError:
     """Construct a named Lean-backend diagnostic."""
@@ -203,6 +204,7 @@ fn translate_mir_global_state_body_v1(body: MirBody) -> Result<LeanGlobalStateBo
         lines.join("\n"), "Nat → " + state_value_type, written_regions))
 
 fn lean_runtime_name(operand: MirOperand) -> text:
+    if operand.call_origin != MirCallOrigin.Runtime: return ""
     match operand.kind:
         case Const(MirConstValue.Str(name), _): name
         case _: ""
@@ -705,7 +707,7 @@ fn translate_mir_inst(inst: MirInst, body: MirBody) -> Result<text, CompileError
             # closed instead of becoming an uninterpreted Lean call.
             match func.kind:
                 case Const(MirConstValue.Str(runtime_name), _):
-                    if runtime_name == "rt_enum_new" and dest != nil:
+                    if func.call_origin == MirCallOrigin.Runtime and runtime_name == "rt_enum_new" and dest != nil:
                         val result_dest = dest ?? LocalId(id: -1)
                         val result_type = lean_body_local_type(body, result_dest)
                         if result_type != nil:
@@ -773,6 +775,8 @@ fn translate_operand_list_exact(body: MirBody, ops: [MirOperand], sep: text) -> 
     Ok(parts.join(sep))
 
 fn translate_direct_call_callee(operand: MirOperand) -> Result<text, CompileError>:
+    if operand.call_origin != MirCallOrigin.Source:
+        return Err(lean_err("lean-backend: call requires proven source origin or a registered exact Runtime semantic lowering; foreign and unknown call semantics are unsupported"))
     match operand.kind:
         case Const(MirConstValue.Str(name), type_):
             match type_.kind:

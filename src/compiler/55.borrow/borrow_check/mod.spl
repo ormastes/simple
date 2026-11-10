@@ -21,7 +21,7 @@ use compiler.borrow.borrow_check.borrow_graph.*
 use compiler.borrow.borrow_check.nll.*
 use compiler.borrow.borrow_check.nll.{NLLError}  # explicit: enum payload owner must name the payload type (hir-payload-origin-unresolved)
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instruction_support.{MirTerminator, MirOperandKind, MirOperand}
+use compiler.mir.mir_instruction_support.{MirTerminator, MirOperandKind, MirOperand, MirCallOrigin}
 use compiler.mir.mir_types.{LocalId, BlockId, MirType, MirTypeKind, MirSignature, MirLocal, MirConstValue}  # explicit: a glob is not an import-origin for surface projection
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.common.diagnostics.span.{Span}
@@ -684,7 +684,10 @@ class BorrowChecker:
     # stay conservative outside strict mode by explicit design.
     # doc/08_tracking/bug/legacy_direct_call_short_contract_unsatisfiable_2026-10-24.md
     me record_direct_call_contract_v1(callee: MirOperand, args: [MirOperand], nll: NLLChecker, point: i64):
-        if self.nogc_strict:
+        # Legacy local calls retain their policy, but a declared extern (or a
+        # target without declaration authority) cannot assume that a borrow is
+        # released when the call returns. This covers Call and CallTerminator.
+        if self.nogc_strict or callee.call_origin == MirCallOrigin.Foreign or callee.call_origin == MirCallOrigin.Unknown:
             self.record_short_call_contract(callee, args, nll, point)
 
     me record_call_result_loans(args: [MirOperand], destination: LocalId, nll: NLLChecker, point: i64, direct: bool = false):
@@ -708,10 +711,14 @@ class BorrowChecker:
 
     me record_short_call_contract(callee: MirOperand, args: [MirOperand], nll: NLLChecker, point: i64):
         var effects: [text] = []
-        match callee.kind:
-            case MirOperandKind.Const(MirConstValue.Str(name), _):
-                effects = short_call_effects_at(self.short_call_contracts, name)
-            case _: pass
+        # Published short summaries prove local Simple bodies only. Foreign,
+        # generated-runtime and unknown callees may share their spelling, but
+        # that never transfers a local declaration's non-retaining proof.
+        if callee.call_origin == MirCallOrigin.Source:
+            match callee.kind:
+                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                    effects = short_call_effects_at(self.short_call_contracts, name)
+                case _: pass
         # Positional summaries are authoritative only at their checked arity.
         # A stale row must not bless a prefix of a different call signature.
         if effects.len() != args.len(): effects = []

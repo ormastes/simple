@@ -1,3 +1,4 @@
+use compiler.mir.mir_instruction_support.{MirCallOrigin, mir_call_origin_uses_local_symbols}
 use compiler.backend.float_literal_owner.{float_literal_scalar}
 use std.common.binary_io.{f64_to_bits, f32_to_bits}
 # Cranelift Codegen Adapter
@@ -22,7 +23,7 @@ use compiler.backend.cranelift_global_address.*
 use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_void}
 use compiler.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
 use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
-use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.sffi.codegen.*
 use compiler.mir.mir_instruction_support.{mir_operand_const_int}
@@ -1129,7 +1130,7 @@ fn cl_translate_terminator(
             if val term_dest_l = dest:
                 term_ret_type = local_type(term_dest_l.id, func)
                 term_has_dest = true
-            val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, 0, {}, func, term_ret_type, term_has_dest)
+            val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, cl_module, {}, func, term_ret_type, term_has_dest)
             if dest.?:
                 # Inline extraction: calling a helper with a LocalId? ARGUMENT is
                 # miscompiled on the stage4 lane (callee never runs, garbage
@@ -1173,7 +1174,7 @@ fn cl_translate_operand(
                 return load_local(ctx, local_value.id, value_map, slot_map, func)
             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Const(value, type_):
-            return cl_translate_const_value(ctx, cl_module, value, type_)
+            return cl_translate_const_value(ctx, cl_module, value, type_, operand.call_origin)
 
 # Uniform-i64 memory load for a local's value: floats keep their typed
 # load, everything else loads as I64 (the lane is uniformly i64 — see the
@@ -1237,7 +1238,7 @@ fn load_local(
 # Constant Translation
 # ============================================================================
 
-fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type_: MirType) -> i64:
+fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type_: MirType, origin: MirCallOrigin = MirCallOrigin.Source) -> i64:
     # EXPLICIT returns: mixed-return/tail rule (see cl_translate_operand).
     match value:
         case Int(_):
@@ -1252,15 +1253,17 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
         case Str(v):
             match type_.kind:
                 case FuncPtr(_):
-                    var address = cranelift_function_addr_in_func(ctx, v)
+                    val source_call = mir_call_origin_uses_local_symbols(origin)
+                    val symbol = if source_call and mir_runtime_owned_call_name(v): mir_runtime_owned_local_symbol(v) else: v
+                    var address = cranelift_function_addr_in_func(ctx, symbol)
                     if address == 0:
                         # A function VALUE naming an imported function: only
                         # this module's own functions are pre-declared, so
                         # declare the import from the declared FuncPtr
                         # signature, as cl_translate_call does for calls.
                         val import_sig = cl_import_call_signature(type_, cl_declared_callee_params(type_).len())
-                        cranelift_declare_function(cl_module, v, import_sig, CL_LINKAGE_IMPORT)
-                        address = cranelift_function_addr_in_func(ctx, v)
+                        cranelift_declare_function(cl_module, symbol, import_sig, CL_LINKAGE_IMPORT)
+                        address = cranelift_function_addr_in_func(ctx, symbol)
                     if address == 0:
                         panic("Cranelift function address missing declaration: {v}")
                     return address
@@ -1646,6 +1649,23 @@ fn cl_translate_call(
         case Const(value, type_):
             match value:
                 case Str(name):
+                    val source_call = mir_call_origin_uses_local_symbols(func_op.call_origin)
+                    # Source authority wins before runtime-specific ABI rewrites.
+                    # Runtime and Foreign must never use this local handle table.
+                    if source_call and func_handles.has(name):
+                        val source_ref = cranelift_import_function(ctx, func_handles[name])
+                        return cranelift_call(ctx, source_ref, arg_vals)
+                    if func_op.call_origin != MirCallOrigin.Runtime:
+                        val external_name = if source_call and mir_runtime_owned_call_name(name): mir_runtime_owned_local_symbol(name) else: name
+                        val abi_error = cl_import_call_abi_error(type_, args, ret_type, has_ret_dest, func)
+                        if abi_error != "":
+                            panic("E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: {abi_error}")
+                        val signature = cl_import_call_signature(type_, args.len())
+                        val handle = cranelift_declare_function(cl_module, external_name, signature, CL_LINKAGE_IMPORT)
+                        val reference = cranelift_import_function(ctx, handle)
+                        return cranelift_call(ctx, reference, arg_vals)
+                    if name == "rt_array_new" or name == "rt_array_push" or name == "rt_bytes_u8_at":
+                        return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
                     val method = method_leaf_name(name)
                     if (method == "unwrap" or method == "unwrap_err" or method == "unwrap_or") and arg_vals.len() > 0:
                         return arg_vals[0]
@@ -1718,12 +1738,12 @@ fn cl_translate_call(
                     # Keep the lowering-owned primitives on the runtime ABI so
                     # a coincidentally named local body cannot capture them.
                     val owned_rt = cl_is_lowering_owned_runtime(name)
-                    if owned_rt:
+                    if owned_rt and not source_call:
                         return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
                     # Named function call. EXPLICIT returns: the implicit
                     # tail-value through match->if nesting yields 0 on the
                     # stage4 native lane (rt_print received a NULL handle).
-                    if func_handles.has(name):
+                    if source_call and func_handles.has(name):
                         val handle = func_handles[name]
                         val func_ref = cranelift_import_function(ctx, handle)
                         return cranelift_call(ctx, func_ref, arg_vals)
@@ -1777,7 +1797,7 @@ fn cl_function_emit_name(name: text) -> text:
     var no_mangle = false
     unsafe(capabilities: [ffi]):
         no_mangle = (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
-    if no_mangle:
+    if no_mangle and not cl_is_lowering_owned_runtime(name) and not mir_runtime_owned_call_name(name):
         return name
     # cl_is_lowering_owned_runtime names are unconditionally runtime-routed
     # in cl_translate_call above -- a same-named local body is unreachable

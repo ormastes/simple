@@ -1,3 +1,4 @@
+use compiler.mir.mir_instruction_support.{MirCallOrigin, mir_call_origin_uses_local_symbols}
 use std.common.binary_io.{f64_to_bits}
 use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits, math_f32_widen_bits}
 use std.nogc_sync_mut.io_runtime.{cwd}
@@ -1656,6 +1657,18 @@ impl MirTextCodegen for MirToLlvm:
             return "null"
         value
 
+    me translate_call_target_at(operands: [MirOperand], index: i64) -> text:
+        val operand = operands[index]
+        match operand.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name):
+                        val resolved = if mir_call_origin_uses_local_symbols(operand.call_origin): self.llvm_function_symbol_name(name) else: name
+                        return "@{resolved}"
+                    case _: ()
+            case _: ()
+        self.translate_operand_at(operands, index)
+
     fn normalize_call_callee(callee: text) -> text:
         if callee == "0":
             return "null"
@@ -2126,7 +2139,7 @@ impl MirTextCodegen for MirToLlvm:
                     val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
                     if not elf_arch_supported or not posix_elf_supported:
                         self.codegen_error("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
-                var func_val = self.translate_operand_at(func_operands, 0)
+                var func_val = self.translate_call_target_at(func_operands, 0)
                 match func.kind:
                     case Copy(local) | Move(local):
                         func_val = self.value_as_type(func_val, self.get_operand_type_at(func_operands, 0), "ptr")
@@ -2745,8 +2758,17 @@ impl MirTextCodegen for MirToLlvm:
         val dest_name = if has_dest: self.get_local(dest_id) else: ""
         if bootstrap_debug:
             print "[mir-to-llvm] call:dest index={index} present={has_dest}"
+        # Unknown named-call authority must never fall through string emission.
+        match func.kind:
+            case Const(value, _):
+                match value:
+                    case Str(_):
+                        # Guard only: panics on an unproved (Unknown) callable origin.
+                        mir_call_origin_uses_local_symbols(func.call_origin)
+                    case _: ()
+            case _: ()
         val callee_operands: [MirOperand] = [func]
-        var func_name = self.translate_operand_at(callee_operands, 0)
+        var func_name = self.translate_call_target_at(callee_operands, 0)
         if bootstrap_debug:
             print "[mir-to-llvm] call:callee index={index}"
         match func.kind:
@@ -2786,6 +2808,8 @@ impl MirTextCodegen for MirToLlvm:
         val imported_argv = (bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args") and not self.owned_name_has_local.has(bare_name_for_call)
         val imported_eprint = bare_name_for_call == "eprint" and not self.owned_name_has_local.has("eprint")
         var call_func_name = if imported_argv: "@rt_get_args" elif imported_env_get and args.len() == 1: "@rt_env_get_value" elif imported_env_get: "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif imported_eprint: "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_run" and args.len() == 3: "@rt_process_run_tuple" elif bare_name_for_call == "rt_process_run_bounded" and args.len() == 5: "@rt_process_run_bounded_tuple" elif bare_name_for_call == "rt_process_run_bounded_bytes" and args.len() == 5: "@rt_process_run_bounded_bytes_tuple" elif bare_name_for_call == "rt_cpuid_tuple" and args.len() == 2: "@rt_cpuid_tuple_block" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_name_for_call == "rt_process_run_timeout" and args.len() == 4: "@rt_process_run_timeout_tuple" elif bare_name_for_call == "rt_process_run_owned_observed_bounded_value" and args.len() == 5: "@rt_process_run_owned_observed_bounded_text" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
+        if func.call_origin != MirCallOrigin.Runtime:
+            call_func_name = func_name
         call_func_name = self.normalize_call_callee(call_func_name)
         # Inline typed-bytes LE loads (no per-call registry lock). Only when
         # the destination is a plain i64; anything else keeps the runtime call.
@@ -2965,7 +2989,7 @@ impl MirTextCodegen for MirToLlvm:
                     case FuncPtr(signature):
                         match const_val:
                             case Str(name):
-                                val resolved = self.llvm_function_symbol_name(name)
+                                val resolved = if mir_call_origin_uses_local_symbols(operand.call_origin): self.llvm_function_symbol_name(name) else: name
                                 if self.lookup_function_return_type(resolved) == "" and signature.return_type.?:
                                     val return_types: [MirType] = [signature.return_type]
                                     self.remember_function_return_type(resolved, self.llvm_type_text_at(return_types, 0))
@@ -3046,7 +3070,7 @@ impl MirTextCodegen for MirToLlvm:
                     case FuncPtr(signature):
                         match const_val:
                             case Str(name):
-                                val resolved = self.llvm_function_symbol_name(name)
+                                val resolved = if mir_call_origin_uses_local_symbols(operand.call_origin): self.llvm_function_symbol_name(name) else: name
                                 if self.lookup_function_return_type(resolved) == "" and signature.return_type.?:
                                     self.remember_function_return_type(resolved, self.llvm_type_text(signature.return_type))
                                     self.remember_function_return_unsigned(resolved, self.is_unsigned_mir_kind(signature.return_type.kind))

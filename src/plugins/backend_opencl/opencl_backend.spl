@@ -17,6 +17,8 @@ use compiler.backend.gpu_portable_compute.{
     PortableComputeCompiledArtifactEvidence
 }
 use compiler.backend.spec_const_registry.{spec_const_resolve}
+use compiler.mir.mir_instruction_support.{mir_call_origin_uses_local_symbols}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
 
 class OpenClBackendCompileContract:
     source: text
@@ -68,14 +70,20 @@ class OpenClBackend:
                 "OpenCL backend requires at least one @gpu/@gpu_kernel MIR function"
             ))
         var kernels: [text] = []
-        for symbol in module.functions.keys():
-            val func: MirFunction = module.functions[symbol]
-            if not func.is_kernel:
-                kernels.push(OpenClBackend.emit_device_function_source(func))
+        var kernel_names: [text] = []
         for symbol in module.functions.keys():
             val func: MirFunction = module.functions[symbol]
             if func.is_kernel and OpenClBackend.accepts_gpu_kernel(func):
-                kernels.push(OpenClBackend.emit_kernel_source(func))
+                kernel_names.push(func.name)
+        OpenClBackend.validate_kernel_external_calls(module, kernel_names)?
+        for symbol in module.functions.keys():
+            val func: MirFunction = module.functions[symbol]
+            if not func.is_kernel:
+                kernels.push(OpenClBackend.emit_device_function_source(func, kernel_names))
+        for symbol in module.functions.keys():
+            val func: MirFunction = module.functions[symbol]
+            if func.is_kernel and OpenClBackend.accepts_gpu_kernel(func):
+                kernels.push(OpenClBackend.emit_kernel_source(func, kernel_names))
         val source = kernels.join("\n")
         OpenClBackend.validate_generated_source(source)?
         Ok(source)
@@ -93,16 +101,57 @@ class OpenClBackend:
             ))
         Ok(true)
 
-    static fn emit_kernel_source(func: MirFunction) -> text:
+    static fn emit_kernel_source(func: MirFunction, kernel_names: [text] = []) -> text:
         val params = OpenClBackend.emit_kernel_params(func)
-        OpenClBackend.emit_function_body(func, "__kernel void {func.name}({params})")
+        # Kernel names are an exported launch ABI, not private device symbols.
+        OpenClBackend.emit_function_body(func, "__kernel void {func.name}({params})", kernel_names)
 
-    static fn emit_device_function_source(func: MirFunction) -> text:
+    static fn external_call_name(callee: MirOperand) -> text?:
+        match callee.kind:
+            case Const(MirConstValue.Str(name), _):
+                if mir_call_origin_uses_local_symbols(callee.call_origin): nil else: Some(name)
+            case _: nil
+
+    static fn external_call_conflicts_with_kernel(callee: MirOperand, kernel: text) -> bool:
+        match OpenClBackend.external_call_name(callee):
+            case Some(name): name == kernel
+            case None: false
+
+    static fn external_call_kernel_conflict(callee: MirOperand, kernels: Dict<text, bool>) -> text?:
+        match OpenClBackend.external_call_name(callee):
+            case Some(name): if kernels.has(name): Some(name) else: nil
+            case None: nil
+
+    static fn validate_kernel_external_calls(module: MirModule, kernel_names: [text]) -> Result<(), CompileError>:
+        var kernels: Dict<text, bool> = {}
+        for name in kernel_names: kernels[name] = true
+        for symbol in module.functions.keys():
+            val owner_function: MirFunction = module.functions[symbol]
+            for block in owner_function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case Call(_, callee, _):
+                            match OpenClBackend.external_call_kernel_conflict(callee, kernels):
+                                case Some(name):
+                                    return Err(compileerror_backend_error(BackendKind.OpenCl, "OpenCL external call collides with exported kernel '{name}'"))
+                                case None: ()
+                        case _: ()
+                match block.terminator:
+                    case CallTerminator(_, callee, _, _, _, _, _):
+                        match OpenClBackend.external_call_kernel_conflict(callee, kernels):
+                            case Some(name):
+                                return Err(compileerror_backend_error(BackendKind.OpenCl, "OpenCL external call collides with exported kernel '{name}'"))
+                            case None: ()
+                    case _: ()
+        Ok(())
+
+    static fn emit_device_function_source(func: MirFunction, kernel_names: [text] = []) -> text:
         val params = OpenClBackend.emit_kernel_params(func)
         val return_type = OpenClBackend.opencl_type(func.signature.return_type, false)
-        OpenClBackend.emit_function_body(func, "{return_type} {func.name}({params})")
+        val symbol = if mir_runtime_owned_call_name(func.name): mir_runtime_owned_local_symbol(func.name) else: func.name
+        OpenClBackend.emit_function_body(func, "{return_type} {symbol}({params})", kernel_names)
 
-    static fn emit_function_body(func: MirFunction, signature: text) -> text:
+    static fn emit_function_body(func: MirFunction, signature: text, kernel_names: [text] = []) -> text:
         var lines: [text] = []
         lines.push("{signature} {")
         for block in func.blocks:
@@ -110,8 +159,8 @@ class OpenClBackend:
             if block.label.?:
                 lines.push("    // {block.label.unwrap()}")
             for inst in block.instructions:
-                lines.push("    {OpenClBackend.emit_instruction(func, inst)}")
-            lines.push("    {OpenClBackend.emit_terminator(func, block.terminator)}")
+                lines.push("    {OpenClBackend.emit_instruction(func, inst, kernel_names)}")
+            lines.push("    {OpenClBackend.emit_terminator(func, block.terminator, kernel_names)}")
         lines.push("}")
         lines.join("\n")
 
@@ -176,9 +225,12 @@ class OpenClBackend:
             case _:
                 "ulong"
 
-    static fn emit_instruction(func: MirFunction, inst: MirInst) -> text:
+    static fn emit_instruction(func: MirFunction, inst: MirInst, kernel_names: [text] = []) -> text:
         match inst.kind:
             case Const(dest, value, type_):
+                match type_.kind:
+                    case FuncPtr(_): panic("OpenCL device function address ABI is unsupported")
+                    case _: ()
                 "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_const_value(value)};"
             case Copy(dest, src):
                 val type_ = OpenClBackend.local_id_type(func, dest)
@@ -296,7 +348,7 @@ class OpenClBackend:
             case MirSimdMaskOp(dest, lhs, rhs, op):
                 OpenClBackend.emit_simd_mask_op(func, dest, lhs, rhs, op)
             case Call(dest, callee, args):
-                OpenClBackend.emit_call(func, dest, callee, args)
+                OpenClBackend.emit_call(func, dest, callee, args, kernel_names)
             case CallIndirect(_, _, _, _):
                 "// unsupported OpenCL indirect call"
             case Aggregate(dest, kind, operands):
@@ -351,8 +403,10 @@ class OpenClBackend:
                 OpenClBackend.local_id_name_for_func(func, local)
             case Move(local):
                 OpenClBackend.local_id_name_for_func(func, local)
-            case Const(value, _):
-                OpenClBackend.emit_const_value(value)
+            case Const(value, type_):
+                match type_.kind:
+                    case FuncPtr(_): panic("OpenCL device function address ABI is unsupported")
+                    case _: OpenClBackend.emit_const_value(value)
 
     static fn operand_type(func: MirFunction, operand: MirOperand) -> MirType:
         match operand.kind:
@@ -363,22 +417,25 @@ class OpenClBackend:
             case Const(_, type_):
                 type_
 
-    static fn emit_callable(func: MirFunction, operand: MirOperand) -> text:
+    static fn emit_callable(func: MirFunction, operand: MirOperand, kernel_names: [text] = []) -> text:
         match operand.kind:
             case Const(value, _):
                 match value:
                     case Str(name):
-                        name
+                        if mir_call_origin_uses_local_symbols(operand.call_origin) and mir_runtime_owned_call_name(name) and not kernel_names.contains(name):
+                            mir_runtime_owned_local_symbol(name)
+                        else:
+                            name
                     case _:
-                        OpenClBackend.emit_operand(func, operand)
+                        panic("OpenCL direct call requires a named callee")
             case _:
                 OpenClBackend.emit_operand(func, operand)
 
-    static fn emit_call(func: MirFunction, dest: LocalId?, callee: MirOperand, args: [MirOperand]) -> text:
+    static fn emit_call(func: MirFunction, dest: LocalId?, callee: MirOperand, args: [MirOperand], kernel_names: [text] = []) -> text:
         var rendered_args: [text] = []
         for arg in args:
             rendered_args.push(OpenClBackend.emit_operand(func, arg))
-        val expr = "{OpenClBackend.emit_callable(func, callee)}({rendered_args.join(\", \")})"
+        val expr = "{OpenClBackend.emit_callable(func, callee, kernel_names)}({rendered_args.join(\", \")})"
         if dest.?:
             val dest_id = dest.unwrap()
             val type_ = OpenClBackend.local_id_type(func, dest_id)
@@ -895,7 +952,7 @@ class OpenClBackend:
         parts.push("}")
         parts.join(" ")
 
-    static fn emit_terminator(func: MirFunction, term: MirTerminator) -> text:
+    static fn emit_terminator(func: MirFunction, term: MirTerminator, kernel_names: [text] = []) -> text:
         match term:
             case Ret(value):
                 if value.?:
@@ -911,8 +968,10 @@ class OpenClBackend:
                 "if ({OpenClBackend.emit_operand(func, cond)}) { goto BB{then_.id}; } else { goto BB{else_.id}; }"
             case Switch(value, targets, default):
                 OpenClBackend.emit_switch_terminator(func, value, targets, default)
-            case CallTerminator(_, _, _, normal, _, _, _):
-                "// unsupported OpenCL call terminator: normal BB{normal.id}"
+            case CallTerminator(dest, callee, args, normal, unwind, _, _):
+                if unwind.?:
+                    panic("OpenCL call terminator cannot lower a recoverable unwind edge")
+                "{OpenClBackend.emit_call(func, dest, callee, args, kernel_names)} goto BB{normal.id};"
 
 impl Codegen for OpenClBackend:
     fn backend_kind() -> BackendKind:
