@@ -71,3 +71,25 @@ Interpret-lane parity is **confirmed** for `nvme_registers_check`,
 still running at audit cutoff (interpret is ~10x slower) and are **unverified on
 that lane** — not known good.
 
+## Addendum 2026-11-11 — lane interp5 verdict: SUPERSEDED
+
+Verdict: **SUPERSEDED** by commit `3a3d3b90b10703f90b84f2d4e6b4ec409e94ebc8`
+(2026-11-06, "interp: round 9 fixes (part A) - ... host_equiv check no longer
+relies on struct aliasing, closed-defect regression spec"), an ancestor of base
+`b364745fdbf8`. The commit message matches this bug exactly: reading 1 (the
+check leaned on JIT struct-aliasing behaviour) was the true one, and the check
+was rewritten so it no longer depends on that aliasing.
+
+Seed-smoke verification (2026-11-11, lane interp5, refreshed seed
+`bin/simple.exe` 2026-11-11 build, `SIMPLE_LIB=src`, `--mode=interpret` /
+default lane, `SIMPLE_TIMEOUT_SECONDS=0`):
+
+- Default lane: `HOST EQUIV TRANSPORT OK`; only the 4 expected deliberately
+  unbound `board:` FAILs remain.
+- Interpreter lane (`SIMPLE_EXECUTION_MODE=interpret`): `HOST EQUIV TRANSPORT
+  OK`; the 5th failure "genuine CQE carries the real read payload -- expected 90
+  got 0" no longer reproduces — same 4 expected `board:` FAILs as the default
+  lane.
+
+Lane parity on this check is restored. No further action.
+
