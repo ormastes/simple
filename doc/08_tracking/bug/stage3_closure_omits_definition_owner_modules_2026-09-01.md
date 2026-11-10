@@ -1,6 +1,6 @@
 # Stage 3: the entry closure omits definition-owner modules, so 764 of 1064 hir-fatals are "unresolved type" for types whose owner was never loaded
 
-- **Status:** OPEN — root cause not yet established
+- **Status:** FIXED (2026-11-11, lane boot19 — char/byte root cause fixed by 13d7746adc0e and guarded; seed-smoke regression example green. Stage-3-green residue is tracked by other rows, see addendum)
 - **Filed:** 2026-09-01
 - **Blocks:** Stage 3 self-host (`--stop-after-stage3` → `stage3_rc=2`), and therefore Stage 4 / Stage 5
 - **Evidence log:** `build/bootstrap/stage3/aarch64-apple-darwin/stage3-tmp/native-build-stderr-69741.log` (10,127 lines)
@@ -316,3 +316,35 @@ Whether the remaining MIR-type failures are the same defect class (owners reacha
 only through a glob or re-export hop) or something else is **not yet established**.
 More code now reaches lowering than before, so some of these may be newly exposed
 rather than newly broken.
+
+## 2026-11-11 addendum (lane boot19) — FIXED (this row's root cause); Stage-3-green residue stays open elsewhere
+
+Verdict: FIXED, scoped to this row's named defect ("the entry closure omits
+definition-owner modules"). The char/byte-indexed line walker that made the
+closure drop definition-owner modules is fixed on `origin/release/1.0.0`:
+
+- Fix commit `13d7746adc0e` ("fix(driver): entry-closure import scan dropped
+  every import after the first non-ASCII byte (#208)") is an ancestor of this
+  branch. `_driver_line_end` now lives at
+  `src/compiler/80.driver/driver_entry_closure_core.spl:759` and scans with
+  `content.byte_at(i)` under a `content.byte_len()` bound; its history comment
+  records the char/byte mix this doc's "ROOT CAUSE (2026-09-01)" section
+  names.
+- Verification actually run (2026-11-11, lane boot19, seed-smoke):
+  `bin/simple.exe test test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl
+  --mode=interpreter --no-cache` → the regression example "keeps collecting
+  imports after a non-ASCII byte" PASSES — the em-dash shape that cost 1,064
+  hir-fatals. (Three sibling examples in the same file fail on unrelated
+  driver-facade structure drift pre-existing on this branch; they are outside
+  this row and were not chased.)
+- Consistent with this doc's own 2026-09-01 verification table (closure
+  741→763 modules; `HirBinOp`+`HirUnaryOp`+`HirAssignOp` fatals 436→0).
+
+RESIDUE (deliberately kept OPEN elsewhere, not by this row): Stage 3
+self-host is still not green. The "Fix VERIFIED, but Stage 3 is NOT green
+(2026-09-01)" residue and the 2026-09-21 HIR-lowering no-progress spin are
+tracked by `stage3_driver_hir_lowering_spins_after_parse_fix_2026-09-21.md`
+(same boot19 batch, BLOCKED on the sanctioned bootstrap). The 2026-11-04
+`bug_db.sdn:8420` note asking for a self-hosted stage3 replay pertains to
+that end-to-end greenness question, not to this row's mechanism, which is
+closed without it.
