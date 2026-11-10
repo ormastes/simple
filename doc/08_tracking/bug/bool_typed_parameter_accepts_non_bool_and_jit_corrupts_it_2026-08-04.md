@@ -313,3 +313,26 @@ OPEN, scoped to: seed `coerce_param` bool arm + native-pipeline gating proof.
 
 ## 2026-11-06 skipped
 The interpreter deliberately coerces non-bool args to bool by presence (`present_value_as_bool_arg`, arg_binding.rs) because 2,174 spec sites pass `x.?` payloads to `bool` params; the runtime cannot tell `f(5)` from `f(x.?)`. A rejection needs a static check (literal/typed arg vs bool param) aligned with the pure-Simple checker. f(5) still returns 1.
+
+## 2026-11-10 p2fix-interp lane (work/p2fix-interp-20261110, base d8c0a761988c)
+
+Static bool-argument admission implemented in the seed on BOTH lanes:
+`bind_args_with_injected` (interpreter pre-scan before arg evaluation) and HIR
+`lower_call` (via new `fn_param_bool` table populated in
+`collect_fn_param_defaults`). Identical rule in both places: a literal
+non-bool argument (integer/float/text/nil literal) at a `bool`-declared
+parameter is rejected with "type mismatch: parameter 'X' is declared 'bool'
+but the argument is a <kind> literal". `x.?` existence probes, Option
+payloads, coalesces, spreads, and variadic calls keep the deliberate runtime
+PRESENCE contract (spreads/variadic keep pure runtime semantics on both
+lanes). Verified with a fresh cargo build from this tree: rejection identical
+on interpret and jit lanes (rc=1, same diagnostic); acceptance contract
+unchanged (`take_bool(true/false/opt.?/opt_nil().?)`, `if opt.?:` branch).
+Interpreter `interpreter_call` tests 46/46; specs
+`auto_comprehensive_10` (30/30, historically red from this bug),
+`bool_param_rejects_non_bool` (7/7), val-parity (2/2) all green. New
+regression spec `test/01_unit/compiler/95.interp/interpreter/bool_param_literal_admission_spec.spl`
+(6/6). REMAINING: typed non-bool identifier rejection needs the HM-parity
+call-argument checker (as this doc's 2026-08-10 re-investigation concluded);
+native (compile --native) gate shares the HIR lowering path but awaits an
+admitted producer for end-to-end proof. Seed-smoke evidence only.

@@ -1459,7 +1459,28 @@ impl Lowerer {
                 self.fn_param_names
                     .insert(symbol.clone(), if f.params.iter().any(|p| p.variadic) { Vec::new() } else { f.params.iter().map(|p| p.name.clone()).collect() });
                 self.fn_param_defaults
-                    .insert(symbol, f.params.iter().map(|p| p.default.clone()).collect());
+                    .insert(symbol.clone(), f.params.iter().map(|p| p.default.clone()).collect());
+                // Bool-admission slots: which declared parameters are exactly
+                // `bool`. Parallel to `fn_param_names` (same keying rules,
+                // including the empty-for-variadic rule — a variadic call
+                // keeps the runtime contract on both lanes); consumed by
+                // `lower_call`'s static bool-argument admission.
+                self.fn_param_bool.insert(
+                    symbol,
+                    if f.params.iter().any(|p| p.variadic) {
+                        Vec::new()
+                    } else {
+                        f.params
+                            .iter()
+                            .map(|p| {
+                                matches!(
+                                    p.ty.as_ref(),
+                                    Some(simple_parser::ast::Type::Simple(n)) if n == "bool"
+                                )
+                            })
+                            .collect()
+                    },
+                );
             }
             if let Node::Impl(impl_block) = item {
                 let owner = match &impl_block.target_type {

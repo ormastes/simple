@@ -140,6 +140,13 @@ pub struct Lowerer {
     /// uses named arguments be mapped onto declared slots at the call site.
     pub(super) fn_param_names: HashMap<String, Vec<String>>,
     pub(super) imported_fn_param_names: HashMap<PathBuf, HashMap<String, Vec<String>>>,
+    /// Per-parameter `bool`-declared slots, parallel to `fn_param_names`
+    /// (same keys, same order). Drives the static bool-argument admission
+    /// check at HIR call sites
+    /// (doc/08_tracking/bug/bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04):
+    /// a literal non-bool argument at a `bool` parameter is rejected at
+    /// lowering so the JIT lane cannot re-tag it into a corrupt value.
+    pub(super) fn_param_bool: HashMap<String, Vec<bool>>,
     /// Whole-program map of free-function name -> declared return type,
     /// built by `build_import_map`. Functions reached via the global import map
     /// (called without a `use` import) otherwise have no return-type info, so
@@ -352,6 +359,7 @@ impl Lowerer {
             imported_fn_param_defaults: HashMap::new(),
             fn_param_names: HashMap::new(),
             imported_fn_param_names: HashMap::new(),
+            fn_param_bool: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -433,6 +441,7 @@ impl Lowerer {
             imported_fn_param_defaults: HashMap::new(),
             fn_param_names: HashMap::new(),
             imported_fn_param_names: HashMap::new(),
+            fn_param_bool: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -537,6 +546,7 @@ impl Lowerer {
             imported_fn_param_defaults: HashMap::new(),
             fn_param_names: HashMap::new(),
             imported_fn_param_names: HashMap::new(),
+            fn_param_bool: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
