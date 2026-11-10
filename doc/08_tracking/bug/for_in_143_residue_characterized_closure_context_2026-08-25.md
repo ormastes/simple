@@ -1,6 +1,8 @@
 # The #143 residue is characterized: names, a 4-line reproducer, and one measured cause (2026-08-25)
 
-- **Status:** OPEN — characterized, not fixed
+- **Status:** FIXED (2026-11-11, lane ne9 — the final two unannotated
+  functions were annotated; `git log -S` attributes both to
+  9e7e7a526edb / PR #7597)
 - **Severity:** MEDIUM — it is the largest remaining `#143` block on the MCP
   native-build, and it was previously "uncharacterized"
 - **Area:** `50.mir` for-in lowering; trigger is import-closure context
@@ -266,3 +268,23 @@ verified by native execution. The interpreter comparison above is what stands in
 its place.
 
 That slice gap is now the next thing behind `#143` for this module.
+
+## 2026-11-11 — P3 ne9 triage: FIXED — the last two are annotated
+
+Lane ne9 verified at this tip that the two functions this doc
+deliberately left unannotated ("not guessed, for the third time") have
+since been annotated, with types matching their own docstrings:
+
+- `multi_replace` — now
+  `fn multi_replace(s: text, pairs: [(text, text)]) -> text`
+  (`src/lib/common/text_advanced.spl:1272`)
+- `most_common_char` — now
+  `fn most_common_char(text: text) -> (text, i64)?`
+  (`src/lib/common/text_advanced.spl:348`)
+
+`git log -S` attributes both spellings to `9e7e7a526edb` (merge of PR
+#7597, work/hir-nominal-generic-owner-20261107). Every function named
+in this doc's failure table now carries real type information. The
+remaining `#143` surface for this module is the unrelated
+array/string-slice lowering feature gap recorded at the bottom of this
+doc — not missing annotations.
