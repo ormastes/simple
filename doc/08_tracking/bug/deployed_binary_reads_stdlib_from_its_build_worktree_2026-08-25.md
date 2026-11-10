@@ -117,3 +117,13 @@ from the main repo, run against a foreign tmp project:
 `PASS -- 1 probe, invoking tree's src/lib won (rc=0)` (fatal selftest silent =
 pass, then the real sentinel probe saw 888 from the invoking tree). The
 foreign-build-tree resolution defect does not reproduce on the current seed.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Third consecutive SUPERSEDED verdict, now on this lane's refreshed seed
+(bin/simple.exe, build-commit `0791c2b7f4a7`, 2026-11-11). Gate seed-smoke:
+`sh scripts/check/check-stdlib-invoking-tree-wins.shs --selftest
+"$PWD/bin/simple.exe"` → `PASS -- 1 probe, invoking tree's src/lib won
+(rc=0)` (fatal selftest silent = pass, then the real sentinel probe saw
+the invoking tree's value). Fixing change family: PR #7597 (merge
+`9e7e7a526edb`), module_loader cwd-first / invoking-tree-wins resolution.
