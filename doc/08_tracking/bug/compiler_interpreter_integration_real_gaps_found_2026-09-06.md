@@ -103,3 +103,14 @@ checking, diagnostics span tracking, module visibility, module graph) —
 `src/compiler/**` or the seed compiler frontend, both outside the P3
 interpreter lane's write scope. Routing to the compiler/compiler-seed lanes;
 no code change attempted here.
+
+## 2026-11-10 P3 triage (work/p3-interp2-20261110) — independently confirmed LIVE; out of lane
+
+Second-lane spot re-verification on the same deployed Windows Rust seed
+(worktree `bin/simple.exe`): gap 2 (`val x: i64 = "not a number"`)
+still compiles and runs exit 0, printing a raw pointer/bits value
+(`3854699993329`), i.e. silent mis-coercion unchanged from the
+work/p3-interp-20261110 note above. All five gaps remain owned by the
+compiler frontend (`src/compiler/**`, src/compiler_rust) — outside this
+lane's write scope. Concur with routing to the compiler lanes; no code
+change here.

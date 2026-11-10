@@ -39,3 +39,24 @@ block-local, and never write pattern bindings back.
 ## Closed stale 2026-11-03
 
 Re-verified on the deployed Rust seed (bin/simple.exe, built 2026-11-03) on origin/release/1.0.0 with both `SIMPLE_EXECUTION_MODE=interpret` and `=jit`: the documented repro now produces the correct result on both lanes (see lane seed-interp-p23 evidence: float `0.0/0.0 1.0/0.0 -1.0/0.0` -> `NaN inf -inf`; `d["k"].push` twice on a 1-element list -> len 3; `elif val Some(x) = o` in an if-expression -> binds 7). Closed as stale.
+
+## 2026-11-10 P3 triage (work/p3-interp2-20261110) — interpreter fix CONFIRMED; JIT-lane divergence found (routed)
+
+Independent re-verification on the deployed Windows Rust seed (worktree
+`bin/simple.exe`, fixtures `build/p3fix-interp2/elif_val_repro*.spl`):
+
+- `SIMPLE_EXECUTION_MODE=interpret`: `elif val Opt.Some(x) = o` inside an
+  if-EXPRESSION binds correctly — `r=7` (pattern var as whole arm value) and
+  `r=107` (x + 100 variant). The documented interpreter symptom is gone;
+  the 2026-11-03 stale closure holds for the interpreter lane.
+- `SIMPLE_EXECUTION_MODE=jit` (and default lane): the SAME programs print a
+  nondeterministic pointer-sized garbage value (`r=3788094155553`,
+  `r=4350936198245`, varies per run) — the JIT lane appears to read the
+  enum payload through the wrong representation for elif-val pattern
+  bindings in if-expressions. No fallback diagnostic fires, so this is a
+  silent mis-compile, not a demotion.
+- This is a compiler/JIT codegen issue (elif-val payload extraction),
+  outside the interpreter lane's write scope (src/compiler,
+  src/compiler_rust). Routed to the compiler lanes as a fresh finding;
+  repro fixtures preserved at `build/p3fix-interp2/elif_val_repro.spl` and
+  `elif_val_repro2.spl`.
