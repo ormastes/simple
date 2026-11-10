@@ -36,6 +36,7 @@ var cw_error: text = ""
 var cw_error_line: i64 = 0
 var cw_error_col: i64 = 0
 var cw_globals: [text] = []
+var cw_warnings: [text] = []
 
 fn cw_is_global(name: text) -> bool:
     for g in cw_globals:
@@ -112,6 +113,22 @@ fn cw_note_assign(target_eid: i64, span_id: i64):
         cw_error = cw_message(t.s_val, cw_current_fn(), line)
     elif kind == 0 and not cw_is_global(t.s_val):
         cw_declare(t.s_val)
+
+# W-CAPTURE-MUTATION (staged warning, twin of the seed MUTATING_METHODS): a
+# receiver-mutating builtin call on a captured local lands on the by-value
+# snapshot and is dropped. User `me` methods are not resolved here.
+fn cw_is_mutating_method(m: text) -> bool:
+    m == "push" or m == "insert" or m == "remove" or m == "pop" or m == "clear" or m == "set" or m == "sort" or m == "extend" or m == "append"
+
+fn cw_mutation_message(name: text, method: text, in_fn: text) -> text:
+    val site = if in_fn == "<closure>": "a closure" else: "nested fn `" + in_fn + "`"
+    "warning[W-CAPTURE-MUTATION]: `" + name + "." + method + "(...)` mutates captured variable `" + name + "` inside " + site + ": closures capture enclosing locals by value, so the mutation is dropped; return the new value or use a module-level `var`"
+
+fn cw_note_method_call(e: CoreExpr):
+    if e.left < 0 or not cw_is_mutating_method(e.s_val): return
+    val r: CoreExpr = expr_get(e.left)
+    if r.tag == EXPR_IDENT and cw_lookup(r.s_val) == 2:
+        cw_warnings.push(cw_mutation_message(r.s_val, e.s_val, cw_current_fn()))
 
 fn cw_declare_iter(iter_name: text):
     if iter_name == "": return
@@ -233,6 +250,7 @@ fn cw_walk_expr(eid: i64):
         cw_walk_expr(e.extra)
         return
     if tag == EXPR_CALL or tag == EXPR_METHOD_CALL or tag == EXPR_ARRAY_LIT or tag == EXPR_TUPLE:
+        if tag == EXPR_METHOD_CALL: cw_note_method_call(e)
         cw_walk_expr(e.left)
         for aid in e.args:
             cw_walk_expr(aid)
@@ -243,6 +261,7 @@ fn cw_walk_expr(eid: i64):
 
 # Returns "" when the module is clean, else the first diagnostic.
 fn capture_write_check_module() -> text:
+    cw_warnings = []
     cw_error = ""
     cw_error_line = 0
     cw_error_col = 0
@@ -280,7 +299,11 @@ fn capture_write_error_line() -> i64:
 fn capture_write_error_col() -> i64:
     cw_error_col
 
-export capture_write_check_module, capture_write_error_line, capture_write_error_col
+# W-CAPTURE-MUTATION warnings from the last capture_write_check_module().
+fn capture_write_warnings() -> [text]:
+    cw_warnings
+
+export capture_write_check_module, capture_write_error_line, capture_write_error_col, capture_write_warnings
 
 # ===== CaptureWriteCheckState snapshot (ParseContext stage 1) =====
 # See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
@@ -296,6 +319,7 @@ pub struct CaptureWriteCheckState:
     cw_error_line: i64
     cw_error_col: i64
     cw_globals: [text]
+    cw_warnings: [text]
 
 pub fn capture_write_check_state_take() -> CaptureWriteCheckState:
     val s = CaptureWriteCheckState(
@@ -307,7 +331,8 @@ pub fn capture_write_check_state_take() -> CaptureWriteCheckState:
         cw_error: cw_error,
         cw_error_line: cw_error_line,
         cw_error_col: cw_error_col,
-        cw_globals: cw_globals
+        cw_globals: cw_globals,
+        cw_warnings: cw_warnings
     )
     cw_names = []
     cw_name_frame = []
@@ -318,6 +343,7 @@ pub fn capture_write_check_state_take() -> CaptureWriteCheckState:
     cw_error_line = 0
     cw_error_col = 0
     cw_globals = []
+    cw_warnings = []
     s
 
 pub fn capture_write_check_state_install(s: CaptureWriteCheckState):
@@ -330,5 +356,6 @@ pub fn capture_write_check_state_install(s: CaptureWriteCheckState):
     cw_error_line = s.cw_error_line
     cw_error_col = s.cw_error_col
     cw_globals = s.cw_globals
+    cw_warnings = s.cw_warnings
 
 export CaptureWriteCheckState, capture_write_check_state_take, capture_write_check_state_install
