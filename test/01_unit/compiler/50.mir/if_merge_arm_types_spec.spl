@@ -30,12 +30,31 @@ fn merge_kind(t: MirType) -> text:
         case MirTypeKind.I64: "i64"
         case MirTypeKind.Struct(_): "struct"
         case MirTypeKind.Array(_, _): "array"
+        case MirTypeKind.Tuple(_): "tuple"
+        case MirTypeKind.Opaque(_): "opaque"
         case _: "other"
+
+fn text_t() -> MirType:
+    MirType(kind: MirTypeKind.Tuple([MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)), MirType.i64()]))
 
 describe "mir_merge_arm_types":
     it "keeps a struct second arm over an unresolved i64 first arm":
         step("merge(I64, Struct) -> Struct")
         expect(merge_kind(mir_merge_arm_types(I64_T, struct_t()))).to_equal("struct")
+
+    # bug if_expression_text_result_erased_to_i64_2026-10-25: a text second
+    # arm (fat-pointer Tuple or bootstrap Opaque("str")) must win the same way.
+    it "keeps a text (fat-pointer) second arm over an unresolved i64 first arm":
+        step("merge(I64, Tuple(Ptr(U8), I64)) -> Tuple")
+        expect(merge_kind(mir_merge_arm_types(I64_T, text_t()))).to_equal("tuple")
+
+    it "keeps a bootstrap text (Opaque str) second arm over an unresolved i64 first arm":
+        step("merge(I64, Opaque(str)) -> Opaque")
+        expect(merge_kind(mir_merge_arm_types(I64_T, MirType(kind: MirTypeKind.Opaque("str"))))).to_equal("opaque")
+
+    it "does not let a later i64 arm displace a text first arm":
+        step("merge(Tuple, I64) -> Tuple")
+        expect(merge_kind(mir_merge_arm_types(text_t(), I64_T))).to_equal("tuple")
 
     it "keeps the incumbent i64 when the second arm is also i64":
         step("merge(I64, I64) -> I64")
