@@ -1,0 +1,163 @@
+# Plugin consumers must preserve a named callee's explicit authority.
+# @req REQ-MIR-CALL-ORIGIN
+# Bug: mir_runtime_call_origin_ambiguity_2026-07-17
+use std.spec.*
+use std.spec.step
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use plugins.backend_lua.lua_backend.{MirToLua}
+use plugins.backend_opencl.opencl_backend.{OpenClBackend}
+use plugins.backend_cuda.cuda_backend.{CudaBackend}
+use plugins.backend_cuda.cuda.ptx_builder.{PtxBuilder}
+use plugins.backend_llvm_lib.llvm_lib_translate_expr.{llvm_lib_named_call_symbol}
+use plugins.backend_lean.lean_mir_translate.{lean_runtime_name, translate_direct_call_callee}
+use plugins.backend_vhdl.vhdl_backend.{VhdlBackend}
+use plugins.backend_vhdl.vhdl_codegen_helpers.*
+
+fn p0_inventory_events_setup(name: text, origin: MirCallOrigin) -> MirOperand:
+    val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(signature))), call_origin: origin)
+
+fn p0_inventory_events_function(name: text) -> MirFunction:
+    var builder = MirBuilder.new()
+    builder.begin_simple_function(name, "i64")
+    val result = builder.emit_const_int(42)
+    builder.terminate_return(Some(MirOperand(kind: MirOperandKind.Copy(result))))
+    builder.end_function()
+
+fn p0_inventory_events_call_module(origin: MirCallOrigin, terminator: bool) -> MirModule:
+    var owner_function = p0_inventory_events_function("caller")
+    var entry = owner_function.blocks[0]
+    val callee = p0_inventory_events_setup("rt_array_new", origin)
+    if terminator:
+        val tail = MirBlock(id: BlockId(id: 1), label: nil,
+            instructions: [], terminator: entry.terminator)
+        entry.terminator = MirTerminator.CallTerminator(nil, callee, [],
+            BlockId(id: 1), nil, nil, nil)
+        owner_function.blocks = [entry, tail]
+    else:
+        entry.instructions = entry.instructions + [MirInst(
+            kind: MirInstKind.Call(nil, callee, []), span: nil)]
+        owner_function.blocks = [entry]
+    var builder = MirBuilder.new()
+    builder.add_function(owner_function)
+    builder.module
+
+describe "MIR callable origin in plugin consumers":
+    it "Lua separates module source calls, external symbols and ordinary string data":
+        step("Lua separates module source calls, external symbols and ordinary string data")
+        val emitter = MirToLua.create("origin")
+        val source = p0_inventory_events_setup("rt_array_push", MirCallOrigin.Source)
+        val runtime = p0_inventory_events_setup("rt_array_push", MirCallOrigin.Runtime)
+        val foreign = p0_inventory_events_setup("rt_array_push", MirCallOrigin.Foreign)
+        expect(emitter.callable_text(source)).to_equal("M.__simple_local_rt_array_push")
+        expect(emitter.callable_text(runtime)).to_equal("rt_array_push")
+        expect(emitter.callable_text(foreign)).to_equal("rt_array_push")
+        expect(emitter.operand_text(source)).to_equal("M.__simple_local_rt_array_push")
+        val data = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_array_push"),
+            MirType.ptr(MirType(kind: MirTypeKind.I8), false)))
+        expect(emitter.operand_text(data)).to_equal("\"rt_array_push\"")
+
+    it "Lua declarations and calls agree on the private source symbol":
+        step("Lua declarations and calls agree on the private source symbol")
+        var emitter = MirToLua.create("origin")
+        emitter.translate_function(p0_inventory_events_function("rt_array_new"))
+        emitter.translate_instruction(MirInst(kind: MirInstKind.Call(nil,
+            p0_inventory_events_setup("rt_array_new", MirCallOrigin.Source), []), span: nil))
+        emitter.translate_instruction(MirInst(kind: MirInstKind.Call(nil,
+            p0_inventory_events_setup("rt_array_new", MirCallOrigin.Runtime), []), span: nil))
+        expect(emitter.output).to_contain("function M.__simple_local_rt_array_new(")
+        expect(emitter.output).to_contain("M.__simple_local_rt_array_new()")
+        expect(emitter.output).to_contain("  rt_array_new()")
+
+    it "OpenCL preserves external names and the exported kernel ABI":
+        step("OpenCL preserves external names and the exported kernel ABI")
+        val owner_function = p0_inventory_events_function("rt_array_new")
+        val source = p0_inventory_events_setup("rt_array_new", MirCallOrigin.Source)
+        val runtime = p0_inventory_events_setup("rt_array_new", MirCallOrigin.Runtime)
+        val foreign = p0_inventory_events_setup("rt_array_new", MirCallOrigin.Foreign)
+        expect(OpenClBackend.emit_callable(owner_function, source)).to_equal("__simple_local_rt_array_new")
+        expect(OpenClBackend.emit_callable(owner_function, runtime)).to_equal("rt_array_new")
+        expect(OpenClBackend.emit_callable(owner_function, foreign)).to_equal("rt_array_new")
+        expect(OpenClBackend.emit_device_function_source(owner_function)).to_contain("__simple_local_rt_array_new(")
+        expect(OpenClBackend.emit_kernel_source(owner_function)).to_contain("__kernel void rt_array_new(")
+        expect(OpenClBackend.emit_callable(owner_function, source, ["rt_array_new"])).to_equal("rt_array_new")
+        expect(OpenClBackend.external_call_conflicts_with_kernel(source, "rt_array_new")).to_equal(false)
+        expect(OpenClBackend.external_call_conflicts_with_kernel(runtime, "rt_array_new")).to_equal(true)
+        expect(OpenClBackend.external_call_conflicts_with_kernel(foreign, "rt_array_new")).to_equal(true)
+        expect(OpenClBackend.external_call_conflicts_with_kernel(runtime, "other_kernel")).to_equal(false)
+
+    it "LLVM library aliases only explicit runtime calls":
+        step("LLVM library aliases only explicit runtime calls")
+        expect(llvm_lib_named_call_symbol("rt_array_push", MirCallOrigin.Source)).to_equal("__simple_local_rt_array_push")
+        expect(llvm_lib_named_call_symbol("rt_array_push", MirCallOrigin.Runtime)).to_equal("rt_array_push")
+        expect(llvm_lib_named_call_symbol("rt_array_push", MirCallOrigin.Foreign)).to_equal("rt_array_push")
+        expect(llvm_lib_named_call_symbol("print", MirCallOrigin.Source)).to_equal("print")
+        expect(llvm_lib_named_call_symbol("print", MirCallOrigin.Runtime)).to_equal("rt_println")
+        expect(llvm_lib_named_call_symbol("print", MirCallOrigin.Foreign)).to_equal("print")
+        expect(llvm_lib_named_call_symbol("main", MirCallOrigin.Source)).to_equal("__simple_main")
+        expect(llvm_lib_named_call_symbol("main", MirCallOrigin.Foreign)).to_equal("main")
+
+    it "reserved Source names stay private when the source body is in another module":
+        step("reserved Source names stay private when the source body is in another module")
+        val emitter = MirToLua.create("importer")
+        val importer = p0_inventory_events_function("importer")
+        for name in ["rt_enum_new", "spl_array_imported", "spl_dict_imported", "spl_str_imported"]:
+            val source = p0_inventory_events_setup(name, MirCallOrigin.Source)
+            val runtime = p0_inventory_events_setup(name, MirCallOrigin.Runtime)
+            val foreign = p0_inventory_events_setup(name, MirCallOrigin.Foreign)
+            expect(emitter.callable_text(source)).to_equal("M.__simple_local_{name}")
+            expect(OpenClBackend.emit_callable(importer, source)).to_equal("__simple_local_{name}")
+            expect(llvm_lib_named_call_symbol(name, MirCallOrigin.Source)).to_equal("__simple_local_{name}")
+            expect(OpenClBackend.emit_callable(importer, runtime)).to_equal(name)
+            expect(OpenClBackend.emit_callable(importer, foreign)).to_equal(name)
+            expect(llvm_lib_named_call_symbol(name, MirCallOrigin.Runtime)).to_equal(name)
+            expect(llvm_lib_named_call_symbol(name, MirCallOrigin.Foreign)).to_equal(name)
+
+    it "OpenCL rejects external kernel collisions through call instructions and terminators":
+        step("OpenCL rejects external kernel collisions through call instructions and terminators")
+        for terminator in [false, true]:
+            expect(OpenClBackend.validate_kernel_external_calls(
+                p0_inventory_events_call_module(MirCallOrigin.Source, terminator),
+                ["rt_array_new"]).is_ok()).to_equal(true)
+            for origin in [MirCallOrigin.Runtime, MirCallOrigin.Foreign]:
+                expect(OpenClBackend.validate_kernel_external_calls(
+                    p0_inventory_events_call_module(origin, terminator),
+                    ["rt_array_new"]).is_err()).to_equal(true)
+                expect(OpenClBackend.validate_kernel_external_calls(
+                    p0_inventory_events_call_module(origin, terminator),
+                    ["other_kernel"]).is_ok()).to_equal(true)
+
+    it "CUDA never binds an external call to a same-named source device body":
+        step("CUDA never binds an external call to a same-named source device body")
+        var backend = CudaBackend.create((8, 6))
+        val owner_function = p0_inventory_events_function("rt_array_new")
+        backend.function_signatures[owner_function.name] = owner_function.signature
+        val builder = PtxBuilder.create((8, 6))
+        expect(backend.compile_call(owner_function, builder, Some(LocalId(id: 0)),
+            p0_inventory_events_setup("rt_array_new", MirCallOrigin.Source), []).is_ok()).to_equal(true)
+        for origin in [MirCallOrigin.Runtime, MirCallOrigin.Foreign, MirCallOrigin.Unknown]:
+            expect(backend.compile_call(owner_function, builder, Some(LocalId(id: 0)),
+                p0_inventory_events_setup("rt_array_new", origin), []).is_err()).to_equal(true)
+
+    it "Lean does not model a same-named source call as a runtime enum operation":
+        step("Lean does not model a same-named source call as a runtime enum operation")
+        val source = p0_inventory_events_setup("rt_enum_payload", MirCallOrigin.Source)
+        val runtime = p0_inventory_events_setup("rt_enum_payload", MirCallOrigin.Runtime)
+        expect(lean_runtime_name(source)).to_equal("")
+        expect(lean_runtime_name(runtime)).to_equal("rt_enum_payload")
+        expect(translate_direct_call_callee(source).unwrap()).to_equal("rt_enum_payload")
+        for origin in [MirCallOrigin.Runtime, MirCallOrigin.Foreign, MirCallOrigin.Unknown]:
+            expect(translate_direct_call_callee(
+                p0_inventory_events_setup("rt_enum_payload", origin)).is_err()).to_equal(true)
+
+    it "VHDL admits source helpers and rejects unrepresentable external call domains":
+        step("VHDL admits source helpers and rejects unrepresentable external call domains")
+        val backend = VhdlBackend.create(CodegenTarget.Riscv32, compileoptions_default_options())
+        expect(backend.call_target_name(
+            p0_inventory_events_setup("rt_array_new", MirCallOrigin.Source)).unwrap()).to_equal("rt_array_new")
+        for origin in [MirCallOrigin.Runtime, MirCallOrigin.Foreign, MirCallOrigin.Unknown]:
+            expect(backend.call_target_name(
+                p0_inventory_events_setup("rt_array_new", origin)).is_err()).to_equal(true)
