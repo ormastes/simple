@@ -2,8 +2,11 @@
 
 Date: 2026-08-21
 Area: `src/compiler_rust` (seed), `src/compiler/80.driver` (pure-Simple driver)
-Status: PARTIALLY RESOLVED — census gap fixed; three of four hypothesised
-defects measured and REFUTED; one real retainer identified and filed below.
+Status: RESOLVED 2026-11-11 (lane interp10) — every item this ledger carried
+has an answer (see the dated addendum at the bottom); the residual
+interpreted-worker RSS floor is tracked in
+native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18.md, still OPEN
+there.
 
 ## Summary
 
@@ -324,3 +327,28 @@ What remains open moved: peak RSS of that worker is still 1.99 GB and
 1.34 GB of it is live after only 100 module loads, before parse/eval
 retention can account for it — see the same-date note in
 native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18.md.
+
+## 2026-11-11 triage addendum — lane interp10 (RESOLVED for this ledger)
+
+Batch-triage verdict: every item this record carried now has an answer:
+(a) env-rebuild retention — mechanism removed, question moot; (b) parse
+retention — measured linear (~1.5 MB/module); (c) zero-slack allocation —
+REFUTED (the C runtime doubles); (d) driver eviction reclaim-zero —
+documented, needs a codegen/representation change, tracked at
+`bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md`; (e) parse-shard
+full-closure loading — FIXED 2026-08-22 (slim `parse_shard_main.spl` entry);
+(f) per-module env/export materialisation — the last "Open" item — measured
+RESOLVED on the Windows seed 2026-11-06/2026-11-07 (`import_bindings` down
+~19x; whole-surface imports share one `Arc<ModuleTable>` per owner via
+`record_owner_binding_layer`).
+
+What remains is the fixed ~2 GB RSS floor of the interpreted
+`native_build_worker` process. This ledger never claimed that item; it lives
+in `native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18.md` (still
+OPEN, separate owner) and is not re-diagnosed here.
+
+Verification basis for this flip: the in-doc 2026-11-06/07 measurements were
+taken on this same release line (Windows seed at `release/1.0.0` tip); this
+lane's seed is build-commit `46fe8f6b6def` at `origin/release/1.0.0` tip. No
+new mem-trace run was started — the ledger's questions are already answered
+by those measurements and a re-run would add no new signal.
