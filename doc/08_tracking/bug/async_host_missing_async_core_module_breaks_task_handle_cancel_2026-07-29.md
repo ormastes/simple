@@ -1,8 +1,7 @@
 # Bug: `std.async_core` module does not exist — the whole async_host task-handle/cancel family is unbuildable
 
 - **Date:** 2026-07-29
-- **Status:** open (one contributing bug fixed this session; the module gap itself is
-  a design decision, not fixed)
+- **Status:** fixed (2026-11-11, P3 lane ne2) — `std.async_core` created 2026-11-05; re-verified green on the refreshed seed
 - **Severity:** CRITICAL — an entire documented API surface (task handles with
   join/abort/cancel, `JoinSet`) cannot be constructed at all
 - **Found by:** lane G9 (mission-critical robustness campaign — cancellation semantics)
@@ -138,3 +137,22 @@ the seed interpreter/compiler fix, not more lib work.
 ## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
 
 Module exists; stale repro fixed (Poll.unwrap was removed, spec now uses poll_unwrap): test/01_unit/lib/async_core_spec.spl 7/7. Prevention: test/01_unit/lib/async_core_importers_prevention_spec.spl (every name an importer takes from std.async_core is exported). Remaining red specs (async_mutex_suspend, handle_cleanup, host_promise_terminal) are the seed hybrid-engine stale-snapshot defect: needs Rust seed change, not fixed here.
+
+
+## Verdict addendum — 2026-11-11 (P3 lane ne2)
+
+Verdict: **FIXED.** The module gap this record tracks closed in the 2026-11-05 update
+(`work/libbug-async-core-20261105`, recorded above) and the round-15 note
+(`work/r15-stdlib-20261107`). This lane re-verified on the refreshed seed
+(`bin/simple.exe`, build-commit `0791c2b7f4a7`, all runs seed-smoke,
+`--mode=interpreter --no-cache`):
+
+- `test/01_unit/lib/async_core_spec.spl` → SPEC FILE VERDICT OK, 7/7 passed.
+- `src/lib/nogc_async_mut/async_core.spl` present on disk (1808 bytes), so the
+  `use std.async_core.{AsyncError, CancellationToken, Poll, Priority, TaskState}`
+  import surface in the async_host family now resolves.
+
+The remaining red specs named in the 2026-11-05 update (`async_mutex_suspend`,
+`async_host_handle_cleanup_contract`, `host_promise_terminal`) are the separate,
+already-filed seed hybrid-engine stale-snapshot defect — outside this record's
+module-gap scope and unaffected by this verdict.
