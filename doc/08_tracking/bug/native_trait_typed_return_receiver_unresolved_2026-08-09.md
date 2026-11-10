@@ -181,3 +181,40 @@ Skipped from this row-order pass: primary file/fix surface is the Rust seed
 (`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
 pure-Simple, non-Codex lane within the triage budget. Not reproduced or
 re-diagnosed this pass; left OPEN as-is.
+
+## Native-route verification repair — 2026-11-10
+
+The historical claim that MIR has no native trait-object dispatch is no longer
+a description of current source: native trait registration, runtime tables,
+thunks, and dispatch now exist. That source implementation does not itself
+verify this report's original failure.
+
+The existing `trait_typed_receiver_dispatch_class_spec.spl` runs interpreter
+and JIT subprocesses only. It cannot establish a `native-build` regression
+result. Its shared probe also returned exit zero after reporting failed shapes.
+The probe now exits nonzero when a shape fails.
+
+`scripts/check/check-native-trait-receiver-resolution.shs` compiles the same
+six-shape probe through self-hosted `native-build`, executes the resulting
+binary, requires exit zero and every exact receiver-shape result, and retains
+build/run output and exit statuses. It covers LLVM and Cranelift by default;
+`BACKENDS=llvm` or `BACKENDS=cranelift` scopes an explicitly backend-specific
+run. It refuses Rust-seed producers, missing source/provenance, existing
+evidence directories, and empty backend selections.
+
+The companion `check-native-trait-receiver-resolution-selftest.shs` executes
+the production checker against controlled compiler/runtime fixtures. These
+controls discriminate build failure, absent executable, runtime failure,
+missing shape, wrong aggregate verdict, an extra failure line, and rejected
+producer identities. They test the checker only, not the compiler.
+
+Validation: `sh scripts/check/check-native-trait-receiver-resolution-selftest.shs`
+passed 10 controls on Windows/Git Bash. The positive control exercised both
+backend selections and checked 12 shape results; all nine negative controls
+returned their expected nonzero category. Working/staged direct-env guards
+passed; the committed `doc/06_spec` tree contained zero executable specs.
+
+The bug remains **OPEN** pending original-boundary execution with a proven
+self-hosted native-build producer. This Windows session's deployed
+`C:/dev/simple/bin/simple.exe` was rejected by the canonical self-hosted guard
+with exit 2 as a Rust seed. No native trait or guest/kernel PASS is claimed.
