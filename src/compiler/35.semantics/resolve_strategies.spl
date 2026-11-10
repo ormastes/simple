@@ -26,6 +26,18 @@ pub fn resolve_strategies_publish_unresolved_method_v1(subject: text,
     reverse_reference_owner_mark_known_v1("unresolved-method-candidate")
     reverse_reference_register_unresolved_method_v1(subject, consumer, evidence)
 
+fn primitive_intrinsic_method_name_v1(receiver_kind: HirTypeKind, method: text) -> bool:
+    """True when `method` names a compiler intrinsic on a primitive scalar
+    receiver (i64/f64/bool/char/text), which UFCS must never override.
+    Numeric conversions on every primitive; `len` only on text."""
+    val is_conversion = method == "to_i64" or method == "to_int" or
+        method == "to_f64" or method == "to_float" or
+        method == "to_text" or method == "to_string"
+    match receiver_kind:
+        case Int(_, _) | Float(_) | Bool | Char: is_conversion
+        case Str: is_conversion or method == "len"
+        case _: false
+
 pub fn ufcs_receiver_may_bind_param(receiver_type: HirType, first_param_type: HirType) -> bool:
     """Fail-closed gate for UFCS on an untyped receiver.
 
@@ -305,6 +317,14 @@ impl MethodResolver:
             match receiver_type.kind:
                 case Array(_, _) | Slice(_): return None
                 case _: ()
+        # Primitive receivers own their intrinsic conversions
+        # (native_primitive_to_i64_ufcs_collision_2026-07-24): `x.to_i64()`
+        # on i64/f64/text is the compiler intrinsic even when a same-named
+        # free function (`fn to_i64(v)`, `fn to_f64(n: i64)` in
+        # src/lib/common/complex) is in scope. Instance and trait owners were
+        # already given priority above; UFCS must not steal the builtin.
+        if primitive_intrinsic_method_name_v1(receiver_type.kind, method):
+            return None
 
         val func_sym_id = self.symbols.lookup_function(method)
         if not func_sym_id.?:
