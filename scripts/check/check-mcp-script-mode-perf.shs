@@ -13,6 +13,9 @@ USE_SMF="${MCP_SCRIPT_PERF_USE_SMF:-0}"
 # Honour SIMPLE_BINARY, the repo-wide override every other gate reads. Without
 # it this gate silently measured whatever stale binary `bin/simple` pointed at.
 SIMPLE_BIN="${MCP_SCRIPT_PERF_SIMPLE_BIN:-${SIMPLE_BINARY:-bin/simple}}"
+case "$RUNS" in ''|*[!0-9]*|0) echo 'error=invalid_run_count' >&2; exit 2 ;; esac
+PYTHON_BIN="$(command -v python3 || command -v python || true)"
+[ -n "$PYTHON_BIN" ] || { echo 'error=python_required_for_protocol_validation' >&2; exit 2; }
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 
@@ -92,6 +95,78 @@ for (const frame of frames) {
 }
 JS
 
+# A fast process that produces no replies is not a fast MCP server. Validate
+# each sample after its end timestamp, so checking does not enter its latency.
+cat >"$TMPDIR/validate.py" <<'PY'
+import json
+import pathlib
+import sys
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON member")
+        result[key] = value
+    return result
+
+def validate(data):
+    replies = {}
+    while data:
+        end = data.find(b"\r\n\r\n")
+        if end < 0:
+            raise ValueError("incomplete frame header")
+        headers = {}
+        for line in data[:end].decode("ascii").split("\r\n"):
+            key, separator, value = line.partition(":")
+            key = key.strip().lower()
+            if not separator or key in headers:
+                raise ValueError("invalid or duplicate frame header")
+            headers[key] = value.strip()
+        length = headers.get("content-length", "")
+        if not length.isascii() or not length.isdecimal() or int(length) <= 0:
+            raise ValueError("invalid Content-Length")
+        length = int(length)
+        body = data[end + 4:end + 4 + length]
+        if len(body) != length:
+            raise ValueError("truncated frame body")
+        data = data[end + 4 + length:]
+        message = json.loads(body.decode("utf-8"), object_pairs_hook=unique_object)
+        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+            raise ValueError("invalid JSON-RPC envelope")
+        if "id" not in message:
+            if not isinstance(message.get("method"), str) or "result" in message or "error" in message:
+                raise ValueError("invalid notification")
+            continue
+        identity = message["id"]
+        if not isinstance(identity, str) or identity not in ("1", "2") or identity in replies:
+            raise ValueError("unexpected or duplicate response ID")
+        if "error" in message or "method" in message or not isinstance(message.get("result"), dict):
+            raise ValueError("response has no successful result")
+        replies[identity] = message["result"]
+    if set(replies) != {"1", "2"}:
+        raise ValueError("missing initialize or tools/list response")
+    init = replies["1"]
+    if not isinstance(init.get("protocolVersion"), str) or not init["protocolVersion"]:
+        raise ValueError("missing protocol version")
+    if not isinstance(init.get("capabilities"), dict) or not isinstance(init.get("serverInfo"), dict):
+        raise ValueError("missing initialize metadata")
+    if not all(isinstance(init["serverInfo"].get(key), str) and init["serverInfo"][key] for key in ("name", "version")):
+        raise ValueError("invalid server identity")
+    tools = replies["2"].get("tools")
+    if not isinstance(tools, list):
+        raise ValueError("missing tools array")
+    for tool in tools:
+        if not isinstance(tool, dict) or not isinstance(tool.get("name"), str) or not tool["name"] or not isinstance(tool.get("inputSchema"), dict):
+            raise ValueError("invalid tool descriptor")
+
+try:
+    validate(pathlib.Path(sys.argv[1]).read_bytes())
+except (OSError, ValueError, TypeError) as error:
+    print("invalid_mcp_response=" + str(error), file=sys.stderr)
+    sys.exit(1)
+PY
+
 median_ms() {
   label="$1"
   shift
@@ -107,20 +182,20 @@ median_ms() {
     if [ "$rc" -ne 0 ]; then
       echo "${label}_command_failed_rc=$rc" >&2
       sed -n '1,20p' "$TMPDIR/err" >&2
-      printf '%s\n' 999999
-      return 0
+      return 1
     fi
+    "$PYTHON_BIN" "$TMPDIR/validate.py" "$TMPDIR/out" || {
+      echo "${label}_protocol_validation_failed" >&2
+      return 1
+    }
     printf '%s\n' "$((end - start))" >>"$TMPDIR/$label.samples"
     i=$((i + 1))
   done
   sort -n "$TMPDIR/$label.samples" | sed -n "$(((RUNS + 1) / 2))p"
 }
 
-python_ms=""
+python_ms="$(median_ms python3 "$PYTHON_BIN" "$TMPDIR/mcp.py")"
 bun_ms=""
-if command -v python3 >/dev/null 2>&1; then
-  python_ms="$(median_ms python3 python3 "$TMPDIR/mcp.py")"
-fi
 if command -v bun >/dev/null 2>&1; then
   bun_ms="$(median_ms bun bun "$TMPDIR/mcp.js")"
 fi
