@@ -1,7 +1,7 @@
 # Interpreter lane: three raw SFFI boundaries abort (or fabricate) instead of returning their documented failure sentinel
 
 Date: 2026-09-05
-Status: OPEN
+Status: SUPERSEDED
 Area: compiler/interpreter externs, SFFI
 Found by: `test/03_system/plan_acceptance/sffi_universal_admission_next_spec.spl`
 

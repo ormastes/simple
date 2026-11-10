@@ -23,6 +23,8 @@ use plugins.backend_wasm.wasm.wasm_control_flow.{WasmControlFlow}
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
+use compiler.mir.mir_instruction_support.{MirCallOrigin, mir_call_origin_uses_local_symbols}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
 
 # Declared explicitly for the unlowered-MIR escape hatch below.
 extern fn rt_env_get(key: text) -> text?
@@ -53,6 +55,7 @@ class MirToWat:
     # function by register_local_types; a local that is absent here has an
     # UNKNOWN type and must trap rather than default to an integer op.
     local_types: Dict<i64, text>
+    source_function_symbols: Dict<text, text> = {}
 
     static fn create(module_name: text) -> MirToWat:
         """Create translator for wasm32-wasi target."""
@@ -63,7 +66,8 @@ class MirToWat:
             control_flow: WasmControlFlow.create(),
             use_wasi: true,
             local_counter: 0,
-            local_types: {}
+            local_types: {},
+            source_function_symbols: {}
         )
 
     static fn create_standalone(module_name: text) -> MirToWat:
@@ -75,11 +79,20 @@ class MirToWat:
             control_flow: WasmControlFlow.create(),
             use_wasi: false,
             local_counter: 0,
-            local_types: {}
+            local_types: {},
+            source_function_symbols: {}
         )
 
     me translate_module(module: MirModule) -> text:
         """Translate a complete MIR module to WAT text."""
+        self.source_function_symbols = {}
+        for key in module.functions.keys():
+            val source_function = module.functions[key]
+            if source_function.blocks.len() > 0:
+                self.source_function_symbols[source_function.name] = if mir_runtime_owned_call_name(source_function.name):
+                    mir_runtime_owned_local_symbol(source_function.name)
+                else:
+                    source_function.name
         val coverage_probe_diagnostic =
             mir_coverage_probe_admission_diagnostic_module_v1(module)
         if coverage_probe_diagnostic != "":
@@ -200,7 +213,8 @@ class MirToWat:
             result_parts.push(" (result {ty.to_text()})")
         val result_str = result_parts.join("")
 
-        builder.emit("(func ${func.name}{param_str}{result_str}")
+        val function_symbol = self.source_function_symbol(func.name)
+        builder.emit("(func ${function_symbol}{param_str}{result_str}")
         builder.indent_level = builder.indent_level + 1
 
         # Emit local variables (non-arg locals)
@@ -738,6 +752,11 @@ class MirToWat:
 
         builder.emit_local_named_set("_l{dest.id}")
 
+    fn source_function_symbol(name: text) -> text:
+        if self.source_function_symbols.has(name):
+            return self.source_function_symbols[name]
+        name
+
     me translate_call(builder: WatBuilder, dest: LocalId?, func_op: MirOperand, args: [MirOperand]):
         """Translate a function call."""
         # Push arguments
@@ -757,7 +776,14 @@ class MirToWat:
             case Const(value, _):
                 match value:
                     case Str(name):
-                        builder.emit("call ${name}")
+                        val target = if mir_call_origin_uses_local_symbols(func_op.call_origin):
+                            if mir_runtime_owned_call_name(name):
+                                mir_runtime_owned_local_symbol(name)
+                            else:
+                                self.source_function_symbol(name)
+                        else:
+                            name
+                        builder.emit("call ${target}")
                     case _:
                         # No WAT lowering exists for a non-symbol constant
                         # callee. Emitting a plausible call target here would

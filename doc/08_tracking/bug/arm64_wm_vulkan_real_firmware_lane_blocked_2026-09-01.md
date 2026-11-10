@@ -195,3 +195,28 @@ ERROR — nothing was checked: ESP build failed (rc=1, ...):
 i.e. the failure is correctly reported as ERROR (exit 2) with a verdict line,
 not as a bare non-zero exit. The only missing input to a real boot is the
 kernel, which is Blocker 1.
+
+## 2026-11-11 addendum — P3 traverse lane ne1 verdict: BLOCKED (OPEN)
+
+Current gate evidence, this host, 2026-11-11 (seed-smoke only, no
+self-hosted claims): `SIMPLE_BIN=<refreshed 2026-11-11 seed> sh
+scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs` →
+`[arm64-wm-vulkan] selftest OK (25 fixtures)` then `ERROR — nothing was
+checked: qemu-system-aarch64 not installed`, exit 2. This host has no
+qemu-system-aarch64, no mkfs.vfat, and no AAVMF pflash; the desktop kernel
+is not built in this worktree, so the real-firmware handover (Blocker 2) and
+paired hardware-Vulkan receipts cannot be produced here. The 2026-11-03
+source repairs (scenario registration present; gate now validates/extracts
+the flat ARM64 Image via llvm-objcopy before ESP handoff) are still the
+latest landed state; the dedicated user-assigned lane
+`arm64-wm-firmware-20261103` (bug_db, 2026-11-03) remains open.
+
+Exact grant command (Linux host with the firmware/QEMU toolchain):
+
+```sh
+sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+SIMPLE_BIN=<admitted compiler> sh scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs
+```
+
+Promotion criteria in this doc are unchanged. Status stays OPEN / ADVISORY.
+Lane evidence: `build/review/p3fix-ne1-20261111.sdn` row 6.

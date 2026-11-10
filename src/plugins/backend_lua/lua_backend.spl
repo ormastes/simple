@@ -20,6 +20,8 @@ use compiler.mir.mir_data.{
     MirType, MirTypeKind, MirConstValue, MirLocal, LocalId, LocalKind
 }
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BackendCompileOptions}
+use compiler.mir.mir_instruction_support.{mir_call_origin_uses_local_symbols}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
 
 # ============================================================================
 # MirToLua - Core translator class
@@ -48,8 +50,22 @@ class MirToLua:
                 self.local_name(local.id)
             case Move(local):
                 self.local_name(local.id)
-            case Const(value, _):
-                self.const_value_text(value)
+            case Const(value, type_):
+                match type_.kind:
+                    case FuncPtr(_): self.callable_text(op)
+                    case _: self.const_value_text(value)
+
+    fn callable_text(op: MirOperand) -> text:
+        match op.kind:
+            case Const(MirConstValue.Str(name), _):
+                if mir_call_origin_uses_local_symbols(op.call_origin):
+                    val symbol = if mir_runtime_owned_call_name(name): mir_runtime_owned_local_symbol(name) else: name
+                    "M.{symbol}"
+                else:
+                    name
+            case Copy(local): self.local_name(local.id)
+            case Move(local): self.local_name(local.id)
+            case _: panic("lua backend: direct call requires a named callee or a function value")
 
     fn const_value_text(value: MirConstValue) -> text:
         match value:
@@ -132,7 +148,8 @@ class MirToLua:
                         params = params + ", " + lname
                 case _: ()
 
-        self.emit_line("function M.{func.name}({params})")
+        val symbol = if mir_runtime_owned_call_name(func.name): mir_runtime_owned_local_symbol(func.name) else: func.name
+        self.emit_line("function M.{symbol}({params})")
 
         # Declare ALL non-param locals upfront (LuaJIT goto scope rule)
         var has_locals = false
@@ -167,9 +184,9 @@ class MirToLua:
 
     me translate_instruction(inst: MirInst):
         match inst.kind:
-            case Const(dest, value, _):
+            case Const(dest, value, type_):
                 val lname = self.local_name(dest.id)
-                val vtext = self.const_value_text(value)
+                val vtext = self.operand_text(MirOperand(kind: MirOperandKind.Const(value, type_)))
                 self.emit_line("  {lname} = {vtext}")
 
             case Copy(dest, src):
@@ -203,7 +220,7 @@ class MirToLua:
                 self.emit_line("  {lname} = {optext}{otext}")
 
             case Call(dest, func, args):
-                val ftext = self.operand_text(func)
+                val ftext = self.callable_text(func)
                 var arg_text = ""
                 for arg in args:
                     val atext = self.operand_text(arg)
@@ -344,7 +361,7 @@ class MirToLua:
                 self.emit_line("  error({self.lua_quoted(message)})")
 
             case CallTerminator(dest, func, args, normal, unwind, _, _):
-                val ftext = self.operand_text(func)
+                val ftext = self.callable_text(func)
                 var arg_text = ""
                 for arg in args:
                     val atext = self.operand_text(arg)

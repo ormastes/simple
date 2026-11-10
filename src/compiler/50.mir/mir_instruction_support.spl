@@ -245,15 +245,56 @@ enum AggregateKind:
     Struct(symbol: SymbolId)
     Enum(symbol: SymbolId, variant: i64)
 
+enum MirCallOrigin:
+    Source
+    Runtime
+    Foreign
+    Unknown
+
 struct MirOperand:
-    """Instruction operand."""
+    """Instruction operand, including the authority of a callable target."""
     kind: MirOperandKind
+    # Non-call operands and existing source constructors retain their meaning.
+    # Production callable lowering must classify its actual declaration owner;
+    # a runtime-looking name is not evidence that the runtime owns the call.
+    call_origin: MirCallOrigin = MirCallOrigin.Source
 
 """Operand kind."""
 enum MirOperandKind:
     Copy(local: LocalId)
     Move(local: LocalId)
     Const(value: MirConstValue, type_: MirType)
+
+fn mir_operand_with_call_origin(operand: MirOperand, origin: MirCallOrigin) -> MirOperand:
+    val result = MirOperand(kind: operand.kind, call_origin: origin)
+    return result
+
+fn mir_operand_runtime_function(name: text, type_: MirType) -> MirOperand:
+    val result = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), type_),
+        call_origin: MirCallOrigin.Runtime)
+    return result
+
+fn mir_operand_foreign_function(name: text, type_: MirType) -> MirOperand:
+    val result = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), type_),
+        call_origin: MirCallOrigin.Foreign)
+    return result
+
+fn mir_call_origin_uses_local_symbols(origin: MirCallOrigin) -> bool:
+    """Resolve callable authority without inferring it from a symbol prefix."""
+    match origin:
+        case MirCallOrigin.Source: true
+        case MirCallOrigin.Runtime: false
+        case MirCallOrigin.Foreign: false
+        case MirCallOrigin.Unknown:
+            panic("MIR call target lacks proven source/runtime/foreign origin")
+
+fn mir_call_origin_text(origin: MirCallOrigin) -> text:
+    """Stable serialization identity, including unproved callable authority."""
+    match origin:
+        case MirCallOrigin.Source: "source"
+        case MirCallOrigin.Runtime: "runtime"
+        case MirCallOrigin.Foreign: "foreign"
+        case MirCallOrigin.Unknown: "unknown"
 
 # Free functions for MirOperand construction (workaround for bootstrap)
 fn mir_operand_copy(local: LocalId) -> MirOperand:

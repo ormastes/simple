@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: SUPERSEDED (2026-09-13)
 - Found: 2026-09-13, PERF-9, running the mandatory before/after seed test leg
   after rebasing onto `origin/main` `6ff00b3df42`.
 - Component: `src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs`,

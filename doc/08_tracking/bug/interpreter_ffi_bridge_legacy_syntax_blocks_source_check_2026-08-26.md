@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** Open compiler/source migration blocker  
+**Status:** SUPERSEDED compiler/source migration blocker  
 **Observed:** 2026-08-26  
 **Path:** `src/app/interpreter/ffi/bridge.spl`
 

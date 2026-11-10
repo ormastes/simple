@@ -92,7 +92,7 @@ this correction supersedes.
 - Date: 2026-08-31
 - Host: macOS aarch64 (aarch64-apple-darwin), `/Users/ormastes/simple`
 - Area: deploy slot + parser/grammar. **Not** `src/compiler/50.mir/**` or `src/compiler/20.hir/**`.
-- Status: OPEN. Two independent defects, both blocking the documented test path.
+- Status: SUPERSEDED. Two independent defects, both blocking the documented test path.
 
 ## Binary identities (recorded, since slots are repointed mid-session)
 

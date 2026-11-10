@@ -507,3 +507,23 @@ downstream defect that no build had ever got far enough to see. It needs its
 own record and is out of scope for this one. Note also that diagnostics
 survived transport on every post-fix run, so secondary defect 1
 ("error array did not survive transport") did not reproduce here.
+
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: SUPERSEDED
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
+
+- Root-cause fix confirmed present in tracked source:
+  `src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs` (file moved
+  from `src/compiler_rust/compiler/src/interpreter/interpreter_helpers/patterns.rs`
+  since filing). The owned-values branch of
+  `handle_method_call_with_self_update_inner` (~l.1264) now threads the root
+  object name only under the corrected gate (`Arc::ptr_eq(self_fields, fields)`
+  AND both inner and outer methods declared `me`) — the trivially-true
+  `updated_class == class` self-comparison is gone.
+- Seed-smoke verification (2026-11-11), doc's own reproduce-test:
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/interpreter/chained_call_self_slot_corruption_spec.spl --mode=interpreter --no-cache`
+  → SPEC FILE VERDICT outcome=OK, declared>=3 executed=3 passed=3 failed=0.
+  Matches the doc's recorded GREEN-after (3/3 PASS).
+- Consistent with bug_db row: verdict=fixed 2026-11-02 (close-invalid lane).
+- Verdict: SUPERSEDED. No code change.

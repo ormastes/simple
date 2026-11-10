@@ -4,6 +4,7 @@ use plugins.backend_c.c_backend_translate.*
 # bare-externs calls whose import chain crosses the facade wildcard re-export.
 # See doc/08_tracking/bug/mangler_bare_extern_sibling_split_part_2026-07-30.md
 use plugins.backend_c._CBackendTranslate.class_core.{sanitize_c_name}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 # C Backend - MIR to C++20 Translation (MirToC class)
 #
 # Contains the MirToC class with core translation methods.
@@ -48,8 +49,9 @@ impl MirToC:
         If the function returns Result<T,E>, the wrapper uses error out-parameter
         pattern: T func_name(args..., spl_error_t** err_out)
         """
-        val internal_name = func.name
-        val export_name = self.derive_export_name(func.export_name, internal_name)
+        val internal_name = self.source_function_symbol(func.name)
+        val export_name = self.derive_export_name(func.export_name, func.name)
+        self.require_non_runtime_export(export_name)
         val ret_ty = self.type_mapper.map_return_type(func.signature.return_type)
         val is_void = ret_ty == "void"
 
@@ -186,7 +188,8 @@ impl MirToC:
         If the method returns Result<T,E>, generates an error-converting wrapper
         with spl_error_t** err_out parameter instead.
         """
-        val internal_name = func.name
+        val internal_name = self.source_function_symbol(func.name)
+        self.require_non_runtime_export(prefix + "_" + method_name)
         val ret_ty = self.type_mapper.map_return_type(func.signature.return_type)
         val is_void = ret_ty == "void"
         val is_text_return = self.is_text_type(func.signature.return_type)
@@ -334,6 +337,10 @@ impl MirToC:
     # ================================================================
     # Export Name Derivation Helpers
     # ================================================================
+
+    fn require_non_runtime_export(name: text):
+        if mir_runtime_owned_call_name(name):
+            panic("C export collides with runtime symbol: {name}")
 
     fn derive_export_name(custom_name: text, internal_name: text) -> text:
         """Derive the C export name for a function.

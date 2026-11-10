@@ -37,3 +37,23 @@ on this host. Source facts established today (release/1.0.0 80f074e5782):
   (`buffer.spl:290-297`) from the stage2 workaround commits (290304c37e0,
   515f96e824e), not unresolved methods.
 Next step: run the Caret closure HIR/MIR on stage3, one row per diagnostic.
+
+## 2026-11-10 fix (fix-implemented-verification-pending)
+
+Enumerated the three classes as 22 concrete shapes in
+`test/01_unit/compiler/50.mir/caret_closure_enum_payload_binding_collection_spec.spl`,
+each driving the pure-Simple HIR -> MIR lowering (the same lowering the caret
+lane runs) and asserting no diagnostic. On the release/1.0.0 tip one shape was
+red: class 3, a captured `Dict` read with `d.get(k)` inside a lifted lambda
+(`unresolved method call: get route=runtime-fallback owner=`, then `cannot
+materialize lambda for its declared function slot`). Root cause:
+`lower_lambda_value_for_type` loads every capture through
+`rt_closure_get_capture` as a bare i64 and carried only the HIR type and
+`struct_value_syms` into the lift, never the MIR `Dict`/`Array` type or the
+`runtime_dict_locals` / `runtime_array_locals` / `runtime_elem_value_type`
+markers the collection method routes key on. Fixed in the capture-load block of
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`. Classes 1
+and 2 (Option-parameter match, captured Option match, for-in over a captured
+array) were red on the older 27e65c24371 tip and already green on the release
+tip; they stay as prevention rows. Still open for verification: a native caret
+closure build on a stage3 producer.

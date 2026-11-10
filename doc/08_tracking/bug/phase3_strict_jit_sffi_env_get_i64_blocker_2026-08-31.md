@@ -1,6 +1,6 @@
 # Phase3 strict-JIT `sffi_env_get_i64` blocker
 
-Status: OPEN / release-blocking for the Phase3 core-C candidate.
+Status: SUPERSEDED / release-blocking for the Phase3 core-C candidate.
 
 ## Observed fact
 

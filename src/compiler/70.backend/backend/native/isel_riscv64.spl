@@ -1,3 +1,4 @@
+use compiler.mir.mir_data.{MirCallOrigin}
 # RISC-V 64-bit Instruction Selection
 #
 # Translates MIR instructions to RISC-V 64-bit (RV64I+M) MachInst sequences.
@@ -25,7 +26,7 @@ use compiler.mir.intrinsics.{BIT_ROTATE_LEFT, BIT_ROTATE_RIGHT, BIT_CLZ, BIT_CTZ
 use compiler.backend.native.mach_inst.{RV_X0, RV_X1, RV_X2, RV_X3, RV_X4, RV_X5, RV_X6, RV_X7, RV_X8, RV_X9, RV_X10, RV_X11, RV_X12, RV_X13, RV_X14, RV_X15, RV_X16, RV_X17, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23, RV_X24, RV_X25, RV_X26, RV_X27, RV_X28, RV_X29, RV_X30, RV_X31}
 use compiler.backend.native.mach_inst.{RV_ARG_REGS, RV_CALLEE_SAVED}
 use compiler.backend.native.mach_inst.{RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM, RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL, RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC, RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE, RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_LWU, RV_OP_SW, RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_EBREAK, RV_OP_RET, RV_OP_CALL, RV_OP_NEG, RV_OP_NOT, RV_OP_SEQZ, RV_OP_SNEZ, RV_OP_ROL, RV_OP_ROR, RV_OP_CLZ, RV_OP_CTZ, RV_OP_REV8}
-use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
+use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label, isel_definition_symbol, isel_call_symbol, isel_module_context}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
 
 fn rv64_linux_contract() -> RiscvTargetContract:
@@ -148,9 +149,9 @@ fn rv_lower_operand(ctx: ISelContext, operand: MirOperand) -> LoweredOperand:
         case Move(local):
             LoweredOperand(insts: [], result: local_vreg_op(local.id), ctx: ctx)
         case Const(const_value, const_type):
-            rv_lower_const(ctx, const_value, const_type)
+            rv_lower_const(ctx, const_value, const_type, operand.call_origin)
 
-fn rv_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> LoweredOperand:
+fn rv_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType, call_origin: MirCallOrigin = MirCallOrigin.Source) -> LoweredOperand:
     match value:
         case Int(v):
             rv_lower_const_int(ctx, v)
@@ -158,6 +159,15 @@ fn rv_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Low
             val imm_val = if v: 1 else: 0
             isel_emit_one(ctx, RV_OP_LI, [op_imm(imm_val)])
         case Str(s):
+            match type_.kind:
+                case FuncPtr(_):
+                    val symbol = isel_call_symbol(ctx, s, call_origin)
+                    val symbol_ctx = isel_add_extern(ctx, symbol)
+                    val low = isel_fresh_dest(symbol_ctx)
+                    val high = new_mach_inst(RV_OP_AUIPC, [low.result, op_sym(symbol)])
+                    val low_bits = new_mach_inst(RV_OP_ADDI, [low.result, low.result, op_sym(symbol)])
+                    return LoweredOperand(insts: [high, low_bits], result: low.result, ctx: low.ctx)
+                case _: ()
             var new_ctx = isel_add_string_data(ctx, s, char_to_ascii)
             val label = isel_last_string_label(new_ctx)
             val low = isel_fresh_dest(new_ctx)
@@ -204,7 +214,7 @@ fn isel_module_riscv64(module: MirModule) -> MachModule:
     if rv_module_has_scalable_vec(module):
         print("riscv_v_native_lowering_deferred")
     var mach_module = new_mach_module(module.name)
-    var ctx = new_isel_context()
+    var ctx = isel_module_context(module)
 
     var static_ids: [i64] = []
     var static_by_id: Dict<i64, MirStatic> = {}
@@ -237,7 +247,7 @@ fn isel_module_riscv64(module: MirModule) -> MachModule:
             case _: false
     ctx = ISelContext(next_vreg: 0, frame_slots: {}, next_frame_offset: 0,
         extern_symbols: static_externs, data_entries: entries, string_counter: 0,
-        global_names: names, global_sizes: sizes, global_signed: signedness, global_mutable: mutability)
+        global_names: names, global_sizes: sizes, global_signed: signedness, global_mutable: mutability, function_names: ctx.function_names)
 
     # Canonical (name-sorted) order: Dict<SymbolId,_> iterates in key-address
     # order on native, which permuted text layout between identical builds.
@@ -308,7 +318,7 @@ fn rv64_static_initializer_supported(value: MirConstValue) -> bool:
         case _: false
 
 fn rv_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
-    var mach_func = new_mach_function(func.name)
+    var mach_func = new_mach_function(isel_definition_symbol(func))
 
     # Reset vreg counter - use local IDs directly, start high for temps
     var local_ctx = ISelContext(
@@ -319,7 +329,8 @@ fn rv_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
         data_entries: ctx.data_entries,
         string_counter: ctx.string_counter,
         global_names: ctx.global_names, global_sizes: ctx.global_sizes,
-        global_signed: ctx.global_signed, global_mutable: ctx.global_mutable
+        global_signed: ctx.global_signed, global_mutable: ctx.global_mutable,
+        function_names: ctx.function_names
     )
 
     # Allocate frame slots for locals that need stack space
@@ -398,7 +409,8 @@ fn rv_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
         data_entries: local_ctx.data_entries,
         string_counter: local_ctx.string_counter,
         global_names: local_ctx.global_names, global_sizes: local_ctx.global_sizes,
-        global_signed: local_ctx.global_signed, global_mutable: local_ctx.global_mutable
+        global_signed: local_ctx.global_signed, global_mutable: local_ctx.global_mutable,
+        function_names: local_ctx.function_names
     )
 
     ISelFuncResult(func: mach_func, ctx: out_ctx)
@@ -847,11 +859,15 @@ fn rv_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [Mi
 
     # Emit call
     match func_op.kind:
-        case Const(Str(name), _):
-            # Direct call to named function: CALL symbol (pseudo: AUIPC ra + JALR ra)
-            current_ctx = isel_add_extern(current_ctx, name)
-            insts.push(new_mach_inst(RV_OP_CALL, [op_sym(name)]))
-            did_emit_call = true
+        case Const(const_value, _):
+            match const_value:
+                case Str(name):
+                    val symbol = isel_call_symbol(current_ctx, name, func_op.call_origin)
+                    current_ctx = isel_add_extern(current_ctx, symbol)
+                    insts.push(new_mach_inst(RV_OP_CALL, [op_sym(symbol)]))
+                    did_emit_call = true
+                case _:
+                    panic("riscv64 isel: call through non-symbol constant callee has no lowering")
         case Copy(local):
             # Indirect call through register: JALR ra, 0(rs)
             insts.push(new_mach_inst(RV_OP_JALR, [op_phys(RV_X1), local_vreg_op(local.id), op_imm(0)]))

@@ -4,6 +4,7 @@
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
+use compiler.hir.primitive_method_identity.{hir_primitive_impl_method_name}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
@@ -342,7 +343,9 @@ impl HirLowering:
             case _: -1
         for name in impl_.methods.keys():
             val fn_ = impl_.methods[name]
-            var hir_fn = self.lower_function(fn_)
+            val primitive_method_name = hir_primitive_impl_method_name(
+                self.symbols, type_, trait_, has_trait, self.module_filename, name)
+            var hir_fn = self.lower_function(fn_, primitive_method_name)
             # #158 Phase B: same rule as the trait tier above -- an impl for a
             # type with type parameter(s) makes every method a template.
             if type_params.len() > 0:
@@ -413,7 +416,15 @@ impl HirLowering:
                             # injecting the default would emit a second body
                             # under the same name (Cranelift "Duplicate
                             # definition"). Bind the written method instead.
-                            val default_written_elsewhere = not methods.contains_key(default_fn.name) and self.impl_textual_method_key_present(impl_owner_name, default_fn.name)
+                            var default_written_elsewhere = not methods.contains_key(default_fn.name) and self.impl_textual_method_key_present(impl_owner_name, default_fn.name)
+                            val primitive_inherent_name = hir_primitive_impl_method_name(
+                                self.symbols, type_, trait_, false, self.module_filename, default_fn.name)
+                            if primitive_inherent_name != "":
+                                # A method in ANOTHER trait impl is not an
+                                # inherent override of this trait's default.
+                                # Canonical preregistration also recognizes an
+                                # inherent i16 method for an alias to i16.
+                                default_written_elsewhere = not methods.contains_key(default_fn.name) and self.symbols.lookup_or_invalid(primitive_inherent_name).is_valid()
                             if default_written_elsewhere:
                                 match type_.kind:
                                     case Named(written_owner_symbol, _):
@@ -421,13 +432,20 @@ impl HirLowering:
                                         if val written_symbol = self.symbols.lookup(written_symbol_name):
                                             if written_symbol != nil:
                                                 methods[default_fn.name] = written_symbol
-                                    case _: ()
+                                    case _:
+                                        if primitive_inherent_name != "":
+                                            if val primitive_inherent_symbol = self.symbols.lookup(primitive_inherent_name):
+                                                methods[default_fn.name] = primitive_inherent_symbol
                             if not methods.contains_key(default_fn.name) and not default_written_elsewhere:
                                 var concrete_default = default_fn
                                 val concrete_symbol_type = self.concrete_default_method_type(default_fn, type_)
-                                val concrete_symbol_name = match type_.kind:
+                                var concrete_symbol_name = match type_.kind:
                                     case Named(owner_symbol, _): self.symbols.method_symbol_name(owner_symbol, default_fn.name)
                                     case _: default_fn.name
+                                val primitive_default_name = hir_primitive_impl_method_name(
+                                    self.symbols, type_, trait_, has_trait, self.module_filename, default_fn.name)
+                                if primitive_default_name != "":
+                                    concrete_symbol_name = primitive_default_name
                                 val concrete_symbol = self.symbols.define(
                                     concrete_symbol_name,
                                     if default_fn.is_static: SymbolKind.Function else: SymbolKind.Method,

@@ -7,6 +7,7 @@ use compiler.hir.hir_lowering._Items.lowering_helpers.{bootstrap_hir_symbol_for_
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
+use compiler.hir.primitive_method_identity.{hir_primitive_owner_name, hir_primitive_impl_method_name}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
@@ -370,17 +371,39 @@ impl HirLowering:
                 self.symbols.lookup_or_invalid(owner_name)
             val previous_impl_self_type = self.current_method_self_type
             val previous_impl_self_symbol_id = self.current_method_self_symbol_id
+            var primitive_impl_type = HirType(kind: HirTypeKind.Error, span: decl_span)
+            var primitive_impl_trait = HirType(kind: HirTypeKind.Error, span: decl_span)
+            # Settle nongeneric aliases through the same type owner as
+            # lower_impl. A primitive alias must not use its alias SymbolId as
+            # Self while the implementation later uses its expanded scalar.
+            var needs_primitive_owner = not impl_owner_symbol.is_valid()
+            if impl_owner_symbol.is_valid():
+                if val owner_declaration = self.symbols.get_symbol_raw(impl_owner_symbol.id):
+                    needs_primitive_owner = owner_declaration.kind == SymbolKind.TypeAlias
+            if needs_primitive_owner and impl_.type_params.len() == 0:
+                val actual_impl_type = self.lower_type(impl_.type_)
+                if hir_primitive_owner_name(actual_impl_type.kind) != "":
+                    primitive_impl_type = actual_impl_type
+                    if impl_.has_trait_:
+                        primitive_impl_trait = self.lower_type(impl_.trait_)
             if impl_owner_symbol.is_valid():
                 self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(impl_owner_symbol, []), span: decl_span))
                 self.current_method_self_symbol_id = impl_owner_symbol.id
+            if hir_primitive_owner_name(primitive_impl_type.kind) != "":
+                self.current_method_self_type = Some(primitive_impl_type)
+                self.current_method_self_symbol_id = -1
             var mi = 0
             while mi < meth_keys.len():
                 val name = meth_keys[mi]
                 val method: ParserFunction = impl_.methods[name]
                 val owner_symbol = impl_owner_symbol
-                val symbol_name = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                var symbol_name = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                val primitive_symbol_name = hir_primitive_impl_method_name(
+                    self.symbols, primitive_impl_type, primitive_impl_trait, impl_.has_trait_, self.module_filename, name)
+                if primitive_symbol_name != "":
+                    symbol_name = primitive_symbol_name
                 val symbol_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
-                val owner_context: SymbolId? = if owner_symbol.is_valid(): Some(owner_symbol) else: nil
+                val owner_context: SymbolId? = if owner_symbol.is_valid() and primitive_symbol_name == "": Some(owner_symbol) else: nil
                 # This pass runs at module scope, before lower_impl binds the
                 # enclosing type parameters. An impl-generic method is a
                 # template even when the method declares no parameters of its
@@ -407,10 +430,14 @@ impl HirLowering:
                         if impl_.methods.contains_key(name):
                             continue
                         val owner_symbol = impl_owner_symbol
-                        val method_symbol = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                        var method_symbol = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                        val primitive_default_symbol = hir_primitive_impl_method_name(
+                            self.symbols, primitive_impl_type, primitive_impl_trait, impl_.has_trait_, self.module_filename, name)
+                        if primitive_default_symbol != "":
+                            method_symbol = primitive_default_symbol
                         if not self.symbols.lookup_or_invalid(method_symbol).is_valid():
                             val symbol_kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
-                            val owner_context: SymbolId? = if owner_symbol.is_valid(): Some(owner_symbol) else: nil
+                            val owner_context: SymbolId? = if owner_symbol.is_valid() and primitive_default_symbol == "": Some(owner_symbol) else: nil
                             var method_type: HirType? = nil
                             if impl_.type_params.len() == 0:
                                 method_type = self.declared_callable_type(trait_method, owner_context)

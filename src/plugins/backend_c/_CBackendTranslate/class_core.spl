@@ -18,6 +18,8 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_instructions.{MirModule, MirBody, MirBlock, MirAsmOperand, MirOperand, MirUnaryOp, MirBinOp}
 use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instruction_support.{mir_call_origin_uses_local_symbols}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
 use plugins.backend_c.c_type_mapper.{CTypeMapper}
 use plugins.backend_c.c_ir_builder.{CIRBuilder, escape_c_string}
 use compiler.backend.backend.backend_types.{CodegenTarget, BackendCompileOptions, CompiledModule}
@@ -61,6 +63,7 @@ class MirToC:
     stack_slots: Dict<i64, text>
     stack_slot_sizes: Dict<i64, i64>
     string_counter: i64
+    source_function_symbols: Dict<text, text> = {}
 
 impl MirToC:
     static fn create(module_name: text) -> MirToC:
@@ -71,7 +74,8 @@ impl MirToC:
             local_types: {},
             stack_slots: {},
             stack_slot_sizes: {},
-            string_counter: 0
+            string_counter: 0,
+            source_function_symbols: {}
         )
 
     static fn create_for_target(module_name: text, target: CodegenTarget) -> MirToC:
@@ -82,7 +86,8 @@ impl MirToC:
             local_types: {},
             stack_slots: {},
             stack_slot_sizes: {},
-            string_counter: 0
+            string_counter: 0,
+            source_function_symbols: {}
         )
 
     me emit_unsupported_panic(message: text):
@@ -106,6 +111,14 @@ impl MirToC:
 
     me translate_module(module: MirModule) -> text:
         """Translate entire MIR module to C++20 source (implementation file)."""
+        self.source_function_symbols = {}
+        for key in module.functions.keys():
+            val source_function = module.functions[key]
+            if source_function.blocks.len() > 0:
+                self.source_function_symbols[source_function.name] = if mir_runtime_owned_call_name(source_function.name):
+                    mir_runtime_owned_local_symbol(source_function.name)
+                else:
+                    source_function.name
         # Emit header preamble
         self.builder.emit_header_file_header()
 
@@ -124,7 +137,7 @@ impl MirToC:
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for _sym in module.functions.keys():
             val func: MirFunction = module.functions[_sym]
-            val fn_name = func.name
+            val fn_name = self.source_function_symbol(func.name)
             val body = MirBody.from_function(func)
             self.emit_forward_declaration(fn_name, body, func.is_comdat)
         self.builder.emit_header_raw("")
@@ -133,7 +146,7 @@ impl MirToC:
         # Function definitions go to impl only
         for _sym in module.functions.keys():
             val func: MirFunction = module.functions[_sym]
-            val fn_name = func.name
+            val fn_name = self.source_function_symbol(func.name)
             val body = MirBody.from_function(func)
             self.translate_function(fn_name, body, func.is_comdat)
 
@@ -589,6 +602,30 @@ impl MirToC:
                 true
             case _:
                 false
+
+    fn source_function_symbol(name: text) -> text:
+        if self.source_function_symbols.has(name):
+            return self.source_function_symbols[name]
+        name
+
+    me translate_call_target(operand: MirOperand) -> text:
+        # A symbol in a callable position is not a text literal. Data operands
+        # still use translate_operand, so ordinary strings keep their storage.
+        match operand.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name):
+                        if mir_call_origin_uses_local_symbols(operand.call_origin):
+                            # Imported source functions may have their body in
+                            # another object. Never bind that source call to a
+                            # same-spelled runtime export when its body is absent.
+                            if mir_runtime_owned_call_name(name):
+                                return mir_runtime_owned_local_symbol(name)
+                            return self.source_function_symbol(name)
+                        return name
+                    case _: ()
+            case _: ()
+        self.translate_operand(operand)
 
     me translate_operand(operand: MirOperand) -> text:
         match operand.kind:

@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** SUPERSEDED
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane F)
 **Area:** `src/compiler/90.tools/lint/_LintMain/traceability_and_assertions.spl:376`
 **Severity:** medium — the linter rejects the assertion form the project's own rules

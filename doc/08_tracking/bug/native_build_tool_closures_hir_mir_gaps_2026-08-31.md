@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
-**Status:** OPEN — measured, not yet fixed
+**Status:** SUPERSEDED — measured, not yet fixed
 **Lane:** Windows MSVC host, `bin/simple.exe native-build`
 
 ## Summary

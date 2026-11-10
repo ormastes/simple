@@ -16,6 +16,8 @@
 
 use std.log.{debug, log_get_level, LOG_DEBUG}
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirCallOrigin, mir_call_origin_text}
+use compiler.interp.mir_interp_runtime.{mir_interp_runtime_arity_v1}
 use compiler.interp.execir.{ExecIrModule, ExecIrArenaCtx, execir_encode_call, execir_binop_code}
 use compiler.interp.mir_simd_interpreter.{MirSimdState, MirSimdShape}
 use compiler.common.diagnostics.span.{Span}
@@ -64,6 +66,9 @@ class MirInterpreter:
     call_stack: [CallFrame]  # Stack of saved frames for nested calls
     next_aggregate_id: i64   # Counter for aggregate base addresses
     aggregate_sizes: {i64: i64}  # Aggregate base address -> element count
+    heap_cells: {i64: i64}  # Virtual aggregate storage survives call-frame reuse.
+    runtime_arrays: {i64: [i64]}  # Interpreter handles, never native ABI pointers.
+    array_slots: {i64: (i64, i64)}  # Virtual element address -> (array, index).
     string_table: {i64: text}
     last_error: InterpError?  # Lane C8: deferred diagnostic from i64-returning helpers (const/intrinsic)
     next_string_id: i64
@@ -122,6 +127,9 @@ impl MirInterpreter:
             call_stack: [],
             next_aggregate_id: 100000,
             aggregate_sizes: {},
+            heap_cells: {},
+            runtime_arrays: {},
+            array_slots: {},
             string_table: {},
             last_error: nil,
             next_string_id: -1,
@@ -206,16 +214,45 @@ impl MirInterpreter:
 
     me set_local(dest: LocalId, value: i64):
         """Store a value in a local variable."""
-        self.locals[dest.id] = value
+        if self.locals.contains(dest.id):
+            self.locals[dest.id] = value
+        elif self.array_slots.contains(dest.id):
+            val slot = self.array_slots[dest.id]
+            var elements = self.runtime_arrays[slot[0]]
+            if slot[1] < 0 or slot[1] >= elements.len():
+                self.last_error = Some(InterpError.RuntimeError(message: "E-INTERP-ARRAY-Bounds: invalid element address"))
+                return
+            elements[slot[1]] = value
+            self.runtime_arrays[slot[0]] = elements
+        elif self.heap_cells.contains(dest.id):
+            self.heap_cells[dest.id] = value
+        else:
+            self.locals[dest.id] = value
 
     fn get_local(local: LocalId) -> i64:
         """Get a value from a local variable (0 if not set)."""
         # ponytail: undefined locals fail closed instead of masquerading as zero.
-        self.locals[local.id] ?? -1
+        # Ordinary register reads keep one lookup; virtual heap lookup is only
+        # needed when the current frame has no local with this address.
+        if val local_value = self.locals[local.id]: return local_value
+        if self.array_slots.contains(local.id):
+            val slot = self.array_slots[local.id]
+            val elements = self.runtime_arrays[slot[0]]
+            if slot[1] < 0 or slot[1] >= elements.len(): return -1
+            return elements[slot[1]]
+        if self.heap_cells.contains(local.id):
+            return self.heap_cells[local.id]
+        -1
 
     fn is_local_set(local: LocalId) -> bool:
         """Miri-mode helper: has this local ever been written?"""
-        self.locals.contains(local.id)
+        self.locals.contains(local.id) or self.heap_cells.contains(local.id) or self.array_slots.contains(local.id)
+
+    fn _array_slot_valid(address: i64) -> bool:
+        if not self.array_slots.contains(address): return true
+        val slot = self.array_slots[address]
+        val elements = self.runtime_arrays[slot[0]]
+        slot[1] >= 0 and slot[1] < elements.len()
 
     me set_simd_vector(local: LocalId, type_: MirType, lanes: [i64]) -> InterpError?:
         """Install an encoded lane vector for focused interpreter tests."""
@@ -387,6 +424,8 @@ impl MirInterpreter:
 
             case Load(dest, ptr):
                 val addr = self.get_operand(ptr)
+                if not self._array_slot_valid(addr):
+                    return Some(InterpError.RuntimeError(message: "E-INTERP-ARRAY-Bounds: load through an invalid element address"))
                 # Interpret addr as local ID for now
                 val local_id = LocalId(id: addr)
                 val value = self.get_local(local_id)
@@ -395,6 +434,8 @@ impl MirInterpreter:
 
             case Store(ptr, value):
                 val addr = self.get_operand(ptr)
+                if not self._array_slot_valid(addr):
+                    return Some(InterpError.RuntimeError(message: "E-INTERP-ARRAY-Bounds: store through an invalid element address"))
                 val val_to_store = self.get_operand(value)
                 val local_id = LocalId(id: addr)
                 self.set_local(local_id, val_to_store)
@@ -407,6 +448,25 @@ impl MirInterpreter:
 
             case GetElementPtr(dest, base, indices):
                 val base_val = self.get_operand(base)
+                if self.runtime_arrays.contains(base_val) or self.array_slots.contains(base_val):
+                    var handle = base_val
+                    var array_index = 0
+                    if self.array_slots.contains(base_val):
+                        val prior = self.array_slots[base_val]
+                        handle = prior[0]
+                        array_index = prior[1]
+                    for index in indices:
+                        array_index = array_index + self.get_operand(index)
+                    val elements = self.runtime_arrays[handle]
+                    # One-past-end is a valid pointer, but cannot be loaded or
+                    # stored. Keep that distinction at the virtual heap boundary.
+                    if array_index < 0 or array_index > elements.len():
+                        return Some(InterpError.RuntimeError(message: "E-INTERP-ARRAY-Bounds: index {array_index}"))
+                    val address = self.next_aggregate_id
+                    self.next_aggregate_id = address + 8
+                    self.array_slots[address] = (handle, array_index)
+                    self.set_local(dest, address)
+                    return nil
                 var offset = base_val
                 for idx in indices:
                     val idx_val = self.get_operand(idx)
@@ -420,17 +480,32 @@ impl MirInterpreter:
                 self.next_aggregate_id = self.next_aggregate_id + (operands.len() * 8) + 8
                 # Store each element at base + index * 8
                 var i = 0
+                var array_values: [i64] = []
+                val is_array = match kind:
+                    case Array(_): true
+                    case _: false
                 for op in operands:
                     val elem_val = self.get_operand(op)
-                    val slot = LocalId(id: base_addr + (i * 8))
-                    self.set_local(slot, elem_val)
+                    self.heap_cells[base_addr + (i * 8)] = elem_val
+                    if is_array: array_values.push(elem_val)
                     i = i + 1
+                self.aggregate_sizes[base_addr] = operands.len()
+                if is_array:
+                    self.runtime_arrays[base_addr] = array_values
+                    for index in 0..array_values.len():
+                        self.array_slots[base_addr + (index * 8)] = (base_addr, index)
                 # dest holds the base address
                 self.set_local(dest, base_addr)
                 nil
 
             case GetField(dest, base, field):
                 val base_val = self.get_operand(base)
+                if self.runtime_arrays.contains(base_val):
+                    val elements = self.runtime_arrays[base_val]
+                    if field < 0 or field >= elements.len():
+                        return Some(InterpError.RuntimeError(message: "E-INTERP-ARRAY-Bounds: field {field}"))
+                    self.set_local(dest, elements[field])
+                    return nil
                 # Read value from base_address + field_offset
                 val field_addr = base_val + (field * 8)
                 val slot = LocalId(id: field_addr)
@@ -441,54 +516,27 @@ impl MirInterpreter:
             case SetField(base, field, value):
                 val base_val = self.get_operand(base)
                 val val_to_set = self.get_operand(value)
+                if self.runtime_arrays.contains(base_val):
+                    val elements = self.runtime_arrays[base_val]
+                    if field < 0 or field >= elements.len():
+                        return Some(InterpError.RuntimeError(message: "E-INTERP-ARRAY-Bounds: field {field}"))
+                    val result = self._dispatch_runtime_call("rt_array_set", [base_val, field, val_to_set])
+                    return result[1]
                 val field_addr = base_val + (field * 8)
                 val slot = LocalId(id: field_addr)
                 self.set_local(slot, val_to_set)
                 nil
 
             case Call(dest, call_target, args):
-                val func_name = _extract_func_name(call_target)
-                if func_name.?:
-                    val name = func_name.unwrap()
-                    val callee_opt = self._resolve_function(name)
-                    if callee_opt.?:
-                        val callee = callee_opt.unwrap()
-                        val call_result = self._call_function(callee, args)
-                        if call_result[1].?:
-                            return call_result[1]
-                        if dest.?:
-                            val ret = call_result[0] ?? 0
-                            self.set_local(dest.unwrap(), ret)
-                    else:
-                        # Unknown function - set dest to 0
-                        if dest.?:
-                            self.set_local(dest.unwrap(), 0)
-                else:
-                    # Cannot resolve function name
-                    if dest.?:
-                        self.set_local(dest.unwrap(), 0)
+                val call_result = self._dispatch_call_operand(call_target, args)
+                if call_result[1].?: return call_result[1]
+                if dest.?: self.set_local(dest.unwrap(), call_result[0] ?? 0)
                 nil
 
             case CallIndirect(dest, ptr, args, sig):
-                # Try to resolve function pointer as a named function
-                val func_name = _extract_func_name(ptr)
-                if func_name.?:
-                    val name = func_name.unwrap()
-                    val callee_opt = self._resolve_function(name)
-                    if callee_opt.?:
-                        val callee = callee_opt.unwrap()
-                        val call_result = self._call_function(callee, args)
-                        if call_result[1].?:
-                            return call_result[1]
-                        if dest.?:
-                            val ret = call_result[0] ?? 0
-                            self.set_local(dest.unwrap(), ret)
-                    else:
-                        if dest.?:
-                            self.set_local(dest.unwrap(), 0)
-                else:
-                    if dest.?:
-                        self.set_local(dest.unwrap(), 0)
+                val call_result = self._dispatch_call_operand(ptr, args)
+                if call_result[1].?: return call_result[1]
+                if dest.?: self.set_local(dest.unwrap(), call_result[0] ?? 0)
                 nil
 
             case Intrinsic(dest, name, args):
@@ -857,7 +905,7 @@ impl MirInterpreter:
             case Float(v): f64_to_bits(v)
             case Bool(v): if v: 1 else: 0
             case Str(v): self._store_string(v)
-            case Array(elements): self._store_const_aggregate(elements)
+            case Array(elements): self._store_const_array(elements)
             case Tuple(elements): self._store_const_aggregate(elements)
             case Struct(fields):
                 # Field order follows keys() order, matching GetField's
@@ -884,10 +932,19 @@ impl MirInterpreter:
         var i = 0
         for elem in elements:
             val elem_val = self._eval_const(elem)
-            val slot = LocalId(id: base_addr + (i * 8))
-            self.set_local(slot, elem_val)
+            self.heap_cells[base_addr + (i * 8)] = elem_val
             i = i + 1
         self.aggregate_sizes[base_addr] = count
+        base_addr
+
+    me _store_const_array(elements: [MirConstValue]) -> i64:
+        val base_addr = self._store_const_aggregate(elements)
+        var values: [i64] = []
+        for index in 0..elements.len():
+            values.push(self.heap_cells[base_addr + (index * 8)])
+        self.runtime_arrays[base_addr] = values
+        for index in 0..values.len():
+            self.array_slots[base_addr + (index * 8)] = (base_addr, index)
         base_addr
 
     me _store_string(s: text) -> i64:
@@ -1020,6 +1077,70 @@ impl MirInterpreter:
     # ========================================================================
     # Call Support
     # ========================================================================
+
+    me _dispatch_call_operand(target: MirOperand, args: [MirOperand]) -> (i64?, InterpError?):
+        val name_opt = _extract_func_name(target)
+        if not name_opt.?:
+            return (nil, Some(InterpError.UnsupportedOperation(op: "E-INTERP-CALL-Target: callable has no supported direct target")))
+        val name = name_opt.unwrap()
+        match target.call_origin:
+            case MirCallOrigin.Source:
+                val callee = self._resolve_function(name)
+                if not callee.?:
+                    return (nil, Some(InterpError.RuntimeError(message: "E-INTERP-CALL-Source: unresolved function '{name}'")))
+                return self._call_function(callee.unwrap(), args)
+            case MirCallOrigin.Foreign:
+                return (nil, Some(InterpError.UnsupportedOperation(op: "E-INTERP-CALL-Foreign: no foreign owner for '{name}'")))
+            case MirCallOrigin.Unknown:
+                return (nil, Some(InterpError.UnsupportedOperation(op: "E-INTERP-CALL-Origin: unproved callable authority for '{name}'")))
+            case MirCallOrigin.Runtime:
+                val arity = mir_interp_runtime_arity_v1(name)
+                if arity < 0:
+                    return (nil, Some(InterpError.UnsupportedOperation(op: "E-INTERP-RUNTIME-Unknown: no runtime owner for '{name}'")))
+                if args.len() != arity:
+                    return (nil, Some(InterpError.RuntimeError(message: "E-INTERP-RUNTIME-Arity: '{name}' expects {arity}, got {args.len()}")))
+                var values: [i64] = []
+                for arg in args:
+                    values.push(self.get_operand(arg))
+                    if self.last_error.?:
+                        val error = self.last_error
+                        self.last_error = nil
+                        return (nil, error)
+                return self._dispatch_runtime_call(name, values)
+
+    me _dispatch_runtime_call(name: text, args: [i64]) -> (i64?, InterpError?):
+        # Virtual arrays belong to the interpreter, not a callee's pooled local
+        # frame. Never pass these synthetic handles to native runtime FFI.
+        if name == "rt_array_new":
+            # Match core_array.array_new_with_flags: small/negative capacity
+            # still creates an empty array; excessive capacity is refused.
+            if args[0] > 100000000: return (Some(0), nil)
+            val handle = self.next_aggregate_id
+            self.next_aggregate_id = handle + 8
+            self.runtime_arrays[handle] = []
+            return (Some(handle), nil)
+        if name == "rt_array_push" or name == "rt_array_len" or name == "rt_array_get" or name == "rt_array_set":
+            val handle = args[0]
+            if not self.runtime_arrays.contains(handle):
+                # These are the known ABI's failure values, not an unresolved
+                # call fallback: get returns tagged nil, length/status return 0.
+                return (Some(if name == "rt_array_get": 3 else: 0), nil)
+            var elements = self.runtime_arrays[handle]
+            if name == "rt_array_len": return (Some(elements.len()), nil)
+            if name == "rt_array_push":
+                elements.push(args[1])
+                self.runtime_arrays[handle] = elements
+                return (Some(1), nil)
+            val index = if args[1] < 0: elements.len() + args[1] else: args[1]
+            if index < 0 or index >= elements.len():
+                return (Some(if name == "rt_array_get": 3 else: 0), nil)
+            if name == "rt_array_get": return (Some(elements[index]), nil)
+            elements[index] = args[2]
+            self.runtime_arrays[handle] = elements
+            return (Some(1), nil)
+        # Only the exact supported async names reach this helper: dispatch
+        # validates authority and arity before invoking the runtime bridge.
+        (Some(mir_interp_call_runtime_fn(name, args)), nil)
 
     me _take_frame_locals() -> {i64: i64}:
         """Take a locals dict for an inner call frame: pooled (cleared) or fresh."""
@@ -1293,6 +1414,22 @@ impl MirInterpreter:
         # Build each byte-identical piece once, then flatten once. Repeated
         # `key = key + piece` recopied the whole prefix for every instruction.
         var key_parts: [text] = ["{func.name}#{func.blocks.len()}#{func.locals.len()}"]
+        # Encoded calls bind source-table authority. A same-shaped function
+        # whose non-entry call changes origin must not reuse that source plan.
+        for call_block in func.blocks:
+            for call_inst in call_block.instructions:
+                match call_inst.kind:
+                    case Call(_, target, _):
+                        val name = _extract_func_name(target) ?? ""
+                        key_parts.push("|call:{call_block.id.id}:{name.len()}:{name}:{mir_call_origin_text(target.call_origin)}")
+                    case CallIndirect(_, target, _, _):
+                        key_parts.push("|indirect:{call_block.id.id}:{mir_call_origin_text(target.call_origin)}")
+                    case _: pass
+            match call_block.terminator:
+                case CallTerminator(_, target, _, _, _, _, _):
+                    val name = _extract_func_name(target) ?? ""
+                    key_parts.push("|invoke:{call_block.id.id}:{name.len()}:{name}:{mir_call_origin_text(target.call_origin)}")
+                case _: pass
         val entry_id = func.entry_block.id
         for block in func.blocks:
             if block.id.id == entry_id:
@@ -1451,39 +1588,25 @@ impl MirInterpreter:
 
             case CallTerminator(dest, call_target, args, normal, unwind,
                                 unwind_payload_dest, unwind_type_tag_dest):
-                val func_name = _extract_func_name(call_target)
-                if func_name.?:
-                    val name = func_name.unwrap()
-                    val callee_opt = self._resolve_function(name)
-                    if callee_opt.?:
-                        val callee = callee_opt.unwrap()
-                        val call_result = self._call_function(callee, args)
-                        if call_result[1].?:
-                            val call_error = call_result[1].unwrap()
-                            # Runtime faults remain diagnostics. Only an
-                            # explicit language exception selects `unwind`.
-                            match call_error:
-                                case InterpError.Exception(payload, type_tag):
-                                    if unwind.?:
-                                        self.pending_exception_type_tag = type_tag
-                                        if unwind_payload_dest.?:
-                                            self.set_local(unwind_payload_dest.unwrap(), payload)
-                                        if unwind_type_tag_dest.?:
-                                            self.set_local(unwind_type_tag_dest.unwrap(), type_tag)
-                                        self.previous_block = self.current_block
-                                        self.current_block = Some(unwind.unwrap().id)
-                                        return nil
-                                    return Some(call_error)
-                                case _: return Some(call_error)
-                        if dest.?:
-                            val ret = call_result[0] ?? 0
-                            self.set_local(dest.unwrap(), ret)
-                    else:
-                        if dest.?:
-                            self.set_local(dest.unwrap(), 0)
-                else:
-                    if dest.?:
-                        self.set_local(dest.unwrap(), 0)
+                val call_result = self._dispatch_call_operand(call_target, args)
+                if call_result[1].?:
+                    val call_error = call_result[1].unwrap()
+                    # Runtime/authority faults stay diagnostics. Only an
+                    # explicit language exception selects the unwind edge.
+                    match call_error:
+                        case InterpError.Exception(payload, type_tag):
+                            if unwind.?:
+                                self.pending_exception_type_tag = type_tag
+                                if unwind_payload_dest.?:
+                                    self.set_local(unwind_payload_dest.unwrap(), payload)
+                                if unwind_type_tag_dest.?:
+                                    self.set_local(unwind_type_tag_dest.unwrap(), type_tag)
+                                self.previous_block = self.current_block
+                                self.current_block = Some(unwind.unwrap().id)
+                                return nil
+                            return Some(call_error)
+                        case _: return Some(call_error)
+                if dest.?: self.set_local(dest.unwrap(), call_result[0] ?? 0)
                 self.previous_block = self.current_block
                 self.current_block = Some(normal.id)
                 nil

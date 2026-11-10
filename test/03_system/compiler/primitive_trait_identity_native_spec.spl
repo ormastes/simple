@@ -1,0 +1,45 @@
+# @req REQ-PRIMITIVE-TRAIT-IDENTITY
+use std.spec.*
+use app.io.env_ops.{env_get}
+use app.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+describe "self-hosted native primitive trait dispatch":
+    it "builds and executes cross-module primitive implementations through a trait alias":
+        step("Select the explicitly supplied self-hosted compiler and private output path")
+        # The campaign receipt must bind this binary's actual self-hosted
+        # lineage. There is deliberately no implicit bin/simple seed fallback.
+        val compiler = env_get("SIMPLE_SELFHOSTED_BIN")
+        val output = env_get("SIMPLE_PRIMITIVE_TRAIT_OUTPUT")
+        expect(compiler == "").to_equal(false)
+        expect(output == "").to_equal(false)
+        expect(env_get("SIMPLE_NO_STUB_FALLBACK")).to_equal("1")
+        expect(env_get("SIMPLE_NO_BOOTSTRAP_DELEGATE")).to_equal("1")
+        expect(file_exists(output)).to_equal(false)
+        step("Compile the original method dispatch shape with the selected compiler")
+        val built = process_run_timeout(compiler,
+            ["native-build", "--backend", "llvm", "--source", "src/lib", "--entry-closure", "--entry",
+             "test/fixtures/compiler/primitive_trait_identity/main.spl", "--output", output], 180000)
+        expect(built.2).to_equal(0)
+        expect(file_exists(output)).to_equal(true)
+        step("Execute the compiled output and check absolute implementation sentinels")
+        val executed = process_run_timeout(output, [], 10000)
+        expect(executed.2).to_equal(0)
+        expect(executed.0.trim()).to_equal("PRIMITIVE_TRAIT_IDENTITY_OK")
+
+    it "rejects unsupported concrete generic trait instantiations without publishing an executable":
+        step("Require a fresh output and the same explicit self-hosted LLVM policy")
+        val compiler = env_get("SIMPLE_SELFHOSTED_BIN")
+        val output_base = env_get("SIMPLE_PRIMITIVE_TRAIT_OUTPUT")
+        expect(compiler == "").to_equal(false)
+        expect(output_base == "").to_equal(false)
+        expect(env_get("SIMPLE_NO_STUB_FALLBACK")).to_equal("1")
+        expect(env_get("SIMPLE_NO_BOOTSTRAP_DELEGATE")).to_equal("1")
+        val output = output_base + ".generic.exe"
+        expect(file_exists(output)).to_equal(false)
+        val built = process_run_timeout(compiler,
+            ["native-build", "--backend", "llvm", "--source", "src/lib", "--entry-closure", "--entry",
+             "test/fixtures/compiler/primitive_trait_identity/generic_rejected.spl", "--output", output], 180000)
+        expect(built.2 == 0).to_equal(false)
+        expect(built.0 + built.1).to_contain("scalar trait method")
+        expect(file_exists(output)).to_equal(false)

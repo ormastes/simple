@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status: OPEN** (filed; not fixed). Class 3 of the stage1-closure HIR fatals.
+**Status: SUPERSEDED** (filed; not fixed). Class 3 of the stage1-closure HIR fatals.
 
 ## Exact text
 ```

@@ -47,3 +47,25 @@ bundle.
 - Owner: ARM32 SimpleOS execution lane
 - Final reviewer: independent normal/highest-capability reviewer
 
+
+## 2026-11-11 addendum — P3 traverse lane ne1 verdict: BLOCKED (OPEN)
+
+No newer ARM32 evidence found at the `origin/release/1.0.0` tip: no
+nonce-correlated 2026-09+ ARM32 transcript/receipt in `doc/09_report/` or
+`doc/08_tracking/evidence/`, and the bug_db row remains `open`
+(triage-20261027-v4: validity=valid, action=keep_open). The two provenance
+gaps named in this doc therefore stand: the 2026-08-11 transcript predates
+per-run nonce correlation, and its kernel was cross-built from the Rust seed
+lineage, not an admitted pure-Simple Stage 4 compiler.
+
+This Windows lane host has no `qemu-system-arm`, so the unblock condition
+cannot be executed here. Exact grant command (Linux/QEMU host, admitted
+pure-Simple Stage 4 CLI selected as the build compiler):
+
+```sh
+sh scripts/check/check-arm32-qemu-real-exec-markers.shs   # expects: SIMPLEOS_FS_EXEC_OK arch=arm32 nonce=<run-nonce>
+```
+
+Retain compiler, kernel, image, QEMU, argv, nonce, transcript, and exit
+hashes per this doc's unblock condition. Status stays OPEN. Lane evidence:
+`build/review/p3fix-ne1-20261111.sdn` row 4.

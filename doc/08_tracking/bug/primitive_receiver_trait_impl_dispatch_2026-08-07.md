@@ -1,5 +1,43 @@
 # Trait `impl` blocks on PRIMITIVE Self types are honoured only by the interpreter
 
+## 2026-11-10 — pure-Simple primitive declaration identity repair, verification pending
+
+Current-source trace found a remaining HIR owner defect independent of the
+already-present MIR scalar registry. Primitive impls have no nominal type
+SymbolId, so method preregistration and `lower_function` reused a bare method
+name. `lower_impl` then stored different primitive implementations under the
+same key in `lowered_impl_functions`, overwriting bodies before MIR received
+them. Primitive instance signatures also omitted implicit self because
+`declared_callable_type` only inserted a receiver for a nominal owner symbol.
+
+The candidate uses one module-qualified primitive/trait declaration identity
+for preregistration, body lookup and default injection. Distinct traits over
+the same primitive retain distinct bodies, so the existing MIR visibility and
+ambiguity checks can operate. Primitive signatures contain exactly one self
+parameter, including explicit untyped self, while static methods contain none.
+An explicit method in another trait no longer suppresses this trait's default.
+Named owners retain their symbol-based path. No MIR registry or HIR struct
+layout was added. Generic scalar trait arguments remain rejected by the
+existing MIR admission rule; this change does not claim to support them.
+
+Authored regression surfaces:
+
+- `test/01_unit/compiler/hir/primitive_method_identity_spec.spl`
+- `test/02_integration/compiler/primitive_trait_identity_hir_spec.spl`
+- `test/03_system/compiler/primitive_trait_identity_native_spec.spl`
+- `test/fixtures/compiler/primitive_trait_identity/` (cross-module trait alias,
+  same-name primitive bodies, primitive type alias, defaults, explicit self,
+  static and nominal controls, and generic refusal)
+
+**Not executed:** no admitted current self-hosted runner was available when
+this candidate was authored. The native spec requires an explicit
+`SIMPLE_SELFHOSTED_BIN`, a fresh `SIMPLE_PRIMITIVE_TRAIT_OUTPUT`, LLVM,
+`SIMPLE_NO_STUB_FALLBACK=1`, and `SIMPLE_NO_BOOTSTRAP_DELEGATE=1`; it checks both
+compilation and execution status. Required unit/integration/system runs,
+coverage, generated manuals and compiler/core/MCP checks remain pending.
+No bug closure or verification PASS is claimed. Historical seed-component
+results below retain only their original scope.
+
 ## 2026-11-10 — nested narrow `self` interpreter component verified
 
 Nested trait calls from an i8/i16/i32 impl lost the declared width when binding
