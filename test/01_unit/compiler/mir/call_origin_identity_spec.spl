@@ -1,0 +1,45 @@
+use compiler.mir.mir_data.*
+use compiler.mir.mir_json.{serialize_operand}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
+use compiler.mir_opt.var_reassign_ssa.{ssa_rewrite_operand, ssa_replace_operand_local}
+use compiler.mir_opt.string_builder_opt.{sb_fn_operand, sb_callee_name}
+
+fn origin_test_operand() -> MirOperand:
+    val signature = MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_array_new"), MirType(kind: MirTypeKind.FuncPtr(signature))))
+
+describe "MIR callable origin identity":
+    it "serializes same spelling with distinct source runtime foreign and unknown identities":
+        val source = origin_test_operand()
+        val runtime = mir_operand_with_call_origin(source, MirCallOrigin.Runtime)
+        val foreign = mir_operand_with_call_origin(source, MirCallOrigin.Foreign)
+        val unknown = mir_operand_with_call_origin(source, MirCallOrigin.Unknown)
+        expect(serialize_operand(source)).to_contain("\"call_origin\":\"source\"")
+        expect(serialize_operand(runtime)).to_contain("\"call_origin\":\"runtime\"")
+        expect(serialize_operand(foreign)).to_contain("\"call_origin\":\"foreign\"")
+        expect(serialize_operand(unknown)).to_contain("\"call_origin\":\"unknown\"")
+        expect(serialize_operand(source) == serialize_operand(runtime)).to_equal(false)
+
+    it "preserves constant and local origins through SSA rewrites":
+        val foreign = mir_operand_with_call_origin(origin_test_operand(), MirCallOrigin.Foreign)
+        expect(ssa_rewrite_operand(foreign, [], []).call_origin).to_equal(MirCallOrigin.Foreign)
+        val unknown = mir_operand_with_call_origin(mir_operand_copy(LocalId(id: 3)), MirCallOrigin.Unknown)
+        val rewritten = ssa_replace_operand_local(unknown, 3, 8)
+        expect(rewritten.call_origin).to_equal(MirCallOrigin.Unknown)
+        match rewritten.kind:
+            case MirOperandKind.Copy(local): expect(local.id).to_equal(8)
+            case _: expect(false).to_equal(true)
+
+    it "optimizes only compiler owned string builder calls":
+        val runtime = sb_fn_operand("rt_string_concat", MirType.i64())
+        expect(runtime.call_origin).to_equal(MirCallOrigin.Runtime)
+        expect(sb_callee_name(runtime)).to_equal("rt_string_concat")
+        expect(sb_callee_name(mir_operand_with_call_origin(runtime, MirCallOrigin.Source))).to_equal("")
+        expect(sb_callee_name(mir_operand_with_call_origin(runtime, MirCallOrigin.Foreign))).to_equal("")
+
+    it "reserves runtime namespaces without reclassifying source operands or entry ABI names":
+        expect(mir_runtime_owned_call_name("rt_enum_new")).to_equal(true)
+        expect(mir_runtime_owned_call_name("spl_str_append")).to_equal(true)
+        expect(mir_runtime_owned_call_name("__simple_main")).to_equal(false)
+        expect(mir_runtime_owned_local_symbol("rt_enum_new")).to_equal("__simple_local_rt_enum_new")
+        expect(origin_test_operand().call_origin).to_equal(MirCallOrigin.Source)
