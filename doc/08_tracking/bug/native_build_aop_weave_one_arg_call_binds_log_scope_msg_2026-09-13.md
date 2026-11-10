@@ -70,3 +70,21 @@ Together with
 this is what still stands between the tree and a `native-build` of a three-line
 hello world. Until both are closed, no "hello native-builds" gate can be added
 as a green row to any harness default sample.
+
+## 2026-11-10 P3-boot5 triage (row 36) — SUPERSEDED
+
+The failure mechanism this record hypothesized — a 1-argument call silently
+binding to `log.spl`'s 2-argument `(scope, msg)` helper via the flat
+last-write-wins pick among co-compiled definitions with differing signatures —
+is closed by `10e216d19f8c` ("fix(resolve): ambiguous co-compiled duplicate
+definition is a compile error (owner decision 6)", ancestor of HEAD
+`4343ce254922`). The interpreter and seed HIR/MIR now refuse the ambiguous
+pick instead of falling back to the last definition; a genuine collision on
+`error`/`warn` would be a compile error, not a silent wrong-arity bind, and
+the tree clash that motivated it (`std.crypto.sha1` function-local
+`bytes_to_hex`) was hoisted to a module-level import in the same commit.
+seed-smoke (worktree seed bin/simple.exe, 2026-11-10):
+`test/01_unit/compiler/interpreter/ambiguous_co_compiled_fn_call_error_spec.spl`
+--mode=interpret -> PASS (5 passed). The "add a `.spl` frame chain for arity
+mismatch" tooling wish remains unaddressed but is an enhancement, not this
+defect.
