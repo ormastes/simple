@@ -5,6 +5,30 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
+
+## Addendum 2026-11-11 (lane ne19) — LIVE, still real (minor); no Status change
+
+Re-checked the named specs on the release/1.0.0 tree. This record's guidance
+still holds and its recommended migration is only partially adopted:
+
+- `test/05_perf/interp/interpreter_component_scaling_spec.spl` still pins
+  within-process wall-clock ratios (`report_ratio`, `ratio_x10`, ratio < 7
+  bound at n vs 4n). Its header now explicitly documents the noisy-host
+  caveat ("READ THE RATIO, NOT THE SECONDS ... absolute times drift 2x"),
+  i.e. the spec knows about this record's finding but has not moved to
+  counts/CPU time.
+- `while_loop_shape_parity_spec.spl` has moved toward this doc's endorsed
+  style: iteration-count non-vacuity pins plus an absolute us/iteration
+  ceiling derived from the fast shape, rather than a bare ratio.
+- `block_scope_shadow_parity_spec.spl` already pins deterministic counts
+  (`BLOCK_SHADOW_*`), as this doc recommends.
+
+The underlying condition (wall-clock ratios on a loaded shared host are
+unreliable; only counts, loose ceilings, or child CPU time are trustworthy) is
+environmental and unchanged. Remaining action — migrate
+`interpreter_component_scaling_spec.spl` off tight ratio pins — is spec
+authoring, not a code fix; left OPEN.
+
 - Found by: PERF-6, host load 27-40, 90 users, 20 cores
 
 ## Evidence
