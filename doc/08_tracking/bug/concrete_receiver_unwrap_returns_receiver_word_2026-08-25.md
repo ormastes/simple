@@ -2,7 +2,7 @@
 
 - **Date:** 2026-08-25
 - **Lane:** lane-fast-oracle
-- **Status:** OPEN — reproduced and localized to a backend divergence; not fixed
+- **Status:** OPEN — BLOCKED on host tooling for empirical re-verification (2026-11-11, lane ne5); fixing commits are compiled into the refreshed seed, but the oracle gate cannot run on this Windows host.
 - **Gate:** `scripts/check/check-erased-receiver-unwrap-oracle.shs` is RED on this defect (`hijack_probe`), 81s
 - **Backend:** cranelift, Rust seed (`native-build --backend=cranelift`)
 - **Severity:** silent wrong value, no diagnostic, exit 0
@@ -101,3 +101,51 @@ sentinel `ERASED_UNWRAP=4242` rather than the exit status.
 No investigation, no disassembly, no fix. The lane that found it was building an
 instrument for a different defect and deliberately did not chase this one. The
 next lane inherits a two-line reproducer and a ~25 s build loop.
+
+## 2026-11-11 addendum (lane ne5)
+
+**Status: BLOCKED (keep OPEN) — fixing commits are compiled into the refreshed
+seed; empirical re-verification of this row's gate is not possible on this
+host.**
+
+What is established (triage on release/1.0.0 tip):
+
+- The refreshed tracked seed (`bin/simple.exe`, 2026-11-11 build, build-commit
+  `0791c2b7f4a7`) provably contains the fix family for this defect class; all
+  four are ancestors of the seed build commit AND of release tip:
+  - `09b9c429c972` "never bind a bare Optional/Result helper to a lone user
+    method" (the lone-user-method same-FuncId shortcut this row's hijack is an
+    instance of),
+  - `7e8e1748490e` "bare Optional/Result helpers must not suffix-rebind to a
+    user method",
+  - `28852ec7e3d6` "close the Cranelift twin of the qualified enum-helper
+    rebind" (the cranelift-backend half of this row's divergence),
+  - `efafcb91aed9` "route the LLVM unwrap family to the flat-nullable-aware
+    helpers".
+- The gate `scripts/check/check-erased-receiver-unwrap-oracle.shs` still
+  classifies this row's `hijack_probe` as the discriminator case (selftest
+  cases 10-13).
+
+What blocks verification here (Windows Git Bash host, worktree
+simple-p3-ne5-20261111):
+
+- `bin/simple.exe native-build --backend=cranelift <fixture> -o <bin>` writes
+  its full build log (terminating with the workaround-coverage advisory) and
+  then NEVER EXITS; no output binary appears. Measured: a single fixture build
+  sat past 280 s (killed by `timeout` with rc 124); the full oracle's four
+  fixture builds each stalled the same way (logs byte-identical at 913553
+  bytes, processes unkillable by MSYS `timeout`, requiring `taskkill /F` on the
+  WINPID). The gate was calibrated on Linux (~25-55 s per fixture build); on
+  this host it cannot produce a verdict. This hang is itself a host-level seed
+  defect worth a separate record — noted here, not chased (out of lane scope).
+
+Exact grant to close this row:
+
+    # on a Linux host with a Linux seed binary (or WSL):
+    cd <repo root>
+    sh scripts/check/check-erased-receiver-unwrap-oracle.shs \
+        --seed <path-to-linux-seed> --build-timeout 900
+
+Expected if the fixes hold: `case hijack_probe (probe) ... verdict=OK` and
+`PASS — 9 case(s) checked`. If it instead reports THEFT for hijack_probe, the
+defect is LIVE and row 1 reopens with a two-line reproducer as before.
