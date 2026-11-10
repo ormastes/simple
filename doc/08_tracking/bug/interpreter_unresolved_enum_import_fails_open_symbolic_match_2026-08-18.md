@@ -72,3 +72,35 @@ unexecuted. No retry or source repair is recorded here. The historical
 remains OPEN and unverified. Neither the rejected candidate nor its zero-test
 attempts establish runtime closure, and the existing bug database status
 remains open.
+
+## Addendum 2026-11-11 (lane interp6) — SUPERSEDED
+
+**Verdict: SUPERSEDED — remeasured against this release; the fail-open
+behavior is closed on the refreshed seed.**
+
+The record's exact repro (import of the nonexistent `ByteOrderX` from
+`std.binary_io`, used as a parameter type, a `case` pattern, and a value
+constructor) was run unmodified against the refreshed seed
+(build-commit 0791c2b7f4a7), plain run mode, fixture
+`build/p3fix-interp6/fx/enumfailopen.spl` (gitignored):
+
+```
+SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter ./bin/simple.exe run enumfailopen.spl
+error: semantic: in call to `order_name` (declared at line 2): variable `ByteOrderX` not found
+exit=1
+```
+
+No WARN-and-continue, no `little,big`, exit nonzero — the expected
+fail-closed behavior this record asked for. Unresolved identifiers (enum
+type names included) now hard-error in the interpreter's name resolution
+(`variable `{}` not found`,
+`src/compiler_rust/compiler/src/interpreter/expr/literals.rs:449`), so a
+T0 "does this import/type resolve?" probe is vacuous no longer.
+
+Fixing lineage on this branch: the strict undefined-identifier resolution
+carried by squash-merge `9e7e7a526edb43ab29171d920449367e5fd48127`
+(2026-11-07, PR #7597) — confirmed by
+`git log -S 'Failed to load imported types'` and the literals.rs resolution
+arm both tracing to that merge. (The 2026-11-03 rejected candidate patch
+remains rejected and unneeded; the 2026-11-10 seedfix lane's four rows were
+other defects.)

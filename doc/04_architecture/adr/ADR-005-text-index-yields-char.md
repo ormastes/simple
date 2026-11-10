@@ -98,7 +98,7 @@ stay byte-offset. Phase 3 remains the self-hosted verification step, not a gate.
 
 | item | now | after phase 3 passes once |
 |---|---|---|
-| `s[i]` used where an i64/int is expected | **warning** | error (TODO + bug row `text_index_char_int_context_warning_to_error_2026-11-03`) |
+| `s[i]` used where an i64/int is expected | **warning** `W-CHAR-INT-CONTEXT` (HIR lowering; `E-CHAR-INT-CONTEXT` fatal under env `SIMPLE_CHAR_INT_CONTEXT=error` or `SIMPLE_SAFETY_PROFILE=critical\|verified`; switch point `ci_default_mode()` in `src/compiler/20.hir/exhaustiveness/char_int_context.spl`) | error (bug row `text_index_char_int_context_warning_to_error_2026-11-03`) |
 | `c == "x"`, `c + 1` on a char | warning while `char` is still erased in a lane; error once the lane types `char` | error |
 | seed interpreter / JIT / runtime returning `char` | lands now (Rust PR) | — |
 | pure-Simple compiler codegen meaning switch | **held** behind the phase-3 gate (TODO + bug row) | lands |

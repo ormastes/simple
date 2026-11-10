@@ -5971,15 +5971,24 @@ impl MirLowering:
             return self.builder.emit_const_int(0)
         var vi = 0
         while vi < values.len():
+            # Bug mir_enum_payload_inline_none_lowered_as_nil_2026-11-10: bind
+            # the source argument ONCE before lowering it (the codec-pool
+            # single-read class, see expression_core.spl's NamedVar arm). The
+            # stage3 native build re-read `values[vi]` after the slot lowering
+            # had allocated and saw an inline `None` as a NilLit, rejecting
+            # `MirInstKind.Call(None, ..)` as "nil outside unsafe". The
+            # single-argument path (`val value = payload_values[..]`) already
+            # binds once and never failed.
+            val value: HirExpr = values[vi]
             val local = if typed_slots:
-                self.lower_declared_enum_payload_expression(self.enum_variant_payload_types[construct_key][vi], values[vi])
+                self.lower_declared_enum_payload_expression(self.enum_variant_payload_types[construct_key][vi], value)
             else:
-                self.lower_untyped_enum_payload_expression(construct_key, values[vi])
+                self.lower_untyped_enum_payload_expression(construct_key, value)
             if typed_slots:
                 val expected = self.enum_variant_payload_types[construct_key][vi]
-                if not self.enum_payload_local_compatible(expected, values[vi], local):
-                    self.enum_payload_mismatch_trace(expected, values[vi], local)
-                    self.error_fatal(self.enum_payload_mismatch_message(construct_key, vi, expected, values[vi]), Some(values[vi].span))
+                if not self.enum_payload_local_compatible(expected, value, local):
+                    self.enum_payload_mismatch_trace(expected, value, local)
+                    self.error_fatal(self.enum_payload_mismatch_message(construct_key, vi, expected, value), Some(value.span))
                     return self.builder.emit_const_int(0)
                 lowered.push(self.adapt_declared_enum_payload(expected, local))
             else:

@@ -1,6 +1,6 @@
 # Lane-local Rust seed unbuildable: REBASE91 salvage re-introduced a stale `INLINE_INT_BITS` block
 
-- **Status:** CLOSED-OBSOLETE (2026-11-08) — the reported duplicate was
+- **Status:** SUPERSEDED (2026-11-08) — the reported duplicate was
   lane-local and was already repaired. Current `release/1.0.0` contains exactly
   one `INLINE_INT_BITS` definition and one `fits_inline_int` definition in
   `runtime/src/value/core.rs:292,309`. No release source change is required.
@@ -111,3 +111,26 @@ Two further practical blockers, recorded but not forced: `bin/simple` here is a
 symlink to the SHARED seed binary used by other lanes and must not be rebuilt or
 replaced, and this worktree has no `build/` directory at all (cold cache,
 multi-hour full rebuild).
+
+---
+
+## Addendum 2026-11-11 — lane seed2 — verdict SUPERSEDED (self-closed 2026-11-08, spot-checked)
+
+Triage-first pass, batch 2, judged against the refreshed seed (bin/simple.exe,
+build-commit `0791c2b7f4a7`, refresh #8184). The row was already self-declared
+CLOSED-OBSOLETE (2026-11-08): the duplicate was lane-local REBASE91-salvage
+damage, not an origin defect.
+
+**Spot-check (this lane's proof):** in this worktree
+`src/compiler_rust/runtime/src/value/core.rs` contains exactly
+`1 x pub const INLINE_INT_BITS` (line 292) and `1 x fits_inline_int` (line
+309) — byte-identical to the 2026-11-08 closure claim, and the doc's own
+origin/main oracle (`grep -c` -> 1) matches. The "unbuildable seed" premise
+is additionally moot on the refreshed binary: the 2026-11-11 seed was built
+from this source line and this lane ran it successfully four times today
+(lint + two specs + one repro, all rc=0 / green). The two "still blocked"
+unrelated errors (`module_globals_generation` import, `FunctionDef::as_ref`)
+were explicitly out of this row's scope and remain seed-owner scope; no cargo
+rebuild attempted per lane mandate.
+
+**Cycles:** 0. Evidence: `build/review/p3fix-seed2-20261111.sdn`.

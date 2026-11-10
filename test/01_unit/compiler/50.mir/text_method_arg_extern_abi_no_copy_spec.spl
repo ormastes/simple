@@ -1,0 +1,188 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: text method operands are not copied through the extern ABI per call
+
+Bug text_method_arg_copied_through_extern_abi_per_call_2026-10-25: a text
+receiver (or text argument) handed to a runtime text primitive was lowered
+as `rt_interp_cstr(v)` + `rt_string_len(v)` + `rt_string_new(...)` on EVERY
+call -- a full copy of the value, even when it was already a tagged heap
+string (the common case: a file's content). `_driver_line_end` called
+`content.index_of("\\n", start)` once per line and copied the whole file per
+line (1.17 MB x 20,000 lines -> 22.9 GB maxrss).
+
+The copy is only needed for a genuinely RAW char* (a bootstrap string
+literal). `ensure_tagged_str` must therefore guard the `rt_string_new`
+re-tag behind a runtime raw-vs-tagged branch so an already-tagged value
+reaches the primitive unchanged: the block that calls the text primitive
+must not itself call `rt_string_new`, and the re-tag must sit in its own
+conditional block.
+"""
+
+# @tag: unit, compiler, mir, text, perf
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct AbiLowered:
+    messages: [text]
+    block_labels: [text]
+    block_callees: [[text]]
+
+fn abi_lower(src: text) -> AbiLowered:
+    val file = "testdata/fixture_text_extern_abi.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_text_extern_abi", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+    var block_labels: [text] = []
+    var block_callees: [[text]] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            var callees: [text] = []
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+            block_labels = block_labels.push(block.label ?? "")
+            block_callees = block_callees.push(callees)
+    AbiLowered(messages: messages, block_labels: block_labels, block_callees: block_callees)
+
+fn abi_clean(src: text) -> AbiLowered:
+    val low = abi_lower(src)
+    for m in low.messages:
+        print "diagnostic: {m}"
+    expect(low.messages.len()).to_equal(0)
+    low
+
+fn abi_has(items: [text], wanted: text) -> bool:
+    for item in items:
+        if item == wanted:
+            return true
+    false
+
+fn abi_count_calls(low: AbiLowered, wanted: text) -> i64:
+    var n = 0
+    for callees in low.block_callees:
+        for c in callees:
+            if c == wanted:
+                n = n + 1
+    n
+
+fn abi_primitive_blocks(low: AbiLowered, primitive: text) -> i64:
+    """Number of blocks that call `primitive`."""
+    var n = 0
+    for callees in low.block_callees:
+        if abi_has(callees, primitive):
+            n = n + 1
+    n
+
+fn abi_copies_beside_primitive(low: AbiLowered, primitive: text) -> i64:
+    """`rt_string_new` calls that sit UNCONDITIONALLY in a block which also
+    calls `primitive`: each one is a per-call copy of an operand."""
+    var n = 0
+    for callees in low.block_callees:
+        if abi_has(callees, primitive):
+            for c in callees:
+                if c == "rt_string_new":
+                    n = n + 1
+    n
+
+fn abi_promote_blocks(low: AbiLowered) -> i64:
+    var n = 0
+    for label in low.block_labels:
+        if label == "text_box_raw":
+            n = n + 1
+    n
+
+fn abi_dump(low: AbiLowered):
+    """Name every block so a failure shows the real lowering shape."""
+    var i = 0
+    while i < low.block_labels.len():
+        var line = "block " + i.to_string() + " [" + low.block_labels[i] + "]:"
+        for c in low.block_callees[i]:
+            line = line + " " + c
+        print line
+        i = i + 1
+
+fn abi_expect_no_per_call_copy(src: text, primitive: text):
+    val low = abi_clean(src)
+    val primitive_blocks = abi_primitive_blocks(low, primitive)
+    val copies_beside = abi_copies_beside_primitive(low, primitive)
+    val promote_blocks = abi_promote_blocks(low)
+    if primitive_blocks == 0 or copies_beside != 0 or promote_blocks == 0:
+        abi_dump(low)
+    expect(primitive_blocks > 0).to_equal(true)
+    expect(copies_beside).to_equal(0)
+    # The raw-literal re-tag still exists, but only behind a runtime branch.
+    expect(promote_blocks > 0).to_equal(true)
+    expect(abi_count_calls(low, "rt_string_new") > 0).to_equal(true)
+
+describe "text method receiver through the extern ABI (bug repro)":
+    it "two-arg index_of on a text parameter does not copy the receiver per call":
+        abi_expect_no_per_call_copy(
+            "fn line_end(content: text, start: i64) -> i64:\n" +
+            "    content.index_of(\"\\n\", start)\n",
+            "rt_text_find")
+
+    it "the per-line scan shape of _driver_line_end: index_of inside a loop":
+        abi_expect_no_per_call_copy(
+            "fn count_lines(content: text) -> i64:\n" +
+            "    var n = 0\n" +
+            "    var start = 0\n" +
+            "    while start < content.len():\n" +
+            "        val nl = content.index_of(\"\\n\", start)\n" +
+            "        if nl < 0:\n" +
+            "            break\n" +
+            "        n = n + 1\n" +
+            "        start = nl + 1\n" +
+            "    n\n",
+            "rt_text_find")
+
+describe "text method operands through the extern ABI (sibling prevention)":
+    it "one-arg contains with a text parameter argument":
+        abi_expect_no_per_call_copy(
+            "fn has(content: text, needle: text) -> bool:\n" +
+            "    content.contains(needle)\n",
+            "rt_string_contains")
+
+    it "one-arg find with a text parameter receiver":
+        abi_expect_no_per_call_copy(
+            "fn at(content: text, needle: text) -> i64:\n" +
+            "    content.find(needle)\n",
+            "rt_string_find")
+
+    it "starts_with with an indexed [text] array argument":
+        abi_expect_no_per_call_copy(
+            "fn first(content: text, parts: [text]) -> bool:\n" +
+            "    content.starts_with(parts[0])\n",
+            "rt_string_starts_with")
+
+    it "index_of whose needle is a nested text method call":
+        abi_expect_no_per_call_copy(
+            "fn at(content: text, needle: text, start: i64) -> i64:\n" +
+            "    content.index_of(needle.trim(), start)\n",
+            "rt_text_find")
+
+    it "split with a text parameter separator":
+        abi_expect_no_per_call_copy(
+            "fn parts(content: text, sep: text) -> i64:\n" +
+            "    content.split(sep).len()\n",
+            "rt_string_split")

@@ -144,6 +144,20 @@ impl HirLowering:
         self.glob_expand_memo_values = self.glob_expand_memo_values.push(depth)
         self.glob_expand_memo[key] = depth
 
+    fn glob_private_would_displace(local_name: text, imported_module_name: text) -> bool:
+        """True when `local_name` is already bound in the importer to a symbol
+        owned by a module other than `imported_module_name` -- a private glob
+        item must not overwrite that binding."""
+        val existing_id = self.import_binding_or_invalid(local_name)
+        if not existing_id.is_valid():
+            return false
+        if not self.symbols.symbols.has(existing_id.id):
+            return false
+        val existing: HirSymbol = self.symbols.symbols[existing_id.id]
+        if val existing_owner = existing.defining_module:
+            return existing_owner != imported_module_name
+        true
+
     me register_glob_imported_symbols_depth(imported_mod: ModuleSurface, imported_mod_name: text, import_span: Span, depth: i64, include_private_named_imports: bool, materialize_enums: bool):
         if depth > 8:
             return
@@ -181,7 +195,17 @@ impl HirLowering:
         keys = imported_mod.callable_names
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
+            # private_symbol_collision_sshd_four_names_2026-07-28: a private
+            # callable reached only through a glob is an implementation detail
+            # of its module. It may fill an unbound name (the tolerated leak
+            # tracked by interp_private_names_selfhost_check_2026-11-09) but
+            # must never displace a binding the importer already holds from a
+            # different module, or the bare name silently rebinds to whichever
+            # module was globbed last.
+            val callable_is_private = idx < imported_mod.callable_values.len() and
+                not imported_mod.callable_values[idx].is_public
+            if not (callable_is_private and self.glob_private_would_displace(keys[idx], imported_mod.module_name)):
+                self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.type_alias_names
@@ -193,7 +217,11 @@ impl HirLowering:
         keys = imported_mod.constant_names
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
+            # Same module-local rule as private callables above.
+            val constant_is_private = idx < imported_mod.constant_values.len() and
+                not imported_mod.constant_values[idx].is_public
+            if not (constant_is_private and self.glob_private_would_displace(keys[idx], imported_mod.module_name)):
+                self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         # A split module can explicitly re-export names it imports. Register

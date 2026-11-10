@@ -74,3 +74,40 @@ blocks.
   `src/lib/nogc_async_mut_noalloc/baremetal/x86_64/msr.spl`.
 
 Implementation is awaiting focused compiler verification and review.
+
+## 2026-11-11 addendum — P3 traverse lane ne1 verdict: BLOCKED (stays WAITING_VERIFY)
+
+Provenance verified at the `origin/release/1.0.0` tip: both fix commits are
+ancestors of the refreshed 2026-11-11 seed's build commit `0791c2b7f4a7`:
+
+- `82405d7bfccc` (2026-11-07, "fix: collect asm block constraints and reject
+  unresolved operands") — block-form operand collection in
+  `src/compiler_rust/parser/src/stmt_parsing/asm.rs` + C sidecar rejection in
+  `native_project/inline_asm_emit.rs`.
+- `23ede5e6b783` (2026-11-07, "fix: reject unbound MIR asm operands in
+  Cranelift") — `E-ASM-OPERANDS-UNSUPPORTED` hard error in
+  `src/compiler_rust/compiler/src/codegen/instr/mod.rs`.
+
+So the deployed refreshed seed necessarily carries the fix; what remains is
+runtime verification, which this lane could not complete:
+
+- The focused parser/codegen regression tests
+  (`codegen_instr_tests/inline_asm.rs`, asm-block parser tests — per the
+  2026-11-07 luna lane note) require cargo/rustc, which is forbidden in this
+  lane.
+- Seed-level behavioral probes hang on this host: `bin/simple.exe
+  native-build --backend=cranelift --entry <probe> -o <out> --no-cache` on a
+  trivial block-form `asm volatile: "nop" / out(reg) x` program stayed
+  CPU-bound mid-compile (log frozen, no output artifact, never reached the
+  probe's codegen; no `E-ASM-OPERANDS-UNSUPPORTED` emitted) — the same
+  silent-CPU-bound family as the stage4 worker, not asm-specific.
+
+Exact grant commands: (1) `cd src/compiler_rust && cargo test inline_asm`
+(parser + codegen rejection suites); (2) on a host where the seed compile
+finishes: `bin/simple native-build --backend=cranelift --entry
+<operand-probe.spl> -o <out>` must fail with `E-ASM-OPERANDS-UNSUPPORTED`,
+and the volatile-only control (`asm volatile: "nop"` with no operands) must
+still compile.
+
+Status stays WAITING_VERIFY / open. Lane evidence:
+`build/review/p3fix-ne1-20261111.sdn` row 7.

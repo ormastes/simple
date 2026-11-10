@@ -1,0 +1,115 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# W-CHAR-INT-CONTEXT: a char used where an integer is expected (ADR-005)
+
+`text[i]` yields a `char`. Arithmetic on it (`h * 31 + s[i]`, `c + 1`) and the
+integer-parse conversions (`s[i].to_i64()`) are the silent-zero family: they
+lower with a recovered HIR diagnostic (mode `warn`, default) or a fatal one
+(SIMPLE_CHAR_INT_CONTEXT=error, or a critical/verified safety profile).
+Explicit conversions (`.ord()`, `as i64`, `.to_digit()`), char comparisons and
+the byte/code-point accessors produce no diagnostic.
+Default flip tracked by bug row text_index_char_int_context_warning_to_error_2026-11-03.
+"""
+
+# @tag: unit, compiler, hir
+
+use std.spec
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.exhaustiveness.char_int_context.{ci_mode_resolve, ci_default_mode, ci_message}
+
+val CODE: text = "W-CHAR-INT-CONTEXT"
+val ERR_CODE: text = "E-CHAR-INT-CONTEXT"
+
+fn count_diag(body: text, mode: text) -> i64:
+    count_kind(body, mode, "warning")
+
+fn count_err(body: text, mode: text) -> i64:
+    count_kind(body, mode, "error")
+
+fn count_kind(body: text, mode: text, kind: text) -> i64:
+    val src = "fn f(s: text, c: char, i: i64, h: i64) -> i64:\n" + body + "    0\n"
+    val saved_mode = env_get("SIMPLE_CHAR_INT_CONTEXT")
+    val saved_profile = env_get("SIMPLE_SAFETY_PROFILE")
+    val _a = env_set("SIMPLE_CHAR_INT_CONTEXT", mode)
+    val _b = env_set("SIMPLE_SAFETY_PROFILE", "")
+    val parsed = parse_full_frontend(src, "testdata/char_int_context.spl", "char_int_context", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/char_int_context.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var n = 0
+    if kind == "warning":
+        for m in hir_lowering.diagnostic_messages:
+            if m.contains(CODE):
+                n = n + 1
+    else:
+        for e in hir_lowering.errors:
+            if e.message.contains(ERR_CODE):
+                n = n + 1
+    val _c = env_set("SIMPLE_CHAR_INT_CONTEXT", saved_mode)
+    val _d = env_set("SIMPLE_SAFETY_PROFILE", saved_profile)
+    n
+
+describe "text[i] in an integer context":
+    it "warns for s[i].to_i64()":
+        expect(count_diag("    val x = s[i].to_i64()\n", "warn")).to_equal(1)
+    it "warns for the checksum shape h * 31 + s[i]":
+        expect(count_diag("    val x = h * 31 + s[i]\n", "warn")).to_equal(1)
+    it "warns for arithmetic on an indexed char":
+        expect(count_diag("    val x = s[i] * 2\n", "warn")).to_equal(1)
+        expect(count_diag("    val x = s[i] - 48\n", "warn")).to_equal(1)
+    it "warns for arithmetic on a declared char":
+        expect(count_diag("    val x = c + 1\n", "warn")).to_equal(1)
+        expect(count_diag("    val x = c.to_int()\n", "warn")).to_equal(1)
+    it "warns by default when the mode is unset":
+        expect(count_diag("    val x = s[i].to_i64()\n", "")).to_equal(1)
+
+describe "explicit conversions and char-safe forms are silent":
+    it "accepts .ord(), as i64 and .to_digit()":
+        expect(count_diag("    val x = s[i].ord()\n", "warn")).to_equal(0)
+        expect(count_diag("    val x = s[i] as i64\n", "warn")).to_equal(0)
+        expect(count_diag("    val x = c as i64 + 1\n", "warn")).to_equal(0)
+        expect(count_diag("    val x = s[i].to_digit()\n", "warn")).to_equal(0)
+    it "accepts char comparisons":
+        expect(count_diag("    val x = s[i] == 'a'\n", "warn")).to_equal(0)
+        expect(count_diag("    val x = c != '\\0'\n", "warn")).to_equal(0)
+    it "accepts byte and code-point accessors and text slices":
+        expect(count_diag("    val x = s.char_code_at(i) + 1\n", "warn")).to_equal(0)
+        expect(count_diag("    val x = s.byte_at(i) * 2\n", "warn")).to_equal(0)
+        expect(count_diag("    val x = s[0..2] + \"x\"\n", "warn")).to_equal(0)
+    it "accepts plain integer arithmetic":
+        expect(count_diag("    val x = h * 31 + i\n", "warn")).to_equal(0)
+        expect(count_diag("    val x = i.to_i64()\n", "warn")).to_equal(0)
+
+describe "char int-context staging mode":
+    it "defaults to warn and honours error":
+        expect(ci_mode_resolve("", "")).to_equal("warn")
+        expect(ci_mode_resolve("bogus", "")).to_equal("warn")
+        expect(ci_mode_resolve("error", "")).to_equal("error")
+    it "is forced to error by critical or verified profiles":
+        expect(ci_mode_resolve("warn", "critical")).to_equal("error")
+        expect(ci_mode_resolve("", "verified")).to_equal("error")
+
+describe "char int-context error mode (SIMPLE_CHAR_INT_CONTEXT=error)":
+    it "is fatal for the conversion and arithmetic shapes":
+        expect(count_err("    val x = s[i].to_i64()\n", "error")).to_equal(1)
+        expect(count_err("    val x = h * 31 + s[i]\n", "error")).to_equal(1)
+        expect(count_err("    val x = c + 1\n", "error")).to_equal(1)
+    it "emits no warning when fatal and no error by default":
+        expect(count_diag("    val x = s[i].to_i64()\n", "error")).to_equal(0)
+        expect(count_err("    val x = s[i].to_i64()\n", "")).to_equal(0)
+    it "stays silent for explicit conversions in error mode":
+        expect(count_err("    val x = s[i].ord()\n", "error")).to_equal(0)
+        expect(count_err("    val x = s[i] as i64\n", "error")).to_equal(0)
+
+describe "char int-context promotion gate":
+    it "has a single default switch, warn until the ADR-005 gate opens":
+        expect(ci_default_mode()).to_equal("warn")
+        expect(ci_mode_resolve("", "")).to_equal(ci_default_mode())
+    it "carries the code and a fix-it hint":
+        expect(ci_message("warn", 3, 8, "to_i64")).to_contain("W-CHAR-INT-CONTEXT")
+        expect(ci_message("error", 3, 8, "+")).to_contain("E-CHAR-INT-CONTEXT")
+        expect(ci_message("error", 3, 8, "+")).to_contain("help: use `.ord()`")
+        expect(ci_message("error", 3, 8, "+")).to_contain("3:8")

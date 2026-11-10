@@ -117,3 +117,37 @@ server payload and desktop kernel; AAVMF-to-BOOTAA64.EFI-to-kernel handover and
 fresh native pixel/input evidence remain unverified. The historical
 `arm64-wm-ramfb` versus Engine2D source-contract disagreement also remains a
 separate scope decision; this change does not repoint either lane.
+
+## 2026-11-11 addendum — P3 traverse lane ne1 verdict: BLOCKED (OPEN)
+
+Premise updates verified at the `origin/release/1.0.0` tip:
+
+- Blocker 4's cited stage-binary blocker is stale as a general premise:
+  `stage3_native_build_and_compile_segv_on_hello_world_2026-08-18` was CLOSED
+  2026-11-05 (native W4 sweep: x86_64-windows hello.spl native-build compiles,
+  lld link rc=0, no SEGV). Whether the refreshed 2026-11-11 seed now passes
+  the `native-build --target aarch64-unknown-simpleos` probe was NOT
+  re-measured here (heavy cross build; dedicated lane owns it).
+- The 2026-11-03 media compiler admission repair is present
+  (`test/01_unit/scripts/simpleos_server_payload_compiler_admission_test.shs`
+  pins explicit-seed rejection through `simple_compiler_select`).
+
+Current gate evidence, this host, 2026-11-11 (seed-smoke only, no
+self-hosted claims): `SIMPLE_BIN=<refreshed seed> sh
+scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs` → selftest
+OK (25 fixtures), then `ERROR — nothing was checked: qemu-system-aarch64 not
+installed`, exit 2. The desktop/WM kernel is likewise not built here. The
+gate cannot move; Blocker 2 (AAVMF → BOOTAA64.EFI → kernel handover) and
+fresh native pixel/input evidence remain unverified, and the dedicated
+user-assigned lane `arm64-media-chain-20261103` (bug_db, 2026-11-03) remains
+open — assignment is not completion.
+
+Exact grant command (Linux host with qemu-system-aarch64, AAVMF pflash,
+mkfs.vfat, clang/lld cross):
+
+```sh
+sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+SIMPLE_BIN=<admitted compiler> sh scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs
+```
+
+Status stays OPEN. Lane evidence: `build/review/p3fix-ne1-20261111.sdn` row 5.

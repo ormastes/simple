@@ -46,3 +46,18 @@ tagged-value runtime entry points, as `rt_any_to_int` does for `to_i64`).
 `nm` on the linked carrier shows no undefined bare `len/trim/starts_with/unwrap_err`;
 the carrier runs the tokenizer probe. Add a MIR-level spec asserting no `Call` to a
 bare built-in method name in an entry-closure lowering of a two-module fixture.
+
+## Resolution (2026-11-10): closed-obsolete, premise does not hold on the current tree
+
+The suspected mechanism -- `method_calls_literals.spl` emitting a `Call` to the
+bare method name when `receiver.type_` is nil -- does not exist on
+`release/1.0.0`: the unresolved-method path is fail-closed (`rt_panic` +
+const-0, Task #145) and no site in `src/compiler/50.mir` emits the raw method
+name as a call target. Literal/primitive receivers are pinned by
+`test/01_unit/compiler/mir/bare_builtin_method_literal_receiver_spec.spl`
+(6/6) and cross-module nil-typed receivers by
+`test/01_unit/compiler/mir/bare_builtin_method_carrier_link_probe_spec.spl`
+(3/3; its negative probes were vacuous -- escaped-quote pattern the serializer
+never emits -- and are now live). The 95-module native link failure was never
+reproduced; if it recurs, re-file naming the lane (Rust seed native-build vs
+stage2) with the MIR dump of the bare `Call`.

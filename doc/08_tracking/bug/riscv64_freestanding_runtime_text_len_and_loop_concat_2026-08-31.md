@@ -38,7 +38,7 @@ the tracked probe link at tip needs `rt_text_eq_any` provided outside the
 absolute-path include on hosts without the ormastes checkout; nothing about
 that caveat affects the len/accumulation verdicts above.
 
-Status: OPEN. Blocks running real toolchain components (caret, MCP, linter,
+Status: SUPERSEDED. Blocks running real toolchain components (caret, MCP, linter,
 test runner) in-guest on SimpleOS riscv64.
 
 ## How this was found
@@ -279,3 +279,33 @@ ONCE, so this is a trap re-entry, not a firmware reset. The closure ABI fix
 above was necessary but not sufficient — the trap survives it. Ruled out:
 defect C1 (no module-level `val`/`var` initialised from a call exists in
 `id_path.spl`, `authority_token.spl` or `mcp/dispatch.spl`).
+
+---
+
+# P3 TRIAGE ADDENDUM (2026-11-11, lane boot8) — SUPERSEDED
+
+Verdict: **SUPERSEDED — already fixed at tip; re-verified by source + guard this lane.**
+
+This doc carries a "VERIFIED FIXED AT TIP 2026-11-05" header (both defects:
+`text.len()` ABI and in-loop accumulation, re-run green in-guest). Spot-checked
+at `work/p3-boot8-20261111` HEAD (`7d4140c1a6b3`):
+
+- Source: every 64-bit freestanding `RuntimeString` now declares a 64-bit
+  `len` (payload at +16, matching the codegen-inlined i64 load at +8). Verified
+  all 7 ratchet lanes in
+  `scripts/check/check-freestanding-string-len-abi.shs`: common
+  `baremetal_runtime.h`, riscv64 `baremetal_runtime_core.inc.c` /
+  `baremetal_stubs.c` / `ghdl_boot_info_runtime.c`, arm64, x86_64, and
+  `user_stubs.c` — all `uint64_t len`.
+- Guard: with a working host C compiler the guard is GREEN:
+  `CC=<llvm-mingw cc> sh scripts/check/check-freestanding-string-len-abi.shs` →
+  selfcheck reproduced the 32-bit-len defect then `OK`, and
+  `PASS — 8 check(s) run, codegen .len() ABI (i64 len at +8, data at +16) holds
+  on every 64-bit freestanding lane` (rc=0). Host-toolchain note: the default
+  `clang` on this host is a header-less ROCm clang, so `CC` must point at the
+  llvm-mingw `cc`; with the default the selfcheck compile fails for lack of
+  `stdio.h` (host limitation, not a regression).
+
+Host-limit note: in-guest re-run is not possible on this Windows host;
+verification here is source-presence + guard. The in-guest proof stands from
+the cited 2026-11-05 header.
