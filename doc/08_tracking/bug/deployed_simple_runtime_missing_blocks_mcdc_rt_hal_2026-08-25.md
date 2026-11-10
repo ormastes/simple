@@ -84,3 +84,23 @@ smokes cannot establish compiler/lib checks, SPipe behavior, cross-backend
 unwind, static-off binary absence, or same-fixture timing/peak-RSS/allocation
 thresholds. The unblock condition remains an admitted self-hosted Stage 3/4
 executable with `check` and `test`; source completeness cannot close this bug.
+
+## 2026-11-10 status — P3 runtime-lane triage (worktree simple-p3-rt-20261110)
+
+**Verdict: LIVE, but not a `src/runtime` defect — out of this lane's reach.**
+Re-confirmed still registered open (`bug_db.sdn` row; triage_20261027
+residual: `keep_open` / `needs_more_evidence`). The unblock condition is
+bootstrap-deployment admission state — an admitted self-hosted Stage 3/4
+binary with general `check`/`test` — and nothing in the doc names a defective
+runtime source. This session's lane is `src/runtime` + runtime bug docs +
+evidence; there is no runtime source change that would close this, and a
+≈55-minute bootstrap admission run is neither in scope nor verifiable inside
+this session.
+
+The live continuation of this blocker is owned by later, still-open
+compiler/bootstrap-lane bugs: `stage3_hir_segv_compiler_driver_unit2of833_2026-09-14`,
+`stage3_driver_hir_lowering_spins_after_parse_fix_2026-09-21`, and the
+Stage-4 tracker `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01`.
+Flag for bookkeeping: when Stage 3/4 admission lands, this entry's acceptance
+(unblock condition above) can be re-run from this doc's reproduction. No
+change made; label: host-independent-source bookkeeping.
