@@ -91,3 +91,28 @@ then chokes on `describe`/`it`".
 `SIMPLE_EXECUTION_MODE=interpret bin/simple lint <spec>` — rc 0, correct
 verdict.
 
+## Addendum 2026-11-11 — lane runner4: SUPERSEDED (not reproducible at release tip)
+
+Re-ran the isolated discriminator probe on release/1.0.0 tip `b364745fdbf8`
+with the refreshed 2026-11-11 seed (seed-smoke; JIT lane, no
+SIMPLE_EXECUTION_MODE override):
+
+```
+printf 'use std.spec\n\ndescribe "x":\n    it "y":\n        expect(1).to_equal(1)\n' > c1.spl
+cp c1.spl c1_spec.spl
+bin/simple.exe lint c1.spl        # rc=0, 1/1
+bin/simple.exe lint c1_spec.spl   # rc=0, 3/3 runs, lint completes with a real verdict
+```
+
+Both byte-identical files lint clean in the default (JIT-attempt) lane; the
+`_spec` basename no longer selects a crashing path. The regression window
+recorded in the original probe (Sep-6 deployed seed clean, `2cb951036a4`
+seed crashing) has closed: the fix is in the ancestry of the release tip.
+Exact fixing sha not isolated here (would need seed bisection across the
+window); the sibling lint-JIT SEGV record
+`lint_intermittent_segv_on_deployed_seed_2026-09-13` was closed stale by PR
+#7886 (merge `6c23aec76200`, 2026-11-09), consistent with this family being
+addressed.
+
+Verdict: SUPERSEDED. Workaround no longer needed.
+
