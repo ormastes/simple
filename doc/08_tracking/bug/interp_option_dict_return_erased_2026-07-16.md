@@ -77,3 +77,38 @@ rt_cranelift_new_aot_module_triple`), irrelevant to this probe which already
 captured its answer before that point.
 
 **Status:** STILL-REPRODUCES (exact match, in-context).
+
+## 2026-11-10/11 triage — BLOCKED, needs-grant (lane p3-interp4 row 19, seed-smoke)
+
+Re-verification attempted with this doc's prescribed in-context method on the
+worktree seed. Probe added temporarily at the top level of
+src/compiler/70.backend/backend/cranelift_codegen_adapter.spl (after the
+CL_TYPE_* block), exactly this shape:
+
+    fn _probe_opt_dict() -> Dict<i64, i64>?:
+        var h: Dict<i64, i64> = {}
+        Some(h)
+    val _probe_opt_dict_run = _probe_opt_dict()
+    print "PROBE_OPT_DICT_CHECK={_probe_opt_dict_run.?}"
+
+Exact command (worktree C:/Users/yoon/dev/simple-p3-interp4-20261110):
+
+    ./bin/simple.exe native-build --entry examples/01_getting_started/hello_native.spl --backend cranelift
+
+Cycle 1 result: ABANDONED per budget ruling. The run spent >50 min
+CPU-saturated (~1 core, ~1.7 GB RSS) in the silent compiler-graph
+interpretation phase and was killed by the 3600 s harness task timeout before
+the cranelift adapter module initialized (log: build/p3fix-interp4/row19_probe.log,
+2518 lines, last line "workarounds: incomplete coverage; run simple check-dbs
+--fullscan bugs"; PROBE_OPT_DICT_CHECK never emitted). Per the 2026-11-11
+parent directive this cycle was abandoned, not retried unchanged: a full
+in-context re-verification needs an UNBOUNDED wall-clock grant (the 2026-07-17
+run reached module load quickly; today's graph+seed takes >1 h before any
+user-visible phase runs). Standalone `bin/simple run` still does not reproduce
+per this doc, so no cheaper repro exists within lane scope.
+
+Status: OPEN, root fix in src/compiler_rust (seed interpreter Option-of-Dict
+return channel) — write-forbidden to this lane; routed to the seed-fix lane
+together with this grant request. The STATICS_FAILED_KEY workaround in
+cranelift_codegen_adapter.spl remains the in-tree mitigation and is unaffected
+by the probe (file restored byte-identical to HEAD).

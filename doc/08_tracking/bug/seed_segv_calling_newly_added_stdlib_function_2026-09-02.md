@@ -1,7 +1,7 @@
 # Rust seed SEGVs when calling a NEWLY ADDED function in an existing stdlib module
 
 Date: 2026-09-02. Host: Windows 11. Binary: `bin/simple.exe` (Rust bootstrap seed).
-Status: OPEN. Blocks: extracting testable pure helpers out of stdlib modules.
+Status: SUPERSEDED. Blocks: extracting testable pure helpers out of stdlib modules.
 
 ## Symptom
 
@@ -86,3 +86,16 @@ The class of safe refactor the doc wanted (extract pure helpers from stdlib
 modules) is no longer blocked on this host. A spec-level regression cannot be
 written for this: the repro inherently edits a stdlib module, which an in-tree
 `.spl` spec cannot do; the reproduction transcript above is the evidence.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Reproduced the doc's exact scenario on this lane's refreshed seed
+(bin/simple.exe, build-commit `0791c2b7f4a7`, 2026-11-11): extracted
+`os_from_uname` into the module `std.env.platform` actually resolves to
+(`src/lib/nogc_async_mut/env/platform.spl`) and called it from user code.
+p6 equivalent (call `detect_os` + `os_from_uname`): rc=0, prints
+`a=windows` / `b=linux`; p5 equivalent (`os_from_uname` alone): rc=0,
+prints `b=freebsd`. No SEGV, no rc=139 on either variant. The stdlib edit
+was reverted; `git diff -- src/lib` is empty. The rc=139 call-time crash
+stays fixed; verified-good boundary is the refreshed seed dispatch itself
+(prior verdict recorded at `1fc7d13bc89e`).

@@ -63,3 +63,32 @@ Any one of:
    organised as independent sections, not as one running program.
 
 Option 2 is likely the cheapest and helps every import-listing document.
+
+## Addendum 2026-11-11 — lane runner5: SUPERSEDED (fix + doc re-verification complete on refreshed seed)
+
+The owning lane took suggested fix 2, exactly as recommended:
+`build_accumulated_preambles`
+(`src/lib/nogc_sync_mut/test_runner/sdoctest/extractor.spl:519`) now
+deduplicates top-level `use`/`import` lines (first-seen order kept) while
+accumulating a block's reusable lines into subsequent preambles, so an
+import-listing document no longer grows its preamble linearly. Guard spec:
+`test/01_unit/lib/test_runner/sdoctest_preamble_dedup_spec.spl`.
+
+Seed-smoke verification on refreshed seed (build-commit 0791c2b7f4a7):
+
+1. `bin/simple.exe test test/01_unit/lib/test_runner/sdoctest_preamble_dedup_spec.spl
+   --mode=interpreter --no-cache` → **3/3 PASS**
+   (`preamble_build_ms=9` for 40 import-heavy blocks; last preamble carries
+   only the 3 unique `use` lines).
+2. The status line's pending item — re-verification of the
+   `import_quick_reference.md` fences — is now done:
+   `bin/simple.exe test --sdoctest doc/07_guide/quick_reference/import_quick_reference.md
+   --mode=interpreter --no-cache` → **1 total, 1 passed, 0 failed, 71 ms,
+   "All sdoctest blocks passed!"**. The document-side mitigation recorded in
+   the bug body has since retagged every import-listing fence out of the
+   `simple` language tag (33 fences remain, all `text`/`bash` except one
+   runnable `simple` block), so the use-accumulation shape this bug measured
+   no longer exists in that document.
+
+Verdict: SUPERSEDED — runner cost model fixed (preamble dedup) and the
+reference doc re-verified green on the refreshed seed.

@@ -71,3 +71,22 @@ build or fourth retry. See
 `doc/08_tracking/bug/async_header_native_qualification_rss_2026-10-16.md`
 for exact command, producer and source identities, cache reuse and evidence
 limitations. This does not change the OPEN or AUTHORED_UNEXECUTED status.
+
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: SUPERSEDED
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
+
+- bug_db row records: "2026-11-05 rel100-armfix: FIXED already present on
+  release/1.0.0; strict header + Host policy verified green (evidence:
+  test/01_unit/lib/nogc_async_mut/http_server/async_parser_limits_spec.spl 28/28
+  + async_header_lexical_contract_spec.spl 8/8 interpreted)". The doc body's
+  OPEN/AUTHORED_UNEXECUTED state predates that lane; the doc was not annotated.
+- Seed-smoke re-verification (2026-11-11), both cited specs:
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/lib/nogc_async_mut/http_server/async_header_lexical_contract_spec.spl --mode=interpreter --no-cache`
+  → 8/8 PASS; and
+  `... test test/01_unit/lib/nogc_async_mut/http_server/async_parser_limits_spec.spl --mode=interpreter --no-cache`
+  → 28/28 PASS. Exact match with the armfix evidence, including the strict
+  Host/field-name assertions that were RED when filed.
+- Verdict: SUPERSEDED (fixed on release/1.0.0; verified green on refreshed seed).
+  No code change.

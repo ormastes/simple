@@ -34,3 +34,32 @@ but the class field must remain the SAME object.
 Fix value copy semantics in the interpreter for class-typed fields. Seed-side
 (Rust) interpreter; re-verify with the minimal repro above, then re-run
 `test/01_unit/lib/nogc_async_mut/actor_mailbox_close_spec.spl`.
+
+## Addendum 2026-11-11 (lane interp6) — SUPERSEDED
+
+**Verdict: SUPERSEDED — fixed on origin/release/1.0.0.**
+
+Value-copy semantics now distinguish value-type classes from reference
+classes: `copy_value_type_in_place`
+(`src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs:65`)
+deep-copies a struct's field map ONLY when the class is declared value-type
+(`def.is_value_type`); a reference-class field (the actor mailbox's
+`ActorMailboxState`) keeps its `Arc` — the SAME object is shared across
+struct copies, so mutation through one alias is observed through the other.
+Array copies recurse with the same guard, so aliasing semantics for arrays
+of reference-class objects are unchanged.
+
+Fixing commit on this branch: `9e7e7a526edb43ab29171d920449367e5fd48127`
+(2026-11-07, squash-merge of PR #7597) — confirmed by
+`git log -S 'copy_value_type_in_place'`.
+
+**Seed-smoke verification (refreshed seed, build-commit 0791c2b7f4a7):** the
+record's own unblock condition — the blocking spec passes in full:
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe $PWD/bin/simple.exe test \
+  test/01_unit/lib/nogc_async_mut/actor_mailbox_close_spec.spl \
+  --mode=interpreter --no-cache
+SPEC FILE VERDICT ... outcome=OK declared>=6 executed=6 passed=6 failed=0
+Results: 6 total, 6 passed, 0 failed
+```
