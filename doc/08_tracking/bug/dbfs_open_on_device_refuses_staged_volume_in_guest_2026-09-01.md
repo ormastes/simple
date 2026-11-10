@@ -2,7 +2,7 @@
 
 Date: 2026-09-01
 Gate: `scripts/check/check-simpleos-dbfs-server-roundtrip-ovmf.shs` (honestly RED)
-Status: OPEN — blocks L5..L10 of the dbfs in-guest round-trip lane
+Status: SUPERSEDED (2026-11-11, lane ne5) — was: OPEN — blocks L5..L10 of the dbfs in-guest round-trip lane. Remaining blocker now tracked in naked_asm_lowering_miscompiles_simpleos_mutex_2026-09-01.md; the dbfs gate stays honestly RED by design until that lands.
 
 ## Summary
 
@@ -148,3 +148,37 @@ DBFS-in-guest actually needs"), then add SimpleOS to the allow-list in the same
 change. The gate is fail-closed and needs no modification to go green once
 `open_on_device` succeeds. Fixing freestanding `FsError` rendering is a cheaper,
 independent win that should probably land first.
+
+## 2026-11-11 addendum (lane ne5)
+
+**Status: SUPERSEDED — the "implement a SimpleOS critical-section provider"
+next-step is DONE; the remaining blocker moved to
+`naked_asm_lowering_miscompiles_simpleos_mutex_2026-09-01.md`.**
+
+Triage on release/1.0.0 tip:
+
+- `src/os/kernel/net/thread_shim.spl` (9433 bytes) now EXISTS — SimpleOS's
+  critical-section provider with exactly the audited design this doc asked
+  for: `@export("C") spl_mutex_create/lock/try_lock/unlock/destroy` over a
+  bounded boot-lifetime arena word, per-architecture acquire/release CAS, a
+  lock word carrying `cpu_id + 1` so a non-owner core cannot release, fail-stop
+  on double unlock, bounded spin budget.
+- `device_commit_owner.spl` still fail-closes SimpleOS/freestanding on the
+  static allow-list — correctly, per this doc's "must NOT be relaxed" — and
+  now additionally runs a BEHAVIOURAL provider probe (the double-unlock leg)
+  on platforms the allow-list does not know, so a genuine provider would be
+  admitted and the deceptive constant-return stubs measured 2026-09-01
+  (create→8, lock→3) still fail closed.
+- What remains is that the provider cannot survive codegen: the sibling doc
+  `naked_asm_lowering_miscompiles_simpleos_mutex_2026-09-01.md` (same date,
+  same dbfs lane) proves `@naked` is ignored by the cranelift freestanding
+  backend — the CAS thunks get frame prologues and jump to arbitrary
+  addresses. That is the live defect now.
+
+Grant for closing the chain: fix the `@naked` lowering defect (seed cranelift
+backend AND its pure-Simple twin, per that doc), then add `"simpleos"` to the
+allow-list in the same change as the audited provider, then run
+`sh scripts/check/check-simpleos-dbfs-server-roundtrip-ovmf.shs` on a Linux
+host with qemu-system-x86_64 + OVMF pflash. The secondary freestanding
+`FsError`-rendering defect (empty string from a total match) remains a valid,
+cheaper independent fix per this doc's own note.
