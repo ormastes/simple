@@ -78,3 +78,28 @@ compiler/interpreter stage (symbol resolution, type checking, diagnostics
 span tracking, module visibility, module graph construction respectively);
 none was attempted here, this is a test-file-only modernization batch. The
 spec scenarios above are the reproduction fixtures for each.
+
+## 2026-11-10 P3 triage (work/p3-interp-20261110) — all 5 gaps confirmed LIVE; out of interpreter lane
+
+Each gap re-reproduced on the deployed Windows Rust seed (worktree
+`bin/simple.exe`, fixtures under `build/p3fix/gap4/`):
+
+1. Ambiguous zero-arg `get()` across two `impl Box` blocks: no diagnostic;
+   silent resolution prints `10` (first impl wins on this build; either way
+   ambiguous). LIVE.
+2. `val x: i64 = "not a number"` compiles and runs exit 0, printing
+   `6207503407825` — a raw pointer/bits reinterpretation, i.e. silent
+   mis-coercion, worse than the original note ("prints the string"). LIVE.
+3. `print(10 / 0)` (line 3): process dies `Illegal instruction` (exit 132)
+   with NO diagnostic at all on this host — no E2001, no span. LIVE; on
+   Windows strictly worse than "no line/column".
+4. Non-exported `fn _secret_add` imported via `use secret_mod.{_secret_add}`
+   from another module: exit 0, prints `5`. LIVE.
+5. Circular `use` between moda/modb over top-level vals: exit 0, prints `3`,
+   no diagnostic. LIVE.
+
+All five fixes live in the compiler frontend (symbol resolution, type
+checking, diagnostics span tracking, module visibility, module graph) —
+`src/compiler/**` or the seed compiler frontend, both outside the P3
+interpreter lane's write scope. Routing to the compiler/compiler-seed lanes;
+no code change attempted here.
