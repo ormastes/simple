@@ -1,7 +1,7 @@
 # `use compiler.mir.{MirLowering}` resolves silently, then fails at the use site
 
 - **Filed:** 2026-09-01
-- **Status:** OPEN (secondary defect). The reported blocker "`MirLowering` not
+- **Status:** SUPERSEDED (silent-unresolved-import defect mitigated at tip; verified 2026-11-11, lane p3-compiler4). The reported blocker "`MirLowering` not
   found — `compiler.mir` fails to re-export `MirLowering`" is **NOT a defect**;
   see "Not a bug" below.
 - **Platform:** cross-platform. **Explicitly NOT Windows-specific** — see
@@ -95,3 +95,33 @@ absent, or it will produce false positives on every wildcard re-export.
 ## Specs
 
 `test/01_unit/bugs/mir_facade_mirlowering_import_spec.spl`
+
+## Triage 2026-11-11 (p3-compiler4 lane, batch 4 row 6) — SUPERSEDED (silent-import defect mitigated at tip)
+
+The secondary defect (importing a name a module does not export succeeds
+silently, failing later at the use site with a misdirected "variable not
+found") is mitigated at this lane's base:
+
+- `src/compiler/10.frontend/core/interpreter/module_loader_core.spl:910-950`
+  (`warn_unprovided_use_names`): every braced `use` name the resolved module's
+  recorded surface does not provide now emits an import-time `[use-warning]`
+  naming the module and the name, deduped per (module, name, importer);
+  wildcard/opaque surfaces are exempt (no false positives on wildcard
+  re-export chains); `SIMPLE_NO_DEPRECATED_WARNINGS` disables it.
+- Re-ran this record's repro on the 2026-11-11 seed:
+  `use compiler.mir.{MirLowering}` now prints `[use-warning] 'MirLowering' is
+  named in `use compiler.mir.{...}` but module '...50.mir/__init__.spl' does
+  not provide it` at import time and the program completes (rc=0) — the
+  silent, misdirected use-site failure is gone.
+
+Variance from this record's "Expected": the landed parity decision is
+WARNING-only ("the module's whole surface stays registered and execution
+continues"), not a hard import-time error. The diagnostic-quality harm this
+record filed (silent, misdirected) is resolved; the warning-vs-error choice is
+the seed-oracle parity decision recorded in the code.
+
+Note: `test/01_unit/bugs/mir_facade_mirlowering_import_spec.spl` fails 1/3 at
+tip — its third scenario pins the pre-reorg file `80.driver/pipeline_fn.spl`
+(since split into `driver_pipeline*.spl`) and the pre-split import path
+(`mir_lowering` -> `mir_lowering_types`). Stale spec pins from the driver
+reorganization, not a behavior regression; left as test churn per lane rules.

@@ -1,5 +1,5 @@
 # devhub native-build fails in HIR: `unresolved name: json_object_get` (+89 more)
-## Open 2026-09-16 — needs owner triage
+## SUPERSEDED 2026-11-11 (lane p3-compiler4) — defect class fixed-at-tip
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -183,3 +183,20 @@ Re-verified at this lane's base (origin/release/1.0.0):
 The remaining sibling items (search `Id`, `print_raw`, `errors.spl kind`,
 `rt_env_cwd`, stage2 SEGV-after-monomorphize) are tracked in their own
 records, not this one. No change made in this lane.
+
+## Triage 2026-11-11 (p3-compiler4 lane, batch 4 row 2) — SUPERSEDED
+
+Corroborates the 2026-11-05 and 2026-11-10 (p3-boot4) triages with fresh
+seed-smoke at this lane's base:
+
+- Facade owner edges present: `src/lib/common/json/__init__.spl` declares real
+  `export use` owner-module edges; compiler fix `bb27a92a7a8` and the closure-defect fixes
+  (`7d8820319a2` / `5334d6c7b3d` / `4a5b072e594`) are ancestors of the base.
+- Seed-smoke (2026-11-11 refreshed seed, interpreter):
+  `bin/simple.exe run src/app/devhub/main.spl --version` -> `devhub 0.1.0`,
+  exit 0. HIR name resolution, the phase this record's 175-error census died
+  in, is clean on the interpreter lane.
+
+Sibling items (search `Id`, `print_raw`, `errors.spl kind`, `rt_env_cwd`,
+stage2 SEGV-after-monomorphize) remain tracked in their own records. No code
+change.

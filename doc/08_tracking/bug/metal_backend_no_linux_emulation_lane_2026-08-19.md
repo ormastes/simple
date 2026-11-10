@@ -1,7 +1,7 @@
 # Metal engine2d backend has no Linux emulation lane — blocked on non-macOS hosts
 
 - **Date:** 2026-08-19
-- **Status:** FIXED (2026-11-04) — owner chose the GPU-execution lane: disclosed `metal-on-vulkan` engine2d backend (Vulkan executes; not Apple Metal semantics). Strict `metal` still reports "Metal requires macOS".
+- **Status:** SUPERSEDED — FIXED 2026-11-04 (owner: metal-on-vulkan lane), corroborated 2026-11-11 (lane p3-compiler4). Disclosed `metal-on-vulkan` engine2d backend present at tip (Vulkan executes; not Apple Metal semantics). Strict `metal` still reports "Metal requires macOS".
 - **Owner/lane:** Linux — `crosscompile_xray_lead/linux_adapter` (reassigned 2026-11-04 by owner decision; removed from the macOS lane and its open count).
 - **Area:** rendering / engine2d backend matrix
 
@@ -124,3 +124,18 @@ RED 3/6 failed (normalization, display name, probe) -> GREEN 6/6 incl. a real 8x
 read back (source `device_readback`, read before `present()`, pixels exact); 3.4s wall, 207 MB max RSS.
 `backend_emulation_spec.spl` 4/4 green (1.8s). Comparison `vulkan_compute_oracle_spec.spl`
 (covers directx-on-vulkan): 18.7s, 195 MB; its 2 failures are identical without this change.
+
+## Triage 2026-11-11 (p3-compiler4 lane, batch 4 row 5) — corroborated FIXED at tip
+
+Source audit at this lane's base confirms the 2026-11-04 fix:
+
+- `helpers_availability.spl:52-53,75` normalizes `metal_on_vulkan` /
+  `metal-on-vulkan`; `engine.spl:852-857` constructs a real VulkanBackend for
+  the lane; `engine.spl:1106` probes it with the disclosed reason.
+- Seed-smoke: `test/02_integration/rendering/backend_emulation_spec.spl` runs
+  4 scenarios; the Metal availability context ("reports the exact macOS gate
+  evidence when unavailable") PASSES. The 2 failing scenarios are in the
+  unrelated `directx software-emulation lane` context (Windows-host behavior,
+  separate family) — noted for the rendering lane, not this row.
+
+No code change in this lane.
