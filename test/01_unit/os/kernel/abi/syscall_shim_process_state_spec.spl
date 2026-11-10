@@ -27,16 +27,10 @@
 #
 # Run with: bin/simple test test/01_unit/os/kernel/abi/syscall_shim_process_state_spec.spl
 #
-# NOTE: this spec seeds `g_shim_scheduler`/`g_shim_ipc`/`g_shim_klog` by
-# direct assignment rather than calling the real `shim_init()` boot
-# entrypoint. `shim_init()` unconditionally calls `_shim_keepalive()`
-# (a DCE-retention helper that sums `spl_handle_* as u64` function-pointer
-# casts) — under `bin/simple test`'s tree-walk interpreter engine, executing
-# that cast is a hard `semantic: type mismatch: cannot cast function to u64`
-# error, reproduced in isolation with nothing else in the file. This is a
-# real, pre-existing engine gap: `shim_init()` itself cannot be unit-tested
-# under the interpreter today. Filed as a follow-up rather than fixed here
-# (Rust-seed engine work is out of scope for a spec-coverage pass) — see
+# Initialization goes through the real `shim_init()` boot entrypoint. Its
+# native link root must remain a function value: executing the keepalive
+# address arithmetic here regresses the interpreter before either syscall.
+# See
 # doc/08_tracking/bug/shim_init_keepalive_function_ptr_cast_breaks_interpreter_2026-08-06.md.
 #
 # Known gap — spl_handle_fork (syscall 57, syscall_shim_file.spl) is NOT
@@ -58,7 +52,7 @@
 # surfaces an example's LAST failed assertion) was not run. Left as a
 # follow-up rather than guessed at.
 use std.spec.{describe, it, expect}
-use os.kernel.abi.syscall_shim.{g_shim_scheduler, g_shim_ipc, g_shim_klog}
+use os.kernel.abi.syscall_shim.{g_shim_scheduler, shim_init}
 use os.kernel.abi.syscall_shim_process.{spl_handle_spawn_binary, spl_handle_getpid}
 use os.kernel.abi.syscall_shim_file.{spl_handle_waitpid}
 use os.kernel.scheduler.scheduler.{Scheduler}
@@ -153,9 +147,7 @@ describe "spl_handle_spawn_binary (syscall 13) C-ABI shim":
         _clear_synthetic_vfs_for_test()
         _set_synthetic_vfs_file_for_test(path, _make_x86_64_exec())
 
-        g_shim_scheduler = Scheduler.new()
-        g_shim_ipc = IpcManager.new()
-        g_shim_klog = KernelLog.new(16)
+        shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(16))
 
         val pid = spl_handle_spawn_binary(
             rt_string_data(path) as u64, path.len() as u64, 2, 0, 0, 0
@@ -170,14 +162,16 @@ describe "spl_handle_spawn_binary (syscall 13) C-ABI shim":
         # (Sabotage-verified: see the file header note above.)
         val tcb = g_shim_scheduler.get_task(TaskId(id: pid as u64))
         expect(tcb).to_not_equal(nil)
+        # Reinitializing must replace the old scheduler, not merely avoid the
+        # failing casts. A no-op shim_init would leave this task behind.
+        shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(16))
+        expect(g_shim_scheduler.get_task(TaskId(id: pid as u64))).to_be_nil()
         _clear_synthetic_vfs_for_test()
 
 describe "spl_handle_waitpid (syscall 61) C-ABI shim error path":
     it "returns ECHILD cleanly through the C-ABI boundary for a nonexistent child":
         fd_table_init()
-        g_shim_scheduler = Scheduler.new()
-        g_shim_ipc = IpcManager.new()
-        g_shim_klog = KernelLog.new(16)
+        shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(16))
 
         # arg0 = bogus pid, arg1 = 0 (no status pointer), arg2 = 1 (WNOHANG)
         # so a genuinely missing child returns synchronously with -10

@@ -1,0 +1,82 @@
+#!/bin/sh
+# Check the production keepalive providers in an unstripped native artifact.
+# A weak C fallback is not evidence that the Simple handler survived linking.
+# --selftest exercises this gate with real ELF objects, not Simple execution.
+set -u
+root=$(cd "$(dirname "$0")/../.." && pwd)
+source_file="$root/src/os/kernel/abi/syscall_shim.spl"
+NM_BIN=${NM:-llvm-nm}
+command -v "$NM_BIN" >/dev/null 2>&1 || { echo "ERROR: missing $NM_BIN"; exit 2; }
+[ -r "$source_file" ] || { echo "ERROR: missing production shim source"; exit 2; }
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/syscall-keepalive.XXXXXX") || exit 2
+trap 'rm -f "$scratch"/expected "$scratch"/symbols "$scratch"/strong-unsorted "$scratch"/strong "$scratch"/missing "$scratch"/positive.c "$scratch"/positive.o "$scratch"/weak.c "$scratch"/weak.o "$scratch"/absent.c "$scratch"/absent.o "$scratch"/invalid.o "$scratch"/control.log; rmdir "$scratch"' 0
+sed -n 's/.*(\(spl_[A-Za-z0-9_]*\) as u64).*/\1/p' "$source_file" |
+    LC_ALL=C sort -u > "$scratch/expected"
+[ -s "$scratch/expected" ] || { echo "ERROR: no production keepalive providers"; exit 2; }
+
+check_artifact() {
+    artifact=$1
+    [ -f "$artifact" ] || { echo "ERROR: artifact missing: $artifact"; return 2; }
+    "$NM_BIN" -g -P "$artifact" > "$scratch/symbols" 2>/dev/null || {
+        echo "ERROR: unreadable symbol table: $artifact"; return 2;
+    }
+    # Mach-O prefixes external C names with one underscore. Only strong text
+    # definitions qualify; W/w/U and data symbols cannot satisfy a handler.
+    awk '$2 == "T" { name=$1; sub(/^_spl_/, "spl_", name); print name }' \
+        "$scratch/symbols" > "$scratch/strong-unsorted" || return 2
+    LC_ALL=C sort -u "$scratch/strong-unsorted" > "$scratch/strong" || return 2
+    LC_ALL=C comm -23 "$scratch/expected" "$scratch/strong" > "$scratch/missing" || return 2
+    if [ -s "$scratch/missing" ]; then
+        echo "FAIL: required strong Simple providers missing or weak:"
+        head -5 "$scratch/missing"
+        return 1
+    fi
+    count=$(wc -l < "$scratch/expected" | tr -d ' ')
+    echo "PASS: $count production providers have strong text definitions"
+}
+
+case "${1:-}" in
+    --selftest)
+        [ "$#" -eq 1 ] || exit 2
+        CC_BIN=${CC:-clang}
+        command -v "$CC_BIN" >/dev/null 2>&1 || { echo "ERROR: missing $CC_BIN"; exit 2; }
+        # Cross-compile relocatable ELF without libc or a guest. These are
+        # symbol-gate controls only; they do not qualify the Simple fix.
+        awk '{ print "long " $1 "(void) { return 1; }" }' \
+            "$scratch/expected" > "$scratch/positive.c"
+        awk 'NR == 1 { print "__attribute__((weak)) long " $1 "(void) { return -38; }"; next }
+             { print "long " $1 "(void) { return 1; }" }' \
+            "$scratch/expected" > "$scratch/weak.c"
+        awk 'NR > 1 { print "long " $1 "(void) { return 1; }" }' \
+            "$scratch/expected" > "$scratch/absent.c"
+        for kind in positive weak absent; do
+            "$CC_BIN" --target=x86_64-unknown-linux-gnu -ffreestanding -c \
+                "$scratch/$kind.c" -o "$scratch/$kind.o" || exit 2
+        done
+        check_artifact "$scratch/positive.o" > "$scratch/control.log" || {
+            cat "$scratch/control.log"; exit 1;
+        }
+        for kind in weak absent; do
+            check_artifact "$scratch/$kind.o" > "$scratch/control.log"
+            result=$?
+            [ "$result" -eq 1 ] || { cat "$scratch/control.log"; echo "FAIL: $kind control returned $result"; exit 1; }
+        done
+        printf 'not an object\n' > "$scratch/invalid.o"
+        check_artifact "$scratch/invalid.o" > "$scratch/control.log"
+        result=$?
+        [ "$result" -eq 2 ] || { echo "FAIL: invalid artifact returned $result"; exit 1; }
+        check_artifact "$scratch/not-created.o" > "$scratch/control.log"
+        result=$?
+        [ "$result" -eq 2 ] || { echo "FAIL: absent artifact returned $result"; exit 1; }
+        echo "PASS: 5 symbol-gate controls (strong, weak, absent provider, invalid artifact, absent artifact)"
+        ;;
+    --artifact)
+        [ "$#" -eq 2 ] || exit 2
+        check_artifact "$2"
+        exit $?
+        ;;
+    *)
+        echo "usage: $0 --artifact <unstripped-native-artifact> | --selftest" >&2
+        exit 2
+        ;;
+esac
