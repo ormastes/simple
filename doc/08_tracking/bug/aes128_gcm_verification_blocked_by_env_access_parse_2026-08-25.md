@@ -43,3 +43,18 @@ semantic/runtime stages and stops on a different, Windows-seed-specific gap:
 deployed seed's dispatch — a seed/runtime registration gap, not a src/lib
 defect). Executable NIST-vector verification therefore remains host-limited on
 Windows seeds; the env-parse premise of this record is stale.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Re-verified with this lane's refreshed seed (bin/simple.exe, build-commit
+0791c2b7f4a7, 2026-11-11). Seed-smoke: `SIMPLE_LIB=src
+SIMPLE_BINARY=$PWD/bin/simple.exe $PWD/bin/simple.exe test
+test/fixtures/doctest/green.md --mode=interpreter --no-cache` runs the
+full doctest to `PASS (1 passed, 0 skipped, 83ms)`, rc=0 — the
+`env_access_host.spl` parse failure (fixed in `a8a32ebccad`, ancestor of
+this base) is gone, and unlike the 2026-11-10 lane's run there is no
+Windows-seed extern stop on this seed. Env-facade lens: the historical
+blocker was a parse-level defect, not a raw env read; no direct-env
+violation observed in the load path. Executable AES-128-GCM NIST-vector
+verification remains a separate coverage question for the crypto owner,
+but this record's premise is stale.

@@ -64,3 +64,13 @@ deployed_binary_reads_stdlib_from_its_build_worktree_2026-08-25; same result on
 this lane's base: `check-stdlib-invoking-tree-wins.shs --selftest <deployed
 seed>` → `PASS -- 1 probe, invoking tree's src/lib won`. The baked
 build-worktree search root no longer wins over the invoking repo's `src/lib`.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Same root cause and same gate as
+deployed_binary_reads_stdlib_from_its_build_worktree_2026-08-25; verdict
+re-confirmed on this lane's refreshed seed (bin/simple.exe, build-commit
+`0791c2b7f4a7`): `check-stdlib-invoking-tree-wins.shs --selftest
+"$PWD/bin/simple.exe"` → `PASS -- 1 probe, invoking tree's src/lib won
+(rc=0)`. The `_access_ensure`-era foreign-tree-wins behaviour does not
+reproduce.

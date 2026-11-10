@@ -129,3 +129,13 @@ SIMPLE_NO_DEPRECATED_WARNINGS=1 bin/simple run <same file>    # 7 lines
   probe exercising `self.n = self.n + 1` / `return self.n` compiles and runs
   (rc=0, correct value) with **0** `Common mistake detected` lines. The ~11.5k
   hint wall cannot reproduce.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Confirmed on this lane's refreshed seed (bin/simple.exe, build-commit
+`0791c2b7f4a7`, 2026-11-11). Seed-smoke probe
+(`build/review/probe_self_field_20261111.spl`): a class using
+`self.n = self.n + 1` and `return self.n` compiles and runs rc=0 with the
+correct value (`n=2`), and the run log contains **0**
+`Common mistake detected` lines (`grep -c` = 0). The PythonSelf hint wall
+stays absent from src/compiler_rust (PR #7597, merge `9e7e7a526edb`).
