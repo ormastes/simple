@@ -160,3 +160,50 @@ bootstrap redeploy, unlike the two driver fixes which the worker reads as source
   `driver_source_pipeline_loading.spl` and `src/app/io/_CliCompile/compile_targets.spl`.
 - Per-file `parse` dt remains 4.8-22.2 s and is untouched: that is the parser lane.
 
+
+## 2026-11-10/11 status — SUPERSEDED (P3 bootstrap lane row 46, work/p3-boot6-20261110)
+
+Re-judged on this lane's base (`4343ce254922`). The three defects filed here are
+fixed and present in source, and the behavior pins pass under seed-smoke
+(refreshed seed 0791c2b7f4a7, `SIMPLE_LIB=src ... test <spec> --no-cache`):
+
+1. **Import-scan per-line work** — whole-content early-out
+   (`driver_entry_closure_core.spl:763`), allocation-free per-line predicate
+   (`_driver_entry_import_line_needs_materialization` :725-757) and forward
+   triple-quote cursor (:773, :783) all present.
+2. **Text-set O(bucket)** — `_driver_text_bucket_set_*` now exact
+   `Dict<text, bool>` membership (`driver_source_loading.spl:117-124`).
+   seed-smoke: `driver_text_set_lookup_cost_spec.spl` PASS 2/2 (2026-11-11).
+3. **Registry linear scans** — O(1) Dict memoization with
+   `module_registry_scan_steps()` counter (`module_loader_core.spl:111-127`).
+
+`entry_closure_physical_source_dedup_spec.spl` runs 13/14 — the single
+failure ("scans imports without materializing ordinary source lines",
+`unicode_imports` fixture) is an ADJACENT LIVE DEFECT, not a residue of this
+row: the entry-import scanner loses every import on lines after any
+multi-byte-UTF-8 line. Verified by probe specs (build/test_tmp, gitignored;
+results in build/review/p3fix-boot6-20261110.sdn): `"é\nuse std.a\nuse std.b\n"`
+→ `[]` (both lost), `"# 文\n\tuse std.unicode\n"` → `[]`, but pure-ASCII
+controls collect correctly. Confirmed seed semantic mismatch: `index_of`
+returns CHARACTER offsets (probed: `"éa\nb".index_of("\n",0)` → 2) while the
+scanner operates in BYTE space (`byte_at`/`byte_len`/`substring` probed
+byte-based). Concrete byte/char mixing points in-tree:
+`_driver_text_index_of` = `split(needle)[0].len()` (CHARS) feeding a byte
+slice at `driver_entry_closure_core.spl:794`; the triple-quote cursor compares
+`index_of` char offsets against byte offsets at :777/:783; `_driver_line_end`
+returns `content.len()` (CHARS) on its no-newline miss branch (:712) against
+byte scans elsewhere. The owning lane should make one side consistent (byte
+helper for find, or fix the seed's `index_of` to return byte offsets) and add
+a regression pin with the probed fixtures. Fix surface: `src/compiler` +
+`src/compiler_rust` — NOT bootstrap tooling, so recorded here, not edited.
+`module_registry_lookup_o1_spec.spl` does not execute on this base: the spec
+imports now-private `module_find_by_file_path` (seed visibility enforcement);
+same unrelated class as `module_path_naming_spec.spl` ERROR — recorded for the
+compiler/test-runner lanes.
+
+BLOCKED-needs-grant: none for the row itself; `driver_entry_import_scan_cost_spec.spl`
+exceeded its 600 s budget twice under host contention (orphan worker held the
+pipe) — its wall-clock-insensitive mechanism assertions are the ones
+source-verified above; a quiet re-run is in the evidence file if it landed.
+Residue items (path-keyed memo, ~14 s BFS body) remain owned by the
+front-end-cache and compiler lanes as this record already states.
