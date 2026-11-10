@@ -1,9 +1,11 @@
 # `RuntimeValue::from_int` still truncates to 61 bits at HEAD — the fix landed, was reverted, and only its readers and specs came back
 
 - **Filed:** 2026-08-17
-- **Status:** PARTIALLY FIXED 2026-08-17 — runtime choke point + JIT green
-  (`boxed_int_wide_roundtrip` 3/3, rc 0); LLVM backend and MIR interpreter still
-  TRUNCATING. See the note at the end. Do not close.
+- **Status:** OPEN — PARTIALLY FIXED, re-verified 2026-11-11 (p3-interp11
+  lane). Runtime choke point + JIT still green on the fresh seed 46fe8f6b6def;
+  the LLVM backend and MIR interpreter paths still truncate in the seed Rust
+  codegen (source-confirmed 2026-11-11) and are BLOCKED for this lane (no
+  cargo/rustc permitted). Do not close. See the 2026-11-11 addendum at the end.
 - **Severity:** High, and mis-recorded as fixed. This defect has been declared
   resolved at least four times.
 - **Component:** `src/compiler_rust/runtime/src/value/core.rs`,
@@ -233,3 +235,41 @@ already records as STILL TRUNCATING. No regression relative to the isolated buil
 
 **Status: still PARTIALLY FIXED — runtime + JIT green on the DEPLOYED seed; LLVM
 backend and MIR interpreter still open.**
+
+
+## 2026-11-11 — P3 interp11 triage: criteria 1-2 re-verified green on fresh seed 46fe8f6b6def; criteria 3-4 still open (BLOCKED for this lane)
+
+Seed-smoke probe (`build/review/interp11_wide_int_probe.spl`) on the fresh
+Windows seed, 2026-11-11, both engines:
+
+```
+VAR60=1152921504606846976|ARR60=1152921504606846976|ARR62=4611686018427387904
+```
+
+`2^60` (inline boundary) and `2^62` (heap-boxed wide value) both round-trip
+exactly, identically under `SIMPLE_EXECUTION_MODE=interpret` and under JIT
+(`bin/simple run`, env unset). So the runtime choke point (`core.rs`
+`fits_inline_int`/`from_wide_int`) and the Cranelift JIT delegation remain
+fixed on the current seed.
+
+**Still truncating (source-confirmed at HEAD, not executed here):**
+- LLVM backend: `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:2030`
+  still emits `build_left_shift(int_v, three, "box_shl")` and never calls
+  `rt_value_int` — criterion 3 unmet.
+- MIR interpreter: `src/compiler_rust/compiler/src/codegen/mir_interpreter.rs:774`
+  still does `self.set(dest, self.get(value) << 3)` in `emit_box_int` —
+  criterion 4 unmet.
+
+The pure-Simple side has already moved to the runtime call
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:2474-2491` emits
+`rt_value_int_wide`); the open residual is the seed Rust codegen only.
+
+**Blocked**: fixing/verifying criteria 3-4 requires editing
+`src/compiler_rust/compiler/src/codegen/**` and rebuilding the seed with
+cargo, plus LLVM AOT verification — and this lane is forbidden cargo/rustc and
+entry-closure native builds, and `native-build` on this Windows host is a
+known-live hang lane. Grant needed: a cargo-enabled lane to change the LLVM
+emitter to call `rt_value_int`/`rt_value_int_wide`, and give the MIR
+interpreter a heap (or document unreachability with evidence), then verify via
+`boxed_int_wide_roundtrip` (expect 3/3 rc 0) and the LLVM path
+independently. Do not close this row until criteria 3-4 land.

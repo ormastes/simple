@@ -177,6 +177,18 @@ fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_leve
     for name in init_names:
         c_source = c_source + "extern void {name}(void);\n"
     c_source = c_source + "int main(int argc, char** argv) {\n"
+    # The renderer worker's jail must be entered before any runtime init,
+    # matching the .preinit_array ordering on lanes that keep constructors.
+    # Lanes that compile the registration out (core-C standalone archive;
+    # the Stage4 capsule forbids constructor sections) get the jail from
+    # this explicit call instead -- doc/08_tracking/bug/
+    # core_c_lane_cannot_host_browser_renderer_preinit_2026-08-22.md.
+    # The callee refuses any argv[0] that is not the worker marker and is
+    # idempotent once the jail is up, so ordinary binaries and
+    # constructor-hosted lanes are unaffected.
+    c_source = c_source + "#if !defined(_WIN32)\n"
+    c_source = c_source + "    { extern char** environ; extern void rt_browser_renderer_preinit_enter(int, char**, char**); rt_browser_renderer_preinit_enter(argc, argv, environ); }\n"
+    c_source = c_source + "#endif\n"
     c_source = c_source + "    spl_init_args(argc, argv);\n"
     c_source = c_source + "#if defined(__ELF__)\n"
     c_source = c_source + "    if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) return 125;\n"

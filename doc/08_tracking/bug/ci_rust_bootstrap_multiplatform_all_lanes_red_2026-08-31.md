@@ -5,7 +5,10 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
-**Status:** OPEN (2 of 5 causes fixed elsewhere; 3 remain)
+**Status:** SUPERSEDED 2026-11-11 — all four named causes verified fixed in
+workflow/source at the p3-boot11 tip (re-checked, not cited from prior
+lanes); a green CI run remains the only unproduced evidence (host-blocked
+here). Original report below retained for history.
 **Workflow:** `.github/workflows/rust-bootstrap-multiplatform.yml`
 **Run:** <https://github.com/ormastes/simple/actions/runs/33357844564>
 **Head:** `21bf278fd7eeee85d6fc0558bac09f5bd85a9ef7` (PR #148)
@@ -194,3 +197,29 @@ with current line numbers:
 Host-limited: true proof of causes B/D is a green CI run, which this Windows
 lane cannot execute; the fix-content evidence above is verified at a pinned
 base. No change made in this lane.
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: SUPERSEDED (fix-content verified at this lane's base,
+origin/release/1.0.0 tip f01a4d15967e).** Independent source re-check, not a
+citation of the 2026-11-09/2026-11-10 notes:
+
+- **Cause A (MSVC `unistd.h`).** `src/runtime/startup/common/runtime_log_hosted.c:18-28`
+  carries the genuine Win32 backend (`#if defined(_MSC_VER) ||
+  defined(SPL_TOOLCHAIN_CLANGCL)` → `<io.h>`/`<basetsd.h>`, `ssize_t` from
+  `SSIZE_T`, `#define write _write`); POSIX side keeps `<unistd.h>`.
+- **Cause B (host-native Linux freetype).**
+  `.github/workflows/rust-bootstrap-multiplatform.yml:355` installs
+  `libfreetype6-dev libunwind-dev` (also `:862`).
+- **Cause D (MinGW cross E0463).** `:936`
+  `cd src/compiler_rust && rustup target add ${{ matrix.target }}` inside the
+  cross matrix (`:913-922`, `x86_64-pc-windows-gnu` with
+  `gcc-mingw-w64-x86-64`).
+- **Formerly untriaged aarch64/riscv64.** First-class matrix rows with
+  `gcc-aarch64-linux-gnu` / `gcc-riscv64-linux-gnu` and the same
+  `rustup target add`.
+- **Causes C/E.** Documented fixed in the sibling record.
+
+Host limitation unchanged: true proof of B/D is a green workflow run, which
+this Windows lane cannot trigger or observe; the fix-content evidence above
+is verified at a pinned base. No change made in this lane.

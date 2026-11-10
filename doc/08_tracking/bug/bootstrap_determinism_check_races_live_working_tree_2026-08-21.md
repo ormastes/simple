@@ -1,11 +1,11 @@
 # Bootstrap "determinism check" compares builds of DIFFERENT source trees; PARTIAL then deploys
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 (lane boot9) — SUPERSEDED (steps 1-4: pinned snapshot, race fail-closed, PARTIAL no longer deploys); end-to-end gate re-run BLOCKED outside lane grant
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-21
-- Status: OPEN
+- Status: superseded (triage 2026-11-11, lane boot9) — steps 1-4 implemented in misc_commands.rs; end-to-end re-run needs a full three-stage bootstrap (BLOCKED outside lane grant)
 - Area: `src/compiler_rust/driver/src/cli/commands/misc_commands.rs` (bootstrap gate)
 - Severity: high — the gate's central claim ("deterministic output") is unfalsifiable as written, and its
   fallback verdict deploys on the strength of that claim.
@@ -189,3 +189,24 @@ in-tree and is the cited evidence.
 ## Triage 2026-11-03 (boot-script-fixes lane)
 
 Deferred: the stage-compare logic is in the Rust seed handle_bootstrap (misc_commands.rs), outside this lane scope; fix needs a source snapshot per stage and a seed build to verify. Still open.
+
+## Triage 2026-11-11 (lane boot9, work/p3-boot9-20261111)
+
+SUPERSEDED (steps 1-4) — re-confirmed in
+`src/compiler_rust/driver/src/cli/commands/misc_commands.rs`:
+
+1. `create_bootstrap_snapshot()` (:680) materialises the closure once;
+   the stages compile from the `SIMPLE_BOOTSTRAP_SNAPSHOT_DIR` snapshot
+   (:420-426).
+2. Race fail-closed: `ERROR — inputs changed during the run: ...` exits 2
+   before any VERIFIED/PARTIAL/MISMATCH verdict (:520).
+3. Pinned re-run precondition met 2026-08-21 (in-code comment at :548-552).
+4. `BootstrapVerdict::Partial` no longer deploys — it prints
+   `Bootstrap PARTIAL — not deployed` and returns exit 1 (:547-556); only
+   VERIFIED deploys.
+
+End-to-end re-run of the gate: BLOCKED in this lane — it requires a full
+three-stage bootstrap (`bin/simple build bootstrap`), which is outside
+grant; and the known live Windows native-build hang would likely kill such
+a run anyway. Source-level verification only, same evidence class as the
+2026-11-10 p3-boot triage.

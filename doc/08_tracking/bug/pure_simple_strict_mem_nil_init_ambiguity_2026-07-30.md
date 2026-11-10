@@ -1,7 +1,10 @@
 # Finding: pure-Simple interpreter strict-mem trap cannot distinguish "no initializer" from explicit `= nil` at HIR level
 
 - **Date:** 2026-07-30
-- **Status:** open — implemented with a documented, accepted over-approximation (not a blocker, not a regression)
+- **Status:** FIXED 2026-11-11 (p3-interp11 lane) — the HIR-level ambiguity was
+  closed by the new `HirExpr.is_uninit_marker` field (the doc judged that fix
+  "too cross-cutting"; it landed anyway, 2026-11-07). Verified on the fresh
+  seed 46fe8f6b6def. See the 2026-11-11 addendum at the end.
 - **Severity:** low (opt-in debug-only gate, off by default; the only effect is
   an occasional false positive when the gate is explicitly turned on)
 - **Lane:** M5 pure-Simple parity for strict-memory mode
@@ -88,3 +91,31 @@ practice.
 - `grep -rn "HirStmtKind.Let(" src/compiler --include=*.spl | wc -l` → `21`;
   `grep -rn "case HirStmtKind.Let(" src/compiler --include=*.spl | wc -l` →
   `7` (construction + pattern-match sites outside this lane's ownership).
+
+
+## 2026-11-11 — P3 interp11 triage verdict: FIXED (verified on fresh seed 46fe8f6b6def)
+
+The fix this doc judged "too cross-cutting" (threading a distinguishing bit
+through HIR) landed anyway, via a struct-field default rather than a
+tuple-arity change: `HirExpr.is_uninit_marker`. Verified at HEAD:
+
+- `src/compiler/20.hir/hir_lowering/statements.spl:1036` and `:1203` set
+  `is_uninit_marker: true` on the synthesized `NilLit` for an initializer-less
+  `var x: T` only.
+- `src/compiler/70.backend/backend/interpreter.spl:563-570`
+  (`interp_is_uninit_marker_init`) returns `init.is_uninit_marker` for the
+  `NilLit` case, so a source-written `= nil` is no longer classified as
+  uninitialized.
+- `test/01_unit/compiler/backend/interpreter_strict_mem_spec.spl` carries the
+  regression case ("ON: reading `var x: T? = nil` returns nil, no trap").
+
+Seed-smoke verification (2026-11-11): the committed spec cannot execute on the
+Rust seed because it imports the private free fn `interp_is_uninit_marker_init`
+and the seed's visibility checker rejects private free-fn imports
+(`ascii_utils_spec.spl` fails identically, so this is a systematic
+seed/pure-Simple divergence, not a strict-mem defect). A behavioral probe that
+drives only the pub `InterpreterBackendImpl` + pub HIR constructors
+(`build/review/interp11_strict_mem_probe_spec.spl`, 3 examples) passes 3/3 on
+the seed: OFF-mode uninit read returns `Value.Nil`; ON-mode initializer-less
+read traps with the strict-mem diagnostic; ON-mode explicit `= nil` returns
+`Nil` with NO trap — the documented false positive is gone.

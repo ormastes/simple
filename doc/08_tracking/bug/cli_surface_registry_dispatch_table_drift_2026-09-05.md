@@ -1,7 +1,7 @@
 # CLI surface drift fail-closes completion to `[]`, blocking startup-perf C4
 
 - **Filed:** 2026-09-05
-- **Status:** OPEN
+- **Status:** FIXED — verified 2026-11-11 (lane ne4); drift reconciled and receipt regenerated (Round 8, 2026-11-06)
 - **Blocks:** `doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md`
   Phase C checkbox C4, pinned by
   `test/03_system/plan_acceptance/startup_perf_plan_spec.spl`
@@ -97,3 +97,36 @@ would re-open exactly the fail-open this guard exists to prevent.
 
 ## Round 8 part 2 note 2026-11-06
 Drift is gone: registry == dispatch table (133 commands, table-only [] / help-only []). The remaining block was the codegen check `dispatch-registry-drift`: 3 registry commands (`code`, `dist-build`, `tldr`) are table-dispatched, with no hardcoded `str_eq` handler. The check now requires hardcoded handlers to be a SUBSET of the registry (table parity is checked separately). Receipt regenerated with the sanctioned generator (`simple run src/app/cli/help_surface_codegen.spl --write` -> PASS). `cli_surface_completion_candidates_v1(.., "bu")` now returns candidates (bug-add, bug-gen, bug-resolve, build, build-progress). Stale oracles updated (count 127 -> derived from registry; plan spec list gains build-progress). startup_perf_plan C4 still has its other REMAINING clause (zero-rebuild sha256 proof).
+
+## 2026-11-11 addendum (lane ne4, batch p3-ne4-20261111)
+
+Verdict: FIXED. The 2026-11-06 Round 8 part 2 reconciliation landed on
+release/1.0.0 and was re-verified on this tree (work/p3-ne4-20261111,
+tip fa6366ca8bf5, seed-smoke runs with the refreshed 2026-11-11 seed,
+build-commit 0791c2b7f4a7):
+
+- `simple run src/app/cli/help_surface_codegen.spl` ->
+  `cli_help_surface_codegen=PASS detail=current` (was
+  `FAIL detail=dispatch-registry-drift` at filing time).
+- `test/03_system/plan_acceptance/startup_perf_plan_spec.spl` Phase C
+  C4 oracle now PASSES: `cli_surface_completion_candidates_v1(snapshot,
+  "bu")` returns exactly `["bug-add", "bug-gen", "bug-resolve", "build",
+  "build-progress"]` (2 passed / 1 failed overall; the remaining failure
+  is the unrelated Phase E "per-phase snapshot bracketing" REMAINING
+  item, not C4).
+- `test/01_unit/app/cli/help_surface_codegen_spec.spl` 4/4 PASS.
+- Stale-oracle repair in this commit:
+  `test/01_unit/app/cli/help_surface_production_parity_spec.spl`
+  "keeps provider and extension completions on the production adapter"
+  asserted the completion wiring text inside `src/app/cli/query.spl`;
+  perf refactor `9e7d95d17e00` (2026-11-07) moved that wiring to the
+  standalone `src/app/cli/query_cli_completions.spl` entry that
+  `query.spl` routes to. Spec now asserts the wiring in the new file
+  (route assertion in query.spl unchanged). Behavior was confirmed
+  intact before the edit by a direct probe of
+  `cli_generated_completion_candidates_v1("provider", ...)` and
+  `("--x", ...)`. Spec now 8/8 PASS.
+
+Still open per the plan spec (not this bug): the C4 "zero-rebuild sha256
+proof" REMAINING clause and the Phase E snapshot-bracketing item remain
+tracked in `startup_perf_plan_spec.spl`.

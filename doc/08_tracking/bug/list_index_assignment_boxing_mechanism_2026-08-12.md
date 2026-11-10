@@ -226,3 +226,53 @@ this session).
    not conclusively determined this session (no fallback message printed,
    unlike several of the synthetic probes).
 
+
+## Addendum 2026-11-11 (lane ne14) — CONFIRMED LIVE on the JIT lane (kept OPEN)
+
+Re-verified on the fresh seed (46fe8f6b6def, worktree simple-p3-ne14-20261111,
+SIMPLE_LIB=src). The confirmed narrow defect — a `list`-typed (untyped)
+function PARAMETER that is bracket-index-assigned inside its own body reads
+back corrupted **under `bin/simple run` (default JIT lane)** — still
+reproduces. The `run` lane is NOT covered by the lint/fix/fmt interpreter pin
+(`b41d64cad69d`), so this is unaffected by that mitigation.
+
+Probe (verbatim this doc's probe (d), plus a pin):
+
+```simple
+fn mutate(s):
+    s[2] = s.get(0) ^ s.get(1)
+    s
+fn main() -> i64:
+    var s = [0x6a09e667, 0x11111111, 0, 0]
+    val out = mutate(s)
+    val x = out.get(2)
+    print "bare={x}"      # expect 2065233782
+    print "arith={x+5}"   # expect 2065233787
+    print "eq={x == 2065233782}"
+```
+
+| lane | bare | arith | eq |
+|---|---|---|---|
+| interpreter (`SIMPLE_EXECUTION_MODE=interpret run`) | 2065233782 | 2065233787 | true |
+| **JIT (default `run`)** | **`<enum@0x...>` (boxed pointer)** | **5587920329798 (= 0x5150a019c40 + 5, pointer arithmetic)** | **false** |
+
+So under JIT the element read back from the mutated untyped-param list is a
+raw boxed/tagged word, not the flat i64: `+5` adds to the pointer, `==` fails.
+Binding to `val x` first keeps the box; an inline `{out.get(2)+5}` in a string
+happens to unwrap (constant-folded), which is why a bare `print "{out.get(2)}"`
+probe looks merely odd rather than nil. Same class as the 2026-08-12 filing,
+different surface detail. Controls: the fully `[i64]`-typed variant
+(`fn mutate(s: [i64])`) passes on both lanes, and the real-world
+`sha3_256_bytes([97,98,99])` now returns the correct digest on the JIT lane —
+the headline sha3 corruption is fixed; only the untyped-param mechanism above
+remains.
+
+**Not fixed in this lane** — the locus is the seed's JIT parameter
+binding/tagging for untyped-`list` slots (`src/compiler_rust`); the lane is
+forbidden cargo/rustc and entry-closure native builds, and cannot rebuild or
+re-deploy the tracked seed. **Grant to fix:** a session that may
+`cargo build --release -p simple-compiler` (or the repo's seed-rebuild
+wrapper) in `src/compiler_rust`, patch the untyped-list-param JIT binding to
+the flat encoding the typed and interpreter lanes already use, rebuild the
+tracked seed, and re-run the probe above plus a paired spec (e.g. an A/B
+untyped-vs-typed param bracket-assign assertion) on both lanes.

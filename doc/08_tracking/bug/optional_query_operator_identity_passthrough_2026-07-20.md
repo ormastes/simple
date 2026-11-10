@@ -7,7 +7,10 @@ evidence found in the body. This is bookkeeping, not verification.
 **Date:** 2026-07-20
 **Severity:** high (silently wrong boolean result; `.?` is the prescribed
 idiom per `.claude/rules/language.md`: "Use `.?` over `is_*` predicates")
-**Status:** open
+**Status:** FIXED — closed 2026-11-05 (F1 lane: passthrough is the documented
+`T?` contract); closure verified on the fresh seed 2026-11-11 (lane interp10):
+both contract-pin specs green (7/7, 10/10), seed-smoke on build-commit
+46fe8f6b6def
 **Found by:** whole-suite triage campaign, `test/feature/plugin/` cluster
 (`plugin_startup_block_spec.spl` / `runtime_api_plugin_spec.spl` /
 `sugar_plugin_spec.spl`)
@@ -296,3 +299,23 @@ Current contract: `doc/07_guide/quick_reference/syntax_quick_reference.md`
 Re-measured on the release/1.0.0 seed: `find(true).?` prints the payload and
 `find(false).?` prints `nil` — exactly the documented behaviour. A `-> bool`
 function must spell presence as `opt != nil`. Pinned by `test/01_unit/compiler/interpreter/exists_check_presence_regression_spec.spl`.
+
+## 2026-11-11 triage addendum — lane interp10 (FIXED, closure verified)
+
+The F1-lane closure of 2026-11-05 stands: passthrough IS the contract
+(`doc/07_guide/quick_reference/syntax_quick_reference.md` § "Existence Check
+(`.?`) — Returns `T?`"). This lane flips the first header line (it still read
+`open`) to match and verifies the pins on the fresh seed (`bin/simple.exe`,
+build-commit `46fe8f6b6def`, `SIMPLE_LIB=src`,
+`test --mode=interpreter --no-cache`; seed-smoke):
+
+- `test/01_unit/compiler/interpreter/exists_check_presence_regression_spec.spl`
+  — 7/7 PASS.
+- `test/01_unit/compiler/interpreter/exists_check_bool_payload_compare_spec.spl`
+  — 10/10 PASS.
+
+Both are the contract pins cited by the 2026-11-05 closure. No code change in
+this lane; the "bool conversion" premise remains the stale claim, and the
+2026-09-19 guidance (a `.?` failure whose oracle is a strict
+`== true/false` against the `.?` result is a spec bug, not seed debt) stays
+the standing rule.

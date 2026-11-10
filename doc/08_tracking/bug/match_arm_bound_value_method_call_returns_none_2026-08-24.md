@@ -6,7 +6,7 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-24
 **Severity:** HIGH (silent wrong answers, not a crash — two hardening exit gates were dead for days because of it)
-**Status:** OPEN in the JIT. Two call sites worked around; the defect itself is NOT fixed.
+**Status:** FIXED (2026-11-11, lane ne14) — seed flat-Option/flat-Some fixes (fcb661fe957c, 90f9d6b7c15e); verified on fresh seed 46fe8f6b6def, see addendum
 **Discriminator:** fails under default `bin/simple run` (JIT), passes under `SIMPLE_EXECUTION_MODE=interpreter`, and passes under `bin/simple test`.
 
 ## The defect
@@ -87,3 +87,32 @@ ERROR, then restored to PASS — all three observations made.
 - **Done when:** the un-hoisted parser gives identical results under JIT and
   interpreter, with a fixture that fails pre-fix under `run`.
 
+
+## Addendum 2026-11-11 (lane ne14) — FIXED, verified on fresh seed 46fe8f6b6def
+
+**Fixing commits:** the 2026-11-09 array-get contract change made `.get()`
+return a flat `T?` and the seed was then repaired to match the pure-Simple
+interpreter's flat encoding:
+`fcb661fe957c` "fix: array .get(i) returns T? (None out of range) on every
+lane" and `90f9d6b7c15e` "fix(seed): flat Option encoding for array get/at +
+flat Some pattern arm" (2026-11-10, HEAD~ of this lane's base) — the latter
+makes a bare non-Nil value match `case Some(x)`, which is exactly the binding
+this defect degrades.
+
+**Verification actually run** (seed-smoke, worktree simple-p3-ne14-20261111,
+SIMPLE_LIB=src): a probe parses a real SDN doc (`assurance: { waivers: ... }`)
+and reads `waivers` through the bound value in all three of this doc's
+A/B/C shapes — inline-arm `av.get(...)`, hoisted `var h = av`, and
+`case Some(av): f(av)` param pass — printing 1 (FOUND) / 0 (MISSING) per shape.
+
+| shape | 2026-08-24 (JIT) | today JIT | today interpreter |
+|---|---|---|---|
+| A inline-arm | MISSING | **FOUND (1)** | FOUND (1) |
+| B hoisted-var | FOUND | FOUND (1) | FOUND (1) |
+| C param pass | MISSING | **FOUND (1)** | FOUND (1) |
+
+`bin/simple run` (default JIT lane) and `SIMPLE_EXECUTION_MODE=interpret
+bin/simple run` now agree on all three shapes. The un-hoisted parser no longer
+diverges, so the "Done when" clause is met. The two product-code hoists
+(`package_pins._parse_waivers`, `completeness_seal/manifest.parse_manifest_text`)
+are semantics-preserving and may stay, but are no longer load-bearing.

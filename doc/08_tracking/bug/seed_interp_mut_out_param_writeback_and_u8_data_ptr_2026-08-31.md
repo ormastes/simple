@@ -1,7 +1,7 @@
 # Seed interpreter: `&mut` out-param writeback loss and `[u8].data_ptr()` pointing at boxed value cells
 
 - **Filed:** 2026-08-31
-- **Status:** FIXED 2026-11-06 — gap 1 already fixed upstream, gap 2 fixed in `work/seed-interp-batch2-20261106` (see "Resolution"); originally: two distinct seed-interpreter ABI gaps,
+- **Status:** FIXED 2026-11-06 — gap 1 already fixed upstream, gap 2 fixed in `work/seed-interp-batch2-20261106` (see "Resolution"); re-verified 2026-11-11 (lane interp12) on fresh seed 46fe8f6b6def, both gaps green (see "Addendum 2026-11-11"); originally: two distinct seed-interpreter ABI gaps,
   in-tree workarounds landed at the two call sites that blocked the UI showcase
 - **Platform:** aarch64-apple-darwin (likely all platforms; untested elsewhere)
 - **Found during:** UI showcase real-launch sweep (2d / 2d-metal / web / gui / wm)
@@ -106,3 +106,23 @@ Measured with `test/fixtures/seed_interp/mut_out_param_and_data_ptr_repro.spl`
   FAILED before (`data_ptr must return the packed byte pointer`, left/right
   differ), ok after. The `metal_sffi.spl` host-buffer marshal is not
   reverted here (no Metal host to verify it on).
+
+
+## Addendum 2026-11-11 (lane interp12) — re-verified FIXED on fresh seed 46fe8f6b6def
+
+**Verification actually run** (worktree simple-p3-interp12-20261111, seed-smoke):
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe SIMPLE_EXECUTION_MODE=interpret \
+  ./bin/simple.exe run test/fixtures/seed_interp/mut_out_param_and_data_ptr_repro.spl --no-cache
+# out_param status=0 handle_nonzero=true
+# data_ptr word=67305985        (rc=0)
+```
+
+Gap 1 (`&mut` extern out-param writeback reaches the caller's `var`) and gap 2
+(`[u8].data_ptr()` addresses the packed bytes, `0x04030201`) both print the
+documented fixed values on the current tracked seed. Verdict: STALE (fix
+previously landed; no new code change this lane). Note: `simple run` selects
+the engine via `SIMPLE_EXECUTION_MODE`, not a `--mode` flag — passing
+`--mode=interpreter` to `run` leaves the default hybrid lane and reproduces a
+spurious `Array.data_ptr not found`; that routing artifact is not this bug.

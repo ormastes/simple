@@ -80,3 +80,31 @@ Preserve the core, executable sha256, environment transcript, last surface
 identity, and backtrace; treat `driver.spl` as first observed victim until the
 stack says otherwise. Related current tracker for the same surface-promote
 path (perf, not crash): `stage3_quadratic_transient_heap_promote_2026-09-02.md`.
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: BLOCKED-needs-grant — status stays OPEN.** Same posture as the
+2026-10-27 ledger triage round (accepted, `keep_open`) and the 2026-11-10
+p3-boot3 lane: the crash owner is the self-hosted compiler's
+streaming-surface parse (`src/compiler/80.driver`), outside this lane's
+bootstrap-script scope, and there is still no artifact/stack link from this
+report to the 2026-10-27 surface-release ordering fix. This Windows lane
+cannot run the retained-core reproduction (no admitted Stage 2 Linux binary;
+full bootstrap + gdb repro is the heavy grant below).
+
+Exact command for the granted lane (Linux host, per this doc's "Next
+diagnostic"; do not discard Stage2/Stage3 caches):
+
+```sh
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2
+ulimit -c unlimited
+gdb -batch -ex run -ex bt --args \
+  build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple native-build \
+  --source src/compiler --source src/app --source src/lib \
+  --entry src/app/cli/bootstrap_main.spl --entry-closure --threads 4 \
+  -o build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple
+```
+
+Preserve core, executable sha256, environment transcript, last surface
+identity, and backtrace; treat `driver.spl` as first observed victim until the
+stack says otherwise.

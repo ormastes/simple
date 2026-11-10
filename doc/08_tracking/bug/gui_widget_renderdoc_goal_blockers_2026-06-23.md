@@ -5,7 +5,7 @@
 - **inferred**: reproduction needs a Linux host with a GPU, RenderDoc, and/or Electron/Chrome Vulkan backing. This triage host is Windows with no such lane, and `bin/simple` here is the Rust seed (v1.0.0-rc.1), not the self-hosted binary these evidence gates are written against.
 - **inferred**: "does not run on Windows" is not evidence of a fix, so no closure is claimed. The gate remains blocked until re-run on the Linux evidence lane.
 
-Status: open
+Status: open — re-confirmed 2026-11-11 (lane ne11); BLOCKED on this host, see addendum
 Date: 2026-06-23
 Area: GUI widget RenderDoc evidence
 
@@ -93,3 +93,22 @@ Still blocked:
   and Electron DOM audit/geometry, but still fails with no `.rdc` and no
   offscreen ARGB paint:
   `build/renderdoc/electron-gpu-autocapture-elf-trigger-offscreen-failfast/electron-html/evidence.env`.
+
+---
+
+## 2026-11-11 addendum — lane ne11 (P3 traverse, batch ne11)
+
+**Verdict: OPEN, BLOCKED on this host (Linux GPU + RenderDoc + Electron lane required).**
+
+- Every product path referenced above still exists in the tree
+  (`src/app/test/renderdoc_vulkan_widget_capture.spl`, the generated HTML
+  fixture, `scripts/check/check-gui-widget-renderdoc-goal-status.shs`), so
+  there is no stale/dead-reference basis for closure.
+- This host is Windows with no Simple Vulkan Engine2D + Electron
+  Chromium/Vulkan `.rdc` lane; the 2026-09-13 triage conclusion stands — the
+  Electron widget `.rdc` gate remains unproven and "does not run on Windows"
+  is not evidence of a fix.
+- Grant: on the Linux evidence lane, run
+  `sh scripts/check/check-gui-widget-renderdoc-goal-status.shs --strict` with
+  real Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc` artifacts
+  present, and record the resulting gate report under `doc/09_report/`.

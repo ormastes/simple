@@ -1,6 +1,8 @@
 # BUG: every `class` (reference-type) instance loses field and method resolution in the Rust-seed interpreter
 
-- **Status:** OPEN — root cause identified, fix is in the Rust seed (cannot be deployed from this lane)
+- **Status:** FIXED — resolution of 2026-08-18 verified on the deployed fresh
+  seed 2026-11-11 (lane interp10): both regression-guard specs green (4/4,
+  7/7) on build-commit 46fe8f6b6def, `--mode=interpreter`, seed-smoke
 - **Severity:** CRITICAL — dominant failure class in the 2026-08-18 full sharded test run (~8000 failures)
 - **Found:** 2026-08-18, lane `lane-test-fix`
 - **Regression from:** `981c88435e0` "fix(interpreter): nested-call dispatch on class instances and struct zero-fill" (2026-08-16 23:11:33 +0000)
@@ -252,3 +254,28 @@ fixed binary. The most likely explanation is that specs which previously aborted
 immediately on the `object` error now execute for real and one of them does not
 terminate; that would be a pre-existing defect unmasked by this fix rather than
 caused by it, but it has NOT been proven either way and must not be assumed.
+
+## 2026-11-11 triage addendum — lane interp10 (FIXED, deployment verified)
+
+The 2026-08-18 resolution was proven on a private seed build; this lane
+confirms it is live in the deployed artifact. On the tracked fresh seed
+(`bin/simple.exe`, build-commit `46fe8f6b6def`, `SIMPLE_LIB=src`,
+`test --mode=interpreter --no-cache`; seed-smoke):
+
+- `test/01_unit/compiler/interpreter/class_instance_field_method_regression_spec.spl`
+  — 4/4 PASS.
+- `test/01_unit/compiler/interpreter/class_instance_resolution_class_spec.spl`
+  — 7/7 PASS (static constructor, mutating `me` method, trait-`impl` block
+  method, collection-held instance, cross-module `FixedStepClock`, plus
+  struct/primitive controls).
+
+Current source state: `Value::aggregate`
+(`src/compiler_rust/compiler/src/value.rs:3243-3251`) now builds
+`Value::ClassInstance` only when `class_instance_storage_enabled()`
+(`value.rs:3467-3470`, env `SIMPLE_INTERP_CLASS_REF`, default ON) — i.e. the
+`TODO(class-instance)` follow-up was completed as a gated re-land rather than
+left dead. With the flag at its default, interpreted `class` instances ARE
+`ClassInstance` values, so both primary resolution paths must (and do) handle
+them — the 7/7 resolution-class spec above is the empirical proof on the
+fresh seed. The 2026-08-18 `test/01_unit/browser_engine` hang follow-up is
+not re-examined in this lane.

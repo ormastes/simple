@@ -1,7 +1,7 @@
 # Bug: `Dict<K, StructValue>.get()` returns a corrupt Option on a HIT (native codegen); index read and `Some(index)` are correct
 
 - **Date:** 2026-07-27
-- **Status:** open
+- **Status:** FIXED in source (verified 2026-11-11, lane ne16); native-binary re-probe still owed, see addendum
 - **Area:** native codegen — MIR dict-method lowering (`.get()` vs `d[k]` decode divergence)
 - **Severity:** high — was the true root cause of the stage-4 bootstrap segfault previously (wrongly) attributed to header-only/partial modules with nil decl dicts
 - **Found by:** isolated native-codegen probes (A, B, C below), one-binary build
@@ -230,3 +230,41 @@ read pattern (Probe C) instead of `.get()` on struct-valued dicts.
 - `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` —
   `register_imported_symbol`, the stage-4 crash site fixed by switching to
   `contains_key` + index read.
+
+## Addendum 2026-11-11 (lane ne16, seed-smoke verification)
+
+Verdict: FIXED in source — both halves of the doc's "Suggested fix" landed,
+in exactly the shape proposed (a shared helper both readers of `rt_dict_get`
+call, so the paths cannot re-diverge).
+
+- The old inline `.get()` arm at `method_calls_literals.spl:1244-1262` is
+  gone. The current arm (`method_calls_literals.spl:3969-3998`,
+  `try_lower_dict_builtin_method_v1`) routes `.get(k)` through
+  `self.lower_dict_runtime_read(receiver, receiver_local, key_local, true)`
+  — the shared helper the `d[k]` index read uses — with a comment citing
+  this bug doc by name.
+- Shared value-type resolution: the helper resolves `V` through the same
+  tracked-local + HIR-annotation chain as `d[k]` (fixes Probe A's
+  undecoded-integer symptom).
+- Bug #189 struct registration: `expr_dispatch.spl:3086-3125` registers
+  `struct_value_syms[decoded.id]` for `MirTypeKind.Struct` dict results
+  (fixes Probe B's corrupt-payload/segfault symptom), and `:3036` carries
+  the store-observed struct name for the probe path.
+- A follow-on latent miss-sentinel regression
+  (`native_dict_get_miss_returns_zero_not_nil_2026-07-28`, re-opened
+  2026-08-17) is also fixed in the same arm: `.get()` now calls the helper
+  with `as_option: true` so the miss sentinel routes AROUND
+  `decode_runtime_value` (`3 >> 3 -> 0` / `rt_interp_cstr(3) -> NULL`).
+
+**Verification actually run (fresh seed, build-commit `46fe8f6b6def`):**
+`test/01_unit/compiler/native/dict_get_struct_value_spec.spl` -> 6/6 PASS
+(interpreter mode), including the scenario that was deliberately RED when
+written ("get() on a hit yields a usable value": non-nil Option, unwraps to
+`name="Read" n=5`).
+
+**Caveat / still owed:** the bug is native-codegen-only; the interpreter run
+proves no regression on the oracle but not the native fix end-to-end. A
+native re-probe (one-binary build of Probe B) remains owed on a host where
+native-build completes — impossible on this Windows host (known live hang).
+The spec header still says "EXPECTED RED ... under native codegen"; the
+native owner lane should flip that note when running the probe.

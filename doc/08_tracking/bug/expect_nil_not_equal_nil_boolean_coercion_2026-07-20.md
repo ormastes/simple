@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** CLOSED 2026-11-11 — FIXED on release; verified by lane ne8 (seed 46fe8f6b6def)
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** interpreter — `!=` operator / SSpec `expect()` boolean coercion
 
@@ -89,3 +89,27 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
   for unknown name" specifically will still fail with this doc's distinct
   `nil != nil` defect even after the `.?` -> `!= nil` migration is applied.
 
+
+---
+
+## 2026-11-11 addendum — lane ne8 (P3 traverse, batch ne8)
+
+**Verdict: FIXED on release — the `nil != nil` form now coerces to boolean false.**
+
+- **Direct probe (seed-smoke, seed 46fe8f6b6def):** a spec asserting
+  `expect(nil != nil).to_equal(false)`, `expect(nil == nil).to_equal(true)`, and a
+  non-nil `!= nil` control — **3/3 examples PASS** (`simple test --mode=interpreter --no-cache`,
+  probe under `build/review/`). The both-sides-nil case no longer propagates raw nil into the
+  matcher.
+- **Affected spec re-run (seed-smoke):** `test/01_unit/lib/ffi/ffi_signature_spec.spl` —
+  **7/7 PASS**, including "returns nil for unknown name" (`FfiManifest.get` falls through to nil;
+  `expect(sig.?).to_equal(false)` now yields the genuine boolean). The spec file was never
+  migrated to `!= nil`; the seed interpreter's nil/`.?` comparison handling was fixed underneath
+  it.
+- **Related fix:** `5a06a70c8b74` `fix(seed-bdd): keep .? as T? when compared with nil in
+  expect; close stale .? rows` (2026-11-05, on release tip), which closed the sibling
+  `.?`-passthrough rows (`optional_query_operator_identity_passthrough_2026-07-20`,
+  `option_predicate_returns_payload_not_bool_2026-07-28`, ...). This row's distinct
+  both-sides-nil symptom also no longer reproduces.
+- The recommended `.?` -> `!= nil` migration is therefore no longer required to reach green;
+  both spellings now pass.

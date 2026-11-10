@@ -205,6 +205,74 @@ describe "W-MC-RES-001: unwrapped foreign resource":
             val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
             expect(findings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
+    context "verb-only over-fire (bug w_mc_res_001_overfires_verb_only_heuristic_2026-08-07)":
+        # An acquire-verb name alone is not a resource acquire. The rule now
+        # requires EITHER a resource-typed declared return (Any or a named
+        # non-primitive type) OR a known resource family token in the name.
+
+        it "is silent on rt_string_new: a value constructor returning i64":
+            # @req REQ-SSPEC-COMPILER
+            step("is silent on rt_string_new: a value constructor returning i64")
+            val source = "extern fn rt_string_new(data: i64, len: i64) -> i64\n\nfn mk(data: i64, len: i64) -> i64:\n    val out = rt_string_new(data, len)\n    return out\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/runtime/simple_core/core_string.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — string value, no handle to wrap
+
+        it "is silent on rt_array_new returned bare":
+            # @req REQ-SSPEC-COMPILER
+            step("is silent on rt_array_new returned bare")
+            val source = "extern fn rt_array_new(cap: i64) -> i64\n\nfn empty() -> i64:\n    return rt_array_new(0)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/runtime/simple_core/core_string.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — array value, no handle to wrap
+
+        it "is silent on rt_dir_create: creates a directory, returns bool":
+            # @req REQ-SSPEC-COMPILER
+            step("is silent on rt_dir_create: creates a directory, returns bool")
+            val source = "extern fn rt_dir_create(path: text, recursive: bool) -> bool\n\nfn ensure(path: text) -> bool:\n    rt_dir_create(path, true)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/game/new.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — bool, no handle to wrap
+
+        it "is silent on rt_atomic_int_load: an atomic read, not an acquire":
+            # @req REQ-SSPEC-COMPILER
+            step("is silent on rt_atomic_int_load: an atomic read, not an acquire")
+            val source = "extern fn rt_atomic_int_load(a: i64) -> i64\n\nfn get(a: i64) -> i64:\n    return rt_atomic_int_load(a)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/lib/nogc_sync_mut/atomic.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — `load` collides with the acquire verb catalog
+
+        it "is silent on an undeclared verb-only call with no known family":
+            # @req REQ-SSPEC-COMPILER
+            step("is silent on an undeclared verb-only call with no known family")
+            val source = "fn mk() -> i64:\n    return rt_string_clone(1)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — neither resource-typed nor a known family
+
+        it "still flags a known socket family even with a cross-prefix release":
+            # @req REQ-SSPEC-COMPILER
+            step("still flags a known socket family even with a cross-prefix release")
+            val source = "extern fn rt_io_tcp_socket_create(port: i64) -> i64\n\nfn listen(port: i64) -> i64:\n    return rt_io_tcp_socket_create(port)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/lib/net.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — socket needs closing
+
+        it "still flags a known cuda module family":
+            # @req REQ-SSPEC-COMPILER
+            step("still flags a known cuda module family")
+            val source = "fn load(path: text) -> i64:\n    return rt_cuda_module_load(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/lib/cuda.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — CUDA module needs unloading
+
+        it "still flags an unknown family whose declared return is a named handle type":
+            # @req REQ-SSPEC-COMPILER
+            step("still flags an unknown family whose declared return is a named handle type")
+            val source = "extern fn rt_widget_new(w: i64) -> WidgetHandle\n\nfn mk(w: i64) -> WidgetHandle:\n    return rt_widget_new(w)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — resource-typed return
+
+        it "still flags a known family via self.field assignment":
+            # @req REQ-SSPEC-COMPILER
+            step("still flags a known family via self.field assignment")
+            val source = "class Db:\n    handle: i64\n\n    me reopen(path: text):\n        self.handle = rt_db_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — db handle stored unwrapped
+
     context "profile plumbing (critical tier)":
 
         it "maps W-MC-RES-001 to the unwrapped_foreign_resource config name":

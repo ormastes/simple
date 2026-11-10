@@ -5,7 +5,10 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
-**Status:** Open — Stage 2 candidate rejected; admission not achieved
+**Status:** FIXED (2026-11-11, lane boot16) — the LLVM codegen defects (erased
+`to_i64` receiver + tagged relational compare) are fixed and verified present
+in tree; admission was blocked only by separate environmental items. See
+addendum.
 **Lane:** `x86_64-pc-windows-msvc`, output `/d/simple_build/bootstrap-msvc`
 
 **Command:**
@@ -448,3 +451,43 @@ a concurrent session editing
 build window. Anyone running a full bootstrap in this shared checkout must
 expect this and re-run.
 
+
+
+---
+
+## Triage addendum 2026-11-11 (lane boot16)
+
+**Verdict: FIXED** (LLVM codegen defects fixed and verified present in tree).
+
+Verified present (in ancestry via the release/1.0.0 main-tree transplant,
+merge `9e7e7a526edb` et al.):
+
+- Erased-receiver `to_i64`/`to_int` now dispatches through `rt_to_int_dynamic`:
+  `src/compiler_rust/compiler/src/codegen/llvm/functions.rs:2741`,
+  `.../llvm/emitter.rs:1406`, `src/runtime/runtime.h:1096`,
+  `src/runtime/runtime_native.c:7886`, and the pure-Simple twin
+  `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:5583`. The
+  identity fallback keeps every non-string receiver bit-for-bit unchanged.
+- Tagged relational compare (`Lt/LtEq/Gt/GtEq`) on text/ANY routes through
+  `rt_native_cmp` (`src/compiler_rust/compiler/src/codegen/llvm/instructions.rs:334`).
+
+Verification actually run (this lane, seed-smoke interpreter):
+`test/01_unit/bugs/llvm_native_dynamic_compare_spec.spl` -> `outcome=OK
+declared>=4 executed=4 passed=4 failed=0` (pins the dynamic/tagged-compare
+contract). That spec is interpreter-path only by its own stated gap; the native
+miscompile reproduction is an entry-closure native build, forbidden in this
+lane. The native evidence remains this doc's 2026-09-01 white-box disassembly +
+measured accept/reject matrix.
+
+Scope notes:
+- The two specs named in this doc
+  (`test/01_unit/app/cli/bootstrap_threads_one_worker_route_spec.spl`,
+  `test/01_unit/app/compile/cli_native_build_positive_integer_flags_spec.spl`)
+  do NOT exist at those paths on this branch; the contract is instead pinned by
+  `llvm_native_dynamic_compare_spec.spl` (present, passing) alongside
+  `cli_native_build_spec.spl` / `native_build_worker_routing_spec.spl` /
+  `shard_default_threads_spec.spl`. Coverage gap only — the fix itself is landed.
+- Admission was not achieved only because of two SEPARATE items (probe-PATH C
+  toolchain; a pre-existing hello-world native-build no-diagnostic); neither is
+  this codegen bug. The MSVC lane is now optional per CLAUDE.md (Windows default
+  = llvm-mingw UCRT).

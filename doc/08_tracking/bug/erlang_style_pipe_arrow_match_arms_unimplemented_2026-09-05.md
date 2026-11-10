@@ -1,13 +1,13 @@
 # Erlang-style `| pattern -> expr` match arms are documented as preferred but parse nowhere
-## Closed 2026-09-16 — ... here instead of guessed at. ## Resolution options (pick one — do not leave the doc as-is)
+## Closed 2026-11-11 — FIXED on release (lane ne8 verification below)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
 **Filed:** 2026-09-05
-**Severity:** medium — documentation promises a syntax no compiler accepts; 16 tracked files are silently unparseable
-**Status:** open
+**Severity:** medium — documentation promised a syntax no compiler accepted; 16 tracked files were silently unparseable (resolved, see below)
+**Status:** CLOSED 2026-11-11 — FIXED on release; verified by lane ne8 (seed 46fe8f6b6def)
 **Area:** parser (Rust seed + self-hosted frontend), language documentation
 
 ## Summary
@@ -109,3 +109,25 @@ of guessed at.
 Either way the current state — documented as *preferred*, implemented nowhere,
 with 16 unparseable files in tree — should not persist.
 
+
+---
+
+## 2026-11-11 addendum — lane ne8 (P3 traverse, batch ne8)
+
+**Verdict: FIXED on release.** Resolution option 1 was taken.
+
+- **Fixing commit:** `13fd96fd4f9f` `feat(parser): \`| Pat -> expr\` match arms in self-hosted
+  frontend + seed parity tests`, merged to release by PR #7990 (`71bea40f3ee5`, 2026-11-09);
+  ancestor of release tip (verified `git merge-base --is-ancestor`).
+- **Regression spec:** `test/01_unit/compiler/parser/pipe_arrow_match_arm_spec.spl` (added by
+  the fix) — **7/7 examples PASS** on tracked seed `bin/simple.exe` build-commit `46fe8f6b6def`
+  (seed-smoke: `simple test ... --mode=interpreter --no-cache`).
+- **Doc repro re-run (seed-smoke):** the verbatim `fn cls` example from this doc now compiles
+  and prints `r=one`. All three arm shapes called out as failing on 2026-09-05 — literal
+  (`| 0 -> "zero"`), guard (`| n if n < 0 -> "neg"`), and enum-constructor
+  (`| Shape.Circle(r) -> ...`) — parse and execute correctly.
+- **16 dashboard files:** `src/compiler_rust/lib/std/src/tooling/dashboard/notify.spl` (and the
+  rest) still carry genuine `| pat -> expr` arms; a lint copy of `notify.spl` now parses and is
+  analysed (no more "could not be parsed"), confirming the files are live-parseable.
+- **Doc claim:** `doc/07_guide/quick_reference/syntax_quick_reference.md` § Pattern Matching
+  still states "Erlang-style `| ->` is preferred" — now true.

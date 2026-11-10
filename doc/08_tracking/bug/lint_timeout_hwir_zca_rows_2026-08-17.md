@@ -23,8 +23,7 @@
 > `doc/08_tracking/bug/lint_dejits_whole_program_span_struct_collision_2026-08-18.md`.
 
 - Date: 2026-08-17
-- Status: **OPEN (bounded, guarded)** — DUPLICATE of
-  lint_single_file_superlinear_timeout_on_line_count_2026-08-06.md.
+- Status: SUPERSEDED (2026-11-11, lane interp9) — the dominant cost term this row hunts was located (de-JIT constant factor, see `lint_dejits_whole_program_span_struct_collision_2026-08-18.md`, both causes now fixed); the bounded/guarded state stands. See 2026-11-11 addendum below.
   **2026-08-18: the dominant term IS located** — see the banner above — and it
   is a de-JIT constant factor, not a superlinear term. Optimisation still OPEN
   (the fix is a struct rename plus a driver-heuristic change, neither landed). The "not a hang / cost not deadlock" verdict, the
@@ -410,3 +409,28 @@ apart; backward seeks 29 us instead of an O(position) rescan), pinned by
 `simple-base.exe`, so this is recorded as an algorithmic fix, not a lint
 speed-up: the function's sampled self time is the per-call constant, which
 only a seed-side change moves.
+
+## 2026-11-11 addendum (lane interp9, work/p3-interp9-20261111) — SUPERSEDED, bounded state stands
+
+Lane interp9 re-triaged this row together with
+`lint_dejits_whole_program_span_struct_collision_2026-08-18.md`. Findings:
+
+- The dominant cost term this row hunts — the interpreted-frontend constant
+  factor — was located by the 2026-08-18 banner, and BOTH stacked de-JIT
+  causes behind it are verified fixed on the current tip (argv-capability
+  gate; module-qualified HIR struct identity). What keeps lint on the
+  interpreter today is the deliberate `lint-jit-parity-unproven` pin, tracked
+  by `lint_jit_segv_text_as_string_array_2026-10-10.md`.
+- This row's own evidence already established the honest bounds: the lexer is
+  linear (~21 ms/token interpreted constant), whole-lint shows only a mild
+  ~1.33 secondary exponent, and the 2026-11-07 Windows round measured
+  `zca_rows.spl` (1901 lines) terminating in 502 s — the ">2400 s" table row
+  was a killed loaded-box lower bound, never a measurement.
+- The cost guard remains the live control:
+  `scripts/check/check-lint-cost-budget.shs`
+  with fixtures under `test/fixtures/lint_cost/`; `zca_rows.spl` itself stays
+  knowingly outside the lint sweep per this record's follow-up 3.
+
+Not re-run in this lane: the guard (it lints a committed fixture inside a
+240 s budget; this Windows lane spent its budget on the eight assigned
+rows' seed-smoke evidence). Nothing in this addendum changes lint behaviour.

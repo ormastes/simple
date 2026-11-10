@@ -1,6 +1,8 @@
 # A glob-imported PRIVATE fn lowers to an unmangled extern instead of failing to resolve
 
-- **Status:** OPEN (2026-09-13). Worked around at the call site, NOT fixed.
+## Open 2026-11-11 — LIVE (interpreter leg re-confirmed permissive), keep OPEN (lane ne10; see addendum)
+
+- **Status:** OPEN (2026-09-13; re-confirmed LIVE 2026-11-11 lane ne10). Worked around at the call site, NOT fixed.
 - **Layer:** Rust seed, name resolution -> MIR/LLVM lowering.
 
 ## Shape
@@ -49,3 +51,36 @@ unresolved name, so the next module to depend on a glob-imported private helper
 will fail the same way at the same late stage.
 
 Refs: doc/08_tracking/bug/stage2_link_undefined_cpu_probe_and_surface_symbols_2026-09-13.md
+
+---
+
+## 2026-11-11 addendum — lane ne10 (P3 traverse, batch ne10)
+
+**Verdict: LIVE — keep OPEN.** The expected compile-time unresolved-name error still does not
+happen; the glob-imported private name resolves permissively on the current seed.
+
+- **Seed:** tracked `bin/simple.exe` build-commit `46fe8f6b6def` (contains
+  `6d15331f91eb`, verified `git merge-base --is-ancestor`). All runs seed-smoke
+  (`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ... --mode=interpreter --no-cache`).
+- **Related but narrower fix already landed:** `6d15331f91eb` (2026-11-09)
+  `fix(seed-interp): error on cross-directory call of a private fn (glob/no-import leak)` gates
+  the *bare-name leak* leg — its spec
+  `test/01_unit/compiler/95.interp/interpreter/private_fn_call_visibility_spec.spl` passes 3/3
+  on this seed.
+- **This bug's leg is NOT covered by it.** A two-module same-directory glob repro
+  (`use app.ma.*` + `use app.mb.*`, both defining private `fn _helper(x: i64) -> i64`, importer
+  calls `_helper(1)`) still runs, exit 0, printing the resolved result (`R=2`) — only a
+  `compiler_cross_module_private_symbol_collision` warning is emitted. A single-module
+  cross-directory glob repro (`use app.sub.lib.*` calling its private `_helper`) also still runs,
+  exit 0. In both shapes the private name resolves through the glob import binding itself, which
+  the `6d15331f91eb` call-time gate does not reject.
+- **Native-lowering leg (unmangled extern at link):** not re-provable on this lane — the Windows
+  native-build hang is a known live defect, never retried. Grant command:
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ./bin/simple.exe native-build --source src
+  --entry build/p3ne10-probes/row7fix/app/main.spl --output build/p3ne10-probes/row7fix/app/main`
+  (minimal repro entry as described above; run on a host where native-build does not hang, and
+  confirm the link either resolves per-module-mangled or fails at compile time, never an
+  unmangled `_sffi_*` reference).
+- **The call-site workaround in this doc remains in place** (`method_calls_literals.spl` defines
+  `_sffi_enum_discriminant` locally), so the original Stage-2 link is not blocked by this row
+  today; the seed behavior this record is about is unchanged.

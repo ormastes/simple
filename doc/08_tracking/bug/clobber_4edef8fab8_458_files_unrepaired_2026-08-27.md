@@ -7,7 +7,7 @@ evidence found in the body. This is bookkeeping, not verification.
 **Date:** 2026-08-27
 **Offending commit:** `4edef8fab8` "feat: snapshot current development state"
 (2026-08-26 01:21) — **11,225 files, +1,275,284 / −860,823**
-**Status:** OPEN — one portion repaired (20.hir callable dependency), the rest unaudited until now
+**Status:** OPEN — greatly reduced; 2026-08-27 counts stale. Re-measured 2026-11-11 (lane ne4): 96 files / 20,852 lines still below pre-snapshot baseline (was 458 / 32,530); sampled residue is mostly intentional post-snapshot refactor, see addendum
 **Severity:** critical — it is an ANCESTOR of `origin/main`, so the deletions are live
 
 ## What it is
@@ -155,3 +155,86 @@ including the 9.57x re-export fix. Repair must be per-file, restoring from
 `4edef8fab8~1` only where HEAD has no newer intentional change. The list above
 is the work queue, not a patch.
 
+
+## 2026-11-11 addendum (lane ne4, batch p3-ne4-20261111)
+
+Re-measured the doc's own regeneration command verbatim on release/1.0.0
+tip (fa6366ca8bf5, this worktree):
+
+- **96 files / 20,852 lines** still hold less content than
+  `4edef8fab8~1` — down from 458 files / 32,530 lines at filing. 362 of
+  the 458 queued files are no longer below baseline.
+- Of the 96, **29 are at zero lines** (file absent). Basename sweep of
+  those 29: 23 still exist under the same basename elsewhere in `src/`
+  (moved); 6 are basename-absent, and each sampled case is an intentional
+  post-snapshot change, not clobber residue:
+  - `40.mono/instantiation.spl`, `40.mono/verify/post_mono_verify.spl` —
+    the whole `src/compiler/40.mono/` phase directory was removed in the
+    post-snapshot monomorphization refactor (directory no longer exists;
+    mono is absorbed into 50.mir).
+  - `70.backend/mir_test_builder.spl` — renamed to
+    `backend/mir_test_builder_full.spl` (re-export comments at
+    `src/compiler/70.backend/__init__.spl:22-23` name the rename).
+  - `70.backend/backend/vhdl/*.spl` (9 files), `wasm_backend.spl`,
+    `wasm/wat_codegen.spl`, `c_backend_*`, `llvm_lib_*`, `cuda_*`,
+    `lean_mir_translate.spl`, `vhdl_*.spl` — the VHDL/Wasm/C-family
+    backends were relocated to `src/plugins/backend_vhdl/`,
+    `src/plugins/backend_wasm/` etc. (verified: `vhdl_abi.spl` now at
+    `src/plugins/backend_vhdl/vhdl/vhdl_abi.spl`).
+  - `src/compiler_rust/compiler/tests/process_checked_symbols_registered.rs`,
+    `src/compiler_rust/driver/tests/interpreter_module_global_writeback.rs`
+    — compiler_rust seed tests; compiler_rust is bootstrap-only legacy
+    (not audited further here; rustc out of lane scope).
+  - `src/os/apps/sshd/ssh_exec_status_contract.spl` (8 lines pre) — no
+    same-basename or `exec_status` reference in current `src/os/apps/sshd`;
+    sshd was heavily refactored (`ssh_deferred_exec_owner.spl` etc.).
+    Small; genuinely-lost-vs-absorbed not proven either way from the
+    basename sweep alone.
+- The 67 partial-shrink files sit in areas with heavy intentional
+  post-snapshot churn (CLI dispatch table shrunk to a 25-line shim by the
+  2026-11-06 registry reconciliation, driver cache, editor, sshd session,
+  QEMU runner scenario catalogues), consistent with refactor skew rather
+  than a single surviving reverted hunk; the doc's own caveat applies —
+  below-baseline line count is not proof of clobber damage.
+
+Verdict: the 2026-08-27 headline queue is STALE as stated (458 -> 96,
+most sampled rows intentional). The clobber repair is substantially
+advanced; no confirmed live reverted hunk was found in the sampled
+residue. Full closure needs a per-file refactor-vs-loss disambiguation
+over the 67 partial-shrink rows — a dedicated lane, not completed here.
+The Stage-3 wall evidence from 2026-08-27 remains historical; the
+20.hir callable-dependency restore predates this measurement.
+
+## 2026-11-11 addendum (lane hunk-audit-20261111)
+
+Sibling-of-clobber audit: same merged-and-then-dropped defect class as
+the 68596e901bd1 office hunk lost by transplant merge 9e7e7a526edb
+(PR #7597, restored by interp8 as 2866c3af35e5 / PR #8269). Mechanical
+signature sweep over the 2026-08-01..2026-09-15 fix-commit window
+(src/app, src/lib; 120 commits selected, 412 signature lines,
+P0 = office/dashboard): 56 commits had absent signatures, of which
+
+- **3 genuine drops restored** (specs 6/6 GREEN interpreted, on
+  work/hunk-audit-20261111):
+  - `20c824be328e` FLOOR/CEILING negative-significance inversion
+    (math_bridge.spl) — restored as 3ee9789eed71
+  - `574e897a4805` circular references silently wrong instead of #CIRC!
+    (file_formats.spl) — restored as 41a5f079e0bd, 3-way merged with
+    the tip's newer spill-spec phase
+  - `282d89f85df7` dependency-order recalculation (file_formats.spl) —
+    restored as b7bfdecb91ea
+- 2 office Calc-access candidates (`f67242086ac7`, `c0c2ef518afe`)
+  recorded BLOCKED-not-dropped: absent, but the tip carries a newer
+  channel-based transport reworking the same files; restoring would
+  regress it.
+- All other candidates excluded with rationale: the 2026-09-21
+  layout-renderer module split (symbols verified in successor files),
+  http_client/fs.spl moves, simd_scan and storage_roots reworks whose
+  fix intent survives in evolved form, SPIR-V blob regeneration, and
+  meta restore/revert commits.
+
+Full machine-readable report: `build/review/hunk-audit-20261111.sdn`
+(gitignored, on disk in the lane worktree). The three restored hunks
+were all from the same office-fix campaign as the known
+68596e901bd1 instance — the transplant dropped that campaign nearly
+wholesale, not as a one-off.

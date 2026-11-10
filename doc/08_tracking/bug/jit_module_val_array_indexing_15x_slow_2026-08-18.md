@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (SIMPLE-CAPABILITY / PERF-REGRESSION root cause)
+**Status:** FIXED 2026-11-11 (lane ne12) — shipped bench at parity (~1.5 ms vs filed 47,390 us) with correct checksums on JIT, untyped-callee residual reads correct, crc32 KAT passes under JIT, and the load-bearing `_table_copy()` mitigation has been removed from gzip/crc.spl (fresh seed 46fe8f6b6def)
 **Filed:** 2026-08-18
 **Found by:** root-causing crc32_text_codegen_lane_14x_slower_than_c_2026-08-18.
 
@@ -162,3 +162,56 @@ made to the 129 sites; annotating them is a viable belt-and-braces mitigation
 if a deploy stays blocked, but was not done here (129-site churn against a
 fix that already addresses the class).
 
+
+## Triage 2026-11-11 (lane ne12, seed-smoke on fresh seed 46fe8f6b6def)
+
+**Verdict: FIXED — including the "STILL OPEN" untyped-callee residual.**
+
+Re-ran the shipped reproduce under `SIMPLE_JIT_STRICT=1` on the fresh seed
+(filed numbers were `module_val_unannotated 47,390 us / GARBAGE`):
+
+```
+RESULT|local_control|1821 us|27500000
+RESULT|module_val_annotated|1531 us|27500000
+RESULT|module_val_unannotated|1523 us|27500000
+RESULT|module_val_typed_fn_init|1535 us|27500000
+```
+
+All four shapes at indexing parity (~1.5 ms per 1M reads vs the filed ~71
+ns/read slow path) AND all four checksums correct (27500000).
+
+Untyped-callee residual (this record's "STILL OPEN" tail:
+"`val T = make()` where the callee has no declared return type stays ANY and
+still returns garbage") — re-probed directly
+(`build/review/ne12/row7_untyped_fn_init.spl`: `fn make_table():` with NO
+declared return type, `val T_UNTYPED_FN = make_table()`, 1M indexed reads):
+
+```
+JIT:         checksum=27500000   (correct)
+interpreter: checksum=27500000   (correct)
+```
+
+CRC-32 KAT through the current public lane
+(`std.common.crypto.crc32.crc32("123456789".bytes())`) under the default JIT
+lane: `kat=3421780262` = 0xCBF43926 — passes.
+
+Deployment evidence: the load-bearing `_table_copy()` mitigation this record
+said must stay is GONE from the gzip/crc sources
+(`src/lib/{nogc_sync_mut,nogc_async_mut,gc_async_mut}/compression/gzip/crc.spl`
+— no module-level table at all anymore; the file forwards to
+`std.common.crypto.crc32` and carries only an i64-width workaround tagged to a
+different bug). The library was reworked only after the carrying compiler
+shipped, which corroborates the deployed-fix read.
+
+Fix lineage (all in-branch): `cd6659b8a866` (2026-08-18, module vals inherit a
+declared fn-call initializer return type — this record's fix #2);
+`0a8ee7ec45a3` (2026-08-20, `infer_const_array_type` for unannotated literals
+— fix #3, "47,390us/GARBAGE -> 4,387us/correct"); the untyped-callee residual
+additionally needed inferred (not just declared) return types to reach module
+val initializers — `c99d4a95b31b` "infer unannotated fn return types" plus the
+2026-08..2026-11 HIR/MIR hardening around `global_init_values`/`__module_init_dynamic`;
+this lane did not bisect the exact residual-closing hash and records the
+verification honestly rather than over-claiming one.
+
+Not carried by seedfix A (fa6939eb4b9e is JIT tuple unbox; unrelated to
+module-val global typing).

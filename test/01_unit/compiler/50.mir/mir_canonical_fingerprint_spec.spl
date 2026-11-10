@@ -1,0 +1,90 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Canonical MIR module fingerprint (native_cache_mir_fingerprint_prerequisite_blocked_2026-08-02)
+
+The fingerprint must not depend on Dict insertion order and must cover
+statics, constants and types, which serialize_mir_module omits.
+"""
+
+# @tag: unit, compiler, mir, fingerprint
+
+use std.spec
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_canonical_fingerprint.{mir_module_canonical_fingerprint_v1}
+
+fn span0() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "fixture/fp.spl", length: 0)
+
+fn i64_t() -> MirType:
+    MirType(kind: MirTypeKind.I64)
+
+fn mk_fn(sym: i64, name: text) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: sym), name: name,
+        signature: MirSignature(params: [], return_type: i64_t(), is_variadic: false, params_known: true),
+        locals: [],
+        blocks: [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [],
+                          terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId(id: 0), span: span0(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false,
+        unroll_factor: 0, pipeline_ii: 0, memory_banks: 0
+    )
+
+fn mk_const(sym: i64, name: text, v: i64) -> MirConstant:
+    MirConstant(symbol: SymbolId(id: sym), name: name, type_: i64_t(), value: MirConstValue.Int(v))
+
+fn mk_static(sym: i64, name: text) -> MirStatic:
+    MirStatic(symbol: SymbolId(id: sym), name: name, type_: i64_t(), init: nil, is_mutable: false)
+
+fn mk_type(sym: i64, name: text) -> MirTypeDef:
+    MirTypeDef(symbol: SymbolId(id: sym), name: name, kind: MirTypeDefKind.Struct(fields: []),
+               is_export_c: false, export_name: "")
+
+fn module_of(fns: [MirFunction], statics: Dict<SymbolId, MirStatic>,
+        consts: Dict<SymbolId, MirConstant>, types: Dict<SymbolId, MirTypeDef>) -> MirModule:
+    var m: Dict<SymbolId, MirFunction> = {}
+    for f in fns:
+        m[f.symbol] = f
+    MirModule(name: "fixture.fp", functions: m, statics: statics, constants: consts, types: types)
+
+fn base_module() -> MirModule:
+    module_of([mk_fn(1, "a"), mk_fn(2, "b"), mk_fn(3, "c")], {}, {}, {})
+
+describe "mir_module_canonical_fingerprint_v1":
+    it "is independent of function insertion order":
+        val m1 = module_of([mk_fn(1, "a"), mk_fn(2, "b"), mk_fn(3, "c")], {}, {}, {})
+        val m2 = module_of([mk_fn(3, "c"), mk_fn(1, "a"), mk_fn(2, "b")], {}, {}, {})
+        expect(mir_module_canonical_fingerprint_v1(m1)).to_equal(mir_module_canonical_fingerprint_v1(m2))
+
+    it "changes when a static is added":
+        var s: Dict<SymbolId, MirStatic> = {}
+        s[SymbolId(id: 10)] = mk_static(10, "g")
+        val m = module_of([mk_fn(1, "a"), mk_fn(2, "b"), mk_fn(3, "c")], s, {}, {})
+        expect(mir_module_canonical_fingerprint_v1(m) == mir_module_canonical_fingerprint_v1(base_module())).to_equal(false)
+
+    it "changes when a constant is added or its value differs":
+        var c1: Dict<SymbolId, MirConstant> = {}
+        c1[SymbolId(id: 20)] = mk_const(20, "K", 1)
+        var c2: Dict<SymbolId, MirConstant> = {}
+        c2[SymbolId(id: 20)] = mk_const(20, "K", 2)
+        val m1 = module_of([mk_fn(1, "a")], {}, c1, {})
+        val m2 = module_of([mk_fn(1, "a")], {}, c2, {})
+        val m0 = module_of([mk_fn(1, "a")], {}, {}, {})
+        expect(mir_module_canonical_fingerprint_v1(m1) == mir_module_canonical_fingerprint_v1(m0)).to_equal(false)
+        expect(mir_module_canonical_fingerprint_v1(m1) == mir_module_canonical_fingerprint_v1(m2)).to_equal(false)
+
+    it "changes when a type is added":
+        var t: Dict<SymbolId, MirTypeDef> = {}
+        t[SymbolId(id: 30)] = mk_type(30, "T")
+        val m = module_of([mk_fn(1, "a"), mk_fn(2, "b"), mk_fn(3, "c")], {}, {}, t)
+        expect(mir_module_canonical_fingerprint_v1(m) == mir_module_canonical_fingerprint_v1(base_module())).to_equal(false)
+
+    it "carries the schema tag prefix":
+        expect(mir_module_canonical_fingerprint_v1(base_module()).starts_with("simple/mir-fp/v1:")).to_equal(true)

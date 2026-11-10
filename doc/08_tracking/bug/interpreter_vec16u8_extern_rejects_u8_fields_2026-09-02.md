@@ -1,6 +1,6 @@
 # Every `Vec16u8`-taking SIMD extern is uncallable from the interpreter
 
-- **Status:** OPEN
+- **Status:** FIXED (2026-11-11, lane interp9) — `require_u8_field` accepts `UInt{width:8}`; dual-run spec green on seed. See addendum below.
 - **Found:** 2026-09-02, while wiring dual-run pairs for
   `src/runtime/runtime_simd_dispatch.c`
 - **Severity:** blocks all interpreter-side use and all dual-run coverage of the
@@ -81,3 +81,31 @@ Observed on Windows. The defect is in platform-independent Rust
 (`match` on a `Value` variant) with no `cfg` guards anywhere on the path, so it
 is expected to reproduce identically on Linux and macOS — but that was **not**
 tested from this host, and the claim should be verified before it is relied on.
+
+## 2026-11-11 addendum (lane interp9, work/p3-interp9-20261111) — FIXED, verified on seed
+
+Verdict: FIXED, by exactly the one-helper widening this record prescribed.
+`require_u8_field` (`src/compiler_rust/compiler/src/interpreter_extern/simd.rs`)
+now has a `Some(Value::UInt { value, width: 8 })` arm range-checking
+`0..=255` (`u8::try_from`), keeping the `Value::Int` arm. The unblock condition
+in this record is also satisfied: the scalar twin
+`std.common.simd_lane_pure.shuffle_u8x16_pure` is wired as a `@dual_pair`
+against `rt_simd_shuffle_u8x16` in
+`test/01_unit/lib/common/spec/dual_run_tranche_e_spec.spl` (identity mask,
+reversal, cross-vector indices 16..31, bit-7 zeroing, fold-through-5-bit-mask,
+all-zero operands, `a == b`).
+
+Verification actually run (seed-smoke, tracked `bin/simple.exe` build-commit
+`46fe8f6b6def`, `SIMPLE_LIB=src`, `--mode=interpreter --no-cache`):
+
+- `test/01_unit/lib/common/spec/dual_run_tranche_e_spec.spl` — 5/5 PASS,
+  including `shuffle_u8x16_vs_rt_simd_shuffle_u8x16`, `shl_u64x4`, `shr_u64x4`,
+  `hmax_f32x4`, `hmin_f32x4`, `str_search` dual pairs.
+- Direct probe: `Vec16u8.from_array(...)`/`splat(...)` construct correctly and
+  `to_array()` round-trips on the interpreter lane.
+
+Out of scope, observed while probing (not this record's defect): a standalone
+`bin/simple run` of a locally redeclared `extern fn rt_simd_add_u8x16` panicked
+with a Rust `capacity overflow` in the splice path. The same call shape passes
+under the test-runner lane. Filed as follow-up evidence in
+`build/review/p3fix-interp9-20261111.sdn`; not pursued here.

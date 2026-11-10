@@ -1,6 +1,6 @@
 # Reading a class element out of a `[Class]` field returns a COPY; `me`-method mutation is lost
 
-- **Status:** OPEN
+- **Status:** FIXED — 2026-11-11 (lane interp8): engine aliasing fixed by the 2026-11-04 ClassInstance default-carrier flip (6c7b4db3d392; minimal repro prints `local=1 refetch=1 direct=1`; class_ref spec 4/4). The office acceptance spec was still RED because office fix 68596e901bd1 was dropped from `sheets_app.spl` by a later tree transplant — restored in this lane; cursor spec 6/6 and hidden-row nav spec 6/6 under the interpreter.
 - **Filed:** 2026-08-17
 - **Severity:** HIGH (silent wrong answer, no diagnostic)
 - **Engine:** tree-walk interpreter (`bin/simple test`, and `bin/simple run` with
@@ -264,3 +264,38 @@ for-loop element, nested grid, `map`/`filter` result, slice, dict value and
 carrier on). The 2026-11-04 default-flip note stands; this lane's row-16/row-18
 repros additionally confirm dict/list element reads of class values alias.
 Bug_db status change remains with the coordinator per the 2026-11-04 note.
+
+
+## 2026-11-11 triage — FIXED (lane interp8; code change in this lane)
+
+Two layers verified separately on the fresh worktree seed (build-commit
+`46fe8f6b6def`, `SIMPLE_LIB=src`, `--mode=interpreter --no-cache`):
+
+1. **Engine layer** (the defect this record tracks): FIXED by the
+   2026-11-04 ClassInstance default-carrier flip (`6c7b4db3d392` "fix(interp):
+   class reference semantics by default"). The record's 5-line minimal repro
+   (`build/p3fix-interp8/row3_minimal_repro.spl`,
+   `SIMPLE_EXECUTION_MODE=interpreter`) now prints `local=1 refetch=1
+   direct=1` — the unblock condition's first half.
+   `test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`
+   is 4/4 under `--mode=interpreter`.
+
+2. **Office acceptance layer**: `test/01_unit/app/office/cursor_hidden_row_invariant_spec.spl`
+   was still RED 6/6, but NOT for the engine defect — the office-side fix
+   `68596e901bd1` ("fix(office): SheetsApp.navigate_to landed the cursor on
+   hidden rows", 2026-08-17) is an ancestor of HEAD, yet its hunk is absent
+   from `src/app/office/sheets/sheets_app.spl`: a later tree transplant
+   (merge `9e7e7a526edb` / the "transplant current main tree onto
+   release/1.0" commits) restored the pre-fix file. The current
+   `navigate_to` had no hidden-row skip at all (zero `hidden`/`skip`
+   occurrences in the file). Restored the exact `68596e901bd1` hunk in this
+   lane. After the restore, on the interpreter:
+   - `cursor_hidden_row_invariant_spec.spl` — 6 total, 6 passed
+   - `sheets_app_hidden_row_nav_spec.spl` — 6 total, 6 passed
+
+Blast-radius note for the coordinator: the same transplant may have dropped
+other app/office hunks. The sibling record
+`calc_cursor_hidden_row_awareness_divergence_2026-08-11.md` describes this
+same lost fix from the app-defect angle and may warrant its own status flip;
+a wider audit of `68596e901bd1`-era office fixes against the current tree is
+recommended (out of scope for this lane).

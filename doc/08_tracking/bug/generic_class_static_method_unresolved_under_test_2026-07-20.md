@@ -1,7 +1,7 @@
 # Bug: `GenericClass<T>.static_method()` unresolved under `simple test` (non-generic classes work fine)
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/futures_promises_spec.spl`)
+- **Status:** CLOSED 2026-11-11 — FIXED on release; verified by lane ne10 (seed 46fe8f6b6def)
 - **Area:** interpreter method-call dispatch for generic classes (likely
   `src/compiler_rust/compiler/src/interpreter_method/mod.rs`, same family as
   `doc/08_tracking/bug/enum_impl_static_fn_method_call_path_skips_impl_methods_2026-07-20.md`),
@@ -97,3 +97,28 @@ bin/release/x86_64-unknown-linux-gnu/simple test <non-generic control spec above
 Not checked against the pure-Simple self-hosted compiler or the JIT/native
 path — only the Rust seed interpreter (the path `bin/simple test` exercises on
 this host) was probed.
+
+---
+
+## 2026-11-11 addendum — lane ne10 (P3 traverse, batch ne10)
+
+**Verdict: FIXED on release.**
+
+- **Fixing commit:** `2a488e2cf130` `fix(hir): apply nominal generic declaration defaults and
+  arity` (branch tip of PR #7597, merged as `9e7e7a526edb`, 2026-11-07; ancestor of release tip).
+  This matches the root-cause hypothesis recorded above: generic class instances were being
+  looked up under a parameterized/mangled type name the static-method table had no entry for;
+  the HIR nominal-generic-owner work makes the declared owner resolve.
+- **Verification (seed-smoke, tracked seed `bin/simple.exe` build-commit `46fe8f6b6def`,
+  `--mode=interpreter --no-cache`):**
+  - The doc's minimal repro (`class Box<T>` + inline `static fn wrap`, control included) now
+    passes: `1 example, 0 failures` — the
+    `semantic: unknown static method wrap on class Box` error no longer reproduces.
+  - The original trigger `test/feature/usage/futures_promises_spec.spl` now executes all 15
+    examples (`Results: 15 total, 14 passed, 1 failed`). Every
+    `Promise.new/resolved/rejected(...)` static call resolves and runs; on 2026-07-20, 9 of ~15
+    failed at the first line with `unknown static method resolved on class Promise`.
+  - The one remaining failure (`retries failed future`:
+    `expected Promise(state: PromiseState::Resolved(100), callbacks: []) to equal 100`) is a
+    spec expectation mismatch (a Promise object compared to a bare `100`), not this dispatch
+    defect.

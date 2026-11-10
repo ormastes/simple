@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** FIXED 2026-11-11 (lane ne12) — seed parser fix 8702b3c3826d + self-hosted parity 13fd96fd4f9f; repro `zero other` on JIT and interpreter with fresh seed 46fe8f6b6def (the `=>` lambda sub-item remains OPEN, tracked by arrow_lambda_parser_half_reverted_by_snapshot_commit_2026-09-01)
 **Filed:** 2026-09-05
 **Affects:** BOTH the Rust seed and the Stage-2 pure-Simple compiler — this is a
 parser/grammar defect, not a codegen one.
@@ -162,3 +162,41 @@ Note that `\x:` closures, while they parse and interpret correctly, **SEGV under
 Stage-2 native codegen** — that is a separate defect, tracked as Defect 3 in
 `stage2_native_codegen_silent_wrong_values_aarch64_2026-09-05.md`.
 
+
+## Triage 2026-11-11 (lane ne12, seed-smoke on fresh seed 46fe8f6b6def)
+
+**Verdict: FIXED** for the title defect (inline `| pattern -> body` match arm
+followed by another arm).
+
+The filed 6-line repro (`fn f(n: i64) -> text: match n: | 0 -> "zero" | _ -> "other"`)
+now prints `zero other` on BOTH engines with the fresh seed:
+
+```
+SIMPLE_LIB=src bin/simple.exe run row1_inline_arrow.spl          -> zero other
+SIMPLE_EXECUTION_MODE=interpret bin/simple.exe run row1_inline_arrow.spl -> zero other
+```
+
+Attribution:
+- Seed parser: `8702b3c3826d` "fix(parser): preserve newline boundaries between
+  arrow match arms" (2026-11-07, touches `src/compiler_rust/parser` — binary.rs,
+  control_flow.rs, core.rs; pins `parser/tests/match_arrow_arm_boundaries.rs`).
+  This is the doc's "not investigated" site: the `|` binary-or no longer absorbs
+  a newline-bound arm marker at match-arm indentation.
+- Self-hosted frontend parity: `13fd96fd4f9f` "feat(parser): `| Pat -> expr`
+  match arms in self-hosted frontend + seed parity tests" (2026-11-09); its
+  message confirms "Seed already parses the form".
+
+The block-form and `case` forms were already working and still work (no
+regression observed in the same run set).
+
+**Residual (separately tracked, NOT closed by this verdict):** the second,
+independent grammar gap recorded in this doc — the bare `x => x + 1` lambda
+spelling — still fails on the fresh seed with
+`expected expression, found FatArrow` on both engines (seed-smoke, lane ne12).
+It is tracked by
+`doc/08_tracking/bug/arrow_lambda_parser_half_reverted_by_snapshot_commit_2026-09-01.md`
+(parenthesized `(x) => x + 1` parses; the quick-reference bare spelling does not).
+Not seedfix A (fa6939eb4b9e is JIT tuple-destructure unbox; unrelated to the
+parser). Usage census caveat from this lane: the guide recommendation issue
+this doc raises is moot once both halves land; the `=>` half still steers
+readers at `doc/07_guide/quick_reference/syntax_quick_reference.md`.

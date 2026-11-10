@@ -1,0 +1,95 @@
+# Purpose and audience: executable evidence for self-hosted compiler engineers
+# that a BARE field name inside a method body (`xlen` instead of `self.xlen`)
+# is reported by HIR lowering as a field-aware diagnostic rather than the
+# generic "unresolved name", and that a bare field name which happens to
+# resolve to a module-level global of the same name is WARNED about
+# (W-HIR-BAREFIELD-001) instead of silently binding to the global.
+# Bug: doc/08_tracking/bug/bare_field_reference_in_methods_is_illegal_but_pervasive_2026-08-10.md
+# Staged plan: the shadowed-global case stays a warning while the in-tree
+# census of offenders is non-zero; the unresolved case was already an error.
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+
+fn lower_messages(src: text) -> [text]:
+    # Returns [joined diagnostic messages, hard error count, recovered count].
+    val parsed = parse_full_frontend(src, "testdata/bare_field.spl", "bare_field", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/bare_field.spl")
+    lowering.lower_module(parsed)
+    var msgs = ""
+    for m in lowering.diagnostic_messages:
+        msgs = msgs + m + "\n"
+    var hard = 0
+    var soft = 0
+    for rec in lowering.diagnostic_recovered:
+        if rec:
+            soft = soft + 1
+        else:
+            hard = hard + 1
+    [msgs, "{hard}", "{soft}"]
+
+val BARE_UNRESOLVED = "class Desc:\n" +
+    "    xlen: i32\n" +
+    "    me bare() -> i32:\n" +
+    "        xlen\n"
+
+val BARE_SHADOWS_GLOBAL = "fn xlen() -> i32:\n" +
+    "    7\n" +
+    "class Desc:\n" +
+    "    xlen: i32\n" +
+    "    me bare() -> i32:\n" +
+    "        xlen\n"
+
+val QUALIFIED = "class Desc:\n" +
+    "    xlen: i32\n" +
+    "    me qualified() -> i32:\n" +
+    "        self.xlen\n"
+
+val LOCAL_SHADOWS_FIELD = "class Desc:\n" +
+    "    xlen: i32\n" +
+    "    me local(xlen: i32) -> i32:\n" +
+    "        val n = xlen\n" +
+    "        n\n"
+
+val FREE_FN_NO_CLASS = "fn free() -> i32:\n" +
+    "    xlen\n"
+
+describe "HIR bare field reference diagnostic":
+    it "reports a bare field name with no other binding as a field-aware error":
+        step("given a method reading a declared field without self. when lowered then an error names the field and the self. spelling")
+        val r = lower_messages(BARE_UNRESOLVED)
+        expect(r[0].contains("[E-HIR-BAREFIELD-001]")).to_equal(true)
+        expect(r[0].contains("bare field reference `xlen`")).to_equal(true)
+        expect(r[0].contains("self.xlen")).to_equal(true)
+        expect(r[1]).to_equal("1")
+
+    it "warns when a bare field name silently resolves to a same-named global":
+        step("given a module-level xlen and a field xlen when a method reads bare xlen then a warning is recorded, not an error")
+        val r = lower_messages(BARE_SHADOWS_GLOBAL)
+        expect(r[0].contains("[W-HIR-BAREFIELD-001]")).to_equal(true)
+        expect(r[0].contains("bare field reference `xlen`")).to_equal(true)
+        expect(r[1]).to_equal("0")
+        expect(r[2]).to_equal("1")
+
+    it "is silent for a self.-qualified field read":
+        step("given self.xlen when lowered then no bare-field diagnostic is recorded")
+        val r = lower_messages(QUALIFIED)
+        expect(r[0].contains("BAREFIELD")).to_equal(false)
+        expect(r[1]).to_equal("0")
+
+    it "is silent when a parameter shadows the field name":
+        step("given a parameter xlen when the body reads xlen then the local wins with no diagnostic")
+        val r = lower_messages(LOCAL_SHADOWS_FIELD)
+        expect(r[0].contains("BAREFIELD")).to_equal(false)
+        expect(r[1]).to_equal("0")
+
+    it "keeps the generic unresolved-name error outside any class":
+        step("given a free function reading an unknown name when lowered then the plain unresolved-name error is kept")
+        val r = lower_messages(FREE_FN_NO_CLASS)
+        expect(r[0].contains("unresolved name: xlen")).to_equal(true)
+        expect(r[0].contains("BAREFIELD")).to_equal(false)

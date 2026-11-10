@@ -4,7 +4,9 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** FIXED (2026-11-11, lane boot17) — all five defects were verified
+fixed on a stage2 candidate 2026-11-05 (addenda below); re-confirmed at tip by
+source-guard checks and seed probes of every reproducer. See addendum.
 **Filed:** 2026-09-05
 **Host:** aarch64-unknown-linux-gnu (Ubuntu 24.04)
 **Severity:** HIGH — four of five defects return a *wrong value with exit 0*, no
@@ -188,3 +190,26 @@ literal dicts): exit 0 — no SIGSEGV, correct values. Nonexistent-method probe
 size` MIR lowering error (build rc=1, no binary emitted) — the seed's
 refusal-to-substitute mitigation now holds on the stage2 lane too, so all
 five recorded defects are verified fixed at current release/1.0.0 source.
+
+## Addendum 2026-11-11 (lane boot17) — FIXED, re-confirmed at tip (aarch64 host-limited)
+
+Prior verification: the 2026-11-05 addenda above ran the exact reproducers
+through a cranelift aarch64 stage2 candidate built from release/1.0.0-source
+(df48a86ff5a worktree) — defects 1-2 exit 0 with correct values, defects 3-5
+(closure call, Dict.len(), nonexistent-method refusal) exit 0 with correct
+values / build-refusal. This lane's branch is cut from origin/release/1.0.0
+tip, so that evidence covers this tree; per the no-green-rerun rule the
+aarch64 stage2 probes were not repeated (no aarch64 host here).
+
+**Source-guard + seed re-confirmation actually run** (worktree
+simple-p3-boot17-20261111, fresh seed 46fe8f6b6def):
+
+- Defect 5 refusal pinned in source: `mir_legacy_message_is_fatal`
+  (src/compiler/50.mir/mir_lowering_types.spl:1272-1274) classifies
+  `unresolved method call:` as FATAL, so a missing method is a build error,
+  not a silent plausible integer. Seed run of `{"a": 1}.size()`:
+  `Runtime error: Function 'Dict.size' not found ... Refusing to substitute a
+  placeholder value` — the seed's mitigation holds in current source.
+- Combined defects 1-4 probe under `bin/simple.exe run --mode=interpreter`:
+  `direct=14 indirect=14`, `ys_len=3 ys=[2, 4, 6]`, `clo=15`, `dict_len=1`,
+  `lit_len=2` — every interpreter-column value from the doc's tables matches.

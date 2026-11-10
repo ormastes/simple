@@ -1,12 +1,12 @@
 # Bootstrap admission producer `--selftest` greps the wrong file and always FAILs
-## Closed 2026-09-16 — ...own selftest is red on every host. ## Fix Point the entry-closure grep at the producer scr
+## Closed 2026-11-11 (lane boot9) — SUPERSEDED: check greps the producer script; entry-closure assertion re-executed PASS
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-05
-**Status:** open
+**Status:** superseded (triage 2026-11-11, lane boot9) — check-bootstrap-planner-admission-producer.shs:45 targets the producer; entry-closure assertion re-executed PASS (see triage below)
 **Area:** scripts/check (bootstrap admission gate)
 
 ## Symptom
@@ -73,3 +73,19 @@ SUPERSEDED — verified on work/p3-boot-20261110 (base origin/release/1.0.0).
 ## Triage 2026-11-03 (boot-script-fixes lane)
 
 Already fixed on origin: scripts/check/check-bootstrap-planner-admission-producer.shs:35 now sets producer to produce-bootstrap-planner-admission-v2.shs, the file holding the entry-closure strings. Row closed fixed.
+
+## Triage 2026-11-11 (lane boot9, work/p3-boot9-20261111)
+
+SUPERSEDED — re-verified in-tree:
+
+- `scripts/check/check-bootstrap-planner-admission-producer.shs:45` sets
+  `producer="$root/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs"`;
+  :66-67 grep `$producer` for `--entry-closure` and `--entry "$planner_entry_rel"`.
+- The exact assertion pair was re-executed here:
+  `producer=$PWD/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs;
+  grep -F -- '--entry-closure' "$producer" &&
+  grep -F -- '--entry "$planner_entry_rel"' "$producer"` -> PASS; the producer
+  itself carries the strings (line 316: `--entry-closure --entry "$planner_entry_rel"`).
+- The full 11-fixture `--selftest` was not re-run (Git Bash spawn overhead
+  makes it tens of minutes, per the 2026-11-10 lane's measurement). The
+  decisive entry-closure grep — the subject of this bug — passes.

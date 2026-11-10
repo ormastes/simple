@@ -31,6 +31,7 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 SECCOMP_SRC="$ROOT_DIR/src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c"
 NS_SRC="$ROOT_DIR/src/runtime/test/rt_browser_renderer_namespace_selfcheck.c"
 STARTUP_SRC="$ROOT_DIR/src/runtime/test/rt_browser_renderer_startup_failure_selfcheck.c"
+PREINIT_ENTRY_SRC="$ROOT_DIR/src/runtime/test/rt_browser_renderer_preinit_entry_selfcheck.c"
 
 err() { echo "ERROR — nothing was checked: $1"; exit 2; }
 
@@ -184,8 +185,42 @@ esac
 # and rt_browser_renderer_sandbox_enter refuses when preinit never ran.
 CHECKS=$((CHECKS + 2))
 
+# --- SANDBOX explicit preinit entry (core-C / constructorless lanes) ---------
+# The checks above all reach the jail through the .preinit_array constructor,
+# which the core-C standalone archive and the Stage4 capsule compile out.
+# This one proves the exported startup entry the generated entry main calls
+# instead (rt_browser_renderer_preinit_enter) routes the worker marker into
+# the same contract, and that ordinary argv is left untouched by that call.
+if ! build "$PREINIT_ENTRY_SRC" "$WORK/preinit_entry"; then
+    cat "$WORK/build.log"
+    echo "FAIL — browser renderer preinit-entry self-check did not compile"
+    exit 1
+fi
+
+set +e
+"$WORK/preinit_entry" >"$WORK/preinit_entry.log" 2>&1
+PREINIT_ENTRY_EXIT=$?
+set -e
+cat "$WORK/preinit_entry.log"
+
+case "$PREINIT_ENTRY_EXIT" in
+    0)
+        grep -q 'rt_browser_renderer_preinit_entry_selfcheck: PASS' \
+            "$WORK/preinit_entry.log" ||
+            err "preinit-entry self-check exited 0 without its PASS marker"
+        ;;
+    *)
+        echo "FAIL — browser renderer preinit-entry self-check failed (exit $PREINIT_ENTRY_EXIT)"
+        exit 1
+        ;;
+esac
+# Two assertions: the exported entry enforces the empty-envp contract with
+# exit 126 for the worker marker, and an ordinary argv passes through the
+# entry with preinit inactive and sandbox_enter still refusing.
+CHECKS=$((CHECKS + 2))
+
 # Non-vacuity: a run that verified nothing is an ERROR, never a pass.
 [ "$CHECKS" -gt 0 ] || err "no checks were executed"
 
-echo "PASS — $CHECKS check(s) verified: allow-listed read/write work inside the jail, a non-allow-listed socket() is SIGSYS-killed by SECCOMP_RET_KILL_PROCESS through the real rt_browser_renderer_sandbox_enter, the namespace posture ($POSTURE) matches the observed /proc/self/ns/net identity without changing effective credentials, an injected partial namespace failure exits 126, a non-empty envp is refused with exit 126, and sandbox_enter fails closed without preinit"
+echo "PASS — $CHECKS check(s) verified: allow-listed read/write work inside the jail, a non-allow-listed socket() is SIGSYS-killed by SECCOMP_RET_KILL_PROCESS through the real rt_browser_renderer_sandbox_enter, the namespace posture ($POSTURE) matches the observed /proc/self/ns/net identity without changing effective credentials, an injected partial namespace failure exits 126, a non-empty envp is refused with exit 126, sandbox_enter fails closed without preinit, the exported rt_browser_renderer_preinit_enter entry enforces the same empty-envp contract for the worker marker, and an ordinary argv passes through the entry untouched with sandbox_enter still refusing"
 exit 0

@@ -1,7 +1,11 @@
 # Module resolver re-probes the numbered layer dirs on every import — 12-line fixture never finishes
 
 - **Filed:** 2026-08-31
-- **Status:** OPEN (fix in progress)
+- **Status:** FIXED (2026-11-11, lane ne15) — the per-process `(parent, segment)`
+  memos this doc prescribed are present in `resolution.rs` with the guard
+  preserved and cache-clear wiring; whether the Stage-2/3 route fully completes
+  behind the memo remains unverified on this lane (native routes not granted).
+  See addendum.
 - **Platform:** observed on aarch64-apple-darwin; the code is platform-independent
 - **Component:** `src/compiler_rust/compiler/src/module_resolver/resolution.rs`
 
@@ -73,3 +77,35 @@ string.
 Whether the route COMPLETES once this is cached, or whether a further cost sits
 behind it. A cached resolver is necessary here; it is not yet shown to be
 sufficient. Do not record this gate as passing on the strength of this fix alone.
+
+
+## Addendum 2026-11-11 (lane ne15) — FIXED; prescribed per-process memo is present
+
+**Verification** (source inspection at tip f7640d20a458, worktree
+simple-p3-ne15-20261111):
+`src/compiler_rust/compiler/src/module_resolver/resolution.rs:30-85` now
+carries exactly the fix this doc prescribed:
+
+- `thread_local!` per-process memos `NUMBERED_DIR_CACHE` and
+  `SEGMENT_WITHIN_NUMBERED_CACHE`, keyed by `(parent, segment)`, checked at
+  the top of `find_numbered_dir` / `find_segment_within_numbered_dirs`;
+- hit/miss perf counters (`NUMBERED_DIR_HITS` / `_MISSES`,
+  `SEGMENT_WITHIN_NUMBERED_HITS` / `_MISSES`) for observation;
+- the `!prefix.is_empty()` guard is preserved with the dotfile-vacuous-truth
+  rationale this doc demanded (`find_numbered_dir_uncached`, ~:112-130);
+- an explicit BUILD-LIFETIME ASSUMPTION comment — per process, never on disk,
+  mirroring the `parsed_imported_module` memo constraint this doc cited;
+- `clear_numbered_dir_cache()` wired into the `clear_module_cache` chain
+  alongside `clear_path_resolution_cache` / `clear_fs_probe_cache`.
+
+The 1052-line zero-cache file this doc measured is now 1154 lines with the
+memo and counters. The uncached bodies (`find_numbered_dir_uncached`) preserve
+the original probe semantics exactly.
+
+**Not established** (per this doc's own caveat): whether the
+`check-bootstrap-stage2-struct-receiver.shs` positional Stage-2/3 route fully
+completes behind the memo. That gate requires a freshly built stage-2
+compiler + runtime archive (a native-build route); native builds are not
+granted on this lane, and the native-build Windows hang is a separately
+routed live defect. Do not record the gate as passing on the strength of the
+memo alone — the memo is necessary, sufficiency still needs the gated run.

@@ -1012,6 +1012,14 @@ impl<'a> MirLowerer<'a> {
                                     val_reg
                                 }
                             };
+                            // Bug jit_struct_assignment_aliases_not_copies: `arr[i] = s`
+                            // for an existing value-struct PLACE must snapshot it,
+                            // same rule as the Let (site G) and field (site H) arms.
+                            let boxed_val = if Self::hir_expr_is_place(&value.kind) {
+                                self.copy_if_value_type(boxed_val, value.ty)?
+                            } else {
+                                boxed_val
+                            };
 
                             // Use rt_index_set for array/dict index assignment (handles both types)
                             let target = crate::mir::CallTarget::from_name("rt_index_set");
@@ -1090,6 +1098,41 @@ impl<'a> MirLowerer<'a> {
                                 self.lower_array_destructuring_assign(nested, elem_reg, 1)?;
                                 continue;
                             }
+                            // `rt_tuple_get` returns the stored tagged
+                            // RuntimeValue verbatim, so storing `elem_reg` raw
+                            // fed `v << 3` into an int-typed sink (`10` read
+                            // back as `80` under JIT). Decode the leaf through
+                            // the same shared type-directed unbox tail as
+                            // tuple `.get(const)` / `d[k]` before the Store;
+                            // aggregate and erased (ANY) leaves pass through
+                            // unchanged. Same defect family as
+                            // jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17
+                            // — that fix (ee815637f72) typed only the `.get()`
+                            // path and missed this destructuring-assign site.
+                            let elem_reg = self.unbox_dict_read_result(elem_reg, elem.ty)?;
+                            // A global leaf has no addressable lvalue:
+                            // `lower_lvalue(Global)` is a dynamic value lookup,
+                            // not an address, so the generic Store below wrote
+                            // nowhere the global read path observes (the sink
+                            // kept its initial value under JIT). Mirror the
+                            // plain `g = v` arm: GlobalStore with the
+                            // tagged-slot boxing tail.
+                            if let HirExprKind::Global(global_name) = &elem.kind {
+                                let global_name = global_name.clone();
+                                let stored_val =
+                                    self.box_scalar_for_tagged_slot(elem.ty, elem.ty, elem_reg)?;
+                                let stored_ty =
+                                    if stored_val != elem_reg { TypeId::ANY } else { elem.ty };
+                                self.with_func(|func, current_block| {
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::GlobalStore {
+                                        global_name,
+                                        value: stored_val,
+                                        ty: stored_ty,
+                                    });
+                                })?;
+                                continue;
+                            }
                             let addr_reg = self.lower_lvalue(elem)?;
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
@@ -1119,6 +1162,11 @@ impl<'a> MirLowerer<'a> {
                         // Nullable scalar globals (`T?`) are tagged-value slots too,
                         // not just `Any` -- see `slot_holds_tagged_value`.
                         let stored_val = self.box_scalar_for_tagged_slot(target.ty, ty, val_reg)?;
+                        let stored_val = if Self::hir_expr_is_place(&value.kind) {
+                            self.copy_if_value_type(stored_val, ty)?
+                        } else {
+                            stored_val
+                        };
                         let stored_ty = if stored_val != val_reg { TypeId::ANY } else { ty };
                         self.with_func(|func, current_block| {
                             let block = func.block_mut(current_block).unwrap();
@@ -1196,6 +1244,14 @@ impl<'a> MirLowerer<'a> {
                             store_val
                         } else {
                             self.unbox_scalar_for_raw_slot(target.ty, ty, store_val)?
+                        };
+                        // Bug jit_struct_assignment_aliases_not_copies: `b = a`
+                        // re-assignment of an existing value-struct PLACE must
+                        // copy, mirroring the Let arm's site G.
+                        let store_val = if Self::hir_expr_is_place(&value.kind) {
+                            self.copy_if_value_type(store_val, target.ty)?
+                        } else {
+                            store_val
                         };
 
                         let addr_reg = self.lower_lvalue(target)?;

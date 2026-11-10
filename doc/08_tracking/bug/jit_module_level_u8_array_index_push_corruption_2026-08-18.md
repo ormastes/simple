@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
-**Status:** OPEN — real correctness bug, worked around at the call site (not fixed in the compiler)
+**Status:** FIXED 2026-11-11 (lane ne12) — seed fix a00a1811c049 (2026-10-05, decode an ANY argument before the typed `[u8]` push, pinned by MIR test `any_push_into_u8_array_is_decoded`); minimal repro reads back 65/65 on JIT and interpreter with fresh seed 46fe8f6b6def
 **Binary used:** `bin/release/x86_64-unknown-linux-gnu/simple` (Rust bootstrap
 seed), 59620392 bytes, mtime 2026-08-18 01:08:42. `readlink -f bin/simple`
 resolved to this path at measurement time.
@@ -83,3 +83,37 @@ No compiler source change was made — this was found and worked around while
 doing library-level perf work, not a compiler-focused task. Filing this so
 whoever owns Cranelift JIT array/module-scope codegen can pick it up.
 
+
+## Triage 2026-11-11 (lane ne12, seed-smoke on fresh seed 46fe8f6b6def)
+
+**Verdict: FIXED — compiler-side, no longer worked around.**
+
+The minimal repro from this record (module-level `val TBYTES = TABLE.bytes()`,
+read `TBYTES[0]` into `x`, `out.push(x)`, read `out[0]`) now prints
+`x=65` and `after push x: 65` on BOTH engines with the fresh seed:
+
+```
+SIMPLE_LIB=src bin/simple.exe run row6_modval_u8_push.spl          -> x=65 / after push x: 65
+SIMPLE_EXECUTION_MODE=interpret bin/simple.exe run row6_modval_u8_push.spl -> x=65 / after push x: 65
+```
+
+(The filed symptom was `after push x: 8`, i.e. `65 >> 3` — the tag word's
+low byte stored instead of the decoded value.)
+
+Fixing commit: `a00a1811c049` "fix(seed): decode an ANY argument before the
+typed `[u8]` push (expression and statement paths)" (2026-10-05,
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_method.rs` +
+`lowering_stmt.rs`), pinned by the MIR regression test
+`any_push_into_u8_array_is_decoded` (compiles `out.push(xs[0])` on `xs: [Any]`
+and asserts an `UnboxInt` precedes `rt_typed_bytes_u8_push`). The module-level
+source array element arrives ANY-typed at the typed byte push; the decode now
+happens at the push boundary, which is exactly the "combination
+(module-level source + push-elsewhere)" shape this doc isolated.
+
+The base64 call-site workaround (function-local `encode_bytes`) remains in
+`src/lib/common/base_encoding/base64.spl` — harmless either way; removing it
+is library-owner hygiene, not required for this verdict.
+
+Not carried by seedfix A (fa6939eb4b9e, 2026-11-10, is JIT tuple-destructure
+unbox in `lowering_stmt.rs`; a00a1811c049 landed 2026-10-05 and pins this
+exact shape — honest attribution is the October fix).

@@ -6,7 +6,7 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
 **Area:** interpreter / SFFI return marshalling
-**Status:** open
+**Status:** FIXED (2026-11-11, lane interp12) — Defect A closed by the `[u8]?` declarations of every nil-returning fs extern (pinned, spec green); Defect B (cross-engine `rt_bytes_alloc(n).len()`) fixed by the packed-byte bridge in `runtime_bridge.rs`, verified equal on the interpreter and JIT lanes of fresh seed 46fe8f6b6def; defect-class spec 6/6 GREEN. See "Addendum 2026-11-11". (Supersedes:) open
 **Found while:** verifying the premise of todo_db rows 6/40/96/155/355/418/487
 (all seven are duplicate scanner hits of one TODO in
 `src/lib/nogc_sync_mut/io/signature_sffi.spl`).
@@ -77,3 +77,31 @@ Defect A resolved by declaration: every `rt_file_read_bytes` declaration is alre
 (pinned by `test/01_unit/lib/contract/fs_extern_optional_spec.spl`). The remaining nil-returning
 `rt_io_tcp_read` declarations (`http_baremetal.spl`, `_SshTool/run.spl`, `_SshTool/transport.spl`)
 are now `[u8]?` with explicit absence handling. `rt_io_file_read` returns empty (documented), not nil.
+
+
+## Addendum 2026-11-11 (lane interp12) — verified FIXED on fresh seed 46fe8f6b6def
+
+**Verification actually run** (worktree simple-p3-interp12-20261111, seed-smoke):
+
+```
+# Defect B engine-parity probe, default run (JIT-eligible) lane:
+./bin/simple.exe run build/review/p3fix-interp12-20261111/tmp/row7_len_probe.spl --no-cache
+# alloc len=24 | read nil=true        (rc=0)
+
+# interpreter lane:
+SIMPLE_EXECUTION_MODE=interpret ./bin/simple.exe run build/review/p3fix-interp12-20261111/tmp/row7_len_probe.spl --no-cache
+# alloc len=24 | read nil=true        (rc=0)
+
+# defect-class spec:
+./bin/simple.exe test test/01_unit/compiler/sffi_byte_array_return_class_spec.spl --mode=interpreter --no-cache
+# SPEC FILE VERDICT: outcome=OK declared>=6 executed=6 passed=6 failed=0
+```
+
+Both engines now agree: `rt_bytes_alloc(24).len() == 24` (JIT previously
+reported 0) and `rt_file_read_bytes` on a missing path binds `nil` under its
+`[u8]?` declaration. The `[u8]?`-declaration census
+(`fs_extern_optional_spec.spl`) is 15/16 on this host — the single failure is
+the dangling-symlink fingerprint case, which depends on POSIX symlink
+semantics and is unrelated to this defect class (noted for routing; not
+re-diagnosed on this lane). Verdict: STALE (fix previously landed; no new code
+change this lane).

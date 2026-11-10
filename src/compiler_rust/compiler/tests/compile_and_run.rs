@@ -615,3 +615,95 @@ fn main() -> i64:
 "#;
     assert_eq!(compile_and_run(src), 42);
 }
+
+// Bug jit_struct_assignment_aliases_not_copies_2026-08-10: value-struct
+// assignment must copy on the JIT/SMF lane; classes keep reference semantics.
+#[test]
+fn struct_reassign_copies_not_aliases() {
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+struct P:
+    x: i64
+    y: i64
+
+fn main() -> i64:
+    val a = P(x: 1, y: 2)
+    var b = P(x: 0, y: 0)
+    b = a
+    b.x = 99
+    a.x
+"#;
+    assert_eq!(compile_and_run(code), 1);
+}
+
+#[test]
+fn struct_let_copy_field_mutate_keeps_source() {
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+struct P:
+    x: i64
+    y: i64
+
+fn main() -> i64:
+    val a = P(x: 1, y: 2)
+    var b = a
+    b.x = 99
+    a.x + b.x
+"#;
+    assert_eq!(compile_and_run(code), 100);
+}
+
+#[test]
+fn nested_struct_reassign_copies_inner() {
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+struct In:
+    a: i64
+
+struct Out:
+    inner: In
+    k: i64
+
+fn main() -> i64:
+    val o = Out(inner: In(a: 5), k: 1)
+    var o2 = Out(inner: In(a: 0), k: 0)
+    o2 = o
+    o2.inner.a = 77
+    o.inner.a
+"#;
+    assert_eq!(compile_and_run(code), 5);
+}
+
+#[test]
+fn struct_stored_in_array_element_is_copied() {
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+struct P:
+    x: i64
+
+fn main() -> i64:
+    var a = P(x: 3)
+    var arr = [P(x: 0)]
+    arr[0] = a
+    a.x = 50
+    arr[0].x
+"#;
+    assert_eq!(compile_and_run(code), 3);
+}
+
+#[test]
+fn class_reassign_keeps_reference_semantics() {
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+class C:
+    x: i64
+
+fn main() -> i64:
+    val a = C(x: 1)
+    var b = C(x: 0)
+    b = a
+    b.x = 42
+    a.x
+"#;
+    assert_eq!(compile_and_run(code), 42);
+}

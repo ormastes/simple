@@ -1,5 +1,8 @@
 # A function with no declared return type returns 0 in native codegen
-## Fix implemented 2026-11-06 — verification pending (pure-Simple native e2e)
+## Status: FIXED (2026-11-11, lane ne17) — fix of 2026-11-06 verified on fresh
+## seed 46fe8f6b6def; the one remaining red example in the evidence spec is a
+## distinct fresh-seed visibility defect (see addendum), not this row's
+## behavior. Pure-Simple native e2e + differential harness still pending.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -133,3 +136,38 @@ is a compile error.
   (14/14; red before the change). Neighbouring untyped-return specs stay green.
 - **Pending:** pure-Simple native end-to-end on a deployed self-hosted binary,
   and the differential harness run requested above.
+
+## Addendum 2026-11-11 (lane ne17) — FIXED verified on fresh seed; one
+## unrelated example masked by a distinct seed defect
+
+`test/01_unit/compiler/hir/untyped_tail_return_infer_spec.spl` on fresh seed
+46fe8f6b6def (Windows, worktree simple-p3-ne17-20261111,
+`test --mode=interpreter --no-cache`): **16 executed, 15 passed** — including
+both bug-shape examples ("bare local tail is not dropped to Unit",
+"un-inferrable tail type is reported, never silent") and all robust-mode and
+driver-flag examples. The untyped-return behavior this row records is fixed.
+
+The single red example ("gives an explicit unit tail a Unit MIR signature,
+matching its bare returns") fails NOT on this row's behavior but on a
+distinct fresh-seed defect:
+
+```
+semantic: private fn `compiler_value_discriminant` of module
+`\?\C:\...\src\compiler\00.common\value_access.spl` is not visible to
+\?\C:\...\src\compiler\50.mir\_MirLoweringExpr\expr_dispatch.spl;
+mark it `pub` or `export` it
+```
+
+Controls run in-lane: plain, generic, and `@inline` private cross-module
+imports in a minimal probe all PASS; the tree PINS these wrappers non-pub
+(`test/01_unit/compiler/mir/value_access_ownership_spec.spl` asserts the
+facade contains no `pub fn compiler_value_`, and the module header documents
+cross-module import of the wrappers as the design), and marking them `pub`
+(tried, reverted) merely moves the red example to the pinning spec. This is
+a seed-lane defect (Windows module-identity/visibility escalation, both
+module paths `\?`-prefixed in the error) to route — not this row.
+
+Pending items from the 2026-11-06 decision, unchanged and blocked on this
+lane: pure-Simple native end-to-end on a deployed self-hosted binary, and
+the `check-native-interp-differential.shs` harness run (native-build lanes
+not granted here).

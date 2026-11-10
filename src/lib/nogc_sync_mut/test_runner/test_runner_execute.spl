@@ -868,8 +868,8 @@ fn prepare_native_generated_source(file_path: text, options: TestOptions, author
         return Err(preprocessed.unwrap_err())
     Ok((preprocessed.unwrap(), wrapped_path, cleanup_path))
 
-fn cleanup_native_generated_file(path: text, original_path: text, preserved_path: text, keep_artifacts: bool):
-    if not keep_artifacts and path != "" and path != original_path and path != preserved_path and file_exists(path):
+fn cleanup_native_generated_file(path: text, original_path: text, preserved_path: text, keep_artifacts: bool, retain_source_path: text = ""):
+    if not keep_artifacts and path != "" and path != original_path and path != preserved_path and path != retain_source_path and file_exists(path):
         file_delete(path)
 
 fn bounded_native_compile_output(output: text) -> text:
@@ -877,10 +877,15 @@ fn bounded_native_compile_output(output: text) -> text:
         return output[0:4096] + "...[truncated at 4096 characters]"
     output
 
-fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_path: text, cleanup_path: text, original_path: text, keep_artifacts: bool, native_cache_path: text = "", quarantine_path: text = "") -> bool:
-    cleanup_native_generated_file(smf_path, original_path, "", keep_artifacts)
-    cleanup_native_generated_file(source_path, original_path, wrapped_path, keep_artifacts)
-    cleanup_native_generated_file(cleanup_path, original_path, "", keep_artifacts)
+pub fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_path: text, cleanup_path: text, original_path: text, keep_artifacts: bool, native_cache_path: text = "", quarantine_path: text = "", retain_source_path: text = "") -> bool:
+    # `retain_source_path` (2026-11-11): a generated source that FAILED to
+    # compile is the only evidence of the failure, so the coverage abort
+    # paths retain the wrapper through cleanup regardless of
+    # --keep-artifacts (bug coverage_wrapper_not_retained_keep_artifacts_
+    # 2026-08-31). It is an additional preservation, never an extra delete.
+    cleanup_native_generated_file(smf_path, original_path, "", keep_artifacts, retain_source_path)
+    cleanup_native_generated_file(source_path, original_path, wrapped_path, keep_artifacts, retain_source_path)
+    cleanup_native_generated_file(cleanup_path, original_path, "", keep_artifacts, retain_source_path)
     val native_prefix = _tp_get_temp_dir() + "/native-"
     var cache_clean = true
     if not keep_artifacts and native_cache_path != "" and native_cache_path == smf_path + ".cache" and smf_path.starts_with(native_prefix) and smf_path.ends_with(".exe"):
@@ -1006,6 +1011,16 @@ pub fn mcdc_manifest_absent_degrade_opted_in(env_value: text) -> bool:
 pub fn coverage_wrapper_abort_error(diagnostic: text) -> text:
     "ABORTED BEFORE EXECUTION — coverage instrumentation wrapper failed to compile; the spec was NEVER run under the requested coverage path, so this is NOT a test result. Compiler diagnostic: " + diagnostic + " (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)"
 
+# 2026-11-11 (bug coverage_wrapper_not_retained_keep_artifacts_2026-08-31): a
+# wrapper that failed to compile is retained on disk regardless of
+# --keep-artifacts, and the abort names it so the operator can recompile it
+# standalone. Empty when no wrapper path is in scope (message shape unchanged).
+pub fn coverage_wrapper_retention_note_v1(wrapped_path: text) -> text:
+    if wrapped_path == "":
+        ""
+    else:
+        " Wrapper source retained at: {wrapped_path}"
+
 # A killed compiler is not a source diagnostic. Preserve the fail-closed
 # verdict while reporting the process limit and the resource receipt that
 # explain why no coverage was collected.
@@ -1018,7 +1033,7 @@ pub struct CoverageWrapperCompileFailureV1:
 
 pub fn coverage_wrapper_compile_failure_v1(
     diagnostic: text, limit_type: text, compile_ms: i64,
-    resource_class: text, budget_status: text
+    resource_class: text, budget_status: text, wrapped_path: text = ""
 ) -> CoverageWrapperCompileFailureV1:
     val timeout = limit_type == "timeout"
     val failure = if timeout:
@@ -1030,7 +1045,7 @@ pub fn coverage_wrapper_compile_failure_v1(
     else:
         "Compiler diagnostic: {diagnostic}"
     CoverageWrapperCompileFailureV1(
-        error: "ABORTED BEFORE EXECUTION — {failure}; the spec was NEVER run under the requested coverage path, so this is NOT a test result. limit={limit_type}; compile_ms={compile_ms}; resource_class={resource_class}; budget_status={budget_status}. {detail} (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)",
+        error: "ABORTED BEFORE EXECUTION — {failure}; the spec was NEVER run under the requested coverage path, so this is NOT a test result. limit={limit_type}; compile_ms={compile_ms}; resource_class={resource_class}; budget_status={budget_status}. {detail}{coverage_wrapper_retention_note_v1(wrapped_path)} (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)",
         timed_out: timeout, compile_ms: compile_ms,
         resource_class: resource_class, budget_status: budget_status)
 
@@ -1474,8 +1489,12 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             val end_abort = time_now_unix_micros()
             val failure = coverage_wrapper_compile_failure_v1(
                 compile_output_diagnostic_line_v1(compile_output), compile_result.limit_type, compile_ms,
-                test_resource_class_name(compile_class), scoped_child_budget_status(compile_scoped))
-            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+                test_resource_class_name(compile_class), scoped_child_budget_status(compile_scoped), wrapped_path)
+            # The failed wrapper is the only evidence of this failure: retain
+            # it regardless of --keep-artifacts so the operator can recompile
+            # it standalone (bug coverage_wrapper_not_retained_keep_artifacts_
+            # 2026-08-31). Its path is named in the abort message.
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path, wrapped_path)
             return TestFileResult(
                 path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: (end_abort - start) / 1000, setup_ms: 0,
@@ -1502,8 +1521,12 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             # copy, not evidence the spec itself is broken -- the fallback
             # below runs the REAL, unwrapped spec and reports its real
             # pass/fail, so this cannot mask a genuine defect.
-            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
-            val reason = "COVERAGE NOT COLLECTED (explicit SIMPLE_COVERAGE_FALLBACK=interpreter opt-in): wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + compile_output_diagnostic_line_v1(compile_output)
+            # Same retention discipline as the fail-closed arm: the wrapper
+            # failed to compile, so it is the evidence and survives cleanup
+            # regardless of --keep-artifacts, with its path named in the
+            # degrade reason.
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path, wrapped_path)
+            val reason = "COVERAGE NOT COLLECTED (explicit SIMPLE_COVERAGE_FALLBACK=interpreter opt-in): wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + compile_output_diagnostic_line_v1(compile_output) + coverage_wrapper_retention_note_v1(wrapped_path)
             return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "coverage-fallback", reason,
                 smf_compile_degrade_token(compile_output))
         val end = time_now_unix_micros()

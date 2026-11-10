@@ -102,10 +102,18 @@ classify_source() {
         echo "GUARDED"
         return
     fi
-    # Is there a raw-zero formation guard on the bound name BEFORE the first
-    # dereference? `== 0` on the kind slot, or `== nil` on the object.
+    # Is there a raw-zero formation guard on the bound name before the
+    # dereference? Recognize EVERY idiom the fix has used across refactors:
+    #   if <b> == nil: / if <b> == None:   object-formation guard
+    #                                       (d5943d124053 moved 50.mir to
+    #                                       the `None` spelling)
+    #   if <b>.kind == 0:                  raw-zero guard on the kind slot
+    #   if hir_type_kind_discriminant(<b>.kind) < 0:
+    #                                       kind-slot validity guard; the
+    #                                       helper answers < 0 for a kind
+    #                                       slot that was never written
     _guard=$(printf '%s\n' "$_body" \
-        | grep -cE "if $_bound(\.kind)? == (0|nil):" || true)
+        | grep -cE "if $_bound(\.kind)? == (0|nil|None):|if hir_type_kind_discriminant\($_bound\.kind\) < 0:" || true)
     if [ "${_guard:-0}" -ge 1 ]; then
         echo "GUARDED"
     else
@@ -202,6 +210,31 @@ selftest() {
     #    a boot that produced nothing is absence of evidence, never a pass.
     : > "$_tmp/empty.log"
     _expect "empty transcript must be EMPTY" "$(classify_transcript "$_tmp/empty.log")" "EMPTY"
+
+    # 9. must-PASS: the post-d5943d124053 idiom — `None` spelling of the
+    #    object-formation guard (50.mir safe code uses None, not nil).
+    _mk "$_tmp/none_guard.spl" '        if val expected_found = expected:
+            if expected_found == None:
+                return MirType.i64()
+            match expected_found.kind:
+                case _:
+                    return self.lower_type(expected_found)
+        return MirType.i64()'
+    _expect "None-object guard must be GUARDED" "$(classify_source "$_tmp/none_guard.spl")" "GUARDED"
+
+    # 10. must-PASS: the discriminant-helper guard on the kind slot
+    #     (`hir_type_kind_discriminant(<bound>.kind) < 0`), the form the
+    #     repair currently carries after the None object-guard line.
+    _mk "$_tmp/disc_guard.spl" '        if val expected_found = expected:
+            if expected_found == None:
+                return MirType.i64()
+            if hir_type_kind_discriminant(expected_found.kind) < 0:
+                return MirType.i64()
+            match expected_found.kind:
+                case _:
+                    return self.lower_type(expected_found)
+        return MirType.i64()'
+    _expect "discriminant guard must be GUARDED" "$(classify_source "$_tmp/disc_guard.spl")" "GUARDED"
 
     rm -rf "$_tmp"
     if [ "$_fail" -ne 0 ]; then

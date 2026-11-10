@@ -4,9 +4,33 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN — root cause **localized** (Stage-2 native codegen/runtime, not
-  `src/compiler` algorithmically), exact defect not yet found. Filed as its
-  own site because the macOS chain never reached real Stage-3 compilation —
+- Status: OPEN — **BLOCKED (stage-chain probe), triaged 2026-11-11 (lane boot14).**
+  Root cause proven (Rust `rt_transient_heap_promote` O(N) `Vec::retain` per call); the
+  pure-Simple call-count batching mitigation **is present in-tree** and its regression spec
+  passes 4/4 (seed-smoke). Real-scale Stage-2→Stage-3 confirmation is pending (not runnable
+  on this Windows host — known native-build hang on the success path). The underlying Rust
+  data-structure defect remains open (out of scope here: no cargo/rustc).
+
+## Triage 2026-11-11 (lane boot14) — BLOCKED, kept OPEN
+
+Verdict: **BLOCKED** (stage-chain probe). Kept OPEN — the Rust `TransientHeapScope.objects:
+Vec<RuntimeValue>` linear-retain defect is real and out of this lane's reach (no cargo/rustc).
+
+Evidence gathered this session (seed-smoke, build-commit `46fe8f6b6def`):
+- The batching mitigation is present in-tree: `module_surface_promote_fields` collects roots
+  into one `[ModuleSurfaceRoot]` and calls `rt_transient_heap_promote` once
+  (`src/compiler/20.hir/hir_lowering/module_surface_registry.spl:566-590`); the per-commit
+  `9788f8341a8` is not in this tree by that hash but the change is (rebased/squashed).
+- Regression spec `test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`
+  **passes 4/4** (seed-smoke 2026-11-11), pinning calls/surface at ≤2.
+
+Exact grant command (non-Windows host) — rebuild Stage 2 with the mitigation, then run the
+real 832-surface Stage-3 closure to confirm the surface phase reaches HIR:
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --output=build/bootstrap
+```
+If the surface phase still stalls, the real fix must change `TransientHeapScope.objects` to a
+removable structure in `src/compiler_rust/runtime/src/value/collections.rs` (Rust lane).
   every macOS run stopped at the admission-receipt gate (site 20). This is
   the first time anyone has run the actual 832-file Stage-3 closure to
   completion or failure on either platform.

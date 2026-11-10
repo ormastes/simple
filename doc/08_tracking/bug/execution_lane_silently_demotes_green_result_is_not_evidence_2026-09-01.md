@@ -6,7 +6,7 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Found by:** the COW-scoping agent; **verified by the parent.**
-**Status:** OPEN. General testing hazard — not specific to COW.
+**Status:** CLOSED 2026-11-11 — FIXED on release; verified by lane ne8 (seed 46fe8f6b6def). General testing hazard — not specific to COW.
 
 ## Measured
 
@@ -74,3 +74,35 @@ in the deployed binary but in no `.rs`/`.spl` source under `src/` — the deploy
 binary is not built from this worktree, so the demotion logic cannot be cited
 here.
 
+
+---
+
+## 2026-11-11 addendum — lane ne8 (P3 traverse, batch ne8)
+
+**Verdict: FIXED on release** (the "impossible to silently accept" branch of Required #1).
+
+- **Fixing change:** non-forgeable engine receipt `src/compiler_rust/common/src/engine_receipt.rs`
+  (fix `498eb1fc078`, guard + fixture pair `cc173c44cb4`, 2026-08-23; recorded in
+  `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md` §20/§27). The engine
+  field is stamped from INSIDE the engine that actually executes; no flag can set it; a demotion
+  is announced on stderr unconditionally (`[engine-demotion]`, no suppressing knob) whenever a
+  compiled lane was requested — and an UNSET `SIMPLE_EXECUTION_MODE` deliberately counts as
+  requesting the compiled lane, because the seed's default lane already is the JIT.
+- **This doc's exact scenario re-run (seed-smoke, seed 46fe8f6b6def):**
+  `SIMPLE_EXECUTION_MODE=llvm SIMPLE_ENGINE_RECEIPT=1 simple run <probe>` now prints
+  `[engine-demotion] reason=jit-compile-error ...` on stderr AND a receipt naming what really
+  ran: `[engine-receipt] engine=interpreter requested=llvm demoted=yes reason=...`. An
+  `interpret` request yields `engine=interpreter requested=interpret demoted=no`. The
+  interpreter's answer can no longer be laundered into an LLVM result.
+- **Fail-closed guard:** `scripts/check/check-engine-receipt-discriminates.shs` — selftest 8/8;
+  full run on this seed: **PASS — 10 assertion(s) checked, receipt discriminates
+  (clean=cranelift-jit, demoted=interpreter)**. Its discriminating fixture pair
+  (`test/fixtures/engine_receipt/{jit_clean,demote_graphics_text}.spl`) had been deleted in the
+  2026-11-07 snapshot commit `4edef8fab8e1`, leaving the guard at ERROR "nothing was checked";
+  lane ne8 restored both fixtures byte-identical from `cc173c44cb4` (commit
+  `test(seed): engine-receipt guard + discriminating fixture pair`) and the guard now runs green.
+  This restoration ships in the same commit as this addendum.
+- **Required #3 (documentation):** `SIMPLE_EXECUTION_MODE` and the receipt contract are
+  documented in `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md`; the
+  receipt line format `[engine-receipt] engine=<E> requested=<R> demoted=<yes|no> reason=<R|->
+  file=<P>` is pinned by the guard's selftest fixtures.

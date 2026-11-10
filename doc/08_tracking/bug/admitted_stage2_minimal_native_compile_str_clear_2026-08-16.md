@@ -27,7 +27,7 @@ The runtime guard itself (`rt_refuse_non_text_receiver`) is intentionally loud
 and unchanged — the repair was in dispatch, as this record's "Repair belongs
 to the bootstrap/runtime owner" note anticipated.
 
-Status: open runtime blocker for `compiler_minimal_native_compile_perf`.
+Status: superseded (triage 2026-11-11, lane boot9) — fixing commit 3c31fc3aa8b6 is an ancestor of this branch; rt_dict_clear dispatch arm and pinned spec verified in-tree (native-oracle re-run outside lane grant).
 
 An admitted Stage2 compiler at
 `/mnt/data/worktrees/restart12-compiler_perf_a/build/restart12-build11-a-r4/output/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`
@@ -43,3 +43,17 @@ the first minimal path to `HirLowering.begin_module()` clearing its diagnostic
 collection before the stub-HIR boundary. Repair belongs to the bootstrap/runtime
 owner, not this benchmark lane. Re-test only with a newly admitted pure-Simple
 artifact and do not substitute the Rust seed.
+
+## Triage 2026-11-11 (lane boot9, work/p3-boot9-20261111)
+
+SUPERSEDED — fixing commit `3c31fc3aa8b6 fix(mir): route Dict.clear() to
+rt_dict_clear instead of str.clear` re-confirmed as an ancestor of
+work/p3-boot9-20261111 (`git merge-base --is-ancestor 3c31fc3aa8b6 HEAD` ->
+true). Dispatch arm present at
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:4032,4056`
+(`rt_dict_clear`); pinned regression spec
+`test/01_unit/compiler/codegen/dict_clear_native_dispatch_spec.spl` in tree.
+The spec's oracle is a full native build of the probe, which this lane
+cannot run (no self-hosted native driver; native builds outside grant), so
+no re-execution: commit ancestry + dispatch arm + pinned spec remains the
+verification, same evidence class as the 2026-11-10 p3-boot triage.

@@ -1,7 +1,7 @@
 # Seed interpreter rebuilds the whole callee env per call (O(module globals))
 
 ## Status
-PARTIALLY RESOLVED — 408fb57b109 landed the initial mitigation (misses down 6.5x, wall still far above target); superseded by e73a0bec647 (scope-chain CowEnv replaces per-call env clone). OPEN: confirm wall-clock now meets target on the original repro.
+PARTIALLY RESOLVED — 408fb57b109 landed the initial mitigation (misses down 6.5x, wall still far above target); superseded by e73a0bec647 (scope-chain CowEnv replaces per-call env clone). OPEN: confirm wall-clock now meets target on the original repro — CONFIRMED FAILING 2026-11-11 (lane interp12): `check-lint-cost-budget.shs` on `driver_types.spl` exceeded even a 240 s probe budget (gate budget is 60 s) under fresh seed 46fe8f6b6def. LIVE; fix is structural `src/compiler_rust` work that requires a seed rebuild — BLOCKED on this lane (no cargo/rustc). See "Addendum 2026-11-11" for the grant command.
 
 
 Status: PARTIALLY FIXED (2026-08-21) — misses down 6.5x, wall still far above target.
@@ -186,3 +186,44 @@ SipHash lookups keyed by the ~70-byte owner path); `write_back_mutable_arguments
 (1.0 us on calls with no mutable args). None of these is O(globals); the
 per-call cost is now a sum of constant rungs, which is why the 60 s lint
 budget on `driver_types.spl` is still missed (124 s).
+
+
+## Addendum 2026-11-11 (lane interp12) — still LIVE; wall confirmed far above target
+
+**Verification actually run** (worktree simple-p3-interp12-20261111, fresh seed
+46fe8f6b6def, seed-smoke):
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe sh scripts/check/check-lint-cost-budget.shs \
+  --fixture src/compiler/80.driver/driver_types.spl --budget 240 \
+  --simple-bin "$PWD/bin/simple.exe"
+# selftest: 4 fixture(s) passed
+# FAIL — 1 fixture(s) checked, lint exceeded its 240s budget on src/compiler/80.driver/driver_types.spl
+#        (load=10.29, concurrent simple=0)
+```
+
+Wall is not merely above the 60 s gate budget — it did not finish inside a 240 s
+probe budget on this seed. (2026-11-07 measured 124 s on `simple-base.exe`;
+box load differs, but any reading is an order of magnitude over the 5 s target
+and over the 60 s gate.) The remaining per-call cost is the sum of constant
+rungs documented above (P2/P3 builtin string matches, body prelude TLS takes,
+SipHash-keyed scope attach, mutable-arg writeback), i.e. structural
+`src/compiler_rust` work.
+
+**Disposition: LIVE + BLOCKED.** This lane is forbidden cargo/rustc, so the seed
+cannot be rebuilt to land or verify a Rust-side fix; no pure-Simple change can
+move this number.
+
+**Grant command for the owning lane:**
+
+```
+# seed-source lane, authorized for cargo:
+# 1. implement the next structural step in
+#    src/compiler_rust/compiler/src/interpreter_call/** (scope-chain env /
+#    name-keyed builtin pre-check / body-prelude trimming), then
+cargo build --release --bin simple   # in src/compiler_rust, opt-level=z bootstrap profile
+# 3. verify the gate that pins this exact defect:
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe sh scripts/check/check-lint-cost-budget.shs \
+  --fixture src/compiler/80.driver/driver_types.spl --budget 60 \
+  --simple-bin "$PWD/bin/simple.exe"
+```

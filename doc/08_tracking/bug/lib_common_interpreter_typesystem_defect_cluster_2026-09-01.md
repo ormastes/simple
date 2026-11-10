@@ -1,8 +1,7 @@
 # `test/01_unit/lib/common/` triage: interpreter type-system defect cluster
 
 Date: 2026-09-01
-Status: OPEN (multiple distinct defects, filed together per the triage task's
-instruction not to attempt risky compiler-internals fixes)
+Status: FIXED (2026-11-11, lane interp9) — cluster signatures no longer reproduce on deployed seed; per-cluster evidence below. Remaining reds in the named specs trace to routed known defects or new narrow issues, not this cluster.
 Severity: Medium-High — affects dozens of spec files across `lib/common`
 
 ## Context
@@ -119,3 +118,52 @@ None of the specs above were modified; all are left RED and reported as
 genuine failures, per `.claude/rules/testing.md` ("a known-failing spec
 documents a real defect"). Each cluster needs its own compiler-side (or, for
 cluster 5, codec-side) investigation before a fix is attempted.
+
+## 2026-11-11 addendum (lane interp9, work/p3-interp9-20261111) — cluster FIXED, verified per-cluster on seed
+
+All verification below is seed-smoke: tracked `bin/simple.exe` build-commit
+`46fe8f6b6def`, `SIMPLE_LIB=src`, `--mode=interpreter --no-cache`, on this
+Windows worktree (base c8b6d0ebe90e). Verdict per cluster:
+
+- **Cluster 1 (nil forbidden by non-optional return contract): signature GONE
+  in the specs that can execute.** `date_calculate_coverage_spec.spl` 30/30,
+  `date_format_coverage_spec.spl` 65/65, `html_entities_coverage_spec.spl`
+  140/140 — all PASS. The other two named specs fail today for causes that are
+  NOT this cluster: `compress_facade_harness_spec.spl` and `xz_lzma2_spec.spl`
+  stop at the **VirtMemManager tri-def** (routed known defect:
+  `semantic: ambiguous type VirtMemManager` from
+  `src/os/kernel/{arch/x86_64/paging,memory/vmm,memory/vmm_core}.spl`), and
+  `parsers_sdn_coverage_spec.spl` stops at a NEW narrow visibility error
+  (`private fn yaml_sequence of module lib.yaml.types is not visible`; recorded
+  as a follow-up finding, not fixed here).
+- **Cluster 2 (enum treated as tuple / cannot convert enum to int): GONE.**
+  `option_ce_spec.spl` 27/27, `parsers_json_core_spec.spl` 101/101,
+  `parsers_json_ops_spec.spl` 64/64 (was 25/64) — all PASS.
+  `module_import_spec.spl` still fails 21/21, but the recorded
+  "cannot convert enum to int" signature is replaced by `expected -1 to equal
+  0`: the spec hardcodes
+  `SIMPLE_BIN = "bin/release/x86_64-unknown-linux-gnu/simple"` and
+  `PROBE_BASE = "/tmp/..."`, so its subprocess probes cannot run from a Windows
+  host — a spec-hostility issue, not the interpreter defect.
+  `xz_lzma2_spec.spl` is again the routed VirtMemManager tri-def.
+- **Cluster 3 (unknown static method on class): GONE.** `immut/ref_spec.spl`
+  (EnvironmentStack `new`) 38/38, `mock_phase3_spec.spl` (MockFunction
+  `create`) 31/31 — all PASS. No duplicate-definition collision remains for
+  either class on this lane.
+- **Cluster 4 (undefined `idx3` in generated/desugared code): GONE.**
+  `contracts/execution/simpleos_executable_admission_v1_spec.spl` 9/9 PASS.
+  `feature_validation/codegen_spec.spl` is 32/33; the one red example is
+  "proves each arm reached the engine it names" (expected codegen
+  feature-validation probe #100/#95/#96) — the engine-reachability proof arm,
+  i.e. the **MECALL counters read 0** routed known defect, not the `idx3`
+  lowering bug.
+- **Cluster 5 (LZ4 empty input): FIXED.**
+  `compress/lz4_empty_frame_roundtrip_spec.spl` 4/4 (was 3/4),
+  `compress/lz4_empty_payload_roundtrip_spec.spl` 3/3 (was 0/3) — the
+  empty/zero-length boundary now round-trips.
+
+Follow-ups recorded in `build/review/p3fix-interp9-20261111.sdn` (not fixed in
+this lane): the `yaml_sequence` visibility gate;
+`module_import_spec.spl` host-hardcoded binary path; the standalone-run
+`rt_simd_add_u8x16` capacity-overflow panic (see the Vec16u8 record's
+2026-11-11 addendum).

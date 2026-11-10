@@ -1411,6 +1411,11 @@ pub fn check_import_compatibility(
 /// verbatim with the pure-Simple twin in
 /// `src/compiler/10.frontend/core/interpreter/resolve.spl`.
 pub fn reject_captured_local_writes(module: &Module, path: &Path) -> Result<(), CompileError> {
+    // W-CAPTURE-MUTATION (staged warning): a receiver-mutating call on a
+    // captured local is dropped with the by-value snapshot.
+    for m in simple_parser::capture_write_check::find_captured_local_mutations(module) {
+        eprintln!("{}: {}", crate::display_path::display_path(path), m.message());
+    }
     match simple_parser::capture_write_check::find_captured_local_writes(module).into_iter().next() {
         Some(write) => Err(CompileError::semantic(format!(
             "in {}: {}",

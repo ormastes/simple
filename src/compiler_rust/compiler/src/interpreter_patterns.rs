@@ -428,6 +428,27 @@ pub(crate) fn pattern_matches(
             {
                 return Ok(true);
             }
+            // Flat Option encoding (parity with the pure-Simple interpreter's
+            // `match_enum_variant_pattern`): a bare non-Nil, non-Enum value IS
+            // its own `Some` payload. The pure-Simple interpreter has always
+            // matched `case Some(x)` this way (flat raw-or-nil word); the seed
+            // matcher lacked the arm, which forced the 2026-11-09 array-get
+            // change to box results as real `Option::Some` values and thereby
+            // broke every `arr.get(i).<method>()` chain in the stdlib
+            // (seedfix 2026-11-11 js-runtime failure). Enum scrutinees keep
+            // the name-keyed arm below — only flat values take this path.
+            if variant == "Some"
+                && matches!(enum_name.as_str(), "Option" | "_")
+                && !matches!(value, Value::Enum { .. } | Value::Nil)
+            {
+                return match payload {
+                    None => Ok(true),
+                    Some(patterns) if patterns.len() == 1 => {
+                        pattern_matches(&patterns[0], value, bindings, enums, classes)
+                    }
+                    _ => Ok(false),
+                };
+            }
             if let Value::Enum {
                 enum_name: ve,
                 variant: vv,

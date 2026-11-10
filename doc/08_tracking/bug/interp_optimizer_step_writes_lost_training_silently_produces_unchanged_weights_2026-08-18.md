@@ -1,6 +1,6 @@
 # Optimizer `step()` writes to `param.value` are lost in the interpreter — training silently produces UNCHANGED WEIGHTS
 
-- **Status:** OPEN
+- **Status:** SUPERSEDED — 2026-11-11 (lane interp8): list-element bind-then-mutate over `self.params[i]` lands after the 2026-11-04 ClassInstance default-carrier flip (6c7b4db3d392); the record's repro prints `expect 98, got 98` on the fresh seed (build 46fe8f6b6def). No write-back needed in `training.spl`.
 - **Filed:** 2026-08-18
 - **Severity:** CRITICAL (silent, plausible wrong answer — the worst failure mode in this family)
 - **Evidence bar:** **SOURCE-VERIFIED, NOT EXECUTION-VERIFIED** (see below)
@@ -127,3 +127,16 @@ reads of class values alias after the 2026-11-04 ClassInstance
 default-carrier flip; optimizer `step()` writes land. Engine fix confirmed; no
 `self.parameters[i] = param` write-back is needed in
 `src/lib/gc_async_mut/pure/training.spl`.
+
+
+## 2026-11-11 triage — SUPERSEDED confirmed (seed-smoke, lane interp8)
+
+Re-ran the record's minimal repro (`build/p3fix-interp8/row7_optimizer_repro.spl`,
+list element bind-then-mutate over `self.params[i]`) on the fresh worktree
+seed (build-commit `46fe8f6b6def`, `SIMPLE_EXECUTION_MODE=interpreter
+--no-cache`): prints `expect 98, got 98` — optimizer `step()` writes land.
+
+Carrier: the 2026-11-04 ClassInstance default-carrier flip (`6c7b4db3d392`) —
+the same fix family as the 2026-11-10 lane's row 18; NOT the 2026-11-11
+seedfix A/B. No `self.parameters[i] = param` write-back added to
+`src/lib/gc_async_mut/pure/training.spl` — none is needed.

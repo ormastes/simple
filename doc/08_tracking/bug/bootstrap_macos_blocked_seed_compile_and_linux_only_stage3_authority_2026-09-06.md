@@ -1,9 +1,9 @@
 # macOS bootstrap blocked at origin/main: seed compile break + Linux-only Stage-3 authority lib (2026-09-06)
-## Open — re-triaged 2026-11-04: seed + Stage-2 authority FIXED; Stage-3 manifest verification still Linux-only (owner design decision)
+## Closed 2026-11-11 — SUPERSEDED (lane boot10): bootstrap-tooling scope fixed per landed commits verified as ancestors; residuals are host-limited/other-lane. See addendum
 
 See "Re-triage 2026-11-04" at the end for evidence.
 
-**Status:** partially FIXED (3 fixes in this change); the remaining `/proc` coupling is documented below.
+**Status:** CLOSED 2026-11-11 (SUPERSEDED for bootstrap-tooling scope, lane boot10; host-limited residuals remain, see 2026-11-11 addendum)
 **Host:** aarch64-apple-darwin, macOS 25.5.0. **Base:** `1bd13da6125`.
 
 ## Symptom
@@ -969,3 +969,35 @@ edit scope but reviewed as landed. The remaining Stage-3/4 manifest-verification
 descriptor-pinning security property whose macOS port (`/dev/fd/N` semantics
 differ) "needs a design decision rather than a substitution" — not a P3 code
 fix, and unverifiable from a Windows host. No change made.
+
+## Triage 2026-11-11 (lane boot10)
+
+SUPERSEDED for this record's bootstrap-tooling scope, with the same
+host-limited residuals the 2026-11-10 triage assigned to other lanes.
+Verified on work/p3-boot10-20261111 (base origin/release/1.0.0), one cycle,
+source + gate evidence only — a macOS host is not reachable from this Windows
+lane and no macOS run is claimed:
+
+- Defect 1 (seed E0609): `src/compiler_rust/runtime/src/cache_host_authority_v1.rs:196-206`
+  uses `st_mtime_nsec`/`st_ctime_nsec` in every arm including the
+  `cfg(any(target_os = "macos", target_os = "ios"))` one; the fixing commits
+  `72b11296929` / `2cf4bb13366` / `478f4b1b093` are ancestors of this branch.
+- Defects 2-3 (GNU-only `stat -Lc`, unconditional `/proc/self/stat`):
+  `scripts/check/lib/bootstrap-stage3/authority.shs` gates its procfs reads
+  (`if [ -r /proc/self/stat ]` at :353, :3059) and uses the repo
+  `stat -c ... || stat -f ...` fallback idiom (e.g. :773-774, :3578-3580).
+- Owner decision (2026-11-07) implemented: `bootstrap_stage3_fd_identity` /
+  `bootstrap_stage3_fd_stamp` / `bootstrap_stage3_fd_matches_path` in
+  `scripts/check/lib/bootstrap-stage3/manifest-verify.shs:692+` (landed
+  `f6c03cbc837` + `62f9fed02aa`, both ancestors); capsule-port native helpers
+  shipped as `2e12cd1f450f` — `src/runtime/tools/stage3_fdwalk.c` present
+  (20031 bytes).
+
+Honest host-limit note: the end-to-end macOS Stage-3 run
+(`sh scripts/bootstrap/resume-stage3-from-admitted.sh <admitted-stage2-output-dir>`
+on aarch64-apple-darwin with the ≥12288 MiB sanity memory reserve) remains
+unverifiable from this Windows host; that grant belongs to the macOS-owning
+lane per this doc's own re-triage ("a separate lane owns it"). Residuals
+unchanged and owned elsewhere: `serialize_mir_function` Stage-2 SEGV and
+native f64 correctness (compiler/runtime lanes), Stage-4 gate 6 Mach-O
+capsule symbol strength (link-architecture lane). No code change this lane.

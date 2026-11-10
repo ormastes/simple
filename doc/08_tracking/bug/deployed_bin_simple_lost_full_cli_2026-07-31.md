@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
 the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
-**Status:** OPEN, ACTIVE BREAKAGE of the repo's default tooling.
+**Status:** SUPERSEDED 2026-11-11 — self-recorded dupe of deployed_bin_simple_bootstrap_only_2026-07-31; condition recorded gone 2026-08-17; tracked binary exposes the full CLI (verified by p3-boot12).
 **Detected:** 2026-07-31 ~12:20 UTC, mid-session, between two spec runs.
 
 ## Symptom
@@ -89,4 +89,21 @@ missing test/run/lint); condition recorded gone 2026-08-17." Verified on the
 p3-boot4 worktree that the sibling record
 `doc/08_tracking/bug/deployed_bin_simple_bootstrap_only_2026-07-31.md` exists
 in-tree and covers this breakage. Nothing further to triage from this lane.
+No change made in this lane.
+
+
+## Triage 2026-11-11 (P3 boot12 lane, work/p3-boot12-20261111)
+
+**Verdict: SUPERSEDED — confirms the doc's own 2026-09-16 normalization
+verdict and the 2026-11-10 p3-boot4 note with first-hand evidence.**
+
+- Sibling record
+  `doc/08_tracking/bug/deployed_bin_simple_bootstrap_only_2026-07-31.md`
+  exists in-tree (ls verified) and owns this breakage.
+- Seed-smoke (fresh seed 46fe8f6b6def, 2026-11-11): `bin/simple.exe --help`
+  lists the full CLI surface — `simple test [path]` plus the whole test
+  option family (:22-42), `lint` (:51), `fmt` (:54), `compile`, `build`,
+  `watch`, `examples-check` (126 usage lines). The tracked worktree binary is
+  NOT a bootstrap-only deploy; the narrowed-CLI deployment state is gone.
+
 No change made in this lane.

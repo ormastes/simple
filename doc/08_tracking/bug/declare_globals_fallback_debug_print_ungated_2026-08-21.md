@@ -1,7 +1,8 @@
 # `[DEBUG declare_globals fallback]` printed unconditionally on the cranelift codegen path
 
 - **Date:** 2026-08-21
-- **Status:** OPEN (recorded only — gating deliberately NOT implemented here)
+- **Status:** FIXED 2026-11-11 — landed 2026-08-21 as `dec68f5173ff` ("gated
+  declare_globals log"); re-verified in source at tip by lane ne6
 - **Severity:** low (noise, not miscompilation)
 - **Found during:** `bin/simple build bootstrap` Stage 1, after the
   `auto`→backend resolution fix; Stage 1 is a plain `--backend=cranelift`
@@ -74,3 +75,26 @@ function.
   name is a `*_trace_state` global, suggesting these genuinely miss both
   `use_map` and `import_map` and fall through to `mangle_name`. That is a
   distinct question from the logging and is not filed here.
+
+---
+
+## Addendum 2026-11-11 (lane ne6, batch p3-ne6)
+
+**Verdict: FIXED.** Fixing commit `dec68f5173ff` (2026-08-21, "gated
+declare_globals log"), an ancestor of this branch tip.
+
+Verified at tip by source read (no cargo/rustc permitted in this lane, so no
+seed rebuild — the change is Rust-source-only and the probe line is data-flow
+trivial):
+
+- The ungated `[DEBUG declare_globals fallback]` eprintln is gone from
+  `src/compiler_rust/compiler/src/codegen/common_backend.rs`.
+- In its place (`common_backend.rs:~1798-1813`, inside `declare_globals`) the
+  fallback line is emitted only when `SIMPLE_TRACE_DECLARE_GLOBALS` is set —
+  the same knob as the neighbouring `[declare-globals]` traces at :1546-ish —
+  and the tag now reads `[declare-globals] fallback name=.. module_prefix=..`,
+  matching the recommended shape exactly.
+- The `SIMPLE_NO_DEPRECATED_WARNINGS` condition was dropped from this site
+  (that knob still governs actual deprecation warnings elsewhere, e.g.
+  `interpreter_module/module_loader.rs`, `hir/lower/module_lowering/module_pass.rs`).
+- The fixing commit's comment block in-source cites this bug doc.

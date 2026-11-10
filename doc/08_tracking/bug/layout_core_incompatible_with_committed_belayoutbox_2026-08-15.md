@@ -4,7 +4,9 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** FIXED (2026-11-11, lane ne13) — layout_core ported to the committed
+BeLayoutBox shape; spec `test/01_unit/browser_engine/layout_text_node_spec.spl`
+4/4 green on the release/1.0.0 seed. See addendum.
 **Area:** `src/lib/gc_async_mut/gpu/browser_engine/layout_core.spl` vs
 `layout_box.spl`
 **Spec blocked:** `test/01_unit/browser_engine/layout_text_node_spec.spl` — 0/4
@@ -52,4 +54,27 @@ Port `layout_core.spl` (10 ctor sites plus all `container.content_*` reads)
 to the committed `BeLayoutBox` shape, implement
 `layout_text_has_break_opportunity` (whitespace break-opportunity scan), and
 update `layout_text_node_spec.spl` to the ported signatures.
+
+## Addendum 2026-11-11 (lane ne13) — FIXED, verified on release/1.0.0
+
+The unblock condition has been met. Current tree (tip c8b6d0ebe90e):
+
+- `layout_text_has_break_opportunity` exists as
+  `pub fn layout_text_has_break_opportunity(s: text) -> bool`
+  (`layout_core.spl:157`) and is used by the layout pass (`:172`).
+- `layout_core.spl:49-53` constructs `BeLayoutBox(...)` with the fields the
+  class now actually has. Note the class moved AGAIN after this bug was filed:
+  `d01f25ea7969` (2026-11-05, "land residual text-metrics API surface")
+  restored `content_x`/`content_y`/`content_width`/`content_height` as stored
+  fields on `BeLayoutBox` (plus a `node` field and per-field defaults) so the
+  pinned partial-box constructor compiles; derived methods are kept with
+  same-name field/method dispatch by syntax. So the field-vs-method tension
+  this doc recorded was resolved by giving the class BOTH, pinned by
+  `test/03_system/.../layout_box_content_contract` per that commit.
+- **Verification actually run** (seed-smoke, fresh seed 46fe8f6b6def,
+  `SIMPLE_LIB=src bin/simple.exe test
+  test/01_unit/browser_engine/layout_text_node_spec.spl --mode=interpreter
+  --no-cache`): **outcome=OK, 4 declared, 4 executed, 4 passed, 0 failed**
+  (was 0/4 blocked with `no field named content_x` +
+  `layout_text_has_break_opportunity not found`).
 

@@ -173,3 +173,44 @@ awk '/MemAvailable/{print int($2/1048576)"G"}' /proc/meminfo   # wait for >= 40G
 sh scripts/check/check-native-erased-dispatch.shs
 ```
 
+## Addendum 2026-11-11 (lane ne16) — BLOCKED, still OPEN
+
+Verdict: BLOCKED (verification requires native-build; cannot run on this
+Windows host — known live native-build hang, never retried). Stays OPEN.
+
+**What is verifiable in tree today:**
+- The test family the doc says was "written, NOT run" is intact:
+  `scripts/check/check-native-erased-dispatch.shs` plus all six fixtures
+  under `scripts/check/fixtures/native_erased_dispatch/`. The script's
+  contract (native/AOT only, exact-stdout assertions, 137/143/144 =>
+  UNVERIFIED, sequential with MemAvailable re-checks) is unchanged.
+- **Step 2 (sharpened diagnostic) partially landed in source:**
+  `method_calls_literals.spl:2506` now fails with
+  `unresolved method call: {method} route={route}
+  key=... owner=... struct_method_syms=yes/no
+  record_instance_method=yes/no lookup_method_in_type=yes/no` and passes the
+  receiver's span (`Some(receiver.span)`), so the "method exists on the
+  declared type but dispatch failed" case is now distinguishable from "no
+  such method anywhere". It does not yet enumerate candidate class names
+  (`Dog::speak, Cat::speak`); the fail-closed contract (fatal error +
+  rt_panic placeholder, :2495-2525) is preserved.
+- **Step 1 (`val d: Any = Dog()` propagation) — UNCONFIRMED.**
+  `struct_value_syms` propagation has broadened since filing (match-arm
+  results, moves, loop vars: `mir_lowering_stmts.spl:1711/1747/1790/1931/
+  5342`), but whether the Any-annotated local arm now aliases the
+  constructed local's struct name is only decidable by running the positive
+  fixtures — which needs native-build.
+- **Step 3 (type-id header + vtable + dynamic-call MIR + runtime lookup) —
+  absent by design**, as the doc recommends (multi-lane feature, needs its
+  own design review).
+
+**Exact grant command (Linux host, pure-Simple release binary, >= 40G
+MemAvailable, strictly one case at a time):**
+```sh
+SIMPLE_BIN=$PWD/bin/release/x86_64-unknown-linux-gnu/simple \
+  sh scripts/check/check-native-erased-dispatch.shs
+```
+Expected per the doc's table: the four `any_local_*` fixtures print their
+exact lines; `any_param_two_classes` and `any_local_missing_method` fail
+closed loudly. Any 137/143/144 verdict is UNVERIFIED (exit 2), never a pass.
+

@@ -2,7 +2,32 @@
 
 Date: 2026-08-25
 
-Status: OPEN — measured bootstrap blocker; no source workaround is safe.
+Status: OPEN — **BLOCKED (stage-chain probe), triaged 2026-11-11 (lane boot14).**
+Measured bootstrap blocker; no source workaround is safe; verification requires a full
+dynload Stage-3 run with memory telemetry (not runnable on this Windows host — known
+native-build hang on the success path).
+
+## Triage 2026-11-11 (lane boot14) — BLOCKED, kept OPEN
+
+Verdict: **BLOCKED** (stage-chain probe). No safe in-scope source fix; the safety
+constraints (no untyped/deep free on aliased no-GC objects, Pure Simple only, deterministic
+parent-authority commit) rule out a blind change that cannot be measured.
+
+Evidence gathered this session (seed-smoke, build-commit `46fe8f6b6def`):
+- The parse pipeline has since been split; `driver_source_pipeline_parsing.spl` now
+  re-exports `driver_source_parse_retained.*` and streaming/reclaim owners exist
+  (`reclaim_streaming_source_contents_owner`, `evict_sources` at `driver_types.spl:1394`).
+  The documented zero-reclaim no-GC constraint on class-backed module objects is unchanged,
+  so a real RSS improvement cannot be asserted without measurement.
+
+Exact grant command (non-Windows host, sized RAM from the measured Stage-3 frontend/HIR
+peak — see also `stage3_selfhost_status_after_dedent_fix_2026-08-10.md`):
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --jobs=half --output=build/bootstrap --progress=build/bootstrap/mcdc-postfix-stage3.progress.log
+```
+Acceptance is the doc's own criteria: Stage-3 completes and publishes a valid candidate
+receipt, telemetry records peak tree RSS + per-phase progress, parse growth is bounded by a
+stated per-module budget, and the result is measured once against this baseline.
 
 ## Impact
 

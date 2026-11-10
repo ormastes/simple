@@ -1,6 +1,6 @@
 # MCP `TaskManager` lifecycle is a complete no-op in the interpreter — results and error text silently discarded
 
-- **Status:** OPEN
+- **Status:** SUPERSEDED — 2026-11-11 (lane interp8): Dict element reads of class values alias after the 2026-11-04 ClassInstance default-carrier flip (6c7b4db3d392); the record's repro prints `expect 2, got 2` on the fresh seed (build 46fe8f6b6def). No write-back needed in `tasks.spl`.
 - **Filed:** 2026-08-18
 - **Severity:** HIGH (silent data loss across an entire subsystem)
 - **Evidence bar:** **SOURCE-VERIFIED, NOT EXECUTION-VERIFIED**
@@ -112,3 +112,17 @@ prints `expect 2, got 2` — Dict element reads of class values alias after the
 2026-11-06 re-verification covers the dict-value probe). Engine fix confirmed;
 no `self.tasks[id] = task` write-back is needed in
 `src/lib/nogc_async_mut/mcp/tasks.spl`.
+
+
+## 2026-11-11 triage — SUPERSEDED confirmed (seed-smoke, lane interp8)
+
+Re-ran the record's minimal repro (Dict<text, Info> element
+bind-then-mutate, `build/p3fix-interp8/row5_taskinfo_repro.spl`) on the
+fresh worktree seed (build-commit `46fe8f6b6def`,
+`SIMPLE_EXECUTION_MODE=interpreter --no-cache`): prints `expect 2, got 2`.
+
+Carrier: the 2026-11-04 ClassInstance default-carrier flip (`6c7b4db3d392`) —
+the same fix family as the canonical record's 2026-11-06 re-verification
+(dict-value probe) and the 2026-11-10 lane's row 16; NOT the 2026-11-11
+seedfix A/B. No `self.tasks[id] = task` write-back added to
+`src/lib/nogc_async_mut/mcp/tasks.spl` — none is needed.

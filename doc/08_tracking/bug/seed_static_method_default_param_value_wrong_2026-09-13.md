@@ -1,6 +1,6 @@
 # Seed interpreter: static-method default parameter fills the constant 3, not the declared value
 
-Status: FIXED (already, verified 2026-11-06) — see "Resolution"
+Status: FIXED (already, verified 2026-11-06; re-verified 2026-11-11 lane interp12 on fresh seed 46fe8f6b6def — `static_default 105 42 105` under both `SIMPLE_EXECUTION_MODE=interpret` and the default run lane) — see "Resolution" and "Addendum 2026-11-11"
 Date: 2026-09-13
 Severity: HIGH — silent wrong answers; no error is raised
 Component: Rust seed interpreter (`src/compiler_rust`), static-method overload/default fill
@@ -60,3 +60,21 @@ No longer reproduces on a seed built from `release/1.0.0` @ `ecb705896a4` (debug
 `static_default 105 42 105` (`Probe.make(5)`, `Probe.one()`, `freefn(5)`)
 under both `SIMPLE_EXECUTION_MODE=interpret` and the default `run` lane.
 No code change in this pass.
+
+
+## Addendum 2026-11-11 (lane interp12) — re-verified FIXED on fresh seed 46fe8f6b6def
+
+**Verification actually run** (worktree simple-p3-interp12-20261111, seed-smoke):
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe SIMPLE_EXECUTION_MODE=interpret \
+  ./bin/simple.exe run test/fixtures/seed_interp/static_method_default_param_repro.spl --no-cache
+# static_default 105 42 105        (rc=0)
+
+# default run lane:
+./bin/simple.exe run test/fixtures/seed_interp/static_method_default_param_repro.spl --no-cache
+# static_default 105 42 105        (rc=0)
+```
+
+Declared defaults (`100`, `42`) bind correctly for static methods and the free
+control on both engines. Verdict: STALE (no new code change this lane).

@@ -1,7 +1,9 @@
 # MC/DC defaults ON, so every "interpreter" test run is diverted to native compile
 
 **Date:** 2026-09-05
-**Status:** OPEN — root cause located, fix is a policy decision, not a code bug
+**Status:** FIXED 2026-11-11 (lane interp10) — policy taken: an interpreter run
+never diverts on the MC/DC default; only explicit `--coverage` selects the
+native lane (verified on fresh seed 46fe8f6b6def, seed-smoke)
 **Severity:** blocks the entire test runner on any host without a compiling binary
 
 ## Chain
@@ -152,3 +154,27 @@ default**: with MC/DC left at its default `on`, the same command still
 diverts to `run_test_file_native` and fails to compile. `SIMPLE_MCDC_MODE=off`
 is still required. That is the policy decision recorded above, deliberately
 not taken here.
+
+## 2026-11-11 triage addendum — lane interp10 (FIXED)
+
+The policy decision this record deferred has been taken and implemented.
+`interpreter_run_diverts_to_native(coverage)`
+(`src/lib/nogc_sync_mut/test_runner/test_runner_config.spl:433-435`) now
+returns only the explicit-coverage flag; the
+`SIMPLE_MCDC_MODE == "on"/"dynamic"` diversion is gone from
+`run_test_file_interpreter` (`test_runner_execute.spl:318-320`), and an
+explicit `interpreter_mcdc_not_instrumented_notice` tells the user when MC/DC
+is on but the interpreter path cannot instrument it. The code comment names
+this bug doc. First appearance on this release line: merge `9e7e7a526edb`
+(PR #7597, 2026-11-07).
+
+seed-smoke verification (fresh seed `bin/simple.exe`, build-commit
+`46fe8f6b6def`, `SIMPLE_LIB=src`, `--mode=interpreter --no-cache`, NO
+`SIMPLE_MCDC_MODE` override — i.e. the default that used to divert): specs
+execute on the interpreter with real verdicts
+(`skip_helper_discards_block_prevention_spec.spl` 3/3,
+`class_instance_field_method_regression_spec.spl` 4/4,
+`exists_check_presence_regression_spec.spl` 7/7). Under the old default these
+runs would have diverted to `run_test_file_native` and died with
+`Error: Compilation failed:`. Fault 2 (`find_simple_binary` reading
+`SIMPLE_BINARY`, fixed 2026-09-05) is unchanged.

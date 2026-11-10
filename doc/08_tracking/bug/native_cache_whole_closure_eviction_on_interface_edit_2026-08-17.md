@@ -1,7 +1,7 @@
 # Native object cache evicts the WHOLE closure on any interface edit
 
 Date: 2026-08-17
-Status: OPEN (defect precisely localized; fix not yet landed)
+Status: FIXED (2026-11-11, lane ne16) — coarse whole-closure partition removed in source; four-scenario native re-measurement still owed, see addendum
 Lane: build-manager (implementing
 `doc/03_plan/compiler/build_system/targeted_build_interface_compat_minimal_bootstrap_2026-08-10.md`)
 
@@ -160,3 +160,45 @@ so the row stays OPEN with its fix direction intact.
 
 Prerequisite for anyone picking this up: get a native-build of a small fixture
 to COMPLETE first, then re-run the four scenarios.
+
+## Addendum 2026-11-11 (lane ne16, seed-smoke verification)
+
+Verdict: FIXED in source; the four-scenario native re-measurement remains
+owed on a host where native-build completes (see caveat).
+
+**The reported mechanism is gone.** The `sources-{sources_fingerprint}`
+partition no longer names the object directory —
+`driver_aot_native_output.spl:2138-2145` now sets
+`cache_scope_root = base_cache_scope_root` with an explicit comment: "Keep
+the object root stable across closure revisions. Cache hits below are
+admitted only by the complete per-module witness ... so partitioning by the
+coarse closure digest merely hid safe reusable objects before their witness
+could be read." The closure digest survives only as comparison/diagnostic
+metadata. The unconditional full rebuild this doc described is therefore
+structurally impossible: a new fingerprint no longer creates a new scope dir.
+
+**The replacement is finer than the proposed fix.** Instead of wiring
+`DependencyEntry.dependencies` + `needs_recompile`, the driver now
+invalidates per consumer via reverse-reference receipts:
+`driver_build/incremental.spl:1313-1340` compares
+`interface_digest_of_source(current)` against the recorded per-module
+interface digest — a body-only edit narrows invalidation to the
+`module-scc-artifact / emitted-symbol-relocation / generic-specialization`
+families, an interface edit invalidates the exact consumer set via
+`reverse_reference_consumers_v1`, and any non-exact lookup fails closed
+(falls back to full invalidation). `needs_recompile`
+(`incremental.spl:1116`) and `interface_digest_of_source`
+(`cache/action_key.spl:227`) now have real callers.
+
+**Verification actually run (fresh seed, build-commit `46fe8f6b6def`):**
+- `test/01_unit/compiler/cache/reverse_reference_projection_v2_spec.spl`
+  -> 14/14 PASS (interpreter mode) — the consumer-projection machinery that
+  replaces whole-closure eviction.
+
+**Caveat / still owed:** the doc's own proof standard — cold / unchanged /
+body-edit / interface-edit on a 3-module fixture counting `[NATIVE] cache
+hit:` lines — requires native-build to complete, which is impossible on this
+Windows host (known live hang; never retry). Recommended re-measurement on a
+Linux host with the pure-Simple release binary: repeat the table at the top
+of this doc against the current driver; expected now is unchanged=3/3,
+body-edit>=2/3, interface-edit=dependents-only (main, not leaf_b).

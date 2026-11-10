@@ -462,42 +462,33 @@ pub fn handle_array_methods(
         "is_empty" => Value::Bool(arr.is_empty()),
         "first" => arr.first().cloned().unwrap_or(Value::Nil),
         "last" => arr.last().cloned().unwrap_or(Value::Nil),
-        // Array `get` / `at`: bounds-checked element access returning a real
-        // `Option` -- `Value::some(elem)` in range, `Value::none()` otherwise.
+        // Array `get` / `at`: bounds-checked element access under the FLAT
+        // Option encoding — the bare element in range, `Value::Nil` otherwise
+        // (including negative indices, which are signed-checked and never
+        // saturate to 0).
         //
         // Owner decision (2026-11-09, array_get_contract_drift_crypto_2026-10-18):
         // `a.get(i)` returns `T?` on EVERY lane; `a[i]` is the direct form.
-        // `get` used to return the bare element here (and `nil` out of range),
-        // read its index through `eval_arg_usize` -- so `get(-1)` saturated to
-        // `get(0)` and answered the FIRST element -- while the native lane
-        // already typed it `Optional(elem)`. That drift is what broke crypto's
-        // nested-limb helpers under native codegen.
-        //
-        // Until this arm existed the seed had NO array `at` at all: the only
-        // `at` binding was the *text* one (`"char_at" | "at" =>
-        // rt_string_char_at`). Every `arr.at(i)` therefore fell to
-        // `_ => Ok(None)` ("unhandled"). On this interpreter that surfaced
-        // loudly as "method `at` not found on type `array`", but on the JIT and
-        // native-LLVM lanes the same gap silently yields `nil`, which reads as
-        // `None` for EVERY index -- in-range hits included, and
-        // indistinguishable from a genuinely absent element. See
-        // doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
-        //
-        // Note this must build an actual Option, NOT the "flat" encoding the
-        // pure-Simple interpreter uses (where the bare element stands for
-        // `Some`). This interpreter's pattern matcher rejects a bare `i64`
-        // against `Some(v)`/`None` with "match expression exhausted", so
-        // returning the element directly trades a loud missing-method error for
-        // a loud missing-pattern one.
+        // `.get(i)` and `.at(i)` are the same operation. The original seed
+        // implementation of that decision returned a BOXED `Value::some(elem)`,
+        // diverging from the pure-Simple interpreter's flat encoding (bare
+        // word = Some payload, nil = None — see its
+        // `match_enum_variant_pattern`). That divergence broke every
+        // `arr.get(i).<method>(...)` chain in the stdlib (e.g. the js engine's
+        // `parts.get(i).trim()`, seedfix 2026-11-11) with
+        // "method not found on value of type enum in nested call context".
+        // Flat returns plus the matcher's flat `Some` arm (interpreter_patterns.rs)
+        // restore pure-Simple parity: chains work AND `Some(v)`/`None` patterns
+        // bind. JIT/native lanes keep their typed Optional form untouched.
         //
         // The index is read as *signed* on purpose: `eval_arg_usize` cannot
-        // represent `at(-1)`; a negative index must resolve to `None`, not
+        // represent `at(-1)`; a negative index must resolve to absent, not
         // wrap (or saturate) to another element.
         "get" | "at" => {
             let idx_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match idx_val {
-                Value::Int(idx) if idx >= 0 && (idx as usize) < arr.len() => Value::some(arr[idx as usize].clone()),
-                _ => Value::none(),
+                Value::Int(idx) if idx >= 0 && (idx as usize) < arr.len() => arr[idx as usize].clone(),
+                _ => Value::Nil,
             }
         }
         "has" | "contains" => {

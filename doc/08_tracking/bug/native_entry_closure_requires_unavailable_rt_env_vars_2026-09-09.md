@@ -1,7 +1,7 @@
 # Native entry closure requires unavailable `rt_env_vars`
 
 Date: 2026-09-09  
-Status: CLOSED (outdated, 2026-11-05) — see addendum.
+Status: CLOSED (outdated, 2026-11-05; reaffirmed SUPERSEDED 2026-11-11 by p3-boot12) — see addendum.
 
 ## Reproducer
 
@@ -89,3 +89,27 @@ native_build_entry_closure_unknown_extern_rt_env_vars_2026-09-13: the
 `rt_env_vars` semantic gap no longer reproduces on current stage3 (blocked
 later, separately, at MIR by the F3 AV fixed in PR #6933). Premise stale on
 this lane's base.
+
+
+## Triage 2026-11-11 (P3 boot12 lane, work/p3-boot12-20261111)
+
+**Verdict: SUPERSEDED — premise stale on this base; corroborates the
+2026-11-05 W3b addendum, the 2026-11-10 p3-lib lane note above, and the
+2026-11-10 p3-boot6 lane note on the sibling doc. Library-area overlap read
+first, per the batch assignment note.**
+
+- PR #6933 merge 37a5739f0c17 (`work/nto-hirtype-payload`) verified ancestor
+  of this base (`git merge-base --is-ancestor` → YES): the MIR-phase AV named
+  in the W3b addendum is fixed in-tree, so the only remaining blocker the
+  addendum recorded is closed.
+- Sibling doc
+  `native_build_entry_closure_unknown_extern_rt_env_vars_2026-09-13.md`
+  carries the same W3b closure (lib lane 2026-11-10; boot6 row 41
+  2026-11-10): `unknown extern function: rt_env_vars` no longer appears in
+  any log shape; both docs agree the residual MIR AV was PR #6933.
+- Not re-run live in this lane: entry-closure native builds are out of lane
+  scope and the Windows native-build hang is a routed live defect. The
+  premise-stale classification rests on the recorded W3b addendum + verified
+  commit ancestry + sibling corroboration.
+
+No change made in this lane.

@@ -2,7 +2,7 @@
 
 Date: 2026-09-07
 Severity: MEDIUM (the linter cannot process affected files at all — it is not a finding, it is an abort)
-Status: OPEN
+Status: FIXED (2026-11-11, lane ne13) — fixing commit eea2a322ac74; verified on release/1.0.0 tip, see addendum
 Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, 50093192 bytes, mtime 2026-09-06 09:59:11)
 
 ## Symptom
@@ -70,3 +70,27 @@ None for the affected files. Lint verdicts for
 `src/app/ci/pipeline_runner.spl` and `src/lib/common/sdn/parser.spl` are recorded
 as BLOCKED-by-linter in `.spipe/simple_orchestrator/state.md`, not as PASS and
 not as findings.
+
+## Addendum 2026-11-11 (lane ne13) — FIXED, verified on release/1.0.0
+
+**Fixing commit:** `eea2a322ac74` "fix(lint): read CodeLine.trimmed in
+linear_scan_in_loop" (2026-10-09) — the abort came from a lint rule reading a
+nonexistent `cl.code` on `CodeLine` (which has only `line_num`/`raw`/`trimmed`);
+the rule now reads `.trimmed` and skips comment-only lines, with a spec case
+added. Companion `b41d64cad69d` pinned lint to the interpreter lane.
+
+**Verification actually run** (seed-smoke, worktree simple-p3-ne13-20261111,
+tip c8b6d0ebe90e, fresh seed 46fe8f6b6def via
+`sh scripts/check/lint-cached.shs`, SIMPLE_LIB=src):
+
+| probe (from this doc's own repro table) | 2026-09-07 verdict | today |
+|---|---|---|
+| 4-line file importing only `std.common.contracts.orchestration.ci_v1.{CI_API_VERSION_V1}` | abort (`CodeLine has no field named code`) | **PASS, clean** (0 cached, 1 linted) |
+| `src/lib/common/sdn/parser.spl` (was: abort even at origin/main) | abort | **PASS, clean** (46 warnings, 0 errors) |
+| `src/app/ci/pipeline_runner.spl` | abort | **lints to completion**: 2 `error[primitive_api]` (bare `bool` in public API at :290) + 5 warnings — real findings, no abort |
+
+The linter no longer aborts on any of the three recorded closures; the "verdict
+says findings but there are none" misreport shape is gone. The remaining
+`pipeline_runner.spl` `primitive_api` findings are ordinary lint output for the
+file's authors, not this defect. The `.spipe/simple_orchestrator/state.md`
+BLOCKED-by-linter entries for these two files can be re-lifted by their owner.

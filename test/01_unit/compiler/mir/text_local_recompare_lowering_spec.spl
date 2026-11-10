@@ -1,0 +1,30 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+# Bug freestanding_text_local_recompare_flips_material_admission_2026-08-10:
+# a text local compared again later (after reassignment) must still lower to a
+# CONTENT compare (rt_text_eq_any), never a raw i64 identity icmp.
+fn lower_recompare_mir(src: text, fname: text) -> text:
+    val module = parse_full_frontend(src, fname + ".spl", fname + ".spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(fname + ".spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    serialize_mir_module(mir_lowering.lower_module(hir))
+
+fn count_of(hay: text, needle: text) -> i64:
+    hay.split(needle).len() - 1
+
+describe "Text local re-compare MIR lowering", tag: ["only-compiled"]:
+    it "lowers every == and != on a reassigned text local as content compare":
+        val source = "fn admit(raw: text, other: text) -> i64:\n    var mode = raw.trim()\n    val early = mode == \"solid-material\"\n    mode = other\n    val late_lit = mode == \"solid-material\"\n    val late_local = mode == other\n    val late_ne = mode != raw\n    var n = 0\n    if early: n = n + 1\n    if late_lit: n = n + 2\n    if late_local: n = n + 4\n    if late_ne: n = n + 8\n    n\n"
+        val mir = lower_recompare_mir(source, "text_recompare")
+        expect(count_of(mir, "rt_text_eq_any")).to_equal(4)
+
+    it "keeps content compare for an if-merged text local":
+        val source = "fn pick(flag: bool, a: text, b: text) -> bool:\n    val chosen = if flag: a else: b\n    chosen == \"cpu\"\n"
+        val mir = lower_recompare_mir(source, "text_if_merge")
+        expect(count_of(mir, "rt_text_eq_any")).to_equal(1)
