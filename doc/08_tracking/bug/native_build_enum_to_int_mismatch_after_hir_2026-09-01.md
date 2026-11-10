@@ -46,3 +46,20 @@ the `self` defect applies: find the emitting site in the Rust seed and have it
 name the receiver/expression and the enclosing frame (the `[field-access-error]`
 branch in `interpreter/expr/calls.rs` is the worked example, and it now prints
 `locals=` / `env_keys=` under `SIMPLE_DEBUG_FIELD_ACCESS`).
+
+## 2026-11-10 status — SUPERSEDED (P3 bootstrap lane row 42, work/p3-boot6-20261110)
+
+The prescribed next step is implemented and merged to `origin/main`: commit
+`21e7eac04165` ("fix(seed): name enum::variant in 'cannot convert enum to
+int'", merged via PR #7995, `1e1dc5278a9e`) makes `Value::as_int` report
+`cannot convert enum <Enum>::<Variant> to int` instead of bare `enum`, with
+pinning unit tests (`as_int_enum_attribution_tests`). That merge is not yet an
+ancestor of this lane's base (`HEAD..origin/main` = 35 commits), and the fix
+surface is `src/compiler_rust/compiler/src/value_impl.rs` = seed-fix lane, so
+no edit was made here. Related, already in this base: `hir/lower/expr/
+operators.rs:49-86` rejects arithmetic/bitwise/ordered-compare on unwrapped
+optional scalars at compile time with an unwrap-guidance message, which closes
+the most likely root class (optional-int arithmetic reaching `as_int`). Root
+repro (`build/reprobuild.sh`, 12-module `i_owner.spl` closure, ~9 min
+interpreted worker) was not re-run: host-heavy and the attribution fix is
+already verified on main.

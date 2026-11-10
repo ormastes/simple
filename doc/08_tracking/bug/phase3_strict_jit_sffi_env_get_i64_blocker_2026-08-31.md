@@ -1,6 +1,6 @@
 # Phase3 strict-JIT `sffi_env_get_i64` blocker
 
-Status: OPEN / release-blocking for the Phase3 core-C candidate.
+Status: SUPERSEDED / release-blocking for the Phase3 core-C candidate.
 
 ## Observed fact
 
@@ -102,3 +102,16 @@ the doc's acceptance condition is met in-tree.**
 - Host-limit note: cargo test execution of `compiler_rust` is outside this lane's
   scope (agent-10 owns compiler_rust); the fix + both regression tests are
   present and wired in the current tree.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Re-confirmed statically on this base (`790b54f7c4fc`): the doc's acceptance
+condition stays met in-tree. `sffi_alias_target("sffi_env_get_i64") ==
+Some("rt_env_get_i64")` at `codegen/instr/calls.rs:3856` (comment cites
+this exact import), wired into JIT import resolution at
+`codegen/jit.rs:492`; `rt_env_get_i64` registered at
+`common/src/runtime_symbols.rs:881`; the demanded strict-JIT regression
+`jit_tests.rs::test_jit_sffi_env_i64_alias_uses_registered_runtime_provider`
+present at :455. No synthetic bare provider added. Host-limit unchanged:
+cargo execution of compiler_rust belongs to the compiler_rust owner lane;
+this lane is not that owner and made no change.

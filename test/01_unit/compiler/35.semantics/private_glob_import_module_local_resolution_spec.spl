@@ -1,0 +1,124 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+## Purpose and audience
+
+Purpose: pin that a PRIVATE (non-`pub`) free function or constant reached only
+through a glob import (`use m.*`) never displaces a same-named binding the
+importer already holds -- its own declaration, or an earlier import from a
+different module. Two modules may each declare the same private name without a
+collision error, and a consumer's call must not silently rebind to whichever
+module's private symbol was globbed last.
+
+Bug: doc/08_tracking/bug/private_symbol_collision_sshd_four_names_2026-07-28.md
+
+Audience: compiler engineers maintaining HIR import registration and method
+resolution (src/compiler/20.hir/hir_lowering/_Items/module_import_resolution.spl,
+src/compiler/35.semantics/resolve.spl).
+
+## Operator workflow
+
+Run `bin/simple test test/01_unit/compiler/35.semantics/private_glob_import_module_local_resolution_spec.spl`.
+Each scenario names the module whose symbol the consumer's bare name must bind to.
+
+## Compatibility and limitations
+
+In-process: lowers three tiny modules through the self-hosted HIR lowering and
+inspects the consumer's symbol table. The seed-side JIT dedup (C1/C2 in the bug
+record) is a separate Rust lane and is not exercised here.
+"""
+use std.spec.*
+use std.spec.step
+
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn pg_surfaces(modules: Dict<text, Module>, sources: [SourceFile]) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(error):
+            assert_true(false)
+            ModuleSurfacesByName.empty()
+
+# Lower consumer `pc` (source `consumer_source`) against providers `pa` and `pb`.
+fn pg_lower(pa_source: text, pb_source: text, consumer_source: text) -> HirLowering:
+    val log = Logger(level: 0)
+    val pa = parse_full_frontend(pa_source, "pa", "pa", log)
+    val pb = parse_full_frontend(pb_source, "pb", "pb", log)
+    val pc = parse_full_frontend(consumer_source, "pc", "pc", log)
+    var modules: Dict<text, Module> = {}
+    modules["pa"] = pa
+    modules["pb"] = pb
+    val sources = [
+        SourceFile(path: "pa.spl", content: pa_source, module_name: "pa"),
+        SourceFile(path: "pb.spl", content: pb_source, module_name: "pb")
+    ]
+    var lowering = hirlowering_for_module("pc", pg_surfaces(modules, sources))
+    val hir = lowering.lower_module(pc)
+    lowering
+
+# Module that owns the consumer's bare `name` binding ("" when unbound).
+fn pg_owner(lowering: HirLowering, name: text) -> text:
+    val id = lowering.symbols.lookup_or_invalid(name)
+    if not id.is_valid():
+        return ""
+    val sym = lowering.symbols.get_symbol(id)
+    if not sym.?:
+        return ""
+    sym.defining_module ?? ""
+
+fn pub_helper() -> text:
+    "pub fn helper(x: i64) -> i64:\n    x + 1\n"
+
+fn private_helper() -> text:
+    "fn helper(x: i64) -> i64:\n    x + 2\n"
+
+fn consumer_globs() -> text:
+    "use pa.*\nuse pb.*\n\nfn go() -> i64:\n    helper(1)\n"
+
+describe "private glob-imported names stay module-local":
+    it "a later private glob never displaces an earlier public binding":
+        # @req: REQ-SSPEC-UNIT
+        step("Lower: pa exports pub helper, pb declares private helper, pc globs pa then pb")
+        val lowering = pg_lower(pub_helper(), private_helper(), consumer_globs())
+        expect(pg_owner(lowering, "helper")).to_equal("pa")
+
+    it "a public glob still displaces an earlier private glob of the same name":
+        # @req: REQ-SSPEC-UNIT
+        step("Lower: pa private helper, pb pub helper, pc globs pa then pb")
+        val lowering = pg_lower(private_helper(), pub_helper(), consumer_globs())
+        expect(pg_owner(lowering, "helper")).to_equal("pb")
+
+    it "two modules declaring the same private name coexist without cross-binding to the last glob":
+        # @req: REQ-SSPEC-UNIT
+        step("Lower: pa and pb each declare private helper, pc globs both")
+        val lowering = pg_lower(private_helper(), private_helper(), consumer_globs())
+        expect(pg_owner(lowering, "helper")).to_equal("pa")
+
+    it "the importer's own private declaration outranks every glob-imported private":
+        # @req: REQ-SSPEC-UNIT
+        step("Lower: pc declares its own private helper after globbing pa and pb")
+        val own = "use pa.*\nuse pb.*\n\nfn helper(x: i64) -> i64:\n    x\n\nfn go() -> i64:\n    helper(1)\n"
+        val lowering = pg_lower(private_helper(), private_helper(), own)
+        val owner = pg_owner(lowering, "helper")
+        expect(owner != "pa" and owner != "pb").to_be(true)
+
+    it "a later private glob constant never displaces an earlier public constant":
+        # @req: REQ-SSPEC-UNIT
+        step("Lower: pa exports pub LIMIT, pb declares private LIMIT, pc globs pa then pb")
+        val lowering = pg_lower("pub val LIMIT = 1\n", "val LIMIT = 2\n",
+            "use pa.*\nuse pb.*\n\nfn go() -> i64:\n    LIMIT\n")
+        expect(pg_owner(lowering, "LIMIT")).to_equal("pa")
+
+    it "a later private glob type never displaces an earlier public type":
+        # @req: REQ-SSPEC-UNIT
+        step("Lower: pa exports pub struct Cell, pb declares private struct Cell, pc globs pa then pb")
+        val lowering = pg_lower("pub struct Cell:\n    v: i64\n", "struct Cell:\n    w: i64\n",
+            "use pa.*\nuse pb.*\n\nfn go() -> i64:\n    1\n")
+        expect(pg_owner(lowering, "Cell")).to_equal("pa")

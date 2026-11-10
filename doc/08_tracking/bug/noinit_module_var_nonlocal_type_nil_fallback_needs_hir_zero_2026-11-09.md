@@ -62,3 +62,17 @@ src/ site given an explicit initializer: `src/os/kernel/interrupts/gdt.spl` (`ts
 Not changed: fixed-size ARRAYS of an unzeroable named element in kernel/noalloc modules keep the
 zero-BSS nil slots (`riscv/startup.spl`, `riscv32/startup.spl` `trap_frames`); native static-zero
 proof is deferred to stage3 verification.
+
+## 2026-11-10 P2 triage (lane p2-compiler-triage-20261110)
+
+VERDICT: SUPERSEDED on compiler(simple). Commit 0e9cf3282498 is an ancestor of
+release/1.0.0 d7a430cc2baf; parser_decls_use.spl:459-474 rejects no-init
+class/enum/unzeroable named module vars ("explicit initializer required"),
+nil fallback gone. Qualified on the deployed seed (seed-smoke):
+test/01_unit/compiler/parser/module_noinit_enum_class_zero_spec.spl 7/7 PASS.
+The interp spec is 0/5 on the deployed seed, matching this document's recorded
+"0/5 deployed -> 5/5 rebuilt" red/green; seed source carries the fix
+(6109d315b22e, class_instantiation.rs:570), so interp qualification belongs to
+the seed-fix lane (src/compiler_rust, out of scope here). Kernel/noalloc
+static-zero proof remains deferred per this document. Cycles: 1. Evidence:
+build/review/p2fix-compiler-20261110.sdn.

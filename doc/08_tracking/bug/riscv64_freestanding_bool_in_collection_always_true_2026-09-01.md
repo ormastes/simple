@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: **OPEN** — root cause of goal item 1 row 2 (SimpleOS riscv64 in-guest
+- Status: **SUPERSEDED** — root cause of goal item 1 row 2 (SimpleOS riscv64 in-guest
   build-and-run sanity). Not fixed.
 - Date: 2026-09-01
 - Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`,
@@ -562,3 +562,27 @@ fresh session. Three independent checks:
   and are also part of the same probe run.
 
 **Status: FIXED at tip, behaviorally verified in-guest 2026-11-05.**
+
+---
+
+# P3 TRIAGE ADDENDUM (2026-11-11, lane boot8) — SUPERSEDED
+
+Verdict: **SUPERSEDED — already fixed at tip; re-verified by source + guard this lane.**
+
+This doc already carries a 2026-11-05 "VERIFIED AT TIP" addendum with in-guest
+behavioral proof (real OpenSBI v1.4 fw_payload, probe rc=0, every comparison
+shape EXPECTED). This lane spot-checked the fix is still present at
+`work/p3-boot8-20261111` HEAD (`7d4140c1a6b3`, cut from `origin/release/1.0.0`):
+
+- Source: the tagged-bool arm is present at
+  `examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c:1143`
+  (`if (value == 11) return 1; if (value == 19) return 0;`).
+- Guard: `sh scripts/check/check-baremetal-tagged-bool-decode.shs` →
+  `PASS — 4 definition(s) checked, all decode the tagged bool` (rc=0).
+- Ancestry: fixing merge `91bc01a35eb` (PR #257, "tagged-bool decode, baremetal
+  heap tags, riscv64 in-guest fixes") IS an ancestor of this HEAD.
+
+Host-limit note: this is a riscv64/freestanding in-guest defect; the in-guest
+OpenSBI boot cannot be run on this Windows host. This lane's verification is
+source-presence + the wired shape guard; the behavioral in-guest proof stands
+from the cited 2026-11-05 addendum. No in-guest execution is claimed here.

@@ -1,7 +1,7 @@
 # `bin/simple run` resolves `std.*`/`lib.*` to a stale bundled stdlib — on-disk edits are silently ignored
 
 - **Date:** 2026-08-08
-- **Status:** OPEN
+- **Status:** SUPERSEDED
 - **Severity:** High (measurement trap — produces confident false results, not a crash)
 - **Component:** module resolution in the deployed binary
   (`bin/release/x86_64-unknown-linux-gnu/simple`), `run` subcommand
@@ -130,3 +130,15 @@ run` resolves the working-tree stdlib. Verified with the worktree Rust seed
   and is out of this library row's scope.
 - The sabotage patch was reverted; tree clean. Standing guidance (verify with
   sabotage-to-constant) remains good practice regardless.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Re-ran the doc's exact sabotage repro on this lane's refreshed seed
+(bin/simple.exe, build-commit `0791c2b7f4a7`): `src/lib/common/bcrypt/salt.spl`
+line 115 patched `var byte_val = rt_random_i64() % 256` → `var byte_val = 7`;
+`bin/simple.exe run` of a probe importing
+`std.bcrypt.salt.generate_random_bytes(4)` printed **7,7,7,7**, rc=0.
+On-disk `.spl` edits are live on the `run` path. Patch reverted; `git diff
+-- src/lib` empty. Resolution fix family: PR #7597 (merge `9e7e7a526edb`).
+The "second trap" (list[i] shifted left 3 under JIT) stays out of this row's
+scope per the 2026-11-10 lane.

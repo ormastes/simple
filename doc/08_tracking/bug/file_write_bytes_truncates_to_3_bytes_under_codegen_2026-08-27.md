@@ -1,7 +1,7 @@
 # `file_write_bytes` writes 3 garbage bytes when the call is codegen-compiled
 
 Date: 2026-08-27
-Status: OPEN — root-caused and minimally reproduced; fix is in the Rust seed
+Status: SUPERSEDED — root-caused and minimally reproduced; fix is in the Rust seed
         (`src/compiler_rust/`), out of scope for this lane.
 Class: (b) real product bug — seed extern-argument marshalling
 Found by: soak lane (reported, not fixed; it cost that lane real time by
@@ -67,3 +67,43 @@ here: `src/compiler_rust/**` was explicitly out of scope for this lane.
 The `lit3`/`lit4` pair above is the whole test: write N bytes, read the file
 back, assert the size and content match, from a call site that is NOT forced
 into the interpreter.
+
+---
+
+## Addendum 2026-11-11 — lane compiler2 — verdict SUPERSEDED (fixed on refreshed seed)
+
+Triage-first pass, batch 2. The codegen `[u8]`-to-extern marshalling defect is
+fixed and the fix ships in the refreshed seed (bin/simple.exe, build-commit
+0791c2b7f4a7, built 2026-11-11).
+
+**Root cause confirmed and fixed in-tree.** `src/compiler_rust/compiler/src/codegen/instr/calls.rs:367-371`
+carries the corrected ABI and a comment naming this exact defect: the array
+argument "must cross as exactly TWO owner words (path RuntimeValue, `[u8]` array
+adapter ...). The historical defect expanded only the path text to (ptr, len)
+and passed the array handle as `data_ptr` with a stale register as `data_len`,
+silently" truncating output. Fix present; mitigation-free.
+
+**Fixing / pinning commit:** `904640beb29a` (2026-11-05) "test(compiler_rust):
+pin file_write_bytes compiled-call ABI (2-owner-word, full 256-byte payload)" —
+the exact regression test this doc asked for ("write N bytes, read back, assert
+size+content from a non-interpreter call site"). Precedes the seed build.
+
+**Seed-smoke (codegen lane — the only honest proof for a codegen defect):**
+minimal repro `build/review/p3c2-lit4.spl` (5-elem `[u8]` literal via
+`use std.io_runtime.{file_write_bytes}`) run under the seed's default codegen
+engine, `bin/simple run`:
+- output `ok=true`; written file is `01 02 03 04 05`, size 5 (CORRECT — was
+  `08 00 00`, size 3, pre-fix).
+- Crucially, `rt_file_write_bytes_array` is **ABSENT** from the
+  `[engine-demotion] hybrid-interp-splice` symbol list in the run log, so the
+  `file_write_bytes` call was genuinely **codegen-compiled**, not spliced to the
+  interpreter. The correct bytes therefore prove the marshalling fix, not a
+  silent interpreter fallback (the failure mode this doc warned about).
+Evidence: `build/review/p3c2-lit4-run.log`, `build/review/p3c2-lit4.bin`.
+
+Note: `--mode=interpreter` cannot verify this row (the interpreter always
+marshalled correctly); the proof necessarily used the seed's own codegen lane.
+Related but distinct sibling `seed_file_write_bytes_noop_and_timeout_directive_2026-10-24.md`
+(the symbol-table no-op) also already fixed on release/1.0.0.
+
+**Cycles:** 0 (no live defect; no fix attempted).

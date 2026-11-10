@@ -104,3 +104,32 @@ Stage-4 tracker `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-
 Flag for bookkeeping: when Stage 3/4 admission lands, this entry's acceptance
 (unblock condition above) can be re-run from this doc's reproduction. No
 change made; label: host-independent-source bookkeeping.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: LIVE — corroborated-by-prior-lane; not a `src/runtime` defect.**
+Spot-check agrees with the 2026-11-10 p3-rt addendum: the unblock condition
+is bootstrap-deployment admission state (an admitted self-hosted Stage 3/4
+binary with general `check`/`test`), and nothing in this doc names a
+defective runtime source, so there is no runtime-source change this lane
+could land. No deep triage redone.
+
+Spot-check at this lane's base (790b54f7c4fc, refreshed seed 0791c2b7f4a7):
+
+- seed-smoke (repro): `bin/simple.exe check src/lib/common/mcdc/model.spl
+  --mode=interpreter --no-cache` exit 0 (only W-STR-BRACE-001 lint noise) —
+  the MC/DC contract slice parses and checks clean against current source on
+  the refreshed seed. This is source-side readiness only; per the doc the
+  Rust seed is not an authorized fallback for the acceptance.
+- `bug_db.sdn` row still `open` (P3); triage_20261027 residual
+  `keep_open` / `needs_more_evidence` unchanged.
+- No admitted Stage 2/3 binary or sanity/provenance receipts under
+  `build/bootstrap/` in this worktree (directory absent). The unblock
+  condition remains unmet here.
+
+Bookkeeping flag carried forward: when Stage 3/4 admission lands (tracked
+by `stage3_hir_segv_compiler_driver_unit2of833_2026-09-14`,
+`stage3_driver_hir_lowering_spins_after_parse_fix_2026-09-21`, and
+`stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01`),
+re-run this doc's reproduction from the admitted binary. No change made;
+label: host-independent-source bookkeeping.
