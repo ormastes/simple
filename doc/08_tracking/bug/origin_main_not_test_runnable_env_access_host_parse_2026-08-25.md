@@ -79,3 +79,13 @@ Verified on `origin/main` at `c2504144e5a` after the fix in `a8a32ebccad`:
 `PASS — 1 fixture invocation executed ... tree is test-runnable`.
 
 Status: the original defect is FIXED (`a8a32ebccad`) and the class is now guarded.
+
+## 2026-11-10 status — SUPERSEDED (P3 library lane, work/p3-lib-20261110)
+
+Re-verified on this lane's base (origin/release/1.0.0, which contains
+`a8a32ebccad`): the env_access_host.spl parse failure does not reproduce. The
+guard fixture `test/fixtures/doctest/green.md` was executed with the deployed
+seed from a clean lane worktree — the run compiled and progressed past parsing
+to runtime stages (it stops on a Windows-seed-only gap: `unknown extern
+function: rt_io_file_open_read`, a seed registration gap unrelated to this
+record). The parse regression is fixed and guarded as the record states.
