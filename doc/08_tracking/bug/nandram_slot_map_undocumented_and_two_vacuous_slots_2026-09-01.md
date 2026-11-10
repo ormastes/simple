@@ -1,7 +1,7 @@
 # `.nandram` slot map was undocumented; two slots are defective
 
 **Date:** 2026-09-01
-**Status:** OPEN (map documented; the two slot defects are unfixed)
+**Status:** SUPERSEDED (2026-11-11, lane ne16) — firmware rewrite removed the defective code; see addendum. FINDING 3 (const_drift_check.spl import failure) still reproduces and remains out of scope here.
 **Area:** `examples/09_embedded/simpleos_nvme_fw/fw_rv32`
 **Related:** `doc/03_plan/hardware/nvme_emu_first_increment_plan.md` §3,
 `doc/09_report/nvme_fw_current_state_audit_2026-09-01.md` (P0-1)
@@ -116,3 +116,35 @@ drift it exists to catch is unguarded. `ipc_drift_check.spl` runs fine
 drift-check pattern.
 
 Needs its own fix; not in scope here.
+
+## Addendum 2026-11-11 (lane ne16, seed-smoke verification)
+
+Verdict: SUPERSEDED. The code this row's findings target no longer exists.
+
+- `fw_rv32/entry.spl` is now a 175-line self-test wrapper; the ~1000-line
+  module with the ~250 bare-integer `_nand_ram_load/_nand_ram_store` sites was
+  replaced by the `logic*.spl` family (22-module no-alloc port). A repo-wide
+  grep finds **zero** live `_nand_ram_store`/`_nand_ram_load` call sites in
+  any firmware source; the API is gone. FINDING 1 (slots 23/24) and FINDING 2
+  (slot 31) therefore cannot reproduce — there is no `_nand_ram_remap`, no
+  slot-31 evidence digit, and no startup slot-31 write anywhere in the tree.
+- The replacement design does not reintroduce the drift hole: the nand-region
+  model (`logic_nand_region_core.spl`) is pure math with "No shm/memory
+  access"; region bases are owned by `logic_ipc_layout_core.spl` and geometry
+  values are named constants (re-declared values explicitly flagged for the
+  L7 drift-check extension).
+- The map and its gate survive as historical documentation and still pass on
+  the fresh seed (build-commit `46fe8f6b6def`):
+  `bin/simple.exe run .../nand_slot_drift_check.spl` ->
+  `checked 49 slots in a 64-word region, 0 drift` / `NAND SLOT MAP OK`.
+  The `(?)` markers on slots 23/24 in `nand_test_slots.spl` now describe
+  slots that exist only in this host-only map.
+
+**FINDING 3 — still LIVE, still out of scope here.** Re-ran on the fresh
+seed: `bin/simple.exe run fw_rv32/const_drift_check.spl` fails with the exact
+doc error (`cannot resolve import fw.nvme_types ... module path segment fw
+not found`) — the `fw/` directory it imported was removed in the same
+rewrite, and the drift-check's docstring command was never repointed. Per
+this doc's own scope note ("Needs its own fix; not in scope here") it stays
+with the hardware owner lane; recommended fix is repointing the check at the
+`logic_*_core.spl` constants or deleting it in favor of the L7 extension.
