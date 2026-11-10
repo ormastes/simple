@@ -1,7 +1,7 @@
 # A module-level `val` holding a struct is zero-initialized when passed as a call argument
 
 - **Date:** 2026-09-01
-- **Status:** OPEN
+- **Status:** SUPERSEDED — 2026-11-11 (lane interp8): the two-module repro binds correctly on the fresh seed (build 46fe8f6b6def); every `mask(...)` prints 24 under the interpreter. Fixing commit not isolated; the module-global lowering/registration fix family (952d2ca34d71, 6109d315b22e) is the plausible carrier.
 - **Binary:** `bin/simple` (Rust seed), interpreter path (`bin/simple run`)
 - **Severity:** silent wrong answer — no error, no warning, no crash
 
@@ -102,3 +102,22 @@ copy, inline, rebuilt) in both the default run and
 as call arguments on the current seed. The nullary-function workaround in
 `examples/09_embedded/simpleos_nvme_fw/fw/nvme_reg_defs.spl` can be retired by
 its owner (optional; outside this lane).
+
+
+## 2026-11-11 triage — SUPERSEDED confirmed (seed-smoke, lane interp8)
+
+Re-ran the record's two-module repro (`build/p3fix-interp8/bfmod.spl` +
+`bfuse.spl`) on the fresh worktree seed (build-commit `46fe8f6b6def`,
+`SIMPLE_EXECUTION_MODE=interpreter --no-cache`): every `mask(...)` prints
+24 (`A`, `B`, local copy, inline, rebuilt) — module-level `val` structs bind
+correctly as call arguments on the current seed.
+
+Fixing commit not isolated by this lane. The module-global
+lowering/registration fix family (`952d2ca34d71` "fix(mir): lower
+module-level globals whose initializer does not const-fold",
+`6109d315b22e` "fix(interp): default no-init class/enum module vars") is the
+plausible carrier; note `952d2ca34d71` (2026-07-25) predates the 2026-09-01
+filing, so the deployed-then seed may simply have been older than the fix.
+The nullary-function workaround in
+`examples/09_embedded/simpleos_nvme_fw/fw/nvme_reg_defs.spl` can be retired
+by its owner (optional; outside this lane).

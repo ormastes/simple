@@ -281,3 +281,24 @@ Windows Rust seed (worktree `bin/simple.exe`):
   interpreter lane's write scope. Routed to the compiler lanes. No code
   change here.
 
+
+
+## 2026-11-11 triage — visibility RE-CONFIRMED, perf-cliff root cause LIVE, routed (seed-smoke, lane interp8)
+
+Third-lane re-run of the decisive 8x8 strict probe on the fresh worktree seed
+(`bin/simple.exe`, build-commit `46fe8f6b6def`, `SIMPLE_LIB=src`, fixture
+`build/p3fix-interp8/row1_probe_caller_frame.spl`, log
+`build/p3fix-interp8/row1_strict.log`):
+`SIMPLE_JIT_STRICT=1 bin/simple.exe run build/p3fix-interp8/row1_probe_caller_frame.spl --no-cache`
+exits 1 within seconds with the loud
+`[jit-fallback] HIR lowering error: Unsupported feature: type alias 'JsBrowserError' names a struct/class declared with different layouts by several flattened modules ... whole module dropped to the interpreter`
+line plus the hard
+`error: SIMPLE_JIT_STRICT: ... refusing to fall back to the interpreter`.
+The trigger name is UNCHANGED from the 2026-11-10 pass — the visibility item
+stays REFUTED for this call shape (loud, both modes, every run).
+
+The remaining open work (item 2, the perf-cliff root cause: JIT/HIR lowering
+of the `gui_window` -> `gui_renderer` import context) is LIVE but lives in
+the seed JIT/HIR lowering (`src/compiler_rust` / `src/compiler`) — outside
+the P3 interpreter lane's write scope. Routed to the compiler lanes; no code
+change here.
