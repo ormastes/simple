@@ -458,3 +458,37 @@ regression from this change.
   the mapping from a fixed module to a wrapper count is still NOT established —
   no failing wrapper was captured here either. Read it as attribution, never as
   a measured effect of this change.
+
+## 2026-11-10 triage (P3 runner2 lane, work/p3-runner2-20261110): round-1/3 fixes verified standing; residual layering is compiler/lib lane
+
+Discriminator per this doc's own method: `bin/simple.exe compile
+<probe>.spl` on a 3-line `use <module>` + `fn main()` probe, exit status
+read on the next line (Rust seed bin/simple.exe, this worktree, base
+origin/release/1.0.0):
+
+| probe (use) | rc | diagnostic on this base | reading |
+|---|---|---|---|
+| `std.nogc_sync_mut.lsp.lsp_protocol` | 1 | "cannot compile to standalone SMF: 5 function(s) contain constructs that require the interpreter" | round-1 `io_runtime` / `text_byte_len` / `print_raw` Undefineds are GONE; the residual is the pre-existing interpreter-construct limitation, not an identifier cluster |
+| `os.crypto.aes256_gcm` | 0 | fully clean | cause-C `_append_bytes` concern does not fire; closure compiles |
+| `os.kernel.memory.pmm` | 0 | fully clean | round-3 merge-dropped registry restore stands |
+| `std.nogc_sync_mut.js.engine.runtime` | 1 | "HIR lowering: Unsupported feature: type alias `JsBrowserError` names a struct/class declared with different layouts..." + co-compiled-definition collision warnings (`JsError`, `JsLogger`) | round-3 `value` fix stands; the closure now stops at a DIFFERENT, named defect class (duplicate class definitions across modules — cause-C shape), js-engine lane |
+| `compiler.mir._MirLoweringExpr.expr_dispatch` | 1 | `Undefined("undefined identifier: local")` | round-3 `folded_global_scalar_type` hoist stands (that symbol is resolved); the closure has layered to a new symbol `local`, owner unknown — compiler lane |
+
+Verdicts:
+- The undefined-identifier clusters this doc tracked are SUPERSEDED on
+  this base at the probed sites: no probed module reproduces any of the
+  census symbols (`io_runtime`, `text_byte_len`, `print_raw`,
+  `gzip_stream_compress`, `value`, `String`, `_pmm_reset_contiguous_registry`,
+  `folded_global_scalar_type`, `rt_random_randint`).
+- LIVE residue, all outside this lane: (a) compiler.mir expr_dispatch ->
+  `Undefined("undefined identifier: local")` (src/compiler); (b) js engine
+  duplicate-class collision `JsError`/`JsLogger`/`JsBrowserError`
+  (src/lib, needs the cause-C owner decision this doc already records for
+  `Platform`/`_append_bytes`); (c) the ~350 long-tail symbols still
+  unre-baselined per round 3 — each needs the same probe before it is
+  worked; the probe recipe above is the cheapest known discriminator.
+- The companion retention gap (no failing wrapper retained, no artifact
+  path in the diagnostic) is tracked separately in
+  coverage_wrapper_not_retained_keep_artifacts_2026-08-31.md and remains
+  the blocker for census work; its owner is the live runner twin in
+  src/lib/nogc_sync_mut, outside this lane.
