@@ -1,7 +1,8 @@
 # Windows MSVC Stage 2: struct-receiver capability probe SEGVs (new, distinct from the resolved module-init bug)
 
 - **Date:** 2026-09-01
-- **Status:** OPEN — root cause not yet investigated. Reproduced by hand,
+- **Status:** SUPERSEDED (2026-11-11, lane boot19 — MSVC lane dropped by policy on the 1.0.0 line; see addendum).
+  Originally: OPEN — root cause not yet investigated. Reproduced by hand,
   isolated to a specific gate, and shown to be a DIFFERENT defect than the
   already-RESOLVED module-init SEGV
   (`windows_msvc_module_init_alternatename_link_order_2026-08-31.md`).
@@ -261,3 +262,30 @@ invocation, exit code 2) — a distinct, pre-existing issue unrelated to
 this bug and not touched by this fix. Full stage2 admission is still
 blocked on that. Not investigated further here; needs its own bug record
 if it reproduces on a clean end-to-end run.
+
+## 2026-11-11 addendum (lane boot19) — SUPERSEDED
+
+Verdict: SUPERSEDED. The MSVC lane this defect belongs to no longer exists by
+policy on the 1.0.0 line: the Windows target set is llvm-mingw UCRT only —
+`doc/03_plan/compiler/build_system/release_1_0_0_bootstrap_session_plan_2026-10-27.md:8`
+("no MSVC, no GCC") and
+`doc/03_plan/compiler/cross_compile_matrix_plan.md:9` ("No MSVC, no GCC").
+The 2026-11-04 bootstrap triage in `doc/08_tracking/bug/bug_db.sdn:8385`
+already records this row as "CLOSED obsolete ... Generic struct-receiver
+miscompile is tracked by the stage2 native-codegen rows."
+
+For completeness, the in-tree harness fix this doc's own RESOLVED section
+describes is present and evolved: both probes in
+`scripts/check/check-bootstrap-stage2-struct-receiver.shs` now set
+`SIMPLE_NO_STUB_FALLBACK=1` (receiver probe at `:69`, positional Stage-3
+route probe at `:136`), and the fixture moved to
+`src/compiler/bootstrap_admission/bootstrap_struct_receiver_guard.spl`. The
+doc's cited lane commits (`64b50bb5d61`, `0cb65d3078f`) are not ancestors of
+this branch — the substance they carried reached `release/1.0.0` through
+other merges.
+
+No MSVC native-build was run to re-verify (lane rules: entry-closure builds
+forbidden; the MSVC toolchain is out of policy scope). Nothing further to
+triage on this row; the underlying `linker.rs` `/WHOLEARCHIVE` +
+`/FORCE:MULTIPLE,UNRESOLVED` contract concern is moot while no MSVC lane
+exists.
