@@ -24,7 +24,7 @@ fix, row 2 moves on to a DIFFERENT, later blocker
 on this branch), so that gate's verdict cannot go green from this defect
 alone and cannot add discriminating evidence for it.
 
-- Status: **OPEN** — the current blocker for goal item 1 row 2 (SimpleOS riscv64
+- Status: **SUPERSEDED** — the current blocker for goal item 1 row 2 (SimpleOS riscv64
   in-guest build-and-run sanity).
 - Date: 2026-09-01
 - Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`,
