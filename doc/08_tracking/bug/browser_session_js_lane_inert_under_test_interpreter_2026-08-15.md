@@ -104,3 +104,15 @@ Evidence (deployed Windows Rust seed, worktree bin/simple.exe, cwd = worktree):
 
 Cycles used: 2 (fix constructor → verify; add `_define_global_native` →
 verify). Status: FIXED on the interpreter lane.
+
+### 2026-11-10 rebase correction (landing review)
+
+The code change in commit d4c7ea8312c9 (adding `new_browser` /
+`_define_global_native` to the common-tier JsRuntime) is **superseded by the
+core-purity tier relocation landed in PR #8144**: the common tier no longer
+carries the impure JsRuntime class at all, and the full-runtime tier's
+JsRuntime already exposes both methods. The rebase resolved the conflict by
+keeping the relocated structure. Post-rebase verification on current
+release/1.0.0 source: `browser_script_execution_spec` 4/4 PASS,
+`browser_animation_clock_spec` 2/2 PASS with NO code change. Bug status
+remains FIXED; the fixing change is #8144, not the reverted hunk.
