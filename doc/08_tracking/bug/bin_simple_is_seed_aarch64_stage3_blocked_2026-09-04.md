@@ -68,3 +68,17 @@ Delete the seed copy and re-run
 `scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy` once
 Stage 3 self-host is green on aarch64. That is the only exit condition.
 
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **STALE-BLOCKED (host/infra bookkeeping, not a seed code defect)**. This
+record is an aarch64-host stopgap ledger entry; its only exit condition is
+"delete the seed copy and re-run
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy` once
+Stage 3 self-host is green on aarch64". The blocker it cites,
+`zerokind_is_a_corrupt_aggregate_2026-09-03.md`, is itself
+FIX-IMPLEMENTED-VERIFICATION-PENDING (seed fix 2c89727c11c in release/1.0.0,
+awaiting an aarch64 Stage-3 run). Nothing here is fixable from
+`src/compiler_rust` on a Windows lane, and the stopgap rules it records (never
+commit/launder the seed copy) are behavioural, not code. No change made; the
+entry remains accurate as written.

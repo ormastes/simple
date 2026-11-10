@@ -100,3 +100,34 @@ sha256sum build/review/determinism-probe-*.bin   # all equal -> this row closes
 `cmp -l` on a fresh mismatching pair (and a `SOURCE_DATE_EPOCH`-pinned
 rebuild) remains the first byte-level step, per this doc's "Not investigated
 here".
+
+---
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **STALE-BLOCKED (host-limited — repro not completable in this lane)**.
+Attempted a same-input double-build probe on the Windows lane with a fresh seed
+built from this base (`cargo build --offline --profile bootstrap -p simple-driver`,
+rc 0, 2m32s, CARGO_TARGET_DIR under the lane worktree; the binary reports
+`build-commit: 1504212d788b`). Three probe attempts, none reached a pair of
+output artifacts:
+
+1. `native-build` of a trivial `fn main` probe refused by SCV stage-3 admission
+   (`source-inventory-scope-unsupported`) until the entry was moved under
+   `test/` — probe-layout constraint, not the bug.
+2. Admitted full-closure dynload build ran >34 min of CPU (RSS pinned ~1.5 GB,
+   no phase output after the semantic log) and was stood down per lane budget —
+   the whole-compiler closure build dominates the probe cost on this host.
+3. `--emit-entry-object` bounded retry refused twice by the seed's own memory
+   reserve gate (`SIMPLE_BUILD_MEMORY_RESERVE_BYTES`, 24576 MiB reserve vs
+   19-20 GiB free headroom) because the shared host was under load from other
+   lanes; lowering the reserve was rejected as it would defeat a working guard
+   under genuine memory pressure.
+
+No output pair was produced, so the byte-difference question this record
+defers ("Not investigated here: which bytes differ") remains open. Recommended
+next step unchanged from the original record, on the Linux lane where the
+mismatch was observed: run the three identical `native-build` invocations
+there and `cmp -l` the outputs with `SOURCE_DATE_EPOCH` pinned. No seed change
+made; the fresh-seed build artifacts remain under
+`build/p3-seed-20261110/cargo-target/` in the lane worktree (git-ignored).
