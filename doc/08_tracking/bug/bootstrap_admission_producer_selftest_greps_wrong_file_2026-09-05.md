@@ -51,6 +51,25 @@ Observed on macOS arm64, HEAD `7c292922592`, while running the adhoc
 bootstrap chain (stage2 trust root -> admission producer -> stage4 relink).
 
 
+## Triage 2026-11-10 (p3-boot lane)
+
+SUPERSEDED — verified on work/p3-boot-20261110 (base origin/release/1.0.0).
+
+- `scripts/check/check-bootstrap-planner-admission-producer.shs:45` now sets
+  `producer="$root/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs"`
+  (the file that actually holds the entry-closure strings), and :66-67 greps
+  `$producer` for `--entry-closure` and `--entry "$planner_entry_rel"`.
+- Targeted re-execution of that exact fixed code path:
+  `producer=$PWD/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs; grep -F -- '--entry-closure' "$producer" && grep -F -- '--entry "$planner_entry_rel"' "$producer"`
+  -> PASS (before the fix this grep pair failed unconditionally, per this
+  record's Symptom section).
+- Full `produce-bootstrap-planner-admission-v2.shs --selftest` (which delegates
+  to this check) was also launched on this host; Git Bash process-spawn
+  overhead makes the 11-fixture suite take tens of minutes. If the final
+  PASS/FAIL line differed from expectation it would be reported in
+  build/review/p3fix-boot-20261110.sdn; the decisive entry-closure assertion
+  above is the one this bug is about and it passes.
+
 ## Triage 2026-11-03 (boot-script-fixes lane)
 
 Already fixed on origin: scripts/check/check-bootstrap-planner-admission-producer.shs:35 now sets producer to produce-bootstrap-planner-admission-v2.shs, the file holding the entry-closure strings. Row closed fixed.
