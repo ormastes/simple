@@ -115,3 +115,45 @@ so these new tests are not claimed as executed.
 | `[gc-warning]` (seed emitter, frozen) | 30 | 30 |
 | `[use-warning]` manifest symbol loss | 2 | 0 |
 | spec result | 3 total, 3 passed, 0 failed | 3 total, 3 passed, 0 failed |
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: FIXED — VERIFIED on refreshed seed (verification no longer
+pending).** This run is the seed-side verification the 2026-11-08 entry left
+pending.
+
+Repro on refreshed seed (build-commit 0791c2b7f4a7, 2026-11-11 build):
+`SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/lib/common/crypto/bytes_to_hex_guard_spec.spl
+--mode=interpreter --no-cache` → exit 0, **3 total, 3 passed, 0 failed**.
+
+Warning analysis (full log captured):
+
+- **0 of 49 `[gc-warning]` lines name a `test_runner` module.** All 28
+  family-mirror facade false positives from the 2026-08-31 measurement are
+  eliminated — the exemption works on the refreshed seed.
+- The 49 lines name only 12 distinct modules — `nogc_sync_mut.io.{dir_ops,
+  external_text_io,file_ops,process_ops}`, `io_runtime`,
+  `sffi.{diag,env,fs,system_env_core}`, `shell.shebang_script`,
+  `simd_crypto`, `spec` — each verified to be a REAL implementation
+  (41–3289 source lines, no one-line `export use` re-export shim). These are
+  genuine async→sync higher-layer crossings, the class this doc deliberately
+  leaves firing ("left firing on purpose"); they belong to the broader
+  violation backlog, not to this bug. `nogc_sync_mut.spec` is one of the two
+  genuine warnings named in the 2026-08-31 body; the genuine set has simply
+  grown with the lib since then.
+
+Fix lineage cited:
+
+- Pure-Simple half: `ebcef7d2e368` (2026-08-31, `fix(semantics): exempt
+  family-mirror re-export shims from the layer-rank rule`) — `is_family_
+  mirror_facade` in `35.semantics/gc_boundary_check.spl` + sdoctests +
+  `test_manifest.spl` export-surface repair.
+- Seed half: `0ee4e247c0dd` (2026-11-08, `fix(runtime): align heap ABIs and
+  mirror facades`) — `path_resolution.rs` separator normalization +
+  `module_loader.rs` structural mirror exemption; confirmed an ancestor of
+  the refreshed seed's build-commit `0791c2b7f4a7`.
+
+Also per the 2026-11-08 entry: focused Rust regressions were written but not
+executed (unrelated E0433/E0283/E0624 test-code errors); that gap stands —
+this verification is the spec-level repro only. No change made in this lane.

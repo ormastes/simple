@@ -50,3 +50,26 @@ there. Minimal fix would be qualifying the include as
 `"platform/async_driver.h"` in the fixture. Left for its owner lane.
 
 No `src/runtime` change made by this triage.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: SUPERSEDED-by-prior-lane** — spot-check corroborates the
+2026-11-10 p3-rt addendum; no deep triage redone.
+
+Spot-check at this lane's base (790b54f7c4fc):
+
+- `clang -fsyntax-only -I src/runtime -I src/runtime/include
+  src/runtime/test/rt_browser_renderer_namespace_selfcheck.c` (pinned
+  llvm-mingw 20260922 clang) → exit 0. The fixture still compiles clean.
+- Fix commit `bd6ba8faae70` (empty-TU behind the two never-implemented
+  functions) is an ancestor of this base.
+- seed-smoke (refreshed seed 0791c2b7f4a7): `bin/simple.exe test
+  test/00_quick/spec_it_accumulation_probe.spl --mode=interpreter
+  --no-cache` → 5 total, 1 passed, 4 failed — exactly this deliberately-RED
+  probe's documented expected outcome on fixed code (spec-it accumulation
+  P0 fix holds on the refreshed seed).
+
+Side observation carried from the prior addendum (out of assignment scope):
+`src/runtime/test/async_driver_iocp_smoke_selfcheck.c` still includes
+`"async_driver.h"` unqualified, unreachable from the gate's include set on
+Windows; left for its owner lane. No change made.

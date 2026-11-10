@@ -306,3 +306,30 @@ active with its one hard blocker owned by **todo 285**
 this lane); `runtime.c` remains bootstrap-only, its exclusion gated on build
 work, not a bug. Nothing actionable remains that is not already tracked
 elsewhere. No change made.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: SUPERSEDED-by-prior-lane** — spot-check corroborates the
+2026-11-10 p3-rt addendum; the doc's own 2026-09-13 closure stands. No deep
+triage redone.
+
+Spot-check at this lane's base (790b54f7c4fc):
+
+- `hosted_cocoa.c` / `hosted_win32.c` / `runtime_db.c` / `runtime.c` all
+  still on disk exactly as recorded (stale unbuilt duplicates; active SQLite
+  wrapper; bootstrap-only respectively).
+- `runtime_db.c` still referenced in `src/compiler_rust/runtime/build.rs`
+  c_sources. The core-C lane's `tools.rs` has moved to
+  `src/compiler_rust/compiler/src/pipeline/native_project/tools.rs` but its
+  `runtime_inputs` composition (`runtime_native.c` first-class, :535-536) is
+  unchanged in shape.
+- Bookkeeping churn note: the closure's cited todo-db anchor ("No external
+  SQLite" row 285 / `todo_db.sdn:287`, P1 runtime) no longer greps under
+  that id/text at this base — the todo db was renumbered/restructured since
+  2026-09-13. The closure itself (nothing actionable not tracked elsewhere)
+  is unaffected.
+- seed-smoke (refreshed seed 0791c2b7f4a7): `bin/simple.exe check
+  src/lib/common/ctype.spl` exit 0 (W-STR-BRACE-001 lint warnings only) —
+  seed check path healthy on a runtime-adjacent stdlib module.
+
+No change made.
