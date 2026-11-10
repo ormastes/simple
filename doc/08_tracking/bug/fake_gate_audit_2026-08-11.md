@@ -1,6 +1,6 @@
 # Fake-gate audit — specs that cannot detect a violation (2026-08-11)
 
-**Status:** OPEN — inventory complete, 1 fixed, 1 root cause proven, remainder filed.
+**Status:** OPEN 2026-11-11 — lane ne8 re-verified: the requested sixth guard now exists and passes, but it is tracked unwired, and the formatter/depgraph + literal-only redesign follow-ups remain (see addendum).
 
 A *fake gate* is a spec that is structurally incapable of failing, or that
 measures something other than what its name claims. It is worse than no spec:
@@ -235,3 +235,35 @@ they are themselves measurement traps worth keeping.
   `command_dispatch_spec.spl`.
 - File the missing `src/app/formatter/main.spl` and `src/app/depgraph/main.spl`
   (or correct the dispatch table's migrated-command list) to clear the new RED.
+
+---
+
+## 2026-11-11 addendum — lane ne8 (P3 traverse, batch ne8)
+
+**Verdict: LIVE — the audit's follow-up list is partially discharged; residue remains. Kept
+OPEN.**
+
+Follow-up state measured at release tip (branch `work/p3-ne8-20261111`, seed 46fe8f6b6def):
+
+- **"A sixth guard should exist" — DONE (guard exists, green, but tracked unwired).**
+  `scripts/check/check-vacuous-specs.shs` is a fail-closed detector for exactly the requested
+  family: V0 no-assert-file, V1 zero-assert `it`, V2 literal-subject assertion
+  (`expect(<literal>).to_equal(<literal>)` class), V3 tautology, V4 weak-contain, V5 shape-only,
+  V6 stub-helper. Fatal 22-fixture `--selftest` PASSES (22/22); full corpus run PASSES —
+  "21917 files scanned, 23056 flagged" against the frozen 56-file zero-assertion baseline
+  (`scripts/check/vacuous_spec_zero_assertion_baseline.txt`). It is deliberately tracked as an
+  unwired guard (`scripts/check/guard_wiring_unwired_baseline.txt:335`) with its fail-open
+  patterns pinned in `scripts/check/silent_fail_open_baseline.txt:561`; promoting it to a push
+  gate is a governance decision still open. The SSDOC-ORA-001 "No real executed assertion"
+  class also lives in `src/app/sspec_maintain/rules.spl` for `sspec-maintain scan`.
+- **`print "SKIP"` kill-switch superset — appears DISCHARGED:** a precise
+  `print "SKIP"` scan over `test/` (fixtures excluded) now matches **0 files** (was a 143-file
+  superset).
+- **formatter/depgraph — STILL OPEN:** `src/app/formatter/main.spl` and
+  `src/app/depgraph/main.spl` still do not exist, and `test/01_unit/app/tooling/
+  command_dispatch_spec.spl` still contains the literal-only `it` blocks ("formatter app
+  path", "depgraph app path" asserting properties of `val path = "src/app/..."` literals).
+  No separate bug doc for this pair was found under `doc/08_tracking/bug/`.
+- **command_dispatch_spec remainder — STILL OPEN:** the ~100 literal-only `it` blocks outside
+  section 1 were not redesigned in this lane (the doc itself classifies that as "needs a
+  redesign, not a patch").

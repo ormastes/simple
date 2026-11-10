@@ -1,6 +1,6 @@
 # Engine lib specs red on stale API contracts (ids, units, rect, font_ffi, gpu_bridge)
 
-**Status:** OPEN 2026-09-16.
+**Status:** OPEN 2026-11-11 — lane ne8 re-measured 2 of 5 items FIXED on release (ids, gpu_bridge green); units/rect/font_ffi still red pending the API-contract owner decision (see addendum).
 **Severity:** Non-blocking documentation of contract drift; 38 failing examples across 5 spec files.
 **Spec files:** `test/01_unit/lib/engine/{ids,units,rect,font_ffi,gpu_bridge}_spec.spl`
 **Path:** `bug` track.
@@ -52,3 +52,27 @@ rather than softened.
 
 A reviewed lane per item above; then all five spec files reach `outcome=OK`
 with assertions that still test the intended behaviour.
+
+---
+
+## 2026-11-11 addendum — lane ne8 (P3 traverse, batch ne8)
+
+**Verdict: LIVE — 2 of 5 items FIXED on release, 3 remain RED. Kept OPEN.**
+
+Re-measured all five spec files on tracked seed `bin/simple.exe` build-commit `46fe8f6b6def`
+(seed-smoke: `simple test test/01_unit/lib/engine/<f>_spec.spl --mode=interpreter --no-cache`):
+
+| spec | 2026-09-16 | 2026-11-11 (seed-smoke) | item state |
+|---|---|---|---|
+| ids_spec | 8 fails | 13/13 PASS | **FIXED** — spec rewritten against the current packed-`i64` handle API (`Generation.matches`, no `SpriteId` object API) |
+| units_spec | 25 fails | 17/42 pass, **25 fail** | LIVE — failures are exactly the documented drift (`Seconds.to_f64/add/sub`, `Angle.to_radians`, `Volume.mute_vol`, `KeyCode.eq`, ...); still a design decision, ~20 methods |
+| rect_spec | 1 fail | 10/11 pass, **1 fail** | LIVE — "contains edge point" still expects inclusive bounds; `Rect2.contains_point` still deliberately half-open |
+| font_ffi_spec | 2 fails | 12/14 pass, **2 fail** | LIVE — the owned-byte-handoff examples still pin exact source text of moved lib files |
+| gpu_bridge_spec | 1 fail | 16/16 PASS | **FIXED** |
+
+Aggregate: 38 failing examples on 2026-09-16 -> **28 failing examples** across 3 files now.
+
+**Not fixed in this lane:** per the doc's own "Expectation", each remaining pair needs a reviewed
+decision on which side is canonical (restore/port the API vs rewrite the spec); per
+`.claude/rules/testing.md` the three files stay RED rather than softened. ids/gpu_bridge going
+green confirms the pattern — these close when an owner picks a side and lands it.
