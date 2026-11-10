@@ -179,3 +179,36 @@ needs reference-typed DOM nodes (dom.spl) or a mutate-in-place-by-id API
 (`document_set_*_by_id(root, id, …) -> BeDomNode`). The conformance matrix's
 mutation rows all use build-then-query or same-`var` reassignment, which work;
 mutate-then-requery does not.
+
+## 2026-11-10 P3 triage (work/p3-interp-20261110) — SUPERSEDED, guard promoted
+
+Unblock condition met on the deployed Windows Rust seed (worktree
+`bin/simple.exe`, cwd = worktree root):
+
+- `test test/01_unit/browser/script/timer_api_spec.spl` → 14/14 PASS,
+  including the retained "schedules a one-shot timer" guard (line 15).
+- Standalone positive control
+  `test/fixtures/browser/event_loop_set_timeout_standalone.spl` → exactly
+  `tid=1 pending=1` (byte-exact match on one line).
+- `test test/01_unit/browser/script/event_api_spec.spl` → 8/9; both original
+  mutation-defect examples ("adds an event listener", "adds capture phase
+  listener") PASS.
+
+Promotion: `timer_api_spec.spl` added to the default
+`BROWSER_CORPUS_SPECS` in `scripts/check/check-gui-hardening-open-gates.shs`
+(runs `--mode=interpreter`, same runtime family as the standalone control;
+`REQUIRE_BROWSER_CORPUS=1` makes it a hard gate where enabled).
+
+Caveat recorded, not blocking: on Windows hosts `--mode=interpreter` for any
+spec currently dies `SDN worker scoped-environment process provider is
+unavailable` (pre-existing runner/Windows defect, test-runner lane family), so
+the corpus row can only go green on hosts where that defect is fixed; the
+spec's default-mode run is green here.
+
+Residual (new, unrelated to this bug): the one remaining event_api_spec
+failure ("dispatches typed routes and projects author ids on demand") is spec
+drift — it calls `_event_api_index` / `_event_api_route` /
+`event_dispatch_route` / `event_dispatch_target_author_id`, none of which exist
+in `src/lib/gc_async_mut/gpu/browser_engine/script/event_api.spl` (or anywhere
+in src). Tracked as
+`event_api_spec_dispatch_route_api_drift_2026-11-10.md`.
