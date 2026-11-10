@@ -114,3 +114,38 @@ work/p3-interp-20261110 note above. All five gaps remain owned by the
 compiler frontend (`src/compiler/**`, src/compiler_rust) — outside this
 lane's write scope. Concur with routing to the compiler lanes; no code
 change here.
+
+
+## 2026-11-11 P3 triage (work/p3-interp7-20261111) — gaps 1+2 FIXED on the fresh seed; gaps 3/4/5 remain LIVE (out of lane)
+
+Third-lane re-verification on the fresh seed (worktree `bin/simple.exe`,
+build-commit `46fe8f6b6def`; minimal fixtures under `build/p3fix-interp7/`):
+
+1. Ambiguous zero-arg `get()` across two `impl Box` blocks: NOW A HARD ERROR —
+   `error: semantic: duplicate method `get` in `impl` blocks of the same type
+   (the same signature is defined twice)`, exit 1 (JIT HIR lowering also
+   rejects it before any interpreter fallback). FIXED. Both new diagnostics
+   originate in `src/compiler_rust/compiler/src/impl_duplicate_check.rs`,
+   introduced by PR #7597 (`9e7e7a526edb`, in branch ancestry).
+2. `val x: i64 = "not a number"`: NOW A HARD ERROR — `error: semantic: type
+   mismatch: cannot initialize `i64` binding with a text literal`, exit 1.
+   FIXED (same PR #7597 file). The silent mis-coercion reported by both
+   2026-11-10 lanes is gone on this seed.
+3. `print(10 / 0)` (line 3 of the fixture): process still dies `Illegal
+   instruction` (exit 132) after printing `2`, with NO diagnostic and no
+   line/column. LIVE, unchanged on this host.
+4. Non-exported `fn _secret_add` imported via `use secret_mod.{_secret_add}`:
+   exit 0, prints `5`. LIVE, unchanged.
+5. Circular `use` between moda/modb over top-level vals: exit 0, prints `3`,
+   no diagnostic. LIVE, unchanged.
+
+Note: the tracked spec
+`test/02_integration/compiler/compiler_interpreter_integration_spec.spl`
+drives its scenarios through `src/compiler_rust/target/bootstrap/simple`,
+which does not exist in this worktree (no cargo build permitted in this lane),
+so its scenario verdicts were not refreshed here; the fixture repros above
+against `bin/simple.exe` are this lane's evidence. Gaps 3 (div-zero span
+diagnostics), 4 (export visibility), 5 (circular-import detection) remain
+owned by the compiler frontend (`src/compiler/**`, `src/compiler_rust`) —
+outside this lane's write scope; routing to the compiler/compiler-seed lanes
+stands. Status stays OPEN (partial closure only).
