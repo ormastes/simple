@@ -2364,6 +2364,62 @@ bootstrap_stage2_sanity_reserve_retry() {
   done
 }
 
+# Print up to SIMPLE_BOOTSTRAP_ADMISSION_DIFF_MAX (default 5) source paths
+# whose snapshot record differs between two source-inputs snapshots
+# (file-hex:<len>:<hex path>:<exec>:<sha256> records, one per path). A Stage 2
+# admission refusal used to say only THAT a snapshot differed; naming a few
+# paths turns the 3-run investigations of doc/08_tracking/bug/
+# bootstrap_stage2_admission_refused_by_concurrent_source_edits_2026-09-05.md
+# into a one-line read.
+bootstrap_stage2_source_snapshot_diff_paths() {
+  [ "$#" -eq 2 ] || return 2
+  [ -f "$1" ] && [ -f "$2" ] || return 2
+  SNAP_DIFF_BEFORE=$1 SNAP_DIFF_AFTER=$2 SNAP_DIFF_MAX=${SIMPLE_BOOTSTRAP_ADMISSION_DIFF_MAX:-5} perl -e '
+    my ($before, $after) = @ENV{qw(SNAP_DIFF_BEFORE SNAP_DIFF_AFTER)};
+    my (%before_records, %after_records);
+    my $record_path = sub {
+        my ($kind, $field1, $field2) = split /:/, $_[0], 4;
+        return undef unless defined $kind;
+        # file-hex records carry a path-length field first; link-* records
+        # put the relative path hex in the second field.
+        my $path_hex = $kind eq "file-hex" ? $field2 : $field1;
+        return undef unless defined $path_hex;
+        return pack "H*", $path_hex;
+    };
+    open my $bf, "<", $before or exit 2;
+    while (my $line = <$bf>) {
+        chomp $line;
+        my $path = $record_path->($line);
+        next unless defined $path;
+        $before_records{$path} = $line;
+    }
+    close $bf;
+    open my $af, "<", $after or exit 2;
+    while (my $line = <$af>) {
+        chomp $line;
+        my $path = $record_path->($line);
+        next unless defined $path;
+        $after_records{$path} = $line;
+    }
+    close $af;
+    my %diff;
+    for my $path (keys %before_records) {
+        $diff{$path} = 1
+            if !exists $after_records{$path}
+            || $after_records{$path} ne $before_records{$path};
+    }
+    for my $path (keys %after_records) {
+        $diff{$path} = 1 if !exists $before_records{$path};
+    }
+    my $left = $ENV{SNAP_DIFF_MAX};
+    for my $path (sort keys %diff) {
+        last if $left <= 0;
+        print "$path\n";
+        $left--;
+    }
+  '
+}
+
 bootstrap_stage_sanity() (
   candidate=$1
   evidence_path=${2:-}
@@ -5026,6 +5082,19 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         echo "error: refused Stage 2 admission: comparator infrastructure failure" >&2
       else
         echo "error: refused incomplete Stage 2 admission provenance" >&2
+        if [ "${stage2_tool_compare_status}" -ne 0 ]; then
+          echo "error: admission input drifted: tool-authority snapshot" >&2
+          echo "  before: $(absolute_path "${tool_authority_before}")" >&2
+          echo "  after:  $(absolute_path "${tool_authority_after}")" >&2
+        fi
+        if [ "${stage3_source_compare_status}" -ne 0 ]; then
+          echo "error: admission input drifted: source-inputs snapshot; first differing source paths:" >&2
+          bootstrap_stage2_source_snapshot_diff_paths "${stage3_source_before}" "${stage3_source_after}" 2>/dev/null | sed 's/^/  /' || :
+        fi
+        grep -qx 'status=pass' "${stage2_sanity_evidence}" ||
+          echo "error: admission input not passing: sanity evidence ${stage2_sanity_evidence}" >&2
+        grep -qx 'status=pass' "${stage2_receiver_evidence}" ||
+          echo "error: admission input not passing: receiver evidence ${stage2_receiver_evidence}" >&2
       fi
       stage2_status=4
     else
@@ -5048,6 +5117,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         rm -f "${stage2_admitted_bin}"
         rmdir "${stage2_admitted_dir}" 2>/dev/null || true
         echo "error: refused incomplete Stage 2 admission provenance" >&2
+        echo "error: admission input drifted: source-inputs snapshot changed during private admission; first differing source paths:" >&2
+        bootstrap_stage2_source_snapshot_diff_paths "${stage3_source_before}" "${stage3_source_after}" 2>/dev/null | sed 's/^/  /' || :
         stage2_status=4
       elif ! bootstrap_stage3_write_stage2_admission_receipt \
         "${stage2_admission_receipt_absolute}" \

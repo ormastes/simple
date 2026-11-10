@@ -1,0 +1,64 @@
+#!/bin/sh
+# Regression: a Stage 2 admission refusal must name WHICH input drifted and
+# the first few differing source paths, not just refuse (see
+# doc/08_tracking/bug/bootstrap_stage2_admission_refused_by_concurrent_source_edits_2026-09-05.md
+# "What to do": printing the first few differing paths turns a 3-run
+# investigation into a one-line read).
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+temp_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+tmp=$(mktemp -d "$temp_parent/simple-bootstrap-admission-diff.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+
+eval "$(sed -n '/^bootstrap_stage2_source_snapshot_diff_paths()/,/^}/p' \
+  "$repo/scripts/bootstrap/bootstrap-from-scratch.sh")"
+
+hex_of() { perl -e 'print unpack "H*", $ARGV[0]' "$1"; }
+record() { # record <path> <hash>
+  printf 'file-hex:%s:%s:%s:%s\n' "${#1}" "$(hex_of "$1")" 0 "$2"
+}
+
+cat >"$tmp/before" <<EOF
+$(record src/keep.spl aaaa)
+$(record src/changed.spl bbbb)
+$(record src/removed.spl cccc)
+EOF
+cat >"$tmp/after" <<EOF
+$(record src/keep.spl aaaa)
+$(record src/changed.spl dddd)
+$(record src/added.spl eeee)
+EOF
+
+# Identical snapshots report nothing.
+bootstrap_stage2_source_snapshot_diff_paths "$tmp/before" "$tmp/before" \
+  >"$tmp/same.out"
+[ ! -s "$tmp/same.out" ] || { echo "FAIL: identical snapshots reported a diff" >&2; exit 1; }
+
+# Changed, added and removed paths are all decoded and reported, sorted.
+bootstrap_stage2_source_snapshot_diff_paths "$tmp/before" "$tmp/after" \
+  >"$tmp/diff.out"
+printf 'src/added.spl\nsrc/changed.spl\nsrc/removed.spl\n' >"$tmp/diff.expected"
+cmp "$tmp/diff.expected" "$tmp/diff.out" || {
+  echo "FAIL: differing paths not decoded/reported as expected" >&2; exit 1; }
+
+# At most SIMPLE_BOOTSTRAP_ADMISSION_DIFF_MAX (default 5) paths are printed.
+: >"$tmp/many.before"; : >"$tmp/many.after"
+i=1
+while [ "$i" -le 8 ]; do
+  record "src/file$i.spl" ffff >>"$tmp/many.before"
+  record "src/file$i.spl" 8888 >>"$tmp/many.after"
+  i=$((i + 1))
+done
+SIMPLE_BOOTSTRAP_ADMISSION_DIFF_MAX=3 \
+  bootstrap_stage2_source_snapshot_diff_paths "$tmp/many.before" "$tmp/many.after" \
+  >"$tmp/many.out"
+[ "$(wc -l <"$tmp/many.out")" -eq 3 ] || {
+  echo "FAIL: SIMPLE_BOOTSTRAP_ADMISSION_DIFF_MAX not honoured" >&2; exit 1; }
+
+# Missing inputs fail loudly (status > 1), they must not read as "no diff".
+status=0
+bootstrap_stage2_source_snapshot_diff_paths "$tmp/absent" "$tmp/after" \
+  >/dev/null 2>&1 || status=$?
+[ "$status" -gt 1 ] || { echo "FAIL: missing snapshot not refused" >&2; exit 1; }
+
+echo "PASS: 4 assertion(s): identical silent; changed/added/removed decoded; max honoured; missing refused"
