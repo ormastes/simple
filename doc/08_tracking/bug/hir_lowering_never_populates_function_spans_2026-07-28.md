@@ -59,3 +59,17 @@ text and asserts a non-zero line, rather than one that hand-builds HIR.
 - `doc/08_tracking/bug/string_interpolation_silently_evaluates_literal_braces_2026-07-28.md`
   — same session, also a silent-degradation defect in the diagnostics path.
 - `.spipe/mission_critical_harden/state.md` — DS1/DS3/DS5 lane records.
+
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: SUPERSEDED
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
+
+- Status confirmed: both `HirFunction(` construction sites in
+  `src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl` set `span`
+  (`span: span` at l.169, `span: fn_.span` at l.661). Fixing commit per bug_db:
+  4b88aebf00b (doc marked CLOSED 2026-11-06).
+- Seed-smoke verification (2026-11-11):
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/compiler/hir/hir_function_span_populate_spec.spl --mode=interpreter --no-cache`
+  → SPEC FILE VERDICT outcome=OK, declared>=2 executed=2 passed=2 failed=0.
+- Verdict: SUPERSEDED. No code change.

@@ -42,6 +42,12 @@ impl<'a> super::Lexer<'a> {
                 self.advance();
                 match self.process_escape(false) {
                     EscapeResult::Char(c) => c,
+                    // `\X` is not an escape: it is two scalars, which a char
+                    // literal cannot hold (pure-Simple lexer agrees: the
+                    // backslash survives, so 'a\b' is invalid as a char).
+                    EscapeResult::KeepBoth(_) => {
+                        return TokenKind::Error(format!("Char literal holds more than one Unicode scalar; {}", HINT))
+                    }
                     EscapeResult::Error(msg) => return TokenKind::Error(msg),
                     EscapeResult::Unterminated => {
                         return TokenKind::Error(format!("Unterminated char literal; {}", HINT));
@@ -578,6 +584,14 @@ impl<'a> super::Lexer<'a> {
                 match self.process_escape(true) {
                     EscapeResult::Char(c) => {
                         current_literal.push(c);
+                        current_literal_raw.push(c);
+                    }
+                    // Not an escape: the backslash stays, exactly like the
+                    // pure-Simple lexer (`\X` -> `\` + X).
+                    EscapeResult::KeepBoth(c) => {
+                        current_literal.push('\\');
+                        current_literal.push(c);
+                        current_literal_raw.push('\\');
                         current_literal_raw.push(c);
                     }
                     EscapeResult::Error(msg) => return TokenKind::Error(msg),
