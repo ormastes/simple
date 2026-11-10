@@ -159,6 +159,33 @@ Steps 1 and 2 landed in `src/compiler_rust/driver/src/cli/commands/misc_commands
   re-run — is still outstanding; a bootstrap was in flight and was not disturbed.
 
 
+## Triage 2026-11-10 (p3-boot lane)
+
+SUPERSEDED — all four steps of this record's "Exact next step" are implemented
+in `src/compiler_rust/driver/src/cli/commands/misc_commands.rs` on
+work/p3-boot-20261110 (base origin/release/1.0.0):
+
+1. Pinned input closure: `create_bootstrap_snapshot()` (:680) materialises the
+   closure once at `<output_dir>/.input-snapshot` (override
+   `SIMPLE_BOOTSTRAP_SNAPSHOT_DIR`) before stage 1 (:426); `compile_stage`
+   takes the snapshot workdir so all three stages read the immutable copy.
+2. Fail closed on a moving tree: the closure is fingerprinted before stage 1
+   and after stage 3; a delta prints
+   `ERROR — inputs changed during the run: <k> of <n> source file(s) differ: <paths>`
+   and exits 2 (:493-537), before any VERIFIED/PARTIAL/MISMATCH verdict. An
+   empty closure is likewise exit 2. A stable run prints `Inputs stable: ...
+   tree=<digest>`.
+3. The pinned re-run precondition was met (per the in-code comment at :548-552)
+   on 2026-08-21.
+4. The `PARTIAL` -> deploy branch is REMOVED: `BootstrapVerdict::Partial` now
+   prints `Bootstrap PARTIAL — not deployed: stage1 differs (...)` and returns
+   exit 1 (:548-556). Only `VERIFIED` deploys.
+
+Verification not re-run here: exercising the gate end-to-end requires a full
+three-stage bootstrap build, which is outside this lane's grant (recorded as
+BLOCKED-needs-grant: `bin/simple build bootstrap`). The step-1..4 code is read
+in-tree and is the cited evidence.
+
 ## Triage 2026-11-03 (boot-script-fixes lane)
 
 Deferred: the stage-compare logic is in the Rust seed handle_bootstrap (misc_commands.rs), outside this lane scope; fix needs a source snapshot per stage and a seed build to verify. Still open.

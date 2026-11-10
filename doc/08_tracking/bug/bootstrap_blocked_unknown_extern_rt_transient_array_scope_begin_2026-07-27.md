@@ -120,6 +120,22 @@ No `.spl` or Rust source change is required — the source is already correct.
 Option 1 is the one to try first, and it is a repo-tooling fix, not a source
 change.
 
+## Triage 2026-11-10 (p3-boot lane)
+
+SUPERSEDED (stale-binary condition no longer holds on this host). This record's
+own CORRECTION says the source was always correct and the fix is rebuilding the
+seed from current source. State on the p3-boot worktree today:
+
+- Registered in current source: `src/compiler_rust/common/src/runtime_symbols.rs:134,419`.
+- Present in the deployed binaries: `strings bin/simple.exe | grep -c
+  rt_transient_array_scope_begin` -> 2 for this worktree's seed binary, and 8
+  for the main-repo seed at C:/Users/yoon/dev/simple/bin/simple.exe. Both
+  binaries' extern tables now carry the symbol, so the stage-1 "unknown extern"
+  rejection cannot fire from either driver.
+
+No `.spl` or Rust source change was or is required; the source was already
+correct per the 2026-07-27 correction.
+
 ## Note for whoever picks this up
 
 Do not "fix" this by deleting the extern reference from `module_assembly.spl` —

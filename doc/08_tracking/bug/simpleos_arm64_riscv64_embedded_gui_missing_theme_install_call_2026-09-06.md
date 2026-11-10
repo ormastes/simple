@@ -82,6 +82,24 @@ TODO(deferred-perf): with the admitted ARM64/RV64 phase environment, retain
 first-frame latency and boot heap deltas before/after this one-time install.
 No additional theme installation or receipt formatting belongs in the frame loop.
 
+## Triage 2026-11-10 (p3-boot lane)
+
+SUPERSEDED — verified on branch work/p3-boot-20261110 (base origin/release/1.0.0).
+
+- `examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl:128` and
+  `examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl:50` each
+  contain exactly one `install_generated_simpleos_wm_theme()` call
+  (`grep -n "install_generated_simpleos_wm_theme()"` on both files, one hit
+  each).
+- Focused regression spec executed PASS (seed-smoke):
+  `SIMPLE_LIB=src bin/simple.exe test test/01_unit/os/simpleos_cross_arch_theme_install_source_spec.spl --mode=interpreter`
+  -> `outcome=OK declared>=2 executed=2 passed=2 failed=0` using this
+  worktree's own seed binary (sha256 prefix f719626aed33e42f). The main-repo
+  seed at C:/Users/yoon/dev/simple/bin/simple.exe is an older build whose
+  extern table predates GetProcessHeap and could not load this spec closure.
+- Deferred QEMU/perf TODOs from the 2026-09-23 resolution remain unchanged
+  (live ARM64/RV64 boot evidence is outside this lane's grant).
+
 ## Recovery note (2026-09-06)
 
 This record was accidentally lost once during authoring -- a concurrent
