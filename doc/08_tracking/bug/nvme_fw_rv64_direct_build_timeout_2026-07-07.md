@@ -1901,3 +1901,34 @@ RV32 NVME FW LOGIC OK
 
 Status: OPEN (architectural native-build parse/throughput; the compiled-dispatch
 remedy identified in the rv32 sibling record remains the prescribed fix).
+
+## 2026-11-10: LLVM-only assembler prerequisite
+
+On Windows with Clang 23.1.2 and no `riscv64-unknown-elf-gcc`, the original
+wrapper exits 1 at `start-stub` before invoking the Simple compiler. The exact
+generated RV64 startup assembly compiles with
+`clang --target=riscv64-unknown-elf -march=rv64imafdc -mabi=lp64d`.
+
+The wrapper now prefers installed cross-GCC, otherwise accepts
+`NVME_RV64_CROSS_CLANG` or discovers a Clang with RISC-V target support, as the
+RV32 sibling already does. Missing target support and assembler failures stay
+nonzero. This fixes the toolchain prerequisite only; it does not increase the
+native-build timeout or replace the self-hosted compiler.
+
+The regression `sh scripts/check/check-nvme-rv64-cross-assembler.shs` exercises
+the production wrapper with real RV64 startup objects. A deliberately failing
+compiler command stops each positive assembler case at the next boundary;
+these controls are not firmware compilation or boot evidence. The seven cases
+cover automatic discovery, an explicit path containing spaces, GCC precedence,
+an unsupported candidate before a valid candidate, missing toolchains, an
+invalid explicit compiler, and assembly failure. No case may produce a
+successful firmware ELF.
+
+Executed on Windows against baseline `6d496f82c5a`: **7/7 cases PASS**, exit 0.
+Both working/staged direct-env guards and shell syntax checks passed. This is
+assembler-selection and failure-propagation evidence only.
+
+The original architectural timeout remains **OPEN**. Acceptance still requires
+a genuine self-hosted native build followed by the real RV64 boot gate.
+Provider token usage and a comparable cohort ratio are unavailable; no
+performance or compiler-throughput improvement is claimed by this change.

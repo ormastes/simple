@@ -86,3 +86,26 @@ on type object (receiver Transform3D)` — `component/camera3d.spl:57` calls
 `transform.up()` but `math3d.Transform3D` defines only `forward()`; no
 `Transform3D.up` exists in `src/lib` (lib gap, previously masked by the
 `Vec3.one()` failure).
+
+## 2026-11-10 triage (lane p3-runner3, row 15): LIVE — fix surface out of lane
+
+Re-checked `test/01_unit/lib/engine/engine3d_spec.spl` with the worktree
+seed-smoke binary (bin/simple.exe, v1.0.0-rc.1, `--mode=interpreter`): 0/5,
+with shape 2 (`nil is forbidden by the non-optional return contract of
+'select_backend'`) x2 and shape 3 (`unknown static method one on class Vec3`)
+x3 — i.e. the 2026-11-07 #7498 registry fix (present in this tree's
+`src/compiler_rust/.../module_cache.rs`) is NOT effective in this deployed
+seed-smoke binary, and shape 2 was never addressed. The doc's residual notes
+(factory mismatch, `Transform3D.up()`) are not even reached on this binary.
+
+Fix surface, all out of this lane's scope:
+- seed interpreter (`src/compiler_rust/**`, seed-fix lane active): rebuild the
+  deployed seed from current source and re-verify shape 3; implement shape 2
+  (enum non-optional return marshalling on the spec-runner path).
+- `Transform3D.up()` lib gap (`src/lib/common/engine/math3d.spl` — only
+  `forward()` exists; `component/camera3d.spl:57` calls `transform.up()`).
+- Owner decision: which `PhysicsConfig3D` factory the engine3d spec and
+  `PhysicsWorld3D.create` should standardise on (`physics.simple.types3d`
+  3-field vs `physics/config.spl` with `backend`).
+
+Per the unblock condition, no spec-side weakening was done.

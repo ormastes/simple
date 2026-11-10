@@ -26,3 +26,14 @@ value and call `emit_method_writeback`, but `merge` was missing from
 Fix: add `merge` to `is_mutating_method` (switch_operators_calls.spl). Spec
 `test/01_unit/compiler/50.mir/merge_field_update_writeback_spec.spl` 2/2 green,
 0/2 with the fix reverted. Native re-verification needs a rebuilt producer.
+
+## 2026-11-10 P2 triage (lane p2-compiler-triage-20261110)
+
+VERDICT: SUPERSEDED on source. Root fix present: switch_operators_calls.spl:9674
+`case "merge": true` in is_mutating_method (9653), commit 6c86fde0319a, ancestor
+of release/1.0.0 d7a430cc2baf. Qualified on the deployed seed (interpreter):
+merge_field_update_writeback_spec.spl 2/2; workaround pin
+n88b_native_workaround_shapes_spec.spl 8/8. @workaround tag at
+ast_semantic_value.spl:30 intentionally retained until the stage3 repro runs
+(native-build of test/fixtures/compiler/n88b_native_producer_idioms_native.spl,
+exact command in build/review/p2fix-compiler-20261110.sdn). Cycles: 1.

@@ -287,7 +287,7 @@ fn coerce_store_at_place(
             field_place.projections.pop();
             coerce_store_at_field_place(env, &field_place, true, value, classes)
         }
-        None => value,
+        Some(super::place::Projection::Unwrap) | None => value,
     }
 }
 

@@ -2442,7 +2442,27 @@ impl Lowerer {
                                 },
                                 ty: payload_expr_ty,
                             };
-                            let payload_expr = if enum_variant == "Some" && payload_patterns.len() == 1 {
+                            // The dual-representation `Some` handling (boxed
+                            // Option enum vs the raw `T?` migration form) is only
+                            // valid when the subject IS an optional. A USER enum
+                            // with a variant merely NAMED `Some` (e.g.
+                            // `enum Opt: Some(i64) | None`) is a plain enum:
+                            // `rt_enum_id != OPTION_ENUM_ID`, so the branch below
+                            // took `rt_unwrap_or_self`, which hands back the whole
+                            // enum word for a non-optional, and the payload slot
+                            // was filled with a tagged enum pointer read as a raw
+                            // scalar (garbage, varying per run, no diagnostic).
+                            // Gate on the subject type so user enums keep the plain
+                            // `rt_enum_payload` extraction the other variants use.
+                            // Interpreter lane was always correct; this is the
+                            // compiled HIR/MIR/JIT path. See doc/08_tracking/bug/
+                            // elif_val_pattern_in_if_expression_fails_to_bind_2026-08-19.md
+                            let subject_is_optional = self.optional_enum_payload_inner(subject_ty).is_some()
+                                || self.module.types.optional_inner(subject_ty).is_some();
+                            let payload_expr = if enum_variant == "Some"
+                                && payload_patterns.len() == 1
+                                && subject_is_optional
+                            {
                                 HirExpr {
                                     kind: HirExprKind::If {
                                         condition: Box::new(HirExpr {
@@ -4396,6 +4416,88 @@ mod nested_struct_pattern_in_enum_payload_tests {
                 }
             }
             other => panic!("expected FieldAccess for x, got {:?}", other),
+        }
+    }
+}
+
+#[cfg(test)]
+mod user_enum_some_variant_payload_binding_tests {
+    use super::super::lower;
+    use crate::hir::types::{HirExpr, HirExprKind, HirModule, HirStmt, LocalVar};
+    use simple_parser::Parser;
+
+    fn lower_source(source: &str) -> crate::hir::lower::LowerResult<HirModule> {
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        lower(&ast)
+    }
+
+    /// Find the initializer of the first `Let` binding local `name`, recursing
+    /// into `If` then/else blocks (a `match` lowers to an If-chain and the arm
+    /// payload `Let`s live inside the matching arm's `then_block`).
+    fn find_let_value<'a>(stmts: &'a [HirStmt], locals: &[LocalVar], name: &str) -> Option<&'a HirExpr> {
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Let { local_index, value, .. } => {
+                    if locals.get(*local_index).map(|l| l.name.as_str()) == Some(name) {
+                        if let Some(v) = value {
+                            return Some(v);
+                        }
+                    }
+                }
+                HirStmt::If { then_block, else_block, .. } => {
+                    if let Some(v) = find_let_value(then_block, locals, name) {
+                        return Some(v);
+                    }
+                    if let Some(else_b) = else_block {
+                        if let Some(v) = find_let_value(else_b, locals, name) {
+                            return Some(v);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    // Regression for elif_val_pattern_in_if_expression_fails_to_bind_2026-08-19
+    // (compiled HIR/MIR/JIT lane). The dual-representation `Some` binder was
+    // emitted for ANY single-payload enum variant merely NAMED `Some`, but its
+    // else branch (`rt_unwrap_or_self`) is only correct for genuine optionals.
+    // A user enum such as `Opt.Some(i64)` is a plain enum, so the else branch
+    // handed the whole tagged enum word to the payload slot, read back as
+    // pointer garbage under the JIT. The fix gates the dual form on the subject
+    // actually being an optional, so user enums bind via `rt_enum_payload`
+    // exactly like every other variant. Reverting the gate turns this
+    // initializer back into an `If` and fails the match below.
+    #[test]
+    fn user_enum_some_variant_binds_payload_via_enum_payload() {
+        let module = lower_source(
+            "enum Opt:\n    Some(i64)\n    None\n\nfn main() -> i64:\n    val o = Opt.Some(7)\n    match o:\n        case Opt.Some(x): print(x)\n        case Opt.None: print(0)\n    return 0\n",
+        )
+        .expect("source should lower");
+
+        let func = module
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("main function should lower");
+
+        let x_value = find_let_value(&func.body, &func.locals, "x")
+            .expect("user-enum Some payload must emit a Let binding for x");
+        match &x_value.kind {
+            HirExprKind::BuiltinCall { name, .. } => {
+                assert_eq!(
+                    name, "rt_enum_payload",
+                    "user-enum Some payload must extract via rt_enum_payload, not the optional dual-form"
+                );
+            }
+            other => panic!(
+                "user-enum Some payload must be a direct rt_enum_payload call, got {:?} \
+                 (an If here means the optional-only dual-form leaked onto a plain enum)",
+                other
+            ),
         }
     }
 }

@@ -1,0 +1,47 @@
+# Direct cold-admission owner regression, runnable by a bootstrap producer.
+# Success requires validating real entry values and canonical encoded bytes.
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_entry_valid_v1, compile_source_inventory_encode_v1}
+
+fn main() -> i64:
+    val a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    val b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    val c = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    val d = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    val e = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    val bad = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    var checked = 0
+    for entry in [
+            CompileSourceInventoryEntryV1("src/a.spl", a, a, a, a, a, 7),
+            CompileSourceInventoryEntryV1("src/a.spl", a, b, c, b, c, 7),
+            CompileSourceInventoryEntryV1("src/a.spl", a, b, c, d, e, 7)]:
+        if not compile_source_inventory_entry_valid_v1(entry): return 11
+        val encoded = compile_source_inventory_encode_v1(CompileSourceInventoryV1(1, 1, [entry]))
+        val expected = "simple-compile-source-inventory-v1\ngeneration=1\ncount=1\nsrc/a.spl|{entry.content_digest}|{entry.semantic_digest}|{entry.export_digest}|{entry.initializer_digest}|{entry.provider_digest}|7"
+        if encoded != expected: return 12
+        checked = checked + 2
+    for left in 0..5:
+        for right in 0..5:
+            if right <= left: continue
+            var digests = [a, b, c, d, e]
+            digests[right] = digests[left]
+            val entry = CompileSourceInventoryEntryV1("src/a.spl", digests[0], digests[1], digests[2], digests[3], digests[4], 7)
+            if not compile_source_inventory_entry_valid_v1(entry): return 13
+            val encoded = compile_source_inventory_encode_v1(CompileSourceInventoryV1(1, 1, [entry]))
+            val expected = "simple-compile-source-inventory-v1\ngeneration=1\ncount=1\nsrc/a.spl|{digests[0]}|{digests[1]}|{digests[2]}|{digests[3]}|{digests[4]}|7"
+            if encoded != expected: return 14
+            checked = checked + 2
+    for entry in [
+            CompileSourceInventoryEntryV1("src/a.spl", bad, bad, bad, bad, bad, 7),
+            CompileSourceInventoryEntryV1("src/a.spl", a, bad, bad, bad, bad, 7),
+            CompileSourceInventoryEntryV1("src/a.spl", a, a, bad, bad, bad, 7),
+            CompileSourceInventoryEntryV1("src/a.spl", a, a, a, bad, bad, 7),
+            CompileSourceInventoryEntryV1("src/a.spl", a, a, a, a, bad, 7),
+            CompileSourceInventoryEntryV1("src/a.spl", a, b, c, d, bad, 7),
+            CompileSourceInventoryEntryV1("src/../a.spl", a, a, a, a, a, 7),
+            CompileSourceInventoryEntryV1("src/a.spl", a, a, a, a, a, -1)]:
+        if compile_source_inventory_entry_valid_v1(entry): return 21
+        if compile_source_inventory_encode_v1(CompileSourceInventoryV1(1, 1, [entry])) != "": return 22
+        checked = checked + 2
+    if checked != 42: return 31
+    print "scv_digest_validation_reuse checks={checked} PASS"
+    0
