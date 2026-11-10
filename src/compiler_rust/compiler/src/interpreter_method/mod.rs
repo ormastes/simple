@@ -2619,6 +2619,45 @@ pub(crate) fn evaluate_method_call_with_self_update(
 mod tests {
     use super::*;
 
+    /// ADR-005: user-facing text `len()` counts code points; `byte_len()` stays
+    /// bytes. `text_cp_len` is the single helper every interpreter `len` arm
+    /// (method dispatch, `len()` builtin, slice bounds) routes through, so it is
+    /// pinned directly on the ASCII memo path and on 2/3/4-byte and combining
+    /// sequences (a combining mark is its own code point, not folded into a
+    /// grapheme). Before the switch it returned `s.len()` (bytes) for all rows.
+    #[test]
+    fn text_cp_len_counts_code_points_not_bytes() {
+        let cases: &[(&str, usize, usize)] = &[
+            ("", 0, 0),
+            ("hello", 5, 5),
+            ("h\u{e9}llo", 5, 6),         // 2-byte
+            ("a\u{20ac}b", 3, 5),         // 3-byte
+            ("a\u{1F600}b", 3, 6),        // 4-byte
+            ("e\u{301}", 2, 3),           // combining sequence
+            ("h\u{e9}llo\u{20ac}", 6, 9), // the bug's repro text
+        ];
+        for (s, cp, bytes) in cases {
+            let arc = Arc::new((*s).to_string());
+            assert_eq!(text_cp_len(&arc), *cp, "code points of {s:?}");
+            assert_eq!(arc.len(), *bytes, "bytes of {s:?}");
+            // Memoized ASCII path must agree with the non-memo path.
+            assert_eq!(text_cp_len(&arc), arc.chars().count(), "memo path of {s:?}");
+        }
+    }
+
+    /// End-to-end through the interpreter: `.len()` and `.byte_len()` on the
+    /// bug's repro text disagree exactly by the multi-byte overhead.
+    #[test]
+    fn interpreter_text_len_is_code_points_and_byte_len_is_bytes() {
+        use crate::interpreter::evaluate_module;
+        use simple_parser::Parser;
+        let source = "val s = \"h\u{e9}llo\u{20ac}\"\nmain = s.len() * 100 + s.byte_len()\n";
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse");
+        let result = evaluate_module(&module.items).expect("len/byte_len must evaluate");
+        assert_eq!(result, 609, "len()=6 code points, byte_len()=9 bytes");
+    }
+
     // Regression test: me.field as a direct argument to a nested me fn call must
     // not produce "self not found". The bug was that the two typed-dict dispatch
     // paths in evaluate_method_call mutated outer_env with self=recv_val before
