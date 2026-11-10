@@ -1,7 +1,7 @@
 # A failing coverage/MC-DC wrapper cannot be captured for inspection
 
 Date: 2026-08-31
-Status: OPEN
+Status: FIXED 2026-11-11 — asks #1 (retain on failure) and #2a (name the artifact) implemented in the live runner twin with paired spec evidence; per-run subdirectory isolation (ask #2b) remains open (P3 runner6 lane)
 Impact: has blocked **three** separate investigations in one day.
 
 ## The gap
@@ -107,3 +107,65 @@ owner-lane fix, per this doc's own acceptance check: retain the wrapper
 whenever the coverage compile fails (regardless of flag), include
 `wrapped_path` in `coverage_wrapper_compile_failure_v1`'s detail, and
 scope wrappers to a per-run subdirectory of the temp dir.
+
+## 2026-11-11 triage + fix (P3 runner lane, work/p3-runner6-20261111): LIVE -> FIXED
+
+**Verdict: FIXED.** The 2026-11-10 runner2 lane confirmed both core asks were
+still open and suggested the owner-lane fix; this lane owns the test-runner
+area, so the fix landed here, in the live twin
+(`src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl`; the app twin
+`src/app/test_runner_new/test_runner_execute.spl` remains dead code and was
+not edited).
+
+What changed (all in `test_runner_execute.spl`):
+
+1. **Ask #1 — retain on failure, unconditionally.**
+   `cleanup_native_generated_files` gained a trailing `retain_source_path`
+   parameter (now `pub`, so the behaviour is spec-pinned), threaded into
+   `cleanup_native_generated_file` as an additional preservation. Both
+   coverage wrapper compile-failure arms — the fail-closed abort
+   (:1473-1494) and the explicit `SIMPLE_COVERAGE_FALLBACK=interpreter`
+   degrade (:1495-1508) — pass the wrapper path, so a failed wrapper
+   survives cleanup regardless of `--keep-artifacts`. With the production
+   invariant `wrapped_path == cleanup_path` and the staged source deleted,
+   exactly one generated source remains on disk, matching this doc's
+   suggested acceptance check.
+2. **Ask #2a — name the artifact in the diagnostic.** New pure helper
+   `coverage_wrapper_retention_note_v1(wrapped_path)`; when a path is in
+   scope the abort/degrade messages end with
+   `Wrapper source retained at: {wrapped_path}`.
+   `coverage_wrapper_compile_failure_v1` takes an optional trailing
+   `wrapped_path` (default `""`; the 5-arg call shape and message text are
+   unchanged when absent).
+3. **Ask #2b — per-run subdirectory isolation: NOT implemented.** Wrappers
+   still share `_tp_get_temp_dir()` under spec-derived names. Reason: the
+   compile of the relocated wrapper depends on the temp path's relative-import
+   resolution behaviour, and this lane cannot run an instrumented build to
+   end (the SCV inventory cold-init and the build-admission memory gate block
+   it on this host), so an isolation change would ship unverified. Left as
+   the remaining open item for a lane that can drive a real coverage build;
+   it is hygiene, not evidence integrity — asks #1/#2a cover the acceptance
+   check.
+
+**Paired test.** `test/01_unit/app/test/coverage_wrapper_fail_closed_spec.spl`
+gained a describe block (5 examples): abort names the retained wrapper path
+(compile failure and timeout), message shape unchanged with no path, and two
+behavioural examples driving the real `cleanup_native_generated_files`
+(retained wrapper survives `keep_artifacts=false`; everything is deleted
+without a retention path).
+
+**Seed-smoke evidence (fresh Rust seed bin/simple.exe, build-commit
+46fe8f6b6def, SIMPLE_LIB=src,
+`bin/simple.exe test test/01_unit/app/test/coverage_wrapper_fail_closed_spec.spl
+--mode=interpreter --no-cache`):**
+`SPEC FILE VERDICT outcome=OK declared>=16 executed=16 passed=16 failed=0`
+(first run 15/16 exposed a test-modelling bug — production never has
+`wrapped_path != cleanup_path`; the test was corrected to the production
+invariant, not the code).
+
+**Residual / limits.** End-to-end confirmation of retention-on-real-abort is
+still unobservable on this host (the wrapper compile is refused by the
+SIMPLE_BUILD_MEMORY_RESERVE_BYTES admission gate before a real compile
+failure path completes, and the SCV cold-init blocks the instrumented lane);
+the behaviour is covered by the direct cleanup test above, and the abort
+message contract is unit-pinned. Per-run isolation remains OPEN as stated.
