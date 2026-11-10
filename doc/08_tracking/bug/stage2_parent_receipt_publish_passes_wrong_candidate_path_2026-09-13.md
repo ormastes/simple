@@ -1,6 +1,6 @@
 # Site 14: Stage 2 is ADMITTED, then the parent-receipt publisher is handed the wrong candidate path, and Stage 3 cannot be admitted
 
-- **Status:** OPEN (2026-09-13)
+- **Status:** FIXED (2026-11-11, lane boot18) — driver now passes the admitted path; candidate-binding fence repaired and green. See addendum below.
 - **Lane:** BOOT-13, measured on `build/bootstrap-boot13b` (canonical
   `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --backend=llvm
   --mode=dynload --jobs=10 --stop-after-stage2`), branch
@@ -125,3 +125,30 @@ Pass `stage2_admitted_bin` (the path the receipt names) as the publisher's
 `CANDIDATE`, or record `stage2_bin` in the receipt. Either way the two must be
 derived from one variable; the assertion itself is correct and should stay
 fail-closed.
+
+
+## 2026-11-11 addendum (lane boot18, work/p3-boot18-20261111) — FIXED, verified
+
+Verdict: FIXED. `scripts/bootstrap/bootstrap-from-scratch.sh:5177-5185` now
+passes `"${stage2_admitted_absolute}"` — the very path the admission receipt
+records as `candidate_path` — to `publish-stage2-parent-receipts.shs`, with a
+comment citing this bug doc. `stage2_admitted_absolute` is derived from
+`stage2_admitted_bin` at :4531, the same admitted copy the receipt writer
+names, so both sides now read one variable. The publisher's fail-closed
+candidate-path assertion is intentionally unchanged.
+
+Verification actually run (this is shell-driver, not compiler):
+
+- `sh scripts/check/check-stage2-parent-receipt-candidate-binding.shs` was RED
+  on the base tip (rc=1): check `publisher-accepts-receipt-path` failed because
+  the fence's replay-fixture `admission.env` lacked `sanity_evidence_path` /
+  `sanity_evidence_sha256`, which the publisher now requires (via
+  `bootstrap_stage3_verify_requalification_commit`) BEFORE the candidate-path
+  assertion is reached. The real receipt writer
+  (`bootstrap_stage3_write_stage2_admission_receipt`, `sanity.shs:1181-1182`)
+  emits both fields. I repaired the fixture (added a
+  `simple-bootstrap-sanity-evidence-v1` sanity-evidence file + the two fields,
+  mirroring the real writer) and re-ran: **fence 3/3 GREEN** — the publisher
+  publishes on the receipt-named path, refuses a byte-identical copy at another
+  path writing nothing, and the driver wiring check passes (same expression on
+  both sides).
