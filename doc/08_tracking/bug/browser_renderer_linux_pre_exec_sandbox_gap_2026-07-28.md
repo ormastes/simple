@@ -175,3 +175,39 @@ sandbox), and `check-browser-renderer-sandbox-seccomp.shs` PASS 8/8.
 
 Still pending per this doc: installed pure-Simple renderer READY/frame
 evidence. Bug row moved to fix-implemented-verification-pending.
+
+## 2026-11-10 status (P1 verify pass, branch work/p1verify-runtime-20261110)
+
+Windows x86_64 host; the Linux sandbox path cannot execute here. No source
+change, 0 fix cycles. Old allocator candidate stays HOLD — not touched.
+
+- Source-verify PASS on current source, matching the p2-19 assessment
+  (`build/review/p2-19-runtime-assessment-20261111.sdn`) line-for-line, via a
+  preprocessor-stack scan of `src/runtime/runtime_process.c`:
+  - `browser_renderer_preinit` (L3801, inside `#ifdef __linux__`): requires the
+    broker-fixed `simple-browser-renderer` argv[0] AND an empty environment;
+    `PR_SET_NO_NEW_PRIVS`; namespaces -> deny-all Landlock -> startup seccomp
+    in load-bearing order; `_exit(126)` on partial failure; sets
+    `s_browser_renderer_preinit_active` (L3592/L3831).
+  - `.preinit_array` registration (L3845-3847) compiled only when
+    `!SIMPLE_CORE_C_STANDALONE`; the core-C lane stays fail-closed through the
+    stage-two marker check.
+  - Linux `rt_browser_renderer_sandbox_enter` (L4024) refuses without the
+    preinit marker, then layers rlimits (AS/CPU/FSIZE/NPROC/NOFILE=4),
+    `no_new_privs`, Landlock, and the stage-two seccomp allow-list.
+  - Fail-closed entries: Windows stubs (L1567-1580, `#ifdef _WIN32`:
+    spawn -> -1, enter -> false, netns -> false) and the non-Linux POSIX
+    `#else` (L4043-4049, enter/netns -> false).
+- Windows-side compile evidence: the focused gate fixture
+  `test/01_unit/runtime/process_piped_write_test.c` does NOT compile on this
+  host (pinned llvm-mingw clang: `fatal error: 'sys/socket.h' file not
+  found` — POSIX-only fixture), so `run_process_piped_write_test.shs` was NOT
+  run here. The owner file `src/runtime/runtime_process.c` alone compiles
+  clean on the Windows lane with the same clang (rc=0, one pre-existing
+  unused-function warning; object emitted).
+- Outstanding, release-blocking, host-limit: installed admitted pure-Simple
+  renderer READY/frame artifact evidence on Linux. The historical Linux
+  production C gate PASS stands as recorded above; no bootstrap/seed
+  substitute is claimed.
+- Verdict: source-level fix VERIFIED (host-limited); installed-artifact leg
+  remains BLOCKED-host-limit. Evidence: `build/review/p1verify-rt-20261110.sdn`.
