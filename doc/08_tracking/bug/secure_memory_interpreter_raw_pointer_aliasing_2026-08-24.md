@@ -1,10 +1,12 @@
 # Secure-memory interpreter raw-pointer aliasing
-## Open 2026-09-16 — needs owner triage
+## FIXED 2026-11-11 (p3-interp11 lane)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** Open
+**Status:** FIXED 2026-11-11 (p3-interp11 lane) — the `Array.fill_span` fix
+(f680394dddf8, 2026-11-07) is verified on the fresh seed 46fe8f6b6def. See the
+2026-11-11 addendum at the end.
 **Date:** 2026-08-24
 
 ## Failure
@@ -85,3 +87,25 @@ Fix (compiler-owned, no raw pointer in Simple code):
 - Prevention: `test/01_unit/lib/crypto/secure_memory_fill_span_prevention_spec.spl`
   (general shape across representations and places) and the engine-parity
   fixture `test/fixtures/engine_differential/fill_span_secure_wipe.spl`.
+
+
+## 2026-11-11 — P3 interp11 triage verdict: FIXED (verified on fresh seed 46fe8f6b6def)
+
+The 2026-11-07 `Array.fill_span` fix (commit `f680394dddf8`, "interp:
+Array.fill_span compiler-owned volatile fill; secure_memory on mut params")
+is present at HEAD and verified by execution on the fresh Windows seed
+(build-commit `46fe8f6b6def`), 2026-11-11, both interpreter-mode unit specs
+green with `--mode=interpreter --no-cache`:
+
+- `test/01_unit/lib/crypto/secure_memory_aliasing_spec.spl`: **6/6 passed**
+  (was RED pre-fix: "method fill_span not found", 0/6).
+- `test/01_unit/lib/crypto/secure_memory_fill_span_prevention_spec.spl`:
+  **7/7 passed**.
+
+This satisfies the row's six-point required fix: the wipe is compiler-owned
+(`Array.fill_span`), reaches the caller's place through the interpreter's
+mutating-method write-back (`Arc::make_mut` exclusive storage), does one O(n)
+volatile fill, returns a typed count while preserving boolean semantics,
+keeps raw pointers inside the runtime boundary (`rt_array_fill_span` /
+interpreter kernels), and carries differential interpreter/native coverage
+plus the prevention spec. No residual.

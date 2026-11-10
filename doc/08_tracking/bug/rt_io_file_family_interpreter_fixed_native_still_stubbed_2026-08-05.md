@@ -2,8 +2,11 @@
 
 Date: 2026-08-05
 Lane: IO-REWIRE follow-up
-Status: PARTIALLY FIXED, re-verified 2026-08-08 (see follow-up section below
-— now with a landed fence, `scripts/check/check-rt-io-file-native-jit-stub.shs`).
+Status: FIXED 2026-11-11 (p3-interp11 lane) for the interpreter and JIT
+engines — the JIT gap is verified closed on the fresh seed 46fe8f6b6def. The
+AOT (`native-build`) leg remains fenced (`RUN_AOT_LEG`) and is blocked by
+separate native-build prerequisite rows, not by rt_io_file itself. See the
+2026-11-11 addendum at the end.
 Interpreter engine now works end-to-end and is verified with a real disk
 round-trip, including an out-of-process on-disk check. JIT engine is
 UNCHANGED — confirmed still stubbed today with the same zero-syscall
@@ -228,3 +231,31 @@ fixture's written content flips the script to `FAIL`/exit 1 with a clear
 message; corrupting the shell-side on-disk expectation (independently of the
 fixture) also flips to `FAIL`/exit 1; restoring either returns to `PASS`/exit
 0.
+
+
+## 2026-11-11 — P3 interp11 triage verdict: interpreter + JIT FIXED on fresh seed 46fe8f6b6def (AOT leg stays fenced)
+
+Both runnable engines were re-verified on the fresh Windows seed
+(build-commit `46fe8f6b6def`, seedfix A+B), 2026-11-11:
+
+- **Interpreter** (`SIMPLE_EXECUTION_MODE=interpret bin/simple run
+  test/fixtures/rt_io_file_roundtrip/main.spl`): `VERDICT: PASS rt_io_file
+  roundtrip ok`, and the out-of-process on-disk check confirms a real 10-byte
+  file with content `0123456789` after exit (at `C:\tmp\`, the Windows
+  resolution of the fixture's hardcoded `/tmp/...` path).
+- **JIT** (`bin/simple run` with `SIMPLE_EXECUTION_MODE` unset — per
+  `.claude/rules/testing.md` this is always the JIT lane): `VERDICT: PASS
+  rt_io_file roundtrip ok` with the same real on-disk file. The 2026-08-08
+  "JIT still stubbed / zero openat syscalls" claim is STALE — the fence
+  script's own header recorded this JIT PASS on 2026-08-08, and it holds on
+  the fresh seed. Caveat: this Windows lane has no `strace`, so the
+  zero-syscall proof could not be re-run; the accepted evidence is the
+  VERDICT line plus the real on-disk file, which is exactly what the fence
+  script's "gap closed" branch requires.
+
+**AOT leg**: unchanged and deliberately not re-run here — it is blocked by
+separate, still-open native-build prerequisite bugs (cross-module
+`Result<T,E>` payload struct-name recovery et al., see the fenced refs in
+`scripts/check/check-rt-io-file-native-jit-stub.shs`), and `native-build` on
+this Windows host is a known-live hang lane. The fence script continues to
+gate AOT via `RUN_AOT_LEG=1`; this row's interpreter+JIT scope is resolved.
