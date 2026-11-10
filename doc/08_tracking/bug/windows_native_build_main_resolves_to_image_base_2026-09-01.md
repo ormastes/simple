@@ -1,6 +1,8 @@
 # Windows native-build: every produced binary calls `main` at the image base (0xC0000005)
 
-- **Status:** OPEN
+- **Status:** SUPERSEDED (2026-11-11, lane boot16) — premise outdated; observed
+  on the MSVC/clang-cl link lane, which is no longer the supported/default
+  Windows lane (llvm-mingw UCRT is; CLAUDE.md). See addendum.
 - **Filed:** 2026-09-01
 - **Lane:** `x86_64-pc-windows-msvc`, LLVM backend, pure-Simple `native-build`
 - **Severity:** blocker — no natively built Windows binary runs at all
@@ -140,3 +142,23 @@ natively built pure-Simple Windows binaries run `main` correctly: e.g.
 `C:/dev/p3new/s3new/s3_fable57s.exe` (sha256 acf09bd3c650...fea29) prints
 `simple-bootstrap 1.0.0-rc.1`, rc=0. Reopen only if an llvm-mingw-linked
 binary reproduces the image-base call.
+
+
+---
+
+## Triage addendum 2026-11-11 (lane boot16)
+
+**Verdict: SUPERSEDED (premise outdated).**
+
+This bug was measured on the `x86_64-pc-windows-msvc` / clang-cl link lane: every
+natively built binary called `main` at RVA 0 (the image base) and died
+0xC0000005. Per CLAUDE.md Critical Rules, the Windows default is now GitHub
+llvm-mingw UCRT; MSVC (clang-cl) is only the optional `--msvc` lane, so the lane
+that produced the RVA-0 `main` is no longer the supported/default route. This
+doc's own 2026-11-07 note already recorded closure on this basis (an
+llvm-mingw-linked binary, `s3_fable57s.exe`, ran `main` correctly, rc=0).
+
+This lane did not re-run a native build (entry-closure native builds are
+forbidden here), so no new runtime evidence is added; the verdict rests on the
+policy change plus the doc's existing 2026-11-07 evidence. Reopen only if an
+llvm-mingw-linked binary reproduces the image-base `main` call.

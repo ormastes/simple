@@ -104,3 +104,39 @@ build evidence with a cached stale binary.
 5. Complete admitted Stage 2 and Stage 3 with
    `SIMPLE_NO_STUB_FALLBACK=1`, then pass the Stage-3 provenance and sanity
    gates. Stage 4 remains a separate required production gate.
+
+
+---
+
+## Triage addendum 2026-11-11 (lane boot16)
+
+**Verdict: BLOCKED** (requires cargo/rustc plus a sanctioned full bootstrap; both
+are forbidden in this lane, and the recorded reproduction host is
+x86_64-linux, not this Windows-native host).
+
+This is a P2 authority-build *performance* bug: a clean x86_64 build spends
+23m21s across four serial Cargo invocations, recompiling shared LTO-heavy
+compiler units because the package feature/profile tuples differ. Its
+acceptance criteria require a measured >=30% clean pre-Stage-2 wall-time
+reduction with byte- and provenance-correct seed/native-all/runtime-symbol-table
+/compiler-backfill artifacts — which can only be demonstrated by running the
+full Rust-authority bootstrap and timing it.
+
+This lane forbids cargo/rustc and entry-closure native builds, and this host is
+Windows-native, so neither a reproduction nor a fix verification is possible
+here. The 2026-11-04 `bug_db.sdn` triage reached the same conclusion: "needs a
+working self-hosted stage3 to verify or repro; cannot be settled with the Rust
+seed."
+
+Exact grant command to settle this row (sanctioned bootstrap lane,
+x86_64-linux host, fresh worktree on origin/release/1.0.0, isolated output):
+
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_LLVM_DIAGNOSTIC_DIR=build/native_probe/x86_bootstrap_readiness/llvm-diag \
+    sh scripts/bootstrap/bootstrap-from-scratch.sh \
+      --full-bootstrap --stop-after-stage2 --backend=llvm --mode=dynload \
+      --jobs=1 --output=build/native_probe/x86_bootstrap_readiness/bootstrap
+
+Then compare the four `rust-*-build.log` Cargo wall times against the recorded
+9m56s / 10m00s / 1m25s / 2m00s baseline and demonstrate the dominant repeated
+compiler units with Cargo timing/fingerprint evidence before optimizing.
