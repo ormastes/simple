@@ -192,3 +192,45 @@ with `data_ops.spl` in the text keeps Defect 3 open for the parser lane.
 Also noted, NOT fixed here (out of lane scope): the stale ByteOrder KNOWN
 BLOCKER section in `.claude/rules/bootstrap.md` this doc says should be
 updated — `.claude/**` is write-protected for this lane.
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: Defect 2 SUPERSEDED (source re-verified at this base); Defect 3
+FIXED-observed (misparse does not reproduce on the current parser, seed-smoke
+verified); Defect 1 BLOCKED-needs-grant — row status stays OPEN.**
+
+- Defect 2 (native_all 60s per-file timeout): re-verified in source at this
+  base — `src/compiler_rust/native_all/src/lib.rs:46` imports
+  `DEFAULT_NATIVE_FILE_TIMEOUT_SECS` from the compiler pipeline
+  (`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:720` = 300,
+  default applied at `:728`); pinning test
+  `native_build_provider_uses_compiler_sized_file_timeout`
+  (`native_all/src/lib.rs:1353`) asserts `file_timeout == 300`. No 60s
+  default remains. (Cargo test execution forbidden in this lane; source
+  assertions verified directly — same posture as prior lanes.)
+- Defect 3 (`data_ops.spl:38` comparison misparsed as a generic-argument
+  list): seed-smoke at this lane's base (fresh tracked seed, build-commit
+  46fe8f6b6def):
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe compile
+  src/app/office/sheets/data_ops.spl -o build/p3boot11/data_ops.smf` —
+  **clean, rc=0**, no 38:18 generic-argument diagnostic; 119 KB artifact
+  emitted. The current parser accepts the exact file verbatim, so the
+  misparse itself is cleared on this base (the misleading-message half was
+  already resolved per the sibling bug's RESOLUTION 2026-08-17). Caveat: the
+  original repro was on the stage-3 self-hosted binary at a 1793-module
+  closure, so the seed-smoke clears the parse path but not the exact stage-3
+  scale conditions.
+- Defect 1 (stage-4 `load_sources` SEGV at the 1793-module closure): still
+  unverifiable here — it needs the stage-3 self-hosted binary on a POSIX
+  host; a full entry-closure native build is forbidden in this lane and the
+  Windows native-build hang is a known live defect (recorded, not retried).
+
+Exact command for the granted lane (clears Defect 1 if the build survives
+`load_sources`; keep Defect 3 reopened only if a `data_ops.spl` diagnostic
+reappears under stage-3 scale):
+
+```sh
+bootstrap/stage3/<triple>/simple native-build --source src/compiler \
+  --source src/app --source src/lib --entry src/app/cli/main.spl \
+  --entry-closure --threads 4 -o build/stage4/simple
+```

@@ -1,6 +1,6 @@
 # Stage 2 admission refuses because a concurrent session edits the source tree mid-run (2026-09-05)
 
-Status: OPEN — not a compiler defect; the gate is behaving correctly
+Status: FIXED 2026-11-11 — pinned-archive isolation is the default path and the refusal diagnostic names the differing inputs (verified by p3-boot11)
 
 ## Verdict
 
@@ -157,3 +157,20 @@ paths via the new `bootstrap_stage2_source_snapshot_diff_paths` helper
 `sh scripts/bootstrap/tests/stage2-admission-refusal-diff-test.shs` — PASS
 (4 assertions: identical silent; changed/added/removed decoded; max honoured;
 missing snapshot refused).
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: SUPERSEDED as operational concern; refusal-diagnostic fix VERIFIED
+live in this lane (evidence re-run, not cited from prior lanes).**
+
+- `sh scripts/bootstrap/tests/stage2-admission-refusal-diff-test.shs` — PASS,
+  4 assertions (identical silent; changed/added/removed decoded; max honoured;
+  missing refused), rc=0, run 2026-11-11 on this worktree.
+- `sh scripts/bootstrap/bootstrap-in-snapshot.shs --selftest` — PASS, 8
+  assertions ("snapshot isolates the build from concurrent edits"), rc=0, run
+  2026-11-11 on this worktree.
+- Pinned-archive isolation remains the default build path
+  (`bootstrap-pin-archive.shs` unless `SIMPLE_BOOTSTRAP_LIVE_TREE=1`).
+
+The gate itself stays correct-by-design (a tree mutated mid-build has no
+honest provenance and must be refused). No change made in this lane.

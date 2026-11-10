@@ -1,7 +1,9 @@
 # Bootstrap is NON-DETERMINISTIC on a fresh `origin/main` tree with a fresh seed (2026-09-01)
 
-Status: **OPEN**. Found while trying to produce an admissible pure-Simple
-compiler for the arm64 WM+Vulkan pixel-evidence lane.
+Status: **SUPERSEDED as root-cause tracker 2026-11-11** — the live defect is
+owned by `native_codegen_object_nondeterminism_2026-10-25.md`; stage-chain
+re-verification remains BLOCKED-needs-grant (host-heavy). Original report
+below retained for history.
 
 ## Reproduce
 
@@ -131,3 +133,36 @@ mismatch was observed: run the three identical `native-build` invocations
 there and `cmp -l` the outputs with `SOURCE_DATE_EPOCH` pinned. No seed change
 made; the fresh-seed build artifacts remain under
 `build/p3-seed-20261110/cargo-target/` in the lane worktree (git-ignored).
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: SUPERSEDED as root-cause tracker; stage-chain verification
+BLOCKED-needs-grant.** Corroborates the 2026-11-10 lanes: the current
+root-cause tracker `native_codegen_object_nondeterminism_2026-10-25.md`
+exists at this base (objects differ between runs of ONE binary even in
+no-fork mode — the same "same size class, different bytes" signature this
+report recorded); the 2026-10-19 emission-order fix
+(`native_build_symbolid_dict_emission_nondeterminism_2026-10-19.md`)
+predates the 2026-10-25 observation, so closure requires a rebuilt compiler
+on a POSIX host. This Windows lane has a fresh seed
+(46fe8f6b6def) but no POSIX compiler build and no cargo/rustc permission;
+whole-compiler closure native builds are forbidden here (and the Windows
+native-build hang is a known live defect).
+
+Exact commands for the granted lane (unchanged from 2026-11-10):
+
+```sh
+# Cheap probe first (from the 2026-10-25 bug): build a fixed closure twice,
+# no fork workers, compare per-object digests.
+SIMPLE_MIR_FORK_WORKERS=0 <compiler> native-build <fixed 142-module closure> -o /tmp/probe-a.bin
+SIMPLE_MIR_FORK_WORKERS=0 <compiler> native-build <fixed 142-module closure> -o /tmp/probe-b.bin
+
+# Then the stage chain, three runs from one seed on the pinned archive:
+for i in 1 2 3; do
+  build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple native-build \
+    --source src/compiler --source src/app --source src/lib \
+    --entry-closure --entry src/app/cli/bootstrap_main.spl \
+    -o build/review/determinism-probe-$i.bin
+done
+sha256sum build/review/determinism-probe-*.bin   # all equal -> this row closes
+```

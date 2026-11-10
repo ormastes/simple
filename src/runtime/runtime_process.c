@@ -1579,6 +1579,12 @@ bool rt_browser_renderer_sandbox_netns_active(void) {
     return false;
 }
 
+/* The jail is Linux-only; Windows defines the explicit entry as a no-op so
+   the runtime.h symbol resolves everywhere. */
+void rt_browser_renderer_preinit_enter(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
+}
+
 const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes) {
     win_browser_renderer_stdin_buf[0] = '\0';
     if (max_bytes <= 0) return win_browser_renderer_stdin_buf;
@@ -3800,6 +3806,14 @@ typedef void (*BrowserRendererPreinitFn)(int, char**, char**);
 
 static void browser_renderer_preinit(int argc, char** argv, char** envp) {
     static const char marker[] = "simple-browser-renderer";
+    if (s_browser_renderer_preinit_active) {
+        /* Idempotent: lanes that keep .preinit_array run this from the
+           constructor before main, and the generated entry main also calls
+           rt_browser_renderer_preinit_enter() for the same marker. The
+           second call must be a no-op -- re-entering namespaces/Landlock/
+           seccomp would _exit(126) on an already-jailed worker. */
+        return;
+    }
     if (argc <= 0 || !argv || !argv[0] || strcmp(argv[0], marker) != 0) {
         return;
     }
@@ -3837,23 +3851,39 @@ static void browser_renderer_preinit(int argc, char** argv, char** envp) {
  * standalone archive. That lane is fail-closed, not silently unjailed:
  * rt_browser_renderer_sandbox_enter() refuses unless
  * s_browser_renderer_preinit_active was set here, so a core-C-built renderer
- * worker exits instead of running without its jail. Hosting the renderer on
- * the core-C lane needs an explicit startup call instead of a constructor --
- * recorded in doc/08_tracking/bug/
+ * worker exits instead of running without its jail. The explicit startup
+ * entry rt_browser_renderer_preinit_enter() below is the documented way out:
+ * the generated native entry main (compile_entry_point_c) calls it before
+ * runtime init, so the worker enters the same jail without a constructor.
+ * Original gap: doc/08_tracking/bug/
  * core_c_lane_cannot_host_browser_renderer_preinit_2026-08-22.md. */
 #if !defined(SIMPLE_CORE_C_STANDALONE)
 __attribute__((section(".preinit_array"), used))
 static BrowserRendererPreinitFn const browser_renderer_preinit_entry =
     browser_renderer_preinit;
 #else
-/* Keep the function referenced so -Wunused-function stays clean and the
-   selfchecks that call it directly still link. */
+/* Constructorless lanes enter the jail through rt_browser_renderer_preinit_enter
+   instead; this alias only keeps the function-typedef referenced so
+   -Wunused-function stays clean for the selfchecks that call it directly. */
 static BrowserRendererPreinitFn const browser_renderer_preinit_entry_unregistered
     __attribute__((used)) = browser_renderer_preinit;
 #endif
 
 bool rt_browser_renderer_preinit_active_for_test(void) {
     return s_browser_renderer_preinit_active;
+}
+
+/* Explicit startup entry for lanes where the .preinit_array registration is
+ * compiled out (core-C standalone archive; the Stage4 capsule forbids
+ * constructor sections). The generated native entry main calls this before
+ * runtime init, forwarding argc/argv/envp, so a core-C-built renderer worker
+ * enters the same jail the constructor would have entered. browser_renderer_preinit
+ * refuses any argv[0] that is not the worker marker and is idempotent once
+ * the jail is up, so ordinary binaries and constructor-hosted lanes are
+ * unaffected. Non-Linux lanes get a no-op stub so the runtime.h symbol is
+ * defined everywhere (the jail itself is Linux-only). */
+void rt_browser_renderer_preinit_enter(int argc, char** argv, char** envp) {
+    browser_renderer_preinit(argc, argv, envp);
 }
 
 static bool browser_renderer_apply_seccomp(void) {
@@ -4046,6 +4076,12 @@ bool rt_browser_renderer_sandbox_enter(void) {
 
 bool rt_browser_renderer_sandbox_netns_active(void) {
     return false;
+}
+
+/* The jail is Linux-only; non-Linux POSIX lanes define the explicit entry so
+   the runtime.h symbol resolves everywhere (no-op here). */
+void rt_browser_renderer_preinit_enter(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
 }
 
 #endif
