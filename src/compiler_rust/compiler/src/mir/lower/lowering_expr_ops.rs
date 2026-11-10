@@ -662,17 +662,63 @@ impl<'a> MirLowerer<'a> {
             return self.emit_to_string(source_reg, inner.ty);
         }
 
+        // `T? as <numeric>` (only admitted inside `unsafe:`, see the HIR
+        // gate in hir/lower/expr/operators.rs): the source register holds the
+        // boxed `Option.Some` carrier (or a flat-nullable payload), and a
+        // plain MirInst::Cast bit-copies that heap word — `r as u64` printed
+        // 6219716837105 for Some(4275044352). Unwrap the payload through the
+        // checked helper (None traps, like `.unwrap()`), decode it to its
+        // native payload type, and only then apply the numeric conversion.
+        // Bug: doc/08_tracking/bug/jit_unsafe_optional_as_cast_garbage_2026_11_09.md
+        let (source_reg, from_ty) = if Self::is_native_scalar(target) && target != TypeId::BOOL && target != TypeId::CHAR
+        {
+            match self.optional_payload_type(inner.ty) {
+                Some(payload_ty) => {
+                    let payload = self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target: crate::mir::CallTarget::from_name("rt_unwrap_or_trap"),
+                            args: vec![source_reg],
+                        });
+                        dest
+                    })?;
+                    let decoded = self.unbox_scalar_for_raw_slot(payload_ty, TypeId::ANY, payload)?;
+                    (decoded, payload_ty)
+                }
+                None => (source_reg, inner.ty),
+            }
+        } else {
+            (source_reg, inner.ty)
+        };
+
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
             block.instructions.push(MirInst::Cast {
                 dest,
                 source: source_reg,
-                from_ty: inner.ty,
+                from_ty,
                 to_ty: target,
             });
             dest
         })
+    }
+
+    /// Payload type of an optional source in either HIR spelling: the
+    /// registry optional id (`T?`) or the builtin `Option<T>` enum (its `T`
+    /// binding, or ANY when unbound). None for every non-optional type.
+    fn optional_payload_type(&self, ty: TypeId) -> Option<TypeId> {
+        let tr = self.type_registry?;
+        if let Some(inner) = tr.optional_inner(ty) {
+            return Some(inner);
+        }
+        match tr.get(ty) {
+            Some(HirType::Enum { name, type_bindings, .. }) if name == "Option" => {
+                Some(type_bindings.get("T").copied().unwrap_or(TypeId::ANY))
+            }
+            _ => None,
+        }
     }
 
     /// True for types whose runtime representation is a raw machine scalar
