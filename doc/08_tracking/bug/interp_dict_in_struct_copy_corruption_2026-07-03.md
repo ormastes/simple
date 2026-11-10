@@ -6,7 +6,7 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03
 **Severity:** high (silent data corruption)
-**Status:** open — workaround in use
+**Status:** SUPERSEDED — 2026-11-11 (lane interp8): the 8x corruption does not reproduce on the fresh seed (build 46fe8f6b6def); re-verified `stored=42 orig_a=1`, `k2=7` under the interpreter. The 2026-07-20 total-loss variant is documented struct value-semantics (owner decision 2026-11-06), not an interpreter defect.
 
 ## Symptom
 
@@ -131,4 +131,27 @@ shape ("Aggregates through function params lose mutations — return-the-object
 rule"): copy-return keeps the original, matching the 2026-11-06 owner decision
 (classes reference, structs value). Its app-level one-line fix (reassign the
 singleton in `register_block`, or make `BlockRegistry` a `class`) lives in
+`src/compiler/15.blocks` — outside the interpreter lane.
+
+
+## 2026-11-11 triage — SUPERSEDED confirmed (seed-smoke, lane interp8)
+
+Re-ran the minimal copy-return repro on the fresh worktree seed
+(build-commit `46fe8f6b6def`, `SIMPLE_EXECUTION_MODE=interpreter`, fixture
+`build/p3fix-interp8/row2_dict_struct_copy.spl`): prints
+`stored=42 orig_a=1`, `k2=7` — no 8x width-confusion corruption; the
+Dict-in-struct copy path is clean on the current seed.
+
+Carrier attribution (copy/mutation-semantics family): carried by the seed
+interpreter value-model/carrier work — the 2026-11-04 ClassInstance
+default-carrier family (`6c7b4db3d392` "fix(interp): class reference
+semantics by default" and its predecessors) — NOT by the 2026-11-11 seedfix
+A/B (JIT tuple destructure unbox / flat Option array get-at + flat Some
+pattern arm), which is a different surface.
+
+The 2026-07-20 total-loss variant remains the documented struct
+value-semantics shape ("Aggregates through function params lose mutations —
+return-the-object rule"; owner decision 2026-11-06: classes reference,
+structs value). Its app-level one-line fix (reassign the singleton in
+`register_block`, or make `BlockRegistry` a `class`) lives in
 `src/compiler/15.blocks` — outside the interpreter lane.

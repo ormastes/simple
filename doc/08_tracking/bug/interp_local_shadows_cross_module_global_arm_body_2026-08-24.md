@@ -1,6 +1,6 @@
 # Interpreter: a function-local binding writes through to a same-named module-global in another module (2026-08-24)
 
-- **Status:** OPEN
+- **Status:** SUPERSEDED — 2026-11-11 (lane interp8): round-8 fix (1889cc95543d) verified live on the fresh seed (build 46fe8f6b6def); acceptance spec 2/2 under `--mode=interpreter`. The 2026-11-10 LIVE reading was stale-binary build skew, as the same-day seedfix lane diagnosed.
 - **Severity:** HIGH — silently corrupts compiler arena state; the observable
   failure surfaces several layers away and names neither the variable nor the file
 - **Area:** seed interpreter variable scoping / global environment
@@ -124,3 +124,20 @@ symptom would be speculative churn). The .spl acceptance spec is the
 regression/acceptance lock and passes on a fresh build. Recommend a seed
 rebuild+redeploy so the deployed binary matches source. Evidence:
 build/review/p3fix-seedfix-20261110.sdn.
+
+
+## 2026-11-11 triage — SUPERSEDED (seed-smoke, lane interp8)
+
+Re-ran the round-8 acceptance spec on the fresh worktree seed (build-commit
+`46fe8f6b6def`, `SIMPLE_LIB=src`, `--mode=interpreter --no-cache`):
+`bin/simple.exe test test/01_unit/compiler/interpreter/local_shadows_module_global_spec.spl`
+-> 2 total, 2 passed, 0 failed. The local reassignment no longer publishes
+into the cross-module global, and the fixed-size module-array `it` is green
+on the same run.
+
+This confirms the same-day seedfix lane's BUILD-SKEW diagnosis: the round-8
+fix (`1889cc95543d` "interp: round 8 fixes (part A)") is present in source
+AND carried by the current deployed seed; the spec is the acceptance lock and
+is GREEN. The second `it` (round-8 fixed-size module arrays) covers
+`interpreter_fd_ownership_private_module_globals_not_linked_2026-08-12` —
+see that record's 2026-11-11 addendum (3/3 on the same binary).
