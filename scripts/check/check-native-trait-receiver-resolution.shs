@@ -1,0 +1,86 @@
+#!/bin/sh
+# Execute the original native-build boundary, not interpreter/JIT proxies.
+# Bug: native_trait_typed_return_receiver_unresolved_2026-08-09.
+# Retain every build/run artifact. Missing prerequisites are ERROR (2),
+# measured compile/run/output failures are FAIL (1), and only all six
+# receiver shapes on each selected backend establish this gate's PASS (0).
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT"
+. "$ROOT/scripts/check/lib/require-self-hosted.shs"
+. "$ROOT/scripts/check/lib/guard-binary-provenance.shs"
+
+require_self_hosted "${SIMPLE_BINARY:-${SIMPLE_BIN:-bin/simple}}" native-trait-compiler
+# Also reject the short seed banner used by older bootstrap producers.
+case "$SELF_HOSTED_VERSION" in
+    *"bootstrap seed"*) check_untestable "native trait gate requires a self-hosted producer" ;;
+esac
+guard_require_native_build_binary "$SELF_HOSTED_BIN" "$ROOT"
+require_tool timeout "bounded native compilation and execution"
+
+FIXTURE=test/01_unit/compiler/codegen/probe_trait_typed_receiver_dispatch.spl
+[ -f "$FIXTURE" ] || check_untestable "native trait receiver fixture is missing"
+[ -d src/compiler ] && [ -d src/lib ] ||
+    check_untestable "compiler/library source trees are required for provenance and native-build"
+BACKENDS=${BACKENDS:-"llvm cranelift"}
+case "$BACKENDS" in
+    llvm|cranelift|"llvm cranelift"|"cranelift llvm") ;;
+    *) check_untestable "BACKENDS must select llvm, cranelift, or both exactly once" ;;
+esac
+BUILD_TIMEOUT=${BUILD_TIMEOUT:-300}
+RUN_TIMEOUT=${RUN_TIMEOUT:-30}
+for duration in "$BUILD_TIMEOUT" "$RUN_TIMEOUT"; do
+    case "$duration" in ''|*[!0-9]*|0) check_untestable "timeouts must be positive integer seconds" ;; esac
+done
+if [ -n "${WORK_DIR:-}" ]; then
+    [ ! -e "$WORK_DIR" ] || check_untestable "WORK_DIR already exists; use a fresh evidence directory"
+    mkdir -p "$WORK_DIR"
+else
+    WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/native-trait-receiver.XXXXXX")
+fi
+WORK_DIR=$(CDPATH= cd -- "$WORK_DIR" && pwd)
+printf '%s\n' "producer: $SELF_HOSTED_REAL" "version: $SELF_HOSTED_VERSION" > "$WORK_DIR/producer.txt"
+cat > "$WORK_DIR/expected.txt" <<'EXPECTED'
+PASS shape_a_local_var
+PASS shape_b_struct_field
+PASS shape_c_return_value
+PASS shape_c2_return_via_local
+PASS shape_d_optional_field
+PASS shape_e_array_element
+TRAIT_RECEIVER PROBE: ALL PASS
+EXPECTED
+
+checked=0
+for backend in $BACKENDS; do
+    binary="$WORK_DIR/trait-receiver-$backend"
+    build_log="$WORK_DIR/$backend-build.log"
+    if timeout "$BUILD_TIMEOUT" env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+        "$SELF_HOSTED_BIN" native-build --backend="$backend" \
+        --source test/01_unit/compiler/codegen --source src/lib \
+        --entry-closure --entry "$FIXTURE" --cache-dir "$WORK_DIR/cache-$backend" \
+        --output "$binary" > "$build_log" 2>&1; then
+        build_rc=0
+    else
+        build_rc=$?
+    fi
+    printf '%s\n' "$build_rc" > "$WORK_DIR/$backend-build.exit"
+    [ "$build_rc" -ne 124 ] || check_untestable "$backend native-build timed out; evidence $WORK_DIR"
+    [ "$build_rc" -eq 0 ] || check_fail "$backend native-build exited $build_rc; evidence $WORK_DIR"
+    if [ ! -x "$binary" ] && [ -x "$binary.exe" ]; then binary="$binary.exe"; fi
+    [ -x "$binary" ] || check_fail "$backend native-build produced no executable; evidence $WORK_DIR"
+    if timeout "$RUN_TIMEOUT" "$binary" > "$WORK_DIR/$backend.stdout" 2> "$WORK_DIR/$backend.stderr"; then
+        run_rc=0
+    else
+        run_rc=$?
+    fi
+    printf '%s\n' "$run_rc" > "$WORK_DIR/$backend-run.exit"
+    [ "$run_rc" -ne 124 ] || check_untestable "$backend probe timed out; evidence $WORK_DIR"
+    [ "$run_rc" -eq 0 ] || check_fail "$backend probe exited $run_rc; evidence $WORK_DIR"
+    # print() implementations differ in whether the fixture's explicit newline
+    # adds a blank line. Normalize that presentation only, never payload text.
+    tr -d '\r' < "$WORK_DIR/$backend.stdout" | sed '/^$/d' > "$WORK_DIR/$backend.actual"
+    cmp -s "$WORK_DIR/expected.txt" "$WORK_DIR/$backend.actual" ||
+        check_fail "$backend receiver-shape output differs; evidence $WORK_DIR"
+    checked=$((checked + 6))
+done
+echo "PASS — $checked native receiver shape(s) checked; evidence $WORK_DIR"

@@ -1,0 +1,88 @@
+#!/bin/sh
+# Controls for the production native-trait checker; not compiler qualification.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+FIXTURE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/native-trait-checker-controls.XXXXXX")
+# Evidence is intentionally retained, including fixture compiler and all logs.
+mkdir -p "$FIXTURE_ROOT/scripts/check/lib" "$FIXTURE_ROOT/src/compiler" "$FIXTURE_ROOT/src/lib" \
+    "$FIXTURE_ROOT/test/01_unit/compiler/codegen"
+cp "$ROOT/scripts/check/check-native-trait-receiver-resolution.shs" "$FIXTURE_ROOT/scripts/check/"
+cp "$ROOT/scripts/check/lib/require-self-hosted.shs" "$ROOT/scripts/check/lib/guard-binary-provenance.shs" \
+    "$FIXTURE_ROOT/scripts/check/lib/"
+cp "$ROOT/test/01_unit/compiler/codegen/probe_trait_typed_receiver_dispatch.spl" \
+    "$FIXTURE_ROOT/test/01_unit/compiler/codegen/"
+cat > "$FIXTURE_ROOT/compiler" <<'COMPILER'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then
+    case "$CONTROL" in
+        seed) echo 'simple bootstrap seed only'; exit 0 ;;
+        short-seed) echo 'simple bootstrap seed'; exit 0 ;;
+        version-fail) exit 7 ;;
+        *) echo 'simple self-hosted CHECKER CONTROL FIXTURE'; exit 0 ;;
+    esac
+fi
+[ "$1" = native-build ] || exit 91
+printf '%s\n' "$*" >> "$CONTROL_CALLS"
+case "$CONTROL" in build-fail) exit 9 ;; no-output) exit 0 ;; esac
+out=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = --output ]; then shift; out=$1; fi
+    shift
+done
+[ -n "$out" ] || exit 92
+cat > "$out" <<'PROGRAM'
+#!/bin/sh
+set -eu
+case "$CONTROL" in run-fail) exit 8 ;; esac
+echo 'PASS shape_a_local_var'
+echo 'PASS shape_b_struct_field'
+[ "$CONTROL" = missing-shape ] || echo 'PASS shape_c_return_value'
+echo 'PASS shape_c2_return_via_local'
+echo 'PASS shape_d_optional_field'
+echo 'PASS shape_e_array_element'
+case "$CONTROL" in
+    bad-verdict) echo 'TRAIT_RECEIVER PROBE: FAILURES' ;;
+    hidden-failure) echo 'FAIL shape_d_optional_field'; echo 'TRAIT_RECEIVER PROBE: ALL PASS' ;;
+    *) echo 'TRAIT_RECEIVER PROBE: ALL PASS' ;;
+esac
+PROGRAM
+chmod +x "$out"
+COMPILER
+chmod +x "$FIXTURE_ROOT/compiler"
+checked=0
+run_case() {
+    control=$1; want=$2
+    calls="$FIXTURE_ROOT/$control.calls"
+    if CONTROL="$control" CONTROL_CALLS="$calls" SIMPLE_BINARY="$FIXTURE_ROOT/compiler" \
+        BACKENDS='llvm cranelift' WORK_DIR="$FIXTURE_ROOT/run-$control" \
+        sh "$FIXTURE_ROOT/scripts/check/check-native-trait-receiver-resolution.shs" \
+        > "$FIXTURE_ROOT/$control.log" 2>&1; then rc=0; else rc=$?; fi
+    if [ "$rc" -ne "$want" ]; then
+        echo "FAIL — control $control expected exit $want, got $rc; evidence $FIXTURE_ROOT"
+        exit 1
+    fi
+    case "$want" in
+        0)
+            grep -q '^PASS — 12 native receiver shape(s) checked;' "$FIXTURE_ROOT/$control.log"
+            [ "$(wc -l < "$calls" | tr -d ' ')" = 2 ]
+            grep -q -- '--backend=llvm' "$calls"
+            grep -q -- '--backend=cranelift' "$calls"
+            ;;
+        1) tail -n 1 "$FIXTURE_ROOT/$control.log" | grep -q '^FAIL' ;;
+        2) grep -q 'ERROR — nothing was checked' "$FIXTURE_ROOT/$control.log"
+           [ ! -e "$calls" ] ;;
+    esac
+    checked=$((checked + 1))
+}
+run_case good 0
+run_case build-fail 1
+run_case no-output 1
+run_case run-fail 1
+run_case missing-shape 1
+run_case bad-verdict 1
+run_case hidden-failure 1
+run_case seed 2
+run_case short-seed 2
+run_case version-fail 2
+echo "PASS — $checked native checker controls; no compiler qualification; evidence $FIXTURE_ROOT"
