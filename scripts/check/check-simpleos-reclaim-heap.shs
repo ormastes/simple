@@ -1,0 +1,66 @@
+#!/bin/sh
+# Execute the actual freestanding allocator and allocation wrappers on a host.
+# This proves explicit-owner release; it does not admit a WM/QEMU frame run.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+OUT=${SIMPLE_RECLAIM_HEAP_OUT:-"$ROOT/build/native_probe/simpleos-reclaim-heap"}
+CC=${CC:-clang}
+OWNER="$ROOT/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+HEADER="$ROOT/examples/09_embedded/simple_os/arch/common/simpleos_reclaim_heap.h"
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR: C compiler missing: $CC"; exit 2; }
+[ -f "$OWNER" ] && [ -f "$HEADER" ] || { echo "ERROR: allocation owner missing"; exit 2; }
+mkdir -p "$OUT"
+
+"$CC" -std=c11 -O2 -Wall -Wextra -Werror \
+    "$ROOT/src/runtime/test/simpleos_reclaim_heap_selfcheck.c" \
+    -o "$OUT/core.exe" >"$OUT/core-compile.log" 2>&1 || {
+    echo "FAIL: core compile (see $OUT/core-compile.log)"; exit 1;
+}
+"$OUT/core.exe" >"$OUT/core-run.log" 2>&1 || {
+    cat "$OUT/core-run.log"; exit 1;
+}
+
+cat >"$OUT/owner.c" <<'PRELUDE'
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "simpleos_reclaim_heap.h"
+static void serial_puts(const char *s) { (void)s; }
+static void serial_put_hex(uint64_t value) { (void)value; }
+static void outb(uint16_t port, uint8_t value) { (void)port; (void)value; exit(3); }
+#define malloc runtime_freestanding_malloc
+#define realloc runtime_freestanding_realloc
+#define free runtime_freestanding_free
+#define calloc runtime_freestanding_calloc
+PRELUDE
+awk '
+    /^static const size_t BAREMETAL_HEAP_SIZE/ { active=1; found=1 }
+    /^RuntimeValue rt_alloc\(/ { active=0 }
+    active { print }
+    END { if (!found) exit 2 }
+' "$OWNER" >>"$OUT/owner.c" || { echo "ERROR: malloc owner not extracted"; exit 2; }
+awk '
+    /^typedef struct \{/ { candidate=$0 "\n"; capture=1; next }
+    capture {
+        candidate=candidate $0 "\n"
+        if (/^} nvme_aligned_alloc_header_t;/) { printf "%s",candidate; capture=0; active=1; found=1; next }
+        if (/^}/) { capture=0; candidate="" }
+        next
+    }
+    active && /^\/\* Ring a doorbell/ { active=0 }
+    active { print }
+    END { if (!found) exit 2 }
+' "$OWNER" >>"$OUT/owner.c" || { echo "ERROR: NVMe allocation owner not extracted"; exit 2; }
+cat "$ROOT/src/runtime/test/simpleos_reclaim_heap_owner_selfcheck.c" >>"$OUT/owner.c"
+"$CC" -std=c11 -O2 -Wall -Wextra -Werror \
+    -I"$ROOT/examples/09_embedded/simple_os/arch/common" "$OUT/owner.c" \
+    -o "$OUT/owner.exe" >"$OUT/owner-compile.log" 2>&1 || {
+    echo "FAIL: allocation owner compile (see $OUT/owner-compile.log)"; exit 1;
+}
+"$OUT/owner.exe" >"$OUT/owner-run.log" 2>&1 || {
+    cat "$OUT/owner-run.log"; exit 1;
+}
+cat "$OUT/core-run.log" "$OUT/owner-run.log"
+echo "PASS: explicit retained/scratch ownership; WM frame integration remains pending"

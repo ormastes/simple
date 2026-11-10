@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "../../common/boot/freestanding_bool_abi.h"
 #include <stddef.h>
+#include "../../common/simpleos_reclaim_heap.h"
 
 #include "embedded_ssh_host_rsa.h"
 #include "embedded_ssh_host_rsa_crt.h"
@@ -465,9 +466,9 @@ RuntimeValue rt_bytes_alloc_packed(RuntimeValue len_val)
  * packed array. Every caller that had already sized its buffer exactly -- most
  * importantly _vfs_boot_read_file_chain_raw, which knows the FAT32 file size
  * before it reads a byte -- was therefore forced through the doubling growth
- * path in rt_array_push_handle: 128, 256, ... 1M, 2M, 4M, 8M, 16M, 32M. On this
- * BUMP-ONLY heap free() is a no-op, so every intermediate buffer is leaked
- * permanently -- a 24 MiB boot asset burns ~63 MiB. That is what drove
+ * path in rt_array_push_handle: 128, 256, ... 1M, 2M, 4M, 8M, 16M, 32M. On the
+ * former bump-only heap, free() was a no-op, so every intermediate buffer was
+ * leaked permanently -- a 24 MiB boot asset burned ~63 MiB. That is what drove
  * heap_off to 0xbf12660 during vfs-init, before any render code ran.
  * Honouring the reservation makes that one exact allocation instead.
  *
@@ -661,56 +662,25 @@ static const size_t BAREMETAL_HEAP_SIZE = 192ULL * 1024ULL * 1024ULL;
 static const size_t BAREMETAL_HEAP_WARN_SIZE = 144ULL * 1024ULL * 1024ULL;
 
 static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
-static size_t _heap_off = 0;
+static SimpleosReclaimHeap _heap_state = {(unsigned char *)_heap, sizeof(_heap), 0, NULL, {NULL}};
+#define _heap_off (_heap_state.used)
 
 void *malloc(size_t sz);
 
-static inline size_t simpleos_heap_align(size_t sz)
-{
-    return (sz + 15U) & ~(size_t)15U;
-}
+void *realloc(void *p, size_t sz);
 
+/* Array storage has a unique allocation owner. Preserve the stable header and
+ * release replaced auxiliary storage; retained RuntimeValue objects are not
+ * reclaimed implicitly. The allocator metadata owns the actual old extent. */
 static void *simpleos_heap_realloc_last(void *p, size_t old_sz, size_t new_sz)
 {
-    size_t old_aligned = simpleos_heap_align(old_sz);
-    size_t new_aligned = simpleos_heap_align(new_sz);
-    if (!p) return malloc(new_sz);
-
-    uint8_t *base = (uint8_t *)p;
-    if (base >= (uint8_t *)_heap &&
-        base + old_aligned == (uint8_t *)&_heap[_heap_off]) {
-        if (new_aligned > old_aligned) {
-            size_t grow = new_aligned - old_aligned;
-            if (_heap_off + grow > sizeof(_heap)) {
-                serial_puts("[PANIC] heap exhausted\r\n");
-                serial_puts("[PANIC] heap_off=");
-                serial_put_hex((uint64_t)_heap_off);
-                serial_puts(" req=");
-                serial_put_hex((uint64_t)grow);
-                serial_puts(" limit=");
-                serial_put_hex((uint64_t)sizeof(_heap));
-                serial_puts("\r\n");
-                for (;;) outb(0xF4, 0);
-            }
-            _heap_off += grow;
-        } else {
-            _heap_off -= (old_aligned - new_aligned);
-        }
-        return p;
-    }
-
-    void *n = malloc(new_sz);
-    if (p && n) {
-        size_t copy_sz = old_sz < new_sz ? old_sz : new_sz;
-        __builtin_memcpy(n, p, copy_sz);
-    }
-    return n;
+    (void)old_sz;
+    return realloc(p, new_sz);
 }
 
 void *malloc(size_t sz)
 {
     void *caller = __builtin_return_address(0);
-    sz = simpleos_heap_align(sz);
     if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
         serial_puts("[heap] alloc sz=");
         serial_put_hex((uint64_t)sz);
@@ -720,7 +690,8 @@ void *malloc(size_t sz)
         serial_put_hex((uint64_t)(uintptr_t)caller);
         serial_puts("\r\n");
     }
-    if (_heap_off + sz > sizeof(_heap)) {
+    void *p = simpleos_reclaim_alloc(&_heap_state, sz);
+    if (!p) {
         serial_puts("[PANIC] heap exhausted\r\n");
         serial_puts("[PANIC] heap_off=");
         serial_put_hex((uint64_t)_heap_off);
@@ -731,8 +702,6 @@ void *malloc(size_t sz)
         serial_puts("\r\n");
         for(;;) outb(0xF4, 0);
     }
-    void *p = &_heap[_heap_off];
-    _heap_off += sz;
     if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
         serial_puts("[heap] alloc off_after=");
         serial_put_hex((uint64_t)_heap_off);
@@ -743,18 +712,25 @@ void *malloc(size_t sz)
 
 void free(void *p)
 {
-    (void)p; /* bump allocator: no-op */
+    simpleos_reclaim_free(&_heap_state, p);
 }
 
 void *realloc(void *p, size_t sz)
 {
-    void *n = malloc(sz);
-    if (p && n) __builtin_memcpy(n, p, sz);
+    void *n = simpleos_reclaim_realloc(&_heap_state, p, sz);
+    if (!n && sz != 0) {
+        serial_puts("[PANIC] heap realloc exhausted\r\n");
+        for (;;) outb(0xF4, 0);
+    }
     return n;
 }
 
 void *calloc(size_t n, size_t sz)
 {
+    if (n != 0 && sz > SIZE_MAX / n) {
+        serial_puts("[PANIC] heap calloc overflow\r\n");
+        for (;;) outb(0xF4, 0);
+    }
     size_t total = n * sz;
     void *p = malloc(total);
     if (p) __builtin_memset(p, 0, total);
@@ -789,6 +765,9 @@ RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 
 RuntimeValue rt_dealloc(RuntimeValue ptr)
 {
+    /* A raw RuntimeValue does not prove unique ownership. Explicit C scratch
+     * free() is now reclaiming, but escaped/aliased objects stay retained until
+     * their language owner supplies a proven destruction boundary. */
     (void)ptr;
     return NIL_VALUE;
 }
@@ -1624,19 +1603,20 @@ static struct {
 } _nvme;
 
 typedef struct {
-    size_t prev_heap_off;
-    size_t alloc_end_off;
+    void *raw;
 } nvme_aligned_alloc_header_t;
 
-/* Allocate page-aligned memory from the bump allocator.
+/* Allocate page-aligned memory with an explicit raw-allocation owner.
  * NVMe requires queue and data buffers to be page-aligned (4KB).
  * We waste up to (alignment-1) bytes of padding to get the alignment. */
 static void *nvme_alloc_aligned(size_t size, size_t alignment)
 {
-    if (alignment == 0) return (void *)0;
-    /* Allocate extra space so we can align within it */
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0 ||
+        alignment > SIZE_MAX - sizeof(nvme_aligned_alloc_header_t) ||
+        size > SIZE_MAX - alignment - sizeof(nvme_aligned_alloc_header_t))
+        return (void *)0;
+    /* Allocate extra space so we can align within it. */
     size_t total = size + alignment + sizeof(nvme_aligned_alloc_header_t);
-    size_t prev_heap_off = _heap_off;
     void *raw = malloc(total);
     if (!raw) return (void *)0;
     /* Align the pointer within the allocated region */
@@ -1644,8 +1624,7 @@ static void *nvme_alloc_aligned(size_t size, size_t alignment)
     uintptr_t aligned = (addr + alignment - 1) & ~(alignment - 1);
     nvme_aligned_alloc_header_t *hdr =
         (nvme_aligned_alloc_header_t *)(aligned - sizeof(nvme_aligned_alloc_header_t));
-    hdr->prev_heap_off = prev_heap_off;
-    hdr->alloc_end_off = _heap_off;
+    hdr->raw = raw;
     return (void *)aligned;
 }
 
@@ -1654,8 +1633,7 @@ static void nvme_free_aligned(void *ptr)
     if (!ptr) return;
     nvme_aligned_alloc_header_t *hdr =
         (nvme_aligned_alloc_header_t *)((uintptr_t)ptr - sizeof(nvme_aligned_alloc_header_t));
-    if (_heap_off == hdr->alloc_end_off && hdr->prev_heap_off <= hdr->alloc_end_off)
-        _heap_off = hdr->prev_heap_off;
+    free(hdr->raw);
 }
 
 /* Ring a doorbell: SQ tail doorbell = BAR0 + 0x1000 + (2*qid) * stride
@@ -8270,7 +8248,7 @@ void _start(void)
 
     serial_puts("SimpleOS x86_64 boot\r\n");
     serial_puts("[BOOT] COM1 serial initialized at 115200 baud\r\n");
-    serial_puts("[BOOT] Heap: 512 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 192 MB explicit-free allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)\r\n");
 
     /* BGA + GUI rendering is now done by Pure Simple code in spl_start().
@@ -9735,11 +9713,9 @@ static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val)
                 if (!new_data) return ENCODE_PTR(a);
                 for (uint32_t i = 0; i < a->len; i++) new_data[i] = data[i];
             } else {
-                /* REUSE rather than reallocate: free() is a no-op on the bump
-                 * heap, so an unconditional fresh malloc+copy leaks the entire
-                 * old buffer on every doubling. simpleos_heap_realloc_last
-                 * extends in place when this is the most recent allocation (the
-                 * common append-loop case) and copies only when it is not. The
+                /* Reallocate through the unique auxiliary-storage owner.
+                 * simpleos_heap_realloc_last extends the latest allocation in
+                 * place; otherwise it copies and releases the old buffer. The
                  * value-array branch below has always done this; the packed byte
                  * branch did not. Same realloc-instead-of-reuse defect fixed in
                  * _reset_font_atlas (font_renderer.spl). */
@@ -13478,7 +13454,7 @@ static void map_grow(RuntimeMap *m)
         nk[i] = NIL_VALUE;
         nv[i] = NIL_VALUE;
     }
-    /* Bump allocator: old arrays leak but that is acceptable on bare metal */
+    /* Map auxiliary arrays have no explicit release boundary yet; old arrays stay retained. */
     m->keys   = nk;
     m->values = nv;
     m->cap    = new_cap;
@@ -13982,7 +13958,7 @@ RuntimeValue rt_abort(RuntimeValue msg)
     return NIL_VALUE;
 }
 
-/* GC: safe no-ops on bare metal (bump allocator, no GC) */
+/* GC: safe no-ops on bare metal (explicit C free only, no GC) */
 RuntimeValue rt_gc_collect(void) { return NIL_VALUE; }
 RuntimeValue rt_gc_disable(void) { return NIL_VALUE; }
 RuntimeValue rt_gc_enable(void)  { return NIL_VALUE; }
