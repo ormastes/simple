@@ -1,0 +1,76 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Nil singleton type: runtime behavior evidence
+
+Companion to nil_singleton_type_pipeline_spec.spl (owner lane p2_28, bug
+family `unresolved_type_declared_nowhere_family_2026-08-01`). Where the
+pipeline spec asserts parser -> HIR -> MIR shapes in-process, this spec runs
+the canonical forms end to end in the interpreter and pins the value-level
+behavior:
+
+- `Result<nil, text>` constructed with Ok(nil) matches its Ok arm; the Err
+  arm still carries text.
+- A `nil`-annotated local binds the nil literal.
+- No Optional regression: Some(0) and Some(3) keep their payloads (the nil
+  word constant 3 must not collide with a real Some(3)).
+"""
+
+# @tag: unit, compiler, nil, runtime, p2_28
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+
+fn nil_success() -> Result<nil, text>:
+    return Result.Ok(nil)
+
+fn nil_failure() -> Result<nil, text>:
+    return Result.Err("boom")
+
+fn nil_forward() -> Result<nil, text>:
+    return nil_success()
+
+describe "Result<nil, text> runtime behavior":
+    it "constructs Ok(nil), matches the Ok arm, and the payload is nil":
+        step("constructs Ok(nil), matches the Ok arm, and the payload is nil")
+        match nil_success():
+            case Result.Ok(v):
+                expect(v == nil).to_equal(true)
+            case Result.Err(_):
+                expect(false).to_equal(true)
+
+    it "constructs Err(text) and binds the message arm":
+        step("constructs Err(text) and binds the message arm")
+        match nil_failure():
+            case Result.Err(msg):
+                expect(msg).to_equal("boom")
+            case Result.Ok(_):
+                expect(false).to_equal(true)
+
+    it "forwards the Ok(nil) result through a helper":
+        step("forwards the Ok(nil) result through a helper")
+        match nil_forward():
+            case Result.Ok(v):
+                expect(v == nil).to_equal(true)
+            case Result.Err(_):
+                expect(false).to_equal(true)
+
+    it "binds a nil-annotated local to the nil literal":
+        step("binds a nil-annotated local to the nil literal")
+        val x: nil = nil
+        expect(x == nil).to_equal(true)
+
+describe "Optional regression controls (Some(0) / Some(3) must not collapse to nil)":
+    it "Some(0) unwraps to 0, not nil":
+        step("Some(0) unwraps to 0, not nil")
+        val o: i64? = Option.Some(0)
+        expect(o.unwrap()).to_equal(0)
+
+    it "Some(3) unwraps to 3, not nil (no collision with the nil word constant 3)":
+        step("Some(3) unwraps to 3, not nil (no collision with the nil word constant 3)")
+        val o: i64? = Option.Some(3)
+        expect(o.unwrap()).to_equal(3)
+
+    it "None stays absence and unwrap_or falls back":
+        step("None stays absence and unwrap_or falls back")
+        val n: i64? = Option.None
+        expect(n.unwrap_or(7)).to_equal(7)

@@ -1,0 +1,318 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Nil singleton type: parser -> HIR -> MIR pipeline evidence
+
+Owner lane p2_28, bug family `unresolved_type_declared_nowhere_family_2026-08-01`
+(design boundary: build/review/p2_28-unresolved-type-nil-followup.md).
+
+The library writes `Result<Nil, text>` with an uppercase `Nil` that is
+declared nowhere, and even the frontend's advertised lowercase `nil`
+annotation had no strict HIR name mapping: the parser emits TYPE_NIL
+(10.frontend/core/parser.spl), the flat AST bridge converts it to
+Named("nil") (_FlatAstBridge/convert_nodes.spl), and HIR lowering had no
+nil/Nil arm, so the annotation hit the hard `unresolved type: nil` gate
+(20.hir/hir_lowering/types.spl lower_named_kind). MCP phase-4 construction 6
+terminated on 22 such HIR errors in src/lib/common/debug/service_v1.spl.
+
+This spec is the CURRENT-SOURCE regression evidence for the fix:
+
+- `nil` (lowercase, the canonical parser spelling) resolves to an explicit
+  semantic nil-singleton type `HirTypeKind.Nil`, distinct from Unit and from
+  an Optional's absence state.
+- The identity threads through generic-argument resolution
+  (Result<nil, text> stays a Result with its exact payload type), HIR type
+  equality, MIR lowering (`MirTypeKind.Nil`, one tagged SplValue word,
+  constant 3 — the representation NilLit has always materialized), the
+  exported/imported signature surface (a provider module declares the
+  function; a consumer module calls it and re-declares the same return
+  annotation, mirroring service_v1/dap_bridge).
+- A type alias to `nil` expands to the same singleton.
+- Precedence: a REAL declaration named `Nil` (uppercase) still wins through
+  the ordinary symbol lookup; undeclared uppercase `Nil` stays erroring
+  (deliberate policy hold — no blanket whitelist, no library rewrite).
+- Fail-closed negatives on declared enum constructors (the
+  enum_constructor_payload_nested_unit_nil_veto surface): the veto still
+  rejects a NilLit for a declared Unit payload leaf, including nested
+  tuples; a nil payload slot accepts exactly the nil literal and nothing
+  else; nil stays out of a non-optional nominal slot.
+"""
+
+# @tag: unit, compiler, hir, mir, types, nil, p2_28
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+# Provider module: mirrors lib/common/debug/service_v1.spl's shape — public
+# functions returning Result<nil, text> whose bodies produce Ok(nil) or
+# forward to one of those functions. Written with the CANONICAL lowercase
+# `nil` spelling (the uppercase library dialect is the separate policy hold).
+val provider_source = "pub fn nil_success() -> Result<nil, text>:\n" +
+    "    return Ok(nil)\n" +
+    "\n" +
+    "pub fn nil_forward() -> Result<nil, text>:\n" +
+    "    return nil_success()\n" +
+    "\n" +
+    "pub fn nil_failure() -> Result<nil, text>:\n" +
+    "    return Err(\"boom\")\n" +
+    "\n" +
+    "type AliasNil = nil\n" +
+    "\n" +
+    "pub fn alias_nil_success() -> Result<AliasNil, text>:\n" +
+    "    return Ok(nil)\n" +
+    "\n" +
+    "pub struct Nil:\n" +
+    "    marker: i64\n" +
+    "\n" +
+    "pub fn declared_nil_success() -> Result<Nil, text>:\n" +
+    "    return Ok(Nil(marker: 1))\n" +
+    "\n" +
+    "pub enum Slot:\n" +
+    "    U(x: unit)\n" +
+    "    N(x: nil)\n" +
+    "    T(x: (unit, i64))\n" +
+    "    S(x: Nil)\n"
+
+fn lower_two(consumer_source: text) -> (text, MirModule, HirModule, HirModule):
+    val log = Logger(level: 0)
+    val provider_ast = parse_full_frontend(provider_source, "lib/prov.spl", "lib.prov", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.prov"] = provider_ast
+    val sources = [SourceFile(path: "lib/prov.spl", content: provider_source, module_name: "lib.prov")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var provider_lowering = hirlowering_for_module("lib.prov", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val provider_hir = provider_lowering.lower_module(provider_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["provider_hir"] = provider_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "provider_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    # NOTE: lower_module MIR-lowers the CONSUMER module's bodies; the
+    # provider's bodies are not re-lowered (their HIR signatures still travel
+    # into the consumer through the module surfaces, which is the
+    # service_v1 -> dap_bridge failure route).
+    val mir = mir_lowering.lower_module(consumer_hir, [provider_hir, consumer_hir])
+    var out = ""
+    for e in provider_lowering.errors:
+        out = out + "hir(provider): " + e.message + "\n"
+    for e in consumer_lowering.errors:
+        out = out + "hir(consumer): " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    (out, mir, provider_hir, consumer_hir)
+
+fn lower_standalone(source: text) -> (text, HirModule):
+    # One module, no other surfaces in the closure: the faithful reduced
+    # form of the service_v1 failure (uppercase Nil declared nowhere).
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var out = ""
+    for e in lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    (out, hir)
+
+fn hir_fn_return_type(h: HirModule, name: text) -> HirType?:
+    for f in h.functions.values():
+        if f.name == name:
+            return Some(f.return_type)
+    None
+
+# Renders the shape of a HIR type at the granularity this spec asserts on.
+fn hir_type_shape(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Nil: "nil"
+        case HirTypeKind.Unit: "unit"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Result(ok, err):
+            "result<{hir_type_shape(ok)},{hir_type_shape(err)}>"
+        case HirTypeKind.Named(sym, _):
+            "named:{sym.id}"
+        case _: "other"
+
+fn mir_type_shape(t: MirType) -> text:
+    match t.kind:
+        case MirTypeKind.Nil: "nil"
+        case MirTypeKind.Unit: "unit"
+        case MirTypeKind.Bool: "bool"
+        case MirTypeKind.I64: "i64"
+        case MirTypeKind.Result(ok, err):
+            "result<{mir_type_shape(ok)},{mir_type_shape(err)}>"
+        case MirTypeKind.Tuple(elems):
+            if elems.len() == 2:
+                "text"  # Str lowers to (Ptr(U8), U64)
+            else:
+                "tuple"
+        case MirTypeKind.Struct(sym): "struct:{sym.id}"
+        case _: "other"
+
+fn mir_fn_return_type(m: MirModule, name: text) -> MirType?:
+    # MIR function names are module-qualified ("app.main.own"); match the
+    # trailing component.
+    for f in m.functions.values():
+        if f.name == name or f.name.ends_with("." + name):
+            return Some(f.signature.return_type)
+    None
+
+fn count_nil_words(m: MirModule) -> i64:
+    # Const Int(3) is the tagged nil word (expr_dispatch.spl `case NilLit`).
+    var count = 0
+    for func in m.functions.values():
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Const(_, value, _):
+                        match value:
+                            case MirConstValue.Int(v):
+                                if v == 3: count = count + 1
+                            case _: ()
+                    case _: ()
+    count
+
+describe "nil singleton type resolves through the parser-HIR-MIR pipeline":
+    it "resolves the canonical lowercase nil annotation to HirTypeKind.Nil with no errors":
+        val consumer = "use lib.prov.*\n\nfn own() -> Result<nil, text>:\n    return Ok(nil)\n"
+        val (errors, _mir, provider_hir, consumer_hir) = lower_two(consumer)
+        expect(errors).to_equal("")
+        val provider_shape = match hir_fn_return_type(provider_hir, "nil_success"):
+            case Some(t): hir_type_shape(t)
+            case None: "missing"
+        expect(provider_shape).to_equal("result<nil,text>")
+        val consumer_shape = match hir_fn_return_type(consumer_hir, "own"):
+            case Some(t): hir_type_shape(t)
+            case None: "missing"
+        expect(consumer_shape).to_equal("result<nil,text>")
+
+    it "preserves the nil payload identity into MIR as MirTypeKind.Nil":
+        val consumer = "use lib.prov.*\n\nfn own() -> Result<nil, text>:\n    return Ok(nil)\n"
+        val (errors, mir, _ph, _ch) = lower_two(consumer)
+        expect(errors).to_equal("")
+        val mir_shape = match mir_fn_return_type(mir, "own"):
+            case Some(t): mir_type_shape(t)
+            case None: "missing"
+        expect(mir_shape).to_equal("result<nil,text>")
+        # Ok(nil) materializes exactly one tagged nil word (constant 3) in
+        # the lowered consumer body.
+        expect(count_nil_words(mir)).to_equal(1)
+
+    it "threads the imported Result<nil, text> signature across the module boundary":
+        # Mirrors dap_bridge.spl: the consumer imports a provider whose
+        # return annotation travels through the module surface; the consumer
+        # re-declares the same annotation and forwards the call.
+        val consumer = "use lib.prov.*\n\nfn use_it() -> Result<nil, text>:\n    return nil_forward()\n"
+        val (errors, mir, _ph, consumer_hir) = lower_two(consumer)
+        expect(errors).to_equal("")
+        val shape = match hir_fn_return_type(consumer_hir, "use_it"):
+            case Some(t): hir_type_shape(t)
+            case None: "missing"
+        expect(shape).to_equal("result<nil,text>")
+        val mir_shape = match mir_fn_return_type(mir, "use_it"):
+            case Some(t): mir_type_shape(t)
+            case None: "missing"
+        expect(mir_shape).to_equal("result<nil,text>")
+
+    it "expands a type alias to nil to the same singleton":
+        val consumer = "use lib.prov.*\n\nfn via_alias() -> Result<AliasNil, text>:\n    return alias_nil_success()\n"
+        val (errors, _mir, provider_hir, consumer_hir) = lower_two(consumer)
+        expect(errors).to_equal("")
+        val shape = match hir_fn_return_type(consumer_hir, "via_alias"):
+            case Some(t): hir_type_shape(t)
+            case None: "missing"
+        expect(shape).to_equal("result<nil,text>")
+        val alias_shape = match hir_fn_return_type(provider_hir, "alias_nil_success"):
+            case Some(t): hir_type_shape(t)
+            case None: "missing"
+        expect(alias_shape).to_equal("result<nil,text>")
+
+    it "lets a real declared type named Nil win over the builtin (symbol-shadowing precedence)":
+        # The provider declares `struct Nil`; its Result<Nil, text> resolves
+        # to the NOMINAL type, never to the nil singleton. The consumer sees
+        # the same through the import and constructs the struct payload.
+        val consumer = "use lib.prov.*\n\nfn use_declared() -> Result<Nil, text>:\n    return declared_nil_success()\n"
+        val (errors, mir, provider_hir, consumer_hir) = lower_two(consumer)
+        expect(errors).to_equal("")
+        match hir_fn_return_type(provider_hir, "declared_nil_success"):
+            case Some(t):
+                match t.kind:
+                    case HirTypeKind.Result(ok, _):
+                        match ok.kind:
+                            case HirTypeKind.Named(_, _): expect(true).to_equal(true)
+                            case _: expect("payload is not the declared nominal Nil").to_equal("named")
+                    case _: expect("return is not a Result").to_equal("result")
+            case None:
+                expect("declared_nil_success missing").to_equal("present")
+        match hir_fn_return_type(consumer_hir, "use_declared"):
+            case Some(t):
+                match t.kind:
+                    case HirTypeKind.Result(ok, _):
+                        match ok.kind:
+                            case HirTypeKind.Named(_, _): expect(true).to_equal(true)
+                            case _: expect("consumer payload is not the declared nominal Nil").to_equal("named")
+                    case _: expect("consumer return is not a Result").to_equal("result")
+            case None:
+                expect("use_declared missing").to_equal("present")
+        match mir_fn_return_type(mir, "use_declared"):
+            case Some(t):
+                match t.kind:
+                    case MirTypeKind.Result(ok, _):
+                        match ok.kind:
+                            case MirTypeKind.Struct(_): expect(true).to_equal(true)
+                            case _: expect("MIR payload is not the declared struct").to_equal("struct")
+                    case _: expect("MIR return is not a Result").to_equal("result")
+            case None:
+                expect("use_declared missing in MIR").to_equal("present")
+
+    it "keeps undeclared uppercase Nil erroring (deliberate policy hold)":
+        # Nothing anywhere in this closure declares Nil; the strict gate must
+        # still report it. No blanket whitelist was added. (Lowered
+        # standalone so no provider surface can publish a real `struct Nil` —
+        # that shadowing case is asserted separately above.)
+        val (errors, _hir) = lower_standalone("fn bad() -> Result<Nil, text>:\n    return Ok(nil)\n")
+        expect(errors.contains("unresolved type: Nil")).to_equal(true)
+
+describe "nil versus Unit stays fail-closed and payload-aware on declared enum constructors":
+    it "accepts the nil literal for a declared nil payload slot (identity rule)":
+        val consumer = "use lib.prov.*\n\nfn mk() -> Slot:\n    return Slot.N(nil)\n"
+        val (errors, _mir, _ph, _ch) = lower_two(consumer)
+        expect(errors).to_equal("")
+
+    it "still rejects a NilLit for a declared Unit payload leaf (existing veto)":
+        val consumer = "use lib.prov.*\n\nfn mk() -> Slot:\n    return Slot.U(nil)\n"
+        val (errors, _mir, _ph, _ch) = lower_two(consumer)
+        expect(errors.contains("payload type mismatch")).to_equal(true)
+
+    it "still rejects a nested NilLit under a declared Unit tuple leaf":
+        val consumer = "use lib.prov.*\n\nfn mk() -> Slot:\n    return Slot.T((nil, 1))\n"
+        val (errors, _mir, _ph, _ch) = lower_two(consumer)
+        expect(errors.contains("payload type mismatch")).to_equal(true)
+
+    it "does not accept a non-nil literal for a declared nil payload":
+        # The nil singleton payload is identity-typed: only the nil literal
+        # is its value. N(0) into a nil slot must be rejected.
+        val consumer = "use lib.prov.*\n\nfn mk() -> Slot:\n    return Slot.N(0)\n"
+        val (errors, _mir, _ph, _ch) = lower_two(consumer)
+        expect(errors.contains("payload type mismatch")).to_equal(true)
+
+    it "keeps nil out of a non-optional nominal slot (existing strictness)":
+        val consumer = "use lib.prov.*\n\nfn mk() -> Slot:\n    return Slot.S(nil)\n"
+        val (errors, _mir, _ph, _ch) = lower_two(consumer)
+        expect(errors.contains("payload type mismatch")).to_equal(true)
