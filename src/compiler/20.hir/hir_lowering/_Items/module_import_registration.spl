@@ -17,6 +17,7 @@ use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_importe
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use std.io_runtime.{hash_text}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.type_aliases.*
 use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_type, hir_dependency_type_name}
@@ -1101,6 +1102,14 @@ impl HirLowering:
                 if hir_dependency_is_builtin_container(imported_name) and
                         not hir_compilation_declares_nominal(self.module_surfaces, imported_name):
                     return
+                # bug=undeclared_imported_symbols_census: staged diagnostic.
+                # Census non-zero (~1,226 sites), so a recorded warning by
+                # default; hard error under SIMPLE_STRICT_IMPORTS=1.
+                val undecl_msg = "`{imported_name}` is named in `use {imported_mod.module_name}.\{...\}` but that module neither declares nor re-exports it (importer {self.module_filename})"
+                if (env_get_opt("SIMPLE_STRICT_IMPORTS") ?? "") == "1":
+                    self.error("[E-HIR-UNDECL-IMPORT-001] " + undecl_msg, import_span)
+                else:
+                    self.warning("[W-HIR-UNDECL-IMPORT-001] " + undecl_msg, import_span)
                 eprint("[hir-reexport-chase-unresolved] facade={imported_mod.module_name} item={imported_name} local={local_name} importer={self.module_filename}: the facade neither declares this name nor routes it through a resolvable re-export; nothing was registered and a later `unresolved type`/`unresolved name: {imported_name}` will be reported against an importing module instead")
 
     me report_reexport_chase_stats():

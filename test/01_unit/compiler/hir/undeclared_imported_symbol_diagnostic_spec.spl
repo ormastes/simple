@@ -1,0 +1,75 @@
+# Purpose and audience: executable evidence for self-hosted compiler engineers
+# that HIR lowering reports a braced import of a name the target module
+# declares nowhere (bug undeclared_imported_symbols_census). Staged: a recorded
+# warning W-HIR-UNDECL-IMPORT-001 by default (census non-zero, ~1,226 sites),
+# a hard error E-HIR-UNDECL-IMPORT-001 under SIMPLE_STRICT_IMPORTS=1.
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{env_set_process}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+fn undecl_probe(consumer_source: text, flag: text) -> [text]:
+    # Returns [hard (non-recovered) error count, joined messages]; warnings are recorded as recovered entries.
+    val log = Logger(level: 0)
+    val provider_source = "pub fn present() -> i64:\n    1"
+    val provider = parse_full_frontend(provider_source, "undecl.provider", "undecl.provider", log)
+    val consumer = parse_full_frontend(consumer_source, "undecl.consumer", "undecl.consumer", log)
+    var modules: Dict<text, Module> = {}
+    modules["undecl.provider"] = provider
+    modules["undecl.consumer"] = consumer
+    var surfaces = ModuleSurfacesByName.empty()
+    match module_surfaces_from_test_modules(modules, [
+            SourceFile(path: "undecl/provider.spl", content: provider_source, module_name: "undecl.provider"),
+            SourceFile(path: "undecl/consumer.spl", content: consumer_source, module_name: "undecl.consumer")
+        ]):
+        case Ok(value): surfaces = value
+        case Err(_): assert_true(false)
+    env_set_process("SIMPLE_STRICT_IMPORTS", flag)
+    var lowering = hirlowering_for_module("undecl.consumer", surfaces)
+    lowering.lower_module(consumer)
+    env_set_process("SIMPLE_STRICT_IMPORTS", "")
+    var msgs = ""
+    for m in lowering.diagnostic_messages:
+        msgs = msgs + m + "\n"
+    var hard = 0
+    for rec in lowering.diagnostic_recovered:
+        if not rec:
+            hard = hard + 1
+    ["{hard}", msgs]
+
+val UNDECL_SRC = "use undecl.provider.\{ghost\}\nfn main() -> i64:\n    0"
+
+describe "HIR undeclared imported symbol diagnostic":
+    it "warns by default on an import of a name declared nowhere":
+        step("given use undecl.provider braced ghost with ghost declared nowhere when lowered then W-HIR-UNDECL-IMPORT-001 is recorded and no error")
+        val r = undecl_probe(UNDECL_SRC, "")
+        expect(r[0]).to_equal("0")
+        expect(r[1]).to_contain("[W-HIR-UNDECL-IMPORT-001]")
+        expect(r[1]).to_contain("ghost")
+
+    it "errors under SIMPLE_STRICT_IMPORTS=1":
+        step("given the same import when SIMPLE_STRICT_IMPORTS=1 then E-HIR-UNDECL-IMPORT-001 is a hard error")
+        val r = undecl_probe(UNDECL_SRC, "1")
+        expect(r[0]).to_equal("1")
+        expect(r[1]).to_contain("[E-HIR-UNDECL-IMPORT-001]")
+
+    it "stays silent for a provided name even in strict mode":
+        step("given use undecl.provider braced present when strict then no diagnostic")
+        val r = undecl_probe("use undecl.provider.\{present\}\nfn main() -> i64:\n    present()", "1")
+        expect(r[0]).to_equal("0")
+        expect(r[1].contains("UNDECL-IMPORT")).to_equal(false)
+
+    it "stays silent for an aliased provided name":
+        step("given use undecl.provider braced present as p when strict then no diagnostic")
+        val r = undecl_probe("use undecl.provider.\{present as p\}\nfn main() -> i64:\n    p()", "1")
+        expect(r[0]).to_equal("0")
+        expect(r[1].contains("UNDECL-IMPORT")).to_equal(false)
