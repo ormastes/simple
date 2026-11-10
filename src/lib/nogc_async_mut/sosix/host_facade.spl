@@ -232,19 +232,81 @@ fn sosix_process_run(cmd: text, args: [text]) -> (text, text, i64):
     (result.stdout, result.stderr, result.exit_code)
 
 
+fn _tasklist_csv_fields(line: text) -> [text]:
+    # tasklist /FO CSV wraps every field in quotes; the Mem Usage figure is
+    # quoted precisely because it contains a thousands comma, so a bare
+    # comma split corrupts the columns. Only the trailing window title may
+    # embed the `","` sequence, and the caller never reads it.
+    var fields: [text] = []
+    val parts = line.split("\",\"")
+    var i = 0
+    while i < parts.len():
+        var field = parts[i]
+        if i == 0 and field.starts_with("\""):
+            field = field.substring(1, field.len())
+        if i == parts.len() - 1 and field.ends_with("\"") and field.len() > 0:
+            field = field.substring(0, field.len() - 1)
+        fields.push(field)
+        i = i + 1
+    fields
+
+
+fn _tasklist_mem_kb(raw: text) -> i64:
+    # "5,580 K" -> 5580 KiB. Thousands separators vary with locale, so strip
+    # every comma and the K suffix instead of indexing fixed characters.
+    var cleaned = raw
+    if cleaned.ends_with(" K"):
+        cleaned = cleaned.substring(0, cleaned.len() - 2)
+    var digits = ""
+    for part in cleaned.split(","):
+        digits = digits + part
+    val parsed = digits.trim()
+    if parsed == "":
+        return 0
+    parsed.to_i64()
+
+
+fn _tasklist_run(args: [text]) -> SosixRun:
+    # tasklist emits ASCII in every field this lane reads (pid, session,
+    # Mem Usage), so the text capture provider is sufficient here. The
+    # byte-strict provider that sosix_run uses on Windows is not bound in
+    # every hosted context (interpreter spec runs hit
+    # `unknown extern rt_process_run_bounded_bytes`), and this lane must
+    # work there too; general sosix_run keeps the byte provider.
+    val result = process_run_bounded("tasklist", args, 0, 65536)
+    SosixRun(stdout: result.0, stderr: result.1, exit_code: result.2)
+
+
 fn sosix_proc_usage(pid: i64) -> SosixProcUsage:
     """CPU percentage and resident set size for a live process.
 
     Adapter: no existing primitive reports this. POSIX reads
-    `ps -o %cpu=,rss= -p <pid>`. A dead or unknown pid yields `valid: false`
-    rather than fabricated zeros, which a caller cannot distinguish from a truly
-    idle process.
+    `ps -o %cpu=,rss= -p <pid>`. Windows reads `tasklist` (the one native
+    per-pid probe; a PowerShell CIM probe costs ~1.2 s on this class of host,
+    too slow for dashboard refresh). tasklist reports the working set but not
+    the process start time, and a lifetime-average %cpu cannot be derived
+    without it, so on Windows cpu_pct comes back -1.0 (the callers' UNMEASURED
+    sentinel), never a fabricated 0.0. A dead or unknown pid yields
+    `valid: false` on both families rather than fabricated zeros, which a
+    caller cannot distinguish from a truly idle process.
     """
     if pid <= 0:
         return SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
     if sosix_platform() == "windows":
-        # Honest stub: the real Windows backend is a separate work package.
-        return SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
+        val sampled = _tasklist_run(["/FI", "PID eq {pid}", "/FO", "CSV", "/NH"])
+        if sampled.exit_code != 0:
+            return SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
+        val line = sampled.stdout.trim()
+        # A no-match prints a one-line INFO banner (localized per locale),
+        # never a CSV record; the absence of the quote marker distinguishes
+        # the two regardless of the banner language.
+        if not line.contains("\""):
+            return SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
+        val fields = _tasklist_csv_fields(line)
+        if fields.len() < 5:
+            return SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
+        SosixProcUsage(cpu_pct: -1.0, rss_mb: _tasklist_mem_kb(fields[4]) / 1024,
+            valid: true)
 
     val sampled = sosix_run("ps", ["-o", "%cpu=,rss=", "-p", "{pid}"])
     if sampled.exit_code != 0:
