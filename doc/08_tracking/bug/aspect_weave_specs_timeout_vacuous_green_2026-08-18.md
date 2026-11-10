@@ -309,3 +309,31 @@ own `extern` declarations (1 today), not the 85 symbols that arrive through the
 `--entry-closure` transitive graph; and its wiring half is a static check on
 driver source, not a link proof.
 
+
+## 2026-11-10 triage (P3 runner lane, work/p3-runner-20261110): SUPERSEDED on release/1.0.0
+
+Defect 2 (vacuous aggregate `Results:` on timeout) is fixed on this base:
+
+- `src/app/test_runner_new/test_runner_single.spl` `print_summary` carries an
+  `unverified` parameter: TIMEOUT/TERMINATED runs (failed:0 by contract) print
+  `UNVERIFIED {path}: {reason}` instead of `PASS` (lines 537-545), and the
+  single-file path emits `timeout_verdict_line`/`unrun_verdict_line` for killed
+  children (lines 1658-1663) with exit 1.
+- Aggregation counts `total_timed_out`
+  (`src/lib/nogc_sync_mut/test_runner/test_runner_types.spl:305-331`);
+  `classify_test_run_result` maps `total_timed_out > 0` to
+  `TimeoutResourceFailure` -> exit 124. This is the fail-closed contract this
+  bug asked for.
+- Defect 1 (30 GB RSS blowup) remains non-reproducible per the in-doc
+  2026-08-18 correction.
+
+Seed-smoke evidence (Rust seed `bin/simple.exe`, this worktree):
+`test/01_unit/app/test_runner_new/bounded_run_classification_spec.spl` 5/5 and
+`test/01_unit/app/test_runner/no_verdict_is_unverified_spec.spl` 9/9 PASS.
+
+Evidence limit: the per-file budget kill does not fire on this Windows Rust
+seed (probe: a 3s-budget spec using sleep_blocking(30000) ran the full 30s and
+PASSED; an infinite-loop child survived to manual kill), so the kill-to-
+UNVERIFIED path could not be exercised end-to-end on this host. The
+classification/reporting contract is unit-covered above; the kill mechanism
+itself is seed/host-side, not runner code.

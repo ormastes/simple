@@ -137,3 +137,11 @@ lane, not this bug).
 lane per e8cfbc4d5e5's message; the sibling concurrency spec's 7 failures
 are a distinct issue.
 
+
+## 2026-11-10 triage (P3 runner lane, work/p3-runner-20261110): SUPERSEDED
+
+Fix commit e8cfbc4d5e5 ("test(std): repair async_spec Future/Promise state
+model (registry-based)") is an ancestor of this lane's base
+(origin/release/1.0.0); the doc header already records CLOSED 2026-11-05.
+No live reproduce attempted; the 46/46 full/interpreter/native evidence in
+the resolution section stands.

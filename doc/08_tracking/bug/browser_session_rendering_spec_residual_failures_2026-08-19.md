@@ -48,3 +48,24 @@ the flush into the session document is where the writes vanish. Overlaps the
 open inline-handler-title bug and the in-flight (uncommitted) JS-engine work in
 this worktree — coordinate before fixing.
 
+
+## 2026-11-10 triage (P3 runner lane, work/p3-runner-20261110): LIVE, out of lane scope
+
+Both specs are comprehensively red under the current Rust seed
+(bin/simple.exe, this worktree), worse than the 6/7 residuals recorded above:
+
+- browser_session_dom_input_spec.spl: 25 examples, 24 failures
+- browser_session_script_css_animation_spec.spl: 25 examples, 25 failures
+
+Every failure carries one common diagnostic:
+`semantic: unknown static method new_browser on class JsRuntime` — an
+engine API-surface mismatch in the JS-engine/browser-session lane
+(spec imports JsRuntime expecting a `new_browser` static the current
+src/lib JS engine does not provide). The specific residual mechanisms listed
+above are not separately reachable until that import resolves; e.g. the
+default-action attribute stamping (dom_accessors.spl:1306-1310) is unchanged.
+
+Not fixed in this lane: the defect lives in sibling-owned engine code
+(src/lib JS engine / browser engine), and this doc itself says to coordinate
+with the in-flight JS-engine work before fixing. Handed back with measured
+verdicts for the engine lane.

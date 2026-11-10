@@ -243,3 +243,23 @@ module and checks each spec's brace-imports against it. Over the failing set it
 flagged exactly `anonymous_block_spec`, `ifc_linebox_spec` and
 `debug_service_v1_spec`. It is a throwaway investigation aid, not landed as a
 gate — turning it into one is the design decision recorded above.
+
+## 2026-11-10 triage (P3 runner lane, work/p3-runner-20261110): SUPERSEDED (runner-level decision landed)
+
+R1 (the runner-routing decision) is implemented on this base: a coverage run
+whose instrumentation wrapper fails to compile now FAILS CLOSED by default —
+`TestFileResult(passed:0, failed:1, error:"ABORTED BEFORE EXECUTION ... this
+is NOT a test result ...")` with `mcdc_skip_reason:"coverage-abort: wrapper
+failed to compile"` — and only an explicit
+`SIMPLE_COVERAGE_FALLBACK=interpreter` opt-in accepts a loudly-tagged,
+non-evidence interpreter degrade of the ORIGINAL source. See
+src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:543-602 (live
+twin; the app copy at src/app/test_runner_new/test_runner_execute.spl is
+unreached). This is exactly the "never silently accept a degraded run"
+contract this bug left open.
+
+R2 was fixed in-doc (SimpleAbiDigest256V1 declared). R3-R8 remain as the
+original lane recorded them: design decisions (ANY-receiver dynamic access,
+implicit field declaration, ghost-import hard error), declared native-codegen
+gaps (Context statements), sibling-branch items (R7), and one non-reproduced
+row (R8) — all explicitly "not papered over", none test-runner owned.
