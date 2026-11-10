@@ -201,9 +201,6 @@ imports now-private `module_find_by_file_path` (seed visibility enforcement);
 same unrelated class as `module_path_naming_spec.spl` ERROR — recorded for the
 compiler/test-runner lanes.
 
-BLOCKED-needs-grant: none for the row itself; `driver_entry_import_scan_cost_spec.spl`
-exceeded its 600 s budget twice under host contention (orphan worker held the
-pipe) — its wall-clock-insensitive mechanism assertions are the ones
-source-verified above; a quiet re-run is in the evidence file if it landed.
+BLOCKED-needs-grant: `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/compiler/driver/driver_entry_import_scan_cost_spec.spl --no-cache` on a quiet host (budget >= 900s) if executed confirmation of the scan-cost mechanism pin is wanted.
 Residue items (path-keyed memo, ~14 s BFS body) remain owned by the
 front-end-cache and compiler lanes as this record already states.
