@@ -1,7 +1,7 @@
 # CPU-SIMD evidence lanes blocked: refuse Rust seed, no self-hosted bin/simple deployable
 
 - **Date:** 2026-08-19
-- **Status:** OPEN (blocked-by: bootstrap redeploy — see stage3 SEGV bug)
+- **Status:** SUPERSEDED (2026-11-11, lane ne5) — was: OPEN (blocked-by: bootstrap redeploy — see stage3 SEGV bug). Premise closed; remaining red is the designed seed refusal, not a defect.
 - **Severity:** medium — two evidence lanes red for environmental reasons, kernels themselves proven green by sibling lanes
 
 ## Symptom
@@ -55,3 +55,33 @@ fail-open).
   fast with `missing-arm-linux-gnueabihf-readelf` — host lacks armhf binutils
   (`apt install binutils-arm-linux-gnueabihf` would unblock; aarch64/riscv64
   toolchains and qemu are present).
+
+## 2026-11-11 addendum (lane ne5)
+
+**Status: SUPERSEDED — the blocking premise is closed; the remaining red is the
+designed seed refusal, not a defect.**
+
+Triage on release/1.0.0 tip (worktree simple-p3-ne5-20261111, refreshed seed
+bin/simple.exe 2026-11-11):
+
+- The premise of this row — "all four tracked stage binaries SEGV, so no
+  compliant binary exists" — is resolved: the premise bug
+  `stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md` carries a
+  2026-08-31 measured update that the rc=139 SEGV no longer reproduces on any
+  tracked stage binary (residual darwin bare-path clobber is a different,
+  separately-tracked defect class).
+- Re-ran the evidence lane here to confirm the current refusal shape:
+  `sh scripts/check/check-cpu-simd-engine2d-evidence.shs` answers
+  `cpu_simd_evidence_reason=simple-bin-forbidden`,
+  `simple_bin_source=missing-self-hosted-engine2d-simd-rust-seed-forbidden` —
+  the designed fail-closed refusal (weakening it would be fail-open, as this
+  doc notes). This worktree has no `bin/release/<triple>/simple` deployed, so
+  the environmental wait is unchanged HERE, but it is a deployment step, not a
+  code defect: default tooling is the pure-Simple self-hosted binary
+  (AGENTS.md / .claude/rules/bootstrap.md), built by the normal bootstrap flow.
+- The "not a kernel regression" claim was disproven at filing time and the
+  kernels remain green per this doc's own sweep record.
+
+Nothing in this row is a live code defect. Bookkeeping closure: re-run
+`check-cpu-simd-engine2d-evidence.shs` and `check-cpu-simd-engine2d-arch-matrix.shs`
+once a self-hosted `bin/release/<triple>/simple` is deployed.

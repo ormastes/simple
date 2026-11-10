@@ -1,5 +1,5 @@
 # Dict memo `contains_key` under-reporting: what the native lanes actually show (2026-09-14)
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 — FIXED (lane ne6): the pinned rc-139 compile-SEGV guard is in source (hardened), interpreter differential 6/6 green on the refreshed seed; native differential half remains deferred to a native lane. See addendum
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -213,3 +213,38 @@ of `check-native-interp-differential.shs` is likewise unmeasured: the seed's
 `--mode=dynload` build of the spec did not complete in 25 minutes on this host.
 The six rows are GREEN on the interpreter oracle and **deferred** natively.
 
+
+---
+
+## Addendum 2026-11-11 (lane ne6, batch p3-ne6)
+
+**Verdict: FIXED for the pinned defect this doc fixed** (the rc-139
+compile-time SEGV on any `class ... me ...`), with the dict-premise standing
+conclusion unchanged.
+
+Verified at tip (source read, lane runs with the refreshed seed,
+build-commit 0791c2b7f4a7):
+
+1. **The nil-`Option` guard this doc landed is present and hardened.**
+   `record_external_layout_reference` now lives at
+   `src/compiler/50.mir/_MirLowering/module_lowering.spl:954` and no longer
+   carries `HirSymbol?` across the boundary at all: it uses the scalar readers
+   (`symbol_name_scalar_raw`, `symbol_defining_module_scalar_raw`, `""` means
+   absent), with an in-source comment citing the follow-up
+   `unwrap_still_rebinds_to_poll_unwrap_at_closure_scale_2026-09-13.md` —
+   i.e. the guard was re-hardened after the staged-native-ABI `Poll.unwrap`
+   rebind was found to defeat a plain `if info == nil: return`.
+2. **Interpreter differential re-run, still clean.** Seed-smoke:
+   `bin/simple.exe test test/01_unit/lib/common/dict_native_shape_differential_spec.spl
+   --mode=interpreter --no-cache` → `outcome=OK, 6 total, 6 passed, 0 failed`,
+   rc 0. Same six shapes the doc pinned; the interpreter oracle remains clean
+   at tip, so nothing measured here implicates `rt_dict_contains`.
+3. **Native half remains deferred** (host-limited for this lane: the seed's
+   `--mode=dynload` build of the spec historically exceeded 25 min on this
+   host, and entry-closure native builds are out of lane). The doc's listed
+   next measurement stands: run
+   `check-native-interp-differential.shs --specs-file
+   config/check/native_interp_differential_dict_shapes.txt` on a native lane.
+
+The "under-reporting" premise therefore stays **unproven**, now with a
+2026-11-11 interpreter-oracle re-confirmation.

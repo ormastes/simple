@@ -1,5 +1,5 @@
 # A Dict keyed by a struct is keyed by object identity, so a copied key silently misses
-## Open 2026-09-16 — needs owner triage
+## Open 2026-09-16 — needs owner triage; re-confirmed LIVE 2026-11-11 (lane ne6) — per-lane measurement in the addendum below
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -100,3 +100,48 @@ Either give struct keys structural hashing + equality in both runtimes, or refus
 a struct-keyed `Dict` a compile-time error unless the type opts in. Until then the language
 guide needs the rule "never bind a struct dict key to a local before looking it up".
 
+
+---
+
+## Addendum 2026-11-11 (lane ne6, batch p3-ne6)
+
+**Verdict: LIVE** — the copied/twin key still misses, per-lane state below.
+The language-level decision this doc demands (structural hash+eq in both
+runtimes, or compile-time refusal, or guide rule) has not landed; the defect
+cannot be closed by a P3 traverse lane.
+
+Measured on the refreshed seed (v1.0.0-rc.1, build-commit 0791c2b7f4a7),
+`build/p3-ne6-probes/dictkey_probe*.spl`, `--mode=interpreter` (seed-smoke):
+
+- `d[a]=10` with `a = Point(1,2)`, then `d[b]` for a separately constructed
+  `Point(1,2)` → **nil** (`copied=nil`).
+- Inserting both twins → `len=2`: the two structurally identical keys land in
+  distinct buckets (identity-keyed).
+- `d[keys()[0]]` (the bundled original object) → hits; `d[Point(1,2)]` inline
+  fresh → nil.
+- Text-form probes `d["Point{x=1,y=2}"]` / `d["Point{x=1, y=2}"]` both miss.
+
+Per-lane source state at tip:
+
+- **C runtime (`src/runtime/runtime_native.c:13252-13330`): UNCHANGED.**
+  `rt_core_dict_canon_key` still returns a heap key verbatim (`:13275`), and
+  `rt_core_dict_hash` still falls through to hashing the raw pointer for a heap
+  non-float/non-uint (`:13316`). (Float and uint-box keys got value-hashing
+  since this doc; structs did not.)
+- **Rust native twin (`src/compiler_rust/runtime/src/value/dict.rs`): FIXED in
+  source.** `hash_value` delegates to `sffi::equality::value_hash` and
+  `keys_equal` to `rt_value_eq` (canonical structural hash/eq shared with
+  `==`), with `dict_composite_key_tests::struct_key_via_variable_*` pinning it.
+  The fix predates the seed build commit, so the JIT/native Rust-runtime lane
+  carries it.
+- **Seed interpreter: identity-keyed at runtime despite structural-looking tip
+  source.** `compiler/src/value_impl.rs` `to_key_string()` has the canonical
+  sorted-field `Value::Object` arm at tip (and at the seed's build commit), yet
+  the running binary buckets struct twins separately. That is a
+  seed-vs-source discrepancy on the interpreter lane — flagged here for the
+  seedfix lanes; not root-caused further in this lane.
+
+The "copied key silently misses" hazard is therefore still live on the
+interpreter lane of the current seed and in the C runtime; the unaudited
+shapes called out in this doc (struct field reads, struct returns/arguments as
+lookup keys) remain unaudited.

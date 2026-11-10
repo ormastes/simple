@@ -1,7 +1,7 @@
 # Bug: cross-module class-name collision — type resolution can pick the OTHER module's class
 
 - **Date filed:** 2026-08-17
-- **Status:** FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
+- **Status:** FIXED (verified 2026-11-11, lane ne5) — was: FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
 - **Suspected layer:** semantic / type resolution (co-compilation symbol table keyed by bare class name)
 
 Resolution: `93991c37304` added interpreter module-owner class resolution,
@@ -108,3 +108,45 @@ this up: reintroduce a same-named class pair inside a large co-compiled unit
 (e.g. temporarily re-add a second `ModuleLoader` under `99.loader/`) and run
 the loader specs — or extend the scratchpad fixtures until the
 register-order-dependent shadowing shows.
+
+## 2026-11-11 addendum (lane ne5)
+
+**Status: FIXED — verification completed this lane.**
+
+Verified green under the refreshed seed (`bin/simple.exe`, 2026-11-11 build,
+build-commit 0791c2b7f4a7), interpreter mode, `--no-cache` (seed-smoke):
+
+- `test/01_unit/compiler/interpreter/class_name_collision_warning_spec.spl` — 2/2
+- `test/01_unit/compiler/interpreter/class_same_name_constructor_layout_spec.spl` — 2/2
+- `test/01_unit/compiler/interpreter/cross_module_name_collision_resolution_spec.spl` — 3/3
+- `test/01_unit/compiler/interpreter/enum_same_name_import_collision_spec.spl` — 3/3
+- `test/01_unit/compiler/interpreter/same_name_type_collision_prevention_spec.spl` — 2/2
+- `test/01_unit/compiler/interpreter/crossmodule_class_mutparam_writeback_spec.spl` — 1/1
+
+Total 13 examples, 0 failures.
+
+Two fixture-side blockers had to be cleared before the row's own verification
+could run (both visibility-only; the collision semantics under test are
+unchanged):
+
+1. `class_name_collision_warning_spec` imports the collision-diagnostic API of
+   `compiler.core.interpreter.eval_tables`; all five entry points
+   (`struct_table_reset/register/lookup/collisions/get_module`) were private,
+   so the spec ERRORed under the seed's visibility rule. Widened to `pub`. The
+   same-name different-signature `struct_table_register` in
+   `src/runtime/simple_core/core_memory.spl` already coexists under the
+   2026-11-09 owner decision (call sites resolve by import path, else exact
+   arg-type match; ambiguous-neither is a compile error).
+2. The `test/fixtures/flat_fn_shadow/*` helpers the specs import directly were
+   defined without `pub`: added to `load_config`, `c_val`, `tag_b`,
+   `mode_a_level`, `mode_b_name`, `mode_b_mix`, `pair_a_sum`, `pair_b_text`,
+   `circle_b_label`.
+
+Fixing-commit archaeology: `285c714d2248` ("fix(seed-jit): module-qualified
+struct identity for same-named flattened structs") is in this repo. The other
+cited hash, `93991c37304`, is not a git object here (authored in another
+clone); the equivalent landed work is visible as `b80584d93d7d` (loader
+duplicate type names), PR #7498 (`r15-class-registry-modqual-20261107`),
+`8e443ed51f4b` and `9728f2ac2e70`. Current source retains both the
+interpreter module-owner resolution path and the owner-qualified flattened-HIR
+path described above.
