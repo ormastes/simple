@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-01
 **Found by:** the emulator-media spec agent; **verified by the parent.**
-**Status:** OPEN. Scopes what "the payload is widened" may be claimed to mean.
+**Status:** FIXED 2026-11-11 (lane compiler6) — items 1 and 2 verified by re-running the record's witness gate on the fresh seed; see the 2026-11-11 addendum. Scopes what "the payload is widened" may be claimed to mean.
 
 ## Measured
 
@@ -136,3 +136,30 @@ order of preference, none applied here:
   2. A coarse mode in the NeChip: full per-cell fidelity on a sampled column
      subset, bulk-evolve the rest. Library change, needs its own gate.
   3. Raise the example timeout for this one check.
+
+## Verification addendum 2026-11-11 — lane compiler6 (FIXED)
+
+Lane compiler6 re-verified the 2026-09-01 resolution on the tracked fresh seed
+(`bin/simple.exe`, build 46fe8f6b6def, seed-smoke), repo root cwd:
+
+* Structural: `examples/09_embedded/simpleos_nvme_fw/fw/fil_nand_emu.spl`
+  carries `PageData` (20 occurrences), runs NeProfile.S3 with the checked
+  identity `PAGE_BYTES + OOB_BYTES == page_bytes` (4096 + 128 == 4224) in
+  `emu_geometry_ok` (:165), and exposes the widened seams `program_page` (:379)
+  / `read_page_data` (:467). `fil_fmc.spl` no longer narrows to column 0.
+* Gate: the record's own witness,
+  `examples/09_embedded/simpleos_nvme_fw/fw/emu_payload_widening_witness_check.spl`,
+  was re-run with `SIMPLE_TIMEOUT_SECONDS=0` (the 10s default example cap is
+  too tight for the S3 cell sweep under the seed interpreter on this host —
+  the same load-sensitivity class the record already documents for
+  rel_wiring_check). Verdict printed: **EMU PAYLOAD WIDENING WITNESS OK**
+  (exit 0; ~7.5 min wall under interpretation). Key rows: byte path
+  programmed 4 of 33792 cells; page path programmed 32768 of 33792 cells;
+   >1000x cell-count separation; wear+retention drift fixture moved 512 of
+  512 words on an aged worn page — drift acts across the WHOLE page, the
+  exact property items 1/2 exist to deliver.
+* Corroboration: `fil_nand_emu_e2e_check.spl` (the fold-collision check
+  ported to the S3 window) was launched on the same lane; it is dominated by
+  full-chip per-op cell sweeps and progresses at minutes-per-device-op under
+  the seed interpreter, so it is not a lane-time gate; the witness above is
+  the record's stated acceptance gate.
