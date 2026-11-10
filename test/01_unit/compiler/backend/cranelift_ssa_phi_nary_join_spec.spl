@@ -1,0 +1,152 @@
+# Three-predecessor __simple_ssa_phi join executed through the real Cranelift
+# provider JIT. Bug: cranelift_ssa_phi_nary_join_guard_now_fires_2026-08-17 —
+# the N-ary guard trapped for args.len() > 4 without a slot. compile_function
+# gives every non-Unit local a slot, so the only reachable pre-fix shape was a
+# Unit-typed phi destination; compile_function now normalizes phi destinations
+# to always carry a slot (cranelift_ssa_phi_dest_ids), making the
+# edge-store/reload lowering (store_phi_incomings_for_edge, arity-agnostic)
+# handle N-ary joins.
+#
+# compile_function itself targets AOT modules (its define step is AOT-only),
+# and the seed runtime's rt_cranelift_call_function_ptr accepts no arguments
+# (no-arg i64-returning functions only), so this spec drives the same product
+# lowering helpers on the executable JIT module, mirroring compile_function's
+# per-block flow and slot policy exactly (owner file, Function Compilation
+# section). Each probe carries the full 3-pair phi but routes its entry block
+# through exactly one predecessor, so every arm's store/lookup is observed.
+# Requires an admitted runtime (cranelift provider JIT).
+use std.spec.*
+use std.spec.step
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.backend.cranelift_codegen_adapter.{
+    build_signature,
+    cl_translate_instruction,
+    cl_translate_terminator,
+    cranelift_ssa_phi_dest_ids
+}
+use std.nogc_sync_mut.sffi.codegen.*
+
+fn phi_join_metadata(dest_type: MirType, entry_pred: i64, name: text) -> MirFunction:
+    # entry routes through exactly one of the three predecessors (1/2/3); the
+    # join block carries the full 3-pair __simple_ssa_phi:
+    #   pred 1 -> 10, pred 2 -> 20, pred 3 -> 30
+    MirFunction(
+        symbol: SymbolId(id: 9021), name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: [
+            MirLocal(id: LocalId(id: 1), name: nil, type_: dest_type, kind: LocalKind.Temp, is_ghost: false)
+        ],
+        blocks: [
+            MirBlock(id: BlockId(id: 0), label: nil, instructions: [],
+                terminator: MirTerminator.Goto(BlockId(id: entry_pred))),
+            MirBlock(id: BlockId(id: 1), label: nil, instructions: [], terminator: MirTerminator.Goto(BlockId(id: 4))),
+            MirBlock(id: BlockId(id: 2), label: nil, instructions: [], terminator: MirTerminator.Goto(BlockId(id: 4))),
+            MirBlock(id: BlockId(id: 3), label: nil, instructions: [], terminator: MirTerminator.Goto(BlockId(id: 4))),
+            MirBlock(
+                id: BlockId(id: 4), label: nil,
+                instructions: [
+                    MirInst(
+                        kind: MirInstKind.Intrinsic(
+                            Some(LocalId(id: 1)),
+                            "__simple_ssa_phi",
+                            [
+                                mir_operand_const_int(1), mir_operand_const_int(10),
+                                mir_operand_const_int(2), mir_operand_const_int(20),
+                                mir_operand_const_int(3), mir_operand_const_int(30)
+                            ]
+                        ),
+                        span: nil
+                    )
+                ],
+                terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+            )
+        ],
+        entry_block: BlockId(id: 0), span: Span.default(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, is_export_c: false,
+        export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
+    )
+
+fn execute_phi_join(dest_type: MirType, entry_pred: i64, name: text) -> i64:
+    val func = phi_join_metadata(dest_type, entry_pred, name)
+    val module = cranelift_new_module(name, -1)
+    expect(module != 0).to_equal(true)
+    val sig = build_signature(func.signature, false)
+    val ctx = cranelift_begin_function(module, func.name, sig)
+    expect(ctx != 0).to_equal(true)
+
+    # Block map: entry block 0 first, then the rest (compile_function order).
+    var block_map: Dict<i64, i64> = {}
+    val entry_block = cranelift_create_block(ctx)
+    block_map[0] = entry_block
+    for block in func.blocks:
+        if block.id.id != 0:
+            block_map[block.id.id] = cranelift_create_block(ctx)
+    cranelift_append_func_params(ctx, entry_block)
+
+    var value_map: Dict<i64, i64> = {}
+    var slot_map: Dict<i64, i64> = {}
+
+    # Slot allocation — mirrors compile_function's loop, including the owner
+    # fix: Unit-typed locals get size 0 EXCEPT __simple_ssa_phi destinations,
+    # which must carry a slot for the edge-store/reload N-ary lowering.
+    val phi_dest_ids = cranelift_ssa_phi_dest_ids(func)
+    for local in func.locals:
+        var size = 8
+        match local.type_.kind:
+            case Unit:
+                size = 0
+            case _:
+                ()
+        if size == 0 and phi_dest_ids.has(local.id.id):
+            size = 8
+        if size > 0:
+            slot_map[local.id.id] = cranelift_stack_slot(ctx, size, 8)
+
+    cranelift_switch_to_block(ctx, entry_block)
+
+    # Compile each block (value_map resets per non-entry block, as in
+    # compile_function: it is compile-order state, not SSA across CFG edges).
+    for i in 0..func.blocks.len():
+        val block = func.blocks[i]
+        if i > 0:
+            value_map = {}
+            cranelift_switch_to_block(ctx, block_map[block.id.id])
+        var inst_index = 0
+        while inst_index < block.instructions.len():
+            cl_translate_instruction(ctx, block.instructions[inst_index], value_map, slot_map, block_map, module, {}, {}, func)
+            inst_index = inst_index + 1
+        cl_translate_terminator(ctx, module, block.id, block.terminator, value_map, slot_map, block_map, func)
+
+    cranelift_seal_all_blocks(ctx)
+    val finished = cranelift_end_function(ctx)
+    expect(finished != 0).to_equal(true)
+    expect(cranelift_define_function(module, 0, finished)).to_equal(true)
+    expect(cranelift_finalize_module(module) != 0).to_equal(true)
+    val address = cranelift_get_function_ptr(module, func.name)
+    expect(address != 0).to_equal(true)
+    # rt_cranelift_call_function_ptr accepts no arguments (seed runtime
+    # contract: no-arg, i64-returning functions), which is why the probes
+    # route their entry through exactly one predecessor instead of taking a
+    # selector argument.
+    val actual = cranelift_call_function_ptr(address, 0, 0)
+    cranelift_free_module(module)
+    actual
+
+describe "Cranelift N-ary __simple_ssa_phi join":
+    it "lowers a 3-predecessor i64 join and stores the correct arm per edge":
+        expect(execute_phi_join(MirType.i64(), 1, "phi_i64_p1")).to_equal(10)
+        expect(execute_phi_join(MirType.i64(), 2, "phi_i64_p2")).to_equal(20)
+        expect(execute_phi_join(MirType.i64(), 3, "phi_i64_p3")).to_equal(30)
+
+    it "lowers a 3-predecessor Unit-typed phi destination without trapping":
+        # Pre-fix this shape had no stack slot (Unit locals get size 0), so
+        # the N-ary guard trapped. The probe returns the loaded slot word so
+        # the join result is still observable through the i64 return ABI.
+        expect(execute_phi_join(MirType.unit(), 1, "phi_unit_p1")).to_equal(10)
+        expect(execute_phi_join(MirType.unit(), 2, "phi_unit_p2")).to_equal(20)
+        expect(execute_phi_join(MirType.unit(), 3, "phi_unit_p3")).to_equal(30)
