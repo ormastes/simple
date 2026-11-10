@@ -46,3 +46,30 @@ rejections.
 - The v0.9.8 runner cannot execute the capsule source-inspection spec because
   its `file_read` recurses past depth 1000; this is a tool-version limitation,
   not substituted PASS evidence.
+
+## Triage 2026-11-10 (p3-boot2 lane)
+
+SUPERSEDED — both source-side fixes verified live on
+work/p3-boot2-20261110 (base origin/release/1.0.0), seed-smoke evidence:
+
+- `src/compiler/20.hir/hir_verification.spl:6-12` —
+  `hir_verification_decreases_type_valid` now uses one expression-bodied
+  match arm per admitted unsigned width (8/16/32/64/128, `case
+  HirTypeKind.Int(w, false): true`), exactly this record's described fix.
+  The multiline `case A | B | C:` form the v0.9.8 parent could not discover
+  is gone from the compiler source.
+- `src/compiler/20.hir/hir_lowering/_Expressions/match_desugaring.spl:276` —
+  the enum-payload helper binds `binding_pattern`, not the reserved `bind`.
+- Named evidence spec: `SIMPLE_LIB=src bin/simple.exe test
+  test/01_unit/compiler/hir/parser_contract_type_owner_spec.spl
+  --mode=interpreter` -> `SPEC FILE VERDICT outcome=OK declared>=2
+  executed=2 passed=2 failed=0` (covers the admitted 8-bit/128-bit
+  boundaries plus signed/boolean/text rejections).
+
+Remaining 2026-08-22 item ("seed's hard-wired runtime builder ignores the
+explicit runtime capsule for its core-bootstrap lane"): the seed lane has
+since taken extensive capsule/bootstrap fixes, e.g. `8a1b47a255f6`
+("let the bootstrap capsule supply C-only runtime exports", 2026-10-22) and
+`b91c2221514c` ("root native_all owners of every capsule-retained symbol",
+2026-10-22), both ancestors of this branch — that residual belongs to the
+Rust seed lane (agent-10 scope), not this record's grammar/provenance scope.
