@@ -1,6 +1,8 @@
 # Kernel-launch grammar has no `stream:` / `shared:` slot — 2026-08-25
 
-Status: OPEN (feature request). Filed while porting
+Status: OPEN (feature request; triaged LIVE 2026-11-11, lane ne13 — only the
+grammar slot remains; interim API + `_ex` runtime symbol now exist. See
+addendum). Filed while porting
 `examples/08_gpu/simple_cuda_example/20.cuda_intermediate/22.Streams_and_Async`
 (clone of github.com/ormastes/simple_cuda_example) against the Rust seed.
 Per the repo rule ("when a short, safe grammar ... fails ... record a concrete
@@ -98,3 +100,41 @@ Until the grammar gains `stream:`/`shared:` slots, express a stream launch throu
 contract the slot would lower to (`rt_cuda_launch_kernel_ex`). The slot itself is deferred because
 the self-hosted AST variant `KernelLaunch(Expr, Expr, Expr, [CallArg])` (`10.frontend/parser_types_expr.spl:406`)
 is positional and every construction/match site would ripple.
+
+## Addendum 2026-11-11 (lane ne13) — still LIVE; 2 of 3 gap layers now landed
+
+**Layer state on release/1.0.0 (tip c8b6d0ebe90e):**
+
+- Layers 2+3 (runtime + SFFI): LANDED. `rt_cuda_launch_kernel_ex(module,
+  func_name, gx,gy,gz, bx,by,bz, shared_bytes, stream, args_ptr)` exists
+  (`src/lib/nogc_sync_mut/cuda/sffi.spl:129`, `io/cuda_sffi.spl:57` mirror),
+  and the interim API this doc prescribed is in the tree:
+  `cuda_launch_on(kfn, config, stream, shared_bytes, args)` at
+  `src/lib/nogc_sync_mut/io/cuda_sffi.spl:254` calling the `_ex` symbol;
+  `nogc_async_mut/io/cuda_sffi.spl:14` also exports `CudaStream` /
+  `cuda_stream_create`. The `shared_mem`/arity mismatch (old Gap B) is gone.
+- Layer 1 (grammar): NOT LANDED. The AST variant is still
+  `KernelLaunch(Expr, Expr, Expr, [CallArg])` (`10.frontend/parser_types_expr.spl:636`
+  — comment "GPU kernel launch: kernel<<<grid, block>>>(args)"), no
+  stream/shared fields; the generated visitor/semantic-value match arms still
+  take 4 slots.
+
+**Verification actually run** (seed-smoke, fresh seed 46fe8f6b6def,
+`bin/simple.exe check` on probes under /tmp — parse-level, no device needed):
+
+| probe | result |
+|---|---|
+| `k<<<grid: g, block: b, stream: s>>>(args)` (the doc's exact failing form) | **parse error** (`unexpected token in expression: < '<'` at the `<<<`) |
+| `k<<<grid: g, block: b>>>(args)` (today's supported-labelled form) | **parse error** (same, first `<`) |
+| `k<<<g, b>>>(args)` (positional) | parse reaches past `>>>` then errors: `<` is lexed as generic-args, `>>>` not a launch — launch syntax not recognised in expression position |
+
+So the slot cannot be added by grammar tweak alone on this parser, and no
+in-tree example uses `<<<` anymore (`examples/08_gpu/simple_cuda_example/` is
+gone; only `cuda/basic.spl` remains, API-style). The stream-launch path today
+is `cuda_launch_on`, as this doc's interim section prescribes.
+
+**Why not fixed in this lane:** the slot change ripples through the generated
+AST files (visitor, semantic-value encoder), HIR lowering, and every
+`KernelLaunch` match site — a compiler-frontend feature, not P3 scope; and the
+fully-supported path (`cuda_launch_on`) already covers the use case. Routed to
+the compiler-frontend owner as a feature request.
