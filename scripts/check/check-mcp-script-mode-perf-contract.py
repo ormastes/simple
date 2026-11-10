@@ -28,17 +28,18 @@ elif mode == "invalid_init": init["result"] = {}
 elif mode == "invalid_tools": tools["result"]["tools"] = {}
 elif mode == "invalid_tool": tools["result"]["tools"] = [{"name": "missing-schema"}]
 elif mode == "numeric_id": tools["id"] = 2
+elif mode == "nonfinite": init["result"]["capabilities"]["invalid"] = float("nan")
 elif mode in ("unicode", "wrong_length"):
     init["result"]["serverInfo"]["name"] = "한글"
     messages = [tools, notification, init]
 data = b""
 for message in messages:
     body = json.dumps(message, ensure_ascii=False).encode("utf-8")
+    if mode == "duplicate_member": body = body.replace(b'"id": "2"', b'"id": "wrong", "id": "2"')
     length = len(body.decode("utf-8")) if mode == "wrong_length" else len(body)
     data += ("Content-Length: %d\r\n\r\n" % length).encode() + body
 if mode == "truncated": data = data[:-1]
 elif mode == "trailing": data += b"not a frame"
-elif mode == "duplicate_member": data = data.replace(b'"id": "2"', b'"id": "wrong", "id": "2"')
 sys.stdout.buffer.write(data)
 sys.exit(7 if mode == "nonzero" else 0)
 '''
@@ -47,6 +48,7 @@ sys.exit(7 if mode == "nonzero" else 0)
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("build/test-artifacts/mcp-script-mode-perf-contract"))
+    parser.add_argument("--case", action="append", help="Run only these named controls after a focused repair")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     shell = shutil.which("sh")
@@ -57,8 +59,13 @@ def main():
     cases += [(name, "valid", False) for name in (
         "empty", "missing", "foreign", "duplicate", "error", "invalid_init",
         "invalid_tools", "invalid_tool", "numeric_id", "wrong_length", "truncated",
-        "trailing", "duplicate_member", "nonzero")]
+        "trailing", "duplicate_member", "nonfinite", "nonzero")]
     cases += [("valid", "empty", False)]
+    if args.case:
+        names = {mcp + "_" + lsp for mcp, lsp, _ in cases}
+        if set(args.case) - names:
+            parser.error("unknown control name")
+        cases = [case for case in cases if case[0] + "_" + case[1] in args.case]
     failures = 0
     records = ["cases |name, expected_success, exit_code, passed|"]
     with tempfile.TemporaryDirectory(prefix="mcp-perf-contract-") as directory:
@@ -87,6 +94,10 @@ def main():
                 passed = passed and ("protocol_validation_failed" in completed.stdout or
                                      "command_failed_rc=7" in completed.stdout)
                 passed = passed and "mcp_script_perf_status=pass" not in completed.stdout
+                if mcp_case == "duplicate_member":
+                    passed = passed and "invalid_mcp_response=duplicate JSON member" in completed.stdout
+                if mcp_case == "nonfinite":
+                    passed = passed and "invalid_mcp_response=nonfinite JSON constant" in completed.stdout
             failures += not passed
             records.append(f"    {name}, {str(expected).lower()}, {completed.returncode}, {str(passed).lower()}")
             print(("PASS " if passed else "FAIL ") + name, flush=True)

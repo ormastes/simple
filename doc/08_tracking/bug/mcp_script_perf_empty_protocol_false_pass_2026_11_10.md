@@ -3,7 +3,7 @@
 - ID: `mcp_script_perf_empty_protocol_false_pass_2026_11_10`
 - Priority: P2
 - Owner: `scripts/check/check-mcp-script-mode-perf.shs`
-- Status: fix implemented; 17 executable contract controls passed; review pending.
+- Status: fix implemented; 18 executable contract controls covered; review pending.
 
 ## Reproduction
 
@@ -31,8 +31,8 @@ Both requested string IDs (`1` initialize and `2` tools/list) must appear once
 as successful JSON-RPC 2.0 responses with the required result shapes. Replies
 may arrive in either order and valid notifications may appear between them.
 An empty tools array is valid; an absent or malformed array is not. Duplicate
-JSON members, foreign IDs, error replies, partial frames and trailing garbage
-are rejected. Validation happens after the sample end timestamp and therefore
+JSON members, nonfinite JSON constants, foreign IDs, error replies, partial
+frames and trailing garbage are rejected. Validation happens after the sample end timestamp and therefore
 does not enter the reported server latency. A failed command or invalid response
 exits nonzero even when timing thresholds are advisory.
 
@@ -50,6 +50,13 @@ The Windows Git-sh/Python 3.13 run on 2026-11-10 completed with
 `mcp_perf_contract_cases=17 failures=0` and exit zero. The original empty-output
 case now exits one with `missing initialize or tools/list response`. Positive
 empty-inventory and Unicode/reordered/notification controls remain accepted.
+Independent review found that the duplicate-member fixture originally had an
+incorrect frame length and that Python's default JSON parser accepted NaN.
+The fixture now computes its byte length after inserting the duplicate member;
+the parser rejects nonfinite JSON constants explicitly. Both affected controls
+passed (`mcp_perf_contract_cases=2 failures=0`), with assertions checking the
+specific duplicate-member and nonfinite diagnostics. The other 16 unchanged
+controls retain their initial passing evidence. Together these cover 18 cases.
 The direct environment/process guard reports PASS; no application or library
 source changed. Shell syntax and patch whitespace checks passed, and the
 tracked `doc/06_spec` tree contains zero executable `_spec.spl` files.
