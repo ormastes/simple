@@ -4,7 +4,9 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: OPEN (triaged LIVE 2026-11-11, lane ne13 — 2026-11-05 wakeup fix
+  confirmed in source; dominant per-request re-compile term remains, needing
+  runtime/verdict-transport support + linux measurement. See addendum.)
 
 ## Summary
 
@@ -149,3 +151,28 @@ captured stdout and there is no in-process stdout-capture facility in the
 stdlib, so that change needs runtime support or a structured (non-printed)
 verdict transport. The lane is still ~0.58 s slower than direct per
 invocation because of it.
+
+## Addendum 2026-11-11 (lane ne13) — still LIVE; wakeup fix confirmed in source
+
+**Source verification (tip c8b6d0ebe90e):** the 2026-11-05 wakeup protocol is
+in the tree and unchanged — `light_daemon.spl:278-324` idle loop stat()s
+`LIGHT_WAKE` in-process every 10 ms (was: `dir_list()` shell-out every 250 ms),
+with the 500 ms/5 s fallback sweep and stop-file check; `test_runner_client.spl`
+`run_one_via_daemon` bumps the wakeup sequence after the request rename. So
+the polling half of this doc's diagnosis is fixed as recorded; the 1.47 -> 1.27 s
+median improvement and the still-open ~0.58 s gap stand as the current truth.
+
+**Verification limits of this lane (Windows):** the pinned perf spec
+`test/05_perf/test_runner/light_daemon_wakeup_no_idle_shell_spec.spl` fails
+2/2 on this host with instrumentation sentinels (`execve count = -1, daemon
+ends = -1`) because the light daemon is bypassed on non-linux — exactly the
+constraint this doc already records ("must be authored and measured on
+linux"). No new wall-clock evidence is possible from this lane; the aarch64
+linux measurements in the 2026-11-05 update remain the latest honest numbers.
+
+**Why not fixed in this lane:** the remaining term is the per-request
+re-compile (amortization 1.0). The documented fixes are (a) in-process serving,
+which needs runtime support for stdout capture or a structured verdict
+transport — a runtime/stdlib change with a bootstrap bar, not P3 scope; or
+(b) further measurement on an unloaded linux host to separate protocol cost
+from contention. Routed to the test-runner/runtime owner.
