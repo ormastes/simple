@@ -1,6 +1,6 @@
 # `origin/main` is not test-runnable: `src/app/io/env_access_host.spl` fails to parse (2026-08-25)
 
-**Status:** OPEN. **Not caused by the GPU hardening landing** (`8a291217121`) — reproduced on a
+**Status:** SUPERSEDED. **Not caused by the GPU hardening landing** (`8a291217121`) — reproduced on a
 clean worktree of `origin/main` with two independent binaries, including one that predates it.
 
 ## Symptom
@@ -89,3 +89,17 @@ seed from a clean lane worktree — the run compiled and progressed past parsing
 to runtime stages (it stops on a Windows-seed-only gap: `unknown extern
 function: rt_io_file_open_read`, a seed registration gap unrelated to this
 record). The parse regression is fixed and guarded as the record states.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Re-verified with this lane's refreshed seed (bin/simple.exe, build-commit
+`0791c2b7f4a7`, seed-smoke): `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe
+$PWD/bin/simple.exe test test/fixtures/doctest/green.md --mode=interpreter
+--no-cache` → full `PASS (1 passed, 0 skipped, 83ms)`, rc=0 — no parse
+failure at `env_access_host.spl`, and no Windows-seed extern stop either
+(the 2026-11-10 lane stopped at `rt_io_file_open_read`; the 2026-11-11
+seed completes the doctest). Original defect fixed in `a8a32ebccad`
+(ancestor of this base); guard `check-main-test-runnable-push.shs`
+remains the class gate. Env-facade lens: the failure class was
+parse-level, not a raw env read; the guarded invariant is the committed
+tree staying test-runnable.

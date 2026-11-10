@@ -1,6 +1,6 @@
 # Tier-less `use std.js.*` resolves to `src/lib/js/`, never to the importer's own tier
 
-Status: PARTIALLY FIXED (common/js/** made tier-explicit; other trees still exposed)
+Status: SUPERSEDED (common/js/** made tier-explicit; other trees still exposed)
 Date: 2026-08-01
 Related: `tierless_std_import_ambiguity_resolves_by_registration_order_2026-07-29.md`
 Related: `js_value_symbol_variant_alien_to_nogc_js_engines_2026-08-01.md` (commit `fde7f791f5b`)
@@ -191,3 +191,14 @@ check worker artifact" gap (identical rc=1 on an untouched control file).
 Remaining exposure unchanged from round 15: ~test/** tier-less spec imports and
 the `std.js.node.buffer_module` exception stay as recorded; the conformance
 runner home decision is still open.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Verify-only row: claim was PR #8159. **Claim holds.** Merge `28a2398780db`
+is an ancestor of this base, and the ground-truth ratchet passes on this
+lane's tree at `790b54f7c4fc`: `sh scripts/check/check-tierless-std-js-imports.shs`
+→ `PASS — 141 tier-less std.js import(s) checked, common/js=1, baseline 141`
+(the 2026-11-10 lane's FAIL was 5>1 gc_async_mut, 145>141; that lane's
+import rewrite plus the JsRuntime tier relocation `ca7a7b84b274` inside PR
+#8159 repointed the four browser-engine consumers, and the rewrite holds).
+No source change on this branch. Remaining exposure per round 15 unchanged.

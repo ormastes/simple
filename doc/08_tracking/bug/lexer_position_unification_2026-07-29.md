@@ -375,3 +375,43 @@ bin/simple test --no-session-daemon <spec>`, seed binary
 All eight specs green, matching the mandated counts exactly. No defects
 found.
 
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: SUPERSEDED (product fix verified in tree; behavioral guard spec blocked by unrelated seed-side defect)
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
+
+- Product fix CONFIRMED present at this tip:
+  - Fixing commit d6555eb932f7 "fix(frontend): spec-DSL grammar in pure parser +
+    lexer position unification (LNT2+LEX1+PRM1)".
+  - `src/compiler/10.frontend/core/lexer_scanners.spl` — deleted (entire dead
+    free-function scanner cluster).
+  - `src/compiler/10.frontend/core/lexer.spl` — zero remaining definitions of
+    `lex_pos_get/set`, `lex_line_get/set`, `lex_col_get/set`,
+    `lex_indent_stack_*`, `lex_at_end`, `lex_peek*`, `lex_scan_token_local`.
+  - The three mixing sites in `_ParserDecls/fn_struct_decls.spl` now import and
+    use the live accessors (file line 59; uses at 191 `lex_token_end_get()`,
+    246-247 `lex_live_line_get()`/`lex_live_col_get()`, 257 `lex_force_set_pos()`,
+    263 `lex_token_end_get()`).
+- Seed-smoke status of the guard specs (label: seed-smoke, refreshed seed):
+  - `test/01_unit/compiler/frontend/lexer_position_unification_spec.spl` →
+    4/4 FAIL, every example with `semantic: variable 'par_state' not found`.
+    Root-caused to the KNOWN, separately-tracked module-static defect
+    `module_static_unresolved_initializer_2026-10-24` (its `@workaround` tag
+    sits at src/compiler/10.frontend/core/parser.spl:161, same module, same
+    class). Control spec `test/01_unit/core/parser_unsafe_block_spec.spl` fails
+    3/3 with the identical error — every spec that drives
+    `core.parser.parse_module` directly on this seed fails the same way. This
+    is seed/module-static infrastructure, NOT a lexer-position regression.
+  - `test/01_unit/compiler/lexer/lexer_spec.spl` → 1/2 PASS; the
+    "keeps lexer scanner dispatch helpers available" example still asserts
+    `lexer_scanners.spl` text (`fn lex_scan_number()` etc.) — the spec update
+    this doc attributes to the SCRUB lane is ABSENT at this tip (the
+    file-restoration revert phenomenon also seen in other 2026-09 docs). Spec
+    staleness, not a product regression.
+- Verdict: SUPERSEDED. The position-unification fix and both deletion lanes are
+  landed and verified structurally at this tip. The behavioral re-run is blocked
+  on this lane's seed by the unrelated `par_state` module-static defect; no
+  evidence of LIVE lexer-position symptoms. Follow-up (not this lane): refresh
+  the stale structural assertions in lexer_spec.spl once the module-static
+  defect is fixed.
+

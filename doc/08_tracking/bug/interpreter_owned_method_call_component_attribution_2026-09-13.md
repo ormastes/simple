@@ -183,3 +183,62 @@ contracts, not a generator, not async) that skips `bind_args_with_values_named`
 and most of `execute_function_body`'s bookkeeping — the call-path analogue of
 what PERF-3 did for while loops. The component table says the ceiling for that
 is roughly the 765 ns of call machinery, i.e. about a quarter of the call.
+
+## Addendum 2026-11-11 (lane interp6) — SUPERSEDED, with two recorded residuals
+
+**Verdict: SUPERSEDED — the fixes this record files are landed on
+origin/release/1.0.0; the deferred optimisations remain deferred by design.**
+
+Re-checked on lane worktree `work/p3-interp6-20261111` (cut from
+origin/release/1.0.0 tip 462b3b334fef) with the refreshed seed
+(build-commit 0791c2b7f4a7):
+
+1. **PERF-9 (caller-frame-width publish term) — re-verified GREEN on the
+   refreshed seed.** `test/05_perf/interp/call_entry_publish_scan_spec.spl`
+   under `--mode=interpreter --no-cache`: 3/3 passed; child counters show
+   `PUBLISH_GLOBALS_SCANNED = 2` TOTAL for both narrow (3-locals) and wide
+   (23-locals) callers at n = 400,000 — the scan no longer tracks caller
+   width. The `CowEnv::nonlocal_overlay` mechanism is present in the tree.
+
+2. **PERF-7 (double method resolution + throwaway containers) — present in
+   tree source; its pinning spec cannot re-verify on this seed (residual
+   below).** `resolve_object_method` returns the resolution used once; six
+   call sites use it directly; the throwaway bind/write-back containers are
+   gone from the wholly-positional path. The semantics half of
+   `test/05_perf/interp/owned_method_call_parity_spec.spl` matches every
+   base-seed oracle on the refreshed seed (acc=20:25, 111:214:220, 43:12,
+   3:7:8:3:8, 3:5:3, 12 — all equal to oracle).
+
+3. **Residual A — deliberately deferred optimisations remain unlanded:**
+   `owner_scope()` in
+   `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:181`
+   still rebuilds the per-owner `GlobalScope` on every call
+   (`seed_owner_globals` + `MODULE_ENV_BY_OWNER` probe + `owner_bindings` +
+   snapshot — three ~60-char path hashes per call); the specialised
+   owned-call kernel is likewise still not landed. Both were "recorded
+   rather than attempted" by this bug's own risk analysis; nothing has
+   changed that calculus.
+
+4. **Residual B — NEW observation, needs its own tracking row: the MECALL
+   perf-counter family is dead on the refreshed seed.**
+   `test/05_perf/interp/owned_method_call_parity_spec.spl` runs 10/10
+   scenarios on the seed with **9 failed**: every budget scenario reads
+   `MECALL_CALLS / METHOD_LOOKUPS / STRING_ALLOCS / CONTAINER_ALLOCS = 0`
+   from child runs whose RESULT lines and semantics are correct. Probed
+   directly (fixtures under `build/p3fix-interp6/fx/`, gitignored):
+   an imported-module class-method call (`c.bump()`, m4 shape) reports
+   `OWNED_CALLS=500` for the sibling imported free fn but `MECALL_CALLS=0`
+   for the method call; entry-file classes behave the same. Other counter
+   families on the same binary are live (`EVALCALL_*`, `PUBLISH_GLOBALS_*`
+   above). The bump sites are in the tree source at and since the seed's
+   build-commit, so the seed's actual method-dispatch path does not execute
+   the kernel those counters instrument — either the seed was built from a
+   dispatch that differs from this tree, or a dispatch layer above the
+   counted kernel intercepts method calls. Either way the spec's budget half
+   currently pins nothing on this binary. Not fixed here: interpreter
+   dispatch is outside this lane's bookkeeping scope and the failing
+   assertions are instrumentation, not behaviour.
+
+Fixing lineage on this branch: the PERF-7/PERF-9 work carried by squash-merge
+`9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07, PR #7597), original
+PRs #841/#849 (2026-09-13).
