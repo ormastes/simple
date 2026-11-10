@@ -9,7 +9,12 @@
 #   2. fails if the baseline GAINED any line relative to a base revision, so
 #      it can only shrink (removals only).
 #
-#   sh scripts/check/check-private-import-baseline.shs [--root DIR] [--base REV] [--selftest]
+#   sh scripts/check/check-private-import-baseline.shs [--root DIR] [--base REV] [--range B..N] [--strict-stale] [--prune] [--selftest]
+#
+# --range (push/PR tier): stale rows are non-blocking (INFO line, exit 0); only
+# an ADDED row fails. --strict-stale makes them fail there too. Tree mode (no
+# --range; CI extended job) always fails on stale. --prune rewrites the
+# baseline dropping exactly the stale rows (never adds).
 #
 # --base overrides PRIVATE_IMPORT_BASE (the trusted CI event base), then defaults to the merge-base of HEAD with origin/release/1.0.0; when the
 # base revision has no baseline file (the introducing change) the ratchet check
@@ -552,8 +557,14 @@ range_scan() (
     k=0; first=""
     while IFS= read -r l; do k=$((k+1)); [ $k -le 5 ] && first="$first$l "; done < "$rtmp/stale"
     if [ "$k" -gt 0 ]; then
-        echo "FAIL - $naff affected entries checked, $k stale: $first"
-        exit 1
+        if [ "${PRIVATE_IMPORT_STRICT_STALE:-0}" = 1 ]; then
+            echo "FAIL - $naff affected entries checked, $k stale: $first"
+            exit 1
+        fi
+        # Stale rows are paid-down debt, not a new violation: report, do not block.
+        echo "INFO - $k stale baseline row(s) (run --prune to drop): $first"
+        echo "PASS - $nchanged changed file(s) checked, $naff of $total baseline entries re-verified, $k stale (non-blocking), $ratchet"
+        exit 0
     fi
     echo "PASS - $nchanged changed file(s) checked, $naff of $total baseline entries re-verified, 0 stale, $ratchet"
 )
@@ -594,6 +605,24 @@ range_parser_selftest() {
     return 0
 }
 
+# --prune: rewrite the baseline dropping exactly the stale rows (never adds).
+prune_baseline() {
+    proot=$1; pfile="$proot/$BASELINE_REL"
+    [ -f "$pfile" ] || { echo "ERROR - nothing was checked (missing $pfile)"; return 2; }
+    ptotal=$(wc -l < "$pfile" | tr -d ' ')
+    [ "$ptotal" -gt 0 ] || { echo "ERROR - nothing was checked (empty baseline)"; return 2; }
+    pstale=$(stale_scan "$proot") || { echo "ERROR - nothing was checked (source/index scan failed)"; return 2; }
+    if [ -z "$pstale" ]; then echo "PASS - $ptotal baseline entries checked, 0 stale, nothing pruned"; return 0; fi
+    ptmp=$(mktemp) || { echo "ERROR - nothing was checked (mktemp)"; return 2; }
+    printf '%s\n' "$pstale" > "$ptmp.stale"
+    grep -vxF -f "$ptmp.stale" "$pfile" > "$ptmp"; prc=$?
+    [ "$prc" -le 1 ] || { rm -f "$ptmp" "$ptmp.stale"; echo "ERROR - nothing was checked (prune filter failed)"; return 2; }
+    cat "$ptmp" > "$pfile"; rm -f "$ptmp" "$ptmp.stale"
+    pk=$(printf '%s\n' "$pstale" | wc -l | tr -d ' ')
+    echo "PASS - $ptotal baseline entries checked, $pk stale pruned"
+    return 0
+}
+
 # Git fixtures for --range (run by --selftest and tree mode, not at push).
 range_fixture_selftest() (
     rd=$(mktemp -d) || exit 2
@@ -619,12 +648,20 @@ range_fixture_selftest() (
     expect "$b2..$b3" 1 new-leak "gained 1 line"
     g checkout -q "$b2" 2>/dev/null || exit 2
     printf 'pub fn live() -> i64:\n    1\n' > "$rd/lib/m.spl"; b4=$(commit promote) || exit 2
-    expect "$b2..$b4" 1 promotion "lib/m.spl|live"
+    expect "$b2..$b4" 0 promotion "1 stale (non-blocking)"
     g rm -q lib/m.spl && b5=$(g commit -qm del && g rev-parse HEAD) || exit 2
-    expect "$b4..$b5" 1 deletion "lib/m.spl|live"
+    expect "$b4..$b5" 0 deletion "1 stale (non-blocking)"
+    PRIVATE_IMPORT_STRICT_STALE=1; export PRIVATE_IMPORT_STRICT_STALE
+    expect "$b4..$b5" 1 strict-stale "lib/m.spl|live"
+    unset PRIVATE_IMPORT_STRICT_STALE
     g checkout -q "$b2" 2>/dev/null || exit 2
     printf 'fn live() -> i64:\n    9\n' > "$rd/lib/m.spl"; b6=$(commit edit) || exit 2
     expect "$b2..$b6" 0 regular-blob "1 of 1 baseline entries re-verified"
+    # --prune removes exactly the stale row and keeps the live one.
+    printf 'lib/m.spl|live\nlib/m.spl|ghost\n' > "$rd/$BASELINE_REL"; g add -A || exit 2
+    po=$(prune_baseline "$rd"); pc=$?
+    [ "$pc" -eq 0 ] && [ "$(cat "$rd/$BASELINE_REL")" = 'lib/m.spl|live' ] || { echo "ERROR - range selftest prune: rc=$pc ($po)"; exit 2; }
+    g reset -q --hard "$b6" || exit 2
     # Sparse checkout without lib/: committed content still verifies.
     (g sparse-checkout init --cone && g sparse-checkout set scripts/check) >/dev/null 2>&1 || exit 2
     [ ! -e "$rd/lib/m.spl" ] || { echo "ERROR - range selftest: sparse fixture not sparse"; exit 2; }
@@ -689,10 +726,13 @@ while [ $# -gt 0 ]; do
         --base) main_base=$2; shift ;;
         --range) main_range=$2; mode=range; shift ;;
         --selftest) mode=selftest ;;
+        --strict-stale) PRIVATE_IMPORT_STRICT_STALE=1; export PRIVATE_IMPORT_STRICT_STALE ;;
+        --prune) mode=prune ;;
         *) echo "ERROR - nothing was checked (unknown arg $1)"; exit 2 ;;
     esac
     shift
 done
+if [ "$mode" = prune ]; then prune_baseline "$main_root"; exit $?; fi
 if [ "$mode" = range ]; then
     # Push tier: the git-fixture suites cost ~150 process spawns, which is
     # minutes on a loaded Windows host; they run under --selftest / tree mode.
