@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** FIXED (verified 2026-11-11, lane boot13)
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane C)
 **Area:** `scripts/check/check-riscv-fpga-sidecar-contract.shs`
 **Severity:** high — an evidence-integrity defect: the gate that exists to reject
@@ -111,3 +111,21 @@ Verified 2026-11-05 on this host:
    → exit 1. The guard now fires against a seed-clobbered `bin/release`
    exactly as required. No code change needed in this lane.
 
+
+## 2026-11-11 — lane boot13 (work/p3-boot13-20261111)
+
+Status: **FIXED** — first Status line flipped (was still `open`); the 2026-07-28
+hardening and the 2026-11-05 verification above stand. This lane re-verified on a
+Windows/Git-Bash host at tip c8b6d0ebe90e:
+
+- Source: `is_rust_seed_simple()` at `scripts/check/check-riscv-fpga-sidecar-contract.shs:9-34`
+  is the identity probe this doc asked for — `"$bin" --version 2>&1` fail-closed on
+  the "bootstrap seed only" / "Rust-built" / "debug build" banners, on nonzero
+  exit, and on empty output; the `src/compiler_rust/` path rule remains as a
+  first-line shortcut.
+- Hermetic classifier self-test, run here:
+  `sh scripts/check/check-riscv-fpga-sidecar-contract.shs --self-test`
+  -> `STATUS: PASS riscv-fpga-sidecar-contract self-test — 8 fixture(s) checked`
+  (both banner polarities plus all fail-closed branches; fixtures are
+  synthesized in a temp dir, so the verdict is host-independent).
+- No code change was needed in this lane.

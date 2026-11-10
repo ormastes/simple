@@ -90,3 +90,17 @@ Tracker re-checked; still no host-actionable rows — the open RISC-V FPGA port
 items (KV260 clocking/UART routing, rv32 exec-core debug ports, StarFive TAP
 wiring) remain blocked on physical FPGA board access. No software change was
 made or needed in this pass.
+
+## 2026-11-11 — lane boot13 (work/p3-boot13-20261111)
+
+Status: **BLOCKED** — remains OPEN; tracker re-checked at tip c8b6d0ebe90e and
+still has no host-actionable rows (Open/Fixed/Deferred tables all empty). The
+open FPGA-port items (KV260 clocking/UART routing, rv32 exec-core debug ports,
+StarFive TAP wiring) require physical board access and vendor toolchains
+(Vivado for Kria K26, Quartus for DE10-Nano); this Windows CI-style host has
+neither, so no software change was made or is possible in this lane.
+
+Exact grant: physical access to the Kria KV260 and DE10-Nano boards with
+Vivado/Quartus installed, then run the phase 7-verify hardware pass per
+`doc/07_guide/platform/simpleos/riscv_fpga_simpleos_guide.md` and populate the
+Open Bugs table here; the tracker doc itself needs no edit until then.

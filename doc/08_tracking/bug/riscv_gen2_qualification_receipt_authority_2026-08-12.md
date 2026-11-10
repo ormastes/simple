@@ -148,3 +148,35 @@ provenance, not an adversarial boundary. The coverage-inventory design
 (compiler-emitted zero-count decision manifest, `MirCoverage*V1` lowering) and
 the descriptor-relative runtime snapshot transaction remain unimplemented; the
 containment rules above still govern. Status: OPEN.
+
+## 2026-11-11 — lane boot13 (work/p3-boot13-20261111)
+
+Status: **BLOCKED** — remains OPEN; architectural state re-checked at tip
+c8b6d0ebe90e. The receipt is still controlled-run provenance, not an
+adversarial boundary, and the containment rules above still govern. Since the
+2026-11-05 note, the building blocks this doc's designs demand have started
+landing in source — coverage probe kinds and admission
+(`src/compiler/50.mir/mir_coverage_probe_admission.spl`,
+`mir_instruction_kinds.spl`, DCE probe handling in `60.mir_opt`) and
+retained/no-follow file primitives (`src/lib/nogc_sync_mut/io/retained_file*.spl`,
+`src/lib/common/cache_path_policy_v1.spl`) — but the closure items that make the
+receipt an authority (reviewed source-controlled decision inventory with
+compiler-emitted zero-count manifest bound in, descriptor-relative snapshot
+transaction admitted from a clean dedicated worktree, external review of the
+admitted revision) are not complete, and no admitted Stage-4 RV32/RV64 run of
+the qualification exists.
+
+Exact grant (run on a Linux host with `ghdl` and the workspace-admitted Stage-4
+pure-Simple CLI plus its adjacent `.provenance.env`):
+
+```
+sh scripts/check/run-riscv-gen2-hwir-qualification.shs \
+  --stage4-cli <admitted-stage4-simple> \
+  --stage4-provenance <admitted-stage4-simple.provenance.env> \
+  --output-dir build/evidence/riscv_gen2_hwir_foundation
+sh scripts/check/test-riscv-gen2-qualification-writer-reds.shs
+```
+
+plus the reviewed-inventory promotion and the dedicated-worktree snapshot
+transaction admission this doc's "Required closure" lists, and independent
+review of the admitted revision before any mission-critical claim.

@@ -6,7 +6,8 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Found by:** workstream F (`simple_riscv_production_dft_svap_plan.md` §2), independently re-verified by the parent session.
-**Status:** OPEN. Not a shipped-product vulnerability — this is pre-silicon RTL in
+**Status:** FIXED (verified 2026-11-11, lane boot13). Originally OPEN. Not a shipped-product
+vulnerability — this is pre-silicon RTL in
 a development core. It is filed now because a debug-authentication lifecycle must
 exist *before* any part is built from this RTL, not after.
 
@@ -145,3 +146,24 @@ VHDL testbench simulation itself was not re-run here; the prior GHDL 4.1.0
 evidence in the FIXED section stands, and the executable spec pins the same
 invariants against the current sources. No code change needed in this lane.
 
+
+## 2026-11-11 — lane boot13 (work/p3-boot13-20261111)
+
+Status: **FIXED** — first Status line flipped; the 2026-11-05 verifications above
+stand, and this lane independently re-verified at the release/1.0.0 tip
+(c8b6d0ebe90e) with the fresh seed binary (build-commit 46fe8f6b6def, seedfix A+B):
+
+- Source assertions (exactly the spec's greps): HARDWIRE=0 GATE=1 FSM=9
+  AUTHDATA=2 FWD=1 — `dmstatus_v(7) := '1';` non-comment occurrences = 0, the
+  AUTH-GATE-DENY choke point exists, `authenticated_r` is computed, `A_AUTHDATA`
+  is present, and dmi_bus forwards DMI 0x30.
+- Executable spec (seed-smoke: `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe
+  bin/simple.exe test test/01_unit/lib/hardware/debug/dm_auth_gate_spec.spl
+  --mode=interpreter --no-cache`):
+  `outcome=OK declared>=5 executed=5 passed=5 failed=0` — 5/5 examples pass;
+  example 1 asserts the real RTL invariants above, examples 2-5 take the spec's
+  documented UNVERIFIED path because GHDL is not installed on this host
+  (absence of a simulator is absence of evidence, never a pass — per the spec's
+  own convention). The prior GHDL 4.1.0 simulation evidence (CHECK1-8 plus both
+  sabotage non-vacuity runs) stands from the FIXED section.
+- No code change was needed in this lane.
