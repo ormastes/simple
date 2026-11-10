@@ -216,3 +216,27 @@ grep -a -m 12 '\[mcp\]' build/os/riscv64_components/serial.log
 
 The probes are checked in, in `toolchain_components_entry.spl`, so the serial
 log names the last call that completed on every future run.
+
+---
+
+# P3 TRIAGE ADDENDUM (2026-11-11, lane boot8) — SUPERSEDED
+
+Verdict: **SUPERSEDED — already fixed (PR #6954, 2026-11-05); re-verified by source + guard this lane.**
+
+This doc's header records RESOLVED 2026-11-05 with in-guest verification. This
+lane spot-checked at `work/p3-boot8-20261111` HEAD (`7d4140c1a6b3`):
+
+- Source: the HIR type-resolver `Type::Generic` dispatch now special-cases
+  lowercase `list`, at
+  `src/compiler_rust/compiler/src/hir/lower/type_resolver.rs:669`
+  (`"List" | "list" if args.len() == 1 => { ... HirType::Array ... }`), so
+  `list<T>` no longer erases to `TypeId::ANY` and `self.entries + [entry]`
+  lowers to `rt_array_concat`, not a native integer add.
+- Guard: `sh scripts/check/check-hir-lower-list-generic-not-any.shs` →
+  `selftest OK (4 fixtures)` + `PASS — 1 definition checked, lowercase list<T>
+  resolves to HirType::Array (not TypeId::ANY)` (rc=0).
+
+Host-limit note: in-guest re-run is not possible on this Windows host;
+verification here is source-presence + guard. The in-guest proof (probe p1-p5b
+green) stands from the 2026-11-05 section. The separate module-init trap
+observed there is a different defect, out of this record's scope.
