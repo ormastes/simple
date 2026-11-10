@@ -1,8 +1,11 @@
 # JIT co-compiled definition ambiguity debt — native-build blocker chain
 
 Date: 2026-09-15
-Status: open — `native-build` on Windows blocked; one symbol fixed, systematic
-debt remains
+Status: SUPERSEDED 2026-11-11 (lane ne12) — owner decision 6 landed 2026-11-09
+(10e216d19f8c, PR #7966): an ambiguous co-compiled bare-name call is a
+compile error on the HIR/JIT lane instead of a silent last-defined pick;
+residuals (seed interpreter fallback flat-pick; pinned spec load failure)
+recorded in the 2026-11-11 addendum
 Host: Windows 11, seed rebuilt + deployed 2026-09-15 21:15 (39,274,496 bytes)
 
 ## Symptom
@@ -157,3 +160,49 @@ oracles — runner-environment dispatch skew, unconfirmed root cause.
    spec closure dispatched to a $dup whose signature carries a diagnostics
    `msg` parameter. Sixth instance; same closed-repro shape as (4)/(5)
    should be constructible by importing the spec's exact block into a stub.
+
+## Triage 2026-11-11 (lane ne12, seed-smoke on fresh seed 46fe8f6b6def)
+
+**Verdict: SUPERSEDED by owner decision 6 — landed 2026-11-09
+(`10e216d19f8c`, PR #7966, "ambiguous co-compiled duplicate definition is a
+compile error").** The doc's demanded root fix ("dispatch must resolve by
+import path, not last-defined $dup") was implemented as fail-closed instead:
+when a bare name has >= 2 co-compiled owners and the caller neither defines
+nor selectively imports it, the HIR/JIT lane raises a compile error naming
+both definition sites and the remediation. The silent skew class behind the
+`format_size` ("1.5 KB" vs "1.5 KiB"), `process_run`, `fill_series_spec`,
+`assistant_dashboard_e2e_spec` and `storage_layout_native_projection_spec`
+dispatches is closed on the compile lane.
+
+Seed-smoke evidence (this lane's probe, fresh seed):
+`mod_a.spl`/`mod_b.spl` both define `pub fn format_size(x: i64) -> text`; a
+caller `use`-ing both and calling `format_size(1)`:
+- default `run` (JIT lane): hard error `ambiguous call to 'format_size': 2
+  co-compiled definitions (...) and <entry file> neither defines nor imports
+  it ... [compiler_cross_module_private_symbol_collision]`; module demoted to
+  interpreter (by default; `SIMPLE_JIT_STRICT=1` makes it a hard error).
+- Warnings now name every remaining colliding helper (~24 symbols) with
+  "owner decision 2026-11-09, no last-definition fallback" — the rename-lane
+  debt is now loudly visible instead of silently skewing.
+
+Residuals recorded honestly (not blocking the verdict):
+1. The seed's built-in tree-walk interpreter still flat-picks after the JIT
+   demotion (printed `A1` = one owner's body) with only the same-signature
+   collision warning. The self-hosted interpreter tables WERE fixed by the
+   same commit (`src/compiler/10.frontend/core/interpreter/eval*.spl`), so the
+   pure-Simple lane fails closed; the seed interpreter lane remains the
+   warned-flat-pick fallback. Filing a follow-up row for the seed interpreter
+   half is left to a compiler-owner lane.
+2. The fix's pinned spec
+   `test/01_unit/compiler/interpreter/ambiguous_co_compiled_fn_call_error_spec.spl`
+   currently fails to LOAD on this tree: `func_table_reset` of
+   `compiler.core.interpreter.eval_tables` is private ("not visible to
+   <spec>") — spec/drift visibility, separate from the resolver fix.
+   `test/01_unit/compiler/interpreter/ambiguous_co_compiled_call_compile_error_spec.spl`
+   (added by the same commit) should be re-run by its owner.
+3. Same-signature co-compiled duplicates (e.g. the 78-name warning census)
+   still "one silently wins" by design on the seed interpreter lane; only
+   differing-signature ambiguity fails closed.
+
+Not carried by seedfix A (fa6939eb4b9e is JIT tuple unbox; this row is
+resolver/HIR debt).

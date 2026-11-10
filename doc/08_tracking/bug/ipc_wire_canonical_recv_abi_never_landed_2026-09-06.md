@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-09-06
 - **Area:** os / kernel / ipc
-- **Status:** OPEN — codec guarded, wiring absent
+- **Status:** OPEN 2026-11-11 (lane ne12) — core debt unchanged (codec still zero-importer, syscall 21 still returns a materialized kernel pointer, no dest-buffer ABI); unblock conditions 1 and 2 now met (missing symbols defined); guard spec currently load-blocked by the routed VirtMemManager tri-def live defect
 - **Base examined:** `origin/main` @ `4699194f81e`
 - **Guarding spec:** `test/01_unit/os/kernel/ipc/ipc_wire_transfer_spec.spl`
   (16 cases, 16 passed under the Sep-5 bootstrap seed)
@@ -167,3 +167,42 @@ spec's `-1` unknown-destination case reachable at all.
 Resurrecting the deleted 434-line spec, or implementing the nine missing
 symbols to make it pass. `f91b3a48702` refused exactly that, and doing it
 under a "recovery" label would be new kernel ABI work.
+
+## Triage 2026-11-11 (lane ne12, fresh seed 46fe8f6b6def)
+
+**Verdict: LIVE — kept OPEN.** The title debt is unchanged; two of the four
+unblock conditions are now met.
+
+Re-checked against the tree at `origin/release/1.0.0` tip (this lane's branch):
+
+1. `src/os/kernel/ipc/ipc_wire.spl` still has **zero importers** under `src/`
+   (`grep -rn "ipc_wire" src --include='*.spl'` returns only the codec itself).
+   Unblock condition 3 (wire `ipc_wire_encode`/`ipc_user_range_check` into
+   `syscall_ipc.spl` and the ring-3 client) is NOT met.
+2. `_handle_ipc_recv_state` (syscall 21) still returns
+   `_ipc_materialize_received(header, received.payload)` — a kernel virtual
+   address of a materialized envelope, not a count of bytes written into a
+   ring-3 dest buffer (`src/os/kernel/ipc/syscall_ipc.spl:246-268`). The
+   canonical syscall-21 dest-buffer recv ABI still has not landed.
+3. **Unblock condition 1 — now met.** `_copy_owned_payload` is defined at
+   `src/os/kernel/ipc/ipc.spl:63` (called at :369 and :458);
+   `OwnedIpcReceiveStatus` is an enum at `src/os/kernel/types/ipc_types.spl:34`;
+   `OwnedIpcReceiveResult` is a struct at `src/os/kernel/types/ipc_types.spl:42`.
+   `IpcManager.send_owned`/`recv_owned` can now execute end to end (was: every
+   passing send died at the undefined call).
+4. **Unblock condition 2 — symbol repaired.** `sosix_fs_kernel_uninstalled_positioned_state_v1`
+   is now defined at `src/os/sosix/fs/kernel_positioned_dispatch_v1.spl:51`, so
+   the positioned-shim import closure loads.
+
+**Guard spec status regression (load-blocked, not codec-broken):** the pinned
+guard `test/01_unit/os/kernel/ipc/ipc_wire_transfer_spec.spl` now ends
+`outcome=ERROR declared>=16 executed=0` under the seed interpreter. The error is
+`semantic: ambiguous type 'VirtMemManager'` (tri-def across
+arch/x86_64/paging.spl, memory/vmm.spl, memory/vmm_core.spl) — one of the
+repo's known-live routed defects, surfaced loud by owner decision 2026-11-09
+(ambiguous co-compiled bare names are compile errors). The codec spec could not
+be re-executed in this lane; re-run it after the VirtMemManager tri-def owner
+resolves that row.
+
+Not carried by seedfix A (fa6939eb4b9e is JIT tuple unbox; this row is
+kernel ABI/design debt, not codegen).
