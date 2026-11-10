@@ -4,8 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN 2026-09-02 — four guards remain honestly RED after five
-mechanical defects in the guards themselves were fixed.
+**Status:** OPEN 2026-09-02 — gates re-measured 2026-11-11 (lane ne4) on release/1.0.0 tip: core-lib-purity FAIL (34 new, grown), seed-extern-registry FAIL (145 new/148 stale, grown), sffi-v2-authority FAIL (3 sub-guards, improved), bodyless-parity partially fixed (run path green, native-build B/D divergent); rules.sdl digest/floor defect fixed in this lane; two drifted context gates recorded. Details in addendum.
 **Severity:** Blocking promotion — none of these may be wired push-blocking yet.
 **Path:** `bug` track.
 
@@ -111,3 +110,70 @@ the missing-verdict-line defect that lane is already repairing.
 | `check-interpreter-extern-registry-gap.shs` | FAIL — 0 new, 3 stale | PASS — 232 checked, 0 new, 0 stale |
 | `check-type-walk-constructor-parity.shs` | FAIL — Function Pointer Union | PASS — 12 constructors, 0 unprojected |
 
+
+## 2026-11-11 addendum (lane ne4, batch p3-ne4-20261111)
+
+All gates re-measured on release/1.0.0 tip (fa6366ca8bf5 + this lane's
+commits) in this worktree. Per the doc's own §0 caveat, these numbers are
+from a clean release tree, not the skewed detached HEAD of 2026-09-02.
+
+### The four named guards
+
+1. `check-core-lib-purity.shs` — **FAIL, debt grown**. `FAIL — 1399
+   file(s) scanned, 34 new violation(s), 1 stale baseline entry(ies)`
+   (2026-09-02: 976 files, 19 new). Pure-core files declaring
+   syscall-class externs or importing host tiers. Unblock is still the
+   per-file host-tier refactor program (now 34), not a baseline edit.
+
+2. `check-seed-extern-registry.shs` — **FAIL, debt grown in both
+   directions**. `FAIL — 2751 extern(s) checked, 145 new unregistered,
+   148 stale baseline entry(ies)` (2026-09-02 on the skewed tree: 1
+   compiler + 68 lib). The 2026-09-02 numbers were inflated by the
+   detached-HEAD skew this doc warned about; even so, the gate is
+   honestly RED on the release tree. Not a baseline edit; registration
+   is owner work.
+
+3. `check-bodyless-block-parity.shs` — **PARTIALLY FIXED; remainder
+   LIVE**. 2026-11-11: `FAIL — 8 case(s) checked, divergent:
+   native-build/shapeB native-build/shapeD` — the `run/` shapes A/C no
+   longer flag: the seed now rejects bodyless ifs on the run path (the
+   original bug). The remaining divergence is the pure-Simple
+   `native-build` path failing rc=1 on two LEGAL shapes (flat body /
+   control flow) with a working llvm-mingw toolchain on this host — the
+   compiler front-end lane's tracked work, not a guard defect.
+
+4. `check-sffi-v2-authority.shs` — **FAIL, improved**. 3 sub-guards
+   failing (`sffi-contract-inventory` source_variants 402/399,
+   `test-runner-single-sffi-authority`, `time-utils-sffi-authority`) +
+   `ERROR — expected 46 guards, ran 44` (2026-09-02: 14 of 46). Down
+   14 -> 3(+2 missing). SFFI-lane work remains.
+
+### Context gates from §0 re-measured
+
+- `check-rules-sdl.shs --group quick` — was ERROR-red on tip:
+  `committed rules.sdl is not bound to the reviewed policy digest`.
+  Root cause: merged chore commit `abb2fe62cc64` (2026-11-09, retired
+  the test-tree-divergence guard pair) changed rules.sdl without
+  re-binding `RULES_POLICY_SHA256` or lowering the `rules_sdl_gates`
+  floor (min 20). FIXED IN THIS LANE (commit on
+  work/p3-ne4-20261111): floor 20 -> 19 with changelog comment,
+  digest re-bound to the committed blob. Verified: `--group quick`
+  -> `PASS — 10 gates checked, 0 shrank`; `--selftest` -> `PASS — 7
+  selftest fixtures checked` (digest-binding and shrink fixtures
+  intact).
+- `check-interpreter-extern-registry-gap.shs` — **FAIL, drifted back
+  since 2026-09-02**: `1 new (rt_actor_try_send), 10 stale`. The
+  extern rename rt_actor_send -> rt_actor_try_send in
+  `src/compiler/95.interp/mir_interp_runtime.spl` was not propagated to
+  `interpreter_extern_gap_baseline.txt`. Registry-owner bookkeeping.
+- `check-type-walk-constructor-parity.shs` — **FAIL, drifted back**:
+  `14 constructor(s) checked; unprojected and unallowlisted: Shared
+  Unique; stale allowlist (now projected): Optional Reference`
+  (2026-09-02: 12 constructors, 0 unprojected). Compiler-core
+  projection work.
+
+Verdict: LIVE. Three of the four named gates remain honestly RED (two
+with grown debt), one partially fixed; two context gates drifted red,
+one rules.sdl binding defect repaired here. None of the remaining red
+is a guard-text defect; all are real debt. Not fixable wholesale in a
+P3 lane — the per-gate owner programs stand.
