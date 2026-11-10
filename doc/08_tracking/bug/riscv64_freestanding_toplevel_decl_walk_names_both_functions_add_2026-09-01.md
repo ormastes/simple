@@ -268,3 +268,28 @@ seen downstream on this row. The new blocker is unrelated: `fn main():`
 declares no return type, and the producer of its implicit return HirType leaves
 `kind` at raw 0. Filed as
 `riscv64_in_guest_mir_lower_type_zero_kind_on_main_2026-09-01.md`.
+
+---
+
+# P3 TRIAGE ADDENDUM (2026-11-11, lane boot8) — SUPERSEDED
+
+Verdict: **SUPERSEDED — already fixed at tip; re-verified by source + guard this lane.**
+
+This doc's "VERIFIED FIXED AT TIP 2026-11-05" header records the source
+re-verification and the wired guard, and explicitly notes the in-guest buildrun
+re-run was NOT repeated because row 2 moves on to a different, later blocker
+(`riscv64_in_guest_mir_lower_type_zero_kind_on_main_2026-09-01.md`). Spot-checked
+at `work/p3-boot8-20261111` HEAD (`7d4140c1a6b3`):
+
+- Source: `module_decl_at` still carries the measured fix at
+  `src/compiler/10.frontend/core/_Ast/module_state.spl:453`
+  (`if env_value.len() > 0:`), so the decl-index lookup no longer takes the
+  `env_value != ""` arm that was TRUE for a zero-length text on this lane.
+- Guard: `sh scripts/check/check-decl-index-lookup-not-empty-text-compare.shs` →
+  `selftest OK (5 fixtures)` + `PASS — 4 site(s) checked, none compares against
+  an empty literal` (rc=0).
+
+Host-limit note: in-guest re-run is not possible on this Windows host, and per
+the 2026-11-05 header it was already not re-run because the row's blocker has
+moved downstream. Verification here is source-presence + guard only; no
+in-guest execution is claimed.

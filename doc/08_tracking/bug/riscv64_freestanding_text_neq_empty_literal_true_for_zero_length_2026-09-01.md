@@ -176,3 +176,27 @@ SIMPLE_BIN=<rust seed> sh scripts/check/run-riscv64-text-probe-opensbi.shs
   sidesteps them. That breakage predates this change.
 
 **Status: FIXED (2026-11-05), behaviorally verified in-guest.**
+
+---
+
+# P3 TRIAGE ADDENDUM (2026-11-11, lane boot8) — SUPERSEDED
+
+Verdict: **SUPERSEDED — already fixed (2026-11-05); re-verified by source + guard this lane.**
+
+This doc's "FIXED (2026-11-05)" section records the lowering change
+(`060926039bc`, typed text equality → `rt_text_eq_any` on every backend) plus
+the riscv freestanding port of `rt_text_eq_any`, behaviorally verified in-guest.
+Spot-checked at `work/p3-boot8-20261111` HEAD (`7d4140c1a6b3`):
+
+- Source: `rt_text_eq_any` is defined (nil-sentinel-aware, heap-vs-raw and
+  raw-vs-raw content paths) at
+  `examples/09_embedded/simple_os/arch/common/riscv_common.h:615`.
+- Guard: `sh scripts/check/check-riscv-text-eq-any.shs` →
+  `PASS — 1 definition(s) checked, all nil-aware and raw-content-comparing`
+  (rc=0).
+- Ancestry: the lowering change `060926039bc` IS an ancestor of this HEAD.
+
+Host-limit note: in-guest re-run is not possible on this Windows host;
+verification here is source-presence + guard. The in-guest proof (every
+comparison shape EXPECTED, including `coalesced env != "" = false`) stands from
+the cited 2026-11-05 section.

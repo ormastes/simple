@@ -324,3 +324,27 @@ guards and loop bounds answer correctly. Filed here only so the next session
 does not re-derive it; it needs its own record.
 
 **Status: FIXED at tip, behaviorally verified in-guest 2026-11-05.**
+
+---
+
+# P3 TRIAGE ADDENDUM (2026-11-11, lane boot8) — SUPERSEDED
+
+Verdict: **SUPERSEDED — already fixed at tip; re-verified by source + guard this lane.**
+
+This doc carries a 2026-11-05 "VERIFIED AT TIP" addendum (fix present, derived
+guard GREEN, fail-open shapes run CORRECTLY in-guest under OpenSBI fw_payload).
+Spot-checked at `work/p3-boot8-20261111` HEAD (`7d4140c1a6b3`):
+
+- Source: the Cranelift inline `.len()` baremetal tag-11 arm is present at
+  `src/compiler_rust/compiler/src/codegen/instr/helpers.rs:111`
+  (`let is_bm_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 11);`
+  joining the offset-8 length group).
+- Guard: `sh scripts/check/check-inline-len-covers-baremetal-heap-tags.shs` →
+  `PASS — 8 length-bearing tag(s) checked, all recognised or baselined` (rc=0).
+- Ancestry: fixing merge `91bc01a35eb` (PR #257) IS an ancestor of this HEAD.
+
+Host-limit note: in-guest behavioral re-run is not possible on this Windows
+host; verification here is source-presence + guard. The in-guest proof stands
+from the cited 2026-11-05 addendum. The adjacent dict-index-assign-insert drop
+noted there is a separate defect (dict-writes family), not this record's
+`.len()` fail-open.

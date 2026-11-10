@@ -559,3 +559,35 @@ Not re-run here: the full OpenSBI guest boot (the row's later
 `invalid operands for +` blocker and everything downstream of it is a
 different defect family and out of this record's scope). Re-open with a
 fresh dated repro if the reset symptom returns.
+
+---
+
+# P3 TRIAGE ADDENDUM (2026-11-11, lane boot8) — SUPERSEDED
+
+Verdict: **SUPERSEDED — this record's own defect already fixed; re-verified by source + behavioral guard this lane.**
+
+This doc records RESOLVED 2026-09-02 (fix `b655e343cdb`: `rt_unwrap_or_trap`
+now actually unwraps) and a 2026-11-05 "RE-VERIFIED at tip" addendum. The cited
+`b655e343cdb` is a pre-tree-transplant hash and does not resolve as an ancestor
+of current `release/1.0.0` (`git merge-base --is-ancestor` fails on it), so this
+lane verified by source + guard instead. Spot-checked at
+`work/p3-boot8-20261111` HEAD (`7d4140c1a6b3`):
+
+- Source: `rt_unwrap_or_trap`
+  (`examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c:1884`)
+  traps on a nil optional AND unwraps a boxed `Some`/`Ok` (returns the payload,
+  not the 24-byte `RuntimeEnum` wrapper), with the measured
+  `0x0000003200000001` HeapHeader chain recorded in its comment.
+- Guard (behavioral, host-compiled): with a working host C compiler,
+  `CC=<llvm-mingw cc> sh scripts/check/check-rv64-unwrap-or-trap-unwraps.shs` →
+  `selftest OK (6 fixtures)` + `PASS — 5 case(s) executed, rt_unwrap_or_trap
+  yields payloads and traps on None (some_ord=payload some_hash=payload
+  ok_hash=payload plain=verbatim none=trapped)` (rc=0). The companion trap-vector
+  guard `check-riscv64-boot-installs-trap-vector.shs` needs a `riscv64-*`
+  cross toolchain absent on this host, so it was source-presence only (the
+  vector body is present in `boot_entry.c`), matching the 2026-11-05 note.
+
+Host-limit note: the in-guest OpenSBI boot is not possible on this Windows
+host; the changed-failure-mode proof (fault gone, `invalid operands for +` is a
+different, later blocker) stands from the cited sections. No in-guest execution
+is claimed here.
