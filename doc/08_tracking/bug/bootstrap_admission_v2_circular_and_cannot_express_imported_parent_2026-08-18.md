@@ -91,3 +91,33 @@ compiler. Three routes refused with the identical
 `bootstrap-strategy.sh`, which is a supervisor and `exec`s the engine unchanged
 when given no `--bootstrap-receipt=`. Evidence and the route table:
 `stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md`.
+
+## Triage 2026-11-10 (p3-boot lane)
+
+SUPERSEDED — the receipt chain is wired end-to-end on
+work/p3-boot-20261110 (base origin/release/1.0.0):
+
+- Receipt WRITERS now exist: `scripts/check/lib/bootstrap-stage3/sanity.shs`
+  (`bootstrap_stage3_write_stage2_admission_receipt`, writes
+  `stage2-sanity.receipt`) and `scripts/bootstrap/publish-stage2-parent-receipts.shs`
+  (writes the sanity + provenance pair) — both wired into the trust-root
+  Stage-2 lane, closing section 2's "nothing ever WRITES the two receipts".
+- Entry point: `scripts/bootstrap/bootstrap-from-scratch.sh:485` declares
+  `produce_stage3_receipt_reason=''`, parses `--produce-stage3-receipt=<reason>`
+  (:510), and invokes `produce-bootstrap-planner-admission-v2.shs --reason=...`
+  (:5141-5143, :5162). The pin is
+  `scripts/check/check-bootstrap-stage3-receipt-autowire.shs`, which greps the
+  script for that exact invocation and a default-empty typed reason.
+- The cycle exit for a never-bootstrapped tree is the planner producer run
+  against a trust-root Stage-2 artifact; hand-placed/imported parents without
+  the sanity+provenance receipt pair are refused by design
+  (`parent-compiler-missing-or-not-canonical` /
+  `parent-stage2-provenance-authority-mismatch`).
+
+Residual (design suggestion, not a live blocker): the doc's section-3 schema
+extension (`parent_origin_root`, `parent_origin_git_head`, `parent_is_imported`)
+was NOT taken up — the v2 receipt still carries the original 29 keys
+(`scripts/check/lib/bootstrap-planner-admission-bound.shs:221,225`). Under the
+trust-root design an imported parent is refused rather than recorded, so the
+"silently associates with current git state" hazard has no path to fire. If
+cross-worktree parent import is ever allowed, reopen with this note.
