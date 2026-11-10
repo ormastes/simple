@@ -2,7 +2,7 @@
 
 Date: 2026-09-07
 Severity: MEDIUM (blocks a Kubernetes-vocabulary field name; workaround is a rename)
-Status: OPEN
+Status: FIXED (verified 2026-11-11, lane ne16)
 Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, 50093192 bytes, mtime 2026-09-06 09:59:11)
 
 ## Symptom
@@ -65,3 +65,37 @@ bin/simple run /tmp/ns.spl   # -> Common mistake detected
 - `doc/08_tracking/bug/pub_reserved_identifier_undocumented_2026-08-10.md`
 - `doc/08_tracking/bug/move_identifier_rejected_as_expression_2026-08-15.md`
 - `doc/08_tracking/bug/admit_is_a_hard_keyword_unusable_as_identifier_2026-08-21.md`
+
+## Addendum 2026-11-11 (lane ne16, seed-smoke verification)
+
+Verdict: FIXED. The "common mistake" check is now contextual in both
+compilers — exactly the treatment the `pub`/`move`/`admit` family received:
+
+- Pure-Simple compiler: `src/compiler/10.frontend/parser/recovery.spl:201-207`
+  gates on the next token being an Identifier, with a comment recording that
+  `namespace` is a legal Simple identifier (citing in-tree users) and only the
+  declaration shape `namespace <ident>` is the C++ mistake.
+- Rust seed parser: `src/compiler_rust/parser/src/error_recovery.rs:508-513`
+  applies the identical next-token-Is-Identifier gate.
+
+Reproduced the doc's three failing shapes in one file on the fresh seed
+(`bin/simple.exe`, build-commit `46fe8f6b6def`):
+
+```
+struct Meta: namespace: text
+struct M: meta: Meta
+fn main():
+    var namespace = "default"
+    val m = M(meta: Meta(namespace: "kube-system"), name: "pod")
+    print("{m.meta.namespace} {namespace}")
+-> kube-system default     (compiles and runs clean)
+```
+
+(struct field declaration, local `var` binding, and caller field read — the
+three shapes the doc listed as refused.) The module-declaration mistake shape
+`namespace math` is still caught (the gate is on `namespace <Identifier>`).
+
+**Follow-up not done here (owner lane):** the recorded workaround in
+`src/lib/common/contracts/orchestration/resource_v1.spl:31-37` (field named
+`ns`) is still in place; renaming it back to `namespace` is contract churn for
+the orchestration owner lane. The workaround comment cites this doc.

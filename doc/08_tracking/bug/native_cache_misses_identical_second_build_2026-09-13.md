@@ -53,3 +53,36 @@ destination before publishing), not the miss. After that fix the second build
 succeeds by RECOMPILING; `cached=0` remains. Diagnosing the miss needs a trace
 line naming the declining sub-condition, which does not exist today.
 
+## Addendum 2026-11-11 (lane ne16) — BLOCKED, still OPEN
+
+Verdict: BLOCKED (measurement cannot run on this host); stays OPEN.
+
+**What changed since filing (code inspection, verified in tree):**
+- The doc's diagnostic prerequisite LANDED: the driver now prints the
+  declining sub-condition — `driver_aot_native_output.spl:2437` logs
+  `reason={witness_reason}` per declined module, and `:2585` logs
+  `cached={n} uncached={n} uncached_modules=[...]`. The hit machinery was
+  also reworked around `source_snapshot_matches` + a per-module witness
+  (`expected_witness_reason == "ok"` gate at `:2394-2439`).
+- Unit coverage for the witness machinery passes on the fresh seed
+  (build-commit `46fe8f6b6def`):
+  `test/01_unit/compiler/cache_v2/native_module_witness_spec.spl` -> 6/6 PASS
+  (interpreter mode).
+
+**What is NOT proven:** whether an identical second positional build now
+reports a hit. That requires two real `native-build`s sharing one HOME — and
+native-build on this Windows host is a known live defect (hang; never retry a
+hung build), so the measurement cannot be taken here. No in-tree check script
+automates the identical-second-build scenario (grep of `scripts/check/`).
+
+**Exact grant command (Linux host, pure-Simple release binary):**
+```sh
+# from repo root, with bin/release/x86_64-unknown-linux-gnu/simple deployed as bin/simple
+SIMPLE_COMPILER_TRACE=1 bin/simple native-build \
+  scripts/check/cert/redeploy_gate/fixtures/hello_world.spl -o /tmp/nc1/hello
+SIMPLE_COMPILER_TRACE=1 bin/simple native-build \
+  scripts/check/cert/redeploy_gate/fixtures/hello_world.spl -o /tmp/nc2/hello
+# pass: second build prints "[NATIVE] cache hit: ..." and cached>=1;
+# fail: cached=0 again — but now the decline reason IS logged, capture it.
+```
+

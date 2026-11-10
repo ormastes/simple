@@ -1,6 +1,6 @@
 # Named target execution lacks dependency inputs and authoritative receipts
 
-Status: partial; open (2026-08-14)
+Status: FIXED — typed dependency-input blocker resolved (verified 2026-11-11, lane ne16); authoritative imported-closure receipt (executor reuse) remains deliberately disabled and open
 
 The build CLI can parse, validate, deterministically resolve, and execute an
 independent named target. The old CLI printed the plan and then fell through to
@@ -89,3 +89,36 @@ Unblock condition:
 3. The product graph declares the remaining configuration/provider/bootstrap
    targets with typed edges and focused mutation tests prove the expected
    rebuild closures.
+
+## Addendum 2026-11-11 (lane ne16, seed-smoke verification)
+
+**Unblock condition 1 — DONE.** The exact "smallest sound extension" this doc
+specified now exists:
+
+- `src/app/cli/native_build_main.spl:2400` recognizes `--input-manifest`
+  (`native_build_manifest_requested`); the flag is consumed on the
+  native-build CLI path.
+- `src/app/build/targets/target_executor.spl:126-171` builds a typed
+  `DependencyArtifactInputV1` manifest per dependency-bearing target —
+  `producer_target`, repo-root-checked `artifact_path`, `artifact_kind:
+  "archive"`, and SHA-256 digests used as the conservative link/ABI identity
+  — and passes it via `target_action_args_with_manifest`
+  (`--input-manifest <path>`).
+- The fail-closed `target-error: dependency-input-unsupported` path no longer
+  exists anywhere in `src/` (grep-verified 2026-11-11).
+- In-tree focused coverage exists and passes on the fresh seed
+  (build-commit `46fe8f6b6def`):
+  `test/01_unit/app/build/target_dependency_link_spec.spl` -> 5/5 PASS
+  (`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+  ... --mode=interpreter --no-cache`).
+
+**Unblock conditions 2 and 3 — still open (by design).**
+`_target_action_digest` (`target_executor.spl:91-97`) still returns `""`
+(Unknown) with the same fail-closed rationale; executor-level reuse stays
+disabled and every action rebuilds under `closure-digest=unknown
+executor-reuse=disabled`. `targets.sdn` still registers only the minimal
+config/provider proof targets (no SCI projection / bootstrap / convergence /
+DDC edges). These are feature-lane items, not the defect this row named.
+
+Verdict: FIXED for the named "Remaining typed dependency-input blocker";
+receipt/graph increments remain open under their own lanes.

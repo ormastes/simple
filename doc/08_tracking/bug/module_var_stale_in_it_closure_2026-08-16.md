@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-16
-**Status:** OPEN
+**Status:** FIXED (verified 2026-11-11, lane ne16)
 **Component:** compiler — closure capture of module-level `var` in SSpec `it` blocks
 
 ## Symptom
@@ -87,4 +87,33 @@ Make an `it` closure reference the live module-level binding rather than a
 snapshot. Re-run the reproduction above; both examples must pass. Then drop the
 `_get_metrics()` indirection in `test/03_system/tools/smux_system_spec.spl` and
 confirm all 56 examples still pass.
+
+## Addendum 2026-11-11 (lane ne16, seed-smoke verification)
+
+Re-ran the doc's minimal reproduction verbatim (both the `int` counter and the
+list-typed `_items` variants) against the fresh seed
+(`bin/simple.exe`, build-commit `46fe8f6b6def`, seedfix A+B):
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test \
+  build/p3-ne16/mv_repro_spec.spl --mode=interpreter --no-cache
+-> SPEC FILE VERDICT: outcome=OK declared>=2 executed=2 passed=2 failed=0
+```
+
+The direct `_counter` read inside the `it` body now observes the live module
+binding (both examples pass; the doc observed `passed=1 failed=1` with
+`expected 0 to equal 2` on the same `test`-subcommand lane). Verdict: FIXED.
+
+Also verified: the seed's `test` subcommand now works at all — the doc's
+"Notes on evidence" blocker ("no in-tree self-hosted binary implements a
+working `test` subcommand", see
+`deployed_selfhost_test_subcommand_segv_blocks_bootstrap_2026-08-16.md`) is
+obsolete on this build.
+
+**Follow-up not done here (owner lane):** the recorded workaround in
+`test/03_system/tools/smux_system_spec.spl` (`_get_metrics()` indirection,
+lines 202-203 and ~15 call sites) is still in place. The doc's unblock
+condition asks to drop it and confirm all 56 examples pass; that churn belongs
+to the smux owner lane, not this P3 traverse. The workaround comment cites
+this doc and remains accurate either way.
 
