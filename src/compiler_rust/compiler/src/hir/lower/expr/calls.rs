@@ -313,6 +313,61 @@ impl Lowerer {
             self.lower_call_args(args, ctx)?
         };
 
+        // BOOL-ARG STATIC ADMISSION (doc/08_tracking/bug/bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04):
+        // lowering-side mirror of the interpreter pre-scan in `bind_args`: a
+        // literal non-bool argument at a `bool`-declared parameter of a
+        // directly-named function is a lowering error, so the JIT lane cannot
+        // re-tag it into a corrupt value. Existence probes (`x.?`), Option
+        // payloads, and non-literal expressions keep the runtime PRESENCE
+        // contract. Spreads are statically uncounted and keep the runtime
+        // contract for every spread-touched slot.
+        if let (Expr::Identifier(_), HirExprKind::Global(symbol)) = (callee, &func_hir.kind) {
+            if let Some(slots) = self.fn_param_bool.get(symbol) {
+                if !slots.is_empty() && !args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+                    let named: std::collections::HashSet<&str> =
+                        args.iter().filter_map(|a| a.name.as_deref()).collect();
+                    let names = self.fn_param_names.get(symbol);
+                    let mut cursor = 0usize;
+                    for arg in args {
+                        let slot = match arg.name.as_deref() {
+                            Some(n) => names.and_then(|ns| ns.iter().position(|p| p == n)),
+                            None => {
+                                // Advance past slots a named argument claimed.
+                                while cursor < slots.len() {
+                                    let claimed = names
+                                        .and_then(|ns| ns.get(cursor))
+                                        .map(|p| named.contains(p.as_str()))
+                                        .unwrap_or(false);
+                                    if !claimed {
+                                        break;
+                                    }
+                                    cursor += 1;
+                                }
+                                let s = (cursor < slots.len()).then_some(cursor);
+                                cursor += 1;
+                                s
+                            }
+                        };
+                        if let Some(i) = slot {
+                            if slots[i] {
+                                if let Some(kind) =
+                                    crate::interpreter::interpreter_call::non_bool_literal_arg_kind(&arg.value)
+                                {
+                                    let pname = names
+                                        .and_then(|ns| ns.get(i))
+                                        .map(String::as_str)
+                                        .unwrap_or("?");
+                                    return Err(LowerError::Unsupported(format!(
+                                        "type mismatch: parameter '{pname}' is declared 'bool' but the argument is a {kind} literal"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // M12 3b: fill omitted trailing arguments from the callee's parameter
         // defaults, for a directly-named free function called purely
         // positionally (same-module table first, then the importing file's

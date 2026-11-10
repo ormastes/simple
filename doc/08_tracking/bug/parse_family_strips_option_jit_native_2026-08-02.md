@@ -387,3 +387,20 @@ platform-specific or single-build artifact:
 Native column still not re-measured: `native-build` on this host is blocked
 before codegen by the persistent package index (`scv-authority-missing`), so a
 native row would be manufactured rather than observed.
+
+## 2026-11-10 p2fix-interp lane (work/p2fix-interp-20261110, base d8c0a761988c)
+
+Value-level contract re-verified on a fresh cargo build from this tree, full
+six-name family (parse_int/parse_i64/parse_i32/parse_float/parse_f64/
+parse_f64_safe), both lanes, with the 0/3 controls: interpreter yields
+Option::Some/Option::None; JIT yields bare scalar/nil; all `??` coalesces
+correct on both lanes ("3" present stays 3, "0" control = 0, failure takes
+the default). The remaining defect is unchanged and is exactly the documented
+representation scope: JIT/native strip the Option wrapper (bare tagged int /
+bare runtime nil instead of Option::Some/Option::None). That scope is the
+seed-wide nil-boxed primitive T? representation migration staged in this doc
+(stages 1-5, difficulty 4, incl. [TryOperator] on native) — NOT completable
+within this lane's budget or host (no admitted native producer); per the
+record's own next_step it needs the shared-representation design review with
+int/float Some/None print, pattern, coalesce, and native controls. No
+sentinels were restored and no value-fix is claimed as scope completion.

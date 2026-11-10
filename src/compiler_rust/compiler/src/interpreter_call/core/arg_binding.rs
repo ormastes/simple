@@ -15,6 +15,47 @@ type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
 
+/// BUG-ADMISSION (doc/08_tracking/bug/bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04):
+/// does this argument expression statically prove a non-`bool` value at a
+/// `bool`-typed parameter? Only literal shapes qualify: an integer/float/text
+/// literal or a bare `nil`. Existence probes (`x.?`), Option payloads,
+/// coalesces, and every non-literal expression stay on the deliberate runtime
+/// PRESENCE contract (`present_value_as_bool_arg`): the runtime cannot tell
+/// `f(5)` from `f(x.?)`, but a literal is unambiguous. This is intentionally
+/// NOT a general argument-type check — typed non-bool identifiers need the
+/// HM-parity checker and are tracked as remaining scope in the bug doc.
+pub(crate) fn non_bool_literal_arg_kind(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::Integer(_) | Expr::TypedInteger(..) => Some("integer"),
+        Expr::Float(_) | Expr::TypedFloat(..) => Some("float"),
+        Expr::String(_) | Expr::TypedString(..) | Expr::FString { .. } => Some("text"),
+        Expr::Nil => Some("nil"),
+        _ => None,
+    }
+}
+
+/// Reject a literal non-`bool` argument bound to a `bool`-typed parameter
+/// before any argument is evaluated: a rejected call must not run argument
+/// side effects. Returns `None` when the admission rule does not apply.
+fn reject_bool_literal_arg(expr: &Expr, param: &Parameter) -> Option<CompileError> {
+    if !matches!(param.ty.as_ref(), Some(Type::Simple(n)) if n == "bool") {
+        return None;
+    }
+    let kind = non_bool_literal_arg_kind(expr)?;
+    let ctx = ErrorContext::new()
+        .with_code(codes::TYPE_MISMATCH)
+        .with_help(format!(
+            "pass a `bool` value or an existence probe (`x.?`); a {kind} literal is not a bool"
+        ));
+    Some(CompileError::semantic_with_context(
+        format!(
+            "type mismatch: parameter '{}' is declared 'bool' but the argument is a {kind} literal",
+            param.name
+        ),
+        ctx,
+    ))
+}
+
 // Value-type (struct) arguments are passed by copy. Until 2026-08-21 every
 // bind built a `HashSet` of ALL value-type class names by iterating and
 // cloning every entry of `classes` (thousands in the self-hosted compiler) on
@@ -246,6 +287,41 @@ pub(crate) fn bind_args_with_injected(
     let mut bound = HashMap::with_capacity(params_to_bind.len());
     let mut positional_idx = 0usize;
     let mut variadic_values = Vec::new();
+
+    // Static bool admission pre-scan (same bug doc as `reject_bool_literal_arg`):
+    // mirror the binding cursor so a literal non-bool argument at a `bool`
+    // parameter is rejected BEFORE any argument is evaluated. Spreads fan out
+    // per element with a statically unknown count and variadic calls bind the
+    // tail into the variadic parameter, so a call containing either keeps the
+    // pure runtime contract for every slot it touches.
+    if variadic_param_idx.is_none() && !args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+        let mut admission_idx = 0usize;
+        for arg in args {
+            if let Some(name) = &arg.name {
+                if let Some(param) = params_to_bind.iter().find(|p| &p.name == name) {
+                    if !param.variadic {
+                        if let Some(err) = reject_bool_literal_arg(&arg.value, param) {
+                            return Err(err);
+                        }
+                    }
+                }
+            } else {
+                while admission_idx < params_to_bind.len()
+                    && named_params.contains(params_to_bind[admission_idx].name.as_str())
+                {
+                    admission_idx += 1;
+                }
+                if admission_idx >= params_to_bind.len() {
+                    break;
+                }
+                let param = params_to_bind[admission_idx];
+                if let Some(err) = reject_bool_literal_arg(&arg.value, param) {
+                    return Err(err);
+                }
+                admission_idx += 1;
+            }
+        }
+    }
 
     let coerce_param = |value: Value, ty: Option<&Type>| -> Value {
         // Unsigned-int coercion for u8..u64 parameter types.
