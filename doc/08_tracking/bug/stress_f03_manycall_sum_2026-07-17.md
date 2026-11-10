@@ -125,3 +125,17 @@ re-verification.
 cd src/compiler_rust && cargo build --release
 SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/cert/stress-suite.shs
 ```
+
+## 2026-11-10 p2fix-interp lane (work/p2fix-interp-20261110, base d8c0a761988c) — VERIFIED-GREEN (seed-smoke)
+
+Fix confirmed in source (`builtin_wins_over_user_fn` gate at Priority 2;
+PRELUDE_UNSHADOWABLE = exit/dprint only) and executed with the deployed seed
+bin/simple.exe (which contains the fix): the exact stress shape
+`manycall_sum_300.spl` (fn f0..f299 -> int, main prints f0()+...+f299())
+prints 44850 on BOTH `SIMPLE_EXECUTION_MODE=interpret` and the default JIT
+lane (interpreter was 44786 when this was filed; the sole miscounted term was
+zero-arg `f64()` losing to the cast builtin). Isolated repro
+`fn f64() -> int: return 64; print(f64())` prints 64 on both lanes.
+Retained unit `interpreter_call::precedence_tests::user_defined_function_wins_over_builtin`
+passes in a fresh cargo build (46/46 interpreter_call tests). Seed-smoke
+evidence only; compiled-contract confirmation per stress-suite gate.

@@ -52,3 +52,20 @@ The seed's interpreter extern dispatch must return the documented sentinel /
 nil for these three symbols instead of raising, and
 `rt_webgpu_create_surface_fn` must return `-1`, not `0`. Once that lands, the
 caller-side existence probes above can be removed.
+
+## 2026-11-10 p2fix-interp lane (work/p2fix-interp-20261110, base d8c0a761988c) — VERIFIED
+
+All three boundary fixes are present at this base and were executed against a
+fresh cargo build of the seed from this tree (the 2026-11-07 deployed seed
+bin/simple.exe predates them: its spl_dlopen still raised and
+rt_webgpu_create_surface still returned 0; rt_file_mmap_read_bytes already
+returned nil). Fresh-build probe on BOTH interpret and jit lanes:
+spl_dlopen(missing) -> 0, rt_file_mmap_read_bytes(missing) -> nil,
+rt_webgpu_create_surface(640,480) -> -1. Retained Rust unit tests all pass:
+wsffi::dlopen_load_failure_returns_zero_not_abort,
+file_io::mmap_named_text_and_bytes_match_read_contract,
+gpu::webgpu_create_surface_returns_invalid_handle_not_zero.
+New regression spec
+test/01_unit/compiler/95.interp/interpreter/raw_boundary_failure_sentinels_spec.spl
+(4/4 seed-smoke). Caller-side existence probes in nogc_sync_mut remain as
+defense in depth; removal is a separate cleanup.

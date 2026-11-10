@@ -56,3 +56,14 @@ list wherever the name appears -- the same mechanism
 helper arguments. It must run LAST, after PERF-3's matcher, so already-matched
 shapes keep their cheaper path.
 
+
+## 2026-11-10 p2fix-interp lane (work/p2fix-interp-20261110, base d8c0a761988c) — VERIFIED-GREEN (seed-smoke)
+
+Retained specs executed with the deployed seed bin/simple.exe
+(`bin/simple test <spec> --mode=interpreter`):
+while_block_local_val_parity_spec.spl 2/2
+(299995 and 1333333000 in interpreter mode, interpreter==jit output);
+while_block_local_val_trap_parity_spec.spl 4/4 (unused `val y = i % 0`
+initializer traps identically on both lanes). Both also re-run green on a
+fresh cargo build of this tree. Seed-smoke only; the 271x speed claim itself
+still needs a release-seed latency measurement (not re-measured here).
