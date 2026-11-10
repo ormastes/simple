@@ -1,6 +1,9 @@
 # `i64?` return payload is silently corrupted (seed interpreter)
 
-Status: OPEN — SILENT WRONG ANSWERS, no error raised
+Status: FIXED — producer (#138) and consumer halves verified on the fresh
+seed 2026-11-11 (lane interp10): unwrap idioms ALL PASS on both lanes,
+`??` yields the raw payload, unnarrowed arithmetic fails closed; seed-smoke
+on build-commit 46fe8f6b6def
 Found: 2026-08-31, while applying the class-(c) optional-widening remedy to
 `ThreadHandle.join()` (known_bugs C12).
 Severity: high. This produces wrong numbers rather than failing.
@@ -104,3 +107,29 @@ asymmetric): `u64?` (HeapUInt), `f64?`/`f32?` (raw enum payload bits vs
 BoxFloat), `bool?` (rt_value_bool), and `Any?` (known_bugs R4). Whether
 `!= nil` should narrow remains the design decision tracked by the PROPOSAL
 doc — narrowing was not invented here.
+
+## 2026-11-11 triage addendum — lane interp10 (FIXED)
+
+Full-chain verification on the fresh seed (`bin/simple.exe`, build-commit
+`46fe8f6b6def`, `SIMPLE_LIB=src`; seed-smoke):
+
+- `simple run test/01_unit/compiler/interpreter/probe_optional_tail_return_jit.spl`
+  — ALL PASS, both default (JIT) and `SIMPLE_EXECUTION_MODE=interpret`.
+- `simple run .../probe_optional_unwrap_idioms_jit.spl` — ALL PASS, both lanes.
+- `simple run .../probe_optional_unwrap_jit.spl` — ALL PASS, both lanes.
+- `simple test test/01_unit/std/concurrent_join_nil_contract_spec.spl --mode=interpreter`
+  — 2/2 PASS (extern-backed `i64?` round-trip still correct).
+- Repro chain re-run (interpret lane): `f() ?? 0` prints `coalesce: 42
+  plus1: 43`; nil arm `g() ?? -1` prints `-1`; unnarrowed `v + 1` fails
+  closed with `semantic: type mismatch: cannot convert enum to int` —
+  exactly the consumer-half contract of 2026-08-31. No silent corruption
+  observed anywhere; the class-(c) `T -> T?` widening remedy is safe for
+  BoxInt-family scalars via the `??` / `if val` / `.unwrap()` idioms.
+- Note: the three `probe_optional_*_jit.spl` files are `simple run` probes
+  (`fn main` + `exit`), not specs — `simple test` reports
+  `reason=zero-examples` for them; they must be run with `simple run`.
+
+Citations: producer fix PR #138 (tail-return boxing); consumer half
+`fix/optional-narrowing-divergence` 2026-08-31 (`hir lower_coalesce` /
+`build_if_let_binding_stmts` typing, `mir lower_builtin_call_expr`
+`rt_unwrap_or_self` unbox, HIR `lower_binary` fail-closed rejection).
