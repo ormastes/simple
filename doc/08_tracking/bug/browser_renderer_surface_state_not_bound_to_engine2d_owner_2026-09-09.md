@@ -1,7 +1,9 @@
 # BrowserRenderer surface state is not bound to the Engine2D owner
 
-Status: open; blocks any claim of production BrowserRenderer surface-lifecycle
-integration.
+Status: fixed (O1 owner-bound slice landed and verified 2026-11-11 — focused
+owner spec 20/20 PASS, seed-smoke). Residual follow-ups tracked in the
+requirement/plan docs: B/N2 submission session, async present release/scanout,
+and SPipe/device lifecycle evidence. See Addendum 2026-11-11 below.
 
 ## Evidence
 
@@ -136,3 +138,51 @@ production receipt/replacement wiring. These are unexecuted specifications at
 this revision, not runtime PASS evidence. Source review and whitespace checks
 are sufficient only for a WARN development PR; full production verification,
 SPipe generation, device lifecycle evidence, and B/N2 integration remain open.
+
+
+## Addendum 2026-11-11 — lane ne3: FIXED (O1 owner-bound slice landed;
+## previously "unexecuted" focused spec now executes 20/20 green); B/N2 and
+## full-production acceptance remain tracked follow-ups
+
+Traversed on work/p3-ne3-20261111 (origin/release/1.0.0 tip 93490a99c5d8),
+refreshed seed bin/simple.exe (2026-11-11, build-commit 0791c2b7f4a7), run as
+seed-smoke (`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe
+test <spec> --mode=interpreter --no-cache`).
+
+- The O1 vertical slice described under "O1 vertical slice landed" above is
+  present at this tip: `src/os/compositor/compositor_gpu_surface_owner.spl`
+  and its focused contract
+  `test/01_unit/os/compositor/compositor_gpu_surface_owner_spec.spl` (20
+  scenarios, including the Astra-review corrections: damaged-then-idle,
+  missing/duplicate intermediates, counter regression, out-of-order
+  completion, raw-handle reuse, generation exhaustion, unbound offers,
+  intermediate target mismatch, contradictory host-cache refresh, and
+  resource-capacity rejection).
+- The spec's own last-paragraph caveat ("These are unexecuted specifications
+  at this revision, not runtime PASS evidence") is now outdated on this tip:
+  the spec executes to completion on the refreshed seed —
+  `SPEC FILE VERDICT: outcome=OK declared>=20 executed=20 passed=20 failed=0`
+  (log: `build/review/p3fix-ne3-20261111-logs/row1_surface_owner.log`). The
+  owner binding the bug demanded — render methods routed through an
+  owner-bound session lease with real receipt validation, not pixel-returning
+  free functions — is therefore landed AND covered by executed green
+  evidence, not just source review.
+- The `BrowserRenderer`-specific framing (fresh software renderer per
+  `BrowserSession.render/render_to_pixels`) is superseded by the selected O1
+  design: the persistent production display owner lives in the compositor and
+  the pixel APIs are retained only as compatibility capture routes
+  (`doc/02_requirements/feature/browser_renderer_gpu_surface_owner.md`,
+  `doc/04_architecture/browser_renderer_gpu_surface_owner.md`).
+- Still open by the requirement/plan docs' own status lines (not silently
+  dropped): B/N2 runtime-owned bounded submission session ("B/N2 remains
+  unconnected" above; `doc/03_plan/sys_test/browser_renderer_gpu_surface_owner.md`
+  — "Status: selected O1 + B/N2; blocked only on implementation/provider
+  admission"), asynchronous present release/scanout receipt (the slice is
+  explicitly `synchronous-present-receipt`), and SPipe/system + device
+  lifecycle evidence (no `test/03_system/**/gpu_surface*` spec exists yet).
+
+Verdict: the titular defect — surface state not bound to the Engine2D owner —
+is fixed with executed evidence. The wider production-boundary acceptance list
+in this doc (three frames in flight with bounded backpressure, zero
+steady-state CPU waits, SPipe generation) remains open under the O1+B/N2
+requirement and plan docs. Status flipped accordingly.
