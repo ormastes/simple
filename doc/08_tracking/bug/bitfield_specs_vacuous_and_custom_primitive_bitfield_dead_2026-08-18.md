@@ -224,3 +224,25 @@ has been proven.
 Finding 2 RESOLVED: `src/compiler/50.mir/custom_primitive_bitfield.spl` no longer exists and no
 `BitfieldValidator` references remain outside an unrelated census scanner. Finding 1 still OPEN:
 `test/01_unit/compiler/mir/bitfield_mir_spec.spl` still has 31 `contains(` assertions on literals.
+
+## 2026-11-10 triage (P3 runner lane, work/p3-runner-20261110): Finding 1 LIVE -> FIXED (93a6de8b95ee)
+
+Live state confirmed by direct grep (31 `check(code.contains(...))`
+assertions on string literals) — the 2026-11-03 re-probe still held. Root
+cause of the regression: consolidation commit f1509b5947e7
+(test/unit/compiler -> test/01_unit/compiler, 2026-11-09) kept the legacy
+vacuous copy at test/01_unit/compiler/mir/bitfield_mir_spec.spl and spliced
+the migrated genuine copy below it, trapping the genuine copy's two `use`
+import lines inside a triple-quoted string literal (so even the genuine
+section could not resolve `BitLayout`/`bits_needed`/`would_straddle_word`).
+
+Fix: restored the pre-consolidation genuine spec verbatim (14 examples, all
+assertions compare COMPUTED values to expected constants, explicit
+positive-control example that fails if the import resolves to nothing).
+
+Finding 2 remains RESOLVED (custom_primitive_bitfield.spl deleted earlier;
+verified absent in this worktree).
+
+Seed-smoke evidence (Rust seed `bin/simple.exe`, this worktree):
+`bin/simple.exe test test/01_unit/compiler/mir/bitfield_mir_spec.spl`
+-> SPEC FILE VERDICT outcome=OK declared>=14 executed=14 passed=14 failed=0.

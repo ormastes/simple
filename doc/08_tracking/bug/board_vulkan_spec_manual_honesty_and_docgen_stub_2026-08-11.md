@@ -136,3 +136,18 @@ owning lane).
 - Docgen log: session scratchpad `docgen.log`
 - Scorer log: session scratchpad `sspec_scan.log`
 
+
+## 2026-11-10 triage (P3 runner lane, work/p3-runner-20261110): Finding 1 LIVE -> FIXED (69d3ce4d5e58)
+
+The docstring in test/01_unit/os/vulkan/cross_arch_boundary_substitution_spec.spl
+was still comment-wrapped (`# """ ... # """`), so spipe_docgen would still
+emit a stub. Fix: converted the block to a real top-level triple-quoted
+literal (verbatim narrative, sibling-spec convention). Finding 2 required no
+change (readback/cmdstream manuals already carry honest limitation wording).
+
+Seed-smoke evidence (Rust seed `bin/simple.exe`, this worktree):
+- `bin/simple.exe test test/01_unit/os/vulkan/cross_arch_boundary_substitution_spec.spl`
+  -> 4 total, 4 passed, 0 failed.
+- `bin/simple.exe run src/app/spipe_docgen/main.spl <spec> --output <scratch> --no-index`
+  -> "Generated 1 docs (1 complete, 0 stubs)"; the generated manual opens with
+  the narrative block instead of AUTO-generated stub text.
