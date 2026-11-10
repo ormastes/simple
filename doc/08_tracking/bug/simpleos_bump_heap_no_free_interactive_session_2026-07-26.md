@@ -1,6 +1,6 @@
 # SimpleOS x86_64 bump heap never reclaims — the FIRST interaction after boot panics "heap exhausted" (2026-07-26)
 
-Status: OPEN (mitigated by sizing, root fix not implemented)
+Status: FIXING (explicit C allocation release repaired; renderer lifetime integration remains incomplete)
 Lane: `scripts/check/check-simpleos-wm-fullscreen-evidence.shs` (SimpleOS-WM x QEMU showcase cell)
 
 ## Symptom
@@ -137,3 +137,51 @@ exists because the defect is in the freestanding C allocator itself, not in
 compiler-generated code. Leaving **OPEN — ARCHITECTURAL** (requires baremetal
 C allocator redesign + fresh QEMU/board evidence, out of scope for this
 sweep). The 512MB mitigation remains landed and is not further downgraded.
+
+## 2026-11-10: explicit C allocation ownership prerequisite
+
+Current source still used a 192 MiB no-free heap, despite the historical sizing
+notes above. An executable probe of that exact owner retained 64 bytes and
+allocated/freed four 1 MiB temporaries. Its watermark grew to 4,194,368 bytes;
+the probe exited 1. This is a direct allocator reproduction, not a guest run.
+
+The allocator now uses `arch/common/simpleos_reclaim_heap.h`: 16-byte aligned
+allocations, size-segregated free lists, physical-neighbour coalescing and tail
+trimming. Only explicit `free` releases storage. Retained objects never move
+or disappear at a frame boundary. Reallocation preserves existing bytes,
+releases replaced auxiliary storage and preserves the old allocation on
+failure. Checked arithmetic rejects oversized allocations. NVMe aligned
+buffers retain their original allocation pointer and release that owner;
+they no longer change the global heap watermark behind the allocator.
+
+The single-owner serialization requirement is unchanged. This is not a
+thread-safe allocator. `rt_dealloc` still does not infer ownership from an
+arbitrary RuntimeValue: aliases, retained surfaces and cached glyph atlases
+must not be freed without their language owner's lifetime contract.
+
+Executable evidence from `sh scripts/check/check-simpleos-reclaim-heap.shs`:
+
+- Allocator: 5 scenarios and 18,240,357 assertions, including 3,000 temporary
+  frame cycles around a retained sentinel, coalescing, allocation exhaustion,
+  realloc failure/preservation and 20,000 mixed-owner operations.
+- Actual extracted C wrappers: 263 assertions covering malloc/free/calloc,
+  auxiliary-buffer realloc, retained bytes and non-LIFO NVMe aligned release.
+  Only serial diagnostics and the hardware panic port are adapted for host use.
+- LLVM instrumentation: 92.86% branch and 99.19% line coverage of the allocator.
+- The complete `baremetal_stubs.c` compiled for `x86_64-unknown-none` with
+  `-ffreestanding -fno-builtin -fno-stack-protector -mno-red-zone`.
+- A same-host, same-compiler 100-frame probe wrote every byte of a 1 MiB
+  temporary then explicitly freed it, preserving a 64-byte retained sentinel.
+  The original owner ended at 104,857,664 heap bytes (114 ms CPU); the repaired
+  owner peaked at 1,048,704 bytes and ended at 96 bytes including metadata
+  (46 ms CPU). These are one bounded allocator experiment, not WM timing or RSS
+  qualification; they establish that the release path does not trade a leak
+  for an obvious loop-cost regression on this workload.
+
+**The parent bug remains source-incomplete.** Explicit C scratch buffers now
+have a reclaiming release boundary; generated arrays/readback snapshots still
+need explicit retained-versus-temporary owner integration. Do not replace that
+work with a global frame checkpoint reset. After integration, rebuild the actual
+WM guest, exercise repeated maximize/restore/input frames, verify bounded live
+memory and compare retained glyph/surface pixels. No QEMU or full WM result is
+claimed by these host C tests, and this prerequisite does not close the bug.
