@@ -1,7 +1,11 @@
 # Stage-2 hello world SEGVs in `native_compile` (step 5/6) — newly exposed by the unwrap-theft fix
 
 - **Filed:** 2026-08-25
-- **Status:** OPEN. Newly exposed, not newly introduced.
+- **Status:** OPEN — BLOCKED on a Stage-2 binary (2026-11-11, lane boot17).
+  Direct re-verification needs either the preserved evidence binary (dead
+  host path) or a fresh full-bootstrap Stage-2; both are outside this lane's
+  grant. Corroborating evidence says likely FIXED at current source (see
+  addendum). Exact grant commands in the addendum.
 - **Severity:** blocks the Stage-2/Stage-3 self-host lane (rc=139 on hello world).
 - **Parent:** `stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md`
 - **Predecessor:** `poll_unwrap_second_bind_site_lower_and_check_impl_2026-08-25.md` (FIXED)
@@ -71,3 +75,49 @@ printf 'fn main():\n    print "hello"\n' > /tmp/hw.spl
 "./$S2" native-build /tmp/hw.spl --backend=cranelift -o /tmp/hw.bin; echo "rc=$?"
 # expect rc=139, and ZERO E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED lines
 ```
+
+## Addendum 2026-11-11 (lane boot17) — BLOCKED on a Stage-2 binary; likely FIXED
+
+**Why BLOCKED:** the crash is in the Stage-2 binary's own native-compiled
+execution, so only a Stage-2-class binary can prove or disprove it today.
+This lane cannot produce one (full bootstrap is outside the grant;
+entry-closure native builds are forbidden; only small Rust-engine builds are
+allowed, and those exercise the Rust codegen, not the pure-Simple
+native_compile path this bug dies in). The preserved bind2 evidence binary
+lives at `/mnt/data/evidence-bind2/stage2-bind2-simple.rejected` — a host
+path that no longer exists.
+
+**Exact grant commands to unblock:**
+
+```sh
+# A. Replay the preserved evidence binary (if that volume is mountable):
+S2=/mnt/data/evidence-bind2/stage2-bind2-simple.rejected
+printf 'fn main():\n    print "hello"\n' > /tmp/hw.spl
+"$S2" native-build /tmp/hw.spl --backend=cranelift -o /tmp/hw.bin
+# fixed == rc 0 (or any non-139), ZERO E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED lines
+
+# B. Preferred — fresh Stage-2 from current source, then this doc's own gate:
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap \
+  --backend=cranelift --stop-after-stage2 --output=build/<lane>
+sh scripts/check/check-stage2-option-unwrap-not-stolen.shs \
+  --stage2 build/<lane>/stage2/x86_64-unknown-linux-gnu/simple
+```
+
+**Corroborating evidence it no longer reproduces at current source** (not a
+verification — the gate above is):
+
+- The unwrap-theft family this segv belongs to was swept: the gate's own
+  SYMBOLIC check is green at source and
+  `src/compiler/80.driver/driver_aot_native_output.spl:2754` carries the
+  note "stage2 workaround: Option<fn> unwrap + _N placeholder closure
+  miscompile (sweep 2026-11-04)".
+- A cranelift aarch64 Stage-2 candidate built from current release/1.0.0
+  source (df48a86ff5a worktree, per the sibling f64 / silent-wrong-values
+  records, 2026-11-05) native-built and ran multiple probes end-to-end —
+  Stage-2 `native_compile` of real programs succeeds on that host today.
+- This lane ran the current-source pure-Simple native-build coordinator
+  (interpreted by the fresh seed) on a small fixture: the pipeline walked
+  parse and entered MIR/codegen without the native_compile-phase segv the
+  doc records (run ended at the lane's outer 120s harness cap, not a crash).
+- The behavioural half of the gate remains RED only because it needs a
+  `--stage2 <path>` binary; with the current seed its symbolic half passes.

@@ -4,7 +4,11 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: FIXED at source (2026-11-11, lane boot17) — both link symbols now have
+  reachable definitions: `module_surfaces_promote_reason` restored (pub fn,
+  merge 9e7e7a526edb / PR #7597) and `_sffi_enum_discriminant` module-ownership
+  closed (40c2ce3d9caf + `method_calls_literals.spl` no longer references it).
+  Stage-2 link re-qualification not re-run on this lane. See addendum.
 - Area: Stage-2 native link (`--backend=llvm --mode=dynload`), pure-Simple symbol
   emission / `@always_inline` elision in `native_project`
 - Found by: BOOT-16, run A (`build/bootstrap-boot16a`, branch head `4d51c3d3071`,
@@ -134,3 +138,40 @@ Stage2 link/qualification is UNRUN locally under the low-disk build constraint.
 The earlier `module_surfaces_promote_reason` scope is not revalidated here, so
 this broader bug remains verification-pending rather than closed.
 
+
+## Addendum 2026-11-11 (lane boot17) — FIXED at source; link re-qualification pending
+
+**Verification actually run** (worktree simple-p3-boot17-20261111, branch
+`work/p3-boot17-20261111`, fresh seed 46fe8f6b6def):
+
+1. `module_surfaces_promote_reason` — defined again at
+   `src/compiler/20.hir/hir_lowering/module_surface_registry.spl:608` as
+   `pub fn`; the clobber recorded above is undone. Introduced by merge
+   `9e7e7a526edb` (PR #7597, 2026-11-07). Seed-smoke:
+   `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+   test/01_unit/compiler/hir/module_surface_promote_reason_spec.spl
+   --mode=interpreter --no-cache` → `executed=4 passed=4 failed=0`.
+2. `_sffi_enum_discriminant` — repo-wide static audit (python3 over
+   `src/**/*.spl` + `plugins/**/*.spl`): every module that references the
+   symbol owns exactly one local definition; **no module references it
+   without defining it** (the dangling cross-module pattern that produced the
+   mold undefined-symbol is gone). `method_calls_literals.spl` now contains
+   zero references; `enum_constructor_payload.spl` owns the local
+   generic-unsafe wrapper + `rt_enum_discriminant` extern added by
+   `40c2ce3d9caf` "fix(mir): own enum payload diagnostic discriminant helper"
+   (2026-11-07). The 2026-11-07 candidate fix is therefore fully landed.
+
+**Not re-run here:** the Stage-2 link itself (full bootstrap is outside this
+lane's grant; entry-closure native builds are forbidden). The check-in gate
+`test/01_unit/scripts/mir_enum_discriminant_owner_contract_test.shs` currently
+FAILS its `expr_dispatch.spl` arm — not over ownership (expr_dispatch still
+defines its own module-owned `@always_inline` wrapper at :60-62) but because a
+later refactor routed that wrapper's body through the canonical
+`compiler.common.value_access.compiler_value_discriminant` owner instead of a
+local `unsafe(ffi)` + `extern` pair, so the audit's literal-shape regex no
+longer matches. That delegation intersects the separately-tracked live defect
+"seed private-fn-import visibility divergence" (route-don't-fix on this lane;
+the `compiler_value_discriminant` wrappers are explicitly not to be pub'd).
+Owner lane should decide whether the audit's shape pin should accept the
+canonical-delegation form; the missing-definition link class this doc tracks
+is closed either way.
