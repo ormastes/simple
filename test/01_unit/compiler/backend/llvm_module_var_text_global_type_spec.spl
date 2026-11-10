@@ -1,0 +1,106 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/db/native_module_var_text_global_type_mismatch_2026-07-16.sdn
+# A module-level `var x: text = "..."` must be emitted as an LLVM global whose
+# declared storage type, initializer and every load/store agree (`ptr`), never
+# as `global i64 <ptr constant>` (llc: constant expression type mismatch).
+
+use std.spec.step
+
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering.*
+
+fn translate_source(source: text) -> text:
+    val ast = parse_full_frontend(source, "modvar_text.spl", "modvar_text.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("modvar_text.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    expect(errors).to_equal("")
+    MirToLlvm.create("test.llvm.modvar_text", CodegenTarget.X86_64, nil).translate_module(mir)
+
+fn global_decl_line(output: text, name: text) -> text:
+    for line in output.split("\n"):
+        if line.starts_with("@g_modvar_text__{name} = "):
+            return line
+    ""
+
+fn count_of(output: text, needle: text) -> i64:
+    output.split(needle).len() - 1
+
+describe "LLVM module-level text var global typing":
+    it "declares `var s: text = \"\"` as a ptr global with a ptr initializer":
+        # @req REQ-SSPEC-UNIT
+        step("declares `var s: text = \"\"` as a ptr global with a ptr initializer")
+        val output = translate_source("var s: text = \"\"\nfn read() -> text: s\nfn write(v: text): s = v\n")
+        val decl = global_decl_line(output, "s")
+        expect(decl.contains("global ptr ")).to_equal(true)
+        expect(decl.contains("global i64 ")).to_equal(false)
+        expect(decl.contains("ptrtoint")).to_equal(false)
+        expect(output.contains("load ptr, ptr @g_modvar_text__s")).to_equal(true)
+        expect(output.contains(", ptr @g_modvar_text__s, align 8")).to_equal(true)
+        expect(output.contains("load i64, ptr @g_modvar_text__s")).to_equal(false)
+        expect(output.contains("store i64 %l0, ptr @g_modvar_text__s")).to_equal(false)
+
+    it "declares `var s: text = \"hello\"` with a non-empty literal consistently":
+        # @req REQ-SSPEC-UNIT
+        step("declares `var s: text = \"hello\"` with a non-empty literal consistently")
+        val output = translate_source("var s: text = \"hello\"\nfn read() -> text: s\n")
+        val decl = global_decl_line(output, "s")
+        expect(decl.contains("global ptr ")).to_equal(true)
+        expect(decl.contains("global i64 ")).to_equal(false)
+        expect(output.contains("load ptr, ptr @g_modvar_text__s")).to_equal(true)
+
+    it "declares `var s: text? = None` as a ptr global loaded and stored as ptr":
+        # @req REQ-SSPEC-UNIT
+        step("declares `var s: text? = None` as a ptr global loaded and stored as ptr")
+        val output = translate_source("var s: text? = None\nfn read() -> text?: s\nfn write(v: text?): s = v\n")
+        val decl = global_decl_line(output, "s")
+        expect(decl.contains("global ptr ")).to_equal(true)
+        expect(output.contains("load ptr, ptr @g_modvar_text__s")).to_equal(true)
+        expect(output.contains("load i64, ptr @g_modvar_text__s")).to_equal(false)
+
+    it "declares `var xs: [text] = []` as a ptr global loaded and stored as ptr":
+        # @req REQ-SSPEC-UNIT
+        step("declares `var xs: [text] = []` as a ptr global loaded and stored as ptr")
+        val output = translate_source("var xs: [text] = []\nfn read() -> [text]: xs\nfn write(v: [text]): xs = v\n")
+        val decl = global_decl_line(output, "xs")
+        expect(decl.contains("global ptr ")).to_equal(true)
+        expect(output.contains("load ptr, ptr @g_modvar_text__xs")).to_equal(true)
+        expect(output.contains("load i64, ptr @g_modvar_text__xs")).to_equal(false)
+
+    it "declares a text var initialised from a call as ptr with a module-init ptr store":
+        # @req REQ-SSPEC-UNIT
+        step("declares a text var initialised from a call as ptr with a module-init ptr store")
+        val output = translate_source("fn make() -> text: \"made\"\nvar s: text = make()\nfn read() -> text: s\n")
+        val decl = global_decl_line(output, "s")
+        expect(decl.contains("global ptr ")).to_equal(true)
+        expect(decl.contains("global i64 ")).to_equal(false)
+        expect(output.contains(", ptr @g_modvar_text__s, align 8")).to_equal(true)
+        expect(output.contains("store i64 %l0, ptr @g_modvar_text__s")).to_equal(false)
+        expect(output.contains("load ptr, ptr @g_modvar_text__s")).to_equal(true)
+
+    it "prevention: module `val` text constant does not become an i64 global":
+        # @req REQ-SSPEC-UNIT
+        step("prevention: module `val` text constant does not become an i64 global")
+        val output = translate_source("val s: text = \"fixed\"\nfn read() -> text: s\n")
+        expect(output.contains("global i64 getelementptr")).to_equal(false)
+        expect(output.contains("global i64 ptrtoint")).to_equal(false)
+
+    it "control: module `var n: i64 = 5` stays an i64 global with i64 load/store":
+        # @req REQ-SSPEC-UNIT
+        step("control: module `var n: i64 = 5` stays an i64 global with i64 load/store")
+        val output = translate_source("var n: i64 = 5\nfn read() -> i64: n\nfn write(v: i64): n = v\n")
+        val decl = global_decl_line(output, "n")
+        expect(decl.contains("global i64 5")).to_equal(true)
+        expect(output.contains("load i64, ptr @g_modvar_text__n")).to_equal(true)
+        expect(count_of(output, "store i64 %")).to_be_greater_than(0)
