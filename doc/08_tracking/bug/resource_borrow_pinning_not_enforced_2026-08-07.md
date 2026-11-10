@@ -205,3 +205,31 @@ for `pinning|BorrowPin|foreign_call_borrow` in `55.borrow/` and `50.mir/`:
 0 hits. A local "reject move with outstanding borrow" check without borrow
 liveness would flag every move after any earlier borrow (borrows never
 expire), so it is not a safe local fix. Left OPEN.
+
+## 2026-11-10: exact foreign-call authority repair, execution pending
+
+Current source contains NLL consumption checks and call-wide short-loan
+infrastructure (`call_loans.spl`, `nll_short_calls.spl`). The remaining concrete
+boundary is that legacy direct calls skip contract checking, while MIR previously
+lost whether a named target was a declared extern. An unused `Ref; Drop` without
+a call cannot independently prove that boundary.
+
+The repair uses the shared `MirCallOrigin` operand field. Provider metadata marks
+actual externs Foreign, proven Simple functions Source, and missing declaration
+authority Unknown. Signature/ABI rewrites preserve the marker. The borrow checker
+checks Foreign and Unknown calls even in legacy bodies; they cannot inherit a
+same-spelled local function's checked short summary. Existing extern parameter
+analysis declares reference retention unknown, so passing a live loan to that
+unproved boundary emits the existing non-retaining-contract escape diagnostic.
+Scalar extern inputs without loans and proven local legacy calls remain valid.
+
+Executable regressions are in
+`test/01_unit/compiler/resource/foreign_call_borrow_origin_spec.spl` (eight
+cases, including actual source classification and NLL consumption). Design:
+`doc/05_design/language/resource/foreign_call_borrow_origin.md`.
+
+**Verification pending:** execute that spec plus `resource_move_while_borrowed`
+and `resource_pinning_lifetime` on a source-compatible self-hosted runner, then
+the required compiler/core/MCP checks and MCP stdio integration smoke. No test
+execution, runtime pinning, trusted foreign non-retention contract, platform
+qualification, or bug closure is inferred from these source changes.

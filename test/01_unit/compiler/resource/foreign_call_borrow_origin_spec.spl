@@ -1,0 +1,151 @@
+"""Foreign-call lifetime boundary with real source classification and NLL checks.
+
+Regression: resource_borrow_pinning_not_enforced_2026-08-07.
+Unknown retention is rejected rather than assumed to end at call return.
+"""
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir.mir_instruction_graph.{MirBody, MirBlock, MirInst}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirCallOrigin, MirBorrowKind, MirPlace, MirTerminator, BlockId}
+use compiler.mir.mir_types.{LocalId, MirLocal, LocalKind, MirType, MirTypeKind, MirSignature, MirConstValue}
+use compiler.borrow.borrow_check.mod.{BorrowChecker}
+
+fn compiler_tools_setup(source: text, metadata_present: bool = true,
+    named_reference: bool = false) -> MirOperand:
+    val filename = "foreign_call_borrow_origin.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    if not metadata_present:
+        val symbol = hir.symbols.lookup_or_invalid("sink")
+        expect(symbol.id).to_be_greater_than(-1)
+        return lowering.symbol_to_operand(symbol)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    if named_reference:
+        val named = lowering.named_function_operand("sink")
+        expect(named != nil).to_equal(true)
+        if val operand = named:
+            return lowering.direct_call_operand_with_return_type(operand, MirType.unit())
+    var found = false
+    var callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
+    for function in mir.functions.values():
+        if function.name != "invoke" and not function.name.ends_with(".invoke"): continue
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, target, _):
+                        match target.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                if name == "sink" or name.ends_with(".sink"):
+                                    found = true
+                                    callee = target
+                            case _: ()
+                    case _: ()
+    expect(found).to_equal(true)
+    callee
+
+fn compiler_tools_callee(origin: MirCallOrigin) -> MirOperand:
+    val signature = MirSignature(params: [MirType.i64()], return_type: MirType.unit(),
+        is_variadic: false, params_known: true)
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("sink"),
+        MirType(kind: MirTypeKind.FuncPtr(signature))), call_origin: origin)
+
+fn compiler_tools_check(callee: MirOperand, borrowed: bool = true,
+    local_summary: bool = false, strict: bool = false, terminator_call: bool = false,
+    copied_alias: bool = false) -> [text]:
+    val owner = LocalId(id: 0)
+    val reference = LocalId(id: 1)
+    val alias = LocalId(id: 2)
+    val reference_type = MirType(kind: MirTypeKind.Ref(MirType.i64(), false))
+    val locals = [
+        MirLocal(id: owner, name: Some("owner"), type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false),
+        MirLocal(id: reference, name: Some("reference"), type_: reference_type, kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: alias, name: Some("alias"), type_: reference_type, kind: LocalKind.Temp, is_ghost: false)
+    ]
+    var instructions: [MirInst] = []
+    var argument = MirOperand.copy(owner)
+    if borrowed:
+        instructions.push(MirInst(kind: MirInstKind.Ref(reference, MirBorrowKind.Shared,
+            MirPlace(local: owner, projection: [])), span: nil))
+        argument = MirOperand.copy(reference)
+        if copied_alias:
+            instructions.push(MirInst(kind: MirInstKind.Copy(alias, reference), span: nil))
+            argument = MirOperand.copy(alias)
+    var blocks: [MirBlock] = []
+    if terminator_call:
+        blocks = [
+            MirBlock(id: BlockId(id: 0), label: nil, instructions: instructions,
+                terminator: MirTerminator.CallTerminator(nil, callee, [argument], BlockId(id: 1), nil, nil, nil)),
+            MirBlock(id: BlockId(id: 1), label: nil,
+                instructions: [MirInst(kind: MirInstKind.Drop(owner), span: nil)],
+                terminator: MirTerminator.Ret(nil))
+        ]
+    else:
+        instructions.push(MirInst(kind: MirInstKind.Call(nil, callee, [argument]), span: nil))
+        instructions.push(MirInst(kind: MirInstKind.Drop(owner), span: nil))
+        blocks = [MirBlock(id: BlockId(id: 0), label: nil, instructions: instructions,
+            terminator: MirTerminator.Ret(nil))]
+    var contracts: Dict<text, [text]> = {}
+    if local_summary: contracts["sink"] = ["read-short"]
+    val body = MirBody(name: "foreign-borrow-origin", blocks: blocks, locals: locals,
+        arg_count: 1, return_ty: MirType.unit(), nogc_strict: strict,
+        short_call_contracts: contracts)
+    var checker = BorrowChecker.create()
+    checker.check_function(body)
+    var messages: [text] = []
+    for error in checker.errors: messages.push(error.message)
+    messages
+
+describe "foreign-call borrow retention authority":
+    it "classifies a declared extern and rejects unproved retention in a legacy body":
+        step("Lower a declared extern and check its borrowed argument")
+        val callee = compiler_tools_setup("extern fn sink(value: i64) -> i64\nfn invoke(value: i64) -> i64:\n    sink(value)\n")
+        expect(callee.call_origin).to_equal(MirCallOrigin.Foreign)
+        expect(compiler_tools_check(callee).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "keeps a local same-spelled function under the legacy local-call policy":
+        step("Lower the local declaration and check the same argument lifetime")
+        val callee = compiler_tools_setup("fn sink(value: i64) -> i64:\n    value\nfn invoke(value: i64) -> i64:\n    sink(value)\n")
+        expect(callee.call_origin).to_equal(MirCallOrigin.Source)
+        expect(compiler_tools_check(callee).len()).to_equal(0)
+
+    it "does not lend a same-name local summary to a foreign callee":
+        step("Offer a local short summary to a foreign target with the same name")
+        val callee = compiler_tools_callee(MirCallOrigin.Foreign)
+        expect(compiler_tools_check(callee, local_summary: true, strict: true).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "does not treat missing callee authority as a safe local body":
+        step("Lower an extern without registered provider authority")
+        val callee = compiler_tools_setup("extern fn sink(value: i64) -> i64\n", metadata_present: false)
+        expect(callee.call_origin).to_equal(MirCallOrigin.Unknown)
+        expect(compiler_tools_check(callee, local_summary: true).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "preserves a named extern reference through return-signature repair":
+        step("Repair the return signature of a classified named extern")
+        val callee = compiler_tools_setup("extern fn sink(value: i64) -> i64\nfn invoke(value: i64) -> i64:\n    sink(value)\n", named_reference: true)
+        expect(callee.call_origin).to_equal(MirCallOrigin.Foreign)
+        expect(compiler_tools_check(callee).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "permits a scalar foreign argument without an outstanding loan":
+        step("Check a foreign call with an ordinary scalar argument")
+        expect(compiler_tools_check(compiler_tools_callee(MirCallOrigin.Foreign), borrowed: false).len()).to_equal(0)
+
+    it "preserves the escaping loan through a copied argument":
+        step("Copy the borrowed reference before invoking the foreign target")
+        expect(compiler_tools_check(compiler_tools_callee(MirCallOrigin.Foreign), copied_alias: true).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "applies the same foreign boundary to a call terminator":
+        step("Check the foreign argument at a terminating call edge")
+        expect(compiler_tools_check(compiler_tools_callee(MirCallOrigin.Foreign), terminator_call: true).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
