@@ -1,0 +1,164 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: for-in over a field of an if/match-valued local, cross-module
+
+Bug for_in_unresolved_if_match_route_type_2026-10-24: in
+driver_source_pipeline_loading.spl
+
+    val route = if c:
+        <statements>
+        match load_v1(...):          # Result<PackageIndexRouteV1, text>
+            case Ok(v): v
+            case Err(e): ...; return (self.ctx, false)
+    else:
+        current_v1(...)              # PackageIndexRouteV1
+    for m in route.items: ...
+
+typed `route` as bare I64 so the for-in hit "for-in over non-array iterables
+(#143)". Both callees and the struct live in ANOTHER module, which is what the
+same-module sibling spec (if_merge_unresolved_arm_struct_for_in_spec.spl) does
+not cover. Every shape here must lower with zero #143 errors.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val dep_source = "pub struct Route:\n" +
+    "    items: [i64]\n" +
+    "\n" +
+    "pub fn make() -> Route:\n" +
+    "    Route(items: [1, 2])\n" +
+    "\n" +
+    "pub fn pick(t: text) -> Result<Route, text>:\n" +
+    "    if t == \"\": return Err(\"empty\")\n" +
+    "    Ok(make())\n"
+
+val consumer_prelude = "use lib.dep.{make, pick, Route}\n\n"
+
+val for_tail = "    var s = 0\n" +
+    "    for i in route.items:\n" +
+    "        s = s + i\n" +
+    "    s\n"
+
+fn for_in_143_count(consumer_body: text) -> i64:
+    val consumer_source = consumer_prelude + consumer_body
+    val log = Logger(level: 0)
+    val dep_ast = parse_full_frontend(dep_source, "lib/dep.spl", "lib.dep", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.dep"] = dep_ast
+    val sources = [SourceFile(path: "lib/dep.spl", content: dep_source, module_name: "lib.dep")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var dep_lowering = hirlowering_for_module("lib.dep", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val dep_hir = dep_lowering.lower_module(dep_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["dep_hir"] = dep_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "dep_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    mir_lowering.lower_module(consumer_hir)
+    var bad = 0
+    for e in mir_lowering.errors:
+        if e.message.contains("for-in over non-array"):
+            print "  #143: {e.message}"
+            bad = bad + 1
+    bad
+
+describe "for-in over if/match-valued local with cross-module Route":
+    it "driver shape: then-block statements + match tail, else call":
+        val body = "fn total(c: bool) -> i64:\n" +
+            "    val route = if c:\n" +
+            "        val t = \"a\"\n" +
+            "        match pick(t):\n" +
+            "            case Ok(v): v\n" +
+            "            case Err(_): return 0\n" +
+            "    else:\n" +
+            "        make()\n" + for_tail
+        expect(for_in_143_count(body)).to_equal(0)
+
+    it "then-arm tail is the match itself, else call":
+        val body = "fn total(c: bool) -> i64:\n" +
+            "    val route = if c:\n" +
+            "        match pick(\"a\"):\n" +
+            "            case Ok(v): v\n" +
+            "            case Err(_): return 0\n" +
+            "    else:\n" +
+            "        make()\n" + for_tail
+        expect(for_in_143_count(body)).to_equal(0)
+
+    it "both arms are matches with early-return Err":
+        val body = "fn total(c: bool) -> i64:\n" +
+            "    val route = if c:\n" +
+            "        match pick(\"a\"):\n" +
+            "            case Ok(v): v\n" +
+            "            case Err(_): return 0\n" +
+            "    else:\n" +
+            "        match pick(\"b\"):\n" +
+            "            case Ok(v): v\n" +
+            "            case Err(_): return 0\n" + for_tail
+        expect(for_in_143_count(body)).to_equal(0)
+
+    it "bare match initializer with early-return Err":
+        val body = "fn total() -> i64:\n" +
+            "    val route = match pick(\"a\"):\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(_): return 0\n" + for_tail
+        expect(for_in_143_count(body)).to_equal(0)
+
+    it "else-arm match (struct first, match second)":
+        val body = "fn total(c: bool) -> i64:\n" +
+            "    val route = if c:\n" +
+            "        make()\n" +
+            "    else:\n" +
+            "        match pick(\"a\"):\n" +
+            "            case Ok(v): v\n" +
+            "            case Err(_): return 0\n" + for_tail
+        expect(for_in_143_count(body)).to_equal(0)
+
+    it "nested if, inner then-arm match":
+        val body = "fn total(c: bool, d: bool) -> i64:\n" +
+            "    val route = if c:\n" +
+            "        if d:\n" +
+            "            match pick(\"a\"):\n" +
+            "                case Ok(v): v\n" +
+            "                case Err(_): return 0\n" +
+            "        else:\n" +
+            "            make()\n" +
+            "    else:\n" +
+            "        make()\n" + for_tail
+        expect(for_in_143_count(body)).to_equal(0)
+
+    it "match arm yields the iterable field directly":
+        val body = "fn total() -> i64:\n" +
+            "    val items = match pick(\"a\"):\n" +
+            "        case Ok(v): v.items\n" +
+            "        case Err(_): return 0\n" +
+            "    var s = 0\n" +
+            "    for i in items:\n" +
+            "        s = s + i\n" +
+            "    s\n"
+        expect(for_in_143_count(body)).to_equal(0)
+
+    it "while-let style: if val over an Optional Route field":
+        val body = "fn total(r: Route?) -> i64:\n" +
+            "    val route = if val got = r:\n" +
+            "        got\n" +
+            "    else:\n" +
+            "        make()\n" + for_tail
+        expect(for_in_143_count(body)).to_equal(0)

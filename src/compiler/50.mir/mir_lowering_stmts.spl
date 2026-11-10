@@ -222,10 +222,42 @@ fn mir_merged_arm_struct_name(recorded: [text], from_hir: [text]) -> text:
             return ""
         if i == 0:
             shared = name
-        elif name != shared:
-            return ""
+        else:
+            shared = mir_merged_struct_name_pair(shared, name)
+            if shared == "":
+                return ""
         i = i + 1
     shared
+
+fn mir_merged_struct_name_pair(first: text, second: text) -> text:
+    """The one struct name two merge arms agree on, or "".
+
+    bug=for_in_unresolved_if_match_route_type_2026-10-24: a cross-module
+    `Result<T, E>` Ok payload arm (`case Ok(v): v`) names its struct through
+    the name-keyed `bootstrap_fn_ret_ok_shape_*` registry, which carries the
+    BARE `T`, while a call / constructor arm of the same `T` carries the
+    consumer table's qualified `mod::T`. The two spellings denote one struct;
+    treating them as a disagreement left `val route = if c: <match> else:
+    make()` with no struct identity, so `route.items` lowered to Unit and the
+    for-in hit #143. The qualified spelling is kept, since it is the one the
+    call paths already record."""
+    if first == second:
+        return first
+    # Only a bare spelling unifies with a qualified one; two qualified names
+    # that differ are two structs (`lib.a::Route` vs `lib.b::Route`).
+    val first_qualified = first.contains("::")
+    val second_qualified = second.contains("::")
+    if first_qualified == second_qualified:
+        return ""
+    if mir_struct_name_bare(first) != mir_struct_name_bare(second):
+        return ""
+    if first_qualified:
+        return first
+    second
+
+fn mir_struct_name_bare(name: text) -> text:
+    val parts = name.split("::")
+    parts[parts.len() - 1]
 
 fn mir_merge_arm_types(first: MirType, second: MirType) -> MirType:
     """Pick the more specific of two branch result types at a merge block.
