@@ -6,51 +6,51 @@
 use compiler.common.assurance.flight_rules.{assurance_text_hash}
 use compiler.common.assurance.formal_interfaces.{CompilerCertificateV1, CompilerRefinementRelationV1}
 
-enum DceTvInstructionV1:
+pub enum DceTvInstructionV1:
     Const(destination: i64, value_bits: i64)
     Add(destination: i64, left: i64, right: i64)
     Copy(destination: i64, source: i64)
 
 impl DceTvInstructionV1:
-    fn destination() -> i64:
+    pub fn destination() -> i64:
         match self:
             case Const(destination, _): destination
             case Add(destination, _, _): destination
             case Copy(destination, _): destination
 
-    fn reads(register: i64) -> bool:
+    pub fn reads(register: i64) -> bool:
         match self:
             case Const(_, _): false
             case Add(_, left, right): register == left or register == right
             case Copy(_, source): register == source
 
-    fn same_as(other: DceTvInstructionV1) -> bool:
+    pub fn same_as(other: DceTvInstructionV1) -> bool:
         self.canonical_text() == other.canonical_text()
 
-    fn canonical_text() -> text:
+    pub fn canonical_text() -> text:
         match self:
             case Const(destination, value_bits): "const:{destination}:{value_bits}"
             case Add(destination, left, right): "add:{destination}:{left}:{right}"
             case Copy(destination, source): "copy:{destination}:{source}"
 
-struct DceTvProgramV1:
+pub struct DceTvProgramV1:
     instructions: [DceTvInstructionV1]
     result_register: i64
 
 impl DceTvProgramV1:
-    fn diagnostic() -> text:
+    pub fn diagnostic() -> text:
         if self.result_register < 0: return "FV2-E-DCE-TV-RESULT: result register must be non-negative"
         for instruction in self.instructions:
             if instruction.destination() < 0: return "FV2-E-DCE-TV-REGISTER: register identifiers must be non-negative"
         ""
 
-    fn canonical_text() -> text:
+    pub fn canonical_text() -> text:
         var rows: [text] = []
         for instruction in self.instructions:
             rows = rows.push(instruction.canonical_text())
         "DceTvProgramV1|result={self.result_register}|instructions=" + rows.join(",")
 
-    fn semantic_hash() -> text:
+    pub fn semantic_hash() -> text:
         assurance_text_hash(self.canonical_text())
 
 fn _dce_tv_live_in(instructions: [DceTvInstructionV1], start: i64, register: i64, result_register: i64) -> bool:
@@ -61,13 +61,13 @@ fn _dce_tv_live_in(instructions: [DceTvInstructionV1], start: i64, register: i64
         (register != instruction.destination() and
             _dce_tv_live_in(instructions, start + 1, register, result_register))
 
-fn dce_tv_instruction_is_dead(program: DceTvProgramV1, index: i64) -> bool:
+pub fn dce_tv_instruction_is_dead(program: DceTvProgramV1, index: i64) -> bool:
     if index < 0 or index >= program.instructions.len():
         return false
     val destination = program.instructions[index].destination()
     not _dce_tv_live_in(program.instructions, index + 1, destination, program.result_register)
 
-fn dce_tv_optimize(source: DceTvProgramV1) -> DceTvProgramV1:
+pub fn dce_tv_optimize(source: DceTvProgramV1) -> DceTvProgramV1:
     var target: [DceTvInstructionV1] = []
     for index in 0..source.instructions.len():
         if not dce_tv_instruction_is_dead(source, index):
@@ -78,7 +78,7 @@ fn dce_tv_optimize(source: DceTvProgramV1) -> DceTvProgramV1:
 # _dce_tv_live_in, including reads of instructions which will be removed.
 # Keep is observed before kill/gen. No SSA assumption: read-before-write and
 # repeated destinations retain their legacy abstract meaning.
-fn dce_tv_keep_flags_v1(source: DceTvProgramV1) -> [bool]:
+pub fn dce_tv_keep_flags_v1(source: DceTvProgramV1) -> [bool]:
     var needed: Dict<i64, bool> = {}
     needed[source.result_register] = true
     var reverse_flags: [bool] = []
@@ -98,7 +98,7 @@ fn dce_tv_keep_flags_v1(source: DceTvProgramV1) -> [bool]:
                 needed[from_register] = true
     reverse_flags
 
-fn dce_tv_validate(source: DceTvProgramV1, target: DceTvProgramV1) -> bool:
+pub fn dce_tv_validate(source: DceTvProgramV1, target: DceTvProgramV1) -> bool:
     if source.diagnostic() != "" or target.diagnostic() != "": return false
     if source.result_register != target.result_register: return false
     val reverse_flags = dce_tv_keep_flags_v1(source)
@@ -114,14 +114,14 @@ fn dce_tv_validate(source: DceTvProgramV1, target: DceTvProgramV1) -> bool:
         target_index = target_index + 1
     target_index == target.instructions.len()
 
-struct DceTranslationValidationResultV1:
+pub struct DceTranslationValidationResultV1:
     source_hash: text
     target_hash: text
     accepted: bool
     diagnostic: text
     certificate: CompilerCertificateV1?
 
-fn validate_dce_translation_v1(
+pub fn validate_dce_translation_v1(
     source: DceTvProgramV1,
     target: DceTvProgramV1,
     axiom_audit_hash: text
