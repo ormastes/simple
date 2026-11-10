@@ -1,6 +1,9 @@
 # Module-global function-pointer slot lowers to a DIRECT call
 
-Status: OPEN (pre-existing; not a regression from the 2026-08-21 50.mir work)
+Status: FIXED (2026-11-11, lane ne15) — the demote-when-global-slot fix named
+after this bug is present at `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`
+(~:8937-8948); the pinning spec no longer reaches the assertion for unrelated
+spec/seed drift. See addendum.
 Spec: `test/01_unit/compiler/mir/module_global_function_pointer_lowering_spec.spl`
 Verbatim: `Results: 1 total, 0 passed, 1 failed`
 
@@ -55,3 +58,49 @@ The spec's own import was wrong and masked the real failure: it did
 so the example errored with `semantic: variable MirLowering not found` before
 reaching any assertion. That import is fixed; the spec now runs and fails on
 the real defect above.
+
+
+## Addendum 2026-11-11 (lane ne15) — FIXED; global-slot demote landed, pinning spec drifted
+
+**Code evidence at tip f7640d20a458**
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:8937-8948`):
+a comment block naming this bug documents the landed fix — a callee naming a
+module global with backing static storage that is not a known top-level
+function is demoted from `is_direct`:
+
+```simple
+if is_direct and not self.is_known_top_level_function(direct_name, direct_symbol):
+    val slot_symbol_id = mir_expr_symbol_id_value(direct_symbol)
+    if slot_symbol_id >= 0 and self.global_symbol_ids.contains(slot_symbol_id):
+        if self.find_global_static(slot_symbol_id).?:
+            is_direct = false
+```
+
+so `var cleanup: fn() = default_cleanup` reassigned via `install()` is
+observed by `cleanup()` through the LoadGlobal/CallIndirect path. The
+adjacent local/param demotion (same site, ~:8926-8931) covers fn-typed
+parameters. This is exactly the predicate this doc said was missing; the
+`find_global_static`-returns-nil inconsistency noted here is also surfaced by
+the `?.` guard in the new code.
+
+**Spec status (seed-smoke, same tip):** the pinning spec
+`test/01_unit/compiler/mir/module_global_function_pointer_lowering_spec.spl`
+now fails 0/4 BEFORE reaching any assertion, for unrelated drift:
+
+- example 1 references `bootstrap_mir_static_remap_add`, which no longer
+  exists anywhere in `src/compiler` (the remap API was removed/renamed);
+- examples 2-4 stop at a seed visibility error — `private fn
+  compiler_value_discriminant of module 00.common/value_access.spl is not
+  visible to 50.mir/_MirLoweringExpr/expr_dispatch.spl` — while current
+  `expr_dispatch.spl:55` named-imports it and the self-hosted compiler
+  accepts that import, i.e. a seed/self-hosted visibility divergence on the
+  compiler module graph, not this defect.
+
+Observed: `Results: 4 total, 0 passed, 4 failed`.
+
+**Follow-up (not this row):** the spec needs a refresh against current
+compiler internals, and the seed visibility divergence on
+`compiler_value_discriminant` deserves its own row, before the spec can serve
+as a runtime fence again. The code-level fix this doc asked for is present at
+HEAD; no seed-side equivalent was inspected beyond noting the spec cannot
+compile the compiler graph under the seed's stricter visibility pass.
