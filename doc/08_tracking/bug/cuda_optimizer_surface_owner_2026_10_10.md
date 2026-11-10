@@ -73,3 +73,16 @@ refresh; its database/index was not modified by this lane.
 
 ## Bootstrap repro/prevention 2026-11-05
 Spec: test/01_unit/compiler/mir_opt/cuda_optimizer_owner_imports_spec.spl (owners + 4 optimizer modules import together; passes on seed). Status: verification-pending; retire the explicit imports only after a stage3 producer compiles the CUDA closure without them.
+
+## 2026-11-10 P2 triage (lane p2-compiler-triage-20261110)
+
+VERDICT: LIVE, blocked on native closure grant. Workaround still required and
+pinned on current source: explicit owner imports at
+60.mir_opt/mir_opt/inline.spl:4 (mir_types.LocalId), loop_opt.spl:9,
+loop_licm.spl:8, auto_vectorize_cost.spl:8 (mir_instruction_support.BlockId);
+@workaround tag at auto_vectorize_cost.spl:7. Retained specs green on the
+deployed seed (interpreter): cuda_optimizer_owner_imports_spec.spl 2/2,
+call_terminator_unwind_destinations_spec.spl 4/4. The underlying native
+MIR-lowering SIGSEGV (exit 139 after HIR 157/157) remains unresolved; per b519
+triage no current producer trace exists. Cycles: 1. Grant command recorded in
+build/review/p2fix-compiler-20261110.sdn.

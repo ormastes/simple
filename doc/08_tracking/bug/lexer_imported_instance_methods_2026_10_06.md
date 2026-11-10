@@ -65,3 +65,17 @@ workaround kept. Status left open; needs a stage3 owner trace first.
 ## HIR-P2 HC triage 2026-11-05
 
 Native-only evidence (stage3 generator closure); candidate wrappers/fixtures are UNRUN and root cause unproven. Cannot be verified from the interpreter lane; needs stage3 rerun. Remains OPEN (deferred).
+
+## 2026-11-10 P2 triage (lane p2-compiler-triage-20261110)
+
+VERDICT: LIVE (root unproven), blocked on stage3 generator rerun. Root cause
+still unproven; native-only (stage3 generator closure). Workaround pinned on
+current source: lexer.spl:25-26 @workaround routes the five calls through free
+functions in lexer_struct.spl (1981-1994). Deployed-seed verification
+(seed-smoke): imported-inline fixture PASS 6 checks (interpreter);
+negative_owner.spl rejects NoMethods.pop_indent (runtime unresolved-symbol);
+owner_wrappers.spl exits 9 at its alias check (dynamic-array reference
+semantics across value-copy wrappers) so it stays unqualified on the
+interpreter lane, consistent with this document. Cycles: 1. Grant: stage3
+actual-generator rerun with receiver-owner trace (producer SHA-256
+29f26fc8b054abc170d198d6a837b9e1d348476379266546c5c89577efa0f07a).
