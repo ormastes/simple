@@ -1,0 +1,269 @@
+#!/bin/sh
+# Exercise the production retention owner with actual filesystem artifacts.
+# Command failures are deliberate negative controls, not QEMU/WM evidence.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+LIB=${WM_RETENTION_LIB:-$ROOT/scripts/check/lib/simpleos-wm-fullscreen/retention.shs}
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/wm-retention.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+cat >"$WORK/driver.sh" <<'DRIVER'
+#!/bin/sh
+set -eu
+LIB=$1
+BUILD_DIR=$2
+MODE=$3
+ROOT_DIR=$BUILD_DIR
+EVIDENCE_RUNS_DIR=$BUILD_DIR/runs
+EVIDENCE_RETAIN=2
+LAUNCH_OUT=$BUILD_DIR/qemu.out
+SERIAL_LOG=$BUILD_DIR/serial.log
+QMP_SOCKET=$BUILD_DIR/qmp.sock
+CAPTURE_OUT=$BUILD_DIR/capture.out
+BASELINE_PPM=$BUILD_DIR/baseline.ppm
+FULLSCREEN_PPM=$BUILD_DIR/fullscreen.ppm
+RESTORED_PPM=$BUILD_DIR/restored.ppm
+BROWSER_EVENT_PPM=$BUILD_DIR/browser-event.ppm
+BASELINE_RAW=$BASELINE_PPM.raw
+FULLSCREEN_RAW=$FULLSCREEN_PPM.raw
+RESTORED_RAW=$RESTORED_PPM.raw
+BROWSER_EVENT_RAW=$BROWSER_EVENT_PPM.raw
+FONT_REGION_RGB=$BUILD_DIR/font-region.rgb
+FONT_REGION_CORRUPT_COPY=$BUILD_DIR/font-region-corrupt.rgb
+WRAPPER=retention-regression
+SIMPLE_BIN=/unused
+SIMPLE_BIN_SOURCE=fixture
+SIMPLE_BIN_STATUS=unchecked
+SIMPLE_BIN_RESOLVED=
+SIMPLE_BIN_VERSION=
+SIMPLE_BIN_SHA256=
+QEMU_PID=
+date() {
+    [ "$MODE" != clock-fail ] || return 1
+    case "$MODE" in
+        sequence-*) printf '%s\n' 20261110T000000Z; return 0 ;;
+    esac
+    command date "$@"
+}
+mktemp() {
+    [ "$MODE" != staging-fail ] || return 1
+    if [ "$MODE" = marker-create-fail ] && [ "$1" != -d ]; then
+        return 1
+    fi
+    case "$MODE:$1" in
+        sequence-a:-d) nonce=ZZZZZZ ;;
+        sequence-b:-d) nonce=AAAAAA ;;
+        sequence-fail:-d) nonce=MMMMMM ;;
+        *) nonce= ;;
+    esac
+    if [ -n "$nonce" ]; then
+        pending="$EVIDENCE_RUNS_DIR/.pending-$stamp-$nonce"
+        mkdir "$pending"
+        printf '%s\n' "$pending"
+        return 0
+    fi
+    if [ "$MODE" = collision ]; then
+        pending="$EVIDENCE_RUNS_DIR/.pending-$stamp-COLLIDE"
+        mkdir "$pending" "$EVIDENCE_RUNS_DIR/$stamp-COLLIDE-pass"
+        printf 'preexisting collision proof\n' >"$EVIDENCE_RUNS_DIR/$stamp-COLLIDE-pass/proof"
+        printf '%s\n' "$pending"
+    else
+        command mktemp "$@"
+    fi
+}
+cp() {
+    case "$MODE:$2" in
+        copy-fail:*/serial.log) return 1 ;;
+        interrupt:*/serial.log) kill -TERM $$; return 143 ;;
+        metadata-fail:*/serial.log)
+            command cp "$@"
+            mkdir "$3/RUN_INFO.env"
+            return 0 ;;
+    esac
+    command cp "$@"
+}
+mv() {
+    [ "$MODE" != publish-fail ] || return 1
+    if [ "$MODE" = marker-publish-fail ] && [ "$1" = -f ]; then
+        return 1
+    fi
+    command mv "$@"
+}
+rm() {
+    case "$MODE:$*" in
+        prune-fail:*20000101T000000Z-fail*) return 1 ;;
+    esac
+    command rm "$@"
+}
+# Sourcing the whole production owner installs its unrelated QEMU cleanup.
+# No QEMU was launched, and the fixture must not kill host processes.
+pkill() { return 0; }
+. "$LIB"
+DRIVER
+
+os_wm_setup() {
+    case_dir="$WORK/$1"
+    mkdir -p "$case_dir"
+    printf '%s\n' 'simpleos_wm_fullscreen_status=pass' >"$case_dir/evidence.env"
+    printf '%s\n' 'original serial proof' >"$case_dir/serial.log"
+    printf 'P6\n1 1\n255\n\001\002\003' >"$case_dir/fullscreen.ppm"
+    cp "$case_dir/evidence.env" "$case_dir/expected-evidence"
+    cp "$case_dir/serial.log" "$case_dir/expected-serial"
+    cp "$case_dir/fullscreen.ppm" "$case_dir/expected-pixels"
+}
+os_wm_check_preserved() {
+    cmp "$case_dir/expected-evidence" "$case_dir/evidence.env"
+    cmp "$case_dir/expected-serial" "$case_dir/serial.log"
+    cmp "$case_dir/expected-pixels" "$case_dir/fullscreen.ppm"
+}
+os_wm_check_prune_failure() {
+    os_wm_setup prune-fail
+    mkdir -p "$case_dir/runs/20000101T000000Z-fail" \
+        "$case_dir/runs/20000102T000000Z-pass"
+    touch -t 200001010000 "$case_dir/runs/20000101T000000Z-fail"
+    printf 'prior archive proof\n' >"$case_dir/runs/20000102T000000Z-pass/proof"
+    if sh "$WORK/driver.sh" "$LIB" "$case_dir" prune-fail >"$case_dir/run.log" 2>&1; then
+        echo 'FAIL: pruning failure accepted' >&2
+        exit 1
+    fi
+    os_wm_check_preserved
+    grep '^prior archive proof$' "$case_dir/runs/20000102T000000Z-pass/proof" >/dev/null
+    echo 'PASS: pruning failure retains canonical and previous archived evidence'
+}
+if [ "${1:-}" = --prune-only ]; then
+    os_wm_check_prune_failure
+    exit 0
+fi
+os_wm_check_newest_pass() {
+    os_wm_setup newest-pass
+    mkdir -p "$case_dir/runs/99990101T000000Z-pass" \
+        "$case_dir/runs/99990102T000000Z-fail"
+    sh "$WORK/driver.sh" "$LIB" "$case_dir" success >"$case_dir/run.log" 2>&1
+    archive=$(sed -n 's/^simpleos_wm_fullscreen_retained_previous_run=\(.*\) status=pass$/\1/p' "$case_dir/run.log")
+    [ -n "$archive" ]
+    cmp "$case_dir/expected-evidence" "$archive/evidence.env"
+    cmp "$case_dir/expected-serial" "$archive/serial.log"
+    cmp "$case_dir/expected-pixels" "$archive/fullscreen.ppm"
+    echo 'PASS: newest completed PASS survives adversarial archive name ordering'
+}
+if [ "${1:-}" = --newest-pass-only ]; then
+    os_wm_check_newest_pass
+    exit 0
+fi
+if [ "${1:-}" = --completion-record-only ]; then
+    os_wm_setup sequential
+    sh "$WORK/driver.sh" "$LIB" "$case_dir" sequence-a >"$case_dir/a.log" 2>&1
+    printf 'simpleos_wm_fullscreen_status=pass\n' >"$case_dir/evidence.env"
+    printf 'PASS B proof\n' >"$case_dir/serial.log"
+    sh "$WORK/driver.sh" "$LIB" "$case_dir" sequence-b >"$case_dir/b.log" 2>&1
+    pass_b=$(sed -n 's/^simpleos_wm_fullscreen_retained_previous_run=\(.*\) status=pass$/\1/p' "$case_dir/b.log")
+    printf 'simpleos_wm_fullscreen_status=fail\n' >"$case_dir/evidence.env"
+    printf 'subsequent failure\n' >"$case_dir/serial.log"
+    sh "$WORK/driver.sh" "$LIB" "$case_dir" sequence-fail >"$case_dir/fail.log" 2>&1
+    [ -n "$pass_b" ]
+    grep '^PASS B proof$' "$pass_b/serial.log" >/dev/null
+    [ "$(cat "$case_dir/runs/.latest-pass")" = "${pass_b##*/}" ]
+    echo 'PASS: PASS-A/PASS-B/FAIL preserves actual latest completed PASS despite reversed nonce order'
+    for mode in marker-create-fail marker-publish-fail invalid-marker; do
+        os_wm_setup "$mode"
+        mkdir -p "$case_dir/runs/20000101T000000Z-pass"
+        if [ "$mode" = invalid-marker ]; then
+            mkdir "$case_dir/runs/.latest-pass"
+        else
+            printf '20000101T000000Z-pass\n' >"$case_dir/runs/.latest-pass"
+        fi
+        if sh "$WORK/driver.sh" "$LIB" "$case_dir" "$mode" >"$case_dir/run.log" 2>&1; then
+            echo "FAIL: $mode accepted failed completion record" >&2
+            exit 1
+        fi
+        os_wm_check_preserved
+        [ -d "$case_dir/runs/20000101T000000Z-pass" ]
+        if [ "$mode" != invalid-marker ]; then
+            grep '^20000101T000000Z-pass$' "$case_dir/runs/.latest-pass" >/dev/null
+        fi
+        echo "PASS: $mode preserves canonical evidence and previous completion record"
+    done
+    exit 0
+fi
+if [ "${1:-}" = --extended-only ]; then
+    for mode in clock-fail staging-fail collision; do
+        os_wm_setup "$mode"
+        if sh "$WORK/driver.sh" "$LIB" "$case_dir" "$mode" >"$case_dir/run.log" 2>&1; then
+            echo "FAIL: $mode accepted failed archive" >&2
+            exit 1
+        fi
+        os_wm_check_preserved
+        if [ "$mode" = collision ]; then
+            grep '^preexisting collision proof$' "$case_dir"/runs/*-COLLIDE-pass/proof >/dev/null
+        fi
+        echo "PASS: $mode preserves originals and cannot overwrite a published run"
+    done
+    os_wm_setup unknown-status
+    printf 'simpleos_wm_fullscreen_status=unexpected/value\n' >"$case_dir/evidence.env"
+    sh "$WORK/driver.sh" "$LIB" "$case_dir" success >"$case_dir/run.log" 2>&1
+    archive=$(sed -n 's/^simpleos_wm_fullscreen_retained_previous_run=\(.*\) status=unknown$/\1/p' "$case_dir/run.log")
+    [ -n "$archive" ]
+    grep '^archived_run_status=unknown$' "$archive/RUN_INFO.env" >/dev/null
+    echo 'PASS: unexpected status cannot escape the archive namespace'
+    os_wm_setup failed-run
+    printf 'simpleos_wm_fullscreen_status=fail\n' >"$case_dir/evidence.env"
+    mkdir -p "$case_dir/runs/20000101T000000Z-pass" "$case_dir/runs/20000102T000000Z-fail"
+    printf 'last passing proof\n' >"$case_dir/runs/20000101T000000Z-pass/proof"
+    sh "$WORK/driver.sh" "$LIB" "$case_dir" success >"$case_dir/run.log" 2>&1
+    grep '^last passing proof$' "$case_dir/runs/20000101T000000Z-pass/proof" >/dev/null
+    echo 'PASS: archiving a failed run preserves the previous PASS'
+    exit 0
+fi
+for mode in mkdir-fail copy-fail metadata-fail publish-fail interrupt; do
+    if [ "${1:-}" = --metadata-only ] && [ "$mode" != metadata-fail ]; then
+        continue
+    fi
+    os_wm_setup "$mode"
+    if [ "$mode" = mkdir-fail ]; then
+        printf 'occupied\n' >"$case_dir/runs"
+    else
+        mkdir -p "$case_dir/runs/20000101T000000Z-pass"
+        printf 'prior archive proof\n' >"$case_dir/runs/20000101T000000Z-pass/proof"
+    fi
+    if sh "$WORK/driver.sh" "$LIB" "$case_dir" "$mode" >"$case_dir/run.log" 2>&1; then
+        echo "FAIL: $mode accepted failed archive" >&2
+        exit 1
+    fi
+    os_wm_check_preserved
+    if [ -d "$case_dir/runs" ]; then
+        complete=$(find "$case_dir/runs" -mindepth 1 -maxdepth 1 -type d ! -name '.pending-*' | wc -l | tr -d ' ')
+        [ "$complete" = 1 ] || { echo "FAIL: $mode published incomplete archive" >&2; exit 1; }
+        grep '^prior archive proof$' "$case_dir/runs/20000101T000000Z-pass/proof" >/dev/null
+    fi
+    echo "PASS: $mode retains original evidence without published archive"
+done
+if [ "${1:-}" = --metadata-only ]; then
+    exit 0
+fi
+
+os_wm_setup success
+mkdir -p "$case_dir/runs/20000101T000000Z-pass" \
+    "$case_dir/runs/20000102T000000Z-fail" \
+    "$case_dir/runs/.pending-old"
+sh "$WORK/driver.sh" "$LIB" "$case_dir" success >"$case_dir/run.log" 2>&1
+[ ! -e "$case_dir/evidence.env" ]
+[ ! -e "$case_dir/serial.log" ]
+[ ! -e "$case_dir/fullscreen.ppm" ]
+archive=$(sed -n 's/^simpleos_wm_fullscreen_retained_previous_run=\(.*\) status=pass$/\1/p' "$case_dir/run.log")
+[ -n "$archive" ]
+cmp "$case_dir/expected-evidence" "$archive/evidence.env"
+cmp "$case_dir/expected-serial" "$archive/serial.log"
+cmp "$case_dir/expected-pixels" "$archive/fullscreen.ppm"
+grep '^archived_run_status=pass$' "$archive/RUN_INFO.env" >/dev/null
+[ -d "$case_dir/runs/.pending-old" ]
+[ -d "$archive" ]
+echo 'PASS: complete archive publishes before canonical reset and survives pruning'
+
+os_wm_check_prune_failure
+
+empty="$WORK/no-previous"
+mkdir -p "$empty"
+sh "$WORK/driver.sh" "$LIB" "$empty" success >"$WORK/no-previous.log" 2>&1
+[ ! -e "$empty/runs" ]
+echo 'PASS: no prior run creates no archive'
+os_wm_check_newest_pass
+echo 'STATUS: PASS (9 actual retention scenarios; no guest/render qualification)'
