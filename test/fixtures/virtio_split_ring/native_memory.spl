@@ -1,0 +1,62 @@
+"""Native-only probe: execute the real queue methods against owned memory."""
+
+use os.drivers.virtio.virtio_common.{Virtqueue}
+use os.kernel.boot.mmio.{mmio_disable_test_mode, mmio_read16, mmio_write16, mmio_read32, mmio_write8}
+use std.nogc_sync_mut.io.dma.{dma_raw_alloc, dma_raw_free, dma_raw_virt_of}
+
+fn os_gpu_bridge_check(base: u64) -> i32:
+    var offset = 0u64
+    while offset < 4096u64:
+        mmio_write8(base + offset, 0xA5u8)
+        offset = offset + 1u64
+    var queue = Virtqueue.new(base, 4)
+    queue.init_free_list()
+    # Descriptor 0's next must not overwrite descriptor 1's address.
+    if mmio_read32(base + 16u64) != 0xA5A5A5A5u32: return 10
+    if mmio_read16(base + 62u64) != 4u16: return 11
+    if queue.used_addr % 4u64 != 0u64: return 12
+    if mmio_read16(queue.used_addr + 2u64) != 0u16: return 13
+    var descriptor: i32 = 0
+    while descriptor < 4:
+        if queue.alloc_desc() != descriptor: return 20 + descriptor
+        descriptor = descriptor + 1
+    if queue.alloc_desc() != -1: return 24
+    queue.free_desc(2u16)
+    if mmio_read32(base + 48u64) != 0xA5A5A5A5u32: return 25
+    if queue.alloc_desc() != 2 or queue.alloc_desc() != -1: return 26
+    mmio_write16(queue.avail_addr + 6u64, 0xBEEFu16)
+    queue.push_avail(3u16)
+    if mmio_read16(queue.avail_addr + 2u64) != 1u16: return 30
+    # Updating idx must preserve slot 0, and slot 0 must preserve slot 1.
+    if mmio_read16(queue.avail_addr + 4u64) != 3u16: return 31
+    if mmio_read16(queue.avail_addr + 6u64) != 0xBEEFu16: return 32
+    mmio_write16(queue.avail_addr + 2u64, 65535u16)
+    mmio_write16(queue.avail_addr + 12u64, 0xCAFEu16)
+    queue.push_avail(2u16)
+    if mmio_read16(queue.avail_addr + 10u64) != 2u16: return 33
+    if mmio_read16(queue.avail_addr + 12u64) != 0xCAFEu16: return 34
+    if mmio_read16(queue.avail_addr + 2u64) != 0u16: return 35
+    if mmio_read16(queue.avail_addr + 4u64) != 3u16: return 36
+    0
+
+fn main() -> i32:
+    mmio_disable_test_mode()
+    val handle = dma_raw_alloc(1048576, 2)
+    if handle < 0: return 1
+    val base = dma_raw_virt_of(handle).to_u64()
+    if base == 0u64 or (base & 15u64) != 0u64:
+        dma_raw_free(handle)
+        return 2
+    var result = os_gpu_bridge_check(base)
+    if result == 0:
+        var maximum = Virtqueue.new(base, 32768)
+        maximum.init_free_list()
+        if mmio_read16(base + 32767u64 * 16u64 + 14u64) != 32768u16:
+            result = 40
+        maximum.free_head = 32767u16
+        if maximum.alloc_desc() != 32767 or maximum.alloc_desc() != -1:
+            result = 41
+    dma_raw_free(handle)
+    if result == 0:
+        print("VIRTIO_SPLIT_RING_NATIVE_MEMORY_PASS")
+    result
