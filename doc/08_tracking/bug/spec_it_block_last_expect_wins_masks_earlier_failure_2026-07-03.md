@@ -102,3 +102,58 @@ file-summary bug and should be prioritized accordingly.
   multiple checks into one boolean before the final assertion, until the
   runner itself accumulates failures correctly.
 
+## 2026-11-10 status — P0 fix-agent verification (worktree simple-p0-spec-it-20261110)
+
+**Verdict: the defect is ALREADY FIXED on release/1.0.0 (tip d8c0a761988c);
+the bug is not live on any audited it-execution path.** All evidence below is
+seed-smoke (Rust seed `bin/simple.exe`, bootstrap-only). Full evidence:
+`build/review/p0fix-spec-it-20261110.sdn`.
+
+- Reproduction (doc's sabotage shape, fail-then-pass in one `it`):
+  `bin/simple run test/00_quick/spec_it_accumulation_probe.spl` reports
+  `✗ fail then pass in same it-block` + `expected 1 to equal 2`, summary
+  shows failures, exit 1. A fail-pass-fail example lists BOTH failure
+  messages. Pass-then-fail also `✗`. The first failure is kept, never
+  cleared by a later pass.
+- Per-path audit (all accumulate or fail-closed, none last-wins):
+  - `std.spec` `_execute_it`/`fail_assertion` (`src/lib/nogc_sync_mut/spec.spl`):
+    `current_test_errors: [text]` list; cleared once per `it`; every failure
+    appends; outcome from `len() == 0`. (Fix landed earlier via bugdb batch D,
+    commit cf188f01f884.)
+  - Seed interpreter `it` arm (`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`):
+    `BDD_EXPECT_FAILED` latch (set-only-true; a passing matcher does not
+    clear it) + `BddFailures` bounded message list.
+  - Native/JIT seed runtime (`src/compiler_rust/runtime/src/value/bdd_sffi.rs`):
+    same bounded accumulation (commit ff04c9fa25c3).
+  - Pure-Simple native BDD subset (`src/runtime/simple_core/core_bdd.spl`):
+    `bdd_current_failed` latch — outcome correct (this minimal path does not
+    list multiple messages, only the ✓/✗ outcome).
+  - `spec/decorators.spl`: no local `fn it(`; all decorators delegate to the
+    `it` builtin / spec.spl `it` — inherits the fixed behavior.
+  - Facades: `std.spec` → `std.nogc_sync_mut.spec`; `std.gc_async_mut.spec.spl`
+    re-exports `it` from `std.nogc_sync_mut.spec` (the `spec/` package holds
+    only the skip/ignore submodule system, no `it`); `std.gc_sync_mut.spec` →
+    `std.gc_async_mut.spec.*`; `std.nogc_async_mut.spec` → direct re-export.
+    Verified empirically for the gc_async_mut chain with the sabotage shape.
+  - Aggregate mode (`_aggregate_run_case`) delegates to `_execute_it` — same
+    accumulation; per-case fail outcome lands in the ledger.
+  - Pure-Simple sdoctest runner and `src/app/test_runner_new/doctest_runner.spl`:
+    verdict by child exit code / block-level results — no per-example
+    last-wins failure variable exists there.
+  - `fail_assertion` outside an `it` (comment doctests, script top level):
+    fail-closed (print + `exit(1)` in spec.spl; semantic error in the seed's
+    `record_assertion_failure`).
+- Follow-up question (nested `context`/`describe` framing): audited and
+  verified live — nested fail-then-pass inside `describe > context` reports
+  `✗` with the first failure message. Now pinned by an executable guard.
+- Regression guard added (commit 821e92878eb8 on
+  `work/p0-spec-it-accum-20261110`): new RED fixture
+  `test/fixture/spec/it_block_nested_context_accumulation_fixture.spl`, two
+  new examples in `test/01_unit/lib/std/spec/it_block_error_accumulation_spec.spl`
+  (5/5 PASS via seed), and the manual probe
+  `test/00_quick/spec_it_accumulation_probe.spl`. No fix commit was needed.
+- Recommendation: flip this bug's status from Open to
+  Resolved-with-regression-guard.
+- Out of scope, untouched: `spec_it_block_reads_stale_module_var_2026-08-04`,
+  `test_runner_interpreter_file_summary_greenwash_2026-07-03`.
+
