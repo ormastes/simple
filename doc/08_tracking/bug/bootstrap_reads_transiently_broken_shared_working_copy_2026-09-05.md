@@ -316,3 +316,29 @@ Option 2 is the smallest correct change; option 1 is reversible and needs no
 edit to a shared script. Either way the decision belongs to whoever owns the
 box, not to a single lane mid-run.
 
+
+## Triage 2026-11-10 (p3-boot2 lane)
+
+SUPERSEDED — the 2026-11-09 status ("fix-implemented-verification-pending")
+is now verified, AND the record's outstanding RSS-monitor fix option is also
+found landed. Verified on work/p3-boot2-20261110 (base origin/release/1.0.0),
+one cycle:
+
+1. Snapshot fix (fix 3): `sh scripts/bootstrap/bootstrap-pin-archive.shs
+   --selftest` -> `PASS — 5 selftest assertion(s) checked, pinned archive
+   isolates build from live edits`. Wired at
+   `scripts/bootstrap/bootstrap-from-scratch.sh:21-29` — the wrapper re-execs
+   from the pinned `git archive` snapshot by default; `SIMPLE_BOOTSTRAP_LIVE_TREE=1`
+   opts back into the live tree. Landed as `60c57b7bdd89` (2026-11-09).
+2. RSS-monitor fix (the "not applied — not mine to change alone" options):
+   `scripts/resource/kill_simple_monitor.shs:216-226` now protects
+   `*native_build_worker.spl*` and `*bootstrap_main.spl*` in `is_protected()`,
+   with a comment citing this exact record and its seven killed Stage-3 runs;
+   `:522-526` additionally exempts native bootstrap builds from the CPU guard.
+   This closes the "Stage-3 self-host cannot complete on this host while that
+   monitor runs" blocker by the record's own option 2.
+
+Not re-verified (out of scope by this record's own classification): the
+cross-session process-contention modes (1-3 in the UPDATE section) are
+coordination/environmental; the planner-admission produce-then-launch window
+is covered by the receipt-chain wiring verified in the p3-boot batch-1 lane.
