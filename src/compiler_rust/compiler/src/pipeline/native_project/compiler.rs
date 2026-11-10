@@ -700,6 +700,9 @@ pub(crate) fn compile_file_to_object(
     if let Some(write) = simple_parser::capture_write_check::find_captured_local_writes(&ast).into_iter().next() {
         return Err(format!("{}: semantic: {}", file_path.display(), write.message()));
     }
+    for m in simple_parser::capture_write_check::find_captured_local_mutations(&ast) {
+        eprintln!("{}: {}", file_path.display(), m.message());
+    }
     let is_freestanding = matches!(
         target.os,
         simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS

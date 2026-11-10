@@ -54,6 +54,32 @@ impl CaptureWrite {
     }
 }
 
+/// Receiver-mutating builtin methods whose effect a by-value capture drops.
+const MUTATING_METHODS: &[&str] = &["push", "insert", "remove", "pop", "clear", "set", "sort", "extend", "append"];
+
+/// One dropped mutation: `name.method(...)` on a captured local.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureMutation {
+    pub name: String,
+    pub method: String,
+    pub in_fn: String,
+}
+
+impl CaptureMutation {
+    /// Warning text shared with the pure-Simple twin.
+    pub fn message(&self) -> String {
+        let site = if self.in_fn == "<closure>" {
+            "a closure".to_string()
+        } else {
+            format!("nested fn `{}`", self.in_fn)
+        };
+        format!(
+            "warning[W-CAPTURE-MUTATION]: `{}.{}(...)` mutates captured variable `{}` inside {}: closures capture enclosing locals by value, so the mutation is dropped; return the new value or use a module-level `var`",
+            self.name, self.method, self.name, site
+        )
+    }
+}
+
 struct Frame {
     names: HashSet<String>,
     boundary: bool,
@@ -65,11 +91,26 @@ struct Checker {
     fn_names: Vec<String>,
     pending_fn: Option<String>,
     found: Vec<CaptureWrite>,
+    mutations: Vec<CaptureMutation>,
 }
 
 /// Returns every assignment in `module` that writes a captured enclosing
 /// local from a nested `fn` or lambda, in source order.
 pub fn find_captured_local_writes(module: &Module) -> Vec<CaptureWrite> {
+    run(module).found
+}
+
+/// Returns every receiver-mutating method call (`push`, `insert`, `remove`,
+/// `pop`, `clear`, `set`, `sort`, `extend`, `append`) on a captured enclosing
+/// local from a nested `fn` or lambda. The mutation lands on the by-value
+/// snapshot and is dropped. Staged as warning W-CAPTURE-MUTATION (census
+/// 2026-11-10: 0 in src lambdas, 15 in test specs incl. a policy pin);
+/// user `me` methods are not resolved at parse level and are not covered.
+pub fn find_captured_local_mutations(module: &Module) -> Vec<CaptureMutation> {
+    run(module).mutations
+}
+
+fn run(module: &Module) -> Checker {
     let mut checker = Checker {
         frames: vec![Frame {
             names: HashSet::new(),
@@ -79,11 +120,12 @@ pub fn find_captured_local_writes(module: &Module) -> Vec<CaptureWrite> {
         fn_names: Vec::new(),
         pending_fn: None,
         found: Vec::new(),
+        mutations: Vec::new(),
     };
     for item in &module.items {
         checker.node(item);
     }
-    checker.found
+    checker
 }
 
 fn pattern_names(pattern: &Pattern, out: &mut Vec<String>) {
@@ -298,7 +340,17 @@ impl Checker {
                 self.expr(callee);
                 self.args(args);
             }
-            Expr::MethodCall { receiver, args, .. } => {
+            Expr::MethodCall { receiver, method, args, .. } => {
+                if let Expr::Identifier(name) = receiver.as_ref() {
+                    if MUTATING_METHODS.contains(&method.as_str()) && self.is_captured_local(name) == Some(true) {
+                        let in_fn = self.fn_names.last().cloned().unwrap_or_else(|| "<closure>".to_string());
+                        self.mutations.push(CaptureMutation {
+                            name: name.clone(),
+                            method: method.clone(),
+                            in_fn,
+                        });
+                    }
+                }
                 self.expr(receiver);
                 self.args(args);
             }
@@ -334,7 +386,7 @@ impl Checker {
 
 #[cfg(test)]
 mod tests {
-    use super::find_captured_local_writes;
+    use super::{find_captured_local_mutations, find_captured_local_writes};
     use crate::Parser;
 
     fn writes(src: &str) -> Vec<(String, String)> {
@@ -422,5 +474,38 @@ mod tests {
     fn colon_block_own_locals_are_allowed() {
         let src = "describe \"g\":\n    it \"x\":\n        var n = 0\n        n = n + 1\n        for x in [1]:\n            n = n + x\n";
         assert!(writes(src).is_empty());
+    }
+
+    fn mutations(src: &str) -> Vec<String> {
+        let module = Parser::new(src).parse().expect("parse");
+        find_captured_local_mutations(&module)
+            .into_iter()
+            .map(|m| format!("{}.{}@{}", m.name, m.method, m.in_fn))
+            .collect()
+    }
+
+    #[test]
+    fn closure_push_on_captured_local_is_a_mutation() {
+        let src = "fn outer() -> i64:\n    var seen: [i64] = []\n    [1, 2].each(\\x:\n        seen.push(x)\n    )\n    seen.len()\n";
+        assert_eq!(mutations(src), vec!["seen.push@<closure>"]);
+        assert!(writes(src).is_empty());
+    }
+
+    #[test]
+    fn nested_fn_mutating_calls_on_captured_local_are_mutations() {
+        let src = "fn outer():\n    var xs: [i64] = []\n    var d = {}\n    fn fill():\n        xs.insert(0, 1)\n        xs.sort()\n        d.set(\"k\", 1)\n        xs.clear()\n    fill()\n";
+        assert_eq!(mutations(src), vec!["xs.insert@fill", "xs.sort@fill", "d.set@fill", "xs.clear@fill"]);
+    }
+
+    #[test]
+    fn own_local_global_and_read_only_calls_are_not_mutations() {
+        let src = "var g: [i64] = []\nfn outer():\n    var xs: [i64] = []\n    xs.push(1)\n    [1].each(\\x:\n        var mine: [i64] = []\n        mine.push(x)\n        g.push(x)\n        val n = xs.len()\n    )\n";
+        assert!(mutations(src).is_empty());
+    }
+
+    #[test]
+    fn colon_block_push_on_enclosing_local_is_not_a_mutation() {
+        let src = "describe \"g\":\n    it \"x\":\n        var xs: [i64] = []\n        xs.push(1)\n";
+        assert!(mutations(src).is_empty());
     }
 }
