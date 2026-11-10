@@ -6,7 +6,7 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11
 **Lane:** S3 (spipe docgen for `test/01_unit/os/vulkan/`)
-**Status:** Open — informational/documentation-quality, not a product defect
+**Status:** FIXED 2026-11-11 — Finding 1 verified fixed on release/1.0.0 (P3 runner6 lane; squash-merge b4a784df0640 of 69d3ce4d5e58); Finding 2 required no change
 
 ## What was run
 
@@ -151,3 +151,20 @@ Seed-smoke evidence (Rust seed `bin/simple.exe`, this worktree):
 - `bin/simple.exe run src/app/spipe_docgen/main.spl <spec> --output <scratch> --no-index`
   -> "Generated 1 docs (1 complete, 0 stubs)"; the generated manual opens with
   the narrative block instead of AUTO-generated stub text.
+
+## 2026-11-11 triage (P3 runner lane, work/p3-runner6-20261111): verified FIXED on this base
+
+- Finding 1: `test/01_unit/os/vulkan/cross_arch_boundary_substitution_spec.spl`
+  now opens with a real top-level `"""..."""` literal (narrative block at
+  lines 13+), no longer comment-wrapped — verified by direct read. The fixing
+  change is present as squash-merge `b4a784df0640` ("test(std.spec): real
+  docstring literal in cross_arch vulkan spec (docgen stub fix)"; the
+  2026-11-10 lane's SHA `69d3ce4d5e58` is not itself an ancestor — branch
+  squash-merged — content verified in-tree).
+- Finding 2: unchanged from the 2026-11-10 assessment — the readback and
+  cmdstream manuals already carry the honest limitation wording; no wording
+  change required.
+
+No live rerun (the prior lane's docgen smoke — "Generated 1 docs (1 complete,
+0 stubs)" — stands on this same base; per the lane's no-green-rerun rule).
+Verdict: FIXED.

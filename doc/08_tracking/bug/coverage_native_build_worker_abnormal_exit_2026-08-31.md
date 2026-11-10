@@ -120,3 +120,27 @@ evidence on this base (origin/release/1.0.0 tip + boot11 merge).**
   ~12 s) stays with the native-build/compiler lane.
 
 No change made in this lane.
+
+## Triage 2026-11-11 (P3 runner6 lane, work/p3-runner6-20261111)
+
+**Verdict: STALE — concurs with the 2026-11-10 p3-runner2, p3-boot4, and
+p3-boot12 verdicts; first-hand citation check on this base.**
+
+- Subject binary `bin/release/x86_64-unknown-linux-gnu/simple` absent in this
+  worktree (the 2026-08-31 filing-host Linux state cannot be reconstituted
+  here; confirmed by ls rc=2).
+- Reporting rewrite confirmed live first-hand:
+  `native_build_worker_failure_lines_v1` at
+  `src/app/cli/native_build_main.spl:2298` (grepped this lane).
+- Runner-side fail-closed contract re-verified live at
+  `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:1473-1494`
+  (same gate the sibling bug
+  `coverage_wrapper_not_retained_keep_artifacts_2026-08-31` extends this
+  week with wrapper retention + naming).
+- Weekly sweep (lane assignment): `git log --since=2026-11-05 --oneline --
+  test/ src/lib | grep -i coverage` shows no new coverage-wrapper runner work
+  this week; the coverage-native-build worker family stays partially
+  SUPERSEDED on the runner side (fail-closed contract) while the host-side
+  native-compile root cause remains with the compiler/native-build lane.
+
+No change made in this lane.

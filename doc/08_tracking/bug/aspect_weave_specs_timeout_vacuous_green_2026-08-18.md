@@ -1,5 +1,5 @@
 # Aspect weave/join-point specs time out, and the runner reports it as a vacuous green
-## Open 2026-09-16 — needs owner triage
+## SUPERSEDED 2026-11-11 — P3 runner6 lane; runner-side fail-closed contract verified live on release/1.0.0
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -337,3 +337,27 @@ PASSED; an infinite-loop child survived to manual kill), so the kill-to-
 UNVERIFIED path could not be exercised end-to-end on this host. The
 classification/reporting contract is unit-covered above; the kill mechanism
 itself is seed/host-side, not runner code.
+
+## 2026-11-11 triage (P3 runner lane, work/p3-runner6-20261111): SUPERSEDED — confirmed on this base
+
+Independently re-verified the 2026-11-10 triage's citations on this lane's base
+(origin/release/1.0.0 tip, worktree simple-p3-runner6-20261111):
+
+- Defect 2 (vacuous aggregate `Results:` on timeout) stays fixed:
+  `src/app/test_runner_new/test_runner_single.spl:537-545` prints
+  `UNVERIFIED {path}: {unverified}` for TIMEOUT/TERMINATED runs, and
+  `src/lib/nogc_sync_mut/test_runner/test_runner_types.spl:305-331` counts
+  `total_timed_out` and maps `total_timed_out > 0` to
+  `TimeoutResourceFailure` (exit 124) — the fail-closed contract this bug
+  asked for. Grepped live, line numbers match the prior triage.
+- Defect 1 (30 GB RSS blowup) remains non-reproducible per the in-doc
+  2026-08-18 correction (premise replaced by the class-field-erasure seed
+  regression, itself long since resolved on this base).
+- The 2026-08-31 Stage 1 link-failure family this doc also recorded is
+  covered by the standing
+  `scripts/check/check-bootstrap-entry-core-lane-abi.shs` detector and the
+  bootstrap lanes, not this one.
+
+No live reproduce attempted beyond the citation checks (the 2026-11-10 lane
+already ran the classification specs 5/5 and 9/9 on this same seed; per the
+lane's no-green-rerun rule they were not re-run). Verdict: SUPERSEDED.
