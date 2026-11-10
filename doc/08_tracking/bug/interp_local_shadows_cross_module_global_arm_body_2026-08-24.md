@@ -103,3 +103,24 @@ Routed to the compiler-seed lane; spec and probe stay RED as the acceptance
 test. Note the second `it` (round-8 fixed-size module arrays,
 `interpreter_fd_ownership_private_module_globals_not_linked_2026-08-12`) fails
 on the same binary too.
+
+## 2026-11-10 P3 seedfix lane — BUILD SKEW, round-8 fix present and correct (no source fix)
+
+Routed today as "guard IS in source but FAILS at runtime — residual hole or build
+skew". Finding: BUILD SKEW. The round-8 fix (1889cc95543d) is present and correct in
+this branch's source: the four `env.is_local(name) ||` guards in
+`interpreter/node_exec.rs` (1424/1457/1488/1553) AND the `module_global_target`
+`is_local` early-return in `interpreter_call/block_execution.rs:34`. A FRESH debug
+AND release build from HEAD source passes the acceptance spec
+`test/01_unit/compiler/interpreter/local_shadows_module_global_spec.spl` 2/2.
+
+The deployed `bin/simple.exe` (git blob 1e46cf298, committed 9e7e7a526edb) fails the
+same spec 2/2 ("expected 2 to equal 1"; "r8a_slots not found") — the committed seed
+binary predates the round-8 fix. The residual-hole hypothesis is ruled out by the
+fresh build passing.
+
+Action: no source change (correctly — modifying working code on the stale-binary
+symptom would be speculative churn). The .spl acceptance spec is the
+regression/acceptance lock and passes on a fresh build. Recommend a seed
+rebuild+redeploy so the deployed binary matches source. Evidence:
+build/review/p3fix-seedfix-20261110.sdn.
