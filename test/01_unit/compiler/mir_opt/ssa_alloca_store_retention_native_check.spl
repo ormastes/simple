@@ -12,22 +12,22 @@ fn local(id: i64) -> LocalId:
 fn copy_operand(id: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Copy(local(id)))
 
-fn retained_cross_block_store(value: MirConstValue, type_: MirType) -> bool:
+fn retained_cross_block_store(value: MirConstValue, type_: MirType, target_id: i64) -> bool:
     val blocks = [
         MirBlock(
             id: BlockId.new(0),
             label: "entry",
-            instructions: [MirInst(kind: MirInstKind.Const(local(5), value, type_), span: nil)],
+            instructions: [MirInst(kind: MirInstKind.Const(local(target_id), value, type_), span: nil)],
             terminator: MirTerminator.Goto(BlockId.new(1))
         ),
         MirBlock(
             id: BlockId.new(1),
             label: "return",
             instructions: [],
-            terminator: MirTerminator.Ret(Some(copy_operand(5)))
+            terminator: MirTerminator.Ret(Some(copy_operand(target_id)))
         )
     ]
-    val locals = [MirLocal(id: local(5), name: nil, type_: type_, kind: LocalKind.Var, is_ghost: false)]
+    val locals = [MirLocal(id: local(target_id), name: nil, type_: type_, kind: LocalKind.Var, is_ghost: false)]
     val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
     if not result.applied or result.blocks.len() != 2:
         return false
@@ -73,17 +73,122 @@ fn retained_cross_block_store(value: MirConstValue, type_: MirType) -> bool:
                 case _: false
         case _: false
 
+fn retained_same_block_reassignment(first: MirConstValue, second: MirConstValue, type_: MirType) -> bool:
+    # Single-block multi-def: `x = first; x = second; return x`. The alloca
+    # transform docs require this to be slotted too (duplicate `%lN` SSA defs
+    # otherwise), producing: Alloc(slot), Const(t1, first), Store(slot, t1),
+    # Const(t2, second), Store(slot, t2), Load(l, slot); Ret(l).
+    val blocks = [
+        MirBlock(
+            id: BlockId.new(0),
+            label: "entry",
+            instructions: [
+                MirInst(kind: MirInstKind.Const(local(5), first, type_), span: nil),
+                MirInst(kind: MirInstKind.Const(local(5), second, type_), span: nil)
+            ],
+            terminator: MirTerminator.Ret(Some(copy_operand(5)))
+        )
+    ]
+    val locals = [MirLocal(id: local(5), name: nil, type_: type_, kind: LocalKind.Var, is_ghost: false)]
+    val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+    if not result.applied or result.blocks.len() != 1:
+        return false
+    val insts = result.blocks[0].instructions
+    if insts.len() != 6:
+        return false
+
+    var slot_id = -1
+    var first_value = -1
+    var second_value = -1
+    var loaded_id = -1
+    match insts[0].kind:
+        case Alloc(dest, _): slot_id = dest.id
+        case _: return false
+    match insts[1].kind:
+        case Const(dest, _, _): first_value = dest.id
+        case _: return false
+    match insts[2].kind:
+        case Store(ptr, stored):
+            match ptr.kind:
+                case Copy(local_):
+                    if local_.id != slot_id: return false
+                case _: return false
+            match stored.kind:
+                case Copy(local_):
+                    if local_.id != first_value: return false
+                case _: return false
+        case _: return false
+    match insts[3].kind:
+        case Const(dest, _, _): second_value = dest.id
+        case _: return false
+    if second_value == first_value:
+        return false
+    match insts[4].kind:
+        case Store(ptr, stored):
+            match ptr.kind:
+                case Copy(local_):
+                    if local_.id != slot_id: return false
+                case _: return false
+            match stored.kind:
+                case Copy(local_):
+                    if local_.id != second_value: return false
+                case _: return false
+        case _: return false
+    match insts[5].kind:
+        case Load(dest, ptr):
+            loaded_id = dest.id
+            match ptr.kind:
+                case Copy(local_):
+                    if local_.id != slot_id: return false
+                case _: return false
+        case _: return false
+    match result.blocks[0].terminator:
+        case Ret(returned):
+            if returned == nil: return false
+            match returned.unwrap().kind:
+                case Copy(local_): local_.id == loaded_id
+                case _: false
+        case _: false
+
 describe "SSA alloca rewrite retains definitions and stores":
     it "retains the exact cross-block boolean value flow":
         val retained = retained_cross_block_store(
             MirConstValue.Bool(true),
-            MirType.bool()
+            MirType.bool(),
+            5
         )
         expect(retained).to_equal(true)
 
     it "retains the adjacent text-pointer value flow":
         val retained = retained_cross_block_store(
             MirConstValue.Str("linux"),
-            MirType.ptr(MirType.i64(), false)
+            MirType.ptr(MirType.i64(), false),
+            5
+        )
+        expect(retained).to_equal(true)
+
+    # llvm_constants_lost_ret_zero_2026_08_01 adjacent owner hardening: the
+    # transform must apply the def-rename + Store for a slotted local whose id
+    # is 0. var_reassign_ssa.spl documents that a payload-truthiness check on
+    # the written-local Option collapsed Some(0) to falsy, silently dropping
+    # the rename and Store for id 0 (the first real local of a Unit-returning
+    # function) and leaving the slot read uninitialized -- the same
+    # "definition lost, slot never stored" family as the lost constants.
+    it "retains the defining store when the slotted local is id 0":
+        val retained = retained_cross_block_store(
+            MirConstValue.Bool(true),
+            MirType.bool(),
+            0
+        )
+        expect(retained).to_equal(true)
+
+    # Same-block straight-line reassignment (multi-def): both defining
+    # constants must survive as distinct renamed temps with a Store into the
+    # one shared slot, and the Ret must read the slot back through a Load.
+    it "retains both stores of a same-block reassignment":
+        val retained = retained_same_block_reassignment(
+            MirConstValue.Bool(true),
+            MirConstValue.Bool(false),
+            MirType.bool()
         )
         expect(retained).to_equal(true)
