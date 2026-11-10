@@ -156,3 +156,22 @@ not regressions from this change. Known unrelated pre-existing failure:
 `PROBE_DONE` missing on macOS; the spec never calls `.set`).
 
 Status: FIXED on all three engines (interpret, jit, native).
+
+## 2026-11-10 P3 triage (work/p3-interp-20261110) — SUPERSEDED, interpreter lane verified
+
+Re-verified on the deployed Windows Rust seed (`bin/simple.exe`, 34 MB 2026-11-10
+worktree build), cwd = worktree root:
+
+- `test test/01_unit/interpreter/array_set_method_spec.spl` → 7/7 PASS.
+- `test test/01_unit/language/array_set_spec.spl` → 5/5 PASS.
+- Three-engine repro (`set(0,9)`/`set(-1,7)`/`set(10,99)`/`set(-10,42)`):
+  `SIMPLE_EXECUTION_MODE=interpret` prints exactly the fixed table
+  (`true [9,3,1]` / `true [9,3,7]` / `false` / `false`).
+
+Interpreter lane: FIXED and green on the deployed seed. JIT lane on this host
+still aborts `Method 'set' not found on type 'Array'` — the deployed Windows
+seed binary predates `c3b2271c310`; the fix itself IS in source and branch
+ancestry (`rt_collection_set` routes Array → `rt_array_set` at
+`src/compiler_rust/runtime/src/value/collections.rs:2811-2837`, verified read).
+Residual action is a seed redeploy for jit/native, not a code change
+(same class as `deployed_seed_binary_missing_var_roots_cache_fix_2026-09-13`).
