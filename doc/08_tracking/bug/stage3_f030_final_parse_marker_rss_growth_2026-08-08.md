@@ -104,3 +104,37 @@ until that diagnostic plan is approved.
 - structured progress: `build/production-runtime-admission-f030/bootstrap-build-progress.events`
 - Stage 3 log: `build/production-runtime-admission-f030/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`
 - admitted Stage 2: `build/production-runtime-admission-f030/stage2/x86_64-unknown-linux-gnu/simple`
+
+## 2026-11-11 addendum (lane boot19) — BLOCKED (needs the sanctioned bootstrap; first status stays OPEN)
+
+Verdict: BLOCKED. Same grant as the sibling stage-3 rows: the 2026-11-04
+bootstrap triage in `doc/08_tracking/bug/bug_db.sdn:8423` requires a
+self-hosted stage3 replay before this can be closed — "cannot be settled
+with the Rust seed bin/simple.exe."
+
+Exact grant command (verbatim from that adjudication):
+
+1. Fresh worktree rebased on origin/release/1.0.0 with no other bootstrap running.
+2. `SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`
+   (sanctioned bootstrap; yields `build/bootstrap/stage3/<triple>/simple` and
+   `stage3-command.transcript`).
+3. Replay the Observation/Symptom section of this doc with that stage3 binary
+   under a timeout (stage3 cmd form: `build/bootstrap/stage3/<triple>/simple
+   native-build <entry> ...`, or replay `stage3-command.transcript`) and
+   capture rc plus last 50 log lines.
+4. Append the observed rc and log here (and in `bug_db.sdn`) and set status
+   closed if it no longer reproduces.
+
+This record's own acceptance criteria additionally demand the
+`SIMPLE_COMPILER_PHASE_PROFILE=1` marker sequence (`phase2:parse:file:done` /
+`phase2:parse:done` / `phase3:hir_typecheck:start`, each with a
+`heap_registry` count) before any fix may be scoped; plan approval for that
+instrumentation belongs to the granted lane. Note the observation is at
+revision f030 (2026-08-08) and the stage-2/3 chain has since absorbed
+multiple memory-shape fixes (entry-closure byte scan `13d7746adc0e` with the
+2026-09-25 index_of negative-miss history at
+`driver_entry_closure_core.spl:759`; topological_order sites 9-11 of
+`stage2_stage3_route_native_compile_timeout_2026-09-13`), so supersession is
+plausible — but per the 2026-11-04 adjudication the close must come from the
+replay, not from inference. Do not retry the f030 build itself; this doc's
+diagnostic-plan gate still stands.
