@@ -5,8 +5,8 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-17
-**Status:** OPEN — **and the obvious one-character fix is now PROVEN UNSAFE.**
-See "Why the obvious fix is wrong" below. Reproduced again 2026-08-17.
+**Status:** OPEN — **BLOCKED 2026-11-11 (lane compiler6): grammar-owner decision + Rust seed rebuild required; see the 2026-11-11 addendum at the end of this file.**
+See "Why the obvious fix is wrong" below. Reproduced again 2026-08-17; reproduced once more on the fresh seed (build 46fe8f6b6def) by lane compiler6 on 2026-11-11.
 **Severity:** MEDIUM — `src/lib/nogc_async_mut/wm/wm_optimization.spl` (and every
 module importing it) fails to parse
 **Found by:** `src/lib/**` parse sweep (7780 files)
@@ -174,3 +174,46 @@ The source was deliberately left unchanged: reindenting it would erase the
 repro and paper over a parser defect. Fix belongs in the frontend's
 continuation handling.
 
+
+## Verdict addendum 2026-11-11 — lane compiler6 (BLOCKED, OPEN kept)
+
+Reproduced on the tracked fresh seed (`bin/simple.exe`, build 46fe8f6b6def,
+seed-smoke): the minimal same-indent `+ "y"` repro still fails with
+`Unexpected token: expected expression, found Plus`. The defect is LIVE.
+
+Why this lane routes it BLOCKED instead of fixing:
+
+1. The Rust seed parser now rejects same-indent `+`/`-`/`*` **by design**, with
+   the exact hazard this record documents cited as the rationale:
+   `src/compiler_rust/parser/src/expressions/binary.rs:458-466` — additive
+   ops are parsed `indent_required` because a same-indent `-1` line after
+   `return 15` is a new statement ("gluing it produced `return (15 - 1)` == 14").
+   `*` is treated the same (`848b823cdf41`); `/` and `%` keep same-indent
+   continuation (`binary.rs:487-525`) because they cannot begin a statement.
+2. The record itself demands a disambiguation rule, not a relaxed comparison —
+   its options (2) "last statement of the block" and (3) "head line
+   syntactically incomplete" are both contradicted by the record's own repro
+   (`"x" + a` is a complete expression and the `+ "y"` chain sits in
+   implicit-return position in the real-world site), so choosing the rule is a
+   **grammar-design decision for the language owner**, not a lane call.
+3. Landing any such rule requires changing the Rust seed parser **and** the
+   pure-Simple frontend together (the family spec tracks
+   "Self-hosted frontend parity"), then rebuilding the seed. This lane is
+   forbidden cargo/rustc and the tracked seed binary is the only executable
+   frontend in the worktree, so a seed-side parser change is unlandable and
+   unverifiable here.
+4. Related untracked observation for the owner (not fixed here, unverifiable
+   without a self-hosted binary): the pure-Simple front end
+   (`src/compiler/10.frontend/core/lexer_struct.spl:358`,
+   `leading_op_continues` guard 2) rejects same-indent continuation for ALL
+   operators including `/` and `%`, while the seed accepts same-indent `/` and
+   `%` — a divergence in the safe direction only.
+
+Exact grant needed to unblock: (a) language-owner decision on the
+same-indent `+`/`-` disambiguation rule (or WONTFIX with the seed's current
+design documented as the resolution); (b) seed-build lane grant to land + rebuild
+the Rust seed parser, e.g. `cd src/compiler_rust && cargo build --release &&
+cp target/release/simple.exe ../../bin/simple.exe`, followed by the matching
+pure-frontend change and the negative coverage this record already demands
+(`cross_query.spl:137` shape in
+`test/01_unit/compiler/parser_leading_operator_continuation_spec.spl` FIRST).
