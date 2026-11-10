@@ -658,3 +658,40 @@ mod is_condition_present_tests {
         assert!(is_condition_present(&cond, &Value::Int(1)));
     }
 }
+
+#[cfg(test)]
+mod iter_to_vec_list_tests {
+    use super::*;
+
+    // Regression for interp_for_over_list_generic_2026-07-02 after the
+    // 2026-11-04 ClassInstance storage flip: a `List<T>` value is a
+    // `Value::ClassInstance` (not `Value::Object`) whose payload is the plain
+    // `items` array. Iteration must yield those elements -- the defect raised
+    // "cannot iterate over this type: ClassInstance" on the interpreter lane.
+    // Acceptance spec: test/01_unit/compiler/interpreter/for_over_list_class_spec.spl.
+    #[test]
+    fn iter_to_vec_iterates_class_instance_list_items() {
+        let items = Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(4)]);
+        let mut fields = HashMap::new();
+        fields.insert("items".to_string(), items);
+        let list = Value::aggregate("List".to_string(), fields, false);
+        assert!(
+            matches!(list, Value::ClassInstance(_)),
+            "List aggregate should use ClassInstance storage by default (2026-11-04 flip)"
+        );
+
+        let values = iter_to_vec(&list).expect("List<T> ClassInstance must be iterable");
+        assert_eq!(values, vec![Value::Int(1), Value::Int(2), Value::Int(4)]);
+    }
+
+    #[test]
+    fn iter_to_vec_rejects_non_list_class_instance() {
+        let mut fields = HashMap::new();
+        fields.insert("v".to_string(), Value::Int(1));
+        let other = Value::aggregate("Widget".to_string(), fields, false);
+        assert!(
+            iter_to_vec(&other).is_err(),
+            "an arbitrary ClassInstance is not iterable"
+        );
+    }
+}
