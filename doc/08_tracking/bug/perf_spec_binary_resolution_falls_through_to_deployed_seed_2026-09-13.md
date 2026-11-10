@@ -67,3 +67,37 @@ PERF-6 spent an hour on interleaved runs before the fingerprint was run down.
 Not fixed here: (2) touches the runner and the sibling spec, both outside
 PERF-6's scope, and (1) is applied only to the spec this lane owns.
 
+## Addendum 2026-11-11 — lane runner5: SUPERSEDED (fix verified on refreshed seed)
+
+Fix shape 2 (the actual defect) has been implemented: the test runner now
+forwards `SIMPLE_PERF_SELF_BIN`. `src/app/test_runner_new/test_runner_client.spl`
+`_binary_override_vars()` (~line 708) includes `"SIMPLE_PERF_SELF_BIN"`, so any
+allowlisted binary selector set in the invoking environment makes the client
+bypass the session daemon and propagate the variable to the spec child. The
+mechanism is pinned by `scripts/check/check-perf-regression-tests.shs:877-886`
+(greps for `"SIMPLE_PERF_SELF_BIN"]` in the client). Ledger row
+`doc/08_tracking/bug/bug_db.sdn:5820` (2026-11-09) records
+"fix-implemented-verification-pending … Not re-run" — this addendum supplies
+the pending verification.
+
+Seed-smoke verification on refreshed seed (build-commit 0791c2b7f4a7):
+re-ran the bug's own measurement matrix with an env-probe spec
+(`build/review/p3fix-runner5-20261111/perf_bin_probe/perf_bin_probe_spec.spl`,
+gitignored temp):
+
+    SIMPLE_PERF_SELF_BIN=PROBE_XYZ_VALUE bin/simple.exe test <file>  -> OK (child sees the var)
+    SIMPLE_PERF_SELF_BIN=PROBE_XYZ_VALUE bin/simple.exe test <dir>   -> OK (child sees the var)
+
+Both single-file and DIRECTORY mode now deliver `SIMPLE_PERF_SELF_BIN` to the
+child — the 2026-09-13 "directory mode drops the variable" behaviour no longer
+reproduces.
+
+Residual (non-blocking) gap from the original "Fix shape": the sibling
+`while_loop_shape_parity_spec.spl` still does not print the resolved binary
+(fix shape 1 was applied only to `block_scope_shadow_parity_spec.spl`, the
+spec PERF-6 owned). The silent-wrong-binary defect itself is closed by the
+runner forwarding; the print line remains a diagnostic nice-to-have.
+
+Verdict: SUPERSEDED — runner fix in test_runner_client.spl, verified on the
+refreshed seed in both runner modes.
+
