@@ -30,7 +30,7 @@ than fixed here because the parser half lives in `src/compiler_rust/**`,
 which a concurrently running bootstrap forbids editing.
 
 Date: 2026-07-02
-Status: open (workaround in place)
+Status: SUPERSEDED 2026-11-11 (lane compiler6) — template corrected + convention codified (MNT-003); parser change no longer the chosen resolution. See the 2026-11-11 addendum at the end of this file.
 Severity: P3
 Related: .claude/templates/spipe_template.spl, SPipe SSpec authoring
 
@@ -64,3 +64,32 @@ e.g. the pre-fix version of
 ## Workaround
 
 Converted the spec's `@step "..."` lines to `# @step: ...`.
+
+## Verdict addendum 2026-11-11 — lane compiler6 (SUPERSEDED)
+
+Verified on the tracked fresh seed (`bin/simple.exe`, build 46fe8f6b6def,
+seed-smoke): a spec using the decorated-string form still fails with
+`Unexpected token: expected Fn, found FString([Literal("Open the application")])`
+at line 2, column 7 — the parse behaviour is unchanged.
+
+The record itself allowed two resolutions: "Either the parser should accept
+the decorated-string form the template advertises, or the template should be
+corrected to the comment form." The second branch has since been taken and
+codified:
+
+* `.claude/templates/spipe_template.spl` no longer advertises `@step "..."`.
+  Its score-bearing structure block now mandates: "never a bare `@step "..."`
+  decorator; use `# @step:` (MNT-003)".
+* The SPipe authoring convention `.claude/skills/spipe.md` rule **MNT-003**
+  scores any line starting with `@step ` at -10 mnt and prescribes
+  `# @step: Label` instead.
+* Both arrived via merge `9e7e7a526edb` (PR #7597, 2026-11-07), the sspec
+  modernization lane.
+* Working specs in the tree use the comment form; docgen binds `# @step:`
+  comments (template header: "`# @step:` overrides the label").
+
+With the template corrected and the convention enforced by the scorer, the
+parser half of this record is no longer the chosen resolution: blessing a form
+the style guide penalizes would contradict the owner's documented convention,
+and landing it would need a Rust seed rebuild this lane is not granted.
+SUPERSEDED, CLOSED.

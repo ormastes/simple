@@ -1,6 +1,11 @@
 # BUG-TRACKING: Dead "only-compiled" spec tag — repo-wide sweep
 
-Status: PARTIAL SWEEP COMPLETE (2026-07-03)
+Status: SUPERSEDED→FIXED — 2026-11-11 (lane ne18). The mechanism this sweep
+attributed to tag non-recognition was root-caused 2026-08-10 as the `tag:`
+named argument deleting the BDD block body, and fixed the same day in
+`3305df7e1508` ("fix(spec-dsl): a `tag:` named argument no longer deletes the
+BDD block"), ancestor of release/1.0.0 tip. See
+`only_compiled_tag_silently_drops_describe_bodies_2026-08-10.md`.
 
 **Date:** 2026-07-03
 **Context:** The tag `["only-compiled"]` is not recognized by any runner source
@@ -287,3 +292,38 @@ heavy backend specs: llvm_backend*, vhdl_backend*, llvm_compiled_proof,
 llvm_parity, remote_riscv32, gpu_ptx_gen, llvm_lib_ffi_perf). Passing files
 were left untagged; failing files had the tag restored immediately (verified
 via `git diff` producing no residual change).
+
+## Addendum 2026-11-11 (lane ne18) — mechanism fixed by 3305df7e1508; sweep premise superseded
+
+Triage verdict: **FIXED** (with the mechanism corrected). This sweep
+concluded the runner "does not recognize" the tag. The 2026-08-10 root-cause
+doc `only_compiled_tag_silently_drops_describe_bodies_2026-08-10.md` proved
+the real mechanism: describe/context/it selected their body by HARD-CODED
+positional index 1 in the BDD interpreter, so a named `tag: ["only-compiled"]`
+array sat at index 1, was evaluated as the block, fell through to Nil, and
+the body never ran — describe-level tags silently dropped whole groups
+(tautology-green at `it` level). That doc's census: 146 spec files, 279 tag
+occurrences, ~376-443 examples silently absent. The fix landed the same day
+in `3305df7e1508` ("fix(spec-dsl): a `tag:` named argument no longer deletes
+the BDD block"), ancestor of the release/1.0.0 tip this lane was cut from.
+
+Verification actually run in this lane (seed-smoke: fresh seed 46fe8f6b6def,
+`SIMPLE_LIB=src`, interpreter mode, `--no-cache`):
+
+- `sh scripts/check/check-bdd-tagged-block-drop.shs` (the 2026-08-10 gate)
+  with `SIMPLE_BIN=$PWD/bin/simple.exe`: **PASS — all 4 declared example(s)
+  accounted for (executed=4 dropped=0)** on its tag-drop fixture.
+- `test/01_unit/compiler/cache/cold_full_index_retention_v1_spec.spl`
+  (currently carries `tag: ["only-compiled"]`): **2 total, 2 passed, 0
+  failed** — tagged examples now EXECUTE under the interpreter; the body is
+  no longer deleted.
+
+Semantics note for follow-up: `only-compiled` remains UNIMPLEMENTED as a
+filter (no runner source recognizes it), so tagged blocks now run in ALL
+modes — the tag is inert, not a gate. That resurrects exposure for the 29
+"restored-with-failures" files above and the ~100 files tagged since (many
+new ones under `test/01_unit/compiler/{cache,mir,backend}/`); whether each
+now-passes is tracked by the ora/sspec red-spec batches, not re-swept here.
+The unprocessed 50 legacy-mirror follow-up from this doc is moot for
+correctness (mirrors now execute their bodies too) but the mirrors still
+carry the inert tag.

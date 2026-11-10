@@ -1,6 +1,8 @@
 # NLL borrow check: `&mut` of a local is reported "may still be active at return" at every return (2026-08-24)
 
-- **Status:** OPEN — not fixed
+- **Status:** FIXED — 2026-11-11 (lane ne18); fixing commit `9e3eb1adccdb`
+  (2026-08-24, "fix(interp,borrow): ... Return borrow check rejected every Ref"),
+  ancestor of release/1.0.0 tip
 - **Severity:** HIGH — blocks `native-build` of any program whose closure
   contains such a function, including everything importing `std.io_runtime`
 - **Area:** `src/compiler/55.borrow/borrow_check/` (pure Simple)
@@ -84,3 +86,32 @@ sensitive to attempt in the same lane that fixed the two defects above.
 - `--no-borrow-check` makes the build proceed past this point. That was used
   ONLY as a diagnostic probe to see what lay beyond; it is not a fix and must
   not be wired into any build lane.
+
+## Addendum 2026-11-11 (lane ne18) — FIXED, verified
+
+Triage verdict: **FIXED**. Fixing commit `9e3eb1adccdb` (2026-08-24,
+"fix(interp,borrow): if-val in expression position never bound its name;
+Return borrow check rejected every Ref") is an ancestor of the
+release/1.0.0 tip this lane was cut from (`git merge-base --is-ancestor`
+confirmed). The commit rewired exactly the three structural gaps listed
+above: `Ref` dests are recorded (`note_borrow_dest`), `Ret` operand locals
+are recorded (`note_returned_local`, wired at
+`src/compiler/55.borrow/borrow_check/mod.spl:626-632`), and the `Return`
+arm of `check_terminator`
+(`src/compiler/55.borrow/borrow_check/nll.spl:590-616`) now gates on
+`borrow_reference_escapes(borrow.id)`
+(`src/compiler/55.borrow/borrow_check/borrow_graph.spl:835-839`) instead of
+reporting every active borrow. A dedicated fail-closed gate ships at
+`scripts/check/check-ifval-expr-binding-and-outparam-borrow.shs`
+(mutation-tested in both directions per the commit message).
+
+Verification actually run in this lane (seed-smoke: fresh seed binary
+build-commit 46fe8f6b6def, `SIMPLE_LIB=src`, interpreter mode, `--no-cache`):
+a spec holding this doc's exact reproducer shape
+(`&mut` out-param consumed by a call, then three returns) at
+`build/p3ne18/row1/nll_outparam_borrow_spec.spl` — module compiles clean
+through the borrow-check pass (zero `may still be active at return`
+diagnostics) and the example passes `1 total, 1 passed, 0 failed`
+(exit 0). The doc's own `native-build` reproducer was also attempted but
+exceeds the lane's 120 s small-fixture native-build budget, so runtime
+proof is the interpreter-mode spec above plus the in-tree gate.

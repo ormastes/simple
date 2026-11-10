@@ -4,6 +4,11 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
+Addendum 2026-11-11 (lane ne18): re-verified a representative sample on the
+release/1.0.0 tip — all still red at the same baseline counts (see the
+addendum at the bottom). Record stays OPEN as the tracking record for these
+specs' owning lanes.
+
 - Date: 2026-08-26
 - Discovered during: sspec-maintain modernization of `/tmp/sspec_census/ora_batch_aa`
 - Status: OPEN (one entry per spec; baseline proven by restoring the pre-edit
@@ -90,3 +95,27 @@ to the baseline's. Structural modernization was still applied (scores in
 `wine_vm_write_readback_token_renamed_specs_red_2026-08-26.md` for the Wine
 evidence-token family.)
 
+
+## Addendum 2026-11-11 (lane ne18) — sample re-verified, all still red
+
+Triage verdict: **LIVE as a tracking record; stays OPEN**. A representative
+sample of the listed specs was re-run on the release/1.0.0 tip this lane was
+cut from (seed-smoke: fresh seed build-commit 46fe8f6b6def, `SIMPLE_LIB=src`,
+interpreter mode, `--no-cache`). Every sampled spec is still red, at the same
+total counts as the 2026-08-26 baseline:
+
+| spec | 2026-08-26 baseline | 2026-11-11 seed-smoke |
+|---|---|---|
+| `test/01_unit/os/dma_driver_spec.spl` | 1 total, 0 passed | 1 total, 0 passed, 1 failed — SAME |
+| `test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl` | 3 total, 0 passed | 3 total, 0 passed, 3 failed — SAME |
+| `test/01_unit/lib/nogc_sync_mut/js/engine/js_vm_reclamation_spec.spl` | 4 total, 0 passed | 4 total, 0 passed, 4 failed — SAME |
+| `test/03_system/os/wm/simple_wm_render_provenance_spec.spl` | 5 total, 0 passed | now fails earlier with a PARSE error (1 total, 0 passed, dropped=1 reason=parse-error) — still red, different first-layer failure |
+
+No fixing was attempted: this record aggregates many independent owning
+lanes' red specs (per-spec fixes belong to those lanes), and the batch-wide
+re-baseline sweep belongs to the sspec/ora maintenance lane that owns this
+file. The row-5 addendum (`only_compiled_dead_tag_sweep_2026-07-03.md`) is
+directly relevant here: with the 2026-08-10 spec-dsl fix, formerly
+dead-tagged specs now execute everywhere, so several entries above may have
+changed failure layers since the batch was filed — the counts sampled here
+match the baseline anyway.

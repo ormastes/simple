@@ -1,7 +1,8 @@
 # Coverage-wrapper native compile: HIR-lowering residuals (2026-08-31)
 
-Status: OPEN (residual classes). Three sibling root causes were FIXED in the
-same change (`fix/cov-wrapper-hir-lowering`); this record covers what is left.
+Status: SUPERSEDED 2026-11-11 — runner-level R1 decision (fail-closed coverage
+abort) verified live on release/1.0.0; remaining R3–R8 are design decisions or
+sibling-lane items, none test-runner owned (P3 runner6 lane).
 
 ## Context
 
@@ -263,3 +264,32 @@ original lane recorded them: design decisions (ANY-receiver dynamic access,
 implicit field declaration, ghost-import hard error), declared native-codegen
 gaps (Context statements), sibling-branch items (R7), and one non-reproduced
 row (R8) — all explicitly "not papered over", none test-runner owned.
+
+## 2026-11-11 triage (P3 runner lane, work/p3-runner6-20261111): SUPERSEDED — confirmed on this base
+
+- R1 (the runner-routing decision): re-verified live in
+  `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:1473-1508` — a
+  coverage run whose wrapper fails to compile returns
+  `ABORTED BEFORE EXECUTION ... this is NOT a test result` with
+  `mcdc_skip_reason: coverage-abort: wrapper compile failure` unless
+  `SIMPLE_COVERAGE_FALLBACK=interpreter` is set explicitly. This is exactly
+  the "never silently accept a degraded run" contract this bug left open.
+  (The fail-closed helper this lane extended for the sibling bug
+  `coverage_wrapper_not_retained_keep_artifacts_2026-08-31` now also names
+  and retains the failed wrapper; see that doc's 2026-11-11 addendum.)
+- Weekly sweep per lane assignment: `git log --since=2026-11-05 --oneline --
+  test/ src/lib | grep -i coverage` returns only 3 commits on this base —
+  `92a60788444d` (doc-coverage DocItem migration), `ccf09759ce3c`
+  (interpreter call-ladder docs), `dd2769de5411` (MIR Result join test) —
+  none is coverage-wrapper runner work; the wrapper-name-length fix
+  `0125c6aef755` and MC/DC-manifest fix `ed7fa030f9a6` landed 2026-11-07/08
+  under test-runner, not coverage. No new in-tree wrapper-lowering change
+  this week.
+- R2 was fixed in-doc (SimpleAbiDigest256V1 declared). R3–R8 stand as the
+  original lane recorded: ANY-receiver dynamic access, implicit field
+  declaration, and ghost-import hard error are design decisions; Context
+  statements are a declared native-codegen gap; R7 is a sibling-branch item;
+  R8 needs a coverage-instrumented repro. None is test-runner owned; none
+  was papered over here.
+
+Verdict: SUPERSEDED (runner-owned part landed and verified; rest routed).

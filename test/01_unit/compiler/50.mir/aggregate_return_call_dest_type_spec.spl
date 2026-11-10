@@ -1,0 +1,116 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR: aggregate (class/struct/tuple) return keeps its type at the call dest
+
+Bug native_theme_package_aggregate_return_nil_2026-07-24: `load_theme_package`
+returns a named class local, `load_default_theme_package` forwards it, and the
+caller reads `.snapshot` -> nil on the native lane. This pins the MIR half:
+the callee signature and the caller's call-destination local must both keep
+the aggregate type (not erase to i64/Any).
+
+Bug: doc/08_tracking/bug/native_theme_package_aggregate_return_nil_2026-07-24.md
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val CLASS_SRC = "class Snap:\n    n: i64\n\nclass Pkg:\n    snapshot: Snap\n    name: text\n\nfn load_pkg(k: i64) -> Pkg:\n    val s = Snap(n: k)\n    val pkg = Pkg(snapshot: s, name: \"x\")\n    pkg\n\nfn load_default() -> Pkg:\n    load_pkg(7)\n\nfn main() -> i64:\n    val p = load_default()\n    p.snapshot.n\n"
+val STRUCT_SRC = "struct Pt:\n    x: i64\n\nfn make_pt() -> Pt:\n    val p = Pt(x: 3)\n    p\n\nfn fwd_pt() -> Pt:\n    make_pt()\n\nfn main() -> i64:\n    fwd_pt().x\n"
+val TUPLE_SRC = "fn make_t() -> (i64, text):\n    val t = (1, \"a\")\n    t\n\nfn fwd_t() -> (i64, text):\n    make_t()\n\nfn main() -> i64:\n    val t = fwd_t()\n    t.0\n"
+val OPT_SRC = "class Snap:\n    n: i64\n\nfn maybe(k: i64) -> Snap?:\n    if k < 0:\n        return nil\n    val s = Snap(n: k)\n    Some(s)\n\nfn main() -> i64:\n    if val s = maybe(2):\n        return s.n\n    0\n"
+val EARLY_SRC = "class Snap:\n    n: i64\n\nfn pick(k: i64) -> Snap:\n    val a = Snap(n: 1)\n    if k > 0:\n        return a\n    val b = Snap(n: 2)\n    b\n\nfn main() -> i64:\n    pick(1).n\n"
+
+fn kind_name(t: MirType) -> text:
+    match t.kind:
+        case MirTypeKind.Struct(_): "struct"
+        case MirTypeKind.Tuple(_): "tuple"
+        case MirTypeKind.I64: "i64"
+        case MirTypeKind.Union(_): "union"
+        case MirTypeKind.Ptr(_, _): "ptr"
+        case _: "other"
+
+struct Lowered:
+    errors: [text]
+    rets: Dict<text, text>
+    dests: Dict<text, text>
+
+fn lower_source(src: text) -> Lowered:
+    val parsed = parse_full_frontend(src, "agg_ret.spl", "agg_ret", Logger(level: 0))
+    var hl = HirLowering.with_filename("agg_ret.spl")
+    val hir = hl.lower_module(parsed)
+    expect(hl.errors.len()).to_equal(0)
+    var ml = MirLowering.new(hir.symbols)
+    val mir = ml.lower_module(hir)
+    var errors: [text] = []
+    for e in ml.errors:
+        if e.fatal:
+            errors = errors.push(e.message)
+    var rets: Dict<text, text> = {}
+    var dests: Dict<text, text> = {}
+    for function in mir.functions.values():
+        rets[function.name] = kind_name(function.signature.return_type)
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(dest, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                val did = instruction.bootstrap_call_dest_local_id()
+                                for l in function.locals:
+                                    if l.id.id == did:
+                                        dests[function.name + "->" + name] = kind_name(l.type_)
+                            case _: pass
+                    case _: pass
+    Lowered(errors: errors, rets: rets, dests: dests)
+
+fn dest_of(l: Lowered, caller: text, callee: text) -> text:
+    for k in l.dests.keys():
+        if k.contains(caller + "->") and k.ends_with(callee):
+            return l.dests[k]
+    "missing"
+
+fn ret_of(l: Lowered, name: text) -> text:
+    for k in l.rets.keys():
+        if k.ends_with(name):
+            return l.rets[k]
+    "missing"
+
+describe "MIR aggregate return keeps its type at the call destination":
+    it "class returned as named local and forwarded across a call (theme package shape)":
+        val l = lower_source(CLASS_SRC)
+        expect(l.errors).to_equal([])
+        expect(ret_of(l, "load_pkg")).to_equal("struct")
+        expect(ret_of(l, "load_default")).to_equal("struct")
+        expect(dest_of(l, "load_default", "load_pkg")).to_equal("struct")
+        expect(dest_of(l, "main", "load_default")).to_equal("struct")
+
+    it "struct value forwarded":
+        val l = lower_source(STRUCT_SRC)
+        expect(l.errors).to_equal([])
+        expect(ret_of(l, "make_pt")).to_equal("struct")
+        expect(dest_of(l, "fwd_pt", "make_pt")).to_equal("struct")
+        expect(dest_of(l, "main", "fwd_pt")).to_equal("struct")
+
+    it "tuple forwarded":
+        val l = lower_source(TUPLE_SRC)
+        expect(l.errors).to_equal([])
+        expect(ret_of(l, "make_t")).to_equal("tuple")
+        expect(dest_of(l, "fwd_t", "make_t")).to_equal("tuple")
+        expect(dest_of(l, "main", "fwd_t")).to_equal("tuple")
+
+    it "optional class return":
+        val l = lower_source(OPT_SRC)
+        expect(l.errors).to_equal([])
+        expect(dest_of(l, "main", "maybe")).to_equal(ret_of(l, "maybe"))
+        expect(ret_of(l, "maybe") == "i64").to_equal(false)
+
+    it "class early return":
+        val l = lower_source(EARLY_SRC)
+        expect(l.errors).to_equal([])
+        expect(ret_of(l, "pick")).to_equal("struct")
+        expect(dest_of(l, "main", "pick")).to_equal("struct")

@@ -8,8 +8,11 @@
 # SIMPLE_COVERAGE_FALLBACK=interpreter opt-in.
 use std.test_runner.test_runner_execute.{
     coverage_interpreter_fallback_opted_in, coverage_wrapper_abort_error,
-    coverage_wrapper_compile_failure_v1, compile_output_diagnostic_line_v1
+    coverage_wrapper_compile_failure_v1, compile_output_diagnostic_line_v1,
+    cleanup_native_generated_files, coverage_wrapper_retention_note_v1
 }
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
 
 describe "coverage wrapper compile failure fails closed":
 
@@ -81,6 +84,58 @@ describe "coverage wrapper compile failure fails closed":
         expect(failure.error.contains("failed to compile")).to_equal(true)
         expect(failure.error.contains("limit=memory")).to_equal(true)
         expect(failure.error.contains("compile_ms=47000")).to_equal(true)
+
+describe "failed coverage wrapper is retained and named (2026-11-11)":
+    # Bug coverage_wrapper_not_retained_keep_artifacts_2026-08-31: a generated
+    # wrapper that failed to compile was deleted (flag-gated only), and the
+    # abort text named no artifact, so the only evidence of the failure was
+    # unrecoverable. The wrapper now survives cleanup regardless of
+    # --keep-artifacts and its path is printed in the abort/degrade message.
+
+    it "names the retained wrapper path in the abort message":
+        val failure = coverage_wrapper_compile_failure_v1(
+            "error: undefined identifier: io_runtime", "", 17, "unit", "failure",
+            "/tmp/simple_cov_probe_spec.spl")
+        expect(failure.error.contains("Wrapper source retained at: /tmp/simple_cov_probe_spec.spl")).to_equal(true)
+
+    it "names the retained wrapper path for a compile timeout too":
+        val failure = coverage_wrapper_compile_failure_v1(
+            "compiler output", "timeout", 300000, "unit", "within",
+            "/tmp/simple_cov_probe_spec.spl")
+        expect(failure.error.contains("Wrapper source retained at: /tmp/simple_cov_probe_spec.spl")).to_equal(true)
+
+    it "keeps the message shape unchanged when no wrapper path is in scope":
+        val failure = coverage_wrapper_compile_failure_v1(
+            "error: unexpected token", "", 17, "unit", "failure")
+        expect(failure.error.contains("Wrapper source retained at:")).to_equal(false)
+        expect(coverage_wrapper_retention_note_v1("")).to_equal("")
+
+    it "retains the failed wrapper through cleanup without --keep-artifacts":
+        val dir = _tp_get_temp_dir()
+        # Production invariant (build_coverage_wrapper_checked): wrapped_path
+        # == cleanup_path, so the wrapper is deleted via the cleanup_path arm.
+        val wrapped = dir + "/cov_wrapper_retain_probe_wrapped.spl"
+        val source = dir + "/cov_wrapper_retain_probe_source.spl"
+        expect(file_write(wrapped, "probe wrapper")).to_equal(true)
+        expect(file_write(source, "probe staged source")).to_equal(true)
+        val _ok = cleanup_native_generated_files(dir + "/cov_wrapper_retain_probe.smf",
+            source, wrapped, wrapped, dir + "/cov_wrapper_retain_probe_original.spl",
+            false, "", "", wrapped)
+        expect(file_exists(wrapped)).to_equal(true)
+        expect(file_exists(source)).to_equal(false)
+        expect(file_delete(wrapped)).to_equal(true)
+
+    it "still deletes every generated file when no retention path is given":
+        val dir = _tp_get_temp_dir()
+        val wrapped = dir + "/cov_wrapper_no_retain_probe_wrapped.spl"
+        val source = dir + "/cov_wrapper_no_retain_probe_source.spl"
+        expect(file_write(wrapped, "probe wrapper")).to_equal(true)
+        expect(file_write(source, "probe staged source")).to_equal(true)
+        val _ok = cleanup_native_generated_files(dir + "/cov_wrapper_no_retain_probe.smf",
+            source, wrapped, wrapped, dir + "/cov_wrapper_no_retain_probe_original.spl",
+            false)
+        expect(file_exists(wrapped)).to_equal(false)
+        expect(file_exists(source)).to_equal(false)
 
 describe "compile diagnostic selection ignores source-listing lines":
     it "does not pick a warning snippet line that merely contains an Error identifier":

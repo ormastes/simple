@@ -145,3 +145,16 @@ model (registry-based)") is an ancestor of this lane's base
 (origin/release/1.0.0); the doc header already records CLOSED 2026-11-05.
 No live reproduce attempted; the 46/46 full/interpreter/native evidence in
 the resolution section stands.
+
+## 2026-11-11 triage (P3 runner lane, work/p3-runner6-20261111): SUPERSEDED — confirmed ancestor on this base
+
+Fix commit e8cfbc4d5e5 ("test(std): repair async_spec Future/Promise state
+model (registry-based)") verified as an ancestor of this lane's base
+(origin/release/1.0.0 tip) via `git merge-base --is-ancestor` — the doc
+header's CLOSED 2026-11-05 state stands on this tree. The registry-based
+state model and the `enum TaskState` declaration are both present in
+`test/01_unit/lib/std/async_spec.spl`. No live reproduce attempted: the
+46/46 full/interpreter/native evidence in the resolution section stands, and
+the prior runner lane already re-verified on this same base this week.
+
+Verdict: SUPERSEDED (nothing left to fix).

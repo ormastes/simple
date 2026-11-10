@@ -1,7 +1,7 @@
 # Stage-2 self-hosted compiler SEGVs on a positional entry — `module_surfaces` reads as NULL
 
 - **Filed:** 2026-08-31
-- **Status:** OPEN — isolated to one instruction, cause not yet found
+- **Status:** FIXED (2026-11-11, lane boot18) — seed `unwrap` mis-dispatch root cause verified fixed on tracked seed; doc's own A/B symptom already resolved. See addendum below.
 - **Blocks:** Stage-2 admission, therefore Stage 3, therefore Stage 4/5
 - **Platform:** observed on aarch64-apple-darwin. NOT established as macOS-specific — see below.
 
@@ -306,3 +306,31 @@ Two separate open questions, neither of which is this record's defect:
 
 Both should be filed and chased separately. This record's own symptom is
 resolved; the record stays open only until the two follow-ups have homes.
+
+
+## 2026-11-11 addendum (lane boot18, work/p3-boot18-20261111) — FIXED, verified on seed
+
+Verdict: FIXED. Root cause (per this doc's own 2026-08-31 section) is the
+seed's bare-`unwrap` mis-dispatch in
+`src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs
+resolve_method_call_static`: `.unwrap()` on an `Option<Class>` field binds to
+`Poll.unwrap` when any bare-`unwrap` provider is imported, the native match
+falls through and returns raw 0, so `module_surfaces` reads as NULL and the
+frontend SEGVs at `module_surface_registry_index`. The doc's own A/B symptom
+was already resolved on 2026-08-31; the record stayed open only for the two
+follow-ups (phase-3 FAILED with an empty error list; `self.ctx` null on the
+failure path), which are separate records' material.
+
+Verification actually run (seed-smoke NATIVE build — this is a seed-codegen
+defect, so interpreter mode cannot exercise it; PATH enabler
+`$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin` +
+`SIMPLE_NATIVE_BUILD_RUST=1`, ~7 s, well under the 120 s cap):
+
+- The doc's minimal reproducer shape — a class with an `Option<Class>` field,
+  `use std.nogc_async_mut.async.poll.{Poll}` (a bare-`unwrap` provider) in
+  scope, and `return ctx.module_surfaces.unwrap()` under a nil guard — now
+  **builds rc=0 and RUNS rc=0 printing `names=2`** on the tracked seed
+  `46fe8f6b6def`. The unwrap returns the real value instead of 0 (the with-import
+  case is exactly the one that SEGV'd per the doc's matrix; the
+  without-import control was already rc=0). compiled=2 modules, confirming the
+  Poll provider was co-compiled.
