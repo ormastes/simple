@@ -347,3 +347,43 @@ what catches it.
   SOURCE.
 - `substitute_expr` still does not recurse into sub-expressions.
 
+
+---
+
+## Addendum 2026-11-11 — lane compiler2 — verdict SUPERSEDED (40.mono replaced; templates now marked + consumed)
+
+Triage-first pass, batch 2. The literal subsystem this bug describes no longer
+exists on the refreshed seed (build-commit 0791c2b7f4a7).
+
+**The `40.mono` no-op pass is gone.** `src/compiler/40.mono/` (and its specs
+`test/01_unit/compiler/mono/*`, incl. `mono_template_pruning_spec.spl` and
+`hir_monomorphization_rewrite_spec.spl`) are absent from HEAD — `find
+src/compiler -iname '*mono*'` and a `test/` grep for `prune_consumed_templates`
+return nothing. Monomorphization was reworked: function selection /
+specialization now lives in `src/compiler/20.hir/hir_function_selection_v1.spl`
+with the `is_generic_template` group on `HirFunction` + struct/class/enum/trait
+(consumed across `hir_definitions.spl`, the `_Items/*_lowering.spl` tiers, and
+MIR — `module_lowering.spl:1228,1352` now branch on
+`type_params.len() > 0 or is_generic_template`), plus module-scoped COMDAT mono
+(`7c03cb625fa3`) and the receiver-type-arg substitution fixes (`c9294577eff5`,
+`6672f9336413`). The "rewrite_module returns the module unchanged" premise has
+no referent in the current tree.
+
+**Seed-smoke (both green, refreshed seed, `--mode=interpreter --no-cache`):**
+- `test/01_unit/compiler/hir/generic_template_marking_spec.spl` ->
+  `outcome=OK, passed=4/4` (this bug's own defect-2 pin: generic struct/class/
+  free-fn tiers are truthfully marked `is_generic_template`).
+- `test/01_unit/compiler/hir/hir_function_selection_v1_spec.spl` ->
+  `outcome=OK, passed=4/4` (the current selection/specialization mechanism that
+  consumes those templates).
+- Also green earlier this lane: `test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl`
+  5/5 (generic-enum self-match lowers). Evidence logs:
+  `build/review/p3c2-gentemplatemark-seedsmoke.log`,
+  `build/review/p3c2-hirfuncsel-seedsmoke.log`.
+
+**Caveat:** end-to-end demonstration from a full native build of a generic user
+was NOT run (heavy entry-closure native build; blocked under this lane's
+mandate). The verdict rests on the disappearance of the named no-op subsystem +
+the landed #158/#7991 selection machinery + the two green pins above.
+
+**Cycles:** 0 (no fix attempted; addressed by prior #158 rework).
