@@ -1,6 +1,6 @@
 # JIT array/text builtin dispatch defects (2026-07-28)
 
-## Re-verified 2026-09-13 — items 4, 5 and the SIGSEGV are FIXED; `any`/`all` still wrong on JIT (left open)
+## Re-verified 2026-09-13 — items 4, 5 and the SIGSEGV are FIXED; the any/all residual FIXED 2026-11-11 (lane ne12, fresh seed 46fe8f6b6def)
 
 Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
 (Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
@@ -56,7 +56,7 @@ Entry stays OPEN for that residual only. Items 4 and 5 and the filter SIGSEGV
 can be struck. Not fixed in this pass: the site is
 `src/compiler_rust/**` and a bootstrap was running, which forbids Rust edits.
 
-**Status:** PARTIAL — some items FIXED per record's own "FIXED in this change" section; remainder CLOSED-STALE (2026-09-12: not re-verifiable from the record)
+**Status:** FIXED 2026-11-11 (lane ne12) — the remaining any/all residual now returns correct booleans on the JIT lane (fresh seed 46fe8f6b6def); JIT == interpreter on `any(pred)`/`all(pred)` including lambda forms
 
 Engine under test: **Cranelift JIT** (`bin/simple run`, `SIMPLE_EXECUTION_MODE=jit`).
 Reference semantics: the tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpreter`),
@@ -248,3 +248,32 @@ adding more `cranelift_only_test!` entries would add coverage in name only.
 
 ## Triage 2026-09-12
 Older than 45 days for the unresolved remainder; not re-run in this pass (Cranelift-JIT-specific, deployed binary is the seed by design per the record). Closing the open remainder per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-11-11 (lane ne12, seed-smoke on fresh seed 46fe8f6b6def)
+
+**Verdict: FIXED — entry closed.** The last open residual (items 6a/6b
+remainder: `any`/`all` returning non-boolean `nil`/`0` on the JIT lane) no
+longer reproduces. Both the named-predicate and lambda-predicate spellings now
+return correct booleans on the JIT lane, matching the interpreter:
+
+```
+JIT:        any=true   all=false   any2=true   all2=true
+interpreter: any=true   all=false   any2=true   all2=true
+```
+
+Probe (`build/review/ne12/row3_any_all.spl` in this lane's worktree):
+`val a = [1,2,3]; a.any(big); a.all(big); a.any(\x: x > 2); a.all(\x: x > 0)`
+with `big(x) = x > 1`. Run as
+`SIMPLE_LIB=src bin/simple.exe run row3_any_all.spl` (default JIT lane) and
+`SIMPLE_EXECUTION_MODE=interpret ...` as control.
+
+With this, every item in the record's "FILED — not fixed here" section is now
+resolved (4 map dispatch FIXED 2026-09-13; 5 lines FIXED 2026-09-13; 6
+filter SIGSEGV FIXED 2026-09-13; 6a any/all predicate semantics FIXED — this
+triage; 7 exit-0-on-missing-builtin remains a deliberate behaviour-change
+deferral, out of this row's scope). The file's own 2026-09-12 triage note
+("closing the open remainder per age policy") is now backed by an actual
+re-run: the deployed fresh seed carries the fix.
+
+Not carried by seedfix A (fa6939eb4b9e is JIT tuple-destructure unbox; the
+any/all fix is seed builtin/dispatch work that predates today's seed).

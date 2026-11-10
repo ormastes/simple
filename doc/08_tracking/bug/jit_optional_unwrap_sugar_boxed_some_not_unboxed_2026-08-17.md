@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN. Found 2026-08-17 by the class-detection half of
+**Status:** FIXED 2026-11-11 (lane ne12) — seed-jit Option if-val/`??` payload-decode cluster of 2026-11-06 (70405500887d et al., merged via PR #7094); pinned probe reports ALL PASS on the JIT lane with fresh seed 46fe8f6b6def. Found 2026-08-17 by the class-detection half of
 `test/01_unit/compiler/codegen/native_optional_payload_extraction_class_spec.spl`,
 while confirming
 `native_optional_tuple_payload_extraction_broken_2026-07-29.md` as already
@@ -125,3 +125,48 @@ pure-Simple fix. The filed fix direction (emit the `rt_enum_id(subj) >= 0`
 discrimination branch that `stmt_lowering.rs` already has, at BOTH sites) still
 stands and was not attempted.
 
+
+## Triage 2026-11-11 (lane ne12, seed-smoke on fresh seed 46fe8f6b6def)
+
+**Verdict: FIXED — the filed sugar/coalesce paths now unbox correctly on the
+JIT lane.**
+
+The record's own run-path probe
+(`test/01_unit/compiler/codegen/probe_optional_payload_extraction_jit.spl`)
+under the DEFAULT JIT lane on the fresh seed:
+
+```
+PASS match_scalar_i64
+PASS boxed_match_some
+PASS boxed_ifval_some_pattern
+PASS boxed_ifval_sugar
+PASS boxed_coalesce
+PASS nil_pair_none_arm
+PASS nil_scalar_none_arm
+OPTIONAL_PAYLOAD PROBE: ALL PASS
+```
+
+`boxed_ifval_sugar` and `boxed_coalesce` are the two failures this record
+pinned (`FAIL boxed_ifval_sugar got=... want=99`, `FAIL boxed_coalesce
+got=792 want=99`). A minimal `fn f() -> i64?: Some(99)` probe (`if val e =
+f(): print e` / `print f() ?? 0` / `if val Some(g) = f(): print g`) prints
+`99 / 99 / 99` on BOTH engines.
+
+The record's third, unresolved failure (`ifval_scalar_f64 got=576601489791778816
+want=2.5`, "reproduces only in the full multi-function probe") does not
+reproduce in the current probe file — it reports ALL PASS, so that sub-item is
+either healed by the same cluster or subsumed; left as observed.
+
+Fixing cluster: the 2026-11-06 seed-jit Option if-val/`??` payload-decode
+commits — `56e9a8d11d4e` (unbox if-val payload of explicit Option<T> enum
+form), `4899b8d6f483` (decode if-val payload of Option<T> subjects),
+`70405500887d` ("Option<scalar> ?? uses rt_is_some + raw payload; if-val binds
+f64 payload"), `a2b9b8aa22a2` (Option<f32>/Option<u64> decode) — integrated
+toward main via PR #7094 (`2eb6cafc6592`, work/r8-app2-20261106). This is the
+"same runtime discrimination branch the pattern path already has" direction the
+record asked for, applied at the sugar sites.
+
+Not carried by seedfix A (fa6939eb4b9e, 2026-11-10, is JIT TUPLE-destructure
+unbox in MIR stmt lowering; this row's fix is the earlier Option/enum
+payload-decode cluster in HIR/MIR if-val + `??` lowering — honest attribution
+is the 2026-11-06 cluster, predating today's seed).
