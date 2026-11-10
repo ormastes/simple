@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13) -- fix already landed in source, needs a redeploy
+- Status: SUPERSEDED (2026-09-13) -- fix already landed in source, needs a redeploy
 - Area: compiler / seed module resolution (deployed binary vs source drift)
 - Found by: lane PERF-8 (loader/resolver startup perf), attributing the
   `variants/__init__.spl` 76-open pattern PERF-5 handed to L3

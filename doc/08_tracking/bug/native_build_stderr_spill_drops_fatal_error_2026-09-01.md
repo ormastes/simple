@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
-**Status:** OPEN — measured, not fixed
+**Status:** SUPERSEDED — measured, not fixed
 **Site:** `src/app/cli/native_build_main.spl` (~lines 280-330, the truncation/spill path)
 
 ## Symptom

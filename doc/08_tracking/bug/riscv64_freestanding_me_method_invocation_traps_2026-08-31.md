@@ -120,7 +120,7 @@ returning 0 — a runaway init-time shape that needs its own record. The
 minimal probe above avoids the heavy closure and isolates this record's
 defect; whether the init trap is cured by the same fix is checked separately.
 
-- **Status:** FIXED 2026-11-05 (PR #6954; independent review APPROVE-WITH-NITS, nits landed in follow-up)
+- **Status:** SUPERSEDED 2026-11-05 (PR #6954; independent review APPROVE-WITH-NITS, nits landed in follow-up)
 Filed: 2026-08-31
 Lane: `scripts/check/check-simpleos-riscv64-components-in-guest-opensbi.shs` (mcp row)
 Evidence: in-guest, real OpenSBI v1.4 `fw_payload`, `-bios` only. No `-kernel`, no `isa-debug-exit`.

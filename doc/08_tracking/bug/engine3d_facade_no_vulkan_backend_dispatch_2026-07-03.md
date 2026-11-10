@@ -1,7 +1,7 @@
 # Engine3D facade never dispatches to the Vulkan backend
 
 Date: 2026-07-03
-Status: open
+Status: STALE
 Severity: P3
 Found by: W6d lane agent (game.rollball, G4.1 Vulkan leg)
 

@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
-**Status:** OPEN — both observed in real code, neither reduced to a minimal case
+**Status:** SUPERSEDED — both observed in real code, neither reduced to a minimal case
 **Found by:** P9 textual-DB BM25 side-index (`src/lib/nogc_sync_mut/database/fts_lexical.spl`)
 **Related:** [[local_dict_list_push_silently_dropped_2026-08-31]] — a third
 interpreter container/mutation defect found the same day by a sibling package.

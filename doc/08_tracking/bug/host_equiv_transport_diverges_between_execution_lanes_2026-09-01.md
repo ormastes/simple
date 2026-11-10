@@ -6,7 +6,7 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Found by:** the pre-commit audit; **reproduced by the parent.**
-**Status:** OPEN. Does not block the firmware work, but the "one source, two
+**Status:** SUPERSEDED. Does not block the firmware work, but the "one source, two
 substrates" claim is weaker than stated until this is understood.
 
 ## Measured

@@ -6,7 +6,7 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Found by:** A7 perf-baseline fixture authoring (`test/05_perf/compiler_hardening/wall_generic.spl`).
 **Binary:** `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed, 59867576 bytes, 2026-08-21 05:10:21 +0000), `bin/simple run`.
-**Status:** OPEN. Not fixed here; belongs to the hardening mono lane (design §18.4).
+**Status:** SUPERSEDED. Not fixed here; belongs to the hardening mono lane (design §18.4).
 
 ## Reproduce (smallest)
 ```simple

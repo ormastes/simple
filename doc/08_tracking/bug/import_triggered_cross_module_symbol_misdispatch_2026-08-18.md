@@ -1,6 +1,6 @@
 # Import-triggered cross-module symbol misdispatch (interpreter lane)
 
-Status: OPEN. Filed 2026-08-18 (goal-7 dedup tranche, agent-verified A/B repro).
+Status: SUPERSEDED. Filed 2026-08-18 (goal-7 dedup tranche, agent-verified A/B repro).
 Related: `duplicate_public_symbols_differing_return_types_jit_misdispatch_2026-08-09.md`
 (same duplicate-symbol class, but that one is JIT-lane and needs differing
 return types; this one reproduces in the interpreter via `bin/simple test` and

@@ -6,7 +6,7 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-04
 **Area:** `src/compiler/80.driver/driver_build/parallel.spl`, `driver_aot_native_output.spl`
-**Status:** OPEN (root cause located; fix is blocked on a named prerequisite)
+**Status:** SUPERSEDED (root cause located; fix is blocked on a named prerequisite)
 
 ## Measurement envelope
 

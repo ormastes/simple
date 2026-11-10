@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: **OPEN** — root cause of goal item 1 row 2 (SimpleOS riscv64 in-guest
+- Status: **SUPERSEDED** — root cause of goal item 1 row 2 (SimpleOS riscv64 in-guest
   build-and-run sanity). Not fixed.
 - Date: 2026-09-01
 - Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`,

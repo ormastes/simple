@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
+**Status:** SUPERSEDED (2026-11-08)
 **Filed:** 2026-09-01
 
 Resolution: owner-qualified class handling now covers duplicate `List`
