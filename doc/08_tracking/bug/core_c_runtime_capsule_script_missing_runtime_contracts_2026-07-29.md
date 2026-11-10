@@ -84,3 +84,27 @@ Host-limited: the script intentionally supports only Linux/Darwin
 completion from this Windows (MINGW64) host; verdict is script-content
 evidence at a pinned base, recorded honestly rather than claimed as a run.
 No change made in this lane.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: SUPERSEDED-by-prior-lane** — spot-check corroborates both
+2026-11-10 addenda (p3-rt and p3-boot4). No deep triage redone.
+
+Spot-check at this lane's base (790b54f7c4fc):
+
+- `scripts/check/build-core-c-bootstrap-runtime-capsule.shs` still compiles
+  `runtime_contracts.c` as a first-class source entry (:135), asserts the
+  two `simple_contract_check*` text symbols via `nm` against the object
+  (:336, :384), and pins single-provider ownership (:425-426) — exactly the
+  two-way proof the doc's "Fix" section demanded.
+- Fix merge `9e7e7a526edb` (PR #7597) is an ancestor of this base.
+- Host-limited unchanged: the script intentionally supports only
+  Linux/Darwin (`*) die "unsupported-host:$PLATFORM"`), so it cannot be run
+  to completion from this Windows host; the verdict is script-content
+  evidence, recorded honestly rather than claimed as a run.
+- seed-smoke (refreshed seed 0791c2b7f4a7): `bin/simple.exe check
+  src/lib/common/contracts/contracts.spl` exit 0 (W-STR-BRACE-001 lint
+  warnings only) — contracts stdlib surface healthy under the seed check
+  path.
+
+No change made in this lane.
