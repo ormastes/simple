@@ -101,3 +101,52 @@ PATH source contract forbids metadata probing too.
   broader VFS-operation migration, and mounted-backend/QEMU behavior remain
   unresolved acceptance requirements. This candidate does not close AC-5.
 
+
+
+## Addendum 2026-11-11 — lane ne3: LIVE (bounded fail-closed hardening shipped
+## in source; core acceptance still unmet; unit evidence blocked on this lane)
+
+Traversed on work/p3-ne3-20261111 (origin/release/1.0.0 tip 93490a99c5d8),
+refreshed seed bin/simple.exe (2026-11-11, build-commit 0791c2b7f4a7), all runs
+seed-smoke.
+
+**Source review at this tip confirms the 2026-11-07 candidate is shipped:**
+- `src/os/kernel/loader/fs_exec_spawn.spl:159`
+  `fs_exec_read_boot_executable_bytes(caller: KernelCallContext, path)` is
+  gated by `executable_boot_read_allows(caller)`
+  (`src/os/kernel/security/executable_read.spl:5-7`: only
+  `caller.task_id.id == 0u64`), and `src/os/kernel/boot/pid1_launch.spl:76` is
+  its sole call site.
+- `fs_exec_read_executable_bytes_as` (`:164-172`) never reads: it returns
+  `executable_nonboot_read_unavailable`, an explicit
+  `Err("nonboot executable reads unavailable: resolved mounted-object binding
+  required")` — fail closed even with FileRead+FileExec on the requested name.
+- The legacy callerless seams fail closed: `fs_exec_prepare_spawn` returns
+  pid -13 before resolving any bytes; `fs_exec_prepare_spawn_from_bytes`
+  likewise rejects (pid -13) after the `<= 4` byte guard.
+- `src/os/apps/shell/path_search.spl` is pure name construction — its header:
+  "Presence and bytes belong to the authenticated loader; neither an existence
+  probe nor a byte read is allowed during name planning." Shell execution
+  resolves names only through the recipe-gated path.
+
+**Still unmet (why this stays LIVE/OPEN):** required-resolution items 1
+(context-aware executable lookup/read API binding the resolved mounted object)
+and 4 (migrate every userspace-request VFS operation onto that path) are
+unimplemented; the scalar spawn ABI still lacks a live caller context; AC-5
+cross-domain QEMU evidence does not exist. Per this lane's grant there is no
+QEMU/no-kernel-run grant, so AC-5 could not be advanced here either.
+
+**Unit evidence attempt on this lane — blocked by an untracked seed load
+hazard.** `test/01_unit/os/kernel/security/executable_read_spec.spl` declares
+5 examples but executes 0: semantic load dies with
+`error: semantic: ambiguous type `VirtMemManager`: defined in
+src/os/kernel/arch/x86_64/paging.spl, src/os/kernel/memory/vmm.spl,
+src/os/kernel/memory/vmm_core.spl and none of them is imported by <entry>`
+(log: `build/review/p3fix-ne3-20261111-logs/row6_executable_read.log`). This
+three-way duplicate-definition ambiguity appears in no bug doc and is the same
+CLASS as the routed duplicate-registration seed hazards; it needs a seed-lane
+owner. Grant to finish verification: seed lane resolves the
+`VirtMemManager` triplicate (rename or explicit-import resolution), redeploy,
+then re-run `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe
+test test/01_unit/os/kernel/security/executable_read_spec.spl --mode=interpreter
+--no-cache`, plus the QEMU AC-5 system test on a granted kernel lane.

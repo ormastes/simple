@@ -1,0 +1,61 @@
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+# @req REQ-MIR-ENV-CLOSURE-METHODS
+# Bug: native_env_closure_unsupported_methods_2026-07-16 — native-build of the
+# std.env import closure died in MIR with `unresolved method call: find/join/
+# last/pop`. These sources mirror the exact shapes in
+# src/lib/nogc_sync_mut/env/{variables,config,paths}.spl.
+
+fn lower_env_shape_mir(src: text, fname: text) -> text:
+    val module = parse_full_frontend(src, fname + ".spl", fname + ".spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(fname + ".spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    serialize_mir_module(mir_lowering.lower_module(hir))
+
+describe "std.env closure text method MIR lowering", tag: ["only-compiled"]:
+    it "lowers find on a text parameter to the string runtime owner (expand_var_expr)":
+        val source = "fn expand_var_expr(expr: text) -> text:\n    val default_sep = expr.find(\":-\")\n    if default_sep >= 0:\n        return expr.substring(0, default_sep)\n    val set_sep = expr.find(\":=\")\n    if set_sep >= 0:\n        return expr.substring(set_sep + 2)\n    expr\n"
+        val mir = lower_env_shape_mir(source, "env_expand_var_expr")
+
+        expect(mir).to_contain("rt_string_find")
+        expect(mir.contains("unresolved method call")).to_equal(false)
+
+    it "lowers find chained on a substring result inside a while loop (expand_var)":
+        val source = "fn expand_var(text_in: text) -> text:\n    var result = text_in\n    var pos = 0\n    while pos < result.len():\n        val dollar_idx = result.substring(pos).find(\"$\")\n        if dollar_idx < 0:\n            break\n        val start = pos + dollar_idx\n        val close_offset = result.substring(start + 2).find(\"}\")\n        if close_offset >= 0:\n            pos = start + 2 + close_offset\n        else:\n            pos = start + 1\n    result\n"
+        val mir = lower_env_shape_mir(source, "env_expand_var")
+
+        expect(mir.split("rt_string_find").len() - 1).to_equal(2)
+        expect(mir.contains("unresolved method call")).to_equal(false)
+
+describe "std.env closure array method MIR lowering", tag: ["only-compiled"]:
+    it "lowers join on a [text] local (env config / paths)":
+        val source = "fn env_to_lines(pairs: [text]) -> text:\n    var lines: [text] = []\n    for pair in pairs:\n        lines.push(pair)\n    lines.join(\"\\n\")\n\nfn join_paths(paths: [text], sep: text) -> text:\n    paths.join(sep)\n"
+        val mir = lower_env_shape_mir(source, "env_join")
+
+        expect(mir.contains("unresolved method call")).to_equal(false)
+        expect(mir.split("rt_array_join").len() - 1 + (mir.split("rt_string_join").len() - 1)).to_be_greater_than(1)
+
+    it "lowers last and pop on a [text] local":
+        val source = "fn tail_segment(parts: [text]) -> text:\n    var stack: [text] = []\n    for part in parts:\n        stack.push(part)\n    val last_seen = stack.last()\n    val popped = stack.pop()\n    if popped.?:\n        return popped!\n    if last_seen.?:\n        return last_seen!\n    \"\"\n"
+        val mir = lower_env_shape_mir(source, "env_last_pop")
+
+        expect(mir.contains("unresolved method call")).to_equal(false)
+        expect(mir).to_contain("rt_array_pop")
+
+describe "std.env closure method oracle control", tag: ["only-compiled"]:
+    it "still fails loudly on a genuinely unknown text method (oracle discriminates)":
+        val module = parse_full_frontend("fn f(expr: text) -> i64:\n    expr.frobnicate(\":-\")\n", "env_ctrl.spl", "env_ctrl.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("env_ctrl.spl")
+        val hir = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = serialize_mir_module(mir_lowering.lower_module(hir))
+
+        expect(mir_lowering.errors.len()).to_equal(1)
+        expect(mir).to_contain("unresolved method call")

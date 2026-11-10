@@ -3,7 +3,7 @@
 - **Status:** implemented-behind-gate (default OFF; activation blocked on the stage3 self-build)
 - **Priority:** P2
 - **Decision:** ADR-005 § "Char literal syntax" (`doc/04_architecture/adr/ADR-005-text-index-yields-char.md`)
-- **Last checked:** 2026-11-04 on `origin/release/1.0.0`
+- **Last checked:** 2026-11-10 on `origin/release/1.0.0` (stage3 self-build still unrecorded; escape parity fix landed, see below)
 
 ## What the switch is
 
@@ -66,10 +66,23 @@ read once per lexer construction in both lexers:
   `make_core_lexer_char_mode`), `scan_char_literal`, wire code 9
   (`TokenKind.CharLit`, `TOK_CHAR_LIT`).
 
-ON: `'x'` is one scalar or one escape (`\n \t \r \0 \\ \' \"`, `\u{...}`,
-surrogates rejected). Empty, multi-scalar and unterminated forms are lex errors
-whose message names `r"..."`. `'ident` with no closing tick on the line keeps its
-current meaning (seed: `Label`). OFF: token stream unchanged (legacy raw string).
+ON: `'x'` is one scalar or one escape (`\n \t \r \\ \' \"`, `\xNN`, octal
+`\N`..`\NNN` incl. `\0`, `\u{...}`, surrogates rejected). Empty, multi-scalar
+and unterminated forms are lex errors whose message names `r"..."`. `'ident`
+with no closing tick on the line keeps its current meaning (seed: `Label`).
+OFF: token stream unchanged (legacy raw string).
+
+Escape parity (2026-11-10): the pure-Simple `scan_char_literal` now decodes
+`\xNN` and octal with the same rule as `scan_string`, matching the seed
+(`scan_char_literal` -> `process_escape`), so `'\x41'` lexes to `A` in both
+front ends and equals `"\x41"`. Pinned by
+`lexer_char_literal_gate_spec.spl` (char-vs-string escape parity over 8
+escapes). **Open seed-side gap, next stage:** the seed's `process_escape`
+also accepts `\a \b \f \v`, bare `\uXXXX`, `\: \/ \. \-`, and maps an unknown
+`\q` to `q`; the pure-Simple scanners (string and char) reject or keep these
+literal. The seed must narrow to the shared set in the activation step 4 PR
+(seed + pure-Simple together) so both lexers reject the same literals. Needs a
+cargo build; not done in the 2026-11-10 lane.
 
 Evidence:
 - `cargo test -p simple-parser --lib`: 420 passed (5 new `test_char_gate_*`, ON and OFF).

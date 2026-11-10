@@ -16,6 +16,8 @@ use compiler.hir.hir_lowering.types.{HirLowering, hir_type_kind_disc, hir_type_e
 use compiler.hir.hir_lowering.expressions.*
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, _hir_expr_symbol_or_invalid}
 use compiler.hir.exhaustiveness.char_condition.{cc_message, cc_env_name, cc_mode_resolve, cc_is_char_type}
+use compiler.hir.exhaustiveness.char_int_context.{ci_message, ci_env_name, ci_mode_resolve, ci_is_int_conversion_method}
+use compiler.hir.hir_operators.{HirBinOp}
 
 extern fn rt_enum_payload(value: StmtKind) -> Expr?
 extern fn rt_enum_discriminant(value: StmtKind) -> i64
@@ -320,6 +322,87 @@ impl HirLowering:
             self.error(msg, cond.span)
         else:
             self.warning(msg, cond.span)
+
+    me check_char_int_binary(op: HirBinOp, left: HirExpr, right: HirExpr, span: Span):
+        """W-CHAR-INT-CONTEXT: a char operand of integer arithmetic (ADR-005).
+        Diagnostic only; mode via SIMPLE_CHAR_INT_CONTEXT (warn | error)."""
+        val op_name = match op:
+            case HirBinOp.Add: "+"
+            case HirBinOp.Sub: "-"
+            case HirBinOp.Mul: "*"
+            case HirBinOp.Div: "/"
+            case HirBinOp.Mod: "%"
+            case _: ""
+        if op_name == "":
+            return
+        val left_char = self.char_int_operand_is_char(left)
+        val right_char = self.char_int_operand_is_char(right)
+        if not left_char and not right_char:
+            return
+        # `+` is also text concatenation: flag it only against a known integer
+        # (char-vs-text is the separate ADR-005 comparison/concat row).
+        if op_name == "+":
+            val other_is_int = if left_char: self.char_int_operand_is_int(right) else: self.char_int_operand_is_int(left)
+            if not other_is_int:
+                return
+        self.report_char_int_context(op_name, span)
+
+    me check_char_int_method(receiver: HirExpr, method: text, span: Span):
+        """W-CHAR-INT-CONTEXT: an integer-parse conversion on a char receiver
+        (`s[i].to_i64()`, the silent-zero family of ADR-005)."""
+        if not ci_is_int_conversion_method(method):
+            return
+        if not self.char_int_operand_is_char(receiver):
+            return
+        self.report_char_int_context(method, span)
+
+    me report_char_int_context(what: text, span: Span):
+        val mode = ci_mode_resolve(hir_type_env_get(ci_env_name()) ?? "", hir_type_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+        val msg = ci_message(mode, span.line, span.col, what)
+        # Some forms are lowered more than once; report each site once.
+        for seen in self.diagnostic_messages:
+            if seen.contains(msg):
+                return
+        for err in self.errors:
+            if err.message == msg:
+                return
+        if mode == "error":
+            self.error(msg, span)
+        else:
+            self.warning(msg, span)
+
+    me char_int_operand_is_char(e: HirExpr) -> bool:
+        if cc_is_char_type(self.binding_payload_type(e)):
+            return true
+        # `s[i]` on text yields a char (ADR-005 item 1). The lowerer attaches
+        # no element type to a text index (hir_binding_index_element keeps
+        # the held codegen switch out of binding types), so resolve the base
+        # here, kind-only. A range index `s[a..b]` is text, not a char.
+        match e.kind:
+            case HirExprKind.Index(index_base, index_value):
+                match index_value.kind:
+                    case HirExprKind.Range(_, _, _, _): return false
+                    case _: ()
+                match self.binding_kind_type(index_base.kind, e.span).kind:
+                    case HirTypeKind.Str: return true
+                    case _: return false
+            case _: ()
+        false
+
+    me char_int_operand_is_int(e: HirExpr) -> bool:
+        match self.binding_payload_type(e).kind:
+            case HirTypeKind.Int(_, _): return true
+            case _: ()
+        match e.kind:
+            case HirExprKind.IntLit(_, _): return true
+            # `h * 31 + s[i]`: an arithmetic subterm is integer-valued.
+            case HirExprKind.Binary(inner_op, inner_left, inner_right):
+                match inner_op:
+                    case HirBinOp.Sub | HirBinOp.Mul | HirBinOp.Div | HirBinOp.Mod: return true
+                    case HirBinOp.Add: return self.char_int_operand_is_int(inner_left) or self.char_int_operand_is_int(inner_right)
+                    case _: return false
+            case _: ()
+        false
 
     me binding_payload_type(source: HirExpr, bind_optional_payload: bool = false) -> HirType:
         # Resolve once with the same projection used for symbol registration.
