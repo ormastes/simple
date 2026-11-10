@@ -51,3 +51,25 @@ and `test result: ok. 1 passed`.
 
 This is not related to the stage2_next worker AV after load_sources. That bug
 was a compile-time E0308, and a seed with it cannot build at all.
+
+## 2026-11-10 status (p0-seedsign lane, work/p0-seed-checked-sign-20261110)
+
+Revalidated at origin/release/1.0.0 tip d8c0a761988c in an isolated worktree.
+The mismatch remains fixed: `checked_sign_value`
+(`src/compiler_rust/compiler/src/interpreter_extern/signatures.rs:153`) builds
+both branches via `Value::array(vec![...])`, and `Value::array`
+(`compiler/src/value.rs:3298`) wraps storage in `Arc::new`. No raw-`Vec`
+`Value::Array` construction exists anywhere in `compiler/src/interpreter_extern/`
+(sibling scan: pbkdf2.rs and all other extern files route through
+`Value::array(...)`; `runtime/src/value/sffi/signature.rs` never constructs a
+`Value::Array` — it returns bytes via `rt_string_new`).
+
+Evidence class: type-level/static verification plus focused unit test; the
+original E0308 is a compile-time failure, so no runtime crash is constructible
+at a fixed commit. Regression test
+`checked_signing_distinguishes_success_from_bridge_failure` extended to assert
+the owned pair is exactly `[status, payload]` (length 2), the Ed25519 payload
+round-trips the exact 64-byte fixture signature and verifies against the
+fixture pubkey, and wrong-family keys return `[2, nil]` on RSA/ECDSA signers.
+`cargo test -p simple-compiler --lib checked_signing` result recorded in
+`build/review/p0fix-seedsign-20261110.sdn`.
