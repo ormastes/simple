@@ -50,6 +50,18 @@ and `--version` reports `Simple Language v1.0.0-rc.1` behind that banner.
   lane's provenance check believe a real deploy happened.
 - Do not commit it. `bin/release/**` binaries are not added here.
 
+## Triage 2026-11-10 (p3-boot lane)
+
+STALE (host-state record, not actionable in this lane). This row documents the
+resting state of ONE aarch64 host's `bin/release/aarch64-unknown-linux-gnu/simple`
+and its removal precondition (aarch64 Stage 3 self-host green). The p3-boot
+lane works on Windows x86_64 in worktree simple-p3-boot-20261110; there is no
+aarch64 stopgap artifact here, and neither deleting nor re-bootstrapping an
+aarch64 deployment is possible from this host. The stopgap's own guardrails
+("do not commit it", "do not refresh it", seed banner) are behavioral and
+remain correct. No code change; re-file against the aarch64 host when its
+Stage 3 lane is ready to re-run `--full-bootstrap --deploy`.
+
 ## Removal
 
 Delete the seed copy and re-run
