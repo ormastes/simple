@@ -1012,6 +1012,14 @@ impl<'a> MirLowerer<'a> {
                                     val_reg
                                 }
                             };
+                            // Bug jit_struct_assignment_aliases_not_copies: `arr[i] = s`
+                            // for an existing value-struct PLACE must snapshot it,
+                            // same rule as the Let (site G) and field (site H) arms.
+                            let boxed_val = if Self::hir_expr_is_place(&value.kind) {
+                                self.copy_if_value_type(boxed_val, value.ty)?
+                            } else {
+                                boxed_val
+                            };
 
                             // Use rt_index_set for array/dict index assignment (handles both types)
                             let target = crate::mir::CallTarget::from_name("rt_index_set");
@@ -1154,6 +1162,11 @@ impl<'a> MirLowerer<'a> {
                         // Nullable scalar globals (`T?`) are tagged-value slots too,
                         // not just `Any` -- see `slot_holds_tagged_value`.
                         let stored_val = self.box_scalar_for_tagged_slot(target.ty, ty, val_reg)?;
+                        let stored_val = if Self::hir_expr_is_place(&value.kind) {
+                            self.copy_if_value_type(stored_val, ty)?
+                        } else {
+                            stored_val
+                        };
                         let stored_ty = if stored_val != val_reg { TypeId::ANY } else { ty };
                         self.with_func(|func, current_block| {
                             let block = func.block_mut(current_block).unwrap();
@@ -1231,6 +1244,14 @@ impl<'a> MirLowerer<'a> {
                             store_val
                         } else {
                             self.unbox_scalar_for_raw_slot(target.ty, ty, store_val)?
+                        };
+                        // Bug jit_struct_assignment_aliases_not_copies: `b = a`
+                        // re-assignment of an existing value-struct PLACE must
+                        // copy, mirroring the Let arm's site G.
+                        let store_val = if Self::hir_expr_is_place(&value.kind) {
+                            self.copy_if_value_type(store_val, target.ty)?
+                        } else {
+                            store_val
                         };
 
                         let addr_reg = self.lower_lvalue(target)?;
