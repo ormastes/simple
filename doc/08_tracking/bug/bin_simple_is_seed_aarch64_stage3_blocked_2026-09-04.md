@@ -1,10 +1,10 @@
 # `bin/simple` on this aarch64 host is the Rust seed, deliberately
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 (lane boot9) — STALE: aarch64-host stopgap ledger; not actionable from a Windows x86_64 lane
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — stopgap in place, removal blocked on Stage 3
+**Status:** STALE (triage 2026-11-11, lane boot9) — host-state record; exit condition unchanged: aarch64 Stage 3 green, then remove stopgap and re-deploy
 **Filed:** 2026-09-04
 **Host:** aarch64-unknown-linux-gnu (Ubuntu 24.04, 20 cores, 121 GB)
 
@@ -82,3 +82,15 @@ awaiting an aarch64 Stage-3 run). Nothing here is fixable from
 `src/compiler_rust` on a Windows lane, and the stopgap rules it records (never
 commit/launder the seed copy) are behavioural, not code. No change made; the
 entry remains accurate as written.
+
+## Triage 2026-11-11 (lane boot9, work/p3-boot9-20261111)
+
+STALE — third consecutive triage (2026-11-03 seed lane, 2026-11-10 p3-boot
+lane, this lane) with the same verdict: this is a host-state ledger entry
+for ONE aarch64 host's `bin/release/aarch64-unknown-linux-gnu/simple` seed
+stopgap. This lane runs on Windows x86_64; `bin/release/` does not exist in
+this worktree, and neither deleting an aarch64 deployment nor re-running
+its Stage 3 self-host is possible from here. Exit condition unchanged:
+aarch64 Stage 3 green, then remove the seed copy and re-run
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`.
+No code change.
