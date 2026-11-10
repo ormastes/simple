@@ -1,7 +1,32 @@
 # Stage-3 self-host status after `ee89798a19f` (parse_module_body Dedent absorb)
 
 - **ID:** stage3_selfhost_status_after_dedent_fix_2026-08-10
-- **Status:** IN PROGRESS — no `^error:` observed; recorded so the next stream resumes instead of restarting
+- **Status:** OPEN — **BLOCKED (stage-chain probe), triaged 2026-11-11 (lane boot14).**
+  This is an infrastructure/tracking record: the prior run was `earlyoom`-killed at ~60 min
+  (memory), **not** a compiler failure. Stage-3 status after `ee89798a19f` remains UNKNOWN;
+  answering it needs a stage-3 rerun on a big-memory host (not runnable on this Windows host
+  — known native-build hang on the success path). The unbounded frontend/HIR memory growth is
+  tracked separately as `stage3_no_gc_parse_hir_retention_2026-08-25.md`.
+
+## Triage 2026-11-11 (lane boot14) — BLOCKED, kept OPEN
+
+Verdict: **BLOCKED** (stage-chain probe). Nothing in this record is a compiler defect; it is a
+measurement trap (exit 143 from `earlyoom`, zero `^error:` lines). Do not re-diagnose — rerun.
+
+Evidence/notes for the next stream:
+- Keep `SIMPLE_BOOTSTRAP=1` (it MASKS real failures as bare `rc=1` — never accept `rc=1`
+  with no `^error:` line as a diagnosis; filter with `grep -a -E "^error"` and report the FIRST line).
+- The 2026-08-10 run deviated to `--threads 4`; the recorded transcript specifies `--threads 2`.
+- The binding constraint on that host is memory (frontend/HIR grew unbounded to >52 GB RSS);
+  ensure the host has substantially more free RAM or stop `earlyoom` first.
+
+Exact grant command (non-Windows host): rerun the recorded stage-3 invocation (this doc's
+Reproduction block) via the planner-admission receipt, or the canonical lane:
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --jobs=half --output=build/bootstrap
+```
+If it completes, report the candidate path (`$OUT/stage3_simple`); do **not** relink
+`bin/simple` and do not write under `bin/release/**`.
 - **Why this file exists:** the two prior streams on this question both died
   mid-verification without reporting an after-state. This records the exact
   reproduction command and the observed progress point.
