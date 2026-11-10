@@ -256,3 +256,11 @@ with `SIMPLE_INTERP_CLASS_REF=0`); list-element method, list-element alias,
 for-loop element, nested grid, `map`/`filter` result, slice, dict value and
 `Option` payload probes all share identity on the interpreter. Owner decision
 2026-11-06 confirms the direction (classes reference, structs value).
+
+## 2026-11-10 triage — SUPERSEDED (seed-smoke, lane p3-interp3 row 14)
+
+`bin/simple.exe test test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`
+-> 4 total, 4 passed, 0 failed on the worktree seed (ClassInstance default
+carrier on). The 2026-11-04 default-flip note stands; this lane's row-16/row-18
+repros additionally confirm dict/list element reads of class values alias.
+Bug_db status change remains with the coordinator per the 2026-11-04 note.
