@@ -1,0 +1,125 @@
+# Purpose and audience: compiler engineers owning MIR if/elif/match expression
+# lowering (merge-slot typing in `lower_if`, `lower_if_chain` and the match
+# dispatches) and the phase-3 stage3 native build.
+# @req REQ-SSPEC-COMPILER
+"""
+# An if expression whose arms yield text must keep a text merge slot
+
+Bug if_expression_text_result_erased_to_i64_2026-10-25. In
+src/compiler/70.backend/backend/runtime_compiler.spl the nested
+`val rt_dir = if strict: (if env: strict_dir()? else: find()) else: find()`
+reached the Stage-2-compiled object with an i64 static type, so
+`"{rt_dir}/{name}.c"` rendered the text handle as a decimal
+(`202444832811553/runtime_native.c`). An arm the lowering cannot type comes
+back as a bare i64 word; `mir_merge_arm_types` only promoted i64 -> Struct and
+the match dispatches kept the FIRST typed arm, so a text sibling arm was
+discarded and the merge slot stayed i64. String interpolation then sent the
+slot through `rt_raw_i64_to_string` (decimal rendering) instead of straight to
+`rt_strcat`. Each case lowers `fn pick` whose `d` is interpolated as
+`"{d}/x"` and checks that no `rt_raw_i64_to_string` call is emitted while a
+concat call is (so a pass is never vacuous).
+"""
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+# `ident(find())` returns text through a generic `T`, which lowers to a bare
+# i64 word: the untyped-arm shape that must not win over a text sibling.
+val helpers_src = "fn strict_dir() -> Result<text, text>:\n    Ok(\"strict\")\n\nfn find() -> text:\n    \"found\"\n\nfn maybe_dir() -> text?:\n    Some(\"maybe\")\n\nfn ident<T>(x: T) -> T:\n    x\n\n"
+
+fn callee_name(f: MirOperand) -> text:
+    match f.kind:
+        case MirOperandKind.Const(v, _):
+            match v:
+                case MirConstValue.Str(s): s
+                case _: ""
+        case _: ""
+
+fn text_merge_verdict(body: text) -> text:
+    """Lower `fn pick`; classify how its `d` interpolation renders the value.
+
+    "text-merge-ok": no decimal rendering and at least one concat call.
+    "rendered-as-i64": `rt_raw_i64_to_string` was emitted (the bug).
+    "no-concat": nothing was concatenated (the check would be vacuous).
+    """
+    val log = Logger(level: 0)
+    val src = helpers_src + body
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module("app.main", surfaces)
+    val hir = hl.lower_module(ast)
+    var errors = ""
+    for e in hl.errors:
+        errors = errors + "hir: " + e.message + "\n"
+    var ml = MirLowering.new(hir.symbols)
+    val mir = ml.lower_module(hir, [])
+    for e in ml.errors:
+        errors = errors + "mir: " + e.message + "\n"
+    if errors != "":
+        print("lower errors: " + errors)
+        return "lower-error"
+    var raw_int = 0
+    var concat = 0
+    for function in mir.functions.values():
+        if function.name == "pick" or function.name.ends_with(".pick"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, f, _):
+                            val name = callee_name(f)
+                            if name == "rt_raw_i64_to_string": raw_int = raw_int + 1
+                            if name == "rt_strcat" or name == "rt_strcat_tagged": concat = concat + 1
+                        case _: pass
+    if raw_int > 0: return "rendered-as-i64"
+    if concat == 0: return "no-concat"
+    "text-merge-ok"
+
+describe "if expression with text arms keeps a text merge slot":
+    it "runtime_compiler shape: nested if, inner arm is Result<text> `?`":
+        expect(text_merge_verdict("fn pick(strict: bool, env: bool) -> Result<text, text>:\n    val d = if strict:\n        (if env: strict_dir()? else: find())\n    else:\n        find()\n    Ok(\"{{d}}/x\")\n")).to_equal("text-merge-ok")
+
+    it "untyped-word arm first, text arm second":
+        expect(text_merge_verdict("fn pick(env: bool) -> text:\n    val d = if env: ident(find()) else: find()\n    \"{{d}}/x\"\n")).to_equal("text-merge-ok")
+
+    it "nested if, inner arm is the untyped word":
+        expect(text_merge_verdict("fn pick(strict: bool, env: bool) -> text:\n    val d = if strict:\n        (if env: ident(find()) else: find())\n    else:\n        find()\n    \"{{d}}/x\"\n")).to_equal("text-merge-ok")
+
+    it "text arm first, untyped-word arm second (order must not matter)":
+        expect(text_merge_verdict("fn pick(env: bool) -> text:\n    val d = if env: find() else: ident(find())\n    \"{{d}}/x\"\n")).to_equal("text-merge-ok")
+
+describe "sibling merge shapes (prevention)":
+    it "elif chain, untyped-word arm first":
+        expect(text_merge_verdict("fn pick(k: i64) -> text:\n    val d = if k == 0:\n        ident(find())\n    elif k == 1:\n        find()\n    else:\n        find()\n    \"{{d}}/x\"\n")).to_equal("text-merge-ok")
+
+    it "if with an early-return arm, then the untyped word, else text":
+        expect(text_merge_verdict("fn pick(k: i64) -> text:\n    val d = if k == 0:\n        return \"early\"\n    elif k == 1:\n        ident(find())\n    else:\n        find()\n    \"{{d}}/x\"\n")).to_equal("text-merge-ok")
+
+    it "match expression, untyped-word arm first":
+        expect(text_merge_verdict("fn pick(k: i64) -> text:\n    val d = match k:\n        case 0: ident(find())\n        case _: find()\n    \"{{d}}/x\"\n")).to_equal("text-merge-ok")
+
+    it "flat if, Result<text> `?` arm first":
+        expect(text_merge_verdict("fn pick(env: bool) -> Result<text, text>:\n    val d = if env: strict_dir()? else: find()\n    Ok(\"{{d}}/x\")\n")).to_equal("text-merge-ok")
+
+    it "Option `?` arm (text?) merged with a text arm":
+        expect(text_merge_verdict("fn pick(env: bool) -> text?:\n    val d = if env: maybe_dir()? else: find()\n    Some(\"{{d}}/x\")\n")).to_equal("text-merge-ok")
+
+describe "helper discriminates (control)":
+    it "genuine i64 arms still render as integers":
+        expect(text_merge_verdict("fn pick(env: bool) -> text:\n    val d = if env: 1 else: 2\n    \"{{d}}/x\"\n")).to_equal("rendered-as-i64")
