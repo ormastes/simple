@@ -1,5 +1,5 @@
 # An `Err(FsError)` payload reads as a zero/default value in freestanding cranelift builds
-## Open 2026-09-16 — needs owner triage
+## Open 2026-11-11 — LIVE (not re-verifiable on a no-cargo lane), keep OPEN (lane ne10; see addendum)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -88,3 +88,26 @@ No workaround was applied and the gate was NOT made to pass. Rewriting the
 mount path to avoid `match` would hide a compiler defect that affects every
 `Result<_, FsError>` consumer in the freestanding kernel, not just this lane.
 
+
+---
+
+## 2026-11-11 addendum — lane ne10 (P3 traverse, batch ne10)
+
+**Verdict: LIVE — keep OPEN.** No fix evidence found on release; the defect is not re-verifiable
+on this lane.
+
+- **State check:** the reproduce path, the gate
+  (`scripts/check/check-simpleos-nvfs-server-roundtrip-ovmf.shs`), and the source under test
+  (`src/os/kernel/boot/nvfs_root_mount_transaction.spl`) all still exist unchanged in kind; no
+  commit touching the freestanding/cranelift enum-match or `FsError` payload path was found in
+  the release history since filing. The hosted interpreter remains correct by construction of
+  this record, so the only signal a seed-smoke run can give (the 3/3 unit spec) was already
+  green in the doc and proves nothing about the freestanding build mode.
+- **Blocker:** reproduction requires a cargo-built seed plus the OVMF x86_64 freestanding gate;
+  this is a no-cargo lane (and the lane's known Windows native-build hang rules out native
+  re-proof here as well). Grant command (from this doc's Reproduce section, on a cargo-capable
+  Linux host with OVMF):
+  `cd src/compiler_rust && cargo build --release --bin simple && sh scripts/check/check-simpleos-nvfs-server-roundtrip-ovmf.shs`
+  then `grep -a 'production mount' build/os/nvfsrt/nvfs_server_roundtrip_ovmf.serial.log` and the
+  one-run discriminator from the doc (classify a locally constructed `FsError.NotFound`; `6` ⇒
+  H2 payload loss, `0` ⇒ H1 no-arm-selected).

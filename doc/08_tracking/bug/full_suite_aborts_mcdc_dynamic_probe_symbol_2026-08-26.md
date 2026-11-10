@@ -1,10 +1,10 @@
 # A full-suite run aborts before executing anything: `variable mcdc_dynamic_probe_controller_load_builtin_current_owner not found` (2026-08-26)
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 — FIXED on release (lane ne10 verification below)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN. The original operator report says this was found in a clean worktree at
+**Status:** CLOSED 2026-11-11 — FIXED on release; verified by lane ne10 (seed 46fe8f6b6def). The original operator report says this was found in a clean worktree at
 `b2cbf73988f` with the 2026-08-26 01:16 deployed seed. No binary digest or retained worktree
 transcript makes that binary provenance independently verifiable.
 
@@ -307,3 +307,30 @@ discriminator; it is not about file count.
 Neither fix is landed here: both touch other sessions' active files, and blocker 2 needs an audit
 of how wide the two-registry gap is rather than a single symbol patched in isolation.
 
+
+---
+
+## 2026-11-11 addendum — lane ne10 (P3 traverse, batch ne10)
+
+**Verdict: FIXED on release.** Both stacked blockers are landed.
+
+- **Fixing commit:** `9e7e7a526edb` (merge of PR #7597, `work/hir-nominal-generic-owner-20261107`,
+  2026-11-07), ancestor of release tip (`git merge-base --is-ancestor` verified). It carries:
+  - **Blocker 1** — the real top-level import
+    `use std.mcdc.dynamic_probe.{mcdc_dynamic_probe_controller_load_builtin_current_owner}` at
+    `src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl:11`, so the in-memory MC/DC
+    wrapper prelude resolves against a genuinely loaded module.
+  - **Blocker 2** — an `interpreter_extern` handler for
+    `rt_process_run_owned_observed_bounded_value`
+    (`src/compiler_rust/compiler/src/interpreter_extern/mod.rs:1992`,
+    implementation `interpreter_extern/system.rs:1083`), closing the two-registry gap for this
+    symbol on the tree-walk interpreter path.
+- **Verification (seed-smoke):** the doc's directory-vs-file discriminator was re-run on tracked
+  seed `bin/simple.exe` build-commit `46fe8f6b6def`
+  (`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ./bin/simple.exe test <two-spec dir>
+  --mode=interpreter --no-cache --no-cover-check`). The directory target now reaches execution:
+  `Results: 2 total, 2 passed, 0 failed` — both specs PASS. On the 2026-08-27 base the identical
+  shape aborted after `Session setup` with
+  `variable mcdc_dynamic_probe_controller_load_builtin_current_owner not found`.
+- **Mechanism note:** the "why a single-file run survives both" section is confirmed — single-file
+  runs still bypass wrapper generation entirely; directory runs now pass through it cleanly.
