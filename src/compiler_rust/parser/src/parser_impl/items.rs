@@ -497,6 +497,8 @@ impl<'a> Parser<'a> {
                     Visibility::Private
                 };
 
+                let is_resource_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "resource")
+                    && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
                 // After decorators, could be fn, class, struct, extern, etc.
                 match &self.current.kind {
                     TokenKind::Class => {
@@ -546,6 +548,9 @@ impl<'a> Parser<'a> {
                         // found Trait" — same root cause as the Union arm
                         // above.
                         return self.parse_trait_with_attrs(attributes);
+                    }
+                    TokenKind::Identifier { .. } if is_resource_decl => {
+                        return self.parse_resource_decl(decorators, visibility);
                     }
                     _ => {}
                 }
