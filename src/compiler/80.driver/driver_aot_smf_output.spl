@@ -19,6 +19,7 @@ use compiler.driver.smf_writer.{
     SmfDependencyEntry
 }
 use compiler.driver.smf_binary_helpers.{smf_u32_to_bytes}
+use compiler.driver.smf_elf_parser.{elf_relocated_non_code_section}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{
     CompileResult,
@@ -258,6 +259,14 @@ impl CompilerDriver:
             if coff or macho:
                 return Err(CompileResult.CodegenError(
                     "SMF packaging needs ELF object code, but the backend produced a {if coff: "COFF" else: "Mach-O"} object for this host target"))
+        # SMF relocations address the merged Code section only and every
+        # output mode below drops the other allocated sections, so a relocated
+        # constant in `.data.rel.ro.<sym>` / `.rodata.*` / `.data.*` would be
+        # loaded unrelocated (child SIGBUS). Fail closed by name instead.
+        val relocated_data = elf_relocated_non_code_section(all_object_bytes)
+        if relocated_data != "":
+            return Err(CompileResult.CodegenError(
+                "SMF packaging keeps Code relocations only, but the object relocates non-code section {relocated_data}; its relocated constants cannot be represented in --mode=smf output"))
 
         val deps = smf_collect_dependency_hashes(ctx)
         val entry_source_hash = if ctx.source_content_hashes_owner.len() > 0:
