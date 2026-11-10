@@ -17,6 +17,15 @@ fault/recovery surface that a storage device is actually judged on:
                                      in the file: a device returning wrong bytes
                                      is far worse than one returning an error.
 
+  D. read disturb, injected        — seed a page's neighbour-read counter through
+                                     the typed seam; the erased tail flips at the
+                                     default reference and the ladder recovers it
+                                     at a POSITIVE Vref rung (disturb polarity —
+                                     retention needs negative rungs), with the
+                                     recovery visible in the health/calibration
+                                     sinks; over-injection past the table fails
+                                     loudly like C.
+
   bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_emu_recovery_check.spl
 
 SUBMISSION IS NOT HOST-EQUIVALENT (read this before citing this file).
@@ -30,17 +39,18 @@ goes through the single `submit_io` helper precisely so that swapping in the
 real host transport is a one-function change rather than a rewrite.
 
 Fault injection goes exclusively through the typed emu_* seam
-(emu_set_block_wear / emu_advance_time_s). No media backing array is touched and
-there is no `.nandram` word poking.
+(emu_set_block_wear / emu_advance_time_s / emu_set_read_disturb). No media
+backing array is touched and there is no `.nandram` word poking.
 
 GEOMETRY: firmware addresses 64 blocks x 64 pages; the S1 NeChip backs 8 x 4 and
 aliases beyond that. Everything below stays inside the 1:1 window.
 
-READ DISTURB IS DELIBERATELY ABSENT — see the note at the bottom of this file
-and doc/08_tracking/bug/nvme_emu_typed_seam_has_no_read_disturb_injector_2026-09-01.md. The
-typed seam has no disturb injector and the physics needs ~400,000 neighbour
-reads to flip one cell, so a read-disturb scenario here would be an assertion
-that cannot fail. That is reported as a finding rather than faked.
+READ DISTURB is covered by scenario D via the typed seam
+(emu_set_read_disturb, added with this file's D section) — see
+doc/08_tracking/bug/nvme_emu_typed_seam_has_no_read_disturb_injector_2026-09-01.md
+for why the seam entry point exists: the physics needs ~400,000 real neighbour
+senses to flip one erased cell, so without the injector a read-disturb
+assertion here could not fail.
 """
 
 use nvme_types.*
@@ -201,6 +211,101 @@ fn main():
     c2 = d4
     fail = fail + expect_eq(r_live.status, SC_SUCCESS, "control: a healthy LBA still reads SC_SUCCESS after the media error")
     fail = fail + expect_eq(r_live.data, 0x3C, "control: the healthy LBA returns its own pattern")
+
+    # ── D. READ DISTURB through the typed seam ───────────────────────────────
+    # Polarity (measured, doc §3.4): disturb pushes cells UP, so its victim is
+    # ERASED cells — the scalar host write stages a ZERO page (byte 0 programmed,
+    # but no erased cells anywhere), so this scenario seeds the page through the
+    # FTL page seam with an erased tail instead. S1 rd_coef = 1.0, so 500,000
+    # seeded neighbour reads = +50 Vt codes: an erased cell at 88 crosses the
+    # default reference 128 (flips to 0 at a plain sense) yet stays below the
+    # ladder's largest positive rung vref 152, so the ladder recovers it — the
+    # +16 rung wins. Without the injector this damage needs ~400,000 real
+    # neighbour senses (~10 min of host reads) — the reason this scenario was
+    # deliberately not written until the seam entry existed.
+    print("D. injected read disturb is recovered by a positive Vref rung, observably")
+    var c3: NvmeController = nvme_controller_new_emu()
+
+    # Seed through the FTL page seam: byte 0 programmed (0x01), bytes 1..4095
+    # left ERASED (all-ones). A scalar host write cannot produce this shape (it
+    # stages a zero page), which is exactly why the injector takes a page
+    # address: read disturb has no victim on an all-programmed page.
+    var dp: PageData = page_zero()
+    dp.words[0] = 0x01
+    var tailw: i64 = 1
+    while tailw < PAGE_WORDS:
+        dp.words[tailw] = 0 - 1
+        tailw = tailw + 1
+    fail = fail + expect_eq(c3.ftl.write_page(8, dp), SC_SUCCESS, "seed page WRITE lba8 (byte 0 programmed, tail erased)")
+    val (e1, r8) = submit_io(c3, 31, OP_READ, 8, 1, 0)
+    c3 = e1
+    fail = fail + expect_eq(r8.data, 0x01, "positive control: lba8 reads back while undisturbed")
+
+    val ppn8: i64 = c3.ftl.lba_ppn(8)
+    fail = fail + expect_ne(ppn8, UNMAP, "lba8 mapped before disturb injection")
+    val blk8: i64 = ppn_block(ppn8)
+
+    # Baseline the erased tail so the post-injection read is a DELTA, not an
+    # absolute a zero-initialized page would also satisfy.
+    val raw8a: FilRead = c3.ftl.fil.read(ppn8)
+    fail = fail + expect_eq(page_word(raw8a.page, 511), 0 - 1, "baseline: erased tail senses all-ones")
+
+    # Typed seam only: seed the neighbour-read counter, no `.nandram` poking.
+    c3.ftl.emu_set_read_disturb(ppn8, 500000)
+
+    # Raw ladder-bypassing read at the default reference: the erased tail must
+    # actually have moved. This is the non-vacuity proof that the injector
+    # reached the victim page's Vt cells through the whole
+    # FTL→FIL→FMC→NandEmu chain.
+    val raw8b: FilRead = c3.ftl.fil.read(ppn8)
+    fail = fail + expect_eq(page_word(raw8b.page, 511), 0, "injected disturb flipped the erased tail at the default reference")
+
+    # Host-visible behaviour: the ladder walks its table and recovers the page
+    # at a POSITIVE rung (retention damage needs negative rungs — the sign is
+    # the polarity proof). The data path returns correct bytes, and the
+    # recovery is visible in the health / calibration sinks, not silent.
+    val (e2, r8d) = submit_io(c3, 32, OP_READ, 8, 1, 0)
+    c3 = e2
+    fail = fail + expect_eq(r8d.status, SC_SUCCESS, "ladder recovers the disturbed page for the host")
+    fail = fail + expect_eq(r8d.data, 0x01, "recovered read returns the programmed byte 0")
+    fail = fail + expect_gt(c3.ftl.rel_health.retry_depth_max[blk8], 0, "health sink records the retry rungs the disturb cost")
+    fail = fail + expect_eq(c3.ftl.rel_health.refresh_cause[blk8], rel_cause_err(), "health sink tags the block for error-triggered refresh (DEAR)")
+    fail = fail + expect_gt(c3.ftl.fil.calibrated_offset(blk8), 0, "ladder persisted a POSITIVE Vref offset (disturb polarity, not retention)")
+
+    # Beyond the table: +70 codes lifts the erased lobe to 158, past the
+    # largest positive rung (vref 152), so the page is unrecoverable and the
+    # device must fail LOUDLY — the disturb twin of scenario C.
+    print("D2. disturb past the ladder's reach fails loudly")
+    var dp2: PageData = page_zero()
+    dp2.words[0] = 0x01
+    var tailw2: i64 = 1
+    while tailw2 < PAGE_WORDS:
+        dp2.words[tailw2] = 0 - 1
+        tailw2 = tailw2 + 1
+    fail = fail + expect_eq(c3.ftl.write_page(10, dp2), SC_SUCCESS, "seed page WRITE lba10")
+    val ppn10: i64 = c3.ftl.lba_ppn(10)
+    fail = fail + expect_ne(ppn10, UNMAP, "lba10 mapped before over-injection")
+    c3.ftl.emu_set_read_disturb(ppn10, 700000)
+    val (e3, r10) = submit_io(c3, 33, OP_READ, 10, 1, 0)
+    c3 = e3
+    fail = fail + expect_eq(r10.status, SC_MEDIA_ERR, "over-disturbed page returns SC_MEDIA_ERR to the host")
+    fail = fail + expect_gt(c3.media_errors, 0, "SMART media_errors counts the unrecovered disturbed read")
+    # Non-vacuity: the status is a genuine unrecoverable-media verdict, not an
+    # unrelated rejection — a raw ladder-bypassing read must fail ECC. (The
+    # completion's scalar byte 0 is single-bit-repaired by the legacy codeword;
+    # the uncorrectable part is the erased tail, so the byte is not asserted.)
+    val raw10: FilRead = c3.ftl.fil.read(ppn10)
+    fail = fail + expect_eq(raw10.code, NAND_ECC_FAIL, "raw read confirms the over-disturbed page is unreadable, not merely rejected")
+
+    # Control: an untouched LBA on the same controller still serves its own
+    # pattern, so the disturb did not wedge the device into a global error state.
+    val (e4, w9) = submit_io(c3, 34, OP_WRITE, 9, 1, 0x3C)
+    c3 = e4
+    fail = fail + expect_eq(w9.status, SC_SUCCESS, "control: healthy LBA still writes after the disturb")
+    val (e5, r9) = submit_io(c3, 35, OP_READ, 9, 1, 0)
+    c3 = e5
+    fail = fail + expect_eq(r9.status, SC_SUCCESS, "control: healthy LBA still reads SC_SUCCESS")
+    fail = fail + expect_eq(r9.data, 0x3C, "control: the healthy LBA returns its own pattern")
 
     if fail == 0:
         print("NVME EMU RECOVERY OK")
