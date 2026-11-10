@@ -65,19 +65,27 @@ awk '{ n = split($0, seg, "/"); acc = seg[1]; for (i = 2; i < n; i++) { print ac
   | sort -u > "$WORK/dirs.txt"
 sort -u "$TRACKED" "$WORK/dirs.txt" > "$WORK/known.txt"
 
-# extract_paths <specfile> -> stdout: one candidate path per line
+# extract_paths <listfile> -> stdout: "path<TAB>spec" per candidate, ONE awk pass over all specs
 extract_paths() {
-  awk '
-    BEGIN { scope_stack[0] = 0; indents[0] = 0; scope = 0 }
+  tr '\n' '\000' < "$1" | xargs -0 awk '
+    function reset() {
+      split("", kinds); split("", values); split("", scopes); split("", parent)
+      split("", bound); split("", scope_stack); split("", indents)
+      count = 0; depth = 0; scope_count = 0; scope = 0
+      doc = 0; literal = 0; escaped = 0; text = ""
+      scope_stack[0] = 0; indents[0] = 0
+    }
+    BEGIN { reset() }
     function token(kind, value) { count++; kinds[count] = kind; values[count] = value; scopes[count] = scope }
     function path(value) {
       if (value !~ /\// || value ~ /[{}*?\[\]\\]/ || value ~ /\/$/) return
       if (value ~ /^(src|scripts|test|tools|examples|config|bin|doc)\// || value ~ /^\.spipe\//)
-        print value
+        print value "\t" cur
     }
     function reader(value) {
       return value ~ /(^|\.)(read_file|read_text|read_bytes|file_read|file_read_text|file_read_bytes|rt_file_read_text|rt_file_read_bytes|file_exists|rt_file_exists)$/
     }
+    FNR == 1 { if (cur != "") flush(); reset(); cur = FILENAME }
     {
       if (!doc && !literal && $0 !~ /^[ \t]*(#|$)/) {
         match($0, /^[ \t]*/); indent = RLENGTH
@@ -116,7 +124,7 @@ extract_paths() {
       }
       token("newline", "")
     }
-    END {
+    function flush() {
       # Resolve literal bindings in their lexical indentation scope. A path
       # used only as an example in a sibling scenario must not leak into a
       # read of a same-named variable in another scenario.
@@ -145,7 +153,8 @@ extract_paths() {
         }
       }
     }
-  ' "$1"
+    END { if (cur != "") flush() }
+  '
 }
 
 scan() {
@@ -158,11 +167,11 @@ scan() {
   while IFS= read -r spec; do
     [ -f "$spec" ] || continue
     _nspecs=$((_nspecs + 1))
-    extract_paths "$spec" | sort -u | while IFS= read -r p; do
-      [ -n "$p" ] || continue
-      printf '%s\t%s\n' "$p" "$spec" >> "$_cand"
-    done
-  done < "$_list"
+    printf '%s\n' "$spec"
+  done < "$_list" > "$_out.files"
+  if [ "$_nspecs" -gt 0 ]; then
+    extract_paths "$_out.files" > "$_cand"
+  fi
   # Batch existence check: one pass over the known-path set, not one grep per
   # candidate (a per-candidate grep over 110k tracked paths does not terminate).
   if [ -s "$_cand" ]; then
