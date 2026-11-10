@@ -4,7 +4,8 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: FIXED (2026-11-11, lane ne9 — verified on fresh seed 46fe8f6b6def;
+  owning spec 5/5 in interpreter mode)
 - Found by: BUGFIX-7 lane while fixing
   `trait_conformance_check_ignores_arity_2026-08-04` (a stale `BlockDevice`
   mock in the same spec file previously made the whole file fail to compile
@@ -50,3 +51,22 @@ fail to compile before any example ran (the file's `MockFat32BlockDevice` had
 a 2-arg `read_sector` against the trait's declared 1-arg signature) — so this
 may be a long-standing latent defect, not a new regression.
 
+
+## 2026-11-11 — P3 ne9 triage: FIXED on fresh seed
+
+Lane ne9 (batch 2026-11-11) re-ran the owning spec on the fresh seed
+(build-commit `46fe8f6b6def`, `SIMPLE_LIB=src`, interpreter mode,
+`--no-cache`):
+
+- `test/02_integration/storage/dbfs/fat32_no_regression_spec.spl` —
+  **5/5 PASS**. The tracked scenario "routes atomic replace lifecycle
+  operations through the shared mount table" (the `FsError::Corrupt`
+  repro of this doc) passes; the FAT32 rename/atomic-replace path is
+  fixed. No `FsError::Corrupt`.
+- One sibling scenario in the same file, "stays on the shared
+  FsFat32Driver surface", failed on the first run for an unrelated
+  reason: it scans its OWN source via
+  `read_file("test/integration/storage/dbfs/fat32_no_regression_spec.spl")`,
+  a path orphaned by the test-tree consolidation `4f51a7ee31fc`
+  (`test/integration` -> `test/02_integration`). The stale self-scan
+  path was corrected in the same commit; the full spec is now 5/5.
