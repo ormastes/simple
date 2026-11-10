@@ -76,3 +76,17 @@ Guard worth adding: a post-deploy smoke check that the published binary answers
 `bin/release/<triple>/simple`. A deploy that silently narrows the CLI surface
 should fail loudly at deploy time, not at the next contributor's first command.
 
+
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 29)
+
+**Verdict: SUPERSEDED (self-recorded dupe, verified).**
+
+The doc header already carries the 2026-09-16 normalization verdict:
+"Obsolete 2026-09-16 — dupe of
+deployed_bin_simple_bootstrap_only_2026-07-31.md (same 12:14 deploy, same
+missing test/run/lint); condition recorded gone 2026-08-17." Verified on the
+p3-boot4 worktree that the sibling record
+`doc/08_tracking/bug/deployed_bin_simple_bootstrap_only_2026-07-31.md` exists
+in-tree and covers this breakage. Nothing further to triage from this lane.
+No change made in this lane.
