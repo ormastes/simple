@@ -3,7 +3,7 @@
 - **Filed:** 2026-07-29 (lane A4E `semantic-enum-payloads`)
 - **Severity:** P3 — no runtime-correctness impact; the remaining issue is semantic API lint coverage.
 - **Component:** compiler frontend payload capture and `semantic_api` lint integration.
-- **Status:** OPEN. The parser/decl/bridge payload-loss condition described in the original report is no longer present in the current release source. This record remains open because the MC-API enum-payload lint is still not connected to the captured types. Keep it open until that remaining acceptance scope has an owner and verification.
+- **Status:** OPEN (re-verified 2026-11-11, lane ne8). The parser/decl/bridge payload-loss condition described in the original report is no longer present in the current release source. This record remains open because the MC-API enum-payload lint is still not connected to the captured types. Keep it open until that remaining acceptance scope has an owner and verification.
 
 ## Original finding (historical)
 
@@ -46,3 +46,26 @@ The standard `test` invocation did not execute scenarios: it exited before test 
 ## Tracking disposition
 
 Keep this record **OPEN**. The original parser-capture condition is superseded by current source, but the linked MC-API enum-payload lint acceptance remains unsatisfied. Astra's tracking review recommends retaining the record open until the remaining lint integration has a separately reviewed owner and acceptance scope. No separate issue is created by this update.
+
+---
+
+## 2026-11-11 addendum — lane ne8 (P3 traverse, batch ne8)
+
+**Verdict: LIVE — kept OPEN per this record's own tracking disposition (separately reviewed
+owner and acceptance scope required).**
+
+- The lint walk is still unwired: `src/compiler/35.semantics/lint/semantic_api/checker.spl:229`
+  still has `case Enum(_): pass` (the arm's comment cites this bug doc). The module header also
+  still states the checker "has no integration step wired to walk enum payload types at all yet".
+- **Technical bar has lowered since the 2026-11-02 review:** the flat AST the checker consumes
+  (`compiler.frontend.ast.EnumDef`, `src/compiler/10.frontend/ast.spl:37-62`) now carries
+  `variant_payload_counts`, `variant_payload_kinds` (0=unit/1=tuple/2=struct), and the FLAT
+  `variant_payload_type_names` / `variant_payload_field_names` lists — so the "payload types
+  structurally unavailable" rationale in the checker's inline comment is now stale, and the
+  remaining routing (each payload type through `check_type_text` with MC-API-002 semantics,
+  mirroring struct/class fields) is mechanical. The blocker is process, not data.
+- **Not fixed in this lane:** the record's disposition explicitly assigns the remaining lint
+  integration "a separately reviewed owner and acceptance scope", and the checker is a
+  standalone library not yet wired into the live lint pipeline — an unreviewed P3 lane wiring
+  it would pre-empt that decision. Deferring; the owner lane should now need only the
+  `EnumDef` flat lists above.
