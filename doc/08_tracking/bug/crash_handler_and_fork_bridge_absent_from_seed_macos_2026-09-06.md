@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** STALE — needs an admitted self-hosted macOS binary (re-triaged 2026-11-04)
+**Status:** SUPERSEDED — needs an admitted self-hosted macOS binary (re-triaged 2026-11-04)
 **Found:** 2026-09-06, macOS aarch64 (Darwin 25.5.0)
 **Binary under test:** `src/compiler_rust/target/debug/simple` (the only binary
 this lane is permitted to use; a bootstrap is forbidden this session)
