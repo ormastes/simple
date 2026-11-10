@@ -67,3 +67,14 @@ field; call a `me`-mutating method through `slot` (re-reading the module var
 each time, not a locally-held binding) 3× in sequence; assert the counter
 accumulates rather than resetting.
 
+
+## 2026-11-10 triage — SUPERSEDED (seed-smoke, lane p3-interp4 row 24)
+
+Closed by da93a94183f1 (in branch): real contract violation but seed-only —
+the copy happens at BIND (universal COW), not at trait/Optional slot
+re-read; the pure-Simple interpreter's ObjectValue/ObjectStore reference model
+(29c2a91a030, predating this report) is correct. Guard spec for the exact
+report shape (optional slot, re-read and re-unwrapped every call, must
+accumulate 1,2,3) re-verified this lane:
+`bin/simple.exe test test/01_unit/compiler/interp_object_store_ref_model_spec.spl`
+-> 4 total, 4 passed, 0 failed on the worktree seed. No code change.
