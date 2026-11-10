@@ -1,4 +1,5 @@
 # `TieredJitManager` never tiers up in the interpreter — `compiled` and `call_count` writes are lost, recompilation is unbounded
+Status: SUPERSEDED. Triage 2026-11-11 (lane interp4, PR #8185): seed-smoke verified, fixing commit cited in addendum below.
 
 - **Status:** OPEN
 - **Filed:** 2026-08-18
@@ -118,3 +119,21 @@ interpreter* in tests, but nothing here establishes that it is.
 Engine fix — construct `Value::ClassInstance`. Do **not** add
 `self.functions[idx] = hf` write-backs; that masks the engine defect, per the
 canonical record.
+
+## 2026-11-10 triage — SUPERSEDED (seed-smoke, lane p3-interp4 row 23)
+
+Root cause is interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17,
+verified SUPERSEDED today by lane p3-interp3 (row 14; the 2026-11-04
+ClassInstance default-carrier flip holds on the worktree seed). Confirmed by
+execution this lane, one cycle, both default and
+SIMPLE_EXECUTION_MODE=interpreter:
+- `build/p3fix-interp4/row23_tiered_min.spl` (this doc's minimal repro):
+  prints "expect 3, got 3" — bind-then-mutate through a class element read
+  aliases.
+- `build/p3fix-interp4/row23_tiered_manager.spl` (direct TieredJitManager
+  driver via std.jit.tiered_jit, threshold=2): prints `calls=-1,42,42`,
+  `call_count=3`, `compiled_count=1` — hf.call_count accumulates and tier-up
+  fires exactly once; no lost writes, no unbounded recompilation.
+No write-back added to tiered_jit.spl (per this doc, the engine fix is
+correct — and is now the shipped behavior on this seed). No change from this
+lane.

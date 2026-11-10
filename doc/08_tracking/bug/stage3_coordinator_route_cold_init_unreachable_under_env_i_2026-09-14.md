@@ -1,7 +1,7 @@
 # Stage 3 coordinator route is unusable on a cold checkout: its own remedy cannot reach the child
 
 - **Filed:** 2026-09-14
-- **Status:** OPEN
+- **Status:** SUPERSEDED
 - **Tree:** `origin/main` `4f4d0e12832`
 
 ## Symptom
@@ -68,3 +68,16 @@ engaged) superseded by the route redesign. PR #7597, 2026-11-07.**
   this lane (no admitted Stage 2 + self-hosted binary chain on this Windows
   host); the script-level forwarding and the driver-side route ownership are
   the verified evidence.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Re-verified the script-level evidence on this base: finding 1 stays fixed —
+`scripts/bootstrap/resume-stage3-from-admitted.sh` validates the operator's
+`SIMPLE_SCV_INVENTORY_COLD_INIT` to be unset or exactly `1` (lines
+972-975) and forwards it into env -i child invocations (recorded-cold-init
+forwarding token present at :585). `sh -n` clean. Env-facade lens: the
+pass-through is a deliberate, validated single-variable forward into env -i
+children — not a raw env read in app/lib leaf code. Finding 2 stays
+superseded by the worker-pool coordinator redesign. Host-limit unchanged: a
+full cold-checkout Stage 3 coordinator run needs the admitted Stage 2 +
+self-hosted chain (not on this Windows host); no new executed evidence.

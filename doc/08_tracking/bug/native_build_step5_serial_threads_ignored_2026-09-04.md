@@ -6,7 +6,7 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-04
 **Area:** `src/compiler/80.driver/driver_build/parallel.spl`, `driver_aot_native_output.spl`
-**Status:** OPEN (root cause located; fix is blocked on a named prerequisite)
+**Status:** SUPERSEDED (root cause located; fix is blocked on a named prerequisite)
 
 ## Measurement envelope
 
@@ -278,3 +278,39 @@ settles nothing. That share decides P2-vs-P3 and must be sampled during a real
 step-5 window. Also still open: whether the original >1h33m stall was step 4 or
 step 5.
 
+
+---
+
+## Addendum 2026-11-11 (lane boot7) — SUPERSEDED (headline defect)
+
+The headline finding — step 5 never uses more than one core and `--threads` is
+discarded — is fixed on the release tip.
+
+Source verification at tip b364745fdbf8:
+
+- `driver_aot_native_output.spl:2740-2744` step-5 lane now calls
+  `_driver_codegen_pool_prefetch_v1(...)`, which admits N = min(cores/threads,
+  jobs, memory budget/headroom) `llc` child processes via
+  `native_codegen_pool_run_v1` (`driver_aot_native_output.spl:4653-4710`), with
+  an honest `concurrency=N` line and a reason-coded `concurrency=1` fallback.
+- The pool scheduler lives in
+  `src/compiler/80.driver/driver_build/native_codegen_pool_v1.spl`; the design
+  and scope are recorded in
+  `doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md`
+  section 6 ("Implemented 2026-11-02 — P2 as a process pool").
+- `ParallelBuilder` additionally gained `set_spawn_dispatch` so `build()`'s
+  "parallel" branch can route through the genuine `build_parallel()`
+  (`parallel.spl:571-572`); the step-5 caller keeps the in-process serial lane
+  for publish/verify by design and takes pooled objects where they exist.
+
+Fixing merge on the release tip: 9e7e7a526edb (PR #7597, 2026-11-07) — pickaxe
+`-S _driver_codegen_pool_prefetch_v1` and `-S set_spawn_dispatch` both land
+there.
+
+Seed-smoke verification (2026-11-11, seed 0791c2b7f4a7, interpreter mode):
+`bin/simple.exe test test/01_unit/compiler/driver/native_codegen_pool_v1_spec.spl
+--mode=interpreter --no-cache` — 21/21 PASSED.
+
+Remaining serial portions are recorded follow-ups in the same plan, outside
+this bug's headline scope: MIR -> IR translation stays serial in the parent
+(pool section 6 "Still serial"), and step 4/6 MIR lowering remains serial.

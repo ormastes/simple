@@ -87,3 +87,37 @@ identically. This was NOT censused — no file in the tree is known to trigger
 it, and none did in the 2026-09-13 sweeps, but that is an absence of
 observations, not a measured bound. Recorded rather than fixed.
 
+## Addendum 2026-11-11 — lane runner5: SUPERSEDED (fix verified on refreshed seed)
+
+The redesign this bug called for has landed: a real fault boundary now wraps
+in-process spec preprocessing.
+
+- `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl`
+  `preprocess_boundary_failure()` runs before `preprocess_infix_matchers_only`
+  and, for any spec that needs isolation (heuristic: >1 MB source or >2000
+  consecutive blank lines; `SIMPLE_TEST_PREPROCESS_BOUNDARY=always` probes
+  every spec), lexes the source in an ISOLATED child
+  (`src/app/test_runner_new/preprocess_probe.spl`,
+  `process_run_bounded(..., 120 s)`) instead of in the runner's own process.
+  A child crash is converted to ONE spec FAIL
+  ("spec preprocessing (lexing) crashed or failed in an isolated child
+  (rc=…)") via `_compiler_select_failure`, and the sweep continues. When the
+  probe program cannot be located the boundary FAILS CLOSED rather than
+  lexing in-process. Ordinary specs never pay for the extra child.
+- Ledger `doc/08_tracking/bug/bug_db.sdn:3757` recorded
+  "fix-implemented-verification-pending" on 2026-11-07; this addendum supplies
+  the pending verification.
+
+Seed-smoke verification on refreshed seed (build-commit 0791c2b7f4a7):
+`bin/simple.exe test test/01_unit/app/test_runner_new/preprocess_fault_boundary_spec.spl
+--mode=interpreter --no-cache` → **1/1 PASS**. That spec builds a directory
+holding a hostile spec (200 000 blank lines inside an open bracket) plus a
+good spec, runs `bin/simple test <dir>` through the runner, and asserts the
+hostile file is exactly one FAIL naming the front-end fault, the sibling runs
+OK, and the runner prints its summary — i.e. the sweep survives a hostile
+source instead of dying with no verdict.
+
+Verdict: SUPERSEDED — fault boundary implemented and verified on the
+refreshed seed. (The residual "Related, still uncovered" lexer note above is
+hardened, not censused; the boundary now contains it if it ever triggers.)
+

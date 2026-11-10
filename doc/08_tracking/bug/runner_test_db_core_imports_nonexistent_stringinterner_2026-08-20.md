@@ -111,3 +111,37 @@ reopen that defect.
 - `doc/08_tracking/bug/test_runner_spins_at_100pct_after_summary_2026-08-18.md`
   — the investigation this was found during; §4 of its 2026-08-20 note records
   the same evidence in less detail.
+
+## Addendum 2026-11-11 — lane runner5: SUPERSEDED (fix verified on refreshed seed)
+
+The prescribed fix has been applied exactly as specified (import renamed to the
+real symbol, no `StringInterner` alias reintroduced):
+
+- `src/lib/nogc_sync_mut/test_runner/test_db_core.spl:9` now imports
+  `std.test_runner.string_interner.TestDbStringInterner`; the field
+  (`:35`) and the `RunnerTestDbCore.empty()` initialiser (`:58`) both use
+  `TestDbStringInterner` / `TestDbStringInterner.empty()`.
+- No bare `StringInterner` symbol exists anywhere under
+  `src/lib/nogc_sync_mut/test_runner/` (grepped 2026-11-11; the only matches
+  are historical comments in `string_interner.spl:34-35`).
+- Ledger `doc/08_tracking/bug/bug_db.sdn:3758` already records status
+  `fixed` (2026-11-02); the change is visible at the merge
+  `9e7e7a526edb` (PR #7597, landed 2026-11-07).
+
+Seed-smoke verification on refreshed seed (build-commit 0791c2b7f4a7), the
+bug doc's own probe (`build/review/p3fix-runner5-20261111/test_db_core_probe.spl`,
+gitignored temp):
+
+```
+use std.nogc_sync_mut.test_runner.test_db_core.{RunnerTestDbCore}
+fn main():
+    var db = RunnerTestDbCore.empty()
+    print "tests={db.tests.len()}"
+```
+
+`bin/simple.exe run … --mode=interpreter --no-cache` prints **`tests=0`** —
+verification bar #1 of the bug doc is met (previously:
+`error: semantic: method 'empty' not found on type 'dict'`).
+
+Verdict: SUPERSEDED — import corrected per the doc's fix section; construction
+probe green on the refreshed seed.
