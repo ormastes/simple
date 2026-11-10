@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN
+- Status: FIXED (verified 2026-11-11, lane work/p3-interp7-20261111, fresh seed 46fe8f6b6def — all three engines)
 - Filed: 2026-08-18
 - Severity: medium — silently splits `run`/`test` semantics for a documented array method
 
@@ -175,3 +175,24 @@ ancestry (`rt_collection_set` routes Array → `rt_array_set` at
 `src/compiler_rust/runtime/src/value/collections.rs:2811-2837`, verified read).
 Residual action is a seed redeploy for jit/native, not a code change
 (same class as `deployed_seed_binary_missing_var_roots_cache_fix_2026-09-13`).
+
+
+## 2026-11-11 P3 triage (work/p3-interp7-20261111) — FIXED, all three engines verified on the fresh seed
+
+Re-verified on this lane's fresh seed binary (worktree `bin/simple.exe`,
+build-commit `46fe8f6b6def`, 2026-11-10 21:53, 37584384 bytes; cwd = worktree
+root; `SIMPLE_LIB=src`; `--mode=interpreter --no-cache` for spec runs):
+
+- `test test/01_unit/interpreter/array_set_method_spec.spl` → 7/7 PASS.
+- `test test/01_unit/language/array_set_spec.spl` → 5/5 PASS.
+- Three-engine repro (`build/p3fix-interp7/array_set_repro.spl`: `set(0,9)` /
+  `set(-1,7)` / `set(10,99)` / `set(-10,42)`): `SIMPLE_EXECUTION_MODE=interpret`,
+  `=jit`, and the default lane ALL print exactly `true [9, 3, 1]` /
+  `true [9, 3, 7]` / `false` / `false`.
+
+The 2026-11-10 residual action (JIT lane abort on the then-deployed Windows
+seed, fix in source at `c3b2271c310` but not embodied in that binary) is
+consumed: the fresh seed embodies the fix and the JIT/native lanes match the
+interpreter lane exactly. No code change in this lane; fixes cited:
+interpreter `set` mutator (2026-11-03/04, incl. bool-return parity) and
+`rt_collection_set` Array routing (`c3b2271c310`), both in branch ancestry.

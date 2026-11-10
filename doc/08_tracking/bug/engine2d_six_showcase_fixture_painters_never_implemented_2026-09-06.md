@@ -100,3 +100,42 @@ strict probe and reports the failure faithfully. On this host `opencl`, `metal`,
 `cuda` and `opengl` do not initialize while `vulkan`, `software` and `cpu` do.
 Fixed in the spec by asserting the resolver contract (`opencl` or the documented
 `software` fallback) instead of a backend the host may not provide.
+
+## Triage addendum (2026-11-11, lane ne7)
+
+**Status: LIVE — remains OPEN; verified still-red on the 2026-11-11 seed.
+Owner-reviewed fixture decision still required (matches 2026-10-27 v3
+lane02 freeze: keep_open).**
+
+Seed-smoke run
+(`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe test ... --mode=interpreter --no-cache`,
+fresh seed 46fe8f6b6def):
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`
+→ 21 executed, 14 passed, 7 failed — the same seven exact-pixel fixture
+scenarios (toolbar modal grid + the six from this report) all FAIL.
+
+What changed since 2026-09-06 (mechanism superseded, defect not resolved):
+
+- The marker-dispatch hack and the `_solid_fill_pixels` heuristic fake path
+  were deliberately deleted (renderer header: "legacy heuristic parser is
+  retained only for pixel compatibility"; "There is deliberately NO fixture
+  table here"; see
+  `doc/08_tracking/bug/browser_static_lane_heuristic_fake_2026-10-05.md`,
+  Status: FIXED). Every document now routes through the real
+  parse → cascade → layout → paint engine.
+- The spec fixtures were simultaneously reduced to contentless stubs, e.g.
+  the dashboard scenario is now
+  `<body class='simple-web-engine2d-dashboard-command-list' style='background-color:#0b1220'><main>dashboard command list</main>`
+  yet still asserts `#22C55E` / `#CBD5E1` / `#10B981` content colors that
+  exist nowhere in the document. No correct real-layout render can produce
+  those pixels; the expectations demand fixture-painter semantics that were
+  intentionally removed.
+
+Per this bug's own fix-location constraint ("rewrite the fixtures'
+expectations from that engine's output under review. Do not adjust the
+spec's expected colors to match _solid_fill_pixels; that would be
+oracle-gaming"), the remaining options still require an owner: restore full
+fixture HTML and regenerate goldens under review, or delete/replace the
+seven stale exact-color scenarios. A P3 lane changing the colors to current
+output would be oracle-gaming, exactly as the freeze noted ("changing colors
+to current output would not establish a remedy").

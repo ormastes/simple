@@ -3,7 +3,7 @@
 - **Date:** 2026-09-01
 - **Severity:** HIGH — silent miscompile. Anything relying on `@naked` + `asm volatile`
   is compiled to code that jumps to an arbitrary address. There is no diagnostic.
-- **Status:** OPEN
+- **Status:** FIXED (2026-11-11 lane compiler5: ba7f6fc5c45 in branch history; 3 pinned specs green on fresh seed — see addendum below)
 - **Found by:** the SimpleOS **dbfs** server round-trip lane
   (`scripts/check/check-simpleos-dbfs-server-roundtrip-ovmf.shs`), while trying to give
   DBFS's device commit owner an audited critical-section provider.
@@ -155,3 +155,25 @@ sidecar result instead of trapping. The focused CAS/CPU-ID disassembly and
 execution regression plus the ordinary-asm regression pass. On the subsequent
 OVMF DBFS run, the guest reached `critical-section provider=ready`, proving the
 real mutex path rather than merely linking it.
+
+## Addendum 2026-11-11 — lane compiler5 (P3 batch-5 triage): FIXED
+
+- **Compiler half:** fixed by `ba7f6fc5c45` ("fix(codegen): preserve naked asm
+  control flow", 2026-11-05), an ancestor of this branch. Naked sidecars are
+  emitted without a compiler-generated frame and their wrappers return the
+  sidecar result instead of trapping.
+- **Provider half:** `src/os/kernel/net/thread_shim.spl` carries no `@naked`
+  function anymore (CAS critical-section provider per the 2026-11-05 addendum
+  above). `dbfs_device_mutex_provider_blocker`
+  (`src/lib/nogc_sync_mut/db/dbfs_driver/device_commit_owner.spl:20`) still
+  admits SimpleOS only via the behavioural probe rather than statically — that
+  is unchanged and correct, because the probe now exercises the real CAS
+  provider. The batch row note's "add simpleos to the allow-list in the same
+  change" applies only to a lane landing a fresh fix; the fix already exists,
+  so no allow-list change was taken here.
+- **Verification run on the fresh seed** (build-commit 46fe8f6b6def,
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe`, `--mode=interpreter
+  --no-cache`):
+  - `test/01_unit/compiler/backend/naked_no_prologue_spec.spl` — 11/11 PASS
+  - `test/01_unit/os/kernel/net/thread_shim_cas_critical_section_spec.spl` — 5/5 PASS
+  - `test/01_unit/storage/dbfs/dbfs_critical_section_probe_spec.spl` — 7/7 PASS

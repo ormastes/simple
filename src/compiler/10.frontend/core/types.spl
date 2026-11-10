@@ -786,11 +786,40 @@ var custom_primitive_names: [text] = []
 var custom_primitive_underlying_type_tags: [i64] = []
 var custom_primitive_symbol_ids: [i64] = []
 
+# Declaring-module ownership of each registry entry. The registry is NOT reset
+# between modules on the append-mode parse path (`parse_module_file`: core
+# interpreter module loader, legacy C driver), so a bare name alone is not a
+# key: two modules declaring the same struct name must get distinct ids, or the
+# second declaration's `named_type_update` clobbers the first module's layout
+# (bug bare_name_registry_collision_trigger_conditions_2026-07-30).
+# Kept out of the flat-pool snapshot on purpose: the snapshot path resets per
+# module, where ownership is moot; `named_type_module_at` tolerates a shorter
+# array after a restore.
+var named_type_modules: [text] = []
+var named_type_current_module: text = ""
+
+fn named_type_set_current_module(path: text):
+    named_type_current_module = path
+
+fn named_type_module_at(type_id: i64) -> text:
+    if type_id < named_type_modules.len():
+        return named_type_modules[type_id]
+    ""
+
 fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i64:
-    val existing = named_type_find(name)
+    var existing = named_type_find(name)
+    if existing >= 0 and named_type_module_at(existing) != named_type_current_module and
+            named_type_fields(existing).len() > 0:
+        # Another module already declared this bare name with a layout; a
+        # placeholder (empty layout, e.g. a forward type reference) is still
+        # adopted and claimed below, a declared type is never shared.
+        existing = -1
     if existing >= 0:
         if field_names.len() > 0 or field_types.len() > 0:
             named_type_update(existing, field_names, field_types)
+            while named_type_modules.len() <= existing:
+                named_type_modules.push("")
+            named_type_modules[existing] = named_type_current_module
         return existing
     val idx = named_type_names.len()
     named_type_names.push(name)
@@ -798,6 +827,9 @@ fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i
     named_type_layout_owners.push(idx)
     named_type_field_names.push(field_names)
     named_type_field_types.push(field_types)
+    while named_type_modules.len() < idx:
+        named_type_modules.push("")
+    named_type_modules.push(named_type_current_module)
     idx
 
 fn named_type_update(type_id: i64, field_names: [text], field_types: [i64]):
@@ -829,12 +861,18 @@ fn named_type_arguments_for_tag(tag: i64) -> [i64]:
     []
 
 fn named_type_find(name: text) -> i64:
+    # Precedence: the current module's own declaration, then the first
+    # registration of that bare name (the pre-fix behaviour for imports).
+    var first = -1
     var i = 0
     while i < named_type_names.len():
         if named_type_names[i] == name:
-            return i
+            if named_type_module_at(i) == named_type_current_module:
+                return i
+            if first < 0:
+                first = i
         i = i + 1
-    -1
+    first
 
 fn named_type_name(type_id: i64) -> text:
     named_type_names[type_id]
@@ -1761,6 +1799,7 @@ fn reset_all_pools():
     scope_starts = []
     current_scope_depth = 0
     named_type_names = []
+    named_type_modules = []
     named_type_arguments = []
     named_type_layout_owners = []
     named_type_field_names = []
@@ -1852,6 +1891,7 @@ export TYPE_TUPLE_BASE, is_tuple_type_tag, tuple_type_tag_to_id
 export tuple_type_register, tuple_type_get_elems
 export union_type_register, union_type_get_members
 export named_type_field_type_tags
+export named_type_set_current_module
 export SYM_UNKNOWN, SYM_FN, SYM_VAL, SYM_VAR, SYM_STRUCT, SYM_ENUM, SYM_CLASS
 export scope_push, scope_pop, scope_depth
 
@@ -2069,6 +2109,7 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
     named_type_field_names = flat_pool_dec_text_list(r)
     named_type_field_types = flat_pool_dec_i64_list(r)
     named_type_names = flat_pool_dec_text(r)
+    named_type_modules = []
     named_type_arguments = flat_pool_dec_i64_list(r)
     named_type_layout_owners = flat_pool_dec_i64(r)
     newunit_names = flat_pool_dec_text(r)
@@ -2309,6 +2350,7 @@ pub fn flat_pool_state_install(s: FlatPoolState):
     scope_starts = s.scope_starts
     current_scope_depth = s.current_scope_depth
     named_type_names = s.named_type_names
+    named_type_modules = []
     named_type_arguments = s.named_type_arguments
     named_type_layout_owners = s.named_type_layout_owners
     named_type_field_names = s.named_type_field_names

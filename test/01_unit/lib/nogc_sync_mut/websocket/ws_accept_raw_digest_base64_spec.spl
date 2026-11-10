@@ -1,0 +1,52 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# @bug ws_accept_hash_sha1_bytes_reencoded_utf8_before_base64_2026_11_10
+
+"""
+# RFC 6455 Sec-WebSocket-Accept over raw SHA-1 digest bytes
+
+## Overview
+
+Repro + prevention for the bug where the 20 SHA-1 digest bytes were routed
+through text (char_from_code) before base64, so every byte >= 0x80 became two
+UTF-8 bytes and the accept value came out as
+`wrN6TyzDgGJPFsKQw7ZGBsOPOFlFwrLCvsOEw6o=` instead of the RFC §1.3 example
+`s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`. The fix base64-encodes the [i64] digest
+directly (`base64_encode_bytes`) in both websocket owners.
+"""
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.websocket.handshake.{compute_websocket_accept, base64_encode_bytes, base64_encode, ws_handshake_text_to_bytes}
+use std.nogc_async_mut.websocket.upgrade.{compute_accept_value}
+use std.crypto.sha1.{sha1_bytes, sha1_hex}
+
+val RFC_KEY = "dGhlIHNhbXBsZSBub25jZQ=="
+val RFC_ACCEPT = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+val WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+describe "RFC 6455 accept value":
+    it "sha1 of key+GUID matches the RFC §1.3 digest":
+        step("sha1 of key+GUID matches the RFC digest")
+        expect(sha1_hex(RFC_KEY + WS_GUID)).to_equal("b37a4f2cc0624f1690f64606cf385945b2bec4ea")
+
+    it "sync handshake owner base64-encodes the raw digest (RFC example)":
+        step("sync owner accept")
+        expect(compute_websocket_accept(RFC_KEY)).to_equal(RFC_ACCEPT)
+
+    it "async upgrade owner base64-encodes the raw digest (RFC example)":
+        step("async owner accept")
+        expect(compute_accept_value(RFC_KEY)).to_equal(RFC_ACCEPT)
+
+    it "digest bytes >= 0x80 are NOT re-encoded as UTF-8 before base64 (prevention)":
+        step("high bytes stay single bytes")
+        # 0xB3 0x7A 0x4F are the first three RFC digest bytes; text round-trip
+        # would turn 0xB3 into C2 B3 and yield "wrN6" instead of "s3pP".
+        expect(base64_encode_bytes([0xB3, 0x7A, 0x4F])).to_equal("s3pP")
+        expect(base64_encode_bytes([0xFF])).to_equal("/w==")
+        expect(base64_encode_bytes([0x80, 0xFF])).to_equal("gP8=")
+
+    it "text base64 still encodes ASCII through the same byte encoder":
+        step("ascii text base64")
+        expect(base64_encode("abc")).to_equal("YWJj")
+        expect(base64_encode_bytes(ws_handshake_text_to_bytes("abc"))).to_equal("YWJj")

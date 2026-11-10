@@ -5,9 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-17
-**Status:** OPEN — but the root cause is now LOCATED to an exact function, and a
-partial fix was built and measured (it moves the error one token but does not
-close it). See "Root cause located" and "Partial fix attempted" below.
+**Status:** FIXED (2026-11-11 lane compiler5: both roots parse with correct values on the fresh seed — see addendum below). Historical note: the root cause was once LOCATED to an exact function and a partial fix was built and measured; see "Root cause located" and "Partial fix attempted" below — the shipped fix supersedes that half-fix.
 **Severity:** MEDIUM — `src/lib/hardware/rv64gc_rtl/imac_protected_core.spl` and
 `src/lib/common/crypto/x25519_mlkem768/matrix_receipt.spl` (and every module
 importing them) fail to parse
@@ -190,3 +188,26 @@ same continuation-line-indentation family as
 `parser_same_indent_leading_operator_continuation_2026-08-17.md` and
 `stage2_multiline_if_continuation_2026-08-14.md`.
 
+
+## Addendum 2026-11-11 — lane compiler5 (P3 batch-5 triage): FIXED
+
+Both roots now parse AND produce correct values — the half-fix failure mode this
+doc warned about (parse succeeds, value wrong) was checked for explicitly.
+Verified on the fresh seed (build-commit 46fe8f6b6def, `SIMPLE_LIB=src`,
+`--mode=interpreter --no-cache`):
+
+- Plain-if root (this doc's FAILS fixture): `val v = if p == 1:\n lo else: 9`
+  evaluates to 5 for (p=1, lo=5).
+- Elif route: `val v = if a: "" elif r != "":\n r else: "z"` evaluates to
+  "reason" for (a=false, r="reason").
+- Controls (`else:` on its own line, fully-inline form) still parse.
+- The shipped fix is exactly this doc's "Recommended next step": the block-form
+  `parse_if_expr` now carries the `then_arm_indent_unclosed` deferred-dedent
+  machinery plus explicit Else/Elif handling
+  (`src/compiler_rust/parser/src/expressions/helpers.rs`), with dedicated unit
+  tests `if_expr_newline_arm_trailing_else_test.rs`
+  (newline_arm_trailing_else / _in_field_position / _elif_chain). Landed via
+  merge `9e7e7a526edb` (PR #7597, 2026-11-07).
+- The two real-world sites named in this doc
+  (`imac_protected_core.spl:529-531`, `matrix_receipt.spl:697-698`) use exactly
+  the accepted mixed forms.
