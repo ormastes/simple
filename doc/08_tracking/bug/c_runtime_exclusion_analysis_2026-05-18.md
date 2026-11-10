@@ -293,3 +293,16 @@ symbols — they provide equivalent functionality at the stdlib layer.
 | random | `src/lib/common/random_pure.spl` | 21/21 |
 | time_utils | `src/lib/common/time_utils.spl` | 53/53 |
 | audio_effects | `src/lib/common/audio_effects.spl` | 7/7 |
+
+## 2026-11-10 status — P3 runtime-lane triage (worktree simple-p3-rt-20261110)
+
+**Verdict: SUPERSEDED — the doc's own 2026-09-13 closure stands; re-verified
+consistent at base 1504212d788b.** This entry is a removal audit, not a defect.
+Spot re-verification (host-independent-source): `hosted_cocoa.c` /
+`hosted_win32.c` remain on disk, unbuilt, exactly as recorded (stale exact-ABI
+duplicates of the Rust `spl_hosted_runtime` exports); `runtime_db.c` remains
+active with its one hard blocker owned by **todo 285**
+(`doc/08_tracking/todo/todo_db.sdn:287`, "No external SQLite" directive — not
+this lane); `runtime.c` remains bootstrap-only, its exclusion gated on build
+work, not a bug. Nothing actionable remains that is not already tracked
+elsewhere. No change made.
