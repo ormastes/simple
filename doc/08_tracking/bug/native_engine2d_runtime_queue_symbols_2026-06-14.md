@@ -1,7 +1,9 @@
 # Native Engine2D Runtime Queue Symbols Missing From Linked Runtime
 
 Date: 2026-06-14
-Status: Open (re-triaged 2026-09-13 — see the note at the end of this file)
+Status: FIXED (verified 2026-11-11, lane rt3) — `native-build` now works on this
+Windows host, `rt_host_gpu_queue_*` symbols are exposed in the linked native
+binary, and the CPU-only import split has landed. See the 2026-11-11 addendum.
 
 ## Symptom
 
@@ -36,3 +38,48 @@ so the runtime queue spec does not drag unrelated backend SFFI/WFFI imports.
 - **measured**: neither is possible here — `bin/simple native-build` fails on this Windows host before producing a binary (`native-build worker wrapper exited abnormally ... code -1`).
 - **inferred**: the second half of the Minimal Fix — splitting a CPU-only Engine2D/Draw IR import path so the queue spec stops dragging SFFI/WFFI backend surfaces in — shows no sign of having been done.
 - Verdict: OPEN.
+
+---
+
+## 2026-11-11 — Lane rt3 triage verdict: FIXED
+
+Both halves of the Minimal Fix are now landed and verified:
+
+1. **Native archive/binary exposes `rt_host_gpu_queue_*`.** The 2026-09-13
+   blocker — "`bin/simple native-build` fails on this Windows host before
+   producing a binary (`native-build worker wrapper exited abnormally ...
+   code -1`)" — no longer reproduces on the refreshed seed (build
+   `46fe8f6b6def`). A small native build now compiles and links:
+   - Fixture: `build/scratch/rt3_bug8_native.spl` (raw
+     `rt_host_gpu_queue_emit_payload_text`/`drain`/`last_payload_hash`
+     externs, one module).
+   - `SIMPLE_NATIVE_BUILD_RUST=1 bin/simple.exe native-build
+     build/scratch/rt3_bug8_native.spl -o build/scratch/rt3_bug8_native.bin`
+     → `Linked: build/scratch/rt3_bug8_native.bin (511 KB) via clang`, rc=0.
+   - `nm build/scratch/rt3_bug8_native.bin` → **48** `rt_host_gpu_queue_*`
+     symbols linked, including `T rt_host_gpu_queue_complete` and refptrs for
+     `emit_payload_text` / `drain` / `last_payload_hash` / `reset`.
+   - Running the binary prints `native hash=424242` — the queue works
+     natively, and the emitted `payload_hash` round-trips (cf. the sibling fix
+     for `host_gpu_runtime_emit_payload_text_drops_hash_2026-07-08`).
+   - Registry rows remain in place (`config/api/api_registry.sdn:1904-1908+`
+     list `rt_host_gpu_queue_*` with `nm`-verified backing), and
+     `src/runtime/runtime_native.c` carries 142 `rt_host_gpu_queue`
+     references.
+
+2. **CPU-only import split has landed.**
+   `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl`
+   now states in its Overview: "It intentionally avoids SGTTI and broad
+   browser imports so native verification stays scoped to Engine2D, Draw IR,
+   and the runtime queue API", and imports only `common.ui.draw_ir` +
+   `engine2d.draw_ir_runtime_adv` + `engine2d.draw_ir_runtime_queue`. The spec
+   passes 4/4 on the interpreter lane.
+
+**Caveats:** (a) the fail-closed `check-extern-abi-signatures.shs` arity gate
+currently ERRORs (`exit 2 — nothing was checked`) because it references a
+missing file `src/compiler/70.backend/backend/llvm_lib_translate.spl`; that is
+pre-existing gate infra drift on this branch, unrelated to this bug — the
+symbol exposure was instead verified directly via `nm` over a freshly linked
+binary as above. (b) `--mode=native` for *specs* degrades to the interpreter
+on the Rust seed ("Ran on the interpreter; this file's REAL pass/fail is
+reported"), so native spec evidence still uses the direct native-build route.

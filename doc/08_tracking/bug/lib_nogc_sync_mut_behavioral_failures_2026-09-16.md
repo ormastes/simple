@@ -139,3 +139,37 @@ heading-based recovery recognition. The factual reviewed header explains the
 29/41 closure payloads, purpose and recovery; generated body is retained.
 No passing test or manual scan was replayed. Working/staged environment,
 layout-zero and staged diff checks pass for the three-file test-only scope.
+
+---
+
+## 2026-11-11 — Lane rt3 triage verdict: OPEN, substantially narrowed (partial)
+
+Status kept OPEN: a subset of the 22 RED specs is fixed on the current base,
+but confirmed remaining failures need per-owner implementation. Sampled
+re-verification on the fresh seed (build `46fe8f6b6def`,
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe test <spec> --mode=interpreter --no-cache`):
+
+**Now PASS (were RED on 2026-09-16):**
+- `concurrent_thread_lifecycle_spec.spl` 2/2 PASS (join-after-complete nil contract).
+- `web_framework/session_csrf_signing_spec.spl` 11/11 PASS (sha256-style digests).
+- `io/stream_reader_append_shape_spec.spl` PASS (tcp.spl quadratic accumulator gone).
+- `file_read_single_return_type_spec.spl` PASS (single-return read API restored).
+
+**Still RED (confirmed this lane):**
+- `engine/render/shader_compile_spec.spl` — 12/17, 5 failing (WgslEmitter still
+  emits `void main()` without `@vertex`/`@fragment` entry-point markers).
+- `gpu/gpu_queue_usm_spec.spl` — 30/34, 4 failing (`E_GPU_COMPILE_ONLY:
+  gpu_block_id_x is only valid after GPU compiler lowering`; spec exercises
+  GPU intrinsics off the lowering path).
+
+**Not re-run this lane (budget):** the remaining ~16 items (DbFsDriver method
+parity, `Vec3.transform_direction` receiver, `with_lock_guard` crash,
+`raw_f64_to_bits`, js engine reclaim, `domain_arena_v1`, `ui_scene_column_arena_v2`,
+lint crash regression, test_runner resolution order, durable_atomic_bytes, etc.).
+Disposition is expected to mirror the sampled split — fixed by intervening
+lanes or still red — but each needs its own owner pass.
+
+Per the testing rules (leave RED, do not weaken), no spec was edited and no
+assertion was relaxed. This umbrella needs its remaining items either fixed in
+`src/lib`/`src/app` or individually retired by their owners; it is too broad
+for a single P3 triage lane to close wholesale.
