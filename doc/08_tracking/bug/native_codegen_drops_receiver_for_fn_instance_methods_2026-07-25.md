@@ -1,7 +1,7 @@
 # Native codegen drops the receiver for non-`me` (`fn`) instance methods — SIGSEGV in `native-build --entry-closure`
 
 - **ID:** native_codegen_drops_receiver_for_fn_instance_methods_2026-07-25
-- **Status:** OPEN (root-caused with disassembly, NOT fixed)
+- **Status:** FIXED (2026-11-11 lane compiler5: source-fixed; the OPEN text below was a stale resurrection by merge 9e7e7a526edb — see addendum)
 - **Severity:** high — silent ABI mismatch; any natively-compiled caller of a
   `fn`-declared instance method passes arguments into the `self` slot
 - **Found via:** `native-build` crashing on a showcase entry (showcase was a red
@@ -128,3 +128,33 @@ source contract protects this non-obvious closure root.
 
 The showcase-matrix "compiled lane" does **not** need this fixed first: use the
 Rust-built `bin/simple` for `native-build` instead of a session-built native CLI.
+
+## Addendum 2026-11-11 — lane compiler5 (P3 batch-5 triage): FIXED (source)
+
+- **This doc's "OPEN (NOT fixed)" text is stale.** It was reconciled to
+  "SOURCE FIXED; native self-host execution pending" by `22a899d5968c`
+  (2026-07-26, "docs(native): reconcile immutable receiver ABI status"), but
+  merge `9e7e7a526edb` (PR #7597, 2026-11-07) re-created this file as a new file
+  carrying the pre-2026-07-26 content, resurrecting the OPEN status. The source
+  fix stands in current source.
+- **Source verification (current tree):**
+  - `src/compiler/50.mir/_MirLowering/function_lowering.spl:680-685` — a
+    fail-closed gate: every non-static instance method (including immutable
+    zero-argument `fn`) MUST have an ABI-visible receiver in parameter slot
+    zero, else `error_fatal`. `is_me_receiver` now controls only value-copy
+    semantics, not receiver emission.
+  - Both MIR method-call routes prepend the receiver operand
+    (`lower_receiver_and_args` and the pre-lowered writeback route, per the
+    22a899d5968c reconciliation); test coverage added by `7554bc6ff18e`
+    (2026-07-26) incl. `check-native-immutable-fn-receiver.shs` and
+    `test/01_unit/compiler/native_immutable_fn_receiver.spl`.
+- **Verification run on the fresh seed** (build-commit 46fe8f6b6def,
+  `--mode=interpreter --no-cache`):
+  `test/01_unit/compiler/hir/class_method_bodies_reachable_spec.spl` — 4/4 PASS,
+  including "keeps the ABI receiver on an immutable zero-argument fn method"
+  (`fn has_value() -> bool: self.value > 0` must lower with `self` as param 0).
+- **Still pending (environmental, not a defect):** native self-host execution
+  proof of the new ABI — blocked by the self-host parse-performance blocker
+  (this doc's own "Bootstrap bridge" section) and, on this Windows host, by the
+  known native-build hang (log completes, no binary, process never exits;
+  confirmed with a trivial probe, not retried per lane rules).
