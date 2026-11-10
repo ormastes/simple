@@ -97,3 +97,27 @@ now builds with a 128 MB image (`_FULL_ROOTFS_IMAGE_MB`); assertions unchanged.
 Block 3 passes: artifact spec 1/3 -> 2/3. Remaining failure ("writes
 installer-media staging for non-x86 architectures", arm64 ISO) builds Ok at 128 MB
 but one output/contents-path expectation is false; separate, still open.
+
+## Update 2026-11-10 (work/g100-os_boot)
+
+The manual-scenario addition in `f10491812210` introduced a fourth artifact
+scenario using a 64 MB image. Current `ImageBuilder.build` rejects every size
+below `MIN_IMAGE_SIZE_MB_V1` (67 MB) before staging; the scenario therefore
+cannot reach any of its filesystem assertions. Its fixture now uses the same
+128 MB `_FULL_ROOTFS_IMAGE_MB` as the existing full-rootfs scenarios. The
+original nvfs marker assertions and every executable-presence assertion are
+unchanged.
+
+This is a fixture prerequisite correction, not image-builder qualification.
+The artifact spec and marker spec were not executed in this lane: no admitted
+self-hosted test runner was available, and FAT32 image generation requires the
+Linux tooling used by the builder. The record remains unresolved, with
+verification pending on those runs and changed-spec manual generation.
+
+The remaining artifact expectations also need a controlled native-payload
+fixture. The ARM64 installer scenario supplies no installer bytes while
+`_populate_install_media` deliberately records a blocked executable payload.
+The disk scenario similarly expects `/sbin/init` despite an explicit empty
+candidate; its toolchain executable paths can additionally depend on ambient
+native-tool discovery. Do not restore fabricated executables or flip all those
+assertions without testing the applicable payload contract.
