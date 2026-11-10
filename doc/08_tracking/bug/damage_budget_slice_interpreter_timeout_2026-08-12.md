@@ -39,3 +39,12 @@ Not done here, per this record's own prohibition: the slicer was NOT wired
 into WM/Web/GUI production; that admission decision (and a daemon-mode
 re-check, plus replay-checksum parity against recorded frames) stays with the
 owning UI/render lane.
+
+## 2026-11-10 P3 triage (work/p3-interp2-20261110) — independently confirmed; verdict unchanged
+
+Second-lane re-run of
+`test test/01_unit/lib/common/ui/render_opt/damage_budget_slice_spec.spl`
+on the deployed Windows Rust seed (worktree `bin/simple.exe`, direct seed
+invocation): 4 total, 4 passed in ~3.1s, matching the
+work/p3-interp-20261110 note. SUPERSEDED (timeout no longer reproduces)
+stands; production wiring remains with the owning UI/render lane.
