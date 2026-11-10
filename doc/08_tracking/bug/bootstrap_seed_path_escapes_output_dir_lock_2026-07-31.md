@@ -212,3 +212,21 @@ but the artifact whose clobbering motivated the guard (the seed and its
 siblings) is now covered by the worktree-level authority lock, so concurrent
 bootstraps with different outputs no longer race the staging copy. No change
 made in this lane.
+
+---
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **SUPERSEDED (fix verified present on this base)**. The 2026-11-03
+triage note's claim was checked against the code, not just trusted: the shared
+seed path is no longer a bare `cp -p` target. This worktree
+(1504212d788b) has the worktree-level Rust authority lock
+(`rust_authority_lock_root="${repo_root}/src/compiler_rust/target/.bootstrap-authority-locks"`,
+`bootstrap_acquire_rust_authority()` at `scripts/bootstrap/bootstrap-from-scratch.sh:3004-3059`,
+acquired at :3151/:3723/:3926/:4153) held around the seed publish
+(`bootstrap_stage3_publish_seed_generation`,
+`scripts/check/lib/bootstrap-stage3/authority.shs:4676`), which commits an
+immutable generation and rebinds the marker instead of overwriting an executing
+binary — implementing suggested fixes 1+2 together and eliminating the ETXTBSY
+clobber class by construction. Lock arrival merged via 9e7e7a526edb (2026-11-07,
+ancestor of this branch). No change made.

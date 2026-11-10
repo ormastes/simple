@@ -953,3 +953,19 @@ Residuals owned elsewhere (not this lane, not re-litigated):
   owner lane.
 - End-to-end macOS Stage-3 run: needs a macOS host; the doc's own re-triage
   states "a separate lane owns it".
+
+---
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **STALE-BLOCKED (host-limited + owner design decision)**. Verified in
+this worktree (base `origin/release/1.0.0`, 1504212d788b): the three landed
+fixes are present — defect 1's Apple stat field names exist at
+`src/compiler_rust/runtime/src/cache_host_authority_v1.rs:196-206`
+(`st_mtime_nsec`/`st_ctime_nsec` arms); defects 2-4 live in
+`scripts/check/lib/bootstrap-stage3/` and `src/runtime/`, outside this lane's
+edit scope but reviewed as landed. The remaining Stage-3/4 manifest-verification
+`/proc` coupling is, per this doc's own "Still OPEN" section, a deliberate
+descriptor-pinning security property whose macOS port (`/dev/fd/N` semantics
+differ) "needs a design decision rather than a substitution" — not a P3 code
+fix, and unverifiable from a Windows host. No change made.
