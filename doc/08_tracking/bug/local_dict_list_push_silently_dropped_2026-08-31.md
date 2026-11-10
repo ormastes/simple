@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
-**Status:** OPEN — reproduced incidentally, needs a minimal reduction + spec
+**Status:** CLOSED-STALE (2026-11-11, lane interp9; first closed stale 2026-11-03) — repro now produces the correct result on the deployed seed on both lanes. See the 2026-11-03 closure and the 2026-11-11 addendum below.
 **Severity:** high — silent data loss, no error, no diagnostic
 **Found by:** graph fusion source work (`src/app/spipe/fusion/graph_source.spl`)
 
@@ -69,3 +69,16 @@ bare local dict-of-list anywhere correctness depends on the push landing.
 ## Closed stale 2026-11-03
 
 Re-verified on the deployed Rust seed (bin/simple.exe, built 2026-11-03) on origin/release/1.0.0 with both `SIMPLE_EXECUTION_MODE=interpret` and `=jit`: the documented repro now produces the correct result on both lanes (see lane seed-interp-p23 evidence: float `0.0/0.0 1.0/0.0 -1.0/0.0` -> `NaN inf -inf`; `d["k"].push` twice on a 1-element list -> len 3; `elif val Some(x) = o` in an if-expression -> binds 7). Closed as stale.
+
+## 2026-11-11 addendum (lane interp9, work/p3-interp9-20261111) — STALE reconfirmed on current seed
+
+Independent re-verification on the tracked seed (build-commit `46fe8f6b6def`,
+`SIMPLE_LIB=src`, `--mode=interpreter`): the documented shape
+`d["k"].push(v)` twice on a bare local `{"a": [1]}` dict lands both mutations —
+the list reads back length 3. No diagnostic, no error, and the value is there
+on the next read, so the silent-drop defect no longer reproduces. Verdict:
+STALE (fixed by an unattributed interpreter mutation-path fix between
+2026-08-31 and the 2026-11-03 deployed seed; the 2026-11-03 closure above is
+the first closure evidence). The `_ForwardIndex` owner-class workaround in
+`src/app/spipe/fusion/graph_source.spl` can be simplified by its owner lane
+when convenient; no correctness dependency remains.
