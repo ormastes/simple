@@ -116,3 +116,49 @@ compiled-path owner artifacts (phase-2 full CLI + test runner per
 `doc/07_guide/tooling/bootstrap_phase_verification.md`) remain unbuildable on
 this host until the spin is fixed. Samples and build log:
 `build/agent-worktrees/boot-t2/out/coldstart/{samples.log,build.log,run.meta}`.
+
+## 2026-11-10 scoped admission improvement (full bug remains open)
+
+Per-entry facet validation previously rescanned all five digests even when several
+facets carried identical bytes (empty facets commonly share the same digest).
+The owner now reuses only an earlier successful validation of exactly equal text
+within that entry. It preserves the existing hex validator, rejection order,
+canonical encoded bytes and scratch lifetime; it introduces no retained cache
+or temporary comparison container.
+
+Direct bootstrap regression:
+`test/fixtures/bootstrap/scv_digest_validation_reuse/main.spl` executed 42 checks,
+including every equal-facet pair, all-equal and mixed valid facets, repeated invalid digests, distinct
+late invalid facets, path rejection and unchanged canonical encoding. The
+unchanged production validator is also covered by the existing unit spec, now
+extended with these cross-facet cases. A separate fail-open mutation of the
+owner made the direct regression exit 21 as expected.
+
+The diagnostic producer was the Windows Rust bootstrap seed
+`C:/dev/simple/bin/simple.exe`, SHA-256
+`8c7341592f4d47ded4a0603347cf972e344a3fd075444a8004afcae94917741c`, running
+`SIMPLE_EXECUTION_MODE=interpreter` against release source `6d496f82c5a`
+and the scoped owner patch. These are seed bootstrap-boundary measurements,
+not self-hosted runtime qualification.
+
+`test/05_perf/scv/digest_validation_reuse_workload.spl` validates 2048 entries
+per shape. Separate processes loaded the baseline and changed owner bytes with
+identical dependencies, fixture and producer:
+
+| Digest shape | Baseline owner time | Changed owner time |
+|---|---:|---:|
+| Five equal digests | 3.128292 s | 0.664211 s |
+| Three distinct digests across five facets | 3.100709 s | 2.010704 s |
+| Five distinct digests | 3.192758 s | 3.131832 s |
+
+Process peak working sets were 32,661,504 and 32,669,696 bytes respectively
+(Windows GetProcessMemoryInfo); this single pair shows approximately unchanged
+process memory, not a statistically established memory improvement.
+
+A private 512-source cold Git fixture also localized baseline cost: refresh
+12.775192 s, snapshot creation 7.117068 s, final authority validation 1.200391 s.
+All phases completed locally. That narrow Windows fixture does not establish
+the original full-checkout/aarch64 stall's cause or resolution. Full native
+performance/RSS, self-hosted unit/integration gates and original aarch64 cold
+startup remain required before this P1 can be closed. Logs and source copies
+are retained under `build/p1-seed-startup/` in the owning worktree.
