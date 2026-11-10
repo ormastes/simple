@@ -1,6 +1,6 @@
 # Compiler semantic cache weakness audit — 2026-09-01
 
-Status: open; cache authority and release remain blocked.
+Status: open; cache authority and release remain blocked. Re-verified 2026-11-11 (lane ne4): gate-level conclusions still hold; several evidence rows stale (oracle helpers gone, split-lock evidence gone, Linux native daemon serve/route landed) — see addendum.
 
 ## Critical correctness gaps
 
@@ -95,3 +95,66 @@ audit's kind-matrix claim for the two frontend kinds, but not production wiring.
 No semantic cache, daemon, remote-main, GC, or cross-worktree reuse claim is
 release-admissible until its row's falsifying tests pass under the pure-Simple
 self-hosted/native runtime rather than only the Rust seed or synthetic DTOs.
+
+## 2026-11-11 addendum (lane ne4, batch p3-ne4-20261111)
+
+Spot-re-verified the audit's load-bearing evidence against release/1.0.0
+tip (fa6366ca8bf5, this worktree). Static verification only; no native
+builds were run in this lane.
+
+STALE evidence rows (claims no longer hold):
+
+- "seven `fail(\"unimplemented oracle\")` helpers" (Critical gap 4):
+  zero matches anywhere in `src/` now. The RED-oracle claim's cited
+  mechanism is gone.
+- CSG-010 evidence: neither `.simple-cache-daemon-v1.lock` nor
+  `.simple-cache-writer.lock` exists in `src/` anymore. A unified
+  `std.nogc_sync_mut.daemon_sdk.lock` module (try_acquire_daemon_lock /
+  release_daemon_lock / is_daemon_running / read_daemon_pid /
+  is_pid_alive) is the shared lock owner now. The split-authority
+  *evidence* is stale; whether one epoch receipt binds admission is not
+  re-proven here.
+- CSG-001 partial: native-C `rt_cache_daemon_serve_v1` /
+  `rt_cache_daemon_route_v1` now exist — a Linux implementation
+  (descriptor-anchored socket, fsync-before-publish, flock) with a
+  deliberate fail-closed `#else !__linux__` branch, i.e. exactly the
+  "Linux provider, unsupported hosts fail closed" shape the row
+  required. `runtime_cache_host_authority_v1.c` is now 1106 lines with a
+  v3 namespace API, capability table, and `renameat2(RENAME_NOREPLACE)`
+  no-replace publication (also CSG-006's core requirement) plus a
+  Windows file-authority subset. The row's "no native-C definition"
+  evidence is stale.
+- CSG-002 partial: a `src/compiler/10.frontend/snapshot/` module now
+  exists (compile_snapshot_freezer.spl + __init__), so the "no such
+  owner" framing is stale — but see OPEN below.
+
+OPEN evidence rows (verified still true):
+
+- CSG-001 core: the v1 daemon-authority entry points
+  (`rt_cache_host_authenticate_peer_v1`, `acquire_exclusive_lock_v1`,
+  `boot_identity_v1`, `advance_writer_epoch_v1`,
+  `publish/validate_readiness_v1`, `commit/read_journal_v1`,
+  `release_daemon_receipt_v1`) still return -1 unconditionally at
+  `runtime_cache_host_authority_v1.c:11-19`, with the header comment
+  "Native-C daemon authority remains fail-closed until its canonical
+  byte records and cryptographic corruption checks exactly match the
+  Rust provider." The authority gate is still closed.
+- CSG-002 core: `freeze_compile_snapshot_v1` /
+  `compile_snapshot_freezer` still have no production compiler callers
+  in `src/compiler/80.driver` or `src/compiler/10.frontend` outside the
+  snapshot module itself.
+- CSG-004: `compile_snapshot_freezer.spl:95,184` still folds identity
+  with `to_lower()` under `PathSemanticsV1.CaseFoldedNfc` — no NFC
+  normalization owner was added.
+- CSG-007 core: `fast_gc.spl` `gc_delete_trash` still removes the whole
+  trash directory (`gc_dir_remove_all_raw`) rather than per-entry age
+  checks; HOWEVER the sweep now early-returns unless
+  `reader_pin_gc_authoritative_delete_available()`, which is fail-closed
+  while CSG-001 is, so the hazard is latent, not active — matching this
+  audit's own admission order.
+
+Verdict: audit remains substantively OPEN — its release gates (native
+daemon authority, compiler cutover wiring, trustworthy path identity)
+are still unmet — but ~half of its cited evidence is stale and should
+be re-based before the next admission-order review. This lane updated
+the tracker only; the remaining work is cache-lane scope.
