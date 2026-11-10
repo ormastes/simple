@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: SUPERSEDED (2026-09-13)
 - Binary: deployed seed `bin/release/aarch64-unknown-linux-gnu/simple`,
   sha256 `3d120a6f9ab5704b2225654e4f2773cdbdc787108bd21b67aab657ffe3da72ef`
 - Host: aarch64, 20 cores, shared box at load ~40
