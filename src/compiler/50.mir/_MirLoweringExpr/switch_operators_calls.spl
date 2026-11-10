@@ -9250,6 +9250,29 @@ impl MirLowering:
                 if lambda_operand != None:
                     arg_operands = arg_operands.push(lambda_operand.unwrap())
                     continue
+            # `x: mut <primitive>` param: pass the caller local's address
+            # (bug mut_param_annotation_no_reference_propagation_2026-07-20).
+            if current_arg_index < call_param_types.len() and not arg.has_name:
+                var mut_ref_operand: MirOperand? = None
+                match call_param_types[current_arg_index].kind:
+                    case HirTypeKind.Ref(ref_inner, true):
+                        match ref_inner.kind:
+                            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                                match arg_kind:
+                                    case HirExprKind.NamedVar(ref_symbol, _):
+                                        val ref_key = mir_expr_symbol_id_value(ref_symbol)
+                                        if self.local_map.has(ref_key):
+                                            val var_local = self.local_map[ref_key]
+                                            var b_mut_ref = self.builder
+                                            val ref_local = b_mut_ref.emit_ref(MirPlace.local_place(var_local), MirBorrowKind.Mutable, MirType(kind: MirTypeKind.Ref(self.lower_type(ref_inner), true)))
+                                            self.builder = b_mut_ref
+                                            mut_ref_operand = Some(mir_operand_copy(ref_local))
+                                    case _: ()
+                            case _: ()
+                    case _: ()
+                if val ref_operand = mut_ref_operand:
+                    arg_operands = arg_operands.push(ref_operand)
+                    continue
             var arg_local = if current_arg_index < call_param_types.len() and not arg.has_name:
                 self.lower_expr_for_slot(arg_value, call_param_types[current_arg_index])
             elif current_arg_index < call_param_types.len():

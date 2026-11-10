@@ -156,6 +156,11 @@ struct MirBuilder:
     enum_semantic_site_overflow: bool = false
     # Nil ordinary route allocates no capture tables or provider views.
     loop_view_capture_v1: MirLoopBuilderCaptureV1? = None
+    # `x: mut <primitive>` params (bug mut_param_annotation_no_reference_
+    # propagation_2026-07-20): the incoming arg is the caller's address; the
+    # body works on a loaded copy, stored back before every Ret.
+    mut_ref_param_ptrs: [LocalId] = []
+    mut_ref_param_values: [LocalId] = []
 
 impl MirBuilder:
     static fn new() -> MirBuilder:
@@ -209,6 +214,8 @@ impl MirBuilder:
             capture.accept(capture.begin_function(symbol.id, name_text_v1, signature_cursor_v1, span_node_v1))
         if val capture = self.loop_view_capture_v1:
             if not capture.is_active(): return
+        self.mut_ref_param_ptrs = []
+        self.mut_ref_param_values = []
         self.current_function = Some(MirFunction(
             symbol: symbol,
             name: name,
@@ -2241,6 +2248,14 @@ impl MirBuilder:
         """Set terminator for current block."""
         if val capture = self.loop_view_capture_v1:
             if not capture.is_active(): return
+        if self.mut_ref_param_ptrs.len() > 0:
+            match term:
+                case MirTerminator.Ret(_):
+                    var wi = 0
+                    while wi < self.mut_ref_param_ptrs.len():
+                        self.emit_store(MirOperand(kind: MirOperandKind.Copy(self.mut_ref_param_ptrs[wi])), MirOperand(kind: MirOperandKind.Copy(self.mut_ref_param_values[wi])))
+                        wi = wi + 1
+                case _: ()
         if self.enum_semantic_recording:
             if self.enum_semantic_site_calls.len() + self.enum_semantic_terms.len() >= 65536:
                 self.enum_semantic_site_overflow = true
