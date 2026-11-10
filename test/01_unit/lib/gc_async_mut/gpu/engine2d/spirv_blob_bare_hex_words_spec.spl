@@ -1,0 +1,53 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Pins module_load_24s_unless_window_winit_imported_2026-07-25: the generated
+# Vulkan SPIR-V blob modules must carry bare `0xNN` words, never `0xNNu8`
+# suffixed literals (the suffixed form was the ~25x slower JIT frontend path
+# that made the engine2d import closure cost 35 s instead of 12 s).
+
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_read}
+
+val SPIRV_BLOB_MODULES: [text] = [
+    "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_affine_coverage_spirv.spl",
+    "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_blur_rect_spirv.spl",
+    "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spirv.spl",
+    "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glass_material_spirv.spl",
+    "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_spirv.spl",
+    "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_shadow_rect_spirv.spl",
+    "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv.spl"
+]
+
+fn has_suffixed_hex_byte(src: text) -> bool:
+    # A digit immediately followed by `u8` and a separator is the slow suffixed
+    # literal shape (decimal `3u8,` or hex `0x03u8,`); a `[u8]` type never matches.
+    var d = 0
+    while d < 10:
+        if src.contains("{d}u8,") or src.contains("{d}u8]"):
+            return true
+        d = d + 1
+    false
+
+describe "engine2d SPIR-V blob modules use bare hex words":
+    it "no generated blob module carries u8-suffixed byte literals":
+        # @req REQ-SSPEC-UNIT
+        step("scan each generated SPIR-V blob module")
+        var offenders = 0
+        var scanned = 0
+        for path in SPIRV_BLOB_MODULES:
+            val src = file_read(path)
+            if src.len() > 0:
+                scanned = scanned + 1
+            if has_suffixed_hex_byte(src):
+                offenders = offenders + 1
+        expect(scanned).to_equal(7)
+        expect(offenders).to_equal(0)
+
+    it "the detector flags the slow suffixed shape":
+        # @req REQ-SSPEC-UNIT
+        step("vacuity guard for the detector")
+        expect(has_suffixed_hex_byte("[0x03u8, 0x02u8, 0x23u8, 0x07u8]")).to_equal(true)
+        expect(has_suffixed_hex_byte("[3u8, 2u8, 35u8, 7u8]")).to_equal(true)
+        expect(has_suffixed_hex_byte("val blob: [u8] = []")).to_equal(false)
+        expect(has_suffixed_hex_byte("[0x03, 0x02, 0x23, 0x07]")).to_equal(false)
