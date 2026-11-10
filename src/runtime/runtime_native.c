@@ -17117,14 +17117,62 @@ int64_t rt_env_home(void) {
 /* env_process.rs rt_env_all/rt_env_vars: array of (key, value) 2-tuples,
  * one per process environment variable. Order is whatever the OS yields.
  * Zero-arg call, confirmed at every call site (mod_751/809/840). */
+#if defined(_WIN32)
+/* This snapshot owns every pair/string it has constructed so far. */
+static void native_env_snapshot_discard(SplArray* snapshot) {
+    for (int64_t i = 0; i < rt_array_len(snapshot); i++) {
+        int64_t pair = rt_array_get(snapshot, i);
+        rt_string_free(rt_tuple_get(pair, 0));
+        rt_string_free(rt_tuple_get(pair, 1));
+        rt_array_free((SplArray*)(uintptr_t)pair);
+    }
+    rt_array_free(snapshot);
+}
+#endif
+
 int64_t rt_env_vars(void) {
     SplArray* out = rt_array_new(0);
     if (!out) return rt_core_nil();
 #if defined(_WIN32)
-    char** env = _environ;
+    /* The CRT drops explicitly empty values and misses direct Win32 writes.
+     * Match rt_env_get/rt_env_set's Unicode process-environment authority.
+     * The OS block is immutable until FreeEnvironmentStringsW releases it. */
+    LPWCH block = GetEnvironmentStringsW();
+    if (!block) {
+        rt_array_free(out);
+        return rt_core_nil();
+    }
+    for (const wchar_t* entry = block; *entry; entry += wcslen(entry) + 1) {
+        const wchar_t* eq = wcschr(entry, L'=');
+        /* Hidden =C: drive entries are not public environment names. */
+        if (!eq || eq == entry) continue;
+        size_t key_len = (size_t)(eq - entry);
+        size_t value_len = wcslen(eq + 1);
+        if (key_len > INT_MAX || value_len > INT_MAX) goto failed;
+        int64_t key_str = native_host_text_from_wide(entry, (DWORD)key_len);
+        int64_t value_str = native_host_text_from_wide(eq + 1, (DWORD)value_len);
+        int64_t pair = rt_core_nil();
+        if (key_str != rt_core_nil() && value_str != rt_core_nil()) {
+            pair = rt_tuple_new(2);
+            if (pair != rt_core_nil()) {
+                rt_tuple_set(pair, 0, key_str);
+                rt_tuple_set(pair, 1, value_str);
+                if (rt_array_push(out, pair)) continue;
+                rt_array_free((SplArray*)(uintptr_t)pair);
+            }
+        }
+        rt_string_free(key_str);
+        rt_string_free(value_str);
+        goto failed;
+    }
+    FreeEnvironmentStringsW(block);
+    return (int64_t)(uintptr_t)out;
+failed:
+    FreeEnvironmentStringsW(block);
+    native_env_snapshot_discard(out);
+    return rt_core_nil();
 #else
     char** env = environ;
-#endif
     for (int64_t i = 0; env && env[i]; i++) {
         const char* entry = env[i];
         const char* eq = strchr(entry, '=');
@@ -17141,6 +17189,7 @@ int64_t rt_env_vars(void) {
         rt_array_push(out, pair);
     }
     return (int64_t)(uintptr_t)out;
+#endif
 }
 
 /* descriptor.rs: rt_file_open(path_ptr, path_len, mode) -> fd (-1 on

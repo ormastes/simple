@@ -1,0 +1,9 @@
+#ifndef P0_THREAD_RUNTIME_ENV_FAULTS_H
+#define P0_THREAD_RUNTIME_ENV_FAULTS_H
+#include <winsock2.h>
+#include <windows.h>
+LPWCH WINAPI p0_thread_runtime_get_environment_strings(void);
+BOOL WINAPI p0_thread_runtime_free_environment_strings(LPWCH);
+#define GetEnvironmentStringsW p0_thread_runtime_get_environment_strings
+#define FreeEnvironmentStringsW p0_thread_runtime_free_environment_strings
+#endif
