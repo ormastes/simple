@@ -4,7 +4,12 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-14)
+- Status: FIXED for the filed symptom (2026-11-11, lane boot17) — the
+  "imported enum has no declaration owner" failure on a plain single-hop
+  import is worked around and its guards are GREEN at tip (BOOT-20 block 2/2,
+  stage3 reuse contract 7/7 on the fresh seed). Root-cause stage2-native
+  codegen Dict class-field defect and the stage3 driver.spl wedge remain LIVE
+  under the codegen lane; a companion-spec alias block drifts (see addendum).
 - Lane: BOOT-20 (`work/bootstrap-s3-2-2026-09-14`)
 - Binary: pinned Stage-2 candidate `bin/release/aarch64-unknown-linux-gnu/simple.phase2`
   (the boot18d `stage2/aarch64-unknown-linux-gnu/simple` artifact), sha256 `80911c47f07cdb64...`
@@ -402,3 +407,44 @@ The next diagnostic step remains the instrumented stage2 (SIGPROF sampler)
 or a seed-vs-native registry-state differential inside the wedged process;
 the qemu `-g` route was attempted twice and is impractical (single-session
 stub; >3h to reach the wedge under TCG).
+
+## Addendum 2026-11-11 (lane boot17) — filed symptom FIXED at tip; three follow-ups routed
+
+**Verification actually run** (worktree simple-p3-boot17-20261111, branch
+`work/p3-boot17-20261111`, fresh seed 46fe8f6b6def, all runs
+`--mode=interpreter --no-cache`):
+
+- Workaround present and hardened at tip: `imported_enum_owner_module`
+  (src/compiler/20.hir/hir_lowering/_Items/module_build.spl:195) reads the
+  owner from the symbol table; the `imported_enum_owner_rows` [text] scalar
+  mirror (types.spl:153-159, written at module_import_registration.spl:837)
+  is the BOOT-20-robust read authority.
+- `test/01_unit/compiler/hir/imported_enum_owner_native_workaround_spec.spl`
+  — the BOOT-20 describe block (this doc's exact filed shape: plain
+  single-hop `use A.{Kind}`, no facade, enum unused) PASSES 2/2, including
+  the "does not carry an imported enum alias owner into the next consumer"
+  two-owner case.
+- `test/01_unit/compiler/driver/stage3_hir_lowerer_reuse_contract_spec.spl`
+  PASSES 7/7 (the reuse/reset contract this doc says pins the field shape).
+- Native re-verification (a rebuilt Stage-2/3 candidate running the stage3
+  closure) is still NOT re-run here — entry-closure native builds are
+  forbidden on this lane; that remains the bootstrap lane's acceptance gate.
+
+**Routed follow-ups (pre-existing at tip, untouched by this lane):**
+
+1. The same workaround spec's `function-local imported enum finalization`
+   block (4 examples, function-scoped `use` with aliasing) is RED at tip
+   (e.g. two sibling `use` scopes now retain 2-3 identities/rows where the
+   pins expect dedup to 1). Current source carries PR #7597's deliberate
+   "Module-owned identities survive scope pop, including local aliases"
+   retention logic (purge/keep in module_import_registration.spl:255-288), so
+   this reads as pins left asserting the pre-#7597 pop/dedup semantics —
+   but ruling intended-vs-regression belongs to the HIR nominal-generic-owner
+   lane. Not the filed symptom; the BOOT-20 block for it stays GREEN.
+2. `test/01_unit/compiler/bootstrap/stage2_source_shape_regression_spec.spl`
+   fails 1/5 on "uses owned trait and CUDA size paths" (CUDA type-mapper
+   source drift) — unrelated to this doc.
+3. The root-cause stage2-native codegen defect (class-field Dict
+   bracket-read corruption) and the stage3 driver.spl HIR wedge documented
+   above remain LIVE and owned by the codegen lane; this doc's five
+   hardening slices are all merged, so main stays strictly better.
