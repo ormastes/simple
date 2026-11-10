@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN. **Severity: HIGH — this silently invalidates stdlib evidence.** Not a GPU bug;
+**Status:** SUPERSEDED. **Severity: HIGH — this silently invalidates stdlib evidence.** Not a GPU bug;
 it was found while investigating one, and it is the actual cause of that "GPU bug".
 
 ## Symptom

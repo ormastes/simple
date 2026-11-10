@@ -1,7 +1,7 @@
 # Deployed seed resolves `src/lib` stdlib from a FOREIGN worktree first
 
 - **Date:** 2026-08-20
-- **Status:** OPEN
+- **Status:** SUPERSEDED
 - **Severity:** high (silently executes another session's stdlib; edits to this tree's `src/lib/**` are invisible)
 
 ## Symptom

@@ -1,7 +1,7 @@
 # web_ui facade spec blocked: lib compile error in common/web/node_types.spl
 
 Date: 2026-09-16
-Status: OPEN
+Status: SUPERSEDED
 
 ## Observed
 
