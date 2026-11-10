@@ -77,3 +77,21 @@ its canonical owner" note), which the 2026-09-01 bug tracks. No `src/runtime`
 change made; nothing further actionable in this lane. Execution label:
 host-independent-source (presence verified by source audit at a pinned base).
 
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 21)
+
+**Verdict: SUPERSEDED — corroborated independently.**
+
+The same-day runtime-lane triage above stands. Re-verified at this lane's
+base (origin/release/1.0.0, worktree simple-p3-boot3-20261110):
+
+- The superseding tracker
+  `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`
+  exists.
+- All three sub-issue-(b) providers are live at the cited lines:
+  `rt_array_concat` `src/runtime/runtime_native.c:11122`,
+  `spl_dlsym` `:11370`, `spl_wffi_call_i64` `:11421`. No `src/runtime` gap
+  on this side of the Stage-4 link boundary.
+
+No change made in this lane; the Stage-4 linker/provider-composition boundary
+remains with the compiler/native_project lane under the 2026-09-01 tracker.
