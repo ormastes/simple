@@ -428,3 +428,55 @@ passed / 52 failed — the same failure set as baseline (3 more tests pass).
 3. Scalar-boxing of a closure handle (refusal 3 above): `BoxInt` needs to see
    that its operand is a heap handle.
 
+---
+
+## Addendum 2026-11-11 — lane runner5: LIVE; one whole-module de-JIT fixed, next blocker is seed-side
+
+State on the refreshed seed (build-commit 0791c2b7f4a7, this worktree at
+origin/release/1.0.0 tip): the pinned acceptance gate
+`scripts/check/check-lint-runs-on-jit.shs` **FAILS**.
+
+Measured chain (`SIMPLE_EXECUTION_MODE=jit bin/simple.exe lint
+src/compiler/80.driver/driver_types.spl`, reproduced twice before any
+change):
+
+1. **First blocker (FIXED this lane):** HIR lowering failed with
+   `ambiguous call to 'check_short_grammar_refactor': 2 co-compiled
+   definitions (src/compiler/90.tools/fix/rules/impl_/lint_short_grammar.spl,
+   src/lib/nogc_sync_mut/tooling/easy_fix/rules.spl)` — exactly the
+   duplicate-name landmine this doc's "Still-open duplicate-name census"
+   section predicts. The cli caller
+   (`src/app/io/cli_lint_commands.spl:15`,
+   `src/app/io/_CliCommands/run_commands.spl:13`) already imports the
+   compiler variant selectively; the seed's ambiguity checker still refused
+   (changing `use lazy` to `use` made no difference — reverted). Fix:
+   renamed the stdlib copy to `easy_fix_check_short_grammar_refactor`
+   (commit `47a812b49475`; definition `easy_fix/rules.spl:490`, internal call
+   `:1311`, re-exports `easy_fix/__init__.spl:13,30` and `easy_fix.spl:20`).
+   No external by-name or wildcard user of the old easy_fix name exists
+   (tree-grepped; the wildcard `use std.tooling.easy_fix.*` compiler files
+   never reference the name). **Verified effect:** lint now clears HIR
+   lowering entirely and reaches Cranelift codegen.
+2. **Second blocker (seed-side, NOT fixed):** codegen now refuses
+   `function 'Future.map' creates a lambda/closure the JIT closure ABI cannot
+   compile (the call boundary types [ANY] -> ANY are not carryable across the
+   closure ABI …)` and the whole module still drops to the interpreter.
+   `Future.map` (`src/lib/nogc_async_mut/async/future.spl:80`) is
+   `fn map<U>(f: fn(T) -> U)`; in lint's closure it monomorphizes to
+   ANY→ANY. This is the doc's own "What is still refused, and why" item 1
+   (an ANY-typed boundary has no sound encoding) plus "Remaining, in order"
+   item 1 (undeclared/generic lambda typing) — both documented as seed-side
+   work. Chasing it in `.spl` means pinning generic std types for one entry
+   point's closure (open-ended, other-lane-owned surface), so it is recorded
+   here per the cap rule rather than worked around.
+
+Verdict: **LIVE** — `check-lint-runs-on-jit.shs` remains red on the
+refreshed seed. Progress landed: the `check_short_grammar_refactor`
+whole-module de-JIT is fixed (47a812b49475). Exact remaining command for the
+owning (seed/compiler) lane:
+
+```
+SIMPLE_LIB=src SIMPLE_BIN=$PWD/bin/simple.exe sh scripts/check/check-lint-runs-on-jit.shs
+# current failure: Future.map ANY→ANY closure boundary (seed-side)
+```
+

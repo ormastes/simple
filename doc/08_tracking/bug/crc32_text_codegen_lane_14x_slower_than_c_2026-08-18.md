@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
-**Status:** OPEN (PERF-REGRESSION / SIMPLE-CAPABILITY)
+**Status:** SUPERSEDED (PERF-REGRESSION / SIMPLE-CAPABILITY)
 **Filed:** 2026-08-18
 **Found by:** first codegen-lane parity measurement for C-MIG-0001
 (binary_runtime_hardening goal 3).

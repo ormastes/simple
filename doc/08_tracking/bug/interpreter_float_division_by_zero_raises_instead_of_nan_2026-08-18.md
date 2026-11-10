@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: BLOCKED-ON-DEPLOY (fix committed to source, not yet in the deployed binary)
+- Status: SUPERSEDED (fix committed to source, not yet in the deployed binary)
 - Found: 2026-08-18, while writing C-MIG-0033 (`test/01_unit/lib/common/numeric_round_is_nan_crosslang_spec.spl`)
 - Severity: correctness divergence from IEEE 754
 

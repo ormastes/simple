@@ -51,7 +51,7 @@ linking, not an isolated function. Cross-referenced verification against
   from the production `link_llvm_native` body" and "Provider composition, TODO
   535" remains incomplete.
 
-**Status:** PARTIALLY-FIXED. Sub-issue (a) resolved; sub-issue (b) remains
+**Status:** SUPERSEDED. Sub-issue (a) resolved; sub-issue (b) remains
 explicit open TODO per cross-referenced doc.
 
 ## 2026-11-10 status — P3 runtime-lane triage (worktree simple-p3-rt-20261110)

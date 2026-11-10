@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** SUPERSEDED
 **Filed:** 2026-09-01
 **Found by:** triage of `test/01_unit/lib/std/` failures on Windows
   (`test/01_unit/lib/std/compiler/loader/jit_instantiator_spec.spl`).

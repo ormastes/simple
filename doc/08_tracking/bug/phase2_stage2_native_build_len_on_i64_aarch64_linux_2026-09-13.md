@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-13, FULLTEST lane (`work/fulltest-phase2-2026-09-13`).
-**Status:** OPEN — this is the SAME class as
+**Status:** SUPERSEDED — this is the SAME class as
 `full_cli_selfhosted_native_build_blockers_2026-08-27.md` Blocker A and
 `mcp_stdio_smoke_seed_flat_registry_len_i64_2026-07-17.md`, re-confirmed here
 on a different arch/OS (aarch64 Linux vs. that record's x86_64) and at a

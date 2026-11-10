@@ -1,7 +1,7 @@
 # Rust seed SEGVs when calling a NEWLY ADDED function in an existing stdlib module
 
 Date: 2026-09-02. Host: Windows 11. Binary: `bin/simple.exe` (Rust bootstrap seed).
-Status: OPEN. Blocks: extracting testable pure helpers out of stdlib modules.
+Status: SUPERSEDED. Blocks: extracting testable pure helpers out of stdlib modules.
 
 ## Symptom
 

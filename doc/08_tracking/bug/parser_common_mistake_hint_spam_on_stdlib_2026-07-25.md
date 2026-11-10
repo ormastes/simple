@@ -5,7 +5,7 @@
   `src/compiler_rust/compiler/src/pipeline/module_loader.rs` (hint printer)
 - **Severity:** medium — not a correctness bug, but it buries every real
   diagnostic and costs ~16% of a short interpreted run.
-- **Status:** OPEN. Found while root-causing the 2D × headless showcase cell
+- **Status:** SUPERSEDED. Found while root-causing the 2D × headless showcase cell
   (see `engine2d_load_font_interpreter_3kb_per_sec_2026-07-25.md`).
 
 ## What happens

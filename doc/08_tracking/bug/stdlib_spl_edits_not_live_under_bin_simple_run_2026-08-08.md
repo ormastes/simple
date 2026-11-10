@@ -1,7 +1,7 @@
 # `bin/simple run` resolves `std.*`/`lib.*` to a stale bundled stdlib — on-disk edits are silently ignored
 
 - **Date:** 2026-08-08
-- **Status:** OPEN
+- **Status:** SUPERSEDED
 - **Severity:** High (measurement trap — produces confident false results, not a crash)
 - **Component:** module resolution in the deployed binary
   (`bin/release/x86_64-unknown-linux-gnu/simple`), `run` subcommand

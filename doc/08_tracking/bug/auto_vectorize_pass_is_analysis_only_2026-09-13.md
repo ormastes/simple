@@ -1,6 +1,6 @@
 # Auto-vectorization never runs in a production compile (`AnalysisOnly`)
 
-- **Status:** open — blocks every downstream SIMD-automation claim
+- **Status:** fixed (2026-11-11, P3 lane ne2) — pass `Active` and wired in production pipeline; verified on release/1.0.0 tip
 - **Found:** 2026-09-13 (adversarial review of `34b96e29837`)
 
 ## The gate
@@ -88,3 +88,32 @@ status must NOT be flipped without the alias oracle from `55.borrow` that
 `rewrite.spl:64-69` already lists as the follow-up. Flipping it is an owner
 decision gated on that proof — the same proof `PatternIdiom` and
 `PredicatePromote` are also waiting on.
+
+
+## Verdict addendum — 2026-11-11 (P3 lane ne2)
+
+Verdict: **FIXED** (superseded by a same-day follow-up the record body predates).
+
+The gate this record demanded — an execution-level differential test, not
+structural inspection — passed on 2026-09-13 and the status flipped. Current
+`release/1.0.0` tip:
+
+- `pass_status(PassKind.AutoVectorize)` returns `PassStatus.Active`
+  (`src/compiler/60.mir_opt/mir_opt/mod.spl:364-390`, with the landed rationale
+  comment naming the four fixed revert-forcers and the R4b refusal + width-ladder
+  narrowing). Landed via merge `9e7e7a526edb` (PR #7597).
+- `run_pass_on_module` dispatches `case AutoVectorize: result_module = run_auto_vectorize(result_module)`
+  (`mod.spl:1911-1914`), and `pipeline_optimize` admits it through
+  `pass_status_allows_transform` — the pass runs in production compiles.
+- The "one remaining hard gate: no alias oracle" is also closed: the oracle
+  lives in `compiler.mir_opt.auto_vectorize_alias`
+  (`alias_pair_decision` / `decide_recipe_aliasing`, verdicts
+  `ExactAliasOnly`/`ProvenDisjoint`/`Unsafe`/`NeedsRuntimeGuard` with a runtime
+  range-guard path). Verified this lane on the refreshed seed (build-commit
+  `0791c2b7f4a7`, seed-smoke): `test/01_unit/compiler/mir_opt/auto_vectorize_alias_spec.spl`
+  → 15/15 passed.
+
+`@must(simd)` enforcement, `@simd(disable)`, and AVX-512 recipe planning are
+therefore live in real builds within the deliberately narrow scope the landed
+comment documents (static trip count, whole chunks, alias-oracle-cleared or
+runtime-guarded); widening still means extending the differential sweep first.

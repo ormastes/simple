@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** SUPERSEDED
 **Filed:** 2026-08-21
 **Relates to:** #158 Phase B; plan `doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md`
 
