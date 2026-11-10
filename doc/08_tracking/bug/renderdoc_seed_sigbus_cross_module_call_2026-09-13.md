@@ -93,3 +93,41 @@ If that PASSes on Linux, the defect is macOS/aarch64-specific in the seed's JIT.
 
 ## Round-10 verdict note (2026-11-06)
 Verdict: host-blocked. macOS M4 seed codegen SIGBUS; the record itself asks for a Linux/x86_64 reproduction under a debugger. Repro: <seed> run src/app/ui/renderdoc_diff/main.spl <events a> <events b> --out /tmp/rdx, expect rc 0.
+
+---
+
+## Addendum 2026-11-11 — lane seed2 — verdict SUPERSEDED on x86_64 (record's unblock criterion met)
+
+Triage-first pass, batch 2, judged against the refreshed seed (bin/simple.exe,
+build-commit `0791c2b7f4a7`, refresh #8184) on this Windows x86_64 host — the
+Linux/x86_64 reproduction the record demanded ("If that PASSes on Linux, the
+defect is macOS/aarch64-specific in the seed's JIT").
+
+**Seed-smoke (this lane's proof), two runs:**
+1. The record's exact repro
+   `bin/simple.exe run src/app/ui/renderdoc_diff/main.spl
+   test/fixtures/renderdoc_diff/identical_a.events.json
+   test/fixtures/renderdoc_diff/identical_b.events.json --out <dir>`
+   -> **rc=0** (was rc=138, empty stdout, on the 2026-09-05 macOS aarch64
+   seed), printing all four metric rows and
+   `RENDERDOC DIFF: PASS — 4 event(s) aligned, 0 divergent`; report written.
+   `renderdoc_diff/` remains a 7-module cross-module program, so the crashing
+   shape (call site into a sibling module taking values from an earlier
+   cross-module call) is exercised, not avoided.
+2. The record's own unblock command:
+   `SIMPLE_SEED=$PWD/bin/simple.exe sh scripts/check/check-renderdoc-web-diff.shs --selftest`
+   -> **GATE_RC=0**, `renderdoc_diff_status=pass`,
+   `renderdoc_diff_selftest_fixtures=10`,
+   `RENDERDOC DIFF: PASS — 10 selftest fixture(s) checked, 0 failed` — the
+   alignment fixtures the record says were "never exercised" all pass here.
+
+**Reading:** per the record's disjunction, the SIGBUS was specific to the
+2026-09-05 macOS aarch64 seed build; on the current x86_64 refreshed seed the
+defect does not reproduce. The macOS/aarch64 side cannot be re-judged from
+this Windows lane (no admitted macOS binary — same blocker family as
+crash_handler_and_fork_bridge_absent_from_seed_macos_2026-09-06); if it
+recurs on an admitted macOS Stage-2+ binary, reopen with a debugger session
+per the record's instruction. `src/app/ui/renderdoc_metrics/main.spl` stays
+single-module as its docstring constrains; not touched.
+
+**Cycles:** 0. Evidence: `build/review/p3fix-seed2-20261111.sdn`.
