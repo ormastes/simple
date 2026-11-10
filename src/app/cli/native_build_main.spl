@@ -71,7 +71,7 @@ use compiler.driver.driver_log_helpers.{build_trace_enabled, log_build_trace,
     build_trace_list, build_trace_detail}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_closure_walk_check_v1}
 use app.cli.native_build_streaming_request_owner.{native_build_streaming_surfaces}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_reap_state_v1, hir_shard_reap_deadline_hit_v1, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
     hir_shard_recovery_failed_rows_v1, hir_shard_recovery_replacements_dispatchable}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1,
@@ -1173,6 +1173,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             # timeout, so the kill/seal handling below is unchanged.
             var reap_at: i64 = -1
             var code: i64 = -1
+            var deadline_hit = false
             i = 0
             while reap_at < 0 and i < pids.len():
                 if label == "hir-shard":
@@ -1195,9 +1196,11 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                     reap_at = i
                 else:
                     val polled = native_build_normalize_exit_code(process_wait(pids[i], SHARD_POOL_POLL_MS))
-                    if polled != -2 or (timeout_ms > 0 and time_now_monotonic_ms() - started_ms[i] >= timeout_ms):
+                    val deadline_now = hir_shard_reap_deadline_hit_v1(polled, timeout_ms, time_now_monotonic_ms() - started_ms[i])
+                    if polled != -2 or deadline_now:
                         reap_at = i
                         code = polled
+                        deadline_hit = deadline_now
                 i = i + 1
             if reap_at < 0:
                 if label == "hir-shard": sleep_ms(10)
@@ -1245,13 +1248,14 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             val progress = hir_shard_recovery_owner_tree_progress_v1(queue_dir, owner)
             total_claims = if progress < 0 or total_claims < 0: -1 else: total_claims + progress
             val finished = hir_shard_recovery_finished(queue_dir, owner)
-            val state = if hir_shard_recovery_blocked(queue_dir): "BLOCKED" elif code < 0: "CRASH" elif finished: "FAILED" else: "BLOCKED"
+            val state = hir_shard_reap_state_v1(hir_shard_recovery_blocked(queue_dir), code, finished, deadline_hit)
+            val state_label = if state == "TIMEOUT": "TIMEOUT (deadline {timeout_ms / 1000}s)" else: state
             val sealed = if owner_stopped: hir_shard_recovery_seal(queue_dir, owner, state) else: -1
             if code != 0 or sealed != 0 or not finished:
                 if first_error_line == "":
                     first_error_line = native_file_worker_first_error_line_v1(label, owner, native_file_worker_error_reason_read_v1(queue_dir, owner))
                 failed_workers = failed_workers + 1
-                eprint "[{label}] owner={owner} status={state} exit={code} claimed={progress} sealed={sealed} finished={finished}{shard_worker_exit_hint_v1(code, label)}"
+                eprint "[{label}] owner={owner} status={state_label} exit={code} claimed={progress} sealed={sealed} finished={finished}{shard_worker_exit_hint_v1(code, label)}"
                 if hir_shard_recovery_reap_blocks_ledger_v1(code, progress, sealed, finished):
                     val _blocked = hir_shard_recovery_block(queue_dir, "incomplete worker or ledger publication: owner={owner} exit={code} claimed={progress} sealed={sealed} finished={finished}")
                 elif not finished and not hir_shard_recovery_blocked(queue_dir) and hir_shard_recovery_can_replace(fail_fast, code, progress, hir_shard_recovery_unclaimed_count(queue_dir)):

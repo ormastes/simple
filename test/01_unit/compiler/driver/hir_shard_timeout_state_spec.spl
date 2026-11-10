@@ -1,0 +1,33 @@
+# @cover src/compiler/80.driver/driver_hir_recovery.spl
+# Purpose: a shard worker reaped at the --timeout deadline is sealed TIMEOUT, not CRASH.
+# Requirements: doc/08_tracking/bug/db/native_build_shard_timeout_reported_as_crash_2026_11_11.sdn
+
+use std.spec
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory, hir_shard_reap_state_v1, hir_shard_reap_deadline_hit_v1}
+use std.io_runtime.{dir_create_all, dir_exists, getpid}
+
+describe "HIR shard reap state classifier":
+    it "classifies a deadline reap as TIMEOUT":
+        expect(hir_shard_reap_deadline_hit_v1(-2, 1500000, 1500000)).to_equal(true)
+        expect(hir_shard_reap_state_v1(false, -2, false, true)).to_equal("TIMEOUT")
+
+    it "keeps a real negative exit as CRASH":
+        expect(hir_shard_reap_deadline_hit_v1(-11, 1500000, 1600000)).to_equal(false)
+        expect(hir_shard_reap_state_v1(false, -11, false, false)).to_equal("CRASH")
+
+    it "does not report a deadline without a timeout or before it":
+        expect(hir_shard_reap_deadline_hit_v1(-2, 0, 9999999)).to_equal(false)
+        expect(hir_shard_reap_deadline_hit_v1(-2, 1500000, 1499999)).to_equal(false)
+
+    it "keeps BLOCKED, FAILED precedence":
+        expect(hir_shard_reap_state_v1(true, -2, false, true)).to_equal("BLOCKED")
+        expect(hir_shard_reap_state_v1(false, 1, true, false)).to_equal("FAILED")
+        expect(hir_shard_reap_state_v1(false, 1, false, false)).to_equal("BLOCKED")
+
+    it "accepts TIMEOUT as a terminal state":
+        val queue = "build/tmp/hir_recovery/{getpid()}-timeout-terminal"
+        expect(dir_exists(queue)).to_equal(false)
+        expect(dir_create_all(queue)).to_equal(true)
+        expect(hir_shard_recovery_inventory(queue, "closure-test", ["module.spl"])).to_equal(true)
+        expect(hir_shard_recovery_claim(queue, "worker", "module.spl", "key-test")).to_equal(1)
+        expect(hir_shard_recovery_terminal(queue, "worker", "module.spl", "TIMEOUT", false)).to_equal(true)
