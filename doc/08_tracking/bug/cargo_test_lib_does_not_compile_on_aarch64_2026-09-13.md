@@ -98,3 +98,16 @@ this bug tracks, and the vulkan pin/count skew is a deliberate anti-inflation
 guard that needs the owning lane's context. Diagnosed first failure verbatim:
 `family_size_is_pinned`: `assertion left == right failed: left: 132, right: 131`
 at `compiler/src/interpreter_extern/vulkan.rs:487`.
+
+## 2026-11-10 status — SUPERSEDED (P3 library lane, work/p3-lib-20261110)
+
+Confirmed the 2026-11-05 verification evidence still holds on
+origin/release/1.0.0: the aarch64 compile blocker is fixed in-tree.
+`common/src/target.rs:1303` guards
+`the_host_target_widens_exactly_when_the_host_admits_avx512` behind a real
+`#[cfg(target_arch = "x86_64")]` (the `cfg!` + `is_x86_feature_detected!`
+anti-pattern is gone), the production probe at `common/src/target.rs:304-308`
+is likewise cfg-guarded, and
+`compiler/src/codegen/llvm/backend_core.rs` no longer references
+`is_x86_feature_detected!`. This lane is not the src/compiler_rust owner; no
+change made here.

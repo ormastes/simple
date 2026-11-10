@@ -107,3 +107,13 @@ results: a spec that passes may be passing against foreign source.
 ## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
 
 Not reproducible on the current seed (sentinel 888 in an invoking-tree src/lib shadowing std.async_core is read; build tree has the module too). Gate: scripts/check/check-stdlib-invoking-tree-wins.shs --selftest <binary>. Run it against each deployed Linux binary to confirm.
+
+## 2026-11-10 status — SUPERSEDED (P3 library lane, work/p3-lib-20261110)
+
+Round-15 note confirmed on this lane's base with the deployed Windows seed
+from the main repo, run against a foreign tmp project:
+`sh scripts/check/check-stdlib-invoking-tree-wins.shs --selftest
+/c/Users/yoon/dev/simple/bin/simple.exe` printed
+`PASS -- 1 probe, invoking tree's src/lib won (rc=0)` (fatal selftest silent =
+pass, then the real sentinel probe saw 888 from the invoking tree). The
+foreign-build-tree resolution defect does not reproduce on the current seed.

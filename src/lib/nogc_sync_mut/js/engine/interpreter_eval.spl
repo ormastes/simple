@@ -213,12 +213,9 @@ impl JsInterpreter:
             i = i + 1
         match callee_val:
             JsValue.Function(fn_id):
-                var ni = 0
-                while ni < self.native_id_map.len():
-                    val mapping = self.native_id_map.get(ni)
-                    if mapping.first == fn_id:
-                        return Ok(self._dispatch_native_with_receiver(mapping.second, JsValue.Undefined, arg_vals, env))
-                    ni = ni + 1
+                val eval_new_native_id = self._lookup_native_id(fn_id)
+                if eval_new_native_id != 0:
+                    return Ok(self._dispatch_native_with_receiver(eval_new_native_id, JsValue.Undefined, arg_vals, env))
                 val obj_id = self.create_object()
                 val this_val = JsValue.Object(id: obj_id)
                 # Set __proto__ to the class prototype for method lookup
@@ -1310,9 +1307,12 @@ impl JsInterpreter:
                             return self._invoke_function_with_this(fn_id, arg_vals, env, this_val_for_call)
                         bound_direct_i = bound_direct_i + 1
                     # Check if this function index maps to a native function
+                    # (binary-searched; the former linear scan of native_id_map
+                    # made every JS call O(registered natives)).
+                    val call_native_id = self._lookup_native_id(fn_id)
                     var ni = 0
-                    while ni < self.native_id_map.len():
-                        val mapping = self.native_id_map.get(ni)
+                    while call_native_id != 0 and ni < 1:
+                        val mapping = NativeIdMapping(first: fn_id, second: call_native_id)
                         if mapping.first == fn_id:
                             var this_val = JsValue.Undefined
                             if is_member:

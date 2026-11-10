@@ -67,3 +67,34 @@ engine's timer-registration code path (likely under
 
 Per `.claude/rules/testing.md`, this spec is left RED/hanging rather than
 skipped, tagged in-development, or deleted. Not modified.
+
+## 2026-11-10 status — LIVE-FIXED (P3 library lane, work/p3-lib-20261110)
+
+Root cause found and fixed in `src/lib/*/js/engine/`, two compounding O(n)
+costs per `setTimeout` once the native tables grow:
+
+1. `_register_native` (interpreter_object.spl) used local-alias-store-back
+   pushes, deep-copying `functions` + `native_id_map` per registration; each
+   node-compat timer handle registers 8 native methods → O(n) per timer.
+   Now in-place pushes (all three family trees).
+2. Every JS call linearly scanned `native_id_map` to detect native callees
+   (interpreter_eval.spl eval_call/eval_new, interpreter_async.spl
+   `_native_id_of_fn`) → O(n) per call. Now a binary search
+   (`_lookup_native_id`) — the map is sorted by fn_id because registrations
+   append increasing function indices. Native ids are strictly negative
+   (min -1126, e.g. NATIVE_SET_TIMEOUT = -40), so 0 is the absent sentinel.
+
+Evidence (seed-smoke, deployed seed from main repo, SIMPLE_LIB=src,
+worktree work/p3-lib-20261110): the bug's exact fill loop in a standalone
+`run` probe (the spec-runner closure cannot load under the Windows seed:
+unknown extern GetProcessHeap — host-limit, separate seed gap). Before:
+512→1024 ≈ 35 s, 1024→2048 ≈ 209 s, 4096 never finished (>280 s). After:
+512 +6 s, 1024→2048 +18 s, 2048→4096 +67 s, all with denied=0.0 and
+pending/handle collections exactly N. A spec-equivalent functional probe
+(requestAnimationFrame + drain, 4096 fill, completedFrame.refresh() identity,
+state string "1:false:false:true") prints PROBE-VERDICT PASS in ~66 s wall
+including startup. The checked-in spec
+test/01_unit/lib/common/completed_animation_handle_capacity_spec.spl is the
+regression guard (runnable on Linux CI; Windows-seed-blocked here).
+Fix cycles: 4 (dict-index variant reverted: own-field Dict index-write is
+dropped by the seed interpreter, recorded here so later lanes do not retry).
