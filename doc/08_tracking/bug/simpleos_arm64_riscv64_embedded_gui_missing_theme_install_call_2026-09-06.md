@@ -1,7 +1,7 @@
 # arm64 and riscv64 embedded GUI entries import but never call `install_generated_simpleos_wm_theme()`
 
 Date: 2026-09-06
-Status: fixed (source regression verified 2026-09-23; live QEMU verification deferred)
+Status: superseded (triage 2026-11-11, lane boot9; was: fixed 2026-09-23) — arm64/riscv64 theme-install call re-verified in-tree; focused spec PASS (seed-smoke 2/2); QEMU/perf evidence remains host-limited
 Severity: P3 (visual regression: generated Aetheric base theme is never installed before the CSS override runs)
 Location:
 - `examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl:40` (import), no call site
@@ -112,3 +112,20 @@ rewritten and re-verified (score + runtime pass count) after the fact. This
 is the documented shared-working-copy risk noted in
 `.claude/rules/vcs.md` / project memory: untracked files in this checkout
 can be swept by peer sessions mid-edit.
+
+## Triage 2026-11-11 (lane boot9, work/p3-boot9-20261111)
+
+SUPERSEDED — re-verified on this lane's own worktree (base
+origin/release/1.0.0 tip, fresh seed 46fe8f6b6def):
+
+- `grep -c "install_generated_simpleos_wm_theme()"` on all three
+  `gui_entry_desktop.spl` arch entries (arm64, riscv64, x86_64) -> exactly
+  1 hit each.
+- Focused regression re-executed (seed-smoke):
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+  test/01_unit/os/simpleos_cross_arch_theme_install_source_spec.spl
+  --mode=interpreter --no-cache`
+  -> `outcome=OK declared>=2 executed=2 passed=2 failed=0` (~12 s).
+- The two deferred TODOs (ARM64/RV64 QEMU boot evidence; first-frame latency
+  / boot heap deltas) remain open and host-limited; no QEMU or heavy native
+  build was run in this lane.
