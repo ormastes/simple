@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: FIXED (2026-11-11, lane ne14) — fixing commit b41d64cad69d; verified on release/1.0.0 tip, see addendum
 
 ## Summary
 
@@ -103,3 +103,37 @@ run to completion in its default lane from a binary deployed and invoked the
 ordinary way (`bin/simple lint <file>`, from repo root, same as every example
 in this repo's own docs).
 
+
+## Addendum 2026-11-11 (lane ne14) — FIXED, verified on release/1.0.0
+
+**Fixing commit:** `b41d64cad69d` "fix(lint): stop SEGV on every file and pin
+lint to the interpreter lane" (2026-10-10). Two parts:
+
+1. **Root cause fixed.** The SEGV was `lint_checks.spl` passing the whole-file
+   `content` (a `String`) to five checks declared `lines: [String]`, so the JIT
+   indexed a string as an 8-byte-element array (`movq (%r9,%rcx,8), %rax` at
+   `Linter.check_ui_raw_widget_kind`). All five call sites now pass `lines`.
+   This is the same defect family as, and fully cross-referenced by,
+   `lint_jit_segv_text_as_string_array_2026-10-10.md` (Defect 1, marked FIXED
+   there). That sibling doc's bisect also explains this record's
+   "exe-path-under-cwd" discriminator as a cache-scope/workspace-root artifact
+   of `current_exe()` vs cwd gating whether the process reached the buggy JIT
+   path — the crash was never truly about the binary's location.
+2. **Lane pinned.** `src/compiler_rust/driver/src/exec_core.rs`
+   `interpreter_preference_reason` returns `lint-jit-parity-unproven` for
+   `src/app/cli/lint_entry.spl`, so `lint`/`fix`/`fmt` run interpreted by
+   default; an explicit `SIMPLE_EXECUTION_MODE=jit` still reaches the JIT
+   (where sibling-doc Defects 2-4 remain OPEN-seed, reachable only by that
+   explicit override — a different lane from this row's default-lane claim).
+
+**Verification actually run** (seed-smoke, worktree simple-p3-ne14-20261111,
+fresh seed 46fe8f6b6def, SIMPLE_LIB=src; exe invoked as `./bin/simple.exe`
+from the worktree root — exactly this record's crashing shape, exe path a
+descendant of cwd):
+
+| probe | 2026-09-13 verdict | today |
+|---|---|---|
+| `./bin/simple.exe lint src/lib/common/base_encoding.spl` (default lane) | SIGSEGV rc 139 | **"Lint passed: all files clean", rc 0** |
+
+No segfault in the default lane; the linter completes from a cwd-rooted binary
+path. The PERF-5 interpret-lane workaround is no longer required for lint.
