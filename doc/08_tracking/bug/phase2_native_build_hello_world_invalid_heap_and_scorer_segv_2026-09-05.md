@@ -69,3 +69,48 @@ proof that `simple sspec-maintain scan` can be built here. Sibling record from t
 
 ## Round-10 verdict note (2026-11-06)
 Verdict: host-blocked. Needs the macOS aarch64 phase2 binary; not reproducible on this Windows host. Re-test the struct-generic SEGV on a Phase-3 stage binary: simple compile --format=smf build/nb/gen.spl
+
+---
+
+## Addendum 2026-11-11 (lane boot7) — SUPERSEDED (all three defects addressed on tip; e2e native re-run blocked)
+
+Triage at release tip b364745fdbf8 (Windows host, refreshed seed 0791c2b7f4a7).
+
+**Defect 3 (struct-level generic `unresolved type: Id`): FIXED.**
+`crypto_digest_generic_struct_2026-06-15` was CLOSED 2026-09-13 with
+"struct type parameter resolves inside its `impl` block" and its closure note
+explicitly names this row's shapes (`PostingList<Id>`, `Embedding<D>`) as
+covered by the same resolution. Fixing commit dc23f165150d ("generic fn/method
+give clean #158 diagnostic; thread struct type params") is an ancestor of the
+tip; later generic-struct MIR hardening also on tip (2cf0821e85a1, 25577096b822).
+
+**Defect 2 (SEGV 139 after monomorphize with `[post-mono-verify] unhandled
+HirTypeKind variant at walk_type`): SUPERSEDED by removal.** The 40.mono
+monomorphization pass was deleted from the compiler (e.g. 56c0499ebd15 "remove
+the remaining monomorphization references", ab9305d783e9 "remove every caller of
+the deleted 40.mono pass"); `src/compiler/` no longer contains a mono pass
+directory and neither `post-mono-verify` nor the walk_type message exists in
+the tree. The failing path is structurally gone.
+
+**Defect 1 (hello-world native-build fails, error text is `<invalid-heap:…>`):
+MITIGATED on the symptom this row tracks.** The raising site now prints the
+diagnostic eagerly: `_aot_compile_failure`
+(driver_aot_native_output.spl:3456-3467) emits pure-literal + bare-print
+name/reason + length lines BEFORE returning Err, precisely so the corrupt
+`err.to_text()` crossing can no longer blind every failure. The underlying
+`Err`-payload-crossing ABI defect remains OPEN and is tracked in its own row,
+stage2_aot_error_message_lost_invalid_heap_2026-09-06.md (sibling; the
+eager-print hardening comments cite it).
+
+Seed-smoke verifications (2026-11-11, seed 0791c2b7f4a7):
+- `bin/simple.exe compile --format=smf -o gen.smf build/nb/gen.spl` (the row's
+  own struct-generic isolation repro) — rc=0; the produced SMF then runs
+  correctly on the seed (`run gen.smf` prints `3`, rc=0), also under
+  SIMPLE_EXECUTION_MODE=interpret. No SEGV, no `unresolved type`.
+
+Blocked in-lane (needs grant): the row's actual unblock condition —
+`native-build build/nb/hello.spl` and `native-build build/nb/sspec_score_min.spl`
+on a stage2/stage3 binary — is a native/entry-closure build, forbidden in this
+lane; the original repro host was macOS aarch64 (Round-10 already called it
+host-blocked from Windows). Mechanism-level evidence above is the strongest
+available in-lane.

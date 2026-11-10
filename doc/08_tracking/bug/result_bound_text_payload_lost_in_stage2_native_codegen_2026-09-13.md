@@ -76,3 +76,46 @@ Reduce it: a self-contained `.spl` that writes n bytes, reads them through
 `file_read_regular_no_follow_bounded`, and prints `.len()`, compiled natively
 by a Stage-2 binary. Until that exists the blast radius is unknown.
 
+
+---
+
+## Addendum 2026-11-11 (lane boot7) — SUPERSEDED (masking symptom fixed on tip; codegen root fix tracked by the stage2-miscompile campaign)
+
+State at release tip b364745fdbf8:
+
+- **The masking symptom this row filed is fixed.** The failure arm of
+  `_finish_selected_module_compile` now asks the RUNTIME for the on-disk size
+  before naming the failure mode, re-reads through
+  `_sffi_file_read_text(path) ?? ""` when the bound payload reads empty, and
+  reports `diagnostic <n> bytes on disk, payload lost on read` when both reads
+  fail — a true statement naming this defect instead of the false
+  `diagnostic file empty` (driver_aot_native_output.spl:4478-4508, including
+  the 2026-09-13 strace measurement quoted in its comment). Pickaxe for
+  "payload lost on read" lands on 9e7e7a526edb (PR #7597) / the release
+  transplants (88aac2ffe286, bb3f6ab8ab29). This is exactly the "worked
+  around" state the doc records, now shipped.
+
+- **The underlying stage2 codegen defect** (a `case Ok(x):`-bound payload —
+  text here, scalar in the `[receipt-size-canary]` family — misread by a
+  stage-2-compiled binary) is covered by the systematic stage2-miscompile
+  campaign, not by a per-bug root fix: MIR payload-provenance fixes are on the
+  tip (e.g. ffe84b4e0a2 "register an Optional payload NAME and give
+  `case Some(x)` the type-directed path", b0729ed807bd, and the 2026-11-05
+  s2fix sweep notes in bug_db.sdn which mark the related Result/Optional
+  payload rows "still open, root fix needs a stage3 producer"). The
+  `[receipt-size-canary]` runtime cross-checks are still present at
+  driver_aot_native_output.spl:1111, :3513, :3793 — i.e. the guards remain
+  because the frozen stage-2 producer still misreads pattern-bound payloads.
+  Root-fix verification needs a stage3 native producer — a native/entry-closure
+  build, forbidden in this lane (BLOCKED: `native-build` of the stage3 chain +
+  this bug's own "next step" self-contained repro, per the doc).
+
+Seed-smoke verification (2026-11-11, seed 0791c2b7f4a7, interpreter mode):
+- `bin/simple.exe test test/01_unit/compiler/codegen/native_result_struct_payload_push_spec.spl
+  --mode=interpreter --no-cache` — 2/2 PASSED (Result-struct payload family
+  coverage).
+- `bin/simple.exe test test/01_unit/compiler/mir/optional_payload_struct_provenance_source_spec.spl
+  --mode=interpreter --no-cache` — behavioral cases PASSED; 2 of 4 failed only
+  on pinned-source-text drift (expected-source embedding references old
+  `compiler.mir.*` module spellings) — pre-existing spec drift on the tip,
+  unrelated to this row.
