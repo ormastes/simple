@@ -61,3 +61,26 @@ only Linux/Darwin (`*) die "unsupported-host:$PLATFORM"`), so it cannot be run
 to completion from this Windows (MINGW64) host; the verdict above is
 script-content evidence at a pinned base, recorded honestly rather than
 claimed as a run. No change made.
+
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 27)
+
+**Verdict: SUPERSEDED (corroborated at this lane's base).**
+
+Independently re-verified on the p3-boot4 worktree, confirming the
+2026-11-10 p3-rt note:
+
+- `scripts/check/build-core-c-bootstrap-runtime-capsule.shs` compiles
+  `runtime_contracts.c` as a first-class source entry (`:135`), proves the
+  provider with `nm` text-symbol assertions against both the archive and
+  `runtime_contracts.o` (`:336`, `:384`), and pins single-provider ownership
+  via `assert_single_provider simple_contract_check runtime_contracts.o` and
+  the `_msg` twin (`:425-426`) — exactly the two-way proof (build succeeds;
+  deleting a provider fails naming it) this doc's "Fix" section demanded.
+- Fix merge `9e7e7a526edb` (PR #7597) is an ancestor of this lane's base.
+
+Host-limited: the script intentionally supports only Linux/Darwin
+(`*) die "unsupported-host:$PLATFORM"`), so it cannot be executed to
+completion from this Windows (MINGW64) host; verdict is script-content
+evidence at a pinned base, recorded honestly rather than claimed as a run.
+No change made in this lane.
