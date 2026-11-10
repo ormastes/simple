@@ -1,0 +1,89 @@
+# Purpose and audience: compiler engineers owning MIR `.?` (ExistsCheck) lowering
+# and the phase-3 stage3 native build of nogc_sync_mut.io.buffer.
+# @req REQ-SSPEC-COMPILER
+"""
+# `if val c = e as Trait` must not merge into a void slot
+
+Bug mir_if_val_trait_cast_exists_unit_slot_2026-11-10. The phase-3 stage3 build
+failed `lib.nogc_sync_mut.io.buffer` `BufferedReader.close/is_open` with
+E-BACKEND-LLVM-CONST-TYPE "integer constant cannot define void". `if val c =
+self.inner as Close` desugars to `c = (self.inner as Close).?`; the ExistsCheck
+node is untyped (HIR Unit placeholder), so its payload-or-nil merge slot was
+typed Unit and its absent edge stored `Const 3` into it. Each case lowers `fn a`
+and counts Const/Copy defs into a Unit-typed MIR local (must be 0).
+"""
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val traits_src = "trait Close:\n    fn is_open() -> bool\n    fn close() -> Result<(), text>\n\ntrait Reader:\n    fn read_one() -> i64\n\nclass Fh:\n    open: bool\n\nimpl Reader for Fh:\n    fn read_one() -> i64:\n        1\n\nimpl Close for Fh:\n    fn is_open() -> bool:\n        self.open\n    fn close() -> Result<(), text>:\n        Ok(())\n\nclass Rd:\n    inner: Reader\n\n    fn a() -> bool:\n        if val c = self.inner as Close:\n            c.is_open()\n        else:\n            true\n\n"
+
+var last_void_word_defs = 0
+
+fn void_word_defs(body: text) -> i64:
+    val log = Logger(level: 0)
+    val src = traits_src + body
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module("app.main", surfaces)
+    val hir = hl.lower_module(ast)
+    var errors = ""
+    for e in hl.errors:
+        errors = errors + "hir: " + e.message + "\n"
+    var ml = MirLowering.new(hir.symbols)
+    val mir = ml.lower_module(hir, [])
+    for e in ml.errors:
+        errors = errors + "mir: " + e.message + "\n"
+    if errors != "":
+        print("lower errors: " + errors)
+        return -1
+    var count = 0
+    for function in mir.functions.values():
+        if function.name == "a" or function.name.ends_with(".a"):
+            var unit_ids: Dict<i64, bool> = {}
+            for local in function.locals:
+                match local.type_.kind:
+                    case MirTypeKind.Unit: unit_ids[local.id.id] = true
+                    case _: pass
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Const(dest, _, _):
+                            if unit_ids.contains(dest.id): count = count + 1
+                        case MirInstKind.Copy(dest, _):
+                            if unit_ids.contains(dest.id): count = count + 1
+                        case _: pass
+    count
+
+describe "if val trait downcast: no word defined into a void slot":
+    it "buffer.spl is_open shape (method, bool, else)":
+        expect(void_word_defs("")).to_equal(0)
+
+    it "buffer.spl close shape (free fn, Result, else)":
+        expect(void_word_defs("fn a(r: Rd) -> Result<(), text>:\n    if val c = r.inner as Close:\n        c.close()\n    else:\n        Ok(())\n")).to_equal(0)
+
+describe "similar ExistsCheck patterns (prevention)":
+    it "if val trait downcast without else":
+        expect(void_word_defs("fn a(r: Rd) -> i64:\n    if val c = r.inner as Close:\n        if c.is_open(): return 1\n    0\n")).to_equal(0)
+
+    it "if val trait downcast in an elif chain":
+        expect(void_word_defs("fn a(r: Rd, k: i64) -> bool:\n    if k > 3:\n        false\n    elif val c = r.inner as Close:\n        c.is_open()\n    else:\n        true\n")).to_equal(0)
+
+    it "if val trait downcast assigning a var":
+        expect(void_word_defs("fn a(r: Rd) -> bool:\n    var open = true\n    if val c = r.inner as Close:\n        open = c.is_open()\n    open\n")).to_equal(0)

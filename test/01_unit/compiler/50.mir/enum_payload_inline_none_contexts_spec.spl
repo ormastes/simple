@@ -1,0 +1,67 @@
+# Purpose and audience: compiler engineers owning MIR enum-constructor payload admission.
+# @req REQ-SSPEC-COMPILER
+"""
+# Inline `None` in a `T?` enum payload slot is admitted in every lowering context
+
+Bug mir_enum_payload_inline_none_lowered_as_nil_2026-11-10. The phase-3 stage3
+build (stage2 `stage2_new4.exe`) rejected `MirInstKind.Call(None, ...)` at
+`src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl:197` with "nil outside
+unsafe into optional payload slot (declared 'LocalId?')". The interpreter-run
+`50.mir` lowering admits every shape below; these pin that contract for the
+contexts the failing sites share (struct-field initializer, loop body, `if val`
+arm, match arm, multi-arg payload) so a regression in the pure-Simple lowering
+is caught here rather than in a native bootstrap.
+"""
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val defs = "struct LocalId:\n    id: i64\n\nenum Op:\n    Copy(id: LocalId)\n    Const(v: i64)\n\nenum Kind:\n    Call(dest: LocalId?, func: Op, args: [Op])\n    Nop\n\nstruct Inst:\n    kind: Kind\n    span: i64?\n\nstruct Pair:\n    s_id: i64\n    suffix: Op\n\nfn pair_of(i: i64) -> Pair?:\n    if i > 0: return Some(Pair(s_id: i, suffix: Op.Const(i)))\n    None\n\n"
+
+fn probe(body: text) -> text:
+    val log = Logger(level: 0)
+    val src = defs + body
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module("app.main", surfaces)
+    val hir = hl.lower_module(ast)
+    var errors = ""
+    for e in hl.errors:
+        errors = errors + "hir: " + e.message + "\n"
+    var ml = MirLowering.new(hir.symbols)
+    ml.lower_module(hir, [])
+    for e in ml.errors:
+        errors = errors + "mir: " + e.message + "\n"
+    errors
+
+describe "inline None in a LocalId? enum payload slot":
+    it "rejects a bare nil (non-vacuity)":
+        expect(probe("fn main() -> Kind:\n    Kind.Call(nil, Op.Const(1), [])\n").contains("nil outside unsafe into optional payload slot")).to_be_true()
+
+    it "direct constructor":
+        expect(probe("fn main() -> Kind:\n    Kind.Call(None, Op.Const(1), [])\n")).to_equal("")
+
+    it "struct field initializer":
+        expect(probe("fn main() -> Inst:\n    Inst(kind: Kind.Call(None, Op.Const(1), [Op.Const(2)]), span: None)\n")).to_equal("")
+
+    it "string_builder_opt shape: push inside if-val arm inside while":
+        expect(probe("class Opt:\n    n: i64\n\n    me apply(src: [i64]) -> [Inst]:\n        var insts: [Inst] = []\n        var i = 0\n        while i < src.len():\n            val pair = pair_of(src[i])\n            if val p = pair:\n                if p.s_id == 2:\n                    insts.push(Inst(kind: Kind.Call(None, Op.Const(1), [Op.Const(2), p.suffix]), span: Some(i)))\n                    i = i + 1\n                    continue\n            insts.push(Inst(kind: Kind.Nop, span: None))\n            i = i + 1\n        insts\n")).to_equal("")
+
+    it "match arm body":
+        expect(probe("fn main(k: i64) -> Kind:\n    match k:\n        case 0: Kind.Nop\n        case _: Kind.Call(None, Op.Const(k), [])\n")).to_equal("")
