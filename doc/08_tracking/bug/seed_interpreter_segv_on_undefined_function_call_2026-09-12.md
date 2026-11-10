@@ -2,7 +2,7 @@
 
 Date: 2026-09-12. Host: Windows 11 (Git Bash). Binary: `bin/simple.exe`
 (Rust bootstrap seed, built 2026-09-02, 16,347,136 bytes).
-Status: FIXED (already, verified 2026-11-06) — see "Resolution". Lane: **interpreter/JIT (`run`) only** — see "Phase-2 applicability".
+Status: FIXED (already, verified 2026-11-06; re-verified 2026-11-11 lane interp12 on fresh seed 46fe8f6b6def — rc=1 clean diagnostic on both the default run lane and the interpreter lane, no SEGV) — see "Resolution" and "Addendum 2026-11-11". Lane: **interpreter/JIT (`run`) only** — see "Phase-2 applicability".
 Found while diagnosing: `t32_mcp_server` exiting with rc=139 and no diagnostic.
 
 ## Symptom
@@ -118,3 +118,26 @@ No longer reproduces on a seed built from `release/1.0.0` @ `ecb705896a4` (debug
   deferring to interpreter`) and the interpreter reports the same E1002.
 
 No SIGSEGV, and the identifier is named. No code change in this pass.
+
+
+## Addendum 2026-11-11 (lane interp12) — re-verified FIXED on fresh seed 46fe8f6b6def
+
+**Verification actually run** (worktree simple-p3-interp12-20261111, seed-smoke):
+
+```
+# default run lane (JIT-eligible):
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ./bin/simple.exe run \
+  test/fixtures/seed_interp/undefined_function_call_repro.spl --no-cache
+# rc=1, stderr: error[E1002]: function `no_such_fn` not found
+#   = help: check the function name or import the module that defines it
+# (module drops to interpreter after the JIT reports the unresolved symbol;
+# no SIGSEGV, no silent rc=139)
+
+# interpreter lane:
+SIMPLE_EXECUTION_MODE=interpret ./bin/simple.exe run \
+  test/fixtures/seed_interp/undefined_function_call_repro.spl --no-cache
+# rc=1, same error[E1002] diagnostic
+```
+
+Both lanes fail cleanly with a named diagnostic instead of SEGV. Verdict: STALE
+(fix previously landed; no new code change this lane).

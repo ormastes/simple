@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** fixed for the JIT (re-verified 2026-11-06, see "Re-verification 2026-11-06"). Workaround shipped (table scan), filed per CLAUDE.md rule
+**Status:** fixed for the JIT (re-verified 2026-11-06, see "Re-verification 2026-11-06"); re-verified 2026-11-11 (lane interp12) on fresh seed 46fe8f6b6def — JIT and interpreter both correct, prevention spec 3/3 GREEN (see "Addendum 2026-11-11"). Workaround shipped (table scan), filed per CLAUDE.md rule
 "when a compact expression form fails ... record a concrete bug".
 
 ## Symptom
@@ -81,3 +81,30 @@ Interpreter high-bit literal arm already fixed in source (777859ac906); the stoc
 
 
 Round 15 update: verified on a seed built from this tree (D:/dev/wt/target-stdlib): u64_literal_match_prevention_spec 3/3 GREEN (was RED on the stale seed).
+
+
+## Addendum 2026-11-11 (lane interp12) — re-verified FIXED on fresh seed 46fe8f6b6def
+
+**Verification actually run** (worktree simple-p3-interp12-20261111, seed-smoke):
+
+```
+# JIT lane (default run):
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ./bin/simple.exe run \
+  test/fixtures/seed_interp/u64_high_bit_literal_pattern_repro.spl --no-cache
+# u64_high_bit sign other        (rc=0)
+
+# interpreter lane:
+SIMPLE_EXECUTION_MODE=interpret ./bin/simple.exe run \
+  test/fixtures/seed_interp/u64_high_bit_literal_pattern_repro.spl --no-cache
+# u64_high_bit sign other        (rc=0)
+
+# prevention spec:
+./bin/simple.exe test test/01_unit/lib/nogc_async_mut_noalloc/u64_literal_match_prevention_spec.spl \
+  --mode=interpreter --no-cache
+# SPEC FILE VERDICT: outcome=OK declared>=3 executed=3 passed=3 failed=0
+```
+
+The residual interpreter-only high-bit arm tracked here is fixed by
+`777859ac906` (an ancestor of this seed's build commit) and is also closed by
+`seed_interp_u64_high_bit_literal_pattern_2026-11-06.md` (FIXED). Verdict:
+STALE (no new code change this lane).
