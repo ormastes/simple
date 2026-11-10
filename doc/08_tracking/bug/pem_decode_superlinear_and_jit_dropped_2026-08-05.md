@@ -1,13 +1,33 @@
 # PEM/base64 decode is superlinear, and the whole module never JIT-compiles
-## Open 2026-09-16 — needs owner triage
+## Status: FIXED 2026-11-11 (P3 lane ne19 triage, release/1.0.0 worktree) —
+the superlinear perf bug is measured gone; the JIT-drop misattribution was
+already closed in-body.
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+## Addendum 2026-11-11 (lane ne19) — superlinearity FIXED, verified by execution
 
-**Status:** PARTIALLY FIXED — accumulator fixed; the "dominant cause" was
-MISATTRIBUTED (see 2026-08-05 update below). PEM decode is still ~11.5 s for
-16,000 base64 chars **with the module fully JIT-compiled**, so the perf bug is
-open on its own terms; the JIT-drop theory is closed.
+The 2026-11-03 "source candidate" from this doc (single byte traversal, one
+quartet of scalar state, no indexed `char_at`/`index_of` per character) has
+landed in `src/lib/common/crypto/pem.spl` (`_b64_decode_to_u8`, lines 24-71;
+comments at lines 30-32 describe exactly that rewrite).
+
+Measured on the release/1.0.0 worktree seed binary (`bin/simple.exe`, Rust
+bootstrap seed v1.0.0-rc.1), whole-process wall clock timed externally around
+separate runs, in-repo driver calling the public `parse_pem` over a
+`-----BEGIN CERTIFICATE-----` body of N 'A' chars:
+
+| N base64 chars | wall (ms) | DER bytes |
+|---|---|---|
+| 4,000  | 207 | 3,000 |
+| 16,000 | 374 | 12,000 |
+
+4x input now costs ~1.8x wall (and that includes process startup); the
+original report measured 1.70 s -> 14.01 s (8.2x, quadratic). Correctness of
+the sizing is confirmed by the DER byte counts (4:3 base64 ratio). Both runs
+rc=0. The remaining in-body "Next step" items are separate records: the two
+source defects (`region`, `CryptoCudaSession`) tracked/filed per that section,
+and the diagnostic-string correction (`expect ~100-1000x slowdown`) is a
+seed-only string edit still open on the Rust seed. No code change in this
+lane.
 **Found:** 2026-08-05
 **Component:** `src/lib/common/crypto/pem.spl`, plus HIR lowering
 (`src/compiler_rust/compiler/src/hir/lower/expr/access.rs:400`)

@@ -1,10 +1,36 @@
 # SimpleOS path-based POSIX syscalls: fake success replaced with honest ENOSYS; real FAT32 backend exists but is not wired to the syscall path
 
-Status: PARTIALLY FIXED 2026-08-06 (honesty landed 2026-08-06 AM; kernel-global
-mount + open/stat/mkdir/readdir/unlink/rmdir wiring landed 2026-08-06 PM;
-read/write-after-open wiring landed 2026-08-06 evening, see "Update 3" below;
-Wall 2 (mount-accessor persistence) INVESTIGATED and CONFIRMED REAL 2026-08-06
-night — see "Update 4" below; boot-reachability still open)
+Status: SUPERSEDED 2026-11-11 (P3 lane ne19 triage, release/1.0.0 worktree) —
+remaining open threads absorbed by in-tree boot wiring and other tracked
+records; see addendum below.
+
+## Addendum 2026-11-11 (lane ne19) — SUPERSEDED, absorbed
+
+Verified against the release/1.0.0 tree; every open thread this doc carried is
+either landed in-tree or owned by another record:
+
+1. **Boot-reachability (was the doc's last open item): LANDED.**
+   `boot_fs_mount_fat32_from_device` now has live callers:
+   `src/os/services/vfs/arm_fs_exec_vfs.spl:312` mounts VirtIO-BLK, publishes
+   the kernel FAT32 mount (`boot_fs_mount_fat32_from_device(dev,
+   "arm64-virtio-mmio", true)`), and registers the canonical MountTable root —
+   its own comment names it "Shared by the classic fs-exec boot init ... and
+   the aarch64 clang-bringup lane". The generic probe chain
+   `boot_fs_mount_from_device` (NVFS -> DBFS -> FAT32) is reachable through
+   `boot_fs_mount_pure_nvme_from_device` and the c-boot-bridge entry
+   (`src/os/kernel/boot/boot_fs_mount.spl:105,159`). The stale
+   "no caller anywhere in the live boot sequence" comment in
+   `syscall_file.spl` (~lines 291-292) predates this wiring.
+2. **Wall 2 (mount-accessor persistence): absorbed by the already-closed
+   seed-interpreter defect** named in Update 4 —
+   `interp_trait_slot_receiver_reboxed_per_call_mutation_loss_2026-07-07.md`.
+3. **Atomic rename-replace boundary: owned by the ARM64 database
+   atomic-replace lane** per the 2026-08-14 ownership update in this doc; not
+   this record's scope and unchanged by this triage.
+
+The fake-success honesty fix and the real FAT32 syscall wiring this doc
+tracked remain landed and were re-confirmed present in source. No code change
+in this lane.
 
 ## Ownership update 2026-08-14 — ARM64 database atomic-replace boundary claimed
 

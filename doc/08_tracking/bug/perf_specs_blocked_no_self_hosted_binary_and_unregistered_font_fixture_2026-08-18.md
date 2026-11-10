@@ -1,7 +1,39 @@
 # Two perf specs blocked: no self-hosted Simple binary, and an unregistered font fixture (2026-08-18)
 
-Status: OPEN
-Lane: lane-test-fix worktree, `bin/simple` -> shared Rust seed (rebuild forbidden in this lane)
+Status: BLOCKED 2026-11-11 (P3 lane ne19 triage, release/1.0.0 worktree) —
+font-fixture blocker fixed in-tree; remaining blocker is deployment of a
+pure-Simple self-hosted binary plus host-pinned baseline env, both outside a
+P3 lane's grant.
+Lane: lane-test-fix worktree, `bin/simple` -> shared Rust seed (rebuild forbidden in that lane)
+
+## Addendum 2026-11-11 (lane ne19) — BLOCKED, one of two blockers resolved in-tree
+
+Verified against the release/1.0.0 tree (worktree `bin/simple.exe` is still
+the Rust seed v1.0.0-rc.1; no `bin/release/<triple>/` exists here).
+
+**Blocker 2 (font fixture): FIXED in-tree.** `simple_2d_vector_fonts_perf_spec.spl`
+now loads the fixture through the bytes API (`engine.load_font_bytes(PERF_FONT,
+font_blob)`, line ~110) — exactly the remedy this doc specified — instead of
+the registry-gated file-path API. The `SIMPLE_2D_BITMAP_BASELINE_NS` /
+`SIMPLE_2D_BITMAP_BASELINE_CHECKSUM` pins remain env-supplied by design; this
+lane did not invent values.
+
+**Blocker 1 (self-hosted binary): unchanged.** `multicore_green_fanout_spec.spl`
+still asserts `expect(stderr).to_equal("")` (lines ~215, ~225), which only a
+deployed pure-Simple `bin/release/<triple>/simple` can satisfy; the seed's
+mandatory banner makes every available binary fail that assertion. Per this
+doc's own reasoning the assertion must not be relaxed.
+
+**Grant addendum (verbatim unblock path):** in a lane authorized to run the
+bootstrap build, deploy the self-hosted binary (`bin/simple build bootstrap`
+or the release-channel equivalent) so `bin/release/<triple>/simple` exists,
+then set `SIMPLE_2D_BITMAP_BASELINE_NS` / `SIMPLE_2D_BITMAP_BASELINE_CHECKSUM`
+from the pinned host and run:
+
+    bin/simple test test/05_perf/stress/multicore_green_fanout_spec.spl
+    bin/simple test test/05_perf/graphics_2d/simple_2d_vector_fonts_perf_spec.spl
+
+A P3 triage lane is not granted a bootstrap rebuild, so this row stays BLOCKED.
 
 ## 1. `test/05_perf/stress/multicore_green_fanout_spec.spl` — needs a self-hosted binary
 
