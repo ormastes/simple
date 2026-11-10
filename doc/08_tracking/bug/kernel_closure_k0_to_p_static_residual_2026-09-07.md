@@ -1,7 +1,9 @@
 # Kernel closure: 10 residual K0 -> P_STATIC imports (2026-09-07)
 
-Status: OPEN (partial fix landed). Guard:
-`sh scripts/check/check-kernel-closure.shs`.
+Status: FIXED for the 10 recorded edges (2026-11-11, lane ne13) — the guard
+still FAILs on 19 newer edges unmasked by this triage; see the 2026-11-11
+addendum at the end of this file before trusting any per-edge claim here.
+Guard: `sh scripts/check/check-kernel-closure.shs`.
 Partition authority: `doc/04_architecture/compiler/plugin_arch/kernel_pluggable_partition.md` §3.
 Migration plan: `doc/03_plan/compiler/plugin_arch/kernel_plugin_migration_plan.md`.
 
@@ -128,3 +130,60 @@ across 13 files under `src/compiler`.
 sh scripts/check/check-kernel-closure.shs --selftest   # 4 fixture rounds, fatal
 sh scripts/check/check-kernel-closure.shs              # FAIL, 10 K0->P imports
 ```
+
+## Addendum 2026-11-11 (lane ne13) — recorded 10 edges are FIXED; guard still red, two layers
+
+**Verification actually run** (this lane, worktree simple-p3-ne13-20261111,
+release/1.0.0 tip c8b6d0ebe90e):
+
+```
+sh scripts/check/check-kernel-closure.shs --selftest   # kernel closure self-test OK (11 fixtures)
+sh scripts/check/check-kernel-closure.shs
+# before this lane's manifest repair:
+#   FAIL — 2621 classified, 20 unclassified   (all 20 = src/compiler/bootstrap_admission/**)
+# after:
+#   FAIL — 2641 classified, 0 unclassified, 1 K0->P, 3 K1->P, 15 kernel->app/os, 0 unresolved
+```
+
+**The 10 recorded K0->P_STATIC edges are gone.** None of the nine VHDL edges
+nor the `layer_call_wiring -> compiler.tools.verify.layer_call_scan` edge
+appears in the current violation scan. The fixing change is the Phase 5
+backend-plugin migration this doc names as the correct fix: the non-bootstrap
+backend implementations and their driver outputs now live under
+`src/plugins/backend_*/` (e.g. `driver_aot_vhdl_output.spl` is now
+`plugins/backend_vhdl/driver/driver_aot_vhdl_output`, the VHDL impl under
+`plugins/backend_vhdl/vhdl/`; `src/compiler/backend/` no longer exists). The
+kernel scan covers only `src/compiler`, so the recorded hard-links are out of
+the kernel by construction, and the live scan confirms zero K0->P_STATIC edges
+for the recorded files. The K0 driver holds the interface, not the
+implementation — the architecture this doc asked for.
+
+**Layer 1 (fixed in this lane): 20 unclassified `bootstrap_admission` files
+were masking the entire edge scan.** The checker is fail-closed: while any
+file is unclassified it prints only KERNEL-CLOSURE-001 and exits BEFORE the
+import scan (`END { if (missing > 0) exit 1 }`). `src/compiler/bootstrap_admission/`
+(20 files incl. `signature_owner_diagnostic/`) landed after the manifest was
+written and never got a row. Fixed by adding one `entries:` row:
+`P_STATIC|src/compiler/bootstrap_admission/**` — admission fixtures compiled by
+bootstrap verification scripts (`check-bootstrap-stage2-struct-receiver.shs`,
+`candidate_frontend_admission.shs`, `bootstrap-from-scratch.sh` and peers), no
+`src/` importer outside the directory, not on any kernel path — same precedent
+as `src/compiler/test/**` and the §3 "not on any kernel path" reading. The
+`rules:` projection was deliberately NOT touched (the manifest's own NOTE:
+editing it changes the bootstrap kernel-inputs hash, which cannot be verified
+without a bootstrap run — out of this lane's grant).
+
+**Layer 2 (unmasked, NEW, needs the architecture owner — do not read this doc
+as "guard green"):** with classification complete the edge scan now reports 19
+boundary edges introduced by KPF-worker / dynsmf / backend_plugin work
+(2026-10/11), invisible since `bootstrap_admission` landed:
+
+- 1 K0->P: `80.driver/driver_aot_pipeline.spl -> plugins.backend_vhdl.driver.driver_aot_vhdl_output`
+- 3 K1->P: `70.backend/backend/_VhdlProcess/process_codegen.spl -> plugins.backend_vhdl.vhdl.{vhdl_builder,vhdl_helpers}`, `70.backend/backend/_VhdlProcess/terminator_codegen.spl -> plugins.backend_vhdl.vhdl.vhdl_builder`
+- 15 K0/K1->app/os, incl. `99.loader/{module_loader_compat,loader/module_loader}.spl -> os.smf.{dynsmf_owned_v2,smf_dynlib,smf_generation}`, `70.backend/backend_plugin/kpf_worker/session.spl -> os.smf.kernel_plugin.*` (5), `70.backend/linker/linker_pack{,_entry}.spl -> os.smf.*`, `70.backend/introspection/elf_artifact_gate.spl -> app.io.file_ops`, `95.interp/execution/mod.spl -> app.io.jit_sffi`, `70.backend/linker/test/smf_header_reader_parity_spec.spl -> {os.smf.*, app.startup.launch_metadata}`
+
+These are genuine per the WP-05-widened checker and each needs a §3-cited
+owner decision (reclassify the source file, relocate the import behind a K0
+interface, or record an explicit manifest exemption). They are NOT the 10
+edges recorded above; this lane routed them here instead of leaving them
+masked behind the unclassified failure.
