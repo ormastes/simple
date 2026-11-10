@@ -160,3 +160,26 @@ unrelated to the `errors.spl` `kind` regression that test guards. None of the
 23 failing functions are in `src/app/devhub/**`; fixing them belongs to the
 http_client/seed-JIT lane. No source change was made for this record.
 
+
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 31)
+
+**Verdict: SUPERSEDED (defect class fixed; corroborated + fresh seed-smoke).**
+
+Re-verified at this lane's base (origin/release/1.0.0):
+
+- Compiler fix `bb27a92a7a8` (devhub 175→21 among four native-build fixes)
+  is an ancestor of this base.
+- `src/lib/common/json/__init__.spl` (14 lines) now declares real `export
+  use` owner-module edges (`common.json.{array_ops,object_ops,parser,
+  path_ops,serializer,types,utilities,validation}.*`), and the facade
+  closure defect that made those edges necessary
+  (`entry_closure_drops_facade_reexport_owner_modules_2026-09-03.md`) is
+  fixed via `7d8820319a2` / `5334d6c7b3d` / `4a5b072e594` — all ancestors.
+- Fresh seed-smoke (worktree Rust seed `bin/simple.exe`, label seed-smoke):
+  `bin/simple.exe run src/app/devhub/main.spl --version` → `devhub 0.1.0`,
+  exit 0 (2026-11-10).
+
+The remaining sibling items (search `Id`, `print_raw`, `errors.spl kind`,
+`rt_env_cwd`, stage2 SEGV-after-monomorphize) are tracked in their own
+records, not this one. No change made in this lane.
