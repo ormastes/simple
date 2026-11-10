@@ -1,6 +1,6 @@
 # riscv64 in-guest: MIR lowering rejects `main` with a raw-0 HirType kind
 
-- Status: **OPEN** — the current blocker for goal item 1 row 2, and a NEW one.
+- Status: **FIXED** 2026-11-11 — repair verified live at tip by p3-boot12; pinned guard-script classifier drift found and fixed in the same lane
 - Date: 2026-09-01
 - Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`
   row 2 (`buildrun`)
@@ -207,3 +207,37 @@ fix; the pinned guard and the unit spec above are the authoritative
 hosted evidence. The behavioural in-guest half (real OpenSBI boot) is
 not re-run here; the guard's transcript mode plus the original measured
 nonce runs remain the in-guest evidence of record.
+
+
+## Triage 2026-11-11 (P3 boot12 lane, work/p3-boot12-20261111)
+
+**Verdict: FIXED — the documented repair is live at this base and re-verified
+first-hand; a pinned-guard-script drift found during verification is fixed in
+this lane (companion commit).**
+
+- Source re-read: `match_result_mir_type`
+  (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1672-1712`)
+  carries both formation guards — `if expected_found == None:` (:1703) and
+  `if hir_type_kind_discriminant(expected_found.kind) < 0:` (:1705) — before
+  the `.kind` match, with the measured in-guest probe comment intact.
+- Seed-smoke (fresh seed 46fe8f6b6def, label seed-smoke, 2026-11-11):
+  `SIMPLE_LIB=src bin/simple.exe test
+  test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl
+  --mode=interpreter --no-cache` → `Results: 4 total, 4 passed, 0 failed`.
+- NEW FINDING, fixed in this lane:
+  `scripts/check/check-rv64-match-result-type-guarded.shs` (wired at
+  `.github/workflows/code-idiom-gates.yml:1213`) was falsely RED at this
+  base. Source drift d5943d124053 (`nil` → `None` across src/compiler/50.mir)
+  plus the discriminant-helper guard idiom introduced by later merges are not
+  recognized by the classifier's `== (0|nil):` regex, so the ratchet cried
+  wolf on the exact fix it pins (run 2026-11-11, pre-fix: FAIL / rc=1).
+  Classifier extended to accept `== None` and
+  `hir_type_kind_discriminant(<bound>.kind) < 0`, with two new must-PASS
+  selftest fixtures for the drifted shapes (selftest 8 → 10 fixtures).
+  Re-run post-fix: selftest OK (10 fixtures), source mode PASS (rc=0), and
+  still RED (rc=1) on a synthetic unguarded body — the ratchet keeps its
+  original sensitivity.
+
+The behavioural in-guest half (real OpenSBI boot) is not re-run here, per the
+2026-11-05 lane's scope note; the pinned guard plus the hosted unit spec
+remain the authoritative hosted evidence.

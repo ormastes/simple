@@ -2,7 +2,7 @@
 
 - **ID:** BUG-2026-08-16-selfhost-test-segv-blocks-bootstrap
 - **Date:** 2026-08-16
-- **Status:** open
+- **Status:** STALE 2026-11-11 — subject deployed binary and Stage-1 "bounded test ABI probe" gate no longer exist in-tree (verified by p3-boot12)
 - **Severity:** high — no pure-Simple self-hosted test evidence is obtainable
   in-tree, and the documented recovery path (re-bootstrap) is itself blocked
 - **Component:** `release/x86_64-unknown-linux-gnu/simple` (git-tracked),
@@ -147,3 +147,22 @@ gate, both gone at this lane's base (origin/release/1.0.0):
   SIGSEGV → planner refuses → from-scratch hard-requires receipt) is a
   2026-08-16 deployment state; current deployment state is tracked by the
   `deployed_bin_simple_*` family. No change made in this lane.
+
+
+## Triage 2026-11-11 (P3 boot12 lane, work/p3-boot12-20261111)
+
+**Verdict: STALE — confirms the 2026-11-10 p3-boot4 verdict with first-hand
+evidence on this base.**
+
+- Subject binary `release/x86_64-unknown-linux-gnu/simple` (md5
+  dcc9f8eae05d512f88d2f5f9fef6af0f) absent in this worktree (ls rc=2); the
+  SIGSEGV condition cannot be re-run, as boot4 recorded after #1054
+  (6b3e640c3fde) untracked it.
+- Stage-1 gate string "bounded test ABI probe" / "test ABI probe": zero hits
+  anywhere in `scripts/` or `src/app/cli/` (grep -rn, empty output).
+- `scripts/bootstrap/bootstrap-from-scratch.sh` now validates typed receipt
+  reasons through `bootstrap_planner_v2` (:92
+  `bootstrap_planner_v2_reason_allowed`; :806/:815 planner-verify comments) —
+  the self-sealing receipt loop the doc described is a 2026-08-16 state.
+
+No change made in this lane.
