@@ -118,3 +118,36 @@ set says done, and were not promote roots. Added. The only class-typed MirLoweri
 `test/01_unit/compiler/mir/transient_owner_promotes_every_field_spec.spl`, which was red on
 release before this fix and green after). `struct_method_syms` is retired and rebuilt per module
 inside the module scope, so it is not a cross-scope survivor.
+
+## Gate reconciliation and remaining verification (2026-11-10)
+
+At release source `6d496f82c5a`, the MIR boundary gate rejected the correctly
+promoted RTI child roots because its derived inventory omitted
+`ReturnTypeInterfaceTable`. It also expected the older abort helper without
+`bootstrap_mir_store_discard_pending()`, so it misreported six error exits as
+unpaired. The guard now derives RTI children from their declarations and requires
+pending bootstrap rows to be discarded before reverse-owner abort and scope end.
+
+Root coverage compares exact field-path sets. Repeated promotion of the same
+field does not add coverage or hide a missing/extra field. The owner grammar still
+allows only the known promotion helper, and that helper must promote and free
+each temporary wrapper. The runtime promotion-share contract
+(`src/runtime/runtime_native.c`, promotion-share comment) preserves the same
+promoted object set across repeated unchanged roots. Positive duplicate-root and
+negative duplicate-without-free fixtures check these independent invariants.
+
+After those scanner corrections, the real source still fails the inventory
+check: `builder.module.attr_sites`, `target_context.build_profile`,
+`target_context.subarch`, and `target_context.cpu_tier` are declared fields but
+absent from `promote_transient_owner`. These are an actual inventory gap, not a
+reason to loosen the guard. Their source repair and native qualification are
+tracked separately from the scanner correction.
+
+The canonical original-form native fixture is
+`test/fixtures/compiler/native_unresolved_owner_method/struct_method.spl`. It
+now returns nonzero when `custom.get()` produces the wrong value, instead of
+silently returning zero without printing the expected marker. Qualification
+requires the selected new compiler's native-build command to succeed and its
+output executable to return zero and print `PASS vb_mm1`, with no invalid-array,
+unresolved-method, or E-RTI-006 diagnostics. Historical manual relinks and the
+source guard do not establish that outcome. This bug remains verification pending.
