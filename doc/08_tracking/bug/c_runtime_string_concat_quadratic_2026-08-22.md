@@ -228,3 +228,50 @@ nothing until the link line gains `runtime.c` or a stub.
   at N=10k/40k/160k measured 110.9 ms / 399 ms / 1,798 ms on the seed interpreter, i.e. linear).
   Status: **fix-implemented-verification-pending**. Still to do: a native-lane run with the opt-in flag,
   then default-on.
+
+## 2026-11-10 status — P3 runtime-lane triage (worktree simple-p3-rt-20261110)
+
+**Verdict: SUPERSEDED for the `src/runtime` lane — the runtime side is a
+recorded, thrice-confirmed design stop, and the owner fix lives compiler-side.**
+The 2026-08-22 / 2026-08-24 / 2026-11-09 design stops (the last including the
+empirical aliasing proof that after `s = s + "b"` a second holder `val t = s`
+still observes the old bytes) stand: any runtime-only in-place append is a live
+aliasing bug, strictly worse than quadratic. Verified present at base
+1504212d788b: the owner fix is the opt-in MIR string-builder optimization
+(`src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl`, gated on
+`SIMPLE_MIR_STRING_BUILDER_OPT=1` pending native verification), landed
+2026-11-07 per the entry above. `src/runtime` intentionally unchanged.
+
+Side observation (`scripts/check/check-runtime-concat-nul.shs` "tests
+nothing"): **already fixed for the Linux lane** by `cc77b18719a6` (2026-11-09,
+sound-verdict-oracle pass — the probe now owns a `spl_panic` stub and the
+script is verdict-conforming). On this Windows host the check is RED at the
+link step (fail-closed, verdict-conforming, but still tests nothing here).
+This session attempted a Windows-lane harness repair and stopped per budget
+after 3 of 6 cycles; both files were reverted to origin, byte-identical:
+
+1. `-ldl` is passed unconditionally → `lld: unable to find library -ldl`
+   (no libdl on UCRT; also broken on Darwin).
+2. With `-ldl` made Linux-only: `lld` then reports 19 undefined symbols —
+   on PE/COFF, `lld-link --gc-sections` keeps every defined symbol as a gc
+   root, so `runtime_native.c`'s full graph must resolve (the only
+   constructor is the `_WIN32`-gated binary-stdio ctor at
+   `runtime_native.c:4006`, so this is not constructor-rooted; it is the
+   COFF exported-symbol root rule). Missing: `spl_print`/`spl_println`/
+   `spl_str_*`/`spl_strdup` family, `spl_f64_to_bits`, `rt_simd_has_*`,
+   `rt_getcwd`, `rt_sleep_ms_native`, `rt_text_slice_audit_*`,
+   `WinHttpCrackUrl`.
+3. Linking the designed core-C bridge set (`runtime_legacy_core.c`,
+   `runtime_simd_utf8.c`, `runtime_simd_dispatch.c` + `-lwinhttp`, mirroring
+   the capsule composition) reduced failures to a single duplicate
+   `spl_panic` (probe stub vs `runtime_legacy_core.c:471`) — but the closure
+   then grew again (`WSAPoll`/`accept`/`bind` Winsock family via `-lws2_32`,
+   `rt_process_run_*`, `rt_open_fd` from `runtime_process.c`). A complete
+   fix needs the capsule-grade provider closure (≈19 sources) plus
+   cross-platform verification this host cannot run; landing it unverified
+   would risk the Linux lane the previous fix already proved.
+
+Follow-up for the owning lane: either run the capsule-grade closure on
+Linux/Darwin CI, or scope the probe's runtime surface (compile
+`runtime_native.c` with a `-ffunction-sections` + hidden-symbol COFF link).
+Labels: windows-lane-compile attempt; host-limited completion.
