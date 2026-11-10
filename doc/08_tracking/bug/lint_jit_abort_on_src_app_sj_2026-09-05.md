@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-05
-- Status: OPEN
+- Status: FIXED (2026-11-11, lane ne14) — lint default lane interpreter-pinned (b41d64cad69d); verified on release/1.0.0 tip, see addendum
 - Severity: tooling — the linter cannot be run at all on two files on the landing path
 - Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, 154560904 bytes, mtime 2026-09-04 14:46:17 +0900 (Rust seed)
 
@@ -75,3 +75,31 @@ Crash reports were written to `.simple/logs/crash_2055979.log`,
 `.simple/logs/crash_2056619.log`, `.simple/logs/crash_2056845.log`,
 `.simple/logs/crash_2057276.log`.
 
+
+## Addendum 2026-11-11 (lane ne14) — FIXED, verified on release/1.0.0
+
+**Fixing change:** `b41d64cad69d` (2026-10-10) — lint's default lane is now the
+interpreter (`interpreter_preference_reason` returns `lint-jit-parity-unproven`
+for `src/app/cli/lint_entry.spl`), so the cranelift `finalize_definitions`
+abort path is no longer reachable by the documented `bin/simple lint <file>`
+invocation; plus the seed itself is ~2 months newer than the reported binary
+(2026-09-04 aarch64 Rust seed) with extensive codegen fixes. This record's own
+"Not yet established" question — "whether a pure-Simple (non-seed) bin/simple
+reproduces it" — is moot for the user-facing tool: the linter no longer enters
+the JIT lane by default anywhere.
+
+**Verification actually run** (seed-smoke, worktree simple-p3-ne14-20261111,
+fresh seed 46fe8f6b6def, SIMPLE_LIB=src):
+
+| probe | 2026-09-05 verdict | today |
+|---|---|---|
+| `bin/simple lint src/app/sj/main.spl` | exit 134 SIGABRT in `finalize_definitions` | **rc 0**, lints to completion (0 errors, 2 warnings — real findings) |
+| `bin/simple lint src/app/sj/integrate_plan.spl` | exit 134 SIGABRT | **rc 0**, lints to completion (3 errors, 5 warnings — real findings) |
+| control: `bin/simple lint src/app/sj/client.spl` | exit 0 clean | exit 0 clean (unchanged) |
+
+No `[INFO] JIT compilation failed, falling back to interpreter` and no panic
+string on either offender — the runs are the pinned interpreter lane, which is
+the landed mitigation. `integrate_plan.spl`'s 3 lint errors are ordinary rule
+findings for that file's authors, not this defect. The `.claude/rules/
+commands.md` `bin/simple lint <changed files>` step is again satisfiable for
+both files.

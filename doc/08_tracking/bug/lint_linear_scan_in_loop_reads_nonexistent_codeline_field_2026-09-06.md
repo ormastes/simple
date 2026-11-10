@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
-**Status:** OPEN — recorded, not fixed (see "Why this was not fixed in passing")
+**Status:** FIXED (2026-11-11, lane ne14) — fixing commit eea2a322ac74; verified on release/1.0.0 tip, see addendum
 **Severity:** High for tooling — the linter cannot complete on affected files,
 so `bin/simple lint <changed files>` (a `.claude/rules/commands.md` step) is
 unreliable.
@@ -95,3 +95,25 @@ unrelated to this defect and does not touch `src/compiler/`.
    analysed nothing must not exit 0 (same principle the pre-push guards apply —
    `ERROR — nothing was checked` is exit 2, never a pass).
 
+
+## Addendum 2026-11-11 (lane ne14) — FIXED, verified on release/1.0.0
+
+**Fixing commit:** `eea2a322ac74` "fix(lint): read CodeLine.trimmed in
+linear_scan_in_loop" (2026-10-09). The rule now reads `cl.trimmed` (line 219);
+no `.code` reference remains anywhere in
+`src/compiler/35.semantics/lint/linear_scan_in_loop.spl`. A spec case was added
+by the same commit.
+
+**Verification actually run** (seed-smoke, worktree simple-p3-ne14-20261111,
+fresh seed 46fe8f6b6def, SIMPLE_LIB=src, `--mode=interpreter --no-cache`):
+
+| probe | 2026-09-06 verdict | today |
+|---|---|---|
+| `test/01_unit/compiler/lint/linear_scan_in_loop_spec.spl` | (rule never ran) | **8/8 PASS** |
+| `bin/simple lint src/app/devhub/retry.spl` (original repro) | `error: class CodeLine has no field named code`, exit 0 lie | **"Lint passed: all files clean"** |
+
+The `PERF-SCAN-001` rule now executes; the whole-linter abort and the
+exit-0-despite-analyzing-nothing shape are gone. (The sibling "linter must exit
+non-zero on abort" item was separately fixed by the fail-closed work recorded
+in `mcdc_wrapped_copy_undefined_identifier_dir_only_2026-09-02.md`'s runner and
+the 2026-09-12 degrade; not re-litigated here.)
