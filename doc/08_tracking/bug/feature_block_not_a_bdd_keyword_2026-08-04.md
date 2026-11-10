@@ -153,3 +153,28 @@ it to `BDD_KEYWORDS` — but it needs a lane that owns the seed rebuild, plus a
 SPipe-owner decision on whether `feature` is blessed vocabulary or the specs
 should be migrated instead.
 
+
+## 2026-11-10 triage (lane p3-runner3, row 17): LIVE — seed-side, out of lane
+
+Re-verified with the worktree seed-smoke binary (bin/simple.exe, v1.0.0-rc.1):
+`test/03_system/compiler/graph_utils_spec.spl` still fails with
+`error[E1002]: function 'feature' not found` + `test-runner: no examples
+executed` (declared>=6 executed=0). The legacy `test/system/` and `test/unit/`
+tree duplicates were removed since the 2026-09-13 re-count; 8 files still open
+with `feature "` (5 unique specs + `bdd_feature_group_keyword_spec.spl`).
+
+Fix surface is the Rust seed (`src/compiler_rust/**`, seed-fix lane active) —
+out of scope here, so no edit made. Sketch for the seed-fix lane (unchanged
+from this doc's root-cause section):
+1. `src/compiler_rust/compiler/src/interpreter_call/bdd.rs` — extend the
+   group-function match arm `"describe" | "context"` with `"feature"` (and
+   `"scenario"` if blessed), treating it as top-level like `describe` in the
+   `name == "describe"` branch.
+2. `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs` — same arm
+   extension on the HIR/JIT lane.
+3. `src/compiler_rust/compiler/src/lint/checker_spipe.rs` `BDD_KEYWORDS` —
+   add `"feature"`.
+4. Rebuild + redeploy the seed, then flip/triage the 8 spec files in the same
+   change (per this doc's warning: turning 300+ dormant `it` blocks on may
+   surface new red — triage in the same PR, and keep
+   `bdd_feature_group_keyword_spec.spl` honest).

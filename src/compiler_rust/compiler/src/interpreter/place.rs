@@ -10,7 +10,7 @@
 //! unsupported place spelled two different ways.
 //!
 //! A place here is an environment-rooted variable plus an arbitrary chain of
-//! field / index projections. `resolve_place` turns an lvalue expression into
+//! field / index / unwrap projections. `resolve_place` turns an lvalue expression into
 //! that path, `write_place` performs the write-through, and both the assignment
 //! statement path and the mutating-method receiver path route through them.
 //!
@@ -36,7 +36,7 @@ use super::core_types::{Enums, ImplMethods};
 use super::expr::evaluate_expr;
 use super::interpreter_state::MODULE_GLOBALS;
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::value::{Env, Value};
+use crate::value::{Env, SpecialEnumKind, SpecialEnumType, Value};
 
 /// One projection step along an lvalue path.
 #[derive(Debug, Clone)]
@@ -45,6 +45,8 @@ pub(crate) enum Projection {
     Field(String),
     /// `[expr]` — the index/key already evaluated to a value.
     Index(Value),
+    /// `!` — preserve the writable payload of Some/Ok, or a direct nullable value.
+    Unwrap,
 }
 
 /// A resolved lvalue: a variable slot in `env` plus the projections that lead
@@ -70,6 +72,7 @@ pub(crate) fn place_has_index(expr: &Expr) -> bool {
     match expr {
         Expr::Index { .. } => true,
         Expr::FieldAccess { receiver, .. } => place_has_index(receiver),
+        Expr::ForceUnwrap(inner) => place_has_index(inner),
         _ => false,
     }
 }
@@ -123,14 +126,18 @@ pub(crate) fn resolve_place(
                 None => Ok(None),
             }
         }
-        // `m!.n = 44`: `!` on an optional class/struct is the identity on the
-        // value (it only narrows `T?` to `T`), so the unwrapped object is the
-        // SAME place as the wrapped one and must be writable through. Without
-        // this arm the interpreter rejected the shape with
-        // `field assignment target is not a place` while the JIT accepted it —
-        // an engine divergence.
-        // Bug: doc/08_tracking/bug/jit_optional_class_unwrap_field_access_segv_2026-08-20.md
-        Expr::ForceUnwrap(inner) => resolve_place(inner, env, functions, classes, enums, impl_methods),
+        // An implicit nullable object is its own place, but explicit Some/Ok
+        // has a payload slot. Keep the unwrap in the path so both forms write
+        // through the same storage that expression evaluation reads.
+        Expr::ForceUnwrap(inner) => {
+            match resolve_place(inner, env, functions, classes, enums, impl_methods)? {
+                Some(mut place) => {
+                    place.projections.push(Projection::Unwrap);
+                    Ok(Some(place))
+                }
+                None => Ok(None),
+            }
+        }
         _ => Ok(None),
     }
 }
@@ -278,10 +285,46 @@ fn value_as_u8(value: &Value) -> Option<u8> {
     }
 }
 
+/// Borrow exactly the value that the expression-level force unwrap reads.
+/// Canonical None/Err and nil have no writable payload; user enums and direct
+/// nullable values retain their identity. Never clone a payload for a write.
+fn unwrap_place_ref(slot: &Value) -> Option<&Value> {
+    match slot {
+        Value::Nil => None,
+        Value::Enum { enum_name, variant, payload }
+            if SpecialEnumType::from_name(enum_name).is_some() =>
+        {
+            match SpecialEnumKind::from_names(enum_name, variant) {
+                Some(SpecialEnumKind::OptionSome | SpecialEnumKind::ResultOk) => payload.as_deref(),
+                _ => None,
+            }
+        }
+        other => Some(other),
+    }
+}
+
+fn unwrap_place_mut(slot: &mut Value) -> Option<&mut Value> {
+    match slot {
+        Value::Nil => None,
+        Value::Enum { enum_name, variant, payload }
+            if SpecialEnumType::from_name(enum_name).is_some() =>
+        {
+            match SpecialEnumKind::from_names(enum_name, variant) {
+                Some(SpecialEnumKind::OptionSome | SpecialEnumKind::ResultOk) => payload.as_deref_mut(),
+                _ => None,
+            }
+        }
+        other => Some(other),
+    }
+}
+
 /// Take one projection step, yielding a mutable reference to the projected
 /// storage. `Arc::make_mut` keeps copy-on-write semantics: unique containers
 /// mutate in place, shared ones deep-copy first.
 fn step_mut<'a>(slot: &'a mut Value, projection: &Projection) -> Option<&'a mut Value> {
+    if matches!(projection, Projection::Unwrap) {
+        return unwrap_place_mut(slot);
+    }
     match (slot, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => Arc::make_mut(fields).get_mut(name),
         (Value::Dict(entries), Projection::Field(name)) => crate::interpreter::module_dict_make_mut(entries).get_mut(name),
@@ -403,6 +446,15 @@ fn write_through(slot: &mut Value, projections: &[Projection], value: Value) -> 
 /// not exist yet creates it, matching what the existing one- and two-level
 /// field-assignment paths do with `HashMap::insert`.
 fn store_last(container: &mut Value, projection: &Projection, value: Value) -> bool {
+    if matches!(projection, Projection::Unwrap) {
+        return match unwrap_place_mut(container) {
+            Some(payload) => {
+                *payload = value;
+                true
+            }
+            None => false,
+        };
+    }
     match (container, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => {
             Arc::make_mut(fields).insert(name.clone(), value);
@@ -612,6 +664,9 @@ pub(crate) fn place_read(env: &Env, place: &Place) -> Option<Value> {
 
 /// Read-only counterpart of `step_mut`.
 fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
+    if matches!(projection, Projection::Unwrap) {
+        return unwrap_place_ref(slot);
+    }
     match (slot, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => fields.get(name),
         (Value::Dict(entries), Projection::Field(name)) => entries.get(name),
@@ -772,6 +827,116 @@ mod tests {
             fields: Arc::new(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect()),
         }
     }
+
+    fn p1_enum_opt_wrapped(owner: &str, variant: &str, payload: Option<Value>) -> Value {
+        Value::Enum {
+            enum_name: owner.into(),
+            variant: variant.into(),
+            payload: payload.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn forceunwrap_place_keeps_option_and_result_wrappers_and_cow_aliases() {
+        for (owner, variant) in [("Option", "Some"), ("Result", "Ok")] {
+            let wrapped = p1_enum_opt_wrapped(owner, variant,
+                Some(object("Cell", vec![("n", Value::Int(5))])));
+            let mut env = Env::new();
+            env.insert("item".into(), wrapped.clone());
+            env.insert("alias".into(), wrapped);
+            let place = Place { root: "item".into(),
+                projections: vec![Projection::Unwrap, Projection::Field("n".into())] };
+            assert!(place_is_live(&env, &place));
+            assert_eq!(place_read(&env, &place), Some(Value::Int(5)));
+            assert!(write_place(&mut env, &place, Value::Int(7)));
+            assert_eq!(place_read(&env, &place), Some(Value::Int(7)));
+            let alias = Place { root: "alias".into(), projections: place.projections.clone() };
+            assert_eq!(place_read(&env, &alias), Some(Value::Int(5)));
+            assert!(matches!(env.get("item"), Some(Value::Enum { enum_name, variant: actual, .. })
+                if enum_name == owner && actual == variant));
+        }
+    }
+
+    #[test]
+    fn forceunwrap_place_rejects_absent_and_malformed_special_values_without_writes() {
+        for original in [Value::Nil,
+            p1_enum_opt_wrapped("Option", "None", None),
+            p1_enum_opt_wrapped("Option", "Some", None),
+            p1_enum_opt_wrapped("Result", "Err", Some(Value::Int(5))),
+            p1_enum_opt_wrapped("Result", "Ok", None),
+            p1_enum_opt_wrapped("Option", "Bad", Some(Value::Int(5))),
+        ] {
+            let mut env = Env::new();
+            env.insert("item".into(), original.clone());
+            let place = Place { root: "item".into(), projections: vec![Projection::Unwrap] };
+            assert!(!place_is_live(&env, &place));
+            assert_eq!(place_read(&env, &place), None);
+            assert!(!write_place(&mut env, &place, Value::Int(7)));
+            let field = Place { root: "item".into(),
+                projections: vec![Projection::Unwrap, Projection::Field("n".into())] };
+            assert!(!write_place(&mut env, &field, Value::Int(7)));
+            assert_eq!(env.get("item"), Some(&original));
+        }
+    }
+
+    #[test]
+    fn forceunwrap_place_is_identity_for_direct_values_and_user_enums() {
+        for original in [Value::Int(5),
+            p1_enum_opt_wrapped("UserOption", "Some", Some(Value::Int(5))),
+            object("Cell", vec![("n", Value::Int(5))]),
+        ] {
+            assert!(std::ptr::eq(unwrap_place_ref(&original).unwrap(), &original));
+            let mut copy = original;
+            *unwrap_place_mut(&mut copy).unwrap() = Value::Int(7);
+            assert_eq!(copy, Value::Int(7));
+        }
+    }
+
+    #[test]
+    fn forceunwrap_place_nested_payload_replacement_preserves_outer_wrappers() {
+        let mut env = Env::new();
+        env.insert("item".into(), p1_enum_opt_wrapped("Option", "Some",
+            Some(p1_enum_opt_wrapped("Result", "Ok", Some(Value::Int(5))))));
+        let place = Place { root: "item".into(),
+            projections: vec![Projection::Unwrap, Projection::Unwrap] };
+        assert!(write_place(&mut env, &place, Value::Int(7)));
+        assert_eq!(env.get("item"), Some(&p1_enum_opt_wrapped("Option", "Some",
+            Some(p1_enum_opt_wrapped("Result", "Ok", Some(Value::Int(7)))))));
+    }
+
+    #[test]
+    fn forceunwrap_place_preserves_shared_class_identity() {
+        use crate::value::ClassInstance;
+        let instance = Arc::new(ClassInstance::new("Cell".into(),
+            [("n".into(), Value::Int(5))].into_iter().collect()));
+        let mut env = Env::new();
+        env.insert("item".into(), p1_enum_opt_wrapped("Option", "Some",
+            Some(Value::ClassInstance(instance.clone()))));
+        let place = Place { root: "item".into(),
+            projections: vec![Projection::Unwrap, Projection::Field("n".into())] };
+        assert!(write_place(&mut env, &place, Value::Int(7)));
+        assert_eq!(instance.field("n"), Some(Value::Int(7)));
+    }
+
+    #[test]
+    fn forceunwrap_place_resolver_keeps_unwrap_and_index_observation() {
+        let mut env = Env::new();
+        env.insert("item".into(), p1_enum_opt_wrapped("Option", "Some", Some(Value::Int(5))));
+        let expr = Expr::ForceUnwrap(Box::new(Expr::Identifier("item".into())));
+        let place = resolve_place(&expr, &mut env, &mut HashMap::new(), &mut HashMap::new(),
+            &Default::default(), &Default::default()).unwrap().unwrap();
+        assert!(matches!(place.projections.as_slice(), [Projection::Unwrap]));
+        let indexed = Expr::ForceUnwrap(Box::new(Expr::Index {
+            receiver: Box::new(Expr::Identifier("items".into())),
+            index: Box::new(Expr::Identifier("index".into())),
+        }));
+        assert!(place_has_index(&indexed));
+        assert!(!place_has_index(&expr));
+        let missing = Expr::ForceUnwrap(Box::new(Expr::Identifier("missing".into())));
+        assert!(resolve_place(&missing, &mut env, &mut HashMap::new(), &mut HashMap::new(),
+            &Default::default(), &Default::default()).unwrap().is_none());
+    }
+
     #[test]
     fn classinstance_tripwire_fires_once_per_site_only_when_enabled() {
         use crate::value::ClassInstance;

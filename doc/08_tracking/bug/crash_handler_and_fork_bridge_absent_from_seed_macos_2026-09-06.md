@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** BLOCKED — needs an admitted self-hosted macOS binary (re-triaged 2026-11-04)
+**Status:** STALE — needs an admitted self-hosted macOS binary (re-triaged 2026-11-04)
 **Found:** 2026-09-06, macOS aarch64 (Darwin 25.5.0)
 **Binary under test:** `src/compiler_rust/target/debug/simple` (the only binary
 this lane is permitted to use; a bootstrap is forbidden this session)
@@ -133,3 +133,38 @@ pass.
 **Still pending:** run that spec on an admitted self-hosted macOS binary
 (bootstrap lane) and confirm the two examples execute and pass; then flip this
 record to FIXED.
+
+---
+
+## Addendum 2026-11-11 — lane seed2 — verdict STALE
+
+Triage-first pass, batch 2, judged against the refreshed seed (bin/simple.exe,
+build-commit 0791c2b7f4a7, 2026-11-11 refresh #8184). The row's premise — missing
+code in the seed — was already disproven by the 2026-11-04 re-triage and native
+selfcheck; nothing about the 2026-11-11 refresh changes the classification.
+
+**Why STALE, not LIVE/SUPERSEDED:** the defect as filed ("handler + fork bridge
+absent from the Rust seed") is not a code gap. Both halves exist and are correct
+in `src/runtime/` (`rt_install_crash_handler` real POSIX impl at runtime.c:3244,
+`_WIN32` stub at :3257 returning 0; `runtime_fork.c` is a `_WIN32` stub
+deliberately — fork has no Windows equivalent). Adding a Rust-seed twin was
+already ruled out 2026-11-04 as "a twin with no consumer". On the refreshed
+Windows seed the `nm` counts for `rt_fork_*` / `rt_install_crash_handler` are 0
+by platform design, not by omission; the macOS SIGSEGV/fork contract itself was
+proven correct natively on macOS arm64 2026-11-04 (rc=139, signaled==false,
+banner + Backtrace:, 15/15 checks). The residual blocker — an *admitted
+self-hosted macOS Stage-2+ binary* — belongs to the macOS bootstrap admission
+lane, not to this Windows P3 lane and not to `src/compiler_rust`.
+
+**Seed-smoke (this lane's proof):**
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+test/01_unit/lib/crash/crash_bundle_spec.spl --mode=interpreter --no-cache`
+-> `outcome=OK declared>=5 executed=5 passed=5 failed=0` and summary
+`5 total, 5 passed, 0 failed, 2 skipped` — byte-identical to the expectation
+recorded 2026-11-04 on the old seed (`release100-7a0e6fe516f-20261031`). The
+two fork examples (`check_fork_bridge_captures_clean_child`,
+`check_null_write_hits_crash_handler`) report an explicit interpreter skip, not
+a silent-nil vacuous pass, exactly as designed.
+
+**Cycles:** 0 (no live defect; no fix attempted). Evidence: this addendum +
+seed-smoke transcript in `build/review/p3fix-seed2-20261111.sdn`.

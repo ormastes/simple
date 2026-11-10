@@ -121,3 +121,51 @@ beside the class.
 Found while working the compiler `.spl` slice; the accessor workaround is in the
 same change that filed this row.
 
+
+## 2026-11-10 P3-boot5 triage (row 37) — LIVE (residual, fix owned by seed-fix lane)
+
+The bare-name class-registry mechanism this record indicts was substantially
+fixed: `6ae0170f5e49` (PR #6981, per-owning-module same-name enum/class
+resolution) and `4a5740091035` (PR #7498, module-qualified type registry,
+657-line `module_cache.rs` change adding `resolve_class_in_scope`) are both
+ancestors of HEAD `4343ce254922`. The accessor workaround for
+`imported_type_methods_in_progress` still exists
+(`context_helpers.spl:28-34`, used from `module_reexport_materialization.spl:1524-1526`)
+but the field is now a normally declared class field
+(`types.spl:182`, constructor `:772`).
+
+However the fix's own regression pins FAIL on the current Windows seed
+(worktree bin/simple.exe built 2026-11-10 15:00, after all three merges):
+
+- `test/01_unit/compiler/95.interp/interpreter/module_qualified_type_registry_spec.spl`
+  --mode=interpret -> FAIL (3 passed, 5 failed). The failures are exactly this
+  record's symptom strings: "unknown static method zero on class Vec3"
+  (`a_vec_zero_sum`), "class `Config` has no field named `backend`"
+  (`a_config_backend`), "unknown variant or method 'Fast' on enum Mode"
+  (`a_mode`) — i.e. module `use_a`'s explicit named imports
+  (`use test.helpers.modqual.geo_a.{Vec3, Config, Mode, ...}`) resolve to
+  `geo_b`'s same-named definitions (registered last win), while all `use_b`
+  calls pass. Not baselined in
+  `scripts/check/use_target_resolves_baseline.txt`.
+- `.../module_qualified_type_registry_prevention_spec.spl` -> FAIL (1 passed,
+  11 failed), same shape.
+
+Control: `test/03_system/gpu_lane/cuda_jit_hello_spec.spl` (same collision
+family, cited by `916af0e33400` interp-lane triage today) passes 14/14 on the
+same seed, so the seed carries the fix and the residual is shape-specific:
+the named-use-import path (`use m.{A, B}` importing same-named types) is not
+covered by `resolve_class_in_scope`, or the Windows path-separator form of
+those import keys is not normalized (`cc397582f447` fixed separator bugs in
+this area once already).
+
+Fix sketch for the seed-fix lane (src/compiler_rust — outside this lane's
+scope): (1) rerun the failing spec with
+`SIMPLE_DBG_COLLISION=1 ./bin/simple.exe test
+test/01_unit/compiler/95.interp/interpreter/module_qualified_type_registry_spec.spl
+--mode=interpret` and trace which registry tier serves `use_a`'s `Vec3`;
+(2) extend `resolve_class_in_scope` (src/compiler_rust/compiler/src/module_cache.rs)
+so named-import-list entries for same-named types bind to the imported module's
+definition before any global/last-registered tier, on Windows path spellings
+too; (3) green both modqual specs as the acceptance gate. The
+`imported_type_methods_in_progress` accessor workaround can be inlined back
+only after (3).

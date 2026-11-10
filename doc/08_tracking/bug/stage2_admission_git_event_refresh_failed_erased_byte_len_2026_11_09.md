@@ -77,3 +77,35 @@ Rebuild stage2 with the existing `seed.exe` from a stage2-rel that carries this 
 WA). No seed rebuild is needed. Presetting `SIMPLE_SCV_SNAPSHOT_ROOT` to skip the coordinator's
 authority acquisition is NOT viable: admission is skipped but the parse-shard closure then fails
 with `snapshot-open-not-owned`. No env knob disables the inventory.
+
+## Native verification gate (2026-11-10)
+
+The existing `inventory_split_line_byte_len_spec.spl` forces JIT execution.
+That is useful diagnostic coverage but does **not** qualify this LLVM failure:
+the same old seed already passed JIT while its LLVM output misdecoded the row
+length. The original untyped fixture now has an explicit native gate:
+
+```sh
+sh scripts/check/check-inventory-split-byte-len-native.shs \
+  /path/to/reviewed/compiler.exe <expected-lowercase-sha256> \
+  build/inventory-byte-len-native-attempt-1
+```
+
+The caller must establish the producer's source lineage before supplying its
+hash. The gate pins those exact bytes, requests LLVM `native-build`, refuses
+stub/delegate and stale-snapshot fallback, requires a fresh evidence directory, executes the
+result, and checks both process exits and exact `lens=11,14, short=0` output.
+It retains the compiler/fixture/artifact hashes, compile log, stdout, stderr,
+and SDN receipt. A caller-selected timeout defaults to 900 seconds per process.
+
+`--selftest <fresh-directory>` exercises ten wrapper controls using an
+explicit fake compiler. The accepted control requires LLVM routing and disabled
+fallbacks. Negative controls cover missing/mismatched/changed producers,
+inherited snapshots, compile/run failure, missing artifact, timeout, and the
+historical wrong output. These do not execute Simple and are not native qualification.
+
+This gate qualifies only the original untyped row fixture on the supplied
+producer. P0 closure still requires the corrected seed to rebuild stage2 and
+actual cold and warm inventory admission with the original loops. Keep both
+typed-text workarounds until those operations pass. No runtime PASS or bug
+closure is inferred from adding the gate or passing its wrapper controls.

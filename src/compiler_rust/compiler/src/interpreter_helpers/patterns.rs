@@ -659,7 +659,7 @@ enum PlaceMutation {
     Object(String, ResolvedMethod),
 }
 
-/// Resolve a pure field chain whose every holder is a `ClassInstance` to the
+/// Resolve a field/unwrap chain whose every holder is a `ClassInstance` to the
 /// innermost holder and the leaf field name. `None` for any other shape (index
 /// steps, struct/dict holders), which keeps those on their existing paths.
 fn class_hop_leaf(env: &Env, target: &super::super::place::Place) -> Option<(Arc<crate::value::ClassInstance>, String)> {
@@ -667,6 +667,10 @@ fn class_hop_leaf(env: &Env, target: &super::super::place::Place) -> Option<(Arc
     let mut cur = env.get(&target.root)?.clone();
     let last = target.projections.len().checked_sub(1)?;
     for (i, projection) in target.projections.iter().enumerate() {
+        if matches!(projection, Projection::Unwrap) {
+            cur = super::super::expr::try_unwrap_option_or_result(&cur)?;
+            continue;
+        }
         let Projection::Field(name) = projection else {
             return None;
         };
@@ -2548,6 +2552,31 @@ fn bind_collection_pattern(patterns: &[Pattern], values: Vec<Value>, is_mutable:
 mod cow_alias_mechanism_tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn forceunwrap_class_array_holder_keeps_the_in_place_fast_path() {
+        use crate::interpreter::place::{Place, Projection};
+        use crate::value::ClassInstance;
+        let instance = Arc::new(ClassInstance::new("Cell".into(),
+            [("items".into(), Value::array(vec![]))].into_iter().collect()));
+        let mut env = Env::new();
+        for wrapped in [
+            Value::ClassInstance(instance.clone()),
+            Value::Enum { enum_name: "Option".into(), variant: "Some".into(),
+                payload: Some(Box::new(Value::ClassInstance(instance.clone()))) },
+        ] {
+            env.insert("item".into(), wrapped);
+            let place = Place { root: "item".into(),
+                projections: vec![Projection::Unwrap, Projection::Field("items".into())] };
+            let (holder, field) = class_hop_leaf(&env, &place).expect("shared class field owner");
+            assert!(Arc::ptr_eq(&holder, &instance));
+            assert_eq!(field, "items");
+        }
+        env.insert("item".into(), Value::Nil);
+        let absent = Place { root: "item".into(),
+            projections: vec![Projection::Unwrap, Projection::Field("items".into())] };
+        assert!(class_hop_leaf(&env, &absent).is_none());
+    }
 
     fn arr_ptr(v: &Value) -> usize {
         match v {

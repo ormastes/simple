@@ -2650,6 +2650,15 @@ fn try_compile_builtin_method_call<M: Module>(
         // `trim_left`/`trim_right`: interpreter aliases of trim_start/trim_end.
         "trim_start" | "trim_left" => "rt_string_trim_start",
         "trim_end" | "trim_right" => "rt_string_trim_end",
+        // `split` is arity-aware, same as `substr` below: with a limit
+        // argument the interpreter consumes it via bounded `splitn` semantics
+        // (interpreter_helpers/method_dispatch.rs "split"), which the runtime
+        // mirrors in `rt_string_split_limit`. Mapping a two-arg call straight
+        // to `rt_string_split` dropped the limit on the floor (the extra arg
+        // was passed but never read), so `"a:b:c".split(":", 2)` returned the
+        // full 3-element split under the JIT while the interpreter honored
+        // the bound. See doc/08_tracking/bug/text_split_limit_ignored_2026-07-20.md.
+        "split" if args.len() == 2 => "rt_string_split_limit",
         "split" => "rt_string_split",
         "bytes" => "rt_string_bytes",
         "chars" => "rt_string_chars",
