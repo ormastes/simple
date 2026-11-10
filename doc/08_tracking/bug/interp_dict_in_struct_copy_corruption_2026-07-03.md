@@ -116,3 +116,19 @@ Affected spec: `test/feature/plugin/plugin_startup_block_spec.spl` (2 of 3
 examples fail; left unmodified per the "never weaken an assertion" rule — the
 spec is asserting the correct/intended two-phase contract).
 
+
+## 2026-11-10 triage — SUPERSEDED (seed-smoke, lane p3-interp3 row 13)
+
+Re-ran the minimal copy-return repro on the worktree seed
+(`C:/Users/yoon/dev/simple-p3-interp3-20261110/bin/simple.exe`,
+`SIMPLE_EXECUTION_MODE=interpreter`, fixture
+`build/p3fix-interp3/row13_dict_struct_copy.spl`):
+`stored=42 orig_a=1`, `k2=7` — no 8x width-confusion corruption; the
+Dict-in-struct copy path is clean on the current seed.
+
+The 2026-07-20 total-loss variant is the documented struct value-semantics
+shape ("Aggregates through function params lose mutations — return-the-object
+rule"): copy-return keeps the original, matching the 2026-11-06 owner decision
+(classes reference, structs value). Its app-level one-line fix (reassign the
+singleton in `register_block`, or make `BlockRegistry` a `class`) lives in
+`src/compiler/15.blocks` — outside the interpreter lane.

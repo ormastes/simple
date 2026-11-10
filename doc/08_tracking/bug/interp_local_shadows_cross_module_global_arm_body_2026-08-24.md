@@ -81,3 +81,25 @@ off.
 
 ## 2026-11-06 round 8: FIXED
 Root cause: plain `name = value` ran the "also sync to MODULE_GLOBALS if it exists there" step by bare name even when `name` is a function-local that merely shares its name with a global, publishing the local into the flat global store. The four sync sites in `exec_assignment` now skip locals. Spec: test/01_unit/compiler/interpreter/local_shadows_module_global_spec.spl (RED on seed, GREEN after).
+
+## 2026-11-10 triage — LIVE on worktree seed, routed (seed-smoke, lane p3-interp3 row 15)
+
+The round-8 source fix (`1889cc95543d`; four `env.is_local(name) ||` guards in
+`exec_assignment`, `src/compiler_rust/.../interpreter/node_exec.rs:1424/1457/1488/1553`)
+IS in this branch's source and the committed binary carries round-8-unique
+strings, yet the failure reproduces on the worktree seed:
+
+- `bin/simple.exe test test/01_unit/compiler/interpreter/local_shadows_module_global_spec.spl`
+  -> 2 total, 0 passed, 2 failed ("expected 2 to equal 1";
+  "semantic: variable `r8a_slots` not found").
+- Direct probe (`build/p3fix-interp3/row15_probe.spl` + `shadow_arena2.spl`):
+  `SIMPLE_EXECUTION_MODE=interpreter` -> `global_len=2` (the local
+  reassignment `r8a_arena = [7]` still publishes into the cross-module
+  global); default (JIT) -> `global_len=1` (correct).
+
+Residual hole or build skew in the seed — either way the fix surface is
+`src/compiler_rust`, which is write-forbidden to this lane (agent-10 active).
+Routed to the compiler-seed lane; spec and probe stay RED as the acceptance
+test. Note the second `it` (round-8 fixed-size module arrays,
+`interpreter_fd_ownership_private_module_globals_not_linked_2026-08-12`) fails
+on the same binary too.
