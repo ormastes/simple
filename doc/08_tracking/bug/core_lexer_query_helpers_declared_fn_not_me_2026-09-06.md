@@ -65,3 +65,20 @@ unrequested behavior change).
   the value copy"` near the `slice_parts` scratch-buffer code, or update the
   spec's expected substring to match the current (or a newly authored)
   comment.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED.** The 2026-11-08 Reading B resolution is merged and verified:
+the 13 query helpers remain `fn` (value-copy receiver) in
+`src/compiler/10.frontend/core/lexer_struct.spl`, the caller's-copy rationale comment is
+restored at the scratch slicing site, and the spec now asserts `fn`.
+
+Seed-smoke: `bin/simple.exe test
+test/01_unit/compiler/lexer/core_lexer_receiver_capability_source_spec.spl` →
+`outcome=OK declared>=3 executed=3 passed=3 failed=0`.

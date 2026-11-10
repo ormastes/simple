@@ -267,3 +267,34 @@ in scope.
   target plumbing is the natural carrier for the fix above.
 - `28ff5e05494` (2026-07-14) — "fix(seed/cranelift): handle simple-core SplDict (tag 6,
   len@16) in `inline_runtime_len_value`" — the commit that introduced the ungated arm.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED.** The 2026-11-08 fix (`0ee4e247c0dd fix(runtime): align heap
+ABIs and mirror facades`) is merged on base:
+
+- `inline_runtime_len_value` no longer carries the ungated tag-6 `is_spldict` arm; it now
+  takes `baremetal`/`fam_arrays` target context (`codegen/instr/helpers.rs:53-60`), dict
+  is tag 3 with `len@8` for BOTH hosted `RuntimeDict` and `RtCoreDict`, closure (0x06 in
+  both runtimes) falls through to the `-1` sentinel, and the riscv64/SimpleOS tag-11 dict
+  arm is properly `Target::is_baremetal()`-gated.
+- `src/runtime/runtime_native.c:294-299` — `RT_VALUE_HEAP_DICT 0x03U` /
+  `RT_VALUE_HEAP_CLOSURE 0x06U` now agree with hosted `HeapObjectType`, with
+  `_Static_assert` guards.
+- Regression `generic_rt_len_hosted_and_core_closures_return_invalid` exists
+  (`codegen/instr/fam_abi_tests.rs:249`), exercising hosted and RtCore-shaped closures on
+  both lanes.
+
+Additional closure observed while verifying: the user-source path now fails CLOSED before
+codegen — `.len()` on a value whose static type is `function` is a semantic hard error
+(`method 'len' not found on type 'function'`), so the silent capture-count answer is
+unreachable from ordinary source; the fam_abi test exercises the raw codegen path
+directly. The fam_abi Rust regression itself was not executed here (building/testing
+`src/compiler_rust` is the seed lane's scope; this doc already records it blocked by
+unrelated test-code errors).

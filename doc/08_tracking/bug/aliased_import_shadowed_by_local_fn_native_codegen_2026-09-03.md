@@ -186,3 +186,29 @@ type checker accepts a `fn` value for a `text` parameter, which is why this was
 silent.
 
 Next step: re-run `w3_alias` on the first stage3 built with `45fb9585333`.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (v1.0.0-rc.1, built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED.** The resolver fix is present on base: `import_alias_symbol`
+(`src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:686-713`, landed via #7597 /
+`9e7e7a526edb`) keeps the authored alias whenever the original bare name is declared in
+the importing module, so the native mangler reaches the owner-exact `use_map` row. The
+`own_declared_function_names` census (`module_pass.rs:1544-1572`) feeds that guard.
+
+Seed-smoke: the existing object-level regression
+`test/01_unit/compiler/aliased_import_shadowed_by_local_fn_spec.spl` passes 3/3 with
+`SIMPLE_BIN=<absolute path>/bin/simple.exe`; the probe's own oracle printed
+`ENTRY_OBJECT=found / ALIAS_TARGET=imported / LOCAL_SYMBOL=present`.
+
+Two environment notes (neither is this defect):
+- The probe script `cd`s to a temp dir before invoking `$BIN`, so a RELATIVE `SIMPLE_BIN`
+  silently runs nothing and every scenario fails; CI/harness usage must pin an absolute path.
+- The native LINK in this fresh worktree cannot find a prebuilt runtime archive
+  (`find_runtime_library()` empty), so the fixture never links; the object-level oracle is
+  unaffected. Same gap seen on every native-build probe in this worktree.
