@@ -1,7 +1,7 @@
 # web_ui facade spec blocked: lib compile error in common/web/node_types.spl
 
 Date: 2026-09-16
-Status: OPEN
+Status: SUPERSEDED
 
 ## Observed
 
@@ -47,3 +47,15 @@ is met. Verified with the worktree Rust seed (bin/simple.exe, built 2026-11-10).
   probe emission)" because the selected binary is the Rust seed — a host-limit,
   not a spec failure; the file's real pass/fail verdict is the PASS above.
 - No source change was needed; the file is untouched on this branch.
+
+## 2026-11-11 status — SUPERSEDED (P3-essential library lane, work/p3-lib3-20261111)
+
+Re-verified with this lane's refreshed seed (bin/simple.exe, build-commit
+`0791c2b7f4a7`), seed-smoke: `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe
+$PWD/bin/simple.exe test
+test/01_unit/lib/nogc_async_mut/web_ui/web_ui_facade_spec.spl
+--mode=interpreter --no-cache` → `SPEC FILE VERDICT ... outcome=OK
+declared>=1 executed=1 passed=1 failed=0`, rc=0. `class Element`'s
+`namespace: text` field (node_types.spl:69) no longer trips any diagnostic;
+the unblock condition is met. The file's last touching merge is PR #7597
+(`9e7e7a526edb`); no source change on this branch.

@@ -111,3 +111,55 @@ surface to add it to (details in
 `map_for_each_missing_on_dict_2026-08-21.md`). Still OPEN, still blocked on a
 seed rebuild + deploy.
 
+
+## Addendum 2026-11-11 (lane interp6) — SUPERSEDED on 5 of 6 items; item 2 fixed in source, blocked on seed redeploy
+
+All checks on lane worktree `work/p3-interp6-20261111` (origin/release/1.0.0
+tip 462b3b334fef), refreshed seed (build-commit 0791c2b7f4a7), every run
+labelled seed-smoke with `--mode=interpreter --no-cache`.
+
+**Item 1 — raw allocator arrays index-assignable: SUPERSEDED, verified.**
+Scratch probe `build/p3fix-interp6/raw_array_lvalue_seed_smoke_spec.spl`
+(build/, gitignored): `rt_byte_array_new` + `rt_array_set_len_known` buffer
+written via `self.xs[i] = v` in a `me` method and via an aliased local —
+both pass (2 examples green).
+
+**Item 2 — nested lvalues: FIXED IN SOURCE, but the refreshed seed still
+rejects them — BLOCKED on a seed rebuild (heavy native build, forbidden in
+this lane).** Granularity probe
+`build/p3fix-interp6/nested_lvalue_granularity_spec.spl` plus a plain
+`simple run` fixture (`build/p3fix-interp6/fx/nested1.spl`) on the seed:
+- `obj.field[i] = v` (2-level, field-first): WORKS on the seed.
+- `arr[i].field[j] = v` and the bug doc's exact `self.buffers[idx].data[dst] = v`
+  (index-first chains): still fail with
+  `invalid assignment: complex field access not supported`.
+The tree source carries the fix and proves it: a general place fallback
+(`resolve_place` + `write_place`, `interpreter/node_exec.rs:2660-2745`) with
+a Rust unit test for the exact shape
+(`three_deep_field_index_field_index_assignment_lands`,
+`s.rows[0].cols[1] = 42`). Both arrived with `9e7e7a526edb` (2026-11-07,
+PR #7597 squash) + `3185f12d1d85` (place.rs), ancestors of the seed's
+build-commit, and `git diff 0791c2b7f4a7 HEAD` on node_exec.rs/place.rs is
+EMPTY — so the tracked seed binary does not match the source at its own
+build-commit for this path (same lag observed for the MECALL perf counters
+in the 2026-09-13 owned-call record). Closest verification available without
+a rebuild: the fix's own Rust tests in the tree source.
+Exact command needing grant: rebuild + redeploy the seed —
+`cargo build --release --manifest-path src/compiler_rust/Cargo.toml --bin simple`
+then redeploy via `scripts/bootstrap/bootstrap-deploy-transaction.shs`
+(installs to `bin/simple.exe`); after redeploy, rerun the two probes above.
+
+**Item 3 — `use std.spec.*` glob omissions: SUPERSEDED, verified.**
+`test/01_unit/lib/nogc_sync_mut/spec_bool_expect_spec.spl`: 3/3 passed
+(`expect_not` reaches glob importers on the seed).
+
+**Item 4 — `dict.for_each`: SUPERSEDED, verified.**
+`test/01_unit/lib/nogc_sync_mut/map_traversal_spec.spl`: 6/6 passed.
+
+**Item 5 — `use pkg.Mod.{Mod}` self-named group import: SUPERSEDED, verified.**
+`group_import_self_named_module_spec.spl` 2/2 and
+`group_import_shadowing_generalization_spec.spl` 3/3 passed.
+
+**Item 6 — unbacked `rt_cpu_*`/`rt_cpuid` externs: SUPERSEDED, verified.**
+`test/01_unit/compiler/native/simd_capabilities_spec.spl`: 14/14 passed
+(the interpreter extern table now backs the whole family).
