@@ -15,3 +15,19 @@ no fatal MIR error, 2/2 pass. Side observation: the same fixture emits a NON-fat
 exhaustive-arms check misfires in that position (arms Loaded + Failed cover the enum). Worth a separate row.
 The real trigger is the cross-module `PackageIndexRouteV1` type from `driver_source_pipeline_loading.spl`; verify on stage3
 by removing the `val route: PackageIndexRouteV1` annotation. Workaround kept.
+
+### 2026-11-10 fix (fable p2 lane) — fix-implemented-verification-pending
+Reproduced on the pure-Simple MIR lowering path with a TWO-module fixture (the
+cross-module trigger named above): `val route = if c: <match pick(): Ok(v): v /
+Err: return> else: make()` with Route/pick/make from `lib.dep` gives
+`#143 (collection mir type: Unit)`. Root cause is in
+`mir_merged_arm_struct_name` (`mir_lowering_stmts.spl`): the Ok-payload arm
+records the BARE struct name (`Route`, name-keyed ret-shape registry), the
+call/constructor arm records the qualified `lib.dep::Route`; the textual
+mismatch dropped the merge slot's struct identity, so `route.items` lowered to
+Unit. Fix: `mir_merged_struct_name_pair` unifies exactly one bare spelling with
+its qualified one (qualified kept; two differing qualified names still
+disagree). Specs: `test/01_unit/compiler/50.mir/for_in_if_match_cross_module_route_spec.spl`
+(4/8 red -> 8/8 green) and `test/01_unit/compiler/50.mir/if_merge_arm_struct_name_spec.spl`
+(8/8). The `val route: PackageIndexRouteV1` workaround annotation stays until
+a stage-3 native build verifies; remove it then.

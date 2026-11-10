@@ -1,0 +1,42 @@
+# @req REQ-SSPEC-COMPILER
+"""
+Direct contract for mir_merged_arm_struct_name (mir_lowering_stmts.spl).
+
+Bug for_in_unresolved_if_match_route_type_2026-10-24: a cross-module
+`Result<T, E>` Ok-payload arm records the BARE struct name (`Route`, from the
+name-keyed ret-shape registry) while a call / constructor arm records the
+qualified one (`lib.dep::Route`). The merge treated that as a disagreement,
+dropped the struct identity, and `route.items` lowered to Unit (#143).
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec
+use compiler.mir.mir_lowering_stmts.{mir_merged_arm_struct_name}
+
+describe "mir_merged_arm_struct_name":
+    it "keeps a name every arm records identically":
+        expect(mir_merged_arm_struct_name(["Route", "Route"], ["", ""])).to_equal("Route")
+
+    it "unifies a bare payload arm with a qualified call arm, keeping the qualified name":
+        expect(mir_merged_arm_struct_name(["Route", "lib.dep::Route"], ["", ""])).to_equal("lib.dep::Route")
+
+    it "unifies in either arm order":
+        expect(mir_merged_arm_struct_name(["lib.dep::Route", "Route"], ["", ""])).to_equal("lib.dep::Route")
+
+    it "unifies across three arms (if / elif / else)":
+        expect(mir_merged_arm_struct_name(["Route", "lib.dep::Route", "Route"], ["", "", ""])).to_equal("lib.dep::Route")
+
+    it "falls back to the HIR-recovered name for an arm with no recorded name":
+        expect(mir_merged_arm_struct_name(["", "Route"], ["lib.dep::Route", ""])).to_equal("lib.dep::Route")
+
+    it "rejects two different structs":
+        expect(mir_merged_arm_struct_name(["Route", "lib.dep::Other"], ["", ""])).to_equal("")
+
+    it "rejects same-named structs from two different modules":
+        expect(mir_merged_arm_struct_name(["lib.a::Route", "lib.b::Route"], ["", ""])).to_equal("")
+
+    it "rejects when an arm names nothing":
+        expect(mir_merged_arm_struct_name(["Route", ""], ["", ""])).to_equal("")
