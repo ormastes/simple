@@ -201,3 +201,26 @@ same file run through the seed's plain interpreter mode, `<seed> repro.spl`).
   accesses. This asymmetry cost significant time to find and is worth its own
   note if `type_resolver.rs` is touched again.
 
+
+## Addendum 2026-11-11 (lane ne17) — reduced write-side probes CORRECT; exact repro blocked
+
+Fresh seed 46fe8f6b6def (Windows, worktree simple-p3-ne17-20261111):
+
+1. Reduced write-side probe A (method-call chain initializer into a named
+   text field): `struct Fp: content_hash: text, size: i64` built with
+   `Fp(content_hash: (5 + 2).to_text(), size: 391)` prints `7` / `391`
+   natively (`native-build --backend cranelift`, Rust engine) — matches the
+   interpreter.
+2. Reduced write-side probe B (the doc's suspected real path): `var hash: text`
+   assigned through an `if val h = rt_file_hash_sha256(path):` unwrap of an
+   extern optional, then a named-field ctor call — prints the real SHA-256
+   natively, byte-identical to the interpreter.
+3. The doc's exact reproducer (`--source src/compiler --source src/lib`,
+   full closure) did NOT complete in 280s on this host and was killed by
+   timeout; per lane rules it was not retried.
+
+So both single-module write-side shapes the doc suspected are correct on the
+fresh seed; the corruption, if still live, needs the real `FileFingerprint`
+closure to reproduce. The defect lives in Rust-seed native codegen, which
+this lane may not rebuild. **Grant:** run the doc's exact reproducer on a
+Linux host with the release seed (documented as "a few seconds once cached").

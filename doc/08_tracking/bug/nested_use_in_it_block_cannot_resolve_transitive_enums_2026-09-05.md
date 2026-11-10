@@ -62,3 +62,32 @@ assertion was changed. Revert the hoist once this is fixed.
 
 A nested `use` resolves its imported module's transitive enum imports
 identically to a file-scope `use`.
+
+## Addendum 2026-11-11 (lane ne17) — mechanism re-confirmed LIVE; surface symbol changed
+
+Fresh seed 46fe8f6b6def (Windows, worktree simple-p3-ne17-20261111):
+
+1. Minimal synthetic repro (one module importing a one-enum module; spec
+   nests the `use` inside the `it`) PASSES — a single-level transitive enum
+   now resolves. The 2026-09-05 failure needs the deeper real import graph.
+2. Real spec, re-nested (the two hoisted `use` lines moved back into their
+   `it` blocks, otherwise identical): the two affected `it`s FAIL with
+   `semantic: function 'vhdl_kernel_accepts' not found` — a TRANSITIVE import
+   of `compiler.backend.unified_kernel_emit` (its own
+   `use compiler.backend.vhdl.vhdl_kernel_entity.{..., vhdl_kernel_accepts}`)
+   fails to resolve when the module is pulled in through the nested-use
+   path. Same mechanism as the recorded `enum Xlen / MirTypeKind not found
+   in this scope`; the module graph changed since 2026-09-05 so a function
+   surfaces first instead of the enums. 5 examples: 3 pass, 2 fail.
+3. Control (byte-identical file with the two `use` lines hoisted to top
+   level) does not compile at all on the current tree:
+   `error: semantic: duplicate impl for trait 'Codegen' and type
+   'OpenClBackend'` — a co-compiled-closure collision (owner decision
+   2026-11-09 family), 0 examples executed. So the hoist workaround is
+   currently unevaluable end-to-end, and the nested-use defect is confirmed
+   by the only runnable shape. Do NOT revert the hoist in the spec.
+
+Fix lives in the module loader / import-resolution of the running engine
+(seed here; pure-Simple frontend parity unverifiable on this lane).
+**Grant:** seed-lane fix, with the spec's nested-use revert as the
+acceptance run.

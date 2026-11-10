@@ -61,3 +61,23 @@ close on a seed-only fix. See
 `doc/08_tracking/bug/function_argument_types_unchecked_2026-09-01.md`, which
 carries the same caveat.
 
+
+## Addendum 2026-11-11 (lane ne17) — LIVE re-confirmed on fresh seed
+
+Fresh seed 46fe8f6b6def (Windows, worktree simple-p3-ne17-20261111):
+
+| form | result |
+|---|---|
+| `newunit LbaU: i64 as lba` | parses cleanly (runs) |
+| `takes_lba(7lba)` | parse error: `function arguments: expected Comma, found Identifier { name: "lba", pattern: Immutable }` |
+| `takes_lba(LbaU(7))` | `semantic: function 'LbaU' not found` |
+
+Identical to the 2026-09-01 measurement. `f957a28ace77` (unified unit
+declaration pool, 2026-11-05) is registry bookkeeping — legacy newunit
+records lower to role "nominal" — and adds no construction form. The two
+`Required` items stand: a spec that constructs a value through the user
+path, and either a working construction syntax or an explicit statement
+that `newunit` is compiler-internal (with the docs that imply otherwise
+corrected). Still a seed-only measurement; the self-hosted retest remains
+blocked on this lane (no buildable self-hosted binary). **Grant:** frontend
+lane with a self-hosted binary.

@@ -169,3 +169,23 @@ trailing-default verdict: native-build was still running when the 3000s harness
 timeout terminated it. No evidence for or against Causes 1/3 from this run
 (they are gated behind the same native-build step). Record stays OPEN on
 Cause 2 only.
+
+## Addendum 2026-11-11 (lane ne17) — Cause 2 re-confirmed LIVE; guard honestly RED
+
+Fresh seed 46fe8f6b6def (Windows, worktree simple-p3-ne17-20261111):
+
+- `--selftest`: `PASS — 8 selftest case(s) checked, all verdicts as expected`
+  (harness sound; ~117s on this host).
+- Real guard: uses `--entry-closure`, which this lane is not granted.
+  Equivalent bounded probe: the SAME fixture and engine (default pure-Simple
+  driver interpreted by the seed) WITHOUT `--entry-closure` was killed by
+  `timeout -s KILL 240` with no binary produced (rc=137) — the worker still
+  does not finish a small fixture on this host. Per lane rules the killed
+  build was not retried. (The Rust engine, `SIMPLE_NATIVE_BUILD_RUST=1`, DOES
+  complete small closures in seconds here — the blowup is specific to the
+  interpreted pure-Simple driver path this guard exercises.)
+
+Record stays OPEN on Cause 2 only. **Grant:** a Linux lane
+(`kill_simple_monitor`, 3000s+ budget) to run the guard verbatim, or a
+pure-Simple driver performance lane; do not raise `KILL_SIMPLE_MEM_MB`, do
+not weaken the guard.

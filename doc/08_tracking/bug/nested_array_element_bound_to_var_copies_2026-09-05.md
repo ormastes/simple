@@ -90,3 +90,27 @@ records a same-family receiver/nested-push defect, so this is likely one instanc
 of a class rather than an isolated case — check whether one root cause covers
 both before fixing only this shape.
 
+
+## Addendum 2026-11-11 (lane ne17) — LIVE re-confirmed on fresh seed
+
+Exact documented fixture run under fresh seed 46fe8f6b6def (Windows,
+worktree simple-p3-ne17-20261111, `run --no-cache`):
+
+```
+nested_direct=MUT
+via_var_row=VIA_VAR outer=c
+flat=FLAT
+```
+
+`var row = outer[1]; row[0] = "VIA_VAR"` still writes the copy and silently
+discards the write; no error, no warning. The discriminator table from
+2026-09-05 reproduces unchanged (chained index assign works, top-level index
+assign works, binding-to-var copies).
+
+No fix attempted: the unblock condition offers two acceptable resolutions
+(alias semantics vs compile-time copy diagnostic) and both are
+language-semantics/owner decisions; verification of either needs the
+self-hosted binary, which this lane cannot build. The flat-array workaround
+in `src/app/llm_caret/workbench/tui_view.spl` remains the mitigation.
+**Grant:** semantics-owner ruling plus a lane with a buildable self-hosted
+binary.
