@@ -84,3 +84,21 @@ B=src/compiler_rust/target/release/simple.exe
 SIMPLE_BINARY="$B" "$B" test test/01_unit/lib/std/compiler/loader/jit_instantiator_spec.spl
 ```
 
+## Addendum 2026-11-11 — lane runner4: SUPERSEDED
+
+All 7 remaining failures are resolved on release/1.0.0 tip `b364745fdbf8`.
+The spec and `src/compiler/99.loader/jit_instantiator.spl` were last touched
+by merge `9e7e7a526edb` (PR #7597, "fix(hir): apply nominal generic
+declaration defaults and arity", 2026-11-07), whose type-system fixes cover
+the contract-checking/shape-mismatch signatures listed above.
+
+seed-smoke verification (refreshed seed 2026-11-11, interpreter,
+`--no-cache`):
+
+```
+SPEC FILE VERDICT: ... outcome=OK declared>=44 executed=44 passed=44 failed=0 skipped=0 dropped=0
+Results: 44 total, 44 passed, 0 failed
+```
+
+44/44 (was 37 passed / 7 failed). Verdict: SUPERSEDED.
+
