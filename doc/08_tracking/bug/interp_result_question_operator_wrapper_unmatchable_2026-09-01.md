@@ -1,6 +1,6 @@
 # `?` on a Result inside a one-line wrapper yields a value matching neither Ok nor Err (interpreter)
 
-Status: OPEN. Found 2026-09-01 while landing the strict HWIR ECC offload equivalence spec.
+Status: SUPERSEDED. Found 2026-09-01 while landing the strict HWIR ECC offload equivalence spec.
 
 ## Symptom
 
