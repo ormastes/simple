@@ -1,6 +1,9 @@
 # `native-build` of an `io_runtime` importer fails with `explicit panic() -- diverging, must not fall through`
 
-**Status:** Open — SIXTH blocker in the `io_runtime` native-build chain
+**Status:** FIXED (verified 2026-11-11, lane rt3) — resolved 2026-08-24 by routing
+the MIR `Abort` terminator to `emit_panic_trap_ir` instead of
+`emit_unsupported_panic`; re-verified on the current base (code present + gate
+selftest PASS). See the 2026-11-11 addendum.
 **Observed:** 2026-08-24
 **Area:** 35.semantics (divergence / fall-through analysis), `std.nogc_sync_mut.io.process_ops`
 **Predecessor:** `native_compile_nonterminating_io_runtime_2026-08-24.md`
@@ -206,3 +209,31 @@ exit 0/1/2, `--build` runs a real `native-build` under `timeout` with
 **rc=124 classified as a distinct HANG** failure. Mutation-tested both
 directions: reverting the Abort arm to the helper must FAIL, and reopening
 the 2026-08-23 fail-open must also FAIL.
+
+---
+
+## 2026-11-11 — Lane rt3 triage verdict: FIXED (re-verified)
+
+The RESOLVED section above (2026-08-24) is confirmed still landed on the
+current base:
+
+- `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl:2080-2091` —
+  the `case Abort(message):` arm calls `self.emit_panic_trap_ir(message)`
+  directly (with the explanatory comment that `emit_unsupported_panic` turned
+  every user `panic()` into a hard compile error), rather than routing through
+  `emit_unsupported_panic`.
+- `src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl:629`
+  — `me emit_panic_trap_ir(message: text)` exists; `emit_unsupported_panic`
+  still fails the build for genuine unsupported kinds (the 2026-08-23
+  fail-open stays closed).
+
+**Verification (lane rt3, 2026-11-11):**
+- Gate `scripts/check/check-llvm-abort-terminator-not-unsupported.shs
+  --selftest` → `PASS — 7 selftest fixture(s) checked, selftest only`.
+
+No code change was needed; the fix from 2026-08-24 remains in place and the
+gate's mutation-tested both-ways contract is intact. (The gate's
+`--require-success` flip for the residual blocker-#7 `Option`/`Result` modules
+is tracked separately under
+`native_compile_unresolved_option_result_io_modules_2026-08-24.md`, which is
+out of scope for this row.)
