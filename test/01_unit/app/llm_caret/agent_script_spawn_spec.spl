@@ -1,0 +1,31 @@
+# LLM Caret agent script-command spawn routing (Windows seam-1 fix)
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{process_is_running, process_kill}
+use app.llm_caret.agent_runtime.{windows_script_interpreter, agent_command_spawn}
+
+describe "Windows script routing for agent commands":
+    it "routes script extensions through their interpreter and binaries directly":
+        # @req: REQ-CARET-WIN-SPAWN-001
+        expect(windows_script_interpreter(
+            "test/fixtures/caret_workbench/agent_stub.shs")).to_equal("sh")
+        expect(windows_script_interpreter("agent.bat")).to_equal("cmd.exe")
+        expect(windows_script_interpreter("agent.cmd")).to_equal("cmd.exe")
+        expect(windows_script_interpreter("claude")).to_equal("")
+        expect(windows_script_interpreter("bin/simple.exe")).to_equal("")
+
+    it "spawns the tracked shs agent stub as a real running child":
+        # @req: REQ-CARET-WIN-SPAWN-002
+        # Cross-platform: POSIX execs the stub via its shebang; Windows routes
+        # it through sh (seam 1: the raw .shs spawn returned -1 / Lost before
+        # this fix). Depends on sh for .shs stubs, as the e2e fixture does.
+        step("Spawn the existing workbench stub through the agent command path")
+        val pid = agent_command_spawn(
+            "test/fixtures/caret_workbench/agent_stub.shs",
+            ["-p", "ignored", "--output-format", "json"])
+        expect(pid > 0).to_equal(true)
+        step("The child is really alive and owned by this runtime")
+        expect(process_is_running(pid)).to_equal(true)
+        step("Teardown leaves nothing running")
+        expect(process_kill(pid)).to_equal(true)
+        expect(process_is_running(pid)).to_equal(false)

@@ -1,6 +1,7 @@
 # LLM Caret - Agent plan runtime launcher
 
 use app.io.mod.{process_spawn_async, process_spawn_async_env, process_is_running, process_kill}
+use std.nogc_async_mut.sosix.{sosix_platform}
 use app.llm_caret.agent_plan.{AgentLaunchPlan, AgentLaunchRequest, build_agent_launch_plan}
 
 struct AgentProcess:
@@ -47,6 +48,41 @@ pub fn agent_command_for_provider_with_gemini(provider: text, claude_path: text,
     agent_command_for_provider_with_all(provider, claude_path, codex_path,
         gemini_path, "", opencode_path)
 
+# Interpreter that must run this command on Windows, "" when the command is
+# a directly executable image. Windows cannot CreateProcess a script file
+# (POSIX execs it via shebang); routing scripts through their interpreter
+# keeps one launch plan working on both families. Pure so the routing
+# decision is unit-testable on any host.
+pub fn windows_script_interpreter(cmd: text) -> text:
+    if cmd.ends_with(".cmd") or cmd.ends_with(".bat"):
+        return "cmd.exe"
+    if cmd.ends_with(".sh") or cmd.ends_with(".shs"):
+        return "sh"
+    ""
+
+# One spawn vocabulary for agent commands: identity on POSIX, interpreter
+# routed on Windows. `.sh`/`.shs` stubs need `sh` on PATH where they are
+# used; production agent CLIs are real executables either way.
+pub fn agent_command_spawn(cmd: text, args: [text]) -> i64:
+    if sosix_platform() == "windows":
+        val interpreter = windows_script_interpreter(cmd)
+        if interpreter != "":
+            if interpreter == "cmd.exe":
+                return process_spawn_async("cmd.exe", ["/C", cmd] + args)
+            return process_spawn_async(interpreter, [cmd] + args)
+    process_spawn_async(cmd, args)
+
+# Environment-carrying sibling of agent_command_spawn for messaging agents.
+pub fn agent_command_spawn_env(cmd: text, args: [text], env: {text: text}) -> i64:
+    if sosix_platform() == "windows":
+        val interpreter = windows_script_interpreter(cmd)
+        if interpreter != "":
+            if interpreter == "cmd.exe":
+                return process_spawn_async_env("cmd.exe", ["/C", cmd] + args, env)
+            return process_spawn_async_env(interpreter, [cmd] + args, env)
+    process_spawn_async_env(cmd, args, env)
+
+
 pub fn agent_command_for_provider_with_all(provider: text, claude_path: text,
         codex_path: text, gemini_path: text, kimi_path: text,
         opencode_path: text) -> text:
@@ -89,7 +125,7 @@ pub fn launch_agent_plan_with_all(agent_id: text, plan: AgentLaunchPlan,
             reason: "unknown_provider:" + plan.provider, pid: -1)
     val cmd = agent_command_for_provider_with_all(plan.provider, claude_path,
         codex_path, gemini_path, kimi_path, opencode_path)
-    val pid = process_spawn_async(cmd, plan.argv)
+    val pid = agent_command_spawn(cmd, plan.argv)
     if pid <= 0:
         return AgentProcess(agent_id: agent_id, status: "error", reason: "spawn_failed", pid: pid)
     AgentProcess(agent_id: agent_id, status: "started", reason: "process_spawned", pid: pid)
@@ -114,7 +150,7 @@ pub fn launch_messaging_agent_plan_with_all(agent_id: text, plan: AgentLaunchPla
             reason: "unknown_provider:" + plan.provider, pid: -1)
     val cmd = agent_command_for_provider_with_all(plan.provider, claude_path,
         codex_path, gemini_path, kimi_path, opencode_path)
-    val pid = process_spawn_async_env(cmd, plan.argv, messaging_agent_environment(context))
+    val pid = agent_command_spawn_env(cmd, plan.argv, messaging_agent_environment(context))
     if pid <= 0:
         return AgentProcess(agent_id: agent_id, status: "error", reason: "spawn_failed", pid: pid)
     AgentProcess(agent_id: agent_id, status: "started",
