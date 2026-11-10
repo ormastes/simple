@@ -1,6 +1,6 @@
 # `?.` chain on a successful optional collapses to None (interpreter)
 
-Status: OPEN. Filed 2026-08-18 (found during layout_schema.spl SDN reader work).
+Status: SUPERSEDED. Filed 2026-08-18 (found during layout_schema.spl SDN reader work).
 
 ## Symptom
 

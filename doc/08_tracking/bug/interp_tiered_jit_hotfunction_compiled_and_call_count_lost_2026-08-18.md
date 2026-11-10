@@ -1,4 +1,5 @@
 # `TieredJitManager` never tiers up in the interpreter — `compiled` and `call_count` writes are lost, recompilation is unbounded
+Status: SUPERSEDED. Triage 2026-11-11 (lane interp4, PR #8185): seed-smoke verified, fixing commit cited in addendum below.
 
 - **Status:** OPEN
 - **Filed:** 2026-08-18

@@ -1,4 +1,5 @@
 # Interpreter: `substring` dispatch fails on chained str receiver with nested call argument
+Status: SUPERSEDED. Triage 2026-11-11 (lane interp4, PR #8185): seed-smoke verified, fixing commit cited in addendum below.
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
