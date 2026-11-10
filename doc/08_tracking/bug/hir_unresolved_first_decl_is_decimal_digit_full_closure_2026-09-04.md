@@ -120,3 +120,38 @@ The nondeterminism between runs A and B is the strongest lead: whatever register
 explicit import members is order- or state-dependent at closure scale. Fixing it
 should restore the explicit list here, which is the regression test.
 
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: NOT REPRODUCED on refreshed seed; full-closure verification BLOCKED (heavy build)
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
+
+- The wildcard workaround is still in the tree
+  (`src/compiler/80.driver/driver_compile_vhdl_expr.spl:20`,
+  `use compiler.driver.driver_compile_vhdl_util.*`); no commit lands an explicit
+  fix for the resolver defect itself (f870118eb1a4 and b702a9398e48 are the two
+  workarounds). Bookkeeping row remains "open".
+- The registration machinery has since been extensively reworked: RISDONE memo
+  (2026-08-21) plus the BOOT-20 scalar-chain replacements for Dict membership
+  mis-reporting under Stage-2 native codegen (2026-09-18) in
+  `src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl` — the
+  same defect class as this bug, fixed adjacent to the failing path.
+- Seed-smoke stress probe (2026-11-11, scratch, not committed): a 102-module
+  synthetic closure (util module with 20 pub fns whose FIRST declaration is the
+  first imported name — the `_is_decimal_digit` shape; consumer with an explicit
+  20-name brace import using every member in one function; 100 cross-glob-importing
+  filler modules) lowered through the real `module_surfaces_from_modules` +
+  `hirlowering_for_module` + `begin_module` + `lower_module` path, 5 fresh
+  lowerers: all 20 members resolved every round, zero lowering errors. On the
+  refreshed Rust seed the explicit list survives closure-scale registration.
+- The original failure was on the Stage-2/3 NATIVE self-host lane (aarch64,
+  771-module closure); that repro is a heavy entry-closure native build, which
+  this lane is forbidden from running. Exact command needing grant (from the
+  doc's own repro, updated to this worktree):
+  `SIMPLE_LIB=$PWD/src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe native-build --backend cranelift --source src/app --source src/lib --source src/compiler --entry-closure --entry src/app/<tmp>/i_owner.spl --runtime-bundle core-c-bootstrap --timeout 1200 --output <out>`
+  run to `hir N/N` completion — but the authoritative discriminator is reverting
+  `driver_compile_vhdl_expr.spl:20` to the explicit 20-name list and rebuilding
+  the full stage-3 closure; any `unresolved name` from that import list = LIVE.
+- Verdict: NOT REPRODUCED on the refreshed seed at 102-module scale (x5 lowerers);
+  likely repaired by the Aug–Nov registration rework but UNVERIFIED on the failing
+  lane. Status: keep OPEN; verification blocked on the heavy full-closure build.
+

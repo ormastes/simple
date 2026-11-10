@@ -8,7 +8,7 @@ evidence found in the body. This is bookkeeping, not verification.
 **Area:** `src/runtime/runtime_native.c:2794-2830` (`rt_string_concat`); pure
 tree-walk `src/compiler/10.frontend/core/interpreter/ops.spl:49` (delegates to
 host `+`)
-**Status:** OPEN (filed from the pure-lane audit of the seed's 2026-08-22
+**Status:** SUPERSEDED (filed from the pure-lane audit of the seed's 2026-08-22
 memory fixes; not fixed here because the sound fix changes the `RtCoreString`
 ABI)
 **Seed counterpart:** `Arc::try_unwrap` in-place append for `s = s + x` /
@@ -275,3 +275,32 @@ Follow-up for the owning lane: either run the capsule-grade closure on
 Linux/Darwin CI, or scope the probe's runtime surface (compile
 `runtime_native.c` with a `-ffunction-sections` + hidden-symbol COFF link).
 Labels: windows-lane-compile attempt; host-limited completion.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: SUPERSEDED-by-prior-lane** — spot-check corroborates the
+2026-11-10 p3-rt addendum: the runtime-side thrice-confirmed design stop
+stands (any runtime-only in-place append is a live aliasing bug, strictly
+worse than quadratic), and the owner fix lives compiler-side. No deep
+triage redone.
+
+Spot-check at this lane's base (790b54f7c4fc):
+
+- `src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl` present, still
+  opt-in (`SIMPLE_MIR_STRING_BUILDER_OPT` gate at :351, "until verified on
+  native" comment at :30); `COLL006` lint owner
+  (`src/compiler/35.semantics/lint/collection_patterns.spl`) and both
+  pinning specs (`string_builder_opt_spec.spl`,
+  `string_builder_append_behavior_spec.spl`) in tree.
+- `src/runtime/runtime_native.c` `rt_string_concat` intentionally untouched
+  (runtime owns no fix here, by recorded decision).
+- seed-smoke (refreshed seed 0791c2b7f4a7): `bin/simple.exe test
+  test/01_unit/compiler/60.mir_opt/string_builder_append_behavior_spec.spl
+  --mode=interpreter --no-cache` → 3 total, 3 passed, 0 failed (~10 s) —
+  builder/concat behavioral equality and linear scaling hold on the seed.
+
+Carried side observation (from prior addendum, out of scope here):
+`scripts/check/check-runtime-concat-nul.shs` is fail-closed RED on this
+Windows host (link step: PE/COFF gc-root rule pulls the full
+`runtime_native.c` closure); a capsule-grade provider-closure repair or a
+scoped-probe harness is left for the owning lane. No change made.
