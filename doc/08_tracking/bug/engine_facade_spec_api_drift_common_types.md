@@ -44,3 +44,19 @@ to import resolution and exist identically in the nogc_async_mut variants.
 - `src/lib/common/engine/math3d.spl` — add Vec3.forward()
 - `src/lib/common/engine/ids.spl` — RawHandle struct + NodeId/TextureId.raw type
 - `src/lib/common/engine/units.spl` — KeyCode.code field
+
+## 2026-11-10 triage (lane p3-runner3, row 14): SUPERSEDED — Bug 2 resolved, all facade specs green
+
+The RawHandle refactor (Bug 2) was resolved without the invasive option (a):
+`src/lib/common/engine/ids.spl` now keeps `RawHandle(value: i64)` but adds
+`static fn new(index: i64, generation: i64) -> i64` (packed handle) plus
+`to_index()`/`generation()` accessors, and the facade specs were rewritten to
+`NodeId(raw: RawHandle.new(i, g))` / `TextureId(raw: RawHandle.new(i, g))`.
+
+Re-verified all 10 affected specs with the worktree seed-smoke binary
+(bin/simple.exe, v1.0.0-rc.1, `--mode=interpreter`), all `outcome=OK`:
+- gc_async_mut: audio 2/2, component 2/2, input 1/1, scene 2/2, sprite 1/1
+- nogc_async_mut: audio 2/2, component 2/2, input 1/1, scene 2/2, sprite 1/1
+
+No source change in this closure; the doc header status line can be retired by
+the doc owner.
