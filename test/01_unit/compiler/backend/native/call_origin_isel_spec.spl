@@ -1,0 +1,99 @@
+# @bug mir_runtime_call_origin_ambiguity_2026-07-17
+# Selector-level regression for callable authority on every native ISel target.
+use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.backend.common.isel_context.{
+    new_isel_context, isel_module_context, isel_definition_symbol, isel_call_symbol
+}
+use compiler.backend.native.isel_x86_64.{isel_call, x64_lower_const}
+use compiler.backend.native.isel_aarch64.{a64_isel_call}
+use compiler.backend.native.isel_riscv64.{rv_isel_call}
+use compiler.backend.native.isel_riscv32.{rv32_isel_call}
+use compiler.backend.native.mach_inst.{MachInst, OperandKind, X86_OP_CALL, A64_OP_BL, RV_OP_CALL}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+fn origin_type() -> MirType:
+    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+        params: [], return_type: MirType.i64(), is_variadic: false)))
+
+fn origin_callee(origin: MirCallOrigin) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("rt_array_new"), origin_type()), call_origin: origin)
+
+fn origin_function(name: text, exported: bool = false, export_name: text = "") -> MirFunction:
+    MirFunction(
+        symbol: SymbolId.new(1), name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: [], blocks: [], entry_block: BlockId.new(0), span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, is_export_c: exported, export_name: export_name)
+
+fn origin_symbol(insts: [MachInst], opcode: i64) -> text:
+    for inst in insts:
+        if inst.opcode == opcode:
+            match inst.operands[0].kind:
+                case OperandKind.Sym(name): return name
+                case _: return ""
+    ""
+
+fn expect_x86_origin(origin: MirCallOrigin, expected: text):
+    val selected = isel_call(new_isel_context(), nil, origin_callee(origin), [])
+    expect(origin_symbol(selected.insts, X86_OP_CALL)).to_equal(expected)
+    expect(selected.ctx.extern_symbols).to_contain(expected)
+
+fn expect_a64_origin(origin: MirCallOrigin, expected: text):
+    val selected = a64_isel_call(new_isel_context(), nil, origin_callee(origin), [])
+    expect(origin_symbol(selected.insts, A64_OP_BL)).to_equal(expected)
+    expect(selected.ctx.extern_symbols).to_contain(expected)
+
+fn expect_rv64_origin(origin: MirCallOrigin, expected: text):
+    val selected = rv_isel_call(new_isel_context(), nil, origin_callee(origin), [])
+    expect(origin_symbol(selected.insts, RV_OP_CALL)).to_equal(expected)
+    expect(selected.ctx.extern_symbols).to_contain(expected)
+
+fn expect_rv32_origin(origin: MirCallOrigin, expected: text):
+    val selected = rv32_isel_call(new_isel_context(), nil, origin_callee(origin), [])
+    expect(origin_symbol(selected.insts, RV_OP_CALL)).to_equal(expected)
+    expect(selected.ctx.extern_symbols).to_contain(expected)
+
+describe "native ISel callable origin":
+    it "separates source runtime and foreign calls on x86_64":
+        expect_x86_origin(MirCallOrigin.Source, "__simple_local_rt_array_new")
+        expect_x86_origin(MirCallOrigin.Runtime, "rt_array_new")
+        expect_x86_origin(MirCallOrigin.Foreign, "rt_array_new")
+
+    it "separates source runtime and foreign calls on aarch64":
+        expect_a64_origin(MirCallOrigin.Source, "__simple_local_rt_array_new")
+        expect_a64_origin(MirCallOrigin.Runtime, "rt_array_new")
+        expect_a64_origin(MirCallOrigin.Foreign, "rt_array_new")
+
+    it "separates source runtime and foreign calls on riscv64":
+        expect_rv64_origin(MirCallOrigin.Source, "__simple_local_rt_array_new")
+        expect_rv64_origin(MirCallOrigin.Runtime, "rt_array_new")
+        expect_rv64_origin(MirCallOrigin.Foreign, "rt_array_new")
+
+    it "separates source runtime and foreign calls on riscv32":
+        expect_rv32_origin(MirCallOrigin.Source, "__simple_local_rt_array_new")
+        expect_rv32_origin(MirCallOrigin.Runtime, "rt_array_new")
+        expect_rv32_origin(MirCallOrigin.Foreign, "rt_array_new")
+
+    it "uses definition authority and preserves explicit C ABI exports":
+        expect(isel_definition_symbol(origin_function("rt_array_new"))).to_equal("__simple_local_rt_array_new")
+        expect(isel_definition_symbol(origin_function("rt_array_new", true, "abi_array_new"))).to_equal("abi_array_new")
+        expect(isel_definition_symbol(origin_function("plain_helper"))).to_equal("plain_helper")
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[SymbolId.new(1)] = origin_function("rt_array_new")
+        val module = MirModule(name: "origin", functions: functions, statics: {}, constants: {}, types: {})
+        val ctx = isel_module_context(module)
+        expect(isel_call_symbol(ctx, "rt_array_new", MirCallOrigin.Source)).to_equal("__simple_local_rt_array_new")
+        expect(isel_call_symbol(ctx, "rt_array_new", MirCallOrigin.Runtime)).to_equal("rt_array_new")
+        expect(isel_call_symbol(new_isel_context(), "rt_array_new", MirCallOrigin.Source)).to_equal("__simple_local_rt_array_new")
+
+    it "lowers a function pointer as a symbol rather than string data":
+        val lowered = x64_lower_const(new_isel_context(),
+            MirConstValue.Str("rt_array_new"), origin_type(), MirCallOrigin.Source)
+        expect(lowered.insts.len()).to_equal(1)
+        expect(origin_symbol(lowered.insts, lowered.insts[0].opcode)).to_equal("__simple_local_rt_array_new")
+        expect(lowered.ctx.data_entries.len()).to_equal(0)
+        expect(lowered.ctx.extern_symbols).to_contain("__simple_local_rt_array_new")

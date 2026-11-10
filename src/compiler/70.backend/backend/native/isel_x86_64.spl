@@ -1,3 +1,4 @@
+use compiler.mir.mir_data.{MirCallOrigin}
 # x86_64 Instruction Selection
 #
 # Translates MIR instructions to x86_64 MachInst sequences.
@@ -17,7 +18,7 @@ use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X
 use compiler.backend.native.mach_inst.{X86_OP_VMOVAPS_LOAD_ZMM, X86_OP_VMOVAPS_STORE_ZMM, X86_OP_VADDPS_ZMM, X86_OP_VSUBPS_ZMM, X86_OP_VMULPS_ZMM, X86_OP_VDIVPS_ZMM, X86_OP_VADDPD_ZMM, X86_OP_VSUBPD_ZMM, X86_OP_VMULPD_ZMM, X86_OP_VDIVPD_ZMM, X86_OP_VPADDD_ZMM, X86_OP_VPSUBD_ZMM, X86_OP_VPMULLD_ZMM, X86_OP_VPANDD_ZMM, X86_OP_VPORD_ZMM, X86_OP_VPXORD_ZMM}
 use compiler.backend.native.mach_inst.{X86_OP_MOVZX_REG_MEM8, X86_OP_MOVZX_REG_MEM16, X86_OP_MOV_REG_MEM32, X86_OP_MOV_MEM8_REG, X86_OP_MOV_MEM16_REG, X86_OP_MOV_MEM32_REG}
 use compiler.backend.native.mach_inst.{X86_OP_MOVSX_REG_MEM8, X86_OP_MOVSX_REG_MEM16, X86_OP_MOVSX_REG_MEM32}
-use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
+use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label, isel_definition_symbol, isel_call_symbol, isel_module_context}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
 use compiler.backend.native.native_avx2_capability.{NativeAvx2CapabilityV1, native_avx2_denied_v1}
 use compiler.backend.native.native_avx512_capability.{NativeAvx512CapabilityV1, native_avx512_denied_v1}
@@ -38,9 +39,9 @@ fn lower_operand(ctx: ISelContext, operand: MirOperand) -> LoweredOperand:
         case Move(local):
             LoweredOperand(insts: [], result: local_vreg_op(local.id), ctx: ctx)
         case Const(const_value, const_type):
-            x64_lower_const(ctx, const_value, const_type)
+            x64_lower_const(ctx, const_value, const_type, operand.call_origin)
 
-fn x64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> LoweredOperand:
+fn x64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType, call_origin: MirCallOrigin = MirCallOrigin.Source) -> LoweredOperand:
     match value:
         case Int(v):
             isel_emit_one(ctx, X86_OP_MOV_REG_IMM, [op_imm(v)])
@@ -48,6 +49,12 @@ fn x64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Lo
             val imm_val = if v: 1 else: 0
             isel_emit_one(ctx, X86_OP_MOV_REG_IMM, [op_imm(imm_val)])
         case Str(s):
+            match type_.kind:
+                case FuncPtr(_):
+                    val symbol = isel_call_symbol(ctx, s, call_origin)
+                    val symbol_ctx = isel_add_extern(ctx, symbol)
+                    return isel_emit_one(symbol_ctx, X86_OP_LEA, [op_sym(symbol)])
+                case _: ()
             var new_ctx = isel_add_string_data(ctx, s, char_to_ascii)
             val label = isel_last_string_label(new_ctx)
             isel_emit_one(new_ctx, X86_OP_LEA, [op_sym(label)])
@@ -70,7 +77,7 @@ fn isel_module_with_avx2_capability(module: MirModule, capability: NativeAvx2Cap
 
 fn isel_module_with_x86_simd_capability(module: MirModule, capability: NativeAvx2CapabilityV1, avx512_capability: NativeAvx512CapabilityV1) -> MachModule:
     var mach_module = new_mach_module(module.name)
-    var ctx = new_isel_context()
+    var ctx = isel_module_context(module)
 
     # Materialize module statics once, before functions.  Stable SymbolId order
     # makes bytes and relocation symbol indices reproducible across Dict seeds.
@@ -113,7 +120,8 @@ fn isel_module_with_x86_simd_capability(module: MirModule, capability: NativeAvx
         next_frame_offset: ctx.next_frame_offset, extern_symbols: static_externs,
         data_entries: static_entries, string_counter: ctx.string_counter,
         global_names: global_names, global_sizes: global_sizes,
-        global_signed: global_signed, global_mutable: global_mutable
+        global_signed: global_signed, global_mutable: global_mutable,
+        function_names: ctx.function_names
     )
 
     # Canonical (name-sorted) order: Dict<SymbolId,_> iterates in key-address
@@ -207,7 +215,7 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
     # The SIMD plans fail closed on multi-block functions, so a deferred body
     # is always followed immediately by its return block and falls through.
     val simd_plan_active = simd_registers.len() > 0 or avx512_shapes.len() > 0
-    var mach_func = new_mach_function(func.name)
+    var mach_func = new_mach_function(isel_definition_symbol(func))
 
     # Reset vreg counter - use local IDs directly, start high for temps
     var local_ctx = ISelContext(
@@ -220,7 +228,8 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
         global_names: ctx.global_names,
         global_sizes: ctx.global_sizes,
         global_signed: ctx.global_signed,
-        global_mutable: ctx.global_mutable
+        global_mutable: ctx.global_mutable,
+        function_names: ctx.function_names
     )
 
     # Allocate frame slots for locals that need stack space
@@ -325,7 +334,8 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
         global_names: local_ctx.global_names,
         global_sizes: local_ctx.global_sizes,
         global_signed: local_ctx.global_signed,
-        global_mutable: local_ctx.global_mutable
+        global_mutable: local_ctx.global_mutable,
+        function_names: local_ctx.function_names
     )
 
     ISelFuncResult(func: mach_func, ctx: out_ctx)
@@ -1167,8 +1177,9 @@ fn isel_call_with_frame(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, a
             match const_value:
                 case Str(name):
                     # Direct call to named function
-                    current_ctx = isel_add_extern(current_ctx, name)
-                    insts.push(new_mach_inst(X86_OP_CALL, [op_sym(name)]))
+                    val symbol = isel_call_symbol(current_ctx, name, func_op.call_origin)
+                    current_ctx = isel_add_extern(current_ctx, symbol)
+                    insts.push(new_mach_inst(X86_OP_CALL, [op_sym(symbol)]))
                 case _:
                     # A non-symbol constant callee has no call lowering.
                     # Emitting a NOP here would silently drop the call and
