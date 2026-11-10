@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
-**Status:** OPEN (PERF-REGRESSION / SIMPLE-CAPABILITY)
+**Status:** SUPERSEDED (PERF-REGRESSION / SIMPLE-CAPABILITY)
 **Filed:** 2026-08-18
 **Found by:** first codegen-lane parity measurement for C-MIG-0001
 (binary_runtime_hardening goal 3).
@@ -93,3 +93,34 @@ were fixed — measured directly on this host, a `[u8]` indexed-store loop runs
 at ~3 ns/byte and a bare `push` loop at ~2 ns/byte, i.e. the JIT's scalar
 array code is already fine. Do not re-open this against those hypotheses.
 
+
+---
+
+## Addendum 2026-11-11 — lane compiler2 — verdict SUPERSEDED
+
+Triage-first pass, batch 2. This row was already self-declared **RESOLVED**
+in-body (2026-09-06 aarch64 re-measurement: codegen lane 1.23x/1.20x, i.e.
+parity for this shape). No fresh defect; bookkeeping was already correct.
+
+**Root-cause fix confirmed merged:** `716808a9784c` (2026-08-20, "perf: fix
+interpreter O(N^2), JIT module-val corruption, CSS render gate, SIMD kernels,
+Vulkan fence"). Its "JIT module-val (10.8x + correctness)" hunk — unannotated
+`val T = [...]` registered as `TypeId::ANY`, forced boxed dispatch + raw-i64
+decode, 47,390us/GARBAGE -> 4,387us/correct — is exactly the module-val
+initializer fix that let `gzip/crc.spl` drop its `_table_copy()` mitigation
+(removed 2026-08-20, matching this doc). Fix is present in the current tree;
+`_table_copy` no longer appears in `src/lib/gzip/crc.spl`.
+
+**Seed-smoke (this lane's proof):** pin spec
+`test/05_perf/lib/crc32_text_c_vs_simple_perf_spec.spl` on the refreshed seed
+(bin/simple.exe 37,577,216 bytes, build-commit 0791c2b7f4a7), interpreter mode,
+`--no-cache` -> `outcome=OK, passed=1/1`. Recorded `perf_evidence:
+lane=interpreter iters=200 body_len=2090 c_us=4580 simple_us=3066489`
+(~670x, inside the documented ~100-1000x interpreter envelope; the spec
+asserts only a 1000x sanity ceiling, not parity). The 14.4x figure was a
+*codegen/JIT-lane* quantity; the doc's own 2026-09-06 JIT strict re-measurement
+(1.2x) plus the merged root-cause fix close it. Interpreter-mode seed-smoke is
+the lane-appropriate proof available under this lane's mandate.
+
+**Cycles:** 0 (no live defect; no fix attempted). Evidence log:
+`build/review/p3c2-crc32-seedsmoke.log`.
