@@ -48,3 +48,40 @@ Owner: provider loader / bootstrap-core integration lane.
 Bootstrap reason for the current provider-boundary implementation: `none`.
 Only the new provider modules and focused tests are expected to rebuild.
 
+## Triage 2026-11-11 (p3fix-p2a-20261111 lane) — prerequisites landing; still blocked, LIVE
+
+Re-verified at release/1.0.0 tip (worktree @ 79d5af6723f6). The unblock
+condition is partially met — substantially more than the doc's "Current
+partial support" records — but the activation itself (removing the concrete
+driver import from `bootstrap_main.spl`) has NOT landed:
+
+- **Unblock item 1 (raw query-call bridge) — landed.**
+  `src/compiler/70.backend/linker/linker_pack_entry.spl:26,52` exports
+  `@export("C") simple_provider_query_v1(request_address, result_address)`
+  and `simple_cli_command_invoke_v1`, implementing the real linker-pack
+  command/query over the provider query wire format. The doc's "no raw
+  query-call bridge" no longer holds.
+- **Unblock item 3 (bootstrap-safe client) — landed, env-gated.**
+  `bootstrap_driver_provider_client_v1` exists with an opt-in route: default
+  stays on the direct driver; when the provider env is set it pins the
+  CompilerDriverV1 interface/ABI in the admission request and fails CLOSED —
+  missing artifact → diagnostic + exit code 3, artifact outside approved
+  roots → refused.
+- **Unblock items 2/4/5 (default activation) — NOT landed.**
+  `src/app/cli/bootstrap_main.spl:13` still imports
+  `compiler_driver.driver.{compiler_driver_create, compiler_driver_run_compile}`
+  and still calls both at :711-712 and :845-846. The independently built
+  compiler-provider artifact with link/run evidence that bootstrap_main has
+  no concrete driver import is still pending, and that proof needs native
+  builds of the bootstrap entrypoint — provider-loader / bootstrap-core
+  integration work owned by another lane.
+
+Fresh spec evidence (tracked seed binary, interpreter, --no-cache):
+`bootstrap_driver_provider_client_v1_spec.spl` 9/9,
+`provider_cli/compiler_driver_provider_v1_spec.spl` 5/5,
+`driver_provider_v1_spec.spl` 4/4, `driver_provider_compile_wire_v1_spec.spl`
+4/4 — all green at tip.
+
+Status stays open (LIVE): gated on the provider-loader/bootstrap-core lane's
+native activation evidence, not on further code from this lane.
+

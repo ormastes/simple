@@ -3,7 +3,7 @@
 - **Status:** implemented-behind-gate (default OFF; activation blocked on the stage3 self-build)
 - **Priority:** P2
 - **Decision:** ADR-005 § "Char literal syntax" (`doc/04_architecture/adr/ADR-005-text-index-yields-char.md`)
-- **Last checked:** 2026-11-10 on `origin/release/1.0.0` (stage3 self-build still unrecorded; escape parity fix landed, see below)
+- **Last checked:** 2026-11-11 on `origin/release/1.0.0` (p3fix-p2a lane: gate specs 7/7 + 5/5 green; stage3 self-build still unrecorded — see 2026-11-11 addendum)
 
 ## What the switch is
 
@@ -144,3 +144,26 @@ Evidence:
 
 The real `Value::Char` / `TAG_SPECIAL` representation (ADR-005
 "Representation and ABI") is separate work and is not needed for this step.
+
+## Triage 2026-11-11 (p3fix-p2a-20261111 lane) — still gated; LIVE, left open
+
+Re-verified at release/1.0.0 tip (worktree @ 79d5af6723f6):
+- The gate is still implemented behind `SIMPLE_CHAR_LITERAL_LEXER`
+  (default OFF) in both lexers — `lexer_struct.spl:177-184` reads the env var
+  once per lexer construction; no default flip has landed.
+- Activation step 2 (bootstrap lane records a passing stage3 self-build) is
+  still unmet, so steps 3-6 (migration batches, default flip, blocking guard,
+  warning promotion) remain blocked. Per this doc, the bootstrap is owned by
+  the bootstrap lane and bug-fix lanes may not run it — an owner/lane gate,
+  not a code defect reachable from this lane.
+- The 2026-11-10 escape-parity fix is present in source
+  (`scan_char_literal` decodes `\xNN` and octal with the `scan_string` rule).
+- Fresh spec evidence under the tracked seed binary
+  (`SIMPLE_LIB=src bin/simple.exe test <spec> --mode=interpreter --no-cache`):
+  `lexer_char_literal_gate_spec.spl` 7/7, `parser_char_literal_gate_spec.spl`
+  5/5 — both green at tip.
+- Open seed-side gap from 2026-11-10 stands (seed `process_escape` accepts
+  `\a \b \f \v`, bare `\uXXXX`, `\: \/ \. \-`, unknown `\q`→`q`; needs a
+  cargo build + activation-PR owner; not attempted here).
+
+Status stays open (gated). No code change in this lane.
