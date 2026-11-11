@@ -5,7 +5,9 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
-**Status:** OPEN — perf finding, no fix attempted here
+**Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — codegen lane cleared of
+the defect (lib+runtime fix merged at tip; ratchet PASS on Windows seed); lib/runtime
+residuals tracked by their own lanes (see addenda)
 **Binary used:** `bin/release/x86_64-unknown-linux-gnu/simple` (Rust bootstrap
 seed — printed `WARNING: this Rust-built Simple binary is a bootstrap seed
 only`), 59620392 bytes, mtime 2026-08-18 01:08:42. `readlink -f bin/simple`
@@ -498,3 +500,22 @@ scope): utf8_validate `u64`-window ASCII fast path and base64 decode single-pass
 (`src/lib/common/base_encoding/utilities.spl`, `base64.spl`), `char_from_code` census,
 and `rt_array_join`'s quadratic (`src/runtime`) — these belong to the lib/runtime lanes.
 C-MIG-0019 time_utils was already debunked in-record as a measurement artifact.
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (Windows Git
+Bash, base `bf946163122f`, tracked seed `bin/simple.exe`):
+
+`sh scripts/check/check-base64url-codegen-lane-perf.shs` →
+**`PASS — 100 vector(s) KAT-verified, ratio 7.5x under ceiling 60x
+(c_us=46635 simple_us=350083)`** — an improvement on the 20.1x the
+2026-11-10 lane recorded, still with the encode+decode KAT asserted
+before timing. Absorber: the 2026-09-06 lib+runtime fix (`9e5671ad32d`
+lineage) merged on release/1.0.0. The record's remaining named items
+(utf8_validate `u64`-window fast path, base64 decode single-pass,
+`char_from_code` census, `rt_array_join` quadratic) are lib/runtime-lane
+scope, not compiler; C-MIG-0019 time_utils was debunked in-record as a
+measurement artifact. Status line flipped from OPEN.

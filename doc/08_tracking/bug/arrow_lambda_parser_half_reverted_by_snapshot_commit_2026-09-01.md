@@ -1,6 +1,6 @@
 # Arrow-lambda parser work partially reverted by a "snapshot" commit
 
-Status: OPEN — reported, NOT fixed here (out of scope of the duplicate-symbol fix).
+Status: SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — both halves of 9e548aad80a restored at tip via 5e937a7116ce; re-verified fresh-seed (see addenda).
 Date: 2026-09-01
 
 ## Symptom
@@ -92,3 +92,16 @@ multi-parameter arrow names before the body"). That spec still has 2 failures in
 UNRELATED scenarios ("admits the supported typed var without an explicit initializer",
 "blocks opaque imported shadow authority ...") — pre-existing on the release base, not
 this bug. The Rust `cargo test` half of the guard remains the seed lane's to execute.
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (base
+`bf946163122f`, tracked seed `bin/simple.exe`): a fixture applying
+`(x) => x + 1`, `(x, y) => x * 10 + y`, and `() => 42` through typed
+higher-order parameters printed `6 34 42` — byte-identical to the
+2026-11-10 addendum's expected values. Absorber: snapshot-recovery commit
+`5e937a7116ce` (both halves of `9e548aad80a` restored). Status line
+flipped from OPEN.

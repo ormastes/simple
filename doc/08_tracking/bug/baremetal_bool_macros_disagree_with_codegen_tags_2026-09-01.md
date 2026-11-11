@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN
+- Status: SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — #7447 lineage merged at tip; check-baremetal-tagged-bool-decode.shs PASS on Windows seed (see addenda)
 - Date: 2026-09-01
 - Scope: `examples/09_embedded/simple_os/arch/common/baremetal_runtime.h`
 - Found while root-causing
@@ -129,3 +129,17 @@ self-contained arch TU carries the same per-definition guard (e.g.
 Verification on this host (Windows Git Bash, source-level check):
 `sh scripts/check/check-baremetal-tagged-bool-decode.shs` →
 `PASS — 4 definition(s) checked, all decode the tagged bool` (exit 0).
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (Windows Git
+Bash, base `bf946163122f`):
+
+`sh scripts/check/check-baremetal-tagged-bool-decode.shs` →
+**`PASS — 4 definition(s) checked, all decode the tagged bool`** (exit 0).
+
+Absorber: the 2026-11-05/2026-11-07 resolution (#7447 lineage) merged on
+release/1.0.0, per the addenda above. Status line flipped from OPEN.
