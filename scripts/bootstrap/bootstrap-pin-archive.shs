@@ -1,47 +1,64 @@
 #!/bin/sh
-# bootstrap-pin-archive.shs -- materialise a PINNED `git archive` snapshot of a
-# source commit so bootstrap-from-scratch.sh builds committed content, never the
-# live shared working copy (owner decision 2026-11-09, item 15).
+# bootstrap-pin-archive.shs -- materialise a PINNED snapshot of a source commit so
+# bootstrap-from-scratch.sh builds committed content, never the live shared
+# working copy (owner decision 2026-11-09, item 15).
 # Bug: doc/08_tracking/bug/bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md
+#
+# The snapshot is a shared-object clone checked out at the pinned sha (not a
+# bare `git archive`): SCV source admission lists the inventory with
+# `git ls-files` and refuses a root without `.git`
+# (`source-inventory-root-not-git`, source_authority.spl), which made every
+# Stage 2 sanity fail on the archive form (2026-11-12). The clone has its own
+# index and working tree, so live edits in the source checkout stay invisible;
+# `git rev-parse HEAD` inside it is the real pinned sha, so provenance captures
+# (git-head, git_state_sha256) keep their meaning. Objects are borrowed through
+# `.git/objects/info/alternates` -- nothing is copied.
 #
 # Usage:
 #   bootstrap-pin-archive.shs <repo> <rev> <dest-parent>   # prints snapshot dir on stdout
 #   bootstrap-pin-archive.shs --selftest
 # Snapshot dir = <dest-parent>/pinned-<sha12>; holds .bootstrap-pinned-sha.
-# Exit 2 = nothing built (bad rev / empty archive / extraction failure).
+# Exit 2 = nothing built (bad rev / empty checkout / clone failure).
 set -u
-
 pin_archive() {
     pa_repo=$1; pa_rev=$2; pa_parent=$3
     pa_sha=$(git -C "$pa_repo" rev-parse --verify "${pa_rev}^{commit}" 2>/dev/null) || {
         echo "ERROR — nothing was checked (cannot resolve rev '${pa_rev}')" >&2; return 2; }
     pa_dir="${pa_parent}/pinned-$(echo "$pa_sha" | cut -c1-12)"
-    rm -rf "$pa_dir.tmp"; mkdir -p "$pa_dir.tmp" || return 2
-    # Extract to a temp dir then rename: a half-extracted tree is never visible.
-    git -C "$pa_repo" archive --format=tar "$pa_sha" | tar -x -C "$pa_dir.tmp" || {
-        rm -rf "$pa_dir.tmp"; echo "ERROR — git archive extraction failed" >&2; return 2; }
-    pa_n=$(find "$pa_dir.tmp" -type f | wc -l)
-    [ "$pa_n" -gt 0 ] || { rm -rf "$pa_dir.tmp"; echo "ERROR — empty archive for ${pa_sha}" >&2; return 2; }
+    rm -rf "$pa_dir.tmp"; mkdir -p "$pa_parent" || return 2
+    # Clone to a temp dir then rename: a half-materialised tree is never visible.
+    # --shared borrows the object store; --no-checkout + detached checkout pins
+    # the exact sha instead of whatever branch HEAD names. LFS smudge is skipped
+    # (the archive form also shipped pointer files).
+    GIT_LFS_SKIP_SMUDGE=1 git clone -q --shared --no-checkout "$pa_repo" "$pa_dir.tmp" 2>/dev/null &&
+        git -C "$pa_dir.tmp" checkout -q --detach "$pa_sha" 2>/dev/null || {
+        rm -rf "$pa_dir.tmp"; echo "ERROR — pinned clone/checkout of ${pa_sha} failed" >&2; return 2; }
+    pa_n=$(git -C "$pa_dir.tmp" ls-files | wc -l)
+    [ "$pa_n" -gt 0 ] || { rm -rf "$pa_dir.tmp"; echo "ERROR — empty checkout for ${pa_sha}" >&2; return 2; }
     printf '%s\n' "$pa_sha" > "$pa_dir.tmp/.bootstrap-pinned-sha"
+    printf '.bootstrap-pinned-sha\n' >> "$pa_dir.tmp/.git/info/exclude"   # keep the snapshot git-clean
     rm -rf "$pa_dir"; mv "$pa_dir.tmp" "$pa_dir" || return 2
     echo "pinned-archive: ${pa_sha} (${pa_n} files) -> ${pa_dir}" >&2
     printf '%s\n' "$pa_dir"
 }
-
 selftest() {
     st=$(mktemp -d) || return 2; fail=0
     git init -q "$st/r" && ( cd "$st/r" && git config user.email t@t && git config user.name t \
         && mkdir -p src && printf 'committed\n' > src/a.spl && git add -A && git commit -qm c1 )
+    src_sha=$(git -C "$st/r" rev-parse HEAD)
     d=$(pin_archive "$st/r" HEAD "$st/out" 2>/dev/null) || { echo "selftest FAIL: pin failed"; fail=1; }
-    # Mutate the live tree AFTER pinning: torn content + new file.
+    # Mutate the live tree AFTER pinning: torn content + new file + new commit.
     printf '<<<<<<< HEAD\n' > "$st/r/src/a.spl"; printf x > "$st/r/src/new.spl"
+    ( cd "$st/r" && git add -A && git commit -qm c2 )
     [ "$(cat "$d/src/a.spl" 2>/dev/null)" = committed ] || { echo "selftest FAIL: live edit visible"; fail=1; }
     [ -e "$d/src/new.spl" ] && { echo "selftest FAIL: new file visible"; fail=1; }
-    [ -e "$d/.git" ] && { echo "selftest FAIL: .git leaked"; fail=1; }
-    [ "$(cat "$d/.bootstrap-pinned-sha" 2>/dev/null)" = "$(git -C "$st/r" rev-parse HEAD)" ] || { echo "selftest FAIL: sha marker"; fail=1; }
+    [ -d "$d/.git" ] || { echo "selftest FAIL: snapshot is not a git repository (SCV admission needs git ls-files)"; fail=1; }
+    [ "$(git -C "$d" rev-parse HEAD 2>/dev/null)" = "$src_sha" ] || { echo "selftest FAIL: snapshot HEAD is not the pinned sha"; fail=1; }
+    [ "$(git -C "$d" ls-files 2>/dev/null)" = "src/a.spl" ] || { echo "selftest FAIL: git ls-files inventory"; fail=1; }
+    [ "$(cat "$d/.bootstrap-pinned-sha" 2>/dev/null)" = "$src_sha" ] || { echo "selftest FAIL: sha marker"; fail=1; }
     pin_archive "$st/r" no-such-rev "$st/out" >/dev/null 2>&1; [ $? -eq 2 ] || { echo "selftest FAIL: bad rev not exit 2"; fail=1; }
     rm -rf "$st"
-    [ "$fail" -eq 0 ] && { echo "PASS — 5 selftest assertion(s) checked, pinned archive isolates build from live edits"; return 0; }
+    [ "$fail" -eq 0 ] && { echo "PASS — 7 selftest assertion(s) checked, pinned snapshot is a git checkout isolated from live edits"; return 0; }
     echo "FAIL — selftest"; return 1
 }
 
