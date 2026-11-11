@@ -53,8 +53,28 @@ impl BddFailures {
 }
 
 /// Record one failing expect (appends; earlier failures in the example are kept).
+/// Upper bound on one recorded failure message. `expect(source).to_contain(..)`
+/// formats the whole actual value; a 300 KB source file overflowed the test
+/// runner's bounded child-output capture, which then dropped the MIDDLE of the
+/// stream (including later example names/verdicts).
+const MAX_BDD_FAILURE_MSG_BYTES: usize = 2000;
+
+fn bound_bdd_failure(mut msg: String) -> String {
+    if msg.len() <= MAX_BDD_FAILURE_MSG_BYTES {
+        return msg;
+    }
+    let mut cut = MAX_BDD_FAILURE_MSG_BYTES;
+    while !msg.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let omitted = msg.len() - cut;
+    msg.truncate(cut);
+    msg.push_str(&format!("... [failure message truncated: {omitted} bytes omitted]"));
+    msg
+}
+
 pub(crate) fn push_bdd_failure(msg: String) {
-    BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().push(msg));
+    BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().push(bound_bdd_failure(msg)));
 }
 
 fn take_bdd_failure_summary() -> Option<String> {
@@ -2448,6 +2468,17 @@ mod failure_retention_tests {
         clear_bdd_state();
         assert!(out.contains("expected 11 to equal 22"), "first failure lost: {out}");
         assert!(out.contains("expected 33 to equal 44"), "second failure lost: {out}");
+    }
+
+    #[test]
+    fn huge_failure_message_is_bounded() {
+        clear_bdd_state();
+        BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
+        record_assertion_failure(format!("expected {} to contain x", "é".repeat(300_000))).unwrap();
+        let out = reported();
+        clear_bdd_state();
+        assert!(out.len() < 4000, "unbounded failure message: {}", out.len());
+        assert!(out.contains("failure message truncated"), "no truncation note: {out}");
     }
 
     #[test]
