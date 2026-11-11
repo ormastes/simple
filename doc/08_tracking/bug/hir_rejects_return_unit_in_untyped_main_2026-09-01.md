@@ -84,3 +84,20 @@ at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
   `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/compiler/hir/return_unit_in_untyped_main_spec.spl --mode=interpreter --no-cache`
   → SPEC FILE VERDICT outcome=OK, declared>=1 executed=1 passed=1 failed=0.
 - Verdict: SUPERSEDED. No code change.
+
+---
+
+## 2026-11-11 (lane p3fix-comp7-20261111) — re-verified FIXED, no header change needed
+
+Independent re-verification of the compiler3 addendum on this lane's fresh
+worktree (base `a64cda1ee32d`, tracked seed `bin/simple.exe`,
+build-commit 46fe8f6b6def):
+
+- Fixing commit present in this branch: `8a4fe2ae2b39` ("fix(hir): untyped fns
+  infer return type from tail value; robust requires -> T").
+- Guard spec `test/01_unit/compiler/hir/return_unit_in_untyped_main_spec.spl`
+  (`--mode=interpreter --no-cache`) → `outcome=OK, executed=1 passed=1 failed=0`.
+
+Disposition confirmed: FIXED by `8a4fe2ae2b3` (doc marked CLOSED 2026-11-09)
+before this campaign; header already carried the CLOSED status, so no flip was
+required. This row was already resolved going into the P3 pass.
