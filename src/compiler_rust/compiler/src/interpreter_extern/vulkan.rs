@@ -33,7 +33,7 @@
 //! Marshalling is per-function typed, driven by `VULKAN_FNS`, which is
 //! generated from the `extern "C"` prototypes in the runtime source. The
 //! generic `dynamic_sffi` path cannot be used here: it marshals every return as
-//! `i64`, which would turn the seven `*const c_char` returns into raw pointers.
+//! `i64`, which would turn the eight `*const c_char` returns into raw pointers.
 //!
 //! Feature gating, checked rather than assumed: 84 of the 90 entry points carry
 //! both a `#[cfg(feature = "vulkan")]` real body and a
@@ -554,7 +554,7 @@ mod tests {
             .filter(|(_, r, _)| *r == Ret::T)
             .map(|(n, _, _)| *n)
             .collect();
-        assert_eq!(text_fns.len(), 7, "expected 7 text returns, got {text_fns:?}");
+        assert_eq!(text_fns.len(), 8, "expected 8 text returns, got {text_fns:?}");
         assert!(text_fns.contains(&"rt_vulkan_selected_device_name"));
         assert!(text_fns.contains(&"rt_vulkan_get_last_error"));
     }

@@ -2100,6 +2100,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_observation_v4_cancel_value", system::rt_process_observation_v4_provider_unavailable);
     insert_simple!("rt_process_observation_v4_collect_value", system::rt_process_observation_v4_provider_unavailable);
     insert_simple!("rt_process_observation_v4_ack_collect_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_reserved_matches_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_reserve_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_reserved_state_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_reserved_start_pinned_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_reserved_observe_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_reserved_ack_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_reserved_confirm_release_value", system::rt_process_observation_v4_provider_unavailable);
     }
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
