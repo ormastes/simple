@@ -709,6 +709,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // entry is likely redundant with referenced_call_names, but kept
             // for parity/safety with the explicit call-site pattern.
             | "rt_opt_i64_to_string"
+            | "rt_opt_value_to_string"
             | "rt_opt_bool_to_string"
             | "rt_opt_f64_to_string"
             | "rt_hash_text"

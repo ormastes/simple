@@ -2180,7 +2180,16 @@ impl Lowerer {
                 "to_i8" => Some(TypeId::I8),
                 "to_i16" => Some(TypeId::I16),
                 "to_i32" => Some(TypeId::I32),
-                "parse_int" | "parse_i32" | "parse_i64" => Some(TypeId::ANY),
+                // `parse_*` is `i64?` (pure Simple), not ANY: the runtime
+                // already returns a tagged int or NIL, and typing it as the
+                // flat optional lets interpolation render `Option::Some(v)` /
+                // `Option::None` like the interpreter. Bug:
+                // parse_family_strips_option_jit_native_2026-08-02.md
+                "parse_int" | "parse_i32" | "parse_i64" => Some(self.module.types.register(HirType::Pointer {
+                    kind: PointerKind::Shared,
+                    capability: ReferenceCapability::Shared,
+                    inner: TypeId::I64,
+                })),
                 _ => None,
             };
 
