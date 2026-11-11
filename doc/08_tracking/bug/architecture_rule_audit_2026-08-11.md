@@ -1,6 +1,6 @@
 # Architecture / structure rule audit of the 2026-08-10→11 landing window
 
-Status: OPEN (P3)
+Status: SUPERSEDED 2026-11-11 (lane p3-ne20) — F1/F2/F4/F7 verified resolved in-tree; F3/backlog/Perl/MDSOC items routed to owner by 2026-11-04 + 2026-11-10 addenda
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Window:** `45e486f0be6..276c61ed464` on `origin/main` — **272 commits, 761
 files changed**. `45e486f0be6` is the exact tip audited by the predecessor doc
@@ -272,3 +272,36 @@ canonical implementation is `nogc_async_mut/async/future.spl`, rank 2).
 Multi-finding audit scope (F3 fanout, 389-violation backlog ratchet, Perl
 scripts, MDSOC adoption) untouched. Runtime verification: Rust seed
 interpreter only; no self-hosted/native claim.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: SUPERSEDED (addenda absorb the row)
+
+Fresh re-verification on origin/release/1.0.0 (worktree @9202f187777), not
+resting on the 2026-11-04/2026-11-10 addenda alone:
+
+- **F1 RESOLVED in-tree:** `host_vulkan_lavapipe_provider.spl:101` imports
+  `vulkan_sffi_device_name` from `std.nogc_sync_mut.gpu.engine2d.sffi_vulkan`
+  (own-family facade), not through the `std.gpu` gc alias — matches the
+  2026-11-10 p2fix-librt-20261110 fix.
+- **F2 RESOLVED in-tree:** `nogc_async_mut/async/runtime.spl:12-14` import
+  `std.nogc_async_mut.async.{future,poll,combinators}`; the phantom
+  `family: "async"` manifest row at `gc_boundary_check.spl:163` remains but
+  is now a deliberately documented reserved/no-op row with an accurate
+  dot-boundary-matching comment — the 2026-11-10 "retire the row" residual is
+  moot as filed.
+- **F4 RESOLVED:** zero `class X(Y)` declarations remain under `src/compiler/`
+  (fresh grep for the three cited names: no hits).
+- **F7 RESOLVED:** `rules.sdl` is committed at tip (9902 bytes; git log shows
+  `139fa13e7c9 fix(check): re-bind rules.sdl digest and lower rules_sdl_gates
+  floor to 19`) — the every-push-blocked condition is gone.
+- **F5/F6** were corrected in-doc at audit time.
+
+Remaining items are owner decisions already routed by this doc's own
+addenda, not defects: F3 fanout (split-vs-rebaseline + DO-NOT-REFACTOR tree
+exemption; a fresh `check-directory-fanout.shs` re-query was started in-lane
+and aborted at ~8 min as a nice-to-have — the 2026-11-04 addendum already
+recorded "F3 not re-run this pass" and routed it), the 389-violation
+runtime-family backlog ratchet question (2026-11-04 owner questions), the two
+Perl scripts (sibling row `architecture_rule_audit_2026-08-10`, BLOCKED with
+grant recorded by lane p3-ne20 same day), and MDSOC/ECS adoption (directory-
+wide migration, explicitly not unilateral). Status flipped to SUPERSEDED.
+Lane evidence: `build/review/p3fix-ne20-20261111.sdn`.
