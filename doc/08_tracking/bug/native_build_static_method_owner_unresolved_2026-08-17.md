@@ -5,10 +5,13 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-17
-- **Status: OPEN — fix present in the tree, still UNVERIFIED (2026-08-17 re-run).**
-  See "Verification attempt 2026-08-17" below: the confirming run still cannot
-  reach a verdict, so the "shipped state" row of the ablation table remains
-  unconfirmed and must not be described as green.
+- **Status:** SUPERSEDED (triage 2026-11-11, lane boot22; disposition first
+  recorded 2026-11-10/11 lane boot6) — both fix halves re-verified present in
+  source at tip (`method_calls_literals.spl:4962-5033` name-derived owner
+  recovery + `mir_trace_enabled()` probe gating); executed confirmation
+  remains blocked-needs-grant (interpreted native-build worker stall >30 min
+  on this host class; quiet-Linux/compiled-worker grant carried verbatim, see
+  2026-11-10/11 and 2026-11-11 addenda below).
 
 ## Verification attempt 2026-08-17 (this pass)
 
@@ -238,3 +241,37 @@ companion parity spec `native_interpreter_owner_resolution_parity_spec.spl`
 is the same shape and cost. Until then the shipped-state caveat of this
 record stands, narrowed: fix confirmed present in source; execution
 unconfirmed for infrastructure reasons only.
+
+
+## 2026-11-11 P3-boot22 triage — SUPERSEDED (header flip; grant carried verbatim)
+
+Row 1 of lane boot22 (bootstrap table, after #40). boot6's 2026-11-10/11
+addendum disposition re-verified FRESH at this lane's base (`79d5af6723f6`,
+tracked seed build-commit `46fe8f6b6def`), not rested on the stale addendum:
+
+- **Fix presence — re-verified in source.** `NAME-DERIVED OWNER LOOKUP` present
+  at `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:5000`
+  (inside the :4962-5033 window): the name-derived arm fires when
+  `static_method_raw < 0 and static_receiver_name != ""`, re-resolves the owner
+  via `self.symbols.lookup_or_invalid(static_receiver_name)`, looks the method
+  up via `lookup_method_in_type`, and accepts only `case SymbolKind.Function`
+  — ordered before the unique-static-leaf widening exactly as prescribed.
+  Probe gating intact: `mir_trace_enabled()` generation counter
+  (`mir_mc_trace_state`, :57, :2604-2609) replaces the 38 unconditional
+  eprints. Fixtures `test/fixtures/native_static_method_owner/main.spl` and
+  `test/fixtures/native_trailing_default_param/` and both pin specs present.
+- **Executed confirmation — NOT re-attempted in-lane (per lane rules).** The
+  confirming spec shells out to a real interpreted-worker `native-build`;
+  boot6 recorded 4 attempts on this host class all stalling deterministically
+  (build-log freeze at 611,607 B, silent CPU-bound phase, worker watchdog at
+  1800 s). Lane boot22's ~10-min per-spec cap makes the 1500-3000 s quiet-host
+  budget unreachable here.
+- **Grant carried verbatim (from boot6 addendum):** quiet Linux host or the
+  compiled-worker lane, command
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/compiler/native/native_static_method_owner_resolution_spec.spl --no-cache --timeout 1800`
+  (historical confirming budget on a quiet 2026-08 box was 1500-3000 s). The
+  companion parity spec `native_interpreter_owner_resolution_parity_spec.spl`
+  is the same shape and cost.
+
+Disposition: SUPERSEDED on source evidence; executed-confirmation residual is
+an infrastructure grant, not an open defect.

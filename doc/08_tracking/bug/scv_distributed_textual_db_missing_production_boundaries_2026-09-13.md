@@ -1,7 +1,9 @@
 # SCV distributed textual DB production boundaries are missing
 
 Date: 2026-09-13  
-Status: OPEN  
+Status: LIVE (triaged 2026-11-11, lane boot22) — design-only gap confirmed still
+present at tip; unblock condition (lanes L0–L10, owner scv-database-team)
+unchanged; no in-lane fix attempted.  
 Class: feature-blocking correctness and performance gaps  
 Owner: scv-database-team
 
@@ -38,3 +40,24 @@ fail-fast checker in
 with production-owner fixtures, satisfy REQ-001..REQ-036 and NFR-001..NFR-015,
 and obtain final verification `STATUS: PASS`. Until then, documentation must
 say design-only and no Git/CI/provider round-trip is claimed.
+
+
+## 2026-11-11 P3-boot22 triage — LIVE (header flip)
+
+Row 3 of lane boot22 (bootstrap table, after #40). Source evidence re-verified
+FRESH at this lane's base (`79d5af6723f6`):
+
+- `src/lib/scv/metadata_db.spl` insert still carries the TODO(perf)
+  read-modify-write-whole-`SdnDatabase`-per-insert comment (the `me insert`
+  arm, :115-135 region) — the 10,000-observation import target is still unmet.
+- `src/lib/scv/network_remote.spl:7-13` still describes Token/OAuth2/SigV4
+  auth and resumable transfer as stubs with HTTP(S) settlement as a "future
+  network-layer extension".
+
+Disposition: LIVE, not fixable in a P3 bug-fix lane. This record tracks a
+deliberately design-only system spec whose unblock condition is the full
+L0–L10 implementation program in
+`doc/03_plan/agent_tasks/simple_distributed_textual_databases.md` plus
+REQ-001..REQ-036 / NFR-001..NFR-015 verification — feature-program work owned
+by scv-database-team, not a root-cause bug fix. No workaround applied, no
+fail-fast checker weakened.

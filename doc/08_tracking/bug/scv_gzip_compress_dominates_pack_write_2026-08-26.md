@@ -6,8 +6,10 @@ bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
 - Found: 2026-08-26, during SCV-IMPL-B-06 (pack v2 hardening).
-- Status: OPEN. Worked around **only** on the new `pack-write-v2r` path; the
-  shared encoder is deliberately not edited.
+- Status: FIXED (triage 2026-11-11, lane boot22; root-cause fixed 2026-08-26, soak +
+  second fast path 2026-08-27, header never flipped until now) — lz77 hash-chain
+  matcher and dense huffman lookup both verified present at tip;
+  `gzip_spec.spl` re-run fresh 6/6 PASS on the tracked seed.
 - Component: `src/lib/common/compress/gzip.spl` (`gzip_compress`).
 
 ## Evidence
@@ -301,3 +303,32 @@ faster — that has not been measured and is not claimed here.
   `var out = target; out.push(...)` alias shape that the repo's COW rule warns
   about. Not measured, not touched.
 
+
+
+## 2026-11-11 P3-boot22 triage — FIXED (header flip)
+
+Row 4 of lane boot22 (bootstrap table, after #40). The body carried the
+root-cause fix (2026-08-26), the second fast path and the completed 50-cycle
+soak (2026-08-27), and the title said "Closed 2026-09-16", but the `Status:`
+line still read OPEN — the flip was never made. Disposition re-verified FRESH
+at this lane's base (`79d5af6723f6`, tracked seed build `46fe8f6b6def`):
+
+- **lz77 hash-chain fix present** at
+  `src/lib/nogc_sync_mut/compression/gzip/lz77.spl`: `head[h]`/`prev[p]` tables
+  (:30-32 comment, :55-64 allocation), chain walks bounded by `max_search`
+  (:45-49 level wiring, :91-96/:121 walk) — the O(n x window) scan is gone.
+- **huffman dense lookup present** at
+  `src/lib/nogc_sync_mut/compression/gzip/huffman.spl:18-24` — the 2026-08-27
+  guarded fast path has since evolved into a direct dense index
+  (`codes[symbol] -> [entry[1], entry[2]]` with bounds guard), still O(1); the
+  later typed-param tagging is tracked separately in
+  `native_huffman_untyped_return_guard_2026_10_11.md` and is not this defect.
+- **Fresh executed evidence**: `gzip_spec.spl` re-run on the tracked seed
+  (`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+  test/01_unit/lib/common/compress/gzip_spec.spl --mode=interpreter --no-cache`)
+  → 6/6 PASS.
+
+Residual (optional cleanup, not this defect): `scv_pack_v2_gzip_stored` in
+`pack_v2.spl` remains as a no-longer-necessary performance workaround;
+re-enabling real compression on `pack-write-v2r` is a separately measured
+change, as the 2026-08-26 section already states.

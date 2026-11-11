@@ -5,7 +5,9 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-24  
-**Status:** OPEN — committed baseline provenance mismatch
+**Status:** SUPERSEDED (triage 2026-11-11, lane boot22; resolved 2026-11-09 lane
+p3-subj6) — scanner/selftest/baseline restore `9414af76ef95` verified ancestor of
+HEAD; baseline ratchet 19412 committed; census selftest re-run fresh PASS.
 
 ## Evidence
 
@@ -74,3 +76,24 @@ This also explains the original +1 (19503 vs 19504): the two measurements came
 from different scanner identities across the sync, not from a new unscoped call
 site. No Simple source was scoped or changed; only the audit script and its
 deleted baseline were restored.
+
+
+## 2026-11-11 P3-boot22 triage — SUPERSEDED (header flip)
+
+Row 8 of lane boot22 (bootstrap table, after #40). The 2026-11-09 p3-subj6
+addendum recorded root cause + fix + executed evidence, but the header was
+never flipped. Disposition re-verified FRESH at this lane's base
+(`79d5af6723f6`):
+
+- Restore commit `9414af76ef95` ("fix(p3): close 4 bootstrap/stage bucket rows
+  — sffi census restore, ...") IS an ancestor of HEAD.
+- `scripts/audit/baselines/sffi-call-authority-v1.tsv` present at tip; ratchet
+  `missing_authority_call_sites=19412` — NOT increased to force green, per the
+  record's own resolution condition.
+- Fresh executed evidence: `sh scripts/audit/sffi-call-authority-census-selftest.shs`
+  → `sffi call authority census selftest: PASS` (re-run by boot22, ~126 s).
+
+The full census (`sffi-call-authority-census.shs --summary`) was not re-run
+in-lane; p3-subj6's 2026-11-09 full-census PASS with the 54-artifact/625-real
+row identification stands. The separate Stage-4 wiring-spec facade debt noted
+in the record remains outside this row.
