@@ -13,25 +13,43 @@
 # ponytail: grep on the raw JSON instead of a JSON parser — the prompt field is
 # the only string these phrases can plausibly appear in; parse properly if it misfires.
 
-ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+# Fork-free (builtins only): on a loaded Windows/Git Bash host each process
+# spawn measured ~4-8 s and the old sed|grep|tr|awk pipeline spawned ~10,
+# blowing the 5 s hook timeout on EVERY prompt. Never add external commands
+# to the no-toggle path.
+ROOT="${CLAUDE_PROJECT_DIR:-${0%/*}/../..}"
 LEVEL_FILE="${PONYTAIL_LEVEL_FILE:-$ROOT/.simple/ponytail.level}"
 
 apply() {  # reads prompt json from stdin
-    input=$(cat)
+    input=""
+    while IFS= read -r l || [ -n "$l" ]; do input="$input$l "; done
+    case "$input" in *[Pp][Oo][Nn][Yy][Tt][Aa][Ii][Ll]*|*[Nn][Oo][Rr][Mm][Aa][Ll]\ [Mm][Oo][Dd][Ee]*) ;; *) return 0 ;; esac
     new=""
     # Deactivation phrases must be the WHOLE prompt (trailing punctuation
     # ignored), as the original plugin does (ponytail-config.js:40-43) — a
     # substring match would switch the mode off on "don't stop ponytail".
-    prompt=$(printf '%s' "$input" | sed -n 's/.*"prompt"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 | tr 'A-Z' 'a-z' | sed 's/^[[:space:]]*//; s/[[:space:]!.?]*$//')
-    if [ "$prompt" = "stop ponytail" ] || [ "$prompt" = "normal mode" ] || printf '%s' "$input" | grep -qiE '/ponytail[[:space:]]+off'; then
-        new=off
-    elif printf '%s' "$input" | grep -qE '/ponytail[[:space:]]+(lite|full|ultra)'; then
-        new=$(printf '%s' "$input" | grep -oE '/ponytail[[:space:]]+(lite|full|ultra)' | head -n 1 | awk '{print $2}')
-    elif printf '%s' "$input" | grep -qE '/ponytail([^-a-z]|$)'; then
-        new=full
+    prompt=""
+    case "$input" in *'"prompt"'*)
+        prompt="${input#*\"prompt\"}"; prompt="${prompt#*\"}"; prompt="${prompt%%\"*}" ;;
+    esac
+    while :; do case "$prompt" in [[:space:]]*) prompt="${prompt#?}" ;; *) break ;; esac; done
+    while :; do case "$prompt" in *[[:space:]!.?]) prompt="${prompt%?}" ;; *) break ;; esac; done
+    # ponytail: glob, not ERE — one whitespace char between /ponytail and the
+    # level; "/ponytail  lite" (two spaces) falls through to bare -> full.
+    case "$prompt" in
+        [Ss][Tt][Oo][Pp]\ [Pp][Oo][Nn][Yy][Tt][Aa][Ii][Ll]|[Nn][Oo][Rr][Mm][Aa][Ll]\ [Mm][Oo][Dd][Ee]) new=off ;;
+    esac
+    if [ -z "$new" ]; then
+        case "$input" in
+            */[Pp][Oo][Nn][Yy][Tt][Aa][Ii][Ll][[:space:]][Oo][Ff][Ff]*) new=off ;;
+            */ponytail[[:space:]]lite*) new=lite ;;
+            */ponytail[[:space:]]full*) new=full ;;
+            */ponytail[[:space:]]ultra*) new=ultra ;;
+            */ponytail|*/ponytail[!-a-z]*) new=full ;;
+        esac
     fi
     [ -z "$new" ] && return 0
-    mkdir -p "$(dirname "$LEVEL_FILE")"
+    [ -d "${LEVEL_FILE%/*}" ] || mkdir -p "${LEVEL_FILE%/*}"
     printf '%s\n' "$new" > "$LEVEL_FILE"
     if [ "$new" = off ]; then
         echo "PONYTAIL MODE OFF"
