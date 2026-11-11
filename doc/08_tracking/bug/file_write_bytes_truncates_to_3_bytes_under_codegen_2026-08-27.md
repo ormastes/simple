@@ -107,3 +107,33 @@ Related but distinct sibling `seed_file_write_bytes_noop_and_timeout_directive_2
 (the symbol-table no-op) also already fixed on release/1.0.0.
 
 **Cycles:** 0 (no live defect; no fix attempted).
+
+---
+
+## Addendum 2026-11-11 — lane comp11 — SUPERSEDED confirmed with fresh codegen-lane repro on the tracked seed
+
+Lane: `work/p3-comp11-20261111` on `origin/release/1.0.0` (base `41935a5f61860`).
+Runtime: tracked seed `bin/simple.exe` build commit `46fe8f6b6def` (2026-11-10) —
+note this lane's seed is the tracked build, one refresh earlier than the
+compiler2 addendum's 0791c2b7f4a7; the row was therefore re-verified on this
+lane's own sanctioned binary rather than trusting the sibling run.
+
+Fresh source checks: `git merge-base --is-ancestor 904640beb29a 46fe8f6b6def`
+= true — the ABI fix AND its pin (`file_write_bytes_compiled_call_writes_
+every_byte_of_a_u8_array`, the exact regression this doc asked for) are both
+inside the tracked seed's lineage. The corrected two-owner-word ABI with the
+comment naming this defect is present at
+`src/compiler_rust/compiler/src/codegen/instr/calls.rs:367-371` at this base.
+
+Fresh behavioral proof (codegen lane — `bin/simple run`, default engine; the
+interpreter mode cannot prove this row):
+`build/review/comp11-probes/row7_lit4.spl` (the doc's `lit4` shape verbatim,
+5-element `[u8]` literal via `use std.io_runtime.{file_write_bytes}`) ->
+`ok=true`, rc=0, written file bytes `01 02 03 04 05` size 5 (was `08 00 00`,
+size 3, pre-fix). The run log's `[engine-demotion] hybrid-interp-splice`
+symbol list does NOT contain `rt_file_write_bytes_array` (0 occurrences), so
+the call was genuinely codegen-compiled, not spliced to the interpreter —
+the correct bytes prove the marshalling fix on this binary. Evidence:
+`build/review/comp11-probes/row7_lit4-run.log`, `row7_lit4.bin`.
+Header (SUPERSEDED) unchanged; this addendum records the fresh per-lane
+verification on the tracked seed.
