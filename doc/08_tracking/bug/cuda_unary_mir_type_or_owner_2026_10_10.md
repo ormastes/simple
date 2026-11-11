@@ -21,3 +21,22 @@ Targeted source a98662333215ca8a9446c44adb74a3ac66555c6f with pure producer aa40
 Durable receipt: `/mnt/c/Temp/simple-cuda-complete-owner-targeted-20261010/all-module-hir-evidence-union.json`. Target terminal, HIR artifact, SHA pins, and the 154-module ledger are retained alongside it.
 
 **Revalidated 2026-11-02: still plausible because OPEN; tagged source workaround, not a compiler repair. Native verification pending; no merged fix commit with a passing regression is cited in this doc.**
+
+## Revalidation 2026-11-11 (work/bugfix-cuda-vulkan-20261111)
+
+Confirmed the landed source fix (commits `d3b9aaa7b67`, `db24c1b783b`) is present
+in the live module `src/plugins/backend_cuda/cuda_backend.spl` — both the unary
+arms and the cycle-1 bitcast/bounds OR-arm records are qualified by the declared
+match-subject owner there. Probe fixture
+`test/fixtures/compiler/cuda_unary_type_owner_probe/main.spl` now prints the
+expected `1/1/0/0/1/0` on the read-only seed; `nested_owners.spl` prints the
+expected `1/0/7/9`. Native targeted cycle2 remains unexecuted (recorded producer
+unavailable on this host); the underlying compiler repair is landed in the live
+module, HIR-verified per the 2026-10-10 evidence above.
+
+The stale duplicate `src/compiler/70.backend/backend/cuda_backend.spl` (no
+importers; live users import `plugins.backend_cuda.cuda_backend`) still carried
+the pre-fix defective text and was mirrored hunk-for-hunk onto the landed fix
+(21 OR-arm qualifications + two unary arms + workaround tags + matching
+explicit imports) so the duplicate no longer contradicts the live module.
+Payloads/binders/arity untouched; arms the landed fix left bare remain bare.
