@@ -1,7 +1,7 @@
 # `Native — macOS aarch64` red on `main`: `rust-bootstrap-multiplatform.yml` never installs freetype
 
 - **Filed:** 2026-09-01
-- **Status:** OPEN — pre-existing on `main`, NOT caused by any open PR
+- **Status:** SUPERSEDED (triage 2026-11-11, lane boot21; first triaged 2026-11-10 lane boot5) — freetype install verified present on every OS row of `rust-bootstrap-multiplatform.yml` at HEAD `d552f63f67f8`; only closure evidence outstanding is a native macOS workflow run, not obtainable from a Windows lane
 - **Lane:** `.github/workflows/rust-bootstrap-multiplatform.yml`, job `native`, step `Test`
 - **Severity:** blocks every macOS row of that workflow; every PR touching its trigger paths shows a red macOS check
 
@@ -117,3 +117,21 @@ macOS `brew install coreutils freetype zstd llvm` with
 exports (:392-398), Windows `vcpkg install freetype:x64-windows` (:414). A
 native macOS workflow run remains the only unexecuted closure evidence and is
 not obtainable from a Windows lane.
+
+
+## 2026-11-11 P3-boot21 triage — SUPERSEDED (header flip)
+
+Fresh re-verification of the 2026-11-10 boot5 disposition (not flipped then),
+at HEAD `d552f63f67f8` in the lane worktree:
+
+- `.github/workflows/rust-bootstrap-multiplatform.yml` installs freetype on
+  every OS row of job `native`: Linux `libfreetype6-dev` (:355 and :862),
+  macOS `brew install coreutils freetype zstd llvm` with
+  `RUSTFLAGS=-L native=$(brew --prefix freetype)/lib`, `LIBRARY_PATH` and
+  `CPATH` exports (:392-398), Windows `vcpkg install freetype:x64-windows`
+  (:414) — byte-for-byte the pattern this record proposed.
+
+A native macOS workflow run remains the only unexecuted closure evidence and
+is not obtainable from a Windows lane; the record's own source-reconciliation
+status ("fix-implemented-verification-pending") is advanced to
+source-re-verified. No code change this lane; header flipped.
