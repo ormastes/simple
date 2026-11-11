@@ -1,7 +1,7 @@
 # Seed: semantic errors are reported without file:line:col
 
 - **Date**: 2026-11-09
-- **Status**: open
+- **Status**: FIXED 2026-11-11 (lane seedB, verified at base 79d5af6723f6)
 - **Area**: compiler_rust (seed interpreter diagnostics)
 - **Split from**: `seed_optional_query_comparison_divergence_2026-08-16.md` § "Divergence C"
   (owner decision 2026-11-09: split C into its own bug; not fixed in the parent).
@@ -46,3 +46,20 @@ Cargo pin: `src/compiler_rust/compiler/tests/semantic_error_position.rs`
 Known limitation: the `Expr` enum carries no span, so the position is
 statement-granularity; plain `CompileError::Semantic(String)` raise sites
 (non-contextual) are not covered by this change.
+
+## 2026-11-11 — FIXED at tip re-verified (lane seedB, base 79d5af6723f6)
+
+runner9's absorber `bdcbec5bd33d` ("fix(seed): JIT to_i32 family parity +
+semantic error positions; close 4 P3 seed/interp/jit rows") is an ancestor of
+this base, and the pin file
+`src/compiler_rust/compiler/tests/semantic_error_position.rs` (2 tests) is
+in-tree. Re-run at this base:
+
+```
+cargo test -p simple-compiler --test semantic_error_position
+-> test semantic_error_from_undefined_variable_carries_file_line_col ... ok
+   test semantic_error_inside_function_body_carries_file_line_col ... ok
+   test result: ok. 2 passed; 0 failed
+```
+
+Status flipped open -> FIXED 2026-11-11 (lane seedB). No re-fix needed.

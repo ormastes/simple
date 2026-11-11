@@ -2,7 +2,7 @@
 
 Date: 2026-08-21
 Reporter: agent A5+Y2 (Any hardening)
-Status: OPEN — reproduced and worked around locally, cause not fixed.
+Status: FIXED 2026-11-11 (lane seedB, verified non-repro at base 79d5af6723f6)
 
 ## Symptom
 
@@ -68,3 +68,28 @@ The diagnostic names a type (`Tuple`) that appears nowhere in the source and a
 field (`kind`) that belongs to an unrelated struct, with no location. Any
 occurrence of this shape costs an operator a long manual bisection; this one took
 roughly a dozen compile cycles to localize.
+
+## 2026-11-11 — FIXED at tip (lane seedB, worktree simple-p3-seedB-20261111, base 79d5af6723f6)
+
+The filed composition no longer reproduces on the tracked seed
+`bin/simple.exe` (mtime 2026-11-11):
+
+1. The doc's exact failing shape — helper declared `-> [text]` whose result
+   is iterated, each element passed to a second function, and a field read
+   off that function's struct result — now **compiles rc=0** and
+   **runs correctly** (`run` prints the struct field for each element,
+   exit 0).
+2. The doc's second symptom (`val paths: [text] = collect_paths(...)` at the
+   call site "changed the error rather than fixing it") also compiles rc=0.
+3. The real `src/app/check/any_escape_census.spl` compiles rc=0 (only
+   unrelated style warnings).
+
+The declared `-> [text]` is no longer ignored: the call result types as
+`[text]`, the for-loop element types as `text`, and the downstream field
+access resolves against the struct, not a fabricated `Tuple`. Absorbed by
+the seed HIR inference fixes landed between 2026-08-21 and this base (the
+inference surface has since been heavily reworked; no single absorber
+commit identified). No re-fix needed. The inline workaround in
+`any_escape_census.spl` may be reverted to the helper form at the owning
+lane's discretion — that source shape is no longer load-bearing for the
+seed.
