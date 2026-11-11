@@ -4,12 +4,15 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN — **BLOCKED (stage-chain probe), triaged 2026-11-11 (lane boot14).**
+- Status: LIVE (triaged 2026-11-11, lanes boot14/int10/int11) — **BLOCKED
+  (stage-chain probe).**
   Root cause proven (Rust `rt_transient_heap_promote` O(N) `Vec::retain` per call); the
-  pure-Simple call-count batching mitigation **is present in-tree** and its regression spec
-  passes 4/4 (seed-smoke). Real-scale Stage-2→Stage-3 confirmation is pending (not runnable
+  pure-Simple call-count batching mitigation **is present in-tree** (source-checked by
+  int11) and its regression spec
+  passes 4/4 (seed-smoke, boot14). Real-scale Stage-2→Stage-3 confirmation is pending (not runnable
   on this Windows host — known native-build hang on the success path). The underlying Rust
-  data-structure defect remains open (out of scope here: no cargo/rustc).
+  data-structure defect remains LIVE (out of scope here: no cargo/rustc); owner Rust lane
+  with stage-chain confirmation grant.
 
 ## Triage 2026-11-11 (lane boot14) — BLOCKED, kept OPEN
 
@@ -353,3 +356,20 @@ run); if it is not enough, the real fix has to change
 `TransientHeapScope.objects`'s data structure in
 `src/compiler_rust/runtime/src/value/collections.rs`.
 
+## Addendum 2026-11-11 (lane int11) — header flipped LIVE; mitigation + defect site source-checked
+
+Sweep flip. boot14's same-day triage (root cause proven; batching mitigation
+in-tree; regression spec 4/4 green on the tracked seed) plus int10's LIVE
+concurrence recorded the verified disposition; the header still read OPEN.
+int11 quick re-verify at base `84f5076db138` (source checks only, no re-runs —
+boot14 ran the 4/4 spec today on this lane's exact tracked seed
+`bin/simple.exe` build `46fe8f6b6def`): the Rust defect site
+`src/compiler_rust/runtime/src/value/collections.rs` still carries the
+per-call `rt_transient_heap_promote` O(N) `Vec::retain` over
+`TransientHeapScope.objects`, and the pure-Simple batching mitigation
+(`module_surface_promote_fields`, `src/compiler/20.hir/hir_lowering/module_surface_registry.spl:566-590`)
+is present in-tree. Real-scale Stage-2→Stage-3 confirmation remains pending on
+a non-Windows host (known native-build hang on the success path); the verbatim
+grant command boot14 recorded above stands. Header flipped to LIVE, owner
+Rust lane (`TransientHeapScope.objects` data structure) with stage-chain
+confirmation.
