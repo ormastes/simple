@@ -12,7 +12,10 @@
 # index and working tree, so live edits in the source checkout stay invisible;
 # `git rev-parse HEAD` inside it is the real pinned sha, so provenance captures
 # (git-head, git_state_sha256) keep their meaning. Objects are borrowed through
-# `.git/objects/info/alternates` -- nothing is copied.
+# `.git/objects/info/alternates` -- nothing is copied. Consequence: the snapshot
+# stays valid only while the pinned sha is reachable in the source repo (or
+# within gc.pruneExpire); do not delete a `work/*` branch whose sha a running
+# managed phase was pinned from until that run is terminal.
 #
 # Usage:
 #   bootstrap-pin-archive.shs <repo> <rev> <dest-parent>   # prints snapshot dir on stdout
@@ -30,8 +33,8 @@ pin_archive() {
     # --shared borrows the object store; --no-checkout + detached checkout pins
     # the exact sha instead of whatever branch HEAD names. LFS smudge is skipped
     # (the archive form also shipped pointer files).
-    GIT_LFS_SKIP_SMUDGE=1 git clone -q --shared --no-checkout "$pa_repo" "$pa_dir.tmp" 2>/dev/null &&
-        git -C "$pa_dir.tmp" checkout -q --detach "$pa_sha" 2>/dev/null || {
+    GIT_LFS_SKIP_SMUDGE=1 git clone -q --shared --no-checkout "$pa_repo" "$pa_dir.tmp" &&
+        git -C "$pa_dir.tmp" checkout -q --detach "$pa_sha" || {
         rm -rf "$pa_dir.tmp"; echo "ERROR — pinned clone/checkout of ${pa_sha} failed" >&2; return 2; }
     pa_n=$(git -C "$pa_dir.tmp" ls-files | wc -l)
     [ "$pa_n" -gt 0 ] || { rm -rf "$pa_dir.tmp"; echo "ERROR — empty checkout for ${pa_sha}" >&2; return 2; }
