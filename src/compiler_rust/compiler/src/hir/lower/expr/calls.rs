@@ -368,6 +368,41 @@ impl Lowerer {
             }
         }
 
+        // Safe code never passes a literal `None` to a parameter that is not
+        // declared `T?` (nil only inside `unsafe`; the empty value is an
+        // Option). Checked against the callee's HIR parameter types, so it
+        // covers imported functions without a new table, and only when some
+        // positional argument IS a literal `None` (one scan of `args`).
+        // Erased (`Any`) and type-parameter slots keep the runtime contract.
+        if ctx.unsafe_depth == 0
+            && args.iter().any(|a| a.name.is_none() && matches!(&a.value, Expr::Identifier(n) if n == "None"))
+            && args.iter().all(|a| a.name.is_none() && !matches!(a.value, Expr::Spread(_)))
+        {
+            if let (Expr::Identifier(_), HirExprKind::Global(_)) = (callee, &func_hir.kind) {
+                if let Some(HirType::Function { params, .. }) = self.module.types.get(func_hir.ty) {
+                    let params = params.clone();
+                    for (i, arg) in args.iter().enumerate() {
+                        if !matches!(&arg.value, Expr::Identifier(n) if n == "None") {
+                            continue;
+                        }
+                        let Some(&pty) = params.get(i) else { break };
+                        let erased = matches!(
+                            self.module.types.get(pty),
+                            None | Some(HirType::Any) | Some(HirType::Nil) | Some(HirType::Void)
+                        );
+                        if !erased && !self.is_optional_source_type(pty) {
+                            return Err(LowerError::Unsupported(format!(
+                                "call to `{callee_name}` passes None to argument {} whose parameter is not declared optional (`T?`); \
+                                 wrap the parameter type in `T?` or pass a value (nil only inside `unsafe`)",
+                                i + 1,
+                                callee_name = match callee { Expr::Identifier(n) => n.as_str(), _ => "?" }
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
         // M12 3b: fill omitted trailing arguments from the callee's parameter
         // defaults, for a directly-named free function called purely
         // positionally (same-module table first, then the importing file's
@@ -589,6 +624,12 @@ impl Lowerer {
             | Expr::Nil
             | Expr::Symbol(_)
             | Expr::Atom(_) => true,
+            // A bare `None` lowers to HirExprKind::Nil exactly like `nil`
+            // (lower_identifier), so an Option-typed `= None` default is a
+            // self-contained constant too. `lower_function` rejects a `= None`
+            // default on a non-optional parameter, so this never fills a
+            // non-optional slot with None.
+            Expr::Identifier(name) if name == "None" => true,
             // Ordinary quoted strings use FString syntax too. Only literal
             // parts are safe here; interpolation must not capture caller scope.
             Expr::FString { parts, .. } => parts.iter().all(|part| matches!(part, ast::FStringPart::Literal(_))),

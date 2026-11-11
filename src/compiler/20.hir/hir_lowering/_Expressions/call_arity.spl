@@ -11,11 +11,40 @@
 # different symbol id and are not checked. Cross-module callees, closures and
 # fn values have no row here and stay unchecked.
 
-use compiler.frontend.parser_types.{ParserFunction, Param}
+use compiler.frontend.parser_types.{ParserFunction, Param, ParserTypeParam}
+use compiler.frontend.parser_types_expr.{parser_type_kind_named_name, parser_type_kind_is_optional}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
 use compiler.hir.hir_lowering.types.HirLowering
+
+# Row spec per parameter: `?` prefix = has a default; `!` suffix = declared
+# with a non-Option, non-erased type (safe code may not pass `None` there).
+fn call_arity_spec_name(spec: text) -> text:
+    spec.replace("?", "").replace("!", "")
+
+# True when a parameter's declared type can never hold `None` in safe code:
+# explicit, not `T?`, not `any`, not one of the function's type parameters.
+fn call_arity_param_non_option(param: Param, type_params: [ParserTypeParam]) -> bool:
+    if not param.has_type_:
+        return false
+    # Discriminant probe, not `case TypeKind.Optional(_)`: see the SEED PATTERN
+    # HAZARD note in expression_core.spl (variant-vs-struct name collision).
+    if parser_type_kind_is_optional(param.type_.kind) or parser_type_kind_named_name(param.type_.kind) == "Option":
+        return false
+    val named = parser_type_kind_named_name(param.type_.kind)
+    if named == "any":
+        return false
+    for tp in type_params:
+        val tp_t: ParserTypeParam = tp
+        if tp_t.name == named:
+            return false
+    true
+
+fn hir_arg_is_none_literal(value: HirExpr) -> bool:
+    match value.kind:
+        case HirExprKind.NamedVar(_, n): n == "None"
+        case _: false
 
 impl HirLowering:
     me record_call_arity_rows(functions: Dict<text, ParserFunction>):
@@ -38,6 +67,8 @@ impl HirLowering:
                     if param.has_default:
                         row = row + "?"
                     row = row + param.name
+                    if call_arity_param_non_option(param, fn_.type_params):
+                        row = row + "!"
                     param_index = param_index + 1
                 ids.push(found_symbol.id)
                 rows.push(row)
@@ -92,26 +123,52 @@ impl HirLowering:
         for raw_arg in args:
             val arg: HirCallArg = raw_arg
             if not arg.has_name:
-                while next_param < total and named.contains(param_specs[next_param].replace("?", "")):
+                while next_param < total and named.contains(call_arity_spec_name(param_specs[next_param])):
                     next_param = next_param + 1
                 if next_param < total and next_param != source_index:
                     val bound_spec: text = param_specs[next_param]
-                    misbind = "function '{fn_name}': positional argument {source_index + 1} would bind parameter {bound_spec.replace("?", "")} but is passed in slot {source_index + 1}; name it or reorder the call"
+                    misbind = "function '{fn_name}': positional argument {source_index + 1} would bind parameter {call_arity_spec_name(bound_spec)} but is passed in slot {source_index + 1}; name it or reorder the call"
                     break
                 next_param = next_param + 1
             source_index = source_index + 1
+        # Safe code never passes a literal `None` to a parameter that is not
+        # declared `T?` (nil only inside unsafe; the empty value is an Option).
+        # Same binding walk as above; `!`-marked specs are the non-Option slots.
+        if self.unsafe_block_depth == 0:
+            var bind_param = 0
+            var arg_pos = 0
+            for raw_arg in args:
+                val arg: HirCallArg = raw_arg
+                var bound = -1
+                if arg.has_name:
+                    var k = 0
+                    while k < total:
+                        if call_arity_spec_name(param_specs[k]) == arg.name:
+                            bound = k
+                            break
+                        k = k + 1
+                else:
+                    while bind_param < total and named.contains(call_arity_spec_name(param_specs[bind_param])):
+                        bind_param = bind_param + 1
+                    if bind_param < total:
+                        bound = bind_param
+                    bind_param = bind_param + 1
+                if bound >= 0 and param_specs[bound].ends_with("!") and hir_arg_is_none_literal(arg.value):
+                    self.error("function '{fn_name}': argument {arg_pos + 1} passes None to parameter {call_arity_spec_name(param_specs[bound])}, which is not declared optional (`T?`); nil/None only inside unsafe", span)
+                    return
+                arg_pos = arg_pos + 1
         var missing: [text] = []
         var positional_left = positional
         var param_index = 0
         while param_index < total:
             val spec: text = param_specs[param_index]
             val optional = spec.starts_with("?")
-            val param_name: text = if optional: spec.substring(1, spec.len()) else: spec
+            val param_name: text = call_arity_spec_name(spec)
             if not named.contains(param_name):
                 if positional_left > 0:
                     positional_left = positional_left - 1
                 elif not optional:
-                    missing.push(spec)
+                    missing.push(param_name)
             param_index = param_index + 1
         if missing.len() > 0:
             self.error("function '{fn_name}' requires argument(s) {missing.join(", ")}, but {args.len()} were provided", span)

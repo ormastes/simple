@@ -2023,3 +2023,24 @@ fn string_receiver_to_i32_family_result_is_typed_not_any() {
         "string-receiver to_i32/to_i16/to_i8 must infer their widths like to_i64"
     );
 }
+
+// stage2_none_default_not_call_site_constant_2026-11-12: a `= None` default
+// on a `T?` parameter is a call-site constant (omitting it must lower, as
+// `= nil` always did); a `= None` default on a non-optional parameter is a
+// declaration error; and safe code never passes a literal `None` to a
+// non-optional parameter (nil/None only inside `unsafe`).
+#[test]
+fn none_default_is_constant_and_none_never_reaches_non_optional_param() {
+    let fo = "fn fo(a: i64, b: i64? = None) -> i64:\n    a\n\n";
+    parse_and_lower(&format!("{fo}fn main() -> i64:\n    fo(1) + fo(1, None)\n"))
+        .expect("omitted and explicit None on an `i64?` parameter must lower");
+    let err = parse_and_lower("fn bad(a: i64 = None) -> i64:\n    0\n")
+        .expect_err("`= None` on a non-optional parameter must not lower");
+    assert!(format!("{err}").contains("not declared optional"), "{err}");
+    let f3 = "fn f3(a: i64, b: i64, c: i64) -> i64:\n    a\n\n";
+    let err = parse_and_lower(&format!("{f3}fn main() -> i64:\n    f3(1, None, 3)\n"))
+        .expect_err("a literal None at an `i64` parameter must not lower");
+    assert!(format!("{err}").contains("passes None to argument 2"), "{err}");
+    parse_and_lower(&format!("{f3}fn main() -> i64:\n    unsafe:\n        f3(1, None, 3)\n"))
+        .expect("inside `unsafe:` the literal None is admitted");
+}

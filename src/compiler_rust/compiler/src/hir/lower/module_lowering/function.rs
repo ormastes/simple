@@ -1159,6 +1159,21 @@ impl Lowerer {
                     function: f.name.clone(),
                 });
             };
+            // A `= None` default is only meaningful on an Option (`T?`)
+            // parameter. Rejecting it here, at the declaration, is what lets
+            // call sites fill an omitted `None` default as a constant
+            // (`is_constant_default`) without ever passing None to a
+            // non-optional slot.
+            if let (Some(ast::Expr::Identifier(d)), Some(t)) = (&param.default, &param.ty) {
+                let optional = matches!(t, ast::Type::Optional(_))
+                    || matches!(t, ast::Type::Generic { name, .. } if name == "Option");
+                if d == "None" && !optional {
+                    return Err(LowerError::Unsupported(format!(
+                        "parameter `{}` of `{}` defaults to None but is not declared optional (`T?`)",
+                        param.name, f.name
+                    )));
+                }
+            }
             // The parser injects `self` before HIR lowering and records that
             // synthetic parameter as immutable, even for `me` methods.  Once
             // `has_self` is true the mutable implicit-self branch above is not
