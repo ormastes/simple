@@ -164,3 +164,18 @@ of hiding it.
 
 - `feedback_when_an_assumption_falls_reaudit_what_was_left` (session memory)
   — a sweep's skipped/commented sites are its unreviewed ones.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: LIVE (left open)
+
+Re-checked on origin/release/1.0.0 (worktree @9202f187777): the partial
+resolution stands as recorded — `test/01_unit/compiler/backend/backend_capability_spec.spl`
+still carries the six commented group blocks (# Test Group 1 at :164 through
+Group 6 at :476, 34 commented `it`s total) and 5 active `it` blocks; the 14
+Group 1/3/4 wirings the MTB1 lane built against real backend behavior remain
+the landed portion. The residual — Groups 2/5/6 (20 bare-`pass` bodies) plus
+porting the commented tests onto the real `mir_test_builder_full` API — still
+needs real assertions written from scratch plus the `is_supported()`
+capability-check design described under "To actually fix"; that is
+non-trivial test-authoring/production-src work, out of scope for a triage
+lane. Status left at PARTIALLY RESOLVED 2026-07-30, which remains accurate.
+Lane evidence: `build/review/p3fix-ne20-20261111.sdn`.

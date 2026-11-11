@@ -1,6 +1,6 @@
 # Architecture / style rule audit of the 2026-08-09→10 landing window
 
-Status: OPEN (P3)
+Status: BLOCKED 2026-11-11 (lane p3-ne20) — scoped-exception grant recorded verbatim below; awaiting human decision
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Audit surface:** 910 files changed across 388 commits in the trailing 20h on
 `origin/main` (tip `45e486f0be6`), of which 330 were newly added. 586 `.spl`,
@@ -152,3 +152,33 @@ Out of lane: affected file is a Perl script (scripts/check/lib/portable-hardlink
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **environment-blocked (deployed-binary/hardware)** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: BLOCKED (verbatim grant)
+
+Re-verified on origin/release/1.0.0 (worktree @9202f187777): both Perl files
+still present and still live dependencies —
+`scripts/check/lib/portable-hardlink-lock.pl` and
+`scripts/check/lib/portable-session-exec.pl` on disk, referenced by
+`scripts/check/lib/portable-process-lock.shs` (2 hits),
+`scripts/check/check-bootstrap-portability.shs` (2 hits), and
+`scripts/bootstrap/bootstrap-from-scratch.sh` (1 hit). Finding 1 therefore
+still reproduces; Finding 2 (fan-out) and Finding 3 (blink/ECS) were already
+classified pre-existing policy/owner items by the doc's own body.
+
+Per this doc's addendum, the resolution is a human decision, not an agent's.
+Verbatim grant addendum — the exception the doc's own recommendation asks the
+owner to grant, quoted in full:
+
+> grant a scoped, documented exception to the `.spl`/`.shs`-only rule for
+> exactly these two files, on the grounds that they are an
+> intentionally-minimized atomic-primitive layer beneath an
+> already-conforming orchestration layer.
+
+Reserve the actual POSIX-sh port for a session with budget to run the full
+differential suite — N-simultaneous-acquire (exactly one winner per round),
+kill-and-reclaim (stale lock recoverable), and clean-exit-release — side by
+side against the Perl original **before** any `.pl` is deleted. Until the
+exception is granted or that port lands, this row stays BLOCKED, not FIXABLE
+in-lane (a blind transliteration of live bootstrap-lock atomic primitives is
+explicitly documented here as the wrong move). Status flipped to BLOCKED with
+this grant addendum. Lane evidence: `build/review/p3fix-ne20-20261111.sdn`.

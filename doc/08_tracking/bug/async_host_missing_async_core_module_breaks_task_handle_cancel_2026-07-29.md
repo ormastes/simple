@@ -156,3 +156,16 @@ The remaining red specs named in the 2026-11-05 update (`async_mutex_suspend`,
 `async_host_handle_cleanup_contract`, `host_promise_terminal`) are the separate,
 already-filed seed hybrid-engine stale-snapshot defect — outside this record's
 module-gap scope and unaffected by this verdict.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: SUPERSEDED (absorber named)
+
+Lane ne2 triaged this row FIXED earlier today on this base and already flipped
+the header; this lane confirms their verdict with one fresh structural check
+rather than resting on their addendum: `src/lib/nogc_async_mut/async_core.spl`
+is present on disk (1808 bytes) on origin/release/1.0.0
+(worktree @9202f187777), so the `use std.async_core.{AsyncError,
+CancellationToken, Poll, Priority, TaskState}` surface the async_host family
+imports now resolves. Their seed-smoke evidence (`async_core_spec.spl` 7/7 on
+the tracked seed) is same-day and same-branch; per the no-rerun rule it is not
+re-executed. Absorber: P3 lane ne2 verdict addendum above (FIXED
+2026-11-11). Lane evidence: `build/review/p3fix-ne20-20261111.sdn`.

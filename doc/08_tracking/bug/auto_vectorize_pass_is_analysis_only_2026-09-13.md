@@ -117,3 +117,16 @@ structural inspection — passed on 2026-09-13 and the status flipped. Current
 therefore live in real builds within the deliberately narrow scope the landed
 comment documents (static trip count, whole chunks, alias-oracle-cleared or
 runtime-guarded); widening still means extending the differential sweep first.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: SUPERSEDED (absorber named)
+
+Lane ne2 triaged this row FIXED earlier today on this base and already flipped
+the header; this lane confirms their central structural claim fresh on
+origin/release/1.0.0 (worktree @9202f187777):
+`src/compiler/60.mir_opt/mir_opt/mod.spl:390` returns `PassStatus.Active`
+for `PassKind.AutoVectorize` with the landed rationale comment (R4b refusal +
+width-ladder narrowing, alias-oracle/runtime-guard scope) — identical to what
+ne2 recorded. Their `auto_vectorize_alias_spec.spl` 15/15 seed-smoke is
+same-day and same-branch; per the no-rerun rule it is not re-executed.
+Absorber: P3 lane ne2 verdict addendum above (FIXED 2026-11-11). Lane
+evidence: `build/review/p3fix-ne20-20261111.sdn`.
