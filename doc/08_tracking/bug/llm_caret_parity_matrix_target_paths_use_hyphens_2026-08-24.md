@@ -1,7 +1,10 @@
 # LLM Caret parity matrices point at hyphenated `.spl` targets that repo convention forbids
 
 - **Date:** 2026-08-24
-- **Status:** OPEN (restored 2026-11-11, lane p3-caret1) — PR #6438 fixed the matrices but left 3 hyphenated decoy `.spl` files under `src/app/llm_caret`, so the gate's `hyphenated_spl_files` check still fails
+- **Status:** FIXED (lane p3-caret2, 2026-11-11) — the 3 decoy files are deleted;
+  `hyphenated_spl_files=0` and `hyphenated_matrix_targets=0` on the gate. The
+  gate's remaining FAIL is the separate, honestly-unimplemented porting surface
+  (`target_files_missing=1156`), not this row.
 - **Component:** `doc/03_plan/trace/llm_caret_claude_cli_full_parity_{file,symbol}_matrix.tsv`,
   `scripts/check/check-llm-caret-full-parity-implementation.shs`
 - **Severity:** medium (gate reports work as unimplemented when it is implemented)
@@ -109,3 +112,29 @@ kind of convention-violating decoy this bug doc says must not satisfy the gate.
 The fix is to delete those 3 files (plus whatever reseal/regeneration the ledger
 requires) — left OPEN with this evidence rather than flipped, per
 fix-implemented-verification-pending → fail → restore-open process.
+
+## Addendum 2026-11-11 — lane p3-caret2: FIXED — 3 decoy files deleted
+
+Traversed on work/p3-caret2-20261111 (origin/release/1.0.0 tip
+66506fda143ca).
+
+- Each decoy re-verified byte-identical to its snake_case twin (`cmp`):
+  `use-multi-select-state.spl`/`use_multi_select_state.spl`,
+  `use-select-navigation.spl`/`use_select_navigation.spl`,
+  `use-multiple-choice-state.spl`/`use_multiple_choice_state.spl`.
+- Re-verified unreferenced: content grep over `src/` and `test/` `.spl` files
+  finds the hyphenated names only inside the decoys' own docstrings and the
+  twins' "parity ledger" comments (those name the `.ts` sources); no import
+  references. Nothing under `scripts/`, `config/`, or `tools/` references them
+  either. The parity matrices' target columns point at the snake_case paths.
+- Deleted the 3 decoys with `git rm`.
+- Gate re-run (full `sh scripts/check/check-llm-caret-full-parity-implementation.shs`,
+  ~23 min on this host; log build/review/p3fix-caret2-20261111-logs/parity_gate_after_delete.log):
+  `hyphenated_spl_files=0`, `hyphenated_matrix_targets=0`,
+  `class_rows=124, class_target_files_missing=0`. The script still exits FAIL
+  on the pre-existing unimplemented porting surface (`target_files_missing=1156`,
+  `target_loc_ge_required=518/1902`) — the gate is right about those per this
+  doc's own triage, and that surface belongs to the parity porting program,
+  not to this row.
+
+This row's acceptance (delete the 3 decoys; hyphen metrics 0) is met.

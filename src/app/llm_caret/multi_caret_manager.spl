@@ -1,9 +1,15 @@
 # LLM Caret - bounded parent-owned multi-agent process adapter
 
-use app.llm_caret.agent_plan.{AgentLaunchRequest}
-use app.llm_caret.agent_runtime.{AgentTeamProcess, launch_agent_team_with_all,
-    agent_team_status, stop_agent_team, summarize_agent_team}
+use app.io.mod.{process_is_running}
+use app.llm_caret.agent_plan.{AgentLaunchRequest, build_agent_launch_plan,
+    agent_plan_launch_error_v1}
+use app.llm_caret.agent_runtime.{AgentProcess, AgentTeamProcess,
+    launch_agent_team_with_all, agent_team_status, stop_agent_team,
+    summarize_agent_team, is_known_agent_provider,
+    agent_command_for_provider_with_all}
 use app.llm_caret.agent_tmux.{AgentTmuxEmbed, build_agent_tmux_embed}
+use app.llm_caret.caret_smux_multi_launch.{CaretSmuxChildSpec,
+    caret_smux_launch_team}
 
 struct MultiCaretManager:
     manager_id: text
@@ -29,8 +35,9 @@ fn _leaked_processes(team: AgentTeamProcess) -> i64:
 fn _manager(manager_id: text, status: text, reason: text, capacity: i64,
         team: AgentTeamProcess) -> MultiCaretManager:
     # The process team is the canonical parent-owned state. The embedded
-    # terminal view is rebuilt from that state and never owns a PID or claims
-    # integration with the separate os.apps.smux service.
+    # terminal view is rebuilt from that state and never owns a PID. Smux
+    # bindings (launch_multi_caret_manager_via_smux) spawn children through
+    # the adapter on real panes, but the team remains the sole PID owner.
     MultiCaretManager(manager_id: manager_id, status: status, reason: reason,
         capacity: capacity, team: team,
         terminal_view: build_agent_tmux_embed(team, []))
@@ -65,6 +72,84 @@ pub fn launch_multi_caret_manager(manager_id: text,
                 rolled_back)
         return _manager(manager_id, "not_started", "launch_rolled_back",
             capacity, rolled_back)
+    _manager(manager_id, "running", "all_processes_started", capacity, launched)
+
+# Smux-bound launch: same bounded admission envelope as the piped path, but
+# every child is spawned by the smux adapter on its own real pseudo-terminal
+# (one smux session per manager, one pane per child), through the common
+# std.sys.pty wrapper. The returned manager carries the same parent-owned
+# process team; the adapter binding (caret_smux_team_binding) only mirrors
+# pane addresses for capture/resize/cancel/stop. Termination of PTY children
+# flows through the adapter (pane PTY close), which is the only engine path
+# that can signal a process the interpreter did not spawn; the manager settles
+# from the adapter's stopped team, or observes termination through poll on
+# hosts where the pid liveness facade is truthful.
+pub fn launch_multi_caret_manager_via_smux(manager_id: text,
+        requests: [AgentLaunchRequest], capacity: i64, claude_path: text,
+        codex_path: text, gemini_path: text, kimi_path: text,
+        opencode_path: text, cols: i64, rows: i64) -> MultiCaretManager:
+    if manager_id == "":
+        return _manager(manager_id, "not_started", "manager_id_required",
+            capacity, _empty_team(manager_id))
+    if capacity <= 0 or capacity > 16:
+        return _manager(manager_id, "not_started", "capacity_out_of_range",
+            capacity, _empty_team(manager_id))
+    if requests.len() == 0:
+        return _manager(manager_id, "not_started", "requests_required",
+            capacity, _empty_team(manager_id))
+    if requests.len() > capacity:
+        return _manager(manager_id, "not_started", "capacity_exceeded",
+            capacity, _empty_team(manager_id))
+
+    # Derive one adapter child spec per request, mirroring the piped path's
+    # plan admission and command/argv derivation. Requests whose plan is not
+    # executable carry an empty command: the adapter marks them not_started
+    # and rolls the partial batch back, exactly like the piped path.
+    var specs: [CaretSmuxChildSpec] = []
+    var seen_ids: [text] = []
+    var idx = 0
+    for req in requests:
+        val plan = build_agent_launch_plan(req)
+        var aid = req.agent_md_path
+        for existing in seen_ids:
+            if existing == req.agent_md_path:
+                aid = req.agent_md_path + "#" + idx.to_text()
+        seen_ids = seen_ids + [req.agent_md_path]
+        var command = ""
+        if plan.provider != "team" and is_known_agent_provider(plan.provider):
+            if agent_plan_launch_error_v1(plan) == "":
+                command = agent_command_for_provider_with_all(plan.provider,
+                    claude_path, codex_path, gemini_path, kimi_path,
+                    opencode_path)
+        specs = specs + [CaretSmuxChildSpec(agent_id: aid, command: command,
+            args: plan.argv)]
+        idx = idx + 1
+
+    val bound = caret_smux_launch_team(manager_id, specs, cols, rows)
+    var processes: [AgentProcess] = []
+    for child in bound.children:
+        if child.status == "started":
+            processes = processes + [AgentProcess(agent_id: child.agent_id,
+                status: "started", reason: "smux_pty_process_started",
+                pid: child.pid)]
+        else:
+            processes = processes + [AgentProcess(agent_id: child.agent_id,
+                status: "not_started", reason: child.reason, pid: -1)]
+    val launched = summarize_agent_team(manager_id, processes)
+    if launched.status != "started":
+        # Fail closed: the adapter already terminated every spawned child and
+        # removed the session; the parent verifies none survived the rollback
+        # before reporting it clean.
+        var leaked = 0
+        for child in bound.children:
+            if child.pid > 0 and process_is_running(child.pid):
+                leaked = leaked + 1
+        if leaked > 0:
+            return _manager(manager_id, "error",
+                "launch_rollback_incomplete:" + leaked.to_text(), capacity,
+                launched)
+        return _manager(manager_id, "not_started", "launch_rolled_back",
+            capacity, launched)
     _manager(manager_id, "running", "all_processes_started", capacity, launched)
 
 # Pure snapshot adapters share the process-owner state rules with pane teams.
@@ -149,5 +234,6 @@ export MultiCaretManager, ManagedAgent
 export launch_multi_caret_manager, poll_multi_caret_manager,
     stop_multi_caret_manager, list_multi_caret_agents,
     render_multi_caret_agents
+export launch_multi_caret_manager_via_smux
 
 export multi_caret_manager_of, reconcile_multi_caret_manager, settle_multi_caret_manager

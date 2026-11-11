@@ -58,3 +58,36 @@ Traversed on work/p3-caret1-20261111 (origin/release/1.0.0 tip 79d5af6723f6).
   runtime. No seed/build/fallback." — the live end-to-end gate stays pending
   until that runtime exists on a POSIX host; 2026-11-06 verify-sweep2 already
   recorded the same environment wall.
+
+## Addendum 2026-11-11 — lane p3-caret2: seed-side classification gap closed;
+## live gate now fully green on the tracked seed
+
+Traversed on work/p3-caret2-20261111 (origin/release/1.0.0 tip
+66506fda143ca).
+
+- The residual gap was pure error-text classification: the seed transport
+  surfaces the raw Windows WSAETIMEDOUT ("os error 10060") for a deadline
+  expiry, while the self-hosted runtime classifies the same condition as
+  "HTTP request timed out" (src/runtime/runtime_native.c) — the text the
+  live gate's spec asserts.
+- Seed-side workaround applied (this lane): the typed boundary
+  `http_request_v2_raw` in src/lib/nogc_sync_mut/io/http_client_core.spl now
+  normalizes known timeout transport errors (timed out / timeout /
+  WSAETIMEDOUT / ETIMEDOUT / os error 10060 / deadline exceeded) to the
+  self-hosted classification "HTTP request timed out". Non-timeout errors
+  pass through unchanged; the negative-timeout preflight is untouched. This
+  mirrors the app-layer classification precedent in multimodal_provider.spl
+  and makes the facade's failure text identical across engines.
+- Live verification on the tracked seed (Windows):
+  `python scripts/check/check-caret-http-attempt-timeout.py --runtime
+  bin/simple.exe` — exit 0; the spec runs 5/5 PASS (three stalled adapters
+  interrupted within the 100 ms budget and tolerance, UTF8 echo round-trip,
+  negative timeout rejected before any request) and the server ledger
+  assertion holds ({"/slow": 3, "/echo": 1} — exactly three bounded
+  attempts, no negative-timeout request) (log:
+  build/review/p3fix-caret2-20261111-logs/t4_http_gate.log). Unit regression
+  retry_timeout_spec stays 4/4 (log: t4_retry_unit.log).
+
+The gate's designed target remains a qualified self-hosted POSIX runtime;
+with the cross-engine classification bridge the same check now also passes
+end to end on the tracked seed, closing the seed-runnable half of the row.

@@ -130,3 +130,26 @@ Verdict: fixed (lane ne3, same-day live PASS stands); this lane's live re-run is
 BLOCKED by host instability — do not re-run the quarantine test on this host
 under load. The five external rows remain deliberate TODO pending the versioned
 validators, as the header states.
+
+## Addendum 2026-11-11 — lane p3-caret2: quiet-host live re-run PASSES (second
+## independent live confirmation)
+
+Traversed on work/p3-caret2-20261111 (origin/release/1.0.0 tip
+66506fda143ca).
+
+The box was quiet (no concurrent lane builds). The bounded single attempt:
+
+```
+$ sh test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs
+PASS: all five generic signed Caret receipts fail closed at the semantic quarantine
+(exit 0)
+```
+
+(log: build/review/p3fix-caret2-20261111-logs/t4_quarantine_test.log). This
+is the second independent live execution of the quarantine regression (lane
+ne3 same-day PASS + this lane), in addition to lane p3-caret1's source
+confirmation at tip. The fabrication path stays closed: reviewer signature
+authentication succeeds, then all five caret gates fail closed with
+`caret-semantic-validator-not-implemented-<gate>` before any evidence
+attachment loads. The five external rows remain deliberate TODO pending the
+versioned validators, as the header states.
