@@ -1,0 +1,31 @@
+use std.spec.*
+use std.scv.compile_snapshot.{scv_compile_snapshot_read_source_v1, scv_compile_snapshot_bytes_match_v1}
+
+# Pins the cold-init admission change (bug
+# native_build_cold_init_admission_wall_386s_2026-11-07): snapshot write/drift
+# verification compares the bytes already in hand instead of re-hashing.
+describe "SCV snapshot byte-equality verification":
+    it "matches a file against its own bytes":
+        val path = "src/lib/scv/compile_snapshot.spl"
+        val bytes: [u8] = scv_compile_snapshot_read_source_v1(path)!
+        expect(scv_compile_snapshot_bytes_match_v1(path, bytes)).to_equal(true)
+
+    it "rejects a length change":
+        val path = "src/lib/scv/compile_snapshot.spl"
+        val bytes: [u8] = scv_compile_snapshot_read_source_v1(path)!
+        expect(scv_compile_snapshot_bytes_match_v1(path, bytes.push(10))).to_equal(false)
+
+    it "rejects same-length different content":
+        val path = "src/lib/scv/compile_snapshot.spl"
+        val other = "src/lib/scv/store.spl"
+        val bytes: [u8] = scv_compile_snapshot_read_source_v1(other)!
+        expect(scv_compile_snapshot_bytes_match_v1(path, bytes)).to_equal(false)
+        var flipped: [u8] = []
+        for b in scv_compile_snapshot_read_source_v1(path)!:
+            flipped = flipped.push(b)
+        flipped[0] = 35
+        expect(scv_compile_snapshot_bytes_match_v1(path, flipped)).to_equal(false)
+
+    it "treats an unreadable path as drift":
+        val bytes: [u8] = []
+        expect(scv_compile_snapshot_bytes_match_v1("build/no/such/file.spl", bytes)).to_equal(false)
