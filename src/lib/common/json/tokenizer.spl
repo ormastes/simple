@@ -20,15 +20,21 @@ fn json_skip_whitespace(text: text, pos: i64) -> i64:
     """
     var p = pos
     while p < text.byte_len():
-        # Byte read (byte_at is BYTE-indexed, matching len()'s byte length on
-        # every engine). Replaces `text[p:p + 1]`, whose index space was chars
-        # under the interpreter but bytes under compiled code, and which
-        # materialised an invalid-UTF-8 1-byte value at every step past a
-        # lead byte. Whitespace is ASCII: 32 ' ', 10 '\n', 13 '\r', 9 '\t'.
-        # A continuation byte (>= 0x80) matches none of these and returns p,
-        # exactly as the old non-whitespace slice did.
-        val c = text.byte_at(p)
-        if c == 32 or c == 10 or c == 13 or c == 9:
+        # 1-unit slice walk in the SAME index space as the caller's pos and
+        # json_tokenize's main loop (characters under the interpreter, bytes
+        # under compiled code): skip_whitespace RETURNS its position, so a
+        # byte_at walk here desynchronizes from the substring-based caller
+        # by one position per multi-byte character, corrupting every token
+        # after the first non-ASCII content (gh_json_roundtrip_spec,
+        # 2026-11-10). The byte_at conversion dated from the escaped-quote
+        # hardening and only stays consistent while the input is pure ASCII.
+        # Whitespace is ASCII, so a 1-unit slice compares exactly; the empty
+        # slice is the authoritative EOF sentinel because len() is bytes in
+        # every engine while slice positions are not.
+        val c = text.substring(p, p + 1)
+        if c == "":
+            return p
+        if c == " " or c == "\n" or c == "\r" or c == "\t":
             p = p + 1
         else:
             return p
