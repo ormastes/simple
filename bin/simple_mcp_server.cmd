@@ -55,9 +55,12 @@ if not "%SIMPLE_BINARY%"=="" goto :runtime_resolved
 if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
 if exist "%~dp0release\x86_64-pc-windows-gnu\simple.exe" set "SIMPLE_RUNTIME=%~dp0release\x86_64-pc-windows-gnu\simple.exe"
 if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
-if exist "%~dp0..\src\compiler_rust\target\bootstrap\simple.exe" set "SIMPLE_RUNTIME=%~dp0..\src\compiler_rust\target\bootstrap\simple.exe"
-if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
+rem Same precedence as bin\simple.cmd: the committed bin\simple.exe matches
+rem the tree; a stale local target\bootstrap seed predating merged syntax
+rem (e.g. @when) must not shadow it.
 if exist "%~dp0simple.exe" set "SIMPLE_RUNTIME=%~dp0simple.exe"
+if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
+if exist "%~dp0..\src\compiler_rust\target\bootstrap\simple.exe" set "SIMPLE_RUNTIME=%~dp0..\src\compiler_rust\target\bootstrap\simple.exe"
 :runtime_resolved
 if not exist "%SIMPLE_RUNTIME%" (
     echo error: no admitted simple_mcp_server.exe and no runtime at %SIMPLE_RUNTIME% 1>&2

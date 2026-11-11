@@ -19,8 +19,18 @@ if defined SIMPLE_BINARY if exist "%SIMPLE_BINARY%" (
     goto :done
 )
 
+rem Prefer the committed tree-matching seed at bin\simple.exe over a stale
+rem local cargo build: the untracked target\bootstrap seed can predate syntax
+rem merged upstream (2026-11-11 it could not parse @when blocks, killing every
+rem source-mode MCP server). An intentionally rebuilt local seed still wins
+rem via SIMPLE_BINARY above.
 set "BOOTSTRAP_BIN="
-if exist "%REPO_ROOT%\src\compiler_rust\target\bootstrap\simple.exe" (
+if exist "%REPO_ROOT%\bin\simple.exe" (
+    for %%P in ("%REPO_ROOT%\bin\simple.exe") do if %%~zP GTR 0 (
+        set "BOOTSTRAP_BIN=%%~fP"
+    )
+)
+if not defined BOOTSTRAP_BIN if exist "%REPO_ROOT%\src\compiler_rust\target\bootstrap\simple.exe" (
     for %%P in ("%REPO_ROOT%\src\compiler_rust\target\bootstrap\simple.exe") do if %%~zP GTR 0 (
         set "BOOTSTRAP_BIN=%%~fP"
     )
