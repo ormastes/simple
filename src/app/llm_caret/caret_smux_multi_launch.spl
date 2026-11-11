@@ -1,0 +1,315 @@
+# LLM Caret - smux multi-launch adapter.
+#
+# Binds the multi_caret_manager's bounded child set to real os.apps.smux panes:
+# one smux session per manager, one pane and one real pseudo-terminal per
+# Caret child, spawned through the smux service surface. The smux service
+# drives the common std.sys.pty wrapper interface (ConPTY on Windows, POSIX
+# PTY elsewhere), so this adapter never touches OS-specific PTY APIs and never
+# spawns a process outside the smux surface.
+#
+# Ownership: the manager remains the lifecycle decision owner (admission,
+# batching, rollback, roster) and its process team is the canonical child
+# record. The smux pane owns the PTY and is the termination authority for
+# these children: on this engine the plain process facade can neither signal
+# nor reliably probe a process it did not spawn (the interpreter kill reaches
+# only engine-spawned pids, and the Windows liveness probe refuses unknown
+# pids), while closing the pane PTY terminates the child and waits for it.
+# The adapter keeps only a pane-addressing mirror (pane id + pid copy) so a
+# caller can reach the panes of a launched team.
+
+use std.io_runtime.{platform_name}
+use os.apps.smux.api.{smux_create_session, smux_list_sessions, smux_list_windows,
+    smux_list_panes, smux_split_pane, smux_resize, smux_focus_pane,
+    smux_pane_spawn_pty, smux_pane_close_pty, smux_close_pane, smux_pane_alive,
+    smux_paste_text, smux_send_text, smux_capture, smux_kill_session}
+use app.llm_caret.pane_backend.{windows_command_line, posix_command_line}
+
+struct CaretSmuxChildSpec:
+    agent_id: text
+    command: text
+    args: [text]
+
+struct CaretSmuxChildBinding:
+    agent_id: text
+    pane_id: text
+    pid: i64
+    command_line: text
+    status: text
+    reason: text
+
+struct CaretSmuxTeamBinding:
+    manager_id: text
+    session_id: text
+    window_id: text
+    children: [CaretSmuxChildBinding]
+    status: text
+    reason: text
+
+fn _is_windows() -> bool:
+    platform_name().lower().contains("windows")
+
+# One command line for the platform launcher, built with the same pure quoting
+# rules the pane backend uses, so the child sees the identical argv the
+# manager's piped launch path would have passed.
+pub fn caret_smux_command_line(command: text, args: [text]) -> text:
+    if _is_windows():
+        return windows_command_line(command, args)
+    posix_command_line(command, args)
+
+# The smux session name a manager's children live in. One session per manager.
+pub fn caret_smux_session_name(manager_id: text) -> text:
+    "caret-smux-" + manager_id
+
+struct _SmuxScope:
+    session_id: text
+    window_id: text
+
+fn _empty_team_binding(manager_id: text, status: text, reason: text) -> CaretSmuxTeamBinding:
+    CaretSmuxTeamBinding(manager_id: manager_id, session_id: "", window_id: "",
+        children: [], status: status, reason: reason)
+
+fn _scope(manager_id: text) -> _SmuxScope:
+    val name = caret_smux_session_name(manager_id)
+    for s in smux_list_sessions():
+        if s.name == name:
+            val ws = smux_list_windows(s.id)
+            if ws.len() > 0:
+                return _SmuxScope(session_id: s.id, window_id: ws[0].id)
+    val created = smux_create_session(name)
+    if created.id == "":
+        return _SmuxScope(session_id: "", window_id: "")
+    val ws = smux_list_windows(created.id)
+    if ws.len() == 0:
+        return _SmuxScope(session_id: "", window_id: "")
+    _SmuxScope(session_id: created.id, window_id: ws[0].id)
+
+# A pane slot with no live child: the window's first pane while it is still
+# empty, otherwise a fresh split.
+fn _free_pane(scope: _SmuxScope) -> Result<text, text>:
+    val panes = smux_list_panes(scope.session_id, scope.window_id)
+    for p in panes:
+        val alive = smux_pane_alive(scope.session_id, scope.window_id, p.id)
+        if alive.is_ok() and not alive.unwrap():
+            return Ok(p.id)
+    if panes.len() == 0:
+        return Err("smux window has no pane to split")
+    val split = smux_split_pane(scope.session_id, scope.window_id, panes[0].id,
+        "vertical")
+    if split.is_err():
+        return Err(split.unwrap_err())
+    Ok(split.unwrap().id)
+
+# Pane-addressing mirror for launched teams, so callers can capture, resize,
+# cancel and stop without re-deriving pane ids. Pids here are copies: the
+# manager's process team remains their sole owner.
+var _team_bindings: [CaretSmuxTeamBinding] = []
+
+fn _remember(binding: CaretSmuxTeamBinding):
+    var kept: [CaretSmuxTeamBinding] = []
+    for existing in _team_bindings:
+        if existing.manager_id != binding.manager_id:
+            kept = kept + [existing]
+    _team_bindings = kept + [binding]
+
+pub fn caret_smux_team_binding(manager_id: text) -> CaretSmuxTeamBinding:
+    for binding in _team_bindings:
+        if binding.manager_id == manager_id:
+            return binding
+    _empty_team_binding(manager_id, "not_started", "unknown_team")
+
+pub fn caret_smux_launch_team(manager_id: text,
+        specs: [CaretSmuxChildSpec], cols: i64, rows: i64) -> CaretSmuxTeamBinding:
+    if manager_id == "":
+        return _empty_team_binding(manager_id, "not_started",
+            "manager_id_required")
+    if specs.len() == 0:
+        return _empty_team_binding(manager_id, "not_started",
+            "children_required")
+    val scope = _scope(manager_id)
+    if scope.session_id == "":
+        return _empty_team_binding(manager_id, "not_started",
+            "smux_session_unavailable")
+    var width = cols
+    var height = rows
+    if width <= 0:
+        width = 80
+    if height <= 0:
+        height = 24
+    var children: [CaretSmuxChildBinding] = []
+    var complete = true
+    for spec in specs:
+        if spec.command == "":
+            children = children + [CaretSmuxChildBinding(agent_id: spec.agent_id,
+                pane_id: "", pid: -1, command_line: "", status: "not_started",
+                reason: "child_command_required")]
+            complete = false
+            continue
+        val free = _free_pane(scope)
+        if free.is_err():
+            children = children + [CaretSmuxChildBinding(agent_id: spec.agent_id,
+                pane_id: "", pid: -1, command_line: "", status: "error",
+                reason: free.unwrap_err())]
+            complete = false
+            continue
+        val pane_id = free.unwrap()
+        # Size the pane before the PTY opens, so the child is born at the
+        # requested geometry. Only a window's sole pane can grow the canvas;
+        # split panes inherit their share of the shared canvas instead.
+        if smux_list_panes(scope.session_id, scope.window_id).len() == 1:
+            if smux_resize(scope.session_id, scope.window_id, pane_id, width,
+                    height).is_err():
+                children = children + [CaretSmuxChildBinding(
+                    agent_id: spec.agent_id, pane_id: pane_id, pid: -1,
+                    command_line: "", status: "error",
+                    reason: "smux_resize_refused")]
+                complete = false
+                continue
+        val line = caret_smux_command_line(spec.command, spec.args)
+        val spawned = smux_pane_spawn_pty(scope.session_id, scope.window_id,
+            pane_id, line)
+        if spawned.is_err():
+            children = children + [CaretSmuxChildBinding(agent_id: spec.agent_id,
+                pane_id: pane_id, pid: -1, command_line: line, status: "error",
+                reason: spawned.unwrap_err())]
+            complete = false
+            continue
+        val _focused = smux_focus_pane(scope.session_id, scope.window_id, pane_id)
+        children = children + [CaretSmuxChildBinding(agent_id: spec.agent_id,
+            pane_id: pane_id, pid: spawned.unwrap(), command_line: line,
+            status: "started", reason: "smux_pty_spawned")]
+    if not complete:
+        # Fail closed: terminate every child this batch started and remove the
+        # whole session, so a partial launch never leaves a running child.
+        val _killed = smux_kill_session(scope.session_id)
+        var rolled: [CaretSmuxChildBinding] = []
+        for child in children:
+            if child.status == "started":
+                rolled = rolled + [CaretSmuxChildBinding(agent_id: child.agent_id,
+                    pane_id: child.pane_id, pid: child.pid,
+                    command_line: child.command_line, status: "stopped",
+                    reason: "launch_rolled_back")]
+            else:
+                rolled = rolled + [child]
+        val binding = CaretSmuxTeamBinding(manager_id: manager_id,
+            session_id: scope.session_id, window_id: scope.window_id,
+            children: rolled, status: "rolled_back",
+            reason: "partial_launch_rolled_back")
+        _remember(binding)
+        return binding
+    val binding = CaretSmuxTeamBinding(manager_id: manager_id,
+        session_id: scope.session_id, window_id: scope.window_id,
+        children: children, status: "started", reason: "all_children_started")
+    _remember(binding)
+    binding
+
+# Cancels one child: ends its pane PTY (which terminates the child and waits
+# for it) and removes the pane when a sibling keeps the window splittable.
+pub fn caret_smux_cancel_child(binding: CaretSmuxTeamBinding,
+        agent_id: text) -> CaretSmuxTeamBinding:
+    var children: [CaretSmuxChildBinding] = []
+    var cancelled = false
+    for child in binding.children:
+        if child.agent_id == agent_id and child.pane_id != "" and
+                not cancelled:
+            cancelled = true
+            var reason = "pty_closed"
+            if not smux_pane_close_pty(binding.session_id, binding.window_id,
+                    child.pane_id):
+                reason = "pty_close_refused"
+            else:
+                # Keep the last pane slot so later spawns can still split.
+                if smux_list_panes(binding.session_id, binding.window_id).len() > 1:
+                    val _removed = smux_close_pane(binding.session_id,
+                        binding.window_id, child.pane_id)
+            children = children + [CaretSmuxChildBinding(agent_id: child.agent_id,
+                pane_id: child.pane_id, pid: child.pid,
+                command_line: child.command_line, status: "cancelled",
+                reason: reason)]
+        else:
+            children = children + [child]
+    var status = binding.status
+    if binding.status == "started" and cancelled:
+        status = "degraded"
+    val updated = CaretSmuxTeamBinding(manager_id: binding.manager_id,
+        session_id: binding.session_id, window_id: binding.window_id,
+        children: children, status: status,
+        reason: if cancelled: "child_cancelled" else: binding.reason)
+    _remember(updated)
+    updated
+
+# Stops the whole team: removes the smux session, closing every pane PTY and
+# terminating any child still attached (close waits for each exit). The
+# returned reason is the termination receipt: "smux_session_closed" means every
+# owned child was terminated and the session removed.
+pub fn caret_smux_stop_all(binding: CaretSmuxTeamBinding) -> CaretSmuxTeamBinding:
+    if binding.session_id == "":
+        return binding
+    val closed = smux_kill_session(binding.session_id)
+    var children: [CaretSmuxChildBinding] = []
+    for child in binding.children:
+        children = children + [CaretSmuxChildBinding(agent_id: child.agent_id,
+            pane_id: child.pane_id, pid: child.pid,
+            command_line: child.command_line,
+            status: if closed.is_ok(): "stopped" else: "error",
+            reason: if closed.is_ok(): "smux_session_closed" else:
+                "smux_session_close_failed")]
+    val updated = CaretSmuxTeamBinding(manager_id: binding.manager_id,
+        session_id: binding.session_id, window_id: binding.window_id,
+        children: children, status: "stopped",
+        reason: if closed.is_ok(): "smux_session_closed" else:
+            "smux_session_close_failed")
+    _remember(updated)
+    updated
+
+# The truthful liveness probe for a PTY child on this engine: the smux pane's
+# own pty_is_running, never the plain pid facade (blind to children it did
+# not spawn on Windows; unprobed on the interpreter's non-spawn table).
+pub fn caret_smux_child_alive(binding: CaretSmuxTeamBinding,
+        agent_id: text) -> bool:
+    for child in binding.children:
+        if child.agent_id == agent_id and child.pane_id != "":
+            val alive = smux_pane_alive(binding.session_id, binding.window_id,
+                child.pane_id)
+            return alive.is_ok() and alive.unwrap()
+    false
+
+# Types a command into one child's pane and submits it with Enter, the same
+# paste-then-Enter contract the pane backend uses for agent TUIs.
+pub fn caret_smux_send_command(binding: CaretSmuxTeamBinding, agent_id: text,
+        body: text) -> bool:
+    for child in binding.children:
+        if child.agent_id == agent_id and child.pane_id != "":
+            if smux_paste_text(binding.session_id, binding.window_id,
+                    child.pane_id, body).is_err():
+                return false
+            return smux_send_text(binding.session_id, binding.window_id,
+                child.pane_id, "\r").is_ok()
+    false
+
+# The pane's current screen text; unknown panes capture as empty.
+pub fn caret_smux_capture_child(binding: CaretSmuxTeamBinding,
+        agent_id: text, history_lines: i64) -> text:
+    for child in binding.children:
+        if child.agent_id == agent_id and child.pane_id != "":
+            val captured = smux_capture(binding.session_id, binding.window_id,
+                child.pane_id, history_lines as int)
+            if captured.is_err():
+                return ""
+            return captured.unwrap().content
+    ""
+
+# Resizes one child's pane and its real PTY. The child observes the new
+# viewport on its next screen read.
+pub fn caret_smux_resize_child(binding: CaretSmuxTeamBinding, agent_id: text,
+        cols: i64, rows: i64) -> bool:
+    for child in binding.children:
+        if child.agent_id == agent_id and child.pane_id != "":
+            return smux_resize(binding.session_id, binding.window_id,
+                child.pane_id, cols as int, rows as int).is_ok()
+    false
+
+export CaretSmuxChildSpec, CaretSmuxChildBinding, CaretSmuxTeamBinding
+export caret_smux_command_line, caret_smux_session_name,
+    caret_smux_team_binding, caret_smux_launch_team, caret_smux_cancel_child,
+    caret_smux_stop_all, caret_smux_send_command, caret_smux_capture_child,
+    caret_smux_resize_child, caret_smux_child_alive

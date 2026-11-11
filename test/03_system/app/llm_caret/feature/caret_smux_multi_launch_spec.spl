@@ -1,0 +1,294 @@
+# @cover src/app/llm_caret/caret_smux_multi_launch.spl 80%
+# @cover src/app/llm_caret/multi_caret_manager.spl 60%
+# @cover src/os/apps/smux/pane_io_service.spl 40%
+"""
+## Purpose and audience
+For llm_caret and smux maintainers: the multi_caret_manager's bounded child
+set launches through the os.apps.smux service surface with one real
+pseudo-terminal per child, and the full launch/capture/resize/cancel/stop
+lifecycle leaves zero surviving processes.
+## Host and evidence boundary
+PTY evidence host: native Windows with ConPTY-backed children (cmd.exe). A
+POSIX branch follows the same contract on a POSIX PTY host; this spec run is
+the Windows evidence. Interactive children are plain shells (no startup
+command), standing in for injected provider executables the way the existing
+manager specs do; the manager-path test uses real plan-derived argv.
+Liveness and termination truth for PTY children on this engine: the smux
+pane's own PTY state. The plain pid facade cannot signal a process the
+interpreter did not spawn, and its Windows liveness probe refuses unknown
+pids, so pid-facade assertions are used only where they are truthful (the
+POSIX negative checks). Termination receipts are the adapter's
+"smux_session_closed" reason and the removed session. Every child this spec
+starts is terminated by this spec.
+Bug: doc/08_tracking/bug/caret_smux_multi_launch_adapter_missing_2026-08-21.md
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{platform_name}
+use std.sosix.time.{sosix_sleep_ms}
+use app.io.mod.{process_is_running}
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.agent_runtime.{AgentProcess, summarize_agent_team}
+use app.llm_caret.multi_caret_manager.{launch_multi_caret_manager_via_smux,
+    poll_multi_caret_manager, settle_multi_caret_manager}
+use app.llm_caret.caret_smux_multi_launch.{CaretSmuxTeamBinding,
+    CaretSmuxChildSpec, caret_smux_session_name, caret_smux_team_binding,
+    caret_smux_launch_team, caret_smux_cancel_child, caret_smux_stop_all,
+    caret_smux_send_command, caret_smux_capture_child, caret_smux_resize_child,
+    caret_smux_child_alive}
+use os.apps.smux.api.{smux_list_sessions}
+
+fn _is_windows() -> bool:
+    platform_name().lower().contains("windows")
+
+fn _shell() -> text:
+    if _is_windows():
+        return "cmd.exe"
+    "/bin/sh"
+
+fn _request(provider: text, agent_id: text) -> AgentLaunchRequest:
+    AgentLaunchRequest(provider: provider, agent_md_path: agent_id,
+        skill_path: "skills/sys.md", task_desc: "smux multi-launch evidence",
+        model: "", session_id: "", extra_args: [])
+
+fn _screen(binding: CaretSmuxTeamBinding, agent_id: text) -> [text]:
+    caret_smux_capture_child(binding, agent_id, 200).split("\n")
+
+fn _await_text(binding: CaretSmuxTeamBinding, agent_id: text, want: text) -> bool:
+    var i = 0
+    while i < 100:
+        for row in _screen(binding, agent_id):
+            if row.contains(want):
+                return true
+        sosix_sleep_ms(100)
+        i = i + 1
+    false
+
+fn _reported(rows: [text], label: text) -> i64:
+    var value = -1
+    for row in rows:
+        if row.contains(label):
+            val parts = row.split(label)
+            if parts.len() < 2:
+                continue
+            val after = parts[1].trim()
+            var digits = ""
+            for c in after.chars():
+                if c < "0" or c > "9":
+                    break
+                digits = digits + c
+            value = if digits == "": -1 else: digits.to_i64() ?? -1
+    value
+
+fn _is_digits(raw: text) -> bool:
+    if raw == "":
+        return false
+    for ch in raw.chars():
+        if ch < "0" or ch > "9":
+            return false
+    true
+
+# The child computes a fresh sum after reporting its viewport, so seeing the
+# sum as a whole row proves the viewport reading is complete.
+fn _child_columns(binding: CaretSmuxTeamBinding, agent_id: text, base: i64) -> i64:
+    if _is_windows():
+        expect(caret_smux_send_command(binding, agent_id,
+            "mode con & set /a " + base.to_text() + "+1")).to_equal(true)
+        val done = (base + 1).to_text()
+        expect(_await_text(binding, agent_id, done)).to_equal(true)
+        return _reported(_screen(binding, agent_id), "Columns:")
+    # POSIX: `stty size` answers "rows cols" on the child's controlling PTY.
+    expect(caret_smux_send_command(binding, agent_id,
+        "echo M" + base.to_text() + " && stty size")).to_equal(true)
+    expect(_await_text(binding, agent_id, "M" + base.to_text())).to_equal(true)
+    val rows = _screen(binding, agent_id)
+    var i = rows.len() - 1
+    while i >= 0:
+        val parts = rows[i].trim().split(" ")
+        if parts.len() == 2 and _is_digits(parts[0]) and _is_digits(parts[1]):
+            return parts[1].to_i64() ?? -1
+        i = i - 1
+    -1
+
+fn _expect_pid_dead_on_posix(pid: i64):
+    # The pid facade is truthful only for engine-spawned pids on Windows;
+    # on POSIX its kill(pid, 0) fallback sees PTY children too.
+    if not _is_windows() and pid > 0:
+        expect(process_is_running(pid)).to_equal(false)
+
+fn _expect_session_gone(manager_id: text):
+    val name = caret_smux_session_name(manager_id)
+    for s in smux_list_sessions():
+        expect(s.name == name).to_equal(false)
+
+fn _expect_clean_stop(binding: CaretSmuxTeamBinding, manager_id: text):
+    val stopped = caret_smux_stop_all(binding)
+    expect(stopped.status).to_equal("stopped")
+    expect(stopped.reason).to_equal("smux_session_closed")
+    for child in stopped.children:
+        expect(child.status).to_equal("stopped")
+        _expect_pid_dead_on_posix(child.pid)
+    _expect_session_gone(manager_id)
+
+describe "caret smux multi-launch adapter binds the manager's children to real panes":
+    it "launches two concurrent interactive children on separate real PTYs and captures a per-child nonce":
+        step("Launch a bounded two-child team through the smux adapter")
+        val binding = caret_smux_launch_team("smux-spec-launch", [
+            CaretSmuxChildSpec(agent_id: "alpha", command: _shell(), args: []),
+            CaretSmuxChildSpec(agent_id: "beta", command: _shell(), args: [])],
+            100, 28)
+        expect(binding.status).to_equal("started")
+        expect(binding.session_id).to_not_equal("")
+        expect(binding.window_id).to_not_equal("")
+        expect(binding.children.len()).to_equal(2)
+        expect(binding.children[0].pid).to_be_greater_than(0)
+        expect(binding.children[1].pid).to_be_greater_than(0)
+        expect(binding.children[1].pid).to_not_equal(binding.children[0].pid)
+        expect(binding.children[0].pane_id).to_not_equal("")
+        expect(binding.children[1].pane_id).to_not_equal("")
+        expect(binding.children[1].pane_id).to_not_equal(
+            binding.children[0].pane_id)
+
+        step("Both children run concurrently on their own PTY")
+        expect(caret_smux_child_alive(binding, "alpha")).to_equal(true)
+        expect(caret_smux_child_alive(binding, "beta")).to_equal(true)
+
+        step("Each child answers for itself: a nonce typed to one pane is " +
+            "captured only there")
+        expect(caret_smux_send_command(binding, "alpha",
+            "echo NONCE_ALPHA_61111")).to_equal(true)
+        expect(caret_smux_send_command(binding, "beta",
+            "echo NONCE_BETA_72222")).to_equal(true)
+        expect(_await_text(binding, "alpha", "NONCE_ALPHA_61111")).to_equal(true)
+        expect(_await_text(binding, "beta", "NONCE_BETA_72222")).to_equal(true)
+        val alpha_screen = caret_smux_capture_child(binding, "alpha", 200)
+        val beta_screen = caret_smux_capture_child(binding, "beta", 200)
+        expect(alpha_screen.contains("NONCE_ALPHA_61111")).to_equal(true)
+        expect(alpha_screen.contains("NONCE_BETA_72222")).to_equal(false)
+        expect(beta_screen.contains("NONCE_BETA_72222")).to_equal(true)
+        expect(beta_screen.contains("NONCE_ALPHA_61111")).to_equal(false)
+
+        step("Stop the whole session: termination receipt, no session, no survivor")
+        _expect_clean_stop(binding, "smux-spec-launch")
+
+    it "drives a bounded manager launch through smux with the parent-owned team":
+        step("Launch a two-request manager through the smux adapter")
+        val manager = launch_multi_caret_manager_via_smux("smux-spec-manager",
+            [_request("claude_cli", "alpha"), _request("codex", "beta")], 2,
+            _shell(), _shell(), "", "", "", 100, 28)
+        expect(manager.status).to_equal("running")
+        expect(manager.team.processes.len()).to_equal(2)
+        expect(manager.team.processes[0].pid).to_be_greater_than(0)
+        expect(manager.team.processes[1].pid).to_be_greater_than(0)
+        expect(manager.team.processes[1].pid).to_not_equal(
+            manager.team.processes[0].pid)
+
+        step("The adapter binding named the same real pids as the team")
+        val binding = caret_smux_team_binding("smux-spec-manager")
+        expect(binding.children.len()).to_equal(2)
+        expect(binding.children[0].pid).to_equal(manager.team.processes[0].pid)
+        expect(binding.children[1].pid).to_equal(manager.team.processes[1].pid)
+        expect(caret_smux_child_alive(binding, "alpha")).to_equal(true)
+
+        step("Terminate the team through the adapter")
+        val stopped_binding = caret_smux_stop_all(binding)
+        expect(stopped_binding.status).to_equal("stopped")
+        expect(stopped_binding.reason).to_equal("smux_session_closed")
+
+        step("The parent observes every child terminal via poll")
+        expect(poll_multi_caret_manager(manager).status).to_equal("exited")
+
+        step("The parent settles the stopped team")
+        var procs: [AgentProcess] = []
+        for child in stopped_binding.children:
+            procs = procs + [AgentProcess(agent_id: child.agent_id,
+                status: child.status, reason: child.reason, pid: child.pid)]
+        val settled = settle_multi_caret_manager(manager,
+            summarize_agent_team("smux-spec-manager", procs))
+        expect(settled.status).to_equal("stopped")
+        expect(settled.reason).to_equal("processes_stopped")
+
+        step("No session and no surviving process remain")
+        _expect_session_gone("smux-spec-manager")
+        for child in stopped_binding.children:
+            _expect_pid_dead_on_posix(child.pid)
+
+    it "resizes one child's real PTY and the child observes the new viewport":
+        step("Launch two interactive children; the split shares the canvas")
+        val binding = caret_smux_launch_team("smux-spec-resize", [
+            CaretSmuxChildSpec(agent_id: "alpha", command: _shell(), args: []),
+            CaretSmuxChildSpec(agent_id: "beta", command: _shell(), args: [])],
+            100, 28)
+        expect(binding.status).to_equal("started")
+
+        step("The child reports the viewport it currently has")
+        val before = _child_columns(binding, "alpha", 61111)
+        expect(before).to_be_greater_than(0)
+
+        step("Resizing the pane reaches the child's real PTY")
+        val target = before - 7
+        expect(caret_smux_resize_child(binding, "alpha", target, 20)).to_equal(
+            true)
+        expect(_child_columns(binding, "alpha", 62222)).to_equal(target)
+        expect(caret_smux_child_alive(binding, "beta")).to_equal(true)
+
+        step("Cleanup leaves zero survivors")
+        _expect_clean_stop(binding, "smux-spec-resize")
+
+    it "cancels one child cleanly while the other keeps answering":
+        step("Launch two children and prove both answer")
+        val binding = caret_smux_launch_team("smux-spec-cancel", [
+            CaretSmuxChildSpec(agent_id: "alpha", command: _shell(), args: []),
+            CaretSmuxChildSpec(agent_id: "beta", command: _shell(), args: [])],
+            100, 28)
+        expect(binding.status).to_equal("started")
+        expect(caret_smux_send_command(binding, "alpha",
+            "echo NONCE_ALPHA_41111")).to_equal(true)
+        expect(caret_smux_send_command(binding, "beta",
+            "echo NONCE_BETA_52222")).to_equal(true)
+        expect(_await_text(binding, "alpha", "NONCE_ALPHA_41111")).to_equal(true)
+        expect(_await_text(binding, "beta", "NONCE_BETA_52222")).to_equal(true)
+
+        step("Cancel beta through the adapter: its PTY closes and it terminates")
+        val beta_pid = binding.children[1].pid
+        val cancelled = caret_smux_cancel_child(binding, "beta")
+        expect(cancelled.children[1].status).to_equal("cancelled")
+        expect(cancelled.children[1].reason).to_equal("pty_closed")
+        expect(caret_smux_child_alive(cancelled, "beta")).to_equal(false)
+        _expect_pid_dead_on_posix(beta_pid)
+
+        step("Alpha is untouched and still answers")
+        expect(caret_smux_child_alive(cancelled, "alpha")).to_equal(true)
+        expect(caret_smux_send_command(cancelled, "alpha",
+            "echo NONCE_ALPHA_43333")).to_equal(true)
+        expect(_await_text(cancelled, "alpha", "NONCE_ALPHA_43333")).to_equal(
+            true)
+
+        step("Stop the rest of the session: zero survivors")
+        _expect_clean_stop(cancelled, "smux-spec-cancel")
+
+    it "rejects an over-capacity batch before any smux session exists":
+        step("Two requests into a one-slot manager never reach smux")
+        val manager = launch_multi_caret_manager_via_smux("smux-spec-admission",
+            [_request("claude_cli", "alpha"), _request("claude_cli", "beta")],
+            1, _shell(), _shell(), "", "", "", 80, 24)
+        expect(manager.status).to_equal("not_started")
+        expect(manager.reason).to_equal("capacity_exceeded")
+        expect(manager.team.processes.len()).to_equal(0)
+        _expect_session_gone("smux-spec-admission")
+
+    it "rolls a partial batch back with no leaked child or session":
+        step("Pair one executable child with a provider the legacy plan " +
+            "cannot run")
+        val manager = launch_multi_caret_manager_via_smux("smux-spec-rollback",
+            [_request("claude_cli", "alpha"), _request("gemini", "beta")], 2,
+            _shell(), _shell(), _shell(), "", "", 100, 28)
+        expect(manager.status).to_equal("not_started")
+        expect(manager.reason).to_equal("launch_rolled_back")
+
+        step("The spawned child was terminated during the rollback")
+        val binding = caret_smux_team_binding("smux-spec-rollback")
+        expect(binding.children[0].status).to_equal("stopped")
+        expect(binding.children[0].pid).to_be_greater_than(0)
+        _expect_pid_dead_on_posix(binding.children[0].pid)
+        _expect_session_gone("smux-spec-rollback")
