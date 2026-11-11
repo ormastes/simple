@@ -119,3 +119,33 @@ Seed-smoke verification (2026-11-11, seed 0791c2b7f4a7, interpreter mode):
   on pinned-source-text drift (expected-source embedding references old
   `compiler.mir.*` module spellings) — pre-existing spec drift on the tip,
   unrelated to this row.
+
+## 2026-11-11 — SUPERSEDED confirmed (lane p3-comp12, row 3)
+
+Independent fresh re-verification at this lane's base (6233df4b9f9ea, tracked
+seed 46fe8f6b6def), concurring with the boot7 addendum above (run on seed
+0791c2b7f4a7, one refresh later — the seed-smoke was re-run here, not trusted
+across the seed swap):
+
+- The masking-symptom workaround is present at this base:
+  `driver_aot_native_output.spl:4506` reports
+  `diagnostic {size} bytes on disk, payload lost on read`, with the
+  `[receipt-size-canary]` runtime cross-checks still guarding at :1112, :3517,
+  :3797; root fix commit 9e7e7a526edb (PR #7597) is an ancestor of this base.
+- Master table row (doc/08_tracking/bug/bug_db.sdn) already reads CLOSED
+  2026-11-05 (native W4 sweep: stage3 s3_fable44 native `case Ok(message)` text
+  payload prints PASS rc=0; the pinned aarch64 stage-2 candidate from this
+  record is superseded).
+- Fresh seed-smoke (tracked seed 46fe8f6b6def, interpreter, --no-cache):
+  test/01_unit/compiler/codegen/native_result_struct_payload_push_spec.spl
+  outcome=OK executed=2 passed=2 failed=0.
+  test/01_unit/compiler/mir/optional_payload_struct_provenance_source_spec.spl
+  outcome=ERROR executed=4 passed=2 failed=2 — failure output inspected: both
+  failures are the pinned-source-text drift boot7 documented (expected-source
+  embedding uses old `compiler.mir.mir_instruction_*` module spellings); the
+  behavioral cases pass. Residual: that spec needs a drift repair pass; it is
+  not evidence for or against this row.
+- The underlying stage-2 codegen root defect (pattern-bound payload misread by
+  a stage-2-compiled binary) remains owned by the stage2-miscompile campaign
+  rows, per boot7; root-fix verification needs a stage3 native producer
+  (native/entry-closure builds forbidden in-lane). Not re-diagnosed here.
