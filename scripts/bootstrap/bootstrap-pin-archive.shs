@@ -16,7 +16,31 @@ pin_archive() {
     pa_sha=$(git -C "$pa_repo" rev-parse --verify "${pa_rev}^{commit}" 2>/dev/null) || {
         echo "ERROR — nothing was checked (cannot resolve rev '${pa_rev}')" >&2; return 2; }
     pa_dir="${pa_parent}/pinned-$(echo "$pa_sha" | cut -c1-12)"
-    rm -rf "$pa_dir.tmp"; mkdir -p "$pa_dir.tmp" || return 2
+    rm -rf "$pa_dir.tmp"; mkdir -p "$pa_parent" || return 2
+    if [ "$(git -C "$pa_repo" config --get core.symlinks 2>/dev/null)" = false ]; then
+        # core.symlinks=false (Windows): `git archive | tar` cannot create the
+        # tracked symlinks, and the Windows materializer that turns them into
+        # junctions/hardlinks (scripts/setup/materialize-symlinks-windows.shs)
+        # needs a real git toplevel. Pin a detached worktree of the exact commit
+        # instead: still isolated from live edits, and a git repo for the
+        # materializer. The recorded .spipe/spipe gitlink is populated the same
+        # way bootstrap-windows.sh does for the live tree.
+        rm -rf "$pa_dir"; git -C "$pa_repo" worktree prune
+        git -C "$pa_repo" worktree add --detach "$pa_dir" "$pa_sha" >/dev/null 2>&1 || {
+            rm -rf "$pa_dir"; git -C "$pa_repo" worktree prune
+            echo "ERROR — git worktree add failed for ${pa_sha}" >&2; return 2; }
+        case "$(git -C "$pa_repo" ls-files -s -- .spipe/spipe 2>/dev/null)" in
+            160000*) git -C "$pa_dir" submodule update --init -- .spipe/spipe >/dev/null 2>&1 || {
+                echo "ERROR — cannot initialize .spipe/spipe gitlink in pinned worktree" >&2; return 2; } ;;
+        esac
+        pa_n=$(find "$pa_dir" -type f -not -path "$pa_dir/.git/*" | wc -l)
+        [ "$pa_n" -gt 0 ] || { echo "ERROR — empty worktree for ${pa_sha}" >&2; return 2; }
+        printf '%s\n' "$pa_sha" > "$pa_dir/.bootstrap-pinned-sha"
+        echo "pinned-archive: ${pa_sha} (${pa_n} files, detached worktree) -> ${pa_dir}" >&2
+        printf '%s\n' "$pa_dir"
+        return 0
+    fi
+    mkdir -p "$pa_dir.tmp" || return 2
     # Extract to a temp dir then rename: a half-extracted tree is never visible.
     git -C "$pa_repo" archive --format=tar "$pa_sha" | tar -x -C "$pa_dir.tmp" || {
         rm -rf "$pa_dir.tmp"; echo "ERROR — git archive extraction failed" >&2; return 2; }
@@ -37,7 +61,8 @@ selftest() {
     printf '<<<<<<< HEAD\n' > "$st/r/src/a.spl"; printf x > "$st/r/src/new.spl"
     [ "$(cat "$d/src/a.spl" 2>/dev/null)" = committed ] || { echo "selftest FAIL: live edit visible"; fail=1; }
     [ -e "$d/src/new.spl" ] && { echo "selftest FAIL: new file visible"; fail=1; }
-    [ -e "$d/.git" ] && { echo "selftest FAIL: .git leaked"; fail=1; }
+    # A detached worktree carries a .git FILE; only a full repo DIRECTORY is a leak.
+    [ -d "$d/.git" ] && { echo "selftest FAIL: .git leaked"; fail=1; }
     [ "$(cat "$d/.bootstrap-pinned-sha" 2>/dev/null)" = "$(git -C "$st/r" rev-parse HEAD)" ] || { echo "selftest FAIL: sha marker"; fail=1; }
     pin_archive "$st/r" no-such-rev "$st/out" >/dev/null 2>&1; [ $? -eq 2 ] || { echo "selftest FAIL: bad rev not exit 2"; fail=1; }
     rm -rf "$st"
