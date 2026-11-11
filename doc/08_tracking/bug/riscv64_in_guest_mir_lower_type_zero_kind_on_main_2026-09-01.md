@@ -241,3 +241,26 @@ this lane (companion commit).**
 The behavioural in-guest half (real OpenSBI boot) is not re-run here, per the
 2026-11-05 lane's scope note; the pinned guard plus the hosted unit spec
 remain the authoritative hosted evidence.
+
+## 2026-11-11 — FIXED confirmed (lane p3-comp12, row 4)
+
+Independent confirmation at this lane's base (6233df4b9f9ea, tracked seed
+46fe8f6b6def — the same seed boot12 smoked today, so the 4/4 unit-spec green
+was NOT re-run per the no-green-rerun rule):
+
+- boot12's companion classifier fix 2c2471ad5d411
+  ("fix(scripts): repair rv64 zero-kind guard ratchet classifier drift") is
+  the tip commit touching the pinned guard script in this lineage.
+- Source re-read at this base: `match_result_mir_type`
+  (src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1703-1706)
+  carries both formation guards (`if expected_found == None:`,
+  `if hir_type_kind_discriminant(expected_found.kind) < 0:`) before the
+  `.kind` match, routing a miscompiled extraction to `MirType.i64()`.
+- Fresh run of the row's pinned hosted verification at this base:
+  `sh scripts/check/check-rv64-match-result-type-guarded.shs` → selftest OK
+  (10 fixtures, including the two drift shapes boot12 added), source mode
+  PASS — "1 site checked, match_result_mir_type guards its if-val extraction
+  before dereferencing".
+- The behavioural in-guest half (real OpenSBI boot) remains as recorded by
+  the nonce-era measured runs; not re-run in-lane (QEMU/OpenSBI riscv64 guest
+  outside this lane's bounded budget).
