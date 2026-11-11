@@ -4,7 +4,11 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** FIXED 2026-11-11 (lane p3-comp10) — seed parser now rejects the fatal class on the tracked seed; fix 68157645f47a in the deployed binary
+**Status:** FIXED (triage 2026-11-11, lane boot22; fix landed with PR #7597
+`9e7e526edb` — verified ancestor of HEAD) — the seed parser's `parse_val` now
+rejects `val match` bindings with `reserved keyword 'match' cannot be used as a
+val binding name`; verified live on the tracked seed binary; zero fatal-class
+instances in the tree; `var match` remains G33-sanctioned on both parsers.
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane H bootstrap redeploy)
 **Area:** Rust seed parser (`src/compiler_rust/`) vs pure-Simple parser
 **Severity:** medium — lets invalid code land, then fails the full-CLI stage of every bootstrap
@@ -72,39 +76,32 @@ git only.
   `seed_parser_rejects_multiline_if_expression_chain_2026-07-27.md` (inverse direction)
 
 
-## Triage 2026-11-11 (lane p3-comp10)
 
-Verdict: FIXED (row's subject = the SEED accepting the fatal class). Fresh
-re-verification at lane base 79d5af6723f6 against the tracked seed
-bin/simple.exe (build 46fe8f6b6def, 2026-11-10):
+## 2026-11-11 P3-boot22 triage — FIXED (header flip)
 
-- Direct probe of the row's exact claim: `fn main() -> i64: val match = 3;
-  return match` now FAILS PARSE on the tracked seed with "reserved keyword
-  'match' cannot be used as a val binding name" rc=1 (probe at
-  build/review/comp10-probes/match_kw_binding.spl). The seed no longer admits
-  the Stage-4 detonator class; seed-compiled code is back to a strict subset of
-  self-hosted-compilable code for this shape.
-- The guard message lives at
-  src/compiler_rust/parser/src/stmt_parsing/var_decl.rs:58; its introducing
-  commit 68157645f47a (2026-08-02, "fix: close claimed parser and byte
-  marshalling bugs") IS an ancestor of both the lane base and the tracked seed
-  binary. The doc's interim guard scripts/check/
-  check-keyword-identifier-bindings.shs is present at tip (could not complete
-  on this Windows host within 5 min — full-tree grep over tracked .spl files;
-  not required for the verdict given the direct probe).
-- Corpus spec test/01_unit/compiler/soft_keyword_identifier_corpus_spec.spl on
-  the tracked seed: the match/case cases PASS, including "case -- the reported
-  defect: match-arm marker only" and "un-reserving must not cost case its real
-  job as a match-arm marker". 2 failures are an UNRELATED keyword-binding
-  corner — `context/feature/scenario` and `lazy/skip/exists` bound as vals fail
-  semantically with "type mismatch: cannot convert function to int"
-  (soft_keyword_identifier_corpus_spec.spl:85,132). That is a different
-  keyword-binding behavior question, recorded here as a residual observation;
-  file separately if it matters.
-- Evidence limit: test/01_unit/core/parser_ce_keyword_identifier_spec.spl (the
-  doc's cited pin, path drifted from test/unit/core/...) is a PURE-SIMPLE
-  parser pin — it imports core.ast/core.parser (parse_module, ast_reset, ...)
-  and fails 6/6 on the tracked seed with "variable `par_state` not found"
-  (the self-hosted parser API does not exist in the seed interpreter). It
-  cannot serve as seed-side evidence; it will pin the self-hosted parser's
-  matching behavior once a self-hosted binary is available.
+Row 7 of lane boot22 (bootstrap table, after #40). Re-verified FRESH at this
+lane's base (`79d5af6723f6`, tracked seed build `46fe8f6b6def`):
+
+- **Fix present in source.** `parse_val`
+  (`src/compiler_rust/parser/src/stmt_parsing/var_decl.rs:51-62`) opens with an
+  explicit `self.check(&TokenKind::Match)` rejection emitting exactly
+  `reserved keyword 'match' cannot be used as a val binding name`, with an
+  in-code comment citing the self-hosted divergence this record filed. It
+  landed with PR #7597 (`9e7e7a526edb`), confirmed an ancestor of HEAD.
+- **Verified live on the tracked seed binary.** Probe
+  (`bin/simple.exe run` on `val match = 1; print(match)`): seed rejects with
+  the reserved-keyword parse error — the Stage-4 detonator class can no longer
+  be admitted by the seed. (The expression-context
+  `TokenKind::Match => parse_keyword_identifier("match")` arm remains, but the
+  val-binding path — the filed divergence — now rejects first.)
+- **Tree census.** `git grep -E "(val|var) match *="` over src/ and test/:
+  zero `val match =` instances; the surviving `var match = true` uses
+  (e.g. `src/lib/blink/css_parser/selector.spl:95`) are the G33-sanctioned
+  form both parsers accept — the self-hosted front end documents the same at
+  `src/compiler/10.frontend/core/parser_stmts.spl:1022` ("G33: `match` may be
+  an identifier"). The two parsers now agree on both forms.
+- The interim grep guard (`scripts/check/check-keyword-identifier-bindings.shs`)
+  remains in place as the cheap tripwire.
+
+Residual: none for this row. A full Stage-1..4 bootstrap re-proof is the
+standing bootstrap-lane grant, not part of this row's acceptance.
