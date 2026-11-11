@@ -1,6 +1,6 @@
 # Cross-language source/SMF actual execution mode receipt missing
 
-Status: OPEN (P3)
+Status: BLOCKED (P3) — 2026-11-11 (lane intne1, batch p3-intne1-20261111): receipt owner present in source but runtime receipt unproven on the Rust seed host; verbatim grant below.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 execution remains required before the rows are release-admitted.
 
@@ -74,3 +74,35 @@ bootstrap was already occupying the host).
 Verdict: **STILL-OPEN (unproven)** — source implementation present, runtime
 receipt not demonstrated. Do not close until re-run on an admitted Stage 3/4
 self-hosted binary.
+
+## 2026-11-11 addendum (lane intne1, batch p3-intne1-20261111) — verdict: BLOCKED (verbatim grant)
+
+Re-probed on release/1.0.0 tip (worktree simple-p3-intne1-20261111, HEAD 79d5af6723f6):
+
+- Receipt owner still present in source: `src/app/io/_CliCommands/run_commands.spl:69-75`
+  (`execution_mode_receipt_enabled` gates on `SIMPLE_EXECUTION_MODE_RECEIPT == "1"`;
+  `emit_execution_mode_receipt` writes `simple_execution_mode_v1 requested=… actual=…
+  fallback=…` to stderr), with the SMF arm at :116 and the interpreter arm at :146.
+- The tracked `bin/simple.exe` (build-commit 46fe8f6b6def, refreshed seed) is still a
+  Rust-built seed: it prints the bootstrap-seed banner, and `strings` on the binary
+  finds no `simple_execution_mode_v1`.
+- Empirical probe on this host: `SIMPLE_EXECUTION_MODE_RECEIPT=1 bin/simple.exe run
+  /tmp/intne1/hello.spl` -> rc=0, stdout `hi`, **no receipt line**; the seed's `run`
+  is JIT-first with engine-demotion, never entering the pure-Simple `cli_run_file`
+  path. A parse-error fixture likewise produced no receipt and no pure-Simple error
+  arm. Same wall as the 2026-08-17 CLI lane: the pure-Simple receipt path cannot
+  execute under the Rust seed.
+
+Verbatim grant to close this row:
+
+    # on a host with a self-hosted pure-Simple Stage 3/4 binary (NOT the Rust seed):
+    cd <repo root>
+    printf 'fn main():\n    print("hi")\n' > /tmp/hello.spl
+    SIMPLE_EXECUTION_MODE_RECEIPT=1 bin/simple run /tmp/hello.spl 2>&1 \
+        | grep 'simple_execution_mode_v1 requested=jit actual=interpreter fallback=true'
+    SIMPLE_EXECUTION_MODE_RECEIPT=1 SIMPLE_EXECUTION_MODE=interpret bin/simple run /tmp/hello.spl 2>&1 \
+        | grep 'simple_execution_mode_v1 requested=interpret actual=interpreter fallback=false'
+
+Expected if the owner holds: each grep matches exactly one line, and the parse-error
+fixture emits no receipt. Then flip Status to FIXED with the captured lines as
+evidence.
