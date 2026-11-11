@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** FIXED 2026-11-11 (lane p3-comp10) — seed HIR-lowering fix 8f667030f2fd at tip, in the tracked seed; fixture verifies correct
 **Found:** 2026-08-16, structural review of `8d96687c991` on `origin/main`
 **Severity:** high — silently reintroduces an irrefutable-pattern bug that a prior fix was written to close
 **Component:** Rust seed, `hir/lower` (both the expression and statement match-lowering twins)
@@ -251,3 +251,55 @@ Repair the native-build worker's `undefined field 'kind'` failure, then run
 without the lowering change. The dual-toolchain SSpec already encodes exactly that
 comparison and will name whichever toolchain disagrees.
 
+
+## Triage 2026-11-11 (lane p3-comp10)
+
+Verdict: FIXED-at-tip (source + tracked-seed behavior) for the row's subject —
+the SEED HIR-lowering name-keyed predicate. Fresh re-verification at lane base
+79d5af6723f6:
+
+- Fix commit 8f667030f2fd ("fix(seed): key builtin-Option lowering on
+  genericity, not the bare name", 2026-08-16) IS an ancestor of both the lane
+  base and the tracked seed build 46fe8f6b6def.
+- Source at tip: both lowering twins key on genericity, not the bare name —
+  `subject_is_builtin_option` requires `name == "Option" &&
+  !generic_params.is_empty()` in
+  src/compiler_rust/compiler/src/hir/lower/expr/control.rs:796-805 and
+  src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs:3467-3476 (the
+  doc-recorded fix shape, unchanged). The companion helper
+  `is_builtin_optional_variant_name` (control.rs:969-976) applies the same
+  genericity exclusion.
+- Behavioral (tracked seed 46fe8f6b6def, interpreter, no-cache):
+  `test/fixtures/user_option_enum_match/main.spl` prints
+  `some_arm=42 none_arm=99 none_via_some=unmatched` rc=0 — exactly the
+  doc's "WITH the lowering fix" expectation row. (As the doc's 2026-08-16
+  correction records, the interpreter path never exercises the HIR lowering
+  predicate, so this run confirms the fixture's correct behavior on the
+  deployed engine, not the lowering change itself.)
+- Ablation-by-inspection: `git log -S '!generic_params.is_empty()'` names
+  8f667030f2fd as the introducing commit for the guard; no later commit
+  removed it (file at tip carries it, see above).
+
+Residuals left to named owners (recorded, not part of this row's subject):
+1. PURE-SIMPLE self-hosted compiler twin is UNFIXED in source —
+   src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl still keys
+   runtime-representation decisions on the bare name at ~8 sites (lines 3410,
+   3766, 4573, 4630, 4907, 6189, 6316, 6370 in the current file). This is
+   compiler-lane source but is only exercised by a self-hosted binary;
+   behavioral verification requires a stage2/stage3 build (entry-closure
+   native builds forbidden in this lane; no stage2/3 dir in the worktree).
+   The dual-toolchain pin
+   test/03_system/compiler/user_option_enum_match_lowering_system_spec.spl
+   exists and will fence it once a self-hosted binary is available.
+2. Seed-side generic-user-enum residual: a user-declared GENERIC
+   `enum Option<T>: Some(T)/None` still satisfies the name+genericity test;
+   the doc's recorded remedy is a provenance flag set by
+   `instantiate_builtin_generic_enum`, a wider change owned by the seed lane.
+3. Companion linter diagnostic-builder defect (`with_fix`/`with_easy_fix` not
+   found on an untyped receiver) is a GENERAL lint crash with multiple
+   triggers, not Option-specific — separate defect class, file separately.
+4. control.rs:80 `result_like_payload_type` still matches
+   `Enum { name, .. } if name == "Option"` (bare name, no genericity test);
+   effect is limited to payload-type lookup for result-like typing (no
+   irrefutable-pattern failure mode). Fold into the seed-lane provenance-flag
+   remedy.
