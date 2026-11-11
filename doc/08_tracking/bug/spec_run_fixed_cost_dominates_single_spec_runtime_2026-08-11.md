@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Category:** Tooling / test runner
-**Status:** Open (measured, not fixed — this is a measurement record, no production code changed)
+**Status:** LIVE 2026-11-11 — runner8 triage; daemon-lane lint tax still present at tip, fix is an owner decision on daemon default/lint cache. See addendum at end.
 **Owner:** lane S2 (measurement only)
 
 ## Binary identity (held fixed for every measurement below)
@@ -166,3 +166,36 @@ Two distinct, unrelated costs were conflated in the original complaint:
 Reporting one number ("specs take 10-25 minutes") without separating these
 two obscures that one has a one-flag fix today and the other does not.
 
+
+---
+
+## Addendum 2026-11-11 — runner8 P3 triage: LIVE (owner decision)
+
+Re-triaged on release/1.0.0 tip (worktree `simple-p3-runner8-20261111`).
+
+Code evidence this remains live at tip:
+
+- `src/app/test_runner_new/test_runner_args.spl:72-77` — "Daemon-owned
+  execution is the default resource boundary"; `--no-session-daemon` /
+  `--session-daemon` (lines 316-320) still gate the two lanes, daemon still
+  the default.
+- The full-tree lint/warning pass the record attributes to session start and
+  teardown is part of the daemon-owned lane's warm-up; no lint cache
+  equivalent to `scripts/check/lint-cached.shs` exists for `bin/simple test`
+  (grepped `src/app/cli/*.spl`, `src/app/test_runner_new/*.spl` — no
+  `SIMPLE_LINT_CACHE`-style cache or cache-hit message).
+
+Why LIVE and not FIXED: this file is explicitly a measurement record ("no
+production code changed"); its own ranked mitigations are (1) use the existing
+`--no-session-daemon` flag — already available, nothing to fix; (2) fix or
+bypass the double full-tree lint pass in daemon mode — that is a product
+decision about the daemon's default and warm-session value proposition
+(change the default for small runs, or cache the analysis across specs in a
+session); (3) the content-bound `spirv_boundary_glslang_spec.spl` cost is
+out of scope for the test runner. None of (2)/(3) can be resolved inside a
+P3 bug-fix lane without an owner call.
+
+Owner decision needed: test-runner/tooling owner — either (a) default
+single/few-spec runs to the no-daemon lane, (b) add a cross-spec lint cache
+to the daemon session, or (c) re-justify the daemon's full-tree warm-up and
+close this as accepted-cost.

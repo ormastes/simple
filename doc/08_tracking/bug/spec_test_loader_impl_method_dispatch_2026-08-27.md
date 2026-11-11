@@ -1,7 +1,7 @@
 # Spec-test loader fails method dispatch and mangles names for locally-defined classes and helpers
 
 Date: 2026-08-27
-Status: OPEN
+Status: LIVE 2026-11-11 — runner8 triage; impl-method dispatch still fails file-globally at tip under BOTH `test` and `run` (seed semantic path, not the test loader); owner: seed/compiler lane. Defects 2 (worked around, 17/17 green) and 3 (no longer reproduces) closed. See addendum at end.
 Discovered during: sspec modernization batch (39 docgen-failing specs, /tmp/sspec_census/docgen_fails.txt)
 
 ## Summary
@@ -89,3 +89,57 @@ Delete candidates (assert nothing, no executable content):
 - `test/unit/compiler/common/config_spec.spl` — 5-line header-only stub.
 - `test/03_system/app/tooling/feature/warning_allow_root_cause_cleanup_spec.spl`
   — prose Gherkin with no code; content belongs in a requirements doc.
+
+---
+
+## Addendum 2026-11-11 — runner8 P3 triage: LIVE (owner: seed/compiler lane)
+
+Re-triaged on release/1.0.0 tip (worktree `simple-p3-runner8-20261111`), seed
+binary tracked `bin/simple.exe` @ 46fe8f6b6def, `SIMPLE_LIB=src`,
+`--mode=interpreter --no-cache`.
+
+Per-defect status:
+
+1. **Impl-method dispatch (core_spec) — STILL LIVE, and worse than filed.**
+   `test/01_unit/app/test_runner/core_spec.spl` fails with
+   `semantic: method `feed` not found on type `object` (receiver value:
+   ProtocolParser(...))` under `bin/simple test`. New evidence tonight:
+   - It now ALSO reproduces under `bin/simple run` (jit-bail:no-main-fn →
+     interpreter fallback → same semantic error after 9 [PASS] lines). The
+     filed claim that it "does NOT reproduce under `bin/simple run`" is
+     STALE — this is the seed semantic path, not the spec-test loader,
+     which moves ownership out of the test runner entirely.
+   - Isolation probe: with the three `parser.feed(...)` call sites rewritten
+     to a free-function stand-in, the next impl call
+     `parser.has_messages()` fails identically. Every impl-method dispatch
+     in the file is broken, not one method.
+   - Minimal probes (fn defined before the class; `me` method chaining;
+     the exact `use std.spec.step` + `use spec.{describe, context, it,
+     expect}` import header) all PASS — the trigger is file-global and was
+     NOT isolated, matching this doc's own failed bisection note.
+   - The in-file `protocol_message_encode` free-function workaround
+     (encode) remains; feed/has_messages/pop_message have no such
+     stand-ins committed.
+2. **DSL builtin shadowing (client_spec) — worked around, spec GREEN.**
+   The local helper carries a non-colliding name (`fixture_assert_true`,
+   defined at client_spec.spl:435). Seed interpreter lane tonight:
+   `client_spec.spl` 17/17 passed. The open question "DSL builtin vs
+   file-local helper precedence (or emit a diagnostic)" is a seed
+   semantic-path decision, same owner as (1).
+3. **Uppercase free-function mangling — NO LONGER REPRODUCES.** The
+   uppercase free fn `ProtocolMessage_test_pass(...)` is called at
+   core_spec.spl:129 inside `run_suite()` (reached from the it-body) and
+   resolves fine — "ProtocolMessage test_pass encoding" PASSes in the run
+   log. Consider (3) closed by the 2026-11-09 owner-decision mangled-name
+   resolution work unless a fresh repro surfaces.
+
+Why LIVE: the surviving defect is in the seed compiler's semantic pass
+(impl registrations dropped file-globally for this shape; both interpreter
+and JIT; both `test` and `run` entry points). Fixing it requires the
+seed/compiler lane to isolate the shape trigger and rebuild/deploy the
+seed — outside a P3 bug-fix lane's authority. The pre-existing
+`success_rate` JIT f64 divergence stays bundled with this row's owner.
+
+Owner decision needed: seed/compiler lane — isolate why co-compiled impl
+blocks lose method registration in this file's shape; decide DSL builtin
+vs file-local helper precedence.
