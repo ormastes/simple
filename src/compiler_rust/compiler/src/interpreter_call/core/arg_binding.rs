@@ -7,7 +7,7 @@ use crate::interpreter::evaluate_expr;
 use crate::interpreter::await_value;
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
-use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Parameter, SelfMode, Type};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Parameter, SelfMode, Type, UnaryOp};
 use std::collections::HashMap;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -30,6 +30,14 @@ pub(crate) fn non_bool_literal_arg_kind(expr: &Expr) -> Option<&'static str> {
         Expr::Float(_) | Expr::TypedFloat(..) => Some("float"),
         Expr::String(_) | Expr::TypedString(..) | Expr::FString { .. } => Some("text"),
         Expr::Nil => Some("nil"),
+        // `~0`, `-1`: a sign or bit-not over a numeric literal is still a literal.
+        Expr::Unary {
+            op: UnaryOp::Neg | UnaryOp::BitNot,
+            operand,
+        } => match non_bool_literal_arg_kind(operand)? {
+            kind @ ("integer" | "float") => Some(kind),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -54,6 +62,44 @@ fn reject_bool_literal_arg(expr: &Expr, param: &Parameter) -> Option<CompileErro
         ),
         ctx,
     ))
+}
+
+/// Static bool admission pre-scan (same bug doc as `reject_bool_literal_arg`):
+/// mirror the binding cursor so a literal non-bool argument at a `bool`
+/// parameter is rejected BEFORE any argument is evaluated. Spreads fan out per
+/// element with a statically unknown count, so a call containing one keeps the
+/// pure runtime contract; variadic callees are excluded by the caller.
+fn reject_bool_literal_args(
+    args: &[Argument],
+    params_to_bind: &[&Parameter],
+    named_params: &std::collections::HashSet<&str>,
+) -> Result<(), CompileError> {
+    if args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+        return Ok(());
+    }
+    let mut admission_idx = 0usize;
+    for arg in args {
+        if let Some(name) = &arg.name {
+            if let Some(param) = params_to_bind.iter().find(|p| &p.name == name) {
+                if let Some(err) = reject_bool_literal_arg(&arg.value, param) {
+                    return Err(err);
+                }
+            }
+            continue;
+        }
+        while admission_idx < params_to_bind.len() && named_params.contains(params_to_bind[admission_idx].name.as_str())
+        {
+            admission_idx += 1;
+        }
+        let Some(param) = params_to_bind.get(admission_idx) else {
+            break;
+        };
+        if let Some(err) = reject_bool_literal_arg(&arg.value, param) {
+            return Err(err);
+        }
+        admission_idx += 1;
+    }
+    Ok(())
 }
 
 // Value-type (struct) arguments are passed by copy. Until 2026-08-21 every
@@ -288,39 +334,8 @@ pub(crate) fn bind_args_with_injected(
     let mut positional_idx = 0usize;
     let mut variadic_values = Vec::new();
 
-    // Static bool admission pre-scan (same bug doc as `reject_bool_literal_arg`):
-    // mirror the binding cursor so a literal non-bool argument at a `bool`
-    // parameter is rejected BEFORE any argument is evaluated. Spreads fan out
-    // per element with a statically unknown count and variadic calls bind the
-    // tail into the variadic parameter, so a call containing either keeps the
-    // pure runtime contract for every slot it touches.
-    if variadic_param_idx.is_none() && !args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
-        let mut admission_idx = 0usize;
-        for arg in args {
-            if let Some(name) = &arg.name {
-                if let Some(param) = params_to_bind.iter().find(|p| &p.name == name) {
-                    if !param.variadic {
-                        if let Some(err) = reject_bool_literal_arg(&arg.value, param) {
-                            return Err(err);
-                        }
-                    }
-                }
-            } else {
-                while admission_idx < params_to_bind.len()
-                    && named_params.contains(params_to_bind[admission_idx].name.as_str())
-                {
-                    admission_idx += 1;
-                }
-                if admission_idx >= params_to_bind.len() {
-                    break;
-                }
-                let param = params_to_bind[admission_idx];
-                if let Some(err) = reject_bool_literal_arg(&arg.value, param) {
-                    return Err(err);
-                }
-                admission_idx += 1;
-            }
-        }
+    if variadic_param_idx.is_none() {
+        reject_bool_literal_args(args, &params_to_bind, &named_params)?;
     }
 
     let coerce_param = |value: Value, ty: Option<&Type>| -> Value {

@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-23
-**Status:** OPEN — re-key deliberately NOT performed
+**Status:** LIVE 2026-11-11 (lane p3fix-comp7-20261111) — deliberate owner deferral, re-verified at tip; needs a dedicated owner compiler/cache lane, not a batch lane (see addenda)
 **Area:** compiler / 80.driver / cache
 **Severity:** perf (0% incremental HIR cache hit rate) — blocked on a correctness gap
 
@@ -282,3 +282,36 @@ rows. That is a large, high-risk compiler change belonging to a dedicated owner
 lane with full differential proof — not a P3-essential batch lane. Recommended
 routing: owner compiler/cache lane; keep the closure digest keyed on
 `content_hash` until the encoder + differential proof exist.
+
+---
+
+## 2026-11-11 (lane p3fix-comp7-20261111) — Status flipped LIVE
+
+Independent re-verification of the same-day compiler2 addendum on this lane's
+fresh worktree (base `a64cda1ee32d`, tracked seed `bin/simple.exe`,
+build-commit 46fe8f6b6def). All four of the addendum's load-bearing facts
+re-confirmed from source, not trusted from the addendum alone:
+
+- `hir_cache_closure_digest` still folds each surface's raw
+  `content_hash`/`content_length` into the closure digest
+  (`src/compiler/80.driver/driver_hir_cache.spl:206`) — still content-keyed;
+  the `hir_cache_surface_neutral_token`/`pp_marker_strip` normalization
+  (lines 152-160) is still content-based, not interface-based.
+- The Update-2 prerequisite `src/compiler/80.driver/cache/surface_type_encode.spl`
+  is absent from `src/` (`find src -iname '*surface_type_encode*'` → no match);
+  only its spec file remains in the test tree.
+- The documented guard row `interface-digest-differential` is absent from
+  `scripts/check/check-perf-regression-tests.shs` (grep count 0).
+- Seed-smoke: `test/01_unit/compiler/driver/interface_digest_differential_spec.spl`
+  (interpreter, `--no-cache`) → `outcome=OK, executed=12 passed=12 failed=0`;
+  the textual extractor behavior is unchanged and pinned.
+
+Disposition unchanged: LIVE. This is a deliberate correctness-before-speed
+deferral — a partially-validated re-key would produce a silently stale
+compiler binary, strictly worse than the 0% hit rate it replaces. The
+prerequisite work (lossless `ModuleSurface` encoder over every field with
+per-surface fail-closed fallback, verified imports/exports/assoc_types
+projections, sorted `impl.methods` keys, trait-default-body and
+enum-variant-default fallbacks, folded through `action_key.interface_digest_of`)
+is a large, high-risk compiler change for a dedicated owner compiler/cache
+lane. Status line flipped from OPEN.
