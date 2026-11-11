@@ -1,7 +1,7 @@
 # native-build --entry-closure collects zero source files for an existing entry (blocks CUDA/Vulkan parity probe)
 
 - **Date:** 2026-08-19
-- **Status:** OPEN
+- **Status:** SUPERSEDED (triage 2026-11-11, lane boot21; first triaged 2026-11-10 lane boot5) — collector diagnostic rewritten at `driver_source_pipeline_loading.spl:1004` (PR #7597 `9e7e7a526edb`, ancestor of HEAD `d552f63f67f8`) directly answering this record's complaint (see 2026-11-11 addendum below)
 - **Severity:** medium — blocks `check-processing-cuda-fill-native.shs` and `check-processing-cuda-vulkan-native-parity.shs` (probe-binary-missing)
 
 ## Repro
@@ -53,3 +53,25 @@ Per the 2026-11-09 note, the documented recipe now passes entry collection on
 seed and proceeds to an unrelated parse error. A full re-run of the CUDA probe
 recipe is host-heavy (Linux CUDA host) and was not repeated from this Windows
 lane.
+
+
+## 2026-11-11 P3-boot21 triage — SUPERSEDED (header flip)
+
+Fresh re-verification of the 2026-11-10 boot5 disposition (not flipped then),
+at HEAD `d552f63f67f8`:
+
+- `git merge-base --is-ancestor 9e7e7a526edb HEAD`: ANCESTOR — PR #7597 is in
+  this tree.
+- The collector diagnostic at
+  `src/compiler/80.driver/driver_source_pipeline_loading.spl:1004` now reads
+  "collected zero source files: the entry must be a path to a .spl file (e.g.
+  'dir/main.spl'), not a module path (e.g. 'dir.main'), and the path is
+  resolved relative to the current working directory" — directly answering
+  this record's complaint that the error message's diagnosis was wrong.
+
+Per the 2026-11-09 bugdb close
+(`doc/08_tracking/bug/db/native_build_entry_closure_collects_zero_files_cuda_fill_probe_2026-08-19.sdn`),
+the documented recipe passes entry collection on the seed and proceeds to an
+unrelated parse error. A full re-run of the CUDA probe recipe is host-heavy
+(Linux CUDA host) and was not repeated from this Windows lane. No code change
+this lane; header flipped to match the verified disposition.

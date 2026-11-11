@@ -418,6 +418,21 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
         return Some(mod_resolved);
     }
 
+    // An importer sitting AT the project root (`./probe.spl` importing
+    // `os.crypto.hotp`) must also try its own `src/`: the ancestor climb below
+    // only probes `<parent>/src`, so `<base>/src` was never searched, the import
+    // stayed unflattened, and the JIT de-JITted on an unresolved Simple import.
+    // Bug: os_crypto_jit_unresolved_symbol_rootcause_2026-07-30.
+    let base_src = base.join("src");
+    if p_is_dir(&base_src) {
+        if let Some(resolved) = resolve_parts_from_root(&base_src, parts, use_stmt) {
+            return Some(resolved);
+        }
+        if let Some(resolved) = resolve_numbered_parts_from_root(&base_src, parts, use_stmt) {
+            return Some(resolved);
+        }
+    }
+
     let mut parent_dir = base.to_path_buf();
     for _ in 0..10 {
         if let Some(parent) = parent_dir.parent() {
@@ -3310,6 +3325,32 @@ mod tests {
         fs::create_dir_all(project.join("src/std")).unwrap();
         fs::write(project.join("src/std/io.spl"), "fn x():\n    1\n").unwrap();
         assert_eq!(resolve_parts_from_project_root(&project, &std_parts, &std_import), None);
+    }
+
+    /// Bug os_crypto_jit_unresolved_symbol_rootcause_2026-07-30: an importer at
+    /// the project root (`proj/probe.spl` with `use os.crypto.hotp.{f}`) must
+    /// resolve `proj/src/os/crypto/hotp.spl`; the ancestor climb only probes
+    /// `<parent>/src`, so the importer's own `src/` used to be skipped.
+    #[test]
+    fn root_level_importer_resolves_from_own_src() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("proj");
+        let hotp = project.join("src/os/crypto/hotp.spl");
+        fs::create_dir_all(hotp.parent().unwrap()).unwrap();
+        fs::write(&hotp, "fn hotp_f() -> i64:\n    42\n").unwrap();
+        let parts: Vec<String> = ["os", "crypto", "hotp"].iter().map(|s| s.to_string()).collect();
+        let import = use_stmt(
+            &["os", "crypto", "hotp"],
+            ImportTarget::Group(vec![ImportTarget::Single("hotp_f".to_string())]),
+        );
+        assert_eq!(resolve_parts_with_search_roots(&project, &parts, &import), Some(hotp));
+        // Sibling shape: a nested importer still resolves via the ancestor climb.
+        let nested = project.join("test/zz");
+        fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            resolve_parts_with_search_roots(&nested, &parts, &import),
+            Some(project.join("src/os/crypto/hotp.spl"))
+        );
     }
 
     /// `use lib.common.env_access.model.{...}` (109 sites in src/) names the

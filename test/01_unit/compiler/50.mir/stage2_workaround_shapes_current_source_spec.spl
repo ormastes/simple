@@ -86,6 +86,26 @@ describe "Stage-2-only workaround shapes lower correctly from current source":
         expect(calls(body, "rt_value_int_wide")).to_equal(false)
         expect(calls(body, "rt_array_new")).to_equal(true)
 
+    it "one-element literal over the re-emptied alias-swapped list keeps text elements (real native_interface_slice shape)":
+        val r = lower_src(
+            "fn fin(a: text, xs: [text]) -> text:\n    a + xs.join(\",\")\n" +
+            "fn go(ts: [text]) -> [text]:\n" +
+            "    var decls: [text] = []\n    var cur_lines: [text] = []\n    var pending_attrs: [text] = []\n" +
+            "    var cur_header = \"\"\n    var i = 0\n" +
+            "    while i < ts.len():\n        val t = ts[i].trim()\n" +
+            "        var logical = t\n        var j = i + 1\n" +
+            "        while j < ts.len() and ts[j].starts_with(\" \"):\n            logical = logical + \" \" + ts[j].trim()\n            j = j + 1\n" +
+            "        if t.starts_with(\"@\"):\n            pending_attrs.push(logical)\n            i = j\n            continue\n" +
+            "        if cur_header != \"\":\n            decls.push(fin(cur_header, cur_lines))\n" +
+            "        cur_header = logical\n        cur_lines = pending_attrs\n        pending_attrs = []\n" +
+            "        cur_lines.push(logical)\n        i = j\n" +
+            "    if cur_header != \"\":\n        decls.push(fin(cur_header, cur_lines))\n" +
+            "    for attr in pending_attrs:\n        decls.push(fin(attr, [attr]))\n    decls\n")
+        expect(r.errors).to_equal([])
+        val body = body_of(r.ir, "go")
+        expect(calls(body, "rt_value_int_wide")).to_equal(false)
+        expect(calls(body, "rt_array_new")).to_equal(true)
+
     it "text receiver of index_of is copied only on the raw fallback branch (text_method_arg_copied_through_extern_abi_per_call)":
         val r = lower_src("fn le(content: text, start: i64) -> i64:\n    content.index_of(\"\\n\", start) ?? -1\n")
         expect(r.errors).to_equal([])

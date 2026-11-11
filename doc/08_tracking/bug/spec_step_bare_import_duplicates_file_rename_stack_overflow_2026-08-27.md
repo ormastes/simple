@@ -7,7 +7,7 @@ evidence found in the body. This is bookkeeping, not verification.
 - Date: 2026-08-27
 - Found by: SCV-IMPL-B-01 (sj-capsule transaction coordinator)
 - Binary: deployed seed `bin/release/x86_64-unknown-linux-gnu/simple`
-- Status: OPEN — worked around in one spec, root cause untouched
+- Status: FIXED 2026-11-11 — runner8 triage; `file_rename` wrapper now forwards to uniquely-named `rename_path`, repro + regression spec green on seed lane. See addendum at end.
 
 ## Symptom
 
@@ -81,3 +81,41 @@ the definition site, or reject a duplicate top-level `fn` whose body calls an
 import aliased to the same name. Either turns a silent infinite recursion into a
 diagnostic.
 
+
+---
+
+## Addendum 2026-11-11 — runner8 P3 triage: FIXED
+
+Verified fixed on release/1.0.0 tip (worktree `simple-p3-runner8-20261111`).
+
+Root-cause fix already in the tree: the `file_rename` wrapper in
+`src/lib/nogc_sync_mut/io/file_ops.spl:451-456` no longer forwards to an
+import aliased to its own name; it calls the uniquely-named
+`rename_path(old_path, new_path)` forwarder (`src/lib/nogc_sync_mut/io_runtime.spl:503-507`,
+rework landed with merge 9e7e7a526edb, 2026-11-07). With the wrapper calling a
+unique name, a second `file_rename` co-compiled into the flattened unit can no
+longer dispatch back to the wrapper, so the unbounded self-recursion through
+`scv_write_text -> atomic_write` is structurally impossible. `dir_remove_all`
+(`src/lib/nogc_sync_mut/io/dir_ops.spl:84-85`) likewise now calls its own raw
+extern lane and never touches `file_rename`.
+
+Evidence (seed binary, tracked `bin/simple.exe` @ 46fe8f6b6def,
+`SIMPLE_LIB=src ... test <spec> --mode=interpreter --no-cache`):
+
+- Repro of the original failing shape — `scv_sj_capsule_spec` content plus the
+  bare `use std.spec.step` line: `SPEC FILE VERDICT ... outcome=OK declared>=14
+  executed=14 passed=14 failed=0`.
+- Regression coverage committed in the same change: the workaround was removed
+  from `test/02_integration/app/scv_sj_capsule_spec.spl` — the bare
+  `use std.spec.step` line is imported again (with a comment naming this bug)
+  and the spec passes 14/14 on the seed interpreter lane. `test/integration/`
+  was consolidated into `test/02_integration/` by 4f51a7ee31fc, so one live
+  copy remains.
+
+Residual (separate concern, seed lane): the GENERAL flattened-unit defect —
+a duplicate top-level fn whose body calls an import aliased to the same name
+still self-dispatches; the tree still emits `compiler_cross_module_private_symbol_collision`
+warnings for other duplicate pairs (e.g. `print_summary`, `spipe_helpers_used`)
+on every test run. That class needs a compiler/seed-lane decision (alias-aware
+duplicate resolution or a hard diagnostic); this row's named `file_rename`
+symptom is closed.

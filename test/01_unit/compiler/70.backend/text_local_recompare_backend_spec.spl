@@ -1,0 +1,66 @@
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val MODULE = "tlrb_probe"
+val SRC = "fn noise(n: i64) -> i64:\n    n + 1\n\nfn admit(raw: text, k: i64) -> i64:\n    var mode = raw\n    if k > 3:\n        mode = \"cpu\"\n    val z = noise(k)\n    if mode == \"cpu\":\n        return 1\n    elif mode == \"\":\n        return 2\n    else:\n        return 3\n"
+
+fn ir_of(src: text) -> text:
+    val file = "testdata/tlrb_probe.spl"
+    var hl = HirLowering.with_filename(file)
+    val m: HirModule = hl.lower_module(parse_full_frontend(src, file, MODULE, Logger(level: 0)))
+    var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(m)
+    MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir)
+
+# Bug freestanding_text_local_recompare_flips_material_admission_2026-08-10,
+# backend half. A text `==` lowers to rt_text_eq_any; its i64 result must be
+# tested as C truthiness (`!= 0`), never `== 1`, so a provider that answers a
+# non-1 truthy word cannot flip a re-compared text local's branch. Also pins
+# that each re-compare after an intervening call reloads the local's slot.
+
+fn lines_after_eq_calls(ir: text) -> [text]:
+    var out: [text] = []
+    var take = false
+    for line in ir.split("\n"):
+        val t = line.trim()
+        if take:
+            out.push(t)
+            take = false
+        if t.contains("call i64 @rt_text_eq_any("):
+            take = true
+    out
+
+describe "text local re-compare lowers to a truthy rt_text_eq_any test":
+    it "emits one rt_text_eq_any per re-compare":
+        expect(lines_after_eq_calls(ir_of(SRC)).len()).to_equal(2)
+
+    it "tests each rt_text_eq_any result with icmp ne 0, not eq 1":
+        for t in lines_after_eq_calls(ir_of(SRC)):
+            expect(t.contains("icmp ne i64") and t.ends_with(", 0")).to_equal(true)
+
+    it "reloads the text local slot before each compare":
+        val ir = ir_of(SRC)
+        var loads = 0
+        var prev = ""
+        for line in ir.split("\n"):
+            val t = line.trim()
+            if t.contains("call i64 @rt_text_eq_any(") and prev.starts_with("%t") and prev.contains("ptrtoint ptr"):
+                loads = loads + 1
+            prev = t
+        expect(loads).to_equal(2)
+
+    it "lowers text != as rt_text_eq_any result == 0 (no xor-then-eq-1)":
+        val neq_src = "fn noise(n: i64) -> i64:\n    n + 1\n\nfn reject(raw: text, k: i64) -> i64:\n    var mode = raw\n    if k > 3:\n        mode = \"cpu\"\n    val z = noise(k)\n    if mode != \"cpu\":\n        return 1\n    0\n"
+        val after = lines_after_eq_calls(ir_of(neq_src))
+        expect(after.len()).to_equal(1)
+        for t in after:
+            expect(t.contains("icmp eq i64") and t.ends_with(", 0")).to_equal(true)

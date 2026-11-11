@@ -10177,3 +10177,51 @@ fn test_freestanding_qualified_to_bare_does_not_alias_weak_undefined() {
     let aliases = NativeProjectBuilder::freestanding_qualified_to_bare_defsyms(&[obj], &[]).unwrap();
     assert_eq!(aliases, Vec::<(String, String)>::new());
 }
+
+/// `use lib.game_api as g` then `g.run(...)`: a whole-module alias must map
+/// `g.run` to the module's owner exactly like `use lib.game_api` maps
+/// `game_api.run`. Before the fix the Aliased arm only resolved `game_api` as
+/// an item, so lowering failed `Unknown variable: g` and the module de-JITed.
+/// doc/08_tracking/bug/jit_lowering_module_alias_and_panic_2026-07-02.md
+#[test]
+fn test_jitalias_module_alias_resolves_qualified_call() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let api_path = lib_root.join("game_api.spl");
+    let other_path = lib_root.join("other_api.spl");
+    let caller_path = lib_root.join("caller.spl");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    std::fs::write(&api_path, "pub fn run(value: i64) -> i64:\n    value + 1\n").unwrap();
+    std::fs::write(&other_path, "pub fn run(value: i64) -> text:\n    \"wrong\"\n").unwrap();
+    std::fs::write(
+        &caller_path,
+        "use lib.game_api as g\n\nfn answer() -> i64:\n    val result = g.run(41)\n    result\n",
+    )
+    .unwrap();
+
+    let paths = [&api_path, &other_path, &caller_path];
+    let file_sources: Vec<_> = paths
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read_to_string(path).unwrap()))
+        .collect();
+    let imports = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&caller_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
+    let selected = use_map.get("g.run").expect("module alias must resolve `g.run`");
+    assert_eq!(
+        imports.fn_return_types.get(selected),
+        Some(&simple_parser::Type::Simple("i64".to_string()))
+    );
+
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_lenient_types(true);
+    lowerer.set_global_fn_return_types(std::sync::Arc::new(imports.fn_return_types.clone()));
+    lowerer.set_qualified_import_functions(std::sync::Arc::new(use_map));
+    let lowered = lowerer.lower_module(&ast).expect("alias call must lower, not fail");
+    let answer = lowered.functions.iter().find(|function| function.name == "answer").unwrap();
+    let result = answer.locals.iter().find(|local| local.name == "result").unwrap();
+    assert_eq!(result.ty, crate::hir::TypeId::I64);
+}

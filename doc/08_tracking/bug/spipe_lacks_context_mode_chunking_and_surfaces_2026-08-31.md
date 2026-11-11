@@ -1,6 +1,33 @@
 # SPipe knowledge provider lacks context-mode's chunking, stemming and exec surfaces (2026-08-31)
 
-Status: OPEN
+Status: OPEN — LIVE 2026-11-11 triage (runner9): needs owner scope decision; do
+not implement from this row.
+
+**Triage addendum 2026-11-11 (runner9, tip `701c757a5658`):** none of the six
+gaps has been absorbed since filing. Verified on current tip: the analyzer
+contract is still `spipe-unicode-lex-v1`
+(`src/lib/common/search/contract_ids.spl:5`), there is no `-v2`; `src/lib/common/search`
+has no chunk/snippet document model, no trigram fallback, no intent-gated output
+search, no `ctx_execute`-class sandboxed execution surface, and no `ctx_stats`
+equivalent ("chunk" occurs only in `roaring.spl`, the unrelated bitmap module).
+
+This row is a six-surface feature-parity program against an external tool, not a
+defect fix, and three of its items carry decisions only the owner can make:
+
+- Gap 2 (Porter stemming) must ship as analyzer `-v2`; the doc forbids editing
+  the frozen `spipe-unicode-lex-v1` identity, so this is a contract-versioned
+  schema change with index-migration implications, not a patch.
+- Gap 5 (sandboxed `ctx_execute`/`ctx_execute_file`/`ctx_batch_execute`
+  surfaces) is called out in the doc itself as "the largest missing piece and
+  the one with real sandbox/security design cost; scope separately from 1-4".
+- Gaps 1/3/4/6 (chunking + `SearchHit` snippet, trigram fuzzy fallback,
+  intent-gated output search, savings accounting) need a funding/scope call on
+  how far SPipe should chase context-mode 1.0.18.
+
+Recommendation recorded for the owner: fund gap 1 (chunking) first — the doc
+marks it highest value and it is the actual token-reduction mechanism; treat
+gap 5 as its own security-reviewed feature; batch gaps 2+3 as the analyzer-v2
+contract release.
 
 ## Evidence
 
