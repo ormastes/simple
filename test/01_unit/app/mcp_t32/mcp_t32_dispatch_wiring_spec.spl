@@ -3,9 +3,12 @@
 
 Executable specification for the T32 MCP tool dispatch wiring: which tool
 names the full and cold frontends recognize, how JSON-RPC methods route in
-each dispatch loop, and which frontend the `bin/t32_mcp_server` wrapper
-selects by default. Maintained for T32 MCP maintainers and reviewers of the
-bug #6 fix that moved the default frontend from `cold` to `full`.
+each dispatch loop, and the admission contract the `bin/t32_mcp_server`
+wrapper enforces. Maintained for T32 MCP maintainers and reviewers of the
+bug #6 fix that moved the default frontend from `cold` to `full` (the
+frontend wiring later gave way to the cached-artifact-only contract: the
+wrapper admits a hash-validated native artifact and refuses otherwise, so
+the full/cold source routing these scenarios once pinned no longer exists).
 
 ## Operator workflow
 
@@ -13,24 +16,26 @@ Run `bin/simple test --no-session-daemon test/01_unit/app/mcp_t32/mcp_t32_dispat
 and read the Results line. Tool-detection scenarios build minimal JSON-RPC
 `tools/call` messages with inlined helpers and run them through the mirrored
 `detect_tool_name` logic; wrapper scenarios read `bin/t32_mcp_server` and pin
-its default-frontend and entry-point wiring lines.
+its native-admission wiring lines.
 
 ## Compatibility and limitations
 
 The tool and method tables below are snapshots derived from the dispatch
 source; adding a tool means updating `full_tools`/`cold_tools` here in the
 same change. The wrapper scenarios pin `bin/t32_mcp_server` text, so
-relocating the wrapper or rewording its assignment lines is a deliberate
-contract change. No imports from t32_mcp.* or t32_lsp_mcp.* — all helpers
-are inlined.
+relocating the wrapper or rewording its admission lines is a deliberate
+contract change; regenerate the wrapper with `sh scripts/setup/setup.shs`
+when it is absent (it is a generated, not tracked, file). No imports from
+t32_mcp.* or t32_lsp_mcp.* — all helpers are inlined.
 
 ## Verification guidance and troubleshooting
 
 If a detection scenario fails, compare the built message against the
 compact vs spaced `"name":"..."` forms the detector mirrors. If a wrapper
-scenario fails, check whether `bin/t32_mcp_server` moved or its
-`T32_MCP_FRONTEND` / `*_ENTRY` assignment lines were reworded, and update
-the pinned anchors only when the routing change is intentional.
+scenario fails, check whether `bin/t32_mcp_server` moved, was regenerated
+with different admission wiring, or lost its `T32_MCP_NATIVE` /
+`native_hash_is_valid` / refuse-with-127 lines, and update the pinned
+anchors only when the contract change is intentional.
 """
 # Lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ;
 # plan doc/03_plan/sspec_modernization_plan.md ;
@@ -567,35 +572,39 @@ describe "T32 MCP dispatch wiring":
             check(escaped.contains("\\" + Q()))
 
     # -----------------------------------------------------------------------
-    context "default frontend changed from cold to full (bug 6 fix)":
+    context "wrapper native-admission contract (supersedes bug-6 frontend wiring)":
     # -----------------------------------------------------------------------
+    # The T32_MCP_FRONTEND full/cold source routing pinned here originally was
+    # replaced by the cached-artifact-only contract: the generated wrapper
+    # admits a sha256-sidecar-validated native artifact (env override or
+    # release-directory scan) and refuses with 127 otherwise — never a raw
+    # .spl launch. These scenarios pin that contract.
 
-        it "default T32_MCP_FRONTEND should be full":
+        it "wrapper admits only a hash-validated native artifact":
             # @req REQ-APP-MCP-T32-DISPATCH-001
-            # @capture(statistics): wrapper default-frontend assignment line
-            step("Read the wrapper and pin its default-frontend assignment")
+            # @capture(statistics): wrapper native admission gate lines
+            step("Read the wrapper and pin the env-override admission gate")
             val wrapper = file_read("bin/t32_mcp_server")
-            val default_line = "T32_MCP_FRONTEND=\"" + "$" + "{T32_MCP_FRONTEND:-full}\""
-            val defaults_to_full = wrapper.contains(default_line)
-            expect(defaults_to_full).to_equal(true)  # oracle: bug #6 fix — an unset T32_MCP_FRONTEND must resolve to full, not cold
+            expect(wrapper.contains("T32_MCP_NATIVE")).to_equal(true)  # oracle: the env override is the only admitted-launch bypass
+            expect(wrapper.contains("native_hash_is_valid")).to_equal(true)  # oracle: every admitted artifact must pass the sha256 sidecar check
+            expect(wrapper.contains("exec \"" + "$" + "{" + "native" + "}" + "\" \"" + "$" + "@")).to_equal(true)  # oracle: admission execs the validated artifact
 
-        it "full mode routes to full entry point":
+        it "wrapper scans the release directory candidates in platform order":
             # @req REQ-APP-MCP-T32-DISPATCH-001
-            # @capture(statistics): wrapper full-mode source artifact wiring lines
-            step("Read the wrapper and pin the full-mode entry routing")
+            # @capture(statistics): wrapper release-candidate scan lines
+            step("Read the wrapper and pin the candidate scan")
             val wrapper = file_read("bin/t32_mcp_server")
-            val routes_full_entry = wrapper.contains("SOURCE_ARTIFACT=\"" + "$" + "FULL_ENTRY\"")
-            expect(routes_full_entry).to_equal(true)  # oracle: full mode must dispatch through the FULL_ENTRY artifact
-            expect(wrapper.contains("FULL_ENTRY=\"")).to_equal(true)  # oracle: FULL_ENTRY is assigned before the routing line consumes it
-            expect(wrapper.contains("/examples/10_tooling/trace32_tools/t32_mcp/main.spl\"")).to_equal(true)  # oracle: the full entry artifact is the examples-tree t32_mcp main
+            expect(wrapper.contains("release/" + "$" + "{" + "platform_dir" + "}" + "/t32_mcp_server" + "$" + "{" + "exe_suffix" + "}")).to_equal(true)  # oracle: the platform triple candidate with its exe suffix is scanned
+            expect(wrapper.contains("release/linux-x86_64/t32_mcp_server")).to_equal(true)  # oracle: the linux fallback candidate remains in the scan list
 
-        it "cold mode routes to cold entry point":
+        it "wrapper refuses without an admitted artifact instead of raw-source fallback":
             # @req REQ-APP-MCP-T32-DISPATCH-001
-            # @capture(statistics): wrapper cold-mode entry wiring lines
-            step("Read the wrapper and pin the cold-mode entry routing")
+            # @capture(statistics): wrapper refusal lines
+            step("Read the wrapper and pin the fail-closed refusal")
             val wrapper = file_read("bin/t32_mcp_server")
-            expect(wrapper.contains("SOURCE_ARTIFACT=\"" + "$" + "COLD_ENTRY\"")).to_equal(true)  # oracle: cold mode is the initial source artifact before frontend selection
-            expect(wrapper.contains("/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl\"")).to_equal(true)  # oracle: the cold entry artifact is the frontend_cold module
+            expect(wrapper.contains("no admitted native t32_mcp_server")).to_equal(true)  # oracle: the refusal names the missing admission
+            expect(wrapper.contains("fall back to a raw-source launch")).to_equal(true)  # oracle: cached-artifact-only contract — no raw .spl launch (pinned across the wrapper's line break)
+            expect(wrapper.contains("exit 127")).to_equal(true)  # oracle: refusal exits 127
 
         it "full dispatch handles all tools cold cannot":
             # The key invariant: every full_only tool must be in full but not cold

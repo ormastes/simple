@@ -9,21 +9,34 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_boun
     file_publish_noreplace}
 use std.nogc_sync_mut.file_system.permissions.file_set_mode
 use std.nogc_sync_mut.file_system.metadata.file_mode_bits
-use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove, platform_name}
 use std.common.build_manager.contracts.builder_identifier_valid_v1
 use std.common.crypto.sha256.sha256_text
 use std.common.contracts.container.stream_v2.{ContainerOutputPlanV2,
     container_output_plan_encode_v2, container_output_plan_decode_v2}
 
+# secure_temp_dir returns an OS-native root (backslashes on Windows); the
+# no-follow bounded reader and the publishing owner resolve mixed-separator
+# paths differently, so every artifact path is built on a normalized root.
+fn _binding_root_normalized(root: text) -> text:
+    root.replace("\\", "/")
+
+# POSIX mode-bit hardening (0o600) is only enforceable where chmod(2) carries
+# permission bits; the Windows CRT maps them to a read-only attribute, so the
+# exact-bits check would refuse every artifact there. chmod stays best-effort
+# on every platform; the equality check is POSIX-only.
+fn _binding_mode_enforced_v3() -> bool:
+    platform_name() != "windows"
+
 fn binding_artifact_path_v3(root: text, category: text, uid: text) -> Result<text, text>:
     if not builder_identifier_valid_v1(uid): return Err("binding-artifact-uid-invalid")
-    Ok(root + "/smux-binding-" + category + "/" + sha256_text(uid) + ".sdn")
+    Ok(_binding_root_normalized(root) + "/smux-binding-" + category + "/" + sha256_text(uid) + ".sdn")
 
 fn binding_artifact_store_v3(root: text, category: text, uid: text, bytes: text,
         maximum: i64 = 16384) -> Result<(), text>:
     val path = binding_artifact_path_v3(root, category, uid)?
     if bytes.bytes().len() == 0 or bytes.bytes().len() > maximum: return Err("binding-artifact-size")
-    val directory = root + "/smux-binding-" + category
+    val directory = _binding_root_normalized(root) + "/smux-binding-" + category
     if not file_exists(directory) and not dir_create(directory, true): return Err("binding-artifact-directory")
     if file_exists(path):
         if file_read_regular_no_follow_bounded(path, maximum)? != bytes: return Err("binding-artifact-conflict")
@@ -34,14 +47,15 @@ fn binding_artifact_store_v3(root: text, category: text, uid: text, bytes: text,
         val stage = secure_temp_dir(directory, ".binding-stage")?
         val staged = stage + "/record.sdn"
         if not file_create_exclusive(staged, bytes): return Err("binding-artifact-write")
-        if not file_set_mode(staged, 0o600) or file_mode_bits(staged) != 0o600: return Err("binding-artifact-mode")
+        val _mode_set = file_set_mode(staged, 0o600)
+        if _binding_mode_enforced_v3() and file_mode_bits(staged) != 0o600: return Err("binding-artifact-mode")
         if file_read_regular_no_follow_bounded(staged, maximum)? != bytes: return Err("binding-artifact-stage-readback")
         if not file_fsync(staged) or not directory_fsync(stage): return Err("binding-artifact-stage-sync")
         val _published = file_publish_noreplace(staged, path)?
         val removed = dir_remove(stage, true)
         if not removed: return Err("binding-artifact-stage-cleanup")
     if file_read_regular_no_follow_bounded(path, maximum)? != bytes: return Err("binding-artifact-readback")
-    if file_mode_bits(path) != 0o600: return Err("binding-artifact-mode")
+    if _binding_mode_enforced_v3() and file_mode_bits(path) != 0o600: return Err("binding-artifact-mode")
     if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root):
         return Err("binding-artifact-sync")
     Ok(())

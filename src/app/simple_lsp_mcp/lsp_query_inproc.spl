@@ -45,6 +45,33 @@ fn lsp_query_inproc_supported_v1(subcmd: text) -> bool:
         subcmd == "completions" or subcmd == "type-at" or subcmd == "signature-help" or
         subcmd == "incoming-calls" or subcmd == "outgoing-calls"
 
+# True when the position sits on a dotted member access (`recv.member`,
+# `self.field`, chained hops). The engine cores below take only a bare symbol
+# name — receiver resolution lives in the one-shot child's resolver, so a
+# member access must decline to the bounded child route instead of degrading
+# into a repo-wide "not found".
+fn lsp_query_inproc_is_member_access_v1(file: text, line_num: i64, col: i64) -> bool:
+    val content = file_read_text(file) ?? ""
+    val lines = content.split("\n")
+    if line_num < 1 or line_num > lines.len():
+        return false
+    val line = lines[line_num - 1]
+    # Walk left from the cursor over identifier bytes, then check the
+    # separator. Identifier chars and '.' are ASCII, so a byte walk cannot
+    # split a multi-byte character.
+    var i = col - 2
+    while i > 0:
+        val b = line.byte_at(i)
+        val is_ident = (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or
+            (b >= 48 and b <= 57) or b == 95
+        if is_ident:
+            i = i - 1
+            continue
+        return b == 46
+    false
+
+export lsp_query_inproc_is_member_access_v1
+
 fn lsp_query_inproc_readable_v1(file: text) -> bool:
     if file == "":
         return false
@@ -69,6 +96,8 @@ fn lsp_query_inproc_dispatch_v1(
     val clean_sym = sanitize_symbol(symbol)
     if clean_sym == "":
         return _declined("symbol_rejected")
+    if lsp_query_inproc_is_member_access_v1(safe_file, line_num, col):
+        return _declined("member_access_deferred_to_child")
 
     if subcmd == "definition":
         val (lines, code) = engine_find_definition_lines(safe_file, clean_sym)

@@ -70,12 +70,20 @@ pub fn sdn_decode_quoted_scalar_v1(source: text) -> Result<text, text>:
         return Err("invalid quoted scalar")
     var cursor = 1
     while cursor < source.byte_len():
+        # 1-unit slices keep cursor in the engine's slice index space (chars
+        # under the interpreter, bytes under compiled code); the loop bound is
+        # bytes in every engine, so the empty slice — not the bound — is the
+        # authoritative EOF. A multi-byte char (e.g. café) otherwise makes the
+        # char cursor and the byte bound disagree and the closing quote is
+        # misread as "trailing content".
         val ch = source.substring(cursor, cursor + 1)
+        if ch == "":
+            break
         if ch == "\\":
             cursor = cursor + 2
         else:
             if ch == "\"":
-                if cursor != source.byte_len() - 1:
+                if source.substring(cursor + 1, cursor + 2) != "":
                     return Err("trailing content after quoted scalar")
                 return Ok(sdn_unescape_scalar_v1(source.slice(1, cursor)))
             cursor = cursor + 1
