@@ -373,3 +373,30 @@ a non-Windows host (known native-build hang on the success path); the verbatim
 grant command boot14 recorded above stands. Header flipped to LIVE, owner
 Rust lane (`TransientHeapScope.objects` data structure) with stage-chain
 confirmation.
+
+## Addendum 2026-11-11 (lane boot23) — LIVE re-confirmed; header disposition stands
+
+Concurrence with boot14/int10/int11, re-verified FRESH at this lane's base
+(`41935a5f61860`), source checks only (boot14 ran the 4/4 regression spec on
+this lane's exact tracked seed `bin/simple.exe` build `46fe8f6b6def` today;
+re-running would re-print a green check):
+
+- The Rust root cause is still present:
+  `src/compiler_rust/runtime/src/value/collections.rs:3431` still performs the
+  per-call `scope.objects.retain(|object| !promoted.contains(&object.0))` —
+  the O(N) `Vec::retain` over `TransientHeapScope.objects` per
+  `rt_transient_heap_promote` call.
+- The pure-Simple call-count batching mitigation is still present in-tree:
+  `src/compiler/20.hir/hir_lowering/module_surface_registry.spl` collects
+  roots into one `fields`/`names` array and promotes once per surface
+  (the `fields.push(ModuleSurfaceRoot.Texts(...))` shape, ~line 566-590).
+
+Disposition unchanged: **LIVE** — underlying Rust-runtime data-structure
+defect remains open (owner: Rust/seed-fix lane, `TransientHeapScope.objects`
+removable structure). Mitigation landed; real-scale Stage-2 -> Stage-3
+confirmation still pending on a non-Windows host. boot14's verbatim grant
+command stands:
+
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --output=build/bootstrap
+```

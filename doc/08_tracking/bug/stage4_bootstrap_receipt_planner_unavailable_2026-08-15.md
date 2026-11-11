@@ -4,8 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open preflight defect; bootstrap transaction not started by the
-planner failures. **Observed:** 2026-08-15.
+**Status:** BLOCKED (kept OPEN), re-confirmed 2026-11-11 (lane boot23); grant verbatim below. **Observed:** 2026-08-15.
 
 The frozen Stage-4 worktree passed the required
 `.stage4-frozen-inputs.sha256` hash and all 27,066 listed-file checks, but the
@@ -59,3 +58,26 @@ then `bootstrap/stage3/x86_64-unknown-linux-gnu/simple build bootstrap --bootstr
 to obtain the failing System/Integration case at the runtime/dispatcher owner, exactly
 as this record's follow-up sentences require. The owner-constructed receipt exception
 for this frozen recovery remains as recorded above.
+
+## Addendum 2026-11-11 (lane boot23) — BLOCKED re-confirmed; boot15 disposition stands
+
+Re-verification at this lane's base (`41935a5f61860`), one source check:
+the current Stage-4 frontier this record's follow-up owner must read first,
+`stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`,
+still carries `Status: **OPEN**` at this tip — the full-CLI target still
+cannot link, so this record's planner SIGSEGV (exit 139) remains behind that
+wall and unreachable from this Windows lane host.
+
+Disposition unchanged: **BLOCKED** (kept OPEN). boot15's guard-side spot-check
+artifact (fresh-worktree LFS preflight exit 70 before the receipt guard runs)
+also stands — re-run the guard on an LFS-smudged host.
+
+Verbatim grant (non-Windows host, x86_64-unknown-linux-gnu, LFS-smudged
+worktree):
+first `sh scripts/check/check-bootstrap-reason-receipt-guard.shs` (must PASS —
+it is the guard's exact regression), then reproduce the planner crash:
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap` through Stage 3,
+then `bootstrap/stage3/x86_64-unknown-linux-gnu/simple build bootstrap --bootstrap-reason=self-host-convergence-check --bootstrap-receipt=<owner-constructed-receipt>`
+to obtain the failing System/Integration case at the runtime/dispatcher owner,
+exactly as this record's follow-up sentences require. The owner-constructed
+receipt exception for this frozen recovery remains as recorded above.

@@ -1,6 +1,6 @@
 # Cross-module public symbol collisions (bootstrap warnings, wrong-dispatch risk)
 
-Status: OPEN (P3)
+Status: LIVE (triaged 2026-11-11, lane boot23; residual rename/unify rows confirmed at tip)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 Date: 2026-08-16. Source: bootstrap log `compiler_cross_module_private_symbol_collision` warnings.
@@ -211,3 +211,29 @@ SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe $PWD/bin/simple.exe test \
 
 Status: OPEN (P3) — still real, minor; rename/unify of the ~24 residual rows
 remains. Lane evidence: `build/review/intne1-collision-probe.log`.
+
+## 2026-11-11 addendum (lane boot23) — LIVE re-confirmed; header flip OPEN -> LIVE
+
+intne1's same-day executed probe (batch p3-intne1-20261111, HEAD
+`79d5af6723f6`) is the freshest evidence; boot23 re-verified FRESH by source
+spot-check at this lane's base (`41935a5f61860`):
+
+- The `shell` collision pair survives: `pub fn shell(command: text) ->
+  ProcessResult` at `src/lib/nogc_sync_mut/io/process_ops.spl:2913` and the
+  app tuple mirror `fn shell(command: text) -> (text, text, i64)` at
+  `src/app/io/file_shell.spl:10` — matching intne1's "3 defs / 2 differing
+  signatures" residual.
+- The silent wrong-dispatch hazard this record's header warned about (JIT
+  last-definition fallback; interpreter class members by NAME across modules)
+  is retired by owner decision 2026-11-09 (no last-definition fallback;
+  unselected calls are compile errors), per intne1's addendum.
+
+Disposition: **LIVE**, still real, minor — the residual rename/unify program
+(~24 rows per intne1's executed probe: `shell`, `env_get`, `dir_list`,
+`join_path`, `detect_arch`, `atomic_bool_new`, `format_hex`, `crc32_*`,
+`bytes_to_*`, `hir_owned_artifact_*`, ...) remains. The vehicle spec's
+`3 total, 0 passed, 3 failed` is the separate `_has` defect
+(`private_helper_name_collision_across_modules_has_2026-08-17.md`), quoted
+only as the warning emitter. No in-lane rename attempted: exported-API renames
+need coordinated caller migration across `src/lib`/`src/app` tiers, beyond a
+P3 lane's blast radius. Owner: compiler-lib symbol-hygiene program.

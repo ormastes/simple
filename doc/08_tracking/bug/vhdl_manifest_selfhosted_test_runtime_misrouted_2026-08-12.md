@@ -1,6 +1,6 @@
 # VHDL manifest verification is blocked by a bootstrap-seed runtime
 
-- **Status:** OPEN
+- **Status:** BLOCKED (kept OPEN), re-confirmed 2026-11-11 (lane boot23); grant verbatim below
 - **Severity:** high — compiler backend provenance changes cannot obtain
   self-hosted test evidence from the repository runtime.
 - **Component:** `bin/simple`, release-runtime deployment/provenance
@@ -72,3 +72,30 @@ If the 6 Gen2 provenance failures persist under the pure-Simple runtime, fix the
 the "Required correction" section (`src/compiler/80.driver/driver_vhdl_artifacts.spl`,
 plus `driver_riscv_gen2_product.spl` for write-boundary failures) and record concrete
 expected/actual per assertion.
+
+## Addendum 2026-11-11 (lane boot23) — BLOCKED re-confirmed; boot15 disposition stands
+
+Re-verification at this lane's base (`41935a5f61860`), one source check: this
+worktree's `bin/simple.exe` is still a TRACKED in-worktree regular file
+(`git ls-files --error-unmatch bin/simple.exe` passes; 37,584,384 B regular
+file, not a symlink) — the misrouting configuration (seed resolving sources
+below an outside worktree) is still absent at this tip, so the record's
+unblock condition remains the deployment action: a verified pure-Simple
+runtime for the checkout, which is Stage 3/4 admission work (blocked by the
+OPEN `stage3_*` / `stage4_full_cli_unlinkable_579_*` records) and cannot be
+produced on the Windows lane host.
+
+Disposition unchanged: **BLOCKED** (kept OPEN). boot15's seed-smoke evidence
+(full log at `build/review/p3fix-boot15-vhdl-seed-smoke.log`) stands; no
+fresh seed run this lane — an untrusted-runner result classifies nothing, per
+this record's own provenance rule.
+
+Verbatim grant (non-Windows host with an admitted self-hosted Stage 3/4
+binary): deploy the pure-Simple executable as `bin/simple` for the checkout,
+then run the exact command
+`bin/simple test test/01_unit/compiler/backend/vhdl_artifact_manifest_spec.spl` once.
+If the 6 Gen2 provenance failures persist under the pure-Simple runtime, fix
+them per the "Required correction" section
+(`src/compiler/80.driver/driver_vhdl_artifacts.spl`, plus
+`driver_riscv_gen2_product.spl` for write-boundary failures) and record
+concrete expected/actual per assertion.
