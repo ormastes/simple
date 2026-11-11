@@ -867,6 +867,15 @@ fn _agent_result_json(result: AgentResult, session_id: text) -> text:
         jp("session_id", js(session_id))
     )
 
+# Agent-endpoint status mapping (pure, unit-testable). The agent loop surfaces
+# backend failures as a final_text "ERROR: ..." text turn (build_model_response
+# maps provider errors to text with no separate flag), so returning HTTP 200
+# with ok:true would mislead callers; a backend failure maps to 502 instead.
+pub fn agent_run_status(final_text: text) -> i64:
+    if final_text.starts_with("ERROR: "):
+        return 502
+    200
+
 fn _agent_run_handle(body: text) -> (i64, text):
     val input = extract_json_string(body, "input")
     if input == "":
@@ -881,7 +890,7 @@ fn _agent_run_handle(body: text) -> (i64, text):
         main_responder, max_iters)
     val hooks = _build_session_hooks(session_id)
     hooks.on_persist(session_id, result.final_transcript)
-    (200, _agent_result_json(result, session_id))
+    (agent_run_status(result.final_text), _agent_result_json(result, session_id))
 
 fn run_server(port: i64) -> Result<(), text>:
     var router = Router.new()
