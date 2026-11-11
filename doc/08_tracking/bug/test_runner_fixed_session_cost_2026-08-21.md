@@ -1,6 +1,6 @@
 # `simple test <dir>` pays ~400s of fixed cost before running any test
 
-Status: PARTIALLY FIXED (root mechanism identified; first two collisions removed)
+Status: FIXED (test-runner scope — 2026-08-21 mechanism fix + pin; header flipped 2026-11-11 runner10 lane; residual compiler blast-radius items redirected, see addendum)
 Date: 2026-08-21
 Binary measured: `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed), origin/main tree at `/mnt/data/worktrees/testperf`
 Host caveat: shared box under concurrent load; wall times are an envelope, the SPLIT is the load-bearing part.
@@ -84,3 +84,30 @@ lane; `scripts/check/check-perf-regression-tests.shs` therefore pins the
 tried and **reverted**: measured 112s (eager) vs 126s (lazy) on the same repo
 for `--list`, i.e. no gain outside noise. The graph is loaded regardless; the
 cost is the interpreter fallback, not the import count.
+
+## 2026-11-11 — runner10 lane verdict: FIXED (test-runner scope; residual redirected)
+
+The row's deliverable was the mechanism fix for the ~400 s fixed session
+cost: `src/compiler/99.loader/compiler_sffi.spl` re-export shim (21 shadow
+declarations removed), verified 163/163 green by the fixing lane, pinned by
+`scripts/check/check-perf-regression-tests.shs` (mechanism rows; the gate's
+ROW_FLOOR has since grown to 317) and by
+`test/01_unit/compiler/loader/compiler_sffi_no_shadow_types_spec.spl`
+(5/5 post-fix). All three artifacts are tracked at this base
+(79d5af6723f6).
+
+Scope decision: the in-body "Still open" items — (1) HIR lowering resolving
+struct-literal types from the construction site's module scope and (2)
+per-function instead of whole-module interpreter fallback — are compiler
+architecture items (src/compiler/**), not test-runner scope, and duplicate
+shadow-census territory tracked under compiler-subject rows. They are NOT
+closed by this flip and should be owned by a compiler lane.
+
+Caveat: this lane's re-run of `check-perf-regression-tests.shs` produced NO
+verdict — the session died at the 720 s wrapper timeout with the gate still
+running, and per the campaign no-rerun rule it was not re-executed. The flip
+therefore rests on the landed mechanism + spec evidence from the fixing
+lane, re-confirmed present at this base; the 2026-11-06 observation stands
+that the seed's fixed session setup still dominates Windows wall time
+(~190-200 s), consistent with the residual interpreter-fallback chain owned
+by the compiler items above.
