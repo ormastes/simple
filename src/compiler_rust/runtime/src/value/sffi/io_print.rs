@@ -507,17 +507,33 @@ pub extern "C" fn rt_raw_i64_to_string(raw: i64) -> RuntimeValue {
 /// tag bits (payload 1 prints as "nil", 2 as "0.0", 4 as "<value:0x4>", ...).
 /// This helper special-cases the flat-optional print path the same way
 /// `rt_raw_i64_to_string` already special-cases raw (non-optional) i64/u64
-/// scalars. NOTE: a genuine payload equal to the nil sentinel (3) is
+/// scalars. Present renders as `Option::Some(v)`, nil as `Option::None`
+/// (seed optional semantics = pure Simple; bug
+/// parse_family_strips_option_jit_native_2026-08-02). NOTE: a genuine payload equal to the nil sentinel (3) is
 /// indistinguishable from real nil at this representation -- documented
 /// limitation, not fixed here; see
 /// doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md.
 #[no_mangle]
+/// Render a TAGGED flat-optional RuntimeValue (`i64?`/`f64?`/`bool?` reaching
+/// string interpolation) as `Option::None` / `Option::Some(v)`, matching the
+/// interpreter (seed optional semantics = pure Simple). Bug:
+/// doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+#[no_mangle]
+pub extern "C" fn rt_opt_value_to_string(v: RuntimeValue) -> RuntimeValue {
+    let s = if v.is_nil() {
+        "Option::None".to_string()
+    } else {
+        format!("Option::Some({})", value_to_display_string(v))
+    };
+    unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
+}
+
 pub extern "C" fn rt_opt_i64_to_string(raw: i64) -> RuntimeValue {
     if raw == RuntimeValue::NIL.0 as i64 {
-        let s = "nil";
+        let s = "Option::None";
         return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
     }
-    let s = raw.to_string();
+    let s = format!("Option::Some({raw})");
     unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
@@ -528,11 +544,11 @@ pub extern "C" fn rt_opt_i64_to_string(raw: i64) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_opt_bool_to_string(raw: i64) -> RuntimeValue {
     let s = if raw == RuntimeValue::NIL.0 as i64 {
-        "nil"
+        "Option::None"
     } else if raw != 0 {
-        "true"
+        "Option::Some(true)"
     } else {
-        "false"
+        "Option::Some(false)"
     };
     unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
 }
@@ -546,11 +562,11 @@ pub extern "C" fn rt_opt_bool_to_string(raw: i64) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_opt_f64_to_string(raw: i64) -> RuntimeValue {
     if raw == RuntimeValue::NIL.0 as i64 {
-        let s = "nil";
+        let s = "Option::None";
         return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
     }
     let f = f64::from_bits(raw as u64);
-    let s = format_float_display(f);
+    let s = format!("Option::Some({})", format_float_display(f));
     unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
