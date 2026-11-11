@@ -1,0 +1,114 @@
+# DevHub secured-DB row-cell decode regression.
+#
+# Pins the exact read boundary that failed in
+# doc/08_tracking/bug/devhub_secured_db_key_session_open_failure_2026_10_27.md
+# ("storage first row value": rows[0].values[0].to_text() != "11"): a
+# messages row whose INTEGER PRIMARY KEY column must decode as the b-tree
+# rowid text, with the record's NULL IPK placeholder replaced by the reader,
+# across a multi-page b-tree with an overflow body. The secured fixture
+# exercises this same reader path over its decrypted snapshot image; this
+# spec exercises it directly on an in-spec image so any engine (interpreter
+# now, native producers later) has an executable oracle for the defect.
+
+use std.spec
+use std.nogc_sync_mut.database.sqlite_format.wimage.{sqlite_format_create_image, SqliteTableData}
+use std.nogc_sync_mut.database.sqlite_format.{sqlite_format_read_table_bytes}
+use std.nogc_sync_mut.database.sql.types.{DbValue, DbRow}
+
+fn messages_schema() -> text:
+    "CREATE TABLE messages (id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL, " +
+    "sender_id INTEGER NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT " +
+    "NULL, seq INTEGER NOT NULL, reply_to_id INTEGER);"
+
+fn unicode_body() -> text:
+    "unicode: 한글 héllo ✓ \"quoted\"\\path\nnext"
+
+fn overflow_body() -> text:
+    var body = "overflow: 한글 ✓ "
+    var i: i64 = 0
+    while i < 700:
+        body = body + "0123456789abcdef"
+        i = i + 1
+    body
+
+fn message_row(id: i64, room_id: i64, sender_id: i64, body: text,
+        created_at: i64, seq: i64, reply_to_id: DbValue) -> DbRow:
+    DbRow(columns: ["id", "room_id", "sender_id", "body", "created_at",
+        "seq", "reply_to_id"], values: [DbValue.Integer(value: id),
+        DbValue.Integer(value: room_id), DbValue.Integer(value: sender_id),
+        DbValue.Text(value: body), DbValue.Integer(value: created_at),
+        DbValue.Integer(value: seq), reply_to_id])
+
+fn fixture_rows() -> [DbRow]:
+    var rows: [DbRow] = []
+    # Same rowids/bodies as test/fixtures/devhub/fresh_secured_db/provision.py
+    rows.push(message_row(11, 1, 101, "late-source-first", 1700000011, 30,
+        DbValue.Null))
+    rows.push(message_row(12, 1, 101, "tie-first", 1700000012, 10,
+        DbValue.Null))
+    rows.push(message_row(13, 1, 102, "tie-second", 1700000013, 10,
+        DbValue.Null))
+    rows.push(message_row(14, 1, 101, unicode_body(), 1700000014, 20,
+        DbValue.Null))
+    rows.push(message_row(15, 1, 102, overflow_body(), 1700000015, 50,
+        DbValue.Null))
+    rows.push(message_row(16, 2, 103, "other-room-only", 1700000016, 1,
+        DbValue.Null))
+    var id: i64 = 17
+    while id <= 56:
+        var body = "filler-" + id.to_text()
+        var pad: i64 = 0
+        while pad < 140:
+            body = body + "x"
+            pad = pad + 1
+        rows.push(message_row(id, 2, 103, body, 1700000000 + id, id,
+            DbValue.Null))
+        id = id + 1
+    rows
+
+fn build_image() -> [u8]:
+    var tables: [SqliteTableData] = []
+    tables.push(SqliteTableData(name: "messages",
+        columns: ["id", "room_id", "sender_id", "body", "created_at", "seq",
+            "reply_to_id"], rows: fixture_rows()))
+    match sqlite_format_create_image(messages_schema(), tables):
+        case Ok(image): image
+        case Err(_): []
+
+describe "devhub messages row-cell decode (secured DB regression)":
+    it "decodes 46 rows and the first row value reads as its rowid text":
+        val image = build_image()
+        expect(image.len() > 4096 * 5).to_equal(true)
+        expect(image.len() % 4096).to_equal(0)
+        match sqlite_format_read_table_bytes(image, "messages"):
+            case Ok(rows):
+                expect(rows.len()).to_equal(46)
+                expect(rows[0].values.len()).to_equal(7)
+                # The exact boundary that failed on the native build:
+                # INTEGER PRIMARY KEY decodes as the b-tree rowid text.
+                expect(rows[0].values[0].to_text()).to_equal("11")
+                expect(rows[0].values[1].to_text()).to_equal("1")
+                expect(rows[0].values[2].to_text()).to_equal("101")
+                expect(rows[0].values[3].to_text()).to_equal(
+                    "late-source-first")
+                expect(rows[0].values[4].to_text()).to_equal("1700000011")
+                expect(rows[0].values[5].to_text()).to_equal("30")
+                expect(rows[0].values[6]).to_equal(DbValue.Null)
+            case Err(e):
+                expect(e.message()).to_equal("")
+
+    it "reads rowid order, unicode bodies and the overflow cell exactly":
+        val image = build_image()
+        match sqlite_format_read_table_bytes(image, "messages"):
+            case Ok(rows):
+                expect(rows[1].values[0].to_text()).to_equal("12")
+                expect(rows[2].values[0].to_text()).to_equal("13")
+                expect(rows[3].values[3].to_text()).to_equal(unicode_body())
+                expect(rows[4].values[0].to_text()).to_equal("15")
+                expect(rows[4].values[3].to_text().len()).to_equal(
+                    overflow_body().len())
+                expect(rows[4].values[3].to_text().len()).to_be_greater_than(
+                    11000)
+                expect(rows[45].values[0].to_text()).to_equal("56")
+            case Err(e):
+                expect(e.message()).to_equal("")

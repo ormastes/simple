@@ -107,3 +107,56 @@ Traversed on work/p3-caret1-20261111 (origin/release/1.0.0 tip 79d5af6723f6).
 
 Status: OPEN (restored) — original key-session failure fixed and evidenced;
 remaining blocker is the downstream first-row cell value boundary above.
+
+## Addendum 2026-11-11 — lane p3-caret2: key-session + full fixture PASS on the
+## interpreter at tip; native-only row-cell failure unreproducible in this lane
+## (native build blocked by known P1). Status: OPEN.
+
+Traversed on work/p3-caret2-20261111 (origin/release/1.0.0 tip
+66506fda143ca).
+
+- The full fixture was executed here, not re-read: provision.py's canonical
+  flow (fresh CSPRNG secret, fresh encrypted inputs, all variants) driving
+  `bin/simple.exe test/fixtures/devhub/fresh_secured_db/main.spl
+  --mode=interpreter`. Result: exit 0 — direct key session opens, both sample
+  pages authenticate and decode, storage opens and reads 46 rows,
+  `rows[0].values[0].to_text() == "11"` HOLDS, the overflow cell (>11000
+  chars) reads, and every downstream stage passes: direct+registered storage,
+  rooms/members/history/fetch/policy, wrong-secret/missing-secret/tamper
+  negatives, recovery, read-only source hash (log:
+  build/review/p3fix-caret2-20261111-logs/t3_fixture_run1.log). The in-tree
+  row-cell decode is therefore correct; caret1's `storage first row value`
+  failure is native-codegen-only.
+- Native reproduction in this lane is blocked: fresh cold-cache native-build
+  hangs on this host — reproduced on BOTH the full fixture closure and a
+  3-import minimal repro (build logs freeze at the identical
+  9919-line/925656-byte preamble with zero cache objects). This is the known
+  P1 `seed_native_build_interpreted_startup_spin_2026-11-09` (BLOCKED,
+  persists at HEAD, root cause in the seed-interpreted pure-Simple driver;
+  needs an aarch64 cold-cache repro lane). No admitted native producer and no
+  bin/release self-hosted binary exist in this environment, and a minimal
+  `--source` root does not dodge the driver-startup inventory walk.
+- Regression spec landed:
+  `test/01_unit/lib/database/sqlite_format/devhub_rowcell_value_spec.spl` —
+  2/2 PASS (interpreter). It builds the exact devhub messages shape (rowids
+  11..56, unicode body, >11000-char overflow body) through
+  `sqlite_format_create_image` and asserts the failing boundary and its
+  neighbors through the same reader path the secured fixture exercises:
+  46 rows, `rows[0].values[0].to_text() == "11"` (INTEGER PRIMARY KEY read
+  as the b-tree rowid text), rowid ordering, unicode and overflow bodies.
+  Sibling specs stay green (record 11/11, read_table 5/5, varint 7/7).
+  Any lane with an admitted native producer can run this spec as the oracle
+  for the native defect.
+- Suspected native loci for the producer lane, in check order: (1) the IPK
+  alias step in `sqlite_format_read_table_bytes`
+  (`values[def.ipk] = DbValue.Integer(value: raw.rowid)` — `def.ipk` from the
+  CREATE TABLE parse, `raw.rowid` from the leaf-cell varint); (2) the
+  `DbValue.Integer` i64 match-payload interpolation in
+  `src/lib/nogc_sync_mut/database/sql/types.spl` `to_text()`. A ready
+  3-stage bisect repro (exact 32-byte first-row record payload + to_text
+  assertions) is at
+  build/review/p3fix-caret2-20261111-logs/rowcell_repro.spl with its
+  interpreter oracle output in the same directory.
+
+Status stays OPEN: the P1's native acceptance cannot be re-run to a final
+verdict in this lane.
