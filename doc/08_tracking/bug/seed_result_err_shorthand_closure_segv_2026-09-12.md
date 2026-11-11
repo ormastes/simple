@@ -4,9 +4,11 @@
 - **Component:** Rust seed (`bin/simple.exe`, 2026-09-02 build), `run` path
 - **Severity:** high — crashed 8 of 19 Simple MCP tools; client sees the stdio
   pipe close (`CONNECTION_CLOSED`), not an error response.
-- **Status:** open. Worked around in
-  `src/lib/nogc_sync_mut/storage_roots/environment_owner.spl`; the workaround
-  must be reverted to the compact form once this is fixed.
+- **Status:** FIXED 2026-11-11 (lane p3-comp11) — root-cause fix
+  `eda88bc75f87e` (2026-11-05, "fix(runtime): preserve Result Err through
+  shorthand map") is an ancestor of the tracked seed build `46fe8f6b6def`; the
+  doc's fixture passes on it and the in-tree workaround has been reverted to
+  the compact form. See the dated addendum at the end of this record.
 
 ## Symptom
 
@@ -127,3 +129,37 @@ per CLAUDE.md the workaround is recorded here rather than silently normalized.
    such a path is mixing a `\\?\` prefix with forward slashes, and `\\?\` paths
    are passed to the OS without normalization. Whether any `inspect_storage_roots`
    path depends on that has not been checked.
+
+## Addendum 2026-11-11 (lane p3-comp11, worktree simple-p3-comp11-20261111, base 41935a5f61860)
+
+Verdict: FIXED (fix predates this lane; this lane re-verified fresh and flipped
+the record).
+
+Root cause / fix: commit `eda88bc75f87e` (2026-11-05, "fix(runtime): preserve
+Result Err through shorthand map") repairs Err preservation through the
+shorthand-closure `.map(_.field)` projection in
+`src/compiler_rust/runtime/src/value/objects.rs` (with the parallel
+`src/runtime/runtime_native.c` twin), adds Rust regression coverage in
+`src/compiler_rust/runtime/src/value/object_tests.rs`, lands the doc-shaped
+fixture `test/fixtures/compiler/result_err_shorthand_map.spl`, and reverts the
+`resolve_ambient_storage_roots` workaround in
+`src/lib/nogc_sync_mut/storage_roots/environment_owner.spl` back to the
+compact `.map(_.roots)` form. `git merge-base --is-ancestor eda88bc75f87e
+46fe8f6b6def` (tracked seed build) = true, so the deployed seed carries the
+fix; the earlier `b580ba84dbb5a` (2026-09-12, "fix(mcp): stop 8 of 19 tools
+segfaulting mid-request") was the interim absorber.
+
+Fresh behavioral verification on the tracked seed (seed-smoke:
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe run
+test/fixtures/compiler/result_err_shorthand_map.spl --mode=interpreter
+--no-cache`): rc=0, prints `E1 base.is_err=true`, `E2 mapped.is_err=true`,
+`Result Err shorthand map: PASS` — the Err variant survives `.map(_.roots)`,
+`unwrap_err() == 42` on both the base and mapped values, and the Ok path maps
+correctly. No rc=139; the doc's acceptance shape holds.
+
+Residuals (explicitly not this row, per the doc's own "Related" section):
+(1) `process_run("sh", ...)` exit-code 56 vs 7 observation; (2)
+`_mcp_read_message()` declared `(text, bool)` returning text; (3) storage-root
+resolution still returning Err on Windows so the 8 passthrough MCP tools
+answer "centralized child storage environment is unavailable" — tracked
+separately.
