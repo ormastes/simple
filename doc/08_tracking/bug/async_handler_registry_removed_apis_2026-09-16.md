@@ -1,7 +1,7 @@
 # Async-handler registry APIs removed; contract specs still pin them
 
 Date: 2026-09-16
-Status: OPEN
+Status: SUPERSEDED 2026-11-11 (lane p3-ne20) — fixed 2026-11-05 (work/libbug-async-registry-20261105), verified green by lane p3-subj7 2026-11-09; this header flip only
 
 ## Observed
 
@@ -82,3 +82,21 @@ Neighbours green: worker_async_fd_registry 1/1, async_dynamic_dispatch 6/6.
 Follow-up rows tracked separately (worker_spl_facade_split,
 async_handler_lifecycle) remain open and were not touched. No source change
 in this closure.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: SUPERSEDED (absorber named)
+
+The 2026-11-09 p3-subj7 closure below left this header at `Status: OPEN`;
+this lane flips it. Fresh source re-verification on origin/release/1.0.0
+(worktree @9202f187777), not resting on the prior addendum alone:
+`src/lib/nogc_async_mut/http_server/worker.spl:17` defines
+`submit_async_handler(fd, job_id, ...)` and :28 carries the exact pinned
+source marker `self.async_job_by_fd[fd] = job_id`; the per-fd registry
+extension the two specs pin is present in-tree. The 2026-11-09 verification
+(`async_handler_registry_spec.spl` 2/2, `async_ssr_disconnect_safety_contract_spec.spl`
+3/3 on the seed interpreter) is 2 days old and same-branch; per the no-rerun
+rule it is not re-executed.
+
+Absorbers: implementation `work/libbug-async-registry-20261105` (resolution
+section above) + verification lane p3-subj7 (2026-11-09). Follow-up rows
+(worker_spl_facade_split, async_handler_lifecycle) are tracked separately and
+untouched. Lane evidence: `build/review/p3fix-ne20-20261111.sdn`.
