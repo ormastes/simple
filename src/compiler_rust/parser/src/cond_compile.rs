@@ -803,4 +803,16 @@ mod tests {
         assert_eq!(sel.source, "fn main():\n    pass\n");
         assert!(sel.balanced && sel.diagnostics.is_empty());
     }
+
+    /// Seed parity pin: block-form `@when(...):` / `@else:` / `@end` around
+    /// top-level items must PARSE end to end. A stale deployed seed rejected
+    /// the MCP import chain at `windows_redirected_process.spl` with
+    /// "expected Fn, found Colon".
+    #[test]
+    fn block_when_chain_parses_end_to_end() {
+        let src = "@when(os=\"windows\"):\nfn f() -> i64: 1\n@else:\nfn f() -> i64: 2\n@end\nfn main():\n    print f()\n";
+        crate::Parser::new(src).parse().expect("block @when chain parses");
+        let real = include_str!("../../../lib/nogc_sync_mut/io/windows_redirected_process.spl");
+        crate::Parser::new(real).parse().expect("windows_redirected_process.spl parses");
+    }
 }
