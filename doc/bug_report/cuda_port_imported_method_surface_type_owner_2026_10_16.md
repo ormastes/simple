@@ -42,3 +42,32 @@ selectors and `native-build --entry src/plugins/backend_cuda/cuda_backend_port.s
 --emit-object`, with isolated SCV/cache ownership, immutable producer/source
 pins and retained nonzero failures. The public command traverses dependencies;
 it is not a private HIR queue replay or exact single-object publication bypass.
+
+## 2026-11-11 triage (lane p3fix-p2a-20261111) — LIVE; workaround landed and pinned, verification still grant-blocked
+
+Re-verified at release/1.0.0 tip (worktree @ 79d5af6723f6):
+
+- **The workaround commit has landed and is pinned**: `b114fbe355e` is an
+  ancestor of HEAD; `src/plugins/backend_cuda/cuda_backend_port.spl:10-11`
+  carries the `@workaround bug=cuda_port_imported_method_surface_type_owner_2026_10_16`
+  tag and `use compiler.mir.mir_types.{MirType, MirSignature}`. The doc's
+  "not yet landed" state is stale.
+- **No owner-projection fix commit found** (`git log --all --grep` over the
+  bug id / "owner projection" / "imported surface"): the explicit import is
+  still required; the 2026-11-07 hir-nominal-generic-owner merge did not
+  retire it.
+- **Fresh spec evidence** (deployed seed bin/simple.exe @ 46fe8f6b6def,
+  interpreter, --no-cache): `test/01_unit/compiler/backend/cuda_backend_port_spec.spl`
+  3/3 PASS (real PTX output, capabilities, wrong-target rejection).
+- **Verdict: LIVE**, same gate as cuda_optimizer_surface_owner_2026_10_10:
+  recovery requires fixing + qualifying imported method/field owner
+  projection and rerunning the CUDA port HIR/native closure
+  (`native-build --entry src/plugins/backend_cuda/cuda_backend_port.spl
+  --emit-object`) under a stage3-admitted producer. That build class is not
+  sanctioned for this bug lane (no stage3 producer / self-hosted check
+  worker on this host); the exact grant command is recorded in
+  build/review/p2fix-compiler-20261110.sdn.
+
+Status stays open. Code change in this lane: none for this row (the Row 7
+evidence-gate repair — pub widening of five mir_opt constructors/analyzers —
+also keeps this row's closure compilable for the future qualification run).

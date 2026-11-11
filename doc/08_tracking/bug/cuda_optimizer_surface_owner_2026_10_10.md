@@ -86,3 +86,36 @@ call_terminator_unwind_destinations_spec.spl 4/4. The underlying native
 MIR-lowering SIGSEGV (exit 139 after HIR 157/157) remains unresolved; per b519
 triage no current producer trace exists. Cycles: 1. Grant command recorded in
 build/review/p2fix-compiler-20261110.sdn.
+
+## 2026-11-11 triage (lane p3fix-p2a-20261111) — LIVE; evidence gate repaired, workaround pins re-verified
+
+Re-verified at release/1.0.0 tip (worktree @ 79d5af6723f6, deployed seed
+bin/simple.exe @ 46fe8f6b6def):
+
+- **Workaround pins still required and present**: inline.spl:3-4
+  (`@workaround` + `use compiler.mir.mir_types.{LocalId}`),
+  auto_vectorize_cost.spl:7-8 (`@workaround` +
+  `use compiler.mir.mir_instruction_support.{BlockId}`), loop_opt.spl:9,
+  loop_licm.spl:8. The 2026-11-07 hir-nominal-generic-owner merge did NOT
+  retire them; no owner-projection fix commit found
+  (`git log --grep` over all refs: only this bug's own triage commits).
+- **Regression spec repaired (was RED at tip on the pinned seed).**
+  `call_terminator_unwind_destinations_spec.spl` ERRORed with 0 executed:
+  the 2026-11-10 20:55 seed refresh (f919ff81626d → 46fe8f6b6def) includes
+  the 11-09 seed visibility fix 6d15331f91eb ("error on cross-directory call
+  of a private fn"), and the spec's imported constructors/analyzers were
+  private: `copypropagation_new`, `copypropagation_propagate_terminator`
+  (copy_prop.spl) and `get_terminator_successors`, `get_terminator_uses`,
+  `_outline_get_inst_uses` (outline.spl). The 11-10 "4/4 green" was on the
+  pre-refresh seed whose glob/no-import leak allowed the private calls.
+  Fix: mark those five fns `pub` (visibility-only widening, no behavior
+  change). Spec now 4/4 PASS on the pinned seed; sibling
+  `cuda_optimizer_owner_imports_spec.spl` re-verified 2/2 PASS.
+- **Verdict: LIVE**, consistent with 2026-11-10: the workaround can be
+  retired only after a stage3-admitted producer compiles the actual CUDA
+  closure without the owner imports. Grant command (verbatim, from
+  build/review/p2fix-compiler-20261110.sdn):
+  `SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 bin/simple native-build --source src/compiler --source src/app --source src/lib --source src/plugins/backend_cuda --source src/compositions/kernel_llvm_cranelift --entry-closure --entry src/plugins/backend_cuda/cuda_backend.spl --threads 10 --cache-dir build/native_probe/cuda-compile/plugin-mono-symbol-cache --output build/native_probe/cuda-compile/plugin`
+  — blocked here: no stage3-admitted producer / self-hosted check worker on
+  this host (policy: no heavy entry-closure builds from bug lanes), and the
+  closure still SIGSEGVs at MIR lowering per the bounded evidence above.
