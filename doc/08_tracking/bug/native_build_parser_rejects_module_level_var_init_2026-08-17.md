@@ -105,3 +105,27 @@ The two `expr_dispatch.spl` declarations named in this record still exist
 and are accepted forms today. Not re-verified end-to-end by this lane: a full
 native-build of a modvar fixture is a ~2-3 GB interpreted-worker run
 (heavy-forbidden); W3b (2026-11-05) already holds the end-to-end rc=0.
+
+## 2026-11-11 — SUPERSEDED confirmed (lane p3-comp12, row 1)
+
+Fresh re-verification at this lane's base (6233df4b9f9ea, tracked seed
+46fe8f6b6def):
+
+- Source: the annotated module-level `var` declaration path in
+  `src/compiler/10.frontend/core/parser_decls_use.spl` handles the no-init
+  forms and then falls through to `parser_expect(100)` + `parse_expr()`
+  (:486-491), i.e. the `var x: T = <expr>` initializer form the record says
+  the native-build parser rejected is parsed today. The two declarations the
+  guard bisected to still exist and are the accepted form:
+  `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:144-145`
+  (`var mir_lower_parent_expr_file: text = ""`,
+  `var mir_lower_parent_expr_line: i64 = -1`).
+- Seed-smoke (tracked seed 46fe8f6b6def, interpreter, --no-cache):
+  `test/01_unit/compiler/parser/module_noinit_zero_default_spec.spl`
+  outcome=OK executed=15 passed=15 failed=0;
+  `test/01_unit/compiler/parser/module_noinit_enum_class_zero_spec.spl`
+  outcome=OK executed=7 passed=7 failed=0. The boot6 addendum above queued
+  these pins but left no in-tree evidence file at this base, so they were
+  re-run here on this lane's sanctioned binary.
+- End-to-end native-build rc=0 for a modvar fixture remains as recorded by
+  W3b (2026-11-05); not re-run in-lane (heavy-forbidden interpreted worker).
