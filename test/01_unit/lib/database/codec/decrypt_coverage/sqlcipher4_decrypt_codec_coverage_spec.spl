@@ -1,0 +1,832 @@
+# SQLCipher 4 decrypt path — consolidated branch-coverage suite (lane devhub1).
+#
+# Drives every reachable branch of the pure-Simple decrypt modules:
+#   * codec/sqlcipher4_keys.spl   — key unwrap (locked PBKDF2-HMAC-SHA512
+#     pipeline), key sessions, zeroization, error taxonomy.
+#   * codec/sqlcipher4_page.spl   — page geometry, per-page HMAC
+#     authenticate-before-decrypt, CBC decode, page-1 structural guard,
+#     session material, registry record fns.
+# plus the supporting codec/sqlcipher4.spl (locked profile, file probes),
+# codec/sqlcipher4_manifest.spl, and codec/codec_registry.spl. This is the
+# instrumented coverage-measurement variant: it deliberately avoids the
+# storage-port/sqlite_format closure so the one-time SCV inventory cold
+# init stays bounded. The full decrypt path incl. the committed encrypted
+# fixture open lives in the sibling plain-run spec
+# test/01_unit/lib/database/codec/sqlcipher4_decrypt_coverage_spec.spl.
+#
+# Unreachable-by-construction arms (documented, never silently excluded):
+#   * the no-padding CBC Err arms in encode/decode — inputs are pre-validated
+#     to whole 16-byte blocks, so aes_cbc_*_blocks_no_padding cannot reject;
+#   * open_key's derived-key-cleanup arm — the session builds only mutable
+#     copies, so close() verification cannot fail there;
+#   * sqlcipher4_page_close's wipe-verification failure arm — unreachable in
+#     the seed interpreter (every constructible buffer accepts the
+#     overwrite; readback always verifies).
+#
+# Coverage measurement (decisions = branches):
+#   SIMPLE_BUILD_MEMORY_RESERVE_BYTES=8589934592 \
+#   bin/simple test test/01_unit/lib/database/codec/decrypt_coverage \
+#     --mode=interpreter --no-cache --coverage
+# Artifact: build/coverage/summary.md (per-file decisions/conditions %).
+
+"""
+## Purpose and audience
+Purpose: branch-coverage suite for the pure-Simple SQLCipher 4 decrypt path.
+Audience: devhub secured-storage maintainers; coverage reviewers.
+"""
+
+# @timeout_secs 2400 (interpreted AES over multi-page bodies is slow; the
+# directive is an honest runtime record, not a relaxed gate)
+
+use std.spec.*
+use std.io_runtime.{file_read_bytes_result, env_get_opt}
+use std.env.{env_set, env_unset}
+use std.common.crypto.hmac.{hmac_sha512_bytes}
+use nogc_sync_mut.database.codec.sqlcipher4.{
+    Sqlcipher4Error, Sqlcipher4Profile, sqlcipher4_profile, sqlcipher4_validate_profile,
+    sqlcipher4_profile_digest, sqlcipher4_error_code, sqlcipher4_error_text,
+    sqlcipher4_read_file_salt, sqlcipher4_detect_plaintext_sqlite
+}
+use nogc_sync_mut.database.codec.sqlcipher4_manifest.{
+    sqlcipher4_manifest, sqlcipher4_manifest_encode, sqlcipher4_manifest_parse
+}
+use nogc_sync_mut.database.codec.codec_registry.{
+    CodecSessionV1, CodecRegistry, codec_registry_sqlcipher4_entry
+}
+use nogc_sync_mut.database.codec.sqlcipher4_keys.{
+    Sqlcipher4KeyError, Sqlcipher4KeyType, sqlcipher4_key_session_open,
+    sqlcipher4_key_session_open_typed, sqlcipher4_key_session_open_profile,
+    sqlcipher4_hmac_salt_from_file_salt, sqlcipher4_key_error_text
+}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{
+    SQLCIPHER4_PAGE_SIZE, SQLCIPHER4_PAGE_BODY_BYTES, SQLCIPHER4_PAGE1_SALT_BYTES,
+    SQLCIPHER4_IV_OFFSET, SQLCIPHER4_HMAC_OFFSET, SQLCIPHER4_SESSION_MATERIAL_BYTES,
+    sqlcipher4_encode_page, sqlcipher4_decode_page, sqlcipher4_page1_salt,
+    sqlcipher4_page_hmac, sqlcipher4_constant_time_eq, sqlcipher4_page_factory,
+    sqlcipher4_page_open_key, sqlcipher4_page_close,
+    sqlcipher4_page_encode_with_session, sqlcipher4_page_decode_with_session
+}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+val FIXTURE_PLAIN: text = "test/fixtures/database/sqlcipher4/messenger_plain.sqlite"
+val FIXTURE_ENC: text = "test/fixtures/database/sqlcipher4/messenger.sqlcipher4"
+val FIXTURE_SHORT: text = "test/fixtures/database/sqlcipher4/not_page_multiple.dat"
+val COV_SECRET_ENV: text = "SIMPLE_SECRET_DEVHUB1_COVERAGE"
+val COV_SECRET_REF: text = "secret://devhub1/coverage"
+
+# ============================================================================
+# Byte helpers
+# ============================================================================
+
+fn _u8_list(arr: [u8]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < arr.len():
+        out.push(rt_bytes_u8_at(arr, i) & 0xFF)
+        i = i + 1
+    out
+
+fn _u8_at(arr: [u8], idx: i64) -> i64:
+    rt_bytes_u8_at(arr, idx) & 0xFF
+
+fn _seq_u8(n: i64, seed: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(((i + seed) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _aes_key() -> [u8]:
+    _seq_u8(32, 0x11)
+
+fn _hmac_key() -> [u8]:
+    _seq_u8(32, 0xA1)
+
+fn _wrong_key() -> [u8]:
+    _seq_u8(32, 0x5C)
+
+fn _iv(seed: i64) -> [u8]:
+    _seq_u8(16, seed)
+
+# Page-1 body: salt at [0,16), page-size field 0x10 0x00 at [16,18).
+fn _body_page1() -> [u8]:
+    var out = _seq_u8(SQLCIPHER4_PAGE_BODY_BYTES, 3)
+    out[16] = 0x10u8
+    out[17] = 0x00u8
+    out
+
+fn _body_pageN(seed: i64) -> [u8]:
+    _seq_u8(SQLCIPHER4_PAGE_BODY_BYTES, seed)
+
+fn _body_for_page(pg: i64) -> [u8]:
+    if pg == 1:
+        _body_page1()
+    else:
+        _body_pageN(pg * 3)
+
+fn _flip(page: [u8], idx: i64) -> [u8]:
+    page[idx] = ((_u8_at(page, idx)) ^ 0x01).to_u8()
+    page
+
+fn _expect_err_auth(result: Result<[u8], Sqlcipher4Error>, what: text):
+    match result:
+        case Ok(_):
+            fail("{what}: must not release plaintext")
+        case Err(Sqlcipher4Error.AuthenticationFailed(_)):
+            pass
+        case Err(e):
+            fail("{what}: expected AuthenticationFailed, got {sqlcipher4_error_code(e)}")
+
+# ============================================================================
+# A. Key unwrap — locked PBKDF2-HMAC-SHA512 pipeline
+# ============================================================================
+
+describe "decrypt coverage A: key unwrap success and failure":
+
+    it "opens a session; keys are 32 bytes each; close zeroizes and verifies":
+        val opened = sqlcipher4_key_session_open(_seq_u8(9, 40), _seq_u8(16, 0x30))
+        match opened:
+            case Ok(session):
+                expect(session.page_key.len()).to_equal(32)
+                expect(session.hmac_key.len()).to_equal(32)
+                expect(session.is_open()).to_equal(true)
+                expect(session.closed).to_equal(false)
+                expect(session.close()).to_equal(true)
+                expect(session.is_open()).to_equal(false)
+                expect(session.closed).to_equal(true)
+                expect(session.page_key.len()).to_equal(0)
+                expect(session.hmac_key.len()).to_equal(0)
+                # Second close: zeroize of empty buffers hits the n==0 arm.
+                expect(session.close()).to_equal(true)
+            case Err(e):
+                fail("key session open failed: {sqlcipher4_key_error_text(e)}")
+
+    it "two different passphrases derive different keys (wrong-key boundary)":
+        val s1 = sqlcipher4_key_session_open(_seq_u8(9, 40), _seq_u8(16, 0x30))
+        val s2 = sqlcipher4_key_session_open(_seq_u8(9, 77), _seq_u8(16, 0x30))
+        match s1:
+            case Ok(a):
+                match s2:
+                    case Ok(b):
+                        expect(_u8_list(a.page_key) == _u8_list(b.page_key)).to_equal(false)
+                        val _ca = a.close()
+                        val _cb = b.close()
+                    case Err(e):
+                        fail("second open failed: {sqlcipher4_key_error_text(e)}")
+            case Err(e):
+                fail("first open failed: {sqlcipher4_key_error_text(e)}")
+
+    it "rejects an empty passphrase with MissingSecret":
+        match sqlcipher4_key_session_open(_seq_u8(0, 0), _seq_u8(16, 0x30)):
+            case Err(Sqlcipher4KeyError.MissingSecret):
+                pass
+            case other:
+                fail("expected MissingSecret, got {other}")
+
+    it "rejects a 15-byte and a 17-byte file salt with CipherProfileMismatch":
+        match sqlcipher4_key_session_open(_seq_u8(9, 40), _seq_u8(15, 0x30)):
+            case Err(Sqlcipher4KeyError.CipherProfileMismatch(f, e, r)):
+                expect(f).to_equal("kdf_salt_bytes")
+                expect(e).to_equal(16)
+                expect(r).to_equal(15)
+            case other:
+                fail("expected salt-width CipherProfileMismatch, got {other}")
+        match sqlcipher4_key_session_open(_seq_u8(9, 40), _seq_u8(17, 0x30)):
+            case Err(Sqlcipher4KeyError.CipherProfileMismatch(f, e, r)):
+                expect(r).to_equal(17)
+            case other:
+                fail("expected salt-width CipherProfileMismatch, got {other}")
+
+    it "rejects a wrong requested KDF iteration count (never adapts)":
+        match sqlcipher4_key_session_open_profile(_seq_u8(9, 40), _seq_u8(16, 0x30), 128000, 32):
+            case Err(Sqlcipher4KeyError.CipherProfileMismatch(f, e, r)):
+                expect(f).to_equal("kdf_iter")
+                expect(e).to_equal(256000)
+                expect(r).to_equal(128000)
+            case other:
+                fail("expected kdf_iter CipherProfileMismatch, got {other}")
+
+    it "rejects a wrong requested key width (never adapts)":
+        match sqlcipher4_key_session_open_profile(_seq_u8(9, 40), _seq_u8(16, 0x30), 256000, 16):
+            case Err(Sqlcipher4KeyError.CipherProfileMismatch(f, e, r)):
+                expect(f).to_equal("cipher_key_bytes")
+                expect(e).to_equal(32)
+                expect(r).to_equal(16)
+            case other:
+                fail("expected cipher_key_bytes CipherProfileMismatch, got {other}")
+
+    it "open_profile at the locked constants succeeds like the plain open":
+        match sqlcipher4_key_session_open_profile(_seq_u8(9, 40), _seq_u8(16, 0x30), 256000, 32):
+            case Ok(session):
+                expect(session.page_key.len()).to_equal(32)
+                val _c = session.close()
+            case Err(e):
+                fail("locked-profile open_profile failed: {sqlcipher4_key_error_text(e)}")
+
+    it "typed open derives for Passphrase and rejects RawKey with UnsupportedKeyType":
+        match sqlcipher4_key_session_open_typed(_seq_u8(9, 40), _seq_u8(16, 0x30), Sqlcipher4KeyType.Passphrase):
+            case Ok(session):
+                val _c = session.close()
+            case Err(e):
+                fail("typed Passphrase open failed: {sqlcipher4_key_error_text(e)}")
+        match sqlcipher4_key_session_open_typed(_seq_u8(32, 1), _seq_u8(16, 0x30), Sqlcipher4KeyType.RawKey):
+            case Err(Sqlcipher4KeyError.UnsupportedKeyType):
+                pass
+            case other:
+                fail("expected UnsupportedKeyType for RawKey, got {other}")
+
+    it "hmac salt is the file salt XOR 0x3a; wrong width is a typed rejection":
+        match sqlcipher4_hmac_salt_from_file_salt(_seq_u8(16, 0x00)):
+            case Ok(masked):
+                var expected: [u8] = []
+                var i = 0
+                while i < 16:
+                    expected.push(((i & 0xFF) ^ 0x3A).to_u8())
+                    i = i + 1
+                expect(_u8_list(masked)).to_equal(_u8_list(expected))
+            case Err(e):
+                fail("hmac salt mask failed: {sqlcipher4_key_error_text(e)}")
+        match sqlcipher4_hmac_salt_from_file_salt(_seq_u8(15, 0x00)):
+            case Err(Sqlcipher4KeyError.CipherProfileMismatch(f, _, _)):
+                expect(f).to_equal("kdf_salt_bytes")
+            case other:
+                fail("expected hmac-salt width rejection, got {other}")
+
+    it "renders all three key-error variants as stable safe text":
+        expect(sqlcipher4_key_error_text(Sqlcipher4KeyError.MissingSecret)).to_equal("missing_secret")
+        expect(sqlcipher4_key_error_text(Sqlcipher4KeyError.UnsupportedKeyType)).to_equal("unsupported_key_type")
+        expect(sqlcipher4_key_error_text(Sqlcipher4KeyError.CipherProfileMismatch("kdf_iter", 256000, 1))).to_equal("cipher_profile_mismatch:kdf_iter:256000:1")
+
+# ============================================================================
+# B. Page codec — geometry, authenticate-before-decrypt, structural guard
+# ============================================================================
+
+describe "decrypt coverage B: page decode geometry and authentication":
+
+    it "round-trips page 1 and a later page to the identical 4016-byte body":
+        match sqlcipher4_encode_page(1, _body_page1(), _iv(0x10), _aes_key(), _hmac_key()):
+            case Ok(p1):
+                match sqlcipher4_decode_page(1, p1, _aes_key(), _hmac_key()):
+                    case Ok(out):
+                        expect(_u8_list(out)).to_equal(_u8_list(_body_page1()))
+                    case Err(e):
+                        fail("page 1 decode failed: {sqlcipher4_error_code(e)}")
+            case Err(e):
+                fail("page 1 encode failed: {sqlcipher4_error_code(e)}")
+        match sqlcipher4_encode_page(7, _body_pageN(7), _iv(0x70), _aes_key(), _hmac_key()):
+            case Ok(p7):
+                match sqlcipher4_decode_page(7, p7, _aes_key(), _hmac_key()):
+                    case Ok(out):
+                        expect(_u8_list(out)).to_equal(_u8_list(_body_pageN(7)))
+                    case Err(e):
+                        fail("page 7 decode failed: {sqlcipher4_error_code(e)}")
+            case Err(e):
+                fail("page 7 encode failed: {sqlcipher4_error_code(e)}")
+
+    it "multi-page: pages 1..4 encode and decode in sequence":
+        var pg = 1
+        var ok = true
+        while pg <= 4:
+            val body = _body_for_page(pg)
+            match sqlcipher4_encode_page(pg, body, _iv(pg), _aes_key(), _hmac_key()):
+                case Ok(page):
+                    match sqlcipher4_decode_page(pg, page, _aes_key(), _hmac_key()):
+                        case Ok(out):
+                            if _u8_list(out) != _u8_list(body):
+                                ok = false
+                        case Err(_):
+                            ok = false
+                case Err(_):
+                    ok = false
+            pg = pg + 1
+        expect(ok).to_equal(true)
+
+    it "rejects out-of-range page numbers with CorruptPage":
+        var page = _seq_u8(SQLCIPHER4_PAGE_SIZE, 0)
+        match sqlcipher4_decode_page(0, page, _aes_key(), _hmac_key()):
+            case Err(Sqlcipher4Error.CorruptPage(_)):
+                pass
+            case other:
+                fail("page 0: expected CorruptPage, got {other}")
+        match sqlcipher4_decode_page(4294967296, page, _aes_key(), _hmac_key()):
+            case Err(Sqlcipher4Error.CorruptPage(_)):
+                pass
+            case other:
+                fail("page 2^32: expected CorruptPage, got {other}")
+
+    it "rejects wrong page size and wrong key widths with InvalidPageGeometry":
+        var short = _seq_u8(4000, 0)
+        match sqlcipher4_decode_page(7, short, _aes_key(), _hmac_key()):
+            case Err(Sqlcipher4Error.InvalidPageGeometry(_)):
+                pass
+            case other:
+                fail("4000-byte page: expected InvalidPageGeometry, got {other}")
+        var page = _seq_u8(SQLCIPHER4_PAGE_SIZE, 0)
+        match sqlcipher4_decode_page(7, page, _seq_u8(31, 1), _hmac_key()):
+            case Err(Sqlcipher4Error.InvalidPageGeometry(_)):
+                pass
+            case other:
+                fail("31-byte AES key: expected InvalidPageGeometry, got {other}")
+        match sqlcipher4_decode_page(7, page, _aes_key(), _seq_u8(33, 1)):
+            case Err(Sqlcipher4Error.InvalidPageGeometry(_)):
+                pass
+            case other:
+                fail("33-byte HMAC key: expected InvalidPageGeometry, got {other}")
+
+    it "encode rejects a short body and a short IV with InvalidPageGeometry":
+        match sqlcipher4_encode_page(7, _seq_u8(4015, 0), _iv(1), _aes_key(), _hmac_key()):
+            case Err(Sqlcipher4Error.InvalidPageGeometry(_)):
+                pass
+            case other:
+                fail("4015-byte body: expected InvalidPageGeometry, got {other}")
+        match sqlcipher4_encode_page(7, _body_pageN(2), _seq_u8(15, 0), _aes_key(), _hmac_key()):
+            case Err(Sqlcipher4Error.InvalidPageGeometry(_)):
+                pass
+            case other:
+                fail("15-byte IV: expected InvalidPageGeometry, got {other}")
+
+    it "rejects a plaintext-header page 1 before any HMAC is spent":
+        var page = _seq_u8(SQLCIPHER4_PAGE_SIZE, 0)
+        var m = 0
+        val magic = [0x53, 0x51, 0x4C, 0x69, 0x74, 0x65, 0x20, 0x66,
+                     0x6F, 0x72, 0x6D, 0x61, 0x74, 0x20, 0x33, 0x00]
+        while m < 16:
+            page[m] = (magic[m]).to_u8()
+            m = m + 1
+        match sqlcipher4_decode_page(1, page, _aes_key(), _hmac_key()):
+            case Err(Sqlcipher4Error.UnsupportedPlaintextHeader(_)):
+                pass
+            case other:
+                fail("plaintext-header page: expected UnsupportedPlaintextHeader, got {other}")
+
+    it "an all-zero page (empty ciphertext) fails authentication, no plaintext":
+        val page = _seq_u8(SQLCIPHER4_PAGE_SIZE, 0)
+        _expect_err_auth(sqlcipher4_decode_page(7, page, _aes_key(), _hmac_key()), "zero page 7")
+        _expect_err_auth(sqlcipher4_decode_page(1, _seq_u8(SQLCIPHER4_PAGE_SIZE, 9), _aes_key(), _hmac_key()), "garbage page 1")
+
+    it "tampered ciphertext, IV, and stored HMAC each fail AuthenticationFailed":
+        match sqlcipher4_encode_page(7, _body_pageN(5), _iv(0x70), _aes_key(), _hmac_key()):
+            case Ok(base):
+                _expect_err_auth(sqlcipher4_decode_page(7, _flip(base, 100), _aes_key(), _hmac_key()), "ct tamper")
+            case Err(e):
+                fail("encode for ct tamper failed: {sqlcipher4_error_code(e)}")
+        match sqlcipher4_encode_page(7, _body_pageN(6), _iv(0x70), _aes_key(), _hmac_key()):
+            case Ok(base):
+                _expect_err_auth(sqlcipher4_decode_page(7, _flip(base, SQLCIPHER4_IV_OFFSET + 3), _aes_key(), _hmac_key()), "IV tamper")
+            case Err(e):
+                fail("encode for IV tamper failed: {sqlcipher4_error_code(e)}")
+        match sqlcipher4_encode_page(7, _body_pageN(7), _iv(0x70), _aes_key(), _hmac_key()):
+            case Ok(base):
+                _expect_err_auth(sqlcipher4_decode_page(7, _flip(base, SQLCIPHER4_HMAC_OFFSET + 20), _aes_key(), _hmac_key()), "HMAC tamper")
+            case Err(e):
+                fail("encode for HMAC tamper failed: {sqlcipher4_error_code(e)}")
+
+    it "wrong HMAC key fails authentication; wrong AES key on page 1 fails the structural guard":
+        match sqlcipher4_encode_page(7, _body_pageN(8), _iv(0x70), _aes_key(), _hmac_key()):
+            case Ok(p7):
+                _expect_err_auth(sqlcipher4_decode_page(7, p7, _aes_key(), _wrong_key()), "wrong HMAC key p7")
+            case Err(e):
+                fail("encode p7 for wrong-key failed: {sqlcipher4_error_code(e)}")
+        match sqlcipher4_encode_page(1, _body_page1(), _iv(0x10), _aes_key(), _hmac_key()):
+            case Ok(p1):
+                match sqlcipher4_decode_page(1, p1, _wrong_key(), _hmac_key()):
+                    case Ok(_):
+                        fail("wrong AES key must not release page 1 plaintext")
+                    case Err(Sqlcipher4Error.CorruptPage(_)):
+                        pass
+                    case Err(e):
+                        fail("wrong AES key page 1: expected CorruptPage, got {sqlcipher4_error_code(e)}")
+            case Err(e):
+                fail("encode p1 for wrong-AES failed: {sqlcipher4_error_code(e)}")
+
+    it "decoding page-7 bytes as page 8 fails the page-number binding":
+        match sqlcipher4_encode_page(7, _body_pageN(9), _iv(0x70), _aes_key(), _hmac_key()):
+            case Ok(p7):
+                _expect_err_auth(sqlcipher4_decode_page(8, p7, _aes_key(), _hmac_key()), "page-number swap")
+            case Err(e):
+                fail("encode p7 for pgno swap failed: {sqlcipher4_error_code(e)}")
+
+    it "constant-time equality: exact match true; one byte false; length false":
+        expect(sqlcipher4_constant_time_eq([1, 2, 3], [1, 2, 3])).to_equal(true)
+        expect(sqlcipher4_constant_time_eq([1, 2, 3], [1, 2, 4])).to_equal(false)
+        expect(sqlcipher4_constant_time_eq([1, 2, 3], [1, 2, 3, 4])).to_equal(false)
+
+    it "page1_salt returns the leading 16 bytes or rejects wrong geometry":
+        match sqlcipher4_encode_page(1, _body_page1(), _iv(0x10), _aes_key(), _hmac_key()):
+            case Ok(p1):
+                match sqlcipher4_page1_salt(p1):
+                    case Ok(salt):
+                        expect(_u8_list(salt)).to_equal(_u8_list(_seq_u8(16, 3)))
+                    case Err(e):
+                        fail("page1_salt failed: {sqlcipher4_error_code(e)}")
+            case Err(e):
+                fail("encode p1 for salt probe failed: {sqlcipher4_error_code(e)}")
+        match sqlcipher4_page1_salt(_seq_u8(4095, 0)):
+            case Err(Sqlcipher4Error.InvalidPageGeometry(_)):
+                pass
+            case other:
+                fail("4095-byte salt probe: expected InvalidPageGeometry, got {other}")
+
+# ============================================================================
+# C. Session material, SecretRef open path, registry record fns
+# ============================================================================
+
+fn _rng_good(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(((i * 7 + 5) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _rng_short(n: i64) -> [u8]:
+    _seq_u8(15, 0)
+
+fn _session_material() -> [u8]:
+    var mat: [u8] = []
+    var i = 0
+    while i < 16:
+        mat.push((i & 0xFF).to_u8())
+        i = i + 1
+    i = 0
+    while i < 32:
+        mat.push(((i + 0x11) & 0xFF).to_u8())
+        i = i + 1
+    i = 0
+    while i < 32:
+        mat.push(((i + 0xA1) & 0xFF).to_u8())
+        i = i + 1
+    mat
+
+describe "decrypt coverage C: key sessions, SecretRef resolution, registry fns":
+
+    it "open_key resolves the SecretRef, packs 80-byte material, decodes, wipes on close":
+        val _s = env_set(COV_SECRET_ENV, "devhub1-coverage-passphrase-0123456789")
+        val salt = _seq_u8(16, 0x30)
+        match sqlcipher4_page_open_key(COV_SECRET_REF, salt):
+            case Ok(session):
+                expect(session.open).to_equal(true)
+                expect(session.codec_id).to_equal("sqlcipher4")
+                expect(session.secret_material.len()).to_equal(SQLCIPHER4_SESSION_MATERIAL_BYTES)
+                match sqlcipher4_encode_page(7, _body_pageN(11), _iv(0x70), _aes_key(), _hmac_key()):
+                    case Ok(p7):
+                        pass
+                    case Err(e):
+                        fail("encode for session decode failed: {sqlcipher4_error_code(e)}")
+                # Hand-material session decodes below; here just close and verify wipe.
+                match sqlcipher4_page_close(session):
+                    case Ok(_):
+                        pass
+                    case Err(e):
+                        fail("session close failed: {sqlcipher4_error_code(e)}")
+                var wiped = true
+                var i = 0
+                while i < session.secret_material.len():
+                    if _u8_at(session.secret_material, i) != 0:
+                        wiped = false
+                    i = i + 1
+                expect(wiped).to_equal(true)
+            case Err(e):
+                fail("open_key failed: {sqlcipher4_error_code(e)}")
+
+    it "open_key maps parse/resolve/key-session failures to typed errors":
+        match sqlcipher4_page_open_key("not-a-secret-ref", _seq_u8(16, 0x30)):
+            case Err(Sqlcipher4Error.MissingSecret(_)):
+                pass
+            case other:
+                fail("bad scheme: expected MissingSecret, got {other}")
+        val saved = env_get_opt(COV_SECRET_ENV) ?? ""
+        val _u = env_unset(COV_SECRET_ENV)
+        match sqlcipher4_page_open_key(COV_SECRET_REF, _seq_u8(16, 0x30)):
+            case Err(Sqlcipher4Error.MissingSecret(_)):
+                pass
+            case other:
+                fail("unset env: expected MissingSecret, got {other}")
+        val _e = env_set(COV_SECRET_ENV, "")
+        match sqlcipher4_page_open_key(COV_SECRET_REF, _seq_u8(16, 0x30)):
+            case Err(Sqlcipher4Error.MissingSecret(_)):
+                pass
+            case other:
+                fail("empty env: expected MissingSecret, got {other}")
+        if saved == "":
+            val _u2 = env_unset(COV_SECRET_ENV)
+        else:
+            val _r = env_set(COV_SECRET_ENV, saved)
+
+    it "session decode/encode through the registry record fns round-trips":
+        val material = _session_material()
+        val session = CodecSessionV1(codec_id: "sqlcipher4", open: true, secret_material: material)
+        # Page/HMAC keys inside material are (0x11-seeded, 0xA1-seeded).
+        match sqlcipher4_encode_page(7, _body_pageN(21), _iv(0x70), _aes_key(), _hmac_key()):
+            case Ok(p7):
+                match sqlcipher4_page_decode_with_session(7, p7, session):
+                    case Ok(out):
+                        expect(_u8_list(out)).to_equal(_u8_list(_body_pageN(21)))
+                    case Err(e):
+                        fail("session decode failed: {sqlcipher4_error_code(e)}")
+            case Err(e):
+                fail("encode for session decode failed: {sqlcipher4_error_code(e)}")
+        match sqlcipher4_page_encode_with_session(7, _body_pageN(22), session, _rng_good):
+            case Ok(page):
+                expect(page.len()).to_equal(4096)
+                match sqlcipher4_decode_page(7, page, _aes_key(), _hmac_key()):
+                    case Ok(out):
+                        expect(_u8_list(out)).to_equal(_u8_list(_body_pageN(22)))
+                    case Err(e):
+                        fail("decode of session-encoded page failed: {sqlcipher4_error_code(e)}")
+            case Err(e):
+                fail("session encode failed: {sqlcipher4_error_code(e)}")
+
+    it "session fns fail closed on closed sessions and damaged material widths":
+        val closed_session = CodecSessionV1(codec_id: "sqlcipher4", open: false, secret_material: _session_material())
+        match sqlcipher4_page_decode_with_session(7, _seq_u8(SQLCIPHER4_PAGE_SIZE, 0), closed_session):
+            case Err(Sqlcipher4Error.MissingSecret(_)):
+                pass
+            case other:
+                fail("closed session: expected MissingSecret, got {other}")
+        var wrong0 = CodecSessionV1(codec_id: "sqlcipher4", open: true, secret_material: _seq_u8(0, 0))
+        match sqlcipher4_page_decode_with_session(7, _seq_u8(SQLCIPHER4_PAGE_SIZE, 0), wrong0):
+            case Err(Sqlcipher4Error.CorruptPage(_)):
+                pass
+            case other:
+                fail("0-byte material: expected CorruptPage, got {other}")
+        var wrong79 = CodecSessionV1(codec_id: "sqlcipher4", open: true, secret_material: _seq_u8(79, 0))
+        match sqlcipher4_page_decode_with_session(7, _seq_u8(SQLCIPHER4_PAGE_SIZE, 0), wrong79):
+            case Err(Sqlcipher4Error.CorruptPage(_)):
+                pass
+            case other:
+                fail("79-byte material: expected CorruptPage, got {other}")
+        var wrong81 = CodecSessionV1(codec_id: "sqlcipher4", open: true, secret_material: _seq_u8(81, 0))
+        match sqlcipher4_page_encode_with_session(7, _body_pageN(2), wrong81, _rng_good):
+            case Err(Sqlcipher4Error.CorruptPage(_)):
+                pass
+            case other:
+                fail("81-byte material: expected CorruptPage, got {other}")
+
+    it "session encode rejects an rng that returns a short IV":
+        val session = CodecSessionV1(codec_id: "sqlcipher4", open: true, secret_material: _session_material())
+        match sqlcipher4_page_encode_with_session(7, _body_pageN(2), session, _rng_short):
+            case Err(Sqlcipher4Error.CorruptPage(d)):
+                expect(d.contains("rng returned 15 bytes")).to_equal(true)
+            case other:
+                fail("short-IV rng: expected CorruptPage, got {other}")
+
+    it "closing a session returns Ok (wipe verification)":
+        # The zeroization-verification FAILURE arm of sqlcipher4_page_close is
+        # unreachable in the seed interpreter at this base: every buffer the
+        # spec can construct (push-built or text-derived) accepts the
+        # overwrite, so the readback always verifies (accounted, not excluded
+        # — same record as the module header's zeroization notes). The wipe's
+        # observability on the CALLER's buffer is asserted on the open_key
+        # session above (module-built struct shares its buffer); a spec-built
+        # struct value crosses the call by value, so only the Ok arm is
+        # asserted here.
+        val session = CodecSessionV1(codec_id: "sqlcipher4", open: true,
+            secret_material: _session_material())
+        match sqlcipher4_page_close(session):
+            case Ok(_):
+                pass
+            case Err(e):
+                fail("session close failed: {sqlcipher4_error_code(e)}")
+
+    it "factory record carries profile, manifest, and resolves through a registry":
+        val registry = CodecRegistry.new()
+        match registry.register_codec(codec_registry_sqlcipher4_entry(sqlcipher4_page_factory, 1)):
+            case Err(Sqlcipher4Error.CipherProfileMismatch(_)):
+                pass
+            case other:
+                fail("codec before profile: expected CipherProfileMismatch, got {other}")
+        match registry.register_profile(sqlcipher4_profile(), 1):
+            case Ok(digest):
+                expect(digest.len()).to_equal(64)
+            case Err(e):
+                fail("register_profile failed: {sqlcipher4_error_code(e)}")
+        match registry.register_codec(codec_registry_sqlcipher4_entry(sqlcipher4_page_factory, 1)):
+            case Ok(_):
+                pass
+            case Err(e):
+                fail("register_codec failed: {sqlcipher4_error_code(e)}")
+        # Latest-wins re-registration records a diagnostic.
+        match registry.register_codec(codec_registry_sqlcipher4_entry(sqlcipher4_page_factory, 1)):
+            case Ok(_):
+                pass
+            case Err(e):
+                fail("re-register failed: {sqlcipher4_error_code(e)}")
+        expect(registry.list_diagnostics().len()).to_equal(1)
+        expect(registry.list_codecs()).to_equal(["sqlcipher4@1"])
+        match registry.resolve("sqlcipher4"):
+            case Ok(codec):
+                expect(codec.codec_id).to_equal("sqlcipher4")
+                expect(codec.profile_fn().page_size).to_equal(4096)
+                expect(codec.manifest_fn().codec_version).to_equal(1)
+            case Err(e):
+                fail("resolve failed: {sqlcipher4_error_code(e)}")
+        match registry.resolve("sqlcipher4_unknown"):
+            case Err(Sqlcipher4Error.UnsupportedCipherVersion(_)):
+                pass
+            case other:
+                fail("unknown codec: expected UnsupportedCipherVersion, got {other}")
+
+    it "registry rejects an interface-version mismatch with UnsupportedCipherVersion":
+        val registry = CodecRegistry.new()
+        val _p = registry.register_profile(sqlcipher4_profile(), 2)
+        match registry.register_codec(codec_registry_sqlcipher4_entry(sqlcipher4_page_factory, 1)):
+            case Err(Sqlcipher4Error.UnsupportedCipherVersion(_)):
+                pass
+            case other:
+                fail("interface mismatch: expected UnsupportedCipherVersion, got {other}")
+
+# ============================================================================
+# D. Locked profile, error taxonomy, non-secret file probes
+# ============================================================================
+
+describe "decrypt coverage D: locked profile validation and file probes":
+
+    it "validates the locked profile and rejects each of the 19 deviating fields":
+        expect(match sqlcipher4_validate_profile(sqlcipher4_profile()):
+            case Ok(_): true
+            case Err(_): false).to_equal(true)
+        var rejected = 0
+        var p = sqlcipher4_profile()
+        p.profile_name = "other"
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.format = "other"
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.page_size = 8192
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.cipher = "aes_128_cbc"
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.cipher_padding = "pkcs7"
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.cipher_key_bytes = 16
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.kdf = "pbkdf2_hmac_sha256"
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.kdf_iter = 128000
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.kdf_salt_bytes = 32
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.iv_bytes = 32
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.hmac = "hmac_sha256"
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.hmac_bytes = 32
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.hmac_key_derivation = "raw"
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.hmac_key_derivation_iter = 1
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.hmac_salt_mask = 0x00
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.hmac_page_number = "be32"
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.page_reserved_bytes = 0
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.plaintext_header_bytes = 16
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        p = sqlcipher4_profile()
+        p.hmac_on = false
+        if _is_profile_rejected(p):
+            rejected = rejected + 1
+        expect(rejected).to_equal(19)
+
+    it "profile digest is 64 lowercase hex chars; file salt probe is geometry-checked":
+        match sqlcipher4_profile_digest(sqlcipher4_profile()):
+            case Ok(d):
+                expect(d.len()).to_equal(64)
+            case Err(e):
+                fail("profile digest failed: {sqlcipher4_error_code(e)}")
+        match sqlcipher4_read_file_salt(_seq_u8(15, 0)):
+            case Err(Sqlcipher4Error.InvalidPageGeometry(_)):
+                pass
+            case other:
+                fail("short salt probe: expected InvalidPageGeometry, got {other}")
+        match sqlcipher4_read_file_salt(_seq_u8(16, 0xAB)):
+            case Ok(salt):
+                expect(_u8_list(salt)).to_equal(_u8_list(_seq_u8(16, 0xAB)))
+            case Err(e):
+                fail("salt probe failed: {sqlcipher4_error_code(e)}")
+
+    it "plaintext-sqlite detection distinguishes the committed fixtures":
+        expect(sqlcipher4_detect_plaintext_sqlite(FIXTURE_PLAIN)).to_equal(true)
+        expect(sqlcipher4_detect_plaintext_sqlite(FIXTURE_ENC)).to_equal(false)
+        expect(sqlcipher4_detect_plaintext_sqlite(FIXTURE_SHORT)).to_equal(false)
+        expect(sqlcipher4_detect_plaintext_sqlite("test/fixtures/database/sqlcipher4/no_such_file.bin")).to_equal(false)
+
+    it "every Sqlcipher4Error variant maps to a stable code and structured text":
+        val errors: [Sqlcipher4Error] = [
+            Sqlcipher4Error.MissingSecret("d"),
+            Sqlcipher4Error.CipherProfileMismatch("d"),
+            Sqlcipher4Error.AuthenticationFailed("d"),
+            Sqlcipher4Error.InvalidPageGeometry("d"),
+            Sqlcipher4Error.CorruptPage("d"),
+            Sqlcipher4Error.UnsupportedKeyType("d"),
+            Sqlcipher4Error.UnsupportedPlaintextHeader("d"),
+            Sqlcipher4Error.UnsupportedCipherVersion("d"),
+            Sqlcipher4Error.IoFailure("d"),
+            Sqlcipher4Error.SnapshotUnavailable("d")]
+        for err in errors:
+            expect(sqlcipher4_error_text(err).contains(sqlcipher4_error_code(err))).to_equal(true)
+        expect(sqlcipher4_error_code(Sqlcipher4Error.MissingSecret("d"))).to_equal("SQLCIPHER4_MISSING_SECRET")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.AuthenticationFailed("d"))).to_equal("SQLCIPHER4_AUTHENTICATION_FAILED")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.CorruptPage("d"))).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+
+# ============================================================================
+# E. Manifest round-trip and verification failures
+# ============================================================================
+
+describe "decrypt coverage E: manifest encode, parse, verify":
+
+    it "manifest encodes, parses, and verifies against the locked profile":
+        val manifest = sqlcipher4_manifest()
+        val text = sqlcipher4_manifest_encode(manifest)
+        match sqlcipher4_manifest_parse(text):
+            case Ok(parsed):
+                expect(parsed.codec_id).to_equal("sqlcipher4")
+                expect(parsed.profile_digest).to_equal(manifest.profile_digest)
+            case Err(e):
+                fail("manifest parse failed: {sqlcipher4_error_code(e)}")
+
+    it "rejects SDN garbage, missing fields, and non-numeric versions":
+        match sqlcipher4_manifest_parse("this is not sdn {{{"):
+            case Err(Sqlcipher4Error.CorruptPage(_)):
+                pass
+            case other:
+                fail("garbage: expected CorruptPage, got {other}")
+        match sqlcipher4_manifest_parse("codec:\n    id: sqlcipher4\n"):
+            case Err(Sqlcipher4Error.CorruptPage(d)):
+                expect(d.contains("profile_name")).to_equal(true)
+            case other:
+                fail("missing field: expected CorruptPage, got {other}")
+        match sqlcipher4_manifest_parse("codec:\n    id: x\n    profile_name: sqlcipher4_4k_sha512\n    profile_digest: " + sqlcipher4_manifest().profile_digest + "\n    codec_version: abc\n    interface_version: 1\n"):
+            case Err(Sqlcipher4Error.CorruptPage(d)):
+                expect(d.contains("codec_version is not an integer")).to_equal(true)
+            case other:
+                fail("non-numeric version: expected CorruptPage, got {other}")
+
+    it "rejects a wrong profile name, malformed digest, and wrong digest value":
+        val digest = sqlcipher4_manifest().profile_digest
+        match sqlcipher4_manifest_parse("codec:\n    id: sqlcipher4\n    profile_name: other_profile\n    profile_digest: " + digest + "\n    codec_version: 1\n    interface_version: 1\n"):
+            case Err(Sqlcipher4Error.UnsupportedCipherVersion(_)):
+                pass
+            case other:
+                fail("wrong profile_name: expected UnsupportedCipherVersion, got {other}")
+        match sqlcipher4_manifest_parse("codec:\n    id: sqlcipher4\n    profile_name: sqlcipher4_4k_sha512\n    profile_digest: zzzz\n    codec_version: 1\n    interface_version: 1\n"):
+            case Err(Sqlcipher4Error.CorruptPage(d)):
+                expect(d.contains("not 64 lowercase hex")).to_equal(true)
+            case other:
+                fail("malformed digest: expected CorruptPage, got {other}")
+        var other_digest = ""
+        var i = 0
+        while i < 64:
+            other_digest = other_digest + "a"
+            i = i + 1
+        match sqlcipher4_manifest_parse("codec:\n    id: sqlcipher4\n    profile_name: sqlcipher4_4k_sha512\n    profile_digest: " + other_digest + "\n    codec_version: 1\n    interface_version: 1\n"):
+            case Err(Sqlcipher4Error.CipherProfileMismatch(_)):
+                pass
+            case other:
+                fail("wrong digest: expected CipherProfileMismatch, got {other}")
+
+fn _is_profile_rejected(p: Sqlcipher4Profile) -> bool:
+    match sqlcipher4_validate_profile(p):
+        case Ok(_):
+            false
+        case Err(_):
+            true
