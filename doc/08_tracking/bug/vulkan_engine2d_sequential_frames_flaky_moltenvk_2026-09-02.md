@@ -1,10 +1,14 @@
 # Vulkan Engine2D: sequential multi-frame runs flaky under interpreted MoltenVK
 
 - **Filed:** 2026-09-02
-- **Status:** PARTIALLY ROOT-CAUSED (2026-09-02, JIT lane) — the frame-2
-  `completion_unknown` cascade is explained and fixed (see "Root cause"
-  below). A separate intermittent SIGBUS under JIT+MoltenVK remains open
-  (see "Still open").
+- **Status:** SUPERSEDED (triaged 2026-11-11, lane int11) — the titled frame-2
+  `completion_unknown` cascade is explained and FIXED (2026-09-02, JIT lane:
+  Vulkan lanes no longer call `engine.clear` per frame; deterministic
+  with-clear/without-clear repro documented below). A separate intermittent
+  SIGBUS under JIT+MoltenVK remains LIVE on macOS only
+  (aarch64-apple-darwin + MoltenVK 1.4.350; not re-verifiable on this
+  Windows host — platform grant), owner macOS Vulkan/MoltenVK verification
+  lane. See "Root cause" and "Still open" below.
 - **Platform:** aarch64-apple-darwin, MoltenVK 1.4.350 (homebrew libvulkan),
   interpreted lane (Rust seed driver, `--features vulkan`)
 - **Found during:** UI showcase feature-screen verification
@@ -93,3 +97,21 @@ Control runs, all passing with `readback=device_readback` and
   dispatch could not find them.
 - Showcase screens render all features on Vulkan: rects, alpha, bitmap and
   vector (TTF) text, polylines (PATH), scroll/clip groups, src-over blend.
+
+## 2026-11-11 triage (lane int11) — header flipped SUPERSEDED with LIVE macOS-only residue
+
+P3 sweep triage of this still-open interpreter-subject row. The titled
+defect (sequential multi-frame `completion_unknown` flakiness) was
+root-caused and fixed by the 2026-09-02 JIT-lane change recorded in "Root
+cause" above — absorber named in-record (per-frame `engine.clear` removed on
+the Vulkan lanes; with-clear repro failed frame 2 deterministically,
+without-clear passed 59/0 then 60/0 rendered/skipped). int11 cannot re-run
+the MoltenVK repro on this Windows host (platform-specific: aarch64-apple-
+darwin + MoltenVK 1.4.350), so the fix is accepted per the in-record
+deterministic evidence and the row is SUPERSEDED for that failure mode.
+
+The residual intermittent `Bus error: 10` (SIGBUS) under JIT+MoltenVK
+("Still open") is a separate live observation: flaky (adjacent same-binary
+runs pass), no panic logged, dies right after a successful
+`[vk-order] flush rc=1`. It needs a macOS host with live Vulkan/MoltenVK to
+reproduce and attribute — owner: macOS Vulkan/MoltenVK verification lane.

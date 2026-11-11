@@ -1,7 +1,8 @@
 # Stage 2 MSVC link failure is UNDIAGNOSABLE: the Err payload interpolates to `<invalid-heap:0x...>`
 
 - **Filed:** 2026-09-03
-- **Status:** OPEN — current Windows MSVC Stage 2 blocker. Masking defect (1) FIXED in source 2026-11-07 (merge 9e7e7a526edb): the wrapper now interpolates `{e.message}`, and `MsvcLinker.link`/`LldLinkLinker.link` print the raw linker output and persist it to `{output}.link.log` at the call site, so the real diagnostic survives even a corrupt Err payload — component-verified on the seed JIT lane 2026-11-11 (lane interp12, see "Addendum 2026-11-11"). The underlying link failure (2) is still unknown: reproducing it requires a self-hosted stage2 native link, which this lane cannot run (no entry-closure native builds; native-build Windows hang is a known live defect). OPEN pending a stage2 lane.
+- **Status:** LIVE (triaged 2026-11-11, lanes interp12/int10/int11) — current
+  Windows MSVC Stage 2 blocker. Masking defect (1) FIXED in source 2026-11-07 (merge 9e7e7a526edb, re-verified in this base's ancestry by int11): the wrapper now interpolates `{e.message}`, and `MsvcLinker.link`/`LldLinkLinker.link` print the raw linker output and persist it to `{output}.link.log` at the call site, so the real diagnostic survives even a corrupt Err payload — component-verified on the seed JIT lane 2026-11-11 (lane interp12, see "Addendum 2026-11-11"). The underlying link failure (2) is still unknown: reproducing it requires a self-hosted stage2 native link, which this lane cannot run (no entry-closure native builds; native-build Windows hang is a known live defect). LIVE pending a stage2 lane with the native-build grant.
 - **Platform:** Windows MSVC (self-hosted stage 2 candidate). The masking mechanism is a
   value-representation defect and is not obviously Windows-specific, but it has only been
   observed on this lane.
@@ -139,3 +140,16 @@ native link grant interp12 recorded verbatim above (this lane is under the
 same entry-closure native-build prohibition and the same known-live Windows
 native-build hang). No re-run of interp12's probe: same seed, same day, green
 check. Owner: stage2 lane with native-build grant.
+
+## Addendum 2026-11-11 (lane int11) — header flipped LIVE; masking-fix ancestry re-verified
+
+Sweep flip. interp12's same-day addendum (masking defect (1) component-verified
+fixed on the tracked seed) plus int10's LIVE concurrence recorded the verified
+disposition; the header still read OPEN. int11 quick re-verify at base
+`84f5076db138` (source checks only): merge `9e7e7a526edb` is an ancestor of
+this base, and the masking-fix surface `src/compiler/70.backend/linker/msvc.spl`
+with the raw-output + `.link.log` persistence is in-tree. The underlying link
+failure (2) remains unknown and its repro requires the self-hosted stage2
+native-link grant interp12 recorded verbatim above (this lane is under the
+same entry-closure prohibition and the same known-live Windows native-build
+hang). Header flipped to LIVE, owner stage2 lane with native-build grant.

@@ -1,10 +1,16 @@
 # Interpreted native-build worker blows up in RSS: two terms, one fixed (~2.7 GB) and one unbounded creep inside `parse`
 
 - **Filed:** 2026-08-18
-- **Status:** OPEN — **located, not fixed.** No fix is claimed and no perf claim
+- **Status:** LIVE (triaged 2026-11-11, lanes boot6/int10/int11) — located, not
+  fixed. No fix is claimed and no perf claim
   is made: the host was halted mid-measurement (see "Halt" below), so no
   before/after arm exists. This row records what was measured, what it means,
-  and exactly where the next owner should put a breakpoint.
+  and exactly where the next owner should put a breakpoint. Term 1 (fixed
+  ~2.7-3.1 GB import-closure load) is intrinsic to the interpreted-worker
+  spawn (unchanged at this base, source-checked by int11); term 2 (unbounded
+  creep inside the interpreted `parse` step) remains unattributed. Owner:
+  seed-fix lane (term 2 attribution, Linux gdb/sampler grant) / bootstrap
+  redesign (term 1). See the 2026-11-10/11 addenda below.
 - **Predecessor row:** `native_build_source_closure_zero_sources_2026-08-17.md`
   — that row fixed the *misattribution* (`-1` is a shared sentinel for deadline
   expiry AND abnormal child exit, so an allocator abort printed
@@ -263,3 +269,17 @@ seed-fix lane, needs the Linux gdb / sampler attribution grant boot6 recorded
 verbatim above — this lane is also Windows, same host constraint). No
 re-measure: 2026-11-07 baseline in-record, identical re-run budget-forbidden.
 Owner: seed-fix lane (term 2 attribution) / bootstrap redesign (term 1).
+
+## 2026-11-11 triage (lane int11) — header flipped LIVE; disposition source-checked
+
+Sweep flip. boot6 (2026-11-10) and int10 (2026-11-11) addenda recorded the
+verified two-term LIVE disposition with named owners; the header still read
+OPEN. int11 quick re-verify at base `84f5076db138` (source checks only, no
+re-measure — same host constraint boot6 recorded verbatim above): the
+interpreted-worker spawn is unchanged (`src/app/cli/bootstrap_main.spl:165`
+`run_native_build_worker(worker_args)`; `src/compiler_rust/compiler/src/module_cache.rs`
+still carries the process-lifetime `thread_local` retention maps, 8 hits), so
+term 1's import-closure floor remains intrinsic to the spawn shape. Term 2
+(unbounded `parse`-step creep) remains unattributed; both fix surfaces are
+outside this lane (`src/compiler` agent-30 lane; `src/compiler_rust`
+seed-fix lane with the Linux gdb/sampler grant). Header flipped to LIVE.

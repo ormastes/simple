@@ -1,7 +1,11 @@
 # Five real compiler/interpreter contract gaps found while modernizing the integration scaffold
 
 Date: 2026-09-06
-Status: open
+Status: LIVE (triaged 2026-11-11, lanes interp7/int9/int11) — gaps 1+2 FIXED on
+the fresh seed via `9e7e7a526edb` (PR #7597, re-verified in this lane's HEAD
+ancestry); gaps 3 (div-zero span diagnostics), 4 (export visibility), 5
+(circular-import detection) remain LIVE, owned by the compiler frontend lanes
+(`src/compiler/**`, `src/compiler_rust`). See the 2026-11-11 addenda below.
 Severity: P3 (each is a real but narrow correctness/diagnostics gap, not a crash)
 Location: found via
 `test/02_integration/compiler/compiler_interpreter_integration_spec.spl`,
@@ -165,3 +169,16 @@ detection) remain owned by the compiler frontend (`src/compiler/**`,
 `src/compiler_rust`) — outside the interpreter lane's write scope. Status
 stays OPEN (partial closure only); routing to the compiler/compiler-seed
 lanes stands.
+
+## 2026-11-11 P3 triage (lane int11) — header flipped LIVE on fresh source checks
+
+Fifth-lane sweep flip. Prior-lane addenda (2026-11-10 interp/interp2,
+2026-11-11 interp7, 2026-11-11 int9) already recorded the verified
+disposition; the header was never flipped. Re-verified fresh at this lane's
+base `84f5076db138` with one source check, no re-runs: the gap-1/gap-2
+absorber `9e7e7a526edb` (PR #7597) is an ancestor of this base, and
+`src/compiler_rust/compiler/src/impl_duplicate_check.rs` is in-tree. Gaps
+3/4/5 were re-verified LIVE three times today on the same tracked seed
+(build `46fe8f6b6def`) — per the no-rerun rule int11 did not repeat them.
+Status flipped: LIVE (partial closure only); routing to the
+compiler/compiler-seed lanes stands.
