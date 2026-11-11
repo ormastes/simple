@@ -243,3 +243,27 @@ build-output fix itself is landed and source-verified.
 
 Per the caveat, the "19 fixtures PASS" evidence for this row rests on the
 2026-11-09 Linux execution recorded above, not a fresh local green run.
+
+## Addendum 2026-11-11 (lane boot23) — FIXED re-confirmed at tip; boot16 disposition stands
+
+boot16 flipped this header to FIXED earlier today and recorded the
+verification caveat (Windows-native gate re-run stops >600 s at an orthogonal
+sanity-evidence assertion; the 19-fixture PASS evidence rests on the
+2026-11-09 Linux execution). boot23 re-verified FRESH by source inspection at
+this lane's base (`41935a5f61860`):
+
+- Private-lane producer mode still present:
+  `scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs:180` binds the
+  admission-chain residency check to the declared `--bootstrap-output`
+  (`case "$admission_file" in "$adm_bootstrap_output"/* ...`); the literal
+  `<repo>/build/bootstrap` hardcoding is gone.
+- Windows-aware resume lane still present:
+  `scripts/bootstrap/resume-stage3-from-admitted.sh` carries 7 `exe_suffix`
+  references plus MSVC `.lib` archive-name plumbing.
+
+Disposition: **FIXED** (re-confirmed). The orthogonal gate-portability issue
+boot16 flagged (guard runs >600 s on Windows Git Bash, passes on Linux) is a
+follow-up worth its own bug; it does not affect this row's build-output
+residency fix. No new spec run this lane — the gate files are byte-identical
+to the recorded 2026-11-09 Linux PASS state, and re-running a green check is
+forbidden.
