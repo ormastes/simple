@@ -1,6 +1,11 @@
 ---
 id: interp_option_dict_return_erased_2026-07-16
-status: OPEN
+status: LIVE (triaged 2026-11-11, lanes interp4/seedfix/int9/int11) — the seed
+  interpreter `-> Dict<K,V>?` return channel HANGS the seed codegen path
+  (CPU-bound no-output loop; parent-executed unbounded probe verdict,
+  `build/review/seedfix-defectC-probe.log`); root fix in
+  `src/compiler_rust` belongs to the seed-fix lane. See the 2026-11-11
+  addenda below.
 severity: medium
 discovered: 2026-07-16
 discovered_by: strict-cranelift diagnosis in scripts/check/check-native-seed-parity.shs
@@ -146,3 +151,18 @@ seed codegen path; next owner step stands (bisect the hang site in
 `src/compiler_rust` with a debug build and `SIMPLE_DBG_*` flags, or bound the
 compiler-graph phase with a cycle counter and dump active nodes). Root fix
 and any grant beyond that belong to the seed-fix lane. Status stays OPEN.
+
+## Addendum 2026-11-11 (lane int11) — header flipped LIVE; in-tree mitigation re-verified
+
+Sweep flip. Same-day prior-lane addenda (interp4 BLOCKED-needs-grant, seedfix
+parent-executed unbounded probe verdict, int9 concurrence) already recorded
+the verified LIVE disposition; the header/frontmatter was never flipped.
+Quick re-verify at base `84f5076db138` (one source check, no re-probe): the
+in-tree mitigation `STATICS_FAILED_KEY` is still present in
+`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl` (10 hits),
+and no commit in ancestry touches the Option<Dict<K,V>> return-channel path.
+The hours-scale in-context repro was already run to a pathological-CPU-freeze
+verdict by the granted parent probe today — re-running is budget-forbidden.
+Verdict stands: LIVE, owner seed-fix lane (`src/compiler_rust`, bisect the
+hang site with a debug build + `SIMPLE_DBG_*` flags, or bound the
+compiler-graph phase with a cycle counter).
