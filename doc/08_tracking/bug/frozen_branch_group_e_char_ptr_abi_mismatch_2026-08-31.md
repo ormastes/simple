@@ -1,7 +1,7 @@
 # Frozen bootstrap branch carries char*-ABI Group E exports (tagged-value callers)
 
 - **Date:** 2026-08-31
-- **Status:** OPEN — blocked on the running bootstrap in `C:\Users\ormas\dev\simple-rebase` (must not be touched while it runs)
+- **Status:** SUPERSEDED (triage 2026-11-11, lane boot21; first triaged 2026-11-10 lane boot5) — tagged-ABI fix `88aac2ffe28` re-verified ancestor of HEAD `d552f63f67f8`; all four Group E symbols carry the tagged int64 ABI at tip (see 2026-11-11 addendum below)
 - **Severity:** HIGH (latent garbage-read / crash class, not a link failure)
 
 ## Defect
@@ -77,3 +77,23 @@ Tagged-ABI fix `88aac2ffe28` and the behaviour selfcheck
 `1591de5a5e58` (2026-11-09) which records the same premise-outdated verdict.
 The char* defect existed only on the out-of-tree `simple-rebase` branch; the
 "blocked on running bootstrap" unblock condition no longer applies to this tree.
+
+
+## 2026-11-11 P3-boot21 triage — SUPERSEDED (header flip)
+
+Fresh re-verification of the 2026-11-10 boot5 disposition (not flipped then):
+
+- `git merge-base --is-ancestor 88aac2ffe28 HEAD` (HEAD `d552f63f67f8`, lane
+  worktree off `origin/release/1.0.0`): ANCESTOR — the tagged-ABI fix and the
+  behaviour selfcheck are in this tree's history.
+- `src/runtime/runtime_core_exports.c` at tip defines all four Group E symbols
+  with the tagged int64 ABI and no `const char*` text arg/return anywhere:
+  `rt_readdir(int64_t path_value)` :162, `rt_readdir_entry(int64_t, int64_t)`
+  :213, `rt_mkdir(int64_t path_value, int64_t mode)` :232,
+  `rt_shell_output(int64_t cmd_value)` :289.
+- The selfcheck driver `src/runtime/test/rt_core_exports_behaviour_selfcheck.c`
+  is present in-tree.
+
+The "blocked on the running bootstrap" unblock condition was host-state on the
+out-of-tree `simple-rebase` branch and no longer applies to this tree. No
+code change this lane; header flipped to match the verified disposition.
