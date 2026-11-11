@@ -35,46 +35,9 @@ use std.spec.step
 
 use std.io_runtime
 
-# --- Inline policy types and logic ---
-
-struct PolicyResult:
-    allowed: bool
-    exit_code: i64
-    message: text
-
-fn policy_allow() -> PolicyResult:
-    PolicyResult(allowed: true, exit_code: 0i64, message: "")
-
-fn policy_forbid(message: text) -> PolicyResult:
-    PolicyResult(allowed: false, exit_code: 1i64, message: message)
-
-fn _has_arg(argv: [text], needle: text) -> bool:
-    var i = 0i64
-    while i < argv.len():
-        if argv[i] == needle:
-            return true
-        i = i + 1i64
-    false
-
-fn check_forbidden(argv: [text]) -> PolicyResult:
-    if argv.len() < 2i64:
-        return policy_allow()
-    if argv[0i64] != "git":
-        return policy_allow()
-    val verb = argv[1i64]
-    if verb == "rebase" and _has_arg(argv, "-i"):
-        return policy_forbid("ERROR[FORBIDDEN]: git rebase -i is not supported here. Use sj split, sj squash --into, or sj rebase --onto instead.")
-    if verb == "push" and (_has_arg(argv, "--force") or _has_arg(argv, "-f")):
-        return policy_forbid("ERROR[FORBIDDEN]: force-push is prohibited. To move a bookmark backward use: jj bookmark move <name> --to <rev> --allow-backwards then: sj git push origin <name>")
-    if verb == "push" and argv.len() == 2i64 and not _has_arg(argv, "--bookmark") and not _has_arg(argv, "--via-worktree"):
-        return policy_forbid("ERROR[FORBIDDEN]: bare 'sj git push' is ambiguous in a jj repo. The project push pattern is: jj bookmark set main -r @- && sj git push origin main")
-    if verb == "checkout" and argv.len() == 2i64:
-        return policy_forbid("ERROR[FORBIDDEN]: bare 'git checkout' with no arguments is not meaningful in a jj-managed repo. Use sj git checkout <rev> or sj git checkout -b <branch> [base]")
-    if verb == "filter-branch":
-        return policy_forbid("ERROR[FORBIDDEN]: git filter-branch rewrites history outside jj's operation log. Use sj raw git filter-branch only if you accept the risk.")
-    if verb == "stash":
-        return policy_forbid("ERROR[FORBIDDEN]: use 'jj new -m wip-<topic>' instead - jj's working-copy-as-commit makes stash unnecessary")
-    policy_allow()
+# Exercise the production policy, not an inline copy: the inline mirror froze
+# before protected-ref enforcement landed and silently diverged from it.
+use app.sj_daemon.forbidden.{check_forbidden}
 
 # ============================================================================
 # Tests
@@ -102,7 +65,7 @@ describe "Forbidden Verbs - Force Push":
         step("forbids git push --force")
         val result = check_forbidden(["git", "push", "--force"])
         expect(result.allowed).to_equal(false)
-        expect(result.message).to_contain("force-push")
+        expect(result.message).to_contain("force")
 
     it "forbids git push -f":
         # @req REQ-SSPEC-UNIT
@@ -114,11 +77,11 @@ describe "Forbidden Verbs - Force Push":
         val result = check_forbidden(["git", "push", "--bookmark", "work/fix/gh-12-parser"])
         expect(result.allowed).to_equal(true)
 
-    it "allows git push with --bookmark":
+    it "forbids protected git push with --bookmark":
         # @req REQ-SSPEC-UNIT
-        step("allows git push with --bookmark")
+        step("forbids protected git push with --bookmark")
         val result = check_forbidden(["git", "push", "--bookmark", "main"])
-        expect(result.allowed).to_equal(true)
+        expect(result.allowed).to_equal(false)
 
 describe "Forbidden Verbs - Bare Push":
     it "forbids bare git push":
@@ -126,17 +89,11 @@ describe "Forbidden Verbs - Bare Push":
         step("forbids bare git push")
         val result = check_forbidden(["git", "push"])
         expect(result.allowed).to_equal(false)
-        expect(result.message).to_contain("ambiguous")
+        expect(result.message).to_contain("explicit owned work")
 
     it "forbids unscoped git push with --via-worktree":
         val result = check_forbidden(["git", "push", "--via-worktree"])
-        expect(result.allowed).to_equal(true)
-
-    it "allows git push with --via-worktree":
-        # @req REQ-SSPEC-UNIT
-        step("allows git push with --via-worktree")
-        val result = check_forbidden(["git", "push", "--via-worktree"])
-        expect(result.allowed).to_equal(true)
+        expect(result.allowed).to_equal(false)
 
 describe "Forbidden Verbs - Bare Checkout":
     it "forbids bare git checkout":
