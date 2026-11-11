@@ -1,0 +1,100 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR: `[x]` over a `for x in <[text]>` loop var is not int-boxed
+
+Bug one_element_literal_of_loop_text_boxed_as_int_2026-10-25: in
+native_interface_slice.spl the trailing `for attr in pending_attrs: f(attr, [attr])`
+boxed `attr` through `rt_value_int_wide` (tagged handle << 3), and the
+callee's `rt_array_join_any` strlen'd the shifted word (SEGV). `pending_attrs`
+is a declared `[text]` that is reassigned `= []` and aliased
+(`cur_lines = pending_attrs`) inside the loop; its elements come from an
+untyped `var logical = t` grown by `+`.
+
+Pins: no function that builds `[attr]` from a text loop var emits
+`rt_value_int_wide`.
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val SINK = "fn sink(h: text, ls: [text]) -> text:\n    h + ls.join(\",\")\n\n"
+
+# The real producer shape (native_slice_decls_v1 trailing pending_attrs).
+val REAL_SRC = SINK + "fn real(lines: [text]) -> [text]:\n    var decls: [text] = []\n    var cur_lines: [text] = []\n    var pending_attrs: [text] = []\n    for t in lines:\n        var logical = t\n        if t.ends_with(\"\\\\\"):\n            logical = logical + \"+\"\n        if logical.starts_with(\"@\"):\n            pending_attrs.push(logical)\n            continue\n        if cur_lines.len() > 0:\n            decls.push(sink(logical, cur_lines))\n        cur_lines = pending_attrs\n        pending_attrs = []\n        cur_lines.push(logical)\n    for attr in pending_attrs:\n        decls.push(sink(attr, [attr]))\n    decls\n"
+# Plain shape: declared [text], no reassignment.
+val PLAIN_SRC = SINK + "fn plain(xs: [text]) -> [text]:\n    var out: [text] = []\n    for a in xs:\n        out.push(sink(a, [a]))\n    out\n"
+# Reassigned-to-empty only.
+val RESET_SRC = SINK + "fn reset(xs: [text]) -> [text]:\n    var out: [text] = []\n    var p: [text] = []\n    for a in xs:\n        p.push(a)\n        p = []\n        p.push(a)\n    for a in p:\n        out.push(sink(a, [a]))\n    out\n"
+# Aliased then reset (cur = p; p = []).
+val ALIAS_SRC = SINK + "fn alias(xs: [text]) -> [text]:\n    var out: [text] = []\n    var cur: [text] = []\n    var p: [text] = []\n    for a in xs:\n        cur = p\n        p = []\n        p.push(a)\n        cur.push(a)\n    for a in p:\n        out.push(sink(a, [a]))\n    out\n"
+# Control: a genuine [i64] loop var MUST still box as an int.
+val INT_SRC = "fn isink(h: i64, ls: [i64]) -> i64:\n    h + ls.len()\n\nfn ints(xs: [i64]) -> i64:\n    var t = 0\n    var p: [i64] = []\n    for a in xs:\n        p.push(a)\n        p = []\n        p.push(a)\n    for a in p:\n        t = t + isink(a, [a])\n    t\n"
+
+struct Lowered:
+    errors: [text]
+    int_wide: Dict<text, i64>
+
+fn lower_source(src: text) -> Lowered:
+    val parsed = parse_full_frontend(src, "loop_text.spl", "loop_text", Logger(level: 0))
+    var hl = HirLowering.with_filename("loop_text.spl")
+    val hir = hl.lower_module(parsed)
+    var ml = MirLowering.new(hir.symbols)
+    val mir = ml.lower_module(hir)
+    var errors: [text] = []
+    for e in hl.errors:
+        errors = errors.push("hir: " + e.message)
+    for e in ml.errors:
+        if e.fatal:
+            errors = errors.push("mir: " + e.message)
+    var int_wide: Dict<text, i64> = {}
+    for function in mir.functions.values():
+        var n = 0
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                if name == "rt_value_int_wide":
+                                    n = n + 1
+                            case _: pass
+                    case _: pass
+        int_wide[function.name] = n
+    Lowered(errors: errors, int_wide: int_wide)
+
+fn wide_in(l: Lowered, fn_name: text) -> i64:
+    for k in l.int_wide.keys():
+        if k == fn_name or k.ends_with("." + fn_name):
+            return l.int_wide[k]
+    -1
+
+describe "one-element literal of a text loop var (MIR)":
+    it "REPRO: real native_interface_slice shape does not int-box [attr]":
+        val l = lower_source(REAL_SRC)
+        expect(l.errors.len()).to_equal(0)
+        expect(wide_in(l, "real")).to_equal(0)
+
+    it "plain declared [text] loop var":
+        val l = lower_source(PLAIN_SRC)
+        expect(l.errors.len()).to_equal(0)
+        expect(wide_in(l, "plain")).to_equal(0)
+
+    it "PREVENTION: [text] var reassigned to [] keeps its element type":
+        val l = lower_source(RESET_SRC)
+        expect(l.errors.len()).to_equal(0)
+        expect(wide_in(l, "reset")).to_equal(0)
+
+    it "PREVENTION: alias swap (cur = p; p = []) keeps text elements":
+        val l = lower_source(ALIAS_SRC)
+        expect(l.errors.len()).to_equal(0)
+        expect(wide_in(l, "alias")).to_equal(0)
+
+    it "CONTROL: an [i64] loop var still boxes as a wide int":
+        val l = lower_source(INT_SRC)
+        expect(l.errors.len()).to_equal(0)
+        expect(wide_in(l, "ints") > 0).to_equal(true)
