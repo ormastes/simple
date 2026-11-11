@@ -1,7 +1,6 @@
 # lib nogc_sync_mut: behavioral/spec failures beyond trivial repair (22 specs RED)
 
-**Status:** OPEN (2026-09-16). All verified with `SIMPLE_TIMEOUT_SECONDS=600 bin/simple test <spec>`
-on `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed banner present).
+**Status:** LIVE (triaged 2026-11-11, lane rt3 two passes — PR #8313 + second pass work/p3-rt3-20261111; umbrella narrowed twice on fresh seed 46fe8f6b6def: 8/13 sampled items green, 5 confirmed RED remain, each needing its owning package lane; see addenda below)
 
 ## Observed (spec -> failing example -> message)
 
@@ -173,3 +172,35 @@ Per the testing rules (leave RED, do not weaken), no spec was edited and no
 assertion was relaxed. This umbrella needs its remaining items either fixed in
 `src/lib`/`src/app` or individually retired by their owners; it is too broad
 for a single P3 triage lane to close wholesale.
+
+---
+
+## 2026-11-11 second-pass narrowing — lane rt3 pass 2 (worktree simple-p3-rt3-20261111, base 7f0fa174083, seed 46fe8f6b6def)
+
+**Verdict: LIVE (named per-item owners) — umbrella narrowed twice, not closeable by a triage lane.**
+
+Pass 2 sampled 7 further unit-scale items never re-checked in pass 1
+(`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe test <spec> --mode=interpreter --no-cache`, per-spec 240s timeout):
+
+**Now PASS (were RED on 2026-09-16):**
+- `env_platform_process_owner_spec.spl` 1/1 PASS (ownership-contract scan; platform.spl routing restored).
+- `js/engine/interpreter_object_single_owner_spec.spl` 1/1 PASS (allocation count).
+- `tooling/easy_fix/duplicate_typed_arg_signature_nil_miss_spec.spl` 2/2 PASS (lint crash regression).
+- `test_runner/native_binary_resolution_contract_spec.spl` 2/2 PASS (SIMPLE_BINARY resolution order).
+
+**Still RED (confirmed pass 2):**
+- `concurrent_thread_pointer_spawn_spec.spl` 1/1 FAIL (closure-pointer vs Any-value forwarding) — owner: `concurrent` package (`src/lib/nogc_sync_mut/concurrent/thread.spl`).
+- `io/window_winit_compat_mapping_spec.spl` 2/2 FAIL (`winit_compat_event_get_type` / `_window_close_requested` not found) — owner: `io` package.
+- `linalg/raw_memory_owner_spec.spl` 0/4 FAIL (`raw_f64_to_bits` not found; owner-shape drift) — owner: `linalg` package.
+
+**Combined tally across both rt3 passes:** 8 of 13 sampled items green;
+5 confirmed RED (shader_compile WgslEmitter entry points, gpu_queue_usm
+lowering path, thread_pointer_spawn, winit_compat_mapping, raw_memory_owner).
+The remaining ~9 unsampled items (DbFsDriver parity, Vec3 receiver,
+with_lock_guard crash, js_vm_reclamation, domain_arena_v1,
+ui_scene_column_arena_v2, durable_atomic_bytes, gpu_mesh3d/graph_ir3d) are
+heavier render/gpu/ui specs expected to mirror the same split; each belongs
+to its owning package lane. Per testing rules no spec was edited and no
+assertion relaxed. No production change attempted in this lane — the 5
+confirmed items are real per-package implementation gaps, and this umbrella
+record stays LIVE until each owning lane fixes or individually retires its item.

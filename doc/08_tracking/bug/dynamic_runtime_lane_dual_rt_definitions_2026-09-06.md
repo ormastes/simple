@@ -1,6 +1,6 @@
 # Dynamic-runtime lane links 509 rt_* twice (executable + .so), and an ABI seam shows
 
-Status: OPEN — top residual risk of the `dynamic-runtime` lane
+Status: LIVE (triaged 2026-11-11, lanes work/p3-rt2-20261111 + work/p3-rt3-20261111 — structural dual-`rt_*`-definition seam in the dynamic-runtime lane; fix owner: compiler/native_project linker lane; see addenda below)
 Component: `pipeline/native_project/linker.rs` (dynamic lane), `src/runtime`
 
 ## What was built
@@ -118,3 +118,32 @@ Labels: host-independent-source (static composition audit at pinned base);
 blocked-repro (needs-grant commands above). No change made in this lane —
 the fix is a linker/projection feature in the compiler/native_project
 lane, deliberately not attempted here under the no-heavy-build constraint.
+
+## 2026-11-11 second-pass corroboration — P3 rt3 lane (worktree simple-p3-rt3-20261111, base 7f0fa174083)
+
+**Verdict: LIVE (corroborates lane p3-rt2 same-day triage; fresh source re-check, no re-diagnosis).**
+
+All four structural facts from the rt2 addendum still hold at this base:
+
+- `build_core_c_runtime_supplement_library` (`tools.rs:925`) still calls
+  `build_c_runtime_library(.., false, true, false, ..)` — no projection/
+  localization parameter exists in that signature; the full core-C archive
+  is still the supplement.
+- The dynamic-runtime lane (`linker.rs:2203-2237`) still appends that archive
+  AFTER the shared runtime; the block comment still states the seam mechanism
+  verbatim ("the executable's copy simply wins for the whole process,
+  including calls made from inside the runtime"). The `projected core-C
+  supplement` wording at `linker.rs:2316` is in the `is_native_all`
+  Linux/FreeBSD branch only — it does NOT cover the dynamic-runtime lane.
+- `scripts/check/check-rt-dual-implementation-ratchet.shs` still has zero
+  `dynamic` mentions — nothing pins the dual-definition count down for this
+  lane.
+- `git log --grep` over the dynamic-lane linker/tools since filing finds no
+  projection fix commit.
+
+Named owner: **compiler/native_project dynamic-runtime linker lane** (project
+the core-C supplement the way `build_stage4_rust_runtime_projection_archive`
+projects the Rust runtime, localized to the C-only gap symbols). Reproduction
+remains grant-gated per the rt2 addendum commands (Linux ELF lane: cdylib
+build + Stage4 driver link + `nm`/`comm` dual-set measurement + array-handle
+hello under interpret/AOT). No change made in this lane.

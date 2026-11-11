@@ -1,6 +1,6 @@
 # lib nogc_sync_mut: specs reference modules/exports absent from src/lib (13 specs RED)
 
-**Status:** OPEN (2026-09-16). Verified with `bin/simple test` per spec, SIMPLE_TIMEOUT_SECONDS=600.
+**Status:** LIVE (triaged 2026-11-11, lane rt3 two passes — landed half verified green; still-missing half is substantive per-module feature implementation, owners named below)
 
 ## Observed (per spec, runtime/semantic error)
 
@@ -89,3 +89,33 @@ is substantive feature implementation beyond a P3 triage lane; per this
 record's own unblock condition each module must be implemented by an owner or
 its spec deliberately retired with the owning lane's sign-off (testing rules
 forbid weakening assertions to pass). Kept OPEN for that subset.
+
+---
+
+## 2026-11-11 second-pass corroboration — lane rt3 pass 2 (worktree simple-p3-rt3-20261111, base 7f0fa174083, seed 46fe8f6b6def)
+
+**Verdict: LIVE (named owners) — corroborates pass 1 census; no drift in either half.**
+
+Fresh directory census at this base:
+- Still missing (confirmed): `enterprise_{assets,expense,quality,warehouse}`
+  (25 other `enterprise_*` dirs exist, these four absent),
+  `mission_critical/domain_arena_v2` (dir still `bounded_process_policy.spl`,
+  `domain_arena_v1.spl`, `mci_evidence_manifest_v1.spl` only),
+  `concurrent/server_worker_policy` (dir still `actor_hooks/channel/mutex/rwlock/thread` only),
+  `io/hal_buffer_dispatch` (no such file).
+- Landed half still present: `gpu/chromium_reference_oracle_sffi.spl`,
+  `gpu/provider.spl`, `ui_test/gui_driver.spl`, `ui_test/tui_driver.spl`,
+  `ui_test/sgtti.spl`.
+
+Behavioral re-check: `enterprise_assets_spec.spl` still
+`outcome=ERROR declared>=10 executed=0 passed=0` on the tracked seed
+(interpreter, 9.4s) — module-resolution failure unchanged.
+
+Named owners for the missing half (per this record's own unblock condition —
+implement the module or retire the spec with the owning lane's sign-off):
+- `enterprise_{assets,expense,quality,warehouse}` — enterprise domain lane (`src/lib/nogc_sync_mut/enterprise_*`).
+- `mission_critical/domain_arena_v2` — mission_critical package owner.
+- `concurrent/server_worker_policy` — concurrent package owner.
+- `io/hal_buffer_dispatch` — io/HAL package owner.
+
+No spec edited, no assertion relaxed, no production change attempted in this lane.
