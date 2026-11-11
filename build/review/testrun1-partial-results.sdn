@@ -1,0 +1,90 @@
+# Test-suite health lane testrun1 — partial-run results (PHASE 1, in flight)
+# Worktree: C:/Users/yoon/dev/simple-testrun1-20261111
+# Branch:   work/testrun1-20261111 (cut from origin/release/1.0.0)
+# Runner:   tracked seed bin/simple.exe (build 46fe8f6b6def), per-spec:
+#           SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe SIMPLE_TIMEOUT_SECONDS=300
+#           bin/simple.exe test <spec> --mode=interpreter --no-cache
+# Host:     Windows (Git Bash), llvm-mingw-20260922-ucrt-x86_64 on PATH. No push, no PR.
+# Ledger:   build/review/testrun1/testrun1-ledger.tsv (spec, verdict, wall_s, cause)
+#           in the worktree; mirrored to build/review/testrun1-ledger.tsv in the
+#           main checkout when the run completes.
+
+lane: testrun1
+phase: 1-partial
+date: 2026-11-11
+base_tip: origin/release/1.0.0 (includes same-day p3 lanes)
+
+coverage:
+  candidates_total: 14483        # *_spec.spl under test/01_unit + test/02_integration
+  upfront_skips: 788             # skip-list classes, recorded with reasons in ledger
+  specs_run_so_far: 7700         # 53% of candidates at commit time; fleet still running
+  passed: 3914
+  failed_error: 2085             # FAIL rows (mostly crash/compile-abort families)
+  failed_assertion: 1205         # ERROR rows (executed, examples failed)
+  timeouts: 435                  # runner 300s per-spec limit or batch cap
+  inconclusive_empty_verdict: 61 # early-worker extraction artifact; fix-loop candidates
+  not_reached: 6783              # 14483 - 7700 (fleet at ~53% when interrupted by cap)
+
+families_seen_among_failures:
+  - id: private_fn_visibility
+    count: 633
+    shape: "error: semantic: private fn `<fn>` of module `<mod>`" — unit specs importing
+      module-private fns; ~25 distinct module::fn pairs, one missing export blocking
+      11-25 specs each.
+    fixed:
+      - modules: [test.fixtures.structural.profile_golden_v1,
+                  test.fixtures.spipe_controlled_work.controlled_work_proof,
+                  test.fixtures.interpreter_global_array_push_linear.shapes]
+        commit: af0e67b749ce6
+        rescued: 25 of 43 affected specs green (residue fails on unrelated causes)
+      - modules: [compiler.loader.smf_cache_manager]
+        commit: 38a5a61374704
+        rescued: 14 of 18 affected specs green (residue: mir_opt private-fn imports, 2 assertion fails)
+    routed: 572 specs as SKIP/owner-decision (ledger cause names module+fn); top
+      modules: compiler.backend.native.isel_x86_64 (25), gpu_portable_compute (25),
+      riscv_target (24), encode_x86_64 (24), native.mod (23), rules_clib_parity (23),
+      gpu_generated_2d_contract (23), backend_helpers (23), app.ui.tui.event_wait (22),
+      app.ui.ipc.async_handler (22). Widening compiler/app-internal visibility needs
+      owner sign-off; recommended pattern = the two fix commits above (visibility only).
+  - id: cannot_resolve_module
+    count: "~60 at last scan"
+    shape: "error: semantic: Cannot resolve module: <mod>" — moved/renamed modules
+      (e.g. app.t32_cli.commands). Unfixed at commit time.
+  - id: runner_300s_timeouts
+    count: 145+ observed (growing)
+    shape: "error: timeout: execution exceeded 300 second limit" — heavy specs
+      (app/cli native-build invocations cluster). Class: TIMEOUT-skip per task rules.
+  - id: batch_cap_timeouts
+    count: ~300 at last scan
+    shape: 25-spec batch exceeded the 420s external cap — attribution lost for the
+      batch; all members marked TIMEOUT, fix-loop re-runs them solo/mini-batch.
+  - id: assertion_failures
+    count: 1205
+    shape: "spec failure: N of M example(s) failed" — real example failures; each
+      needs individual triage (not batch-fixable).
+
+warmup_fixes_landed_before_run:
+  - commit 4e243764f6be test(level_detection): pin 04_smoke classification to
+    TEST_LEVEL_SMOKE — spec predated the SMOKE level; impl doc lists which trees
+    stay unclassified (04_smoke not among them). Repaired spec now 20/20.
+  - commit 6f57d6aa86d2 chore(vacuous-baseline): drop hir_types_spec stale
+    zero-assertion entry — the 2026-11-06 HIR port added real assertions; the
+    baseline line stayed. Repaired spec now 8/8.
+
+runner_health_notes:
+  - seed emits no MC/DC probes: every spec reports "MC/DC: DEGRADED evidence=absent"
+    but its real pass/fail is unaffected (runner is explicit about this).
+  - "test --list <spec>" under the seed does NOT enumerate — it silently executes
+    the spec (exit 0). Equivalent discovery = filesystem enumeration of *_spec.spl
+    (what this lane's harness uses). Phase 2 will re-check.
+
+phase2: not-started at this commit (2h cap consumed by Phase-1 fleet); the
+  testrunner-surface specs are being exercised by the Phase-1 run itself and their
+  ledger rows will seed Phase 2's clean-cache verification.
+
+process:
+  - 16-way round-robin batch workers (25 spec files per invocation, 420s external
+    cap, SIMPLE_TIMEOUT_SECONDS=300), per-spec verdict attribution from
+    "SPEC FILE VERDICT:" lines; per-spec wall = batch wall / batch size.
+  - fix loop: mini-batches of 3 (950s cap), solo-split on cap hit; hard rule kept —
+    a spec is never re-run unchanged more than 3 times.
