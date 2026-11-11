@@ -604,3 +604,41 @@ stale: e.g. `10.frontend/domain/schema_contract.spl` now uses `self.` throughout
 Consequence: this row does **not** block the compiler compiling itself. The
 remaining sites are in `src/os/**` and `src/lib/**` (non-bootstrap scope). Row
 stays OPEN, re-scoped to those trees.
+
+## Triage 2026-11-11 (p3fix-p2a-20261111 lane) — FIXED (fenced population qualified; ratchet regenerated)
+
+Re-verified at release/1.0.0 tip (worktree @ 79d5af6723f6). The product-side
+sweep this doc tracked has LANDED: every one of the 102 baselined triples in
+`scripts/check/bare_field_reference_baseline.txt` is no longer present in
+source — fixes across `10.frontend/domain/schema_contract.spl` (12),
+`10.frontend/domain/style_theme.spl` (14),
+`70.backend/backend/vhdl/vhdl_subprogram_model.spl` (17),
+`os/http/http3_frame.spl` (11), `os/http/stun_scram.spl` (10),
+`os/http/ws_deflate_auth.spl` (14), `os/kernel/arch/riscv64/*` (incl.
+`riscv_mmu_trap.spl` 11, `riscv_dtb_firmware.spl` 10, `riscv_board_boot.spl`
+10) and the remaining fenced clusters. Spot-checked qualifications are real
+(`self.f0_name` schema_contract.spl:68, `self.value` style_theme.spl:14,
+`me.base_delta` http3_frame.spl:110) — not renames or analyzer dodges.
+
+Action taken (the guard's own prescribed remediation for a stale baseline):
+`sh scripts/check/check-bare-field-references.shs --generate-baseline` →
+`wrote scripts/check/bare_field_reference_baseline.txt (0 known sites over
+158 files)`; re-run `--static-only` → `static OK — 158 files scanned, 0 known
+site(s), 0 new, 0 stale` / `PASS — 4 checks ran, all green` (controls A/B/C
+all fired). The static ratchet is green again and now fails on ANY new bare
+field site in the 158 fenced files with an empty baseline.
+
+The 2026-08-10 census's 1,550-row unfenced candidate superset was previously
+shown (docstring-stripping fix + residue hand-read) to be dominated by
+analyzer artifacts, not additional genuine sites; nothing since has reopened
+that question.
+
+Full-mode admission: the second behavioral leg
+(`test/01_unit/os/smux_spec.spl`, fenced smux cluster) produced a clean
+verdict on this host (20/20 in ~9s, tracked seed binary, interpreter) and was
+wired into the guard per its own TODO admission rule; the vhdl spec remains
+unwired (no verdict within the guard bound on the contended copy — TODO
+preserved in the guard). Full mode then passes end-to-end: 6 distinct checks
+(3 controls + static + 2 spec legs).
+
+Status flipped open → fixed (code: regenerated baseline; doc: this addendum).
