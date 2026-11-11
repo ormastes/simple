@@ -1,7 +1,11 @@
 # `native-build` fails after a clean HIR with `type mismatch: cannot convert enum to int`
 
 - **Date:** 2026-09-01
-- **Status:** OPEN — newly reachable, not yet diagnosed
+- **Status:** SUPERSEDED 2026-11-11 (lane p3-comp8; disposition first recorded by
+  lane p3-boot6 2026-11-10) — absorber: seed-fix attribution
+  `21e7eac04165`/`1e1dc5278a9e`, verified on `origin/main`; NOT yet an ancestor
+  of `release/1.0.0` tip (`dacccfc78fd10`), so the port to release plus the
+  tracked-seed rebuild remain with the seed-fix lane.
 - **Lane:** goal item 2, x86_64 WM host-Vulkan pixel evidence (blocks the daemon build)
 
 ## Symptom
@@ -63,3 +67,32 @@ the most likely root class (optional-int arithmetic reaching `as_int`). Root
 repro (`build/reprobuild.sh`, 12-module `i_owner.spl` closure, ~9 min
 interpreted worker) was not re-run: host-heavy and the attribution fix is
 already verified on main.
+
+## Addendum 2026-11-11 — P3 lane comp8 verdict: SUPERSEDED (boot6 disposition re-verified fresh; fix on main only, not release tip)
+
+Fresh re-verification on `origin/release/1.0.0` tip `dacccfc78fd10`
+(worktree `simple-p3-comp8-20261111`):
+
+- `21e7eac04165` ("fix(seed): name enum::variant in 'cannot convert enum to
+  int'") and its merge `1e1dc5278a9e` (PR #7995) exist and ARE ancestors of
+  `origin/main`, but are NOT ancestors of the release tip; `git branch -a
+  --contains 21e7eac04165` shows main-line branches only (no
+  `release/1.0.0`).
+- `grep "cannot convert enum"` over `src/compiler_rust/compiler/src/` at the
+  release tip finds only comments — the named-variant attribution is absent
+  from the release-line seed source.
+- The adjacent compile-time guard IS present at the release tip
+  (`hir/lower/expr/operators.rs:49-86` rejects arithmetic/bitwise/ordered-
+  compare on unwrapped optional scalars with unwrap guidance, closing the most
+  likely root class the boot6 addendum cites).
+- Branch geometry: `release/1.0.0` is 11,203 commits ahead of / 38 behind
+  `origin/main` — release is the live line, so the main-side fix does NOT flow
+  to release automatically; it must be ported.
+- Root repro (`build/reprobuild.sh`, 12-module `i_owner.spl` closure, ~9 min
+  host-heavy interpreted worker, entry-closure native-build) was not re-run:
+  entry-closure native builds are forbidden in-lane and the fix surface is the
+  Rust seed, owned by the seed-fix lane.
+
+Disposition: SUPERSEDED with named absorber and named gap — port of
+`21e7eac04165` to `release/1.0.0` + tracked-seed rebuild belong to the
+seed-fix lane. Header flipped OPEN → SUPERSEDED.
