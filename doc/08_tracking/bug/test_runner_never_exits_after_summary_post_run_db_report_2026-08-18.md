@@ -132,3 +132,32 @@ outside a hang fix. Nothing was changed; this is filed with the reproducer and e
 
 ## Round 8 part 2 note 2026-11-06 (not reproduced on Windows seed)
 `generate_test_result_md` on the current 4904-line test_db.sdn: load 90 ms, generate 448 ms. A 3-file directory run with the DB phase enabled exits normally. The Linux-seed 780 s report generation / non-exit is not reproducible here; stays OPEN for a Linux re-probe (`timeout 1800 bin/simple test test/fixtures/_accept_run --unstable`).
+
+## 2026-11-11 — runner10 lane verdict: BLOCKED (verbatim grant; needs Linux re-probe)
+
+Grant (known-live route, quoted verbatim): "Windows interpreted driver
+>240s (keep to unit-scale specs; abort any spec >10 min and mark BLOCKED
+with the grant instead)." This row is blocked on a different platform
+constraint — the hang was reproduced only on the Linux Rust seed, and this
+lane runs the Windows tracked seed — but the same grant governs: no
+long-running directory-lane reproduction was attempted beyond the evidence
+already on file.
+
+Fresh checks this lane at base 79d5af6723f6:
+
+- The reproducer fixture is unchanged and tracked:
+  `test/fixtures/_accept_run/` (pass_a, pass_b, fail, crash, timeout specs).
+- The 2026-11-06 round-8 note's disposition is the governing evidence and
+  was NOT re-run (campaign no-rerun rule; this lane's planned reproduction
+  died with its session): on the current Windows seed,
+  `generate_test_result_md` over the then-4904-line test_db.sdn loaded in
+  90 ms and generated in 448 ms, and a 3-file directory run with the DB
+  phase enabled exited normally — the Linux-seed 780 s report generation /
+  post-summary non-exit does not reproduce on Windows.
+
+Disposition: Status stays OPEN, owned by a Linux-seed lane. Next step
+remains the 2026-11-06 note's Linux re-probe (`timeout 1800 bin/simple test
+test/fixtures/_accept_run --unstable`, watch the post-summary DB/report
+phase and the +693 s residual spin). The small zombie-reap leak noted in
+the body (`execution.rs:1713-1719` Children dropped unreaped) is cosmetic
+and separate.
