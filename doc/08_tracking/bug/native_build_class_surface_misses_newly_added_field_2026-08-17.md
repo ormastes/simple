@@ -4,8 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (P1 — aborts the native-build worker). Re-triaged 2026-08-17;
-not reproduced in isolation, see "Re-triage" below.
+**Status:** FIXED (triage 2026-11-11, lane boot21; first triaged 2026-11-10 lane boot5) — module-qualified type-registry fixes re-verified at HEAD `d552f63f67f8` and BOTH modqual pins green on the tracked seed 46fe8f6b6def (8/8 and 12/12); the 2026-11-10 LIVE residual reading is itself stale (see 2026-11-11 addendum below).
 
 ## Re-triage 2026-08-17 (seed `bin/release/x86_64-unknown-linux-gnu/simple`, 59537240 bytes, mtime 2026-08-17 12:58:51)
 
@@ -169,3 +168,30 @@ definition before any global/last-registered tier, on Windows path spellings
 too; (3) green both modqual specs as the acceptance gate. The
 `imported_type_methods_in_progress` accessor workaround can be inlined back
 only after (3).
+
+
+## 2026-11-11 P3-boot21 triage — FIXED at tip (header flip)
+
+Fresh re-verification on the tracked seed (build 46fe8f6b6def,
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe`, `--mode=interpreter
+--no-cache`):
+
+- `test/01_unit/compiler/95.interp/interpreter/module_qualified_type_registry_spec.spl`
+  → SPEC FILE VERDICT outcome=OK, executed=8 passed=8 failed=0.
+- `test/01_unit/compiler/95.interp/interpreter/module_qualified_type_registry_prevention_spec.spl`
+  → SPEC FILE VERDICT outcome=OK, executed=12 passed=12 failed=0.
+
+Both pins are GREEN on the current tracked seed. The 2026-11-10 boot5 addendum
+recorded these same two specs FAILing (3/8 and 1/12) on the then-current seed
+and classified the row LIVE-residual for the seed-fix lane; that residual
+reading is itself stale as of tracked seed 46fe8f6b6def — the named-use-import
+(`use m.{A, B}` same-named types) path now resolves correctly.
+
+Source state at HEAD `d552f63f67f8`: the registry fixes `6ae0170f5e49` (PR
+#6981) and `4a5740091035` (PR #7498, `resolve_class_in_scope`) are ancestors;
+`imported_type_methods_in_progress` is a normally declared class field
+(`types.spl:182`, constructor `:772`). The accessor workaround
+(`context_helpers.spl`, used from `module_reexport_materialization.spl:1524-1526`)
+still stands and can now be inlined back as optional cleanup — its acceptance
+gate (both modqual specs green) is satisfied. No code change this lane; header
+flipped from the stale LIVE reading to FIXED-at-tip.

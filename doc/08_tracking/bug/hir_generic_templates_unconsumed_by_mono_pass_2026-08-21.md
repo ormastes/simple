@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** SUPERSEDED
+**Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp7-20261111) — `40.mono` no-op subsystem replaced by `hir_function_selection_v1`; re-verified fresh-seed 4/4 + 4/4 (see addenda)
 **Filed:** 2026-08-21
 **Relates to:** #158 Phase B; plan `doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md`
 
@@ -387,3 +387,32 @@ mandate). The verdict rests on the disappearance of the named no-op subsystem +
 the landed #158/#7991 selection machinery + the two green pins above.
 
 **Cycles:** 0 (no fix attempted; addressed by prior #158 rework).
+
+---
+
+## 2026-11-11 (lane p3fix-comp7-20261111) — Status re-verified SUPERSEDED, header flipped
+
+Independent re-verification of the same-day compiler2 addendum on this lane's
+fresh worktree (base `a64cda1ee32d`, tracked seed `bin/simple.exe`,
+build-commit 46fe8f6b6def):
+
+- `src/compiler/40.mono/` no longer exists (`ls` → No such file or directory);
+  neither does its spec tree `test/01_unit/compiler/mono/`. The literal
+  no-op-pass subsystem this bug describes has no referent in the current tree.
+- Selection/specialization now lives at `src/compiler/20.hir/hir_function_selection_v1.spl`
+  (present), and the `is_generic_template` group is consumed across HIR and MIR.
+- Seed-smoke, refreshed tracked seed, `--mode=interpreter --no-cache`:
+  - `test/01_unit/compiler/hir/generic_template_marking_spec.spl` →
+    `outcome=OK, executed=4 passed=4 failed=0` (this bug's own defect-2 pin).
+  - `test/01_unit/compiler/hir/hir_function_selection_v1_spec.spl` →
+    `outcome=OK, executed=4 passed=4 failed=0` (the mechanism that now consumes
+    the marked templates).
+
+Disposition: SUPERSEDED — absorbed by the #158/#7991 monomorphization rework
+(selection + module-scoped COMDAT mono + receiver-type-arg substitution).
+Header Status line normalized to the dated form.
+
+Caveat carried from the compiler2 addendum: no full end-to-end native build of
+a generic user was run in-lane (heavy entry-closure native build, out of lane
+mandate); the verdict rests on the disappeared subsystem + the landed
+machinery + the two green pins above.
