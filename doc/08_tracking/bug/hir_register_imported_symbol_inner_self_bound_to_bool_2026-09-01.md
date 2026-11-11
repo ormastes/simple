@@ -2,13 +2,12 @@
 
 - **Date:** 2026-09-01
 - **Lane:** goal item 2, x86_64 WM host-Vulkan pixel evidence
-- **Status:** OPEN — root cause located 2026-09-01, but **UNCONFIRMED AT TIP**: a
-  re-measurement the same day on PR #252 (`3b62ae06871`), with `src/compiler`,
-  `src/lib`, `src/app` and the seed binary all verified byte-identical to the
-  reporting worktree, could NOT reproduce it (all 12 modules lowered, zero
-  field-access errors). Read the "Re-measurement" section at the bottom BEFORE
-  acting on the root cause above. The live blocker on this lane is the
-  diagnostics-transport drop, which is now fixed.
+- **Status:** FIXED 2026-11-11 (lane p3fix-comp7-20261111) — Rust-seed chained-call
+  write-back root-cause fix confirmed present in tracked source
+  (`interpreter_helpers/patterns.rs`, corrected `Arc::ptr_eq` + both-`me` gate);
+  doc's own reproduce spec re-verified green 3/3 on the tracked seed. The
+  "UNCONFIRMED AT TIP" note below is historical: the later-session "ROOT CAUSE
+  FOUND AND FIXED" section and this campaign's re-verification close it.
 - **Blocks:** `scripts/check/check-simpleos-x86-64-wm-host-vulkan-pixel-evidence.shs`
   (the host GPU daemon cannot be built, so the gate cannot boot)
 
@@ -527,3 +526,31 @@ at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
   Matches the doc's recorded GREEN-after (3/3 PASS).
 - Consistent with bug_db row: verdict=fixed 2026-11-02 (close-invalid lane).
 - Verdict: SUPERSEDED. No code change.
+
+---
+
+## 2026-11-11 (lane p3fix-comp7-20261111) — Status flipped FIXED
+
+Independent re-verification of the compiler3 addendum on this lane's fresh
+worktree (base `a64cda1ee32d`, tracked seed `bin/simple.exe`,
+build-commit 46fe8f6b6def):
+
+- Root-cause fix confirmed present in tracked source:
+  `src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl`'s
+  trigger — the Rust seed's chained method-call write-back in
+  `src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs` (~l.1250-1262)
+  now threads the root object name only under the corrected gate
+  (`Arc::ptr_eq(self_fields, fields)` AND both the inner and outer methods
+  declared `me`). The trivially-true `updated_class == class` self-comparison is
+  gone (no match). The fixed code carries an explanatory comment naming this
+  bug doc.
+- Seed-smoke, doc's own reproduce test:
+  `test/01_unit/interpreter/chained_call_self_slot_corruption_spec.spl`
+  (`--mode=interpreter --no-cache`) → `outcome=OK, executed=3 passed=3 failed=0`
+  — matches the doc's recorded GREEN-after (3/3 PASS).
+
+Disposition: FIXED (root-cause fix in the seed interpreter landed 2026-09-01;
+bug_db verdict=fixed 2026-11-02). The header's "OPEN — UNCONFIRMED AT TIP" was
+stale: the doc's own later-session "ROOT CAUSE FOUND AND FIXED" section had
+already closed the loop, but the header was never flipped. Header Status line
+flipped from OPEN.

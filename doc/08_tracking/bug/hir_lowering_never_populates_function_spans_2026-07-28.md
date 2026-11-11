@@ -73,3 +73,22 @@ at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
   `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/compiler/hir/hir_function_span_populate_spec.spl --mode=interpreter --no-cache`
   → SPEC FILE VERDICT outcome=OK, declared>=2 executed=2 passed=2 failed=0.
 - Verdict: SUPERSEDED. No code change.
+
+---
+
+## 2026-11-11 (lane p3fix-comp7-20261111) — re-verified CLOSED/FIXED, no header change needed
+
+Independent re-verification of the compiler3 addendum on this lane's fresh
+worktree (base `a64cda1ee32d`, tracked seed `bin/simple.exe`,
+build-commit 46fe8f6b6def):
+
+- Both `HirFunction(` construction sites in
+  `src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl` set
+  `span`: site 1 at :146 sets `span: span` (:172); site 2 at :630 sets
+  `span: fn_.span` (:670).
+- Guard spec `test/01_unit/compiler/hir/hir_function_span_populate_spec.spl`
+  (`--mode=interpreter --no-cache`) → `outcome=OK, executed=2 passed=2 failed=0`.
+
+Disposition confirmed: FIXED by `4b88aebf00b` (doc marked CLOSED 2026-11-06)
+before this campaign; header already carried the CLOSED status, so no flip was
+required. This row was already resolved going into the P3 pass.

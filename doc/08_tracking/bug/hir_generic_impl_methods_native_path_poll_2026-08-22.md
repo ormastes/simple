@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status: SUPERSEDED** (filed; not fixed). Class 3 of the stage1-closure HIR fatals.
+**Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp7-20261111) — HIR gate removed at tip, #158 mono machinery landed; re-verified fresh-seed 5/5 (see addenda). Class 3 of the stage1-closure HIR fatals.
 
 ## Exact text
 ```
@@ -102,3 +102,32 @@ log: `build/review/p3c2-genenum-seedsmoke.log`.
   `build/review/p3c2-pollmono-seedsmoke.log`, `build/review/p3c2-genmethreturn-seedsmoke.log`.
 
 **Cycles:** 0 (no fix attempted; defect already addressed in source).
+
+---
+
+## 2026-11-11 (lane p3fix-comp7-20261111) — Status re-verified SUPERSEDED, header flipped
+
+Independent re-verification of the same-day compiler2 addendum on this lane's
+fresh worktree (base `a64cda1ee32d`, tracked seed `bin/simple.exe`,
+build-commit 46fe8f6b6def):
+
+- The reported HIR gate no longer exists: the exact error string "generic
+  struct/class methods are not supported on the native build path yet" is
+  absent from `src/compiler/20.hir/hir_lowering/_Items/trait_impl_lowering.spl`
+  (grep exit 1), and both the trait tier (:146) and the impl tier (:352) now
+  mark `hir_fn.is_generic_template = true`.
+- Seed-smoke: `test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl`
+  (`--mode=interpreter --no-cache`) → `outcome=OK, executed=5 passed=5 failed=0`
+  — the `Poll<T>`-shape generic-enum self-match lowers at HIR with no gate
+  diagnostic.
+
+Disposition: SUPERSEDED — absorbed by the #158 monomorphization work that
+landed after this was filed. Header Status line normalized to the dated form.
+
+Remaining live tail (not this bug, already routed): the deeper MIR-level
+generic specs (`poll_payload_typeparam_match_spec.spl`,
+`generic_method_return_subst_spec.spl`) still stop on the known LIVE
+seed private-fn-import visibility divergence around private
+`compiler_value_discriminant` (`src/compiler/00.common/value_access.spl:29`)
+— an owner-decision row; per campaign routing the wrappers must NOT be pub'd
+(`value_access_ownership_spec` pins non-pub).
