@@ -1,5 +1,14 @@
 # `SimpleArtifactManifest.signature` has a real Ed25519 primitive available but NO trust-anchor/key-distribution infra to call it meaningfully
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 — SUPERSEDED (infrastructure landed elsewhere at tip; verified this pass)
+
+The 2026-08-07 premise ("no trust-anchor, no key distribution, no wire format,
+no message definition") is stale at release/1.0.0 tip. All four gaps are closed
+by `src/os/kernel/loader/executable_manifest_signature_verifier.spl` +
+`src/lib/common/structural/execution/simple_artifact_manifest_v1_codec.spl`,
+wired into the admission pipeline, with a passing regression spec. Fresh
+evidence in the 2026-11-11 addendum at the bottom of this file.
+
+> Status: SUPERSEDED — was Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -88,4 +97,44 @@ Not repaired here: `src/os/crypto/**` is explicitly out of scope for this lane.
 ## Triage 2026-09-13
 
 Confirmed still absent: `grep -c "trust_anchor\|manifest_verify_signature" src/os/kernel/loader/artifact_manifest.spl` returns 0. Implementing a trust-anchor/key-registry design plus a signature wire format is multi-step security-architecture work (the doc's own "Land, in order" list has 4 steps before wiring `ed25519_verify`), explicitly out of scope for `src/os/crypto/**` per the prior lane. Leaving OPEN, no code change made.
+
+## Triage 2026-11-11 (p3fix-p2a-20261111 lane) — SUPERSEDED
+
+Re-verified at release/1.0.0 tip (worktree @ 79d5af6723f6). The four named gaps
+are all closed by later-landed infrastructure — none of it in
+`artifact_manifest.spl` itself, which is why the doc's original grep stayed 0:
+
+1. **Trust anchor / key registry** —
+   `executable_manifest_trust_owner_initialize` in
+   `src/os/kernel/loader/executable_manifest_signature_verifier.spl:112`
+   installs up to 16 pinned Ed25519 signers (key_id + 32-byte public key) into
+   a one-time private capsule, mutex-protected with quarantine-on-failure.
+   Initialized by the boot owner
+   (`installed_artifact_catalog_boot_owner_v1.spl:171`).
+2. **Manifest field naming the key** — the `signature` field carries the
+   envelope `"ed25519:<key_id>:<128-hex>"`; the key_id is validated and looked
+   up against the pinned registry (`SignerUnknown` when absent).
+3. **Wire-format parser** — envelope split + `_manifest_signature_decode`
+   (hex -> 64-byte signature) + key-id charset/length checks in the same
+   module.
+4. **Defined message** —
+   `encode_simple_artifact_manifest_v1_signing_bytes` in
+   `src/lib/common/structural/execution/simple_artifact_manifest_v1_codec.spl:237`
+   defines the signed bytes: `SAM1` envelope with the image hash bound in,
+   over the manifest's canonical fields (signature excluded).
+5. **Wired as a gate** — `executable_admission_pipeline.spl:242` calls
+   `executable_manifest_signature_verify` before constructing an executable
+   handle, failing closed on `SignatureInvalid`, `SignerUnknown`,
+   `TrustRootMismatch`, `TrustRootsUnavailable`, etc.
+
+Fresh evidence: `SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/os/kernel/loader/executable_manifest_signature_verifier_spec.spl
+--mode=interpreter --no-cache` → PASS (2 declared, 2 executed, 2 passed —
+covers trust init, accepted signature, substituted-signature rejection with
+`signature-invalid`, wrong trust root with `trust-root-mismatch`, malformed
+envelope with `signature-envelope-invalid`). The admission-pipeline spec
+(`test/01_unit/os/kernel/loader/executable_admission_pipeline_spec.spl`)
+covers the wired gate.
+
+Status flipped open → superseded. No code change in this lane.
 
