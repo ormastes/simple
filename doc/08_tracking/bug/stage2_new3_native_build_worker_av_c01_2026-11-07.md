@@ -69,3 +69,33 @@ closure, `StrictSdnReaderV1.byte_at(offset)`, which dereferenced the text pointe
 ## Decision
 Phase 2 rebuilds stay paused until the seed carrying this fix is rebuilt. Phase 3 continues on the
 frozen stage2 lineage (`s3_fable61` gate PASS). The workaround-removal PR is no longer implicated.
+
+## 2026-11-11 — triage (lane p3-comp12, row 8): fix confirmed live in the deployed tracked seed; native verification BLOCKED (stage-chain grant)
+
+Hosted re-verification at this lane's base (6233df4b9f9ea, tracked seed
+build-commit 46fe8f6b6def):
+
+- The fix commit 4c789b292d35a ("fix(hir): type text? unwrap as STRING so
+  chained text methods route to runtime") is an ancestor of BOTH this base and
+  the tracked seed's build commit 46fe8f6b6def — the deployed tracked seed
+  binary already carries the fix.
+- Fix source present at this base: the `unwrap` builtin arm lowers a STRING
+  receiver or Optional-over-STRING to `rt_unwrap_or_trap` typed STRING
+  (src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:1785-1802), with the
+  c01 failure comment intact; regression test
+  `stage2_text_optional_unwrap_keeps_string_type_for_byte_at`
+  (seed_regression_tests.rs:868) and the native smoke fixture
+  test/04_smoke/native_text_optional_unwrap_byte_at.spl are both in tree.
+- The release-tip call-site rewrite `df6d91dc6a0` (`digest: text`) is also an
+  ancestor of this base.
+- Fresh behavioral smoke on the tracked seed (interpreter lane):
+  `bin/simple.exe run test/04_smoke/native_text_optional_unwrap_byte_at.spl
+  --mode=interpreter` -> `PASS text_optional_unwrap_byte_at`.
+
+Verdict: fix-implemented-verification-pending (unchanged). The row's own
+acceptance — rebuild stage2 from the fixed seed and rerun `c01` (and
+`hello`/`var`) through `pwsh C:/dev/p3new/s3sanity/run_case_s2new_mf8.ps1` — is
+a sanctioned stage-chain probe that is BLOCKED in this lane (no grant); it
+routes to the bootstrap/stage-chain lane together with the seed-fix lane that
+owns cargo-side changes. No source change made in-lane; the tracked
+bin/simple.exe was not touched.
