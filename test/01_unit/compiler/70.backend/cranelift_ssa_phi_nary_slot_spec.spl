@@ -1,0 +1,68 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Cranelift __simple_ssa_phi N-ary join always gets a stack slot
+
+Bug cranelift_ssa_phi_nary_join_guard_now_fires_2026-08-17: the no-slot
+fallbacks only read args[0]/args[1], so an N-ary join (> 4 args) without a
+slot traps. A phi destination with no MirLocal entry got no slot from the
+func.locals loop; compile_function now allocates one for each id returned by
+cranelift_ssa_phi_dest_ids_without_local.
+"""
+# @tag: unit, compiler, backend, mir
+
+use std.spec
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.backend.backend.cranelift_codegen_adapter.{cranelift_ssa_phi_dest_ids, cranelift_ssa_phi_dest_ids_without_local}
+
+fn span_at(line: i64) -> Span:
+    Span(start: 0, end: 0, line: line, col: 1, file: "fixture/phi_nary.spl", length: 0)
+
+fn i64_t() -> MirType:
+    MirType(kind: MirTypeKind.I64)
+
+fn unit_t() -> MirType:
+    MirType(kind: MirTypeKind.Unit)
+
+fn const_i64(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(v), i64_t()))
+
+fn tmp(id: i64, t: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: t, kind: LocalKind.Temp, is_ghost: false)
+
+fn nary_phi(dest: i64) -> MirInst:
+    # three incoming (block, value) pairs = 6 args: N-ary
+    val args = [const_i64(1), const_i64(10), const_i64(2), const_i64(20), const_i64(3), const_i64(30)]
+    MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: dest)), "__simple_ssa_phi", args), span: Some(span_at(2)))
+
+fn mk_fn(locals: [MirLocal], insts: [MirInst]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 900), name: "phi_nary",
+        signature: MirSignature(params: [], return_type: i64_t(), is_variadic: false, params_known: true),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId(id: 0), label: Some("b0"), instructions: insts, terminator: MirTerminator.Ret(None))],
+        entry_block: BlockId(id: 0), span: span_at(1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false,
+        unroll_factor: 0, pipeline_ii: 0, memory_banks: 0
+    )
+
+describe "cranelift __simple_ssa_phi N-ary slot coverage":
+    it "collects an N-ary phi destination":
+        val f = mk_fn([tmp(5, i64_t())], [nary_phi(5)])
+        expect(cranelift_ssa_phi_dest_ids(f).has(5)).to_equal(true)
+
+    it "reports a phi destination that has no MirLocal entry":
+        val f = mk_fn([tmp(1, i64_t())], [nary_phi(7)])
+        val missing = cranelift_ssa_phi_dest_ids_without_local(f)
+        expect(missing.len()).to_equal(1)
+        expect(missing[0]).to_equal(7)
+
+    it "reports nothing when the phi destination is declared (even Unit)":
+        val f = mk_fn([tmp(7, unit_t())], [nary_phi(7)])
+        expect(cranelift_ssa_phi_dest_ids_without_local(f).len()).to_equal(0)

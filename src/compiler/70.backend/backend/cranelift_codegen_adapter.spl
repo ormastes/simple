@@ -471,6 +471,21 @@ fn cranelift_ssa_phi_dest_ids(func: MirFunction) -> Dict<i64, bool>:
                     ()
     ids
 
+fn cranelift_ssa_phi_dest_ids_without_local(func: MirFunction) -> [i64]:
+    # __simple_ssa_phi destinations that have no MirLocal entry get no slot
+    # from the func.locals loop, which would route an N-ary join into the
+    # fail-closed trap. compile_function allocates an 8-byte slot for each
+    # of these too (bug cranelift_ssa_phi_nary_join_guard_now_fires_2026-08-17).
+    val phi_ids = cranelift_ssa_phi_dest_ids(func)
+    var declared: Dict<i64, bool> = {}
+    for local in func.locals:
+        declared[local.id.id] = true
+    var missing: [i64] = []
+    for id in phi_ids.keys():
+        if not declared.has(id):
+            missing.push(id)
+    missing
+
 fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, CraneliftGlobalBinding>) -> bool:
     val emit_name = cl_function_emit_name(func.name)
     val sig = build_signature(func.signature, func.name == "main")
@@ -528,6 +543,10 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
         if size > 0:
             val slot = cranelift_stack_slot(ctx, size, 8)
             slot_map[local.id.id] = slot
+    # Phi destinations with no MirLocal entry still need the arity-agnostic
+    # slot path; without it an N-ary join hits the fail-closed trap.
+    for phi_id in cranelift_ssa_phi_dest_ids_without_local(func):
+        slot_map[phi_id] = cranelift_stack_slot(ctx, 8, 8)
 
     # Switch to entry block and process
     cranelift_switch_to_block(ctx, entry_block)
