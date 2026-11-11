@@ -40,13 +40,33 @@ fn http_request_raw(method: text, url: text, headers_text: text, body: text) -> 
     unsafe(capabilities: [ffi]):
         rt_http_request(method, url, headers, body)
 
+# Cross-engine timeout classification. The self-hosted runtime reports a
+# deadline expiry as "HTTP request timed out" (src/runtime/runtime_native.c);
+# the seed transport surfaces the raw OS timeout instead (Windows
+# WSAETIMEDOUT / "os error 10060", POSIX ETIMEDOUT, ureq "timed out"). This
+# boundary is the typed failure point for every timeout-capable request, so
+# normalize known timeout transport errors to the self-hosted classification
+# rather than leaking engine-specific text to callers. Non-timeout errors
+# pass through unchanged.
+fn _timeout_transport_error(raw: text) -> text:
+    val lower = raw.lower()
+    if lower.contains("timed out") or lower.contains("timeout") or
+            lower.contains("wsaetimedout") or lower.contains("etimedout") or
+            lower.contains("10060") or lower.contains("deadline exceeded"):
+        return "HTTP request timed out"
+    raw
+
 fn http_request_v2_raw(method: text, url: text, headers: [text], body: [u8],
                        timeout_ms: i64) -> (i64, text, text, [u8], text):
     """Lossless raw request tuple; callers must lift status/error and parse headers."""
     if timeout_ms < 0:
         return (-1, "", "", [], "HTTP timeout cannot be negative")
-    unsafe(capabilities: [ffi]):
+    val response = unsafe(capabilities: [ffi]):
         rt_http_request_v2(method, url, headers, body, timeout_ms)
+    if response.0 == -1 and response.4 != "":
+        return (response.0, response.1, response.2, response.3,
+            _timeout_transport_error(response.4))
+    response
 
 fn http_request_raw_timeout(method: text, url: text, headers_text: text, body: text,
                             timeout_ms: i64) -> (i64, text, text):
