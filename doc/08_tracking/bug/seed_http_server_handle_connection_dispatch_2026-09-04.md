@@ -1,7 +1,7 @@
 # `SimpleHttpServer` accepts a connection and then dies: `handle_connection` not found on type `dict`
 
 - **Filed:** 2026-09-04
-- **Status:** Open
+- **Status:** FIXED 2026-11-11 (lane p3-comp10) — fix afb36d2e0a5f in the tracked seed; live-socket pin passes 1/1
 - **Severity:** every in-repo HTTP server is unusable on the bootstrap seed.
   The listener binds, the client connects, and the first request kills the
   server process.
@@ -91,3 +91,25 @@ A run of the reproduction above on a deployed pure-Simple `bin/simple` that
 serves the request instead of dying. If it reproduces there too, the defect is
 in `http_server`, not in the seed, and this record should be re-scoped
 accordingly.
+
+## Triage 2026-11-11 (lane p3-comp10)
+
+Verdict: FIXED. Fresh re-verification at lane base 79d5af6723f6 against the
+tracked seed bin/simple.exe (build 46fe8f6b6def, 2026-11-10):
+
+- Root-cause fix: afb36d2e0a5f ("fix(seed): process-global interpreter socket
+  registry so serve_loop workers can serve accepted streams", 2026-11-09) IS an
+  ancestor of both the lane base and the tracked seed binary. Its message
+  records the live-socket repro history: the original serve_loop self-binding
+  defect no longer reproduced even then; the live defect that remained was the
+  seed interpreter's thread_local SOCKET_HANDLES (a stream accepted in
+  serve_loop was an invalid handle in the worker thread — no response, no
+  close, client hang). Fixed by the process-global socket registry in
+  src/compiler_rust/compiler/src/interpreter/interpreter_native_net.rs.
+- Regression pin (added by the same commit):
+  test/03_system/web/server/http_serve_loop_live_socket_spec.spl — drives a real
+  loopback TCP connection through the production SimpleHttpServer.serve_loop
+  accept path. Fresh run on the tracked seed (interpreter, --no-cache):
+  outcome=OK executed=1 passed=1 failed=0 rc=0. The commit records the same spec
+  as red (timeout) on the old seed and green on the fixed seed — a live-socket
+  green cannot be faked by the self-binding class.
