@@ -20,9 +20,7 @@ evidence found in the body. This is bookkeeping, not verification.
 **Filed:** 2026-08-07
 **Severity:** high — undermines the allocation-class lattice (WP-12) the whole
 Wave-3 aerospace plan depends on
-**Status:** fix-implemented-verification-pending. The historical investigation
-below records source behavior and earlier test results; allocation-free native
-steady-state operation remains unverified.
+**Status:** FIXED (source repair landed 2026-08-07; verified 2026-11-11 lane work/p3-rt3-20261111 — unit regression specs green + identified native executable with steady-state allocation measurement delta=0; residual inline-storage scope SUPERSEDED by FR-LANG-INLINE-FIXED-ARRAY-0001, see addendum)
 
 ## Origin
 
@@ -232,3 +230,42 @@ instead of being discarded).
 Tracked as WP-12 input in
 `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`.
 
+
+---
+
+## 2026-11-11 verification — lane rt3 (worktree simple-p3-rt3-20261111, base 7f0fa174083, seed 46fe8f6b6def, Windows native lane)
+
+**Verdict: FIXED for this record's re-scoped scope; residual inline-storage
+scope SUPERSEDED by `doc/08_tracking/feature/inline_fixed_size_array_struct_storage_2026-11-07.md`
+(FR-LANG-INLINE-FIXED-ARRAY-0001, owner-approved split).**
+
+This satisfies the 2026-11-07 re-scope's stated closure condition exactly:
+"an identified native executable and allocation measurements across
+steady-state insert/update/remove/clear operations."
+
+- **Unit regression specs re-verified green on the fresh tracked seed
+  (interpreter, `--no-cache`):**
+  `fixed_array_stack_backing_storage_regression_spec.spl` 4/4 PASS;
+  `fixed_map_backing_storage_regression_spec.spl` 3/3 PASS.
+- **Identified native executable + steady-state measurement** (probe source
+  `build/review/rt3/noalloc_probe.spl`, built with
+  `SIMPLE_NATIVE_BUILD_RUST=1` → `build/review/rt3/noalloc_probe.exe`,
+  549 KB, rc=0): all five types (`FixedArray`, `FixedStack`, `FixedMap`,
+  `FixedSet`, `RingBuffer`) constructed at capacity 64 BEFORE the baseline;
+  `rt_heap_alloc_count()` (src/runtime/runtime_native.c:1971) read around 200
+  steady-state cycles of push/set/remove/clear, stack push/pop/clear,
+  map put/update/remove, set add/remove, ring enqueue/dequeue/clear —
+  roughly 13,000 post-construction operations. Result: `base=8 after=8
+  delta=0` → **STEADY-STATE ALLOCATION-FREE: PASS** on the native lane.
+- **Counter liveness control** (`build/review/rt3/alloc_control.exe`): 50
+  string-concat registrations bumped the same counter by 52
+  (`COUNTER-LIVE: PASS`), so the delta=0 result is a true negative, not a
+  frozen counter.
+- Construction-time allocation remains real (backing `[T]` heap arrays
+  reserved in `new()`) and is NOT claimed fixed here — eliminating it needs
+  the `[T; N]` inline struct-storage language feature, owned by
+  FR-LANG-INLINE-FIXED-ARRAY-0001. The manifest `allocates` boolean
+  correction per WP-12 rides with that feature landing.
+
+No spec edited, no assertion relaxed, no production change made in this lane —
+this pass produced the missing verification receipt only.
