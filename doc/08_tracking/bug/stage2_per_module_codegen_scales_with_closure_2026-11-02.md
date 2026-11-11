@@ -2,7 +2,8 @@
 
 - **ID:** stage2_per_module_codegen_scales_with_closure_2026-11-02
 - **Priority:** P3 (diagnostic; the hypothesis this doc was opened for is refuted)
-- **Status:** open (two small per-module overheads remain, listed below)
+- **Status:** closed — premise refuted (measurement artifact), residuals by-design;
+  fresh re-verification 2026-11-11 in the dated addendum below.
 - **Binary:** frozen stage2 `C:/dev/p3new/stage2.exe` built from `ef0681fc0e1`
 - **Run:** phase-3 run 20: dynload `--emit-archive`, whole-program, 32 MIR shards, `SIMPLE_COMPILER_TRACE=1`, launcher `C:/dev/p3new/r11/run.ps1`
 
@@ -122,3 +123,34 @@ there. Projections:
   object).
 - Check why run 20 stopped after 13 of 48 modules (the last receipt was at
   00:17:40). That is outside the scope of this doc.
+
+## Triage 2026-11-11 (p3fix lane boot24)
+
+**Verdict: SUPERSEDED/STALE — flip to closed. Fresh re-verification at tip
+6233df4b9f9ea.** The filed hypothesis (per-module codegen scales with
+closure size, ~90 s/module) was already refuted in this doc by mtime ground
+truth (two different clocks were subtracted; real per-module cost is
+2-27 s, object-size-bound, matching small-closure controls). No live
+defect remains; what remains are two efficiency/diagnostic follow-ups,
+re-checked today:
+
+1. **Trace timestamp** — still open: the trace line is
+   `driver_aot_native_output.spl:3725` and still prints
+   `[NATIVE] compiling module: {name}` with no `+Nms` timestamp.
+2. **Capsule-identity memoization** — still open:
+   `identity_valid()` at `driver_types.spl:183` still recomputes
+   `native_capsule_mir_identity_v1(self.mir_module)` (full MIR re-serialize
+   + SHA-256) on every call, with fresh calls also at
+   `driver_aot_native_output.spl:373` and `driver_types.spl:1222`. Cost is
+   O(module), 0.3-4.8 s size-bound per the table above — by design, fail
+   closed, not a scaling defect.
+3. **Sibling retention record**
+   (`native_codegen_build_cache_save_retention_2026-10-25.md`) is FIXED
+   (`build_cache_persist` in a transient scope) — that residual is closed
+   elsewhere.
+
+The refuted premise is not re-measured here (that would need the frozen
+stage2 plus a phase-3 shard run; this doc's mtime evidence remains the
+authority). Follow-ups 1-2 are perf/diagnostic hygiene, not correctness;
+any future codegen-perf lane may fold them into a fresh record. bug_db.sdn
+row left for the mechanical sync-db lane per boot22/boot23 precedent.
