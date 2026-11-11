@@ -471,20 +471,31 @@ fn cranelift_ssa_phi_dest_ids(func: MirFunction) -> Dict<i64, bool>:
                     ()
     ids
 
-fn cranelift_ssa_phi_dest_ids_without_local(func: MirFunction) -> [i64]:
-    # __simple_ssa_phi destinations that have no MirLocal entry get no slot
-    # from the func.locals loop, which would route an N-ary join into the
-    # fail-closed trap. compile_function allocates an 8-byte slot for each
-    # of these too (bug cranelift_ssa_phi_nary_join_guard_now_fires_2026-08-17).
-    val phi_ids = cranelift_ssa_phi_dest_ids(func)
-    var declared: Dict<i64, bool> = {}
+fn cranelift_local_slot_sizes(func: MirFunction) -> Dict<i64, i64>:
+    # Stack-slot size per local id; compile_function allocates exactly these.
+    # 8-byte floor: Bool lowers to i64 (mir_type_to_cl), so a 1-byte slot would
+    # be overflowed by i64 stores. Kind-based sizing, no method calls
+    # (`size_bytes()` on a loop-bound field returned 0 on the stage4 lane).
+    var sizes: Dict<i64, i64> = {}
     for local in func.locals:
-        declared[local.id.id] = true
-    var missing: [i64] = []
-    for id in phi_ids.keys():
-        if not declared.has(id):
-            missing.push(id)
-    missing
+        var size = 8
+        match local.type_.kind:
+            case Unit:
+                size = 0
+            case _:
+                ()
+        if size > 0:
+            sizes[local.id.id] = size
+    # Every __simple_ssa_phi destination needs a slot -- Unit-typed ones AND
+    # ones with no MirLocal entry at all: the per-edge store/reload lowering
+    # (store_phi_incomings_for_edge) is the only arity-agnostic join lowering;
+    # without a slot an N-ary join hits the trap guard in
+    # cl_translate_instruction (cranelift_ssa_phi_nary_join_guard_now_fires_2026-08-17).
+    val phi_dest_ids = cranelift_ssa_phi_dest_ids(func)
+    for phi_id in phi_dest_ids.keys():
+        if not sizes.has(phi_id):
+            sizes[phi_id] = 8
+    sizes
 
 fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, CraneliftGlobalBinding>) -> bool:
     val emit_name = cl_function_emit_name(func.name)
@@ -517,36 +528,9 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
     var alloc_addresses: Dict<i64, i64> = {}
 
     # Allocate stack slots for all locals
-    val phi_dest_ids = cranelift_ssa_phi_dest_ids(func)
-    for local in func.locals:
-        # (vestigial local.? gate removed: `.?` on a loop-bound plain
-        # struct is FALSE on the stage4 lane and skipped EVERY local.)
-        # 8-byte slot floor: Bool lowers to i64 in this backend (see
-        # mir_type_to_cl), so a 1-byte Bool slot would be clobber-overflowed
-        # by i64 stores. Widening is safe (stack waste only).
-        # Kind-based sizing, no method calls: `local.type_.size_bytes()` (a
-        # method on a loop-bound struct field, inside a value-if) returned 0
-        # on the stage4 lane (receiver-transport + value-if family), so NO
-        # slots were ever allocated and everything ran on value_map alone.
-        var size = 8
-        match local.type_.kind:
-            case Unit:
-                size = 0
-            case _:
-                ()
-        # __simple_ssa_phi destinations are exempt from the Unit size-0
-        # waiver: the phi edge-store/reload mechanism needs a physical slot
-        # for every predecessor edge, and the no-slot fallbacks cannot
-        # represent N-ary joins (see the guard in cl_translate_instruction).
-        if size == 0 and phi_dest_ids.has(local.id.id):
-            size = 8
-        if size > 0:
-            val slot = cranelift_stack_slot(ctx, size, 8)
-            slot_map[local.id.id] = slot
-    # Phi destinations with no MirLocal entry still need the arity-agnostic
-    # slot path; without it an N-ary join hits the fail-closed trap.
-    for phi_id in cranelift_ssa_phi_dest_ids_without_local(func):
-        slot_map[phi_id] = cranelift_stack_slot(ctx, 8, 8)
+    val slot_sizes = cranelift_local_slot_sizes(func)
+    for slot_id in slot_sizes.keys():
+        slot_map[slot_id] = cranelift_stack_slot(ctx, slot_sizes[slot_id], 8)
 
     # Switch to entry block and process
     cranelift_switch_to_block(ctx, entry_block)
