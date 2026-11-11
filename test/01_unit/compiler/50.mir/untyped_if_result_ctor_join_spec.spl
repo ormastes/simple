@@ -84,3 +84,22 @@ describe "untyped if Result constructor join over same-module declarations":
 
     it "an elif chain over a same-module struct parameter owns its match arms":
         expect(lower_consumer_errors(local_decls + "fn a(t: LocalTyped) -> i64:\n    val r = if t.success:\n        Ok(t.code)\n    elif t.has_error:\n        Err(t.error)\n    else:\n        Err(if t.has_error: t.error else: \"Unknown error\")\n" + match_tail)).to_equal("")
+
+# Native stage2 left one arm's type unresolved (code_result in
+# jit_instantiator). The join must adopt the other arm's settled Result
+# instead of dropping the whole binding to untyped.
+val untyped_helper = "fn untyped_fallback(t: TypedResult):\n    Err(t.error)\n\n"
+
+describe "if Result join with one unresolved arm":
+    it "an unresolved arm adopts the settled Result of the other arm":
+        expect(lower_consumer_errors(untyped_helper + "fn a(t: TypedResult, base: Result<[u8], text>) -> i64:\n    val r = if t.success:\n        base\n    else:\n        untyped_fallback(t)\n" + match_tail)).to_equal("")
+
+    it "the unresolved arm may come first":
+        expect(lower_consumer_errors(untyped_helper + "fn a(t: TypedResult, base: Result<[u8], text>) -> i64:\n    val r = if t.success:\n        untyped_fallback(t)\n    else:\n        base\n" + match_tail)).to_equal("")
+
+    it "an elif chain with one unresolved arm adopts the settled Result":
+        expect(lower_consumer_errors(untyped_helper + "fn a(t: TypedResult, base: Result<[u8], text>) -> i64:\n    val r = if t.success:\n        base\n    elif t.has_error:\n        untyped_fallback(t)\n    else:\n        Err(t.error)\n" + match_tail)).to_equal("")
+
+    it "an unresolved arm never adopts a partially known Result":
+        val errors = lower_consumer_errors(untyped_helper + "fn a(t: TypedResult) -> i64:\n    val r = if t.success:\n        Ok(t.code)\n    else:\n        untyped_fallback(t)\n" + match_tail)
+        expect(errors.contains("ambiguous")).to_equal(true)
