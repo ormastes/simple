@@ -124,3 +124,20 @@ the lane-appropriate proof available under this lane's mandate.
 
 **Cycles:** 0 (no live defect; no fix attempted). Evidence log:
 `build/review/p3c2-crc32-seedsmoke.log`.
+
+---
+
+## Addendum 2026-11-11 — lane comp11 — SUPERSEDED confirmed, header stands
+
+Lane: `work/p3-comp11-20261111` on `origin/release/1.0.0` (base `41935a5f61860`).
+Triage-first; this row already carries today's lane-compiler2 addendum with a
+same-day seed-smoke PASS on the perf pin, so per campaign no-green-rerun rule
+the pin was not re-executed. Fresh source re-verification only:
+`git merge-base --is-ancestor 716808a9784c HEAD` = true (the module-val
+initializer root-cause fix is in the lineage); the `_table_copy` mitigation is
+absent from the (relocated) `src/lib/nogc_sync_mut/compression/gzip/crc.spl`
+(0 occurrences); the pin spec
+`test/05_perf/lib/crc32_text_c_vs_simple_perf_spec.spl` is present. The doc's
+own 2026-09-06 JIT strict re-measurement (1.20x-1.23x, parity for this shape)
+plus the merged fix close the 14.4x codegen-lane figure. No header change; no
+reproduction attempted (cheap-triage; defect class absent at tip).
