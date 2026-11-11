@@ -1,10 +1,10 @@
 # Seed interpreter rebuilds the whole callee env per call (O(module globals))
 
 ## Status
-PARTIALLY RESOLVED — 408fb57b109 landed the initial mitigation (misses down 6.5x, wall still far above target); superseded by e73a0bec647 (scope-chain CowEnv replaces per-call env clone). OPEN: confirm wall-clock now meets target on the original repro — CONFIRMED FAILING 2026-11-11 (lane interp12): `check-lint-cost-budget.shs` on `driver_types.spl` exceeded even a 240 s probe budget (gate budget is 60 s) under fresh seed 46fe8f6b6def. LIVE; fix is structural `src/compiler_rust` work that requires a seed rebuild — BLOCKED on this lane (no cargo/rustc). See "Addendum 2026-11-11" for the grant command.
+LIVE (triaged 2026-11-11, lanes interp12/int11) — 408fb57b109 landed the initial mitigation (misses down 6.5x, wall still far above target); superseded by e73a0bec647 (scope-chain CowEnv replaces per-call env clone; ancestry re-verified by int11). Wall-clock on the original repro CONFIRMED FAILING 2026-11-11 (lane interp12): `check-lint-cost-budget.shs` on `driver_types.spl` exceeded even a 240 s probe budget (gate budget is 60 s) under fresh seed 46fe8f6b6def. Fix is structural `src/compiler_rust` work that requires a seed rebuild — BLOCKED on interpreter lanes (no cargo/rustc); owner seed-fix lane. See "Addendum 2026-11-11" for the grant command.
 
 
-Status: PARTIALLY FIXED (2026-08-21) — misses down 6.5x, wall still far above target.
+Status: LIVE (triaged 2026-11-11, lanes interp12/int11) — partial mitigation only (2026-08-21: misses down 6.5x); wall still far above target, confirmed failing 2026-11-11.
 Area: Rust seed interpreter (`src/compiler_rust/compiler/src/interpreter_call/**`, `interpreter_state.rs`)
 Blocks: stage1 `native-build` of `src/app/cli/bootstrap_main.spl` (phase2 parse 20-50 s/file, 7200 s worker timeout expires)
 
@@ -227,3 +227,16 @@ SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe sh scripts/check/check-lint-cos
   --fixture src/compiler/80.driver/driver_types.spl --budget 60 \
   --simple-bin "$PWD/bin/simple.exe"
 ```
+
+## Addendum 2026-11-11 (lane int11) — Status consolidated to LIVE; ancestry + gate script source-checked
+
+Sweep consolidation. interp12's same-day addendum recorded the verified
+disposition (wall CONFIRMED FAILING over a 240 s probe on the tracked seed;
+structural `src/compiler_rust` fix BLOCKED, no cargo/rustc); the header still
+carried the 2026-08-21 "PARTIALLY FIXED" text. int11 quick re-verify at base
+`84f5076db138` (source checks only, no re-measure — the >240 s interpreted
+driver lint is budget-forbidden to re-run per the campaign grant): the
+CowEnv absorber `e73a0bec647` is an ancestor of this base, and the pinning
+gate `scripts/check/check-lint-cost-budget.shs` is in-tree. Owner: seed-fix
+lane with the cargo rebuild grant recorded verbatim above. Status flipped to
+LIVE.
