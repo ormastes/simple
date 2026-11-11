@@ -95,6 +95,17 @@ fn scv_compile_snapshot_source_digest_v1(path: text) -> text:
     val content = scv_compile_snapshot_read_source_v1(path)
     if content == nil: "" else: scv_content_id_for_u8(content!)
 
+# Byte-equality twin of comparing source_digest(path) to the digest of
+# `expected`: equal bytes <=> equal content id, without another SHA-256 pass.
+# Cold-init admission (bug native_build_cold_init_admission_wall_386s) hashed
+# every selected file up to four times although the bytes were in hand.
+fn scv_compile_snapshot_bytes_match_v1(path: text, expected: [u8]) -> bool:
+    val content = scv_compile_snapshot_read_source_v1(path)
+    if content == nil: return false
+    val actual: [u8] = content!
+    if actual.len() != expected.len(): return false
+    actual == expected
+
 fn scv_compile_snapshot_logical_member_v1(
     root: text, source_roots: [text], source_identity: text
 ) -> bool:
@@ -315,7 +326,7 @@ fn scv_compile_snapshot_write_chunk_v1(
         dir_create(chunk_dir, true)
     val final_path = "{chunk_dir}/{digest}.blob"
     if file_exists(final_path):
-        return scv_compile_snapshot_source_digest_v1(final_path) == digest
+        return scv_compile_snapshot_bytes_match_v1(final_path, content)
     # One secure directory belongs to the whole snapshot invocation, not each
     # file. A failed exclusive write is cleaned by its enclosing stage owner;
     # it must never expose a final path or delete an unowned collision.
@@ -404,18 +415,12 @@ fn scv_compile_snapshot_materialize_source_unscoped_cost_v1(
     if not copied:
         return ScvCompileMaterializedSourceV1("snapshot-materialize-failed:{rel}", "", false)
     val verify_started = scv_cost_now_v1(cost)
-    val copied_digest = scv_compile_snapshot_source_digest_v1(destination)
+    val copied_ok = scv_compile_snapshot_bytes_match_v1(destination, bytes)
     if cost != nil: cost!.record_verify(scv_cost_elapsed_v1(cost, verify_started))
-    if copied_digest != digest:
+    if not copied_ok:
         return ScvCompileMaterializedSourceV1("snapshot-materialize-digest:{rel}", "", false)
-    var drifted = false
     val drift_started = scv_cost_now_v1(cost)
-    val current = scv_compile_snapshot_read_source_v1(path)
-    if current == nil:
-        drifted = true
-    else:
-        if scv_content_id_for_u8(current!) != digest:
-            drifted = true
+    val drifted = not scv_compile_snapshot_bytes_match_v1(path, bytes)
     if cost != nil: cost!.record_verify(scv_cost_elapsed_v1(cost, drift_started))
     ScvCompileMaterializedSourceV1("ok", "{rel}|{digest}|{bytes.len()}", drifted)
 
