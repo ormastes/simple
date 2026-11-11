@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-15
-**Status:** OPEN
+**Status:** SUPERSEDED (2026-11-11, lane int9) — fixed on origin/release/1.0.0 by `9e7e7a526edb` (PR #7597); see addenda below
 **Severity:** P3 — coverage/testability gap: host-gpu ivshmem code paths
 cannot be exercised by any spec on the tree-walk interpreter
 
@@ -68,3 +68,21 @@ Residual (not this bug): the executor spec docstring at
 still lists the host-gpu ivshmem lanes as a headless ceiling and the spec's
 host-gpu waves have not been extended — the "Unblock" follow-up work. That is
 a spec-extension task; the interpreter extern gap itself is closed.
+
+
+## Addendum 2026-11-11 (lane int9) — header flip; int9-firsthand seed-smoke confirms interp6 verdict
+
+Header Status flipped OPEN -> SUPERSEDED. Absorber unchanged:
+`9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07, squash-merge of
+PR #7597), handlers in
+`src/compiler_rust/compiler/src/interpreter_extern/memory.rs`, wired at
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs:2167-2181`
+(ancestor of HEAD `9f3df4c125ad`; confirmed in tree).
+
+int9 re-verified on this lane's own tracked seed (`bin/simple.exe`,
+build-commit `46fe8f6b6def`, `--mode=interpreter --no-cache`), scratch spec
+`build/p3fix-int9/int9_seed_smoke_spec.spl` (build/, gitignored): u8/u16/u32/u64
+volatile write+read round-trips plus `rt_memory_barrier` / `rt_load_barrier` /
+`rt_store_barrier` over an `rt_byte_array_new` buffer addressed via
+`rt_array_data_ptr` — 4/4 examples PASS (volatile example green; the other
+three examples cover rows flipped in the sibling bug docs listed there).

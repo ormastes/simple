@@ -130,3 +130,19 @@ minimal hello-world-class entry with `fn _probe_opt_dict() -> Dict<i64,i64>?`
 never completes codegen. Next owner step: bisect the hang site in
 src/compiler_rust with a debug build (SIMPLE_DBG_* flags), or bound the
 compiler-graph phase with a cycle counter and dump the active node list.
+
+
+## Addendum 2026-11-11 (lane int9) — concurs LIVE; no new probe attempted
+
+int9 triage: no re-probe attempted. The standalone `bin/simple run` repro
+does not reproduce per this record, and the in-context repro is the
+ hours-scale compiler-graph interpretation the 2026-11-11 unbounded probe
+already ran to a pathological-CPU freeze verdict (parent-executed, log at
+`build/review/seedfix-defectC-probe.log`, 9887 lines). int9's tracked seed is
+the same build-commit (`46fe8f6b6def`) the parent's probe ran, so a repeat
+would re-run an existing red check unchanged. Concur with the re-classified
+verdict: LIVE — the seed interpreter `-> Dict<K,V>?` return channel hangs the
+seed codegen path; next owner step stands (bisect the hang site in
+`src/compiler_rust` with a debug build and `SIMPLE_DBG_*` flags, or bound the
+compiler-graph phase with a cycle counter and dump active nodes). Root fix
+and any grant beyond that belong to the seed-fix lane. Status stays OPEN.

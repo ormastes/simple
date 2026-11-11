@@ -149,3 +149,19 @@ diagnostics), 4 (export visibility), 5 (circular-import detection) remain
 owned by the compiler frontend (`src/compiler/**`, `src/compiler_rust`) —
 outside this lane's write scope; routing to the compiler/compiler-seed lanes
 stands. Status stays OPEN (partial closure only).
+
+
+## 2026-11-11 P3 triage (lane int9) — concurs LIVE; no re-run; out of interpreter lane
+
+Fourth-lane triage of this row. int9 re-read the record and verified fix
+ancestry only: the gap-1/gap-2 absorber `9e7e7a526edb` (PR #7597,
+`src/compiler_rust/compiler/src/impl_duplicate_check.rs`) is an ancestor of
+this lane's HEAD `9f3df4c125ad`, matching the 2026-11-11 interp7 note. The
+gap-3/4/5 repro fixtures were already re-verified LIVE twice today
+(2026-11-10 lanes interp/interp2, 2026-11-11 lane interp7) on the same seed
+build this lane runs; per the no-rerun rule int9 did not repeat them. Gaps 3
+(div-zero span diagnostics), 4 (export visibility), 5 (circular-import
+detection) remain owned by the compiler frontend (`src/compiler/**`,
+`src/compiler_rust`) — outside the interpreter lane's write scope. Status
+stays OPEN (partial closure only); routing to the compiler/compiler-seed
+lanes stands.
