@@ -1,7 +1,7 @@
 # Deployed Simple Runtime Missing Blocks MC/DC/RT-HAL Implementation
 
 Date: 2026-08-25
-Status: partially resolved / Stage 4 still unavailable
+Status: LIVE (triaged 2026-11-11, lane work/p3-rt2-20261111 — bootstrap-deployment admission state, not a `src/runtime` defect)
 Owner: bootstrap/runtime deployment
 
 ## Reproduction
@@ -133,3 +133,28 @@ by `stage3_hir_segv_compiler_driver_unit2of833_2026-09-14`,
 `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01`),
 re-run this doc's reproduction from the admitted binary. No change made;
 label: host-independent-source bookkeeping.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111), second pass
+
+**Verdict: LIVE — corroborated again at this lane's base (1f47eda674f1,
+tracked seed 46fe8f6b6def); not a `src/runtime` defect. Status header
+flipped from "partially resolved" to LIVE.** The two prior addenda
+(2026-11-10 p3-rt, 2026-11-11 rt2 first pass) agree, and this lane's fresh
+spot-check re-confirms their evidence rather than relying on them:
+
+- `bug_db.sdn` (sharded DB at `doc/08_tracking/bug/bug_db.sdn:3393`) still
+  registers this row `P3, open`.
+- No admitted Stage 2/3/4 binary or sanity/provenance receipts: `build/bootstrap/`
+  does not exist in this worktree. The unblock condition (admitted self-hosted
+  Stage 3/4 with general `check`/`test`) remains unmet.
+- Correction to the first-pass addendum's seed-smoke: at THIS base/seed,
+  `bin/simple.exe check src/lib/common/mcdc/model.spl` does **not** pass — it
+  fails HIR lowering with `missing module surface for std.common.hash.djb2` /
+  `unresolved name: djb2_hash_text` (model.spl:16), even though
+  `src/lib/common/hash/djb2.spl:11,25` defines and exports that symbol. This
+  is a seed-side module-surface resolution gap on a single-file check, not a
+  runtime-source defect; and per this doc the Rust seed is not an authorized
+  fallback for the acceptance anyway. Recorded for honesty; the disposition
+  is unchanged: no runtime-source change can close this row.
+- Bookkeeping flag carried forward unchanged (Stage 3/4 admission tracked by
+  the three named rows).
