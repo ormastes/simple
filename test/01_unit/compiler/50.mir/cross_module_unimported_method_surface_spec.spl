@@ -1,0 +1,95 @@
+# Purpose and audience: compiler engineers who own cross-module method
+# resolution on the native-build module-surface path.
+# @req REQ-SSPEC-COMPILER
+"""
+# Methods of an imported type resolve when only the type is imported
+
+Repro for native_build_cross_module_trait_only_and_unimported_method_gaps_2026-07-17
+(gap 2). The caller imports ONLY the struct; the method lives in an `impl` (plain,
+or `impl Trait for S` where the trait lives in a module the caller never imports).
+Built through `module_surfaces_from_modules` exactly as native-build does, then
+lowered to MIR against all HIR modules. An unresolved method call is the const-0
+placeholder silent-null class.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+# @tag:imports
+
+use std.spec.{describe, it, expect, step}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val xm_trait_src = "pub trait Greeter:\n    fn name(self) -> i64\n    fn greet(self) -> i64:\n        return self.name() + self.name()\n"
+
+val xm_plain_helper_src = "pub struct Some:\n    v: i64\n\nimpl Some:\n    fn some_method(self) -> i64:\n        return self.v + 1\n"
+
+val xm_trait_helper_src = "use lib.greeter.\{Greeter\}\n\npub struct Some:\n    v: i64\n\nimpl Greeter for Some:\n    fn name(self) -> i64:\n        return self.v\n"
+
+val xm_plain_main_src = "use lib.helper.\{Some\}\n\nfn run() -> i64:\n    val s = Some(v: 2)\n    return s.some_method()\n"
+
+val xm_trait_main_src = "use lib.helper.\{Some\}\n\nfn run() -> i64:\n    val s = Some(v: 2)\n    return s.name()\n"
+
+val xm_default_main_src = "use lib.helper.\{Some\}\n\nfn run() -> i64:\n    val s = Some(v: 2)\n    return s.greet()\n"
+
+fn xm_lower(helper_src: text, main_src: text) -> text:
+    val log = Logger(level: 0)
+    val trait_ast = parse_full_frontend(xm_trait_src, "lib/greeter.spl", "lib.greeter", log)
+    val helper_ast = parse_full_frontend(helper_src, "lib/helper.spl", "lib.helper", log)
+    val main_ast = parse_full_frontend(main_src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.greeter"] = trait_ast
+    modules["lib.helper"] = helper_ast
+    modules["app.main"] = main_ast
+    val sources = [SourceFile(path: "lib/greeter.spl", content: xm_trait_src, module_name: "lib.greeter"), SourceFile(path: "lib/helper.spl", content: helper_src, module_name: "lib.helper"), SourceFile(path: "app/main.spl", content: main_src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var trait_lowering = hirlowering_for_module("lib.greeter", surfaces)
+    var helper_lowering = hirlowering_for_module("lib.helper", surfaces)
+    var main_lowering = hirlowering_for_module("app.main", surfaces)
+    val trait_hir = trait_lowering.lower_module(trait_ast)
+    val helper_hir = helper_lowering.lower_module(helper_ast)
+    val main_hir = main_lowering.lower_module(main_ast)
+    var errors = ""
+    for e in helper_lowering.errors:
+        errors = errors + "hir lib.helper: " + e.message + "\n"
+    for e in main_lowering.errors:
+        errors = errors + "hir app.main: " + e.message + "\n"
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["lib.greeter"] = trait_hir
+    hir_modules["lib.helper"] = helper_hir
+    hir_modules["app.main"] = main_hir
+    var mir_lowering = MirLowering.new(main_hir.symbols)
+    for module_key in hir_modules.keys():
+        mir_lowering.prescan_module_struct_names(hir_modules, module_key)
+    mir_lowering.lower_module(main_hir, [trait_hir, helper_hir, main_hir])
+    for e in mir_lowering.errors:
+        errors = errors + "mir: " + e.message + "\n"
+    errors
+
+describe "cross-module method on an imported type, method module not imported":
+    it "resolves a plain impl method when only the struct is imported":
+        step("impl Some lives in lib.helper; app.main imports only Some")
+        expect(xm_lower(xm_plain_helper_src, xm_plain_main_src)).to_equal("")
+
+    it "resolves a trait-impl method when the trait module is never imported":
+        step("impl Greeter for Some; app.main never imports lib.greeter")
+        expect(xm_lower(xm_trait_helper_src, xm_trait_main_src)).to_equal("")
+
+    it "resolves an injected trait default method through the trait-impl module":
+        step("greet is a default body from lib.greeter, provided only via the impl")
+        expect(xm_lower(xm_trait_helper_src, xm_default_main_src)).to_equal("")
+
+    it "still reports a genuinely missing method (negative control)":
+        step("proves the harness discriminates: no impl provides no_such")
+        val src = "use lib.helper.\{Some\}\n\nfn run() -> i64:\n    val s = Some(v: 2)\n    return s.no_such()\n"
+        expect(xm_lower(xm_plain_helper_src, src) == "").to_equal(false)
