@@ -1,0 +1,95 @@
+# Interop crypto gate spec — pins the config-flag behavior of
+# src/lib/nogc_sync_mut/database/codec/interop_crypto_gate.spl, the consumer of
+# scripts/deps/provision-interop-crypto.shs's status record.
+#
+# Passes in BOTH host states: when an external crypto library is provisioned
+# (status: enabled) and when it is unavailable (status: skipped) — the gate
+# decision must always agree with the mode flag and the status record, so the
+# external-library interop legs are runnable exactly when the provision script
+# enabled them, and skipped-not-failed otherwise.
+
+"""
+## Purpose and audience
+Purpose: pin the external-crypto interop gate (env flag + provisioned status record).
+Audience: devhub SQLCipher 4 interop lane maintainers; bootstrap owners.
+"""
+
+use std.spec.*
+use std.io_runtime.{env_get_opt}
+use std.env.{env_set, env_unset}
+use nogc_sync_mut.database.codec.interop_crypto_gate.{
+    INTEROP_CRYPTO_GATE_ENV, INTEROP_CRYPTO_STATUS_ENV,
+    interop_crypto_gate_mode, interop_crypto_status_path,
+    interop_crypto_status_record, interop_crypto_available,
+    interop_crypto_gate_report
+}
+
+fn _restore_env(key: text, original: text):
+    if original == "":
+        val _u = env_unset(key)
+    else:
+        val _s = env_set(key, original)
+
+describe "REQ-INTEROP-GATE-001: gate mode is a recognized value":
+    # @req REQ-INTEROP-GATE-001
+    it "normalizes the env flag to auto, require, or skip":
+        val original = env_get_opt(INTEROP_CRYPTO_GATE_ENV) ?? ""
+        val _s1 = env_set(INTEROP_CRYPTO_GATE_ENV, "auto")
+        expect(interop_crypto_gate_mode()).to_equal("auto")
+        val _s2 = env_set(INTEROP_CRYPTO_GATE_ENV, "require")
+        expect(interop_crypto_gate_mode()).to_equal("require")
+        val _s3 = env_set(INTEROP_CRYPTO_GATE_ENV, "skip")
+        expect(interop_crypto_gate_mode()).to_equal("skip")
+        # Accepted aliases normalize to skip.
+        val _s4 = env_set(INTEROP_CRYPTO_GATE_ENV, "off")
+        expect(interop_crypto_gate_mode()).to_equal("skip")
+        # Unknown values fail closed to auto, never to skip/require.
+        val _s5 = env_set(INTEROP_CRYPTO_GATE_ENV, "banana")
+        expect(interop_crypto_gate_mode()).to_equal("auto")
+        _restore_env(INTEROP_CRYPTO_GATE_ENV, original)
+
+describe "REQ-INTEROP-GATE-002: gate decision agrees with mode and status record":
+    # @req REQ-INTEROP-GATE-002
+    it "skip mode closes the gate even when the record says enabled":
+        val original = env_get_opt(INTEROP_CRYPTO_GATE_ENV) ?? ""
+        val _s = env_set(INTEROP_CRYPTO_GATE_ENV, "skip")
+        expect(interop_crypto_available()).to_equal(false)
+        _restore_env(INTEROP_CRYPTO_GATE_ENV, original)
+
+    # @req REQ-INTEROP-GATE-002
+    it "require mode opens the gate unconditionally":
+        val original = env_get_opt(INTEROP_CRYPTO_GATE_ENV) ?? ""
+        val _s = env_set(INTEROP_CRYPTO_GATE_ENV, "require")
+        expect(interop_crypto_available()).to_equal(true)
+        _restore_env(INTEROP_CRYPTO_GATE_ENV, original)
+
+    # @req REQ-INTEROP-GATE-002
+    it "auto mode tracks the provisioned status record exactly":
+        val original = env_get_opt(INTEROP_CRYPTO_GATE_ENV) ?? ""
+        val _s = env_set(INTEROP_CRYPTO_GATE_ENV, "auto")
+        val record = interop_crypto_status_record()
+        val expected = record.contains("status: enabled")
+        expect(interop_crypto_available()).to_equal(expected)
+        _restore_env(INTEROP_CRYPTO_GATE_ENV, original)
+
+describe "REQ-INTEROP-GATE-003: status record is well-formed when present":
+    # @req REQ-INTEROP-GATE-003
+    it "carries exactly one recognized status value":
+        val record = interop_crypto_status_record()
+        if record != "":
+            val has_enabled = record.contains("status: enabled")
+            val has_skipped = record.contains("status: skipped")
+            expect(has_enabled or has_skipped).to_equal(true)
+            expect(has_enabled and has_skipped).to_equal(false)
+            expect(record.contains("tool:")).to_equal(true)
+        else:
+            # Provision script has not run in this lane; auto mode must then
+            # keep the interop legs skipped-not-failed.
+            expect(interop_crypto_available()).to_equal(false)
+
+    # @req REQ-INTEROP-GATE-003
+    it "status path is env-overridable for isolated lanes":
+        val original = env_get_opt(INTEROP_CRYPTO_STATUS_ENV) ?? ""
+        val _s = env_set(INTEROP_CRYPTO_STATUS_ENV, "build/interop/selftest/flag_skip.sdn")
+        expect(interop_crypto_status_path()).to_equal("build/interop/selftest/flag_skip.sdn")
+        _restore_env(INTEROP_CRYPTO_STATUS_ENV, original)

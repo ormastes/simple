@@ -1,0 +1,70 @@
+# Interop crypto gate — config flag for the external crypto interop oracle.
+#
+# Consumes the status record written by scripts/deps/provision-interop-crypto.shs,
+# which runs BEFORE the build/test lane that executes the devhub SQLCipher 4
+# decryption-algorithm interop legs (cross-comparing the pure-Simple codec
+# against an open-source crypto library). The external library is OPTIONAL for
+# bootstrap: when this gate is closed, the interop specs report their
+# external-library legs as skipped-not-failed and the build still completes.
+# Only SIMPLE_INTEROP_CRYPTO=require makes the library a hard dependency (the
+# provision script refuses the build early when it is absent then).
+#
+# Gate decision (SIMPLE_INTEROP_CRYPTO):
+#   auto    (default) run interop legs iff the status record says
+#           `status: enabled` (written by the provision script)
+#   require run interop legs unconditionally; the provision script has already
+#           hard-failed the build when the library is unavailable
+#   skip    never run interop legs (status record still written for evidence)
+#
+# SDN is the repo default for the status record (see the provision script);
+# this module only reads it — never writes.
+
+use std.io_runtime.{env_get_opt, file_read_bytes_result}
+use std.common.text_bytes.{bytes_to_text}
+
+val INTEROP_CRYPTO_GATE_ENV: text = "SIMPLE_INTEROP_CRYPTO"
+val INTEROP_CRYPTO_STATUS_ENV: text = "SIMPLE_INTEROP_CRYPTO_STATUS"
+val INTEROP_CRYPTO_STATUS_DEFAULT: text = "build/interop/crypto_interop.sdn"
+
+# The configured gate mode, normalized to auto|require|skip. Unknown values
+# fail closed to auto (status-record driven), never to require or skip.
+fn interop_crypto_gate_mode() -> text:
+    val mode = env_get_opt(INTEROP_CRYPTO_GATE_ENV) ?? "auto"
+    if mode == "require":
+        return "require"
+    if mode == "skip" or mode == "off" or mode == "0" or mode == "disabled":
+        return "skip"
+    "auto"
+
+# Path of the provision-script status record (env-overridable for isolated
+# self-tests and multi-worktree lanes).
+fn interop_crypto_status_path() -> text:
+    env_get_opt(INTEROP_CRYPTO_STATUS_ENV) ?? INTEROP_CRYPTO_STATUS_DEFAULT
+
+# Raw status record text; empty when the provision script has not run (or the
+# record is unreadable) — treated as `not available` in auto mode.
+fn interop_crypto_status_record() -> text:
+    match file_read_bytes_result(interop_crypto_status_path()):
+        case Ok(bytes): bytes_to_text(bytes)
+        case Err(_): ""
+
+# The gate decision the interop specs consume: true = run the
+# external-library legs; false = skip them (never fail a build because the
+# optional external library is unavailable).
+fn interop_crypto_available() -> bool:
+    val mode = interop_crypto_gate_mode()
+    if mode == "skip":
+        return false
+    if mode == "require":
+        return true
+    interop_crypto_status_record().contains("status: enabled")
+
+# Structured, log-safe gate line for spec output and review verdicts.
+fn interop_crypto_gate_report() -> text:
+    "mode={interop_crypto_gate_mode()} status_path={interop_crypto_status_path()} available={interop_crypto_available()}"
+
+export INTEROP_CRYPTO_GATE_ENV, INTEROP_CRYPTO_STATUS_ENV
+export INTEROP_CRYPTO_STATUS_DEFAULT
+export interop_crypto_gate_mode, interop_crypto_status_path
+export interop_crypto_status_record, interop_crypto_available
+export interop_crypto_gate_report
