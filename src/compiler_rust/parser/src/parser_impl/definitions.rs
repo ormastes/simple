@@ -160,4 +160,80 @@ impl<'a> Parser<'a> {
             doc_comment: None,
         }))
     }
+
+    /// `@sffi(prefix: "...", ...) resource Name` (Grammar A). Mirrors the
+    /// pure-Simple `parse_resource_decl` (10.frontend enum_module_body.spl):
+    /// `@sffi` with a `prefix:` key is required, unknown keys are rejected,
+    /// and the decl only registers `Name` as a type. It lowers to an empty,
+    /// method-less struct carrying the `sffi` metadata as named args.
+    pub(crate) fn parse_resource_decl(
+        &mut self,
+        decorators: Vec<Decorator>,
+        visibility: Visibility,
+    ) -> Result<Node, ParseError> {
+        const SFFI_KEYS: [&str; 7] = ["prefix", "handle", "invalid", "retain", "release", "sharing", "thread_safe"];
+        let start_span = self.current.span;
+        self.advance(); // soft keyword `resource`
+        let name = self.expect_identifier()?;
+        let mut sffi: Option<Vec<(String, Expr)>> = None;
+        for decorator in decorators {
+            let is_sffi = matches!(&decorator.name, Expr::Identifier(n) if n == "sffi");
+            if !is_sffi {
+                return Err(ParseError::syntax_error_with_span(
+                    format!("unsupported decorator on `resource {name}`; only `@sffi(...)` is allowed"),
+                    decorator.span,
+                ));
+            }
+            let mut named = Vec::new();
+            for arg in decorator.args.unwrap_or_default() {
+                let Some(key) = arg.name else {
+                    return Err(ParseError::syntax_error_with_span(
+                        "`@sffi` arguments must be named (`key: value`)",
+                        arg.span,
+                    ));
+                };
+                if !SFFI_KEYS.contains(&key.as_str()) {
+                    return Err(ParseError::syntax_error_with_span(
+                        format!("unknown `@sffi` key `{key}`; expected one of prefix, handle, invalid, retain, release, sharing, thread_safe"),
+                        arg.span,
+                    ));
+                }
+                named.push((key, arg.value));
+            }
+            sffi = Some(named);
+        }
+        let Some(named) = sffi else {
+            return Err(ParseError::syntax_error_with_span(
+                format!("`resource {name}` requires an `@sffi(prefix: \"...\")` attribute"),
+                start_span,
+            ));
+        };
+        if !named.iter().any(|(k, _)| k == "prefix") {
+            return Err(ParseError::syntax_error_with_span(
+                format!("`@sffi` on `resource {name}` is missing the required `prefix:` key"),
+                start_span,
+            ));
+        }
+        Ok(Node::Struct(StructDef {
+            span: start_span,
+            name,
+            generic_params: Vec::new(),
+            where_clause: Vec::new(),
+            fields: Vec::new(),
+            methods: Vec::new(),
+            visibility,
+            attributes: vec![Attribute {
+                span: start_span,
+                name: "sffi".to_string(),
+                value: None,
+                args: None,
+                named_args: Some(named),
+            }],
+            doc_comment: None,
+            invariant: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: Default::default(),
+        }))
+    }
 }

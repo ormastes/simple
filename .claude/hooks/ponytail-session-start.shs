@@ -18,24 +18,27 @@
 # ponytail: plain POSIX sh, no JSON output; Codex/Copilot readers get the same
 # text via their own skill mirrors, upgrade to hookSpecificOutput JSON if a host needs it.
 
-ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+# Fork-free on the hot path (builtins only): on a loaded Windows/Git Bash host
+# every process spawn measured ~4-8 s, so head|tr|cat and $(...) subshells blew
+# the 5 s hook timeout. Keep it that way — no external commands in emit().
+ROOT="${CLAUDE_PROJECT_DIR:-${0%/*}/../..}"
 LEVEL_FILE="${PONYTAIL_LEVEL_FILE:-$ROOT/.simple/ponytail.level}"
 BANNER_MAX=4039
 
-read_level() {
+read_level() {  # sets $lvl
     lvl=""
-    [ -f "$LEVEL_FILE" ] && lvl=$(head -n 1 "$LEVEL_FILE" | tr -d '[:space:]')
+    [ -f "$LEVEL_FILE" ] && read -r lvl _ < "$LEVEL_FILE"
+    lvl="${lvl%%[!a-z]*}"   # drop CR / trailing junk
     case "$lvl" in
         lite|full|ultra|off) ;;
         *) lvl=full ;;
     esac
-    printf '%s' "$lvl"
 }
 
 banner() {
     level="$1"
     printf 'PONYTAIL MODE ACTIVE — level: %s\n\n' "$level"
-    cat <<'EOF'
+    while IFS= read -r l; do printf '%s\n' "$l"; done <<'EOF'
 You are a lazy senior developer. Lazy means efficient, not careless. The
 best code is the code never written. ACTIVE EVERY RESPONSE, still active if
 unsure; off only on "stop ponytail" / "normal mode".
@@ -74,9 +77,9 @@ EOF
 }
 
 emit() {
-    level=$(read_level)
-    [ "$level" = off ] && return 0
-    banner "$level"
+    read_level
+    [ "$lvl" = off ] && return 0
+    banner "$lvl"
 }
 
 selftest() {
@@ -91,6 +94,7 @@ selftest() {
     printf 'ultra\n' > "$tmp/level";    check ultra "PONYTAIL MODE ACTIVE — level: ultra"
     printf 'off\n' > "$tmp/level";      check off ""
     printf 'bogus\n' > "$tmp/level";    check bogus-falls-back-to-full "PONYTAIL MODE ACTIVE — level: full"
+    printf 'ultra\r\n' > "$tmp/level"; check crlf-level-file "PONYTAIL MODE ACTIVE — level: ultra"
     printf 'full\n' > "$tmp/level"
     body=$(PONYTAIL_LEVEL_FILE="$tmp/level" sh "$0")
     case "$body" in *"## The ladder"*) pass=$((pass+1));; *) fail=$((fail+1)); echo "FAIL skill-body-included";; esac

@@ -1,7 +1,7 @@
 # native-build --entry-closure fails with span-less `undefined field 'kind'`
 
 Filed: 2026-08-21
-Status: OPEN
+Status: SUPERSEDED (triage 2026-11-11, lane boot21; first triaged 2026-11-10 lane boot5) — `kind`-on-nil/Option trap class re-verified fixed and pinned at HEAD `d552f63f67f8`; pin spec 6/6 on the tracked seed (see 2026-11-11 addendum below)
 Severity: blocker — no MCP or LSP-MCP native artifact can be built from `origin/main`
 
 ## Symptom
@@ -306,3 +306,28 @@ Unrelated red observed in the same directory for the compiler lane:
 `checked_converter_identity_spec.spl` (added by PR #7597) fails 3/4 on the
 Windows seed ("expected 4 to equal 0" warning/error-count shape) — not this
 trap class, not baselined.
+
+
+## 2026-11-11 P3-boot21 triage — SUPERSEDED (header flip)
+
+Fresh re-verification of the 2026-11-10 boot5 disposition (not flipped then),
+at HEAD `d552f63f67f8`:
+
+- `src/compiler/35.semantics/any_escape/checker.spl` unwraps every declared
+  type slot with `if val` before calling `any_type_is_any` /
+  `any_type_mentions_any` — sites at :152-155 (`e.type_`, with the
+  has-type_-is-not-presence comment this record's localization established),
+  :286-288 (closure params), :679-681 (function params) and siblings.
+- The seed interpreter's missing debug branches exist at
+  `src/compiler_rust/compiler/src/interpreter/expr/calls.rs` :833, :1320,
+  :1366, :1408, :1438 (`field_access_debug_enabled()`-gated).
+- Seed-smoke on the tracked seed (build 46fe8f6b6def,
+  `--mode=interpreter --no-cache`): pin spec
+  `test/01_unit/compiler/semantics/any_escape/absent_declared_types_spec.spl`
+  → SPEC FILE VERDICT outcome=OK, executed=6 passed=6 failed=0.
+
+The later blockers this record sequenced into (`mir_unresolved_method_call_merge`,
+`'id' on function`) are filed and tracked as their own records. The unrelated
+`checked_converter_identity_spec.spl` red noted 2026-11-10 (3/4 on the Windows
+seed, PR #7597 shape) is unchanged and not this trap class. No code change
+this lane; header flipped to match the verified disposition.
