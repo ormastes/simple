@@ -1413,6 +1413,18 @@ fn collect_use_imports(
             if let Some(mangled) = resolve_import_name(name, &segments, all_mangled, re_exports) {
                 use_map.insert(alias.clone(), mangled);
             }
+            // Whole-module alias (`use std.game2d as g`): key the module's
+            // free functions as `g.<fn>` so `g.run(...)` resolves exactly as
+            // `game2d.run(...)` does in the Single arm, instead of failing
+            // lowering with `Unknown variable: g` (whole-module de-JIT).
+            // doc/08_tracking/bug/jit_lowering_module_alias_and_panic_2026-07-02.md
+            let mut module_segments = segments.clone();
+            module_segments.push(name.as_str());
+            for raw_name in all_mangled.keys().filter(|raw_name| !raw_name.contains('.')) {
+                if let Some(mangled) = resolve_import_name_strict(raw_name, &module_segments, all_mangled, re_exports) {
+                    use_map.insert(format!("{alias}.{raw_name}"), mangled);
+                }
+            }
         }
         simple_parser::ast::ImportTarget::Group(items) => {
             for item in items {

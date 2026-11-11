@@ -4,7 +4,27 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (diagnostic quality only — the four affected specs are fixed in `4ffc3db47a9`)
+**Status:** SUPERSEDED 2026-11-11 — absorbed by the seed semantic-error-position
+fix (commit `bdcbec5bd33d`, "fix(seed): JIT to_i32 family parity + semantic error
+positions; close 4 P3 seed/interp/jit rows", row
+`seed_semantic_error_missing_position_2026-11-09`, pinned by
+`src/compiler_rust/compiler/tests/semantic_error_position.rs`). The interpreter
+now records the enclosing statement's span at each execution-loop head and the
+`semantic_with_context` factory adopts it (plus the current file) when the raise
+site recorded no position, so `Value::as_int`'s
+`type mismatch: cannot convert tuple to int` now renders with the offending
+span on every path, including the spec compile path.
+
+**Re-verification 2026-11-11 (runner9, worktree `simple-p3-runner9-20261111` @
+`701c757a5658`, tracked seed `bin/simple.exe`):** the doc's 6-line repro was run
+via `bin/simple test build/p3r9-tmp/min_return_spec.spl --mode=interpreter
+--no-cache`. The diagnostic now reads
+`error: semantic: build/p3r9-tmp/min_return_spec.spl:7:1: type mismatch: cannot
+convert tuple to int` — file, line 7 (exactly the column-0 `return ()`), column
+1. The Ask is satisfied; nothing further to fix here.
+
+Historical status line: OPEN (diagnostic quality only — the four affected
+specs are fixed in `4ffc3db47a9`)
 **Filed:** 2026-09-03
 
 ## Symptom
