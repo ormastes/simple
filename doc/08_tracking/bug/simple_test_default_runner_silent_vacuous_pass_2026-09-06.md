@@ -1,9 +1,10 @@
 # `bin/simple test <spec>` exits 0 with NO output at all, and the Rust runner caches by spec mtime only
 
 - **Filed:** 2026-09-06
-- **Status:** OPEN — reported, not fixed. Two independent defects in the test
-  command are recorded here because both were hit in the same session and both
-  manufacture false greens.
+- **Status:** FIXED 2026-11-11 — verified fixed on release tip: Defect 2's
+  `source_tree_stamp` cache key is landed and live-verified on the refreshed
+  seed; Defect 1 does not reproduce on the refreshed seed (default runner
+  emits a full verdict). See the dated addendum at the end of this file.
 - **Severity:** High for a verification tool — a test command that reports
   nothing and exits 0 is indistinguishable from a passing run to any caller,
   human or CI.
@@ -129,3 +130,35 @@ match; legacy rows (no column) never match. Conservative: any source/runner
 change re-runs everything — no stale PASS. Repro/prevention cargo tests:
 `stamp_changes_when_imported_module_changes`, `empty_tree_without_exe_never_matches`.
 cargo not run (disk < 30 GB). Defect 1 not reproduced on Windows seed (see claim notes).
+
+---
+
+## Addendum 2026-11-11 — lane runner7: FIXED verified on release tip (no lane code change)
+
+Verified on the refreshed Windows seed (`bin/simple.exe` at HEAD
+`68ab3383080f`, 2026-11-11):
+
+**Defect 1 (default runner silent vacuous pass) — not reproducible.** The
+default single-spec route (no `SIMPLE_TEST_RUNNER_RUST`) on a trivial probe
+spec prints a real verdict and summary:
+`SPEC FILE VERDICT: ... outcome=OK declared>=1 executed=1 passed=1 failed=0`
+plus `Results: 1 total, 1 passed, 0 failed`, rc=0. Same observed on every
+default-route spec run this lane performed (e.g.
+`test/01_unit/compiler/parser/unsafe_identifier_block_header_spec.spl` ->
+verdict line present, 4/4). The aarch64-Linux 2026-09-06 silent-exit state is
+gone on this tip.
+
+**Defect 2 (Rust runner cache keyed on spec mtime only) — fix live-verified.**
+The 2026-11-09 `source_tree_stamp` change is present in source
+(`src/compiler_rust/driver/src/cli/test_runner/result_cache.rs:208,243` — FNV-1a
+over path+mtime(ns)+size of every `.spl`/`.sdn` under `src/` plus the runner
+exe stamp, as the 8th cache column) and effective in the deployed binary:
+1. Second run of an unchanged spec: `Skipped 1 unchanged test(s) (cached)` — cache hit.
+2. `touch src/lib/nogc_sync_mut/spec.spl` (existing 70154-byte file in the
+   spec's transitive closure; mtime-only change, git content clean): the next
+   run RE-EXECUTED the spec (no `Skipped` line, ~600 ms real run) — an
+   mtime-only change to imported source invalidates the cache.
+3. Following run: `Skipped 1 unchanged` again — stable cache otherwise.
+
+Verdict: both manufactured-false-green paths are closed on current tip. No lane
+code change was needed; this addendum plus the status flip are the change.
