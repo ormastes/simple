@@ -64,3 +64,34 @@ not introduced by this lane (no source changes made). Flagged for a separate
 row; do not conflate with the parser-closure acceptance, which is met.
 
 **Cycles:** 0 (no live defect; no fix attempted).
+
+---
+
+## Addendum 2026-11-11 — lane comp11 — SUPERSEDED confirmed on the tracked seed
+
+Lane: `work/p3-comp11-20261111` on `origin/release/1.0.0` (base `41935a5f61860`).
+Runtime: tracked seed `bin/simple.exe` build commit `46fe8f6b6def` (2026-11-10) —
+one refresh earlier than the compiler2 addendum's 0791c2b7f4a7, so the pin was
+re-run on this lane's own sanctioned binary.
+
+Fresh seed-smoke (`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe
+bin/simple.exe test
+test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl
+--mode=interpreter --no-cache`, evidence
+`build/review/comp11-probes/row8_drawir.log`): the spec **compiles and
+executes 70 examples** (the doc recorded ZERO) — `declared>=70 executed=70
+passed=69 failed=1`. The parser diagnostic
+`Unexpected token: expected pattern, found Use` on
+`src/lib/gc_async_mut/ui/gui_content_renderer.spl` is GONE; the module is
+accepted. The parser-closure acceptance (reduce/repair/parity prerequisites in
+the doc) is met in that the blocking parse failure no longer exists and the
+DrawIR oracle runs.
+
+The single failure is the SAME residual the compiler2 addendum flagged, not
+the parser bug: `stages retained Vulkan composition damage for a partial host
+refresh` — `expected 48 to equal 4` — a retained-Vulkan-damage staging count
+on this host, while the sibling Vulkan tests in the same file pass ("keeps
+retained Vulkan production frames device resident", "fails closed before
+strict Vulkan primitive execution without a Vulkan engine"). That staging
+count belongs in a separate row; this row's disposition stands SUPERSEDED.
+No source change taken.
