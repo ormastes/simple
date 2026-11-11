@@ -5,16 +5,14 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-06 (updated 2026-08-07, 2026-08-09)
-**Status:** PARTIALLY RESOLVED — visibility CONFIRMED, perf-cliff root cause
-still OPEN. 2026-08-09 pass called the real `browser_engine_pixels_at` from a
-module importing `gui_renderer` (the exact `gui_window.spl` shape) and
-confirmed the `[jit-fallback]`/`[INFO] JIT compilation failed, falling back
-to interpreter` diagnostics fire loudly and immediately for this bug's actual
-trigger (`subsys_from_scope` unresolved symbol), in both strict and lenient
-mode. The "silent" framing is refuted for the confirmed trigger. The perf
-cliff itself (whole callee tree running interpreted, ~30x-unbounded) is
-unchanged and still needs the item-2 root-cause fix. See "2026-08-09 update"
-below.
+**Status:** LIVE (triaged 2026-11-11, lanes interp2/interp8/int11) — the
+"silent fallback" framing is REFUTED (loud `[jit-fallback]` diagnostics fire
+immediately in both strict and lenient mode; re-verified fresh by int11's
+strict probe, exit 1 seconds, unchanged `JsBrowserError` alias trigger). The
+perf-cliff root cause itself (whole callee tree interpreted, ~30x-unbounded)
+remains LIVE in the seed JIT/HIR lowering (`src/compiler_rust` /
+`src/compiler`), owned by the compiler JIT/HIR-lowering lanes. See the
+2026-08-09 update and the 2026-11-10/11 addenda below.
 **Severity:** Medium (perf cliff itself is real and reproduced via workaround
 diff and a fresh 2026-08-09 repro; silence claim: refuted — diagnostic fires)
 
@@ -302,3 +300,22 @@ of the `gui_window` -> `gui_renderer` import context) is LIVE but lives in
 the seed JIT/HIR lowering (`src/compiler_rust` / `src/compiler`) — outside
 the P3 interpreter lane's write scope. Routed to the compiler lanes; no code
 change here.
+
+## 2026-11-11 triage (lane int11) — header flipped LIVE; strict probe re-verified fresh
+
+Sweep flip. The 2026-11-10 (interp2) and 2026-11-11 (interp8) addenda
+recorded the verified disposition (visibility item refuted; perf-cliff root
+cause LIVE, routed to the compiler lanes); the header still read PARTIALLY
+RESOLVED. int11 re-ran the decisive probe fresh on the tracked seed
+(`bin/simple.exe` build `46fe8f6b6def`, `SIMPLE_LIB=src`):
+fixture `build/p3fix-int11/row_gui_window_probe.spl` (module importing
+`nogc_sync_mut.ui.gui_renderer` calling the real
+`browser_engine_pixels_at`, 8x8) under
+`SIMPLE_JIT_STRICT=1 ... run --no-cache` exited 1 within seconds with the
+loud
+`[jit-fallback] HIR lowering error: Unsupported feature: type alias 'JsBrowserError' names a struct/class declared with different layouts by several flattened modules ... whole module dropped to the interpreter`
+line plus the hard `SIMPLE_JIT_STRICT: ... refusing to fall back` error
+(full log `build/p3fix-int11/row_gui_window_probe.log`). Trigger name
+UNCHANGED from the interp8 pass — the visibility item stays refuted and the
+perf-cliff item-2 root cause stays LIVE, owned by the seed JIT/HIR lowering
+lanes (`src/compiler_rust` / `src/compiler`). Header flipped accordingly.
