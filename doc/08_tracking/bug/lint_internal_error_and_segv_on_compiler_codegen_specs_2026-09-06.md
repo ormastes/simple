@@ -1,6 +1,9 @@
 # `bin/simple lint` cannot lint `test/01_unit/compiler/codegen/` specs: internal string-index error on one file, SIGSEGV on its neighbour (2026-09-06)
 
-- **Status:** OPEN — filed rather than worked around; no lint verdict was obtainable for a new spec in this directory.
+- **Status:** SUPERSEDED 2026-11-11 (lane p3-comp8) — both named files and the
+  BOOT-6 product spot-check lint clean (0 errors) on the current tracked seed
+  (build-commit `46fe8f6b6def`); absorber verdict lane p3-compiler3 re-verified
+  fresh below.
 - **Severity:** medium — not a wrong-value defect, but the linter is the gate for `.spl` changes and it produces no usable verdict here, so lint coverage for this directory is silently zero.
 - **Class:** tooling / linter internal error.
 - **Host:** aarch64 Linux, `bin/simple` -> `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed, `--version` prints the seed banner).
@@ -112,3 +115,24 @@ at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111), direct
   were unlintable. No fixing commit is cited because no single one was
   identified — the linter has been reworked broadly since 2026-09; the refreshed
   2026-11-11 seed (0791c2b7f4a7) demonstrably no longer exhibits either failure.
+
+## Addendum 2026-11-11 — P3 lane comp8 verdict: SUPERSEDED (compiler3 disposition re-verified fresh on newer seed)
+
+Re-verified on `origin/release/1.0.0` tip `dacccfc78fd10` (worktree
+`simple-p3-comp8-20261111`), tracked seed build-commit `46fe8f6b6def` (a
+newer refresh than the compiler3 addendum's `0791c2b7f4a7`), direct
+`bin/simple.exe lint <file>` (seed-smoke):
+
+- `test/01_unit/compiler/codegen/pure_simple_cond_optional_presence_lowering_spec.spl`
+  → "Lint completed with 0 error(s) and 12 warning(s)", rc=0 — the
+  `string index out of bounds: index is 13083 but length is 13083` internal
+  error is gone.
+- `test/01_unit/compiler/codegen/condition_tag_decode_spec.spl`
+  → "Lint completed with 0 error(s) and 3 warning(s)", rc=0 — the SIGSEGV is
+  gone.
+- BOOT-6 scope spot-check: `src/compiler/70.backend/backend/llvm_backend_tools.spl`
+  → "Lint completed with 0 error(s) and 40 warning(s)", rc=0 (was rc=139).
+
+All three compiler3 observations reproduce on the current seed. No fixing
+commit identified (linter reworked broadly since 2026-09). Status header
+flipped OPEN → SUPERSEDED.

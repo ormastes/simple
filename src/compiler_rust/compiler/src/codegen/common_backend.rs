@@ -709,6 +709,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // entry is likely redundant with referenced_call_names, but kept
             // for parity/safety with the explicit call-site pattern.
             | "rt_opt_i64_to_string"
+            | "rt_opt_value_to_string"
             | "rt_opt_bool_to_string"
             | "rt_opt_f64_to_string"
             | "rt_hash_text"
@@ -2259,6 +2260,7 @@ impl<M: Module> CodegenBackend<M> {
         // name contains <filter> (or all functions when filter is "1").
         let dump_mir_filter: Option<String> = std::env::var("SIMPLE_DUMP_MIR").ok();
         let mut failed_functions: Vec<&MirFunction> = Vec::new();
+        let mut failure_causes: Vec<String> = Vec::new();
         for (idx, func) in functions.iter().enumerate() {
             if func.blocks.is_empty() {
                 continue;
@@ -2340,6 +2342,7 @@ impl<M: Module> CodegenBackend<M> {
                             func.name, _e
                         );
                     }
+                    failure_causes.push(format!("{}: {}", func.name, _e));
                     failed_functions.push(func);
                     // IMPORTANT: Clear context to prevent state from leaking to next function
                     self.module.clear_context(&mut self.ctx);
@@ -2358,7 +2361,7 @@ impl<M: Module> CodegenBackend<M> {
         // restore the old stub-emission path. A warning is printed per stubbed
         // function regardless (see the match arm above).
         if !failed_functions.is_empty() && std::env::var_os("SIMPLE_ALLOW_STUB_FALLBACK").is_none() {
-            let names: Vec<&str> = failed_functions.iter().map(|f| f.name.as_str()).collect();
+            let names = &failure_causes;
             return Err(BackendError::ModuleError(format!(
                 "codegen: {} function body/bodies failed to compile: [{}]; \
                  set SIMPLE_ALLOW_STUB_FALLBACK to emit empty stubs instead (unsafe — binary will silently misbehave)",

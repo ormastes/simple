@@ -2094,6 +2094,34 @@ fn write_back_mutable_arguments(
                         mut_written.insert(caller_name.clone());
                         continue;
                     }
+                    // `x: mut i64` (type-position `mut` capability) binds a plain
+                    // caller variable by reference: write a scalar reassignment
+                    // back. See mut_param_annotation_no_reference_propagation_2026-07-20.
+                    let param_type_is_mut = params_to_bind.iter().any(|p| {
+                        p.name == param_name
+                            && matches!(
+                                p.ty,
+                                Some(Type::Capability {
+                                    capability: simple_parser::ast::ReferenceCapability::Exclusive,
+                                    ..
+                                })
+                            )
+                    });
+                    if param_type_is_mut
+                        && !matches!(
+                            callee_val,
+                            Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                        )
+                        && outer_env.contains_key(&caller_name)
+                    {
+                        let new_val = callee_val.clone();
+                        mut_written.insert(caller_name.clone());
+                        outer_env.insert(caller_name.clone(), new_val);
+                        if !outer_env.is_local(&caller_name) {
+                            crate::interpreter::place::sync_module_global(outer_env, &caller_name);
+                        }
+                        continue;
+                    }
                     // Value-type structs (task #91) keep VALUE semantics: never
                     // write callee mutations back to the caller's binding, unless the
                     // parameter is an explicit `mut` one (then full write-back).

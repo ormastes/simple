@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: SUPERSEDED (2026-11-11, lane int9) — measurement acted upon; pins green on the tracked seed; see addenda below
 - Found by: PERF-6, base `origin/main` f26970e9d93, seed sha256 `22878382bc1b5ccf...`
 
 ## The corpus
@@ -101,3 +101,20 @@ and the tuple-destructure block-shadow scratch vector
 one per destructure). Neither has a correctness or budget criterion attached;
 the corpus's absolute ns/iteration figures are host-and-seed-bound to the
 2026-09-13 measurement and are superseded by the ratio/count pins above.
+
+
+## Addendum 2026-11-11 (lane int9) — header flip; loop/call pins re-run green on the tracked seed
+
+Header Status flipped OPEN -> SUPERSEDED, concurring with lane interp6's
+addendum above.
+
+int9 re-verified on this lane's tracked seed (`bin/simple.exe`,
+build-commit `46fe8f6b6def`, `--mode=interpreter --no-cache`):
+`test/05_perf/interp/push_call_loop_env_cache_spec.spl` — 1/1 passed
+(call-in-loop env rebuild: 2000 iters < 600 ms);
+`test/05_perf/interp/while_loop_shape_parity_spec.spl` — 7/7 passed
+(`x = x + f(y)` within 3x of the fast shape).
+
+Standing perf-debt notes (`.clone()`-density line-count, tuple-destructure
+scratch vector) are not defects and stay open as ordinary perf debt, per the
+interp6 addendum.

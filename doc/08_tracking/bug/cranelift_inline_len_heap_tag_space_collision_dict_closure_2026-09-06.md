@@ -4,7 +4,7 @@
 - **Severity:** high — silent wrong answer. `.len()`/`.is_empty()` on an untyped/ANY-erased
   closure returns a plausible non-negative integer instead of the `rt_len` contract's `-1`.
   No diagnostic, no crash.
-- **Status:** FIX IMPLEMENTED / VERIFICATION PENDING (2026-11-08)
+- **Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — fix 0ee4e247c0dd merged at tip; source re-verified 2026-11-11 (Rust fam_abi execution stays seed-lane scope, see addenda)
 
 Resolution: the C and hosted Rust heap tags now agree (`dict = 0x03`,
 `closure = 0x06`), with compile-time tag and `RtCoreDict` offset assertions.
@@ -298,3 +298,27 @@ unreachable from ordinary source; the fam_abi test exercises the raw codegen pat
 directly. The fam_abi Rust regression itself was not executed here (building/testing
 `src/compiler_rust` is the seed lane's scope; this doc already records it blocked by
 unrelated test-code errors).
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent source re-verification on this lane's fresh worktree (base
+`bf946163122f`):
+
+- `src/compiler_rust/compiler/src/codegen/instr/helpers.rs` —
+  `inline_runtime_len_value` now takes `baremetal`/`fam_arrays` target
+  context; the ungated tag-6 `is_spldict` arm is gone; hosted
+  `RuntimeDict` and `RtCoreDict` share tag 3 with `len@8`; closure
+  (0x06 in both runtimes) falls through to the `-1` sentinel; the
+  riscv64/SimpleOS tag-11 dict arm is `Target::is_baremetal()`-gated.
+- `src/runtime/runtime_native.c:294-301` — `RT_VALUE_HEAP_DICT 0x03U` /
+  `RT_VALUE_HEAP_CLOSURE 0x06U` with `_Static_assert` guards matching
+  hosted `HeapObjectType`.
+
+Absorber: `0ee4e247c0dd fix(runtime): align heap ABIs and mirror
+facades` (per the 2026-11-10 addendum above). Executing the Rust
+`fam_abi_tests.rs` regressions remains the seed lane's scope (blocked by
+unrelated test-code errors per this doc). Status line flipped from
+FIX-IMPLEMENTED-VERIFICATION-PENDING to SUPERSEDED (fix merged at tip).

@@ -246,7 +246,12 @@ fn _read_reply(link: MailLink, tag: text, smtp: bool) -> MailReply:
             return MailReply(lines: _lines_of(buf), raw: buf, error: _timeout_error())
         val chunk = _read_chunk(link, remaining)
         if chunk == "":
-            if time_now_monotonic_ms() >= deadline:
+            # Windows socket reads can surface the deadline as an empty read a
+            # scheduling quantum BEFORE the monotonic clock crosses `deadline`,
+            # which used to misclassify a timeout as "closed the connection".
+            # Within the tolerance band the distinction timeout-vs-EOF is the
+            # clock's, and the honest report is the timeout.
+            if time_now_monotonic_ms() + 100 >= deadline:
                 return MailReply(lines: _lines_of(buf), raw: buf, error: _timeout_error())
             return MailReply(lines: _lines_of(buf), raw: buf, error: "mail server closed the connection before replying")
         chunks.push(chunk)

@@ -1,0 +1,56 @@
+# A trait-typed function RETURN value used directly as a method receiver
+# (`make().identity()`) must lower to a native trait call, never to the
+# `unresolved method call` error/panic. Shapes: one impl and two impls.
+# doc/08_tracking/bug/native_trait_typed_return_receiver_unresolved_2026-08-09.md
+#
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.hir.hir_types.*
+
+val ONE_IMPL = "trait Ident:\n    fn identity() -> text\n\nclass Alpha with Ident:\n    tag: text\n    fn identity() -> text: self.tag\n\nfn make() -> Ident:\n    Alpha(tag: \"a\")\n\n"
+val TWO_IMPL = ONE_IMPL + "class Beta with Ident:\n    tag: text\n    fn identity() -> text: self.tag\n\nfn make_b(flag: bool) -> Ident:\n    if flag:\n        return Beta(tag: \"b\")\n    Alpha(tag: \"a\")\n\n"
+
+fn probe_row(source: text) -> text:
+    """`<errors>|<calls in probe>|<rt_panic calls>` for fn `probe`."""
+    val parsed = parse_and_build_module(source, "trait_return_receiver_probe.spl")
+    var hir_lowering = HirLowering.with_filename("trait_return_receiver_probe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.trait_impl_closure_complete = true
+    val mir = lowering.lower_module(hir)
+    var calls = 0
+    var panics = 0
+    for function in mir.functions.values():
+        if function.name == "probe" or function.name.ends_with(".probe"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            calls = calls + 1
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name == "rt_panic":
+                                        panics = panics + 1
+                                case _: ()
+                        case MirInstKind.CallIndirect(_, _, _, _):
+                            calls = calls + 1
+                        case _: ()
+    "{hir_lowering.errors.len() + lowering.errors.len()}|{calls > 1}|{panics}"
+
+describe "trait-typed return value as method receiver in MIR":
+    it "lowers make().identity() with one impl":
+        expect(probe_row(ONE_IMPL + "fn probe() -> text:\n    make().identity()\n")).to_equal("0|true|0")
+
+    it "lowers make_b(flag).identity() with two impls":
+        expect(probe_row(TWO_IMPL + "fn probe(flag: bool) -> text:\n    make_b(flag).identity()\n")).to_equal("0|true|0")
+
+    it "lowers the call-result-through-a-local shape":
+        expect(probe_row(TWO_IMPL + "fn probe(flag: bool) -> text:\n    val g = make_b(flag)\n    g.identity()\n")).to_equal("0|true|0")
+
+    it "still rejects a method the trait does not declare (probe is not vacuous)":
+        expect(probe_row(ONE_IMPL + "fn probe() -> text:\n    make().nope()\n").starts_with("0|")).to_equal(false)

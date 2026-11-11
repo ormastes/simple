@@ -5,7 +5,8 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-03
-- Status: OPEN
+- Status: SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — defect class fixed at tip
+  (bb27a92a7a8 + facade-owner fixes); re-verified fresh-seed (see triage addenda)
 - Platform observed: Windows x86_64-pc-windows-msvc
 - Severity: blocks the entire devhub compiler/native lane
 
@@ -200,3 +201,21 @@ seed-smoke at this lane's base:
 Sibling items (search `Id`, `print_raw`, `errors.spl kind`, `rt_env_cwd`,
 stage2 SEGV-after-monomorphize) remain tracked in their own records. No code
 change.
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (base
+`bf946163122f`, tracked seed `bin/simple.exe`):
+
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe run
+src/app/devhub/main.spl --version` → **`devhub 0.1.0`, exit 0** —
+HIR name resolution (the phase this record's 175-error census died in)
+is clean on the interpreter lane of the fresh seed. Absorber: compiler
+fix `bb27a92a7a8` (devhub 175→21) plus the facade-owner data fixes and
+closure-defect fixes, all ancestors of the base (per the 2026-11-05,
+2026-11-10 p3-boot4, and 2026-11-11 p3-compiler4 triages above).
+Sibling items remain tracked in their own records. Status line flipped
+from OPEN.

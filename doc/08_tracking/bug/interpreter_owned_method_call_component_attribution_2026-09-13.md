@@ -1,9 +1,9 @@
 # Where the 2,950 ns of an interpreted class-method call actually goes
 
-- Status: OPEN (2026-09-13) — two components fixed by PERF-7, the largest one
-  measured and left alone; see "Not fixed" below. The caller-frame-width term is
-  now **RESOLVED** (PERF-9) — see the section at the end of "The per-call cost
-  grows with the CALLER's frame width".
+- Status: SUPERSEDED (2026-11-11, lane int9) — PERF-7/PERF-9 fixes landed on
+  origin/release/1.0.0 via `9e7e7a526edb` (PR #7597); deferred optimisations
+  remain deferred by design; the dead-MECALL-counter residual is the
+  known-live "MECALL counters read 0" owner-decision item. See addenda below.
 - Lane: PERF-7 (interpreter per-call cost), worktree `/home/yoon/dev/simple-perf-7`,
   base `origin/main` d522cc98da2.
 - Binaries: BASE `simple.base` sha256 `6903816380d27188...`; ablation PROBE
@@ -242,3 +242,24 @@ origin/release/1.0.0 tip 462b3b334fef) with the refreshed seed
 Fixing lineage on this branch: the PERF-7/PERF-9 work carried by squash-merge
 `9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07, PR #7597), original
 PRs #841/#849 (2026-09-13).
+
+
+## Addendum 2026-11-11 (lane int9) — header flip; PERF-9 pin re-run green on the tracked seed
+
+Header Status flipped OPEN -> SUPERSEDED, concurring with lane interp6's
+addendum above. Absorbing lineage unchanged: PERF-7/PERF-9 carried by
+squash-merge `9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07, PR #7597),
+original PRs #841/#849 (2026-09-13); ancestor of HEAD `9f3df4c125ad`.
+
+int9 re-verified on this lane's tracked seed (`bin/simple.exe`,
+build-commit `46fe8f6b6def`, `--mode=interpreter --no-cache`):
+`test/05_perf/interp/call_entry_publish_scan_spec.spl` — 3/3 passed; the
+PERF-9 `CowEnv::nonlocal_overlay` publish-scan fix is live on this binary.
+
+Residuals carried forward unchanged:
+- Residual A (owner_scope memoisation, specialised owned-call kernel):
+  deliberately deferred by this record's own risk analysis — perf debt, not
+  a defect.
+- Residual B (MECALL perf-counter family reads 0 on the seed): routed to
+  the campaign's known-live owner-decision item "MECALL counters read 0";
+  not re-diagnosed here per directive.

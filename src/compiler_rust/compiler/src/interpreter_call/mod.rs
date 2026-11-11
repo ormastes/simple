@@ -710,6 +710,13 @@ mod precedence_tests {
             assert!(builtin_wins_over_user_fn(name, true));
         }
     }
+
+    /// Owner decision 2026-11-11: `panic` is fenced like `exit`/`dprint`.
+    #[test]
+    fn panic_is_not_rebound_by_module_fn() {
+        assert!(crate::interpreter::PRELUDE_UNSHADOWABLE.contains(&"panic"));
+        assert!(builtin_wins_over_user_fn("panic", true));
+    }
 }
 
 /// Report, once per name, that a user `fn` shadows a prelude builtin.

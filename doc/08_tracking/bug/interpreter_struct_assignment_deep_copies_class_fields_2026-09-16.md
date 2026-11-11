@@ -1,7 +1,7 @@
 # Interpreter: struct assignment deep-copies class fields, breaking shared state
 
 Date: 2026-09-16
-Status: OPEN
+Status: SUPERSEDED (2026-11-11, lane int10) — fixed on origin/release/1.0.0 by `9e7e7a526edb` (PR #7597); see addenda below
 
 ## Observed
 
@@ -63,3 +63,17 @@ SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe $PWD/bin/simple.exe test \
 SPEC FILE VERDICT ... outcome=OK declared>=6 executed=6 passed=6 failed=0
 Results: 6 total, 6 passed, 0 failed
 ```
+
+## Addendum 2026-11-11 (lane int10) — header flip; concurs with interp6 SUPERSEDED verdict
+
+Header Status flipped OPEN -> SUPERSEDED. The absorber named by lane interp6
+above is confirmed present at this lane's base: `9e7e7a526edb43ab29171d920449367e5fd48127`
+is an ancestor of HEAD `1771ca481337`, and `copy_value_type_in_place`
+(`src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs:65`)
+is in-tree with the value-type-guarded deep-copy semantics this record's
+unblock condition asks for. interp6's same-day verification of the record's own
+unblock spec (`actor_mailbox_close_spec.spl`, 6/6 PASS on refreshed seed
+0791c2b7f4a7) stands as the execution evidence; this lane's tracked seed
+(`bin/simple.exe` build-commit `46fe8f6b6def`) descends from that build (int9
+lineage confirmation, row `interpreter_raw_array_and_glob_import_gaps`), so a
+re-run would only re-print a green check (no-identical-rerun rule).

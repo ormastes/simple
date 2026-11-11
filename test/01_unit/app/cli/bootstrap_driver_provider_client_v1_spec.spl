@@ -1,0 +1,170 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Bug: doc/08_tracking/bug/compiler_driver_v1_bootstrap_activation_blocked_on_callable_loader_2026-08-14.md
+# Fail-closed evidence for the opt-in bootstrap driver-provider route: missing,
+# path-denied, digest-mismatched, non-loadable, version-incompatible, and
+# entry-less providers all end in a diagnostic plus exit code 3 — never a
+# static-driver fallback. The success path is driven by a test provider's
+# result bytes; loading a built artifact is the remaining native verification.
+
+use std.spec.step
+
+use std.spec.*
+use app.cli.bootstrap_driver_provider_client_v1.*
+use os.smf.provider_loader.{
+    ProviderAdmissionRequestV1, ProviderCallableEvidenceV1, provider_admit_evidence_v1,
+    provider_artifact_digest_v1
+}
+use os.posix.dynlib_sffi.{BytesCallV1}
+use compiler.driver.driver_provider_contract_v1.{SIMPLE_COMPILER_DRIVER_V1_INTERFACE}
+use compiler.driver.driver_provider_compile_wire_v1.{
+    DriverCompileResultV1, DRIVER_COMPILE_STATUS_OK_V1, DRIVER_COMPILE_STATUS_FAILED_V1,
+    encode_driver_compile_result_v1
+}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use app.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io_runtime.{dir_create, remove_file_if_exists}
+use std.nogc_sync_mut.sffi.file_bytes.{file_atomic_write_bytes_tagged_native}
+
+val FAKE_DIR: text = "build/providers/bootstrap_driver_provider_client_v1_spec"
+
+fn route(path: text, digest: text) -> BootstrapDriverProviderRouteV1:
+    BootstrapDriverProviderRouteV1(requested: path != "", artifact_path: path, expected_digest: digest)
+
+fn fake_artifact(name: text, bytes: [u8]) -> text:
+    dir_create(FAKE_DIR, true)
+    val path = FAKE_DIR + "/" + name
+    remove_file_if_exists(path)
+    expect(file_atomic_write_bytes_tagged_native(path, bytes)).to_equal(true)
+    path
+
+fn evidence(address: i64, callable: bool) -> ProviderCallableEvidenceV1:
+    ProviderCallableEvidenceV1(artifact_exists: true, artifact_digest: "a" * 64,
+        loader_valid: true, query_symbol_address: address, query_symbol_process_callable: callable)
+
+fn pinned_request(path: text) -> ProviderAdmissionRequestV1:
+    bootstrap_driver_provider_admission_request_v1(route(path, "a" * 64))
+
+describe "bootstrap driver provider client":
+    it "stays on the direct driver route unless the provider env is set":
+        # @req REQ-SSPEC-COMPILER
+        step("stays on the direct driver route unless the provider env is set")
+        val old_path = env_get(BOOTSTRAP_DRIVER_PROVIDER_ENV_V1) ?? ""
+        val old_digest = env_get(BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1) ?? ""
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_ENV_V1, "")
+        expect(bootstrap_driver_provider_route_v1().requested).to_equal(false)
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_ENV_V1, "build/providers/driver.dll")
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1, "b" * 64)
+        val routed = bootstrap_driver_provider_route_v1()
+        expect(routed.requested).to_equal(true)
+        expect(routed.artifact_path).to_equal("build/providers/driver.dll")
+        expect(routed.expected_digest).to_equal("b" * 64)
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_ENV_V1, old_path)
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1, old_digest)
+        val unrouted = bootstrap_driver_provider_compile_v1(route("", ""), driver_core_compile_options_default())
+        expect(unrouted.loader_refused).to_equal(true)
+        expect(unrouted.exit_code).to_equal(BOOTSTRAP_DRIVER_PROVIDER_EXIT_CODE_V1)
+
+    it "pins the CompilerDriverV1 interface in the admission request and query":
+        # @req REQ-SSPEC-COMPILER
+        step("pins the CompilerDriverV1 interface in the admission request and query")
+        val request = pinned_request("build/providers/driver.dll")
+        expect(request.artifact_kind).to_equal("native")
+        expect(request.requested_interface_major).to_equal(1)
+        expect(request.host_abi).to_equal(BOOTSTRAP_DRIVER_PROVIDER_HOST_ABI_V1)
+        val query = bootstrap_driver_provider_query_v1()
+        expect(query.interface_id).to_equal(SIMPLE_COMPILER_DRIVER_V1_INTERFACE)
+        expect(query.descriptor_size).to_equal(44)
+        expect(query.host_abi).to_be_greater_than(0)
+
+    it "refuses a missing provider artifact with a diagnostic and exit code 3":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a missing provider artifact with a diagnostic and exit code 3")
+        val outcome = bootstrap_driver_provider_compile_v1(
+            route("build/providers/does_not_exist_driver_provider.dll", "a" * 64),
+            driver_core_compile_options_default())
+        expect(outcome.loader_refused).to_equal(true)
+        expect(outcome.compiled).to_equal(false)
+        expect(outcome.exit_code).to_equal(3)
+        expect(outcome.diagnostics.len()).to_equal(1)
+        expect(outcome.diagnostics[0]).to_contain("admission refused")
+        expect(outcome.diagnostics[0]).to_contain("artifact-missing")
+
+    it "refuses a provider outside the approved roots":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a provider outside the approved roots")
+        val outcome = bootstrap_driver_provider_compile_v1(
+            route("src/app/cli/bootstrap_main.spl", "a" * 64), driver_core_compile_options_default())
+        expect(outcome.exit_code).to_equal(3)
+        expect(outcome.diagnostics[0]).to_contain("path-denied")
+
+    it "refuses a provider whose digest does not match the pin":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a provider whose digest does not match the pin")
+        val path = fake_artifact("digest_mismatch.dll", [1, 2, 3, 4])
+        val outcome = bootstrap_driver_provider_compile_v1(route(path, "c" * 64), driver_core_compile_options_default())
+        expect(outcome.exit_code).to_equal(3)
+        expect(outcome.diagnostics[0]).to_contain("artifact-digest-mismatch")
+
+    it "refuses a correctly pinned artifact the platform loader cannot map":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a correctly pinned artifact the platform loader cannot map")
+        val bytes: [u8] = [110, 111, 116, 32, 97, 32, 108, 105, 98, 114, 97, 114, 121]
+        val path = fake_artifact("not_a_library.dll", bytes)
+        val outcome = bootstrap_driver_provider_compile_v1(
+            route(path, provider_artifact_digest_v1(bytes)), driver_core_compile_options_default())
+        expect(outcome.loader_refused).to_equal(true)
+        expect(outcome.exit_code).to_equal(3)
+        expect(outcome.diagnostics[0]).to_contain("admission refused")
+        expect(outcome.diagnostics[0]).to_contain("loader-failed")
+
+    it "refuses an interface-incompatible provider and one without a callable query entry":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses an interface-incompatible provider and one without a callable query entry")
+        var incompatible = pinned_request("build/providers/driver.dll")
+        incompatible.provided_interface_major = 2
+        val version = bootstrap_driver_provider_admission_outcome_v1(
+            provider_admit_evidence_v1(incompatible, evidence(4096, true)))
+        expect(version.is_some()).to_equal(true)
+        expect((version ?? bootstrap_driver_provider_refusal_v1("", 0, "")).exit_code).to_equal(3)
+        expect((version ?? bootstrap_driver_provider_refusal_v1("", 0, "")).diagnostics[0]).to_contain("interface-version-unsupported")
+        val missing = bootstrap_driver_provider_admission_outcome_v1(
+            provider_admit_evidence_v1(pinned_request("build/providers/driver.dll"), evidence(0, false)))
+        expect((missing ?? bootstrap_driver_provider_refusal_v1("", 0, "")).diagnostics[0]).to_contain("query-symbol-missing")
+        val not_callable = bootstrap_driver_provider_admission_outcome_v1(
+            provider_admit_evidence_v1(pinned_request("build/providers/driver.dll"), evidence(4096, false)))
+        expect((not_callable ?? bootstrap_driver_provider_refusal_v1("", 0, "")).diagnostics[0]).to_contain("not-process-callable")
+        val admitted = bootstrap_driver_provider_admission_outcome_v1(
+            provider_admit_evidence_v1(pinned_request("build/providers/driver.dll"), evidence(4096, true)))
+        expect(admitted.is_none()).to_equal(true)
+
+    it "maps a test provider's compile result bytes to the static route's exit codes":
+        # @req REQ-SSPEC-COMPILER
+        step("maps a test provider's compile result bytes to the static route's exit codes")
+        val ok_bytes = encode_driver_compile_result_v1(DriverCompileResultV1(
+            compile_status: DRIVER_COMPILE_STATUS_OK_V1, diagnostics: []))
+        val ok = bootstrap_driver_provider_call_outcome_v1(BytesCallV1(true, ok_bytes.len(), ok_bytes, ""))
+        expect(ok.loader_refused).to_equal(false)
+        expect(ok.compiled).to_equal(true)
+        expect(ok.exit_code).to_equal(0)
+        val failed_bytes = encode_driver_compile_result_v1(DriverCompileResultV1(
+            compile_status: DRIVER_COMPILE_STATUS_FAILED_V1, diagnostics: ["parse error", "type error"]))
+        val failed = bootstrap_driver_provider_call_outcome_v1(BytesCallV1(true, failed_bytes.len(), failed_bytes, ""))
+        expect(failed.loader_refused).to_equal(false)
+        expect(failed.compiled).to_equal(false)
+        expect(failed.exit_code).to_equal(1)
+        expect(failed.diagnostics.len()).to_equal(2)
+        expect(failed.diagnostics[1]).to_equal("type error")
+
+    it "treats a transport failure or malformed result as a loader refusal, not a compile verdict":
+        # @req REQ-SSPEC-COMPILER
+        step("treats a transport failure or malformed result as a loader refusal, not a compile verdict")
+        val transport = bootstrap_driver_provider_call_outcome_v1(BytesCallV1(false, -2, [], "bytes-call-callee-error"))
+        expect(transport.loader_refused).to_equal(true)
+        expect(transport.exit_code).to_equal(3)
+        expect(transport.diagnostics[0]).to_contain("bytes-call-callee-error")
+        val garbage = bootstrap_driver_provider_call_outcome_v1(BytesCallV1(true, 4, [1, 2, 3, 4], ""))
+        expect(garbage.loader_refused).to_equal(true)
+        expect(garbage.exit_code).to_equal(3)
+        expect(garbage.compiled).to_equal(false)
+        expect(garbage.diagnostics[0]).to_contain("compile-result")

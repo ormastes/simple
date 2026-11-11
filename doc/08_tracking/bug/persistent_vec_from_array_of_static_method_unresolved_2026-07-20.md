@@ -7,8 +7,36 @@ evidence found in the body. This is bookkeeping, not verification.
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign, cluster
 `test/unit/lib/{gc_async_immut,gc_sync_immut}`
-**Status:** open — genuine defect, reproduces under both `bin/simple run`
-and `bin/simple test` (NOT the known test-vs-run static-method landmine)
+**Status:** FIXED 2026-11-11 (P3 lane ne19 triage, release/1.0.0 worktree) —
+no longer reproduces; both affected spec clusters green (evidence below)
+
+## Addendum 2026-11-11 (lane ne19) — FIXED, verified by execution
+
+Re-ran the exact `bin/simple run` repro from this doc on the release/1.0.0
+worktree seed binary (`bin/simple.exe`, Rust bootstrap seed v1.0.0-rc.1):
+
+```simple
+use std.gc_async_immut.{PersistentVec}
+
+fn main():
+    val sample = PersistentVec.from_array([4, 5, 6])   # was: unknown static method
+    print(sample.len())                                 # prints 3
+    val sample2 = PersistentVec.of([1, 2])              # was: unknown static method
+    print(sample2.len())                                # prints 2
+```
+
+rc=0, prints `3` then `2` — both statics resolve. The affected specs:
+
+    bin/simple.exe test test/01_unit/lib/gc_async_immut/persistent_vec_native_spec.spl   OK 1/1
+    bin/simple.exe test test/01_unit/lib/nogc_sync_immut/persistent_vec_native_spec.spl  OK 1/1
+    bin/simple.exe test test/01_unit/lib/nogc_sync_mut/gc_runtime_contract_spec.spl      OK 3/3
+
+The second confirmed instance (`GcConfig.with_heap_size`) passes inside the
+green `gc_runtime_contract_spec.spl` run. The free-function aliases
+(`PersistentVec__from_array` et al.) still exist in
+`src/lib/nogc_async_immut/persistent_vec/__init__.spl:429` as exports but are
+no longer load-bearing for these callers. No code change in this lane; the
+resolver fix predates this triage and is now evidenced.
 
 ## Symptom
 

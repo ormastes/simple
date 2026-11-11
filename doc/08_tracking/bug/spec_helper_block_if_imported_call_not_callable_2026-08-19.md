@@ -75,3 +75,38 @@ misreport as test failures. Workaround: inline the helper (done in
 test/01_unit/lib/nogc_sync_mut/text_layout/font_rasterizer_bitmap_spec.spl,
 which is now green 5/5 with identical logic inlined).
 
+
+---
+
+## Addendum 2026-11-11 — lane runner7: LIVE, reproduced verbatim on current tip
+
+Re-ran the doc's verbatim failing fixture on the refreshed Windows seed
+(`bin/simple.exe` at HEAD `68ab3383080f`, 2026-11-11,
+`bin/simple.exe test build/p3-runner7-probes/helper_block_if_repro_spec.spl --mode=interpreter --no-cache`):
+
+- `semantic: value is not callable` — reproduced exactly as filed;
+  `SPEC FILE VERDICT ... outcome=ERROR declared>=1 executed=1 passed=0 failed=1`, runner rc=1.
+
+New discriminating detail this run: the runner emits, before the failure,
+
+```
+[visibility-warning] 'glyph_row_bits' is a private fn of module
+'std.common.ui.glyph_bitmap_5x7' (src/lib/common/ui/glyph_bitmap_5x7.spl);
+mark it `pub` or `export` it
+```
+
+`glyph_row_bits` is a private fn in `src/lib/common/ui/glyph_bitmap_5x7.spl`.
+The private import resolves fine in the doc's other shapes (direct `it`-block
+call, one-line wrapper) but resolves as a non-callable value specifically in
+the block-`if` arm of the nested helper under the test compilation path. This
+is the seed private-fn-import visibility-divergence class (owner decision; see
+the campaign's known-live list — do NOT paper over it by flipping lib
+visibility, which would fix only this spec and leave the seed inconsistency).
+
+Workaround state verified: the inlined spec
+`test/01_unit/lib/nogc_sync_mut/text_layout/font_rasterizer_bitmap_spec.spl`
+is green 5/5 on the same binary.
+
+Verdict: LIVE — fix surface is the seed's private-import call resolution in
+this syntactic shape (`src/compiler_rust/**`, seed lane). Keep the workaround;
+do not pub the lib fn as a substitute fix.

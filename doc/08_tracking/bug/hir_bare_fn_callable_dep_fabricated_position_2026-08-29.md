@@ -5,7 +5,9 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-29 (debug_service_v1 Opus verification)
-**Status:** OPEN
+**Status:** OPEN — BLOCKED 2026-11-11 (lanes compiler2 + p3fix-comp6-20261111):
+end-to-end proof requires the entry-closure native MCP build, which is
+forbidden in-lane; verbatim grant recorded in the 2026-11-11 addendum below
 
 Native build reports `unresolved name: signal|mcp_run_argv|mcp_server_init`
 at (file,line,col) triples that do not match file content. Root: the bare
@@ -62,3 +64,38 @@ attribution). Evidence attempt log: `build/review/p3c2-mcp-check.log` (timed
 out, inconclusive).
 
 **Cycles:** 0 (no fix attempted — verification blocked, not a fix cycle).
+
+
+---
+
+## Addendum 2026-11-11 — lane p3fix-comp6-20261111 — verdict BLOCKED (grant required)
+
+Corroborates lane compiler2's BLOCKED triage above; no new cycle spent
+on a fix (0 fix cycles this lane). The only honest end-to-end proof is
+the heavy entry-closure **native MCP build** — exactly the class of
+build this lane's mandate forbids running — and the lighter proxy
+`bin/simple check src/app/mcp` timed out (exit 124 at 260 s) on the
+refreshed seed in lane compiler2, so it yields no verdict either. The
+dedicated HIR callable-dep unit specs in `test/01_unit/compiler/hir/`
+cover related-but-distinct mechanisms and do not pin this row's
+bare-`fn()` fabricated-position scenario.
+
+**Exact command needing grant (verbatim, unchanged from lane compiler2):**
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe native-build \
+  --source src/compiler --source src/app --source src/lib \
+  --entry-closure --entry src/app/mcp/main.spl --strip \
+  --output build/bootstrap/mcp-package/simple_mcp_server
+```
+
+Run it, then grep the build log for
+`unresolved name: signal|mcp_run_argv|mcp_server_init` and for
+(file,line,col) triples that do not match file content. A clean build =>
+SUPERSEDED (substantial post-2026-08-29 HIR callable-dep work —
+`7623d26baeb4`, `f657be3985da`, `4a710c9ce465`, `22a841b1a579`,
+`1aa81cac8c6` — is already in HEAD); reproduction => LIVE (fix in
+`src/compiler` HIR callable-dep position attribution).
+
+Status: OPEN — BLOCKED pending owner grant for the entry-closure
+native MCP build.

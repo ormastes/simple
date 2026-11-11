@@ -403,7 +403,7 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
 ///
 /// `dprint` (debug print) is fenced too: no Simple source defines a `fn dprint`,
 /// so a transitive one can only hijack debug output (fencing is behaviour-preserving).
-pub const PRELUDE_UNSHADOWABLE: &[&str] = &["exit", "dprint"];
+pub const PRELUDE_UNSHADOWABLE: &[&str] = &["exit", "dprint", "panic"];
 
 /// True for the user-facing prelude names (`print`, `exit`, `abs`, ...) as
 /// opposed to the `rt_*` / `compiler__*` runtime-bridge entries that share

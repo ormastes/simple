@@ -509,7 +509,15 @@ pub(crate) fn evaluate_expr(
                         _ => true,
                     };
                     if is_present {
-                        v
+                        // Nested optional: `Some(None).?` is PRESENT (outer layer
+                        // is Some), but unwrapping to the inner `Option::None`
+                        // would make every truthiness consumer read it as absent.
+                        // Keep the outer wrapper so presence survives.
+                        if matches!(&v, Value::Enum { .. }) && v.is_nil_like() {
+                            val
+                        } else {
+                            v
+                        }
                     } else {
                         Value::Nil
                     }

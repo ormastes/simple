@@ -42,6 +42,11 @@ if "%SIMPLE_LOG%"=="" set "SIMPLE_LOG=error"
 if "%RUST_LOG%"=="" set "RUST_LOG=error"
 if "%SIMPLE_EXECUTION_MODE%"=="" set "SIMPLE_EXECUTION_MODE=interpreter"
 call "%~dp0simple.cmd" run "%~dp0..\src\app\simple_lsp_mcp\main.spl" %*
+set "LSP_MCP_RC=%ERRORLEVEL%"
+rem Answer the client with one JSON-RPC error frame instead of a silent close.
+if not "%LSP_MCP_RC%"=="0" echo {"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"simple_lsp_mcp_server runtime exited %LSP_MCP_RC%; see stderr"}}
+if not "%LSP_MCP_RC%"=="0" 1>&2 echo simple_lsp_mcp_server: exited %LSP_MCP_RC%
+exit /b %LSP_MCP_RC%
 
 :done
 exit /b %ERRORLEVEL%

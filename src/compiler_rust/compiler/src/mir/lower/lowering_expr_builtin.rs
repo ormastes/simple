@@ -6,6 +6,23 @@ use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, UnitOverflowBehavior, VReg};
 
 impl<'a> MirLowerer<'a> {
+    /// Renderer for a flat primitive optional (`T?` lowered to
+    /// `HirType::Pointer { inner: T }`, a raw payload or the nil sentinel).
+    /// Returns None for every other type, including heap optionals.
+    fn flat_opt_to_string_fn(&self, ty: TypeId) -> Option<&'static str> {
+        let Some(HirType::Pointer { inner, .. }) = self.type_registry?.get(ty) else {
+            return None;
+        };
+        match *inner {
+            TypeId::BOOL => Some("rt_opt_bool_to_string"),
+            TypeId::I64 | TypeId::U64 | TypeId::I32 | TypeId::U32 | TypeId::I16 | TypeId::U16 | TypeId::U8 => {
+                Some("rt_opt_i64_to_string")
+            }
+            TypeId::F32 | TypeId::F64 => Some("rt_opt_f64_to_string"),
+            _ => None,
+        }
+    }
+
     /// Materialize `if cond_reg: then_reg else: else_reg` from already-lowered
     /// VRegs (not `HirExpr`s). Mirrors the block/temp-local machinery of
     /// `lower_if_expr` (temp local -> branch -> per-arm store -> merge ->
@@ -627,6 +644,25 @@ impl<'a> MirLowerer<'a> {
                 });
             }
 
+            // Flat primitive optional (`i64?`/`f64?`/`bool?`, HirType::Pointer):
+            // render as `Option::Some(v)` / `Option::None` (seed optional
+            // semantics = pure Simple). At this sink the value is already a
+            // TAGGED RuntimeValue (measured: stored 3 arrives as word 24), so
+            // the raw-payload rt_opt_* helpers do not apply. Bug:
+            // doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+            if self.flat_opt_to_string_fn(arg.ty).is_some() {
+                return self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: CallTarget::from_name("rt_opt_value_to_string"),
+                        args: vec![arg_reg],
+                    });
+                    dest
+                });
+            }
+
             // Check if argument is a native integer or float type that needs boxing
             let needs_boxing = matches!(
                 arg.ty,
@@ -800,27 +836,8 @@ impl<'a> MirLowerer<'a> {
                 // hot-path, bootstrap-only-engine change). See
                 // doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md.
                 if let Some(registry) = self.type_registry {
-                    if let Some(HirType::Pointer { inner, .. }) = registry.get(arg.ty) {
-                        let inner = *inner;
-                        let opt_to_string_fn = if inner == TypeId::BOOL {
-                            Some("rt_opt_bool_to_string")
-                        } else if matches!(
-                            inner,
-                            TypeId::I64
-                                | TypeId::U64
-                                | TypeId::I32
-                                | TypeId::U32
-                                | TypeId::I16
-                                | TypeId::U16
-                                | TypeId::U8
-                        ) {
-                            Some("rt_opt_i64_to_string")
-                        } else if matches!(inner, TypeId::F32 | TypeId::F64) {
-                            Some("rt_opt_f64_to_string")
-                        } else {
-                            None
-                        };
-                        if let Some(fn_name) = opt_to_string_fn {
+                    if let Some(HirType::Pointer { .. }) = registry.get(arg.ty) {
+                        if let Some(fn_name) = self.flat_opt_to_string_fn(arg.ty) {
                             let stringified = self.with_func(|func, current_block| {
                                 let stringified = func.new_vreg();
                                 let block = func.block_mut(current_block).unwrap();

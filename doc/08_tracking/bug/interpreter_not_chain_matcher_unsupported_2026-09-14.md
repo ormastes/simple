@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN, thoroughly diagnosed, deliberately not fixed this round (see "Why not fixed" below)
+- Status: SUPERSEDED (2026-11-11, lane int9) — fixed on origin/release/1.0.0 by `9e7e7a526edb` (PR #7597); see addenda below
 - Binary: `d4c0779cef6cf0cc4054` / rebuilt `57761d4fbfed5e444a36` (neither carries a fix for this)
 - Base: `work/unit-p1-2026-09-13` at `d2887f81bf2`
 - Affects: **61 spec files, 244 call sites** across `test/01_unit` (exhaustive count:
@@ -171,4 +171,23 @@ Results: 3 total, 3 passed, 0 failed
 ```
 
 Before the fix each assertion aborted with
+`semantic: undefined field: unknown property or method 'not' on String`.
+
+
+## Addendum 2026-11-11 (lane int9) — header flip; int9-firsthand seed-smoke confirms interp6 verdict
+
+Header Status flipped OPEN -> SUPERSEDED. Absorber unchanged:
+`9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07, squash-merge of
+PR #7597) — the `peel_bdd_matcher_receiver` /
+`evaluate_negated_bdd_matcher` path the doc prescribed,
+`src/compiler_rust/compiler/src/interpreter/expr/calls.rs:193-206` and
+`src/compiler_rust/compiler/src/interpreter_method/mod.rs:308-341`
+(present in tree at HEAD `9f3df4c125ad`).
+
+int9 re-verified on this lane's tracked seed (`bin/simple.exe`,
+build-commit `46fe8f6b6def`, `--mode=interpreter --no-cache`), scratch spec
+`build/p3fix-int9/int9_seed_smoke_spec.spl` (build/, gitignored): all three
+spellings in use across the tree — `.not.to_contain`, `.not.to_equal`,
+`.not.to_be_nil` — 4/4 examples PASS (the not-chain example green; the other
+examples cover the sibling rows listed there). Before the fix each raised
 `semantic: undefined field: unknown property or method 'not' on String`.

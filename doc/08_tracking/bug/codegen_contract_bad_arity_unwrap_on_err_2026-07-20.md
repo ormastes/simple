@@ -6,8 +6,9 @@ evidence found in the body. This is bookkeeping, not verification.
 "emits diagnostic comment" specs call `.unwrap()` unconditionally, crashing
 on the `Err` the backend now correctly returns
 
-**Status:** OPEN — filed, not fixed (classification needs a product-design
-decision: see below)
+**Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — hard-Err bad-arity
+contract confirmed correct; CUDA rejection scenarios rewritten 2026-11-07 and verified
+PASS on fresh seed 2026-11-10/11 (see addenda)
 
 **Date:** 2026-07-20
 **Campaign:** whole-suite 01_unit triage (fix_guide.md)
@@ -152,3 +153,23 @@ feature/oracle divergence this doc's 2026-11-07 note quarantined ("do not claim 
 vec suite green ... Actual execution plus the separate feature contract must resolve it").
 It needs its own feature-contract row; the positive controls were correctly left
 unweakened.
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (base
+`bf946163122f`, tracked seed `bin/simple.exe`):
+
+`bin/simple.exe test test/01_unit/compiler/codegen/vec_types_contract_spec.spl
+--mode=interpreter --no-cache` → **18/22 PASS**; both CUDA bad-arity
+scenarios PASS ("rejects gpu_vec4_load_f32 with bad arity (CUDA)",
+"rejects gpu_vec4_store_f32 with bad arity (CUDA)"), the OpenCL
+diagnostic-comment bad-arity scenarios PASS, and no `.unwrap()` on a
+bad-arity path remains. The 4 failures are exactly the quarantined
+POSITIVE CUDA vec scenarios (`emits ld/st.global.v4/v2.f32`) — the
+separate feature/oracle divergence this doc's 2026-11-07 note
+quarantined, not this row's arity defect. Absorber: the 2026-11-07
+arity-oracle rewrite (executed and verified per the 2026-11-10 addendum
+above). Status line flipped from OPEN.

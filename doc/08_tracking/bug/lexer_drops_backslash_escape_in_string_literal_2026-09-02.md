@@ -2,7 +2,11 @@
 
 - **Filed:** 2026-09-02 — found while reproducing
   `is_dir_always_false_shell_dependency_2026-09-02.md`
-- **Status:** OPEN (compiler defect; not fixed here)
+- **Status:** SUPERSEDED 2026-11-11 (lane p3-comp8) — FIXED at tip in seed source
+  (`abc4a53d3fca8`, patch-identical to lane p3-compiler3's `a8a1070724d7`);
+  tracked `bin/simple.exe` (build-commit `46fe8f6b6def`, built 19:13) predates
+  the fix (landed 19:29), so campaign specs still observe the old escape
+  behavior until the seed-fix lane rebuilds the seed binary.
 - **Host:** Windows 11, `bin/simple.exe` 16,347,136 bytes,
   md5 `d52d770724a9f8797e98ac7819709ab9`
 
@@ -138,3 +142,29 @@ at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
   (seed rebuild needed); the end-to-end evidence above comes from a debug build
   of the same source tree. The pure-Simple self-hosted side needed no change —
   it already implements the preserving contract.
+
+## Addendum 2026-11-11 — P3 lane comp8 verdict: SUPERSEDED (absorber: lane p3-compiler3 seed fix, re-verified)
+
+Disposition re-verified fresh on `origin/release/1.0.0` tip `dacccfc78fd10`
+(worktree `simple-p3-comp8-20261111`):
+
+- Fix commit `abc4a53d3fca8` ("fix(lexer): seed preserves backslash for
+  non-escape sequences", landed 2026-11-10 19:29) IS an ancestor of the
+  release tip; `src/compiler_rust/parser/src/lexer/escapes.rs` at tip carries
+  `EscapeResult::KeepBoth` and the removed non-authority arms, exactly as the
+  p3-compiler3 addendum above describes. `git patch-id` confirms
+  `abc4a53d3fca8` and the addendum's `a8a1070724d7` are the identical patch
+  (`6a244f7b834e`), re-landed via merge.
+- Pure-Simple lexer side needed no change (already preserving), per the
+  p3-compiler3 addendum.
+- The tracked campaign seed `bin/simple.exe` was refreshed to build-commit
+  `46fe8f6b6def` (2026-11-10 19:13) — BEFORE the fix landed (19:29) — so it
+  does not contain the fix. Behavioral probe on the tracked binary
+  (interpreter mode, seed-smoke): `"a\b".len()` measured 2 (expect 3),
+  `"a\T".len()` measured 2 (expect 3), `"a\n".len()` 2 and raw `r"a\b"` 3 both
+  correct — i.e. the tracked binary still exhibits exactly the filed defect.
+- Per the campaign's known-live routing, Rust seed fixes and the seed rebuild
+  belong to the seed-fix lane. No in-lane change: a regression spec cannot
+  PASS on the current tracked binary, and the p3-compiler3 addendum already
+  records the passing debug-build/cargo verification.
+- Status header flipped OPEN → SUPERSEDED.

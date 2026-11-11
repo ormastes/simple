@@ -637,6 +637,7 @@ int64_t  rt_raw_i64_to_string(int64_t raw);
  * Cranelift-path (compiler_rust) helpers of the same name. See
  * runtime_native.c for the definitions and rationale. */
 int64_t  rt_opt_i64_to_string(int64_t raw);
+int64_t  rt_opt_value_to_string(int64_t v);
 int64_t  rt_opt_bool_to_string(int64_t raw);
 int64_t  rt_opt_f64_to_string(int64_t raw);
 int64_t  rt_value_to_string(int64_t value);

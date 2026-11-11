@@ -273,3 +273,17 @@ emitter to call `rt_value_int`/`rt_value_int_wide`, and give the MIR
 interpreter a heap (or document unreachability with evidence), then verify via
 `boxed_int_wide_roundtrip` (expect 3/3 rc 0) and the LLVM path
 independently. Do not close this row until criteria 3-4 land.
+
+## Addendum 2026-11-11 (lane int10) — LIVE concurrence; Status stays OPEN
+
+int10 re-read this record and lane interp11's same-day 2026-11-11 addendum at
+base `1771ca481337` and concurs with its judgment: criteria 1-2 (runtime
+choke point + Cranelift JIT delegation) stand verified green on this lane's
+own tracked seed (`bin/simple.exe` build-commit `46fe8f6b6def`, the identical
+binary interp11 probed); criteria 3-4 (LLVM backend `emitter.rs:2030`
+`build_left_shift(int_v, three, "box_shl")`; MIR interpreter
+`mir_interpreter.rs:774` `self.set(dest, self.get(value) << 3)`) are
+seed-Rust-codegen paths requiring cargo/rustc + LLVM AOT verification, which
+this lane is likewise forbidden (same grant class interp11 recorded verbatim
+above). No re-run of the wide-int probe: same seed, same day, green check
+(no-identical-rerun rule). Owner: seed-fix lane with cargo grant.

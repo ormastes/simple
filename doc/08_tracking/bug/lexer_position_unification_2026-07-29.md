@@ -6,14 +6,10 @@ bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-29
-**Status:** partially fixed (lane LEX1) — the three real MIXING sites found in
-`_ParserDecls/fn_struct_decls.spl` (domain-block raw-brace parsing) now use
-the live CoreLexer-backed accessors. The pre-existing legacy free-function
-scanner cluster (`lexer_scanners.spl` + `lex_scan_token_local()` in
-`lexer.spl`) was audited and found to be **fully dead code**, not merely
-"legacy but self-consistent" as originally assumed — left in place with a
-guard comment (deleting it requires updating two structural-existence specs,
-out of scope for this lane).
+**Status:** SUPERSEDED 2026-11-11 (lane p3-comp8) — position-unification fix
+and both deletion lanes verified in tree at tip (`d6555eb932f7`; absorber
+verdict lane p3-compiler3). Stale "partially fixed" header superseded; see
+dated addenda below.
 **Found:** lane LEX1 (`lexer-position-unification`), mission-critical
 robustness campaign, 2026-07-29
 **Area:** compiler frontend (`src/compiler/10.frontend/core/`)
@@ -415,3 +411,27 @@ at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
   the stale structural assertions in lexer_spec.spl once the module-static
   defect is fixed.
 
+
+## Addendum 2026-11-11 — P3 lane comp8 verdict: SUPERSEDED (disposition re-verified fresh; absorber: d6555eb932f7)
+
+Fresh re-verification on `origin/release/1.0.0` tip `dacccfc78fd10`
+(worktree `simple-p3-comp8-20261111`), confirming the p3-compiler3 addendum
+above rather than relying on it:
+
+- `d6555eb932f7` ("fix(frontend): spec-DSL grammar in pure parser + lexer
+  position unification (LNT2+LEX1+PRM1)") IS an ancestor of the release tip.
+- `src/compiler/10.frontend/core/lexer_scanners.spl` — absent (dead
+  free-function scanner cluster deleted).
+- `src/compiler/10.frontend/core/lexer.spl` — zero remaining definitions of
+  `lex_pos_get/set`, `lex_line_get/set`, `lex_col_get/set`,
+  `lex_indent_stack_*`, `lex_at_end`, `lex_peek*`, `lex_scan_token_local`.
+- `_ParserDecls/fn_struct_decls.spl:59` imports the live accessors; uses at
+  :191 (`lex_token_end_get()`), :246-247 (`lex_live_line_get()`/
+  `lex_live_col_get()`), :263 (`lex_force_set_pos()`), :277 (`lex_token_end_get()`).
+- Behavioral guard `test/01_unit/compiler/frontend/lexer_position_unification_spec.spl`
+  on the current tracked seed (build-commit `46fe8f6b6def`) still fails 4/4
+  with `semantic: variable 'par_state' not found` — the KNOWN, separately-
+  tracked module-static defect `module_static_unresolved_initializer_2026-10-24`,
+  identical to the p3-compiler3 observation on the older seed. Not a
+  lexer-position symptom.
+- Status header flipped "partially fixed" → SUPERSEDED.

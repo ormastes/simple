@@ -5249,24 +5249,41 @@ int64_t rt_raw_i64_to_string(int64_t raw) {
 /* Forward decl: rt_raw_f64_to_string is defined further below in this file. */
 int64_t rt_raw_f64_to_string(double v);
 
+/* Seed optional semantics = pure Simple (owner rule 2026-11-06): a present
+ * flat optional renders as `Option::Some(v)` and nil as `Option::None`,
+ * matching the interpreter oracle.
+ * Bug: doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md */
+static int64_t rt_opt_wrap_some(int64_t inner) {
+    int64_t pre = rt_string_new((const uint8_t*)"Option::Some(", 13);
+    int64_t post = rt_string_new((const uint8_t*)")", 1);
+    return rt_string_concat(rt_string_concat(pre, inner), post);
+}
+
+int64_t rt_value_to_string(int64_t v);
+/* Tagged flat-optional value (string-interpolation sink). */
+int64_t rt_opt_value_to_string(int64_t v) {
+    if (v == rt_core_nil()) return rt_string_new((const uint8_t*)"Option::None", 12);
+    return rt_opt_wrap_some(rt_value_to_string(v));
+}
+
 int64_t rt_opt_i64_to_string(int64_t raw) {
-    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"nil", 3);
-    char buf[32];
-    int len = snprintf(buf, sizeof(buf), "%lld", (long long)raw);
+    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"Option::None", 12);
+    char buf[48];
+    int len = snprintf(buf, sizeof(buf), "Option::Some(%lld)", (long long)raw);
     return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
 }
 
 int64_t rt_opt_bool_to_string(int64_t raw) {
-    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"nil", 3);
-    if (raw != 0) return rt_string_new((const uint8_t*)"true", 4);
-    return rt_string_new((const uint8_t*)"false", 5);
+    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"Option::None", 12);
+    if (raw != 0) return rt_string_new((const uint8_t*)"Option::Some(true)", 18);
+    return rt_string_new((const uint8_t*)"Option::Some(false)", 19);
 }
 
 int64_t rt_opt_f64_to_string(int64_t raw) {
-    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"nil", 3);
+    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"Option::None", 12);
     double v;
     memcpy(&v, &raw, sizeof(double));
-    return rt_raw_f64_to_string(v);
+    return rt_opt_wrap_some(rt_raw_f64_to_string(v));
 }
 
 /* rt_raw_bool_to_string — same "raw operand, no tag check" contract as

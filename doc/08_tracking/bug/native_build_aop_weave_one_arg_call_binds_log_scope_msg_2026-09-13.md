@@ -1,6 +1,6 @@
 # OPEN: native-build dies after `aop_weave` — a 1-argument call binds to `log.spl`'s 2-argument `(scope, msg)` helper
 
-- **Status:** OPEN — observed 2026-09-13, not diagnosed beyond the binding site.
+- **Status:** FIXED (triage 2026-11-11, lane boot21; first triaged 2026-11-10 lane boot5) — ambiguous co-compiled duplicate call is a compile error since `10e216d19f8c` (ancestor of HEAD `d552f63f67f8`); the pin spec's execution path repaired in this lane (11 `pub` visibility markers in `eval_tables.spl`) and re-verified 5/5 on the tracked seed (see 2026-11-11 addendum below).
 - **Found while** fixing
   `native_build_noop_invocation_frames_raw_i64_mcdc_mode_2026-09-13.md`; this is
   the NEXT blocker uncovered once that one is removed, not the same defect.
@@ -88,3 +88,42 @@ seed-smoke (worktree seed bin/simple.exe, 2026-11-10):
 --mode=interpret -> PASS (5 passed). The "add a `.spl` frame chain for arity
 mismatch" tooling wish remains unaddressed but is an enhancement, not this
 defect.
+
+
+## 2026-11-11 P3-boot21 triage — FIXED (header flip)
+
+Fresh re-verification and repair, at HEAD `d552f63f67f8` (first triaged
+2026-11-10 lane boot5; header not flipped then):
+
+- `git merge-base --is-ancestor 10e216d19f8c HEAD`: ANCESTOR — ambiguous
+  co-compiled duplicate definition is a compile error (owner decision 6), so
+  the silent wrong-arity bind this record filed cannot occur at tip.
+- The pin spec
+  `test/01_unit/compiler/interpreter/ambiguous_co_compiled_fn_call_error_spec.spl`
+  (added by `10e216d19f8c`) could not EXECUTE on the tracked seed: the seed's
+  visibility enforcement rejects the spec's `use
+  compiler.core.interpreter.eval_tables.{...}` imports because all 11 imported
+  helpers were private (same drift class as `f865d6154718`, which pubbed a
+  batch of helpers for its own specs). Repaired in this lane:
+  `src/compiler/10.frontend/core/interpreter/eval_tables.spl` — `pub` added to
+  the 11 names the pin spec imports (`func_table_reset`, `func_table_register`,
+  `func_table_lookup`, `func_table_register_owned`, `func_import_binding_reset`,
+  `func_import_binding_register`, `func_resolve_for_caller`,
+  `func_flat_lookup_for_caller`, `func_owners_of`, `func_ambiguous_call_message`,
+  `pub val FUNC_LOOKUP_AMBIGUOUS`), plus `func_table_lookup_owned` pubbed while
+  unblocking the sibling spec below.
+- Seed-smoke after the repair (tracked seed 46fe8f6b6def,
+  `--mode=interpreter --no-cache`): SPEC FILE VERDICT outcome=OK, executed=5
+  passed=5 failed=0. The five examples pin the exact mechanism: flat table
+  still holds the last-registered definition (the hazard), a caller with no
+  owned definition and no import route gets `FUNC_LOOKUP_AMBIGUOUS` (=-2) not
+  the flat pick, a selective import resolves, single-owner names still resolve,
+  and the diagnostic names symbol/owners/caller.
+
+Note: the sibling spec `cross_module_owned_fn_resolution_spec.spl` still
+ERRORs on further private-helper drift (`func_import_binding_lookup`,
+`struct_table_reset`, `func_import_binding_route`,
+`func_module_namespace_lookup`, `func_resolve_module_member_for_caller`, and
+`module_loader_core` names) — out of this row's scope, not baselined, left for
+the test-repair lane. The ".spl frame chain for arity mismatch" tooling wish
+remains an enhancement, not this defect.

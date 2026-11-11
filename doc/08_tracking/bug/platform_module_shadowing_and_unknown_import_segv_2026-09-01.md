@@ -7,6 +7,40 @@
 - **Status:** OPEN. Worked around, not fixed — see *Workaround normalized* below,
   which is itself the thing that should not have to happen.
 
+## Addendum 2026-11-11 (lane ne19) — LIVE: Defects 2 & 3 verified FIXED; Defect 1 persists. No Status change.
+
+Re-ran this record's repros on the release/1.0.0 worktree seed binary
+(`bin/simple.exe`, Rust bootstrap seed v1.0.0-rc.1):
+
+**Defect 2 (unknown import SEGVs mute): FIXED.** The exact repros
+(`use std.platform.{normalize_arch}` / `{normalize_os}`) no longer SEGV.
+Importing the nonexistent name alone now runs with rc=0, and *calling* it
+produces a real diagnostic instead of a mute crash:
+
+    error[E1002]: function `normalize_arch` not found
+      = help: check the function name or import the module that defines it
+
+(rc=1). That is precisely the demanded fix ("make an unresolved import a
+diagnostic, not a SEGV"). Note for the record: resolution is lazy — the
+import line itself is tolerated and the error surfaces at first use; that is
+diagnosable behavior, not the old mute rc=139.
+
+**Defect 3 (`path_pure` separator-blind on Windows): FIXED.** Both named
+specs now pass on this Windows host:
+
+    path_pure_basename_crosslang_spec.spl   OK 5/5
+    path_pure_dirname_crosslang_spec.spl    OK 5/5
+
+**Defect 1 (two `platform` modules, directory silently wins): STILL OPEN.**
+`src/lib/nogc_sync_mut/platform.spl` and
+`src/lib/nogc_sync_mut/platform/__init__.spl` still coexist; `std.platform`
+still resolves to the directory module, leaving the file module (which now
+uniquely carries `host_os()`, `host_arch()`, `resolve_command()`) dead for
+`std.platform` importers, and the deliberate `to_native_path` duplication in
+both files persists. The collision guard (file-vs-directory sibling check)
+also still does not exist. Left OPEN for a dedicated lane per the original
+"Fix, in order" list; the load-bearing item (Defect 2) is closed.
+
 ## Defect 1 — two `platform` modules, the directory silently wins
 
 `src/lib/nogc_sync_mut/` carries **both**:
