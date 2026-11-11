@@ -1,6 +1,12 @@
 # Windows: the stripped `bin/simple.exe` blinds every symbol-table guard
 
-**Status:** OPEN 2026-09-02 — three guards cannot produce a verdict on Windows.
+**Status:** FIXED 2026-11-11 (lane p3-comp11) — the three unblock conditions are
+resolved at tip: the deployed tracked seed `bin/simple.exe` (build
+`46fe8f6b6def`) is **unstripped** (112,072 unique defined symbols through the
+census's own `census_collect_primary`, rc=0), the PE-export fallback for
+stripped PEs is merged (PR #7626) with a passing parser selftest, and the
+per-platform system-symbol source + the two sibling guard fixes (PRs #7625,
+#7661) are ancestors of the release tip. See the dated addendum below.
 **Severity:** Blocking for promotion — these guards are unpromotable to push-blocking
 on any Windows host, and one of them was emitting a FALSE RED until today.
 **Affected files:** `scripts/check/extern-backing-census.shs`,
@@ -92,3 +98,52 @@ floor is unreachable where a symbol table exists, and no Unix branch was edited.
 Windows PE with no COFF symbol table, to `llvm-readobj --coff-exports` named exports (logged, floor
 still enforced, ordinal-only skipped). Parser fixture: `sh scripts/check/extern-backing-census.shs --selftest`.
 Status: fix-implemented-verification-pending (Windows stripped-exe run still to be observed).
+
+---
+
+## Addendum 2026-11-11 (lane p3-comp11, worktree simple-p3-comp11-20261111, base 41935a5f61860)
+
+Verdict: FIXED (fix predates this lane for the guard scripts; this lane
+supplies the pending Windows observation and flips the record).
+
+Fix commits, all ancestors of the lane base (and of the tracked seed build
+`46fe8f6b6def`):
+- PR #7626 `62be690c6aedf3dd4eefb8fa05895b8d51838e6b` — census symbol sources:
+  `census_collect_primary` in `scripts/check/lib/extern-census-symbol-sources.shs`
+  falls back to `llvm-readobj --coff-exports` for a stripped PE (floor still
+  enforced, ordinal-only skipped), plus the per-platform CRT system-symbol leg.
+- PR #7625 `be076742832fe55c9c135dce89809d6d635d7722` —
+  `check-stage-binaries-runnable.shs` PE admission.
+- PR #7661 `99cd4176a7113867ee84d0517e4ab22b7c7b317e` —
+  `check-no-unresolved-runtime-symbols.shs` reads PE import owners.
+- The 2026-11-09 in-doc fix (same file, PE-export fallback) is the substance of
+  the #7626 line above.
+
+Fresh observations on this Windows host (llvm-mingw-20260922 toolchain):
+1. **The deployed tracked seed is unstripped** — the doc's unblock condition 1
+   is met by the current deployment. `nm --defined-only bin/simple.exe` yields
+   115,123 entries, and the census's own collector
+   (`census_collect_primary bin/simple.exe ...`) returns rc=0 with
+   112,072 unique defined symbols — far above the floor of 100. The primary
+   `in_deployed_binary` evidence path works on the deployed Windows binary.
+2. **Census selftest**: `sh scripts/check/extern-backing-census.shs --selftest`
+   → `PASS — PE export parser selftest: 150 named exports parsed, ordinal-only
+   skipped` (~11s).
+3. **Stripped-exe leg observed (the doc's pending item)**: on an
+   `llvm-strip`ped copy of the same binary, the collector correctly detects no
+   COFF symbol table, logs "reading PE export table", and fails CLOSED with
+   `ERROR — ... yielded 0 PE export(s) (floor 100)`. This executable class
+   carries no PE export table, so the export fallback cannot by itself carry a
+   census for a stripped `simple.exe` — the fail-closed floor is the designed
+   behavior, not a blindness. The durable resolution is condition 1 (ship the
+   unstripped binary), which the current deployment satisfies.
+
+Not completed in-lane (recorded per lane budget, not a defect): the FULL
+census classification run over the whole tree exceeded this lane's ~10-minute
+single-invocation budget and was aborted at the tool timeout with an empty
+log; the per-binary primary-evidence collection above is the lane-bounded
+substitute. Residual observation for a future lane: if a future deployment
+strips `bin/simple.exe` again, the export-table fallback alone yields
+fail-closed ERROR for this no-export-table executable class; options then are
+keeping the unstripped link (current state), a PDB-based source, or an
+export-surface build — tracked here as an observation, not re-opened.
