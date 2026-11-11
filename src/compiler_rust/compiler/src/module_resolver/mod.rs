@@ -64,9 +64,16 @@ mod tests {
 
     #[test]
     fn test_single_file_mode() {
-        let resolver = ModuleResolver::single_file(Path::new("/tmp/test.spl"));
-        assert_eq!(resolver.project_root(), Path::new("/tmp"));
-        assert_eq!(resolver.source_root(), Path::new("/tmp"));
+        // Platform-portable: a hardcoded Unix-absolute path such as
+        // `/tmp/test.spl` is NOT `is_absolute()` on Windows (no drive prefix),
+        // so `normalize_input_path` re-anchors it and the old `/tmp` expectation
+        // failed on Windows. Use a real tempdir (like the sibling single-file
+        // tests) so the asserted parent is correct on every host.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.spl");
+        let resolver = ModuleResolver::single_file(&file);
+        assert_eq!(resolver.project_root(), dir.path());
+        assert_eq!(resolver.source_root(), dir.path());
     }
 
     #[test]
