@@ -1,7 +1,10 @@
 # Remaining no-import carve-outs: `error`/`panic`, block-DSL bodies, `nilnilnilnilnilnil`
 
 - **Date:** 2026-08-01
-- **Status:** OPEN (investigated, not fixed — see "Why not fixed here")
+- **Status:** OPEN — carve-out 1 (`panic`/`error`) fixed in source (verified
+  2026-11-11); block-DSL and `nilnilnilnilnilnil` carve-outs remain open;
+  the pinning spec's panic example is currently harness-blocked by an
+  unrelated PR #7597 visibility regression (see 2026-11-11 addendum).
 - **Parent:** `selfhost_names_with_no_import_path_masked_by_seed_flat_resolution_2026-08-01.md`
 - **Sibling docs (FIXED this lane):**
   - `match_arm_underscore_subpattern_becomes_lambda_2026-08-01.md` (parent
@@ -184,3 +187,52 @@ front end from a compiled binary so the whole file fits in a run.
 | 4 | block-DSL names | OPEN — Stage3 proved the active trigger is the ordinary strings returned by `examples()`; `\{` does not suppress bootstrap interpolation |
 | 5 | `nilnilnilnilnilnil` | OPEN — 4 hypotheses refuted, upstream nil suspected |
 | 7 | `pred` | OPEN — folds into 4, not into the fixed 7 |
+
+---
+
+## Triage 2026-11-11 (p3fix lane boot24)
+
+**Verdict: LIVE (row stays OPEN).**
+
+### Carve-out 1 (`panic`/`error`) — fix re-verified in source
+
+- `panic` is registered in the self-hosted builtin list:
+  `20.hir/hir_lowering/_Expressions/expression_support.spl:63`
+  (`is_interp_builtin_fn` includes `name == "panic"`, with a
+  `check-interp-builtin-list-sync.shs` pin).
+- The bare free-function `error(` call sites in
+  `70.backend/backend/backend_factory_full.spl` and
+  `70.backend/backend/common/type_mapper.spl` are gone (grep: zero
+  hits) — the 2026-11-05 hir-p2 re-scope ("call sites gone, a bare
+  error( stays a loud unresolved-name error") re-confirmed FRESH today.
+
+### Pinning spec currently harness-blocked (fresh finding)
+
+`test/01_unit/compiler/tools/lint/selfhost_noimport_panic_error_spec.spl`
+run on this tip's tracked seed (`bin/simple.exe`, interpreter,
+`--no-cache`): 2 examples, 1 failed —
+
+- ✓ "keeps a bare free-function error(...) as an unresolved name" PASSES
+  (fresh green today).
+- ✗ "resolves panic(...) as a builtin" ERRORS with an unrelated
+  visibility semantic: `private fn empty_type_env of module
+  30.types/type_infer_types.spl is not visible to
+  30.types/type_infer/__init__.spl`.
+
+Root cause of the harness failure: PR #7597 (`9e7e7a526edb4`,
+2026-11-07) added `export use compiler.types.type_infer_types.{...,
+empty_subst_map, empty_type_env}` at `30.types/__init__.spl:20`,
+re-exporting two private fns; the visibility checker now rejects the
+`compiler.types.type_infer` package facade whenever the semantic_check
+harness loads it. This blocks clean spec evidence for the panic half;
+it is NOT this row's defect and is left for the compiler-lib lane
+(fix options: drop the two names from the `:20` re-export list, or
+mark both fns `pub` in `type_infer_types.spl`). The 2026-11-05 hir-p2
+spec pass (2/2) predates PR #7597, so both records are consistent: the
+panic registration landed and was green before the harness regression.
+
+### Carve-outs 4 and 5
+
+Block-DSL body identifiers and `nilnilnilnilnilnil` remain
+unreproduced/open per the 2026-11-05 hir-p2 note; no new evidence this
+pass.
