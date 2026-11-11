@@ -1,7 +1,14 @@
 # Seed native-build interpreted startup spin — 2026-11-09
 
 Bug id: `seed_native_build_interpreted_startup_spin_2026-11-09`
-Severity: P1 · Status: open
+Severity: P1 · Status: BLOCKED 2026-11-11 (lane p3-seedA) — persists at HEAD,
+  root cause locus confirmed to be the seed-INTERPRETED pure-Simple driver
+  (`src/lib/scv/compile_source_inventory_*.spl` + the parse-closure publication
+  walk), NOT a `src/compiler_rust` defect; closing it needs the original aarch64
+  cold-cache `native-build` repro + gdb/perf hot-function naming, which this
+  Windows lane cannot run (tracked seed stays; no admitted native producer; a
+  full cold-cache run exceeds the ~10-min spec cap). Concrete new candidate hot
+  spots recorded in the dated addendum below. Header flipped from "open".
 
 ## Symptom
 
@@ -162,3 +169,59 @@ the original full-checkout/aarch64 stall's cause or resolution. Full native
 performance/RSS, self-hosted unit/integration gates and original aarch64 cold
 startup remain required before this P1 can be closed. Logs and source copies
 are retained under `build/p1-seed-startup/` in the owning worktree.
+
+## 2026-11-11 addendum (lane p3-seedA) — BLOCKED, concrete hot-spot leads recorded
+
+Lane p3-seedA re-investigated this P1 at the campaign base (`origin/release/1.0.0`
+tip `79d5af6723f6`). Findings:
+
+- **Root-cause locus confirmed outside `src/compiler_rust`.** The spin is in the
+  seed-interpreted pure-Simple native-build driver, not the Rust compiler crate.
+  No `cargo test -p <crate> --lib` surface exercises it, so the campaign's
+  code-fix + focused-cargo-test verification model cannot settle it. A fix is
+  pure-Simple + verified only by running the actual cold-cache `native-build`.
+- **Concrete new candidate hot spots (for the granted gdb/perf pass).** The 2026-11-10
+  digest-validation-reuse optimization addressed the *per-entry facet rescan*;
+  it did not touch the whole-text canonicalization, which still contains
+  O(content²) collapse loops at
+  `src/lib/scv/compile_source_inventory_core.spl`:
+  - `compile_source_inventory_whole_text_canonical_v1`:
+    `while body.contains("  "): body = body.replace("  ", " ")` and
+    `while body.contains("\n\n"): body = body.replace("\n\n", "\n")` — each
+    `replace` re-scans the whole string, so deep-indent / many-blank-line files
+    cost O(len²) apiece; interpreted at the doc's 50-100× constant amplification
+    across a large checkout this is a plausible contributor.
+  - `compile_source_inventory_whole_text_rows_v1`: `for prefix in prefixes:
+    marked = marked.replace(...)` — O(prefixes × len) per file.
+  These are *candidates*, not a proven cause: the reported freeze point is the
+  parse-closure publication span (`native_build_parse_closure_owner` →
+  `compiler/backend/linker/_ElfWriter/writer`), and finite-vs-infinite remains
+  unproven, so naming the exact hot function still needs the granted cold run
+  under gdb/perf on a ptrace-permitted host.
+- **Why not half-fixed in-lane:** editing the inventory canonicalization is a
+  high-blast-radius change (it feeds content digests / cache identity) that this
+  lane can only correctness-check on fixtures, not *spin*-check — landing it
+  unverified would be exactly the "half-fix" the campaign forbids. Full closure
+  additionally requires the original aarch64 cold-startup verification per the
+  2026-11-10 note, independent of any single optimization.
+
+Grant integrity check: the "Suggested follow-up" list above is present and
+complete; the 2026-11-10 scoped admission improvement (digest-validation reuse)
+is the only landed absorber and explicitly does not close this bug. No commit
+claims the spin.
+
+Verbatim grant (re-recorded intact — the "Suggested follow-up" items + the
+aarch64 cold-startup closure requirement):
+
+1. Re-run cold under gdb/perf on a ptrace-permitted host to name the exact hot
+   function (start with the `whole_text_canonical_v1` collapse loops and the
+   parse-closure publication walk recorded above).
+2. Check whether the inventory/closure walk is quadratic in checkout file count;
+   if so, bound or index it.
+3. Add a periodic heartbeat/log line to the interpreted driver's post-load
+   startup phases so any future freeze is attributable within one minute.
+4. Close only after the original aarch64 cold-cache `native-build` of
+   `examples/01_getting_started/hello_native.spl` completes (or is proven to
+   make bounded progress) with the fix, with RSS/cache-object evidence.
+
+Disposition: BLOCKED. Header flipped open → BLOCKED 2026-11-11 (lane p3-seedA).
