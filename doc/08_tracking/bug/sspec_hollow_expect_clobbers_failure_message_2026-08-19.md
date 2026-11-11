@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
-**Status:** OPEN (filed only; fix deliberately deferred)
+**Status:** FIXED (2026-11-11 runner10 lane — root-cause fix landed in the Rust seed and verified contained in the tracked seed binary)
 **Site:** `src/compiler_rust/compiler/src/interpreter_call/bdd.rs:1134`
 
 ## Mechanism
@@ -36,3 +36,30 @@ provisional hollow-expect message in its own slot `BDD_PROVISIONAL_MSG` (bdd.rs:
 example (:990) and promoted only when `BDD_FAILURE_MSG` is still None (:1076), so it can no longer
 clobber a real failure. Sibling record: spec_runner_provisional_truthy_message_clobbers_real_failure_2026-08-21.
 Seed rebuild not run in this lane; verify on next seed build.
+
+## 2026-11-11 — runner10 lane verdict: FIXED (verified in tracked seed)
+
+Re-verified fresh at base 79d5af6723f6 (no re-runs of prior green checks):
+
+1. **Fix ancestry.** The provisional-message separation
+   (`BDD_PROVISIONAL_MSG` slot at bdd.rs:212, cleared per example :155/:990/:1076,
+   promoted only when `BDD_FAILURE_MSG` has no summary :1158-1165 — "a
+   provisional message is a FALLBACK, never a replacement") was introduced by
+   merge 9e7e7a526edb (PR #7597, 2026-11-07). `git merge-base --is-ancestor
+   9e7e7a526edb 46fe8f6b6def` confirms the fix IS an ancestor of the tracked
+   seed binary commit, and `git show 46fe8f6b6def:...bdd.rs` shows all 9
+   `BDD_PROVISIONAL_MSG` sites — the deployed `bin/simple.exe` contains the
+   fix (the 2026-11-03 tr-sspec note's "verify on next seed build" condition
+   is now met by lineage).
+2. **Old-vs-new read.** Pre-fix, a passing matcher's provisional text was
+   left standing in the `BDD_FAILURE_MSG` slot, so a later real failure in
+   the same example could be reported with the stale "hollow expect" text.
+   Current code keeps the provisional in its own slot and reports it only
+   when no real matcher failure was recorded — the clobber path is gone by
+   construction.
+
+Residual: no SPipe-level regression spec asserts the reported *message
+text* (that needs a runner-in-runner child harness, expensive and
+child-exit-plumbing-sensitive on the Windows interpreted driver; the
+mechanism is covered by the slot design above plus bdd.rs's 8 Rust unit
+tests). Follow-up harness spec recorded here, not blocking the flip.

@@ -5,7 +5,9 @@
   No prevention-mock capability regresses; a scope that was never
   implementable simply stays unimplementable until this unblock condition
   is met.
-- **Status:** open, doc-only. Filed as part of
+- **Status:** FIXED — closed by feature (2026-11-04 `_prevention.sdn`
+  directory-wide policy, lane `work/feat-sspec-dir-prevention-20261104`;
+  header flipped 2026-11-11 runner10 lane on re-verified evidence). Filed as part of
   `doc/03_plan/infra/testing/sspec_prevention_mock_plan_2026-08-07.md` unit
   U4. A convention-based workaround exists (below) and is documented at
   `doc/07_guide/infra/testing/prevention_mocks.md`.
@@ -217,3 +219,24 @@ per registered mock per example).
 
 Related, same day: `prevention_mock_deferred_arming_impossible_2026-08-07.md`
 Defects 1 and 2 re-verified GONE (see its 2026-11-04 note).
+
+## 2026-11-11 — runner10 lane verdict: FIXED (header flip on re-verified evidence)
+
+The 2026-11-04 LANDED addendum above recorded the `_prevention.sdn`
+directory-wide policy with RED->GREEN evidence (env-var run 0->2 failures;
+runner file lane 4/4 -> 2/2; runner directory lane policy 4/0 -> 2/2 with
+no-policy sibling unchanged) and two new specs
+(`test/01_unit/lib/std/spec/dir_prevention_spec.spl` 12/12,
+`dir_prevention_policy_runner_spec.spl` 4/4) — but the header above it still
+said "open, doc-only". This lane re-verified the disposition fresh at base
+79d5af6723f6 by presence/contents check (campaign no-rerun rule; prior-lane
+greens not re-executed):
+
+- `src/lib/nogc_sync_mut/spec/dir_prevention.spl` — policy loader present;
+- `test/01_unit/lib/std/spec/dir_prevention_spec.spl` and
+  `test/01_unit/lib/std/spec/dir_prevention_policy_runner_spec.spl` — both
+  tracked at this base, matching the 2026-11-04 evidence table.
+
+Unblock condition 1 (per-directory shared-fixture/setup hook in spec
+discovery/launch) is met by the policy-file mechanism. Header flipped to
+FIXED. The in-body gap analysis below is retained as history.

@@ -1,7 +1,7 @@
 # Bug: `bin/simple check` rejects SSpec `describe`/`it` DSL files
 
 Date: 2026-06-28
-Status: open
+Status: fixed (2026-11-11 runner10 lane — `check` now detects SSpec DSL files and emits the fast actionable message; expected-behavior option 2)
 Owner: compiler / SSpec tooling
 
 ## Summary
@@ -62,3 +62,31 @@ pass; it is intentionally a native-platform completion gate.
 
 `doc/07_guide/app/mcp/mcp.md` was updated to use `bin/simple test ... --mode=interpreter`
 for the MCP command-line handshake SSpec instead of `bin/simple check`.
+
+## 2026-11-11 — runner10 lane verdict: FIXED (option 2 of the row's Expected Behavior)
+
+Source-verified at base 79d5af6723f6:
+
+- `src/app/cli/check.spl:269-273` — `_check_path` now calls
+  `check_sspec_guidance(source, path)` BEFORE parsing; on a non-empty result
+  it prints the guidance and returns 1 (no raw parser-error spam, no
+  90-second parse walk into DSL colon tokens).
+- `src/app/check/sspec_source.spl:21-43` — `check_sspec_guidance` detects a
+  spec file by `use std.spec` import + a top-level `describe ...:` line
+  (docstring/comment aware via the shared CoreLexer string-state helpers) and
+  emits exactly the actionable message the row asked for:
+  `error[E-SSPEC-CHECK]: SSpec command-block files must use `bin/simple test
+  <path> --mode=interpreter``.
+- Landed via merge 9e7e7a526edb (PR #7597, 2026-11-07; `git log` on
+  `src/app/check/sspec_source.spl`). `check` is pure-Simple and runs from
+  source under the tracked seed, so the fix is live at this base.
+- Existing regression coverage:
+  `test/01_unit/app/check/check_sspec_guidance_shared_lexer_spec.spl`
+  exercises the guidance mechanism (including its triple-quote-in-comment
+  defect replay over the spec corpus).
+
+The exact observed command from this row
+(`bin/simple check test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl`)
+was NOT re-executed this lane (session died mid-flight; campaign no-rerun
+rule); the flip rests on the unambiguous in-tree source plus the existing
+spec coverage above.

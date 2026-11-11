@@ -2,7 +2,7 @@
 
 Date: 2026-08-23
 Lane: spectriage-1
-Status: OPEN (filed, not fixed — reporting layer; see "Why not fixed here")
+Status: FIXED (D1/D3/D4 fixed and D2 addressed by separate "In development:" summary line per 2026-11-03/2026-11-06 re-probes; header flipped 2026-11-11 runner10 lane on re-verified in-tree evidence — see addendum)
 Engine: Rust seed `bin/release/x86_64-unknown-linux-gnu/simple`, 60650360 bytes, mtime 2026-08-23 04:47
 (copied from `simple-main`; identical to the engine the phase-1 sweep ran on)
 
@@ -143,3 +143,38 @@ in-development to `total` (or print it as its own addend) in test_runner_output.
 
 ## Round 8 part 2 note 2026-11-06
 Seed re-probe (3-file fixture, Windows): D4 FIXED - test_db.sdn is rewritten and test_result.md shows `In Development | 1`. D2: `Results:` keeps example semantics; added a separate `In development: N file(s) expected to fail ...` line (`in_development_files_line`, test_runner_output.spl). Spec: test/01_unit/app/test_runner_new/in_development_files_line_spec.spl 2/2.
+
+## 2026-11-11 — runner10 lane verdict: FIXED (header flip on re-verified in-tree evidence)
+
+The 2026-11-03 re-probe fixed D1 (`IN-DEVELOPMENT SKIP` line, no `PASS`
+greenwash) and D3 (verdict `outcome=OK executed=1 ... in_development=1`);
+the 2026-11-06 round-8 note fixed D4 (test_db.sdn rewritten, test_result.md
+shows `In Development | 1`) and addressed D2 by adding a separate
+`In development: N file(s) expected to fail` summary line instead of
+changing `Results:` example semantics. The header above those addenda still
+said OPEN — flipped now.
+
+Re-verified fresh at base 79d5af6723f6 (campaign no-rerun rule; prior-lane
+greens not re-executed; this lane's spec run died with its session):
+
+- `src/lib/nogc_sync_mut/test_runner/test_runner_output.spl:715-722` —
+  `in_development_files_line` produces exactly the documented line
+  ("In development: {n} file(s) expected to fail (neutralised; not counted
+  in Results: total)"), wired into the suite printer at :665. (The 2026-11-06
+  note attributed the function to `src/app/test_runner_new/test_runner_output.spl`;
+  at this base it lives in the lib module the app re-exports — feature
+  present as described, file attribution drifted.)
+- `src/app/test_runner_new/test_runner_main.spl:1028,1048,1562` —
+  `in_development_skip_line` per-file print, `in_development` count carried
+  into the file result, and `print_in_development_summary` — the D1/D3 fixes
+  are in-tree.
+- `test/01_unit/app/test_runner_new/in_development_files_line_spec.spl` —
+  the 2-example spec from the 2026-11-06 note is tracked at this base
+  (imports `in_development_files_line` from `std.test_runner.test_runner_output`).
+
+All four defects (D1 greenwash line, D2 total conservation via the separate
+addend line, D3 executed=0 lie, D4 silent DB non-persist) are fixed as
+documented by the 2026-11-03/2026-11-06 probes and confirmed present at this
+base. The Rust opt-in runner's in-development blindness (the twin-divergence
+paragraph) remains a known limitation of a non-default lane, recorded here
+for a runner-owner lane; it does not affect the default pure-Simple runner.

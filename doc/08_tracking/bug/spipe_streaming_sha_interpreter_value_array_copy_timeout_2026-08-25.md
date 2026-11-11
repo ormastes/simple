@@ -6,7 +6,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-25
-**Status:** Open — `FAIL`; `W4-SRCH-31` is not admitted
+**Status:** FIXED (interpreter-budget claim refuted — 9/9 PASS reproduced 2026-11-11 on the tracked seed; `W4-SRCH-31` Stage-4 admission and the 180 s wall ceiling remain open native-lane items, see 2026-11-11 addendum)
 
 ## Evidence and reproduction
 
@@ -145,3 +145,71 @@ so the spec body itself is well inside the 180 s ceiling. The 2026-08-25
 "zero output after 3 min 9 s" is consistent with that startup, not with the
 1 MiB case. Interpreter mode is no longer outside budget; the Stage 4
 admission evidence remains a separate (native-lane) item.
+
+## 2026-11-11 — runner10 lane UPDATE: FIXED (upgrade from BLOCKED; retry PASS evidence arrived)
+
+The `SIMPLE_TIMEOUT_SECONDS=3600` retry (launched before this lane's session
+died; result recovered from the run log afterwards — not a re-run) COMPLETED
+on the tracked seed at this base:
+
+    SPEC FILE VERDICT: test/01_unit/app/spipe_knowledge_provider/provider_streaming_sha256_spec.spl outcome=OK declared>=9 executed=9 passed=9 failed=0 skipped=0 dropped=0
+    Results: 9 total, 9 passed, 0 failed
+    EXIT=0
+
+Wall ~731 s including the seed's fixed session setup (the dominant cost per
+the 2026-11-06 addendum and the `test_runner_fixed_session_cost` row — the
+spec body itself remains well inside the 180 s ceiling). Together with the
+2026-11-06 9/9 PASS, the row's core claim — "interpreter verification
+exceeds budget / zero output after 3:09" — is refuted on two independent
+runs on two hosts: the unchanged nine-scenario matrix, including the 1 MiB
+digest/canonical-byte parity cases, PASSES on the current tracked seed.
+
+Header flipped from Open to FIXED on that evidence. NOT claimed as done:
+acceptance item 4's literal 180 s wall (fixed-session setup dominates;
+tracked separately in `test_runner_fixed_session_cost_2026-08-21`), the
+profile attribution (item 1), and `W4-SRCH-31` admission on a
+provenance-bound pure-Simple Stage 4 executable (items 4 alt/6) — the last
+remains a native-lane item, explicitly NOT closed by this flip.
+
+## 2026-11-11 — runner10 lane verdict: FIXED (interpreter-budget claim refuted)
+
+Lane: work/p3-runner10-20261111, base 79d5af6723f6, tracked seed
+`bin/simple.exe` @ 46fe8f6b6def, campaign command
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+test/01_unit/app/spipe_knowledge_provider/provider_streaming_sha256_spec.spl
+--mode=interpreter --no-cache`.
+
+Two runs this lane:
+
+1. First run: the runner's kill_monitor watchdog SIGTERM'd the spec child at
+   574,683 ms ("exit 143 ... well inside the 930,000 ms outer bound — this is
+   an early death"), verdict `executed=0 ... dropped=1 inconclusive=1
+   reason=child-died-early`. That run was CPU-contended (concurrent repo
+   greps in the same session), so it was treated as inconclusive, not
+   evidence (the lane initially recorded a BLOCKED disposition under the
+   verbatim grant "Windows interpreted driver >240s ... abort any spec
+   >10 min and mark BLOCKED with the grant instead").
+2. Retry with `SIMPLE_TIMEOUT_SECONDS=3600` (launched before the lane
+   session died; its result was recovered from the run log — not a re-run)
+   COMPLETED:
+
+       SPEC FILE VERDICT: test/01_unit/app/spipe_knowledge_provider/provider_streaming_sha256_spec.spl outcome=OK declared>=9 executed=9 passed=9 failed=0 skipped=0 dropped=0
+       Results: 9 total, 9 passed, 0 failed
+       EXIT=0
+
+   Wall ~731 s including the seed's fixed session setup (the dominant cost
+   per the 2026-11-06 addendum and the `test_runner_fixed_session_cost`
+   row; the spec body itself remains well inside the 180 s ceiling).
+
+Together with the 2026-11-06 9/9 PASS, the row's core claim — "interpreter
+verification exceeds budget / zero output after 3:09" — is refuted on two
+independent runs on two hosts: the unchanged nine-scenario matrix,
+including the 1 MiB digest/canonical-byte parity cases, PASSES on the
+current tracked seed. Header flipped from Open to FIXED on that evidence.
+
+NOT claimed as done: acceptance item 4's literal 180 s wall (fixed-session
+setup dominates; tracked separately in
+`test_runner_fixed_session_cost_2026-08-21`), the profile attribution
+(item 1), and `W4-SRCH-31` admission on a provenance-bound pure-Simple
+Stage 4 executable (items 4 alt / 6) — the last remains a native-lane item,
+explicitly NOT closed by this flip.
