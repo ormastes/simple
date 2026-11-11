@@ -183,3 +183,25 @@ Verification actually run (seed-smoke, tracked `bin/simple.exe` build-commit
   all passed — only assertion 9 was stale. I repaired assertion 9 to the
   None-based guard and re-ran: **spec 1/1 GREEN**. The defect fix itself was
   untouched.
+
+## 2026-11-11 — FIXED confirmed (lane p3-comp12, row 7)
+
+Independent confirmation at this lane's base (6233df4b9f9ea, tracked seed
+46fe8f6b6def — the same seed boot18 smoked today, so the repaired pin was NOT
+re-run per the no-green-rerun rule):
+
+- Correction-2 fix present at this base:
+  `record_external_layout_reference` reads the symbol through
+  `symbol_name_scalar_raw` / `symbol_defining_module_scalar_raw`
+  (src/compiler/50.mir/_MirLowering/module_lowering.spl:969-972), so no
+  `HirSymbol?` and no `.unwrap()` exists at the call site; the hazard comment
+  (Poll.unwrap misbind returning 0, open producer bug
+  unwrap_still_rebinds_to_poll_unwrap_at_closure_scale_2026-09-13) is at
+  :960-967.
+- boot18's pin-spec repair (assertion 9 now expects
+  `if info != None and info.name != ""`) is commit 82b87a9cb81a8, an ancestor
+  of this base; the nil-safe refactor d5943d124053 is also an ancestor.
+- Residual: clearing the original rc-139 end-to-end needs a rebuilt Stage-2
+  candidate (receipt-free aarch64 build), which is the sanctioned stage-chain
+  probe route — blocked in-lane; the scalar-reader fix shape and the hosted
+  pin are the hosted evidence of record.

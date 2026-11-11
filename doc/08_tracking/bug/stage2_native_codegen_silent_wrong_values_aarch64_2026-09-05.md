@@ -213,3 +213,29 @@ simple-p3-boot17-20261111, fresh seed 46fe8f6b6def):
 - Combined defects 1-4 probe under `bin/simple.exe run --mode=interpreter`:
   `direct=14 indirect=14`, `ys_len=3 ys=[2, 4, 6]`, `clo=15`, `dict_len=1`,
   `lit_len=2` — every interpreter-column value from the doc's tables matches.
+
+## 2026-11-11 — FIXED confirmed (lane p3-comp12, row 5)
+
+Independent confirmation at this lane's base (6233df4b9f9ea, tracked seed
+46fe8f6b6def — the same seed boot17 smoked today, so boot17's interpreter
+repro run was NOT repeated per the no-green-rerun rule):
+
+- Defect-5 refusal guard present at this base: `mir_legacy_message_is_fatal`
+  (src/compiler/50.mir/mir_lowering_types.spl:1272-1274) classifies
+  `unresolved method call:` as FATAL, so a missing method is a build error,
+  not a silent plausible integer.
+- Defects 1-4 were re-confirmed on this exact seed by boot17's combined probe
+  run today (all doc-table interpreter values match); the aarch64 stage2
+  candidate end-to-end verification of all five defects is the 2026-11-05
+  in-doc evidence (df48a86ff5a worktree, cranelift aarch64). No aarch64 host
+  exists in this lane and boot17 already declined to repeat those probes per
+  the no-green-rerun rule — no new rung added here.
+- No in-tree executable pin exists for these five reproducers
+  (test/01_unit/compiler/codegen/cross_engine_silent_divergence_spec.spl
+  belongs to three other rows: jit_if_nil / match_on_optional_enum_variant /
+  mutate_through_index). A stage2-chain pin for this row's combined probe
+  would require the forbidden in-lane native-build grant route.
+- Ledger note: master table row (doc/08_tracking/bug/bug_db.sdn) still reads
+  `fixing` (updated_at 2026-11-03) while this header and the per-row evidence
+  read FIXED — master-table sync gap for the bookkeeping pass, same shape as
+  the row-2 note in this lane's verdict file.
