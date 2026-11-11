@@ -628,6 +628,8 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
         let is_capability_policy_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "capability")
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
+        let is_resource_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "resource")
+            && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
         match &self.current.kind {
             // Route @ and legacy #[...] to attributed_item.
             TokenKind::At | TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
@@ -902,6 +904,9 @@ impl<'a> Parser<'a> {
                     self.parse_security_policy().map(Node::SecurityPolicy)
                 }
             }
+            // `resource Name` (soft keyword): bare form is rejected inside
+            // parse_resource_decl because `@sffi(prefix: ...)` is required.
+            TokenKind::Identifier { .. } if is_resource_decl => self.parse_resource_decl(Vec::new(), Visibility::Private),
             TokenKind::Identifier { name, .. } if name == "sandbox" => {
                 self.parse_sandbox_policy().map(Node::SandboxPolicy)
             }

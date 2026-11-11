@@ -2,7 +2,25 @@
 
 Date: 2026-09-09
 
-Status: manual regenerated from current source (2026-11-04); stale `bin/release/macos-arm64/simple` itself awaits the bootstrap-lane redeploy.
+Status: SUPERSEDED 2026-11-11 — absorbed by the bootstrap lane. The actionable
+spipe-docgen half of this row (regenerate the rendering knowledge manual from
+current source) was completed 2026-11-04 via the release/1.0 seed and is
+re-verified below; the only residual is the stale April `bin/release/macos-arm64/simple`
+Mach-O, whose redeploy this doc already assigns to the bootstrap lane ("Remaining
+gap, owned by the bootstrap lane … do not invoke it directly until redeployed").
+Windows/CI checkouts do not even carry that artifact.
+
+**Re-verification 2026-11-11 (runner9, worktree `simple-p3-runner9-20261111` @
+`701c757a5658`):** source spec SHA-256 still
+`5e966b4510149fa83da24e4d1b846082085f06786b6969226c010d2f0e8de3e5` (unchanged), and
+`doc/06_spec/02_integration/app/llm_process/knowledge_routing_process_spec.md`
+carries both previously missing visible steps ("Exercise exact feature and
+longest source-prefix selection", "Keep sibling names outside the renderer
+source-prefix boundary"). The regeneration evidence in the 2026-11-04 update
+stands; no test-runner/spipe work remains on this row.
+
+Historical status line: manual regenerated from current source (2026-11-04);
+stale `bin/release/macos-arm64/simple` itself awaits the bootstrap-lane redeploy.
 
 ## Affected output
 
