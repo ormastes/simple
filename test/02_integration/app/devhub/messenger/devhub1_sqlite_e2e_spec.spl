@@ -1,0 +1,156 @@
+# Lane devhub1 target 4 — workable sqlite encryption with the specified
+# algorithm, end to end.
+#
+# Input: a real .sqlite produced by the repo's sqlite tooling (python
+# sqlite3, integrity-checked, exact rows asserted) and re-laid into the
+# 4016-usable / 80-reserved geometry the locked sqlcipher4_4k_sha512 profile
+# decrypts to, then encrypted by test/fixtures/database/sqlcipher4/
+# devhub1_sqlite_e2e.py with the specified algorithm (reference
+# implementation, fresh CSPRNG salt + passphrase; reference round-trip
+# verified before emission). Encrypted bytes + non-secret manifest live under
+# build/interop/devhub1/e2e/ (gitignored); the passphrase arrives only via
+# SIMPLE_SECRET_DEVHUB1_E2E, mirroring provision.py --native.
+#
+# End-to-end workable = this spec passes from file bytes to verified
+# plaintext THROUGH the production devhub decrypt path
+# (storage_backend_sqlcipher4_open): the storage port reads the salt, unwraps
+# the key session via the SecretRef, authenticates + decrypts every page,
+# reassembles the snapshot, and the sqlite_format pager reads it.
+#
+# Assertions are structure-aware at the page/image level per the lane rule:
+# sqlite header string "SQLite format 3\0", page count, and a known row's
+# bytes present in the decoded image. Row-cell VALUE text (.to_text()) is
+# caret2's concurrent lane and is not asserted here.
+#
+# Operator workflow:
+#   eval "$(python3 test/fixtures/database/sqlcipher4/devhub1_sqlite_e2e.py | grep '^DEVHUB1_')"
+#   export SIMPLE_SECRET_DEVHUB1_E2E="$DEVHUB1_E2E_SECRET" DEVHUB1_E2E_DIR="$DEVHUB1_E2E_DIR"
+#   bin/simple test test/02_integration/app/devhub/messenger/devhub1_sqlite_e2e_spec.spl \
+#     --mode=interpreter --no-cache
+
+"""
+## Purpose and audience
+Purpose: encrypted real-sqlite opens through the devhub decrypt path with
+verified plaintext (header, page count, known row bytes).
+Audience: devhub secured-storage reviewers.
+"""
+
+# @timeout_secs 1200
+
+use std.spec.*
+use std.io_runtime.{env_get_opt, file_read_bytes_result}
+use std.env.{env_set, env_unset}
+use std.nogc_sync_mut.database.server.storage_port.{
+    storage_backend_sqlcipher4_open, StorageOpenResult
+}
+use std.nogc_sync_mut.database.sqlite_format.reader.{sqlite_format_read_table_bytes}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+val E2E_SECRET_ENV: text = "SIMPLE_SECRET_DEVHUB1_E2E"
+val E2E_SECRET_REF: text = "secret://devhub1/e2e"
+val MARKER: text = "devhub1-e2e-marker-7f3a9c51"
+
+fn _u8_at(arr: [u8], idx: i64) -> i64:
+    rt_bytes_u8_at(arr, idx) & 0xFF
+
+fn _require(condition: bool, boundary: text):
+    if not condition:
+        fail("sqlite e2e: {boundary}")
+
+# True when `needle` (ASCII bytes) occurs in `haystack`.
+fn _contains_bytes(haystack: [u8], needle: [u8]) -> bool:
+    if needle.len() == 0 or haystack.len() < needle.len():
+        return false
+    var i = 0
+    val last = haystack.len() - needle.len()
+    while i <= last:
+        var j = 0
+        var ok = true
+        while j < needle.len():
+            if _u8_at(haystack, i + j) != _u8_at(needle, j):
+                ok = false
+            j = j + 1
+        if ok:
+            return true
+        i = i + 1
+    false
+
+fn _marker_bytes() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < MARKER.len():
+        out.push(MARKER[i].char_code_at(0).to_u8())
+        i = i + 1
+    out
+
+describe "REQ-SQLITE-E2E-001: encrypted real sqlite opens with verified plaintext":
+    # @req REQ-SQLITE-E2E-001
+    it "file bytes -> devhub decrypt path -> header, page count, known row bytes":
+        val dir = env_get_opt("DEVHUB1_E2E_DIR") ?? ""
+        _require(dir != "", "DEVHUB1_E2E_DIR is set")
+        _require(env_get_opt(E2E_SECRET_ENV) ?? "" != "", "e2e secret is set")
+        match file_read_bytes_result(dir + "/e2e.sqlcipher4"):
+            case Ok(bytes):
+                _require(bytes.len() == 8192, "two whole 4096-byte pages on disk")
+                # Encrypted: must NOT carry the plaintext sqlite magic.
+                _require(not (_u8_at(bytes, 0) == 0x53 and _u8_at(bytes, 1) == 0x51), "ciphertext head")
+            case Err(_):
+                _require(false, "e2e file readable")
+        match storage_backend_sqlcipher4_open(dir + "/e2e.sqlcipher4", E2E_SECRET_REF):
+            case Ok(StorageOpenResult.SqliteView(view)):
+                _require(view.page_size == 4096, "page size 4096")
+                _require(view.page_count == 2, "page count 2")
+                _require(view.image.len() == 8192, "image width")
+                # Structure-aware: the sqlite header string.
+                expect(_u8_at(view.image, 0)).to_equal(0x53)
+                expect(_u8_at(view.image, 1)).to_equal(0x51)
+                expect(_u8_at(view.image, 2)).to_equal(0x4C)
+                expect(_u8_at(view.image, 3)).to_equal(0x69)
+                expect(_u8_at(view.image, 15)).to_equal(0x00)
+                # Header fields carried through decryption: reserved=80,
+                # text encoding UTF-8 ([56,60) BE == 1), big-endian page
+                # count 2 at [28,32), change counter 1 at [24,28).
+                expect(_u8_at(view.image, 20)).to_equal(80)
+                expect(_u8_at(view.image, 56)).to_equal(0)
+                expect(_u8_at(view.image, 59)).to_equal(1)
+                expect(_u8_at(view.image, 27)).to_equal(1)
+                expect(_u8_at(view.image, 28)).to_equal(0)
+                expect(_u8_at(view.image, 30)).to_equal(0)
+                expect(_u8_at(view.image, 31)).to_equal(2)
+                # A known row's bytes: the marker text of row id 1 must be
+                # present in the decoded plaintext image.
+                val marker = _marker_bytes()
+                _require(marker.len() == 27, "marker width")
+                _require(_contains_bytes(view.image, marker), "known row bytes present in plaintext")
+                # Row-count level (structure-aware; row VALUE text is
+                # caret2's lane).
+                match sqlite_format_read_table_bytes(view.image, "ledger"):
+                    case Ok(rows):
+                        expect(rows.len()).to_equal(3)
+                        expect(rows[0].values.len()).to_equal(5)
+                    case Err(e):
+                        _require(false, "ledger rows: {e}")
+            case Ok(StorageOpenResult.NativeStore(_)):
+                _require(false, "explicit SQLCipher backend selection")
+            case Err(e):
+                _require(false, "e2e open: {e}")
+
+describe "REQ-SQLITE-E2E-002: fail-closed without the dependency on caret2's lane":
+    # @req REQ-SQLITE-E2E-002
+    it "wrong secret fails authentication on the same file":
+        val dir = env_get_opt("DEVHUB1_E2E_DIR") ?? ""
+        if dir == "":
+            _require(false, "DEVHUB1_E2E_DIR is set")
+        else:
+            val saved = env_get_opt(E2E_SECRET_ENV) ?? ""
+            val _w = env_set(E2E_SECRET_ENV, "wrong-e2e-secret")
+            match storage_backend_sqlcipher4_open(dir + "/e2e.sqlcipher4", E2E_SECRET_REF):
+                case Ok(_):
+                    _require(false, "wrong secret must fail closed")
+                case Err(e):
+                    expect(e.code()).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+            if saved == "":
+                val _u = env_unset(E2E_SECRET_ENV)
+            else:
+                val _r = env_set(E2E_SECRET_ENV, saved)
