@@ -1,8 +1,13 @@
 # arm64 `arm64-desktop-engine2d` media phase: seed native codegen cannot compile two `src/os/apps/dbd/` bodies (2026-09-01)
 
-Status: **OPEN**. Fifth blocker in the chain behind the arm64 WM+Vulkan pixel
-gate. Found after clearing three earlier prerequisites in a fresh
-`origin/main` worktree.
+Status: **SUPERSEDED** 2026-11-11 (lane p3-comp9; closed 2026-11-09 closure first
+confirmed by P3 compiler-seed lane 2026-11-10). Premise stale: (a) bare
+`provider.configured` is invalid Simple — the hard error is parity with the
+self-hosted compiler, pinned on both engines; (b) the imported static call no
+longer reproduces and is pinned by
+`test/01_unit/bugs/dbd_implicit_self_read_and_imported_static_call_spec.spl`
+(2/2 PASS on the tracked seed 46fe8f6b6def, re-verified lane p3-comp9). See the
+dated addendum below.
 
 ## Prerequisites cleared first (each was a separate hard stop)
 
@@ -139,3 +144,31 @@ contract direction (hard error on bare field read, pinned on both engines by
 or needed; a bare-field-resolving seed would break parity with the self-hosted
 compiler. The full arm64 media phase re-run remains a Linux/QEMU-lane item per
 the closure note.
+
+## Triage 2026-11-11 (lane comp9, worktree simple-p3-comp9-20261111, base 77be2266752d)
+
+Verdict: **SUPERSEDED** — confirms the 2026-11-09 closure and the P3 compiler-seed
+lane 2026-11-10 confirmation; not re-litigated. Fresh re-verification at this base
+(not resting on prior addenda alone):
+
+- Source fix 711c590347f IS an ancestor of the lane base; the fixed sources are in
+  tree exactly as the closure records: `self.provider.configured` at
+  `src/os/apps/dbd/dbd_provisioning.spl:170` and `boot_owner.provider.configured`
+  at :139; no bare `provider` remains.
+- Both pinning specs exist:
+  `test/01_unit/bugs/dbd_implicit_self_read_and_imported_static_call_spec.spl` and
+  `test/01_unit/bugs/dbd_transaction_owner_shape_helper.spl`.
+- Behavioral (tracked seed bin/simple.exe @ 46fe8f6b6def,
+  `SIMPLE_LIB=src ... test ... --mode=interpreter --no-cache`):
+  `dbd_implicit_self_read_and_imported_static_call_spec.spl` → outcome=OK,
+  executed=2 passed=2 failed=0.
+- Premise-stale reasoning unchanged: (a) a bare field read is invalid Simple and
+  the seed's hard error IS parity with the self-hosted compiler
+  (`declaration_lowering.spl:326-346` injects only the `self` symbol), pinned on
+  both engines by `scripts/check/check-implicit-self-field-assignment.shs`; a
+  seed that resolved bare fields would break that contract.
+- Not re-run (per the closure note): the full arm64 engine2d media phase needs the
+  aarch64 sysroot + QEMU lane on a Linux host; if it still fails on the dbd bodies
+  it is a different defect to file with its current output.
+
+Disposition: SUPERSEDED. Header flipped OPEN → SUPERSEDED 2026-11-11 (lane p3-comp9).
