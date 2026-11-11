@@ -119,6 +119,11 @@ set "MCP_LOG=%MCP_RUN_DIR%\stderr.log"
 echo simple_mcp_server: no admitted native exe; serving src\app\mcp\main.spl on %SIMPLE_RUNTIME% 1>>"%MCP_LOG%"
 "%SIMPLE_RUNTIME%" run "%~dp0..\src\app\mcp\main.spl" %* 2>>"%MCP_LOG%"
 set "MCP_RC=%ERRORLEVEL%"
-rem Startup errors live in the log, so name it on stderr when the server fails.
-if not "%MCP_RC%"=="0" 1>&2 echo simple_mcp_server: exited %MCP_RC%; stderr log: %MCP_LOG%
+rem Startup errors live in the log, so name it on stderr when the server fails,
+rem and answer the client with one JSON-RPC error frame instead of a silent
+rem close ("Connection closed" with no reason).
+if "%MCP_RC%"=="0" exit /b 0
+echo {"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"simple_mcp_server runtime exited %MCP_RC%; see wrapper stderr for the log path"}}
+1>&2 echo simple_mcp_server: exited %MCP_RC%; stderr log: %MCP_LOG%
+1>&2 powershell -NoProfile -Command "Get-Content -LiteralPath $env:MCP_LOG -Tail 5" 2>nul
 exit /b %MCP_RC%
