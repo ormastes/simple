@@ -105,3 +105,28 @@ land (installed providers, runtime primitives, multi-manager, smux PTY,
 local-Slang generation endpoint). That follow-up is a feature effort, not an
 open security hole: with the quarantine in place, a trusted signature over
 generic blobs can no longer promote a row.
+
+## Addendum 2026-11-11 — lane p3-caret1: fixed status confirmed at tip; live re-run blocked by host
+
+Traversed on work/p3-caret1-20261111 (origin/release/1.0.0 tip 79d5af6723f6).
+
+The quarantined validator and this regression test are unchanged at tip, and the
+2026-11-11 lane-ne3 addendum above records a live re-executed PASS
+(`PASS: all five generic signed Caret receipts fail closed at the semantic
+quarantine`, exit 0, same day). This lane attempted its own live re-verification
+three times; all three runs of
+test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs stalled
+inside the external validator on this shared Windows host under concurrent lane
+build load (MSYS2 fork failure `fork: retry: Resource temporarily unavailable`,
+exit 0xC0000142; fixture temp-dir instability; logs:
+build/review/p3fix-caret1-20261111-logs/row2_*.log). The quarantine code path
+itself was additionally confirmed by source inspection at tip
+(scripts/check/check-external-must-check-receipt.shs:149-160: reviewer signature
+`openssl dgst` verification at :149, then the five caret gates fail closed with
+`caret-semantic-validator-not-implemented-<gate>` before any evidence attachment
+is loaded at :162-164).
+
+Verdict: fixed (lane ne3, same-day live PASS stands); this lane's live re-run is
+BLOCKED by host instability — do not re-run the quarantine test on this host
+under load. The five external rows remain deliberate TODO pending the versioned
+validators, as the header states.

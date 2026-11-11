@@ -82,3 +82,28 @@ rejection checks have not run on Phase 2. On Phase 1 the fixture has no final ve
 **Revalidated 2026-11-02: still plausible because OPEN. Severity: P1. Date: 2026-10-27; no merged fix commit with a passing regression is cited in this doc.**
 
 **2026-11-04:** root causes fixed (key session ace3ef1d00b/93a08ab43ab; text_from_codepoints da22bdea07a). text_codepoints_roundtrip_spec passes 5/5 interpreted. Verification pending: native-build test/fixtures/devhub/fresh_secured_db/main.spl on a current Phase-2 producer; close if it reaches a final verdict.
+
+## Addendum 2026-11-11 — lane p3-caret1: key-session fix VERIFIED; row RESTORED OPEN on new downstream failure
+
+Traversed on work/p3-caret1-20261111 (origin/release/1.0.0 tip 79d5af6723f6).
+
+- Root-cause fix commits ace3ef1d00b1, 93a08ab43ab (key session /
+  native_to_i64_compound_receiver) and da22bdea07a (text_from_codepoints) are
+  all ancestors of tip.
+- Native acceptance executed here, not re-read: Rust-engine native build of
+  test/fixtures/devhub/fresh_secured_db/main.spl — exit 0, 198 modules,
+  106.7 s (log: build/review/p3fix-caret1-20261111-logs/row5_native_build.log).
+- Fixture run via provision.py --native (fresh CSPRNG secret, fresh encrypted
+  inputs): the direct key session NOW OPENS (previously SQLCIPHER4_MISSING_SECRET
+  at exit 1), both sample pages authenticate and decode, storage opens and reads
+  46 rows — the original P1 defect is fixed.
+- New failing boundary, same fixture, next stage: `FAIL fresh secured DB:
+  storage first row value` — `rows[0].values[0].to_text() != "11"` (row 0 has
+  7 cells, 46 rows read; the memory oracle still passes AES/KDF/HMAC/SQLite)
+  (log: build/review/p3fix-caret1-20261111-logs/row5_fixture_run.log). This is a
+  downstream row-cell value decode/read defect, distinct from the fixed
+  key-session open; per this row's own rule ("close if it reaches a final
+  verdict") it did not reach a final verdict.
+
+Status: OPEN (restored) — original key-session failure fixed and evidenced;
+remaining blocker is the downstream first-row cell value boundary above.
