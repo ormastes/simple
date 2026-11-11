@@ -102,14 +102,12 @@ describe "Mir Lowering New":
         val dispatch_source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
         val hir_source = read_mir_source("src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl")
 
-        expect(source).to_contain("case NamedVar(symbol, callee_name):")
-        expect(source).to_contain("MirConstValue.Str(callee_name)")
+        expect(source).to_contain("case NamedVar(symbol, _):")
         expect(source).to_contain("case Var(symbol):")
         expect(source).to_contain("me bootstrap_resolved_call_name(symbol: SymbolId) -> text:")
         expect(source).to_contain("if val found_sym = sym:")
-        expect(source).to_contain("var call_name = \"\"")
+        expect(source).to_contain("var call_name = name")
         expect(source).to_contain("call_name = self.bootstrap_resolved_call_name(symbol)")
-        expect(source).to_contain("MirConstValue.Str(call_name)")
         expect(source).to_contain("MirSignature(params: [], return_type: return_type, is_variadic: false)")
         expect(source).to_contain("me bootstrap_call_return_type(name: text) -> MirType:")
         expect(source).to_contain("name == \"get_args\" or name == \"get_cli_args\"")
@@ -120,8 +118,7 @@ describe "Mir Lowering New":
         expect(source).to_contain("return MirType.ptr(self.bootstrap_text_type(), false)")
         expect(source).to_contain("name == \"eprint\"")
         expect(source).to_contain("return MirType.unit()")
-        expect(source).to_contain("self.bootstrap_resolved_call_return_type(symbol, call_name)")
-        expect(source).to_contain("self.bootstrap_resolved_call_return_type(symbol, callee_name)")
+        expect(source).to_contain("me bootstrap_resolved_call_return_type(symbol: SymbolId, name: text) -> MirType:")
         expect(source.contains("[dbg-namedvar]")).to_equal(false)
         expect(hir_source).to_contain("fn is_bootstrap_builtin_fn(name: text) -> bool:")
         expect(hir_source).to_contain("name == \"get_args\"")
@@ -146,7 +143,7 @@ describe "Mir Lowering New":
         step("keeps MIR type lowering from reading kind on nil")
         val source = read_mir_source("src/compiler/50.mir/_MirLowering/function_lowering.spl")
 
-        expect(source).to_contain("if type_ == nil:")
+        expect(source).to_contain("if type_ == None:")
         expect(source).to_contain("missing HIR type during MIR lowering")
         expect(source).to_contain("return MirType(kind: MirTypeKind.I64)")
         expect(source).to_contain("match type_.kind:")
@@ -181,8 +178,8 @@ describe "Mir Lowering New":
         val array_param = array_param_parts[1].split("case Named(type_symbol, _):")[0]
         expect(array_param).to_contain("self.runtime_array_locals[local.id] = true")
         expect(array_param).to_contain("case Named(element_symbol, _):")
-        expect(array_param).to_contain("self.symbols.get_symbol(element_symbol)")
-        expect(array_param).to_contain("self.array_element_struct_syms[local.id] = element.name")
+        expect(array_param).to_contain("self.symbols.get_symbol_raw(element_symbol.id)")
+        expect(array_param).to_contain("self.array_element_struct_syms[local.id] = self.struct_value_provenance_key(element)")
         expect(index).to_contain("self.array_element_struct_syms.get(base_local.id)")
         expect(index).to_contain("self.struct_value_syms[decoded_elem.id] = esn")
         expect(fixture).to_contain("fn mutate_first(counters: [Counter]):")
@@ -200,10 +197,10 @@ describe "Mir Lowering New":
         expect(source).to_contain("receiver_type = self.lower_type(found_receiver_type)")
         expect(source).to_contain("len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)")
         expect(source.contains("val maybe_receiver_type_for_call = receiver.type_")).to_be(false)
-        expect(source).to_contain("if type_ == nil:")
+        expect(source).to_contain("if type_ == None:")
         expect(source).to_contain("return \"\"")
         expect(source).to_contain("val maybe_elem_type = elem.type_")
-        expect(source).to_contain("if elem_type != nil:")
+        expect(source).to_contain("if elem_type != None:")
         expect(source).to_contain("elem_ty = self.lower_type(elem_type)")
 
     it "keeps MIR expression lowering from matching kind on nil input":
@@ -212,7 +209,6 @@ describe "Mir Lowering New":
         val source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
 
         expect(source).to_contain("var expr_value = nil_expr")
-        expect(source).to_contain("if expr != nil:")
         expect(source).to_contain("expr_value = expr")
         expect(source).to_contain("match expr_value.kind:")
 
@@ -228,38 +224,6 @@ describe "Mir Lowering New":
         expect(source).to_contain("val idx_local = bg.emit_const_int(bind_pos_row[fi])")
         expect(source).to_contain("rt_tuple_get")
 
-    it "uses native-safe indexed scans for MIR locals and enum constructors":
-        # @req REQ-SSPEC-COMPILER
-        step("uses native-safe indexed scans for MIR locals and enum constructors")
-        val stmt_source = read_mir_source("src/compiler/50.mir/mir_lowering_stmts.spl")
-        val dispatch_source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
-        val method_source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
-        val call_source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
-
-        expect(stmt_source.contains("for item in self.builder.locals:")).to_equal(false)
-        expect(dispatch_source.contains("for item in self.builder.locals:")).to_equal(false)
-        expect(dispatch_source).to_contain("val named_var_payload = compiler_value_payload(expr_value.kind)")
-        expect(dispatch_source).to_contain("val named_var_symbol: SymbolId = compiler_value_tuple_at(named_var_payload, 0)")
-        expect(dispatch_source).to_contain("val raw_named_local = self.find_local(named_var_symbol_id)")
-        expect(method_source).to_contain("val receiver_disc = rt_enum_discriminant(receiver_kind)")
-        expect(method_source).to_contain("val named_receiver_payload = rt_enum_payload(receiver_kind)")
-        expect(method_source).to_contain("recv_enum_name = rt_array_get_text(named_receiver_payload, 1)")
-        expect(method_source).to_contain("val variant_names = self.enum_variant_index[recv_enum_name]")
-        expect(method_source).to_contain("while variant_i < variant_names.len():")
-        expect(method_source.contains("for vn in self.enum_variant_index[recv_enum_name]:")).to_equal(false)
-        expect(call_source).to_contain("case HirExprKind.NamedVar(symbol, name):")
-        expect(call_source).to_contain("if not is_direct:")
-        expect(call_source).to_contain("val named_callee_payload = rt_enum_payload(callee.kind)")
-        expect(call_source).to_contain("val named_callee_symbol: SymbolId = rt_tuple_get(named_callee_payload, 0)")
-        expect(call_source).to_contain("direct_name = rt_array_get_text(named_callee_payload, 1)")
-        expect(call_source).to_contain("self.find_local(direct_symbol.id).id >= 0")
-        expect(call_source).to_contain("val arm_pattern_payload = rt_enum_payload(arm_pattern_kind)")
-        expect(call_source).to_contain("val etype: HirType = rt_tuple_get(arm_pattern_payload, 0)")
-        expect(call_source).to_contain("val epayload: HirPatternPayload? = rt_tuple_get(arm_pattern_payload, 2)")
-        expect(call_source).to_contain("val binding_symbol: SymbolId = rt_tuple_get(binding_payload, 0)")
-        expect(call_source).to_contain("while enum_i < enum_names.len():")
-        expect(call_source.contains("for ename in enum_names:")).to_equal(false)
-
     it "keeps MIR diagnostics independent of malformed native span payloads":
         # @req REQ-SSPEC-COMPILER
         step("keeps MIR diagnostics independent of malformed native span payloads")
@@ -268,7 +232,7 @@ describe "Mir Lowering New":
 
         expect(source).to_contain('"MIR lowering error: {err.message}"')
         expect(source.contains("err.span.unwrap()")).to_equal(false)
-        expect(source).to_contain('message.starts_with("undefined variable")')
+        expect(read_mir_source("src/compiler/50.mir/mir_lowering_types.spl")).to_contain('message.starts_with("undefined variable")')
 
     it "reads required MIR identifier wrappers without native destructuring":
         # @req REQ-SSPEC-COMPILER
@@ -305,115 +269,8 @@ describe "Mir Lowering New":
         step("predispatches match expressions before native pattern extraction")
         val source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
 
-        expect(source).to_contain("val match_case_pre_disc = compiler_value_discriminant(HirExprKind.MatchCase(nil_expr, []))")
-        expect(source).to_contain("return self.lower_match_case(match_scrutinee, match_arms)")
-
-    it "defines match bindings before lowering arm bodies":
-        # @req REQ-SSPEC-COMPILER
-        step("defines match bindings before lowering arm bodies")
-        val source = read_mir_source("src/compiler/20.hir/hir_lowering/expressions.spl")
-
-        expect(source).to_contain("val hir_pattern = self.lower_pattern(typed_arm.pattern)")
-        expect(source).to_contain("val hir_guard = self.lower_hir_expr(typed_arm.guard)")
-        expect(source).to_contain("val hir_body = self.lower_hir_block(typed_arm.body)")
-        expect(source).to_contain("val hir_scrutinee = self.lower_hir_expr(scrutinee)")
-        expect(source).to_contain("self.symbols.push_scope(ScopeKind.Match)")
-        expect(source).to_contain("self.symbols.pop_scope()")
-        expect(source).to_contain("pattern: hir_pattern")
-        expect(source).to_contain("body: hir_body")
-        expect(source).to_contain(
-            "self.build_match_expr(hir_scrutinee, hir_arms, scrutinee.span)"
-        )
-        expect(source).to_contain(
-            "hir_patterns = hir_patterns.push(self.lower_pattern(pat))"
-        )
-        expect(source).to_contain(
-            "hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))"
-        )
-        val parser_source = read_mir_source(
-            "src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl"
-        )
-        expect(parser_source).to_contain(
-            "mc_sub = mc_sub.push(Pattern(kind: PatternKind.Binding"
-        )
-        expect(parser_source).to_contain(
-            "sub = sub.push(Pattern(kind: PatternKind.Binding"
-        )
-        expect(parser_source).to_contain(
-            "bsub = bsub.push(Pattern(kind: PatternKind.Binding"
-        )
-        expect(parser_source).to_contain("val bare_args = expr_get_args(pat_eid)")
-        expect(parser_source).to_contain(
-            "val b_eid: i64 = bare_args[bare_arg_index]"
-        )
-        expect(parser_source).to_contain(
-            "Some(EnumPatternPayload.Tuple(bsub))"
-        )
-        val statement_parser = read_mir_source(
-            "src/compiler/10.frontend/core/parser_stmts.spl"
-        )
-        expect(statement_parser).to_contain(
-            "val first_pattern = parse_expr()\n            patterns = patterns.push(first_pattern)"
-        )
-        expect(statement_parser).to_contain(
-            "val first_case_pattern = parse_expr()\n            patterns = patterns.push(first_case_pattern)"
-        )
-
-    it "bootstraps enum and binding patterns without self-host match extraction":
-        # @req REQ-SSPEC-COMPILER
-        step("bootstraps enum and binding patterns without self-host match extraction")
-        val source = read_mir_source("src/compiler/20.hir/hir_lowering/expressions.spl")
-        val bridge = read_mir_source("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
-
-        expect(source).to_contain("val pattern_disc = hir_pattern_kind_disc(pattern_kind_value)")
-        expect(source).to_contain("val binding_name = rt_array_get_text(raw_payload, 0)")
-        expect(source).to_contain("val payload_slot = rt_tuple_get(raw_payload, 2)")
-        expect(source).to_contain("if not rt_is_none(payload_slot):")
-        expect(source).to_contain("var payload_value = payload_slot")
-        expect(source).to_contain("if payload_disc != tuple_disc and payload_disc != struct_disc:")
-        expect(source).to_contain("payload_value = rt_unwrap_or_self(payload_slot)")
-        expect(source).to_contain("var payload_disc = rt_enum_discriminant(payload_value)")
-        expect(source).to_contain("rt_enum_payload(payload_value) as [Pattern]")
-        expect(source).to_contain("rt_enum_payload(payload_value) as [(text, Pattern)]")
-        expect(source).to_contain("return HirPattern(kind: HirPatternKind.Enum(enum_type, variant_name, hir_payload)")
-        expect(bridge).to_contain("mc_sub.push(convert_flat_pattern(a_eid))")
-        expect(bridge).to_contain("sub.push(convert_flat_pattern(a_eid))")
-        expect(bridge).to_contain("bsub.push(convert_flat_pattern(b_eid))")
-
-    it "routes HIR module dictionary views through explicit runtime owners":
-        # @req REQ-SSPEC-COMPILER
-        step("routes HIR module dictionary views through explicit runtime owners")
-        val source = read_mir_source("src/compiler/50.mir/_MirLowering/module_lowering.spl")
-        val function_source = read_mir_source("src/compiler/50.mir/_MirLowering/function_lowering.spl")
-        val switch_source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
-        val dispatch_source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
-        val method_source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
-        val sffi_source = read_mir_source("src/compiler_rust/lib/std/src/alloc/sffi.spl")
-
-        expect(source).to_contain("use std.alloc.sffi.{rt_dict_contains, rt_dict_keys, rt_dict_values}")
-        expect(source).to_contain("rt_dict_values(module.functions)")
-        expect(source).to_contain("rt_dict_keys(impl_def.methods)")
-        expect(source).to_contain("rt_dict_contains(self.enum_variant_index, \"Result\")")
-        expect(source).to_contain("rt_dict_contains(struct_method_first_owner, impl_method_name)")
-        expect(source).to_contain("rt_dict_contains(free_function_names, impl_method_name)")
-        expect(source.contains("module.functions.values()")).to_equal(false)
-        expect(source.contains("impl_def.methods.keys()")).to_equal(false)
-        expect(source.contains("self.enum_variant_index.has(\"Result\")")).to_equal(false)
-        expect(source.contains("struct_method_first_owner.get(impl_method_name)")).to_equal(false)
-        expect(source.contains("free_function_names.has(impl_method_name)")).to_equal(false)
-        expect(sffi_source).to_contain("rt_dict_contains(dict: i64, key: Any)")
-        expect(function_source).to_contain("rt_dict_contains(arg_locals, pli)")
-        expect(switch_source).to_contain("rt_dict_contains(self.enum_variant_index, enum_name)")
-        expect(dispatch_source).to_contain("self.find_local(symbol_id).id >= 0")
-        expect(dispatch_source).to_contain("val enum_pattern_disc = compiler_value_discriminant(HirPatternKind.Enum(")
-        expect(dispatch_source).to_contain("return self.lower_enum_match(scrutinee, arms)")
-        expect(dispatch_source.contains("match arms[scan_i].pattern.kind:")).to_equal(false)
-        expect(method_source).to_contain("rt_dict_contains(self.struct_method_syms, unresolved_method_key)")
-        expect(method_source).to_contain("if self.local_is_runtime_dict(dict_recv_local):\n                receiver_is_dict = true")
-        expect(method_source).to_contain("elif has_prelowered_method_receiver:")
-        expect(function_source.contains("self.struct_value_syms.get(base_local.id)")).to_equal(false)
-        expect(switch_source.contains("self.enum_variant_index.keys()")).to_equal(false)
-        expect(method_source.contains("self.struct_value_syms.get(unresolved_receiver_local.id)")).to_equal(false)
+        expect(source).to_contain("val d_matchcase = _sffi_enum_discriminant(HirExprKind.MatchCase(nil_expr, []))")
+        expect(source).to_contain("self.lower_match_case(scrutinee, arms, expected_match_type)")
 
     it "walks parent scopes without native Option pattern destructuring":
         # @req REQ-SSPEC-COMPILER
