@@ -1,0 +1,34 @@
+"""
+## Purpose and audience
+Pins the inventory row's `byte_count` to the UTF-8 byte length of the source,
+the unit SCV admission compares against (`compile_snapshot.spl` refuses a row
+whose `bytes.len()` differs as `snapshot-index-drift`). Audience: whoever
+touches `compile_source_inventory_event_from_content_cost_v1` or the
+`len()` -> `byte_len()` text migration.
+## Operator workflow
+bin/simple test test/01_unit/lib/scv/compile_source_inventory_byte_count_spec.spl
+## Compatibility and limitations
+Observed red under the native Stage 2 compiler on 2026-11-12 (bootstrap-fable-4,
+aarch64): `src/app/__init__.spl` holds one em-dash, the row recorded 3497
+(characters) while the file is 3499 bytes, and every Stage 2 sanity smoke was
+refused. Red-then-green proven on the seed interpreter too (unfixed: `expected 38
+to equal 40`); the native lane is where it blocked the bootstrap.
+## Verification guidance and troubleshooting
+A failure here means `byte_count` is a character count again; admission will
+refuse every multibyte source with `snapshot-index-drift:<path>`.
+"""
+# @manual_section: scv-inventory
+use std.spec.*
+use std.scv.compile_source_inventory_core.*
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+describe "compile source inventory byte_count":
+    it "records the UTF-8 byte length, not the character count, for a multibyte source":
+        # @req REQ-SCV-INVENTORY-BYTE-COUNT-001
+        step("Build an inventory event for a source holding a 3-byte em-dash")
+        val content = "# Application Layer — tools\nfn a(): 1\n"
+        val event = compile_source_inventory_git_event_v1("create", "src/app/__init__.spl", content)
+        # @capture(text): event.byte_count beside the UTF-8 byte length of the same content
+        step("Compare the recorded byte_count with the admission-side byte length")
+        expect(event.byte_count).to_equal(text_to_utf8_bytes(content).len())
+        expect(event.byte_count).to_be_greater_than(content.len() - 1)
