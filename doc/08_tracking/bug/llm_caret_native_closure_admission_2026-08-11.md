@@ -105,3 +105,30 @@ with retained nm/provenance evidence, install the artifact for bin/caret,
 re-run the cached CLI + PTY TUI system checks, and only then close this row.
 
 Status stays OPEN.
+
+## Addendum 2026-11-11 — lane p3-caret2: BLOCKED kept; fresh native-build
+## attempt evidence at tip
+
+Traversed on work/p3-caret2-20261111 (origin/release/1.0.0 tip
+66506fda143ca).
+
+The conditional grant ("produce it with the Rust engine in a bounded time")
+was exercised and fails on this host: fresh cold-cache `native-build`
+(entry-closure, both the full Caret closure and a 3-import minimal repro)
+hangs — the build log freezes at the identical 9919-line/925656-byte
+preamble with zero cache objects and no binary. This is the known P1
+`seed_native_build_interpreted_startup_spin_2026-11-09` (BLOCKED at HEAD,
+root cause in the seed-interpreted pure-Simple driver; needs an aarch64
+cold-cache repro lane). The sanctioned path (full bootstrap to a self-hosted
+non-seed runtime + admitted simple-core archive) remains outside a bug lane.
+
+The verbatim caret1 grant is re-recorded intact: produce the self-hosted
+non-seed runtime and matching simple-core archive via the sanctioned
+bootstrap (`SIMPLE_NO_STUB_FALLBACK=1 sh
+scripts/bootstrap/bootstrap-from-scratch.shs --full-bootstrap --deploy`),
+then run `sh scripts/check/check-llm-caret-native-closure.shs --check`;
+when it exits 0 with retained nm/provenance evidence, install the artifact
+for bin/caret, re-run the cached CLI + PTY TUI system checks, and only then
+close this row.
+
+Status stays OPEN (BLOCKED on the sanctioned bootstrap).
