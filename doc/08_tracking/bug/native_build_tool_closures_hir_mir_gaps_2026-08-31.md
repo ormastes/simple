@@ -136,3 +136,34 @@ assign, and `t.0` reads on both engines. Fix site is the seed-side lowering of
 tuple destructuring assignment (unbox before the i64 store), not the
 pure-Simple MIR path this doc tracks. Recorded here for routing; the pure-Simple
 AOT path is unverified in-lane (blocked, see above).
+
+## 2026-11-11 — SUPERSEDED confirmed (lane p3-comp12, row 2)
+
+Independent fresh re-verification at this lane's base (6233df4b9f9ea, tracked
+seed 46fe8f6b6def), concurring with the boot7 addendum above (which ran on
+seed 0791c2b7f4a7, one refresh later than this lane's tracked seed — the
+regression spec was therefore re-run here, not trusted across the seed swap):
+
+- All three fix commits are ancestors of this base: PR #8037 root
+  0db8bd34d668 + merge 14ef71e856eb (pub lint readers), PR #7545 merge
+  820631c6e5c7 (tuple-literal assignment-target lowering), d790c7102a30
+  (PR #8056, per-row db status flip).
+- Defect 2 source at this base: `case TupleLit(elements):
+  self.lower_tuple_destructuring_assign(elements, value_local, op)` at
+  src/compiler/50.mir/mir_lowering_stmts.spl:2761-2762, implementation at
+  :2468 — the "unsupported MIR assignment target" failure shape is gone.
+- Defect 3 source at this base: eprint_bounded spill_root prefers
+  SIMPLE_NATIVE_BUILD_CACHE_DIR/diagnostics then TMPDIR/TEMP/TMP before /tmp
+  (src/app/cli/native_build_main.spl:632-650).
+- Fresh seed-smoke (tracked seed 46fe8f6b6def, interpreter, --no-cache):
+  test/01_unit/app/io/cli_lint_imports_pub_spec.spl outcome=OK executed=3
+  passed=3 failed=0 (defect 1 regression).
+- Ledger note: the per-row db file
+  (doc/08_tracking/bug/db/native_build_tool_closures_hir_mir_gaps_2026-08-31.sdn)
+  reads status=closed, but the master table doc/08_tracking/bug/bug_db.sdn row
+  still reads `open` (updated_at 2026-09-21) — a master/per-row sync gap for
+  the bookkeeping pass, not a live-defect signal.
+- Residuals unchanged: the AOT lint-closure and MCP-closure end-to-end reruns
+  are still pending (entry-closure native builds forbidden in-lane; grant
+  route). The related seed-JIT tuple-destructuring miscompute recorded by
+  boot7 routes to the seed-fix lane, not this row.
