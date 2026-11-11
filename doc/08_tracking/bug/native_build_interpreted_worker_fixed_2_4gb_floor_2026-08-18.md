@@ -1,7 +1,11 @@
 # native-build: interpreted worker carries a fixed ~2.4 GB RSS floor before it compiles anything
 
 - **Filed:** 2026-08-18
-- **Status:** OPEN — measured, not fixed
+- **Status:** LIVE (triaged 2026-11-11, lanes boot6/int10/int11) — measured, not
+  fixed; the interpreted-worker spawn shape and the process-lifetime
+  module-cache retention design are unchanged at this base (source-checked by
+  int11). Owner: seed-fix lane (retention census + rebuild grant) /
+  bootstrap redesign (compiled worker). See the 2026-11-10/11 addenda below.
 - **Severity:** HIGH — this is the mechanism by which `earlyoom` reaps the bootstrap
 - **Area:** `src/app/cli/native_build_worker.spl`, `src/app/io/_CliCompile/compile_targets.spl`,
   seed interpreter module loading
@@ -238,3 +242,18 @@ above) or `src/compiler` (agent-30 lane). No re-measure: the 2026-11-07
 Windows baseline (1.99 GB no-arg floor) is already in-record and an
 identical re-run is budget-forbidden. Owner: seed-fix lane (retention
 census + rebuild) / bootstrap redesign (term 1).
+
+## 2026-11-11 triage (lane int11) — header flipped LIVE; disposition source-checked
+
+Sweep flip. boot6 (2026-11-10) and int10 (2026-11-11) addenda recorded the
+verified LIVE disposition with named owners; the header still read OPEN.
+int11 quick re-verify at base `84f5076db138` (source checks only, no
+re-measure — the 2026-11-07 1.99 GB no-arg floor baseline is in-record and an
+identical re-run is budget-forbidden): (1) the worker spawn shape is
+unchanged — `src/app/cli/bootstrap_main.spl:165` still calls
+`run_native_build_worker(worker_args)` (interpreted worker); (2)
+`src/compiler_rust/compiler/src/module_cache.rs` still holds the
+process-lifetime `thread_local` retention maps (8 `thread_local` hits,
+cleared only by the test runner). Both remedy directions remain outside this
+lane: compiled worker = bootstrap redesign; retention census = seed-fix lane
+(cargo rebuild grant). Header flipped to LIVE.
