@@ -1,0 +1,540 @@
+# Lane devhub1 target 3 — open-source library interop, BOTH directions.
+#
+# Oracle: the Python `cryptography` package, provisioned pre-build by
+# scripts/deps/provision-interop-crypto.shs (T0) and gated through
+# codec/interop_crypto_gate.spl: when the library is available the legs run;
+# when it is unavailable (SIMPLE_INTEROP_CRYPTO=skip, or the provisioned
+# status record says skipped) the legs are reported skipped-not-failed and
+# the rest of the suite stays green. The external library is optional for
+# bootstrap, never a hard dependency.
+#
+# Gate note: each leg is `if interop_crypto_available(): run() else:
+# skip(...)` INSIDE its `it` block — the seed interpreter's BDD dispatch
+# rejects fn-valued `it` args and parse-rejects top-level control flow
+# around `it`, so the gate must live inside the block. When the library is
+# unavailable a leg records one skipped AND one passed count (documented
+# runner accounting: skip() inside an it double-counts); it never fails the
+# build. With the library present (the measured state in this lane) all 17
+# legs run with zero skips.
+#
+# Cross-compared algorithm (locked sqlcipher4_4k_sha512, restated in the
+# lane report): PBKDF2-HMAC-SHA512(passphrase, salt, 256000) -> page_key;
+# hmac_salt = salt XOR 0x3a per byte; PBKDF2-HMAC-SHA512(page_key,
+# hmac_salt, 2) -> hmac_key; per page AES-256-CBC no padding with the IV at
+# [4016,4032), HMAC-SHA512 over ciphertext || IV || le32(1-based page no) at
+# [4032,4096), page 1 storing the 16-byte salt plaintext at [0,16).
+#
+# Direction A (oss-encrypt -> simple-decrypt): this spec writes 4016-byte
+# virtual page bodies (hex-encoded text files; file_write is text-oriented),
+# the oracle derives keys with cryptography's PBKDF2HMAC and encrypts each
+# page; the spec unwraps keys with the PRODUCTION sqlcipher4_key_session_open
+# and decodes each page with sqlcipher4_decode_page; plaintext must be
+# byte-identical.
+#
+# Direction B (simple-encrypt -> oss-decrypt): the spec unwraps keys and
+# encodes pages with sqlcipher4_encode_page (fresh spec-chosen IV per page);
+# the oracle authenticates (HMAC verify BEFORE decrypt, fail-closed) and
+# compares plaintext byte-for-byte; a tampered page must fail the oracle's
+# authentication with exit 3.
+#
+# Vectors per direction: 8, incl. the requested edge sizes — 0-content page,
+# 1-byte content, the 4096-byte full-page boundary, last-block-partial
+# content, multi-page sets (3 and 5 pages), the page-1 salt layout, and an
+# all-0xFF bit-pattern page. Passphrases vary per vector (length, spaces,
+# UTF-8), salts are CSPRNG (dir A: oracle-drawn; dir B: spec-drawn).
+
+"""
+## Purpose and audience
+Purpose: byte-identical plaintext both directions between the pure-Simple
+SQLCipher 4 codec and the Python `cryptography` oracle.
+Audience: devhub secured-storage reviewers; interop gate owners.
+"""
+
+# @timeout_secs 2400 (interpreted AES over 15 pages per direction is slow)
+
+use std.spec.*
+use std.io_runtime.{env_get_opt, file_read_bytes_result}
+use std.env.{env_set}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.process.{process_run}
+use std.crypto.types.{bytes_to_hex}
+use nogc_sync_mut.database.codec.interop_crypto_gate.{
+    interop_crypto_available, interop_crypto_gate_report
+}
+use nogc_sync_mut.database.codec.sqlcipher4.{
+    Sqlcipher4Error, sqlcipher4_error_code
+}
+use nogc_sync_mut.database.codec.sqlcipher4_keys.{
+    sqlcipher4_key_session_open, sqlcipher4_key_error_text
+}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{
+    sqlcipher4_encode_page, sqlcipher4_decode_page
+}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+val ORACLE: text = "test/fixtures/database/sqlcipher4/devhub1_crypto_oracle.py"
+val VEC_ROOT: text = "build/interop/devhub1"
+
+fn _u8_at(arr: [u8], idx: i64) -> i64:
+    rt_bytes_u8_at(arr, idx) & 0xFF
+
+fn _u8_list(arr: [u8]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < arr.len():
+        out.push(_u8_at(arr, i))
+        i = i + 1
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if _u8_at(a, i) != _u8_at(b, i):
+            return false
+        i = i + 1
+    true
+
+# Deterministic varied-content body (replayable; the algorithm under test
+# does not care about content entropy).
+fn _body(seed: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 4016:
+        out.push((((i * 2654435761) + seed * 40503) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _zero_body() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 4016:
+        out.push(0u8)
+        i = i + 1
+    out
+
+fn _ff_body() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 4016:
+        out.push(0xFFu8)
+        i = i + 1
+    out
+
+# Page 1 bodies carry the SQLite page-size guard field at [16,18) so the
+# decode structural guard accepts them.
+fn _page1_body(seed: i64) -> [u8]:
+    var out = _body(seed)
+    out[16] = 0x10u8
+    out[17] = 0x00u8
+    out
+
+fn _page1_zero_body() -> [u8]:
+    var out = _zero_body()
+    out[16] = 0x10u8
+    out[17] = 0x00u8
+    out
+
+fn _hex(arr: [u8]) -> text:
+    bytes_to_hex(_u8_list(arr))
+
+fn _write_hex(path: text, bytes: [u8]):
+    val _w = file_write(path, _hex(bytes))
+
+fn _read_u8(path: text) -> [u8]:
+    match file_read_bytes_result(path):
+        case Ok(bytes): bytes
+        case Err(_):
+            []
+
+fn _read_text(path: text) -> text:
+    match file_read_bytes_result(path):
+        case Ok(bytes):
+            match text_from_bytes(bytes):
+                case Ok(t): t
+                case Err(_): ""
+        case Err(_): ""
+
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+fn text_from_bytes(bytes: [u8]) -> Result<text, text>:
+    Ok(rt_bytes_to_text(bytes))
+
+fn text_bytes(t: text) -> [u8]:
+    _text_to_bytes(t)
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+fn _text_to_bytes(s: text) -> [u8]:
+    rt_text_to_bytes(s)
+
+fn _run_oracle(mode: text) -> (text, text, i64):
+    process_run("python3", [ORACLE, mode])
+
+fn _prepare_vec_dir(name: text) -> text:
+    val dir = VEC_ROOT + "/" + name
+    val _m = dir_create_all(dir)
+    dir
+
+fn _write_pages_hex(dir: text, bodies: [[u8]]):
+    val _c = file_write(dir + "/page_count.txt", "{bodies.len()}")
+    var n = 1
+    for body in bodies:
+        _write_hex(dir + "/pt_page_{n}.hex", body)
+        n = n + 1
+
+fn _set_vec_env(dir: text, passphrase: text):
+    val _p = env_set("DEVHUB1_PASSPHRASE", passphrase)
+    val _e = env_set("DEVHUB1_VEC_DIR", dir)
+
+fn _seq_salt(seed: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 16:
+        out.push(((seed * 29 + i * 13 + 7) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _bodies_multi(pages: i64, seed: i64) -> [[u8]]:
+    var out: [[u8]] = []
+    var n = 1
+    while n <= pages:
+        if n == 1:
+            out.push(_page1_body(seed))
+        else:
+            out.push(_body(seed + n))
+        n = n + 1
+    out
+
+fn _iv_for(page_no: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 16:
+        out.push(((page_no * 31 + i * 17 + 9) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _with_salt_head(body: [u8], salt: [u8]) -> [u8]:
+    var b1 = _zero_body()
+    var i = 0
+    while i < 4016:
+        b1[i] = _u8_at(body, i).to_u8()
+        i = i + 1
+    i = 0
+    while i < 16:
+        b1[i] = _u8_at(salt, i).to_u8()
+        i = i + 1
+    b1
+
+# ---------------------------------------------------------------------------
+# Direction A: OSS encrypt -> pure-Simple decrypt
+# ---------------------------------------------------------------------------
+
+fn _dir_a_vector(name: text, passphrase: text, bodies: [[u8]]):
+    val dir = _prepare_vec_dir("a_" + name)
+    _write_pages_hex(dir, bodies)
+    _set_vec_env(dir, passphrase)
+    val (stdout, stderr, code) = _run_oracle("oss-encrypt")
+    if code != 0:
+        fail("A/{name}: oracle oss-encrypt exit={code} stderr={stderr}")
+    val salt = _read_u8(dir + "/salt.bin")
+    if salt.len() != 16:
+        fail("A/{name}: salt.bin is {salt.len()} bytes")
+    match sqlcipher4_key_session_open(text_bytes(passphrase), salt):
+        case Ok(session):
+            var n = 1
+            for body in bodies:
+                val page = _read_u8(dir + "/enc_page_{n}.bin")
+                if page.len() != 4096:
+                    fail("A/{name}: enc page {n} is {page.len()} bytes")
+                match sqlcipher4_decode_page(n, page, session.page_key, session.hmac_key):
+                    case Ok(pt):
+                        if n == 1:
+                            var head_ok = true
+                            var i = 0
+                            while i < 16:
+                                if _u8_at(pt, i) != _u8_at(salt, i):
+                                    head_ok = false
+                                i = i + 1
+                            if not head_ok:
+                                fail("A/{name}: page 1 salt head mismatch")
+                            if not _tail_eq(pt, body):
+                                fail("A/{name}: page 1 plaintext mismatch")
+                        else:
+                            if not _bytes_eq(pt, body):
+                                fail("A/{name}: page {n} plaintext mismatch")
+                    case Err(e):
+                        fail("A/{name}: decode page {n} failed: {sqlcipher4_error_code(e)}")
+                n = n + 1
+            val _c = session.close()
+        case Err(e):
+            fail("A/{name}: key unwrap failed: {sqlcipher4_key_error_text(e)}")
+
+fn _tail_eq(pt: [u8], body: [u8]) -> bool:
+    var i = 16
+    while i < 4016:
+        if _u8_at(pt, i) != _u8_at(body, i):
+            return false
+        i = i + 1
+    true
+
+fn run_a1():
+    _dir_a_vector("a1_empty", "x", [_page1_zero_body()])
+
+fn run_a2():
+    var b = _page1_zero_body()
+    b[100] = 0x42u8
+    _dir_a_vector("a2_one_byte", "devhub1-interop-v2", [b])
+
+fn run_a3():
+    _dir_a_vector("a3_max", "a longer passphrase with spaces", [_page1_body(77)])
+
+fn run_a4():
+    var b = _page1_body(88)
+    var i = 2500
+    while i < 4016:
+        b[i] = 0u8
+        i = i + 1
+    _dir_a_vector("a4_partial", "unicode-한글-passphrase", [b])
+
+fn run_a5():
+    _dir_a_vector("a5_multi3", "v5-passphrase", _bodies_multi(3, 500))
+
+fn run_a6():
+    _dir_a_vector("a6_multi5", "v6 passphrase with 64 hex chars 0123456789abcdef0123456789abcdef", _bodies_multi(5, 600))
+
+fn run_a7():
+    _dir_a_vector("a7_salt_layout", "v7", _bodies_multi(2, 700))
+
+fn run_a8():
+    var b = _ff_body()
+    b[16] = 0x10u8
+    b[17] = 0x00u8
+    _dir_a_vector("a8_ff", "v8", [b])
+
+# ---------------------------------------------------------------------------
+# Direction B: pure-Simple encrypt -> OSS decrypt
+# ---------------------------------------------------------------------------
+
+fn _dir_b_vector(name: text, passphrase: text, salt: [u8], bodies: [[u8]]):
+    val dir = _prepare_vec_dir("b_" + name)
+    _write_pages_hex(dir, bodies)
+    _write_hex(dir + "/salt.hex", salt)
+    _set_vec_env(dir, passphrase)
+    match sqlcipher4_key_session_open(text_bytes(passphrase), salt):
+        case Ok(session):
+            var n = 1
+            for body in bodies:
+                var use_body = body
+                if n == 1:
+                    use_body = _with_salt_head(body, salt)
+                match sqlcipher4_encode_page(n, use_body, _iv_for(n), session.page_key, session.hmac_key):
+                    case Ok(page):
+                        _write_u8_file(dir + "/enc_page_{n}.bin", page)
+                    case Err(e):
+                        fail("B/{name}: encode page {n} failed: {sqlcipher4_error_code(e)}")
+                n = n + 1
+            val _c = session.close()
+        case Err(e):
+            fail("B/{name}: key unwrap failed: {sqlcipher4_key_error_text(e)}")
+    val (stdout, stderr, code) = _run_oracle("oss-decrypt")
+    if code != 0:
+        fail("B/{name}: oracle oss-decrypt exit={code} stderr={stderr}")
+    if not file_exists(dir + "/verdict.txt"):
+        fail("B/{name}: verdict.txt missing")
+    val verdict = _read_text(dir + "/verdict.txt")
+    var n = 1
+    while n <= bodies.len():
+        if not verdict.contains("MATCH {n}"):
+            fail("B/{name}: verdict for page {n} is not MATCH: {verdict}")
+        n = n + 1
+
+# Binary write for Simple-encoded pages: file_write is text-only, and the
+# oracle reads raw enc pages, so the pages go through the runtime's raw
+# bytes-write extern (the sffi file_ops owner; binary payloads, no text
+# encoding anywhere).
+fn _write_u8_file(path: text, bytes: [u8]):
+    if not rt_file_write_bytes_array(path, bytes):
+        fail("write failed: {path}")
+
+extern fn rt_file_write_bytes_array(path: text, bytes: [u8]) -> bool
+
+fn run_b1():
+    _dir_b_vector("b1_empty", "x", _seq_salt(1), [_page1_zero_body()])
+
+fn run_b2():
+    var b = _page1_zero_body()
+    b[100] = 0x42u8
+    _dir_b_vector("b2_one_byte", "devhub1-interop-v2", _seq_salt(2), [b])
+
+fn run_b3():
+    _dir_b_vector("b3_max", "a longer passphrase with spaces", _seq_salt(3), [_page1_body(77)])
+
+fn run_b4():
+    var b = _page1_body(88)
+    var i = 2500
+    while i < 4016:
+        b[i] = 0u8
+        i = i + 1
+    _dir_b_vector("b4_partial", "unicode-한글-passphrase", _seq_salt(4), [b])
+
+fn run_b5():
+    _dir_b_vector("b5_multi3", "v5-passphrase", _seq_salt(5), _bodies_multi(3, 500))
+
+fn run_b6():
+    _dir_b_vector("b6_multi5", "v6 passphrase with 64 hex chars 0123456789abcdef0123456789abcdef", _seq_salt(6), _bodies_multi(5, 600))
+
+fn run_b7():
+    _dir_b_vector("b7_salt_layout", "v7", _seq_salt(7), _bodies_multi(2, 700))
+
+fn run_b8():
+    var b = _ff_body()
+    b[16] = 0x10u8
+    b[17] = 0x00u8
+    _dir_b_vector("b8_ff", "v8", _seq_salt(8), [b])
+
+fn run_neg_tamper():
+    val dir = _prepare_vec_dir("b_neg_tamper")
+    val bodies = _bodies_multi(2, 900)
+    _write_pages_hex(dir, bodies)
+    val salt = _seq_salt(99)
+    _write_hex(dir + "/salt.hex", salt)
+    _set_vec_env(dir, "neg-passphrase")
+    match sqlcipher4_key_session_open(text_bytes("neg-passphrase"), salt):
+        case Ok(session):
+            var n = 1
+            for body in bodies:
+                var use_body = body
+                if n == 1:
+                    use_body = _with_salt_head(body, salt)
+                match sqlcipher4_encode_page(n, use_body, _iv_for(n), session.page_key, session.hmac_key):
+                    case Ok(page):
+                        _write_u8_file(dir + "/enc_page_{n}.bin", page)
+                    case Err(e):
+                        fail("neg: encode failed: {sqlcipher4_error_code(e)}")
+                n = n + 1
+            val _c = session.close()
+        case Err(e):
+            fail("neg: key unwrap failed: {sqlcipher4_key_error_text(e)}")
+    # Positive first: the same bytes must decrypt cleanly.
+    val (out_ok, err_ok, code_ok) = _run_oracle("oss-decrypt")
+    if code_ok != 0:
+        fail("neg: clean decrypt must pass, exit={code_ok} stderr={err_ok}")
+    # Tamper with one ciphertext byte; the oracle must fail authentication.
+    var page2 = _read_u8(dir + "/enc_page_2.bin")
+    page2[500] = ((_u8_at(page2, 500)) ^ 0x01).to_u8()
+    _write_u8_file(dir + "/enc_page_2.bin", page2)
+    val (out_bad, err_bad, code_bad) = _run_oracle("oss-decrypt")
+    expect(code_bad).to_equal(3)
+
+describe "REQ-INTEROP-A: OSS-encrypt -> pure-Simple-decrypt (byte-identical plaintext)":
+    # @req REQ-INTEROP-A
+    it "vector a1 empty-content page (0-content edge)":
+        if interop_crypto_available():
+            run_a1()
+        else:
+            skip("a1", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector a2 one-byte content edge":
+        if interop_crypto_available():
+            run_a2()
+        else:
+            skip("a2", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector a3 max-size full-page boundary (4096 encoded bytes)":
+        if interop_crypto_available():
+            run_a3()
+        else:
+            skip("a3", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector a4 last-block-partial content (2500 bytes then zeros)":
+        if interop_crypto_available():
+            run_a4()
+        else:
+            skip("a4", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector a5 multi-page (3 pages)":
+        if interop_crypto_available():
+            run_a5()
+        else:
+            skip("a5", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector a6 multi-page (5 pages)":
+        if interop_crypto_available():
+            run_a6()
+        else:
+            skip("a6", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector a7 page-1 salt layout with a later page":
+        if interop_crypto_available():
+            run_a7()
+        else:
+            skip("a7", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector a8 all-0xFF bit-pattern page":
+        if interop_crypto_available():
+            run_a8()
+        else:
+            skip("a8", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+
+describe "REQ-INTEROP-B: pure-Simple-encrypt -> OSS-decrypt (byte-identical plaintext)":
+    # @req REQ-INTEROP-B
+    it "vector b1 empty-content page (0-content edge)":
+        if interop_crypto_available():
+            run_b1()
+        else:
+            skip("b1", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector b2 one-byte content edge":
+        if interop_crypto_available():
+            run_b2()
+        else:
+            skip("b2", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector b3 max-size full-page boundary (4096 encoded bytes)":
+        if interop_crypto_available():
+            run_b3()
+        else:
+            skip("b3", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector b4 last-block-partial content (2500 bytes then zeros)":
+        if interop_crypto_available():
+            run_b4()
+        else:
+            skip("b4", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector b5 multi-page (3 pages)":
+        if interop_crypto_available():
+            run_b5()
+        else:
+            skip("b5", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector b6 multi-page (5 pages)":
+        if interop_crypto_available():
+            run_b6()
+        else:
+            skip("b6", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector b7 page-1 salt layout with a later page":
+        if interop_crypto_available():
+            run_b7()
+        else:
+            skip("b7", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+    it "vector b8 all-0xFF bit-pattern page":
+        if interop_crypto_available():
+            run_b8()
+        else:
+            skip("b8", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
+
+describe "REQ-INTEROP-NEG: the oracle fails closed on Simple-produced tampering":
+    # @req REQ-INTEROP-NEG
+    it "a flipped ciphertext byte in a Simple-encoded page fails the oracle HMAC":
+        if interop_crypto_available():
+            run_neg_tamper()
+        else:
+            skip("neg", "external crypto library unavailable; leg skipped per T0 gate ({interop_crypto_gate_report()})")
+
