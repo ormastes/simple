@@ -1,6 +1,6 @@
 # Caret closure: enum payload, local binding, collection method HIR/MIR failures
 
-Status: OPEN (split from caret_essential_leaf_provider_gaps_2026_10_10, 2026-11-03).
+Status: fixed 2026-11-11 (lane p3-caret1) — interpreted regression spec verified 22/22 at release/1.0.0 tip; fix 00e1c8a97203 is an ancestor of tip.
 
 The parent bug covered missing leaf providers (file_read, print_raw, pane-manager
 adapters) and leaf type gaps (ModelProfileV1 import, SMTP `List` return types).
@@ -57,3 +57,19 @@ and 2 (Option-parameter match, captured Option match, for-in over a captured
 array) were red on the older 27e65c24371 tip and already green on the release
 tip; they stay as prevention rows. Still open for verification: a native caret
 closure build on a stage3 producer.
+
+## Addendum 2026-11-11 — lane p3-caret1: verified fixed at tip
+
+Traversed on work/p3-caret1-20261111 (origin/release/1.0.0 tip 79d5af6723f6).
+
+- Fix commit 00e1c8a97203 ("fix(mir): carry Dict/Array capture type and
+  collection markers into lifted lambdas") IS an ancestor of tip.
+- Regression spec
+  test/01_unit/compiler/50.mir/caret_closure_enum_payload_binding_collection_spec.spl
+  (from the same fix) run with the tracked seed interpreter:
+  `Results: 22 total, 22 passed, 0 failed`, spec exit 0
+  (log: build/review/p3fix-caret1-20261111-logs/row6_mir_spec.log).
+- The row's remaining "stage3 native closure build" verification belongs to the
+  separate native-closure admission row (llm_caret_native_closure_admission),
+  which this lane traversed BLOCKED; the HIR->MIR diagnostic classes this bug
+  tracks are all green.
