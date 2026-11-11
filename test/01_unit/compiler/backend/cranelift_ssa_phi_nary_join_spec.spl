@@ -25,20 +25,21 @@ use compiler.backend.cranelift_codegen_adapter.{
     build_signature,
     cl_translate_instruction,
     cl_translate_terminator,
-    cranelift_ssa_phi_dest_ids
+    cranelift_local_slot_sizes
 }
 use std.nogc_sync_mut.sffi.codegen.*
 
-fn phi_join_metadata(dest_type: MirType, entry_pred: i64, name: text) -> MirFunction:
+fn phi_join_metadata(dest_type: MirType, entry_pred: i64, name: text, has_local: bool = true) -> MirFunction:
     # entry routes through exactly one of the three predecessors (1/2/3); the
     # join block carries the full 3-pair __simple_ssa_phi:
     #   pred 1 -> 10, pred 2 -> 20, pred 3 -> 30
+    var locals: [MirLocal] = []
+    if has_local:
+        locals = [MirLocal(id: LocalId(id: 1), name: nil, type_: dest_type, kind: LocalKind.Temp, is_ghost: false)]
     MirFunction(
         symbol: SymbolId(id: 9021), name: name,
         signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
-        locals: [
-            MirLocal(id: LocalId(id: 1), name: nil, type_: dest_type, kind: LocalKind.Temp, is_ghost: false)
-        ],
+        locals: locals,
         blocks: [
             MirBlock(id: BlockId(id: 0), label: nil, instructions: [],
                 terminator: MirTerminator.Goto(BlockId(id: entry_pred))),
@@ -71,8 +72,8 @@ fn phi_join_metadata(dest_type: MirType, entry_pred: i64, name: text) -> MirFunc
         has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
     )
 
-fn execute_phi_join(dest_type: MirType, entry_pred: i64, name: text) -> i64:
-    val func = phi_join_metadata(dest_type, entry_pred, name)
+fn execute_phi_join(dest_type: MirType, entry_pred: i64, name: text, has_local: bool = true) -> i64:
+    val func = phi_join_metadata(dest_type, entry_pred, name, has_local)
     val module = cranelift_new_module(name, -1)
     expect(module != 0).to_equal(true)
     val sig = build_signature(func.signature, false)
@@ -91,21 +92,10 @@ fn execute_phi_join(dest_type: MirType, entry_pred: i64, name: text) -> i64:
     var value_map: Dict<i64, i64> = {}
     var slot_map: Dict<i64, i64> = {}
 
-    # Slot allocation — mirrors compile_function's loop, including the owner
-    # fix: Unit-typed locals get size 0 EXCEPT __simple_ssa_phi destinations,
-    # which must carry a slot for the edge-store/reload N-ary lowering.
-    val phi_dest_ids = cranelift_ssa_phi_dest_ids(func)
-    for local in func.locals:
-        var size = 8
-        match local.type_.kind:
-            case Unit:
-                size = 0
-            case _:
-                ()
-        if size == 0 and phi_dest_ids.has(local.id.id):
-            size = 8
-        if size > 0:
-            slot_map[local.id.id] = cranelift_stack_slot(ctx, size, 8)
+    # Slot allocation: the product helper compile_function uses.
+    val slot_sizes = cranelift_local_slot_sizes(func)
+    for slot_id in slot_sizes.keys():
+        slot_map[slot_id] = cranelift_stack_slot(ctx, slot_sizes[slot_id], 8)
 
     cranelift_switch_to_block(ctx, entry_block)
 
@@ -150,3 +140,18 @@ describe "Cranelift N-ary __simple_ssa_phi join":
         expect(execute_phi_join(MirType.unit(), 1, "phi_unit_p1")).to_equal(10)
         expect(execute_phi_join(MirType.unit(), 2, "phi_unit_p2")).to_equal(20)
         expect(execute_phi_join(MirType.unit(), 3, "phi_unit_p3")).to_equal(30)
+
+    it "lowers a 3-predecessor join whose phi destination has no MirLocal entry":
+        # Orphan phi dest (no locals row) previously got no slot and hit the
+        # N-ary trap guard; cranelift_local_slot_sizes now allocates one.
+        expect(execute_phi_join(MirType.i64(), 1, "phi_orphan_p1", false)).to_equal(10)
+        expect(execute_phi_join(MirType.i64(), 2, "phi_orphan_p2", false)).to_equal(20)
+        expect(execute_phi_join(MirType.i64(), 3, "phi_orphan_p3", false)).to_equal(30)
+
+describe "cranelift_local_slot_sizes":
+    it "gives every phi destination a slot (Unit-typed and local-less)":
+        val unit_sizes = cranelift_local_slot_sizes(phi_join_metadata(MirType.unit(), 1, "s_unit"))
+        expect(unit_sizes.has(1)).to_equal(true)
+        val orphan_sizes = cranelift_local_slot_sizes(phi_join_metadata(MirType.i64(), 1, "s_orphan", false))
+        expect(orphan_sizes.has(1)).to_equal(true)
+        expect(orphan_sizes[1]).to_equal(8)
