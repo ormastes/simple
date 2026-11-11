@@ -1,6 +1,6 @@
 # Interpreter: unresolved enum import fails open — variant access and match work symbolically
 
-Status: OPEN (advisory; found while sabotage-testing check-bootstrap-preflight.shs)
+Status: SUPERSEDED (2026-11-11, lane int10) — fail-open behavior closed on origin/release/1.0.0; strict undefined-identifier resolution carried by `9e7e7a526edb` (PR #7597); see addenda below
 Date: 2026-08-18
 Area: seed interpreter, import/type resolution
 
@@ -104,3 +104,17 @@ carried by squash-merge `9e7e7a526edb43ab29171d920449367e5fd48127`
 arm both tracing to that merge. (The 2026-11-03 rejected candidate patch
 remains rejected and unneeded; the 2026-11-10 seedfix lane's four rows were
 other defects.)
+
+## Addendum 2026-11-11 (lane int10) — header flip; concurs with interp6 SUPERSEDED verdict
+
+Header Status flipped OPEN -> SUPERSEDED. Lane interp6's remeasurement above
+is the execution evidence (exact repro, plain run mode, refreshed seed
+0791c2b7f4a7: `error: semantic: ... variable 'ByteOrderX' not found`, exit=1 —
+no WARN-and-continue, no symbolic match). int10 confirms the strict
+undefined-identifier resolution is present at this lane's base
+(`9e7e7a526edb43ab29171d920449367e5fd48127` is an ancestor of HEAD
+`1771ca481337`; the resolution arm is at
+`src/compiler_rust/compiler/src/interpreter/expr/literals.rs:449`), and this
+lane's tracked seed (`bin/simple.exe` build-commit `46fe8f6b6def`) descends
+from interp6's verification build, so re-running the repro would re-print a
+green check (no-identical-rerun rule).

@@ -125,3 +125,17 @@ bin/simple native-build --entry <small_probe>.spl --linker msvc --output build/r
 #    ([msvc-link] output-begin..end) and/or `<output>.link.log`, then re-triage
 #    the underlying failure and update this doc.
 ```
+
+## Addendum 2026-11-11 (lane int10) — LIVE concurrence; Status stays OPEN
+
+int10 re-read this record and lane interp12's same-day 2026-11-11 addendum at
+base `1771ca481337` and concurs: the masking defect (1) is fixed in source
+(merge `9e7e7a526edb`, ancestor of this base; the `{e.message}` wrapper form
+and `msvc.spl` raw-output + `.link.log` persistence are in-tree) and
+component-verified by interp12 on this lane's exact tracked seed
+(`bin/simple.exe` build-commit `46fe8f6b6def`); the underlying link failure
+(2) remains unknown and reproducing it requires the self-hosted stage2
+native link grant interp12 recorded verbatim above (this lane is under the
+same entry-closure native-build prohibition and the same known-live Windows
+native-build hang). No re-run of interp12's probe: same seed, same day, green
+check. Owner: stage2 lane with native-build grant.
