@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-09-03
 - **Severity:** critical — produces a silent infinite self-recursion (stack overflow) in the emitted binary
-- **Status:** OPEN — premise untestable on stage3 s3_fable44 (2026-11-05, see addendum)
+- **Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — owner-exact alias resolver merged at tip (#7597 / 9e7e7a526edb); re-verified fresh-seed 3/3 (see addenda)
 - **Platforms:** ALL. Reproduced on Windows MSVC; the defect is in the shared Rust-seed AOT lowering,
   not in any Windows-specific code. Linux/macOS bootstrap lanes are affected identically and are
   latent only because they have not rebuilt since 2026-09-02.
@@ -212,3 +212,18 @@ Two environment notes (neither is this defect):
 - The native LINK in this fresh worktree cannot find a prebuilt runtime archive
   (`find_runtime_library()` empty), so the fixture never links; the object-level oracle is
   unaffected. Same gap seen on every native-build probe in this worktree.
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (base
+`bf946163122f`, tracked seed `bin/simple.exe`):
+
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe SIMPLE_BIN=$PWD/bin/simple.exe
+bin/simple.exe test test/01_unit/compiler/aliased_import_shadowed_by_local_fn_spec.spl
+--mode=interpreter --no-cache` → **3/3 PASS** (object-level oracle:
+relocation to the imported symbol present). Absorber: owner-exact alias
+resolution `import_alias_symbol` (#7597 / 9e7e7a526edb), per the
+2026-11-10 addendum above. Status line flipped from OPEN.
