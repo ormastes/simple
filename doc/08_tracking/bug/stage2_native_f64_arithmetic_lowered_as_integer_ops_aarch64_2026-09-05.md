@@ -193,3 +193,27 @@ simple-p3-boot17-20261111, fresh seed 46fe8f6b6def):
   `addf(1.5, 2.25)=3.75`, `0.5+0.5=1.0`, `1.0+1.0=2.0`, `0.0-1.5=-1.5` —
   every interpreter-column value matches the doc's evidence table (no
   integer-bit-pattern lowering).
+
+## 2026-11-11 — FIXED confirmed (lane p3-comp12, row 6)
+
+Independent confirmation at this lane's base (6233df4b9f9ea, tracked seed
+46fe8f6b6def — the same seed boot17 smoked today, so the interpreter probe
+table was NOT repeated per the no-green-rerun rule):
+
+- Hardening commit eda3b5103ca3 (2026-11-09) is an ancestor of this base.
+- `local_is_float` (src/compiler/50.mir/mir_lowering_stmts.spl:616-635) is the
+  discriminant-compare form at this base — its comment names this bug
+  (stage2_native_f64_arithmetic_lowered_as_integer_ops) and explains the
+  stage2-native arm-dispatch mis-route. Read-only verification; the
+  compiler_value_discriminant visibility question is another lane's
+  known-live route and was not touched.
+- The float-directed binop dest-type path is present in
+  src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl (operand
+  f32/f64/i64 classification with a result_f64 arm in the binop lowering).
+- The aarch64 stage2-candidate end-to-end verification is the 2026-11-05
+  in-doc evidence (addf(1.5, 2.25) == 3.75, exit 0, df48a86ff5a worktree);
+  no aarch64 host in this lane and boot17 already declined to repeat it per
+  the no-green-rerun rule.
+- Ledger note: master table row (doc/08_tracking/bug/bug_db.sdn:3915) still
+  reads `fixing` (updated_at 2026-11-03) while this header reads FIXED
+  (2026-11-11) — master-table sync gap for the bookkeeping pass.
