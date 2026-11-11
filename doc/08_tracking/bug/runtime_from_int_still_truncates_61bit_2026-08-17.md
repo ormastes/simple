@@ -1,11 +1,14 @@
 # `RuntimeValue::from_int` still truncates to 61 bits at HEAD — the fix landed, was reverted, and only its readers and specs came back
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN — PARTIALLY FIXED, re-verified 2026-11-11 (p3-interp11
-  lane). Runtime choke point + JIT still green on the fresh seed 46fe8f6b6def;
-  the LLVM backend and MIR interpreter paths still truncate in the seed Rust
-  codegen (source-confirmed 2026-11-11) and are BLOCKED for this lane (no
-  cargo/rustc permitted). Do not close. See the 2026-11-11 addendum at the end.
+- **Status:** LIVE (triaged 2026-11-11, lanes p3-interp11/int10/int11) — PARTIALLY
+  FIXED. Runtime choke point + JIT still green on the fresh seed 46fe8f6b6def;
+  the LLVM backend (`codegen/llvm/emitter.rs` `build_left_shift(int_v, three,
+  "box_shl")`, ~line 2030) and MIR interpreter (`mir_interpreter.rs:774`
+  `self.get(value) << 3`) paths still truncate in the seed Rust codegen
+  (source-confirmed 2026-11-11 by int10 and int11) and are BLOCKED for this
+  lane (no cargo/rustc permitted). Do not close. Owner: seed-fix lane with
+  cargo grant. See the 2026-11-11 addenda at the end.
 - **Severity:** High, and mis-recorded as fixed. This defect has been declared
   resolved at least four times.
 - **Component:** `src/compiler_rust/runtime/src/value/core.rs`,
@@ -287,3 +290,17 @@ seed-Rust-codegen paths requiring cargo/rustc + LLVM AOT verification, which
 this lane is likewise forbidden (same grant class interp11 recorded verbatim
 above). No re-run of the wide-int probe: same seed, same day, green check
 (no-identical-rerun rule). Owner: seed-fix lane with cargo grant.
+
+## Addendum 2026-11-11 (lane int11) — header flipped LIVE; criteria 3-4 source re-checked
+
+Sweep flip. interp11's same-day addendum (criteria 1-2 re-verified green on
+the fresh seed; criteria 3-4 BLOCKED, no cargo/rustc) plus int10's LIVE
+concurrence recorded the verified disposition; the header still read OPEN.
+int11 quick re-verify at base `84f5076db138` (one source check per criterion,
+no re-runs): the two seed-Rust truncation sites named by interp11 are
+unchanged — `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs`
+`build_left_shift(int_v, three, "box_shl")` at ~line 2030 and
+`src/compiler_rust/compiler/src/codegen/mir_interpreter.rs:774`
+`self.set(dest, self.get(value) << 3)`. Criteria 3-4 therefore remain LIVE,
+owned by the seed-fix lane with the cargo grant interp11 recorded verbatim
+above. Header flipped to LIVE.
