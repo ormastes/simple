@@ -39,7 +39,7 @@ reason — an absent tmux binary is an environment limitation, not a pass.
 # design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 use std.spec.{describe, it, expect, step, pending}
-use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, env_get, env_set, cwd, current_time_ms, sleep_ms}
+use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, env_get, env_set, cwd, current_time_ms}
 use app.llm_caret.agent_workspace.{agent_workspace, tmux_available, workspace_available, workspace_backend, capture_pane,
     session_alive, session_ensure, session_kill, window_open, pane_split,
     list_panes, send_to_each_pane, wait_for_pane_text, worktree_add,
@@ -253,9 +253,11 @@ describe "LLM Caret workspace recursion protection":
         expect(wait_for_pane_text(ws, id + ":other", "OWN_SKIPPED", 180000)).to_be(true)
 
         step("The pane the CLI ran in never received it: SMUX_PANE named it as the pane to skip")
-        sleep_ms(3000)
+        # Poll for the CLI's send-report instead of a fixed sleep + one capture:
+        # the pane child is a full interpretation under load, so a single
+        # snapshot can race its output (observed: empty capture at +3s).
+        expect(wait_for_pane_text(ws, id + ":owner", "sent " + id + ":other.0", 120000)).to_be(true)
         expect(capture_pane(ws, id + ":owner").contains("OWN_SKIPPED")).to_be(false)
-        expect(capture_pane(ws, id + ":owner")).to_contain("sent " + id + ":other.0")
         # The owner pane's child is `sleep`, which never echoes typed input, so
         # the CLI's own report is the only witness of a send into its own pane.
         expect(capture_pane(ws, id + ":owner")).not_to_contain("sent " + id + ":owner.0")

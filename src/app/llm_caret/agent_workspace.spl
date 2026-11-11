@@ -223,7 +223,12 @@ fn _smux_owner_forget(ws: AgentWorkspace):
     val path = _smux_owner_path(ws) ?? ""
     if path == "":
         return
-    val deadline = current_time_ms() + 3000
+    # Each probe runs netstat and the owner itself needs seconds to reap its
+    # pane children (taskkill under load), so the old 3s deadline expired while
+    # the owner was still shutting down and the owner file leaked into the state
+    # dir (observed: stale files surviving for hours). Wait generously; the file
+    # is dropped as soon as the owner stops answering.
+    val deadline = current_time_ms() + 30000
     while current_time_ms() < deadline:
         if _smux_req(ws, "list-sessions") == nil:
             val _gone = file_delete(path)
@@ -306,7 +311,11 @@ fn _smux_owner_up(ws: AgentWorkspace) -> bool:
     val (_o, _e, code) = process_run_timeout("powershell", ["-NoProfile", "-NonInteractive", "-Command", start], 30000)
     env_set("SIMPLE_BINARY", pinned)
     if code == 0:
-        val deadline = current_time_ms() + 90000
+        # The owner is a full interpreter start (~30s alone, minutes when the
+        # box is loaded with other compiles); the old 90s budget falsely
+        # reported "owner did not start" on loaded machines. The spec suite
+        # allows 900s per scenario.
+        val deadline = current_time_ms() + 240000
         while current_time_ms() < deadline:
             if _smux_req(ws, "list-sessions") != nil:
                 return true
