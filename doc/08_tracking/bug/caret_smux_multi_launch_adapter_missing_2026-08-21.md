@@ -37,3 +37,26 @@ Verdict: unchanged and still open. Unblock condition is the same as filed: an
 `os.apps.smux` adapter binding the manager's bounded child set to real panes,
 manager remaining sole PID owner, with executable launch/capture/resize/
 cancel/stop evidence and no leaked children. Status stays OPEN.
+
+## Addendum 2026-11-11 — lane p3-caret1: BLOCKED (feature + live PTY evidence; grant recorded)
+
+Traversed on work/p3-caret1-20261111 (origin/release/1.0.0 tip 79d5af6723f6).
+
+Confirmed live at tip, consistent with the lane-ne3 addendum above:
+`src/app/llm_caret/multi_caret_manager.spl` still neither imports nor calls
+`os.apps.smux` (only the :33 comment), and no file in `src/app/llm_caret/`
+binds the manager's bounded child set to smux panes/PTYs. The bootstrap gate
+still asserts the un-promoted state (scripts/check/check-bootstrap-must-pass.shs
+:355 and :377 keep `caret-smux-multi-launch, todo, never`).
+
+Verbatim unblock condition (re-recorded intact): an `os.apps.smux` adapter that
+binds the manager's bounded child set to real panes, keeps the manager as sole
+PID owner, and has executable launch/capture/resize/cancel/stop evidence with no
+leaked children. Per the companion authenticity bug, promotion additionally
+requires one real session/pane/PTY per Caret child, nonce capture, observed
+resize, cancel/stop/wait/close, and zero PID/fd survivors; display-only
+`AgentTmuxEmbed` and in-memory `smux/api.spl` rows are not PTY evidence.
+
+This lane is a Windows seed-only worktree: no live smux PTY runtime environment
+exists here to produce or honestly verify that evidence, and the ledger row is
+deliberately pinned `todo` until it does. Status stays OPEN.
