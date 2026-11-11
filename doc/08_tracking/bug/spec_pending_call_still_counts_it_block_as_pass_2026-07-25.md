@@ -4,7 +4,9 @@
 - **Area:** test runner / `std.spec` pending reporting
 - **Severity:** high — this is a **false-green** mechanism. Every spec that
   parks work behind `pending("...")` currently inflates the passed count.
-- **Status:** OPEN.
+- **Status:** FIXED 2026-11-11 — verified fixed on release tip: pending()
+  now marks the example pending (skipped), excluded from passed. See the dated
+  addendum at the end of this file.
 
 ## Symptom
 
@@ -72,3 +74,34 @@ counter, but the runner path used by `bin/simple test` does not consume it and
 
 Fixing this changes the reported totals of the whole suite, so it needs to be
 done deliberately rather than as a side effect of un-parking one spec.
+
+---
+
+## Addendum 2026-11-11 — lane runner7: FIXED verified on release tip
+
+Reproduced the filing shape on the refreshed Windows seed (`bin/simple.exe` at
+HEAD `68ab3383080f`, 2026-11-11) with a 3-example probe (real assert,
+`pending("parked_reason_2026-11-11")`, real assert):
+
+```
+○ parks work (pending)
+SPEC FILE VERDICT: ... outcome=OK declared>=3 executed=3 passed=2 failed=0 skipped=1 dropped=0
+Results: 2 total, 2 passed, 0 failed
+```
+
+The pending example no longer inflates the passed count — it is tallied as
+`skipped=1` and excluded from `Results: ... passed`. The mechanism this doc's
+"Expected" section asked for is implemented in `src/lib/nogc_sync_mut/spec.spl`:
+`_execute_it` snapshots `test_pending` before the example (:395) and, when the
+counter advanced, emits the `finished/pending` trace event and returns
+`"pending"` instead of marking the example passed (:425-430).
+
+Regression evidence (the doc's own named affected spec, no edit needed):
+`bin/simple.exe test test/01_unit/compiler/r2_pending_helper_spec.spl --mode=interpreter --no-cache`
+-> `outcome=OK declared>=2 executed=2 passed=1 failed=0 skipped=1`,
+`Results: 1 total, 1 passed, 0 failed`, rc=0.
+
+Verdict: FIXED — absorbed by the std.spec pending-consumption fix; no lane
+code change needed beyond this status flip. (The summary line renders pending
+as `skipped` rather than a separate `M pending` token; the false-green
+mechanism — the subject of this record — is closed either way.)
