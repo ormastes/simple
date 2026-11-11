@@ -1,6 +1,10 @@
 # Stage-2 SEGV: unguarded deref of nil struct fields in stage2-generated code (2026-08-24)
 
-Status: OPEN — root cause narrowed, not yet fixed.
+Status: BLOCKED 2026-11-11 (lane p3-comp8) — defect unverified at tip; the only
+repro/verification path is a Stage-2 self-hosted Cranelift-direct native
+build, which is forbidden in-lane (entry-closure native builds). Verbatim
+grant for the owning lane recorded in the dated addendum below. Header
+flipped from "OPEN".
 Lane: S. Binary under test (frozen, do not modify):
 `/mnt/data/worktrees/goal-bootstrap-frozen/build/bootstrap/goal-r4/stage2/x86_64-unknown-linux-gnu/simple`
 
@@ -102,3 +106,44 @@ one systemic miscompile produces both is a hypothesis, not a finding.
   by an unrelated `error[E1002]: function \`fun\` not found` sweeping a stray
   file into the build).
 - No fix landed. Do not read this record as "diagnosed and repaired".
+
+## Addendum 2026-11-11 — P3 lane comp8 verdict: BLOCKED (verification infra forbidden in-lane; no absorber found)
+
+Triage on `origin/release/1.0.0` tip `dacccfc78fd10` (worktree
+`simple-p3-comp8-20261111`), tracked seed build-commit `46fe8f6b6def`:
+
+- No absorber: `git log --all --grep` for this bug id / "nil struct fields" /
+  "selective nil" finds no fixing commit. The 2026-10-27 triage checkpoint
+  (`doc/08_tracking/bug/triage_20261027/evidence_v4/lane07_accepted.md`)
+  already reviewed this record and classified it `accepted` /
+  `keep_open` / `uncertain, untested, unknown` — no repaired-compiler
+  evidence exists there either.
+- Structural check at tip: `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:334`
+  (`build_signature`) still reads `sig.params` and
+  `sig.return_type.kind != MirTypeKind.Unit` directly, with no nil guard —
+  identical to the crash-site shape recorded here. (Same observation the
+  2026-10-27 review made.) This neither proves nor disproves the defect; the
+  nil fields are a *runtime data* property of the Stage-2-generated binary.
+- Repro cost: the deterministic sub-second repro requires a Stage-2
+  self-hosted Cranelift-direct binary
+  (`<stage2> compile h2.spl --format=smf -o h2.smf` on a 2-line
+  `fn main() print("hi")` fixture). Building Stage-2 is an entry-closure
+  native build, forbidden in this lane; the interpreter mode never exercises
+  the Cranelift direct backend, so no cheap in-lane repro exists.
+- Per campaign routing, self-hosted bootstrap/stage2 codegen correctness is
+  owned by the bootstrap lane; the doc's open question ("whether a freshly
+  built native binary from current main/tip reproduces the selective-nil-
+  field pattern") is exactly the grant below.
+
+Verbatim grant for the owning lane:
+
+```
+printf 'fn main()\n    print("hi")\n' > h2.spl
+<fresh stage2 simple from current release tip> compile h2.spl --format=smf -o h2.smf
+# expect rc=139 (SEGV) if the defect persists; rc=0 + valid smf if repaired
+# Field-level follow-ups if reproduced: nil-at-insert vs corruption-at-read
+# (rt_dict_values copy), and whether the same miscompile still produces both
+# Backtrace A (backend build_signature) and Backtrace B (HIR lower_function).
+```
+
+Disposition: BLOCKED. Header flipped OPEN → BLOCKED.

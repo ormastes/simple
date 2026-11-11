@@ -1,6 +1,9 @@
 # MIR Result execution refinement is incomplete for error contracts
 
-Status: open — Formal Verification 2.0 P0
+Status: BLOCKED 2026-11-11 (lane p3-comp8; disposition first triaged BLOCKED by
+lane p3-compiler4 same day) — Formal Verification 2.0 research work; owning
+lane needs an admitted self-hosted full CLI plus the Lean toolchain, verbatim
+grant recorded in the dated addenda below. Header flipped from "open".
 
 ## Evidence
 
@@ -57,3 +60,35 @@ Exact grant command for the owning lane:
 under an admitted self-hosted full CLI with the Lean toolchain on PATH, plus a
 negative-test run proving a deliberately Err-returning implementation fails its
 generated theorem (this record's unblock condition).
+
+## Addendum 2026-11-11 — P3 lane comp8 verdict: BLOCKED (confirms p3-compiler4 same-day triage; grant re-recorded verbatim)
+
+Lane p3-compiler4 (batch 4 row 8) triaged this row BLOCKED hours earlier on
+the same tip family; comp8 re-verified their factual claims fresh on
+`origin/release/1.0.0` tip `dacccfc78fd10` (worktree
+`simple-p3-comp8-20261111`) before adopting the disposition:
+
+- `src/compiler/50.mir/mir_types.spl:193-196` carries
+  `Result(ok: MirType, err: MirType)` with the exactness comment ("the
+  semantic type itself is never erased to I64"); `:249` `static fn result(...)`
+  and `:280` region confirmed structurally.
+- Lean backend present under `src/plugins/backend_lean/`
+  (`lean_backend.spl`, `lean_borrow.spl`, `lean_enum_body_v1.spl`, ...).
+- `test/00_formal_verification/compiler/three_payload_compile_refinement_spec.spl:2`
+  still states it "cannot be admitted until a self-hosted full CLI is
+  available" — the FV specs' own admission gate is unchanged.
+
+This lane carries no FV/Lean toolchain grant and no entry-closure native-build
+grant, so the required fix (complete tagged normal/error propagation, generated
+Lean theorems, transitive axiom audits, negative-test unblock condition) is out
+of scope. Verbatim grant for the owning lane (unchanged from p3-compiler4):
+
+```
+SIMPLE_LIB=src bin/simple test test/00_formal_verification/compiler/ --mode=interpreter
+```
+
+under an admitted self-hosted full CLI with the Lean toolchain on PATH, plus a
+negative-test run proving a deliberately Err-returning implementation fails its
+generated theorem (this record's unblock condition).
+
+Disposition: BLOCKED. Header Status flipped "open" → BLOCKED.
