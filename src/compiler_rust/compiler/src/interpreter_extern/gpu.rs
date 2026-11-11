@@ -2268,11 +2268,18 @@ pub fn rt_cuda_module_load_data_bytes_fn(args: &[Value]) -> Result<Value, Compil
                 return Ok(Value::Int(-1));
             }
             let bytes = unsafe { std::slice::from_raw_parts(ptx_ptr as *const u8, ptx_len as usize) };
-            let c_ptx = CString::new(bytes).map_err(|_| {
-                CompileError::semantic("rt_cuda_module_load_data_bytes does not accept embedded NUL bytes".to_string())
-            })?;
+            // cuModuleLoadData accepts either NUL-terminated PTX text or a binary cubin/
+            // fatbin image (self-describing via its header). CString::new() rejects any
+            // buffer containing an interior NUL, which every cubin has. Mirror the native
+            // cuda_runtime.rs fix: copy the buffer and append a terminator only if one is
+            // not already present; the extra byte is ignored by the cubin/fatbin parsers
+            // and is required by the PTX parser.
+            let mut image: Vec<u8> = bytes.to_vec();
+            if image.last() != Some(&0) {
+                image.push(0);
+            }
             let mut module: *mut std::os::raw::c_void = std::ptr::null_mut();
-            let r = unsafe { (fns.module_load_data)(&mut module, c_ptx.as_ptr() as *const std::os::raw::c_void) };
+            let r = unsafe { (fns.module_load_data)(&mut module, image.as_ptr() as *const std::os::raw::c_void) };
             if r == 0 {
                 return Ok(Value::Int(module as i64));
             }
