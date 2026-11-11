@@ -4,6 +4,7 @@
 # Same protocol as OpenAI but configurable base URL and optional API key.
 
 use app.llm_caret.json_helpers.{json_find, json_parse_int}
+use std.common.json.tokenizer.{json_unescape_string}
 
 use std.nogc_sync_mut.io.http_client_core.{http_request_raw_timeout}
 use app.llm_caret.retry.{retry_policy_from_env}
@@ -241,7 +242,12 @@ fn parse_compat_response(raw: text) -> CompatResponse:
             is_error: true,
             raw: raw
         )
-    val content_text = _extract_json_string(raw, "content")
+    # The extractor preserves wire escapes verbatim (\" stays two chars), so
+    # the content must be unescaped here: otherwise every quote/newline in a
+    # reply arrives corrupted and <tool_use> JSON embedded in the content
+    # fails parse_tool_use_tags (measured: 0 tool calls from a model that
+    # did emit a well-formed tag).
+    val content_text = json_unescape_string(_extract_json_string(raw, "content"))
     val model_val = _extract_json_string(raw, "model")
     val finish = _extract_json_string(raw, "finish_reason")
     val p_tok = _extract_json_int(raw, "prompt_tokens")
