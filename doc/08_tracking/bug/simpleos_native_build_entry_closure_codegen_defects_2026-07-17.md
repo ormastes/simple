@@ -1,5 +1,13 @@
 # Entry-closure freestanding cranelift codegen defects found chasing first desktop frame (2026-07-16/17)
-## Open 2026-09-16 — needs owner triage
+## Status: BLOCKED 2026-11-11 (lane p3-seedA) — seed-side codegen defects C1–C8 are
+  resolved or non-reproducing on the current seed (see the dated addendum:
+  C1/C8 landed root fixes are ancestors of the lane base; C2–C6 confirmed
+  non-reproducing 7/7 on the host Cranelift JIT at the base, matching the
+  2026-11-03 JIT and 2026-11-07 x86_64-none lanes). The row's stated acceptance
+  — a full freestanding QEMU desktop boot of `gui_entry_desktop.spl` with the
+  vfs skip lifted — is freestanding/board infra unavailable in this Windows
+  lane, so the row cannot be closed here. Header flipped from "Open 2026-09-16
+  — needs owner triage".
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -1640,3 +1648,58 @@ code change; status stays OPEN pending a board/QEMU desktop run.
 
 These tests are local-only: CI `rust-tests.yml:112` excludes `simple-compiler`
 from `cargo test`, and they need clang/ld.lld (X86 target) and `qemu-x86_64`.
+
+## 2026-11-11 addendum (lane p3-seedA) — BLOCKED on freestanding/QEMU infra; seed-side defects resolved/non-reproducing
+
+Lane p3-seedA re-verified this cluster at the campaign base (`origin/release/1.0.0`
+tip `79d5af6723f6`). This is the same disposition the 2026-11-03 (JIT) and
+2026-11-07 (x86_64-none object) lanes reached; this lane independently re-ran
+the host-JIT tier on a fresh cargo build rather than resting on their addenda.
+
+**Seed-side defect status (verified at the base):**
+- C1 (module-global call/`[]` initializers) and C8 (import-alias
+  `Alias.staticfn` binding) have **landed root fixes that are ancestors of the
+  lane base**: `git merge-base --is-ancestor` confirms both `4d3f37e3e9e`
+  (entry-closure global init) and `3f0acf071cf` (alias static-call resolution)
+  precede `79d5af6723f6`.
+- C2–C6 do **not reproduce** on the current seed. Fresh run at the base:
+  `cargo test -p simple-compiler --test entry_closure_defects_jit` →
+  **7 passed, 0 failed** (C1 call-init + `[]`-global-with-pushes, C2 `if val`
+  hit payload, C3 `not a and call()` tests LHS, C4 4-tuple positions, C5 enum
+  `==`, C6 `b0 | (b1 << 8)`). Consistent with the 2026-11-07 lane's
+  `entry_closure_defects_x86_64_none` → 7 passed.
+
+**Why the row still cannot be closed here (the binding constraint is infra):**
+- C7 (bare `.to_u32()` alias-bridge) and the whole-cluster acceptance are
+  **freestanding-only**: they need the
+  `--entry-closure --target x86_64-unknown-none --backend cranelift
+  --opt-level=aggressive` object build plus `objdump`/QEMU observation. This
+  Windows lane has no admitted freestanding entry-closure native producer and
+  no QEMU board run; entry-closure native builds are campaign-forbidden here
+  and exceed the ~10-min spec cap. A host-JIT regression test for C7 would be
+  vacuous (the defect does not reproduce at that tier), so none was added.
+
+**Grant integrity check:** the landed C1/C8 fixes above are the absorbers for
+their defect classes; no single absorber exists for the whole cluster because
+C7 + the full desktop boot remain open. Nothing here re-litigates the
+extensive C8-FIX/C8-CLOSE/C8-DEEP history.
+
+Verbatim grant (re-recorded intact — the doc's own "Recommended next probe" +
+the 2026-11-07 repro steps needing a SimpleOS/stage3 run):
+
+1. Build `gui_entry_desktop.spl` (NOT `wm_entry.spl`, per the C8-FIELD entry
+   correction) with `--backend cranelift --cpu x86-64-v1 --opt-level=aggressive
+   --mode dynload --entry-closure --target x86_64-unknown-none`, link via
+   `clang --target=x86_64-unknown-elf`.
+2. `objdump -d` checks: (C1) `_browser_default_font_lock` init stores present;
+   (C2) accessor hit path not `xor rax,rax; ret`; (C3) a test of
+   `registered_only` before the `try_load_runtime_ttf` call; (C7) a bare scalar
+   `.to_u32()` not mis-routed through the alias bridge.
+3. Boot under QEMU with the NVMe drive attached
+   (`-drive file=...,if=none,id=nvm,format=raw,snapshot=on -device
+   nvme,serial=deadbeef,drive=nvm`) and the `vfs_boot_init.spl:374` skip lifted
+   for C8; compare `cr2` / load base vs link base and confirm the fault storm
+   is gone and a frame renders.
+4. Restore the `vfs_boot_init.spl:374` skip to `if true:` afterwards.
+
+Disposition: BLOCKED. Header flipped Open → BLOCKED 2026-11-11 (lane p3-seedA).
