@@ -1,7 +1,7 @@
 # A non-parseable `{...}` interpolation body silently falls back to literal text, swallowing an enclosed `+` concatenation
 
 - **Filed:** 2026-09-05
-- **Status:** OPEN
+- **Status:** SUPERSEDED (2026-11-11, lane int10) — silent swallow closed on origin/release/1.0.0; failure mode is now the loud staged warning W-STR-BRACE-001 (`a67d50a53be8`), and the warning→error ratchet this record's unblock condition asks for is owned by successor bug `string_interp_malformed_brace_warning_to_error_2026-11-09`; see addendum below
 - **Area:** language / lexer — text-literal interpolation
 - **Severity:** HIGH (silent wrong value, no diagnostic)
 - **Binary:** `src/compiler_rust/target/debug/simple` (Rust seed)
@@ -87,3 +87,41 @@ interpolation such as `"{f("x")}"`.
    `"{f(){(" + v + ")}}"`), plus controls that a valid interpolation `"{v}"`
    still interpolates and that a brace run closing before the `+` (B1/B3 above)
    still concatenates.
+
+## Addendum 2026-11-11 (lane int10) — SUPERSEDED: no longer reproducible; silent failure mode replaced by staged warning
+
+int10 re-ran this record's exact minimal repro unmodified on the tracked seed
+(`bin/simple.exe`, build-commit `46fe8f6b6def`, plain run mode, fixture
+`build/p3fix-int10/row8_repro.spl`, gitignored):
+
+```
+B1=[{a;b} V y]
+B2=[{x (V)} y]     <- filed defect case: now the EXPECTED value, no swallow
+B3=[{b+=$1} V y]
+exit=0
+```
+
+B2 — the case that printed `B2=[{x (" + v + ")} y]` at filing — now prints
+`{x (V)} y`. The concatenation is no longer absorbed: the `{x (` brace run is
+kept as literal text and the literal terminates at its own `"`, so the `+`
+concatenates normally. The failure mode is no longer silent: the seed lexer
+and parser emit `W-STR-BRACE-001` ("... is kept as literal text; use `{{`
+...") at every malformed-brace site. Controls guarding the documented
+invariants all hold on the same seed (`build/p3fix-int10/row8_controls.spl`):
+`"{v}" -> V`, `"{v + "!"}" -> V!`, `"{wrap("x")}" -> (x)` (the exact
+nested-string interpolation case this doc warned must keep working), and a
+brace literal concatenated from a separate string. Absorbing change:
+`a67d50a53be8` (2026-11-09, "fix(string-interp): W-STR-BRACE-001 warning for
+malformed brace in string literal (staged)") — ancestor of both this base
+(`1771ca481337`) and the tracked seed build; it landed with regression
+coverage re-run here: `test/01_unit/compiler/frontend/string_interp_brace_escape_spec.spl`
+**6/6 PASS** (seed-smoke, `--mode=interpreter --no-cache`).
+
+Residual, owned elsewhere: this record's unblock condition ("must be a
+compile error") is deliberately NOT met — the behavior is staged as a warning
+because the corpus has ~15,033 such sites; the warning→error ratchet
+(including the corpus codemod) is the explicit subject of successor bug
+`doc/08_tracking/bug/string_interp_malformed_brace_warning_to_error_2026-11-09.md`
+(Status: open). The false-clean audit-oracle impact class named here is
+closed by the loud warning: a swallowed/malformed brace can no longer produce
+a silent wrong string.

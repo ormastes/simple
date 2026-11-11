@@ -310,6 +310,25 @@ per-field and freeze-names promotes cuts calls/surface from 28 to 2 (23,296
 -> 1,664 across the real closure) without changing which values get
 promoted.
 
+## Addendum 2026-11-11 (lane int10) — LIVE concurrence; Status stays OPEN
+
+int10 re-read this record and lane boot14's same-day 2026-11-11 triage at base
+`1771ca481337` and concurs with its BLOCKED-kept-OPEN judgment: the root cause
+(Rust `rt_transient_heap_promote` O(N) `Vec::retain` per call over
+`TransientHeapScope.objects`, `src/compiler_rust/runtime/src/value/collections.rs`)
+is real, outside this lane (no cargo/rustc), and the pure-Simple batching
+mitigation (`module_surface_promote_fields` -> one `rt_transient_heap_promote`
+per surface) is present in-tree at this base
+(`src/compiler/20.hir/hir_lowering/module_surface_registry.spl:566-590`). No
+re-run of the 4/4 regression spec
+(`test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`):
+boot14 ran it today on this lane's exact tracked seed (`bin/simple.exe`
+build-commit `46fe8f6b6def`) — re-running would re-print a green check. The
+real-scale Stage-2 -> Stage-3 confirmation remains pending on a non-Windows
+host (known native-build hang on the success path here); the verbatim grant
+command boot14 recorded above stands. Owner: Rust lane
+(`TransientHeapScope.objects` data structure) with stage-chain confirmation.
+
 RED  `test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`
      4 examples, 2 failures (24 and 4 calls found; budget asserts <=2 — a
      call-count budget, not a timing bound: the interpreter stubs

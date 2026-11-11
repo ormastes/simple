@@ -220,3 +220,21 @@ land/verify any retention fix —
 No measurement re-run this pass: 2026-11-07 baseline on the same host shape is
 already in-record and a re-run would only re-print it (budget rule: no
 identical reruns).
+
+## 2026-11-11 status — LIVE (lane int10 concurrence; Status stays OPEN)
+
+int10 re-read this record and the boot6 2026-11-10 addendum at base
+`1771ca481337` and concurs: still LIVE, disposition unchanged. No merge on
+this base alters the two facts that fix the disposition — the worker spawn
+shape (`bin/simple native-build` still spawns `run
+src/app/cli/native_build_worker.spl` interpreted by the seed) and the
+module-cache retention design (`src/compiler_rust/compiler/src/module_cache.rs`,
+six process-lifetime thread_local maps, cleared only by the test runner).
+Both remedy directions remain outside this lane: (a) running a compiled
+worker is the self-host bootstrap redesign itself, (b) per-`FunctionDef`
+AST density / `PARTIAL_MODULE_EXPORTS_CACHE` census is seed-fix
+(`src/compiler_rust`, needs the cargo rebuild grant boot6 recorded verbatim
+above) or `src/compiler` (agent-30 lane). No re-measure: the 2026-11-07
+Windows baseline (1.99 GB no-arg floor) is already in-record and an
+identical re-run is budget-forbidden. Owner: seed-fix lane (retention
+census + rebuild) / bootstrap redesign (term 1).

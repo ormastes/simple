@@ -250,3 +250,16 @@ run above is Linux-only (this lane runs Windows; `ulimit`/`gdb` shape
 unavailable) and the fixture native-build run peaks ~3 GB against the
 24 GiB reserve guard on a loaded 64 GB host. Exact command recorded above;
 no re-measure this pass (2026-11-07 baseline already in-record).
+
+## 2026-11-11 status — LIVE (lane int10 concurrence; Status stays OPEN)
+
+int10 re-read this record and the boot6 2026-11-10 addendum at base
+`1771ca481337` and concurs: still LIVE, two terms as recorded. Term 1
+(fixed ~2.7-3.1 GB import-closure load) is intrinsic to spawning the
+interpreted worker — the bootstrap redesign item. Term 2 (unbounded creep
+inside the interpreted `parse` step) remains unattributed; both fix surfaces
+are outside this lane (`src/compiler` agent-30 lane; `src/compiler_rust`
+seed-fix lane, needs the Linux gdb / sampler attribution grant boot6 recorded
+verbatim above — this lane is also Windows, same host constraint). No
+re-measure: 2026-11-07 baseline in-record, identical re-run budget-forbidden.
+Owner: seed-fix lane (term 2 attribution) / bootstrap redesign (term 1).
