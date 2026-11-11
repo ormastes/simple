@@ -1,6 +1,11 @@
 # Board-Vulkan lanes compared against fabricated counterpart output while a process-exec API existed
+## Closed 2026-11-11 — FIXED (all four unblock items verified at tip; fresh evidence below)
 
-Status: OPEN (P2)
+All four unblock items are closed in source at release/1.0.0 tip and the
+three quoted gate specs pass under the seed binary. Dated verification
+addendum at the bottom of this file.
+
+> Status: FIXED — was OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Filed:** 2026-08-11
@@ -275,4 +280,36 @@ Requires real Vulkan/lavapipe execution (vulkaninfo, libvulkan_lvp.so)
 across 8 parallel boundary lanes to fix the fabricated-comparator
 pattern -- a GPU/hardware verification gap, not reachable from a unit
 spec here. Leaving OPEN.
+
+## Triage 2026-11-11 (p3fix-p2a-20261111 lane) — FIXED, verified at tip
+
+Re-verified every unblock item against source at release/1.0.0 (worktree
+@ 79d5af6723f6) and ran the three specs this doc quotes, under the tracked
+seed binary (`SIMPLE_LIB=src bin/simple.exe test <spec> --mode=interpreter
+--no-cache`, Windows host):
+
+1. **SPIR-V** — `boundary_spirv_khronos_provider.spl` calls
+   `process_run_bounded` against the pinned Khronos tools and fails closed
+   to `ProviderStatus.unavailable` when they are absent. Not fabricated. ✅
+2. **Enumeration** — `boundary_enumeration_provider.spl` shells out to
+   `vulkaninfo` under the pinned lavapipe ICD and parses the real
+   transcript (`parse_vulkaninfo_lavapipe`, fails closed to nil). ✅
+3. **Readback** — `boundary_readback_lavapipe_provider.spl` now launches an
+   admitted cached readback worker through `process_run_bounded` and
+   projects the capture through `ExecCapture`/`exec_to_evidence`
+   (imports confirmed at lines 34-36, 58-68); missing workers, empty
+   output, incomplete transcripts, and nonzero exits stay
+   `unavailable`/`crashed` and are rejected. ✅
+4. **Independence groups** — `provider_nvidia.spl` keys
+   `independence_gate_executed_group_count` on
+   `SourceResult.independence_group` (Mesa family collapses to one group;
+   empty candidate group skipped), and the previously-reported
+   `provider_id` grouping fail-open is gone.
+
+Spec evidence (all PASS, this pass):
+- `independence_group_key_regression_spec.spl` — 3/3
+- `independence_gate_key_confusion_detection_spec.spl` — 3/3
+- `nvidia_independent_reference_gate_spec.spl` — 5/5
+
+Status flipped open → fixed. No code change in this lane.
 
