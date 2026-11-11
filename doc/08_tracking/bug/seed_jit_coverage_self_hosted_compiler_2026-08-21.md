@@ -480,3 +480,34 @@ SIMPLE_LIB=src SIMPLE_BIN=$PWD/bin/simple.exe sh scripts/check/check-lint-runs-o
 # current failure: Future.map ANY→ANY closure boundary (seed-side)
 ```
 
+
+## Addendum 2026-11-11 — lane seedB: gate re-run CONFIRMS LIVE; SUPERSEDED/STALE rejected
+
+`SIMPLE_LIB=src SIMPLE_BIN=$PWD/bin/simple.exe sh scripts/check/check-lint-runs-on-jit.shs`
+at base 79d5af6723f6 (worktree simple-p3-seedB-20261111, tracked seed
+bin/simple.exe 2026-11-11), ~5 min wall:
+
+```
+FAIL — 1 invocation(s) executed, de-JIT detected: whole-module-de-jit
+no-lint-verdict; [INFO] JIT compilation failed, falling back to interpreter:
+Cranelift JIT compile: Module error: function 'Future.map' creates a
+lambda/closure the JIT closure ABI cannot compile (the call boundary types
+[TypeId(14)] -> TypeId(14) are not carryable across the closure ABI (ANY
+means no encoding is correct for both an integer and a float)); JIT would
+return wrong values or crash; deferring to interpreter
+```
+
+Identical to runner5's recorded blocker (`Future.map` monomorphized
+ANY→ANY in lint's closure). Disposition question posed to this lane —
+"verify whether SUPERSEDED/STALE is the right disposition": **no**. The
+original per-function-census *premise* was already refuted and redirected
+inside the 2026-08-21 body, but the row as the tracker of self-hosted
+compiler JIT coverage is LIVE: the pinned acceptance gate is RED at this
+base with a named seed-side blocker. Remaining work is the documented
+seed-side structural sequence (generic/undeclared lambda typing at the
+ANY boundary; BOOL sub-register across closure boundaries; closure-handle
+scalar boxing) — NOT a `.spl` surface change (open-ended, other-lane-owned)
+and not admittable as-is (an ANY boundary has no sound unboxed encoding).
+
+Verdict: **LIVE + BLOCKED** (seed-side structural; owning lane command
+verbatim in runner5's addendum above).

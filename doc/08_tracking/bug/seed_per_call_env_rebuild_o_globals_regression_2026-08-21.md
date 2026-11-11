@@ -240,3 +240,43 @@ CowEnv absorber `e73a0bec647` is an ancestor of this base, and the pinning
 gate `scripts/check/check-lint-cost-budget.shs` is in-tree. Owner: seed-fix
 lane with the cargo rebuild grant recorded verbatim above. Status flipped to
 LIVE.
+
+## Addendum 2026-11-11 (lane seedB) — BLOCKED confirmed; grant re-verified, no re-measure
+
+Source checks at base 79d5af6723f6 (worktree simple-p3-seedB-20261111),
+same scope as int11's same-day consolidation (no re-run of the >240 s
+measured lint — budget-forbidden per the campaign grant):
+
+- CowEnv scope-chain absorber `e73a0bec647` is an ancestor of this base.
+- Pinning gate `scripts/check/check-lint-cost-budget.shs` is in-tree.
+- The cargo-grant addendum (interp12) is present verbatim above.
+
+Reach assessment by this (cargo-authorized) lane: the named next steps
+from the 2026-11-07 measurement (P2/P3 name-keyed builtin pre-check,
+body-prelude trimming, SipHash-keyed scope attach, mutable-arg writeback
+early-exit) together cover only the ~3.2 us call-wrapper portion of a
+~7-16 us per-owned-call cost whose dominant term is the interpreted body
+itself (`execute_function_body` 15.7 us, the `evaluate_call` ladder /
+nested owned calls). Even a complete wrapper-side fix projects to
+~90-100 s against the 60 s gate budget — still RED. Passing the gate
+requires interpreter-core re-engineering (per-node eval cost), which is
+multi-lane structural work, not a bounded row fix; a partial wrapper
+tweak would be a half-fix on a red gate. Per campaign rule: BLOCKED,
+grant intact.
+
+Verbatim grant (unchanged, from interp12):
+
+```
+# seed-source lane, authorized for cargo:
+# 1. implement the next structural step in
+#    src/compiler_rust/compiler/src/interpreter_call/** (scope-chain env /
+#    name-keyed builtin pre-check / body-prelude trimming), then
+cargo build --release --bin simple   # in src/compiler_rust, opt-level=z bootstrap profile
+# 3. verify the gate that pins this exact defect:
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe sh scripts/check/check-lint-cost-budget.shs \
+  --fixture src/compiler/80.driver/driver_types.spl --budget 60 \
+  --simple-bin "$PWD/bin/simple.exe"
+```
+
+Disposition: **BLOCKED** (structural interpreter-core work; cargo grant
+recorded verbatim; gate expected RED until then).
