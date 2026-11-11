@@ -8,7 +8,8 @@ Left OPEN.
 
 
 - **ID:** stage2_binary_vulkan_backend_init_segfault_2026-08-09
-- **Status:** OPEN
+- **Status:** OPEN — p3fix-lane BLOCKED, verbatim grant recorded 2026-11-11
+  (see dated addendum below)
 - **Found by:** gui/web/2D vulkan showcase sweep, 2026-08-09
 - **Area:** pure-Simple self-hosted runtime (stage2 authority binary) ×
   `std.gpu.engine2d.backend_vulkan` SFFI path
@@ -66,3 +67,40 @@ S=build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority/simpl
 $S run /tmp/vk_probe2.spl        # exit 139, prints "create..." "init..." then dies
 src/compiler_rust/target/bootstrap/simple run /tmp/vk_probe2.spl   # VK_PROBE PASS
 ```
+
+## Triage 2026-11-11 (p3fix lane boot24)
+
+**Verdict: BLOCKED (verbatim grant). Fresh re-verification at tip
+6233df4b9f9ea — reproduction still requires a bootstrap-produced
+self-hosted stage2/stage3 artifact plus a Vulkan-capable host; neither
+is reachable from this Windows p3fix worktree (in-lane bootstrap runs
+forbidden by campaign policy; no Vulkan device exercised here).**
+
+Fresh checks this pass:
+
+- No self-hosted artifact in-tree: `build/bootstrap/` does not exist in
+  a fresh checkout of this tip, so there is no stage2 binary to bisect
+  against. Prior-lane dispositions agree and are re-confirmed rather
+  than re-diagnosed: 2026-11-05 bs-worker ("deferred: many Vulkan
+  landings since; not re-verified on stage2") and 2026-11-06 bsB ("left
+  open: needs GPU host + stage2 run; non-bootstrap-blocking").
+- `std.gpu.engine2d.backend_vulkan` remains substantially evolved at
+  this tip (`VulkanBackend` class at `backend_vulkan.spl:228`,
+  `create()` at :565, headless/window/external SFFI init variants at
+  :80-81), so the 2026-08-09 symptom may or may not survive on the
+  current frozen stage2 — unverifiable without the artifact.
+
+Grant carried verbatim for the sanctioned bootstrap/stage-chain lane
+(Vulkan-capable host, llvmpipe acceptable; probe source in the Symptom
+section above):
+
+```
+S=build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority/simple
+$S run /tmp/vk_probe2.spl        # expect VK_PROBE PASS, not exit 139
+src/compiler_rust/target/bootstrap/simple run /tmp/vk_probe2.spl   # control: VK_PROBE PASS
+```
+
+Re-run against the CURRENT frozen stage2 (or first admitted stage3) so
+the "many Vulkan landings since 2026-08-09" question is answered with
+evidence; close this record only on `VK_PROBE PASS` from the
+self-hosted binary.

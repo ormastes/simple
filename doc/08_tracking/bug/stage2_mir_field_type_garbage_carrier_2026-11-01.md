@@ -51,3 +51,15 @@ returns DefaultHasher(variant name) truncated to u32 (see the comment beside the
 the two `Optional` fields (`Span?`, `text?`), and `lower_type` records no error for either field
 (no `[bootstrap-type-registration]` line). The print was an unconditional debug probe left by
 2cb67158ac0 (`fix: preserve flat optional type tags`); it is removed. Closed as not-a-defect.
+
+## Triage 2026-11-11 (p3fix lane boot24)
+
+**Verdict: closed stands (not-a-defect); stale tracker row flagged for the
+sync-db lane.** The 2026-11-09 bootp2 resolution (value is a stable
+`rt_enum_discriminant` variant-name hash for the two `Optional` fields, not
+a freed carrier; probe removed) re-verified FRESH at tip 6233df4b9f9ea: the
+`[mir-field-type]` probe string no longer exists anywhere in `src/compiler/`
+(ripgrep, zero hits), so no debug print can re-fire from current source.
+The bug_db.sdn row for this ID still reads `open` at this tip — a
+never-flipped prior-lane tracker row, left for the mechanical sync-db lane
+per boot22/boot23 precedent (doc-header flips only in p3fix lanes).

@@ -1,9 +1,9 @@
 # Self-hosted stage3 "unresolved name": names that have NO import path at all, masked by the Rust seed's flat resolution
 
-Status: All 545 unresolved-name errors of the 2026-08-01 census are now classified.
-319 closed (104 by 70bd64128eb; 215 by 5d3223e329e / b9940d8ca5b / e57d171eba2 / f93c9b26232),
-126 are class (A) and need no action, 66 remain as class (B) one-liners, 9 are separate defects.
-See the full-classification section at the end.
+Status: FIXED at origin/release/1.0.0 tip — verified 2026-11-11 by fresh source
+re-check (see dated addendum below); the 2026-11-06 "66 remain" recheck is
+superseded (it predates the landing merge). Full self-hosted re-census rides
+the next sanctioned stage3 run.
 Date: 2026-08-01
 Area: compiler / name resolution (HIR lowering), compiler source hygiene
 
@@ -328,3 +328,44 @@ These are **not** import defects. Adding an import would be wrong.
 - A module path that maps to no file is silent. `compiler.backend.backend_api`
   has no file; the glob simply contributes nothing, and nothing warns.
 
+
+## Triage 2026-11-11 (p3fix lane boot24)
+
+**Verdict: FIXED at the origin/release/1.0.0 tip (6233df4b9f9ea) — the
+residual 66 class-(B) one-liners have landed.** The 2026-11-06
+bsA-p2core recheck ("66 remain per doc census; needs self-hosted resolver
+run") is SUPERSEDED: it rechecked the doc's own census text and predates
+the landing merge PR #7597 (`9e7e7a526edb4`, 2026-11-07), whose file
+history (`git log --follow` on the touched compiler files) shows as the
+tip commit for this family.
+
+Fresh source spot-checks 2026-11-11 (every named row of the
+"class (B) remaining — 66 error lines" table, 10/10):
+
+| symbol | using file | state at tip |
+|---|---|---|
+| `expr_interpolated_string` | `10.frontend/desugar/placeholder_lambda.spl` | imported (`_AstExpr.accessors` line 40) |
+| `parser_parse_type_with_union` | `10.frontend/core/parser_decls_use.spl` | imported line 31 |
+| `parse_fn_lambda_after_kw` | `10.frontend/core/parser_stmts.spl` | imported line 116 |
+| `CodegenMode`, `CodegenPipeline` | `70.backend/backend/compiler.spl` | imported lines 11-12 |
+| `DriverManifestAttrKind` | `50.mir/_MirLowering/module_lowering.spl` | imported line 91 |
+| `vhdl_clock_domain_from_metadata` | `70.backend/backend/_VhdlProcess/process_codegen.spl` | imported line 14 |
+| `mir_fold_binop` | `60.mir_opt/_OptimizationPasses/engine.spl` | imported line 21 |
+| `GpuBarrierScope`, `GpuMemoryScope` | `50.mir/_MirLoweringExpr/method_calls_literals.spl` | imported line 45 |
+| `make_core_decl` | `10.frontend/core/_Ast/module_state.spl` | imported line 26 |
+| `decl_aop_advice`, `decl_arch_rule` | `10.frontend/core/_ParserDecls/bitfield_aop_arch_decls.spl` | imported line 73 |
+| `CompileMode` | `80.driver/driver_source_pipeline_loading.spl` | imported line 63 |
+| `get_shb_interface_hash` | `80.driver/driver_aot_smf_output.spl` | use site removed (symbol absent) |
+| `dir_walk`, `file_write_bytes` | `70.backend/linker/{smf_getter,link}.spl` | resolved with explicit imports (`smf_getter.spl:17-18`) |
+| `rt_file_delete`/`rt_getpid`/`rt_file_rename`/`rt_process_exists` | linker/codegen/daemon_sdk | use sites gone |
+
+The 9 "neither (A) nor (B)" carve-outs were explicitly split out of this
+row; the `error`/`panic`/`blockdsl`/`nilname` one has its own record
+(`selfhost_noimport_carveouts_error_panic_blockdsl_nilname_2026-08-01`,
+still OPEN in the boot24 batch) and the `_`/`_1`, `float`, and
+`selected` carve-outs closed in their own sibling docs.
+
+Verification receipt: the full self-hosted stage3 re-census cannot run
+in-lane (bootstrap runs forbidden); it rides the next sanctioned
+stage3/4 run. The stale addendum chain (2026-11-02 close-invalid,
+2026-10-27 triage audit) is resolved by this fresh source verification.
