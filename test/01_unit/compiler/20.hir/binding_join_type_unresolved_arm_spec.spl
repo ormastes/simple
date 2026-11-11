@@ -1,0 +1,67 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# binding_join_type with one unresolved arm
+
+Bug stage2_if_expr_result_join_untyped_match_payload_2026-11-07 (P2).
+Under native stage2 one `if` arm's tail type stayed unresolved, so the join
+dropped `code_result` to untyped. The interpreter types every arm, so this
+drives the join directly with synthetic HirType inputs.
+"""
+
+# @tag: unit, compiler, hir, result
+
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.binding_types.{hir_const_type_settled}
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn unknown() -> HirType:
+    ty(HirTypeKind.Error)
+
+fn settled_result() -> HirType:
+    ty(HirTypeKind.Result(ty(HirTypeKind.Str), ty(HirTypeKind.Bool)))
+
+fn partial_result() -> HirType:
+    ty(HirTypeKind.Result(ty(HirTypeKind.Str), unknown()))
+
+fn is_result(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Result(_, _): true
+        case _: false
+
+fn join(left: HirType, right: HirType) -> HirType:
+    val modules: Dict<text, Module> = {}
+    val sources: [SourceFile] = []
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("m", surfaces)
+    lowering.binding_join_type(left, right, Span.empty())
+
+describe "binding_join_type unresolved arm":
+    it "unresolved left adopts a settled Result right":
+        val j = join(unknown(), settled_result())
+        expect(is_result(j) and hir_const_type_settled(j)).to_equal(true)
+
+    it "unresolved right adopts a settled Result left":
+        val j = join(settled_result(), unknown())
+        expect(is_result(j) and hir_const_type_settled(j)).to_equal(true)
+
+    it "unresolved arm does not adopt a partially known Result":
+        expect(hir_const_type_settled(join(unknown(), partial_result()))).to_equal(false)
+
+    it "unresolved arm does not adopt a non-Result":
+        expect(is_result(join(unknown(), ty(HirTypeKind.Str)))).to_equal(false)
+
+    it "two unresolved arms stay unresolved":
+        expect(is_result(join(unknown(), unknown()))).to_equal(false)
+
+    it "conflicting Result arms stay unresolved":
+        val other = ty(HirTypeKind.Result(ty(HirTypeKind.Bool), ty(HirTypeKind.Bool)))
+        expect(is_result(join(settled_result(), other))).to_equal(false)
