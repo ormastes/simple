@@ -70,7 +70,8 @@ use app.llm_caret.multimodal_provider.{complete_multimodal_wire_v1}
 use app.llm_caret.tools.{PermissionPolicy, ModelResponse,
     default_policy, allow_all_policy, parse_tool_use_blocks, parse_tool_use_tags,
     new_model_text, new_model_tools}
-use app.llm_caret.types.{Message}
+use app.llm_caret.types.{Message, new_user_message}
+use app.llm_caret.chat.{run_agent_loop, AgentResult}
 use app.llm_caret.chat_tui.{
     make_chat_tui_with_status,
     caret_chat,
@@ -78,7 +79,8 @@ use app.llm_caret.chat_tui.{
     SessionResumeResult,
     SessionHooks
 }
-use app.llm_caret.json_helpers.{build_message_json, ja, extract_json_bool}
+use app.llm_caret.json_helpers.{build_message_json, ja, extract_json_bool,
+    extract_json_string, extract_json_int, jo6, jp, js}
 use app.llm_caret.server.{handle_route, build_error_response,
     build_chat_completion_response, build_anthropic_response,
     build_models_response_with_image_v1,
@@ -288,6 +290,7 @@ fn print_help():
     print "  --send <text>            write one line to the selected agent's stdin"
     print "  --workbench-frames <n>   refresh iterations before the final frame (20)"
     print "  --server                 run the HTTP proxy instead of interactive chat"
+    print "                           (POST /v1/agent/run drives the tool-gated agent loop)"
     print "  --port <n>               proxy port (default 8317, or $LLM_CARET_PORT)"
     print ""
     print "Subcommands:"
@@ -458,7 +461,14 @@ fn main_configure(provider: text, model: text, api_key: text, base_url: text,
     RT_SYSTEM_PROMPT = system_prompt
     RT_SESSION_ID = session_id
     RT_MAX_TOKENS = max_tokens
-    if RT_SYSTEM_PROMPT == "" and (provider == "slang_local" or provider == "local_torch"):
+    # Providers with no wire tool-call format get the <tool_use> tag protocol
+    # via the system prompt: the local in-process pair (slang_local,
+    # local_torch) plus the whole compat-transport family (openai_compat,
+    # slang, kimi, glm, deepseek), whose shared _dispatch_compat parses no
+    # native tool_calls field either.
+    if RT_SYSTEM_PROMPT == "" and (provider == "slang_local" or provider == "local_torch" or
+            provider == "openai_compat" or provider == "slang" or provider == "kimi" or
+            provider == "glm" or provider == "deepseek"):
         RT_SYSTEM_PROMPT = local_agent_tool_prompt()
 
 fn main_session_id() -> text:
@@ -541,7 +551,15 @@ fn main_responder(msgs: [Message]) -> ModelResponse:
     var prompt = _last_user_content(msgs)
     if RT_PROVIDER == "slang_local" or RT_PROVIDER == "local_torch":
         prompt = _render_agent_transcript(msgs)
-    val messages_json = _messages_json(msgs)
+    var messages_json = _messages_json(msgs)
+    # The compat-transport dispatch (openai_compat/slang/kimi/glm/deepseek)
+    # takes no separate system_prompt argument, so without this prepend the
+    # configured system prompt -- including the auto-installed <tool_use>
+    # protocol -- never reaches the model and the agent loop degrades to
+    # prose answers with zero tool calls.
+    if RT_SYSTEM_PROMPT != "":
+        messages_json = "[" + build_message_json("system", RT_SYSTEM_PROMPT) +
+            "," + messages_json.substring(1)
     val resp = dispatch_send(
         RT_PROVIDER, prompt, RT_MODEL, RT_API_KEY, RT_BASE_URL, RT_CLI_PATH,
         RT_SYSTEM_PROMPT, RT_SESSION_ID, 0, RT_MAX_TOKENS, messages_json
@@ -803,7 +821,11 @@ fn _http_handle(req: HttpRequest) -> HttpResponse:
         val wants_stream = (method == "POST" and
             (req.path == "/v1/chat/completions" or req.path == "/v1/messages") and
             extract_json_bool(req.body, "stream"))
-        if wants_stream:
+        if method == "POST" and req.path == "/v1/agent/run":
+            val agent = _agent_run_handle(req.body)
+            code = agent.0
+            body = agent.1
+        elif wants_stream:
             val result = proxy_handle_stream_multimodal(req.path, req.body, _proxy_dispatch_multimodal)
             code = result.0
             content_type = result.1
@@ -820,6 +842,46 @@ fn _http_handle(req: HttpRequest) -> HttpResponse:
         headers: [("Content-Type", content_type)],
         body: body
     )
+
+# --server agent endpoint: POST /v1/agent/run drives the SAME tool-gated agent
+# loop as the interactive shells (chat.spl run_agent_loop) over HTTP, so a
+# client can hand caret real work ("fix the failing tests and land the PR"),
+# not just one-shot text completion. The /v1/chat/completions proxy routes
+# above intentionally stay one-shot; this route is the agentic one.
+
+var RT_SERVER_ALLOW_ALL = false
+var RT_SERVER_WORKSPACE = ""
+
+fn _server_policy() -> PermissionPolicy:
+    if RT_SERVER_ALLOW_ALL:
+        return allow_all_policy(RT_SERVER_WORKSPACE)
+    default_policy(RT_SERVER_WORKSPACE)
+
+fn _agent_result_json(result: AgentResult, session_id: text) -> text:
+    jo6(
+        jp("ok", "true"),
+        jp("final_text", js(result.final_text)),
+        jp("iterations", result.iterations.to_text()),
+        jp("stopped_reason", js(result.stopped_reason)),
+        jp("tool_calls_made", result.tool_calls_made.to_text()),
+        jp("session_id", js(session_id))
+    )
+
+fn _agent_run_handle(body: text) -> (i64, text):
+    val input = extract_json_string(body, "input")
+    if input == "":
+        return (400, build_error_response("input required (JSON: {\"input\": \"...\"})", 400))
+    var max_iters = extract_json_int(body, "max_iterations")
+    if max_iters <= 0:
+        max_iters = 25
+    if max_iters > 200:
+        max_iters = 200
+    val session_id = gen_session_id()
+    val result = run_agent_loop(_server_policy(), [new_user_message(input)],
+        main_responder, max_iters)
+    val hooks = _build_session_hooks(session_id)
+    hooks.on_persist(session_id, result.final_transcript)
+    (200, _agent_result_json(result, session_id))
 
 fn run_server(port: i64) -> Result<(), text>:
     var router = Router.new()
@@ -1290,6 +1352,8 @@ fn run_main_args(raw_args: [text]) -> i64:
     val policy = _build_policy(args, workspace_root)
 
     if args.server_mode:
+        RT_SERVER_ALLOW_ALL = args.allow_all
+        RT_SERVER_WORKSPACE = workspace_root
         val api_key = _effective_api_key(provider)
         val base_url = _effective_base_url(provider)
         val cli_path = _effective_cli_path(provider)
