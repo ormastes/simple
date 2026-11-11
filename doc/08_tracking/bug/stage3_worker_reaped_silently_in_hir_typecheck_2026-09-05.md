@@ -1,5 +1,8 @@
 # Stage-3 worker dies silently in phase 3, and it is NOT an OOM
-## Open 2026-09-16 — needs owner triage
+## Status: BLOCKED 2026-11-11 (lane p3-comp9; first triaged BLOCKED by lane boot15 same
+## day) — disposition re-verified: identical infra wall (needs a non-Windows aarch64
+## host + sanctioned full-bootstrap Stage-3 run); boot15 grant intact, re-recorded
+## below. Header flipped from "OPEN".
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -567,3 +570,38 @@ symbolize this class). The in-tree receipts now bound the fault to
 loop-done / ctx_publish / validate:census / ast_reset / lexer_release / reclaim; the
 `[post-hir-validation-fatal]` line names any dropped module outright. Do not bisect by
 module before reading that trace — UPDATE 3 supersedes the bisect.
+
+## Addendum 2026-11-11 — P3 comp9 lane triage (worktree simple-p3-comp9-20261111, base 77be2266752d)
+
+**Verdict: BLOCKED — confirms boot15 same-day triage; not re-litigated.** Grant integrity
+re-verified at this base:
+
+- diag commit 3adea6ecb4c1 IS an ancestor of base 77be2266752d; the crash-window receipts
+  are present: `phase3:hir:validate:dict_census:start/done dropped=... total=...` at
+  `src/compiler/80.driver/driver_hir_pipeline_support.spl:641-644` (exactly the lines
+  boot15 cited), the fail-closed `[post-hir-validation-fatal]` dropped-aggregate naming at
+  `src/compiler/80.driver/cache/driver_hir_post_validation_gate_facts_v1.spl:64-89`, and
+  the loop/ctx_publish receipts in `driver_hir_pipeline_lowering.spl` (4 hits for
+  `hir:loop:done`/`hir:ctx_publish:done`).
+- Same infra wall: the SEGV repro requires the sanctioned
+  `--full-bootstrap --stop-after-stage3` run on an aarch64-unknown-linux-gnu host with
+  apport core capture and the RSS ceiling lifted — the lane host is Windows
+  (llvm-mingw) with no aarch64 guest, and entry-closure native builds are forbidden
+  in-lane, so no seed-smoke or source-only settlement is possible.
+- No absorber: `git log --all --grep stage3_worker_reaped` finds only the boot15 doc
+  commit b15f4a2093af and the runtime signal-diagnostic fixes (4469ab6a154b,
+  d44c31c8cbac) that landed the UPDATE-2 diagnostics — none claims the SEGV itself.
+
+Verbatim grant (from boot15 addendum, re-recorded intact, non-Windows
+aarch64-unknown-linux-gnu host):
+`KILL_SIMPLE_MEM_MB=65536 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3`
+with `SIMPLE_STAGE3_STREAMING_SURFACES=1 SIMPLE_COMPILER_PHASE_PROFILE=1` and apport
+core capture armed (`printf '[main]\nunpackaged=true\n' > ~/.config/apport/settings`;
+snapshot `/var/crash` by content hash — apport overwrites same-executable reports).
+Read the core by registers/ProcMaps per UPDATE 4 (`gdb -batch -ex bt` will NOT
+symbolize this class). The in-tree receipts bound the fault to
+loop-done / ctx_publish / validate:census / ast_reset / lexer_release / reclaim; the
+`[post-hir-validation-fatal]` line names any dropped module outright. Do not bisect by
+module before reading that trace — UPDATE 3 supersedes the bisect.
+
+Disposition: BLOCKED. Header flipped OPEN → BLOCKED 2026-11-11 (lane p3-comp9).
