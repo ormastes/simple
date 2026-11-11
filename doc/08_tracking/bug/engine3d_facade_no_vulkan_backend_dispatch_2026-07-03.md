@@ -85,3 +85,23 @@ inconsistent lifecycle, install-failure reason surfaced) keeps
 
 **Cycles:** 0 (no live defect; no fix attempted). Not re-opened: the requested
 full scene-render dispatch is a design-scope matter, tracked separately.
+
+---
+
+## Addendum 2026-11-11 — lane comp11 — SUPERSEDED confirmed, header stands
+
+Lane: `work/p3-comp11-20261111` on `origin/release/1.0.0` (base `41935a5f61860`).
+Triage-first; the same-day lane-compiler2 addendum above already carries the
+seed-smoke pin (5/5), so per campaign no-green-rerun rule the pin was not
+re-executed. Fresh source re-verification only, at this base:
+`src/lib/gc_async_mut/gpu/engine3d/engine.spl` still carries the
+`_vulkan_font: VulkanFontAdapter3D? = nil` field, `create_with_backend`
+(:118) accepts `"cpu"` / `"vulkan"` / `"vulkan-font"` with the documented
+"CPU scene renderer remains the portable default" docstring, and
+`install_vulkan_font_backend` (:154) sets `_backend_name = "vulkan-font"` only
+on a ready adapter (fail-closed otherwise). The pin spec
+`test/01_unit/lib/gpu/engine3d/vulkan_font_adapter_branch_spec.spl` is present.
+The filing's literal claims (no field, no dispatch, always `"cpu"`) remain
+outdated; the residual scene-raster-to-device ask is a design-scope matter
+outside this row. Header (SUPERSEDED) unchanged; this addendum records the
+fresh re-verification.
