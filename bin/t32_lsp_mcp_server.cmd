@@ -13,6 +13,10 @@ set "SEED=%~dp0..\src\compiler_rust\target"
 set "SIMPLE_RUNTIME=%SIMPLE_BINARY%"
 if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%REL%\simple.exe"
 if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%SEED%\release\simple.exe"
+rem Same precedence as bin\simple.cmd: the committed bin\simple.exe matches
+rem the tree; a stale local target\bootstrap seed predating merged syntax
+rem (e.g. @when) must not shadow it.
+if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%~dp0simple.exe"
 if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%SEED%\bootstrap\simple.exe"
 if not exist "%SIMPLE_RUNTIME%" (
     echo error: no t32_lsp_mcp_server.exe and no Simple runtime found. Tried: 1>&2
