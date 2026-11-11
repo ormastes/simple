@@ -1,6 +1,15 @@
 # Retained manual Stage4 link route
 
-Status: OPEN — native Stage4 qualification remains pending.
+Status: BLOCKED 2026-11-11 (lane p3-seedA) — native Stage4 qualification remains
+pending; this is an explicit `@workaround` route whose removal is gated on the
+ordinary linker path + native Stage4 tools being proven with the selected
+producer and unchanged retained runtime. That proof is a full Stage4
+retained-manual qualification (sanctioned bootstrap-phase-verification + retained
+receipts + independent object review + strict system clang link) — T3-gated
+infra this lane cannot run (tracked `bin/simple.exe` stays; no push/PR; no
+admitted native producer). Not a `src/compiler_rust` code defect a focused cargo
+test can settle. Grant re-recorded verbatim in the dated addendum below. Header
+flipped from "OPEN".
 
 `@workaround bug=retained_manual_system_link_old_seed_abi_2026_10_25`
 
@@ -138,3 +147,57 @@ or fixes a prior SIG9.
 Missing hosted authority or fail-fast can leave roles unproduced. Inspect the
 preparation roles.tsv and actual receipts; exit86 does not assert that all four
 objects exist or qualify any object.
+
+## 2026-11-11 addendum (lane p3-seedA) — BLOCKED, explicit-interface grant intact
+
+Lane p3-seedA re-verified this `@workaround` row during the P3/P2/P1 bug-fix
+campaign. The underlying ABI incompatibility
+(`retained_manual_system_link_old_seed_abi_2026_10_25`) is real: an already
+retained seed/runtime can have an ABI incompatible with the normal
+`rt_fd_stat_snapshot_v1` system-link path, and rebuilding/substituting a
+producer changes the evidence being qualified — which is exactly why the
+retained-manual route exists. But *settling* this row (removing the workaround)
+requires proving the ordinary linker path and the native Stage4 tools with the
+selected producer and an unchanged retained runtime. That is a full Stage4
+qualification, not a source edit:
+
+- It needs the sanctioned
+  `scripts/bootstrap/bootstrap-phase-verification.shs --phase=stage4 ...`
+  retained-manual run (receipt schema `simple-stage4-retained-manual-self-v1`),
+  four per-role object qualifications under independent review, a canonical
+  entry shim, and a strict-undefined system clang link — T3-gated bootstrap/QA
+  infra.
+- Lane constraints forbid it: the tracked `bin/simple.exe` must stay (no
+  redeploy), no push/PR, and there is no admitted native producer on this
+  Windows host to build the per-role `--emit-object --mode dynload` aggregates.
+  The contract tests under `scripts/check/test-stage4-retained-manual.py` use
+  only synthetic tiny headers/receipts and never execute a compiler, runtime or
+  native artifact, so they cannot qualify raw1 either.
+
+No `src/compiler_rust/**` change and no focused `cargo test` can settle this;
+half-fixing (e.g. flipping the skip without the qualification evidence) is
+explicitly prohibited by the doc's own text.
+
+Grant integrity check: the "Explicit interface" command block above is present
+and complete; no absorber commit exists (`git log --all --grep` for
+`retained_manual_system_link_old_seed_abi` finds only this doc plus routing
+references in `bug_db.sdn` and `windows_fixable_p2_p3_2026-11-03.md`).
+
+Verbatim grant (re-recorded intact — the explicit Stage4-only interface from
+"Explicit interface" above):
+
+```sh
+sh "$CONTROLLER/scripts/bootstrap/bootstrap-phase-verification.shs" \
+  --phase=stage4 --backend=llvm --strategy=full --profile=full \
+  --compiler="$P3B" --compiler-sha256="$P3B_SHA" \
+  --stage3-retained-manual-receipt="$REVIEWED_CHAIN" \
+  --manual-tool-qualifications="$QUALIFICATION_DIR" \
+  --manual-tool-phase=qualified \
+  --stage3-original-runtime="$ORIGINAL_RUNTIME" \
+  --runtime-path="$VERIFIED_RETAINED_CAPSULE" --source-root="$FULL_PAYLOAD" \
+  --work-root="$PRIVATE_WORK" --cache-root="$NORMAL_CACHE" --keep-going
+```
+(First pass uses `--manual-tool-phase=objects`; the qualified pass requires all
+four `QUALIFICATION_DIR/ROLE.env` files before any green gate.)
+
+Disposition: BLOCKED. Header flipped OPEN → BLOCKED 2026-11-11 (lane p3-seedA).

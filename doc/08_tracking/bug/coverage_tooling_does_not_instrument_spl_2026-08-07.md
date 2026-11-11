@@ -1,5 +1,14 @@
 # Coverage tooling does not reproduce end-to-end — no `spl-coverage` CLI in the deployed binary, no branch probes emitted by production MIR lowering, and no coverage artifact written by the spipe/.spl test-runner path
-## Open 2026-09-16 — needs owner triage
+## Status: STALE 2026-11-11 (lane p3-seedA) — premise dead at the lane base for
+  the spipe/.spl runner path. The named blockers are cleared (the `spl-coverage`
+  CLI is registered in the seed driver; the supporting coverage source is landed
+  and tracked), and this lane verified end-to-end that a `--coverage` run emits
+  real branch/decision/condition probes with real file:line:column spans and
+  writes a non-empty artifact (see the dated addendum). The residual
+  JIT/native-compiled-spec probe emission (original structural root cause 1) is a
+  narrower, separately-scoped gap; the interpreter/runner path `bin/simple test`
+  actually uses is instrumented. Header flipped from "Open 2026-09-16 — needs
+  owner triage / OPEN (P2) — blocker cleared, end-to-end still unverified".
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -601,3 +610,49 @@ the 4/10 hand-checked against the artifact rows (exactly 4 rows have both
 counts > 0). Branch coverage is now measurable on the spipe/.spl runner
 path, with the executed-decisions denominator caveat above.
 
+
+## 2026-11-11 addendum (lane p3-seedA) — STALE: interpreter/runner coverage path verified end-to-end
+
+Lane p3-seedA re-verified this row at the campaign base (`origin/release/1.0.0`
+tip `79d5af6723f6`) using the tracked seed `bin/simple.exe`
+(build-commit 46fe8f6b6def) as a run-only oracle.
+
+**End-to-end repro (bounded, seconds-to-minutes, no bootstrap):**
+```
+SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<path> \
+  bin/simple.exe test <dir-with-a-spec> --coverage --no-cache --no-cover-check --mode=interpreter
+```
+Observed at the base:
+- A **non-empty artifact** is written to `SIMPLE_COVERAGE_OUTPUT` (2,494,163 bytes
+  in the lane run) with a `# Coverage Report` header.
+- The artifact carries a `# Runtime decision/condition coverage` section with
+  real per-site tables `decisions |id, file, line, column, true_count,
+  false_count|` and `conditions |decision_id, condition_id, file, line, column,
+  true_count, false_count|` — i.e. the probes carry **real file:line:column
+  identity**, not the hardcoded `<source>`/`0,0` this doc's structural root
+  causes 1/2/4 claimed.
+- The run prints `Decision coverage: 1% (184/10895 decisions)` and
+  `Condition coverage: 0% (60/7308 conditions)` — branch totals are **not**
+  hardcoded zero (root cause 4 is resolved on this path).
+- This matches the landed 2026-08-15 per-file `coverage-branch:` banner feature
+  (`test_runner_single.spl`), which the doc records as working.
+
+**Conclusion:** the specific premise "coverage tooling does not reproduce
+end-to-end ... no branch probes emitted ... no coverage artifact written by the
+spipe/.spl test-runner path" is **dead at the base** for the interpreter/runner
+path that `bin/simple test --coverage` actually uses. The named blockers (no
+`spl-coverage` CLI; coverage source uncommitted) are also cleared — the CLI is
+registered in the seed driver (`driver/src/main.rs`) and the coverage source is
+tracked.
+
+**Residual (narrower than this row, does not reopen it):** original structural
+root cause 1 — the production MIR `lower_to_mir` path emitting `DecisionProbe`s
+for specs that are compiled to JIT/native rather than interpreted — is a
+separately-scoped gap. It only matters if branch coverage of *native-compiled*
+specs is required; the interpreter/runner measurement this row and both coverage
+plans are written against works. Root cause 5 (a static all-decisions
+denominator, vs the current executed-decisions denominator) remains future work
+already acknowledged in the 2026-08-15 note. Neither half was half-fixed here;
+no source change was made.
+
+Disposition: STALE. Header flipped Open/P2 → STALE 2026-11-11 (lane p3-seedA).

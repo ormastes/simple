@@ -1,7 +1,13 @@
 # `cargo test -p simple-compiler --lib` — 135-failure triage (2026-08-10)
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: STALE 2026-11-11 (lane p3-seedA) — the 129/135-failure premise is dead. In a FULL
+worktree at the lane base (`origin/release/1.0.0` `79d5af6723f6`) the `--lib` target compiles
+and is overwhelmingly green: the flagged `import_loader` "aliased trait folder" failure is gone
+(18/18), and a focused re-measure of the remaining genuine failures finds only
+`module_resolver::test_single_file_mode` (a Windows path-portability *fixture* bug, FIXED this
+lane — now 58/58), `cache_host::opens_a_real_root…` (Windows runtime-extern behavior), and
+`mir::…::primitive_field_method_call_is_builtin_qualified` (a mir-lowering expectation) — the
+latter two left to their owners. Header flipped from "OPEN (P2)".
 **Predecessor:** `cargo_test_lib_e0063_missing_struct_owner_fields_2026-08-09.md`
 
 The E0063 fix (`0a99948d436`, confirmed ancestor of `origin/main`) made this
@@ -374,3 +380,42 @@ primitive_field_method_call_is_builtin_qualified`, `hir::lower::import_loader` a
 folder, `cache_host`, `font`, `module_resolver` x2 (Windows `C:/tmp` vs `/tmp` fixture;
 `inventory_scratch_import`). Some are environmental (sparse worktree lacks `src/app`,
 test dirs; Windows paths) and need re-run in a full checkout before attribution.
+
+## 2026-11-11 addendum (lane p3-seedA) — STALE premise + one genuine portability FIX
+
+Lane p3-seedA re-measured this triage in a FULL worktree at the campaign base
+(`origin/release/1.0.0` tip `79d5af6723f6`, own `CARGO_TARGET_DIR`, Windows
+llvm-mingw host). This confirms and extends the doc's own 2026-11-05 sparse-worktree
+re-measure (4,561 passed / 27 failed): the 129/135-failure premise is outdated.
+
+**FIXED this lane (code change + focused cargo test):**
+- `module_resolver::tests::test_single_file_mode` failed on Windows because the
+  fixture hardcoded the Unix-absolute path `/tmp/test.spl`; on Windows that path
+  is not `is_absolute()` (no drive prefix), so `normalize_input_path`
+  re-anchored it and `project_root() != /tmp`. Production behavior is
+  correct-for-platform; the fixture was non-portable (same class as the
+  Category D-3 stale fixture). Rewrote it to use a real `tempfile::tempdir()`
+  (mirroring its sibling single-file tests) and assert the file's parent.
+  - Before: `cargo test -p simple-compiler --lib module_resolver` → 57 passed / 1 failed.
+  - After: **58 passed / 0 failed** (`test_single_file_mode … ok`).
+  - Changed: `src/compiler_rust/compiler/src/module_resolver/mod.rs` (test only).
+
+**Re-measured at the base (focused filters, `--lib` target already green overall):**
+- `import_loader` → **18 passed / 0 failed** (the previously-flagged "aliased trait
+  folder" failure is resolved; no longer reproduces).
+- `cache_host` → 2 passed / 1 failed:
+  `opens_a_real_root_and_reads_it_through_a_pinned_file_view` asserts
+  `rt_cache_host_open_root_v1` returns `handle > 0` for a real absolute tempdir and
+  gets a non-positive handle on Windows. This is runtime-extern/hosted-binding
+  behavior on Windows, not a safe in-lane fix — left to the runtime owner.
+- `mir::lower::tests::branch_coverage::calls::primitive_field_method_call_is_builtin_qualified`
+  → fails expecting `b.line.to_string()` to lower to a static `i32.to_string` call.
+  A mir-lowering behavior expectation; the lowering path is owner-gated — left to
+  the mir-lowering owner.
+
+**Net:** the "129 failures" premise is stale; the suite compiles and is
+overwhelmingly green in a full checkout. This lane landed one verified portability
+fix and characterized the two remaining genuine failures (both owner-gated, not
+safe quick fixes). No assertion was weakened.
+
+Disposition: STALE (premise dead) with one embedded FIX. Header flipped OPEN → STALE 2026-11-11 (lane p3-seedA).

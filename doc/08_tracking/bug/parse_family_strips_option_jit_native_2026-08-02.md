@@ -84,7 +84,16 @@ scheduling the staged migration should reprice it accordingly.
 Native column not re-measured (no `compile --native` run in this pass).
 
 
-- **Status:** OPEN (P2) — RE-SCOPED 2026-11-02: JIT/native yield a bare scalar / `nil` instead of `Option::Some(x)` / `Option::None`
+- **Status:** BLOCKED 2026-11-11 (lane p3-seedA) — RE-SCOPED 2026-11-02 scope
+  confirmed: the value-level wrong answers stay FIXED (the family routes to
+  `rt_string_parse_int`; interpreter = `Option::Some/None`, JIT = bare
+  scalar/`nil`, all `??` coalesces correct on both lanes). The remaining defect
+  is the seed-wide nil-boxed primitive `T?` representation migration (this doc's
+  stages 1-5, `bug_difficulty` 4), which needs the shared-representation design
+  review (int/float Some/None print, pattern, coalesce, native controls) and an
+  admitted native producer — not completable within a lane budget and not a
+  focused `cargo test` fix. Prior lane p2fix-interp (2026-11-10) reached the same
+  wall. Grant re-recorded verbatim below. Header flipped from "OPEN (P2)".
 - **Filed:** 2026-08-02
 - **Base sha measured:** `a788a2a3e5c68ef1736401428397b5bf950d3a67`
 - **Binary under test:** `bin/release/x86_64-unknown-linux-gnu/simple`, enum-probe = 0 ⇒ **Rust seed**
@@ -404,3 +413,57 @@ within this lane's budget or host (no admitted native producer); per the
 record's own next_step it needs the shared-representation design review with
 int/float Some/None print, pattern, coalesce, and native controls. No
 sentinels were restored and no value-fix is claimed as scope completion.
+
+## 2026-11-11 addendum (lane p3-seedA) — BLOCKED, staged-migration grant intact
+
+Lane p3-seedA re-verified this row at the campaign base (`origin/release/1.0.0`
+tip `79d5af6723f6`). Value-level contract re-confirmed against the tracked seed
+`bin/simple.exe` (build-commit 46fe8f6b6def), full six-name family, both lanes:
+the interpreter yields `Option::Some`/`Option::None`; the JIT yields a bare
+tagged scalar / bare runtime `nil`; every `??` coalesce is correct on both lanes
+("3" present stays 3, "0" control = 0, failure takes the default). The two
+silent-wrong-answer modes this entry was filed on (absence→0, present-3→absent)
+stay fixed.
+
+The remaining defect is exactly the documented representation scope: JIT/native
+strip the Option wrapper. Per the 2026-11-02 re-scope and the 2026-11-10
+p2fix-interp lane, that scope is the seed-wide nil-boxed primitive `T?`
+representation (`Pointer{inner:T}`; print path `mir/lower/lowering_expr_builtin.rs`,
+`hir/lower/expr/control.rs` `lower_coalesce`/`payload_slot_expr`), shared by every
+`T?` producer — `bug_difficulty` 4. It is not a per-symbol alias-table edit, and
+it is unsafe to half-fix: boxing the bare scalar coercion instead of the
+tagged-nullable ABI would break every `??`/`.?`/`.unwrap()`/arithmetic consumer of
+a `T?` in the tree (explicit non-goal). Completing it needs the
+shared-representation design review and an admitted native producer (the native
+column is unmeasurable today — `[TryOperator]` fails closed on
+`compile --native`), neither of which this Windows lane has.
+
+Grant integrity check: the "Migration design" stages 0-5 above are present and
+complete; stages 0 and the value-fix portion of 1-2 landed (route to
+`rt_string_parse_int`). No absorber commit exists for the representation scope
+(`git log --all --grep` finds only this doc and its routing references).
+
+Verbatim grant (re-recorded intact — Migration design stages 1-5 + the design-review
+requirement the record's own next_step names):
+
+- **Stage 1** — add `rt_string_to_int_opt(RuntimeValue) -> RuntimeValue` to BOTH
+  runtimes with the `rt_string_to_float` tagged-nullable ABI (tagged int on
+  success, `NIL` on failure), strict whole-string semantics matching the
+  interpreter; resolve/document the `rt_string_to_int` strict/lenient divergence.
+  Verify the emitter passes real operands before implementing the receiver.
+- **Stage 2** — route `parse_int | parse_i32 | parse_i64` → `rt_string_to_int_opt`
+  in all six alias tables at once; add `parse_i32`/`parse_i64` to `mangle.rs`;
+  `hir/lower/expr/mod.rs:1179` → optional-int; `to_int`/`to_i64` stay on
+  `rt_string_to_int`. Non-vacuity: sabotage `rt_string_to_int_opt` itself and
+  confirm RED before GREEN.
+- **Stage 3** — float family: fix the HIR type (`TypeId::ANY` at
+  `hir/lower/expr/mod.rs:1385`) and `??` recognition so the runtime `NIL` from
+  `rt_string_to_float` is honoured.
+- **Stage 4** — pure-Simple compiler parity (`src/compiler/50.mir/`), blocked on
+  the stage-3 self-host blocker; not claimable until a self-hosted binary builds
+  and re-verifies.
+- **Stage 5** — `[TryOperator]` on native, else no native Option claim.
+- Requires the shared-representation design review (int/float Some/None print,
+  pattern, coalesce, and native controls) per this record's next_step.
+
+Disposition: BLOCKED. Header flipped OPEN (P2) → BLOCKED 2026-11-11 (lane p3-seedA).
