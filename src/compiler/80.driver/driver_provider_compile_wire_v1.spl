@@ -1,0 +1,260 @@
+# Packed compile request/result for the CompilerDriverV1 provider boundary.
+#
+# This is the bootstrap-safe half of the contract: it imports only the common
+# option/result types, never the concrete driver, so `bootstrap_main.spl` can
+# encode a request and decode a result without linking `compiler.driver.driver`.
+# The provider artifact (`app.provider_cli.compiler_driver_provider_v1`) decodes
+# the same bytes and runs the real driver.
+#
+# Layout (little-endian, versioned, no Simple object layout crosses):
+#   request: "SCDR" u32 version | u32 format | u32 opt_level | u32 flags
+#            | 6 x (u32 len, utf8): source, output, backend, native_target,
+#              backend_plugin_path, cli_mode_text
+#   result:  "SCDS" u32 version | u32 compile_status | u32 count
+#            | count x (u32 len, utf8)
+
+use compiler.common.driver_core_types.{CompileMode, OutputFormat, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, driver_output_format_smf}
+use compiler.common.driver_compile_options.{CompileOptions}
+use std.common.string_core.{bytes_to_text}
+
+val DRIVER_COMPILE_WIRE_VERSION_V1: u32 = 1
+val DRIVER_COMPILE_REQUEST_V1_HEADER_SIZE: i64 = 20
+val DRIVER_COMPILE_RESULT_V1_HEADER_SIZE: i64 = 16
+val DRIVER_COMPILE_FORMAT_NATIVE_V1: u32 = 0
+val DRIVER_COMPILE_FORMAT_SMF_V1: u32 = 1
+val DRIVER_COMPILE_STATUS_OK_V1: u32 = 0
+val DRIVER_COMPILE_STATUS_FAILED_V1: u32 = 1
+val DRIVER_COMPILE_OPT_LEVEL_NONE_V1: u32 = 4294967295
+val DRIVER_COMPILE_FLAG_RELEASE_V1: u32 = 1
+val DRIVER_COMPILE_FLAG_LOW_MEMORY_V1: u32 = 2
+val DRIVER_COMPILE_FLAG_NO_BORROW_CHECK_V1: u32 = 4
+val DRIVER_COMPILE_SYMBOL_V1: text = "simple_compiler_driver_compile_v1"
+
+# "SCDR" / "SCDS"
+val _REQUEST_MAGIC: [u8] = [83, 67, 68, 82]
+val _RESULT_MAGIC: [u8] = [83, 67, 68, 83]
+
+class DriverCompileRequestV1:
+    format_code: u32
+    opt_level: u32
+    has_opt_level: bool
+    release: bool
+    low_memory: bool
+    no_borrow_check: bool
+    source: text
+    output: text
+    backend: text
+    native_target: text
+    backend_plugin_path: text
+    cli_mode_text: text
+
+class DriverCompileRequestReadV1:
+    ok: bool
+    value: DriverCompileRequestV1
+    diagnostic: text
+
+class DriverCompileResultV1:
+    compile_status: u32
+    diagnostics: [text]
+
+class DriverCompileResultReadV1:
+    ok: bool
+    value: DriverCompileResultV1
+    diagnostic: text
+
+fn _empty_request() -> DriverCompileRequestV1:
+    DriverCompileRequestV1(
+        format_code: DRIVER_COMPILE_FORMAT_NATIVE_V1, opt_level: DRIVER_COMPILE_OPT_LEVEL_NONE_V1,
+        has_opt_level: false, release: false, low_memory: false, no_borrow_check: false,
+        source: "", output: "", backend: "", native_target: "", backend_plugin_path: "",
+        cli_mode_text: "")
+
+fn _push_u32_le(out: [u8], value: u32):
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+    out.push(((value >> 16) & 255) as u8)
+    out.push(((value >> 24) & 255) as u8)
+
+fn _read_u32_le(data: [u8], offset: i64) -> u32:
+    (data[offset] as u32) | ((data[offset + 1] as u32) << 8) |
+        ((data[offset + 2] as u32) << 16) | ((data[offset + 3] as u32) << 24)
+
+fn _push_text(out: [u8], value: text):
+    val raw = value.to_bytes()
+    _push_u32_le(out, raw.len() as u32)
+    var i = 0
+    while i < raw.len():
+        out.push(raw[i])
+        i = i + 1
+
+class _TextReadV1:
+    ok: bool
+    value: text
+    next: i64
+
+fn _read_text(data: [u8], offset: i64) -> _TextReadV1:
+    if offset + 4 > data.len():
+        return _TextReadV1(ok: false, value: "", next: offset)
+    val length = _read_u32_le(data, offset) as i64
+    if offset + 4 + length > data.len():
+        return _TextReadV1(ok: false, value: "", next: offset)
+    var raw: [u8] = []
+    var i = 0
+    while i < length:
+        raw.push(data[offset + 4 + i])
+        i = i + 1
+    _TextReadV1(ok: true, value: bytes_to_text(raw), next: offset + 4 + length)
+
+fn _magic_matches(data: [u8], magic: [u8]) -> bool:
+    if data.len() < 4:
+        return false
+    data[0] == magic[0] and data[1] == magic[1] and data[2] == magic[2] and data[3] == magic[3]
+
+fn encode_driver_compile_request_v1(request: DriverCompileRequestV1) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 4:
+        out.push(_REQUEST_MAGIC[i])
+        i = i + 1
+    _push_u32_le(out, DRIVER_COMPILE_WIRE_VERSION_V1)
+    _push_u32_le(out, request.format_code)
+    _push_u32_le(out, if request.has_opt_level: request.opt_level else: DRIVER_COMPILE_OPT_LEVEL_NONE_V1)
+    var flags: u32 = 0
+    if request.release: flags = flags | DRIVER_COMPILE_FLAG_RELEASE_V1
+    if request.low_memory: flags = flags | DRIVER_COMPILE_FLAG_LOW_MEMORY_V1
+    if request.no_borrow_check: flags = flags | DRIVER_COMPILE_FLAG_NO_BORROW_CHECK_V1
+    _push_u32_le(out, flags)
+    _push_text(out, request.source)
+    _push_text(out, request.output)
+    _push_text(out, request.backend)
+    _push_text(out, request.native_target)
+    _push_text(out, request.backend_plugin_path)
+    _push_text(out, request.cli_mode_text)
+    out
+
+fn _request_refusal(diagnostic: text) -> DriverCompileRequestReadV1:
+    DriverCompileRequestReadV1(ok: false, value: _empty_request(), diagnostic: diagnostic)
+
+fn decode_driver_compile_request_v1(data: [u8]) -> DriverCompileRequestReadV1:
+    if data.len() < DRIVER_COMPILE_REQUEST_V1_HEADER_SIZE:
+        return _request_refusal("compile-request-too-short")
+    if not _magic_matches(data, _REQUEST_MAGIC):
+        return _request_refusal("compile-request-magic-mismatch")
+    if _read_u32_le(data, 4) != DRIVER_COMPILE_WIRE_VERSION_V1:
+        return _request_refusal("compile-request-version-unsupported")
+    val format_code = _read_u32_le(data, 8)
+    if format_code != DRIVER_COMPILE_FORMAT_NATIVE_V1 and format_code != DRIVER_COMPILE_FORMAT_SMF_V1:
+        return _request_refusal("compile-request-format-unknown")
+    val opt_level = _read_u32_le(data, 12)
+    val flags = _read_u32_le(data, 16)
+    var texts: [text] = []
+    var offset = DRIVER_COMPILE_REQUEST_V1_HEADER_SIZE
+    var i = 0
+    while i < 6:
+        val read = _read_text(data, offset)
+        if not read.ok:
+            return _request_refusal("compile-request-truncated")
+        texts.push(read.value)
+        offset = read.next
+        i = i + 1
+    if offset != data.len():
+        return _request_refusal("compile-request-trailing-bytes")
+    DriverCompileRequestReadV1(ok: true, diagnostic: "", value: DriverCompileRequestV1(
+        format_code: format_code,
+        opt_level: opt_level,
+        has_opt_level: opt_level != DRIVER_COMPILE_OPT_LEVEL_NONE_V1,
+        release: (flags & DRIVER_COMPILE_FLAG_RELEASE_V1) != 0,
+        low_memory: (flags & DRIVER_COMPILE_FLAG_LOW_MEMORY_V1) != 0,
+        no_borrow_check: (flags & DRIVER_COMPILE_FLAG_NO_BORROW_CHECK_V1) != 0,
+        source: texts[0], output: texts[1], backend: texts[2], native_target: texts[3],
+        backend_plugin_path: texts[4], cli_mode_text: texts[5]))
+
+fn encode_driver_compile_result_v1(result: DriverCompileResultV1) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 4:
+        out.push(_RESULT_MAGIC[i])
+        i = i + 1
+    _push_u32_le(out, DRIVER_COMPILE_WIRE_VERSION_V1)
+    _push_u32_le(out, result.compile_status)
+    _push_u32_le(out, result.diagnostics.len() as u32)
+    i = 0
+    while i < result.diagnostics.len():
+        _push_text(out, result.diagnostics[i])
+        i = i + 1
+    out
+
+fn _result_refusal(diagnostic: text) -> DriverCompileResultReadV1:
+    DriverCompileResultReadV1(ok: false, diagnostic: diagnostic,
+        value: DriverCompileResultV1(compile_status: DRIVER_COMPILE_STATUS_FAILED_V1, diagnostics: []))
+
+fn decode_driver_compile_result_v1(data: [u8]) -> DriverCompileResultReadV1:
+    if data.len() < DRIVER_COMPILE_RESULT_V1_HEADER_SIZE:
+        return _result_refusal("compile-result-too-short")
+    if not _magic_matches(data, _RESULT_MAGIC):
+        return _result_refusal("compile-result-magic-mismatch")
+    if _read_u32_le(data, 4) != DRIVER_COMPILE_WIRE_VERSION_V1:
+        return _result_refusal("compile-result-version-unsupported")
+    val compile_status = _read_u32_le(data, 8)
+    if compile_status != DRIVER_COMPILE_STATUS_OK_V1 and compile_status != DRIVER_COMPILE_STATUS_FAILED_V1:
+        return _result_refusal("compile-result-status-unknown")
+    val count = _read_u32_le(data, 12) as i64
+    var diagnostics: [text] = []
+    var offset = DRIVER_COMPILE_RESULT_V1_HEADER_SIZE
+    var i = 0
+    while i < count:
+        val read = _read_text(data, offset)
+        if not read.ok:
+            return _result_refusal("compile-result-truncated")
+        diagnostics.push(read.value)
+        offset = read.next
+        i = i + 1
+    if offset != data.len():
+        return _result_refusal("compile-result-trailing-bytes")
+    DriverCompileResultReadV1(ok: true, diagnostic: "",
+        value: DriverCompileResultV1(compile_status: compile_status, diagnostics: diagnostics))
+
+# Only the fields the bootstrap CLI sets cross the boundary; everything else
+# is re-derived from the defaults on the provider side.
+fn driver_compile_request_from_options_v1(options: CompileOptions) -> DriverCompileRequestV1:
+    val level = options.opt_level
+    DriverCompileRequestV1(
+        format_code: if options.output_format.to_text() == "smf": DRIVER_COMPILE_FORMAT_SMF_V1 else: DRIVER_COMPILE_FORMAT_NATIVE_V1,
+        opt_level: if level.is_none(): DRIVER_COMPILE_OPT_LEVEL_NONE_V1 else: (level ?? 0) as u32,
+        has_opt_level: level.is_some(),
+        release: options.release,
+        low_memory: options.low_memory,
+        no_borrow_check: options.no_borrow_check,
+        source: options.bootstrap_input_0,
+        output: options.output_file ?? "",
+        backend: options.backend,
+        native_target: options.native_target,
+        backend_plugin_path: options.backend_plugin_path,
+        cli_mode_text: options.cli_mode_text)
+
+fn driver_compile_options_from_request_v1(request: DriverCompileRequestV1) -> CompileOptions:
+    var options: CompileOptions = driver_core_compile_options_default()
+    options.input_files = [request.source]
+    options.bootstrap_input_count = 1
+    options.bootstrap_input_0 = request.source
+    options.mode = CompileMode.Aot
+    options.cli_mode_text = request.cli_mode_text
+    options.output_file = Some(request.output)
+    options.output_format = if request.format_code == DRIVER_COMPILE_FORMAT_SMF_V1: driver_output_format_smf() else: driver_output_format_native()
+    options.backend = request.backend
+    options.native_target = request.native_target
+    options.backend_plugin_path = request.backend_plugin_path
+    options.low_memory = request.low_memory
+    options.release = request.release
+    options.no_borrow_check = request.no_borrow_check
+    if request.has_opt_level:
+        options.opt_level = Some(request.opt_level as i64)
+    compileoptions_normalize_mir_optimization(options)
+
+export DRIVER_COMPILE_WIRE_VERSION_V1, DRIVER_COMPILE_REQUEST_V1_HEADER_SIZE, DRIVER_COMPILE_RESULT_V1_HEADER_SIZE
+export DRIVER_COMPILE_FORMAT_NATIVE_V1, DRIVER_COMPILE_FORMAT_SMF_V1
+export DRIVER_COMPILE_STATUS_OK_V1, DRIVER_COMPILE_STATUS_FAILED_V1, DRIVER_COMPILE_SYMBOL_V1
+export DriverCompileRequestV1, DriverCompileRequestReadV1, DriverCompileResultV1, DriverCompileResultReadV1
+export encode_driver_compile_request_v1, decode_driver_compile_request_v1
+export encode_driver_compile_result_v1, decode_driver_compile_result_v1
+export driver_compile_request_from_options_v1, driver_compile_options_from_request_v1
