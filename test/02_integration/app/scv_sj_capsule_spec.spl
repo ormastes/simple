@@ -26,15 +26,18 @@ scratch directory. No mutating jj/sj command is run against any repository.
 Audience: Maintainers of the SCV backend transaction and the sj capsule.
 """
 # @req: REQ-SCV-SJ-CAPSULE-001
-# NOTE: the bare `use std.spec.step` line other SCV specs carry is deliberately
-# ABSENT here. On this seed it puts a SECOND `file_rename` into the flattened
-# compilation unit, and the duplicate then dispatches to itself — every write
-# that goes through store.spl's atomic_write dies with "stack overflow:
-# recursion depth 1000 exceeded limit 1000 in function 'file_rename'". Bisected
-# to that single line. `step` is imported below in the braces form, which is
-# what is actually used. TODO(seed): remove this workaround once the flattened
-# -unit duplicate-symbol dispatch bug is fixed.
+# REGRESSION: the bare `use std.spec.step` line below is deliberate coverage
+# for the flattened-unit `file_rename` duplicate self-dispatch bug
+# (doc/08_tracking/bug/spec_step_bare_import_duplicates_file_rename_stack_overflow_2026-08-27.md).
+# It pulls a SECOND `file_rename` into the flattened compilation unit; the
+# wrapper in nogc_sync_mut/io/file_ops.spl used to call an import aliased to
+# its own name, so the duplicate dispatched to itself and every write through
+# store.spl's atomic_write died with "stack overflow: recursion depth 1000
+# exceeded limit 1000 in function 'file_rename'". The wrapper now forwards to
+# the uniquely-named `rename_path` (std.io_runtime), so the duplicate can no
+# longer self-recurse. `step` is also imported in the braces form, as used.
 use std.spec.{describe, it, expect, step}
+use std.spec.step
 use std.nogc_sync_mut.io.file_ops.{file_write}
 use std.nogc_sync_mut.io.dir_ops.{dir_create}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
@@ -54,9 +57,8 @@ use std.scv.sj_capsule.{
     scv_jj_executor_sj_lane, scv_jj_snapshot, scv_jj_read_ids
 }
 
-# A fresh directory per example. dir_remove_all is deliberately NOT used: on
-# this seed it recurses without bound inside file_rename (stack overflow at
-# depth 1000), so isolation comes from a unique name instead of a wipe.
+# A fresh directory per example. Unique names (not a shared wipe) keep
+# examples independent without depending on any removal-lane behavior.
 fn sj_scratch(name: text) -> text:
     val root = "/tmp/scv_sj_capsule_spec/{current_time_ms()}_{name}"
     dir_create(root, true)
