@@ -176,3 +176,38 @@ Pin: `test/01_unit/app/build/cross_module_public_symbol_collision_rows_spec.spl`
 (red 0/2 on base, green 2/2).
 
 Still open: `shell` (app tuple API, many callers) and the new rows above.
+
+
+## 2026-11-11 addendum (lane intne1, batch p3-intne1-20261111) — verdict: LIVE (left open)
+
+Fresh executed probe on release/1.0.0 tip (worktree simple-p3-intne1-20261111,
+HEAD 79d5af6723f6), same vehicle as the 2026-11-09 pass:
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe $PWD/bin/simple.exe test \
+    test/01_unit/app/build/private_helper_name_collision_spec.spl \
+    --mode=interpreter --no-cache 2>&1 | grep compiler_cross_module_private_symbol_collision
+```
+
+- 24 distinct `public function` collision names; **zero class-collision warnings**.
+  `shell` is now 3 defs / 2 differing signatures (`(text)->ProcessResult` x2 lib +
+  `(text)->Tuple([text,text,i64])` app mirror) — down from 5 defs / 3 signatures.
+  Of the original 13-row filing table only `shell` remains; the other twelve were
+  renamed or unified (`compile_native` and `dir_remove_all` by the 2026-11-09 pass,
+  the rest earlier). New rows not in the original filing include `env_get` (5 defs),
+  `dir_list` (4), `join_path` (3), `detect_arch` (3), `atomic_bool_new`,
+  `atomic_i64_new`, `format_hex`, `crc32_update`/`crc32_finalize`, `bytes_to_*`,
+  `hir_owned_artifact_*`, etc.
+- Material hazard change: every warning now carries "call sites resolve by the
+  caller's import path, else by exact arg-type match (mangled `$dupN` variants), and
+  a call that neither selects is a compile error (owner decision 2026-11-09, **no
+  last-definition fallback**)". The silent wrong-dispatch hazard in this row's
+  header (JIT last-definition fallback; interpreter class members by NAME across
+  modules) is retired — the residual is warning noise plus rename/unify work.
+- The vehicle spec itself still reports `Results: 3 total, 0 passed, 3 failed`; that
+  is the separate `_has` defect
+  (`private_helper_name_collision_across_modules_has_2026-08-17.md`), quoted only
+  as the warning emitter.
+
+Status: OPEN (P3) — still real, minor; rename/unify of the ~24 residual rows
+remains. Lane evidence: `build/review/intne1-collision-probe.log`.

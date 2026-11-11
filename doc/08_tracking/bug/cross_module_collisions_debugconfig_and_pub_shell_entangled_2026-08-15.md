@@ -1,7 +1,6 @@
 # Cross-module private-symbol collisions too entangled to rename: `DebugConfig` and public `shell` (2026-08-15)
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: SUPERSEDED 2026-11-11 (lane intne1, batch p3-intne1-20261111) — both named entanglements resolved in-tree; absorber: 9e7e7a526edb / PR #7597; residual shell row tracked in cross_module_public_symbol_collisions_2026-08-16.
 
 `compiler_cross_module_private_symbol_collision` warnings fixed in the same pass:
 `FixApplicator` (compiler side renamed to `FixToolApplicator`), `Lint`/`LintResult`
@@ -51,3 +50,32 @@ colliding `shell`). Fix direction: converge on ONE public `shell` signature
 importers are exactly the entanglement this doc describes, and a partial rename is
 more dangerous than the status quo. Recorded as a knowing non-fix, not a silent
 skip.
+
+## Triage 2026-11-11 (lane intne1, batch p3-intne1-20261111) — verdict: SUPERSEDED (absorbed by PR #7597 convergence; residual tracked in cross_module_public_symbol_collisions_2026-08-16)
+
+Fresh source + compiler-warning re-verification on release/1.0.0 tip (worktree
+simple-p3-intne1-20261111, HEAD 79d5af6723f6):
+
+**Entanglement 1 — `class DebugConfig`: RESOLVED.** Exactly one `class DebugConfig`
+remains in owned src: `src/lib/nogc_sync_mut/debug/remote/types.spl:79`. The app-side
+copy (`src/app/debug/remote/types.spl`) now declares/references it zero times, and
+`src/lib/gc_async_mut/debug/remote/types.spl` no longer exists. A new
+`src/lib/nogc_async_mut_noalloc/qemu/debug_boot_runner.spl:23` declares a same-named
+class, but it never co-compiles with the lib copy — the 2026-11-11 collision probe
+emits no class-collision warning for it.
+
+**Entanglement 2 — public fn `shell`: RESOLVED as filed.** Both lib definitions are
+now the same signature, `pub fn shell(command: text) -> ProcessResult`
+(`src/lib/nogc_sync_mut/io/process_ops.spl:2913` and
+`src/lib/nogc_sync_mut/io_runtime.spl:163`); the lib tuple variant in
+`src/lib/nogc_sync_mut/io/file_shell.spl` is gone (only `shell_output` remains), and
+the `src/app/io/process_ops.spl` mirror was dropped. `git log -S` pins the
+`io_runtime.spl` convergence to `9e7e7a526edb` (merge of PR #7597,
+`work/hir-nominal-generic-owner-20261107` — the 2026-11 interpreter-essential wave),
+which is also the last commit to touch `src/app/debug/remote/types.spl`.
+
+The single residual differing-signature shell row (app tuple mirror
+`src/app/io/file_shell.spl:10` vs the two lib `ProcessResult` defs — 3 defs, 2 sigs)
+and the wider collision list are live-tracked under
+`cross_module_public_symbol_collisions_2026-08-16`; nothing this row named remains
+open here.
