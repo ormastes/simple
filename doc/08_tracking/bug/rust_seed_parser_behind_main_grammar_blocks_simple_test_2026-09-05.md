@@ -132,3 +132,20 @@ current tracked binary. What this row does NOT settle (left to the named owners)
   host infrastructure, not a compiler-source defect.
 
 Disposition: STALE. Header flipped OPEN → STALE 2026-11-11 (lane p3-comp9).
+
+## Confirmation 2026-11-11 (lane seedB, worktree simple-p3-seedB-20261111, base 79d5af6723f6)
+
+Independent re-verification of comp9's disposition on the tracked seed
+`bin/simple.exe` (37584384 B, mtime 2026-11-11). All four of comp9's
+evidence items reproduce at this base:
+
+1. `compile --format=smf` rc=0 on all three named stdlib files
+   (`execution_metrics.spl`, `dynamic_aspect.spl`,
+   `test_runner_execute.spl`); only the pre-existing unrelated
+   cross-module private-signature warnings on the third.
+2. `test test/01_unit/lib/spec/in_development_tag_spec.spl
+   --mode=interpreter --no-cache` → outcome=OK executed=24 passed=24 failed=0.
+3. `parser_trailing_operator_continuation_spec.spl` → 8/8.
+4. `parser_leading_operator_continuation_spec.spl` → 11/11.
+
+Disposition **STALE confirmed**; no re-fix attempted (premise dead at tip).
