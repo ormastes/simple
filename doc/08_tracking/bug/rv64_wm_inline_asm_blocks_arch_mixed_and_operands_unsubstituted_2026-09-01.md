@@ -1,7 +1,11 @@
 # riscv64 WM closure: `simple_asm_blocks.c` mixes x86 asm in and drops operand names
 
 - **Filed:** 2026-09-01
-- **Status:** OPEN
+- **Status:** SUPERSEDED (triage 2026-11-11, lane boot22; fixed 2026-09-01, re-verified
+  2026-11-05 lane libbug-w6, re-verified again in source at tip by boot22) —
+  symmetric `block_matches_target` arch filter and parser re-brace both present
+  at tip with executed evidence (cargo parser 31/31, compiler inline_asm 19/19,
+  riscv64 WM kernel assembles and links clean); header never flipped until now.
 - **Blocks:** `scripts/check/check-simpleos-riscv64-wm-render-smoke-opensbi.shs`
 - **Predecessors (all FIXED, do not re-file):**
   - `riscv64_wm_closure_unbuildable_asm_clobber_string_2026-09-01.md` — `clobber("memory")`
@@ -221,3 +225,36 @@ Evidence:
 - The full render-smoke gate (`check-simpleos-riscv64-wm-render-smoke-opensbi.shs`)
   could not be booted here: it needs OpenSBI built with a riscv64 cross-gcc and
   none is installed on this host (the gate skips with "no riscv64 cross-gcc").
+
+
+## 2026-11-11 P3-boot22 triage — SUPERSEDED (header flip)
+
+Row 2 of lane boot22 (bootstrap table, after #40). The doc body carried
+"Status of this record: FIXED" since 2026-09-01 plus a 2026-11-05 executed
+re-verification, but the header was never flipped. Disposition re-verified
+FRESH in source at this lane's base (`79d5af6723f6`):
+
+- Defect 1 fix present: `block_matches_target`
+  (`src/compiler_rust/compiler/src/pipeline/native_project/inline_asm_emit.rs:120`)
+  is the symmetric form — `AsmArch` classification from the target triple and
+  per-instruction mnemonic; a block is rejected only on unmistakable evidence
+  of a foreign family, unattributable lines stay `Neutral` and are kept.
+- Defect 2 fix present: `extract_asm_block_strings`
+  (`src/compiler_rust/parser/src/stmt_parsing/asm.rs:499-501`) re-braces
+  `render_asm_placeholder` output (`'{' + rendered + '}'`) so `{name}` survives
+  to MIR's `rewrite_asm_placeholders`; the in-code comment cites this record.
+- Pin tests present at tip: `test_asm_block_form_keeps_operand_placeholder_braces`
+  (asm.rs:858) and the three `native_inline_asm_*` compiler tests.
+- Executed evidence on file (2026-11-05, this branch): `cargo test -p
+  simple-parser --lib asm` 31/31; `cargo test -p simple-compiler --lib
+  inline_asm` 19/19; `build-simpleos-riscv64-wm-kernel.shs` produces
+  `kernel.elf` + `kernel.Image` with `simple_asm_blocks` absent from
+  kernel-build.log (assembles AND links clean — the runtime-symbol closure
+  blocker has since been fixed on this branch).
+
+Not re-run in-lane: cargo suites and the riscv64 kernel build are host-heavy
+Rust builds outside this lane's seed-smoke budget; the 2026-11-05 executed
+evidence stands on a branch identical at these two files. Residuals tracked
+separately, not this row: block-form operand constraints
+(`asm_block_form_discards_operand_constraints_2026-09-01.md`), tracked-seed
+redeploy (seed-fix lane), full render-smoke gate (needs riscv64 cross-gcc).
