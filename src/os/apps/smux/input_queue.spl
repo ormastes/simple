@@ -53,6 +53,34 @@ pub fn pane_input_remaining(queue: PaneInput) -> [u8]:
         end = queue.bytes.len()
     return queue.bytes[queue.offset:end]
 
+# Length of the next paced PTY write: at most `limit` bytes, but never ending
+# inside a UTF-8 scalar or an ESC sequence (ConPTY reads a lone trailing ESC
+# as the Escape key). An escape sequence longer than `limit` is sent whole.
+pub fn pane_input_paced_len(bytes: [u8], limit: i64) -> i64:
+    var i: i64 = 0
+    while i < bytes.len() and (i < limit or i == 0):
+        i = i + _paced_unit_len(bytes, i)
+    if i > bytes.len(): return bytes.len()
+    return i
+
+fn _paced_unit_len(bytes: [u8], at: i64) -> i64:
+    val b = bytes[at] as i64
+    if b == 27:
+        if at + 1 >= bytes.len(): return 1
+        val next = bytes[at + 1] as i64
+        if next == 79: return if at + 2 < bytes.len(): 3 else: 2
+        if next != 91: return 2
+        var j = at + 2
+        while j < bytes.len():
+            val c = bytes[j] as i64
+            if c >= 64 and c <= 126: return j - at + 1
+            j = j + 1
+        return j - at
+    var n: i64 = 1
+    while at + n < bytes.len() and ((bytes[at + n] as i64) & 192) == 128:
+        n = n + 1
+    return n
+
 pub fn pane_input_advance(queue: PaneInput, accepted: i64) -> Result<PaneInput, text>:
     if queue.error != "":
         return Err(queue.error)
@@ -77,4 +105,4 @@ pub fn pane_input_fail(queue: PaneInput, error: text) -> PaneInput:
 
 export PaneInput, pane_input_new, pane_input_enqueue, pane_input_remaining
 export pane_input_advance, pane_input_fail
-export pane_input_enqueue_bytes_v1
+export pane_input_enqueue_bytes_v1, pane_input_paced_len

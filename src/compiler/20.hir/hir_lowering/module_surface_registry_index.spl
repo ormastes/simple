@@ -172,14 +172,28 @@ pub(package) fn module_surface_resolve_relative_key(
     # sibling first; a miss must not select the unrelated collapsed twin.
     val physical_name = module_relative_name_from_path(facade.canonical_path, name)
     if physical_name != "":
-        return module_surface_resolve_absolute_key(registry, physical_name)
+        val physical_key = module_surface_resolve_absolute_key(registry, physical_name)
+        # A facade reached through a symlinked directory (src/app/t32_cli ->
+        # examples/10_tooling/trace32_tools/t32_cli) is registered under its
+        # lexical module_name while canonical_path AND canonical_name are
+        # realpath-derived (examples.10_tooling...), so neither the physical
+        # sibling nor the facade's own canonical_name is a registered
+        # spelling. Only such a displaced facade falls through to the
+        # logical splice below; a facade whose canonical_name is registered
+        # keeps the early return so a miss can never select the unrelated
+        # collapsed twin.
+        if physical_key != "" or module_surface_registry_index(registry, facade.canonical_name) >= 0:
+            return physical_key
     var dots = 0
     while dots < name.len() and name.substring(dots, dots + 1) == ".":
         dots = dots + 1
     val tail = name.substring(dots)
     if tail == "":
         return ""
-    var package_name = facade.canonical_name
+    # A displaced facade splices from the spelling the registry holds.
+    var package_name = if module_surface_registry_index(registry, facade.canonical_name) >= 0:
+        facade.canonical_name
+    else: facade.module_name
     var package_index = 0
     while package_index < dots:
         package_name = module_surface_package_name_from_name(package_name)

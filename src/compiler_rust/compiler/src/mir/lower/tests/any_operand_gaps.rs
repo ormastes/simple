@@ -200,3 +200,30 @@ fn lambda_param_index_is_decoded_inside_the_lambda_body() {
     assert_eq!(index_args.len(), 1, "{insts:?}");
     assert!(unboxed.contains(&index_args[0]), "index must be decoded: {insts:?}");
 }
+
+/// `var G = A.create(7).unwrap()` at module scope: the global must take the
+/// type the initializer evaluates to (`A`), not ANY. Typed ANY, `G.telemetry()`
+/// lost its receiver type and was dispatched by bare method name, which is
+/// ambiguous as soon as two types declare `telemetry`
+/// (`[CODEGEN-AMBIGUOUS-METHOD]`, the whole unit fell back from JIT).
+#[test]
+fn module_global_takes_the_type_of_an_unwrapped_static_call() {
+    let source = "class A:\n    v: i64\n\n    static fn create(v: i64) -> Result<A, text>:\n        Ok(A(v: v))\n\n    \
+                  fn telemetry() -> i64:\n        self.v\n\n\
+                  class B:\n    v: i64\n\n    fn telemetry() -> i64:\n        self.v + 1000\n\n\
+                  var G = A.create(7).unwrap()\n\n\
+                  fn use_g() -> i64:\n    return G.telemetry()\n";
+    let insts = instructions_of(source, "use_g");
+    let static_targets: Vec<String> = insts
+        .iter()
+        .filter_map(|inst| match inst {
+            MirInst::MethodCallStatic { func_name, .. } => Some(func_name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        static_targets,
+        vec!["A.telemetry".to_string()],
+        "the call must be bound to the receiver's own type: {insts:?}"
+    );
+}
