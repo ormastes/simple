@@ -190,3 +190,57 @@ results: the 11-file `stage2_result_map_storage_roots.spl` closure
 (`SIMPLE_SHARD_SMALL_CLOSURE_MAX=0`) goes from 3/4 shard SIGSEGV to 0/4; the
 333-file `test_runner_new/main.spl` and the 562-file `stage2_nominal_owner_keys.spl`
 closures complete with every shard at exit 0, and `[parse-shard] N/N shard(s) completed`.
+
+### Completeness audit of the re-parse's other reads
+
+`parser_init_with_path` (`parser.spl:401`) runs these resets before the parse
+body reaches `named_type_find`:
+
+- `layer_eq_registry_reset_module`, `effect_registry_reset_module`,
+  `rt_criticality_reset_module` and `aspect_registry_reset_module` filter by
+  path, so they *read* their registries. Every owner they read is promoted by
+  its `*_promote_transient_owner` function. All four of those are called from
+  `frontend_promote_parse_registry_owners_v1`
+  (`src/compiler/10.frontend/retained_parse_owners_v1.spl:13`), which runs on the
+  retained path through `driver_promote_retained_frontend_owners_v1`.
+- `resource_registry_reset`, `lock_level_metadata_reset`, `representation_parser_reset_v1`,
+  `parser_generic_constraints_reset`, the three `*_pending_reset` functions and
+  `parser_collection_site_reset` replace the whole owner and never read the old one.
+- `ast_reset` operates on decl/AST pools. Those are promoted by
+  `decl_pools_promote_transient_owners` and `parser_decls_pools_promote_transient_owners`,
+  which `parser_promote_transient_owners` (`parser.spl:226`) calls. They were not
+  audited field by field. In every observed crash the parse got past `ast_reset`
+  and failed only on `types.spl` owners.
+
+The `types.spl` flat pools were the one family that was not isolated and not
+fully promoted. This fix isolates that family.
+
+### Native-only risks (verify on the Stage 2 rebuild)
+
+- `flat_pool_state_take`/`install` has never run natively in production. Its
+  only previous caller, `parse_context`, is test-only. It builds a struct of
+  about 70 fields, many of them `[[i64]]`/`[[text]]`, and the neighbouring
+  code already carries `@workaround phase3_global_pool_generic_inference_workaround_2026_10_10`.
+  Stage 2 codegen for it is therefore unproven.
+- In a parse shard, `take` copies the dead owner words into the struct, and
+  `install` writes them back. That is safe only if a native field store never
+  dereferences the stored value. In the runtime, `rt_object_field_set`
+  (`objects.rs:132`) is a plain store. Stores that Stage 2 inlines were not
+  inspected.
+
+### Memory
+
+Each call now allocates a fresh set of about 70 empty pool owners, the
+snapshot struct, and the summary parse's own spans and type entries outside any
+transient scope. `install` drops them and nothing frees them. Before the fix,
+the same summary-parse growth went into the reclaimed arrays instead. This was
+estimated, not measured: under ~10 KB per file, so up to ~30 MB across a
+3134-file closure, split across shard processes. The same projector also runs
+in the main driver (`module_artifacts_v1.spl:222,516`). Measure RSS on the
+Stage 2 rerun.
+
+Lint (seed): `public_summary_projector.spl` shows the same 1 error and 6
+warnings before and after the change. The error is `W-ANY-NOTRUN`, and the
+warnings are on lines this change did not touch. The new spec has 0 errors.
+`types.spl` was not linted because it exceeds the lint cost budget
+(`.claude/rules/commands.md`).
