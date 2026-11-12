@@ -1307,10 +1307,19 @@ impl HirLowering:
             return self.resolve_module_key(name)
         # Callers with a logical context already retain its surface/path.
         # Passing that owner avoids an additional per-import registry scan.
-        val physical_name = module_relative_name_from_path(
-            if source_path == "": ctx_name else: source_path, name)
+        val importer_path = if source_path == "": ctx_name else: source_path
+        val physical_name = module_relative_name_from_path(importer_path, name)
         if physical_name != "":
-            return self.resolve_module_key(physical_name)
+            val physical_key = self.resolve_module_key(physical_name)
+            # Same rule as module_surface_resolve_relative_key: an importer
+            # reached through a symlinked directory (src/app/t32_cli ->
+            # examples/...) carries a realpath whose own derivation is not a
+            # registered spelling; only that displaced importer falls through
+            # to the logical splice from `ctx_name`, the key it IS registered
+            # under. A same-path importer keeps the early return.
+            if physical_key != "" or self.surface_index_for_name(
+                    module_logical_name_from_path(importer_path)) >= 0:
+                return physical_key
         var rel_dots = 0
         while rel_dots < name.len() and name.substring(rel_dots, rel_dots + 1) == ".":
             rel_dots = rel_dots + 1
