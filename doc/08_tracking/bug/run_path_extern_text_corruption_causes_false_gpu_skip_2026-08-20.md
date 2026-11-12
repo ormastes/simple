@@ -124,3 +124,35 @@ a helper that prints `value.len()`:
 - via `simple run <script>.spl`  → `len=-1  discrete=false`
 - via `simple test <spec>.spl`   → `len=8   discrete=true`
 
+
+## 2026-11-12 fix attempt — lane fix-runpath-gpu-20261112 (investigated, no in-scope fix)
+
+Traced the run path on current HEAD (7a06b4aafd5). The defect is the
+pure-Simple codegen `text`-extern ABI collapse — the same family as
+`pure_simple_text_extern_abi_audit_2026-07-30`. The confirmed collapse
+sites and the fix design are recorded in
+`doc/05_design/compiler/codegen/pure_simple_text_extern_abi_fix_plan.md`:
+all three backends (`70.backend/backend/_MirToLlvm/class_def.spl`,
+`cranelift_codegen_adapter.spl`, `native/isel_x86_64.spl`) lower a `text`
+operand to one machine word, and the fix requires a shared
+`text_arg_indices` registry plus a MIR-level split at
+`50.mir/_MirLoweringExpr/switch_operators_calls.spl` (`emit_resolved_direct_call`)
+plus per-backend value-splitting. That is compiler-core scope, explicitly
+outside this lane's touch list (MIR lowering and 80.driver are excluded; no
+working compiler exists on the host to verify such a change, and the fix
+plan's own stop condition says "STOP after the plan" for exactly that
+reason). No source change made here; changing CLI code cannot fix a
+codegen ABI defect and a fake change was not made.
+
+The record's second suggestion (harden the `assert_true(probe_result.
+starts_with("skip:"))` idiom so a false skip is not recorded as PASS) lives
+in 8 spec files under `test/`/`examples/` — also outside this lane's touch
+scope. It needs either a runner-side fail-closed rule for capability-probe
+skips on hosts with enumerable devices, or a spec-idiom sweep; recommend a
+lane that owns `test/` specs plus `src/lib/gc_async_mut/gpu_lane` probes.
+
+Verification pending: everything — the codegen fix needs the admitted
+self-hosted compiler plus a Vulkan host; run-vs-test parity re-measurement
+is the acceptance check.
+
+Status: OPEN (fix site out of lane scope; precisely identified).
