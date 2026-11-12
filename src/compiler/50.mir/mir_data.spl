@@ -2829,9 +2829,12 @@ fn bootstrap_fn_param_hir_types_lookup(name: text) -> [HirType]?:
     None
 
 # Receiver-tail METHOD param records share the param registry (and therefore
-# its promotion, symbol-free admission and ambiguity veto) under a distinct
-# key: `#` never occurs in a module path or callable name. The value holds the
-# method's params AFTER the receiver; the receiver is the handle word.
+# its promotion and symbol-free admission) under a distinct key: `#` never
+# occurs in a module path or callable name. The value holds the method's params
+# AFTER the receiver; the receiver is the handle word. The plain-name return
+# ambiguity veto does not cover these keys, so a CONFLICTING re-registration
+# (e.g. two spellings that sanitize to one key) rejects the key instead of
+# letting the last writer win: see bootstrap_method_receiver_tail_params_register_v1.
 pub fn mir_method_receiver_tail_key_v1(link_name: text) -> text:
     link_name + "#receiver-tail"
 
@@ -2855,6 +2858,18 @@ pub fn mir_method_receiver_handle_word_kind_v1(param_name: text, owner_kind: Sym
 # the tail is unregistered, rejected (symbol-bearing) or ambiguous.
 pub fn bootstrap_method_receiver_tail_params_lookup_v1(link_name: text) -> [HirType]?:
     bootstrap_fn_param_hir_types_lookup(mir_method_receiver_tail_key_v1(link_name))
+
+# Register a receiver tail; a differing list under the same key marks the key
+# rejected (unknown signature, fail closed) rather than replacing it.
+pub fn bootstrap_method_receiver_tail_params_register_v1(link_name: text, tys: [HirType]):
+    val key = mir_method_receiver_tail_key_v1(link_name)
+    if _bootstrap_fn_param_hir_types.contains_key(key):
+        if not _bootstrap_fn_hir_type_lists_equal(_bootstrap_fn_param_hir_types[key], tys):
+            if not _bootstrap_fn_param_hir_rejected.contains_key(key):
+                _bootstrap_fn_param_hir_rejected[key] = true
+                _bootstrap_fn_delta_text(key)
+            return
+    bootstrap_fn_param_hir_types_register(key, tys)
 
 # Per-parameter DEFAULT-expression registry.
 #

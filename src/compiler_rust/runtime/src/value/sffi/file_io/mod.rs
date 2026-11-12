@@ -45,7 +45,7 @@ pub use workspace_storage_v1::{rt_workspace_storage_open_v1, rt_workspace_storag
 // Re-export all public functions for compatibility
 pub use metadata::{
     rt_dir_exists, rt_file_exists, rt_file_exists_probe_begin, rt_file_exists_probe_end, rt_file_is_char_device,
-    rt_file_is_regular_no_follow, rt_file_stat,
+    rt_file_is_regular_no_follow, rt_file_modified, rt_file_modified_time, rt_file_stat,
 };
 pub use file_ops::{
     rt_file_canonicalize, rt_file_read_text, rt_file_read_regular_no_follow_bounded, rt_file_read_regular_no_follow_last_failure, rt_file_read_text_rv,

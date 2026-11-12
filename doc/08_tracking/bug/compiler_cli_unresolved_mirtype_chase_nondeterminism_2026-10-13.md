@@ -536,3 +536,24 @@ whole-program-lane rerun on tip source (same worktree, build/goal-p4/build3.log)
 built 3122/3122 surfaces and entered HIR with 0 errors — consistent with the
 nondeterministic/order-dependent classification; final verdict pending that
 run's HIR outcome.
+
+## 2026-11-12 append 2: full-CLI reproduction on tip (af5e27e46de), precise victim set
+
+Whole-program lane (SIMPLE_FILE_WORKERS=0, frozen stage2 574c95d2, 3122-module closure,
+build/goal-p4/build3.log in worktree simple-boot-goal-20261112): HIR completed all modules
+with per-module count=0, then collect-all reported `7 module(s) poisoned, 23 error(s)
+collected across 3122 source(s) in phase 3 (HIR lowering)`.
+
+Victims (error counts from the log):
+- src/app/mcp_t32/protocol.spl — ~100 unresolved (Eq, Ord, std, list, unit, Value, TypeScheme, LayoutBox, VisibilityWarning)
+- src/app/editor/{commands,editor_controller,editor_ctrl_wiki,editor_markdown_helpers}.spl — 39 unresolved (Eq, Ord, LayoutBox, list, unit)
+- src/lib/editor/services/md_diagnostics.spl — 29+ `unresolved type: LineStartTable`
+- `missing module surface for diagnostic_batch / diagnostic_v1 / fix_ranking / fix_transaction / source_position` (std.common.diagnostics submodules)
+
+Decisive datapoint: md_diagnostics.spl ALREADY imports LineStartTable explicitly
+(`use std.common.diagnostics.{... LineStartTable}`, line 13) and the package __init__
+re-exports it (`export source_position.{LineStartTable, ...}`, line 24) — the explicit
+named import through a bare per-item package re-export fails to bind. This is the
+documented bare-per-item-re-export -> package-sibling-inference arm failure, one level
+downstream of the lost cycle-39 closure fix (which is present in partial form and does
+not cover it). Fix lane opened: work/chasefix-20261112.

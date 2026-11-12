@@ -64,6 +64,13 @@ impl Lowerer {
                 return self.lower_thread_group_field(field);
             }
 
+            // Same-named flattened enum: name the declaration the current
+            // owner sees (flatten_struct_owner.rs). `lookup` below is already
+            // owner-scoped; the emitted `Enum::Variant` global must carry the
+            // same owner-exact name, or MIR resolves the variant against the
+            // other module's enum.
+            let scoped_recv_name = self.module.types.scoped_name(recv_name).to_string();
+            let recv_name = &scoped_recv_name;
             // Check if receiver is an enum type - handle as enum variant access
             if let Some(type_id) = self.module.types.lookup(recv_name) {
                 if let Some(HirType::Enum { name: _, variants, .. }) = self.module.types.get(type_id) {
@@ -233,7 +240,7 @@ impl Lowerer {
         if self.should_treat_unresolved_field_as_static_variant(receiver, &recv_hir, field) {
             if let Expr::Identifier(recv_name) = receiver {
                 return Ok(HirExpr {
-                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                    kind: HirExprKind::Global(format!("{}::{}", self.module.types.scoped_name(recv_name), field)),
                     ty: TypeId::ANY,
                 });
             }
@@ -533,6 +540,8 @@ impl Lowerer {
     /// match — never a lenient guess — so it stays side-effect free for
     /// non-enum receivers and cannot hijack ordinary field accesses.
     fn try_lower_qualified_enum_variant(&mut self, enum_name: &str, field: &str) -> Option<HirExpr> {
+        let scoped_enum_name = self.module.types.scoped_name(enum_name).to_string();
+        let enum_name = scoped_enum_name.as_str();
         // Enum registered in the local type registry.
         if let Some(type_id) = self.module.types.lookup(enum_name) {
             if let Some(HirType::Enum { variants, .. }) = self.module.types.get(type_id) {

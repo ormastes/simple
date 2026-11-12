@@ -78,12 +78,16 @@ pub fn worker_hir_argument_error_v1(args: [text]) -> text:
     if not has_closure: return "HIR worker requires an explicit frozen entry closure"
     ""
 
-pub fn worker_hir_environment_key_admitted_v1(key: text) -> bool:
-    # Exact environment is retained. Unknown names cannot acquire configuration
-    # authority just because their values were included in a request digest.
-    val admitted = ["HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "TMP", "TEMP",
+# Exact environment is retained. Unknown names cannot acquire configuration
+# authority just because their values were included in a request digest.
+pub fn worker_hir_base_environment_keys_v1() -> [text]:
+    ["HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "TMP", "TEMP",
         "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "CI", "PWD", "OLDPWD", "SHLVL", "_",
         "SIMPLE_BIN", "SIMPLE_BINARY", "SIMPLE_LIB", "SIMPLE_EXECUTION_MODE",
+        # Set to "1" by bootstrap_main run_bootstrap_stage3_process_route for
+        # every threads>1 bootstrap native-build; it is live (set, non-empty)
+        # when the coordinator admits its HIR pool (2026-11-12).
+        "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING",
         "SIMPLE_NATIVE_BUILD_WORKER", "SIMPLE_HIR_WORKER_PROFILE_V1", "SIMPLE_BUILD_PROGRESS_EVENTS",
         "SIMPLE_COMPILE_FAIL_FAST", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_SCOPE",
         "SIMPLE_HIR_CACHE", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_CACHE_SCOPE",
@@ -103,7 +107,9 @@ pub fn worker_hir_environment_key_admitted_v1(key: text) -> bool:
         "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH", "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256",
         "SIMPLE_MANAGED_PHASE4_SOURCE_ROOT", "SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH",
         "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH", "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256"]
-    admitted.contains(key) or worker_hir_stage3_capsule_environment_keys_v1().contains(key) or
+
+pub fn worker_hir_environment_key_admitted_v1(key: text) -> bool:
+    worker_hir_base_environment_keys_v1().contains(key) or worker_hir_stage3_capsule_environment_keys_v1().contains(key) or
         worker_hir_tool_build_environment_keys_v1().contains(key)
 
 # Exact launch environment of the Stage 3 capsule: the Stage 3 block of
@@ -150,6 +156,27 @@ pub fn worker_hir_tool_build_environment_keys_v1() -> [text]:
         "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256",
         "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"]
 
+# Value gates for admitted keys whose value selects a route. "" when admitted.
+pub fn worker_hir_environment_value_error_v1(key: text, value: text) -> text:
+    if key == "SIMPLE_EXECUTION_MODE" and value != "" and value != "native":
+        return "HIR profile requires compiled internal worker dispatch"
+    # A HIR-profile worker belongs to the two-pass route; the per-file unit
+    # lane spawns its own children and never comes through this profile.
+    if key == "SIMPLE_FILE_WORKERS" and value != "0":
+        return "HIR profile requires SIMPLE_FILE_WORKERS=0"
+    if key == "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING" and value != "1":
+        return "HIR profile requires the internal routing marker to be 1"
+    ""
+
+# Every captured key the profile does not admit, in capture order, without
+# duplicates. Empty when all are admitted.
+pub fn worker_hir_unsupported_environment_keys_v1(captured: [(text, text)]) -> [text]:
+    var out: [text] = []
+    for pair in captured:
+        if not worker_hir_environment_key_admitted_v1(pair.0) and not out.contains(pair.0):
+            out.push(pair.0)
+    out
+
 pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
         sources: [text], deadline_ms: i64) -> Result<WorkerHirProfileV1, text>:
     val opened = match environment_variant_policy_handoff_extract_v1(args):
@@ -175,16 +202,15 @@ pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
     val captured = env_list_checked()?
     if captured.len() > 256: return Err("HIR worker environment exceeds profile bound")
     var bytes: i64 = 0
+    # Name EVERY unsupported key in one refusal: reporting only the first one
+    # turned discovery into one Stage 2 rebuild per key (2026-11-12).
+    val unsupported = worker_hir_unsupported_environment_keys_v1(captured)
+    if unsupported.len() > 0:
+        return Err("unsupported HIR worker environment key: " + unsupported.join(", "))
     for pair in captured:
-        if not worker_hir_environment_key_admitted_v1(pair.0):
-            return Err("unsupported HIR worker environment key: " + pair.0)
         if seen.has(pair.0): return Err("duplicate HIR worker environment key")
-        if pair.0 == "SIMPLE_EXECUTION_MODE" and pair.1 != "" and pair.1 != "native":
-            return Err("HIR profile requires compiled internal worker dispatch")
-        # A HIR-profile worker belongs to the two-pass route; the per-file unit
-        # lane spawns its own children and never comes through this profile.
-        if pair.0 == "SIMPLE_FILE_WORKERS" and pair.1 != "0":
-            return Err("HIR profile requires SIMPLE_FILE_WORKERS=0")
+        val value_error = worker_hir_environment_value_error_v1(pair.0, pair.1)
+        if value_error != "": return Err(value_error)
         seen[pair.0] = true
         bytes = bytes + pair.0.byte_len() + pair.1.byte_len()
         if bytes > 65536: return Err("HIR worker environment exceeds byte bound")

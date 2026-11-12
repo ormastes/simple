@@ -1,0 +1,90 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Regression lock for
+# doc/08_tracking/bug/native_jit_crypto_tls13_pbkdf2_no_extern_c_implementation.md
+# (PBKDF2/TLS-1.3 runtime symbols are interpreter-only Rust builtins with no
+# `extern "C"`/C definition, so native/JIT-compiled callers fail at link time
+# with "undefined reference").
+#
+# Module under test: src/lib/nogc_sync_mut/database/codec/sqlcipher4_keys.spl
+#
+# Evidence chain (all REAL assertions, no placeholders):
+#   1. Structural: the production key-derivation owner must declare NO
+#      `extern fn` and must not call `rt_pbkdf2_hmac_*` — the KDF executes
+#      through the in-tree pbkdf2 owner (rt_sha512_digest fast path, a real
+#      C-runtime symbol, with a byte-identical pure-Simple per-block
+#      fallback), which compiles and links in native/JIT builds. This is the
+#      exact regression guard for the link failure above.
+#   2. Cheap known-answer: the KDF engine preserves the Python
+#      hashlib.pbkdf2_hmac("sha512", ...) vector (c=1, dk=64), guarding the
+#      [u8] <-> [i64] domain conversion around the pure owner.
+#   3. Full locked-profile pipeline: one real open() derives page_key and
+#      hmac_key byte-equal to independent Python hashlib golden values
+#      (passphrase b"Simple key secret", computed 2026-11-12):
+#        file_salt  = 01 23 45 67 89 ab cd ef fe dc ba 98 76 54 32 10
+#        page_key   = PBKDF2-HMAC-SHA512(passphrase, file_salt, 256000, 32)
+#        hmac_salt  = file_salt ^ 0x3a per byte
+#        hmac_key   = PBKDF2-HMAC-SHA512(page_key, hmac_salt, 2, 32)
+#      and close() verifies zeroization.
+
+use std.spec.step
+
+use std.database.codec.sqlcipher4_keys.{
+    _sqlcipher4_pbkdf2_sha512,
+    sqlcipher4_key_session_open, sqlcipher4_key_error_text}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "sqlcipher4 key session — native-linkable KDF engine":
+    it "declares no extern fn and no rt_pbkdf2 call in the KDF owner":
+        # @req REQ-SSPEC-UNIT
+        step("structural: production KDF path has no interpreter-only extern")
+        val source = rt_file_read_text(
+            "src/lib/nogc_sync_mut/database/codec/sqlcipher4_keys.spl") ?? ""
+        expect(source.len() > 0).to_equal(true)
+        expect(source.contains("extern fn")).to_equal(false)
+        expect(source.contains("rt_pbkdf2_hmac_sha512(password")).to_equal(false)
+
+    it "preserves the Python hashlib one-round SHA512 vector through the KDF owner":
+        # @req REQ-SSPEC-UNIT
+        step("derive synthetic bytes through the production KDF owner")
+        val actual = _sqlcipher4_pbkdf2_sha512(
+            [112u8, 97u8, 115u8, 115u8, 119u8, 111u8, 114u8, 100u8],
+            [115u8, 97u8, 108u8, 116u8], 1, 64)
+        expect(actual).to_equal([134u8, 127u8, 112u8, 207u8, 26u8, 222u8, 2u8, 207u8, 243u8, 117u8, 37u8, 153u8, 163u8, 165u8, 61u8, 196u8, 175u8, 52u8, 199u8, 166u8, 105u8, 129u8, 90u8, 229u8, 213u8, 19u8, 85u8, 78u8, 28u8, 140u8, 242u8, 82u8, 192u8, 45u8, 71u8, 10u8, 40u8, 90u8, 5u8, 1u8, 186u8, 217u8, 153u8, 191u8, 233u8, 67u8, 192u8, 143u8, 5u8, 2u8, 53u8, 215u8, 214u8, 139u8, 29u8, 165u8, 94u8, 99u8, 247u8, 59u8, 96u8, 165u8, 127u8, 206u8])
+
+    it "derives the locked-profile keys byte-exact to the Python golden pipeline":
+        # @req REQ-SSPEC-UNIT
+        step("one open() at 256000 iterations against independent hashlib goldens")
+        val passphrase: [u8] = [83u8, 105u8, 109u8, 112u8, 108u8, 101u8, 32u8,
+                                107u8, 101u8, 121u8, 32u8, 115u8, 101u8, 99u8,
+                                114u8, 101u8, 116u8]
+        val file_salt: [u8] = [1u8, 35u8, 69u8, 103u8, 137u8, 171u8, 205u8, 239u8,
+                               254u8, 220u8, 186u8, 152u8, 118u8, 84u8, 50u8, 16u8]
+        val expected_page_key: [u8] = [92u8, 37u8, 15u8, 222u8, 241u8, 72u8, 192u8,
+                                       240u8, 168u8, 17u8, 57u8, 100u8, 126u8, 80u8,
+                                       120u8, 178u8, 238u8, 141u8, 154u8, 101u8, 50u8,
+                                       239u8, 161u8, 207u8, 33u8, 246u8, 176u8, 25u8,
+                                       238u8, 40u8, 8u8, 142u8]
+        val expected_hmac_key: [u8] = [122u8, 152u8, 16u8, 38u8, 176u8, 201u8, 63u8,
+                                       145u8, 162u8, 87u8, 202u8, 57u8, 86u8, 116u8,
+                                       10u8, 24u8, 182u8, 201u8, 168u8, 201u8, 158u8,
+                                       23u8, 150u8, 14u8, 188u8, 245u8, 22u8, 245u8,
+                                       55u8, 21u8, 110u8, 196u8]
+        val opened = sqlcipher4_key_session_open(passphrase, file_salt)
+        var page_key: [u8] = []
+        var hmac_key: [u8] = []
+        var verified = false
+        var err_text: text = ""
+        match opened:
+            Ok(session):
+                page_key = session.page_key
+                hmac_key = session.hmac_key
+                verified = session.close()
+            Err(e):
+                err_text = sqlcipher4_key_error_text(e)
+        expect(err_text).to_equal("")
+        expect(page_key).to_equal(expected_page_key)
+        expect(hmac_key).to_equal(expected_hmac_key)
+        expect(verified).to_equal(true)

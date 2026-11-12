@@ -1610,6 +1610,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_lock", file_io::rt_file_lock);
     insert_simple!("rt_file_mmap_read_bytes", file_io::rt_file_mmap_read_bytes);
     insert_simple!("rt_file_mmap_read_text", file_io::rt_file_mmap_read_text);
+    insert_simple!("rt_file_modified", file_io::rt_file_modified);
+    insert_simple!("rt_file_modified_time", file_io::rt_file_modified_time);
     insert_simple!("rt_file_move", file_io::rt_file_move);
     insert_simple!("rt_file_open", file_io::rt_file_open);
     insert_simple!("rt_file_read_bytes", file_io::rt_file_read_bytes);
