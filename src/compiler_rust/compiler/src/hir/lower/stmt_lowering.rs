@@ -2508,6 +2508,28 @@ impl Lowerer {
                                     },
                                     ty: payload_expr_ty,
                                 }
+                            } else if enum_variant == "Some"
+                                && payload_patterns.len() == 1
+                                && self
+                                    .module
+                                    .types
+                                    .get(subject_ty)
+                                    .and_then(crate::hir::lower::option_pattern_shape_diag::never_option_type_name)
+                                    .is_some()
+                            {
+                                // Flat Option encoding over a bare scalar/text
+                                // subject (`match <i64>: Some(j)`): the subject
+                                // word IS the payload, exactly as the interpreter
+                                // binds it. `rt_enum_payload` asked a non-enum for
+                                // a payload and bound the nil sentinel (j = 3).
+                                // Bug: doc/08_tracking/bug/seed_match_some_on_plain_i64_binds_wrong_value_2026_11_12.md
+                                if let Some(local) = ctx.locals.get_mut(local_idx) {
+                                    local.ty = subject_ty;
+                                }
+                                HirExpr {
+                                    kind: HirExprKind::Local(subject_idx),
+                                    ty: subject_ty,
+                                }
                             } else {
                                 legacy_payload_expr
                             };
@@ -2529,9 +2551,14 @@ impl Lowerer {
                             }
                         };
 
+                        let let_ty = if matches!(value.kind, HirExprKind::Local(s) if s == subject_idx) {
+                            subject_ty
+                        } else {
+                            binding_ty
+                        };
                         binding_stmts.push(HirStmt::Let {
                             local_index: local_idx,
-                            ty: binding_ty,
+                            ty: let_ty,
                             value: Some(value),
                         });
                     }
