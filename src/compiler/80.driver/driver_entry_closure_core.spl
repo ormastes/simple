@@ -1171,6 +1171,16 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
                 generated_owner = ""
             elif line != "" and not raw_line.trim().starts_with("#"):
                 generated_owner = ""
+        # Comma list `export a.X, b.Y` (src/lib/nogc_sync_mut/env/__init__.spl, 24
+        # lines): one `export` line names several siblings. Scan each member
+        # as its own `export ...` line; the per-line scanner rejects commas.
+        if line.starts_with("export ") and line.contains(",") and
+                not line.contains("{") and not line.contains(" from "):
+            for member in line.substring(7).split(","):
+                val sibling = _driver_entry_sibling_path("export " + member.trim())
+                if sibling != "":
+                    result = result.push(sibling)
+            continue
         val sibling = _driver_entry_sibling_path(line)
         if sibling != "":
             result = result.push(sibling)
@@ -1895,10 +1905,15 @@ fn driver_closure_import_specs_finish_v1(path: text, imports: [text], siblings: 
     val dir = _driver_entry_import_dirname(path)
     for sibling in siblings:
         if sibling.starts_with(".") and not sibling.starts_with(".."):
-            val sibling_file = dir + "/" + sibling.substring(1).replace(".", "/") + ".spl"
+            val sibling_base = dir + "/" + sibling.substring(1).replace(".", "/")
+            # A sibling may be a DIRECTORY package (`export common.Codegen` x17
+            # in src/compiler/70.backend/backend/__init__.spl binds
+            # common/__init__.spl): probe the facade and mod.spl like the loader.
             var exists = false
             unsafe(capabilities: [ffi]):
-                exists = _driver_resolver_path_exists_v1(sibling_file)
+                exists = _driver_resolver_path_exists_v1(sibling_base + ".spl") or
+                    _driver_resolver_path_exists_v1(sibling_base + "/__init__.spl") or
+                    _driver_resolver_path_exists_v1(sibling_base + "/mod.spl")
             if exists:
                 specs = specs.push(sibling)
     specs
