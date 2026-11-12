@@ -111,10 +111,37 @@ everything under the owner label.
   only repaints on input, and the dummy agent shows the same, so this is a
   capture limit of the smoke, not a container problem.
 
+## host_cleanup_spec: five stacked causes (0/10 -> 10/10)
+
+Each one hid the next; none was the first visible error's fault.
+
+1. Fixture JSON one brace short (`}}` collapse) -> `engine-info-json-limit`.
+2. Three `distributed_authority_snapshot_v2` functions imported but not `pub`.
+3. `openat` / `geteuid` declared in `retained_file_abi.spl`'s Linux branch but
+   absent from the interpreter's POSIX table
+   (`src/compiler_rust/compiler/src/interpreter_extern/posix_abi.rs`). A libc
+   name needs no runtime twin; it needs an entry there plus the drift pin in
+   `extern_drift_tests.rs`.
+4. **Private directories made with `dir_create`.** That is 0777 & ~umask —
+   0775 under the usual desktop umask 0002 — and
+   `retained_directory_open_trusted_v1` then refuses the directory
+   (`SCVDB_DIR_FINAL_UNTRUSTED`). The journal root, terminal-wait, cleanup
+   store and exec-publication directories now use
+   `directory_create_private` (`std.nogc_sync_mut.io.dir_entry_ops`, 0700 for
+   every missing component; a umask can only clear bits). A spec that
+   pre-creates such a directory must do the same. Setting `umask 022` in the
+   shell did not change the outcome here; do not rely on it.
+5. The cleanup fixture supplied two scripted clock samples; the path reads
+   three (destroy admission, destroy pre-exec check, absence observation) ->
+   `absence-observation-clock-unavailable`.
+
+Also: an inline `std.a.b.fn(...)` expression is not resolved by the
+interpreter (`variable std not found`); import the name. `opt.?` on a nil
+option evaluates to nil, so `assert(x.?)` reports "condition evaluated to
+nil" rather than the real upstream error — print the error field first.
+
 ## Open
 
-- `host_cleanup_spec` is red on the interpreter: `retained_file_abi` declares
-  raw libc `openat`, a native-only boundary the seed interpreter cannot call.
 - `oci_engine_policy_spec` "executes an exact scripted absolute route" and
   `oci_execution_user_v2_spec:34` (`with` not found) fail for unrelated reasons.
 - Provider journal compaction and a provider-level label sweep are not built.
