@@ -609,6 +609,37 @@ fn test_enum_variant_pattern_condition_uses_identity_and_discriminant() {
     );
 }
 
+/// A bare unit variant inside a tuple / array / enum-payload sub-pattern is a
+/// variant test (one `rt_enum_check_variant` per such element), not an
+/// irrefutable binder; lowercase names and names that are not variants of the
+/// slot's enum still bind (no test).
+/// Bug: doc/08_tracking/bug/seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12.md
+#[test]
+fn test_bare_unit_variant_in_sub_pattern_is_variant_test() {
+    let source = "enum Color:\n    Red\n    Green\n\nenum Mode:\n    Relaxed\n\nenum Wrap:\n    Box(c: Color)\n\n\
+fn both_red(a: Color, b: Color) -> i64:\n    match (a, b):\n        case (Red, Red):\n            return 1\n        case _:\n            return 0\n\n\
+fn bind_pair(a: Color, b: Color) -> i64:\n    match (a, b):\n        case (x, y):\n            return 1\n\n\
+fn other_name(a: Color, b: Color) -> i64:\n    match (a, b):\n        case (Red, Relaxed):\n            return 1\n        case _:\n            return 0\n\n\
+fn nested(a: Color, b: Color) -> i64:\n    match ((a, b), a):\n        case ((Red, Green), Red):\n            return 1\n        case _:\n            return 0\n\n\
+fn first_of(xs: [Color]) -> i64:\n    match xs:\n        case [Red, _]:\n            return 1\n        case _:\n            return 0\n\n\
+fn boxed(w: Wrap) -> i64:\n    match w:\n        case Box(Red):\n            return 1\n        case _:\n            return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let checks = |name: &str| -> usize {
+        let func = module
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("missing fn {name}"));
+        format!("{:?}", func.body).matches("rt_enum_check_variant").count()
+    };
+    assert_eq!(checks("both_red"), 2, "`case (Red, Red)` must test both elements");
+    assert_eq!(checks("bind_pair"), 0, "`case (x, y)` binds, it must not test");
+    assert_eq!(checks("other_name"), 1, "`Relaxed` is not a Color variant: it binds");
+    assert_eq!(checks("nested"), 3, "nested tuple elements are tested by their types");
+    assert_eq!(checks("first_of"), 1, "array element of an enum array is tested");
+    assert_eq!(checks("boxed"), 2, "outer tag + bare variant in the payload slot");
+}
+
 #[test]
 fn test_multi_field_enum_payload_keeps_array_type() {
     let source = "enum Payload:\n    Item(text, i64, text)\n\nfn third(value: Payload) -> text:\n    match value:\n        case Payload.Item(_, _, result):\n            return result\n        case _:\n            return \"\"\n";
