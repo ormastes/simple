@@ -56,7 +56,10 @@ class RetainedFile:
         # A failed positional-read restore never closes a copied owner. Reapply
         # the authoritative logical cursor before every sequential native read.
         if SetFilePointerEx(self.handle, self.position as i64, 0, 0u32) != 0:
-            if ReadFile(self.handle, ptr, maximum as u32, ptr + maximum, 0) != 0: count = volatile_read_u32(ptr + maximum)
+            # The OUT dword must sit at a 4-aligned address: volatile_read_u32
+            # assumes alignment and an unaligned slot read garbage back.
+            val out_ptr = ptr + (((maximum + 3) / 4) * 4)
+            if ReadFile(self.handle, ptr, maximum as u32, out_ptr, 0) != 0: count = volatile_read_u32(out_ptr)
         @else:
         count = retained_native_read(self.handle as i32, ptr, maximum as u64)
         @end
@@ -90,7 +93,9 @@ class RetainedFile:
         while offset < bytes.len():
             var count = -1i64
             @when(os="windows"):
-            if WriteFile(self.handle, ptr + offset, (bytes.len() - offset) as u32, ptr + bytes.len(), 0) != 0: count = volatile_read_u32(ptr + bytes.len())
+            # 4-aligned OUT dword slot; see read() for why alignment matters.
+            val out_ptr = ptr + (((bytes.len() + 3) / 4) * 4)
+            if WriteFile(self.handle, ptr + offset, (bytes.len() - offset) as u32, out_ptr, 0) != 0: count = volatile_read_u32(out_ptr)
             @else:
             count = retained_native_write(self.handle as i32, ptr + offset, (bytes.len() - offset) as u64)
             @end
@@ -582,8 +587,10 @@ fn retained_file_read_at(file: RetainedFile, offset: u64, maximum: i64) -> Resul
     var restored = true
     @when(os="windows"):
     if SetFilePointerEx(file.handle, offset as i64, 0, 0u32) != 0:
-        if ReadFile(file.handle, ptr, maximum as u32, ptr + maximum, 0) != 0:
-            count = volatile_read_u32(ptr + maximum)
+        # 4-aligned OUT dword slot; volatile_read_u32 requires alignment.
+        val out_ptr = ptr + (((maximum + 3) / 4) * 4)
+        if ReadFile(file.handle, ptr, maximum as u32, out_ptr, 0) != 0:
+            count = volatile_read_u32(out_ptr)
     restored = SetFilePointerEx(file.handle, file.position as i64, 0, 0u32) != 0
     @else:
     count = pread(file.handle as i32, ptr, maximum as u64, offset as i64)
