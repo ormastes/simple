@@ -6,11 +6,90 @@
 from ..core import {Value, InterpreterError}
 from shared.operators import {eval_int_int, eval_float_float, eval_string_string, int_pow}
 from shared.operators import {TruthinessRules, TypeCoercion, NumericType}
+from compiler.types.units.unit_ops import {UnitValueResult, unit_value_binop}
 
 export eval_binary_op, eval_unary_op
 
+# Unit identity for the operator matrix: a single-field `value` struct whose
+# name is a declared unit keeps its name as the tag; raw ints/floats map to
+# the matrix's scalar spellings. Anything else is "" (not a unit operand).
+fn unit_operand_name(v: Value) -> text:
+    match v.data:
+        case RuntimeValue.Int(_): return "int"
+        case RuntimeValue.Float(_): return "float"
+        case RuntimeValue.Struct(name, fields):
+            if fields.len() == 1 and fields.contains_key("value"):
+                return name
+            return ""
+        case _:
+            return ""
+
+fn unit_operand_payload(v: Value) -> Option<i64>:
+    match v.data:
+        case RuntimeValue.Int(n): return Some(n)
+        case RuntimeValue.Struct(_, fields):
+            match fields.get("value"):
+                case Some(inner):
+                    return inner.as_int()
+                case None:
+                    return None
+        case _:
+            return None
+
+fn unit_op_class(op: &BinOp) -> (text, text):
+    match op:
+        case BinOp.Add: return ("add", "")
+        case BinOp.Sub: return ("sub", "")
+        case BinOp.Mul: return ("mul", "")
+        case BinOp.Div: return ("div", "")
+        case BinOp.Mod: return ("mod", "")
+        case BinOp.Pow: return ("pow", "")
+        case BinOp.Eq: return ("cmp", "eq")
+        case BinOp.Ne: return ("cmp", "ne")
+        case BinOp.Lt: return ("cmp", "lt")
+        case BinOp.Le: return ("cmp", "le")
+        case BinOp.Gt: return ("cmp", "gt")
+        case BinOp.Ge: return ("cmp", "ge")
+        case _: return ("", "")
+
+# Unit dispatch — runs BEFORE the raw numeric paths so a declared unit keeps
+# its identity and only matrix-approved operators execute. Same verdicts as
+# the compiler gate (both consult compiler.types.units.unit_ops).
+fn eval_unit_binary_op(op: &BinOp, left: Value, right: Value) -> Option<Result<Value, InterpreterError>>:
+    val lname = unit_operand_name(left)
+    val rname = unit_operand_name(right)
+    if lname == "" or rname == "":
+        return None
+    val l_scalar = lname == "int" or lname == "float"
+    val r_scalar = rname == "int" or rname == "float"
+    if l_scalar and r_scalar:
+        return None
+    val (cls, cmp_kind) = unit_op_class(op)
+    if cls == "":
+        return None
+    match (unit_operand_payload(left), unit_operand_payload(right)):
+        case (Some(l), Some(r)):
+            match unit_value_binop(cls, cmp_kind, lname, l, rname, r):
+                case UnitValueResult.Fallthrough:
+                    return None
+                case UnitValueResult.Truth(t):
+                    return Some(Ok(Value.bool(t)))
+                case UnitValueResult.Value(type_name, v):
+                    var fields: Dict<String, Value> = Dict.new()
+                    fields.insert("value".to_string(), Value.int(v))
+                    return Some(Ok(Value { kind: ValueKind.Struct, data: RuntimeValue.Struct(type_name.to_string(), fields) }))
+                case UnitValueResult.Error(message):
+                    return Some(Err(InterpreterError.TypeError(message)))
+        case _:
+            return None
+
 # Binary operation evaluation
 fn eval_binary_op(op: &BinOp, left: Value, right: Value) -> Result<Value, InterpreterError>:
+    match eval_unit_binary_op(op, left, right):
+        case Some(result):
+            return result
+        case None:
+            pass
     match op:
         case BinOp.Add:
             return eval_add(left, right)

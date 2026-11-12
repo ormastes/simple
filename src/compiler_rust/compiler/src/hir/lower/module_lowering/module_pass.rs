@@ -1449,6 +1449,77 @@ impl Lowerer {
     /// so omitted trailing arguments can be filled at call sites (`lower_call`).
     /// Captured here (from the AST) because the HIR function *type* carries only
     /// parameter TypeIds, not the default exprs.
+    /// Declared defaults of `params` as a call site may lower them. A default
+    /// that is a bare name of a `const` bound to a scalar literal -- declared
+    /// by the callee's module `owner`, or imported by it (re-exports and globs
+    /// followed) -- is replaced by that literal, so an omitting call fills the
+    /// slot with the value the CALLEE's scope gives the name; the caller's
+    /// scope is never consulted. Every other default is kept verbatim and
+    /// stays subject to `is_fillable_default`.
+    fn call_site_defaults(&self, owner: Option<&str>, params: &[simple_parser::ast::Parameter]) -> Vec<Option<simple_parser::ast::Expr>> {
+        use simple_parser::ast::Expr;
+        params
+            .iter()
+            .map(|param| match &param.default {
+                Some(Expr::Identifier(name))
+                    if name != "None"
+                        // A sibling parameter or a function of that name
+                        // shadows any const; not a constant default.
+                        && !params.iter().any(|other| other.name == *name)
+                        && !self.flatten_fn_owners.contains_key(name) =>
+                {
+                    match self.literal_const_in_scope(owner, name, 0) {
+                        Ok(Some(literal)) => Some(literal),
+                        _ => param.default.clone(),
+                    }
+                }
+                default => default.clone(),
+            })
+            .collect()
+    }
+
+    /// Literal of the `const` that `name` denotes inside module `owner`:
+    /// `Ok(Some)` when it resolves to exactly one scalar-literal const,
+    /// `Ok(None)` when `owner` neither declares nor imports the name, and
+    /// `Err(())` (fail closed) when the name is a non-literal or duplicated
+    /// global, two glob sources provide it, or the import chain loops or
+    /// exceeds the hop budget.
+    fn literal_const_in_scope(
+        &self,
+        owner: Option<&str>,
+        name: &str,
+        hops: usize,
+    ) -> Result<Option<simple_parser::ast::Expr>, ()> {
+        if hops > 8 {
+            return Err(());
+        }
+        if let Some(declared) = self.flatten_const_literals.get(&(owner.map(str::to_string), name.to_string())) {
+            return declared.clone().map(Some).ok_or(());
+        }
+        let importer = owner.unwrap_or("<entry>");
+        if let Some((source_owner, source_name)) =
+            self.flatten_owner_import_bindings.get(importer).and_then(|bindings| bindings.get(name))
+        {
+            if Some(source_owner.as_str()) == owner {
+                return Err(());
+            }
+            return self.literal_const_in_scope(Some(source_owner), source_name, hops + 1);
+        }
+        let mut found = None;
+        for glob_owner in self.flatten_owner_glob_sources.get(importer).into_iter().flatten() {
+            if Some(glob_owner.as_str()) == owner {
+                continue;
+            }
+            if let Some(literal) = self.literal_const_in_scope(Some(glob_owner), name, hops + 1)? {
+                if found.is_some() {
+                    return Err(());
+                }
+                found = Some(literal);
+            }
+        }
+        Ok(found)
+    }
+
     fn collect_fn_param_defaults(&mut self, ast_module: &Module) {
         for item in &ast_module.items {
             if let Node::Function(f) = item {
@@ -1459,7 +1530,7 @@ impl Lowerer {
                 self.fn_param_names
                     .insert(symbol.clone(), if f.params.iter().any(|p| p.variadic) { Vec::new() } else { f.params.iter().map(|p| p.name.clone()).collect() });
                 self.fn_param_defaults
-                    .insert(symbol.clone(), f.params.iter().map(|p| p.default.clone()).collect());
+                    .insert(symbol.clone(), self.call_site_defaults(owner.as_deref(), &f.params));
                 // Bool-admission slots: which declared parameters are exactly
                 // `bool`. Parallel to `fn_param_names` (same keying rules,
                 // including the empty-for-variadic rule — a variadic call
@@ -1489,6 +1560,7 @@ impl Lowerer {
                     _ => None,
                 };
                 if let Some(owner) = owner {
+                    let module_owner = Self::flatten_owner_of(impl_block.attributes.iter().map(|a| a.name.as_str()));
                     for method in &impl_block.methods {
                         let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                             &method.params[1..]
@@ -1496,13 +1568,14 @@ impl Lowerer {
                         if user_params.iter().any(|p| p.default.is_some()) {
                             self.fn_param_defaults.insert(
                                 format!("{}.{}", owner, method.name),
-                                user_params.iter().map(|p| p.default.clone()).collect(),
+                                self.call_site_defaults(module_owner.as_deref(), user_params),
                             );
                         }
                     }
                 }
             }
             if let Node::Class(class) = item {
+                let module_owner = Self::flatten_owner_of(class.attributes.iter().map(|a| a.name.as_str()));
                 for method in &class.methods {
                     let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                         &method.params[1..]
@@ -1510,12 +1583,13 @@ impl Lowerer {
                     if user_params.iter().any(|p| p.default.is_some()) {
                         self.fn_param_defaults.insert(
                             format!("{}.{}", class.name, method.name),
-                            user_params.iter().map(|p| p.default.clone()).collect(),
+                            self.call_site_defaults(module_owner.as_deref(), user_params),
                         );
                     }
                 }
             }
             if let Node::Struct(struct_) = item {
+                let module_owner = Self::flatten_owner_of(struct_.attributes.iter().map(|a| a.name.as_str()));
                 for method in &struct_.methods {
                     let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                         &method.params[1..]
@@ -1523,7 +1597,7 @@ impl Lowerer {
                     if user_params.iter().any(|p| p.default.is_some()) {
                         self.fn_param_defaults.insert(
                             format!("{}.{}", struct_.name, method.name),
-                            user_params.iter().map(|p| p.default.clone()).collect(),
+                            self.call_site_defaults(module_owner.as_deref(), user_params),
                         );
                     }
                 }
@@ -1793,6 +1867,7 @@ impl Lowerer {
         super::validation::validate_no_duplicate_impl_methods(ast_module)?;
         // Same-named globals of different flattened modules get owner-exact
         // symbols before any registration (see `flatten_global_owner.rs`).
+        self.flatten_const_literals = super::flatten_global_owner::const_literal_census(&ast_module.items);
         let qualified = self.qualify_flattened_globals(ast_module);
         let ast_module: &Module = qualified.as_ref().unwrap_or(ast_module);
 
@@ -2439,6 +2514,7 @@ impl Lowerer {
         super::validation::validate_no_duplicate_impl_methods(ast_module)?;
         // Same-named globals of different flattened modules get owner-exact
         // symbols before any registration (see `flatten_global_owner.rs`).
+        self.flatten_const_literals = super::flatten_global_owner::const_literal_census(&ast_module.items);
         let qualified = self.qualify_flattened_globals(ast_module);
         let ast_module: &Module = qualified.as_ref().unwrap_or(ast_module);
 

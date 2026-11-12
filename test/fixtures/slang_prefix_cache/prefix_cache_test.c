@@ -52,6 +52,12 @@ void mock_llama_fail_restore_once(void);
 void mock_llama_fail_remove_once(void);
 void mock_llama_fail_serialize_once(void);
 void mock_llama_fail_decode_once(void);
+void mock_llama_corrupt_restore_once(void);
+void mock_llama_short_decode_once(void);
+int64_t mock_llama_restore_calls(void);
+void mock_llama_set_n_ubatch(uint32_t);
+int64_t mock_llama_short_first_decodes(void);
+int64_t mock_llama_decode_calls(void);
 static void text(const char *s) { slang_ggml_str_reset(); while (*s) slang_ggml_str_push((unsigned char)*s++); }
 static void prefill(const char *s, int64_t expected_start) {
     text(s);
@@ -203,6 +209,54 @@ int main(void) {
     assert(slang_ggml_request_close(contender) == 0);
     assert(slang_ggml_prefix_cache_configure(0, 0) < 0);
     assert(slang_ggml_request_close(consumer) == 0);
+
+    /* Fail closed: a snapshot is never restored into a request whose context
+     * size differs from the one it was taken from. */
+    assert(slang_ggml_prefix_cache_configure(2, 1024) == 2);
+    int64_t restores = mock_llama_restore_calls();
+    int64_t failures = slang_ggml_prefix_restore_failures();
+    int64_t resized = slang_ggml_request_create(16);
+    request_prefill(resized, "pinY", 0);
+    assert(mock_llama_restore_calls() == restores);
+    assert(slang_ggml_prefix_restore_failures() == failures);
+    assert(slang_ggml_request_close(resized) == 0);
+
+    /* Fail closed: a restore that reports success but leaves fewer cells than
+     * the reused tokens is dropped, and the whole prompt is prefilled. */
+    int64_t verified = slang_ggml_request_create(32);
+    mock_llama_corrupt_restore_once();
+    request_prefill(verified, "pinZ", 0);
+    assert(mock_llama_restore_calls() == restores + 1);
+    assert(slang_ggml_prefix_restore_failures() == failures + 1);
+    assert(slang_ggml_request_close(verified) == 0);
+
+    /* Fail closed: a context whose cells do not match its token list is
+     * never admitted as a snapshot. */
+    admissions = slang_ggml_prefix_admissions();
+    int64_t holed = slang_ggml_request_create(32);
+    request_text(holed, "hole");
+    assert(slang_ggml_request_tokenize(holed, 1) == 5);
+    assert(slang_ggml_request_prefix_prepare(holed) == 0);
+    mock_llama_short_decode_once();
+    assert(slang_ggml_request_eval_prompt(holed) == 5);
+    assert(slang_ggml_prefix_admissions() == admissions);
+    assert(slang_ggml_request_close(holed) == 0);
+
+    /* The full-first-micro-batch rule is off for a model with no offloaded
+     * layers: nothing is warmed up and no reuse is given back. */
+    mock_llama_set_n_ubatch(4);
+    int64_t decodes = mock_llama_decode_calls();
+    int64_t cpu_tiny = slang_ggml_request_create(32);
+    request_prefill(cpu_tiny, "ab", 0);
+    assert(mock_llama_decode_calls() == decodes + 1);
+    assert(slang_ggml_request_close(cpu_tiny) == 0);
+    int64_t cpu_seeded = slang_ggml_request_create(32);
+    request_prefill(cpu_seeded, "warmup", 0);
+    assert(slang_ggml_request_close(cpu_seeded) == 0);
+    int64_t cpu_hit = slang_ggml_request_create(32);
+    request_prefill(cpu_hit, "warmupX", 6);
+    assert(slang_ggml_request_close(cpu_hit) == 0);
+    mock_llama_set_n_ubatch(1);
     assert(slang_ggml_prefix_cache_configure(0, 0) == 0);
     assert(slang_ggml_free() == 0);
     assert(slang_ggml_context_profile_configure(0, 0) == 0);
@@ -214,5 +268,38 @@ int main(void) {
     assert(slang_ggml_request_kv_clear(first) < 0);
     assert(slang_ggml_prefix_hits() == 0);
     assert(slang_ggml_prefix_resident_bytes() == 0);
+
+    /* With layers offloaded, the first decode a context runs is always one
+     * full micro-batch: a cold prompt shorter than that is preceded by a
+     * throwaway full micro-batch, and a restore gives reuse back until its
+     * suffix is a full micro-batch. */
+    text("model"); assert(slang_ggml_model_load(-1) == 0);
+    assert(slang_ggml_prefix_cache_configure(2, 1024) == 2);
+    mock_llama_set_n_ubatch(4);
+    int64_t short_first = mock_llama_short_first_decodes();
+    int64_t tiny = slang_ggml_request_create(32);
+    request_prefill(tiny, "ab", 0);
+    assert(mock_llama_short_first_decodes() == short_first);
+    assert(slang_ggml_request_close(tiny) == 0);
+    int64_t seeded = slang_ggml_request_create(32);
+    request_prefill(seeded, "warmup", 0);
+    assert(slang_ggml_request_close(seeded) == 0);
+    int64_t backed_off = slang_ggml_request_create(32);
+    request_prefill(backed_off, "warmupX", 4);
+    assert(mock_llama_short_first_decodes() == short_first);
+    assert(slang_ggml_request_close(backed_off) == 0);
+    int64_t full_suffix = slang_ggml_request_create(32);
+    request_prefill(full_suffix, "warmupXabcd", 7);
+    assert(mock_llama_short_first_decodes() == short_first);
+    assert(slang_ggml_request_close(full_suffix) == 0);
+    /* Off again when the micro-batch is the whole context. */
+    mock_llama_set_n_ubatch(32);
+    decodes = mock_llama_decode_calls();
+    int64_t whole = slang_ggml_request_create(32);
+    request_prefill(whole, "zz", 0);
+    assert(mock_llama_decode_calls() == decodes + 1);
+    assert(slang_ggml_request_close(whole) == 0);
+    mock_llama_set_n_ubatch(1);
+    assert(slang_ggml_free() == 0);
     return 0;
 }

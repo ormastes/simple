@@ -1,7 +1,8 @@
 # Purpose: the legacy container test backend is bounded, killable and leaves
 # no container behind on normal exit, failure or timeout. Scripted engine only.
 use std.nogc_sync_mut.test_runner.test_runner_container.{
-    container_run_test_bounded_v1, container_test_named_argv_v1, container_test_reap_argv_v1
+    container_run_test_bounded_v1, container_test_named_argv_v1, container_test_reap_argv_v1,
+    container_test_absence_v1, container_test_timeout_ms_v1, CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1
 }
 use std.io_runtime.read_file_text
 
@@ -26,7 +27,9 @@ fn engine_runner(runtime: text, args: [text], timeout_ms: i64) -> (text, text, i
         if engine_mode != "stuck": engine_present = []
         return ("", "", 0)
     if args[0] == "container":
-        return ("", "", if engine_present.len() > 0: 0 else: 1)
+        if engine_mode == "daemon-down": return ("", "Cannot connect to the Docker daemon", 1)
+        if engine_present.len() > 0: return ("present", "", 0)
+        return ("", "Error: no such container " + args[2], 125)
     ("", "unexpected", 2)
 
 fn run_bounded(timeout_ms: i64) -> (text, text, i64, i64):
@@ -78,8 +81,31 @@ describe "Bounded legacy container test run":
         expect(result.1).to_equal("invalid-container-timeout")
         expect(engine_calls.len()).to_equal(0)
 
-    it "has one owner: the app copy is a re-export with no stub clock or shell":
+    it "treats only the engine's explicit not-found answer as gone":
+        expect(container_test_absence_v1(0, "present", "")).to_equal("present")
+        expect(container_test_absence_v1(125, "", "Error: no such container simple-test-1-2")).to_equal("gone")
+        expect(container_test_absence_v1(1, "[]", "Error response from daemon: No such container: simple-test-1-2")).to_equal("gone")
+        expect(container_test_absence_v1(1, "", "Cannot connect to the Docker daemon")).to_equal("unknown")
+        expect(container_test_absence_v1(125, "", "Error: permission denied")).to_equal("unknown")
+        expect(container_test_absence_v1(-1, "", "[TIMEOUT: Process killed after 30s]")).to_equal("unknown")
+
+    it "fails a run whose removal could not be verified instead of calling it clean":
+        engine_reset("daemon-down")
+        val result = run_bounded(2000)
+        expect(result.2).to_equal(1)
+        expect(result.1).to_contain("removal unverified: inspect exit 1")
+
+    it "caps an unconfigured run at a 24 h backstop and honours an explicit limit":
+        expect(CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1).to_equal(86400000)
+        expect(container_test_timeout_ms_v1("")).to_equal(86400000)
+        expect(container_test_timeout_ms_v1("600000")).to_equal(600000)
+        expect(container_test_timeout_ms_v1("0")).to_equal(86400000)
+        expect(container_test_timeout_ms_v1("10m")).to_equal(86400000)
+        expect(container_test_timeout_ms_v1("-5")).to_equal(86400000)
+
+    it "has one owner: the app file is an explicit facade with no stub clock, shell or glob re-export":
         val app = read_file_text("src/app/test_runner_new/test_runner_container.spl")
-        expect(app).to_contain("export use std.nogc_sync_mut.test_runner.test_runner_container.*")
+        expect(app).to_contain("container_run_test as backend_run_test")
+        expect(app.contains("export use")).to_equal(false)
         expect(app.contains("fn time_now_ms")).to_equal(false)
         expect(app.contains("shell(")).to_equal(false)

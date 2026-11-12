@@ -115,3 +115,17 @@ retry or start a full bootstrap in this lane; resume from a separately admitted
 self-hosted candidate and run only
 `NATIVE_PARITY_CASES=module_global_text_array_persistence`.
 
+
+## Fix verification
+
+2026-11-12: The source fix (unannotated primitive literal module globals get
+inferred static types; text globals are runtime-initialized via
+`rt_string_new_literal` into a `ptr` slot) is present on release/1.0.0. Parse-to-LLVM
+evidence: `var name = ""` emits `@g_literal_globals__name = hidden global ptr
+zeroinitializer, align 8` with a boxed `store ptr` from `__module_init_*`; no
+`global i64 getelementptr`, no `ptrtoint`. The two regression specs for this
+bug were stale (pre-module-prefix names, pre-runtime-init initializer
+expectations); repaired in this change so they assert the current safe
+behavior. `llvm_module_var_text_global_type_spec.spl` 8/8 PASS,
+`llvm_mutable_global_static_spec.spl` 4/4 PASS (seed-hosted,
+`--mode=interpreter`).

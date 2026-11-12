@@ -5,8 +5,8 @@
 
 use std.nogc_async_mut.mcp.fileio_protection (ProtectionEngine, RuleType, RuleAction, ProtectionResult, create_engine)
 use std.nogc_async_mut.mcp.fileio_temp (TempManager, create_temp_manager)
-use std.nogc_sync_mut.io.process_ops.{shell}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_copy, file_delete, file_read_nullable, file_write}
+use std.nogc_sync_mut.io_runtime.{file_append_text, file_rename}
 use std.nogc_async_mut.mcp.fileio_json (LB, RB, Q, jp, js, jo2, make_prop, make_tool_schema_multi)
 
 # MCP Server state
@@ -22,7 +22,10 @@ class FileIOServer:
             engine: nil,
             temp_manager: nil,
             config_path: config_path,
-            temp_base: "/tmp/fileio_temp"
+            # Relative temp base: the fileio_main_spec contract (REQ-SSPEC-APP)
+            # redirects under CWD-relative tmp/fileio_temp, and an absolute
+            # /tmp default is not portable to Windows hosts.
+            temp_base: "tmp/fileio_temp"
         )
 
     # Lazily construct the protection engine
@@ -377,30 +380,30 @@ class FileIOServer:
             parts.push("\"" + files[i] + "\"")
         "[" + parts.join("") + "]"
 
-    # File operations
+    # File operations -- portable runtime facades, not POSIX shell one-liners:
+    # cmd.exe (the Windows shell) has no cat/rm/cp/mv, so the shell form broke
+    # every allowed-path operation on Windows while config-string denials
+    # (matched before any FS touch) kept passing.
     fn read_file(path: text) -> text:
-        shell("cat '{path}' 2>/dev/null || echo ''")
+        file_read_nullable(path) ?? ""
 
     fn write_file(path: text, content: text):
-        # Escape content for shell
-        val escaped = content.replace("'", "'\\''")
-        shell("echo '{escaped}' > '{path}'")
+        file_write(path, content)
 
     fn delete_file(path: text):
-        shell("rm -f '{path}'")
+        file_delete(path)
 
     fn copy_file(src: text, dest: text):
-        shell("cp '{src}' '{dest}'")
+        file_copy(src, dest)
 
     fn move_file(src: text, dest: text):
-        shell("mv '{src}' '{dest}'")
+        file_rename(src, dest)
 
     fn atomic_write_file(path: text, content: text):
         file_atomic_write(path, content)
 
     fn append_file(path: text, content: text):
-        val escaped = content.replace("'", "'\\''")
-        shell("echo '{escaped}' >> '{path}'")
+        file_append_text(path, content)
 
     # Response helpers
     fn success_response(data: text) -> text:

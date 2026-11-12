@@ -1,0 +1,145 @@
+# MDSOC+ public-view projection: cumulative reveal levels, feature/layer
+# selectors and the hidden summary every view carries in-band. Pure: the
+# classifier that assigns a class to a declaration lives at the app seam
+# (app.cli._QueryVisibility.visibility_class); this module only projects.
+# Design: doc/05_design/app/source_view/public_view_by_feature_layer.md
+use std.common.json.value.{JsonValue, json_value_object_from}
+
+pub struct SourceVisibleSymbolV1:
+    name: text
+    kind: text
+    visibility_class: text
+    feature: text
+    layer: text
+
+pub struct SourceHiddenSummaryV1:
+    visibility: text
+    feature: text
+    layer: text
+    hidden: i64
+    by_class: [(text, i64)]
+    by_kind: [(text, i64)]
+    by_class_kind: [(text, i64)]
+    top_names: [text]
+    next_level: text
+
+# Reveal levels in order; each admits every class at or before its rank.
+val SOURCE_VISIBILITY_LEVELS_V1 = ["public", "feature_private", "layer_private", "all"]
+val SOURCE_VISIBILITY_CLASSES_V1 = ["public", "feature_private", "layer_private", "module_private"]
+
+fn source_visibility_rank_v1(value: text) -> i64:
+    var index = 0
+    for level in SOURCE_VISIBILITY_LEVELS_V1:
+        if level == value: return index
+        index = index + 1
+    -1
+
+fn source_visibility_class_rank_v1(visibility_class: text) -> i64:
+    var index = 0
+    for known in SOURCE_VISIBILITY_CLASSES_V1:
+        if known == visibility_class: return index
+        index = index + 1
+    # An unknown class is never admitted below `all`; nothing hides silently.
+    3
+
+pub fn source_visibility_level_valid_v1(level: text) -> bool:
+    source_visibility_rank_v1(level) >= 0
+
+pub fn source_visibility_admits_v1(visibility_class: text, level: text) -> bool:
+    val rank = source_visibility_rank_v1(level)
+    if rank < 0: return false
+    source_visibility_class_rank_v1(visibility_class) <= rank
+
+pub fn source_symbol_kind_group_v1(kind: text) -> text:
+    if kind == "fn" or kind == "function" or kind == "extern_fn": return "fn"
+    if kind == "method" or kind == "static_method": return "method"
+    if kind == "field" or kind == "variant": return "field"
+    if kind == "binding" or kind == "val" or kind == "var" or kind == "const": return "const"
+    if kind == "class" or kind == "struct" or kind == "enum" or kind == "trait" or kind == "impl" or kind == "actor" or kind == "bitfield" or kind == "type":
+        return "type"
+    kind
+
+pub fn source_selector_admits_v1(symbol: SourceVisibleSymbolV1, feature: text, layer: text) -> bool:
+    if feature != "" and symbol.feature != feature: return false
+    if layer != "" and symbol.layer != layer: return false
+    true
+
+fn source_count_bump_v1(counts: [(text, i64)], key: text) -> [(text, i64)]:
+    var result: [(text, i64)] = []
+    var found = false
+    for (name, count) in counts:
+        if name == key:
+            result.push((name, count + 1))
+            found = true
+        else:
+            result.push((name, count))
+    if not found: result.push((key, 1))
+    result
+
+pub fn source_hidden_summary_v1(symbols: [SourceVisibleSymbolV1], level: text,
+        feature: text, layer: text) -> SourceHiddenSummaryV1:
+    var by_class: [(text, i64)] = []
+    var by_kind: [(text, i64)] = []
+    var by_class_kind: [(text, i64)] = []
+    var top: [text] = []
+    var hidden = 0
+    var next_rank = -1
+    for symbol in symbols:
+        if not source_selector_admits_v1(symbol, feature, layer): continue
+        if source_visibility_admits_v1(symbol.visibility_class, level): continue
+        hidden = hidden + 1
+        by_class = source_count_bump_v1(by_class, symbol.visibility_class)
+        val group = source_symbol_kind_group_v1(symbol.kind)
+        by_kind = source_count_bump_v1(by_kind, group)
+        by_class_kind = source_count_bump_v1(by_class_kind, symbol.visibility_class + " " + group)
+        if top.len() < 5: top.push(symbol.name)
+        val class_rank = source_visibility_class_rank_v1(symbol.visibility_class)
+        if next_rank < 0 or class_rank < next_rank: next_rank = class_rank
+    val next_level = if next_rank < 0: "" else: SOURCE_VISIBILITY_LEVELS_V1[next_rank]
+    SourceHiddenSummaryV1(level, feature, layer, hidden, by_class, by_kind, by_class_kind, top, next_level)
+
+fn source_hidden_breakdown_v1(symbols_by_class_kind: [(text, i64)]) -> text:
+    var parts: [text] = []
+    for (name, count) in symbols_by_class_kind: parts.push(str(count) + " " + name)
+    parts.join(", ")
+
+pub fn source_hidden_hint_v1(summary: SourceHiddenSummaryV1, surface: text) -> text:
+    if summary.hidden == 0:
+        return "⋯ 0 hidden at visibility=\"" + summary.visibility + "\""
+    val selector = (if summary.feature != "": " feature=\"" + summary.feature + "\"" else: "") +
+        (if summary.layer != "": " layer=\"" + summary.layer + "\"" else: "")
+    val tool = if surface == "source_open": "source_open" else: "lsp_symbols"
+    var handles: [text] = []
+    handles.push(tool + " visibility=\"" + summary.next_level + "\"" + selector)
+    if surface != "source_open":
+        handles.push("LSP initializationOptions.simple.visibility=\"" + summary.next_level +
+            "\" or workspace/executeCommand simple.setVisibility [\"" + summary.next_level + "\"]")
+    if summary.next_level != "all": handles.push("visibility=\"all\" shows everything")
+    "⋯ " + str(summary.hidden) + " hidden (" + source_hidden_breakdown_v1(summary.by_class_kind) +
+        ") — reveal: " + handles.join("; ")
+
+fn source_counts_json_v1(counts: [(text, i64)]) -> JsonValue:
+    var pairs: [(text, JsonValue)] = []
+    for (name, count) in counts: pairs.push((name, JsonValue.Int(count)))
+    json_value_object_from(pairs)
+
+pub fn source_hidden_summary_json_v1(summary: SourceHiddenSummaryV1, surface: text) -> JsonValue:
+    var names: [JsonValue] = []
+    for name in summary.top_names: names.push(JsonValue.Str(name))
+    val level = if summary.next_level == "": "all" else: summary.next_level
+    var mcp: [(text, JsonValue)] = [("visibility", JsonValue.Str(level))]
+    if summary.feature != "": mcp.push(("feature", JsonValue.Str(summary.feature)))
+    if summary.layer != "": mcp.push(("layer", JsonValue.Str(summary.layer)))
+    val lsp = json_value_object_from([
+        ("initializationOptions", json_value_object_from([("simple", json_value_object_from([("visibility", JsonValue.Str(level))]))])),
+        ("command", JsonValue.Str("simple.setVisibility")),
+        ("arguments", JsonValue.Array([JsonValue.Str(level)]))])
+    json_value_object_from([
+        ("visibility", JsonValue.Str(summary.visibility)),
+        ("hidden", JsonValue.Int(summary.hidden)),
+        ("by_class", source_counts_json_v1(summary.by_class)),
+        ("by_kind", source_counts_json_v1(summary.by_kind)),
+        ("top_names", JsonValue.Array(names)),
+        ("next_level", JsonValue.Str(summary.next_level)),
+        ("reveal", json_value_object_from([("mcp", json_value_object_from(mcp)), ("lsp", lsp)])),
+        ("hint", JsonValue.Str(source_hidden_hint_v1(summary, surface)))])
