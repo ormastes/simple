@@ -40,6 +40,7 @@ use compiler.driver.cache.module_artifacts_v1.{module_artifact_module_id_v1,
     module_tldr_companion_path_v1, module_tldr_companion_render_sections_v1,
     module_tldr_companion_view_sections_v1, module_artifact_publish_atomic_v1}
 use compiler.core.parser.{par_had_error_get}
+use compiler.core.types.{reset_all_pools}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_hits, frontend_parse_cache_misses}
 use std.nogc_sync_mut.io_runtime.{env_get}
 
@@ -290,6 +291,17 @@ fn _driver_run_parse_fibers(
                 else:
                     parsed = parsed + 1
                     val module_id = module_artifact_module_id_v1(e.path)
+                    # The AOT parse above ran in a per-file transient scope that has
+                    # already ended: the flat type/span pools reset inside it (spans,
+                    # named-type fields/modules, ...) are not promoted and now name
+                    # reclaimed storage. The public-summary projection below runs a
+                    # second low-level parse that pushes into those same globals
+                    # (parser_init_with_path does not reset them) -- an access
+                    # violation in flat_span_new / named_type_register on Windows.
+                    # The TLDR view reads only the ParserModule and the source, and
+                    # the next file's parse resets the pools again inside its own
+                    # scope, so give the summary parse fresh process-lived pools.
+                    reset_all_pools()
                     val (sections, _refusal) = module_tldr_companion_view_sections_v1(selected.unwrap(),
                         e.path, e.content, module_id)
                     val tldr = module_tldr_companion_render_sections_v1(module_id, e.content, sections)

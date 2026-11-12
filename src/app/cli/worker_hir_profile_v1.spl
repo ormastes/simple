@@ -17,6 +17,8 @@ pub struct WorkerHirProfileV1:
     configuration_digest: text
     deadline_ms: i64
 
+pub const WORKER_HIR_NO_FROZEN_CLOSURE_V1: text = "HIR worker requires an explicit frozen entry closure"
+
 # Deliberately literal: a new compiler switch requires profile review.
 pub fn worker_hir_argument_error_v1(args: [text]) -> text:
     val switches = ["--entry-closure", "--strip", "--release", "--release-optimized",
@@ -75,8 +77,19 @@ pub fn worker_hir_argument_error_v1(args: [text]) -> text:
                 matched = true
         if not matched: return "unsupported HIR worker option: " + arg
         index = index + 1
-    if not has_closure: return "HIR worker requires an explicit frozen entry closure"
+    if not has_closure: return WORKER_HIR_NO_FROZEN_CLOSURE_V1
     ""
+
+# An ordinary (auto) HIR warm-up pool over a build that names no frozen entry
+# closure is skipped, so the coordinator lowers HIR in process -- the same
+# route a 0-worker memory clamp already takes. Before this, whether such a
+# build succeeded depended on free memory: an admitted pool was refused here
+# and the refusal blocked the whole build. An explicit SIMPLE_HIR_SHARDING=1
+# request (which includes the HIR-only route) stays fail-closed, as does every
+# other argument refusal.
+pub fn worker_hir_pool_skip_without_closure_v1(user_args: [text], hir_sharding: text) -> bool:
+    if hir_sharding == "1": return false
+    worker_hir_argument_error_v1(user_args) == WORKER_HIR_NO_FROZEN_CLOSURE_V1
 
 # Exact environment is retained. Unknown names cannot acquire configuration
 # authority just because their values were included in a request digest.
