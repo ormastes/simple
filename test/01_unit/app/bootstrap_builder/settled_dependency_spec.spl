@@ -6,12 +6,23 @@ use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildRunV1, Build
     builder_task_identity_v1}
 use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_encode_v1}
 use app.bootstrap_builder.codec.{builder_write_result_v1}
-use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1, builder_process_portable_v1}
 use app.io.file_ops.{file_atomic_write, file_hash_sha256, path_absolute}
 use app.io.dir_ops.{dir_create_all}
 use app.io.time_ops.{time_now_unix_micros}
 use std.common.build_manager.capacity_request.{BuilderCapacitySettlementV1,
     builder_capacity_settlement_encode_v1}
+use app.bootstrap_builder.process_port_windows.{builder_process_windows_v1}
+use app.io.env_ops.{host_os}
+
+fn settled_process_v1() -> BuilderProcessPortV1:
+    # Windows root resolution and prune safety walk directories through the
+    # process port's no-follow check; the portable stub always declines, so
+    # match the production buildrunner/windows_main.spl composition here.
+    if host_os() == "windows":
+        builder_process_windows_v1()
+    else:
+        builder_process_portable_v1()
 
 fn settled_dependency_fixture(mode: text) -> (BuildRunV1, BuilderCliV1):
     val root = path_absolute(".").replace("\\", "/") + "/build/settled-query-" +
@@ -64,9 +75,9 @@ describe "settled dependency query never admits index content":
     it "admits reaped ERROR2 and crash ownership without requiring an index artifact":
         for mode in ["error", "crash"]:
             val (run, config) = settled_dependency_fixture(mode)
-            expect(builder_cli_verify_settled_v1(run, config, builder_process_portable_v1())).to_equal(0)
+            expect(builder_cli_verify_settled_v1(run, config, settled_process_v1())).to_equal(0)
 
     it "rejects unresolved missing malformed mismatched cancelled and timeout evidence":
         for mode in ["unresolved", "running", "pending", "no-reap", "unsettled", "malformed", "mismatched", "cancel", "timeout"]:
             val (run, config) = settled_dependency_fixture(mode)
-            expect(builder_cli_verify_settled_v1(run, config, builder_process_portable_v1())).to_equal(2)
+            expect(builder_cli_verify_settled_v1(run, config, settled_process_v1())).to_equal(2)
