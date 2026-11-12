@@ -7,7 +7,8 @@ use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1, worker_hir_stag
     worker_hir_pool_skip_without_closure_v1}
 use app.cli.worker_hir_owner_v1.{worker_hir_cleanup_deadline_v1,
     worker_hir_remaining_budget_v1, worker_hir_environment_sort_v1}
-use std.common.process.observation_v4.{ProcessObservationEnvironmentV4}
+use std.common.process.observation_v4.{ProcessObservationEnvironmentV4,
+    PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS}
 
 describe "worker HIR profile admission":
     it "admits explicit HIR consumer arguments":
@@ -217,6 +218,24 @@ describe "worker HIR profile admission":
         expect(worker_hir_remaining_budget_v1(200, 100)).to_equal(100)
         expect(worker_hir_remaining_budget_v1(3600100, 100)).to_equal(3600000)
         expect(worker_hir_remaining_budget_v1(7200000, 0)).to_equal(-1)
+
+    # Matrix rows run native-internal timeouts of 7200 s (bootstrap-fable-19):
+    # the launch budget is clamped to the V4 wall ceiling, never refused.
+    it "clamps a deadline beyond the V4 wall ceiling to that ceiling":
+        val max_ms = PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS / 1000000
+        val now: i64 = 1000
+        expect(worker_hir_remaining_budget_v1(now + 7200000, now)).to_equal(max_ms)
+        expect(worker_hir_remaining_budget_v1(now + max_ms + 1, now)).to_equal(max_ms)
+        expect(worker_hir_remaining_budget_v1(now + max_ms, now)).to_equal(max_ms)
+
+    it "still refuses an expired deadline":
+        expect(worker_hir_remaining_budget_v1(100, 200)).to_equal(-1)
+        expect(worker_hir_remaining_budget_v1(200, 200)).to_equal(-1)
+
+    it "keeps a deadline within the V4 wall ceiling unchanged":
+        val now: i64 = 1000
+        expect(worker_hir_remaining_budget_v1(now + 1800000, now)).to_equal(1800000)
+        expect(worker_hir_remaining_budget_v1(now + 1, now)).to_equal(1)
 
     it "canonicalizes the exact copied environment before V4 encoding":
         val captured = [ProcessObservationEnvironmentV4(key: "SIMPLE_HIR_SHARD_OWNER", value: "0/1@0"),

@@ -22,6 +22,10 @@ pub fn worker_hir_cleanup_deadline_v1(existing: i64, now: i64) -> i64:
     if now <= 0 or now > 9223372036854770807: return -1
     now + 5000
 
+# Launch wall budget for one HIR worker. The ceiling is the named V4 bound
+# (runtime_process_owned.c rejects a larger wall_budget_ns with EINVAL); a
+# worker retired at the clamped budget is reaped and sealed like any other
+# failed owner (bootstrap-fable-19 matrix rows run 7200 s timeouts).
 pub fn worker_hir_remaining_budget_v1(deadline: i64, now: i64) -> i64:
     # V4 rejects wall budgets over PROCESS_OBSERVATION_MAX_DEADLINE_MS (1 h).
     # The parent deadline defaults to 6 h, so an over-long remaining budget
@@ -31,8 +35,8 @@ pub fn worker_hir_remaining_budget_v1(deadline: i64, now: i64) -> i64:
     # 2026-11-13).
     if now <= 0 or deadline <= now: return -1
     val remaining = deadline - now
-    if remaining > 3600000: return 3600000
-    remaining
+    val ceiling_ms = PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS / 1000000
+    if remaining > ceiling_ms: ceiling_ms else: remaining
 
 pub fn worker_hir_environment_sort_v1(input: [ProcessObservationEnvironmentV4]) -> [ProcessObservationEnvironmentV4]:
     var result: [ProcessObservationEnvironmentV4] = []
@@ -237,7 +241,7 @@ pub fn worker_hir_owner_start_v1(profile: WorkerHirProfileV1, binary: text,
     owner.directory = [directory]
     val remaining_ms = worker_hir_remaining_budget_v1(profile.deadline_ms, time_now_monotonic_ms())
     if remaining_ms <= 0:
-        owner.reason = "HIR worker deadline expired or exceeds V4 bound"
+        owner.reason = "HIR worker deadline expired"
         owner.close_pins()
         return owner
     var argv = [binary, "run", "src/app/cli/native_build_worker.spl"]
