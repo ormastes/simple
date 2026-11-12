@@ -1129,17 +1129,26 @@ impl HirLowering:
                 HirPatternKind.Or(self.unify_or_pattern_bindings(hir_patterns, p.span))
 
             case Range(start, end, inclusive):
-                # if-val + bare-lift: value-if-nil and optional-in-arg are
-                # miscompiled on the stage4 native lane (bug doc 2026-07-23).
-                val pstart: HirExpr? = match start:
-                    case Some(pstart_src): self.lower_hir_expr(pstart_src)
-                    case _: nil
-                # if-val + bare-lift: value-if-nil and optional-in-arg are
-                # miscompiled on the stage4 native lane (bug doc 2026-07-23).
-                val pend: HirExpr? = match end:
-                    case Some(pend_src): self.lower_hir_expr(pend_src)
-                    case _: nil
-                HirPatternKind.Range(pstart, pend, inclusive)
+                # HirPatternKind.Range(start: HirExpr, end: HirExpr, ...) has
+                # non-optional bounds; an absent AST bound was stored as nil
+                # there (rejected by the MIR enum payload check). Statement
+                # matches avoid the if-val / value-if-nil miscompile shapes on
+                # the stage4 native lane (bug doc 2026-07-23).
+                var range_kind: HirPatternKind = HirPatternKind.Error
+                var range_complete = false
+                match start:
+                    case Some(pstart_src):
+                        match end:
+                            case Some(pend_src):
+                                val pstart: HirExpr = self.lower_hir_expr(pstart_src)
+                                val pend: HirExpr = self.lower_hir_expr(pend_src)
+                                range_kind = HirPatternKind.Range(pstart, pend, inclusive)
+                                range_complete = true
+                            case _: ()
+                    case _: ()
+                if not range_complete:
+                    self.error("range pattern requires both a start and an end bound", p.span)
+                range_kind
 
             case Error:
                 HirPatternKind.Error
