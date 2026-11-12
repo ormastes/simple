@@ -1,7 +1,7 @@
 # BUG: README documents `| Pattern -> expr` match arms as "preferred", and the parser rejects them
 
 - **id:** readme_arrow_match_arm_syntax_does_not_parse_2026-09-19
-- **status:** OPEN — recorded, deliberately not "fixed" by editing the README (see Why below)
+- **status:** FIXED 2026-11-12 — the old parser error was already fixed; the remaining defect was the README example (see Resolution)
 - **severity:** P2 — a documented language form that does not exist; the only failing block in README.md's executable test surface
 - **found:** 2026-09-19, by running the markdown doctest surface (`bin/simple test README.md`)
 
@@ -97,3 +97,28 @@ record is the justification for removing it rather than a silent edit.
 
 - `rt_file_stat_returns_size_on_interpret_lane_2026-09-19` — found in the same
   pass, also by exercising a surface nothing routinely runs.
+
+## Resolution (2026-11-12)
+
+The arrow arm form `| Pattern -> expr` is defined by
+`doc/07_guide/quick_reference/syntax_quick_reference.md:849-880` and parses on
+both the pinned seed and the self-hosted Stage 2 parser; the 2026-09-19
+"expected identifier, found Float(4.0)" error no longer reproduces. The
+remaining defect was the README example itself: `Triangle` is declared with two
+fields (`base`, `height`) but the arrow arm bound three (`Triangle(a, b, c)`),
+which Stage 2 rejects in HIR lowering ("enum pattern payload arity differs from
+declared variant: .Triangle pattern has 3 slot(s), declaration has 2"). README.md
+line 448 now reads `| Triangle(b, h) -> 0.5 * b * h`, matching the `case` arm.
+
+Evidence (Stage 2 `build/bootstrap-fable-13/stage2/aarch64-unknown-linux-gnu/simple`,
+sha256 `2fb9ecacbf41145f51aff32104978b39485ada4a07d06c8109c38c030a8a340c`,
+`SIMPLE_BOOTSTRAP=1 native-build --backend=cranelift`): the corrected README block
+(enum + `area` + `perimeter`) builds and prints, for `area(Triangle(3.0, 4.0))`,
+`perimeter(Triangle(3.0, 4.0))`, `area(Square(3.0))`, `perimeter(Square(2.0))`,
+`perimeter(Circle(1.0))`, `perimeter(Rectangle(2.0, 3.0))`:
+`6.0 6.0 9.0 8.0 6.28318 10.0` (case and arrow Triangle arms agree). Literal-arm
+and enum-payload arrow programs also build and print `one` / `8.0`.
+
+Regression spec: `test/01_unit/compiler/frontend/match_pipe_arrow_arm_parse_spec.spl`
+(literal, guard, multi-binding payload, case control, syntax-error negative
+control): pinned seed `test` reports 5 total, 5 passed, 0 failed.

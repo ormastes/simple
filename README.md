@@ -445,7 +445,7 @@ fn perimeter(s: Shape) -> f64:
         | Circle(r) -> 2.0 * 3.14159 * r
         | Rectangle(w, h) -> 2.0 * (w + h)
         | Square(side) -> 4.0 * side
-        | Triangle(a, b, c) -> a + b + c
+        | Triangle(b, h) -> 0.5 * b * h
 
 # Pattern matching with nil (not None)
 fn get_radius(opt: Option<f64>) -> f64:
