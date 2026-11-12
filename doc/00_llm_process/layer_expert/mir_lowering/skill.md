@@ -704,3 +704,28 @@ new array HOF. Trap: a direct call (`g(s)`) is correct and hides the bug,
 because the argument local already carries its record. Bug:
 `doc/08_tracking/bug/stage2_array_hof_lambda_record_param_field0_2026-11-12.md`;
 spec `test/01_unit/compiler/50.mir/array_hof_lambda_record_param_field_spec.spl`.
+
+## 2026-11-12 — all-untyped `Ok`/`Err` if/elif joins own `Result<ok, err>`
+
+- `val r = if c: Ok(a) else: Err(b)` has no HIR type on the native path. The
+  merge join (`remember_merged_result_ctor_arm_type`, `mir_lowering_stmts.spl`)
+  adopted a Result only from an already-typed arm, so an all-constructor join
+  stayed untyped and `match r: case Ok(x)` died "bare variant ambiguous" once
+  another enum declared `Ok`/`Err`.
+- Fix: `lower_enum_construct_named` records each untyped ctor's payload witness
+  (`untyped_result_ctor_payload_witness`: local HIR type → expr type → declared
+  non-generic field type → MIR `Str`; Infer/Error/Any refused) in
+  `untyped_ok_ctor_payload_types` / `untyped_err_ctor_payload_types`;
+  `remember_all_untyped_result_ctor_join` owns `Result<ok, err>` only when every
+  arm is such a ctor, both sides are present and each side agrees. New
+  per-function maps must be reset in `function_lowering`, saved/restored in
+  `native_trait_thunks`, and released in `transient_owner`.
+- Trap: on a seed-compiled Stage 2, `hir_types_equal` returns true for most
+  mismatched kinds (seed binds bare fieldless variants in tuple patterns —
+  `seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12`),
+  so "disagreeing arms stay unknown" holds only in pure-Simple-compiled code.
+- Harness trap: `parse_full_frontend` MIR specs lower 0 functions on the seed;
+  `untyped_if_result_ctor_join_spec` now reports that instead of passing
+  vacuously. Behavioural check = a Stage 2 built from the worktree by the seed
+  (stage2-command.transcript argv, ~250 s) native-building
+  `test/fixtures/compiler/hir_untyped_if_result_subject/*.spl`.
