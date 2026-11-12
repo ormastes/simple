@@ -2,7 +2,9 @@
 # repo. In-runner kinds translate to existing lane flags; external kinds
 # (rust, shs-selftest, c-runtime) are enumerated from the tree.
 use std.spec
-use std.nogc_sync_mut.test_runner.test_kinds.{test_kind_names, test_kind_strip_args, test_kind_validation_error, test_kind_enumerate}
+use std.nogc_sync_mut.test_runner.test_kinds.{test_kind_names, test_kind_strip_args, test_kind_validation_error, test_kind_enumerate, test_kind_c_compiler_from}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 
 describe "test kind selector":
     it "enumerates every external kind from the tree and maps in-runner kinds to lane flags":
@@ -22,3 +24,16 @@ describe "test kind selector":
         val guards = test_kind_enumerate("shs-selftest")
         expect(guards.len()).to_be_greater_than(0)
         expect(guards).to_contain("scripts/check/check-guard-selftests-isolated.shs")
+
+    it "resolves the c-runtime compiler to the llvm-mingw UCRT clang on Windows, never MSVC":
+        """
+        An explicit CC wins. With CC unset on a Windows host the llvm-mingw
+        clang is found under SIMPLE_MINGW_ROOT or the user's toolchains dir.
+        """
+        expect(test_kind_c_compiler_from("custom-cc", "C:/mingw", "C:/Users/x")).to_equal("custom-cc")
+        if host_is_windows_host():
+            val user_home = env_get("USERPROFILE")
+            val home = if user_home != "": user_home else: env_get("HOME")
+            val cc = test_kind_c_compiler_from("", "", home)
+            expect(cc).to_end_with("clang.exe")
+            expect(cc).to_contain("llvm-mingw")
