@@ -199,6 +199,10 @@ pub struct Lowerer {
     pub(super) flatten_global_owners: HashMap<String, Vec<Option<String>>>,
     /// Owner-exact symbol of each colliding flattened global -> its owner.
     pub(super) flatten_global_symbol_owners: HashMap<String, Option<String>>,
+    /// `(owner, name)` of every module global -> its scalar literal when it is
+    /// a literal `const`, else `None`. Lets an omitted `param = CONST` default
+    /// be inlined as its literal (`call_site_defaults`).
+    pub(super) flatten_const_literals: super::module_lowering::ConstLiteralCensus,
     /// Flattened unit only: struct/class name declared by two or more
     /// distinct owners with differing layouts -> owner of each declaration
     /// (see `module_lowering/flatten_struct_owner.rs`).
@@ -347,6 +351,7 @@ impl Lowerer {
             flatten_struct_owners: HashMap::new(),
             flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
+            flatten_const_literals: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -429,6 +434,7 @@ impl Lowerer {
             flatten_struct_owners: HashMap::new(),
             flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
+            flatten_const_literals: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -534,6 +540,7 @@ impl Lowerer {
             flatten_struct_owners: HashMap::new(),
             flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
+            flatten_const_literals: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),

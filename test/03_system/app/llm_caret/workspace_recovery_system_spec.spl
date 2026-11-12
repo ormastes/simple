@@ -44,7 +44,7 @@ use std.spec.{describe, it, expect, step, pending}
 use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists,
     file_write, file_exists, file_delete, file_read, cwd, current_time_ms, sleep_ms}
 use app.llm_caret.agent_workspace.{AgentWorkspace, agent_workspace, workspace_available, workspace_backend,
-    session_alive, session_ensure, session_kill, list_panes, send_to_each_pane, pane_split, window_exists, send_to_pane, wait_for_pane_text,
+    session_alive, session_ensure, session_kill, list_panes, capture_pane, send_to_each_pane, pane_split, window_exists, send_to_pane, wait_for_pane_text,
     worktree_path, worktree_add, worktree_list, agent_attach, agent_detach,
     workspace_server_alive, workspace_server_address, workspace_server_token_path}
 use os.apps.smux.server.{smux_server_request}
@@ -303,6 +303,8 @@ describe "LLM Caret workspace recovery and idempotency":
         val deadline = current_time_ms() + 60000
         while current_time_ms() < deadline and not file_exists(ran):
             sleep_ms(250)
+        if not file_exists(ran):
+            print("[evidence] ran.txt missing; cmd-a pane: " + capture_pane(ws, id + ":cmd-a") + " panes: " + list_panes(ws).join(","))
         expect(file_exists(ran)).to_be(true)  # oracle: the attach command really ran in the agent shell
 
         step("A split of a window that does not exist is refused and creates no window")
@@ -311,7 +313,10 @@ describe "LLM Caret workspace recovery and idempotency":
 
         step("A target is exact: cmd-a.0 reaches cmd-a, cmd-a.7 and a missing agent reach nothing")
         expect(send_to_pane(ws, id + ":cmd-a.0", "echo EXACT_$((40+2))").status).to_equal("ok")
-        expect(wait_for_pane_text(ws, id + ":cmd-a", "EXACT_42", 30000)).to_be(true)  # oracle: the shell executed it; the typed text has no EXACT_42
+        val exact_seen = wait_for_pane_text(ws, id + ":cmd-a", "EXACT_42", 30000)
+        if not exact_seen:
+            print("[evidence] EXACT_42 missing; cmd-a pane: " + capture_pane(ws, id + ":cmd-a") + " panes: " + list_panes(ws).join(","))
+        expect(exact_seen).to_be(true)  # oracle: the shell executed it; the typed text has no EXACT_42
         expect(send_to_pane(ws, id + ":cmd-a.7", "echo never").status).to_equal("error")
         expect(send_to_pane(ws, id + ":nobody", "echo never").status).to_equal("error")
 
@@ -320,7 +325,10 @@ describe "LLM Caret workspace recovery and idempotency":
         while wide.len() < 300:
             wide = wide + "W"
         expect(send_to_pane(ws, id + ":cmd-a", "echo " + wide + "_$((1+1))").status).to_equal("ok")
-        expect(wait_for_pane_text(ws, id + ":cmd-a", wide + "_2", 30000)).to_be(true)  # oracle: 302 printed chars on one captured line
+        val wide_seen = wait_for_pane_text(ws, id + ":cmd-a", wide + "_2", 30000)
+        if not wide_seen:
+            print("[evidence] wide line missing; cmd-a pane: " + capture_pane(ws, id + ":cmd-a"))
+        expect(wide_seen).to_be(true)  # oracle: 302 printed chars on one captured line
 
         if workspace_backend() == "smux":
             step("smux rejects names that would corrupt targets or the owner protocol, and creates nothing")
