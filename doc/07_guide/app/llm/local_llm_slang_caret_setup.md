@@ -389,15 +389,21 @@ one-line spec expectation, ran `bin/simple test` on it inside the container
 - **GB10 intermittent CUDA OOM.** CUDA context creation can fail with "out of
   memory" in `ggml_cuda_init` when a second CUDA process starts while a slang
   process holds a loaded model. Run one server for all agents.
-- **Prefix-restore crash.** After hours of two-agent load, the server aborted
-  with `CUDA error: an illegal memory access` right after
-  `state_read_meta: cell_count = 15809` (restoring a cached prompt prefix).
-  Restart the server; a fix is in progress.
-- **JIT demotion.** Fixed: `dir_list` (PR #8524), `RingTelemetry` (PR #8518)
-  and `jo1(p1:)` (PR #8531). Still open: an unbraced single-symbol
-  `use a.b.fn` is not counted as an import by the co-compiled ambiguity check
-  (`ambiguous call to dir_create ... neither defines nor imports it`), so caret
-  still runs in the interpreter. It works, just slower.
+- **CUDA illegal access on a short first micro-batch.** Worked around in the
+  shim (PR #8571, `slang_request_warm`); the record and its removal criteria are in
+  `doc/08_tracking/bug/slang_ggml_cuda_short_first_ubatch_illegal_access_2026-11-12.md`.
+  The shim must be rebuilt for the workaround to apply.
+- **JIT demotion.** Fixed: `dir_list` (PR #8524), `RingTelemetry` (PR #8518),
+  `jo1(p1:)` (PR #8531), unbraced `use a.b.fn`, const defaults, global-init
+  owner, enum owner, and closure ABI parts 0, 2 and 3 (PRs #8626, #8635). Still open: the
+  `Mutex.with_lock` closure boundary (fix in review), then
+  `SimpleHttpServer.start_with_callback`. Until then caret runs in the
+  interpreter. It works, just slower.
+- **Local agents stall after a correct edit.** Qwen3-Coder sometimes makes the
+  briefed edit, then wanders (`ls`, `cd /tmp`) instead of verifying and
+  committing. Check `git diff` in the workspace; the reviewer can verify and
+  commit. Exact single-line `edit_file` calls in `build/TASK.md`, plus a
+  required diff line count, keep destructive edits rare.
 
 ## 10. Troubleshooting
 
@@ -413,6 +419,7 @@ one-line spec expectation, ran `bin/simple test` on it inside the container
 | 503 `model_not_runnable` | non-GGUF or unsupported model | use a GGUF; read the reason in the response |
 | Agent argument ignored or misparsed after `/launch` | args are space-split | no spaces inside one argument |
 | Containerized agent: `fatal: not a git repository` | workspace is a git worktree | add `--container-mount <main-repo>/.git:<main-repo>/.git:rw` |
+| `/launch ... --container ...` prints caret's usage text and the agent exits; no container appears in `podman ps` | the running cs was started from source older than container support, so it passes `--container` to caret | start a new cs from a current checkout (another session name or tmux window); a running cs never reloads its source |
 | Containerized agent: `cannot launch a1: container ... already exists` | another cs on the session, or one killed by SIGKILL | `/reap`, or use another session name |
 
 Design context: `doc/00_llm_process/feature_expert/slang_local_inference/skill.md`.
