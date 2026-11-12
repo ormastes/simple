@@ -166,6 +166,40 @@ fn outlined_bool_result_lambda_is_marked_for_bool_boxing() {
     ));
 }
 
+/// An unannotated lambda passed to a METHOD's `fn(...)` parameter takes the
+/// declared callback parameter type, as for a free function. It used to
+/// default to I64, so `c.run_f(\\x: x * 2.0, 1.25)` decoded a boxed float as
+/// an integer; a generic `fn(T) -> T` slot is the erased `ANY`.
+#[test]
+fn method_call_lambda_takes_declared_callback_param_types() {
+    let lambda_param = |source: &str| {
+        let mir = compile_to_mir(source).expect("mir lowering failed");
+        mir.functions
+            .iter()
+            .flat_map(|f| f.blocks.iter())
+            .flat_map(|b| b.instructions.iter())
+            .find_map(|inst| match inst {
+                MirInst::ClosureCreate { lambda_params, .. } => Some(lambda_params[0].ty),
+                _ => None,
+            })
+            .expect("no ClosureCreate")
+    };
+    let class = "class Calc:\n    k: i64\n\n    fn run_f(f: fn(f64) -> f64, v: f64) -> f64:\n        f(v)\n\n    \
+                 fn with<T>(f: fn(T) -> T, v: T) -> T:\n        f(v)\n\n";
+    assert_eq!(
+        lambda_param(&format!(
+            "{class}fn test() -> f64:\n    val c = Calc(k: 1)\n    return c.run_f(\\x: x * 2.0, 1.25)\n"
+        )),
+        TypeId::F64
+    );
+    assert_eq!(
+        lambda_param(&format!(
+            "{class}fn test() -> any:\n    val c = Calc(k: 1)\n    return c.with(\\x: x, 1.25)\n"
+        )),
+        TypeId::ANY
+    );
+}
+
 /// Sub-register and untyped boundary types are not carryable by the unboxed
 /// closure ABI. `BOOL` lowers to `i8` and crashed the process when a lambda
 /// returned one; `ANY` has no correct encoding at all.
