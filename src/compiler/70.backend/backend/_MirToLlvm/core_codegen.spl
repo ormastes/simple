@@ -1657,11 +1657,22 @@ impl MirTextCodegen for MirToLlvm:
     me translate_call_target_at(operands: [MirOperand], index: i64) -> text:
         val operand = operands[index]
         match operand.kind:
-            case Const(value, _):
+            case Const(value, const_ty):
                 match value:
                     case Str(name):
-                        val resolved = if mir_call_origin_uses_local_symbols(operand.call_origin): self.llvm_function_symbol_name(name) else: name
-                        return "@{resolved}"
+                        match const_ty.kind:
+                            case FuncPtr(_):
+                                # translate_operand_at resolves the authority the same
+                                # way AND registers the return type, external signature
+                                # and `declare` line. Short-circuiting here left every
+                                # runtime callee outside the static declare block
+                                # undeclared (llc: use of undefined value
+                                # '@rt_value_as_int_wide', p2_add, 2026-11-12).
+                                return self.translate_operand_at(operands, index)
+                            case _:
+                                val resolved = if mir_call_origin_uses_local_symbols(operand.call_origin): self.llvm_function_symbol_name(name) else: name
+                                self.unknown_func_decls[resolved] = true
+                                return "@{resolved}"
                     case _: ()
             case _: ()
         self.translate_operand_at(operands, index)
