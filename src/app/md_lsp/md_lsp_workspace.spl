@@ -7,6 +7,8 @@ use std.common.markdown.block.{MarkdownBlock}
 use std.editor.services.md_diagnostics.{MdLinkContext, md_link_targets, md_wiki_inbound_key}
 use std.editor.services.md_wiki_index.{MdWikiDocument, md_wiki_document}
 use app.md_lsp.md_lsp_markdown.{split_lines, parse_blocks, extract_headings}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk, is_dir}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
 
 struct MdDocument:
     uri: text
@@ -21,10 +23,11 @@ class MdWorkspace:
     documents: [MdDocument]
     root_path: text
     graph_complete: bool
+    indexed: [MdDocument]   # unopened files from index_root(), graph edges only
 
 impl MdWorkspace:
     static fn new() -> MdWorkspace:
-        MdWorkspace(documents: [], root_path: "", graph_complete: false)
+        MdWorkspace(documents: [], root_path: "", graph_complete: false, indexed: [])
 
     # Workspace root from `initialize.rootUri` (already uri-decoded path).
     me set_root(path: text):
@@ -38,6 +41,33 @@ impl MdWorkspace:
     # wiki codes may be reported. Until then they are withheld.
     me mark_graph_complete():
         self.graph_complete = true
+
+    # Indexes every `.md` file under the root as an unopened document so the
+    # link graph covers the whole vault, then declares it complete. Returns
+    # false (graph stays incomplete) when there is no root or it is not a dir.
+    me index_root() -> bool:
+        if self.root_path == "" or not is_dir(self.root_path):
+            return false
+        var docs: [MdDocument] = []
+        for entry in dir_walk(self.root_path):
+            if entry.ends_with(".md") and entry.starts_with(self.root_path + "/"):
+                docs.push(self._build("file://" + entry, file_read_text(entry), 0))
+        self.indexed = docs
+        self.mark_graph_complete()
+        true
+
+    fn indexed_count() -> i64:
+        self.indexed.len()
+
+    # Open documents first; indexed documents fill in only uris not open.
+    fn graph_documents() -> [MdDocument]:
+        var out: [MdDocument] = []
+        for d in self.documents:
+            out.push(d)
+        for d in self.indexed:
+            if not self.has_document(d.uri):
+                out.push(d)
+        out
 
     fn relative_path(uri: text) -> text:
         var p = if uri.starts_with("file://") then uri.slice(7, uri.len()) else: uri
@@ -100,7 +130,7 @@ impl MdWorkspace:
         var files: [text] = []
         var wiki: [MdWikiDocument] = []
         var has_inbound = false
-        for doc in self.documents:
+        for doc in self.graph_documents():
             files.push(doc.path)
             wiki.push(md_wiki_document(doc.path, doc.content))
             if doc.uri != uri and (doc.targets.contains(me_doc.path) or doc.targets.contains(inbound_key)):
