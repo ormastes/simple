@@ -403,6 +403,13 @@ pub struct MirLowerer<'a> {
     /// layout-aware `rt_typed_words_i64_*` lane (default on; off for freestanding
     /// runtimes that do not define it).
     pub(super) signed_word_lane: bool,
+    /// Parameters of the lambda bodies being lowered: `(local index, type)`,
+    /// innermost last. A lambda parameter's local index is only live inside
+    /// its body and is REUSED by a later local of the enclosing function, so
+    /// the function's local table must not be consulted for it
+    /// (`recover_receiver_type`): `val f = \i: xs[i]` read `f`'s own slot type
+    /// for `i` and indexed with the tagged word.
+    pub(super) lambda_param_types: Vec<(usize, TypeId)>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -453,6 +460,7 @@ impl<'a> MirLowerer<'a> {
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
             signed_word_lane: true,
+            lambda_param_types: Vec::new(),
         }
     }
 
@@ -497,6 +505,7 @@ impl<'a> MirLowerer<'a> {
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
             signed_word_lane: true,
+            lambda_param_types: Vec::new(),
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,

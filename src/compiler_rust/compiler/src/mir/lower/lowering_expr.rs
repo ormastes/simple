@@ -66,6 +66,9 @@ impl<'a> MirLowerer<'a> {
         match &expr.kind {
             HirExprKind::Local(idx) => {
                 let lookup_idx = *idx;
+                if let Some((_, ty)) = self.lambda_param_types.iter().rev().find(|(index, _)| *index == lookup_idx) {
+                    return Some(*ty);
+                }
                 self.with_func(|func, _| {
                     let nparams = func.params.len();
                     // Local indices include params first, then locals.
