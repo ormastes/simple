@@ -1,0 +1,99 @@
+# Fix candidate ranking (REQ-DIAG-010)
+#
+# A producer attaches several `FixCandidate`s to one diagnostic in the
+# `DiagnosticActionIndex` (producer order is kept there for the legacy
+# `compat_fix_for` projection). Editors need ONE deterministic, explainable
+# order to present them. This module ranks by:
+#
+#   1. enabled before disabled          (a disabled Safe fix never outranks a live one)
+#   2. confidence: Safe < Likely < Uncertain   (correctness/semantic preservation)
+#   3. scope: fewer distinct files first
+#   4. edit size: fewer bytes removed + inserted first
+#   5. candidate id (lexical) as the final tiebreak
+#
+# Edit size is deliberately the FOURTH key: the plan forbids ranking solely by
+# shortest edit. The sort is a stable insertion sort over an explicit
+# `RankKey`, so the same input set yields the same order in any permutation
+# and `explain_ranking` can state exactly which fields decided each position.
+
+use std.common.diagnostics.diagnostic_v1.{FixConfidence}
+use std.common.diagnostics.diagnostic_batch.{FixCandidate, DiagnosticActionIndex}
+
+struct RankKey:
+    disabled_rank: i64      # 0 = enabled, 1 = disabled
+    confidence_rank: i64    # 0 = Safe, 1 = Likely, 2 = Uncertain
+    file_count: i64
+    edit_size: i64          # bytes removed (expected_text) + bytes inserted (new_text)
+    id: text
+
+fn confidence_rank(c: FixConfidence) -> i64:
+    match c:
+        FixConfidence.Safe: 0
+        FixConfidence.Likely: 1
+        FixConfidence.Uncertain: 2
+
+fn rank_key_of(c: FixCandidate) -> RankKey:
+    var size = 0
+    for r in c.replacements:
+        val inserted = r.new_text.byte_len()
+        size = size + inserted
+    for p in c.preconditions:
+        val removed = p.expected_text.byte_len()
+        size = size + removed
+    RankKey(
+        disabled_rank: if c.is_enabled(): 0 else: 1,
+        confidence_rank: confidence_rank(c.confidence),
+        file_count: c.affected_files().len(),
+        edit_size: size,
+        id: c.id
+    )
+
+# True when `a` must come strictly before `b`.
+fn rank_key_before(a: RankKey, b: RankKey) -> bool:
+    if a.disabled_rank != b.disabled_rank: return a.disabled_rank < b.disabled_rank
+    if a.confidence_rank != b.confidence_rank: return a.confidence_rank < b.confidence_rank
+    if a.file_count != b.file_count: return a.file_count < b.file_count
+    if a.edit_size != b.edit_size: return a.edit_size < b.edit_size
+    a.id < b.id
+
+# Stable insertion sort by RankKey; input order only matters for exact-key ties.
+fn rank_candidates(candidates: [FixCandidate]) -> [FixCandidate]:
+    var keys: [RankKey] = []
+    for c in candidates:
+        keys.push(rank_key_of(c))
+    var taken: [bool] = []
+    for c in candidates:
+        taken.push(false)
+    var out: [FixCandidate] = []
+    while out.len() < candidates.len():
+        var best = -1
+        var i = 0
+        while i < candidates.len():
+            if not taken[i]:
+                if best < 0 or rank_key_before(keys[i], keys[best]):
+                    best = i
+            i = i + 1
+        taken[best] = true
+        out.push(candidates[best])
+    out
+
+# One line per ranked candidate stating the fields the order was decided on.
+fn explain_ranking(ranked: [FixCandidate]) -> [text]:
+    var lines: [text] = []
+    var n = 1
+    for c in ranked:
+        val k = rank_key_of(c)
+        var line = "#" + n.to_text() + " " + c.id + ": confidence=" + c.confidence.name()
+            + " files=" + k.file_count.to_text() + " edit_size=" + k.edit_size.to_text()
+        match c.disabled_reason:
+            Some(reason): line = line + " disabled: " + reason
+            None: line = line + " enabled"
+        lines.push(line)
+        n = n + 1
+    lines
+
+# Ranked view over an index entry; the index itself keeps producer order.
+fn ranked_candidates_for(index: DiagnosticActionIndex, diagnostic_id: text) -> [FixCandidate]:
+    rank_candidates(index.candidates_for(diagnostic_id))
+
+export RankKey, rank_key_of, rank_candidates, explain_ranking, ranked_candidates_for
