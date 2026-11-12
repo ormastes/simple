@@ -61,3 +61,82 @@ Item 4 (self-hosted compiler check) filed as interp_private_names_selfhost_check
 Baseline census (20181 pairs / 3589 modules): src/lib/nogc_sync_mut 5578, src/lib/common 2624, src/app/llm_caret 1463,
 src/os/kernel 1147, src/lib/gc_async_mut 857, src/lib/nogc_async_mut 818, src/app/office 522, src/os/crypto 385,
 src/app/devhub 347, src/compiler/10.frontend 313.
+
+## 2026-11-12 self-hosted check landed STAGED (work/bug-privnames-20261112, interp_private_names_selfhost_check_2026-11-09)
+Status: fix-implemented, hard default BLOCKED by census. `HirLowering.private_fn_import_denied`
+(`src/compiler/20.hir/hir_lowering/_Items/module_import_resolution.spl`, called from the braced-item branch of
+`resolve_import_list`) mirrors the seed's `check_private_use_names`: braced group only (a dotted `use m.x as y` is
+`ImportTarget::Aliased` in the seed, not checked), bare `fn` (`Visibility.Private`, not method/extern), importer
+directory != target directory, target module not opaque (any plain `export` list or glob re-export skips it, as
+`module_surface_is_opaque` does), `rel|name` not in `scripts/check/private_import_baseline.txt` at the first `.git`
+ancestor of the target (baselined => the seed's `[visibility-warning]`, recorded). Baseline is read once per process
+into a hash-chain table (module-level vars, BOOT-20: no Dict). Non-baselined pair: recorded warning
+`[W-HIR-PRIVATE-IMPORT-001]` by default, hard error `[E-HIR-PRIVATE-IMPORT-001]` under
+`SIMPLE_STRICT_PRIVATE_IMPORTS=1` (same staging as W-HIR-UNDECL-IMPORT-001). Spec:
+`test/01_unit/compiler/hir/private_fn_import_cross_module_visibility_spec.spl` (pristine resolver 3/7, fixed 7/7;
+run WITHOUT SIMPLE_BOOTSTRAP=1 -- that env skips import resolution in module_build.spl).
+
+**Why not a hard default.** Textual census (same predicate, module->file resolution of std/compiler/app/relative
+paths) over the transitive `use` closure of `src/app/cli/bootstrap_main.spl` (1372 files) found 75 non-baselined
+cross-directory braced private imports and over `src/app/cli/main.spl` (2385 files) 93; 49 distinct `target|name`
+pairs, listed below. Stage 2 lowers every closure module through `resolve_import_list`, so a hard default would stop
+the bootstrap on the first. 5 of the 49 names have several definitions in the tree (`is_digit` x11, `find_c_compiler`
+x3, `_get_temp_dir` x3, `bug_database_from_sdn` x2, `check_formatting` x2), so promoting them to `pub` interacts with the
+co-compiled-public-definition resolution rule and is a separate reviewed change.
+
+**Seed caveat (measured on the pinned seed 4449288fc577).** `simple run src/app/cli/bootstrap_main.spl --version`
+prints 1308 `[visibility-warning]` lines and 0 errors although its own predicate matches the 75 sites above: the seed
+reaches only the modules that run actually loads. From an entry outside `src/` (`privprobe/*.spl`, in-repo) the
+import-time check emitted nothing at all, not even for a baselined pair, and the bug doc repro printed 42. The
+self-hosted check is therefore stricter in reach than the seed in practice; parity is with the seed's rule, not its reach.
+
+**Flip worklist (49 pairs, make `pub` or `export`, then flip the default and delete the toggle):**
+- `src/app/office/sheets/cell_ref.spl|expand_range_refs`
+- `src/app/test_runner_new/json_wrapper.spl|run_test_json_wrapper`
+- `src/app/test_runner_new/json_wrapper.spl|test_json_requested`
+- `src/app/test_runner_new/json_wrapper.spl|test_json_worker_requested`
+- `src/compiler/10.frontend/core/ast_types.spl|make_core_decl`
+- `src/compiler/10.frontend/core/cfg_platform.spl|cfg_eval_key_value`
+- `src/compiler/10.frontend/core/cfg_platform.spl|cfg_normalize_arch`
+- `src/compiler/10.frontend/core/cfg_platform.spl|cfg_normalize_os`
+- `src/compiler/10.frontend/core/cfg_platform.spl|cfg_os_is_unix`
+- `src/compiler/10.frontend/core/cfg_platform.spl|cfg_strip_quotes`
+- `src/compiler/10.frontend/core/lexer_chars.spl|is_digit`
+- `src/compiler/10.frontend/core/parser_cli.spl|parse_cli_decl`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl|get_eligible_rules_for_function`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl|optimization_backend_kind_from_text`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl|optimization_backend_kind_name`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl|optimization_backend_policy_all`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl|optimization_provider_stats_record_scope`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl|optimization_provider_stats_zero`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl|optimization_rule_provider_applies_to_backend_name`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl|optimization_rule_provider_builtin_with_contract`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl|optimization_rule_provider_is_pipeline_pass`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl|optimization_rule_provider_missing_fact`
+- `src/compiler/60.mir_opt/mir_opt/pattern/rules_clib_parity.spl|clib_parity_rule_table`
+- `src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl|ssa_alloca_transform_blocks`
+- `src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl|ssa_var_transform_blocks`
+- `src/compiler/70.backend/backend/backend_helpers.spl|backend_helper_target_opt_context`
+- `src/compiler/70.backend/backend/backend_helpers.spl|compile_llvm_module_to_object_path`
+- `src/compiler/70.backend/backend/backend_helpers.spl|compile_module_with_backend`
+- `src/compiler/70.backend/backend/backend_helpers.spl|compile_module_with_backend_scoped_v1`
+- `src/compiler/70.backend/backend/backend_helpers.spl|get_effective_backend_name`
+- `src/compiler/70.backend/backend/cmake_gen.spl|generate_cmake_for_modules`
+- `src/compiler/70.backend/backend/io_compat.spl|backend_shell_tuple`
+- `src/compiler/70.backend/backend/io_compat.spl|backend_tool_on_path`
+- `src/compiler/70.backend/backend/llvm_ir_builder.spl|is_float_type`
+- `src/compiler/70.backend/backend/llvm_ir_builder.spl|is_integer_type`
+- `src/compiler/70.backend/backend/llvm_ir_builder.spl|is_signed_int_type`
+- `src/compiler/70.backend/backend/llvm_ir_builder.spl|natural_alignment`
+- `src/compiler/70.backend/backend/mir_target_context_provider.spl|backend_mir_target_context`
+- `src/compiler/70.backend/backend/runtime_compiler.spl|find_c_compiler`
+- `src/compiler/70.backend/backend/runtime_compiler.spl|_get_temp_dir`
+- `src/compiler/70.backend/backend/runtime_compiler.spl|_is_msvc_cc`
+- `src/compiler/90.tools/formatter/main.spl|check_formatting`
+- `src/compiler/90.tools/formatter/main.spl|format_file_inplace`
+- `src/compiler/90.tools/formatter/main.spl|print_diff`
+- `src/compiler/99.loader/loader/module_loader_semantic.spl|_semantic_cache_is_fresh_from_maps`
+- `src/compiler/99.loader/loader/module_loader_semantic.spl|_semantic_dependents_from_paths`
+- `src/compiler/99.loader/loader/module_loader_semantic.spl|_semantic_fingerprint_dependents_from_paths`
+- `src/compiler/99.loader/loader/module_loader_semantic.spl|text_array_push_unique`
+- `src/lib/nogc_async_mut/database/bug.spl|bug_database_from_sdn`
