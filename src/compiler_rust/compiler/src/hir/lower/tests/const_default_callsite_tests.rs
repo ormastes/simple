@@ -169,3 +169,37 @@ fn unresolvable_imported_const_default_stays_rejected() {
     let err = lower_flattened(CALLEE, extra).expect_err("imported var");
     assert!(err.contains(NOT_CONSTANT), "{err}");
 }
+
+/// A module-level initializer of an IMPORTED module is lowered under that
+/// module's owner, so its own selective import picks the definition among
+/// co-compiled same-named functions (it is not the entry file's code).
+fn lower_imported_global_initializer(user_imports: bool) -> Result<String, String> {
+    let mut module = Parser::new("fn caller() -> i64:\n    get_counter()\n").parse().expect("parse failed");
+    module.items.push(binding("<entry>", "get_counter", "user.spl", "get_counter"));
+    if user_imports {
+        module.items.push(binding("user.spl", "mk_counter", "atom_a.spl", "mk_counter"));
+    }
+    module.items.extend(flattened(
+        "val COUNTER = mk_counter(0)\n\nfn get_counter() -> i64:\n    COUNTER\n",
+        "user.spl",
+    ));
+    module.items.extend(flattened("fn mk_counter(v: i64) -> i64:\n    v + 100\n", "atom_a.spl"));
+    module.items.extend(flattened("fn mk_counter(v: i64) -> i64:\n    v + 200\n", "atom_b.spl"));
+    crate::hir::lower(&module)
+        .map(|hir| function_text(&hir, "__module_init_dynamic"))
+        .map_err(|e| format!("{e}"))
+}
+
+#[test]
+fn imported_module_global_initializer_resolves_calls_through_its_owner() {
+    let init = lower_imported_global_initializer(true).unwrap_or_else(|e| panic!("{e}"));
+    let other = crate::interpreter::flatten_owner_mangled_name("atom_b.spl", "mk_counter");
+    assert!(init.contains("mk_counter"), "initializer must call mk_counter: {init}");
+    assert!(!init.contains(&other), "initializer must not call atom_b's definition: {init}");
+
+    // Without the owner's import the call is genuinely ambiguous, and the
+    // diagnostic names the owning module, not the entry file.
+    let err = lower_imported_global_initializer(false).expect_err("no import");
+    assert!(err.contains("ambiguous call to `mk_counter`"), "{err}");
+    assert!(err.contains("`user.spl` neither"), "{err}");
+}
