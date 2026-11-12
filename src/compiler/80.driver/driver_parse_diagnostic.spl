@@ -3,6 +3,8 @@ use compiler.core.parser.{parser_first_error_get, parser_get_errors}
 use compiler.core.parser.{ParserErrorRecord, parser_get_error_records}
 use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, render_diagnostic_v1_json}
 use compiler.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_batch.{DiagnosticBatchV1, BatchStatus, diagnostic_stable_id}
+use compiler.core.types.{int_to_str}
 
 # Stable code for every parser-site error (matches query_error_codes
 # "ParseError"); the interpreter's load path reports the same code so
@@ -69,6 +71,25 @@ fn driver_parse_receipt_record(receipt: text) -> ParserErrorRecord:
     val col = rest.substring(0, second).parse_int() ?? 1
     val msg = rest.substring(second + 1, rest.len())
     ParserErrorRecord(line: line, col: col, length: 1, message: msg, expected: "", found: "")
+
+# The parse as one DiagnosticBatchV1 (diag-P1 contract). A parse that
+# recorded errors is `PartialRecovery` — the parser kept going after the first
+# error and the batch is what it could still establish, never a fake success.
+# `document_version` / `source_hash` identify the analyzed snapshot so an LSP
+# consumer can discard a batch the editor has already superseded.
+pub fn driver_parse_batch_v1(source_path: text, uri: text, document_version: i64, source_hash: text, analysis_generation: i64) -> DiagnosticBatchV1:
+    var batch = DiagnosticBatchV1.new("simple-parser", source_path, uri, document_version, source_hash, analysis_generation)
+    var occurrence = 0
+    for d in driver_parse_diagnostics_v1(source_path):
+        var node_identity = "0:0"
+        if d.span != nil:
+            val s = d.span.unwrap()
+            node_identity = int_to_str(s.line) + ":" + int_to_str(s.col)
+        batch = batch.push(diagnostic_stable_id(d.code, source_path, node_identity, occurrence), d)
+        occurrence = occurrence + 1
+    if batch.len() > 0:
+        batch = batch.with_status(BatchStatus.PartialRecovery, "parser recovered after " + int_to_str(batch.len()) + " error(s); later statements may be incomplete")
+    batch
 
 pub fn driver_parse_diagnostics_v1_json(source_path: text) -> [text]:
     var out: [text] = []
