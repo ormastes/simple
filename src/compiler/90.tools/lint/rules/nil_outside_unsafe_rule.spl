@@ -10,6 +10,10 @@
 # is 0, so rewriting `x != nil` as `x != None` changes the result. Those want
 # `.?` / `if val` / `case None`, which is a separate migration.
 #
+# The one safe nil is the value of the unit type `Nil` (= `()`): `return nil`
+# / tail `nil` in a single-line `-> Nil` header's body, and `Ok(nil)` in a
+# `-> Result<Nil, E>` body. Every other nil in that body is still flagged.
+#
 # Block scope only, the same scope MIR enforces for payload slots: an `@unsafe`
 # function attribute is parser metadata and does not reach HIR/MIR.
 #
@@ -130,14 +134,54 @@ fn nil_lint_columns(code: text) -> [i64]:
         start = at + 3
     cols
 
+fn nil_lint_unit_return_kind(code: text) -> i64:
+    # Single-line fn header: -1 not a header, 0 other return, 1 `-> Nil` /
+    # `-> ()`, 2 `-> Result<Nil, E>` / `-> Result<(), E>`.
+    var t = code.trim()
+    for prefix in ["pub ", "export ", "static ", "async "]:
+        if t.starts_with(prefix): t = t.substring(prefix.len(), t.len()).trim()
+    if not (t.starts_with("fn ") or t.starts_with("me ")) or not t.ends_with(":"): return -1
+    val arrow = t.last_index_of("->")
+    if arrow < 0: return 0
+    val ret = t.substring(arrow + 2, t.len() - 1).replace(" ", "")
+    if ret == "Nil" or ret == "()": return 1
+    if ret.starts_with("Result<Nil,") or ret.starts_with("Result<(),"): return 2
+    0
+
+fn nil_lint_is_unit_value(code: text, at: i64, unit_kind: i64) -> bool:
+    # The one safe nil: the value of the unit type `Nil` where the enclosing
+    # function's return type expects it (`return nil` / tail `nil` in `-> Nil`,
+    # `Ok(nil)` in `-> Result<Nil, E>`).
+    val before = code.substring(0, at).trim()
+    val after = code.substring(at + 3, code.len()).trim()
+    if unit_kind == 1: return after == "" and (before == "" or before == "return")
+    if unit_kind == 2: return before.ends_with("Ok(") and after.starts_with(")")
+    false
+
 pub fn check_nil_outside_unsafe(content: text) -> [StaticLintFinding]:
     var findings: [StaticLintFinding] = []
     var in_doc = false
     var unsafe_indent = -1
+    var unit_fn_indent = -1
+    var unit_fn_kind = 0
     var line_num = 0
     for line in content.split("\n"):
         line_num = line_num + 1
         val has_quote = line.contains("\"")
+        if not in_doc and (line.contains("Nil") or line.contains("()") or unit_fn_indent >= 0):
+            # Track the enclosing unit-returning function (header lines spell
+            # `Nil`, not `nil`, so this runs ahead of the fast path).
+            val fn_code = nil_lint_code_of(line)
+            if fn_code.trim() != "":
+                val fn_indent = nil_lint_indent_of(fn_code)
+                if unit_fn_indent >= 0 and fn_indent <= unit_fn_indent:
+                    unit_fn_indent = -1
+                    unit_fn_kind = 0
+                val header_kind = nil_lint_unit_return_kind(fn_code)
+                if header_kind > 0 or (header_kind == 0 and unit_fn_indent >= 0):
+                    # A nested non-unit header ends the exception (conservative).
+                    unit_fn_indent = fn_indent
+                    unit_fn_kind = header_kind
         # Fast path: no nil, no unsafe header, no string. Only block exit matters.
         if not in_doc and not has_quote and not line.contains("nil") and not line.contains("unsafe") and not line.contains("danger"):
             val raw_trimmed = line.trim()
@@ -165,6 +209,7 @@ pub fn check_nil_outside_unsafe(content: text) -> [StaticLintFinding]:
         val inline_unsafe = nil_lint_inline_unsafe_column(code)
         for col in nil_lint_columns(code):
             if inline_unsafe >= 0 and col > inline_unsafe: continue
+            if unit_fn_kind > 0 and nil_lint_is_unit_value(code, col, unit_fn_kind): continue
             findings.push(StaticLintFinding(
                 "NIL-UNSAFE-001", StaticLintLevel.Warn, StaticLintCategory.Safety,
                 "`nil` outside `unsafe`: safe code spells absence `None`",
