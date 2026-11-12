@@ -1,0 +1,84 @@
+# CMM source index — adapter from the CMM lexer's (line, character-column)
+# positions onto the shared diagnostics position infrastructure.
+#
+# Owner decision 9 (unified diagnostics plan, 2026-11-12): CMM reuses the
+# Simple frontend's line-start / UTF-16 projection instead of carrying its own.
+# The line-start table, byte -> UTF-16 projection and the UTF-8 scalar width
+# rule all come from `std.common.diagnostics.source_position` (landed by the
+# diag-P1 facade, PR #8444). The only CMM-specific piece here is the
+# character-column -> byte-offset step, because the CMM lexer counts columns
+# in characters (Simple `text` indexing is per character) while the shared
+# table is byte-addressed.
+#
+# Known convention gap (P1): LineStartTable treats a lone "\r" as a line
+# terminator; the CMM lexer splits only on "\n". CRLF and LF agree.
+
+use std.common.diagnostics.source_position.{LineStartTable, Utf16Position, byte_to_position}
+
+export CmmSourceIndex, build_source_index
+
+struct CmmSourceIndex:
+    src: text
+    table: LineStartTable
+
+fn build_source_index(source: text) -> CmmSourceIndex:
+    CmmSourceIndex(src: source, table: LineStartTable.build(source))
+
+fn scalar_width(lead: i64) -> i64:
+    if lead < 0x80:
+        1
+    elif lead < 0xE0:
+        2
+    elif lead < 0xF0:
+        3
+    else:
+        4
+
+impl CmmSourceIndex:
+    # Logical line count in the lexer's convention: a document that ends in a
+    # newline has no phantom empty last line.
+    fn line_count() -> i64:
+        val n = self.table.line_count()
+        if n > 1 and self.table.line_start(n - 1) >= self.table.byte_len:
+            return n - 1
+        n
+
+    # Byte offset just past the content of 0-based `line` (before "\r\n"/"\n").
+    fn content_end(line: i64) -> i64:
+        var end = self.table.byte_len
+        val next = self.table.line_start(line + 1)
+        if next >= 0:
+            end = next
+            if end > 0 and self.src.byte_at(end - 1) as i64 == 10:
+                end = end - 1
+            if end > 0 and self.src.byte_at(end - 1) as i64 == 13:
+                end = end - 1
+        end
+
+    # 0-based UTF-8 byte offset of a 1-based (line, character col). A column
+    # past the end of the line clamps to the end of that line; a line past
+    # the end clamps to the end of the document.
+    fn byte_offset(line: i64, col: i64) -> i64:
+        val idx = line - 1
+        val start = self.table.line_start(idx)
+        if start < 0:
+            if idx < 0:
+                return 0
+            return self.table.byte_len
+        val limit = self.content_end(idx)
+        var remaining = col - 1
+        var pos = start
+        while remaining > 0 and pos < limit:
+            pos = pos + scalar_width(self.src.byte_at(pos) as i64)
+            remaining = remaining - 1
+        if pos > limit:
+            pos = limit
+        pos
+
+    # 0-based UTF-16 character offset of a 1-based (line, character col),
+    # projected by the shared `byte_to_position`.
+    fn utf16_character(line: i64, col: i64) -> i64:
+        val projected = byte_to_position(self.src, self.table, self.byte_offset(line, col))
+        match projected:
+            case Some(p): p.character
+            case None: 0

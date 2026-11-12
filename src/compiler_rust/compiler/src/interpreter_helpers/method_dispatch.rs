@@ -83,6 +83,16 @@ pub(crate) fn call_method_on_value(
         // String methods
         Value::Str(s) => match method {
             "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
+            // Mirrors interpreter_method/string.rs: UTF-8 byte count. Missing here,
+            // `x.f().byte_len()` hit METHOD_NOT_FOUND "in nested call context".
+            "byte_len" => return Ok(Value::Int(s.len() as i64)),
+            "char_at" | "at" => {
+                let idx = _args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1);
+                if idx < 0 {
+                    return Ok(Value::text(String::new()));
+                }
+                return Ok(Value::text(s.chars().nth(idx as usize).map(|c| c.to_string()).unwrap_or_default()));
+            }
             "is_empty" => return Ok(Value::Bool(s.is_empty())),
             "to_string" => return Ok(Value::shared_text(s.clone())),
             "chars" => return Ok(Value::array(s.chars().map(|c| Value::text(c.to_string())).collect::<Vec<Value>>())),

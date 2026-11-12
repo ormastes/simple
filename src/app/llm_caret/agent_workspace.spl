@@ -15,7 +15,7 @@ use app.io.cli_ops.{cli_current_exe_path}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.nogc_async_mut.sosix.{sosix_platform, sosix_which}
 use std.common.string_core.{text_to_bytes}
-use os.apps.smux.server.{smux_server_request}
+use os.apps.smux.server.{smux_server_request, smux_server_request_within}
 use os.apps.smux.smux_remote.{smux_remote_reply_ok}
 use app.llm_caret.pane_backend.{pane_backend_name, windows_spawn_command_line, posix_quote_arg}
 
@@ -203,20 +203,46 @@ fn _words(line: text) -> [text]:
     out
 
 # The owner reply, or nil when no owner holding this workspace's token answers.
+#
+# The owner serves one request at a time, so a client that connects while it
+# is still handling the previous request (or still reaping a pane) is refused
+# with a 1s connect timeout, and the per-request `netstat` listener probe can
+# itself exceed its budget on a loaded box. Both are transient and happen
+# BEFORE the command reaches the owner, so they are retried a few times; a
+# failure after the connect (write/read timeout) is not, because a mutating
+# command such as `new` or `spawn-window` may already have been applied.
+# Observed: `session_ensure` right after `_smux_owner_up` returned
+# "smux owner unavailable" while the very next request succeeded
+# (agent_workspace_spec "attaches an agent as worktree plus window").
+val SMUX_REQ_ATTEMPTS: i64 = 5
+val SMUX_REQ_RETRY_MS: i64 = 300
+# Reply window per request: the owner spawns or reaps a ConPTY shell inline,
+# which took >1s under load and made a request that the owner had already
+# applied look failed (attach reported error while the window existed).
+val SMUX_REPLY_MS: i64 = 30000
+
 fn _smux_req(ws: AgentWorkspace, command: text) -> text?:
-    val owner = _smux_owner(ws)
-    if owner == nil:
-        return nil
-    val o = owner ?? SmuxOwner(addr: "", token: "", pid: 0)
-    if not _smux_listener_is(o.addr, o.pid):
-        return nil
-    val r = smux_server_request(o.addr, o.token, command)
-    if r.is_err():
-        return nil
-    val body = r.unwrap()
-    if body == "smux: unauthorized":
-        return nil
-    body
+    var attempt = 0
+    while attempt < SMUX_REQ_ATTEMPTS:
+        attempt = attempt + 1
+        val owner = _smux_owner(ws)
+        if owner == nil:
+            return nil
+        val o = owner ?? SmuxOwner(addr: "", token: "", pid: 0)
+        if not _smux_listener_is(o.addr, o.pid):
+            sleep_ms(SMUX_REQ_RETRY_MS)
+            continue
+        val r = smux_server_request_within(o.addr, o.token, command, SMUX_REPLY_MS)
+        if r.is_err():
+            if r.unwrap_err() == "smux owner unavailable":
+                sleep_ms(SMUX_REQ_RETRY_MS)
+                continue
+            return nil
+        val body = r.unwrap()
+        if body == "smux: unauthorized":
+            return nil
+        return body
+    nil
 
 # Drops the owner file once its owner no longer answers.
 fn _smux_owner_forget(ws: AgentWorkspace):

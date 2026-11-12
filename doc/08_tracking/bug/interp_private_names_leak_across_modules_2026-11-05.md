@@ -90,7 +90,7 @@ reaches only the modules that run actually loads. From an entry outside `src/` (
 import-time check emitted nothing at all, not even for a baselined pair, and the bug doc repro printed 42. The
 self-hosted check is therefore stricter in reach than the seed in practice; parity is with the seed's rule, not its reach.
 
-**Flip worklist (49 pairs, make `pub` or `export`, then flip the default and delete the toggle):**
+**Flip worklist (49 pairs, make `pub` or `export`, then flip the default and delete the toggle) -- DONE 2026-11-12, see the section below:**
 - `src/app/office/sheets/cell_ref.spl|expand_range_refs`
 - `src/app/test_runner_new/json_wrapper.spl|run_test_json_wrapper`
 - `src/app/test_runner_new/json_wrapper.spl|test_json_requested`
@@ -140,3 +140,63 @@ self-hosted check is therefore stricter in reach than the seed in practice; pari
 - `src/compiler/99.loader/loader/module_loader_semantic.spl|_semantic_fingerprint_dependents_from_paths`
 - `src/compiler/99.loader/loader/module_loader_semantic.spl|text_array_push_unique`
 - `src/lib/nogc_async_mut/database/bug.spl|bug_database_from_sdn`
+
+## 2026-11-12 default FLIPPED: 49 pairs promoted to `pub`, toggle deleted (work/bug-privnames2-20261112)
+
+Status: fixed. All 49 worklist pairs above were promoted mechanically (`fn NAME(` -> `pub fn NAME(`, one line
+each, 18 files, no refactor or rename). `HirLowering.private_fn_import_denied` now emits the hard error
+`[E-HIR-PRIVATE-IMPORT-001]` for every non-baselined cross-directory braced private-fn import; the recorded
+`W-HIR-PRIVATE-IMPORT-001` warning and the `SIMPLE_STRICT_PRIVATE_IMPORTS` toggle are gone. Baselined pairs
+(`scripts/check/private_import_baseline.txt`, 20,133 rows, NOT grown by this change) stay the seed's recorded
+`[visibility-warning]`.
+
+**Duplicate-definition names (5 of 49).** Each worklist pair names the *target file*, so the import's resolution
+is already fixed by the pair: `is_digit` -> `src/compiler/10.frontend/core/lexer_chars.spl` (the other 10
+`is_digit` definitions in the tree stay private), `find_c_compiler` and `_get_temp_dir` ->
+`src/compiler/70.backend/backend/runtime_compiler.spl`, `bug_database_from_sdn` ->
+`src/lib/nogc_async_mut/database/bug.spl`, `check_formatting` -> `src/compiler/90.tools/formatter/main.spl`.
+Every target file holds exactly one bare `fn NAME` and no `pub fn NAME` twin or `export` list (verified for all
+49). The 2026-11-12 concern that promotion "interacts with the co-compiled-public-definition resolution rule" does
+not hold: the seed's flatten collision table (`hir/lower/lowerer.rs`, `flatten_fn_owners`) is built from every
+`Node::Function` regardless of `pub`, and the module_loader "public function ... co-compiled definitions" warning
+labels by name shape (`_` prefix = "private helper"), not by the keyword -- both are visibility-blind, so `pub` is
+neutral to collision resolution. The self-hosted resolver's one visibility-sensitive rule (a private callable
+reached through a glob never displaces an existing binding, `module_import_resolution.spl`) is not reached: no
+file in `src/` glob-imports any of the 18 promoted modules (textual census; the `mir_opt` `__init__.spl` facades
+re-export `rule_engine` / `rules_clib_parity` / `var_reassign_ssa` names selectively, which the promotion makes
+legal).
+
+**Safety gate (textual census, same scripts as 2026-11-12 above, re-run on this branch).** Stage 2 closure
+(`src/app/cli/bootstrap_main.spl`, 1377 files): offenders 75 -> **0**, baselined 1033, 24 unresolved modules.
+Full-CLI closure (`src/app/cli/main.spl` + `_CliMain/main_and_help.spl`, 2390 files): offenders 93 -> **0**,
+baselined 2212, 111 unresolved modules (the unresolved residue is unchanged from the previous census and consists
+of modules the textual resolver cannot map to a file; it is the same residue that existed when the 49 were
+counted). Real-resolver probe: temporary single-case specs (not committed) lowered four formerly-offending importers
+(`60.mir_opt/general_patterns.spl` vs `pattern/rule_engine.spl`, `99.loader/module_loader_compat.spl` vs
+`loader/module_loader_semantic.spl`, `app/cli/_CliMain/main_and_help.spl` vs `test_runner_new/json_wrapper.spl`,
+`app/io/cli_lint_commands.spl` vs `90.tools/formatter/main.spl`) against their real target files through
+`parse_full_frontend` + `HirLowering.lower_module` (seed harness, no SIMPLE_BOOTSTRAP): 0 `E-HIR-PRIVATE-IMPORT-001`
+in all four (unrelated diagnostics from the absent other imports were ignored; one baselined `[visibility-warning]`
+still recorded where expected). Negative control: the same `general_patterns.spl` probe fed the pristine
+(pre-promotion) `rule_engine.spl` content raised exactly 5 `E-HIR-PRIVATE-IMPORT-001`, naming the 5 promoted
+`optimization_*` names, so the probe exercises the rule. The two largest importers (`_MirToLlvm/core_codegen.spl`,
+`driver_aot_native_output.spl`, 3.7k/4.7k lines) were dropped from the probe: the seed-interpreted frontend did not
+finish them within 20 min; the textual census covers them.
+
+Spec `test/01_unit/compiler/hir/private_fn_import_cross_module_visibility_spec.spl`: rewritten so the default case
+expects the hard error and no toggle exists; against the staged resolver 4/6 (the two hard-error cases red), after
+the flip 6/6.
+
+**Parity notes recorded with the flip (2026-11-12).** (1) The seed's import-time `check_private_use_names` has
+NO `test/**` exemption -- `is_test_caller` belongs only to the seed's call-time gate
+(`check_private_call_visibility`, module_loader.rs:2810). Measured: the pinned seed already hard-errors today on
+`test/01_unit/compiler/mir_opt/clib_parity_hotspot_spec.spl` and
+`test/01_unit/compiler_core/interpreter/registry_scoping_real_spec.spl` (`error: semantic: private fn ... is not
+visible`), so the self-hosted import-time check deliberately carries no test exemption either. (2) Whole-tree
+textual residue outside the two closures (same census over `src/` + `test/`): 130 further `target|name` pairs with
+`src/` importers (283 import rows) and 661 pairs with `test/` importers (1110 rows). These are the seed's existing
+hard errors wherever the seed reaches them (see (1)); the flip adds no new failure class, it only matches the seed's
+reach to the self-hosted compiler's. Fixing them is ordinary `pub` promotion work per file, not a toggle question.
+(3) The 21 other specs that use `module_surfaces_from_test_modules` were run with the seed on this branch and on
+the base commit `a36cf62afc8`: 12 pass on both; 9 fail with identical `Results:` lines on both (none mentions
+`PRIVATE-IMPORT`), so the flip changes no sibling spec outcome.

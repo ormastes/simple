@@ -477,9 +477,17 @@ fn _serve_on(bound_listener: TcpListener, address: text, token: text, initialize
 
 # Each invocation is a disposable client. A partial response or a timeout is
 # an error, not a successful capture. EOF must agree with the byte length frame.
+# The owner answers a liveness query within the 1s default; a request it must
+# WORK for (spawn-window starts a ConPTY and a shell, kill-window reaps one)
+# takes seconds on a loaded box, so those callers pass `reply_ms`.
 pub fn smux_server_request(address: text, token: text, command: text) -> Result<text, text>:
+    smux_server_request_within(address, token, command, 1000)
+
+pub fn smux_server_request_within(address: text, token: text, command: text, reply_ms: i64) -> Result<text, text>:
     if not local_endpoint(address) or not valid_token(token):
         return Err("invalid smux endpoint or token")
+    if reply_ms < 1000:
+        return Err("invalid smux reply window")
     val frame = token + " " + command
     if text_to_bytes(frame).len() > REQUEST_LIMIT or frame.contains("\n") or frame.contains("\r"):
         return Err("invalid smux request")
@@ -487,10 +495,10 @@ pub fn smux_server_request(address: text, token: text, command: text) -> Result<
     if connected.is_err():
         return Err("smux owner unavailable")
     var stream = connected.unwrap()
-    if stream.set_read_timeout(1000).is_err() or stream.set_write_timeout(1000).is_err():
+    if stream.set_read_timeout(reply_ms).is_err() or stream.set_write_timeout(1000).is_err():
         val _closed = stream.close()
         return Err("smux transport timeout unavailable")
-    val deadline = time_now_monotonic_ms() + 5000
+    val deadline = time_now_monotonic_ms() + reply_ms + 4000
     val request_bytes = text_to_bytes(frame + "\n")
     var offset: i64 = 0
     while offset < request_bytes.len() and time_now_monotonic_ms() < deadline:
@@ -527,4 +535,4 @@ pub fn smux_server_request(address: text, token: text, command: text) -> Result<
     val _closed = stream.close()
     return Err("smux response timeout")
 
-export smux_server_dispatch, smux_server_stop_reply_v1, smux_server_decode_reply, smux_server_serve, smux_server_serve_owner_file, smux_server_serve_runtime_owner_file, smux_server_request
+export smux_server_dispatch, smux_server_stop_reply_v1, smux_server_decode_reply, smux_server_serve, smux_server_serve_owner_file, smux_server_serve_runtime_owner_file, smux_server_request, smux_server_request_within

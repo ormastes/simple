@@ -8,7 +8,7 @@ use std.common.json.tokenizer.{json_unescape_string}
 use app.md_lsp.md_lsp_markdown.{split_lines, parse_blocks_with_ranges, compute_folding_ranges}
 use .md_lsp_workspace.{MdWorkspace, MdDocument}
 use std.editor.services.md_diagnostics.{md_diagnose_batch}
-use std.common.diagnostics.{DiagnosticBatchV1, DiagnosticV1, LineStartTable, span_to_range}
+use std.common.diagnostics.{DiagnosticBatchV1, DiagnosticV1, LineStartTable, span_to_range, Span, FixConfidence, FixCandidate, DiagnosticActionIndex, ranked_candidates_for, EditTransaction, DocumentSnapshot}
 
 # One outbound `textDocument/publishDiagnostics` notification, ready to frame.
 pub struct MdLspPublish:
@@ -518,12 +518,95 @@ fn md_lsp_code_action_raw(params_json: text, req_id: text, workspace: MdWorkspac
     val doc = workspace.get_document(uri)
     if _md_lsp_line_is_code(doc, line_num):
         return _md_lsp_ok_response(req_id, "[]")
+    val batch = md_diagnose_batch(doc.content, doc.path, doc.version, workspace.link_context(uri))
+    val table = LineStartTable.build(doc.content)
+    # Candidates are keyed by stable diagnostic id; heuristic fixes with no
+    # diagnostic behind them get a synthetic per-line id.
+    var index = DiagnosticActionIndex.new()
+    var ids: [text] = []
+    for bd in batch.diagnostics:
+        val d = bd.diagnostic
+        if d.fix.? and d.span.? and d.span.unwrap().line - 1 == line_num:
+            val fix = d.fix.unwrap()
+            var c = FixCandidate.new(fix.id, fix.description, d.message, fix.confidence, doc.version)
+            for r in fix.replacements:
+                c = c.with_replacement(r.file, r.span, r.new_text, doc.content.substring(r.span.start, r.span.end))
+            index = index.add(bd.id, c)
+            if not ids.contains(bd.id):
+                ids.push(bd.id)
+    val line_id = "md-quickfix:" + doc.path + ":" + line_num.to_text()
+    for c in _md_lsp_line_candidates(doc, table, line_num):
+        index = index.add(line_id, c)
+        if not ids.contains(line_id):
+            ids.push(line_id)
+    # Only advertise candidates the shared transaction would actually apply.
+    val tx = EditTransaction.new(".", batch.source_hash).with_document(DocumentSnapshot.new(_md_lsp_tx_file(doc.path), doc.version, batch.source_hash, doc.content))
+    var actions: [text] = []
+    for id in ids:
+        for c in ranked_candidates_for(index, id):
+            if tx.apply(_md_lsp_tx_candidate(c, doc.path)).applied():
+                actions.push(_md_lsp_build_candidate_action(uri, doc.content, table, c))
+    _md_lsp_ok_response(req_id, "[" + actions.join(",") + "]")
+
+# EditTransaction confines edits to its root; the document's workspace-relative
+# path is presented under "./" for that check only.
+fn _md_lsp_tx_file(path: text) -> text:
+    "./" + path
+
+fn _md_lsp_tx_candidate(c: FixCandidate, path: text) -> FixCandidate:
+    var out = FixCandidate.new(c.id, c.title, c.explanation, c.confidence, c.required_document_version)
+    var i = 0
+    while i < c.replacements.len():
+        val r = c.replacements[i]
+        val f = if r.file == path then _md_lsp_tx_file(path) else: r.file
+        out = out.with_replacement(f, r.span, r.new_text, c.preconditions[i].expected_text)
+        i = i + 1
+    out
+
+fn _md_lsp_byte_span(table: LineStartTable, line_num: i64, from_byte: i64, to_byte: i64, path: text) -> Span:
+    val base = table.line_start(line_num)
+    var sp = Span.new(base + from_byte, base + to_byte, line_num + 1, from_byte + 1)
+    sp.file = path
+    sp
+
+# Typed replacements for markdown fixes no diagnostic reports yet: a heading
+# marker run missing its space (zero-width insert) and an empty `[]()` link.
+fn _md_lsp_line_candidates(doc: MdDocument, table: LineStartTable, line_num: i64) -> [FixCandidate]:
+    var out: [FixCandidate] = []
     val line = _md_lsp_get_line(doc.content, line_num)
-    val fixed = _md_lsp_quickfix_line(line)
-    if fixed == line:
-        return _md_lsp_ok_response(req_id, "[]")
-    val action = _md_lsp_build_line_replace_action(uri, line_num, line, fixed)
-    _md_lsp_ok_response(req_id, "[" + action + "]")
+    var lead = 0
+    while lead < line.len() and (line.char_at(lead) == " " or line.char_at(lead) == "\t"):
+        lead = lead + 1
+    val trimmed: text = line.slice(lead, line.len())
+    val indent: text = line.slice(0, lead)
+    val indent_bytes = indent.byte_len()
+    if trimmed.starts_with("#"):
+        var level = 0
+        while level < trimmed.len() and trimmed.char_at(level) == "#":
+            level = level + 1
+        if level <= 6 and level < trimmed.len() and trimmed.char_at(level) != " ":
+            val sp = _md_lsp_byte_span(table, line_num, indent_bytes + level, indent_bytes + level, doc.path)
+            out.push(FixCandidate.new("md:heading-space:" + sp.start.to_text(), "Insert space after heading marker", "ATX headings need a space after `#`", FixConfidence.Safe, doc.version).with_replacement(doc.path, sp, " ", ""))
+    if line.contains("[]()"):
+        val parts = line.split("[]()")
+        val prefix: text = parts[0]
+        val start = prefix.byte_len()
+        val sp = _md_lsp_byte_span(table, line_num, start, start + 4, doc.path)
+        out.push(FixCandidate.new("md:empty-link:" + sp.start.to_text(), "Fill empty link", "an empty link has no text and no target", FixConfidence.Likely, doc.version).with_replacement(doc.path, sp, "[text](url)", "[]()"))
+    out
+
+fn _md_lsp_build_candidate_action(uri: text, content: text, table: LineStartTable, c: FixCandidate) -> text:
+    var edits: [text] = []
+    for r in c.replacements:
+        val mapped = span_to_range(content, table, r.span.start, r.span.end)
+        if mapped.?:
+            val m = mapped.unwrap()
+            val start_pos = "{" + _jp("line", str(m.start.line)) + "," + _jp("character", str(m.start.character)) + "}"
+            val end_pos = "{" + _jp("line", str(m.end.line)) + "," + _jp("character", str(m.end.character)) + "}"
+            edits.push("{" + _jp("range", "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}") + "," + _jp("newText", _js(r.new_text)) + "}")
+    val changes = "{" + _jp(uri, "[" + edits.join(",") + "]") + "}"
+    val preferred = if c.confidence.name() == "safe" then "true" else: "false"
+    "{" + _jp("title", _js(c.title)) + "," + _jp("kind", _js("quickfix")) + "," + _jp("isPreferred", preferred) + "," + _jp("edit", "{" + _jp("changes", changes) + "}") + "}"
 
 fn _md_lsp_extract_position_from_range(params_json: text) -> (i64, i64):
     val range_start = _lsp_find_field(params_json, "\"range\"")
@@ -539,30 +622,6 @@ fn _md_lsp_extract_position_from_range(params_json: text) -> (i64, i64):
     val line_num = if line_start >= 0 then _lsp_extract_number(start_obj, line_start) else 0
     val char_num = if char_start >= 0 then _lsp_extract_number(start_obj, char_start) else 0
     (line_num, char_num)
-
-fn _md_lsp_quickfix_line(line: text) -> text:
-    val trimmed = line.trim()
-    if trimmed.starts_with("#"):
-        var level = 0
-        while level < trimmed.len() and trimmed.char_at(level) == "#":
-            level = level + 1
-        if level < trimmed.len() and trimmed.char_at(level) != " ":
-            return trimmed.slice(0, level) + " " + trimmed.slice(level, trimmed.len())
-    if line.contains("[]()"):
-        return line.replace("[]()", "[text](url)")
-    if line.ends_with(" ") or line.ends_with("\t"):
-        return line.trim()
-    line
-
-fn _md_lsp_build_line_replace_action(uri: text, line_num: i64, old_line: text, new_line: text) -> text:
-    val start_pos = "{" + _jp("line", str(line_num)) + "," + _jp("character", "0") + "}"
-    val end_pos = "{" + _jp("line", str(line_num)) + "," + _jp("character", str(md_lsp_utf16_length(old_line))) + "}"
-    val range = "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}"
-    val edit = "{" + _jp("range", range) + "," + _jp("newText", _js(new_line)) + "}"
-    val text_edits = "[" + edit + "]"
-    val changes = "{" + _jp(uri, text_edits) + "}"
-    val workspace_edit = "{" + _jp("changes", changes) + "}"
-    "{" + _jp("title", _js("Apply Markdown quick fix")) + "," + _jp("kind", _js("quickfix")) + "," + _jp("edit", workspace_edit) + "}"
 
 # ---------------------------------------------------------------------------
 # Notification handler (no response)

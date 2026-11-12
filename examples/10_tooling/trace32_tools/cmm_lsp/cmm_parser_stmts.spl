@@ -15,6 +15,7 @@ use cmm_tokens.{CmmTokenKind, CmmToken}
 use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan, CmmDialogItem}
 use cmm_ast.{span, span_range, merge_spans}
 use cmm_parser_core.{CmmParser, CmmParseError, to_upper_cmm}
+use cmm_parser_core.{CMM_UNTERMINATED_BLOCK, CMM_MISSING_BODY, CMM_EXPECTED_MACRO_NAME, CMM_ELSE_WITHOUT_IF, CMM_UNEXPECTED_TOKEN}
 use cmm_parser_expr.{is_access_class}
 
 # Helper struct for flattened macro assignment detection.
@@ -39,6 +40,21 @@ impl CmmParser:
 
     me parse_statement_impl() -> Result<CmmStmt, CmmParseError>:
         val tok = self.peek()
+
+        # --- Lexer error token (unknown character) at statement start ---
+        # Bounded recovery: record one CMM1001 for the character, drop it, and
+        # keep parsing the rest of the line so later findings on the same
+        # line (an unresolved GOTO, say) still surface. Each step consumes
+        # exactly one token, so this cannot loop.
+        match tok.kind:
+            case CmmTokenKind.Error(lex_msg):
+                val bad = self.make_coded_error_at(tok, CMM_UNEXPECTED_TOKEN, "Unexpected character '" + tok.text + "'", ["statement"])
+                self.advance()
+                if self.at_stmt_end():
+                    return Err(bad)
+                self.record_parse_error(bad, bad.message)
+                return self.parse_statement_impl()
+            case _: ()
 
         # --- Labels (must be first — emitted by lexer as Label token) ---
         match tok.kind:
@@ -227,7 +243,7 @@ impl CmmParser:
     # Standalone ELSE without preceding IF is an error.
     me parse_else_error() -> Result<CmmStmt, CmmParseError>:
         val tok = self.peek()
-        Err(self.make_error("ELSE without matching IF"))
+        Err(self.make_coded_error_at(tok, CMM_ELSE_WITHOUT_IF, "ELSE without matching IF", ["IF"]))
 
     # WHILE condition body
     # Flattened to avoid nested match chains.
@@ -274,10 +290,14 @@ impl CmmParser:
     me parse_goto() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume GOTO
         # GOTO can have: label, macro ref, or empty (for ON ERROR GOTO to clear handler)
+        val target_tok = self.peek()
         val label = self.consume_label_or_macro()
         # Consume optional IF condition suffix (GOTO label IF condition)
         var params = self.collect_remaining_exprs()
-        Ok(CmmStmt.Goto(label, span(start_tok.line, start_tok.column)))
+        # Span covers the keyword through the end of the target token so
+        # diagnostics can be anchored on the target (end_col - label width).
+        val end_col = if label == "": start_tok.column + start_tok.text.len() else: target_tok.column + target_tok.text.len()
+        Ok(CmmStmt.Goto(label, span_range(start_tok.line, start_tok.column, target_tok.line, end_col)))
 
     # GOSUB label [args...] — target can be identifier, dot-command, or macro ref
     me parse_gosub() -> Result<CmmStmt, CmmParseError>:
@@ -370,7 +390,7 @@ impl CmmParser:
         val start_tok = self.advance()  # consume LOCAL
         var names = self.collect_macro_names()
         if names.len() == 0:
-            return Err(self.make_error("Expected macro name(s) after LOCAL"))
+            return Err(self.make_coded_error_at(start_tok, CMM_EXPECTED_MACRO_NAME, "Expected macro name(s) after LOCAL", ["&macro"]))
         Ok(CmmStmt.LocalDecl(names, span(start_tok.line, start_tok.column)))
 
     # GLOBAL &a — declare global macro
@@ -378,7 +398,7 @@ impl CmmParser:
         val start_tok = self.advance()  # consume GLOBAL
         var names = self.collect_macro_names()
         if names.len() == 0:
-            return Err(self.make_error("Expected macro name(s) after GLOBAL"))
+            return Err(self.make_coded_error_at(start_tok, CMM_EXPECTED_MACRO_NAME, "Expected macro name(s) after GLOBAL", ["&macro"]))
         Ok(CmmStmt.GlobalDecl(names, span(start_tok.line, start_tok.column)))
 
     # PRIVATE &a — declare private macro (block + sub-blocks)
@@ -386,7 +406,7 @@ impl CmmParser:
         val start_tok = self.advance()  # consume PRIVATE
         var names = self.collect_macro_names()
         if names.len() == 0:
-            return Err(self.make_error("Expected macro name(s) after PRIVATE"))
+            return Err(self.make_coded_error_at(start_tok, CMM_EXPECTED_MACRO_NAME, "Expected macro name(s) after PRIVATE", ["&macro"]))
         Ok(CmmStmt.PrivateDecl(names, span(start_tok.line, start_tok.column)))
 
     # ENTRY [%LINE] &a &b — subroutine parameter binding
@@ -420,7 +440,7 @@ impl CmmParser:
                     break
 
         if names.len() == 0:
-            return Err(self.make_error("Expected macro name(s) after ENTRY"))
+            return Err(self.make_coded_error_at(start_tok, CMM_EXPECTED_MACRO_NAME, "Expected macro name(s) after ENTRY", ["&macro"]))
         Ok(CmmStmt.EntryDecl(names, span(start_tok.line, start_tok.column)))
 
     # =========================================================================
@@ -905,10 +925,7 @@ impl CmmParser:
                 self.advance()  # consume )
                 return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
             if self.check_kind("Eof"):
-                if self.recover_unclosed:
-                    self.warnings = self.warnings.push("Line " + str(start_tok.line) + ": unclosed block — reached end of file without closing )")
-                    return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
-                return Err(self.make_error("Unterminated block — expected )"))
+                break
             if self.check_kind("Newline"):
                 val nl_tok = self.advance()
                 stmts = stmts.push(CmmStmt.EmptyLine(span(nl_tok.line, nl_tok.column)))
@@ -917,10 +934,11 @@ impl CmmParser:
             else:
                 stmts = self.parse_block_statement_into(stmts)
 
+        val unterminated = self.make_coded_error_at(start_tok, CMM_UNTERMINATED_BLOCK, "Unterminated block — expected )", [")"])
         if self.recover_unclosed:
-            self.warnings = self.warnings.push("Line " + str(start_tok.line) + ": unclosed block — reached end of file without closing )")
+            self.record_recovery_warning(unterminated, "unclosed block — reached end of file without closing )")
             return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
-        Err(self.make_error("Unterminated block — expected )"))
+        Err(unterminated)
 
     # Parse the body following a control-flow keyword.
     # If the next non-blank token is `(`, parse a block.
@@ -938,7 +956,8 @@ impl CmmParser:
             case CmmTokenKind.LParen:
                 return self.parse_block()
             case CmmTokenKind.Eof:
-                return Err(self.make_error("Expected body for control-flow statement"))
+                self.restore_cursor(saved)
+                return Err(self.make_coded_error_at(self.previous(), CMM_MISSING_BODY, "Expected body for control-flow statement", ["(", "statement"]))
             case _:
                 return self.parse_statement()
 
@@ -1033,13 +1052,12 @@ impl CmmParser:
                 # Skip remaining tokens on this line, but stop at ) which closes the block
                 self.skip_to_next_line_or_rparen()
             case Err(e):
-                val tok = self.peek()
                 val msg = if self.recover_unclosed: e.message else: "Failed to parse block statement"
-                val error_line = if self.recover_unclosed: e.line else: tok.line
-                val error_column = if self.recover_unclosed: e.column else: tok.column
-                self.errors = self.errors.push("Line " + str(error_line) + ": " + msg)
-                stmts = stmts.push(CmmStmt.ErrorNode(msg, span(error_line, error_column)))
-                self.skip_to_next_line()
+                self.record_parse_error(e, msg)
+                stmts = stmts.push(CmmStmt.ErrorNode(e.message, span(e.line, e.column)))
+                # Bounded panic mode: resync at the next line, but leave a `)`
+                # for the enclosing block so one bad line cannot swallow it.
+                self.skip_to_next_line_or_rparen()
         # Consume trailing newline or comment
         if not self.is_at_end():
             if self.check_kind("Newline"):
