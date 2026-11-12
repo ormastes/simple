@@ -26,6 +26,8 @@ use compiler.hir.hir_types.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.{hir_type_instantiates_to}
+use compiler.common.diagnostics.span.{Span}
 
 val lib_source = "pub enum Poll<T>:\n    Ready(T)\n    Pending\n\npub class Fut<T>:\n    state: [u8]\n    poll_result: Poll<T>\n\n    static fn from_value(value: T) -> Fut<T>:\n        Fut(state: [], poll_result: Poll.Ready(value))\n\n    static fn pending() -> Fut<T>:\n        Fut(state: [], poll_result: Poll.Pending)\n\n    fn poll() -> Poll<T>:\n        self.poll_result\n\n    fn then<U>(f: fn(T) -> Fut<U>) -> Fut<U>:\n        match self.poll_result:\n            case Poll.Ready(v): f(v)\n            case Poll.Pending: Fut.pending()\n\npub enum RErr:\n    Cap\n    Busy\n\npub class Ring<Op, Cpl>:\n    ops: [Op]\n    cpls: [Cpl]\n\n    static fn create(n: i64) -> Result<Ring<Op, Cpl>, RErr>:\n        if n < 0:\n            return Err(RErr.Cap)\n        Ok(Ring(ops: [], cpls: []))\n\n    fn take(n: i64) -> Result<Op?, RErr>:\n        if n < 0:\n            return Err(RErr.Busy)\n        if self.ops.len() == 0:\n            return Ok(nil)\n        Ok(Some(self.ops[0]))\n\npub enum CR:\n    TypeError(errs: [text])\n    ResolveError(errs: [text])\n    Fine\n\npub fn stage(n: i64) -> CR?:\n    if n == 0:\n        return nil\n    Some(CR.TypeError([\"e\"]))\n\npub fn finish<T>(r: Result<T, RErr>) -> Result<T, RErr>:\n    r\n\npub fn sort_by<T>(xs: [T], cmp: fn(T, T) -> i64) -> [T]:\n    if xs.len() <= 1:\n        return xs\n    var less: [T] = []\n    var more: [T] = []\n    for i in 1..xs.len():\n        if cmp(xs[i], xs[0]) < 0:\n            less.push(xs[i])\n        else:\n            more.push(xs[i])\n    var out = sort_by(less, cmp)\n    out.push(xs[0])\n    for m in sort_by(more, cmp):\n        out.push(m)\n    out\n\npub class Rec:\n    v: i64\n"
 
@@ -81,11 +83,13 @@ describe "generic-self method Result (ctor-mir-20261031, open part)":
         val out = lower_consumer(IMP, "fn e5(ring: Ring<i64, i64>) -> i64:\n    match ring.take(1):\n        case Err(_): -2\n        case Ok(Some(x)): x\n        case Ok(_): 0\n")
         expect(out.contains("E-RTI-003")).to_equal(false)
         expect(out.contains("payload type mismatch")).to_equal(false)
+        expect(out.contains("has no complete declaration ownership")).to_equal(false)
 
     it "case Ok(nil) over an unannotated generic-self method Result":
         val out = lower_consumer(IMP, "fn e6(ring: Ring<i64, i64>) -> i64:\n    match ring.take(1):\n        case Err(_): -2\n        case Ok(nil): 0\n        case Ok(Some(x)): x\n")
         expect(out.contains("E-RTI-003")).to_equal(false)
         expect(out.contains("nil sub-pattern")).to_equal(false)
+        expect(out.contains("has no complete declaration ownership")).to_equal(false)
 
     it "[Fut<text>] record field element":
         val out = lower_consumer(IMP, "class Holder:\n    futs: [Fut<text>]\n\nfn ready_count(h: Holder) -> i64:\n    var n = 0\n    for f in h.futs:\n        match f.poll():\n            case Poll.Ready(_): n = n + 1\n            case Poll.Pending: n = n + 0\n    n\n")
@@ -102,3 +106,27 @@ describe "generic-self method Result (ctor-mir-20261031, open part)":
         expect(out.contains("is ambiguous")).to_equal(false)
         expect(out.contains("unknown nested variant")).to_equal(false)
         expect(out.contains("E-RTI-")).to_equal(false)
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+describe "hir_type_instantiates_to (retained declared signature vs substituted expression)":
+    it "accepts only a consistent, concrete substitution of type parameters":
+        val op = ty(HirTypeKind.TypeParam("Op", []))
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        val bool_t = ty(HirTypeKind.Bool)
+        val declared = ty(HirTypeKind.Result(ty(HirTypeKind.Optional(op)), bool_t))
+        expect(hir_type_instantiates_to(declared, ty(HirTypeKind.Result(ty(HirTypeKind.Optional(i64_t)), bool_t)))).to_equal(true)
+        # A differing non-parameter leaf stays a conflict.
+        expect(hir_type_instantiates_to(declared, ty(HirTypeKind.Result(ty(HirTypeKind.Optional(i64_t)), i64_t)))).to_equal(false)
+        # A different shape stays a conflict.
+        expect(hir_type_instantiates_to(declared, ty(HirTypeKind.Result(i64_t, bool_t)))).to_equal(false)
+        # One parameter must bind one type.
+        val pair = ty(HirTypeKind.Tuple([op, op]))
+        expect(hir_type_instantiates_to(pair, ty(HirTypeKind.Tuple([i64_t, i64_t])))).to_equal(true)
+        expect(hir_type_instantiates_to(pair, ty(HirTypeKind.Tuple([i64_t, bool_t])))).to_equal(false)
+        # A binding must be concrete all the way down: never Any, a parameter or an inference variable.
+        val any_t = ty(HirTypeKind.Any)
+        expect(hir_type_instantiates_to(declared, ty(HirTypeKind.Result(ty(HirTypeKind.Optional(any_t)), bool_t)))).to_equal(false)
+        expect(hir_type_instantiates_to(declared, ty(HirTypeKind.Result(ty(HirTypeKind.Optional(ty(HirTypeKind.Array(any_t, None)))), bool_t)))).to_equal(false)
+        expect(hir_type_instantiates_to(declared, declared)).to_equal(false)
