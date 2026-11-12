@@ -2381,7 +2381,10 @@ Classify unavailable adapter, silent UART, all-zero/all-one scan, or missing
 provenance-admitted compiler as `BLOCKED` with exit 2 and a specific receipt
 reason. Classify wrong TAP, target-observed boot failure, malformed/missing
 evidence, forbidden flash command, or failed driver restoration as FAIL. An
-SSpec helper must translate BLOCKED to `pending("BLOCKED: ...")`; it must never
+SSpec helper must translate BLOCKED to `pending("BLOCKED: ...")` (or fail with
+`Err("precondition: ...")` when an env-supplied fixture is missing); the runner
+counts both as `blocked=<n>` / `outcome=BLOCKED` / exit 6, never PASS (see
+`doc/07_guide/infra/testing.md` § BLOCKED). It must never
 return early as success or assert that a blocked marker is a live PASS. Offline
 contract and negative self-tests validate policy only. Physical PASS requires
 the exact image/compiler hashes, load/entry and DTB contract, ordered target

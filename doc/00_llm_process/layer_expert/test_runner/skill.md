@@ -572,3 +572,16 @@ original length-framed group/name fields; short paths are unchanged. Preserve
 full names in the manifest. A manifest-write warning is separate from scenario
 assertion outcomes. The pure-Simple runner does not share this writer in the
 inspected source. See `doc/08_tracking/bug/scenario_artifact_component_length_2026_10_29.md`.
+
+## BLOCKED outcome class (2026-11-12)
+
+Environment-gated examples — `pending("BLOCKED: ...")` and failures whose
+message is `precondition: ...` — are counted BLOCKED by
+`parse_blocked_examples` (`test_executor_parsing.spl`), on both the single-file
+lane (`test_runner_single.spl`) and the directory lane (`make_result_from_output`).
+A real failure keeps the file `ERROR`; otherwise any blocked example makes it
+`outcome=BLOCKED`, `blocked=<n>` on the verdict line, `, <n> blocked` on
+`Results:`, exit 6, DB status `blocked`. The Rust seed (`bdd.rs` +
+`basic.rs report_spec_file_verdict`) prints the same field. Guide:
+`doc/07_guide/infra/testing.md` § BLOCKED. Spec:
+`test/01_unit/app/test_daemon/blocked_outcome_spec.spl`.
