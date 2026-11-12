@@ -399,12 +399,12 @@ pub(super) fn eval_control_expr(
                             Control::Return(v) => return Err(CompileError::TryError(Box::new(v))),
                             Control::Break(..) => return Ok(Some(Value::Nil)),
                             Control::Continue(_) => break,
-                            Control::Next => {
-                                if let Node::Expression(expr) = stmt {
-                                    result =
-                                        evaluate_expr(expr, &mut arm_env, functions, classes, enums, impl_methods)?;
-                                }
-                            }
+                            // exec_node already ran the statement; re-evaluating a
+                            // non-last expression statement here ran its side
+                            // effects twice. The last statement's value is captured
+                            // above. See bug
+                            // seed_val_match_arm_with_return_runs_twice_2026_11_12.
+                            Control::Next => {}
                         }
                     }
                     // Write back only what the arm actually wrote.

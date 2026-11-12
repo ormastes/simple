@@ -78,7 +78,11 @@ pub fn host_execution_fixture_v2(mode: text, operation_id: text = "operation_1")
     val native_id = if mode == "short-native-id": "short-native" else: "1".repeat(64)
     val create_command = build_create_command("podman", state_dir, request, request.operation_id, 7, fence_id).1
     val start_command = build_start_command("podman", state_dir, native_id).1
-    val inspect_command = build_inspect_command("podman", state_dir, native_id).1
+    # A managed provider refuses a create result that is not a full 64-hex ID
+    # and reconciles by the deterministic container NAME, so that is the
+    # inspect the short-ID case scripts; every other case inspects by ID.
+    val inspect_command = build_inspect_command("podman", state_dir,
+        if mode == "short-native-id": linux_oci_container_name(request.pod_uid, request.attempt).unwrap() else: native_id).1
     val create_result = ScriptedCommandResultV1(operation: "create", program: engine_policy.executable_path,
         args: linux_oci_engine_route_v1(engine_policy, create_command.args).unwrap(), stdout: native_id, stderr: "", exit_code: if mode == "create-failed": 1 else: 0)
     val start_result = ScriptedCommandResultV1(operation: "start", program: engine_policy.executable_path,
@@ -111,7 +115,7 @@ pub fn host_execution_fixture_v2(mode: text, operation_id: text = "operation_1")
         service_scope_id: "user_1", request_digest: linux_oci_request_digest_v1(request).unwrap(), physical_host_id: "worker_1", boot_id: scope.boot_id,
         provider_generation: 7, native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
     val row = HostReservationV1(id: "reservation-" + operation_id, operation_id: request.operation_id, payload_digest: "0".repeat(64),
-        service_scope_id: "user_1", assignment_generation: 1, nonce: "reservation-nonce", cpu_millis: 1000,
+        service_scope_id: "user_1", assignment_generation: 1, nonce: "reservation-nonce-" + operation_id, cpu_millis: 1000,
         memory_bytes: 512, exclusive_devices: if mode == "unsupported-device": ["gpu0"] else: [], prepare_deadline_ms: 1000, state: HostReservationStateV1.Prepared)
     val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "worker_1",
         fence: HostLedgerFenceV1(authority_id: "authority", boot_id: fence_id, provider_generation: 7, revision: 1),

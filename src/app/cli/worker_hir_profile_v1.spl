@@ -168,6 +168,15 @@ pub fn worker_hir_environment_value_error_v1(key: text, value: text) -> text:
         return "HIR profile requires the internal routing marker to be 1"
     ""
 
+# Every captured key the profile does not admit, in capture order, without
+# duplicates. Empty when all are admitted.
+pub fn worker_hir_unsupported_environment_keys_v1(captured: [(text, text)]) -> [text]:
+    var out: [text] = []
+    for pair in captured:
+        if not worker_hir_environment_key_admitted_v1(pair.0) and not out.contains(pair.0):
+            out.push(pair.0)
+    out
+
 pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
         sources: [text], deadline_ms: i64) -> Result<WorkerHirProfileV1, text>:
     val opened = match environment_variant_policy_handoff_extract_v1(args):
@@ -193,9 +202,12 @@ pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
     val captured = env_list_checked()?
     if captured.len() > 256: return Err("HIR worker environment exceeds profile bound")
     var bytes: i64 = 0
+    # Name EVERY unsupported key in one refusal: reporting only the first one
+    # turned discovery into one Stage 2 rebuild per key (2026-11-12).
+    val unsupported = worker_hir_unsupported_environment_keys_v1(captured)
+    if unsupported.len() > 0:
+        return Err("unsupported HIR worker environment key: " + unsupported.join(", "))
     for pair in captured:
-        if not worker_hir_environment_key_admitted_v1(pair.0):
-            return Err("unsupported HIR worker environment key: " + pair.0)
         if seen.has(pair.0): return Err("duplicate HIR worker environment key")
         val value_error = worker_hir_environment_value_error_v1(pair.0, pair.1)
         if value_error != "": return Err(value_error)

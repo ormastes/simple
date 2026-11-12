@@ -837,6 +837,7 @@ fn _process_observation_result_error_v1(
             replacement_detected: false, digest: lease.pin_digest),
         failure_reason: reason)
 use std.io_runtime.{env_get, env_get_nullable, read_file_text_result, file_size_signed, host_os}
+use std.io_runtime.{env_set_process, env_remove_process}
 use std.common.string_core.{str_len}
 use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
 use std.nogc_sync_mut.io.file_text_session.{file_default_text_codec, file_session_decode}
@@ -1028,6 +1029,64 @@ pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
         sh_args = sh_args.push(a)
     (sh, sh_args)
 
+# ---------------------------------------------------------------------------
+# Test-runner child-env scrub (test_runner_mode_env_leak_2026_11_12)
+#
+# The test runner pins SIMPLE_EXECUTION_MODE/SIMPLE_RUNTIME_MODE in a spec
+# child's environment so the child's engine is chosen at ITS process start.
+# Those pins are process-start selectors only. When a spec's examples inherit
+# them into the processes they spawn, every grandchild is forced onto the
+# interpreter lane, whose module loader promotes non-baselined private imports
+# to a FATAL error (check_private_use_names in the seed's
+# src/compiler_rust/compiler/src/interpreter_module/module_loader.rs) on
+# compiles the JIT lane a clean invocation would use never checks. A spec
+# child therefore carries the SIMPLE_TEST_CHILD_ENV_SCRUB marker: while it is
+# set, children spawned through these facades inherit an environment with both
+# mode pins AND the marker removed, so a spawned child behaves like a fresh
+# top-level invocation no matter how deeply nested the spawn is. An example
+# that wants a specific mode for its child can still set the variable
+# explicitly (a shell `set`/`env` prefix lands after the scrub and wins).
+# The save/scrub/restore window mutates the process env and is not
+# thread-serialized -- the same contract the LSP server already relies on for
+# this exact variable (std/nogc_sync_mut/lsp/lsp_handlers.spl save/set/restore
+# around its subprocess hop).
+# ---------------------------------------------------------------------------
+
+pub val SIMPLE_TEST_CHILD_ENV_SCRUB_ENV: text = "SIMPLE_TEST_CHILD_ENV_SCRUB"
+
+struct TestChildEnvScrubSave:
+    exec_mode: text?
+    runtime_mode: text?
+    marker: text?
+
+fn _test_child_env_scrub_empty_save() -> TestChildEnvScrubSave:
+    TestChildEnvScrubSave(exec_mode: None, runtime_mode: None, marker: None)
+
+fn _test_child_env_scrub_active() -> bool:
+    (env_get(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV) ?? "") == "1"
+
+fn _test_child_env_scrub_take() -> TestChildEnvScrubSave:
+    val saved = TestChildEnvScrubSave(
+        exec_mode: env_get("SIMPLE_EXECUTION_MODE"),
+        runtime_mode: env_get("SIMPLE_RUNTIME_MODE"),
+        marker: env_get(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV))
+    val _ = env_remove_process("SIMPLE_EXECUTION_MODE")
+    val _ = env_remove_process("SIMPLE_RUNTIME_MODE")
+    val _ = env_remove_process(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV)
+    saved
+
+fn _test_child_env_scrub_put_back(key: text, saved: text?):
+    match saved:
+        case Some(value):
+            val _ = env_set_process(key, value)
+        case None:
+            val _ = env_remove_process(key)
+
+fn _test_child_env_scrub_restore(saved: TestChildEnvScrubSave):
+    _test_child_env_scrub_put_back("SIMPLE_EXECUTION_MODE", saved.exec_mode)
+    _test_child_env_scrub_put_back("SIMPLE_RUNTIME_MODE", saved.runtime_mode)
+    _test_child_env_scrub_put_back(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV, saved.marker)
+
 fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
     val tool: (text, [text]) = _resolve_posix_tool(cmd, args)
     val native_command: text = host_path_native(tool.0 + "")
@@ -1035,23 +1094,30 @@ fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
     # @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=The deployed P2 marshals the legacy process tuple call without its command byte length; use the existing explicit native capture ABI
     val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
     val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
-    if not interpreted and not jit:
+    val scrub_env = _test_child_env_scrub_active()
+    val saved_env = if scrub_env: _test_child_env_scrub_take() else: _test_child_env_scrub_empty_save()
+    val result: (text, text, i64) = if not interpreted and not jit:
         # Preserve the Windows CreateProcess/exit-status repair below. Its
         # bounded provider accepts -1 for unlimited output; POSIX does not.
         if _is_windows_platform():
-            return process_capture_bounded_native(native_command, native_arguments, 0, -1)
-        return process_capture_unbounded_native(native_command, native_arguments)
-    # On Windows the C rt_process_run popen()s a POSIX single-quoted command
-    # line through cmd.exe and decodes _pclose's raw code with `>> 8`, so every
-    # command -- including one that cannot start -- reported exit 0
-    # (doc/08_tracking/bug/windows_rt_process_run_always_exit_zero_2026-09-26.md).
-    # The bounded owner uses CreateProcess and GetExitCodeProcess; timeout 0
-    # means none and -1 means unlimited output, the same as rt_process_run.
-    if _is_windows_platform():
+            process_capture_bounded_native(native_command, native_arguments, 0, -1)
+        else:
+            process_capture_unbounded_native(native_command, native_arguments)
+    elif _is_windows_platform():
+        # On Windows the C rt_process_run popen()s a POSIX single-quoted command
+        # line through cmd.exe and decodes _pclose's raw code with `>> 8`, so every
+        # command -- including one that cannot start -- reported exit 0
+        # (doc/08_tracking/bug/windows_rt_process_run_always_exit_zero_2026-09-26.md).
+        # The bounded owner uses CreateProcess and GetExitCodeProcess; timeout 0
+        # means none and -1 means unlimited output, the same as rt_process_run.
         unsafe(capabilities: [ffi]):
-            return rt_process_run_bounded(native_command, native_arguments, 0, -1)
-    unsafe(capabilities: [ffi]):
-        rt_process_run(native_command, native_arguments)
+            rt_process_run_bounded(native_command, native_arguments, 0, -1)
+    else:
+        unsafe(capabilities: [ffi]):
+            rt_process_run(native_command, native_arguments)
+    if scrub_env:
+        _test_child_env_scrub_restore(saved_env)
+    result
 
 fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
     val tool: (text, [text]) = _resolve_posix_tool(cmd, args)
@@ -1060,10 +1126,16 @@ fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output
     # @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=Keep the command pointer and UTF8 byte extent explicit for native process capture until the deployed P2 ABI is qualified
     val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
     val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
-    if not interpreted and not jit:
-        return process_capture_bounded_native(native_command, native_arguments, timeout_ms, max_output_bytes)
-    unsafe(capabilities: [ffi]):
-        rt_process_run_bounded(native_command, native_arguments, timeout_ms, max_output_bytes)
+    val scrub_env = _test_child_env_scrub_active()
+    val saved_env = if scrub_env: _test_child_env_scrub_take() else: _test_child_env_scrub_empty_save()
+    val result: (text, text, i64) = if not interpreted and not jit:
+        process_capture_bounded_native(native_command, native_arguments, timeout_ms, max_output_bytes)
+    else:
+        unsafe(capabilities: [ffi]):
+            rt_process_run_bounded(native_command, native_arguments, timeout_ms, max_output_bytes)
+    if scrub_env:
+        _test_child_env_scrub_restore(saved_env)
+    result
 
 fn _process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
@@ -1071,8 +1143,13 @@ fn _process_is_running_raw(pid: i64) -> bool:
 
 fn _process_spawn_async_raw(cmd: text, args: [text]) -> i64:
     val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
-    unsafe(capabilities: [ffi]):
+    val scrub_env = _test_child_env_scrub_active()
+    val saved_env = if scrub_env: _test_child_env_scrub_take() else: _test_child_env_scrub_empty_save()
+    val pid = unsafe(capabilities: [ffi]):
         rt_process_spawn_async_value(host_path_native(rcmd), rargs)
+    if scrub_env:
+        _test_child_env_scrub_restore(saved_env)
+    pid
 
 fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
     unsafe(capabilities: [ffi]):

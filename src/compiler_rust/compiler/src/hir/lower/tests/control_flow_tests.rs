@@ -1451,18 +1451,23 @@ fn test_placeholder_lambda_param_defaults_to_any_without_expected_type() {
     );
 }
 
-/// A NAMED unannotated lambda param is intentionally excluded from the
-/// class-3 fix and must keep its existing I64 default (no behavior change
-/// for already-typed/named code).
+/// A NAMED unannotated lambda param with no expected type is an erased
+/// `ANY` as well. It used to keep an I64 default, which made the lambda
+/// decode every argument as an integer: `val u = \x: x` handed a text, a
+/// float or a struct answered a garbage integer under the JIT with no
+/// fallback (`["a", "b"].map(u)`), and no call through a declared
+/// `fn(T) -> T` / `fn(any) -> any` boundary could be compiled. Integer
+/// behaviour is unchanged (operator sweep in
+/// doc/08_tracking/bug/seed_jit_any_operand_lowering_gaps_block_lambda_any_default_2026-11-12.md).
 #[test]
-fn test_named_unannotated_lambda_param_keeps_i64_default() {
+fn test_named_unannotated_lambda_param_defaults_to_any() {
     let module = parse_and_lower("fn apply() -> i64:\n    val f = \\x: x * 2\n    f(3)\n").unwrap();
     let function = module.functions.iter().find(|f| f.name == "apply").unwrap();
     let params = find_lambda_params(&function.body);
     assert_eq!(
         params,
-        vec![("x".to_string(), TypeId::I64)],
-        "a named unannotated lambda param must keep its I64 default: {params:?}"
+        vec![("x".to_string(), TypeId::ANY)],
+        "a named unannotated lambda param must default to ANY: {params:?}"
     );
 }
 

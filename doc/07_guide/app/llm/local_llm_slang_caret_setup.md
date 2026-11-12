@@ -324,20 +324,86 @@ Driving a cs agent from outside (for example `tmux send-keys`): the chat line
 types text into the agent pane but does not submit it; follow it with
 `/key enter`.
 
+### Running an agent inside a podman container
+
+`/launch ... --container <image>` runs the agent through the Simple container
+layer (`std.nogc_sync_mut.container_session.podman_session_v1`): cs builds the
+agent argv as usual and the pane runs the rootless podman client attached to
+the container's tty. Needs podman (rootless), verified on 4.9.3 / aarch64.
+
+Build the agent image once. It holds glibc >= 2.39, `libgcc_s`, git and
+`procps`; no compiler. The Simple binary and the repository are bind-mounted
+at run time, never baked in:
+
+```bash
+podman build -t localhost/simple-caret-agent:1 \
+    -f config/container/caret_agent.Containerfile config/container
+```
+
+Start cs from a repo checkout with `SIMPLE_BINARY` naming the binary the agent
+should run, then launch (one line; arguments are space-split, so no spaces
+inside one argument):
+
+```
+/launch caret:slang/Qwen3-Coder-30B-A3B-Q4_K_M --config <cfg.sdn> --workspace <worktree> --dangerously-allow-all --container localhost/simple-caret-agent:1 --container-mount <cfg.sdn>:<cfg.sdn> --container-mount <main-repo>/.git:<main-repo>/.git:rw
+```
+
+What is mounted, all at the same path as on the host:
+
+| Path | Mode | Why |
+|---|---|---|
+| cs's working directory (the repo root) | ro | the agent program `src/app/llm_caret/main.spl` |
+| `--workspace` | rw | the agent's edits; `bin/simple test` runs here |
+| the resolved `SIMPLE_BINARY` | ro | runs the agent; point the workspace's `bin/simple` symlink at the same file so the agent's `bin/simple test` resolves inside |
+| `--container-mount <cfg>:<cfg>` | ro | the `--config` file lives outside the repo |
+| `--container-mount <main-repo>/.git:...:rw` | rw | only for a git **worktree** workspace, see below |
+
+- **Network** defaults to `host`, so the slang server on `127.0.0.1:8721` is
+  reachable. `--container-network none|private` changes that.
+- **git commit** works inside. A worktree's `.git` is a pointer into the main
+  repository's `.git`, so that directory must be mounted read-write or git
+  reports "not a git repository". The identity comes from the repository's
+  own config; if yours is only in `~/.gitconfig` (not mounted; `HOME=/tmp`
+  inside), pass `--container-env GIT_AUTHOR_NAME=...` and the three sibling
+  variables. To keep the container away from the shared refs and objects, use
+  a standalone clone as the workspace instead and fetch from it on the host.
+- **git push stays on the host.** No credential — `gh` token, SSH key,
+  credential helper — is mounted, deliberately: the agent runs with
+  `--dangerously-allow-all`, so anything inside the container is the model's
+  to use. Push, PR creation and merges are done by the operator outside.
+- **Read-write mounts are refused** on `/`, `$HOME`, `/home`, `/tmp`, `/var`
+  and friends (exact) and anywhere under `/etc`, `/usr`, `/lib*`, `/dev`,
+  `/proc`, `/sys`; `..` in a mount path is refused.
+- **Cleanup.** `/kill <n>` and leaving cs (`/quit`, EOF, Ctrl-C) remove the
+  agent's container and the client's stderr spool. A cs only removes
+  containers it launched itself. After a cs that died by SIGKILL, `/reap`
+  removes every container of that session name. Check with `podman ps -a`.
+
+Verified 2026-11-12: a containerized `caret:slang` agent on a worktree fixed a
+one-line spec expectation, ran `bin/simple test` on it inside the container
+(1 passed), and committed; afterwards `podman ps -a` was empty and no
+`/tmp/cs-<session>-*` file remained.
+
 ## 9. Known issues (open)
 
 - **GB10 intermittent CUDA OOM.** CUDA context creation can fail with "out of
   memory" in `ggml_cuda_init` when a second CUDA process starts while a slang
   process holds a loaded model. Run one server for all agents.
-- **Prefix-restore crash.** After hours of two-agent load, the server aborted
-  with `CUDA error: an illegal memory access` right after
-  `state_read_meta: cell_count = 15809` (restoring a cached prompt prefix).
-  Restart the server; a fix is in progress.
-- **JIT demotion.** Fixed: `dir_list` (PR #8524), `RingTelemetry` (PR #8518)
-  and `jo1(p1:)` (PR #8531). Still open: an unbraced single-symbol
-  `use a.b.fn` is not counted as an import by the co-compiled ambiguity check
-  (`ambiguous call to dir_create ... neither defines nor imports it`), so caret
-  still runs in the interpreter. It works, just slower.
+- **CUDA illegal access on a short first micro-batch.** Worked around in the
+  shim (PR #8571, `slang_request_warm`); the record and its removal criteria are in
+  `doc/08_tracking/bug/slang_ggml_cuda_short_first_ubatch_illegal_access_2026-11-12.md`.
+  The shim must be rebuilt for the workaround to apply.
+- **JIT demotion.** Fixed: `dir_list` (PR #8524), `RingTelemetry` (PR #8518),
+  `jo1(p1:)` (PR #8531), unbraced `use a.b.fn`, const defaults, global-init
+  owner, enum owner, and closure ABI parts 0, 2 and 3 (PRs #8626, #8635). Still open: the
+  `Mutex.with_lock` closure boundary (fix in review), then
+  `SimpleHttpServer.start_with_callback`. Until then caret runs in the
+  interpreter. It works, just slower.
+- **Local agents stall after a correct edit.** Qwen3-Coder sometimes makes the
+  briefed edit, then wanders (`ls`, `cd /tmp`) instead of verifying and
+  committing. Check `git diff` in the workspace; the reviewer can verify and
+  commit. Exact single-line `edit_file` calls in `build/TASK.md`, plus a
+  required diff line count, keep destructive edits rare.
 
 ## 10. Troubleshooting
 
@@ -352,5 +418,8 @@ types text into the agent pane but does not submit it; follow it with
 | `spl_dlsym: unresolved symbol` | shim built from older source | rebuild the shim in this worktree |
 | 503 `model_not_runnable` | non-GGUF or unsupported model | use a GGUF; read the reason in the response |
 | Agent argument ignored or misparsed after `/launch` | args are space-split | no spaces inside one argument |
+| Containerized agent: `fatal: not a git repository` | workspace is a git worktree | add `--container-mount <main-repo>/.git:<main-repo>/.git:rw` |
+| `/launch ... --container ...` prints caret's usage text and the agent exits; no container appears in `podman ps` | the running cs was started from source older than container support, so it passes `--container` to caret | start a new cs from a current checkout (another session name or tmux window); a running cs never reloads its source |
+| Containerized agent: `cannot launch a1: container ... already exists` | another cs on the session, or one killed by SIGKILL | `/reap`, or use another session name |
 
 Design context: `doc/00_llm_process/feature_expert/slang_local_inference/skill.md`.

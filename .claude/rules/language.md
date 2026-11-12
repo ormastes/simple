@@ -17,6 +17,7 @@ alwaysApply: false
 - **SDN format** for all config/data files, not JSON/YAML
 - **Error handling:** Use `Result<T, E>` + `?` operator (no try/catch/throw keywords — by design)
 - **nil only inside `unsafe:` (and interpreted scripts)** - safe compiled code handles `T?` only via `None`, `.?`, `??`, `if val`, or match; match arms are `None:`, never `nil:`
+- **Unit type is `Nil`, its value `nil`** - `Result<Nil, E>` / `Ok(nil)`, `-> Nil` / `return nil` are safe (the one `nil` exception); `Nil` is never absence (`Nil?` rejected); `()` is the same type, new code prefers `Nil`. See `doc/07_guide/language/robust_semantic_absence.md` § Unit type
 - **No `Any` / erased access outside `unsafe:`** - it is a compile error
 - **Generics are erased** - there is no monomorphization pass
 - **Exhaustive match (staged):** a non-exhaustive value match is a WARNING now and becomes an ERROR after phase 3

@@ -65,11 +65,37 @@ fn operation_owner_check_v2(owner: DistributedOperationJournalV2) -> Result<bool
     if sha256_text(lease) != owner.lease_digest: return Err("OPERATION_JOURNAL_LEASE_STALE")
     Ok(true)
 
+# Roots whose journal THIS process currently owns through the path-lock open.
+#
+# `file_lock` is not a same-process exclusion: the interpreter runtime hands a
+# second handle to a path the process already holds (re-entrant by design, see
+# rt_file_lock), and an advisory lock never excludes its own holder on every
+# host. A second open of a live root in one process therefore used to succeed
+# and overwrite `parent.lease`, turning the live owner into LEASE_STALE. The
+# OS lock still fences other processes; this record fences this one. It is
+# added only after a complete open and removed by close, so a failed open
+# leaves nothing behind.
+var operation_journal_owned_roots_v2: [text] = []
+
+fn operation_journal_root_owned_v2(root: text) -> bool:
+    for item in operation_journal_owned_roots_v2:
+        if item == root: return true
+    false
+
+fn operation_journal_root_release_v2(root: text):
+    var kept: [text] = []
+    for item in operation_journal_owned_roots_v2:
+        if item != root: kept.push(item)
+    operation_journal_owned_roots_v2 = kept
+
 fn distributed_operation_journal_open_v2(root: text, authority_digest: text, nonce: text,
         maximum_events: i64) -> Result<DistributedOperationJournalV2, text>:
     if root == "" or not builder_digest_valid_v1(authority_digest) or not builder_digest_valid_v1(nonce) or
             maximum_events <= 0 or maximum_events > 100000:
         return Err("OPERATION_JOURNAL_CONFIGURATION_INVALID")
+    # Checked before the lock and before any write: a live in-process owner's
+    # lease must not be replaced.
+    if operation_journal_root_owned_v2(root): return Err("OPERATION_JOURNAL_ALREADY_OWNED")
     # The journal holds signed authority state and its root is later opened
     # as a trusted directory; create it private instead of 0777 & ~umask.
     directory_create_private(root)
@@ -82,6 +108,8 @@ fn distributed_operation_journal_open_v2(root: text, authority_digest: text, non
     val opened = distributed_operation_journal_replay_v2(root, authority_digest, maximum_events, held, sha256_text(lease))
     if opened.is_err():
         val released = file_unlock(held)
+    else:
+        operation_journal_owned_roots_v2.push(root)
     opened
 
 fn distributed_operation_journal_replay_v2(root: text, authority_digest: text,
@@ -148,6 +176,7 @@ fn distributed_operation_journal_close_v2(owner: DistributedOperationJournalV2) 
     val checked = operation_owner_check_v2(owner)?
     if not file_delete(owner.root + "/parent.lease"): return Err("OPERATION_JOURNAL_LEASE_RELEASE_FAILED")
     if not file_unlock(owner.parent_lock): return Err("OPERATION_JOURNAL_UNLOCK_FAILED")
+    operation_journal_root_release_v2(owner.root)
     Ok(true)
 
 # One indexed read after fixed-size owner/revision checks; never replay in a hot query.

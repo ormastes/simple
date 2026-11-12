@@ -1,7 +1,7 @@
 # Seed interpreter runs a `val x = match` Err arm twice
 
 - id: seed_val_match_arm_with_return_runs_twice_2026_11_12
-- status: open
+- status: verification-pending
 - severity: P2 (silent double side effects)
 - found: 2026-11-12, lane work/t32-cli-pub-20261112
 - binary: phase-1 seed `C:/dev/wt/p1-20261112/src/compiler_rust/target/bootstrap/simple.exe`
@@ -39,3 +39,20 @@ in the same module. A minimal repro is still owed.
 The code now uses a statement-form `match` and assigns
 `dispatch_args = prepared` in the `Ok` arm. It is tagged
 `@workaround bug=seed_val_match_arm_with_return_runs_twice_2026_11_12`.
+
+## Root cause (2026-11-12, lane work/val-match-twice-20261112)
+
+Not cross-module and not `return`-specific. Any match EXPRESSION arm with more
+than one statement re-ran every non-last expression statement:
+`evaluate_expr` in `interpreter/expr/control.rs` (`Expr::Match` arm loop) ran
+the statement via `exec_node`, then on `Control::Next` evaluated the same
+`Node::Expression` again to capture `result`. Only the last statement's value
+is used, and it is captured by the `is_last` branch, so the re-evaluation was
+removed. It reproduced under `bin/simple test` (interpreter); `bin/simple run`
+JIT-compiles small files, which is why single-file `run` reductions showed
+hits=1.
+
+Minimal repro / regression spec:
+`test/01_unit/language/val_match_err_arm_return_runs_once_spec.spl`.
+The statement-form workaround in `t32_cli/mod.spl` can be reverted once a seed
+with this fix is deployed.

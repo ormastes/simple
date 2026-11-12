@@ -33,6 +33,7 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <self-hosted-simple> native-bu
 | `struct_array_push_i64_field_tagshift.spl` | struct pushed into an empty-literal `[]`-declared array (i64 fields) | (this fix) | **30** | PASS | SIGSEGV, or a specific 11x rc marking which field/element mismatched |
 | `scalar_spill_loop_intervening_calls.spl` | scalar vals live across call-bearing while loop (spill clobber) | source fix | **42** | pending stage3 (seed run rc=42) | loop-body scalar reads 0 -> rc = count of bad rows |
 | `runtime_lane_value_representation.spl` | enum payload/Option/text identical across runtime.c vs runtime_native.c lanes | n/a | **42** | pending stage3 (seed run rc=42) | wrong area/Option/len sum |
+| `native_lane_modern_runtime_representation.spl` | Lane C links modern runtime_native.c/runtime_legacy_core.c (bug native_spl_lane_runtime_c_legacy_value_representation_divergence) | n/a | **42** | pending stage3 (seed run rc=42) | build/link failure on the modern lane, or wrong area/Option/len sum |
 | `theme_package_aggregate_return.spl` | named-local class aggregate returned via wrapper keeps fields | n/a | **42** | pending stage3, expected FAIL until bug fixed (seed run rc=42) | `field access on nil receiver` / SIGSEGV |
 
 ## RESOLVED: `option_try_unwrap_ifval*.spl` (i64/text/struct/none)

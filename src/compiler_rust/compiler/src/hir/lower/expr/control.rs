@@ -328,11 +328,17 @@ impl Lowerer {
                     // field-access path instead of the dynamic one, and a
                     // non-numeric receiver (e.g. a struct's `.flag` field)
                     // silently mis-executed instead of routing dynamically.
-                    // No behavior change for a NAMED unannotated lambda param
-                    // (e.g. `\x: x.flag`), which is intentionally excluded.
                     TypeId::ANY
                 } else {
-                    TypeId::I64
+                    // A NAMED unannotated param with no expected type is an
+                    // erased `ANY` too. It used to default to I64, which made
+                    // the lambda decode every argument as an integer: a
+                    // `val u = \x: x` handed text, a float or a struct (e.g.
+                    // `["a", "b"].map(u)`, or any call through a declared
+                    // `fn(T) -> T` / `fn(any) -> any` boundary) returned a
+                    // garbage integer with no fallback. `ANY` is a tagged
+                    // word; the body's operators dispatch on it at run time.
+                    TypeId::ANY
                 };
                 (p.name.clone(), ty)
             })

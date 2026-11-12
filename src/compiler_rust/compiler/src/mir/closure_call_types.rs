@@ -198,6 +198,15 @@ fn propagate_in_function(function: &mut MirFunction) {
         .filter(|(_, sig)| sig.is_some())
         .map(|(local_index, _)| *local_index)
         .collect();
+    // ...and the slot itself: a `bool`-result lambda gave the local an 8-bit
+    // slot, which truncated the closure handle on the way in (`val f = \\x: x
+    // > 1; f(2)` jumped to 0; `xs.filter(f)` saw a non-closure).
+    let nparams = function.params.len();
+    for local_index in &closure_locals {
+        if let Some(local) = local_index.checked_sub(nparams).and_then(|i| function.locals.get_mut(i)) {
+            local.ty = TypeId::I64;
+        }
+    }
     let closure_addr_regs: std::collections::HashSet<VReg> = addr_local
         .iter()
         .filter(|(_, local_index)| closure_locals.contains(local_index))
@@ -221,6 +230,7 @@ fn propagate_in_function(function: &mut MirFunction) {
                 param_types,
                 return_type,
                 args,
+                signature_declared,
                 ..
             } = inst
             else {
@@ -239,21 +249,31 @@ fn propagate_in_function(function: &mut MirFunction) {
             // reinterpret the argument's bits. Poison the site to ANY instead;
             // the JIT admission guard refuses such a module and the interpreter
             // (which is dynamically typed) produces the right answer.
+            //
+            // An `ANY` lambda parameter (an unannotated one) is different: it
+            // takes a tagged word of any type, and the call site boxes each
+            // argument by the CALLER's slot type, so every caller type is
+            // compatible and the caller's own type is kept for that slot.
             let compatible = param_types
                 .iter()
                 .zip(sig_params.iter())
-                .all(|(caller, callee)| *caller == TypeId::ANY || caller == callee);
+                .all(|(caller, callee)| *caller == TypeId::ANY || *callee == TypeId::ANY || caller == callee);
             if !compatible {
                 param_types.iter_mut().for_each(|slot| *slot = TypeId::ANY);
                 *return_type = TypeId::ANY;
                 continue;
             }
             for (slot, inferred) in param_types.iter_mut().zip(sig_params.iter()) {
-                *slot = *inferred;
+                if *inferred != TypeId::ANY {
+                    *slot = *inferred;
+                }
             }
             if *return_type == TypeId::ANY {
                 *return_type = *sig_ret;
             }
+            // The signature now IS the closure's own: an `ANY` slot left in it
+            // is the tagged word that lambda takes or answers, not a guess.
+            *signature_declared = true;
         }
     }
 }

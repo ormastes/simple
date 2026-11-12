@@ -130,22 +130,26 @@ impl<'a> MirLowerer<'a> {
     /// lambda's compiled parameter types agree with its call site before
     /// stamping them onto the boundary — a lambda compiled with `x: i64` that
     /// is handed a `text` handle must NOT be given a typed boundary.
-    fn function_signature_for_callee(&self, callee: &HirExpr, args: &[HirExpr]) -> (Vec<TypeId>, TypeId) {
+    /// `(param types, return type, declared)`. `declared` is true when the
+    /// signature is the callee's declared function type, false when it is
+    /// only inferred from the argument types (see
+    /// `MirInst::IndirectCall::signature_declared`).
+    fn function_signature_for_callee(&self, callee: &HirExpr, args: &[HirExpr]) -> (Vec<TypeId>, TypeId, bool) {
         let arg_types = || args.iter().map(|arg| arg.ty).collect::<Vec<_>>();
         let Some(registry) = self.type_registry else {
-            return (arg_types(), TypeId::ANY);
+            return (arg_types(), TypeId::ANY, false);
         };
         if let Some(HirType::Function { params, ret }) = registry.get(callee.ty) {
-            return (params.clone(), *ret);
+            return (params.clone(), *ret, true);
         }
         if let HirExprKind::Index { receiver, .. } = &callee.kind {
             if let Some(HirType::Array { element, .. }) = registry.get(receiver.ty) {
                 if let Some(HirType::Function { params, ret }) = registry.get(*element) {
-                    return (params.clone(), *ret);
+                    return (params.clone(), *ret, true);
                 }
             }
         }
-        (arg_types(), TypeId::ANY)
+        (arg_types(), TypeId::ANY, false)
     }
 
     fn call_returns_array_of(&self, callee: &HirExpr, element_type: TypeId) -> bool {
@@ -293,7 +297,7 @@ impl<'a> MirLowerer<'a> {
     /// A literal that HIR typed `ANY` is still a RAW machine word (it is what
     /// `box_arg_for_any_param` boxes on the way INTO a tagged slot), so it must
     /// never be fed to the tagged->raw decoders.
-    fn is_raw_literal_typed_any(arg: &HirExpr) -> bool {
+    pub(super) fn is_raw_literal_typed_any(arg: &HirExpr) -> bool {
         arg.ty == TypeId::ANY
             && matches!(
                 arg.kind,
@@ -652,7 +656,11 @@ impl<'a> MirLowerer<'a> {
                 self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
                 self.box_args_for_any_params(callee, args, &mut arg_regs)?;
                 let callee_reg = self.lower_global_expr(name.clone(), callee.ty)?;
-                let (param_types, return_type) = self.function_signature_for_callee(callee, args);
+                let (param_types, return_type, signature_declared) = self.function_signature_for_callee(callee, args);
+                // The arguments above were coerced with `callee_param_types`,
+                // which is the declared function type only when it agrees
+                // with the signature recorded here.
+                let signature_declared = signature_declared && self.callee_param_types(callee) == param_types;
                 return self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
@@ -663,6 +671,7 @@ impl<'a> MirLowerer<'a> {
                         return_type,
                         args: arg_regs,
                         effect: crate::mir::effects::Effect::Io,
+                        signature_declared,
                     });
                     dest
                 });
@@ -1050,7 +1059,7 @@ impl<'a> MirLowerer<'a> {
             // Indirect call through closure/function pointer
             let callee_reg = self.lower_expr(callee)?;
 
-            let (param_types, return_type) = self.function_signature_for_callee(callee, args);
+            let (param_types, return_type, signature_declared) = self.function_signature_for_callee(callee, args);
             self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
             self.coerce_args_for_param_slots(&param_types, args, &mut arg_regs, true)?;
 
@@ -1064,6 +1073,7 @@ impl<'a> MirLowerer<'a> {
                     return_type,
                     args: arg_regs,
                     effect: crate::mir::effects::Effect::Io,
+                    signature_declared,
                 });
                 dest
             })

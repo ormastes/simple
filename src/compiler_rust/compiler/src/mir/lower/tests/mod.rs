@@ -11,6 +11,7 @@ mod snapshot_tests;
 mod module_boundary;
 mod branch_coverage;
 mod seed_regression_tests;
+mod any_operand_gaps;
 mod closure_call_types;
 mod deref_lvalue_tests;
 mod array_push_header_abi;
