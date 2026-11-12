@@ -99,3 +99,38 @@ A. Whack-a-mole (precedent 02821241513): align each rejected construction to
 B. Root cause: find the match/check-evaluation divergence (likely match-arm
    selection or wildcard handling) between seed and self-hosted codegen; that
    fixes the whole family and the "multiple wildcard arms" class too.
+
+## Minimal reproducer (2026-11-13 ~07:20): seed vs self-hosted enum-payload check
+
+shapes.spl: `struct Block(tag: i64)` + `enum NodeKind: CustomBlock(kind: text, value: Block) | Break(level: i64) | Empty`
+use2.spl:
+    fn decode(flag: i64) -> NodeKind:
+        var value: Block? = nil
+        if flag == 1:
+            value = Block(tag: 7)
+        NodeKind.CustomBlock("k", value)   # Optional local into PLAIN payload slot
+
+Seed (`src/compiler_rust/target/bootstrap/simple`, pinned 3a0aac3773a):
+RC=0 -- accepts. J2 stage2-admitted binary (same pin): RC=1
+`enum construction 'shapes.NodeKind.CustomBlock': payload type mismatch at 1`.
+Compile time ~0.4 s per binary. THIS is the 15-line fixpoint break.
+
+Static reading: enum_payload_types_alias_equal((Named, Optional)) has no arm ->
+falls to `case _:` -> hir_types_equal -> false -- STRICT in source. The seed's
+acceptance therefore comes from an EARLIER lenient branch in the
+enum_payload_compatible caller chain (enum_constructor_payload.spl) that the
+seed executes and the self-hosted binary skips -- a match-arm-sensitive path,
+the same class as the B5b wildcard misdiagnosis in core_codegen. The B5b error
+there is collateral: enum constructor arms degrade to Wildcard when their
+shape resolution misses, so a single-wildcard match reports "multiple wildcard
+arms".
+
+## Fix approach for the next lane
+
+Differential-debug the 15-line repro: run both binaries with the payload-trace
+env and MIR dumps, find the first divergent branch in the
+enum_payload_compatible chain, then inspect THAT function's compiled match
+lowering for the arm-selection divergence (likely candidate: or-pattern /
+multi-constructor arm selection in a scrutinee-dependent match, or a
+fall-through branch whose condition involves a registry lookup that resolves
+differently in the self-hosted binary -- chase-family residual).
