@@ -61,3 +61,20 @@ caches (HIR 1626/1626 clean) are warm; the retry resumes at MIR/codegen.
   after the PR #8650 chase fix -- the chase family did NOT reproduce).
 - MIR/codegen witnesses: phase=mir lines; 38 aot-*.o produced before the
   16 GiB kill.
+
+## Correction (same day): ratchet baseline is the constant stage2 transcript
+
+`bootstrap_tree_rss_ceiling_previous_kib` reads the STAGE2 admission
+transcript's recorded ceiling (50331648 / 48 GiB) -- NOT the previous stage3
+attempt's ceiling. Every stage3 resume compares against that same 48 GiB, so
+any ceiling in (48 GiB, 3/4 * MemAvailable] is admissible on every attempt.
+The "62 GiB recorded, cannot re-enter" impasse above was WRONG: 56 GiB
+(58720256) re-admitted cleanly on 2026-11-12 ~23:30 with cap 26 GiB
+(27262976).
+
+Remaining gate for the final stage3 stretch: the lane's exclusive-memory
+admission (concurrent native-build count must be 0 -- other sessions' spec
+runs spawn short native builds). Auto-resume `run-stage3h.sh` polls both
+conditions and launches when the box is quiet. Codegen peak projection
+~18-26 GiB; cap 26 GiB carries the measured curve (HIR 10.2, MIR ~14,
+codegen >16) with headroom.

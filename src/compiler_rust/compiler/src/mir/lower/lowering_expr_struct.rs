@@ -60,7 +60,16 @@ impl<'a> MirLowerer<'a> {
                 // `P(v: 3)` with `v: f64` stores a float constant.
                 let raw = self.float_slot_from_int_literal(*decl_ty, field, field_regs[i])?;
                 let boxed = self.box_scalar_for_tagged_slot(*decl_ty, field.ty, raw)?;
-                field_regs[i] = boxed;
+                // ...and the other direction: a TAGGED value (`any`, erased
+                // `T`, `T?`) stored into a RAW scalar field must be decoded,
+                // as a `val` binding, a return and a call argument already
+                // are. `P(x: v)` with `v: any = 4` stored the tagged word and
+                // `.x` read 32.
+                field_regs[i] = if Self::is_raw_literal_typed_any(field) {
+                    boxed
+                } else {
+                    self.unbox_scalar_for_raw_slot(*decl_ty, field.ty, boxed)?
+                };
             }
         }
 
@@ -362,8 +371,8 @@ impl<'a> MirLowerer<'a> {
         } else {
             self.lower_expr(receiver)?
         };
-        let index_reg = self.lower_expr(index)?;
-        let index_ty = if index.ty == TypeId::ANY || index.ty.0 == u32::MAX {
+        let mut index_reg = self.lower_expr(index)?;
+        let mut index_ty = if index.ty == TypeId::ANY || index.ty.0 == u32::MAX {
             self.recover_receiver_type(index).unwrap_or(index.ty)
         } else {
             index.ty
@@ -378,6 +387,22 @@ impl<'a> MirLowerer<'a> {
             .type_registry
             .and_then(|tr| recovered_receiver_ty.and_then(|ty| tr.get(ty)))
             .is_some_and(|ty| matches!(ty, HirType::Array { .. }));
+        // An index that is statically `ANY` (an `any` value, an erased generic,
+        // an unannotated lambda parameter, the result of any-arithmetic) is a
+        // TAGGED word. An array or text is indexed by an integer, so decode it
+        // once here: every typed read below then sees a raw index, and the
+        // generic path boxes a raw index exactly once. Left tagged, it reached
+        // `rt_typed_words_i64_at` undecoded or was boxed a second time
+        // (`xs[i - 1] + xs[0]` on `[10, 20, 30]`, `i = 3`, answered 13).
+        // A dict / unknown receiver keeps the tagged key it expects.
+        if index.ty == TypeId::ANY
+            && index_ty == TypeId::ANY
+            && !Self::is_raw_literal_typed_any(index)
+            && (receiver_is_array || recovered_receiver_ty == Some(TypeId::STRING))
+        {
+            index_reg = self.unbox_scalar_for_raw_slot(TypeId::I64, TypeId::ANY, index_reg)?;
+            index_ty = TypeId::I64;
+        }
         // Mirror `receiver_is_array` (and Dict #117): test the ANY-recovered
         // type, not the raw `receiver_ty`. When `[u8]`/`[u32]`/`[u64]` erases
         // to ANY across extern facades, the raw ty is ANY and these typed

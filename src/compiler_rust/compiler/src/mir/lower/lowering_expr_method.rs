@@ -1575,6 +1575,9 @@ impl<'a> MirLowerer<'a> {
                 };
                 let is_callable_field = field_ty == TypeId::ANY || field_signature.is_some();
                 if is_callable_field {
+                    // Declared only for a function-typed field; an `any` field
+                    // carries no signature at all.
+                    let signature_declared = field_signature.is_some();
                     let (param_types, return_type) =
                         field_signature.unwrap_or_else(|| (vec![TypeId::ANY; args.len()], TypeId::ANY));
                     self.coerce_args_for_param_slots(&param_types, args, &mut arg_regs, false)?;
@@ -1604,6 +1607,7 @@ impl<'a> MirLowerer<'a> {
                             return_type,
                             args: arg_regs.clone(),
                             effect: crate::mir::effects::Effect::Io,
+                            signature_declared,
                         });
                         dest
                     });

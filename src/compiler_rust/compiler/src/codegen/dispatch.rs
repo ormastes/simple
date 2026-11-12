@@ -84,6 +84,7 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             return_type,
             args,
             effect,
+            ..
         } => emitter.emit_indirect_call(dest, *callee, param_types, *return_type, args, *effect),
 
         // =====================================================================

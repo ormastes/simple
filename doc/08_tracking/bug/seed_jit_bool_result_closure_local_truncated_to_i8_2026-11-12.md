@@ -1,6 +1,6 @@
 # Seed JIT: a local holding a bool-result lambda is typed `bool`, truncating the closure pointer (2026-11-12)
 
-Status: OPEN. Live on `release/1.0.0`; no fallback, no diagnostic.
+Status: FIXED (`mir::closure_call_types` retypes the closure-holding local slot to I64; test `local_holding_a_bool_result_closure_is_pointer_sized`). Was live on `release/1.0.0`; no fallback, no diagnostic.
 
 ## Repro
 
