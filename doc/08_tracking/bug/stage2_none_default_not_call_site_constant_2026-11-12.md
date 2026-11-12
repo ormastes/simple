@@ -64,3 +64,27 @@ wrappers (deletion over stubs), prune their allow-list rows, and mark their
 - Generalization: `test/01_unit/compiler/20.hir/bootstrap_regressions/call_site_arity_spec.spl`
   describe "None never reaches a non-optional parameter in safe code"
   (positional, named, `T?` accepted, `unsafe` accepted, `= None` default).
+
+## Follow-on 2: 55 more, and the gate that should have caught all 75
+
+The relaunched lane on 7f9fb5b compiled everything and failed at link on the
+next error-limited batch of 20. llvm-nm over the real link inputs
+(`libspl_objects.a`, `libsimple_native_all.a`, the core-C
+`simple_runtime.lib`) gives the full set: 55 symbols, again every one
+referenced only by its host.spl wrapper and defined by no lane on Windows
+(`rt_layout_*`, `rt_tls13_*`, `rt_renderdoc_*`, `rt_ipc_*`, x86/rv32
+privileged ops, ...). Same deletion.
+
+Why `check-runtime-link-completeness.shs` passed on every one of the 75: its
+allowlist accepts a symbol "the real stage3 link does not reference", which is
+an ELF fact (dead wrapper dropped by `--gc-sections`), and its Linux run
+compiles a superset of C sources, so `runtime_renderdoc.c`
+(`#if __linux__ || __APPLE__`) counted as defined. Fix: the gate now runs a
+closure-strict pass (allowlist ignored for host.spl / native_build_worker.spl
+externs; defined set = this host's core-C list + the C files
+`src/compiler_rust/runtime/build.rs` compiles + `pub extern "C" fn` exports
+whose `#[cfg]` admits this host), and
+`.github/workflows/runtime-link-completeness-platforms.yml` runs it natively
+on ubuntu, windows (llvm-mingw UCRT) and macos. Spec:
+`test/02_integration/runtime/runtime_link_completeness_spec.spl`
+"rejects a closure-module extern this platform defines nowhere".
