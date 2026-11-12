@@ -1416,9 +1416,45 @@ pub fn rt_file_append_text(args: &[Value]) -> Result<Value, CompileError> {
 /// interpreter-only extern binding.
 pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    match fs::read(&path) {
+    match read_bytes_retrying(&path, "rt_file_read_bytes") {
         Ok(bytes) => Ok(Value::byte_array(bytes)),
         Err(_) => Ok(Value::Nil),
+    }
+}
+
+/// Windows `ERROR_SHARING_VIOLATION` / `ERROR_LOCK_VIOLATION`: another process
+/// (typically an on-access scanner or indexer) holds a freshly written file
+/// with an exclusive share mode for a few milliseconds. The file exists and
+/// has its full size, so `file_size` succeeds while `fs::read` fails.
+fn is_transient_read_error(err: &std::io::Error) -> bool {
+    matches!(err.kind(), std::io::ErrorKind::Interrupted) || matches!(err.raw_os_error(), Some(32) | Some(33))
+}
+
+/// `fs::read` with a bounded retry on transient sharing/lock violations, and
+/// the OS error surfaced on stderr under `SIMPLE_FILE_IO_DEBUG=1`.
+///
+/// bug doc seed_file_read_bytes_nil_after_in_process_write_2026-11-12.md: the
+/// seed returned nil for a file this process had just written while
+/// `file_size` reported its full length; the extern mapped every `Err` to nil
+/// without logging, so the failing syscall was invisible. Total wait is bounded
+/// (~0.5 s) so a genuinely locked file still fails closed.
+pub(crate) fn read_bytes_retrying(path: &str, who: &str) -> std::io::Result<Vec<u8>> {
+    const MAX_ATTEMPTS: u32 = 10;
+    let mut attempt = 0u32;
+    loop {
+        match fs::read(path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) if attempt + 1 < MAX_ATTEMPTS && is_transient_read_error(&err) => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(err) => {
+                if std::env::var_os("SIMPLE_FILE_IO_DEBUG").is_some() {
+                    eprintln!("{who}: read failed for {path:?} after {} attempt(s): {err}", attempt + 1);
+                }
+                return Err(err);
+            }
+        }
     }
 }
 
@@ -1428,7 +1464,7 @@ pub fn rt_file_mmap_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("rt_file_mmap_read_bytes requires 1 argument"));
     }
     let path = extract_path(args, 0)?;
-    match fs::read(&path) {
+    match read_bytes_retrying(&path, "rt_file_mmap_read_bytes") {
         Ok(bytes) => Ok(Value::byte_array(bytes)),
         // Declared `[i64]?`: nil means mapping or read failure (C-runtime parity).
         Err(_) => Ok(Value::Nil),
@@ -2323,6 +2359,44 @@ pub fn rt_file_publish_noreplace(args: &[Value]) -> Result<Value, CompileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Replays seed_file_read_bytes_nil_after_in_process_write_2026-11-12: a
+    /// file this process just wrote is briefly held with share mode 0 (what an
+    /// on-access scanner does); the read must wait it out, not return nil.
+    #[cfg(windows)]
+    #[test]
+    fn rt_file_read_bytes_waits_out_a_transient_sharing_violation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("fresh.bin");
+        let payload: Vec<u8> = (0..36864u32).map(|i| (i % 251) as u8).collect();
+        fs::write(&path, &payload).expect("write");
+        let holder = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("exclusive holder");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            drop(holder);
+        });
+        let got = rt_file_read_bytes(&[Value::text(path.to_string_lossy().to_string())]).expect("extern ok");
+        releaser.join().expect("releaser");
+        match got {
+            Value::ByteArray(bytes) => assert_eq!(bytes.as_ref(), &payload),
+            other => panic!("expected the written bytes, got {other:?}"),
+        }
+    }
+
+    /// A missing file is not transient: exactly one attempt, nil, no hang.
+    #[test]
+    fn rt_file_read_bytes_missing_file_is_nil_without_retry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("absent.bin");
+        let started = std::time::Instant::now();
+        let got = rt_file_read_bytes(&[Value::text(path.to_string_lossy().to_string())]).expect("extern ok");
+        assert!(matches!(got, Value::Nil));
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+    }
 
     fn lock_test_path(dir: &tempfile::TempDir) -> (String, std::path::PathBuf) {
         let lock = dir.path().join("res.lock");

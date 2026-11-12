@@ -1,0 +1,69 @@
+# @req BUG-seed_file_read_bytes_nil_after_in_process_write_2026-11-12
+# Repro + prevention: bytes written in this process read back intact.
+use std.spec.*
+use std.env.{env_get}
+use std.io_runtime.{time_now_unix_micros, file_read_bytes_result, file_size}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+
+val stamp: text = time_now_unix_micros().to_string()
+val tmp_dir: text = env_get("TEMP")
+val base_dir: text = if tmp_dir == "": "/tmp" else: tmp_dir.replace("\\", "/")
+val root: text = base_dir + "/frb_spec_" + stamp + "_"
+
+fn read_len(path: text) -> i64:
+    match file_read_bytes_result(path):
+        case Ok(b): b.len()
+        case Err(_): -1
+
+fn make(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push((i % 251).to_u8())
+        i = i + 1
+    out
+
+fn rotate(path: text, n: i64) -> bool:
+    file_write_bytes(path, make(n))
+
+val pf: text = root + "outer.bin"
+val wrote: bool = file_write_bytes(pf, make(200))
+val got_top: i64 = read_len(pf)
+
+val pr: text = root + "rot.bin"
+val rot1: bool = rotate(pr, 36864)
+val got_rot1: i64 = read_len(pr)
+val rot2: bool = rotate(pr, 36864)
+val got_rot2: i64 = read_len(pr)
+
+describe "file_read_bytes_result after an in-process write":
+    it "reads back a top-level write of 200 bytes":
+        step("write then read at top level")
+        expect(wrote).to_equal(true)
+        expect(file_size(pf)).to_equal(200)
+        expect(got_top).to_equal(200)
+
+    it "reads back a file rewritten inside a function, twice":
+        step("rotate twice, read after each")
+        expect(rot1).to_equal(true)
+        expect(rot2).to_equal(true)
+        expect(got_rot1).to_equal(36864)
+        expect(got_rot2).to_equal(36864)
+
+    it "returns content identical to what was written":
+        step("write 4096 bytes and compare byte-by-byte")
+        val p = root + "cmp.bin"
+        val data = make(4096)
+        expect(file_write_bytes(p, data)).to_equal(true)
+        match file_read_bytes_result(p):
+            case Ok(b):
+                expect(b.len()).to_equal(4096)
+                expect(b[0]).to_equal(data[0])
+                expect(b[4095]).to_equal(data[4095])
+                expect(b[2000]).to_equal(data[2000])
+            case Err(e):
+                expect(e).to_equal("no error")
+
+    it "reports Err for a missing file":
+        step("read a path never written")
+        expect(read_len(root + "absent.bin")).to_equal(-1)

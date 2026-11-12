@@ -4,7 +4,7 @@ Date: 2026-11-12
 Discovered by: lane p1-devhub (writing `sqlcipher_salt_binding_spec.spl`)
 Binary: phase-1 seed `C:/dev/wt/p1-20261112/src/compiler_rust/target/bootstrap/simple.exe`
 (Rust seed, Windows 11, `bin/simple.exe test <spec> --no-session-daemon`)
-Status: OPEN — worked around in the spec, root cause not located
+Status: fixed-verification-pending (2026-11-12, lane seed-readbytes-fix)
 
 ## Observed
 Within one interpreted spec process, `std.io_runtime.file_read_bytes_result(path)`
@@ -86,3 +86,22 @@ through its own path and succeeds).
 2. Re-run the repro above on Windows and Linux seeds; check whether the
    `Value::byte_array` returned is being read as nil on the Simple side
    (`bytes == nil` in `io_runtime.spl:322`) rather than `fs::read` failing.
+
+## Fix (2026-11-12, verification-pending)
+Probable cause: on Windows a freshly written file is briefly held with share
+mode 0 by an on-access scanner/indexer, so `fs::read` gets
+`ERROR_SHARING_VIOLATION` (32) / `ERROR_LOCK_VIOLATION` (33) while
+`file_size` still succeeds. The externs turned every `Err` into nil without
+logging anything.
+- `interpreter_extern/file_io.rs` (`rt_file_read_bytes`, `rt_file_mmap_read_bytes`)
+  and runtime `value/sffi/file_io/file_ops.rs` (`rt_file_read_bytes`): bounded retry
+  on 32/33/Interrupted (10 attempts, about 0.25 s total), and the OS error is printed
+  under `SIMPLE_FILE_IO_DEBUG=1`.
+- Pure-Simple twin `src/runtime/simple_core/core_fs.spl::rt_file_read_bytes`:
+  now loops on short `read()` results instead of truncating.
+- Tests: Rust `rt_file_read_bytes_waits_out_a_transient_sharing_violation`
+  (deterministic repro: holder opened with share mode 0) and
+  `..._missing_file_is_nil_without_retry`; SSpec
+  `test/01_unit/lib/io/file_read_bytes_after_write_spec.spl` (the doc's repro
+  cases). The SSpec does not go red on demand because the scanner race is
+  intermittent.

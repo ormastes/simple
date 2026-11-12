@@ -2120,9 +2120,39 @@ pub unsafe extern "C" fn rt_file_read_bytes(path_ptr: *const u8, path_len: u64) 
         Err(_) => return RuntimeValue::NIL,
     };
 
-    match std::fs::read(path_str) {
+    match read_bytes_retrying(path_str) {
         Ok(bytes) => bytes_to_runtime_array(&bytes),
         Err(_) => RuntimeValue::NIL,
+    }
+}
+
+/// `fs::read` with a bounded retry on Windows sharing/lock violations
+/// (`ERROR_SHARING_VIOLATION` 32 / `ERROR_LOCK_VIOLATION` 33: an on-access
+/// scanner briefly holding a freshly written file) and the OS error surfaced
+/// under `SIMPLE_FILE_IO_DEBUG=1`. Twin of the interpreter extern in
+/// `compiler/src/interpreter_extern/file_io.rs` (bug doc
+/// seed_file_read_bytes_nil_after_in_process_write_2026-11-12.md).
+pub(crate) fn read_bytes_retrying(path: &str) -> std::io::Result<Vec<u8>> {
+    const MAX_ATTEMPTS: u32 = 10;
+    let mut attempt = 0u32;
+    loop {
+        match std::fs::read(path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(err)
+                if attempt + 1 < MAX_ATTEMPTS
+                    && (err.kind() == std::io::ErrorKind::Interrupted
+                        || matches!(err.raw_os_error(), Some(32) | Some(33))) =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(err) => {
+                if std::env::var_os("SIMPLE_FILE_IO_DEBUG").is_some() {
+                    eprintln!("rt_file_read_bytes: read failed for {path:?} after {} attempt(s): {err}", attempt + 1);
+                }
+                return Err(err);
+            }
+        }
     }
 }
 
