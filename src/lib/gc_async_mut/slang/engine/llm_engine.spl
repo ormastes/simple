@@ -28,6 +28,8 @@ var ENGINE_LOADED_ID = ""
 var ENGINE_BACKEND: GgmlBackend? = nil
 # Empty = resolve via engine_lib_path() (SLANG_GGML_LIB, then per-OS default).
 var ENGINE_LIB_PATH = ""
+# Non-empty once engine_preload pinned the resident model for a threaded server.
+var ENGINE_PINNED_ID = ""
 var ENGINE_N_CTX = 4096
 var ENGINE_MATCHED_CPU_THREADS = -1
 var ENGINE_PREFIX_CACHE_ENTRIES = 4
@@ -214,6 +216,8 @@ fn engine_unload() -> Result<(), text>:
 fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
     if ENGINE_LOADED_ID == model.id and ENGINE_BACKEND != nil:
         return Ok(())
+    if ENGINE_PINNED_ID != "" and model.id != ENGINE_PINNED_ID:
+        return Err("this server is pinned to model '" + ENGINE_PINNED_ID + "'; swapping models under concurrent requests is refused")
     if not model.runnable:
         return Err(model.reason)
     if model.entry_path == "":
@@ -301,7 +305,7 @@ fn engine_generate_observed_request(input: EngineGenerationRequest) -> Result<En
             Ok(observed): return Ok(EngineGenerationObservation(
                 output: observed.output, generated_tokens: observed.generated_tokens))
     match generate_observed_request(BackendGenerationRequest(
-          max_tokens: budget.to_text(), prompt: prompt, backend: ENGINE_BACKEND!)):
+          max_tokens: budget.to_text(), prompt: prompt, backend: ENGINE_BACKEND!, chat: false)):
         Err(e):
             Err(backend_error_text(e))
         Ok(observed):
@@ -333,6 +337,56 @@ fn engine_complete(model_root: text, model_id: text, prompt: text, max_tokens: i
         Ok(_):
             engine_generate(prompt, max_tokens)
 
+# Loads `model_id` on the CALLING thread and pins it. A server that handles each
+# connection on its own thread must call this before it starts accepting: under
+# the interpreter a spawned thread starts from a snapshot of module state and
+# its writes stay thread-local, so a model loaded lazily inside one connection
+# thread is invisible to the next one. That thread then re-enters the load
+# path against a backend whose C side is already populated, fails, and tears
+# the resident model down (measured 2026-11-12: every second request answered
+# 503 "model failed to load" and unloaded the model). Preloading on the owner
+# thread puts the backend handle into every later thread's snapshot, so handlers
+# only ever open and close their own request context.
+fn engine_preload(model_root: text, model_id: text) -> Result<(), text>:
+    var found: NativeModel? = nil
+    for m in scan_model_root(model_root, engine_backend_available()):
+        if m.id == model_id:
+            found = m
+    if found == nil:
+        return Err("model '" + model_id + "' was not found under " + model_root)
+    match engine_ensure_loaded(found!):
+        Err(reason):
+            Err(reason)
+        Ok(_):
+            ENGINE_PINNED_ID = model_id
+            Ok(())
+
+# Chat completion: `framed` is every message of the conversation, in order, as
+# backend chat frames. The backend renders them through the model's own chat
+# template, so the model sees its system prompt and the whole history and
+# stops at its own end-of-turn token.
+fn engine_complete_chat(model_root: text, model_id: text, framed: text, max_tokens: i64) -> Result<text, text>:
+    var found: NativeModel? = nil
+    for m in scan_model_root(model_root, engine_backend_available()):
+        if m.id == model_id:
+            found = m
+    if found == nil:
+        return Err("model '" + model_id + "' was not found under " + model_root)
+    match engine_ensure_loaded(found!):
+        Err(reason):
+            return Err(reason)
+        Ok(_): ()
+    if paged_executor_active():
+        return Err("chat templating is not available on the physical page executor")
+    var budget = max_tokens
+    if budget <= 0:
+        budget = 256
+    match generate_observed_request(BackendGenerationRequest(
+          max_tokens: budget.to_text(), prompt: framed, backend: ENGINE_BACKEND!, chat: true)):
+        Err(e): Err(backend_error_text(e))
+        Ok(observed): Ok(observed.output)
+
+export engine_preload, engine_complete_chat
 export engine_set_lib_path, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
 export EngineGenerationObservation, EngineGenerationRequest, engine_generate_observed, engine_generate_observed_request

@@ -125,6 +125,7 @@ struct GgmlBackend:
     f_prefix_rejected_bytes: i64
     f_prefix_restore_failures: i64
     f_context_profile_configure: i64
+    f_request_chat_render: i64
     f_request_configure: i64
     f_request_create: i64
     f_request_close: i64
@@ -171,16 +172,20 @@ struct BackendGeneration:
     generated_tokens: text
     output: text
 
+# `chat` marks `prompt` as chat frames (see chat_frame) to be rendered through
+# the model's chat template; otherwise `prompt` is fed to the model verbatim.
 struct BackendGenerationRequest:
     max_tokens: text
     prompt: text
     backend: GgmlBackend
+    chat: bool
 
 struct BackendActiveGenerationRequest:
     max_tokens: text
     prompt: text
     backend: GgmlBackend
     request: GgmlRequest
+    chat: bool
 
 struct PhysicalPagePoolCreateRequest:
     execution_namespace: text
@@ -299,7 +304,8 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         "slang_ggml_prefix_evictions", "slang_ggml_prefix_resident_entries",
         "slang_ggml_prefix_resident_bytes", "slang_ggml_prefix_rejected_bytes",
         "slang_ggml_prefix_restore_failures",
-        "slang_ggml_context_profile_configure"
+        "slang_ggml_context_profile_configure",
+        "slang_ggml_request_chat_render"
     ]
     var optional: [i64] = []
     for n in optional_names:
@@ -382,6 +388,7 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_prefix_resident_bytes: optional[4], f_prefix_rejected_bytes: optional[5],
         f_prefix_restore_failures: optional[6],
         f_context_profile_configure: optional[7],
+        f_request_chat_render: optional[8],
         f_request_configure: request_addrs[0], f_request_create: request_addrs[1],
         f_request_close: request_addrs[2], f_request_cancel: request_addrs[3],
         f_request_str_reset: request_addrs[4], f_request_str_push: request_addrs[5],
@@ -456,6 +463,12 @@ fn _read_request_out(b: GgmlBackend, request: GgmlRequest) -> text:
         bytes.push(_call2(b.f_request_out_byte, request.handle, i).to_u8())
         i = i + 1
     bytes_to_text(bytes)
+
+# One chat message in the shim's framing: "<role bytes>:<role><content bytes>:
+# <content>". Byte counts, not delimiters, so no content can break the frame.
+fn chat_frame(role: text, content: text) -> text:
+    text_to_utf8_bytes(role).len().to_text() + ":" + role +
+        text_to_utf8_bytes(content).len().to_text() + ":" + content
 
 fn load_model(b: GgmlBackend, model_path: text, n_gpu_layers: i64) -> Result<(), BackendError>:
     _call0(b.f_backend_init)
@@ -554,6 +567,9 @@ fn _generate_request_observed(input: BackendActiveGenerationRequest) -> Result<B
         return Err(BackendError.InvalidTokenBudget)
     if _push_request_text(b, request, prompt) < 0:
         return Err(BackendError.TokenizeFailed)
+    if input.chat and (b.f_request_chat_render == 0 or
+                       _call1(b.f_request_chat_render, request.handle) < 0):
+        return Err(BackendError.TokenizeFailed)
     # Guard capacity in Simple BEFORE eval_prompt: past this point the C side
     # GGML_ASSERT(n_tokens_all <= cparams.n_batch)s and kills the whole process
     # (measured 2026-09-16, caret agent turn with a transcript over n_ctx).
@@ -588,13 +604,15 @@ fn generate_observed_request(input: BackendGenerationRequest) -> Result<BackendG
     val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
     if max_tokens == INVALID_NONNEGATIVE_I64_TEXT:
         return Err(BackendError.InvalidTokenBudget)
+    if input.chat and not b.independent_requests:
+        return Err(BackendError.TokenizeFailed)
     if b.independent_requests:
         val opened = open_request(b, _call0(b.f_n_ctx))
         match opened:
             Ok(request):
                 val result = _generate_request_observed(BackendActiveGenerationRequest(
                     max_tokens: input.max_tokens, prompt: prompt, backend: b,
-                    request: request))
+                    request: request, chat: input.chat))
                 val closed = close_backend_request(b, request)
                 match closed:
                     Err(_): return Err(BackendError.DecodeFailed)
@@ -632,7 +650,7 @@ fn generate_observed_request(input: BackendGenerationRequest) -> Result<BackendG
 fn generate_observed(b: GgmlBackend, prompt: text,
                      max_tokens: i64) -> Result<BackendGeneration, BackendError>:
     generate_observed_request(BackendGenerationRequest(
-        max_tokens: max_tokens.to_text(), prompt: prompt, backend: b))
+        max_tokens: max_tokens.to_text(), prompt: prompt, backend: b, chat: false))
 
 fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
     match generate_observed(b, prompt, max_tokens):
@@ -874,6 +892,7 @@ fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
 
 export BackendError, backend_error_text, GgmlBackend, BackendGeneration, BackendGenerationRequest, PhysicalPagePoolCreateRequest, PrefixCacheStats
 export PhysicalPageProviderStatus, SLANG_CAP_PHYSICAL_PAGED_KV, SLANG_PHYSICAL_PAGE_ABI_V1
+export chat_frame
 export GgmlRequest, open_backend, load_model, open_context, open_request, close_backend_request, cancel_backend_request
 export open_physical_request, prepare_request_tokens, request_token_at
 export request_sample, request_is_eog, request_piece
