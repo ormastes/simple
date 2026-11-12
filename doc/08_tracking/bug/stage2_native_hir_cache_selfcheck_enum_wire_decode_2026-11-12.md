@@ -1,6 +1,14 @@
 # Stage 2 native HIR cache selfcheck fails to decode its own entry (enum wire allocation)
 
-**Status:** OPEN (observed 2026-11-12, aarch64, Linux; lane bootstrap-fable-8/9/10)
+**Status:** ROOT-CAUSED; SOURCE FIX LANDED 2026-11-13 (enum_wire.spl declares
+`rt_enum_new<T>(..) -> T` again; PR on release/1.0.0). Independently reproduced
+and fixed on aarch64-apple-darwin against the pinned stage2-admitted binary
+(pinned-5e217d7fd0e9); evidence appended below. Residual: under the frozen
+stage2 binary the restored handle still degrades when returned through
+`Result<T, text>` (blocker 1 below), so nil-slot entries remain cache-cold
+there — now refused at the re-encode gate instead of misreporting an
+allocation failure. HEAD-built compilers (RTI-007 fixed at source) round-trip
+cleanly.
 **Area:** compiler / HIR cache codec under pure-Simple native codegen
 
 ## Symptom
@@ -130,3 +138,75 @@ either: the encoder rejects the decoded module with `unregistered HirModule node
 That bug was the cache key/header identity (verified fixed 2026-11-12: repeat build
 hits, two targets write two keys). This one is the HIR codec's enum wire restore;
 with the key/header fixed it is now the reason some Stage 3 modules stay cold.
+
+## 2026-11-13 darwin lane: fix landed, blockers re-confirmed on aarch64-apple-darwin
+
+Independent reproduction against the pinned stage2-admitted full-CLI binary
+(`build/bootstrap/pinned-src/pinned-5e217d7fd0e9/.simple/storage/build/bootstrap/
+stage3/aarch64-apple-darwin/stage2-admitted/simple`, whole-program native-build
+probes with `SIMPLE_BUILD_MEMORY_RESERVE_BYTES=4294967296`):
+
+1. **Minimal repro confirmed.** A probe calling
+   `enum_wire_restore_nil<ProbeBreak>(ProbeBreak.Labeled("", None), 2, [0])`
+   (the exact `HirExprKind.Break` shape: arity 2, nil slot 0) prints
+   `RESTORE_ERR: enum wire enum allocation failed` with the unfixed source,
+   deterministically, on darwin — matching the Linux/cranelift finding.
+2. **C runtime exonerated.** Replicating the restore steps manually in the
+   probe with a locally declared `extern fn rt_enum_new(..) -> i64` in
+   *concrete* code prints `IDENTITY_MATCH` (owner=1755757813 round-trips).
+   `rt_enum_new`, the `owner as i32` casts, and the identity check are correct
+   on the darwin runtime; the corruption is specific to the frozen stage2's
+   lowering of the generic binding.
+3. **Root cause mechanism confirmed.** In the *generic* `enum_wire_restore_nil<T>`,
+   the frozen stage2 RTI lowers the concrete `-> i64` declared return through
+   `Any` (E-RTI-007, open only in the frozen binary), and the i64-to-`T`
+   coercion boxes the already-tagged word; `rt_enum_id(restored)` then reads
+   the boxed integer and returns -1.
+4. **Candidate fix verified at the restore site.** Declaring
+   `extern fn rt_enum_new<T>(enum_id: i32, discriminant: i32, payload: i64) -> T`
+   and calling `rt_enum_new<T>(...)` makes the identity check inside
+   `enum_wire_restore_nil` pass (both arity-2 tuple-payload and arity-1
+   nil-payload restores) under the frozen stage2. An `-> i64?` spelling
+   (the mutex_lock_i64_return_double_boxes idiom, landed 2026-11-12 as
+   c21de391b02) passes the identity check equally but does not differ at the
+   Result boundary (item 5), so the explicit generic return was kept: it is
+   the RTI-007 tuple-return idiom ("restore `<T> -> T?` with explicit `<T>`
+   calls") and gives exact declared-return rows at HEAD.
+5. **Blocker 1 (wrap degradation) confirmed on darwin — unchanged by the fix.**
+   After the fixed `enum_wire_restore_nil` returns `Result<T, text>.Ok`, the
+   matched value reads `rt_enum_id = -1`, `rt_enum_discriminant = -1`,
+   `rt_tuple_len(payload) = -1`, and `enum_wire_nil_slot` answers
+   `enum wire invalid enum`. The witness-shaped probe (mirroring
+   `test/01_unit/lib/sffi/enum_wire_restore_nil_spec.spl`) now prints verdict
+   `ok` for all three examples — the decode-level refusal is gone — but the
+   slot re-inspection on the returned value stays broken under the frozen
+   stage2. Owner remains native lowering of a generic `T` payload into
+   `Result`/`Option` (`src/compiler/50.mir`), same family as RTI-007.
+6. **Safety of landing the fix under the frozen stage2.** The store selfcheck
+   is decode **plus re-encode equality** (`hir_cache_selfcheck_blob`,
+   driver_hir_cache.spl:1104): by construction (item 5) a degraded nil-slot
+   node cannot re-encode its `\N` marker, so `\N`-bearing entries are expected
+   to remain refused — with `reason=reencode` instead of a false
+   `enum wire enum allocation failed`. (Not executed end-to-end here: the
+   selfcheck decode runs inside the compiler binary itself, which is frozen;
+   the inference is from the confirmed wrap degradation plus the selfcheck
+   source.)
+   Cache keys/headers are compiler-identity-keyed (see
+   `hir_cache_never_hits_header_rejected_2026_10_26`, verified fixed
+   2026-11-12), so a frozen-stage2 build cannot adopt entries stored by a
+   HEAD-built compiler. No silent-corruption path is opened.
+7. **Fix shape.** `src/lib/nogc_sync_mut/sffi/enum_wire.spl`: the extern now
+   returns `T` (generic), called with explicit `<T>`; no other call sites
+   (grep: only `enum_wire_restore_nil` uses it). The pure-Simple runtime twin
+   `src/runtime/simple_core/core_enum.spl` is intentionally unchanged — this
+   is not an enum-construction-semantics defect; its concrete
+   `pub fn rt_enum_new(..) -> i64` keeps its meaning. The Rust seed twin need
+   not be edited (its `test` lane still lacks an `rt_enum_new` interpreter
+   entry — blocker 3 unchanged).
+
+Net: at HEAD the codec round-trips nil-slot entries (decode verdict `ok` with
+identity intact, re-encode sees the nil slot). Under the frozen stage2 the
+victim set stays cache-cold but loud-and-safe via the re-encode gate until a
+HEAD-built compiler runs the matrix; the wrap-degradation MIR lowering defect
+(blocker 1) is the remaining frozen-binary-only gap and does not affect
+HEAD-built compilers.
