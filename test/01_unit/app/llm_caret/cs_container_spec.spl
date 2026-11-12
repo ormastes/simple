@@ -2,7 +2,9 @@
 # layer. No engine is executed; the real launch/kill smoke is recorded in the
 # feature wiki (doc/00_llm_process/feature_expert/podman_container/skill.md).
 use app.llm_caret.cs_container.{cs_container_request, cs_container_argv,
-    cs_container_name, cs_container_owner, cs_container_spec_is_container}
+    cs_container_name, cs_container_owner, cs_container_spec_is_container,
+    cs_container_launched, cs_container_mark_launched, cs_container_forget, cs_container_reap,
+    cs_container_normal_path, cs_container_rw_refusal}
 use app.llm_caret.cs_dashboard.{cs_launch_argv_with_extras, cs_dashboard_new, cs_handle_command}
 
 describe "cs container launch options":
@@ -50,9 +52,10 @@ describe "cs container argv through the container layer":
         while i < agent.len():
             args = args + [agent[i]]
             i = i + 1
-        val argv = cs_container_argv("main", "a1", "/opt/seed/simple", args, "/repo", "xterm", request).unwrap()
-        expect(argv).to_equal(["podman", "run", "--rm", "--name", "cs-main-a1",
-            "--label", "io.simpleorch.session.owner=cs-main", "--label", "io.simpleorch.session.name=cs-main-a1",
+        val argv = cs_container_argv("main", "a1", "/opt/seed/simple", args, "/repo", "xterm", "/home/op", "cs42-1", request).unwrap()
+        expect(argv).to_equal(["podman", "run", "--rm", "--name", "cs-main-0d6e4079e3-a1",
+            "--label", "io.simpleorch.session.owner=cs-main-0d6e4079e3", "--label", "io.simpleorch.session.name=cs-main-0d6e4079e3-a1",
+            "--label", "io.simpleorch.session.instance=cs42-1",
             "--interactive", "--tty", "--detach-keys=", "--network", "host", "--userns", "keep-id",
             "--volume", "/repo:/repo:ro", "--volume", "/work/a1:/work/a1:rw", "--volume", "/opt/seed/simple:/opt/seed/simple:ro",
             "--workdir", "/repo", "--env", "TERM=xterm", "--env", "HOME=/tmp", "busybox:1.36",
@@ -61,13 +64,13 @@ describe "cs container argv through the container layer":
 
     it "does not mount a binary that already lives inside the repo or the workspace":
         val request = cs_container_request(["--container", "img"])
-        val argv = cs_container_argv("main", "a2", "/repo/bin/simple", ["run", "x.spl"], "/repo", "", request).unwrap()
+        val argv = cs_container_argv("main", "a2", "/repo/bin/simple", ["run", "x.spl"], "/repo", "", "/home/op", "cs42-1", request).unwrap()
         expect(argv.join(" ")).to_contain("--volume /repo:/repo:ro --workdir /repo --env TERM=xterm-256color")
         expect(argv.join(" ").contains("/repo/bin/simple:/repo/bin/simple")).to_equal(false)
 
     it "mounts a workspace that is the repo root once, read-write":
         val request = cs_container_request(["--container", "img", "--workspace", "/repo"])
-        val argv = cs_container_argv("main", "a3", "/repo/bin/simple", [], "/repo", "", request).unwrap()
+        val argv = cs_container_argv("main", "a3", "/repo/bin/simple", [], "/repo", "", "/home/op", "cs42-1", request).unwrap()
         expect(argv.join(" ")).to_contain("--volume /repo:/repo:rw --workdir /repo")
         expect(argv.join(" ").contains("/repo:/repo:ro")).to_equal(false)
 
@@ -77,12 +80,19 @@ describe "cs container argv through the container layer":
 
     it "refuses relative paths and derives engine-safe names from any session":
         val request = cs_container_request(["--container", "img", "--workspace", "work/a1"])
-        expect(cs_container_argv("main", "a1", "/bin/simple", [], "/repo", "", request).unwrap_err())
-            .to_start_with("container launch needs an absolute --workspace")
-        expect(cs_container_argv("main", "a1", "bin/simple", [], "/repo", "", cs_container_request(["--container", "img"])).unwrap_err())
+        expect(cs_container_argv("main", "a1", "/bin/simple", [], "/repo", "", "/home/op", "cs42-1", request).unwrap_err())
+            .to_start_with("container launch needs an absolute --workspace free of '..'")
+        expect(cs_container_argv("main", "a1", "bin/simple", [], "/repo", "", "/home/op", "cs42-1", cs_container_request(["--container", "img"])).unwrap_err())
             .to_start_with("container launch needs an absolute executable path")
-        expect(cs_container_name("my session/1", "a1")).to_equal("cs-my-session-1-a1")
-        expect(cs_container_owner("my session/1")).to_equal("cs-my-session-1")
+        expect(cs_container_name("my session/1", "a1")).to_equal("cs-my-session-1-ac32c75878-a1")
+        expect(cs_container_owner("my session/1")).to_equal("cs-my-session-1-ac32c75878")
+
+    it "gives sessions that read alike different owners":
+        expect(cs_container_owner("a b")).to_equal("cs-a-b-c8687a08aa")
+        expect(cs_container_owner("a-b")).to_equal("cs-a-b-d44362d67d")
+        expect(cs_container_owner("a b") == cs_container_owner("a-b")).to_equal(false)
+        expect(cs_container_owner("a/b") == cs_container_owner("a b")).to_equal(false)
+        expect(cs_container_name("s".repeat(80), "a1").len() < 64).to_equal(true)
 
     it "recognises a containerized agent from its roster spec, so /kill knows to reap":
         val d = cs_dashboard_new("main")
@@ -91,3 +101,57 @@ describe "cs container argv through the container layer":
         expect(cs_container_spec_is_container(launched.agents[0].spec)).to_equal(true)
         val (plain, _action) = cs_handle_command(d, "/launch caret:dummy --verbose")
         expect(cs_container_spec_is_container(plain.agents[0].spec)).to_equal(false)
+
+describe "cs container ownership across two cs on one session":
+    it "never treats a requested-but-not-launched agent as a container to remove":
+        # cs B: `/launch ... --container` on a session where cs A already runs
+        # a1. B's launch is refused, yet B's roster entry still says --container.
+        val (b_dash, _action) = cs_handle_command(cs_dashboard_new("shared"), "/launch caret:dummy --container busybox:1.36")
+        expect(cs_container_spec_is_container(b_dash.agents[0].spec)).to_equal(true)
+        expect(cs_container_launched("shared", "a1")).to_equal(false)
+        # With no launch recorded, /kill and /quit run no engine command at all.
+        expect(cs_container_reap("shared", "a1")).to_equal("")
+
+    it "records a container only after a successful spawn and forgets it once reaped":
+        expect(cs_container_launched("own", "a1")).to_equal(false)
+        cs_container_mark_launched("own", "a1")
+        cs_container_mark_launched("own", "a1")
+        expect(cs_container_launched("own", "a1")).to_equal(true)
+        expect(cs_container_launched("own", "a2")).to_equal(false)
+        expect(cs_container_launched("other", "a1")).to_equal(false)
+        cs_container_forget("own", "a1")
+        expect(cs_container_launched("own", "a1")).to_equal(false)
+
+describe "cs container mount policy":
+    it "normalises paths and refuses parent references":
+        expect(cs_container_normal_path("/work//a1/./src/")).to_equal("/work/a1/src")
+        expect(cs_container_normal_path("/")).to_equal("/")
+        expect(cs_container_normal_path("/work/../etc")).to_equal("")
+        expect(cs_container_normal_path("work/a1")).to_equal("")
+        expect(cs_container_request(["--container", "img", "--container-mount", "/data/../etc:/x"]).error)
+            .to_start_with("--container-mount paths must be absolute and free of '..'")
+        expect(cs_container_request(["--container", "img", "--container-mount", "/data//set/:/data/set"]).mounts[0].source)
+            .to_equal("/data/set")
+
+    it "refuses read-write on the root, the home directory and system trees":
+        expect(cs_container_rw_refusal("/", "/home/op")).to_equal("refusing read-write mount of /")
+        expect(cs_container_rw_refusal("/home/op", "/home/op/")).to_equal("refusing read-write mount of the home directory /home/op")
+        expect(cs_container_rw_refusal("/home", "/home/op")).to_equal("refusing read-write mount of /home")
+        expect(cs_container_rw_refusal("/etc/ssh", "/home/op")).to_equal("refusing read-write mount inside /etc: /etc/ssh")
+        expect(cs_container_rw_refusal("/usr", "/home/op")).to_equal("refusing read-write mount inside /usr: /usr")
+        expect(cs_container_rw_refusal("/home/op/work/a1", "/home/op")).to_equal("")
+        expect(cs_container_rw_refusal("/tmp/scratch/ws", "/home/op")).to_equal("")
+        expect(cs_container_rw_refusal("/libexec-like/x", "/home/op")).to_equal("")
+
+    it "applies the policy to --workspace and to rw mounts, not to read-only mounts":
+        expect(cs_container_argv("main", "a1", "/repo/bin/simple", [], "/repo", "", "/home/op", "cs42-1",
+            cs_container_request(["--container", "img", "--workspace", "/"])).unwrap_err())
+            .to_equal("refusing read-write mount of / (--workspace)")
+        expect(cs_container_argv("main", "a1", "/repo/bin/simple", [], "/repo", "", "/home/op", "cs42-1",
+            cs_container_request(["--container", "img", "--workspace", "/home/op/"])).unwrap_err())
+            .to_equal("refusing read-write mount of the home directory /home/op (--workspace)")
+        expect(cs_container_argv("main", "a1", "/repo/bin/simple", [], "/repo", "", "/home/op", "cs42-1",
+            cs_container_request(["--container", "img", "--container-mount", "/etc:/etc:rw"])).unwrap_err())
+            .to_equal("refusing read-write mount inside /etc: /etc (--container-mount)")
+        expect(cs_container_argv("main", "a1", "/repo/bin/simple", [], "/repo", "", "/home/op", "cs42-1",
+            cs_container_request(["--container", "img", "--container-mount", "/etc/ssl:/etc/ssl:ro"])).is_ok()).to_equal(true)
