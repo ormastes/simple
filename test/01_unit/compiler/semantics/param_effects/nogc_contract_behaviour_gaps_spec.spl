@@ -1,0 +1,94 @@
+# @tag:in-development
+# @req REQ-MEM-3-1
+# @req REQ-MEM-3-6
+"""
+## Purpose and audience
+Known checker gaps split out of nogc_contract_behaviour_spec.spl; expected RED
+until the bugs below are fixed. Bugs:
+doc/08_tracking/bug/nogc_checker_scalar_field_read_aliases_owner_2026-11-12.md
+doc/08_tracking/bug/nogc_checker_explicit_self_receiver_unresolved_2026-11-12.md
+"""
+# Lifecycle: doc/03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md ;
+# doc/02_requirements/feature/release100_memory_mcp_lsp.md
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surface_from_owner, ModuleSurfaceParserOwner}
+use compiler.driver.driver_hir_pipeline_support.{driver_nogc_param_effect_errors_v1, driver_admit_nogc_param_effects_v1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.semantics.param_effects.effects.{param_effect_report_effect}
+use compiler.semantics.param_effects.infer.{infer_param_effects}
+
+val PRELUDE = "class Node:\n    v: i64\n\nclass Holder:\n    head: Node?\n    items: [Node]\n\nclass Box:\n    inner: Node\n\nclass Pair:\n    a: Node\n    b: Node\n\n"
+val PATH = "testdata/contract_behaviour.spl"
+val MODULE = "contract_behaviour"
+
+fn lower(body: text, strict: bool) -> HirModule:
+    var parsed = parse_full_frontend(PRELUDE + body, PATH, MODULE, Logger(level: 0))
+    parsed.nogc_strict = strict
+    var lowering = HirLowering.with_filename(PATH)
+    lowering.lower_module(parsed)
+
+# Production strict gate: the fatal diagnostics the driver would raise.
+fn gate(body: text, strict: bool = true) -> [text]:
+    val source_text = PRELUDE + body
+    var parsed = parse_full_frontend(source_text, PATH, MODULE, Logger(level: 0))
+    parsed.nogc_strict = strict
+    val source = SourceFile(path: PATH, content: source_text, module_name: MODULE)
+    val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source, 0).unwrap()
+    var lowering = HirLowering.with_filename(PATH)
+    val actual: HirModule = lowering.lower_module(parsed)
+    driver_nogc_param_effect_errors_v1({}, [actual], [surface])
+
+# Production admission: the context a real build would continue with.
+fn admit(body: text, strict: bool = true) -> CompileContext:
+    val source_text = PRELUDE + body
+    var parsed = parse_full_frontend(source_text, PATH, MODULE, Logger(level: 0))
+    parsed.nogc_strict = strict
+    val source = SourceFile(path: PATH, content: source_text, module_name: MODULE)
+    val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source, 0).unwrap()
+    var lowering = HirLowering.with_filename(PATH)
+    val actual: HirModule = lowering.lower_module(parsed)
+    val ctx = CompileContext.create(driver_core_compile_options_default())
+    ctx.hir_modules[MODULE] = actual
+    ctx.validation_module_array = [actual]
+    ctx.bootstrap_entry_hir = actual
+    driver_admit_nogc_param_effects_v1(ctx, [surface])
+    ctx
+
+fn effect(body: text, function: text, param: text) -> text:
+    param_effect_report_effect(infer_param_effects(lower(body, true), {}, {}), function, param)
+
+fn count_code(lines: [text], code: text) -> i64:
+    var n = 0
+    for line in lines:
+        if line.contains(code): n = n + 1
+    n
+
+fn has_code(lines: [text], code: text) -> bool:
+    count_code(lines, code) > 0
+
+# Shared fixtures
+val PUSH_OWNER = "fn ps(xs: [Node], n: &Node):\n    xs.push(n)\n"
+val READ_SHORT = "fn rd(n: Node) -> i64:\n    n.v\n"
+
+
+describe "REQ-MEM-3-1 gap: scalar copy of a field is not an owner alias":
+    it "accepts a local whose transfer is its last use":
+        val errors = gate(PUSH_OWNER + "\nfn caller2(xs: [Node]) -> i64:\n    val b = Node(v: 2)\n    val keep = b.v\n    ps(xs, b)\n    keep\n")
+        expect(errors.len()).to_equal(0)
+
+describe "REQ-MEM-3-6 exactly-once cleanup, checker-visible half (mutation: cleanup edge removed)":
+    it "rejects discarding the new owner returned by a receiver-consuming method":
+        val body = "impl Node:\n    fn into_next(self: &Node) -> &Node:\n        self\n\nfn drop_it(n: &Node):\n    n.into_next()\n"
+        val errors = gate(body)
+        expect(has_code(errors, "NOGC-OWN-003")).to_equal(true)
+
+    it "accepts rebinding the new owner returned by a receiver-consuming method":
+        val body = "impl Node:\n    fn into_next(self: &Node) -> &Node:\n        self\n\nfn keep_it(n: &Node) -> &Node:\n    val m = n.into_next()\n    m\n"
+        expect(gate(body).len()).to_equal(0)
