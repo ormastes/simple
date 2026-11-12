@@ -2522,7 +2522,10 @@ impl Lowerer {
     /// - Other static methods are not yet supported in native compilation
     fn lower_path(&mut self, segments: &[String], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         if segments.len() == 2 {
-            let class_name = &segments[0];
+            // Same-named flattened type: name the declaration the current
+            // owner sees (flatten_struct_owner.rs).
+            let scoped_class_name = self.module.types.scoped_name(&segments[0]).to_string();
+            let class_name = &scoped_class_name;
             let method_name = &segments[1];
 
             // Special case: ClassName.new() should be ClassName()

@@ -580,6 +580,75 @@ fn flattened_items(source: &str, owner: &str) -> Vec<simple_parser::Node> {
         .collect()
 }
 
+/// `flattened_items`, additionally tagging enum declarations with their owner
+/// the way `pipeline::module_loader::tag_node_function_owners` does.
+fn flattened_items_with_enums(source: &str, owner: &str) -> Vec<simple_parser::Node> {
+    flattened_items(source, owner)
+        .into_iter()
+        .map(|mut item| {
+            if let simple_parser::Node::Enum(definition) = &mut item {
+                definition.attributes.push(simple_parser::ast::Attribute {
+                    span: definition.span,
+                    name: format!("{}{owner}", crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX),
+                    value: None,
+                    args: None,
+                    named_args: None,
+                });
+            }
+            item
+        })
+        .collect()
+}
+
+/// Two co-compiled modules each declare `enum Status` with DIFFERENT variants.
+/// Each module's `Status.Variant` must resolve against its own declaration;
+/// the bare-name registry used to keep only the last one, so the other
+/// module failed with "unknown variant or method 'Ok' on enum Status".
+#[test]
+fn same_named_enums_of_different_modules_resolve_owner_exactly() {
+    let srv = "srv.spl";
+    let cli = "cli.spl";
+    let mut items = vec![
+        import_binding_marker("<entry>", "srv_from", srv, "srv_from"),
+        import_binding_marker("<entry>", "cli_from", cli, "cli_from"),
+    ];
+    items.extend(flattened_items_with_enums(
+        "enum Status:\n    Ok\n    NotFound\n\n\
+         fn srv_from(code: i64) -> Status:\n    if code == 200:\n        return Status.Ok\n    Status.NotFound\n",
+        srv,
+    ));
+    items.extend(flattened_items_with_enums(
+        "enum Status:\n    OK\n    Created\n    Missing\n\n\
+         fn cli_from(code: i64) -> Status:\n    if code == 200:\n        return Status.OK\n    Status.Missing\n",
+        cli,
+    ));
+    // A third module reaches srv's enum only through `use srv.*`.
+    items.push(import_binding_marker("<entry>", "glob_from", "globber.spl", "glob_from"));
+    items.push(import_binding_marker("globber.spl", "*", srv, "*"));
+    items.extend(flattened_items_with_enums(
+        "fn glob_from() -> Status:\n    Status.NotFound\n",
+        "globber.spl",
+    ));
+    let mir = lower_flattened_unit(items);
+
+    let srv_enum = crate::interpreter::flatten_owner_mangled_name(srv, "Status");
+    let glob_text = format!("{:?}", mir_fn(&mir, "glob_from"));
+    assert!(
+        glob_text.contains(&srv_enum),
+        "glob importer must build variants of the single glob source's enum: {glob_text}"
+    );
+    let srv_text = format!("{:?}", mir_fn(&mir, "srv_from"));
+    let cli_text = format!("{:?}", mir_fn(&mir, "cli_from"));
+    assert!(
+        srv_text.contains(&srv_enum),
+        "srv_from must build variants of srv's own enum ({srv_enum}): {srv_text}"
+    );
+    assert!(
+        !cli_text.contains(&srv_enum),
+        "cli_from must not name srv's enum: {cli_text}"
+    );
+}
+
 fn import_binding_marker(importer: &str, local: &str, source_owner: &str, source_name: &str) -> simple_parser::Node {
     simple_parser::Node::Const(simple_parser::ast::ConstStmt {
         span: simple_parser::token::Span::new(0, 0, 0, 0),
