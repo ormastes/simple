@@ -1,6 +1,6 @@
 # native-build with an absolute entry under `/test/` collects zero source files (2026-11-12)
 
-Status: OPEN (filed, not fixed). Severity P2.
+Status: fix-implemented (requested entry bypasses the packaging filter); native proof pending a Stage 2 rebuild. Severity P2.
 
 ## Symptom
 Stage 2 (aarch64) `native-build <abs>/test/.../x.spl` fails at `phase=load_sources`:
@@ -46,3 +46,19 @@ entry went through the import-closure collector, not the explicit one:
 2. Make `_driver_collect_entry_import_source` skip the filter for the root entry.
 Not implemented here: the only test surface is the pipeline method (needs a full stage2 redeploy to
 observe), so no honest red/green spec on the seed was possible; verify by re-running the matrix row above.
+
+## Fix (2026-11-12)
+Second observer: the Windows Stage 2 parse-shard children. They rebase the
+entry onto the frozen SCV snapshot (`<checkout>/build/scv/snapshots/<rev>/test/...`),
+an absolute spelling that contains `/test/`, so every `test/` fixture entry
+(the Phase 4 Hello gate `test/01_unit/app/provider_cli/fixtures/provider_hello.spl`)
+collected zero sources in both children. With a HIR worker admitted the
+build then failed (`HIR worker requires an explicit frozen entry closure`),
+so the outcome depended on free host memory.
+
+`driver_source_pipeline_loading.spl` now loads the requested entry with
+`_driver_collect_requested_entry_source` (driver_entry_closure_core.spl):
+same alias policy (`_driver_entry_closure_mode()`) as the closure walk, no
+test/doc filter. Imported modules keep the filter.
+Spec: `test/01_unit/compiler/driver/requested_entry_test_tree_spec.spl` (1/1).
+`driver_source_loading_spec` is 5/10 both with and without this change.
