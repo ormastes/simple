@@ -11,7 +11,7 @@ unset native_internal_timeout
 bootstrap_tree_rss_row_cap_enter() { return 0; }
 bootstrap_tree_rss_row_cap_leave() { return 0; }
 tmp=$(mktemp -d) || exit 1
-trap 'rm -f "$tmp"/argv "$tmp"/receipt "$tmp"/expected "$tmp"/command.argv "$tmp"/policy.log; rmdir "$tmp"' EXIT HUP INT TERM
+trap 'rm -f "$tmp"/argv "$tmp"/env "$tmp"/receipt "$tmp"/expected "$tmp"/command.argv "$tmp"/policy.log; rmdir "$tmp"' EXIT HUP INT TERM
 
 hash_stream() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{ print $1 }'
@@ -115,4 +115,91 @@ grep -Fq 'verification-frontend-policy-error: product frontend policy refused ca
   echo 'product frontend refusal left no reason in the row log' >&2; exit 1;
 }
 
+
+# Exact tool-row launch environment (bootstrap-fable-17, 2026-11-12). The row
+# inherited the whole caller shell, and the HIR profile (reject-never-sanitize)
+# refused 111 keys in one line: GITHUB_TOKEN, TMUX, CLAUDE_CODE_*,
+# BOOTSTRAP_VERIFY_*, SIMPLE_BOOTSTRAP_*_ROOT, ... The row is launched through
+# `env -i` plus the keys bootstrap_phase_c_tool_row_environment_keys names,
+# the same shape as the Phase 4 direct product, and every listed key must be
+# one the HIR profile admits (src/app/cli/worker_hir_profile_v1.spl), so the
+# two lists cannot drift apart again.
+row_keys=$(bootstrap_phase_c_tool_row_environment_keys) || { echo 'tool-row key list unavailable' >&2; exit 1; }
+[ -n "$row_keys" ] || { echo 'tool-row key list is empty' >&2; exit 1; }
+profile=$root/src/app/cli/worker_hir_profile_v1.spl
+admitted=$(awk '
+  /^pub fn worker_hir_(base|stage3_capsule|tool_build)_environment_keys_v1/ { inlist = 1; next }
+  inlist && /^[^ \t#]/ { inlist = 0 }
+  inlist && /^[ \t]*#/ { next }
+  inlist { while (match($0, /"[A-Za-z_][A-Za-z0-9_]*"/)) { print substr($0, RSTART + 1, RLENGTH - 2); $0 = substr($0, RSTART + RLENGTH) } }
+' "$profile" | sort -u)
+[ -n "$admitted" ] || { echo 'could not read the HIR profile allowlists' >&2; exit 1; }
+for row_key in $row_keys; do
+  printf '%s\n' "$admitted" | grep -Fxq -- "$row_key" || {
+    echo "tool-row key is not admitted by the HIR profile: $row_key" >&2; exit 1;
+  }
+done
+# Campaign keys the row consumes below the launch and that have no other
+# carrier: the verifier strips --fail-fast from argv, so
+# SIMPLE_COMPILE_FAIL_FAST (bootstrap-cache-policy.shs) is the only one;
+# SIMPLE_KERNEL_K1_POLICY is a required campaign export read by
+# main_and_help.spl; SIMPLE_COMPILER_PHASE_PROFILE travels with its _FILE key.
+for required_key in SIMPLE_COMPILE_FAIL_FAST SIMPLE_KERNEL_K1_POLICY \
+    SIMPLE_COMPILER_PHASE_PROFILE SIMPLE_COMPILER_PHASE_PROFILE_FILE; do
+  printf '%s\n' "$row_keys" | grep -Fxq -- "$required_key" || {
+    echo "tool-row key list drops a campaign key the row consumes: $required_key" >&2; exit 1;
+  }
+done
+for ambient_key in GITHUB_TOKEN GH_TOKEN TMUX CLAUDE_CODE_ENTRYPOINT SSH_CLIENT LD_LIBRARY_PATH \
+    BOOTSTRAP_VERIFY_TIMEOUT_SECONDS SIMPLE_BOOTSTRAP_HOME_ROOT CARGO_TARGET_DIR; do
+  if printf '%s\n' "$row_keys" | grep -Fxq -- "$ambient_key"; then
+    echo "tool-row key list forwards an ambient caller key: $ambient_key" >&2; exit 1;
+  fi
+done
+
+# The exec wrapper forwards exact values (spaces kept, empty kept), drops every
+# other key, and keeps the command argv untouched (argv[0]=compiler,
+# argv[1]=native-build is what every tree-RSS / timeout owner keys on).
+(
+  GITHUB_TOKEN=secret TMUX=/tmp/tmux-1 BOOTSTRAP_VERIFY_TIMEOUT_SECONDS=1 SIMPLE_BOOTSTRAP_HOME_ROOT=/p/home-root
+  SIMPLE_BINARY='/p/compiler tool' SIMPLE_RUNTIME_PATH=/p/rt TMPDIR=/p/tmp SIMPLE_MIR_SHARD_COUNT= SIMPLE_CC=/p/clang
+  SIMPLE_COMPILE_FAIL_FAST=1 SIMPLE_KERNEL_K1_POLICY=require SIMPLE_COMPILER_PHASE_PROFILE=1
+  export GITHUB_TOKEN TMUX BOOTSTRAP_VERIFY_TIMEOUT_SECONDS SIMPLE_BOOTSTRAP_HOME_ROOT \
+    SIMPLE_BINARY SIMPLE_RUNTIME_PATH TMPDIR SIMPLE_MIR_SHARD_COUNT SIMPLE_CC \
+    SIMPLE_COMPILE_FAIL_FAST SIMPLE_KERNEL_K1_POLICY SIMPLE_COMPILER_PHASE_PROFILE
+  unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
+  sh "$root/scripts/bootstrap/phase-c-tool-row-exec.shs" sh -c 'printf "%s\n" "$0" "$@" >"$1"; env | LC_ALL=C sort >"$2"' \
+    '/p/compiler tool' "$tmp/argv" "$tmp/env" native-build
+) || { echo 'tool-row exec wrapper failed' >&2; exit 1; }
+printf '%s\n' '/p/compiler tool' "$tmp/argv" "$tmp/env" native-build >"$tmp/expected"
+cmp -s "$tmp/argv" "$tmp/expected" || { echo 'tool-row exec wrapper changed the command argv' >&2; exit 1; }
+grep -Fxq -- 'SIMPLE_BINARY=/p/compiler tool' "$tmp/env" || { echo 'exact value with a space was not forwarded' >&2; exit 1; }
+grep -Fxq -- 'SIMPLE_MIR_SHARD_COUNT=' "$tmp/env" || { echo 'present-but-empty value was not forwarded exactly' >&2; exit 1; }
+grep -Fxq -- 'SIMPLE_CC=/p/clang' "$tmp/env" || { echo 'chain toolchain pin was not forwarded' >&2; exit 1; }
+grep -Fxq -- 'TMPDIR=/p/tmp' "$tmp/env" || { echo 'TMPDIR was not forwarded' >&2; exit 1; }
+for campaign_pin in SIMPLE_COMPILE_FAIL_FAST=1 SIMPLE_KERNEL_K1_POLICY=require SIMPLE_COMPILER_PHASE_PROFILE=1; do
+  grep -Fxq -- "$campaign_pin" "$tmp/env" || { echo "campaign key was not forwarded: $campaign_pin" >&2; exit 1; }
+done
+if grep -Eq '^(GITHUB_TOKEN|TMUX|BOOTSTRAP_VERIFY_TIMEOUT_SECONDS|SIMPLE_BOOTSTRAP_HOME_ROOT)=' "$tmp/env"; then
+  echo 'ambient caller key leaked through the tool-row exec wrapper' >&2; exit 1;
+fi
+while IFS= read -r env_line; do
+  env_name=${env_line%%=*}
+  case "$env_name" in PWD|OLDPWD|SHLVL|_) continue ;; esac
+  printf '%s\n' "$row_keys" | grep -Fxq -- "$env_name" || {
+    echo "tool-row exec wrapper forwarded an unlisted key: $env_name" >&2; exit 1;
+  }
+done <"$tmp/env"
+
+# An incomplete session contract is refused, like Phase 4 direct.
+if ( SIMPLE_BOOTSTRAP_SESSION_ID=only; export SIMPLE_BOOTSTRAP_SESSION_ID; unset SIMPLE_BOOTSTRAP_SESSION_EXEC
+     sh "$root/scripts/bootstrap/phase-c-tool-row-exec.shs" true ) 2>/dev/null; then
+  echo 'incomplete session contract accepted' >&2; exit 1
+fi
+
+# The verifier routes the stage2/stage3 native-build tool rows through the
+# wrapper at the timeout owner (run_measured_timeout), never as an argv prefix.
+verifier=$root/scripts/bootstrap/bootstrap-phase-verification.shs
+grep -Fq 'measured_exact_env=phase-c-tool-row' "$verifier" || { echo 'verifier does not select the exact tool-row launch' >&2; exit 1; }
+grep -Fq 'phase-c-tool-row-exec.shs' "$verifier" || { echo 'verifier timeout owner is not wrapped by the exact tool-row launch' >&2; exit 1; }
 echo 'PASS: Phase C commands, backend cache identity, and receipt validation'

@@ -1,7 +1,8 @@
 use app.io.time_ops.{sleep_ms}
 use app.cli.worker_hir_profile_v1.{WorkerHirProfileV1, worker_hir_profile_admit_v1, worker_hir_profile_for_owner_v1}
 use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, worker_hir_owner_start_v1, worker_hir_owner_retain_failure_v1}
-use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1}
+use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1,
+    native_build_hir_refusal_runs_serial_v1}
 # Lightweight entrypoint for `simple native-build`.
 
 use app.io.env_ops.{env_get, env_set, env_unset, cwd, host_os}
@@ -1012,9 +1013,6 @@ fn shard_ledger_queue_dir(args: [text], prefix: text, label: text) -> text:
         return ""
     dir
 
-fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64) -> i64:
-    native_build_hir_ledger_run_v1(args, count, simple_bin, timeout_ms).code
-
 # The same coordinator entry is used by production and native integration specs.
 # It returns the actual ledger/retirement verdict, not a test-only success flag.
 pub fn native_build_hir_ledger_run_v1(args: [text], count: i64, simple_bin: text,
@@ -1023,7 +1021,7 @@ pub fn native_build_hir_ledger_run_v1(args: [text], count: i64, simple_bin: text
     if queue_dir == "":
         eprint "[hir-shard] BLOCKED: cannot establish invocation ledger"
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
-            blocked_reason: "cannot establish HIR ledger", all_stopped: true)
+            blocked_reason: "cannot establish HIR ledger", all_stopped: true, refused_before_spawn: true)
     native_build_hir_ledger_run_in_v1(args, queue_dir, count, simple_bin, timeout_ms)
 
 # HIR pool over an already-established ledger, always through the canonical
@@ -1053,7 +1051,7 @@ fn native_build_capsule_hir_ledger_run_v1(args: [text], queue_dir: text, count: 
                 environment_variant_policy_handoff_owner_error_label_v1(failure)
             eprint "[hir-shard] BLOCKED: {reason}"
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
-                blocked_reason: reason, all_stopped: true)
+                blocked_reason: reason, all_stopped: true, refused_before_spawn: true)
     val forwarded = match environment_variant_policy_handoff_attach_v1(user_args, policy.encoded_payload):
         case Ok(value): value
         case Err(failure):
@@ -1061,7 +1059,7 @@ fn native_build_capsule_hir_ledger_run_v1(args: [text], queue_dir: text, count: 
                 environment_variant_policy_handoff_owner_error_label_v1(failure)
             eprint "[hir-shard] BLOCKED: {reason}"
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
-                blocked_reason: reason, all_stopped: true)
+                blocked_reason: reason, all_stopped: true, refused_before_spawn: true)
     # Restore the marker exactly: a present-but-empty SIMPLE_* key would be
     # folded into the in-process environment fingerprint
     # (native_build_environment_snapshot_fingerprint_v1) and shift its cache scope.
@@ -1087,12 +1085,15 @@ const SHARD_POOL_POLL_MS: i64 = 200
 # One pool run's verdict. total_claims sums every owner's claim count; -1 when
 # any count was unreadable. all_stopped is false when a worker could not be
 # reaped. blocked_reason is the ledger's BLOCKED record ("" when not blocked).
+# refused_before_spawn is true only for a refusal returned before any owner
+# was spawned (no claim, ledger row or cache entry exists).
 pub struct LedgerShardRunV1:
     code: i64
     failed_modules: i64
     total_claims: i64
     blocked_reason: text
     all_stopped: bool
+    refused_before_spawn: bool
 
 # Directory holding a ledger queue ("" -> "."), where per-phase measured
 # worker peaks persist across runs.
@@ -1107,7 +1108,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val old_owner = native_build_env_saved_v1(owner_env)
     if not env_set(queue_env, queue_dir):
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
-            blocked_reason: "worker queue environment could not be installed", all_stopped: true)
+            blocked_reason: "worker queue environment could not be installed", all_stopped: true, refused_before_spawn: true)
     var hir_profiles: [WorkerHirProfileV1] = []
     var hir_pool_cleanup_deadline: i64 = 0
     if label == "hir-shard":
@@ -1115,18 +1116,18 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             native_build_env_restore_v1(queue_env, old_queue)
             eprint("[hir-shard] BLOCKED: HIR profile requires the canonical internal worker route")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
-                blocked_reason: "HIR profile requires the canonical internal worker route", all_stopped: true)
+                blocked_reason: "HIR profile requires the canonical internal worker route", all_stopped: true, refused_before_spawn: true)
         if count <= 0 or count > 128 or parallel <= 0 or parallel > 128:
             native_build_env_restore_v1(queue_env, old_queue)
             eprint("[hir-shard] BLOCKED: HIR profile worker count exceeds 128-owner bound")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
-                blocked_reason: "HIR profile worker count exceeds 128-owner bound", all_stopped: true)
+                blocked_reason: "HIR profile worker count exceeds 128-owner bound", all_stopped: true, refused_before_spawn: true)
         val selection = native_build_entry_and_sources_v1(args)
         if selection.is_empty():
             native_build_env_restore_v1(queue_env, old_queue)
             eprint("[hir-shard] BLOCKED: HIR profile has no explicit entry")
             return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
-                blocked_reason: "HIR profile has no explicit entry", all_stopped: true)
+                blocked_reason: "HIR profile has no explicit entry", all_stopped: true, refused_before_spawn: true)
         val budget_ms = if timeout_ms > 0: timeout_ms else: 3600000
         val deadline = time_now_monotonic_ms() + budget_ms
         match worker_hir_profile_admit_v1(base[2:], selection[0], selection[1:], deadline):
@@ -1135,7 +1136,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 native_build_env_restore_v1(queue_env, old_queue)
                 eprint("[hir-shard] profile admission rejected: " + reason)
                 return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
-                    blocked_reason: reason, all_stopped: true)
+                    blocked_reason: reason, all_stopped: true, refused_before_spawn: true)
     val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
     val window_size = if parallel > 0: parallel else: count
     # Measured commit admission (shard_mem_clamp.spl). The estimate starts at
@@ -1386,7 +1387,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val code = if blocked: 1 else: hir_shard_aggregate_exit(failed_workers, failed_modules)
     LedgerShardRunV1(code: code, failed_modules: failed_modules,
         total_claims: total_claims, blocked_reason: blocked_reason,
-        all_stopped: all_stopped)
+        all_stopped: all_stopped, refused_before_spawn: false)
 
 # ===== MIR sharding =========================================================
 #
@@ -2176,8 +2177,14 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
                 native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
                 eprint "SCV-E-HIR-ADMISSION: " + authority.reason
                 return 1
-        val hir_result = run_hir_shards(forwarded_args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
-        if hir_result != 0 and (args.contains("--go-to-end") or (env_get("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1"):
+        val hir_run = native_build_hir_ledger_run_v1(forwarded_args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
+        val hir_result = hir_run.code
+        if native_build_hir_refusal_runs_serial_v1(hir_result, hir_run.refused_before_spawn):
+            # The pool only warms the HIR cache and never started: no claim,
+            # ledger row or cache entry exists. Fail loud, not fatal
+            # (bootstrap-fable-17: a profile refusal failed the whole row).
+            eprint "[hir-shard] WARNING: HIR warm-up pool refused before any worker started ({hir_run.blocked_reason}); the final worker lowers HIR serially in process, {hir_shard_count}-worker HIR parallelism lost"
+        elif hir_result != 0 and (args.contains("--go-to-end") or (env_get("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1"):
             # go-to-end (compiler/80.driver/driver_build/go_to_end.spl): the
             # shards only warm the HIR cache. The final worker redoes HIR for
             # the failed modules in process, drops them and their importers,
