@@ -178,3 +178,42 @@ sites so the declared payload types flow. The old pin passed MIR because its
 codec emitted compatible shapes. NOTE: another lane is concurrently active on
 the sdn enum-payload divergence (main-tree commit 671d5545201) -- coordinate
 before large generator changes.
+
+## Fix (2026-11-13)
+
+Source alignment (branch `work/enum-payload-sites-20261113`, base `release/1.0.0`).
+Each construction now passes a value of the declared payload type, so the
+EXISTING Phase 2 compiler accepts it; every change is also type-correct on the
+seed. Classification: (a) = source genuinely mistyped, (b) = check too strict.
+
+| # | Site | Class | Change |
+|---|------|-------|--------|
+| 1 | `20.hir/generated/hir_codec.spl` CustomBlock (`value: BlockValue`) | (a) | `var f_value: BlockValue = BlockValue.Raw("")` placeholder; generator `app/compiler_schema/codec_gen.spl` `_emit_dec` emits it for the opaque BlockValue payload field (struct-component fallback unchanged) |
+| 2 | `10.frontend/_FlatAstBridge/convert_nodes.spl` ExprKind.StringLit | (a)/(b) | route through existing `flat_bridge_interpolated_string` (typed `[Interpolation]? = Some(parts)`) |
+| 3 | `expression_core.spl` + `statements.spl` HirExprKind.Break (`label: text`) | (a) | AST label is `text?`; `val break_label: text = label ?? ""` ("" = unlabeled, as `am_break_tag` reads it) |
+| 4 | `expression_components.spl` HirPatternKind.Range (`start/end: HirExpr`) | (a) | absent bound was stored as nil in a non-optional slot; both bounds required, else HIR error + `HirPatternKind.Error` (no open-ended range pattern exists in src/) |
+| 5 | `statements.spl` HirStmtKind.Let at 1 (`type_: HirType`) | (a) | the if-arm was the `HirType?` `v_hir_type`; lowered once into bare `v_annotated_hir_type` |
+| 6 | `declaration_default_rewrite_v1.spl` HirExprKind.StringLit | (a)/(b) | `val remapped_interps: [HirInterpolation]? = Some(new_interps)` (expression_core.spl shape) |
+| 7 | `60.mir_opt/mir_opt/outline.spl` MirTerminator.Ret(None) | (a) | inside `case None:` over a `BlockId?` subject; bare `None` there can lower as a catch-all Binding named None (expression_components.spl PatternKind.Binding arm), shadowing the builtin. Arm is now `case _:` |
+| 8 | `35.semantics/resolve_strategies.spl` MethodResolution.FreeFunction (`func_id: SymbolId`) | (a) | `.?`-guarded `SymbolId?` alias replaced by `if val` binding into a typed `SymbolId` |
+| 9 | `70.backend/backend/static_backend_cranelift_jit_lane.spl` CompileResult.Success x2 (`text?`) | (a) | payload was the JIT `i64` result; now `val result_text: text = "{result}"` |
+| 10 | `plugins/backend_vhdl/driver/driver_aot_vhdl_output.spl` CodegenError (`text`) | (a) | `entry_error` is the i64 raw-bridge word annotated `text`; interpolated like the catalog error below it |
+| 11 | `accessor_forwarding.spl` lower_accessor_read MethodCall at 1 (`method: text`) | (a), probable | loop var from an untyped array literal; typed `[text]` + `val accessor_method: text` |
+
+**6bfa14881e1 is not causal.** The check (`50.mir/_MirLoweringExpr/enum_constructor_payload.spl`)
+never lowers a type spelling: it compares the declared payload HirType against
+remembered/source/MIR evidence of the argument. `None` is recognised by
+expression kind (`enum_payload_is_builtin_none`, :245, accepted at :337) and
+`nil` by `HirExprKind.NilLit` (:335, `HirTypeKind.Nil` arm :338 is the
+lowercase `nil` type, types.spl:1542, untouched). 6bfa14881e1 only changes
+`lower_type` for the spelling `Nil` (types.spl:1548 -> Unit) and `Nil?`/`Option<Nil>`
+(`optional_of_non_unit` -> Error). None of the 11 declared payload types or
+argument types is spelled `Nil`, and rejection 8/10/9 are i64/`T?` into a
+nominal/text slot, not unit.
+
+Check-side notes (not fixed here, no Phase 2 rebuild needed for the source fix):
+`enum_payload_present_fills_optional` (:457) and the MIR fallback (:441) admit a
+present `T` into `T?` only for text/class/struct/enum, so a present array into
+`[T]?` (sites 2, 6) is rejected although an array is also a heap handle; and a
+bare `case None:` over a typed Optional subject lowering to a Binding is a HIR
+pattern-lowering hazard worth its own record.
