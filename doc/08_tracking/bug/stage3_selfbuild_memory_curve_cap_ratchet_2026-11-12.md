@@ -78,3 +78,26 @@ runs spawn short native builds). Auto-resume `run-stage3h.sh` polls both
 conditions and launches when the box is quiet. Codegen peak projection
 ~18-26 GiB; cap 26 GiB carries the measured curve (HIR 10.2, MIR ~14,
 codegen >16) with headroom.
+
+## Attempt H result (2026-11-13 ~00:10 KST): 26 GiB cap died in mir-lower, not codegen
+
+run-stage3h.sh (ceiling 58720256, cap 27262976) got further than every prior
+attempt: parse/surfaces/HIR 1626/1626 clean again, MIR setup + physical owners
+route ok, staged codegen batch opened, native session opened -- then
+`primary_status=rss-cap-exceeded` during `mir-lower` of a late module
+(vhdl_gen2_capability_sha256). Watchdog receipt: rss_cap_enforced=1,
+rss_limit_kib=27262976, observation_last_phase=budget_check.
+
+Measured curve this attempt: HIR plateau rss_kib=9523452 (~9.1 GiB, heap live
+2.6 GiB), MIR climb 12 -> 14 -> 16 -> 17.8 -> 20.7 -> 22.6 GiB, kill at 26.
+Growth was still steep (~1.3 GiB/min) at the kill with ~211 prescan / ~200
+native_staged modules of 1626 done, so the "codegen peak ~18-26 GiB"
+projection above is WRONG for the mir-lower stretch: the curve does not
+plateau before 26 GiB.
+
+Ratchet reasoning: the stage2 transcript peak for this exact 1626-module
+closure is 48 GiB (50331648) -- empirical proof the full build fits under 48
+GiB. Skipping the 34 GiB step, attempt I (run-stage3i.sh) launches with
+ceiling 58720256 / cap 54525952 (52 GiB) when the box is quiet
+(3/4 * MemAvailable >= 56 GiB). Caches are warm (38 aot-*.o + HIR + native
+staged 200), so resume cost is MIR-lower forward progress only.
