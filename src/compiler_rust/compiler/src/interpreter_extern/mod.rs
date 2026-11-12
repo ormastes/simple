@@ -70,6 +70,7 @@ pub mod io;
 pub mod network;
 pub mod filesystem;
 pub mod file_io;
+#[cfg(any(unix, windows))]
 mod snapshot_links;
 pub mod bootstrap_runtime;
 pub mod io_file;

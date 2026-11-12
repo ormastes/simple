@@ -280,15 +280,7 @@ pub(super) fn eval_collection_expr(
                         ));
                     }
                 } else {
-                    // A bare identifier key (`{ name: "x" }`) is a literal
-                    // string key, not a variable reference — the dict-entry
-                    // shorthand the frontend parser and the checked-in specs
-                    // use. Evaluating it as a variable died with
-                    // `variable `name` not found` (seed interpreter).
-                    let key_val = match k {
-                        Expr::Identifier(name) => Value::text(name.clone()),
-                        _ => evaluate_expr(k, env, functions, classes, enums, impl_methods)?,
-                    };
+                    let key_val = evaluate_expr(k, env, functions, classes, enums, impl_methods)?;
                     let val = evaluate_expr(v, env, functions, classes, enums, impl_methods)?;
                     map.insert(key_val.to_key_string(), Value::wrap_dict_entry(&key_val, val));
                 }

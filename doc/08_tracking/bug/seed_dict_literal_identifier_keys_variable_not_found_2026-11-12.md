@@ -1,13 +1,18 @@
-# Seed (Windows): dict literal with bare identifier keys mis-evaluated as variables (2026-11-12)
+# Seed: dict literal with bare identifier keys — `variable 'name' not found` (2026-11-12)
 
-- **Status:** FIXED — seed-side (`src/compiler_rust`), fix on `work/seed-bugs-20261112`
-- **Severity:** P2 (spec-lane blocker; affects any spec using `{ ident: value }` dict entries)
+- **Status:** RESOLVED — NOT A SEED DEFECT. Bare identifier dict keys are
+  **variable reads by language contract**; the failing specs were shorthand
+  drift and are quoted now. An interpreter "fix" was attempted and **reverted**
+  after review (PR #8434).
+- **Severity:** P2 (spec-lane blocker; affected specs using `{ ident: value }`
+  where the intent was a literal string key)
 - **Found:** 2026-11-12, release/1.0.0 Windows seed lane
-- **Area:** seed interpreter dict-literal evaluation (`compiler/src/interpreter/expr/collections.rs`)
+- **Area:** language contract for dict-literal keys (all engines), seed
+  interpreter evaluation (`compiler/src/interpreter/expr/collections.rs`)
 
 ## Symptom
 
-Every dict literal whose keys are bare identifiers fails under the seed
+Dict literals whose keys are bare identifiers fail under the seed
 interpreter with:
 
 ```
@@ -15,59 +20,50 @@ semantic: <file>:<line>:<col>: variable `name` not found
 ```
 
 First observed in `test/02_integration/app/app_mcp_intensive_spec.spl:166`
-(`val config = { name: "simple-mcp-server", version: "0.5.0", ... }`), but a
-minimal probe shows the shape that breaks is **any dict entry with a bare
-identifier key** — single-key, multi-key, one-line and multi-line all fail
-identically; string-literal keys (`{ "name": "x" }`) work.
+(`val config = { name: "simple-mcp-server", ... }`); the probe showed the
+shape is any dict entry with a bare identifier key (single or multi key).
 
-Probe evidence (tmp/seed_probe/dict_probe_spec.spl under the lane worktree,
-5 examples against the pre-fix seed):
+## Root cause — shorthand drift in the specs, not an interpreter bug
 
-| example | shape | pre-fix result |
-|---------|-------|----------------|
-| 1 | `{ name: "x" }` | FAIL `variable 'name' not found` |
-| 2 | `{ name: "x", version: "y" }` | FAIL `variable 'name' not found` |
-| 3 | multi-line multi-key | FAIL `variable 'name' not found` |
-| 4 | `{ "name": "x", "version": "y" }` | PASS |
-| 5 | multi-line single identifier key | FAIL `variable 'name' not found` |
+A dict-literal key is a full expression in every engine:
 
-The full spec: 35 executed, 14 passed, 21 failed; 10 of the failures carry the
-`variable \`...\` not found` signature at the first identifier key of a dict
-literal (lines 166, 181, 208, 261, 302, 333, 379, 407, 457, 557).
+- seed interpreter: `Expr::Dict` evaluates keys via `evaluate_expr`
+  (`compiler/src/interpreter/expr/collections.rs`);
+- seed HIR lowering: `lower_dict` lowers keys via `lower_expr`
+  (`compiler/src/hir/lower/expr/collections.rs:707`);
+- self-hosted frontend: `lower_dict_entry`
+  (`src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl:90`).
 
-## Root cause
+So a bare identifier key is a **variable read**, and an unbound identifier
+correctly errors. Product code depends on the bound-name behavior, e.g.
+`src/app/spipe/fusion/rrf.spl:105` `{skey: candidate.source_rank}` where
+`skey` is a bound variable (indexed as `[skey]` on lines 92/101). The
+documented syntax (`doc/syntax_quick_reference.md:317`) shows quoted keys
+only.
 
-The seed parser keeps a bare identifier dict key as `Expr::Identifier(name)`
-(`parser/src/expressions/primary/collections.rs`, `parse_dict_literal` parses
-keys with `parse_expression()`), and the interpreter's dict-literal evaluation
-evaluated that key through the generic identifier path, which resolves it as a
-variable reference and dies with E1001 "variable not found"
-(`compiler/src/interpreter/expr/literals.rs`).
+## What happened in this lane (review record)
 
-The language contract (shared with the pure-Simple frontend and exercised by
-checked-in specs that pass under the self-hosted compiler) is that a bare
-identifier in dict-entry position is a **literal string key** — the Python/JS
-`{ name: value }` shorthand — not a variable read. No currently-passing code
-can depend on the old behavior because the old behavior was always a hard
-error for unbound names.
+1. First attempt treated identifier keys as literal string keys in the seed
+   interpreter only. That made the interpreter silently diverge from every
+   compiled path (P1, review on PR #8434) and was **reverted**.
+2. Correct disposition: quote the identifier keys at the spec sites that
+   used the shorthand. `test/02_integration/app/app_mcp_intensive_spec.spl`
+   had 10 such dict literals (lines 166, 181, 208, 261, 302, 333, 379, 407,
+   457, 557); all keys are now quoted. Sites that legitimately key dicts by
+   bound variables were left alone: `test/01_unit/compiler/codegen/
+   cuda_backend_intensive_contract_spec.spl` (`Dict<SymbolId, ...>` keyed by
+   `struct_symbol`/`symbol` vals) and `test/01_unit/compiler/loader/
+   module_loader_spec.spl:305` (keyed by `owned_symbol_name` vals).
 
-## Fix
+## Regression fixture
 
-`compiler/src/interpreter/expr/collections.rs` (`Expr::Dict` evaluation arm):
-when a key is `Expr::Identifier(name)`, insert the key as the literal string
-`name` instead of evaluating it. All other key expressions (strings,
-concatenations, parenthesized expressions, dict spreads) are unchanged, so
-compiled-mode behavior and the AST are untouched; this is interpreter-only,
-matching the "do not change compiled-mode behavior" constraint.
+`test/01_unit/compiler/interpreter/dict_literal_identifier_key_variable_read_spec.spl`
+pins the contract for every engine: bound-identifier keys key by value,
+quoted keys stay literal.
 
-## Verification (post-fix seed, see commit message for exact commands)
+## Verification (post-revert seed, PR #8434)
 
-- Minimal probe spec (all 5 shapes above): 5/5 PASS.
+- New contract spec: 3/3 examples pass under the seed interpreter.
 - `test/02_integration/app/app_mcp_intensive_spec.spl`: all 10
-  `variable \`...\` not found` failures eliminated; remaining failures are in
-  the known skip-class contexts the lane brief names (not pursued).
-
-## Notes
-
-- The lane brief titled this "multi-key dict literal misparse"; the probe
-  narrowed it to *identifier-keyed* dict literals of any arity.
+  `variable \`...\` not found` failures eliminated (quoted keys); remaining
+  failures are the known skip-class contexts named in the lane brief.

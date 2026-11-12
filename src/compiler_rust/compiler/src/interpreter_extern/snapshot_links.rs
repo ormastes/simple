@@ -189,13 +189,16 @@ mod windows {
     const MAX_REPARSE_DATA: usize = 16 * 1024;
     const FILE_BASIC_INFO_CLASS: i32 = 0; // FileBasicInfo
 
+    // Exact BY_HANDLE_FILE_INFORMATION layout (52 bytes, align 4): attributes,
+    // three FILETIMEs as u32 pairs, volume serial, size, links, index. Only
+    // offset 0 is read, but the layout is the real one, not a padded
+    // approximation — i64 FILETIMEs would force align 8 and sizeof 56.
     #[repr(C)]
     struct ByHandleFileInformation {
         file_attributes: u32,
-        creation_time: i64,
-        last_access_time: i64,
-        last_write_time: i64,
-        last_change_time: i64,
+        creation_time: [u32; 2],
+        last_access_time: [u32; 2],
+        last_write_time: [u32; 2],
         volume_serial_number: u32,
         file_size_high: u32,
         file_size_low: u32,
@@ -203,6 +206,7 @@ mod windows {
         file_index_high: u32,
         file_index_low: u32,
     }
+    const _: () = assert!(std::mem::size_of::<ByHandleFileInformation>() == 52);
 
     #[repr(C)]
     struct FileBasicInfo {
