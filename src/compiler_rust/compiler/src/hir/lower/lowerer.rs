@@ -131,6 +131,12 @@ pub struct Lowerer {
     /// Captured from the AST during module lowering so omitted trailing
     /// arguments can be filled at call sites (`lower_call`).
     pub(super) fn_param_defaults: HashMap<String, Vec<Option<Expr>>>,
+    /// `Owner.method` -> per user parameter, the declared parameter types of
+    /// a `fn(...)`-typed parameter (`None` for any other parameter). An inner
+    /// `None` is an erased generic parameter (`T` -> `ANY`). Lets a lambda
+    /// passed to a method take its declared callback parameter types, as a
+    /// lambda passed to a free function already does (`expr/calls.rs`).
+    pub(super) method_callback_param_types: HashMap<String, Vec<Option<Vec<Option<simple_parser::ast::Type>>>>>,
     /// Importing module identity -> visible name -> parameter defaults.
     /// Separate from local declarations so cached facades and aliases retain
     /// the selected import's contract without a process-wide bare-name lookup.
@@ -361,6 +367,7 @@ impl Lowerer {
             declared_function_returns: HashMap::new(),
             trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            method_callback_param_types: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             fn_param_names: HashMap::new(),
             imported_fn_param_names: HashMap::new(),
@@ -444,6 +451,7 @@ impl Lowerer {
             declared_function_returns: HashMap::new(),
             trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            method_callback_param_types: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             fn_param_names: HashMap::new(),
             imported_fn_param_names: HashMap::new(),
@@ -550,6 +558,7 @@ impl Lowerer {
             declared_function_returns: HashMap::new(),
             trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            method_callback_param_types: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             fn_param_names: HashMap::new(),
             imported_fn_param_names: HashMap::new(),

@@ -1051,6 +1051,41 @@ impl Lowerer {
         self.trait_declaration_for_current_owner(trait_name)
     }
 
+    /// Resolved callback parameter types for the lambda arguments of a
+    /// positional call to a user method, or `None` to lower the arguments the
+    /// ordinary way (no lambda argument, named arguments, unknown receiver
+    /// type or method, or a declared type that does not resolve here).
+    fn method_callback_types_for_call(
+        &mut self,
+        receiver: &HirExpr,
+        method: &str,
+        args: &[ast::Argument],
+    ) -> Option<Vec<Option<Vec<TypeId>>>> {
+        if !args.iter().any(|a| matches!(a.value, Expr::Lambda { .. })) || args.iter().any(|a| a.name.is_some()) {
+            return None;
+        }
+        let owner = self.module.types.get_type_name(receiver.ty)?;
+        let declared = self.method_callback_param_types.get(&format!("{}.{}", owner, method))?.clone();
+        let mut resolved = Vec::with_capacity(declared.len());
+        for callback in declared {
+            resolved.push(match callback {
+                None => None,
+                Some(param_types) => {
+                    let mut out = Vec::with_capacity(param_types.len());
+                    for ty in param_types {
+                        out.push(match ty {
+                            // Erased generic parameter: a tagged word.
+                            None => TypeId::ANY,
+                            Some(ty) => self.resolve_type(&ty).ok()?,
+                        });
+                    }
+                    Some(out)
+                }
+            });
+        }
+        Some(resolved)
+    }
+
     fn lower_method_call(
         &mut self,
         receiver: &Expr,
@@ -1195,7 +1230,28 @@ impl Lowerer {
         }
 
         // Lower arguments for generic method call
-        let mut hir_args = self.lower_call_args(args, ctx)?;
+        // A lambda passed positionally to a `fn(...)`-typed METHOD parameter
+        // takes that parameter's declared callback parameter types, exactly
+        // as for a free function (`expr/calls.rs`). Without this an
+        // unannotated `\x` defaulted to I64 whatever the method declares, so
+        // `cell.with(\x: x * 2.0, 1.25)` on `fn with<T>(f: fn(T) -> T, ..)`
+        // decoded a boxed float as an integer.
+        let callback_param_types = self.method_callback_types_for_call(&receiver_hir, method, args);
+        let mut hir_args = match callback_param_types {
+            Some(callbacks) => {
+                let mut out = Vec::with_capacity(args.len());
+                for (i, arg) in args.iter().enumerate() {
+                    match (&arg.value, callbacks.get(i)) {
+                        (Expr::Lambda { params, body, capture_all, .. }, Some(Some(param_tys))) => {
+                            out.push(self.lower_lambda_with_param_types(params, body, *capture_all, ctx, param_tys)?);
+                        }
+                        _ => out.push(self.lower_expr(&arg.value, ctx)?),
+                    }
+                }
+                out
+            }
+            None => self.lower_call_args(args, ctx)?,
+        };
         // Use the concrete receiver owner in the default lookup.  A bare
         // method-name table would let same-named methods on unrelated classes
         // supply each other's defaults.  MethodCall args exclude the receiver,

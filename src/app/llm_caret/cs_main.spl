@@ -18,7 +18,7 @@ use std.sys.pty.{read as pty_read}
 use std.nogc_async_mut.sosix.host_facade.{sosix_platform, sosix_print_raw as print_raw}
 use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
     cs_render, cs_handle_command, cs_apply_action, cs_frame_rows,
-    cs_poll_screens, cs_resize_agents, cs_agent_area, cs_reap_containers}
+    cs_poll_screens, cs_resize_agents, cs_agent_area}
 use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
 use std.io_runtime.{env_get, time_now_unix_micros, time_now_monotonic_ms}
 
@@ -80,7 +80,9 @@ fn cs_run(io: CaretIo, session: text) -> CaretLoopResult:
         val size = io.terminal_size()
         val (cols, rows) = cs_effective_size(size.cols, size.rows)
         io.emit(cs_render(d, cols, rows))
-        val (got_line, line) = io.read_line()
+        val read_result = io.read_line()
+        val got_line = read_result.0
+        val line = read_result.1
         if got_line:
             if line.trim() == "":
                 consecutive_empty_reads = consecutive_empty_reads + 1
@@ -98,10 +100,6 @@ fn cs_run(io: CaretIo, session: text) -> CaretLoopResult:
                 io.emit(outcome)
         else:
             running = false
-    # Every way out of the loop (quit, EOF, blank-line ceiling): an agent
-    # container must not outlive the dashboard that owns it.
-    val unreaped = cs_reap_containers(d)
-    if unreaped != "": io.emit(unreaped)
     CaretLoopResult(mode: "cs", ok: true, exit_reason: reason, error: "")
 
 # ---------------------------------------------------------------------------
@@ -287,8 +285,6 @@ fn cs_run_live(session: text) -> CaretLoopResult:
             elif ch >= " ":
                 d = _with_input(d, d.input + ch, d.log)
     _live_end()
-    val unreaped = cs_reap_containers(d)
-    if unreaped != "": print unreaped
     CaretLoopResult(mode: "cs", ok: true, exit_reason: reason, error: "")
 
 # The line loop (`cs_plain_io`) prints a frame and reads a whole line. Neither
