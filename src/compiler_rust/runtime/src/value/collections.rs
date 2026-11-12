@@ -4253,6 +4253,11 @@ pub extern "C" fn rt_any_add(left: RuntimeValue, right: RuntimeValue) -> Runtime
     {
         return rt_string_concat(rt_to_string(left), rt_to_string(right));
     }
+    // Float lane, as in rt_any_sub/mul/div: without it two tagged floats
+    // were added as integers (their shifted heap pointers).
+    if any_binop_is_float(left, right) {
+        return RuntimeValue::from_float(any_as_f64(left) + any_as_f64(right));
+    }
 
     RuntimeValue::from_int(left.as_int() + right.as_int())
 }

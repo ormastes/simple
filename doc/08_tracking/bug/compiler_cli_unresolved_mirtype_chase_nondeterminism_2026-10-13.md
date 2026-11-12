@@ -557,3 +557,69 @@ named import through a bare per-item package re-export fails to bind. This is th
 documented bare-per-item-re-export -> package-sibling-inference arm failure, one level
 downstream of the lost cycle-39 closure fix (which is present in partial form and does
 not cover it). Fix lane opened: work/chasefix-20261112.
+
+
+## Cycle 40 (2026-11-12, chasefix lane, work/chasefix-20261112): sibling-arm fold mismatch + __init__ parent-bucket defect found and fixed
+Re-examined the chase's package-sibling inference arm
+(module_reexport_materialization.spl) against the 2026-11-12 victim shape
+(`use std.common.diagnostics.{... LineStartTable}` through the package
+__init__'s `export source_position.{...}`). Two concrete defects, both
+pinned with direct arm probes (test/01_unit/compiler/hir/
+package_qualified_reexport_chase_spec.spl drives
+find_reexport_source_walk with the export-origin index and import rows
+stripped so the arm is the only route -- the degraded window shard runs
+observe via origin-owner bail / cross-wired rows):
+
+1. FOLD MISMATCH: build_package_sibling_index keys every bucket by
+   hir_pkg_canonical_module_name(registry_name) -- which folds a leading
+   `std.` to `lib.` -- but the arm computed its lookup package from the
+   UNFOLDED facade spelling (cached_surface_package_name over
+   surface_registry_name_by_physical_index). Any facade whose first
+   registry alias is std.-spelled therefore searched an EMPTY bucket,
+   found zero siblings, and (state.complete and state.valid) memoized a
+   false negative that resurfaced as hard `unresolved type` in innocent
+   importers. Probe receipt (pre-fix): [sibprobe] facade=lib.zzc.facade
+   module_name=std.zzc.facade package=std.zzc siblings=0 -> [sibprobe-miss].
+2. __INIT__ PARENT-BUCKET: for a package __init__ facade, re-exported
+   items live in modules of the package the facade NAMES (its children,
+   bucket `lib.<pkg>`), but the arm only searched
+   package_name_from_name(facade) -- the PARENT package (`lib.<parent>`).
+   Probe receipt (pre-fix): facade=lib.zzc.diagnostics.__init__
+   package=std.zzc.diagnostics siblings=0 -> [sibprobe-miss].
+
+In a HEALTHY registry the arm is normally never reached for these shapes
+(export-origin index / import row / qualified route resolve first -- the
+end-to-end victim-shape scenario in the spec is green before and after),
+which is why the defect only surfaced in the degraded whole-program
+windows and survived every prior cycle.
+
+FIX (module_reexport_materialization.spl, find_reexport_source_walk
+sibling arm): derive the facade name from the scalar alias arrays as
+before, canonicalize it through hir_pkg_canonical_module_name, and search
+BOTH candidate buckets -- module_surface_package_name_from_name(canon)
+(parent package, regular facades) and canon itself (the package an
+__init__/package-alias facade names) -- unioned with per-surface dedupe
+(one physical sibling can carry several spellings across both buckets)
+under the existing exactly-one-match rule. Ambiguity still returns
+not-found; seed-parity soft tolerance untouched. The env-gated sibprobe
+line now prints registry_name/canon/packages.
+
+Verification (seed interpreter, worktree):
+- package_qualified_reexport_chase_spec: 4/4 PASS with the fix; the two
+  std.-spelled arm probes were RED before it (found=false), the neutral
+  control and the end-to-end victim-shape scenarios green both ways.
+- module_surface_numbered_path_spec 4/4, callable_dependency_frozen_alias_retry_spec 6/6,
+  bare_export_facade_chain_reexport_spec 2/2, imported_optional_argument_reexport_hop_regression_spec 3/3 PASS.
+- reexport_physical_cache_spec 16/4 and reexport_cycle_memo_spec 2/1 FAIL
+  IDENTICALLY at the base commit (pre-existing, not regressions);
+  same_named_package_facade_reexport_spec IMPROVED from 2/3 to 4/1.
+
+Medium-closure status: the frozen stage2 binary (stage3/aarch64...
+/stage2-admitted/simple) reproduces infra BLOCKERS, not the chase failure
+-- every native-build attempt (md_diagnostics / md_lsp_main entries,
+SIMPLE_SCV_INVENTORY_COLD_INIT=1, fresh cache dirs) died in cold-HIR
+receipt capture ('cold-hir-lowered-module-missing:<entry>') before/at HIR
+with zero unresolved-type errors; that receipt gate is SCV/admission
+state entangled with the main checkout's journal, not the chase. The
+3122-module full-CLI repro remains the parent's recorded evidence; a
+candidate-built stage2 rerun is the follow-up.

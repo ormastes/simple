@@ -21,7 +21,12 @@ use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.*
-use compiler.mir_opt.string_builder_opt.{StringBuilderOpt, string_builder_opt_run_on_function, string_builder_opt_enabled_for}
+# Retargeted 2026-11-12: string_builder_opt_run_on_function is package-visible
+# and re-exported by the mir_opt facade; the gate is tested through it
+# (string_builder_opt_enabled_for is an internal helper, not API).
+use compiler.mir_opt.string_builder_opt.{StringBuilderOpt}
+use compiler.mir_opt.{string_builder_opt_run_on_function, create_string_builder_opt_pass}
+use std.io_runtime.{env_get, env_set_process}
 
 val S_ID: i64 = 1
 val X_ID: i64 = 2
@@ -216,6 +221,14 @@ describe "StringBuilderOpt pipeline gate":
         # @req REQ-COMP-MIROPT-SBOPT-003
         # @capture(statistics): gate values
         step("Verify: SIMPLE_MIR_STRING_BUILDER_OPT=1 enables, anything else disables")
-        expect(string_builder_opt_enabled_for("1")).to_equal(true)  # oracle: explicit opt-in
-        expect(string_builder_opt_enabled_for("")).to_equal(false)  # oracle: default off
-        expect(string_builder_opt_enabled_for("0")).to_equal(false)  # oracle: explicit off
+        val saved_gate = env_get("SIMPLE_MIR_STRING_BUILDER_OPT")
+        val _on = env_set_process("SIMPLE_MIR_STRING_BUILDER_OPT", "1")
+        val enabled = string_builder_opt_run_on_function(create_string_builder_opt_pass(), canonical_loop(concat_pair(), [cond_inst()]))
+        val _off = env_set_process("SIMPLE_MIR_STRING_BUILDER_OPT", "0")
+        val disabled = string_builder_opt_run_on_function(create_string_builder_opt_pass(), canonical_loop(concat_pair(), [cond_inst()]))
+        val _unset = env_set_process("SIMPLE_MIR_STRING_BUILDER_OPT", "")
+        val unset = string_builder_opt_run_on_function(create_string_builder_opt_pass(), canonical_loop(concat_pair(), [cond_inst()]))
+        val _restore = env_set_process("SIMPLE_MIR_STRING_BUILDER_OPT", saved_gate)
+        expect(call_names(find_block(enabled, 2))).to_equal(["rt_string_builder_push"])  # oracle: explicit opt-in rewrites
+        expect(call_names(find_block(disabled, 2))).to_equal(call_names(find_block(canonical_loop(concat_pair(), [cond_inst()]), 2)))  # oracle: explicit off leaves the loop body
+        expect(call_names(find_block(unset, 2))).to_equal(call_names(find_block(canonical_loop(concat_pair(), [cond_inst()]), 2)))  # oracle: default off

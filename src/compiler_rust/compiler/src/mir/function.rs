@@ -68,6 +68,11 @@ pub struct OutlinedBody {
     pub frame_slots: Option<usize>,
     pub is_lambda: bool,
     pub lambda_capture_local_indices: Vec<usize>,
+    /// The lambda's result is `bool`. Its outlined function is declared I64
+    /// (a sub-register `i8` result is not carryable), so this is the only
+    /// record of the real result type: the boxed entry needs it to answer a
+    /// tagged BOOL instead of a tagged integer 0/1.
+    pub lambda_returns_bool: bool,
 }
 
 /// MIR function
