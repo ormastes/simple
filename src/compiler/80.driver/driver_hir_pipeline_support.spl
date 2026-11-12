@@ -2,6 +2,7 @@
 
 use compiler.driver.driver_types.{CompileContext}
 use compiler.semantics.param_effects.ownership_source_authority.{OwnershipSourceAuthorityV1, ownership_source_authorities_create_v1}
+use compiler.semantics.param_effects.nogc_admission_verdict.{nogc_admission_report_v1, nogc_admission_conforming_errors_v1, nogc_admission_truth_notes_v1}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_record, mem_snapshot_record_promotion}
@@ -504,6 +505,18 @@ pub fn driver_admit_nogc_param_effects_v1(ctx: CompileContext, surfaces: [Module
     # Admission is transactional. No stale/partial report is published after
     # one module fails, and downstream MIR never consumes error-bearing HIR.
     if admission.errors.len() != 0:
+        log_phase("phase3:hir:ownership_admission:failed")
+        return
+    # Admission truth (plan §1.1/§3.8): a module that skipped the checker is
+    # named, never silent. The empty-closure rule applies only when this
+    # context has never checked anything (later shard/eviction re-admissions
+    # legitimately carry zero modules).
+    val truth = nogc_admission_report_v1(admission.modules)
+    for note in nogc_admission_truth_notes_v1(truth): ctx.add_warning(note)
+    val require_strict = ctx.options.nogc_require_strict and (admission.modules.len() != 0 or not ctx.nogc_ownership_required)
+    val policy_errors = nogc_admission_conforming_errors_v1(truth, require_strict)
+    for error in policy_errors: ctx.add_error(error)
+    if policy_errors.len() != 0:
         log_phase("phase3:hir:ownership_admission:failed")
         return
     # Compact source/body receipts survive HIR-surface eviction. Build before
