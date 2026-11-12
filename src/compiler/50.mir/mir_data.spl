@@ -14,7 +14,7 @@ use compiler.mir.mir_instruction_support.{MirCallOrigin}
 # - mir_instructions.spl: Blocks, instructions, terminators, operands (~460 lines)
 # - mir_data.spl: MirBuilder API + re-exports (this file)
 
-use compiler.hir.hir_types.{SymbolId, SymbolTable, HirType, hir_type_metadata_symbol_free}
+use compiler.hir.hir_types.{SymbolId, SymbolKind, SymbolTable, HirType, hir_type_metadata_symbol_free}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_definitions.{HirParam, HirConst}
 use compiler.common.diagnostics.span.{Span}
@@ -2827,6 +2827,34 @@ fn bootstrap_fn_param_hir_types_lookup(name: text) -> [HirType]?:
                 return None
         return Some(params)
     None
+
+# Receiver-tail METHOD param records share the param registry (and therefore
+# its promotion, symbol-free admission and ambiguity veto) under a distinct
+# key: `#` never occurs in a module path or callable name. The value holds the
+# method's params AFTER the receiver; the receiver is the handle word.
+pub fn mir_method_receiver_tail_key_v1(link_name: text) -> text:
+    link_name + "#receiver-tail"
+
+# The receiver may be treated as the handle word only when it is the leading
+# `self`/`me` parameter of a plain class or struct owner. A unit/newtype owner
+# (custom primitive) may lower to F64/Bool/I64 by value, and any other shape is
+# unknown: callers then keep the signature unknown (fail closed).
+pub fn mir_method_receiver_handle_word_kind_v1(param_name: text, owner_kind: SymbolKind?,
+        owner_is_custom_primitive: bool) -> bool:
+    if param_name != "self" and param_name != "me": return false
+    if owner_is_custom_primitive: return false
+    match owner_kind:
+        case Some(kind):
+            match kind:
+                case SymbolKind.Class | SymbolKind.Struct: true
+                case _: false
+        case None: false
+
+# Declared params of an imported method whose symbol carries no callable type:
+# handle word for the receiver, then the registered receiver tail. None when
+# the tail is unregistered, rejected (symbol-bearing) or ambiguous.
+pub fn bootstrap_method_receiver_tail_params_lookup_v1(link_name: text) -> [HirType]?:
+    bootstrap_fn_param_hir_types_lookup(mir_method_receiver_tail_key_v1(link_name))
 
 # Per-parameter DEFAULT-expression registry.
 #
