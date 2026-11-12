@@ -409,8 +409,25 @@ fn compile_native_source(source_file: text, output_file: text, verbose: bool, co
         if verbose:
             debug("compile", "No mold found, using system linker")
 
-    # Compile runtime files as C even when using a C++ driver
-    val rt_sources = "-x c src/runtime/runtime.c src/runtime/runtime_thread.c src/runtime/runtime_memtrack.c src/runtime/runtime_fork.c src/runtime/runtime_process_tree.c"
+    # Compile the modern core-C runtime set (tagged-heap value
+    # representation), NOT legacy runtime.c — see
+    # doc/08_tracking/bug/native_spl_lane_runtime_c_legacy_value_representation_divergence.
+    # Same source of truth as the Rust core-c-bootstrap lane
+    # (src/compiler_rust/compiler/src/pipeline/native_project/tools.rs
+    # `build_c_runtime_library` unconditional runtime_inputs) plus
+    # runtime_socket_nonblock.c, which Lane B resolves from its Rust
+    # staticlibs (simple_local_unix_origin_v1). Verified collision-free
+    # (nm, host cc, 2026-11-12). runtime.c is excluded wholesale: its
+    # monolithic exports collide with runtime_native.c on ~85 symbols with
+    # a DIFFERENT internal value representation (untagged raw pointers vs
+    # RT_VALUE_TAG_HEAP-tagged, GC-registered handles).
+    # -DSIMPLE_CORE_C_STANDALONE=1 selects the standalone-archive providers
+    # (and makes runtime_legacy_core.c, not runtime_thread.c, own
+    # spl_thread_cpu_count); -DSIMPLE_RUNTIME_MEMORY_OWNER=1 selects
+    # runtime_memory.c as the allocator owner and compiles out
+    # runtime_native.c's mutually-exclusive fallback copies (mirrors
+    # tools.rs and src/compiler/70.backend/backend/runtime_compiler.spl).
+    val rt_sources = "-x c src/runtime/runtime_native.c src/runtime/runtime_file_view.c src/runtime/runtime_disk_headroom.c src/runtime/runtime_memory_headroom.c src/runtime/runtime_cache_host_authority_v1.c src/runtime/runtime_framebuffer.c src/runtime/runtime_directx_core.c src/runtime/runtime_legacy_core.c src/runtime/runtime_core_io_exports.c src/runtime/runtime_core_host_services.c src/runtime/runtime_fork.c src/runtime/runtime_memtrack.c src/runtime/runtime_process.c src/runtime/runtime_process_tree.c src/runtime/runtime_memory.c src/runtime/runtime_alloc_observer.c src/runtime/runtime_process_owned.c src/runtime/runtime_coverage_core.c src/runtime/runtime_contracts.c src/runtime/runtime_font.c src/runtime/runtime_thread.c src/runtime/runtime_simd_utf8.c src/runtime/runtime_simd_case.c src/runtime/runtime_simd_search.c src/runtime/runtime_simd_dispatch.c src/runtime/runtime_packed_span.c src/runtime/runtime_terminal.c src/runtime/runtime_prof_sample.c src/runtime/runtime_core_exports.c src/runtime/runtime_core_intrinsics.c src/runtime/runtime_backend_plugin.c src/runtime/runtime_socket_nonblock.c src/runtime/hosted_cocoa.c src/runtime/hosted_win32.c"
 
     # Link packaged native support library if available (provides Cranelift SFFI + runtime)
     var native_lib_flags = ""
@@ -420,7 +437,7 @@ fn compile_native_source(source_file: text, output_file: text, verbose: bool, co
         linked_native_lib_path = strip_native_all_constructors(native_lib_path, platform, verbose)
         native_lib_flags = " {linked_native_lib_path} -lstdc++ -lm"
 
-    val clang_cmd = "{cc} -std=gnu11 {opt_flags}{lto_flags}{march_flags}{san_flags}{stack_protector_flags}{mold_link}-I src/runtime/ -x c '{temp_cpp}' {rt_sources}{native_lib_flags}{hardening_flags} -o '{output_file}' -lpthread -ldl -lm 2>&1"
+    val clang_cmd = "{cc} -std=gnu11 -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 {opt_flags}{lto_flags}{march_flags}{san_flags}{stack_protector_flags}{mold_link}-I src/runtime/ -I src/runtime/platform/ -x c '{temp_cpp}' {rt_sources}{native_lib_flags}{hardening_flags} -o '{output_file}' -lpthread -ldl -lm 2>&1"
     if verbose:
         debug("compile", "Compiling: {cc} -std=c++20 ...")
 
