@@ -126,6 +126,34 @@ describe "strict SDN worker protocol consumer":
                                 case TestRunnerSdnMessage.Output(output): expect(output.success).to_equal(true)
                                 case _: fail("producer edge-case output was classified as worker failure")
 
+    # a4b1498cf21 added `peak_rss_kib` to the producer's file record; the strict
+    # consumer still listed the 27 older fields and rejected every file result.
+    # ASCII-only on purpose: this must not depend on Unicode framing.
+    it "accepts the producer file record including peak_rss_kib":
+        val file = TestFileResult(
+            path: "test/ascii_only.spl", passed: 1, failed: 0, skipped: 0, pending: 0,
+            duration_ms: 12, setup_ms: 2, error: "", timed_out: false, cached: false,
+            peak_rss_kib: 2048)
+        # Default peak_rss_kib is -1, "not measured"; the producer emits it as is.
+        val unmeasured = TestFileResult(
+            path: "test/ascii_unmeasured.spl", passed: 1, failed: 0, skipped: 0, pending: 0,
+            duration_ms: 3, setup_ms: 1, error: "", timed_out: false, cached: false)
+        val spec = TestRunResult(files: [file, unmeasured], total_passed: 2,
+            total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0,
+            total_duration_ms: 15, total_setup_ms: 3, total_cached: 0)
+        val docs = SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0,
+            errors: 0, accepted: 0, duration_ms: 0)
+        match combined_test_run_sdn(true, true, spec, false, docs, false, docs):
+            case Err(reason): fail("producer rejected an ASCII file result: {reason}")
+            case Ok(source):
+                expect(source.contains("peak_rss_kib: 2048")).to_equal(true)
+                match validate_test_runner_sdn_message(source):
+                    case Err(reason): fail("consumer rejected the producer's own file record: {reason}")
+                    case Ok(message):
+                        match message:
+                            case TestRunnerSdnMessage.Output(output): expect(output.success).to_equal(true)
+                            case _: fail("producer output was classified as worker failure")
+
     it "roundtrips nonempty producer documentation blocks and all modifier variants":
         val resource = Some(ResourceUsage(
             wall_ms: 19, user_cpu_ms: 8, system_cpu_ms: 2, peak_tree_charge_bytes: 1500,

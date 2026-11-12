@@ -2539,11 +2539,68 @@ impl<'a> MirLowerer<'a> {
                     .as_ref()
                     .is_some_and(|(slot, _, _)| *slot == crate::mir::DUCK_DISPATCH_UNSUPPORTED_SLOT)
                 {
-                    let bare = method.to_string();
+                    let mut bare = method.to_string();
+                    // When SEVERAL classes in the unit declare a method of
+                    // this name, the bare call is ambiguous and codegen
+                    // refuses the whole function
+                    // (`[CODEGEN-AMBIGUOUS-METHOD]`). But the receiver is
+                    // statically the trait, and a class can only stand in for
+                    // it if it provides EVERY method the trait declares; one
+                    // that merely shares this method name is not a candidate.
+                    //   - exactly one conforming class: bind it;
+                    //   - none or several: left bare, i.e. the compile-time
+                    //     refusal stays. With no conformer the call is dead in
+                    //     a fully linked unit, but turning it into a run-time
+                    //     "method not found" would be wrong the day an object
+                    //     of a conforming class defined OUTSIDE the unit can
+                    //     reach this code, and there is no by-name run-time
+                    //     method dispatch to send it to.
+                    // A single same-named class keeps the historical bind.
+                    // The trait is the receiver's static type when that is
+                    // known; a trait-typed FIELD erases to ANY, and then it is
+                    // the one trait in the unit declaring this method.
+                    let receiver_trait = self.trait_infos.and_then(|infos| {
+                        recv_type_name.and_then(|name| infos.get(name)).or_else(|| {
+                            let mut declaring = infos.values().filter(|info| {
+                                info.get_method(method)
+                                    .is_some_and(|sig| sig.param_types.len() == args.len())
+                            });
+                            match (declaring.next(), declaring.next()) {
+                                (Some(only), None) => Some(only),
+                                _ => None,
+                            }
+                        })
+                    });
+                    if let Some(trait_info) = receiver_trait {
+                        let suffix = format!(".{}", method);
+                        let mut owners: Vec<&str> = self
+                            .available_functions
+                            .iter()
+                            .filter_map(|name| name.strip_suffix(suffix.as_str()))
+                            .filter(|owner| !owner.contains('.') && Some(*owner) != recv_type_name)
+                            .collect();
+                        owners.sort_unstable();
+                        owners.dedup();
+                        if owners.len() > 1 {
+                            let conforming: Vec<&str> = owners
+                                .iter()
+                                .copied()
+                                .filter(|owner| {
+                                    trait_info
+                                        .methods
+                                        .keys()
+                                        .all(|required| self.available_functions.contains(&format!("{owner}.{required}")))
+                                })
+                                .collect();
+                            if let [only] = conforming.as_slice() {
+                                bare = format!("{only}.{method}");
+                            }
+                        }
+                    }
                     if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                         eprintln!(
-                            "[MIR-METHOD-DISPATCH] '{}' on impl-less trait receiver: erased bare-name dispatch (was duck-dispatch trap)",
-                            method
+                            "[MIR-METHOD-DISPATCH] '{}' on impl-less trait receiver: erased dispatch to '{}' (was duck-dispatch trap)",
+                            method, bare
                         );
                     }
                     self.box_method_args_for_any_params(&bare, args, &mut arg_regs)?;
