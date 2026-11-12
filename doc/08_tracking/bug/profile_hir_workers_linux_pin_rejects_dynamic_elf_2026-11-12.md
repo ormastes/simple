@@ -244,3 +244,15 @@ runtime authority and the Stage 2 built against it do not carry this fix. Steps:
   a dynamic image is refused. `parser_external_inspection_process_v1_spec.spl`
   pins `/usr/bin/false` and unwraps — it could only pass on Darwin before and
   now passes on Linux too.
+
+## Verification note (2026-11-13 ~03:55, s3j/J lane)
+
+The J lane pinned 7d2a96d5a31 (03:11) -- it had the dynamic-ELF admission fix
+bef1d69a6c2 but NOT 34886d22cc2 ("link the real C executable pin into the Rust
+runtime crate on Linux", landed 03:26 via #8705). Its stage2 compiler tests
+reproduced exactly this gate: compiler_cli_build FAIL 465s with
+`[hir-shard] owner=0/2@0 reason: owned executable pin was rejected` (also
+test_runner_build FAIL). Confirms the diagnosis end-to-end: the Rust runtime
+crate linked the stub pin; without the crate-link fix the admission fix cannot
+execute. J2 lane re-pinned at 3a0aac3773a (includes 34886d22cc2) to verify the
+fixed pin under the full test matrix.
