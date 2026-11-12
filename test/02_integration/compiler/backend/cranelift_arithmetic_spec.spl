@@ -7,6 +7,19 @@ use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_timeout}
 use app.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.spec.{skip}
+
+# The native backends these regressions exercise are only implemented by the
+# rebuilt, admitted pure-Simple producer. The Rust bootstrap seed either lacks
+# the backend or hangs on it, so the example is skipped (never failed) when the
+# selected producer is not the pure-Simple toolchain. Mirrors the `--version`
+# identity check the test runner uses for its MC/DC degrade decision.
+fn rust_seed_toolchain(binary: text) -> bool:
+    val (out, err, code) = process_run_timeout(binary, ["--version"], 10000)
+    if code != 0:
+        return false
+    val identity = out + "\n" + err
+    identity.contains("bootstrap seed only") or identity.contains("Simple Language v")
 
 fn execute_cranelift_arithmetic_fixture(name: text) -> text:
     val producer = env_get("SIMPLE_BINARY")
@@ -29,5 +42,10 @@ fn execute_cranelift_arithmetic_fixture(name: text) -> text:
 describe "Cranelift power and remainder dispatch":
     slow_it "executes integer and floating power plus signed floating remainder":
         step("Compile and execute parameterized power, remainder and mixed numeric controls")
+        val producer = env_get("SIMPLE_BINARY")
+        if producer == "" or rust_seed_toolchain(producer):
+            skip("executes integer and floating power plus signed floating remainder",
+                "requires the rebuilt pure-Simple producer; SIMPLE_BINARY is unset or names the Rust seed")
+            return
         val output = execute_cranelift_arithmetic_fixture("power_remainder")
         expect(output).to_contain("PASS power remainder checks=33")
