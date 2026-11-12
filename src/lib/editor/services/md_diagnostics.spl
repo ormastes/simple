@@ -9,99 +9,160 @@
 
 use std.common.markdown.{markdown_slugify}
 use std.editor.services.diagnostics.{EditorDiagnostic}
-use std.editor.services.md_wiki_index.{MdWikiDocument, md_wiki_parse_link_target, md_wiki_target_exists}
+use std.editor.services.md_wiki_index.{MdWikiDocument, md_wiki_parse_link_target, md_wiki_target_exists, md_wiki_slug, md_wiki_title_from_path}
+use std.common.diagnostics.{DiagnosticV1, DiagnosticBatchV1, BatchStatus, Severity, Span, DiagnosticFix, FixReplacement, FixConfidence, diagnostic_stable_id, LineStartTable}
+use std.common.hash.xxh3.{xxh3_128_hex_text}
 
-# Typed Markdown diagnostic: an MD1xxx code on an exact byte span, with an
-# optional safe fix (`has_fix` + `fix_text` replaces exactly [col, end_col)).
-# Codes (plan 2026-11-12 unified diagnostics): MD1001 broken local link,
-# MD1002 unknown anchor, MD1003 unresolved wiki-link/embed, MD1004 duplicate
-# heading, MD1005 unclosed fence, MD1006 invalid frontmatter property,
-# MD1101 missing image alt, MD1102 orphan document, MD1103 inconsistent
-# heading/list structure, MD1104 unsafe/escaping path.
-pub struct MdDiagnostic:
-    code: text
-    path: text
-    line: i64
-    col: i64
-    end_line: i64
-    end_col: i64
-    severity: text
-    message: text
-    source: text
-    has_fix: bool
-    fix_text: text
+# Typed Markdown diagnostics ride the shared contract
+# (`std.common.diagnostics`): one `DiagnosticV1` per finding with an MD1xxx
+# code and a byte `Span` on the exact token; a safe one-token fix travels as
+# `DiagnosticFix` with a single `FixReplacement`. Batches are
+# `DiagnosticBatchV1` with the shared `BatchStatus` vocabulary.
+# Codes (plan 2026-11-12): MD1001 broken local link, MD1002 unknown anchor,
+# MD1003 unresolved wiki-link/embed, MD1004 duplicate heading, MD1005
+# unclosed fence, MD1006 invalid frontmatter property, MD1101 missing image
+# alt, MD1102 orphan document, MD1103 inconsistent heading/list structure,
+# MD1104 unsafe/escaping path.
+
+val MD_DIAG_PRODUCER: text = "md-lsp"
 
 # Cross-file facts the caller already owns. `graph_complete` false means the
 # workspace index is still being built: graph-derived codes (MD1003, MD1102)
-# are withheld and the batch status is `partial_recovery`, never a false orphan.
+# are withheld and the batch status is PartialRecovery, never a false orphan.
 pub struct MdLinkContext:
     existing_files: [text]
     wiki_documents: [MdWikiDocument]
     graph_complete: bool
     has_inbound: bool
 
-# Batch result; `status` follows the shared vocabulary (complete,
-# partial_recovery, stale, cancelled, unsupported, internal_error).
-pub struct MdDiagnosticBatch:
+# Per-call span context. The lint checks measure columns in CODEPOINTS (text
+# `len()`/slicing are codepoint-based); the shared Span wants BYTES, so each
+# column is re-measured against its line here, once, at the lift boundary.
+struct MdSpanCtx:
+    table: LineStartTable
+    lines: [text]
     path: text
-    version: i64
-    status: text
-    diagnostics: [MdDiagnostic]
 
-pub fn md_diagnostic_to_editor(d: MdDiagnostic) -> EditorDiagnostic:
-    EditorDiagnostic(path: d.path, line: d.line, col: d.col, end_line: d.end_line,
-                     end_col: d.end_col, severity: d.severity, message: d.message, source: d.source)
+fn _md_span_ctx(content: text, path: text) -> MdSpanCtx:
+    MdSpanCtx(table: LineStartTable.build(content), lines: content.split("\n"), path: path)
 
-fn _md_typed(ds: [EditorDiagnostic], code: text, has_fix: bool, fix_text: text) -> [MdDiagnostic]:
-    var out: [MdDiagnostic] = []
+fn _md_byte_col(ctx: MdSpanCtx, line: i64, col: i64) -> i64:
+    if line < 0 or line >= ctx.lines.len():
+        return col
+    val text_line: text = ctx.lines[line]
+    val cp_len = text_line.len()
+    if col >= cp_len:
+        val whole_bytes = text_line.byte_len()
+        return whole_bytes + (col - cp_len)
+    # Bound to a local on purpose: `.byte_len()` on a nested `slice()` result
+    # fails in the seed interpreter ("method 'byte_len' not found on value of
+    # type str in nested call context", observed 2026-11-12).
+    val prefix: text = text_line.slice(0, col)
+    prefix.byte_len()
+
+# Codepoint span of a token on one line -> shared Span (1-based line/col,
+# byte offsets relative to the document start).
+fn _md_span(ctx: MdSpanCtx, line: i64, col: i64, end_col: i64) -> Span:
+    val base = ctx.table.line_start(line)
+    val bcol = _md_byte_col(ctx, line, col)
+    var sp = Span.new(base + bcol, base + _md_byte_col(ctx, line, end_col), line + 1, bcol + 1)
+    sp.file = ctx.path
+    sp
+
+fn _md_severity(name: text) -> Severity:
+    if name == "error":
+        return Severity.Error
+    if name == "warning":
+        return Severity.Warning
+    Severity.Info
+
+# Lifts one EditorDiagnostic (byte line/col/end_col) onto the shared type.
+fn _md_lift(ctx: MdSpanCtx, d: EditorDiagnostic, code: text) -> DiagnosticV1:
+    DiagnosticV1.new(_md_severity(d.severity), code, d.message).with_file(d.path).with_span(_md_span(ctx, d.line, d.col, d.end_col))
+
+fn _md_with_fix(d: DiagnosticV1, path: text, description: text, new_text: text) -> DiagnosticV1:
+    val sp = d.span.unwrap()
+    var fix = DiagnosticFix.new("md:" + d.code + ":" + sp.start.to_text(), description, FixConfidence.Safe)
+    fix.replacements = [FixReplacement.new(path, sp, new_text)]
+    d.with_fix(fix)
+
+fn _md_lift_all(ctx: MdSpanCtx, ds: [EditorDiagnostic], code: text) -> [DiagnosticV1]:
+    var out: [DiagnosticV1] = []
     for d in ds:
-        out.push(MdDiagnostic(code: code, path: d.path, line: d.line, col: d.col, end_line: d.end_line,
-                              end_col: d.end_col, severity: d.severity, message: d.message,
-                              source: d.source, has_fix: has_fix, fix_text: fix_text))
+        out.push(_md_lift(ctx, d, code))
     out
 
-fn _md_push_all(dst: [MdDiagnostic], src: [MdDiagnostic]) -> [MdDiagnostic]:
+fn _md_push_all(dst: [DiagnosticV1], src: [DiagnosticV1]) -> [DiagnosticV1]:
     var out = dst
     for d in src:
         out.push(d)
     out
 
 # Document-local typed checks (no cross-file knowledge needed).
-pub fn md_diagnose_typed(content: text, path: text) -> [MdDiagnostic]:
-    var out: [MdDiagnostic] = []
-    out = _md_push_all(out, _md_typed(md_check_broken_heading_links(content, path), "MD1002", false, ""))
-    out = _md_push_all(out, _md_typed(md_check_duplicate_headings(content, path), "MD1004", false, ""))
-    out = _md_push_all(out, _md_typed(md_check_empty_headings(content, path), "MD1004", false, ""))
-    out = _md_push_all(out, _md_typed(md_check_unclosed_code_fences(content, path), "MD1005", false, ""))
-    out = _md_push_all(out, _md_typed(md_check_frontmatter_property_schema(content, path, []), "MD1006", false, ""))
-    out = _md_push_all(out, _md_typed(md_check_missing_alt_text(content, path), "MD1101", false, ""))
-    out = _md_push_all(out, _md_typed(md_check_heading_level_skip(content, path), "MD1103", false, ""))
-    out = _md_push_all(out, _md_check_list_marker_typed(content, path))
+pub fn md_diagnose_typed(content: text, path: text) -> [DiagnosticV1]:
+    val ctx = _md_span_ctx(content, path)
+    var out: [DiagnosticV1] = []
+    out = _md_push_all(out, _md_lift_all(ctx, md_check_broken_heading_links(content, path), "MD1002"))
+    out = _md_push_all(out, _md_lift_all(ctx, md_check_duplicate_headings(content, path), "MD1004"))
+    out = _md_push_all(out, _md_lift_all(ctx, md_check_empty_headings(content, path), "MD1004"))
+    out = _md_push_all(out, _md_lift_all(ctx, md_check_unclosed_code_fences(content, path), "MD1005"))
+    out = _md_push_all(out, _md_lift_all(ctx, md_check_frontmatter_property_schema(content, path, []), "MD1006"))
+    out = _md_push_all(out, _md_lift_all(ctx, md_check_missing_alt_text(content, path), "MD1101"))
+    out = _md_push_all(out, _md_lift_all(ctx, md_check_heading_level_skip(content, path), "MD1103"))
+    out = _md_push_all(out, _md_check_list_marker_typed(ctx, content, path))
     # Trailing single space: the safe fix deletes exactly that byte. Two or
     # more trailing spaces are a hard line break and are never reported.
-    out = _md_push_all(out, _md_typed(md_check_trailing_whitespace(content, path), "MD1103", true, ""))
+    for d in md_check_trailing_whitespace(content, path):
+        out.push(_md_with_fix(_md_lift(ctx, d, "MD1103"), path, "Remove trailing space", ""))
     out
 
 # Full batch: local checks plus link/graph checks against the supplied context.
-pub fn md_diagnose_batch(content: text, path: text, version: i64, ctx: MdLinkContext) -> MdDiagnosticBatch:
-    var out = md_diagnose_typed(content, path)
-    out = _md_push_all(out, _md_check_local_links_typed(content, path, ctx.existing_files))
-    var status = "partial_recovery"
-    if ctx.graph_complete:
-        status = "complete"
-        out = _md_push_all(out, _md_check_wiki_links_typed(content, path, ctx.wiki_documents))
-        if not ctx.has_inbound:
-            val lines = content.split("\n")
-            val first_len = if lines.len() > 0 then lines[0].len() else: 0
-            out.push(MdDiagnostic(code: "MD1102", path: path, line: 0, col: 0, end_line: 0, end_col: first_len,
-                                  severity: "info", message: "Orphan document: no other document links here",
-                                  source: "markdown", has_fix: false, fix_text: ""))
-    MdDiagnosticBatch(path: path, version: version, status: status, diagnostics: out)
+pub fn md_diagnose_batch(content: text, path: text, version: i64, link_ctx: MdLinkContext) -> DiagnosticBatchV1:
+    val ctx = _md_span_ctx(content, path)
+    val table = ctx.table
+    var rows = md_diagnose_typed(content, path)
+    rows = _md_push_all(rows, _md_check_local_links_typed(ctx, content, path, link_ctx.existing_files))
+    var batch = DiagnosticBatchV1.new(MD_DIAG_PRODUCER, path, path, version, xxh3_128_hex_text(content), 0)
+    if link_ctx.graph_complete:
+        rows = _md_push_all(rows, _md_check_wiki_links_typed(ctx, content, path, link_ctx.wiki_documents))
+        if not link_ctx.has_inbound:
+            val first_len = if table.line_count() > 1 then table.line_start(1) - 1 else: table.byte_len
+            rows.push(DiagnosticV1.new(Severity.Info, "MD1102", "Orphan document: no other document links here").with_file(path).with_span(_md_span(ctx, 0, 0, first_len)))
+    else:
+        batch = batch.with_status(BatchStatus.PartialRecovery, "workspace graph incomplete: MD1003/MD1102 withheld")
+    var occurrence = 0
+    for r in rows:
+        val sp = r.span.unwrap()
+        batch = batch.push(diagnostic_stable_id(r.code, path, "byte:" + sp.start.to_text(), occurrence), r)
+        occurrence = occurrence + 1
+    batch
+
+# Outgoing link targets of a document, for the workspace graph: resolved
+# workspace-relative local paths plus "wiki:<slug>" for [[..]] / ![[..]].
+# Fenced text is skipped; absolute/escaping targets are not edges.
+pub fn md_link_targets(content: text, path: text) -> [text]:
+    var out: [text] = []
+    for item in _md_diag_find_links_with_positions(content):
+        val url = item.url
+        if url.starts_with("http://") or url.starts_with("https://") or url.starts_with("#") or url.starts_with("mailto:") or url.len() == 0:
+            continue
+        val resolved = _md_diag_resolve_relative(path, _md_diag_strip_fragment(url))
+        if resolved != "" and not out.contains(resolved):
+            out.push(resolved)
+    for target in _md_diag_wiki_targets(content):
+        val key = "wiki:" + md_wiki_slug(target)
+        if not out.contains(key):
+            out.push(key)
+    out
+
+# The inbound key another document's targets would carry for `path`.
+pub fn md_wiki_inbound_key(path: text) -> text:
+    "wiki:" + md_wiki_slug(md_wiki_title_from_path(path))
 
 # MD1103 for a mixed list marker, with the safe fix: replace the one marker
 # byte with the marker the list started with.
-fn _md_check_list_marker_typed(content: text, path: text) -> [MdDiagnostic]:
-    var results: [MdDiagnostic] = []
+fn _md_check_list_marker_typed(ctx: MdSpanCtx, content: text, path: text) -> [DiagnosticV1]:
+    var results: [DiagnosticV1] = []
     if content.len() == 0:
         return results
     val lines = content.split("\n")
@@ -123,10 +184,8 @@ fn _md_check_list_marker_typed(content: text, path: text) -> [MdDiagnostic]:
                     list_marker = marker
                 elif list_marker != marker:
                     val mcol = _md_diag_indent_width(line)
-                    results.push(MdDiagnostic(code: "MD1103", path: path, line: i, col: mcol, end_line: i, end_col: mcol + 1,
-                                              severity: "hint",
-                                              message: "Inconsistent list marker: \"" + marker + "\" mixed with \"" + list_marker + "\"",
-                                              source: "markdown", has_fix: true, fix_text: list_marker))
+                    val d = DiagnosticV1.new(Severity.Info, "MD1103", "Inconsistent list marker: \"" + marker + "\" mixed with \"" + list_marker + "\"").with_file(path).with_span(_md_span(ctx, i, mcol, mcol + 1))
+                    results.push(_md_with_fix(d, path, "Use the list's first marker", list_marker))
             elif trimmed.len() == 0:
                 list_marker = ""
         i = i + 1
@@ -134,25 +193,23 @@ fn _md_check_list_marker_typed(content: text, path: text) -> [MdDiagnostic]:
 
 # MD1001 (target missing) / MD1104 (target escapes the workspace root) for
 # [text](relative/path) links, resolved relative to the document's directory.
-fn _md_check_local_links_typed(content: text, path: text, existing_files: [text]) -> [MdDiagnostic]:
-    var results: [MdDiagnostic] = []
+fn _md_check_local_links_typed(ctx: MdSpanCtx, content: text, path: text, existing_files: [text]) -> [DiagnosticV1]:
+    var results: [DiagnosticV1] = []
     if content.len() == 0:
         return results
     val lines = content.split("\n")
     for item in _md_diag_find_links_with_positions(content):
         val url = item.url
-        val is_external = url.starts_with("http://") or url.starts_with("https://") or url.starts_with("#") or url.starts_with("mailto:") or url.len() == 0
-        if is_external:
+        if url.starts_with("http://") or url.starts_with("https://") or url.starts_with("#") or url.starts_with("mailto:") or url.len() == 0:
             continue
         val local_path = _md_diag_strip_fragment(url)
         var end_col = item.end_col
         if item.line < lines.len() and end_col > lines[item.line].len():
             end_col = lines[item.line].len()
+        val sp = _md_span(ctx, item.line, item.col, end_col)
         val resolved = _md_diag_resolve_relative(path, local_path)
         if resolved == "":
-            results.push(MdDiagnostic(code: "MD1104", path: path, line: item.line, col: item.col, end_line: item.line, end_col: end_col,
-                                      severity: "error", message: "Link target escapes the workspace root: \"" + local_path + "\"",
-                                      source: "markdown", has_fix: false, fix_text: ""))
+            results.push(DiagnosticV1.new(Severity.Error, "MD1104", "Link target escapes the workspace root: \"" + local_path + "\"").with_file(path).with_span(sp))
             continue
         var found = false
         for f in existing_files:
@@ -160,15 +217,13 @@ fn _md_check_local_links_typed(content: text, path: text, existing_files: [text]
                 found = true
                 break
         if not found:
-            results.push(MdDiagnostic(code: "MD1001", path: path, line: item.line, col: item.col, end_line: item.line, end_col: end_col,
-                                      severity: "warning", message: "Local link target not found: \"" + local_path + "\"",
-                                      source: "markdown", has_fix: false, fix_text: ""))
+            results.push(DiagnosticV1.new(Severity.Warning, "MD1001", "Local link target not found: \"" + local_path + "\"").with_file(path).with_span(sp))
     results
 
 # MD1003 for [[target]] and ![[target]] whose target is not in the supplied
 # document set. Fenced text is skipped.
-fn _md_check_wiki_links_typed(content: text, path: text, documents: [MdWikiDocument]) -> [MdDiagnostic]:
-    var results: [MdDiagnostic] = []
+fn _md_check_wiki_links_typed(ctx: MdSpanCtx, content: text, path: text, documents: [MdWikiDocument]) -> [DiagnosticV1]:
+    var results: [DiagnosticV1] = []
     val lines = content.split("\n")
     var in_fence = false
     var line_idx = 0
@@ -190,17 +245,37 @@ fn _md_check_wiki_links_typed(content: text, path: text, documents: [MdWikiDocum
                     val parsed = md_wiki_parse_link_target(line.slice(col + 2, close))
                     if parsed.0.len() > 0 and not md_wiki_target_exists(documents, parsed.0):
                         val kind = if is_embed then "embed" else: "wiki link"
-                        results.push(MdDiagnostic(code: "MD1003", path: path, line: line_idx, col: start_col, end_line: line_idx, end_col: close + 2,
-                                                  severity: "warning", message: "Unresolved " + kind + ": \"" + parsed.0 + "\"",
-                                                  source: "markdown", has_fix: false, fix_text: ""))
+                        results.push(DiagnosticV1.new(Severity.Warning, "MD1003", "Unresolved " + kind + ": \"" + parsed.0 + "\"").with_file(path).with_span(_md_span(ctx, line_idx, start_col, close + 2)))
                     col = close + 2
                 else:
                     col = col + 1
         line_idx = line_idx + 1
     results
 
-# Resolve `target` relative to the directory of `doc_path`, normalising "."
-# and "..". Returns "" when the target is absolute or climbs above the root.
+# Raw [[target]] / ![[target]] targets outside fences (no resolution).
+fn _md_diag_wiki_targets(content: text) -> [text]:
+    var out: [text] = []
+    var in_fence = false
+    for line in content.split("\n"):
+        if line.trim().starts_with("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        var col = 0
+        while col + 1 < line.len():
+            if line.slice(col, col + 2) == "[[":
+                val close = _md_diag_find_text(line, "]]", col + 2)
+                if close < 0:
+                    break
+                val parsed = md_wiki_parse_link_target(line.slice(col + 2, close))
+                if parsed.0.len() > 0:
+                    out.push(parsed.0)
+                col = close + 2
+            else:
+                col = col + 1
+    out
+
 fn _md_diag_resolve_relative(doc_path: text, target: text) -> text:
     if target.starts_with("/") or target.starts_with("\\"):
         return ""
